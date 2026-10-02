@@ -54,6 +54,16 @@ Each ported file lists its deviations in its module docs. Most are byproducts of
 - **Out-of-range numbers saturate.** Where upstream converts a float such as `1e30` to an integer, Go's result depends on the CPU: amd64 gives the minimum int64, arm64 saturates. We saturate, so a huge thinking budget maps to the highest effort.
 - **Not yet ported in `codex::claude`:** replaying Grok reasoning signatures to Grok-named models, and the compatibility variant `ConvertClaudeRequestToCodexWithCompat`. The upstream Grok test is kept as an ignored test.
 
+## Checking parity
+
+`tools/parity` runs the same requests through upstream's Go translators and through ours, then compares the output. It needs Go and a CLIProxyAPI checkout:
+
+```sh
+cargo run --release -p open-ferry-parity -- --upstream ../CLIProxyAPI
+```
+
+See [tools/parity/README.md](tools/parity/README.md).
+
 ## Deliberately not ported
 
 - **Client impersonation:** TLS fingerprinting (uTLS), synthetic user IDs, forged client build fingerprints, and related "cloaking" code. We send each provider's documented OAuth headers and nothing that disguises the client.
