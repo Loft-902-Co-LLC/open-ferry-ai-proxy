@@ -1,5 +1,6 @@
-// Ported from CLIProxyAPI internal/translator/codex/claude/codex_claude_request_test.go
-// and noop_optimization_test.go (v8.0.10, MIT). https://github.com/router-for-me/CLIProxyAPI
+// Ported from CLIProxyAPI internal/translator/codex/claude/codex_claude_request_test.go,
+// codex_claude_compat_test.go and noop_optimization_test.go (v8.0.10, MIT).
+// https://github.com/router-for-me/CLIProxyAPI
 
 use serde_json::{Value, json};
 
@@ -561,7 +562,6 @@ fn preserves_content_order_across_tool_and_reasoning_items() {
 }
 
 #[test]
-#[ignore = "Grok signature replay is not ported"]
 fn assistant_grok_signature_to_reasoning_item() {
     let request = json!({
         "model": "grok-4.5",
@@ -573,10 +573,16 @@ fn assistant_grok_signature_to_reasoning_item() {
             {"role": "user", "content": "next"}
         ]
     });
-    let out = convert_claude_request_to_codex("grok-4.5", &request);
-
-    assert_eq!(text_at(&out, "input.0.type"), "reasoning", "{out}");
-    assert_eq!(text_at(&out, "input.0.encrypted_content"), GROK_SIGNATURE);
+    // A thinking suffix doesn't hide the base model.
+    for model in ["grok-4.5", " GROK-4.5 ", "grok-4.5(high)"] {
+        let out = convert_claude_request_to_codex(model, &request);
+        assert_eq!(text_at(&out, "input.0.type"), "reasoning", "{model}: {out}");
+        assert_eq!(
+            text_at(&out, "input.0.encrypted_content"),
+            GROK_SIGNATURE,
+            "{model}"
+        );
+    }
 }
 
 #[test]
@@ -591,7 +597,8 @@ fn ignores_grok_signature_for_non_grok_targets() {
         ]
     });
 
-    for model in ["gpt-5.4", "claude-sonnet-4-6"] {
+    // Only the base model counts, not a thinking suffix.
+    for model in ["gpt-5.4", "claude-sonnet-4-6", "gpt-5.4(grok)"] {
         let out = convert_claude_request_to_codex(model, &request);
         assert_eq!(
             count_input_items_by_type(&out, "reasoning"),
@@ -648,6 +655,116 @@ fn ignores_non_codex_thinking_signatures() {
             "{name}: {out}"
         );
     }
+}
+
+fn convert_with_compat(model: &str, request: &str) -> Value {
+    let request: Value = serde_json::from_str(request).expect("test request is valid JSON");
+    convert_claude_request_to_codex_with_compat(model, &request)
+}
+
+/// An assistant message holding one thinking block with `signature`, given as
+/// raw JSON.
+fn thinking_with_signature(signature: &str) -> String {
+    format!(
+        r#"{{"messages":[{{"role":"assistant","content":[{{"type":"thinking","thinking":"reason","signature":{signature}}}]}}]}}"#
+    )
+}
+
+#[test]
+fn convert_claude_request_to_codex_with_compat_preserves_empty_thinking() {
+    let payload = thinking_with_signature(r#""""#);
+
+    let without_compat = convert("deepseek-v4", &payload);
+    assert!(input(&without_compat).is_empty(), "{without_compat}");
+
+    let with_compat = convert_with_compat("deepseek-v4", &payload);
+    assert_eq!(
+        text_at(&with_compat, "input.0.type"),
+        "reasoning",
+        "{with_compat}"
+    );
+    assert!(
+        at(&with_compat, "input.0.encrypted_content").is_some(),
+        "{with_compat}"
+    );
+}
+
+#[test]
+fn convert_claude_request_to_codex_with_compat_unknown_thinking_signatures() {
+    const UNKNOWN_SIG: &str = "opaque-encrypted-reasoning-token-xyz";
+    let unknown = thinking_with_signature(&format!("\"{UNKNOWN_SIG}\""));
+    let with_compat = convert_with_compat("deepseek-v4", &unknown);
+    assert_eq!(
+        text_at(&with_compat, "input.0.type"),
+        "reasoning",
+        "{with_compat}"
+    );
+    assert_eq!(
+        text_at(&with_compat, "input.0.encrypted_content"),
+        UNKNOWN_SIG
+    );
+    let without_compat = convert("deepseek-v4", &unknown);
+    assert!(input(&without_compat).is_empty(), "{without_compat}");
+
+    // A valid Claude signature is recognized, so it isn't replayed to Codex.
+    let claude = thinking_with_signature(&format!(
+        "\"{}\"",
+        crate::signature::tests::OBSERVED_FABLE5_SAMPLE
+    ));
+    let claude_compat = convert_with_compat("deepseek-v4", &claude);
+    assert!(input(&claude_compat).is_empty(), "{claude_compat}");
+
+    let gpt_raw_sig = valid_codex_reasoning_signature();
+    let gpt = thinking_with_signature(&format!("\"gpt#{gpt_raw_sig}\""));
+    let gpt_compat = convert_with_compat("deepseek-v4", &gpt);
+    assert_eq!(
+        text_at(&gpt_compat, "input.0.type"),
+        "reasoning",
+        "{gpt_compat}"
+    );
+    assert_eq!(
+        text_at(&gpt_compat, "input.0.encrypted_content"),
+        gpt_raw_sig
+    );
+
+    for signature in ["12345", r#"{"opaque":"data"}"#, "true", r#"["arr"]"#] {
+        let out = convert_with_compat("deepseek-v4", &thinking_with_signature(signature));
+        assert!(input(&out).is_empty(), "{signature}: {out}");
+    }
+}
+
+#[test]
+fn convert_claude_request_to_codex_with_compat_preserves_message_flushing_and_escaped_unknown_signature()
+ {
+    let escaped_sig = "enc:\"token\"\u{5c}with\u{5c}unicode-\u{4e00}";
+    let payload = r#"{"messages":[{"role":"assistant","content":[{"type":"text","text":"before"},{"type":"thinking","thinking":"reason","signature":"enc:\"token\"\\with\\unicode-ESCAPE"},{"type":"text","text":"after"}]}]}"#
+        // A JSON escape, so the decoded signature is what's compared.
+        .replace("ESCAPE", "\u{5c}u4e00");
+
+    let with_compat = convert_with_compat("deepseek-v4", &payload);
+    let items = input(&with_compat);
+    assert_eq!(items.len(), 3, "{with_compat}");
+    assert_eq!(text_at(&items[0], "role"), "assistant");
+    assert_eq!(text_at(&items[0], "content.0.text"), "before");
+    assert_eq!(text_at(&items[1], "type"), "reasoning");
+    assert_eq!(text_at(&items[1], "encrypted_content"), escaped_sig);
+    assert_eq!(text_at(&items[2], "role"), "assistant");
+    assert_eq!(text_at(&items[2], "content.0.text"), "after");
+}
+
+#[test]
+fn convert_claude_request_to_codex_with_compat_whitespace_and_null_signatures() {
+    let whitespace = convert_with_compat("deepseek-v4", &thinking_with_signature(r#""   ""#));
+    assert_eq!(
+        text_at(&whitespace, "input.0.type"),
+        "reasoning",
+        "{whitespace}"
+    );
+    assert_eq!(text_at(&whitespace, "input.0.encrypted_content"), "   ");
+
+    let null = convert_with_compat("deepseek-v4", &thinking_with_signature("null"));
+    assert_eq!(text_at(&null, "input.0.type"), "reasoning", "{null}");
+    assert_eq!(text_at(&null, "input.0.encrypted_content"), "");
 }
 
 #[test]

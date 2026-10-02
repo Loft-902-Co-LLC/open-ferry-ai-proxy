@@ -31,7 +31,8 @@ Upstream translators live at `internal/translator/<upstream>/<client-format>/`. 
 
 | open-ferry module | Upstream source | Status |
 |---|---|---|
-| `open-ferry-translate`: Claude client → Codex | `internal/translator/codex/claude` | Request and response ported (`codex::claude`) |
+| `open-ferry-translate`: Claude client → Codex | `internal/translator/codex/claude` | Request (including compatibility mode) and response ported (`codex::claude`) |
+| `open-ferry-translate`: reasoning signatures | `internal/signature` | Ported (`signature`): checks for Claude, Gemini, GPT, Grok, Kimi and SWE signatures, replay decisions, and the Claude Messages and Gemini sanitizers |
 | `open-ferry-translate`: Chat Completions → Codex | `internal/translator/codex/openai/chat-completions` | Planned |
 | `open-ferry-translate`: Responses → Codex | `internal/translator/codex/openai/responses` | Request and response ported (`codex::openai::responses`), except the `apply_patch` bridge |
 | `open-ferry-translate`: Chat Completions → Claude | `internal/translator/claude/openai/chat-completions` | Planned |
@@ -51,12 +52,21 @@ Each ported file lists its deviations in its module docs. Most are byproducts of
 - **Embedded JSON is re-serialized compactly.** Where upstream copies a client's raw JSON bytes into a string field (for example `function_call.arguments`), we write the same value as compact JSON. Number text is kept exactly (`arbitrary_precision`). In responses this affects a web search's `partial_json`, where Go's encoder also escapes `<`, `>` and `&`. Function call arguments are passed through byte for byte.
 - **Malformed events carry no fields.** A Codex `data:` line that isn't valid JSON is treated as an event with no fields; gjson reads what it can from it. Codex sends valid JSON, so this only matters for corrupted streams.
 - **Byte-length truncation keeps whole characters.** Upstream cuts names and IDs at 64 bytes and can split a UTF-8 character; we stop at the character boundary before it.
-- **Duplicate object keys: the last one wins.** gjson reads the first occurrence of a key and `serde_json` keeps the last. RFC 8259 leaves this to the parser.
+- **Duplicate object keys: the last one wins.** gjson reads the first occurrence of a key and `serde_json` keeps the last. RFC 8259 leaves this to the parser. For the same reason, a Gemini part with two `thoughtSignature` keys counts as normalized; upstream re-sanitizes it.
 - **Out-of-range numbers saturate.** Where upstream converts a float such as `1e30` to an integer, Go's result depends on the CPU: amd64 gives the minimum int64, arm64 saturates. We saturate, so a huge thinking budget maps to the highest effort.
 - **Escaped cache breakpoint keys are removed too.** Upstream strips `prompt_cache_breakpoint` from Responses `input` only when the body holds the key unescaped. We strip it however it's written.
-- **Not yet ported in `codex::claude`:** replaying Grok reasoning signatures to Grok-named models, and the compatibility variant `ConvertClaudeRequestToCodexWithCompat`. The upstream Grok test is kept as an ignored test.
+- **The signature sanitizer's default target falls back to the model.** `ClaudeMessagesSanitizeOptions::default()` targets `Provider::Unknown`, which falls back to the target model's provider. Upstream's zero value is an empty provider, which skips that fallback.
+- **Protobuf errors always use a regular space.** Signature errors include protobuf-go's parse errors, which start with `proto:` and a space. protobuf-go makes that space a non-breaking one in some builds, chosen per binary so that callers don't compare error strings. We always write a regular space.
+- **Not ported in `signature`:** upstream's debug logging when it sanitizes Gemini signatures. Its tests of that logging are not ported, nor are tests that read captured signature corpora, which aren't in its repository.
 - **Not yet ported in `codex::openai::responses`:** the `apply_patch` bridge. Only upstream's Codex executor turns it on, so it will come with the executor.
 - **The non-streaming response expects a complete final event.** Codex's `response.completed` often has an empty `output`. Upstream's executor fills it with the streamed items before calling the translator, and ours will do the same when the executor is ported.
+
+## Other ported code
+
+Signature checks depend on details of two Go libraries, so the parts used are ported too:
+
+- `go::base64` from Go's `encoding/base64`, and a table generated from `strconv.IsPrint` (BSD-3-Clause, [licenses/Go-LICENSE](licenses/Go-LICENSE)).
+- `protowire` from protobuf-go's `encoding/protowire` v1.34.1 (BSD-3-Clause, [licenses/protobuf-go-LICENSE](licenses/protobuf-go-LICENSE)).
 
 ## Checking parity
 
@@ -71,7 +81,7 @@ See [tools/parity/README.md](tools/parity/README.md).
 ## Deliberately not ported
 
 - **Client impersonation:** TLS fingerprinting (uTLS), synthetic user IDs, forged client build fingerprints, and related "cloaking" code. We send each provider's documented OAuth headers and nothing that disguises the client.
-- **Providers beyond Codex and Claude** for now (Antigravity, Gemini, Vertex, xAI, Kimi, Meta, Devin, AI Studio relay).
+- **Providers beyond Codex and Claude** for now (Antigravity, Gemini, Vertex, xAI, Kimi, Meta, Devin, AI Studio relay). Their reasoning signatures are recognized, because a conversation can move between providers and each signature must be kept, dropped or replaced before it's replayed.
 - **Plugin host and store**, **cluster mode** (CLIProxyAPIHome), **TUI**, **Realtime/WebRTC**, **images and video** endpoints.
 
 ## Upstream issues we intend to address

@@ -12,8 +12,6 @@
 //!   to raw content, and a non-string `text` wrapped in a system reminder.
 //! - Names and call IDs cut to 64 bytes are cut at a UTF-8 character boundary.
 //!   Upstream slices bytes and can split a character.
-//! - Grok reasoning signatures are not replayed to Grok-named models, and the
-//!   compatibility variant (`ConvertClaudeRequestToCodexWithCompat`) is not ported.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -26,8 +24,11 @@ use crate::claude::{align_tool_results, is_attribution_system_text, message_syst
 use crate::go;
 use crate::json::{bool_of, int_of, object, str_of};
 use crate::schema::{MAP_KEYWORDS, VALUE_KEYWORDS, has_unsupported_unicode_property_escape};
-use crate::signature::compatible_gpt_signature;
-use crate::thinking::{LEVEL_XHIGH, budget_to_level};
+use crate::signature::{
+    BlockKind, Provider, compatible_signature_for_provider, detect_signature_provider_for_block,
+    is_valid_grok_encrypted_content,
+};
+use crate::thinking::{LEVEL_XHIGH, base_model_name, budget_to_level};
 
 /// The Responses API limit on function names and call IDs.
 const ID_LIMIT: usize = 64;
@@ -39,12 +40,27 @@ pub(super) type ToolNameMap = HashMap<String, String>;
 /// Converts a Claude Messages request body into a Codex Responses request body
 /// for `model_name`. Codex requests always stream and are never stored.
 pub fn convert_claude_request_to_codex(model_name: &str, request: &Value) -> Value {
+    convert(model_name, request, false)
+}
+
+/// [`convert_claude_request_to_codex`] for compatibility endpoints, which also
+/// get back assistant thinking blocks whose signature is blank or in no known
+/// format.
+pub fn convert_claude_request_to_codex_with_compat(model_name: &str, request: &Value) -> Value {
+    convert(model_name, request, true)
+}
+
+fn convert(model_name: &str, request: &Value, preserve_unknown_signatures: bool) -> Value {
     let tool_names = build_tool_name_map(request.get("tools"));
 
     let mut input = Vec::new();
     input.extend(convert_system(request.get("system")));
     if let Some(Value::Array(messages)) = request.get("messages") {
-        let mut builder = InputBuilder::new(&tool_names);
+        let replay = SignatureReplay {
+            grok_target: go::to_lower(base_model_name(model_name).trim()).contains("grok"),
+            preserve_unknown: preserve_unknown_signatures,
+        };
+        let mut builder = InputBuilder::new(&tool_names, replay);
         for message in messages {
             builder.push_message(message);
         }
@@ -136,6 +152,7 @@ fn message_item(role: &str, content: Vec<Value>) -> Value {
 /// whenever a non-message item has to be emitted, which keeps the original order.
 struct InputBuilder<'a> {
     tool_names: &'a ToolNameMap,
+    replay: SignatureReplay,
     items: Vec<Value>,
     /// IDs of the `tool_use` parts in the latest message, used to put the
     /// following `tool_result` parts in the same order.
@@ -145,6 +162,36 @@ struct InputBuilder<'a> {
     pending_reminders: Vec<Value>,
 }
 
+/// Which thinking signatures are replayed as reasoning `encrypted_content`.
+#[derive(Clone, Copy)]
+struct SignatureReplay {
+    /// The target is an xAI model, which gets its own `encrypted_content` back.
+    grok_target: bool,
+    /// Also replay signatures that are blank or in no known format.
+    preserve_unknown: bool,
+}
+
+impl SignatureReplay {
+    /// The `encrypted_content` to replay for a thinking block's `signature`.
+    fn encrypted_content(self, signature: Option<&Value>) -> Option<String> {
+        let raw = str_of(signature);
+        if let Some(signature) = compatible_signature_for_provider(Provider::Gpt, &raw) {
+            return Some(signature);
+        }
+        if self.preserve_unknown
+            && (raw.trim().is_empty()
+                || matches!(signature, Some(Value::String(_)))
+                    && detect_signature_provider_for_block(&raw, BlockKind::ClaudeThinking)
+                        == Provider::Unknown)
+        {
+            return Some(raw.into_owned());
+        }
+        // xAI's ciphertext has no envelope, so only an xAI target model makes
+        // a value plausibly its own.
+        (self.grok_target && is_valid_grok_encrypted_content(&raw)).then(|| raw.into_owned())
+    }
+}
+
 /// Content parts of the message being converted, not yet emitted as an item.
 struct PendingMessage<'r> {
     role: &'r str,
@@ -152,9 +199,10 @@ struct PendingMessage<'r> {
 }
 
 impl<'a> InputBuilder<'a> {
-    fn new(tool_names: &'a ToolNameMap) -> Self {
+    fn new(tool_names: &'a ToolNameMap, replay: SignatureReplay) -> Self {
         Self {
             tool_names,
+            replay,
             items: Vec::new(),
             pending_tool_use_ids: Vec::new(),
             pending_reminders: Vec::new(),
@@ -216,13 +264,12 @@ impl<'a> InputBuilder<'a> {
                 message.push_text(&str_of(part.get("text")));
             }
             "thinking" => {
-                // Only GPT reasoning can be replayed to Codex. The visible
-                // thinking text is a summary and is never sent back.
+                // Only reasoning the target can decrypt is replayed. The
+                // visible thinking text is a summary and is never sent back.
                 if message.role != "assistant" {
                     return;
                 }
-                let signature = str_of(part.get("signature"));
-                let Some(signature) = compatible_gpt_signature(&signature) else {
+                let Some(signature) = self.replay.encrypted_content(part.get("signature")) else {
                     return;
                 };
                 self.flush(message);

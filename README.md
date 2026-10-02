@@ -13,7 +13,7 @@ A Rust port of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) with 
 
 ## Status
 
-**Pre-alpha. There is no server yet.** This README describes what we're building, not what exists. So far, the translators between Codex and two client formats, Claude Messages and OpenAI Responses, are ported in both directions and checked against upstream's ([UPSTREAM.md](UPSTREAM.md#checking-parity)).
+**Pre-alpha. There is no server yet.** This README describes what we're building, not what exists. So far, the translators between Codex and two client formats, Claude Messages and OpenAI Responses, are ported in both directions, along with upstream's checks of every provider's reasoning signatures. All are checked against upstream's ([UPSTREAM.md](UPSTREAM.md#checking-parity)).
 
 ## Goals for v0.1
 
@@ -48,4 +48,4 @@ This tool lets you use your own subscription credentials through a local proxy. 
 
 ## License
 
-MIT. See [LICENSE](LICENSE). The Luis Pater and Router-For.ME copyright lines cover the portions ported from CLIProxyAPI (MIT); its original license is reproduced verbatim in [licenses/CLIProxyAPI-LICENSE](licenses/CLIProxyAPI-LICENSE).
+MIT. See [LICENSE](LICENSE). The Luis Pater and Router-For.ME copyright lines cover the portions ported from CLIProxyAPI (MIT); its original license is reproduced verbatim in [licenses/CLIProxyAPI-LICENSE](licenses/CLIProxyAPI-LICENSE). Small parts of Go's standard library and of protobuf-go are ported too, under their BSD licenses in [licenses/](licenses).

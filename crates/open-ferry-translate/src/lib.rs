@@ -12,6 +12,7 @@ pub mod codex;
 mod common;
 mod go;
 mod json;
+mod protowire;
 mod schema;
-mod signature;
+pub mod signature;
 mod thinking;

@@ -43,6 +43,27 @@ pub(crate) fn path<'v>(value: &'v Value, path: &str) -> Option<&'v Value> {
     path.split('.').try_fold(value, |value, key| value.get(key))
 }
 
+/// [`path`] for editing.
+pub(crate) fn path_mut<'v>(value: &'v mut Value, path: &str) -> Option<&'v mut Value> {
+    path.split('.')
+        .try_fold(value, |value, key| value.get_mut(key))
+}
+
+/// sjson `Delete` for a dotted path of object keys. Returns whether a value was
+/// removed. The remaining keys keep their order.
+pub(crate) fn delete_path(value: &mut Value, path: &str) -> bool {
+    let (parent, key) = match path.rsplit_once('.') {
+        Some((parent, key)) => match path_mut(value, parent) {
+            Some(parent) => (parent, key),
+            None => return false,
+        },
+        None => (value, path),
+    };
+    parent
+        .as_object_mut()
+        .is_some_and(|object| object.shift_remove(key).is_some())
+}
+
 /// gjson `Int()`.
 pub(crate) fn int_of(value: &Value) -> i64 {
     match value {
@@ -131,6 +152,18 @@ mod tests {
         assert_eq!(path(&value, "a.b"), Some(&json!([1])));
         assert_eq!(path(&value, "a.b.0"), None);
         assert_eq!(path(&value, "a.x"), None);
+    }
+
+    #[test]
+    fn delete_path_keeps_key_order() {
+        let mut value = json!({"a": {"x": 1, "y": 2, "z": 3}, "b": [1]});
+        assert!(delete_path(&mut value, "a.y"));
+        assert_eq!(value.to_string(), r#"{"a":{"x":1,"z":3},"b":[1]}"#);
+        assert!(!delete_path(&mut value, "a.y"));
+        assert!(!delete_path(&mut value, "b.0"));
+        assert!(!delete_path(&mut value, "c.d"));
+        assert!(delete_path(&mut value, "a"));
+        assert_eq!(value.to_string(), r#"{"b":[1]}"#);
     }
 
     #[test]

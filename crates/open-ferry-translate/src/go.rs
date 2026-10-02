@@ -1,5 +1,11 @@
 //! Go standard library behaviour that upstream's output depends on.
 
+pub(crate) mod base64;
+mod printable;
+
+use std::cmp::Ordering;
+use std::fmt::Write as _;
+
 /// Go's `strings.ToLower`: maps each character on its own by its simple Unicode
 /// mapping. Rust's `str::to_lowercase` differs for `İ` (to `i` plus a combining
 /// dot) and for a word-final `Σ` (to `ς`); Go gives `i` and `σ`.
@@ -9,6 +15,82 @@ pub(crate) fn to_lower(s: &str) -> String {
     s.chars()
         .map(|c| c.to_lowercase().next().unwrap_or(c))
         .collect()
+}
+
+/// Go's `strconv.Quote`, which `%q` uses: wraps `s` in double quotes and
+/// escapes `"`, `\` and every character `strconv.IsPrint` rejects.
+pub(crate) fn quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' | '\\' => {
+                out.push('\\');
+                out.push(c);
+            }
+            c if is_print(c) => out.push(c),
+            '\u{7}' => out.push_str("\\a"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{b}' => out.push_str("\\v"),
+            c if c < ' ' || c == '\u{7f}' => {
+                let _ = write!(out, "\\x{:02x}", u32::from(c));
+            }
+            c if u32::from(c) < 0x10000 => {
+                let _ = write!(out, "\\u{:04x}", u32::from(c));
+            }
+            c => {
+                let _ = write!(out, "\\U{:08x}", u32::from(c));
+            }
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Go's `strconv.IsPrint`.
+fn is_print(c: char) -> bool {
+    let c = u32::from(c);
+    printable::PRINTABLE
+        .binary_search_by(|&(start, end)| {
+            if end < c {
+                Ordering::Less
+            } else if start > c {
+                Ordering::Greater
+            } else {
+                Ordering::Equal
+            }
+        })
+        .is_ok()
+}
+
+/// Go's `math.Log2`. Exact powers of two give exact results.
+pub(crate) fn log2(x: f64) -> f64 {
+    let (frac, exp) = frexp(x);
+    if frac == 0.5 {
+        return f64::from(exp - 1);
+    }
+    frac.ln() * std::f64::consts::LOG2_E + f64::from(exp)
+}
+
+/// Go's `math.Frexp`: `x == frac * 2^exp` with `frac` in `[0.5, 1)`.
+fn frexp(x: f64) -> (f64, i32) {
+    if x == 0.0 || !x.is_finite() {
+        return (x, 0);
+    }
+    let (x, mut exp) = if x.abs() < f64::MIN_POSITIVE {
+        // Normalize a subnormal number.
+        (x * (1u64 << 52) as f64, -52)
+    } else {
+        (x, 0)
+    };
+    let bits = x.to_bits();
+    exp += ((bits >> 52) & 0x7ff) as i32 - 1022;
+    let frac = f64::from_bits(bits & !(0x7ff << 52) | 1022 << 52);
+    (frac, exp)
 }
 
 #[cfg(test)]
@@ -21,5 +103,28 @@ mod tests {
         assert_eq!(to_lower("OPENAİ"), "openai");
         assert_eq!(to_lower("ΑΣ"), "ασ");
         assert_eq!(to_lower("Straße ÀÉ"), "straße àé");
+    }
+
+    #[test]
+    fn quote_matches_go() {
+        assert_eq!(quote("abc"), r#""abc""#);
+        assert_eq!(quote(r#"a"b\c"#), r#""a\"b\\c""#);
+        assert_eq!(quote("\n\t\u{7}\u{0}\u{7f}"), r#""\n\t\a\x00\x7f""#);
+        assert_eq!(quote("\u{e9}\u{4e16} "), "\"\u{e9}\u{4e16} \"");
+        // Not printable: a soft hyphen, a line separator and a private-use character.
+        assert_eq!(
+            quote("\u{ad}\u{2028}\u{f0000}"),
+            "\"\u{5c}u00ad\u{5c}u2028\u{5c}U000f0000\""
+        );
+        assert_eq!(quote("\u{80}"), "\"\u{5c}u0080\"");
+    }
+
+    #[test]
+    fn log2_matches_go() {
+        assert_eq!(log2(0.25), -2.0);
+        assert_eq!(log2(256.0), 8.0);
+        assert_eq!(log2(1.0), 0.0);
+        assert!((log2(3.0) - 1.584_962_500_721_156).abs() < 1e-15);
+        assert_eq!(frexp(f64::MIN_POSITIVE / 4.0), (0.5, -1023));
     }
 }
