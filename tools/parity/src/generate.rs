@@ -6,16 +6,16 @@
 //! order, and text that Go and Rust might case-map or trim differently.
 //!
 //! [`response`] generates Codex event streams for the Claude response
-//! translators, and [`responses`] input for the Responses translators.
+//! translators, [`responses`] input for the Responses translators, and
+//! [`signature`] reasoning signatures from every provider.
 
 pub mod response;
 pub mod responses;
+pub mod signature;
 
-use base64::Engine as _;
-use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
 use serde_json::{Value, json};
 
-use crate::cases::{Case, GROK_REPLAY};
+use crate::cases::Case;
 
 /// Builds `count` random cases. Each case depends only on `seed` and its index.
 pub fn cases(seed: u64, count: usize) -> Vec<Case> {
@@ -25,40 +25,9 @@ pub fn cases(seed: u64, count: usize) -> Vec<Case> {
             let model = generator.model();
             let request = generator.request();
             let text = generator.render(&request);
-            let grok = may_replay_grok_signature(&model, &request);
-            let case = Case::new(format!("random-{seed}-{index}"), model, text);
-            if grok {
-                case.may_differ(GROK_REPLAY)
-            } else {
-                case
-            }
+            Case::new(format!("random-{seed}-{index}"), model, text)
         })
         .collect()
-}
-
-/// Whether upstream may replay one of the request's signatures to a Grok
-/// model. This applies upstream's first Grok checks: unpadded standard base64,
-/// at least 32 bytes decoded, and no GPT prefix. Its entropy and other
-/// providers' envelope checks are left out, so the case may still match.
-fn may_replay_grok_signature(model: &str, request: &Value) -> bool {
-    if !model.to_lowercase().contains("grok") {
-        return false;
-    }
-    let Some(messages) = request.get("messages").and_then(Value::as_array) else {
-        return false;
-    };
-    messages
-        .iter()
-        .filter_map(|message| message.get("content").and_then(Value::as_array))
-        .flatten()
-        .filter_map(|part| part.get("signature").and_then(Value::as_str))
-        .any(|signature| {
-            signature.len() >= 43
-                && !signature.starts_with("gAAAA")
-                && signature
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/')
-        })
 }
 
 const MODELS: &[&str] = &[
@@ -71,6 +40,9 @@ const MODELS: &[&str] = &[
     "gpt-5(high)",
     "  GPT-5  ",
     "grok-4",
+    "grok-4(high)",
+    " GROK-4.5 ",
+    "gpt-5.4(grok)",
 ];
 
 const TEXTS: &[&str] = &[
@@ -894,7 +866,37 @@ impl Generator {
         if let Some(input) = self.tool_input() {
             fields.push(("input", input));
         }
+        if self.rng.chance(20) {
+            self.with_tool_signature(&mut fields);
+        }
         self.object(fields)
+    }
+
+    /// A signature on a `tool_use` part, under one of the keys upstream
+    /// strips, and sometimes the model that made it.
+    fn with_tool_signature(&mut self, fields: &mut Vec<(&str, Value)>) {
+        let signature = self.signature().unwrap_or(Value::Null);
+        match self.rng.below(6) {
+            0 => fields.push(("signature", signature)),
+            1 => fields.push(("thoughtSignature", signature)),
+            2 => fields.push(("thought_signature", signature)),
+            3 => {
+                let google = json!({ "thought_signature": signature });
+                fields.push(("extra_content", json!({ "google": google })));
+            }
+            4 => fields.push(("extra_content", json!({ "google": {} }))),
+            _ => {}
+        }
+        if self.rng.chance(30) {
+            let model = self.one_of(&[
+                json!("claude-sonnet-4-6"),
+                json!("gemini-3.1-pro"),
+                json!("gpt-5.6-luna"),
+                json!(""),
+                json!(5),
+            ]);
+            fields.push(("model", model));
+        }
     }
 
     fn tool_use_id(&mut self) -> Option<Value> {
@@ -976,61 +978,19 @@ impl Generator {
         })
     }
 
-    /// GPT reasoning `encrypted_content` and near misses: cache prefixes,
-    /// whitespace, bad lengths and characters, and non-strings.
+    /// A reasoning signature: usually GPT's, which Codex replays, otherwise
+    /// any provider's. Now and then missing or not a string.
     fn signature(&mut self) -> Option<Value> {
-        let blocks = 1 + self.rng.below(3);
-        let raw = self.gpt_signature_bytes(blocks);
-        let sig = if self.rng.chance(50) {
-            URL_SAFE.encode(&raw)
-        } else {
-            URL_SAFE_NO_PAD.encode(&raw)
-        };
         let signature = match self.rng.below(24) {
-            0..=5 => sig,
-            6 => format!("codex#{sig}"),
-            7 => format!(" OpenAI # {sig} "),
-            8 => format!("gpt#{sig}"),
-            9 => format!("claude#{sig}"),
-            10 => format!("unknown#{sig}"),
-            11 => format!("codex##{sig}"),
-            // Go lowercases İ to i, so upstream reads this prefix as "openai".
-            12 => format!("OPENAİ#{sig}"),
-            13 => format!("\u{a0}{sig}\n"),
-            14 => {
-                let at = 10 + self.rng.below(sig.len() - 20);
-                let inserted = self.rng.pick(&["!", "+", "/", "\n", " ", "="]);
-                format!("{}{inserted}{}", &sig[..at], &sig[at..])
+            0..=11 => {
+                let signature = self.gpt_signature();
+                self.damage(signature)
             }
-            15 => with_trailing_bits(&sig),
-            16 => {
-                let mut raw = raw;
-                raw.push(0);
-                URL_SAFE.encode(raw)
-            }
-            17 => {
-                let mut raw = raw;
-                raw[0] = 0x81;
-                URL_SAFE.encode(raw)
-            }
-            18 => URL_SAFE.encode(&raw[..72]),
-            19 => "Eo8CCkYIBxgCKkDr".into(),
-            20 => String::new(),
-            21 => "codex#".into(),
+            12..=21 => self.signature_text(),
             22 => return None,
             _ => return Some(self.one_of(&[json!(5), Value::Null, json!(true)])),
         };
         Some(signature.into())
-    }
-
-    /// Version byte, timestamp, IV, `blocks` AES blocks of ciphertext and HMAC.
-    fn gpt_signature_bytes(&mut self, blocks: usize) -> Vec<u8> {
-        let len = 1 + 8 + 16 + 16 * blocks + 32;
-        let mut raw: Vec<u8> = (0..len).map(|_| self.rng.next() as u8).collect();
-        raw[0] = 0x80;
-        // Real timestamps start with zero bytes, which gives the "gAAAA" prefix.
-        raw[1..4].fill(0);
-        raw
     }
 
     // --- Other request fields ---
@@ -1268,19 +1228,6 @@ fn escape_text(text: &str) -> String {
     out
 }
 
-/// Sets padding bits in the last base64 character, which strict decoders reject.
-fn with_trailing_bits(sig: &str) -> String {
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut bytes = sig.as_bytes().to_vec();
-    let last = sig.trim_end_matches('=').len() - 1;
-    let value = ALPHABET
-        .iter()
-        .position(|&c| c == bytes[last])
-        .expect("signature is base64url");
-    bytes[last] = ALPHABET[value | 1];
-    String::from_utf8(bytes).expect("base64 is ASCII")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1301,28 +1248,5 @@ mod tests {
         let escaped = escape_text(&value.to_string());
         assert!(escaped.is_ascii());
         assert_eq!(serde_json::from_str::<Value>(&escaped).unwrap(), value);
-    }
-
-    #[test]
-    fn grok_replay_needs_a_grok_model_and_signature() {
-        let request = |signature: &str| {
-            json!({ "messages": [{ "role": "assistant", "content": [
-                { "type": "thinking", "thinking": "t", "signature": signature }
-            ]}]})
-        };
-        let grok = "HmlYdr2aCAqCYP/m9mr8PS6KOsdMs72FGDigmydR+Jsmuv8KX97yWPlb";
-        assert!(may_replay_grok_signature("grok-4", &request(grok)));
-        assert!(!may_replay_grok_signature("gpt-5", &request(grok)));
-
-        let mut raw = [0u8; 89];
-        raw[0] = 0x80;
-        let gpt = URL_SAFE_NO_PAD.encode(raw);
-        assert!(gpt.starts_with("gAAAA"));
-        assert!(!may_replay_grok_signature("grok-4", &request(&gpt)));
-        assert!(!may_replay_grok_signature(
-            "grok-4",
-            &request(&format!("{grok}="))
-        ));
-        assert!(!may_replay_grok_signature("grok-4", &request(&grok[..42])));
     }
 }

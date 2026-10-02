@@ -97,6 +97,9 @@ impl Upstream {
             if !case.events.is_empty() {
                 line["events"] = json!(case.events);
             }
+            if !case.options.is_null() {
+                line["options"] = case.options.clone();
+            }
             serde_json::to_writer(&mut input, &line)?;
             input.write_all(b"\n")?;
         }

@@ -13,6 +13,9 @@ pub enum Deviation {
     EmbeddedJson,
     /// Upstream cut a string in the middle of a character; we cut before it.
     CharBoundary,
+    /// protobuf-go's error prefix has a non-breaking space in some builds; ours
+    /// always has a regular one.
+    ProtoErrorPrefix,
 }
 
 impl Deviation {
@@ -21,9 +24,13 @@ impl Deviation {
             Self::ParametersKeyOrder => "tool parameter key order",
             Self::EmbeddedJson => "embedded JSON re-serialized",
             Self::CharBoundary => "cut at a character boundary",
+            Self::ProtoErrorPrefix => "protobuf error prefix space",
         }
     }
 }
+
+/// protobuf-go's error prefix as some builds write it.
+const NBSP_PROTO_PREFIX: &str = "proto:\u{a0}";
 
 #[derive(Clone, Debug)]
 pub struct Difference {
@@ -153,6 +160,10 @@ impl<'a> Walker<'a> {
             && go.replace('\u{FFFD}', "") == rust
         {
             self.out.deviations.insert(Deviation::CharBoundary);
+            return;
+        }
+        if go.contains(NBSP_PROTO_PREFIX) && go.replace(NBSP_PROTO_PREFIX, "proto: ") == rust {
+            self.out.deviations.insert(Deviation::ProtoErrorPrefix);
             return;
         }
         let whole_json_identical = match (
@@ -297,6 +308,21 @@ mod tests {
         let cmp = compare(&go, &rust);
         assert!(cmp.differences.is_empty());
         assert_eq!(cmp.deviations, BTreeSet::from([Deviation::CharBoundary]));
+    }
+
+    #[test]
+    fn protobuf_error_prefix_space_is_equivalent() {
+        let go = json!({ "error": "malformed protobuf tag: proto:\u{a0}unexpected EOF" });
+        let rust = json!({ "error": "malformed protobuf tag: proto: unexpected EOF" });
+        let cmp = compare(&go, &rust);
+        assert!(cmp.differences.is_empty());
+        assert_eq!(
+            cmp.deviations,
+            BTreeSet::from([Deviation::ProtoErrorPrefix])
+        );
+
+        let rust = json!({ "error": "malformed protobuf tag: unexpected EOF" });
+        assert_eq!(compare(&go, &rust).differences.len(), 1);
     }
 
     #[test]

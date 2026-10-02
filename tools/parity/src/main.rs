@@ -7,6 +7,7 @@ mod cases;
 mod compare;
 mod generate;
 mod live;
+mod signature;
 mod translator;
 mod upstream;
 
@@ -152,6 +153,26 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
             Translator::ResponsesNonStream,
             cases::responses::finals(),
             responses_finals,
+        ),
+        (
+            Translator::RequestCompat,
+            cases::hand_written(),
+            generate::cases(seed, random),
+        ),
+        (
+            Translator::SignatureInspect,
+            cases::signature::inspect(),
+            generate::signature::inspect_cases(seed, random),
+        ),
+        (
+            Translator::ClaudeMessagesSignatures,
+            cases::signature::claude_messages(),
+            generate::signature::claude_messages_cases(seed, random),
+        ),
+        (
+            Translator::GeminiSignatures,
+            cases::signature::gemini(),
+            generate::signature::gemini_cases(seed, random),
         ),
     ];
 
@@ -464,7 +485,7 @@ impl Tally {
         };
 
         match (differences, case.known_difference) {
-            (None, Some(_)) if !case.may_match => self.resolved.push(case.name.clone()),
+            (None, Some(_)) => self.resolved.push(case.name.clone()),
             (None, _) => {}
             (Some(_), Some(reason)) => self.known.push((case.name.clone(), reason)),
             (Some(differences), None) => {
@@ -551,6 +572,9 @@ fn write_failure(
             .unwrap_or_else(|_| case.request.as_str().into()),
         "request_text": case.request,
     });
+    if !case.options.is_null() {
+        report["options"] = case.options.clone();
+    }
     if !case.events.is_empty() {
         report["events"] = json!(case.events);
     }

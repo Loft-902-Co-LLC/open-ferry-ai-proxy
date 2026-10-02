@@ -6,6 +6,7 @@ use open_ferry_translate::codex::claude::convert_claude_request_to_codex;
 use serde_json::{Value, json};
 
 pub mod responses;
+pub mod signature;
 
 pub struct Case {
     pub name: String,
@@ -19,17 +20,13 @@ pub struct Case {
     /// For a response translator, the Codex event stream lines, or the final
     /// event alone for the non-streaming one.
     pub events: Vec<String>,
+    /// Inputs that aren't part of the request, as a JSON object for the
+    /// harness entry to read. Null if the entry takes none.
+    pub options: Value,
     /// Why the outputs are expected to differ: behaviour not ported yet, or a
     /// difference between Go and Rust we accept (see UPSTREAM.md).
     pub known_difference: Option<&'static str>,
-    /// Set on a random case that may reach a known difference. Unlike a
-    /// hand-written case, matching upstream doesn't mean the difference is gone.
-    pub may_match: bool,
 }
-
-/// Upstream replays a thinking signature to a Grok-named model if it passes its
-/// Grok checks. We drop it, since the checks aren't ported.
-pub const GROK_REPLAY: &str = "Grok signature replay is not ported";
 
 impl Case {
     pub fn new(
@@ -43,8 +40,8 @@ impl Case {
             request: request.into(),
             translated_request: String::new(),
             events: Vec::new(),
+            options: Value::Null,
             known_difference: None,
-            may_match: false,
         }
     }
 
@@ -60,15 +57,14 @@ impl Case {
         }
     }
 
-    fn known_difference(mut self, reason: &'static str) -> Self {
-        self.known_difference = Some(reason);
+    pub fn with_options(mut self, options: Value) -> Self {
+        self.options = options;
         self
     }
 
-    /// Marks a random case that may reach a known difference.
-    pub fn may_differ(mut self, reason: &'static str) -> Self {
-        self.may_match = true;
-        self.known_difference(reason)
+    fn known_difference(mut self, reason: &'static str) -> Self {
+        self.known_difference = Some(reason);
+        self
     }
 }
 
@@ -197,8 +193,11 @@ pub fn hand_written() -> Vec<Case> {
             ]}]})
             .to_string(),
         ),
-        Case::new("grok-signature", "grok-4", with_thinking_signature(GROK_SIGNATURE))
-            .known_difference(GROK_REPLAY),
+        Case::new(
+            "grok-signature",
+            "grok-4",
+            with_thinking_signature(GROK_SIGNATURE),
+        ),
     ]
 }
 

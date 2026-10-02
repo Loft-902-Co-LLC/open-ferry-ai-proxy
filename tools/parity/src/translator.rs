@@ -3,7 +3,7 @@
 
 use open_ferry_translate::codex::claude::{
     CodexToClaudeStream, convert_claude_request_to_codex,
-    convert_codex_response_to_claude_non_stream,
+    convert_claude_request_to_codex_with_compat, convert_codex_response_to_claude_non_stream,
 };
 use open_ferry_translate::codex::openai::responses::{
     CodexToOpenAIResponsesStream, convert_codex_response_to_openai_responses_non_stream,
@@ -12,6 +12,7 @@ use open_ferry_translate::codex::openai::responses::{
 use serde_json::{Value, json};
 
 use crate::cases::Case;
+use crate::signature;
 
 /// What a generated tool ID is replaced with before comparing.
 const GENERATED_TOOL_ID: &str = "toolu_(generated)";
@@ -26,6 +27,8 @@ const UNCHANGED: &str = "=";
 pub enum Translator {
     /// Claude Messages request → Codex request.
     Request,
+    /// The same in compatibility mode, which keeps more thinking blocks.
+    RequestCompat,
     /// Codex event stream → Claude SSE events.
     Stream,
     /// The final Codex event → one Claude message.
@@ -36,6 +39,12 @@ pub enum Translator {
     ResponsesStream,
     /// The final Codex event → one Responses response.
     ResponsesNonStream,
+    /// One reasoning signature → every check and replay decision on it.
+    SignatureInspect,
+    /// A Claude Messages request → its signed history stripped and sanitized.
+    ClaudeMessagesSignatures,
+    /// A Gemini request → its thought signatures sanitized and validated.
+    GeminiSignatures,
 }
 
 impl Translator {
@@ -43,11 +52,15 @@ impl Translator {
     pub fn key(self) -> &'static str {
         match self {
             Self::Request => "codex/claude/request",
+            Self::RequestCompat => "codex/claude/request-compat",
             Self::Stream => "codex/claude/response",
             Self::NonStream => "codex/claude/response-non-stream",
             Self::ResponsesRequest => "codex/openai-responses/request",
             Self::ResponsesStream => "codex/openai-responses/response",
             Self::ResponsesNonStream => "codex/openai-responses/response-non-stream",
+            Self::SignatureInspect => "signature/inspect",
+            Self::ClaudeMessagesSignatures => "signature/claude-messages",
+            Self::GeminiSignatures => "signature/gemini",
         }
     }
 
@@ -55,22 +68,30 @@ impl Translator {
     pub fn slug(self) -> &'static str {
         match self {
             Self::Request => "claude-request",
+            Self::RequestCompat => "claude-request-compat",
             Self::Stream => "claude-stream",
             Self::NonStream => "claude-non-stream",
             Self::ResponsesRequest => "responses-request",
             Self::ResponsesStream => "responses-stream",
             Self::ResponsesNonStream => "responses-non-stream",
+            Self::SignatureInspect => "signature-inspect",
+            Self::ClaudeMessagesSignatures => "signature-claude-messages",
+            Self::GeminiSignatures => "signature-gemini",
         }
     }
 
     pub fn title(self) -> &'static str {
         match self {
             Self::Request => "Claude -> Codex request",
+            Self::RequestCompat => "Claude -> Codex request, compatibility mode",
             Self::Stream => "Codex -> Claude response, streaming",
             Self::NonStream => "Codex -> Claude response, non-streaming",
             Self::ResponsesRequest => "Responses -> Codex request",
             Self::ResponsesStream => "Codex -> Responses response, streaming",
             Self::ResponsesNonStream => "Codex -> Responses response, non-streaming",
+            Self::SignatureInspect => "Signature checks and replay decisions",
+            Self::ClaudeMessagesSignatures => "Claude Messages signature sanitizers",
+            Self::GeminiSignatures => "Gemini thought signature sanitizer and validators",
         }
     }
 
@@ -88,6 +109,33 @@ impl Translator {
                 let request = request
                     .map_err(|err| format!("case {} is not valid JSON: {err}", case.name))?;
                 Ok(convert_claude_request_to_codex(&case.model, &request))
+            }
+            Self::RequestCompat => {
+                let request = request
+                    .map_err(|err| format!("case {} is not valid JSON: {err}", case.name))?;
+                Ok(convert_claude_request_to_codex_with_compat(
+                    &case.model,
+                    &request,
+                ))
+            }
+            Self::SignatureInspect => Ok(signature::inspect(
+                &case.model,
+                &case.request,
+                &case.options,
+            )),
+            Self::ClaudeMessagesSignatures => {
+                let request = request
+                    .map_err(|err| format!("case {} is not valid JSON: {err}", case.name))?;
+                Ok(signature::claude_messages(
+                    &case.model,
+                    &request,
+                    &case.options,
+                ))
+            }
+            Self::GeminiSignatures => {
+                let request = request
+                    .map_err(|err| format!("case {} is not valid JSON: {err}", case.name))?;
+                Ok(signature::gemini(&request, &case.options))
             }
             Self::Stream => {
                 let mut stream = CodexToClaudeStream::new(&request.unwrap_or_default());
@@ -158,7 +206,12 @@ impl Translator {
     pub fn read(self, output: &[u8]) -> Option<Value> {
         let text = String::from_utf8_lossy(output);
         let mut value = match self {
-            Self::Request | Self::ResponsesRequest => return serde_json::from_str(&text).ok(),
+            Self::Request
+            | Self::RequestCompat
+            | Self::ResponsesRequest
+            | Self::SignatureInspect
+            | Self::ClaudeMessagesSignatures
+            | Self::GeminiSignatures => return serde_json::from_str(&text).ok(),
             Self::ResponsesStream => return read_lines(&text),
             Self::NonStream | Self::ResponsesNonStream if text.is_empty() => {
                 return Some(NO_OUTPUT.into());

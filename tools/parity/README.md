@@ -2,16 +2,20 @@
 
 Differential tests of open-ferry's translators against upstream [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI). The tool runs the same input through upstream's Go translators and through our Rust ports, then compares what they produce.
 
-Six translators are covered so far:
+Ten suites are covered so far:
 
 | Module | Translator | Input | Output |
 |---|---|---|---|
 | `codex::claude` | Request | a Claude Messages request | the Codex request |
+| | Request, compatibility mode | the same | the Codex request |
 | | Response, streaming | a Codex event stream | Claude SSE events |
 | | Response, non-streaming | Codex's final event | one Claude message |
 | `codex::openai::responses` | Request | an OpenAI Responses request | the Codex request |
 | | Response, streaming | a Codex event stream | Responses events |
 | | Response, non-streaming | Codex's final event | one Responses response |
+| `signature` | Checks and replay decisions | one signature, a model and a target provider | every check's result and every replay decision |
+| | Claude Messages sanitizers | a Claude Messages request, a model and options | each sanitizer's output and report |
+| | Gemini sanitizer and validators | a Gemini request, the path of its `contents` and options | the sanitized request and each validator's error |
 
 ## Running it
 
@@ -26,7 +30,7 @@ Options:
 
 | Flag | Default | |
 |---|---|---|
-| `--random <n>` | 5000 | Random cases to generate per translator |
+| `--random <n>` | 5000 | Random cases to generate per suite |
 | `--seed <n>` | 1 | Seed for the random cases |
 | `--show <n>` | 10 | Kinds of difference to print |
 | `--go <path>` | `go` | Go binary |
@@ -37,16 +41,18 @@ The exit status is 0 when every case is identical, equivalent or a known differe
 
 ## How it works
 
-Upstream's translators are in `internal/` packages, which only code inside the CLIProxyAPI module can import. `go/main.go` is a small harness that reads JSON lines from stdin and writes each translation to stdout. The tool builds it with `go build -overlay`, which adds the file to the module as `cmd/open-ferry-parity` at build time. Your checkout is not modified.
+Upstream's translators are in `internal/` packages, which only code inside the CLIProxyAPI module can import. `go/main.go` is a small harness that reads JSON lines from stdin and writes each translation to stdout. A line can carry `options`, a JSON object of inputs that aren't part of the request, such as a signature's target provider. The tool builds it with `go build -overlay`, which adds the file to the module as `cmd/open-ferry-parity` at build time. Your checkout is not modified.
 
 Each translator gets:
 
-- **Hand-written cases** (`src/cases.rs`, and `src/cases/responses.rs` for the Responses translators) for inputs the generator is unlikely to produce. For requests: duplicate keys, a 2 MiB image, a 100-level schema, numbers too large for a float, bodies that aren't objects, keys written with escapes. For responses: parallel function calls with text arriving between them, web search, a policy error, a call ID that is empty, arguments replaced partway through a character, SSE noise, and the client's model given in each place upstream looks for it.
+- **Hand-written cases** (`src/cases.rs`, `src/cases/responses.rs` for the Responses translators, and `src/cases/signature.rs`) for inputs the generator is unlikely to produce. For requests: duplicate keys, a 2 MiB image, a 100-level schema, numbers too large for a float, bodies that aren't objects, keys written with escapes. For responses: parallel function calls with text arriving between them, web search, a policy error, a call ID that is empty, arguments replaced partway through a character, SSE noise, and the client's model given in each place upstream looks for it.
 - **Random cases**, reproducible from the seed. The request generator (`src/generate.rs`) mixes well-formed requests with the sloppy input upstream tolerates: wrong value types, missing fields, unknown roles, near-miss reasoning signatures, case and Unicode edge cases, and JSON written pretty, compact or with escaped characters. The response generator (`src/generate/response.rs`) builds Codex event streams of reasoning, text, function calls and web searches, one item after another or interleaved. Events are sometimes dropped, repeated or loosely typed, and the final event lists more or fewer items than were streamed, or is an error, or is missing. The final event of each stream is also a non-streaming case.
 
   For the Responses translators (`src/generate/responses.rs`), requests mix the fields upstream sets, drops or renames with loosely typed values: required booleans as strings, blank and nearly blank call arguments, every role spelling, web search aliases in each place they're renamed, and cache breakpoints at every level. The event streams are the Codex streams above, with the model in `response.created` and `response.in_progress` removed or mistyped, and the event's `type` or `response` sometimes replaced, and the client's model given in the request, the translated request, the model parameter, or nowhere.
 
-`src/translator.rs` reads each translator's output as JSON. A Claude stream becomes a list of `{"event", "data"}` frames, so frame order, event names and every field are compared. Tool IDs generated for calls that arrive without one (`toolu_<nanoseconds>_<counter>`) are masked on both sides before comparing. The Responses stream translator passes most lines through, so its output is read line by line: `=` for a line returned byte for byte, and otherwise the line's JSON.
+  Signatures (`src/generate/signature.rs`) are built with each provider's real layout, with fields left out or changed: Claude's classic, CAIS and CAQS protobuf envelopes in one or two base64 layers, Gemini's envelopes around Tink payloads, UUIDs and tool blocks, GPT's Fernet tokens, random bytes for Grok and Kimi around their length and entropy limits, and SWE's `sealed.v1.` prefix. Some are then damaged with a cache prefix, whitespace, a cut, or a changed or inserted character. They appear in the thinking blocks and `tool_use` parts of the Claude requests above, in Gemini `contents` whose function calls and responses don't always pair up, and on their own with each target provider.
+
+`src/translator.rs` reads each translator's output as JSON. For the signature suites, both sides return a report of every check (`src/signature.rs` builds ours), with errors as their messages. A Claude stream becomes a list of `{"event", "data"}` frames, so frame order, event names and every field are compared. Tool IDs generated for calls that arrive without one (`toolu_<nanoseconds>_<counter>`) are masked on both sides before comparing. The Responses stream translator passes most lines through, so its output is read line by line: `=` for a line returned byte for byte, and otherwise the line's JSON.
 
 The comparison (`src/compare.rs`) walks both outputs. Each case ends up in one of four groups:
 
@@ -54,8 +60,9 @@ The comparison (`src/compare.rs`) walks both outputs. Each case ends up in one o
 - **equivalent**: the only differences are documented deviations (see UPSTREAM.md):
   - *tool parameter key order*: upstream sorts schema keys, we keep the client's order;
   - *embedded JSON re-serialized*: a string holds the same JSON, written compactly by us (in responses, only a web search query, where Go also escapes `<`, `>` and `&`);
-  - *cut at a character boundary*: upstream cut a name or ID in the middle of a character (written as U+FFFD), we cut before it.
-- **known**: a hand-written case marked with `known_difference`, such as behaviour not ported yet. A random case that may reach such behaviour is marked too. So far that is only a thinking signature upstream could replay to a Grok model.
+  - *cut at a character boundary*: upstream cut a name or ID in the middle of a character (written as U+FFFD), we cut before it;
+  - *protobuf error prefix space*: the harness's protobuf-go build writes a non-breaking space after `proto:`, and we write a regular one.
+- **known**: a hand-written case marked with `known_difference`, such as behaviour not ported yet.
 - **different**: anything else. Failing cases are written to `target/parity/failures/<translator>/` (such as `claude-request` or `responses-stream`) with the input and both outputs.
 
 ## Live mode
