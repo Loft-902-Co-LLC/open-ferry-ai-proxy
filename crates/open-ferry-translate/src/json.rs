@@ -10,6 +10,7 @@ use serde_json::{Number, Value};
 
 use crate::go;
 
+pub(crate) mod lenient;
 pub(crate) mod raw;
 
 /// gjson `String()`: strings as-is, missing/null as `""`, other scalars as text,
@@ -30,9 +31,7 @@ pub(crate) fn str_of(value: Option<&Value>) -> Cow<'_, str> {
                 return Cow::Owned(raw);
             }
             Cow::Owned(match raw.parse::<f64>() {
-                Ok(f) if f == f64::INFINITY => "+Inf".into(),
-                Ok(f) if f == f64::NEG_INFINITY => "-Inf".into(),
-                Ok(f) => f.to_string(),
+                Ok(f) => go::format_float(f),
                 Err(_) => raw,
             })
         }
@@ -91,7 +90,8 @@ pub(crate) fn bool_of(value: &Value) -> bool {
     match value {
         Value::Bool(b) => *b,
         Value::String(s) => matches!(go::to_lower(s).as_str(), "1" | "t" | "true"),
-        Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
+        // A number too large for f64 reads as infinite, which isn't zero.
+        Value::Number(n) => n.to_string().parse::<f64>().is_ok_and(|f| f != 0.0),
         _ => false,
     }
 }

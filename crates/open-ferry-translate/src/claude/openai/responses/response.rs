@@ -23,15 +23,18 @@
 //! - A `data:` line that is not valid JSON or UTF-8 gives nothing. gjson
 //!   reads what it can from malformed JSON. serde_json also rejects an
 //!   unpaired surrogate escape such as `\ud800`, which gjson reads as U+FFFD.
-//! - A web search's streamed input that isn't valid JSON gives an empty
-//!   query. Custom tool call arguments that aren't are read only by
-//!   upstream's fallback scan for an `"input"` string. gjson reads what it
-//!   can from both.
+//! - serde_json can't read JSON nested more than 128 levels deep either. A
+//!   `data:` line that is valid JSON but can't be read for that reason, an
+//!   unpaired surrogate escape or bytes that aren't UTF-8 ends the response
+//!   with `response.failed` if the request declares `apply_patch`, since the
+//!   event could carry part of a patch. Otherwise it gives nothing. Upstream
+//!   reads it.
 //! - A non-string value read as text is written as compact JSON, where
 //!   upstream uses its JSON text. Where a key appears twice in an object, the
-//!   last one counts; gjson reads the first. A `tool_use` block's `input` is
-//!   the exception: it is kept as sent, so `apply_patch` snapshot checks see
-//!   what upstream sees.
+//!   last one counts; gjson reads the first. Two things are read as upstream
+//!   reads them: a `tool_use` block's `input`, kept as sent so `apply_patch`
+//!   snapshot checks see what upstream sees, and the `input` in a custom tool
+//!   call's arguments.
 //! - Strings are written with serde_json's escaping. Upstream writes `<`, `>`,
 //!   `&`, U+2028 and U+2029 in some fields as `\u003c` and so on; the JSON
 //!   values are the same.
@@ -60,6 +63,7 @@ use super::web_search::{
 use crate::apply_patch::input::{CallState, InputError, failure};
 use crate::apply_patch::is_custom_tool;
 use crate::common::request_model_name;
+use crate::go;
 use crate::json::{bool_of, go_value, int_of, path, raw, str_of};
 
 /// Translates a Claude event stream into Responses events, one line at a
@@ -189,6 +193,8 @@ enum ToolInputError {
     ConflictingIdentity,
     /// The stream ended before `message_stop`.
     Unterminated,
+    /// An event was valid JSON that serde_json can't read. Not upstream's.
+    Unreadable,
 }
 
 impl fmt::Display for ToolInputError {
@@ -199,6 +205,7 @@ impl fmt::Display for ToolInputError {
             Self::Unterminated => {
                 f.write_str("upstream apply_patch stream ended before protocol completion")
             }
+            Self::Unreadable => f.write_str("unreadable upstream event in apply_patch stream"),
         }
     }
 }
@@ -260,6 +267,9 @@ impl ClaudeToOpenAIResponsesStream {
             return out;
         }
         let Some((data, event)) = parse_data_line(line) else {
+            if unreadable(line) && patch_enabled(&self.tools) {
+                self.fail_tool_input(ToolInputError::Unreadable, &mut out);
+            }
             return out;
         };
         let index = event.get("index").map_or(0, int_of);
@@ -309,11 +319,7 @@ impl ClaudeToOpenAIResponsesStream {
         if self.error.is_some() || self.completed {
             return out;
         }
-        let enabled = self
-            .tools
-            .winning()
-            .any(|d| is_apply_patch(&self.tools, &d.name));
-        if !enabled {
+        if !patch_enabled(&self.tools) {
             return out;
         }
         self.error = Some(ToolInputError::Unterminated);
@@ -1300,6 +1306,9 @@ fn non_stream(
             line = rest;
         }
         let Some((data, event)) = parse_data_line(line) else {
+            if unreadable(line) && patch_enabled(&tools) {
+                return fail(&response_id, ToolInputError::Unreadable);
+            }
             continue;
         };
         let kind = str_of(event.get("type"));
@@ -1694,6 +1703,16 @@ fn parse_data_line(line: &[u8]) -> Option<(&str, Value)> {
     Some((data, serde_json::from_str(data).ok()?))
 }
 
+/// Whether `line` is a `data:` line [`parse_data_line`] can't read but
+/// upstream can: its payload is valid JSON for gjson, though nested too deeply
+/// for serde_json, holding an unpaired surrogate escape, or not UTF-8.
+/// Bytes that aren't UTF-8 never form JSON's structure, so replacing them
+/// keeps it.
+fn unreadable(line: &[u8]) -> bool {
+    line.strip_prefix(b"data:")
+        .is_some_and(|data| raw::valid(String::from_utf8_lossy(data).trim()))
+}
+
 /// `pickRequestJSON`: the client's request, else the translated one. `Null`
 /// counts as absent.
 fn pick_request<'r>(original_request: &'r Value, request: &'r Value) -> Option<&'r Value> {
@@ -1757,7 +1776,7 @@ fn echo_fields(request: &Value) -> Vec<(&'static str, Value)> {
 fn float_of(value: &Value) -> Value {
     let float: f64 = match value {
         Value::Bool(true) => 1.0,
-        Value::String(text) => text.parse().unwrap_or(0.0),
+        Value::String(text) => go::parse_float(text),
         Value::Number(number) => number.to_string().parse().unwrap_or(0.0),
         _ => 0.0,
     };
@@ -1770,6 +1789,11 @@ fn float_of(value: &Value) -> Value {
 
 /// `isApplyPatch`: whether the request's winning declaration of the tool
 /// Claude calls `name` is the `apply_patch` custom tool.
+/// Whether the request declares an `apply_patch` tool.
+fn patch_enabled(tools: &RequestTools) -> bool {
+    tools.winning().any(|d| is_apply_patch(tools, &d.name))
+}
+
 fn is_apply_patch(tools: &RequestTools, name: &str) -> bool {
     tools
         .winner(tools.identity(name))

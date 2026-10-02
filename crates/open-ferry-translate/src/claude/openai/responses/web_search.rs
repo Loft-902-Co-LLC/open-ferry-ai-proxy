@@ -14,14 +14,10 @@
 //! Results and citations ride through whole: Claude rejects a replayed result
 //! without its genuine `encrypted_content`, so nothing dropped here could be
 //! rebuilt later.
-//!
-//! Deviations from upstream:
-//! - A search's input that isn't valid JSON, such as one whose last
-//!   `partial_json` piece never came, gives an empty query. gjson reads what
-//!   it can from it.
 
 use serde_json::{Map, Value, json};
 
+use crate::json::lenient::{self, Found};
 use crate::json::str_of;
 
 /// The name of Claude's web search tool.
@@ -66,15 +62,14 @@ pub(super) fn claude_web_search_tool_use_id(responses_item_id: &str) -> String {
 }
 
 /// `claudeWebSearchQuery`: the query in a `server_tool_use`'s input JSON,
-/// or `""` if the input isn't valid JSON.
+/// read as gjson reads it, even from input that isn't valid JSON, such as one
+/// whose last `partial_json` piece never came.
 pub(super) fn claude_web_search_query(input: &str) -> String {
-    if input.is_empty() {
-        return String::new();
-    }
-    let Ok(input) = serde_json::from_str::<Value>(input) else {
-        return String::new();
-    };
-    str_of(input.get("query")).trim().to_owned()
+    lenient::get(input, "query")
+        .map(Found::into_string)
+        .unwrap_or_default()
+        .trim()
+        .to_owned()
 }
 
 /// `claudeWebSearchResultsToResponses`: a `web_search_tool_result`'s content
@@ -240,6 +235,23 @@ mod tests {
         assert_eq!(claude_web_search_tool_use_id("ws_a-b.c"), "srvtoolu_a_b_c");
         assert_eq!(claude_web_search_tool_use_id("ws_"), "");
         assert_eq!(claude_web_search_tool_use_id("srvtoolu_"), "");
+    }
+
+    #[test]
+    fn claude_queries_are_read_as_gjson_reads_them() {
+        for (input, want) in [
+            (r#"{"query":" rust "}"#, "rust"),
+            ("", ""),
+            (r#"{"query":12}"#, "12"),
+            (r#"{"query":null}"#, ""),
+            // Two inputs run together, and one cut off.
+            (r#"{"query":" padded "}{"input":"ls -la"}"#, "padded"),
+            (r#"{"query":"cut\n off"#, ""),
+            (r#"{"query":"a\qb", "#, "a"),
+            (r#"[{"query":"q"}]"#, ""),
+        ] {
+            assert_eq!(claude_web_search_query(input), want, "{input}");
+        }
     }
 
     #[test]

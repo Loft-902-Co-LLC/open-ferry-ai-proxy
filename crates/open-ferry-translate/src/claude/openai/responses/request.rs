@@ -39,9 +39,7 @@
 //!   - a non-string value read as text.
 //! - JSON that serde_json can't read is not read. This covers function call
 //!   arguments nested more than 128 levels deep or with a lone UTF-16
-//!   surrogate escape, which give `{}`. [`unwrap_custom_tool_input`] reads
-//!   malformed arguments only by its fallback scan, where gjson would also
-//!   find a field in them.
+//!   surrogate escape, which give `{}`.
 //! - When an object repeats a key, the last value counts; gjson reads the
 //!   first.
 //! - Input items of types with no Claude counterpart are dropped without the
@@ -68,6 +66,7 @@ use crate::common::claude::{
 };
 use crate::common::responses::{extract_responses_call_id, normalize_responses_tool_call_outputs};
 use crate::go;
+use crate::json::lenient::{self, Found};
 use crate::json::{int_of, object, path, str_of};
 use crate::models::ModelCatalog;
 use crate::schema::normalize_claude_tool_input_schema;
@@ -1193,19 +1192,19 @@ fn text_block(text: impl Into<Value>) -> Value {
 }
 
 /// `unwrapCustomToolInput`: the freeform input in a custom tool call's
-/// arguments, `{"input": "..."}`. Arguments that aren't such JSON, such as
-/// ones a stream cut off, are scanned for an `"input"` string and read up to
-/// its closing quote or their end; without one they are returned as they
-/// are.
+/// arguments, `{"input": "..."}`, read as gjson reads it, even from malformed
+/// JSON; a value that isn't a string is kept as written. Arguments gjson
+/// finds no `input` in, such as ones a stream cut off inside it, are scanned
+/// for an `"input"` string and read up to its closing quote or their end;
+/// without one they are returned as they are.
 pub(super) fn unwrap_custom_tool_input(arguments: &str) -> String {
     let trimmed = arguments.trim();
-    if let Ok(Value::Object(fields)) = serde_json::from_str::<Value>(trimmed)
-        && let Some(input) = fields.get("input")
-    {
-        return match input {
-            Value::String(input) => input.clone(),
-            input => input.to_string(),
-        };
+    match lenient::get(trimmed, "input") {
+        Some(Found::String(input)) => return input,
+        Some(Found::Number(input) | Found::Literal(input) | Found::Json(input)) => {
+            return input.to_owned();
+        }
+        None => {}
     }
     let content = trimmed
         .find("\"input\"")

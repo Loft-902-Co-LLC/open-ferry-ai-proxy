@@ -48,4 +48,4 @@ This tool lets you use your own subscription credentials through a local proxy. 
 
 ## License
 
-MIT. See [LICENSE](LICENSE). The Luis Pater and Router-For.ME copyright lines cover the portions ported from CLIProxyAPI (MIT); its original license is reproduced verbatim in [licenses/CLIProxyAPI-LICENSE](licenses/CLIProxyAPI-LICENSE). Small parts of Go's standard library and of protobuf-go are ported too, under their BSD licenses in [licenses/](licenses).
+MIT. See [LICENSE](LICENSE). The Luis Pater and Router-For.ME copyright lines cover the portions ported from CLIProxyAPI (MIT); its original license is reproduced verbatim in [licenses/CLIProxyAPI-LICENSE](licenses/CLIProxyAPI-LICENSE). Small parts of Go's standard library, protobuf-go and gjson are ported too, under their BSD and MIT licenses in [licenses/](licenses).

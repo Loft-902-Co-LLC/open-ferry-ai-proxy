@@ -178,7 +178,7 @@ fn convert(
 fn float_of(value: &Value) -> Option<Value> {
     let float: f64 = match value {
         Value::Number(number) => number.to_string().parse().unwrap_or(0.0),
-        Value::String(text) => text.parse().unwrap_or(0.0),
+        Value::String(text) => go::parse_float(text),
         Value::Bool(true) => 1.0,
         _ => 0.0,
     };

@@ -51,7 +51,7 @@ Each ported file lists its deviations in its module docs. Most are byproducts of
 - **Key order is kept.** Upstream round-trips tool schemas through Go maps, which sorts their keys. We keep the client's order (`serde_json` with `preserve_order`).
 - **Embedded JSON is re-serialized compactly.** Where upstream copies a client's raw JSON bytes into a string field (for example `function_call.arguments`), we write the same value as compact JSON. Number text is kept exactly (`arbitrary_precision`). In responses this affects a web search's `partial_json`. Function call arguments are passed through byte for byte.
 - **Strings use `serde_json`'s escaping.** Where upstream writes a string with Go's JSON encoder, it escapes `<`, `>`, `&`, U+2028 and U+2029 as `\u003c` and so on. We write them as they are; the JSON values are the same.
-- **Malformed JSON is not read.** A Codex `data:` line that isn't valid JSON is treated as an event with no fields, or gives no chunk in Chat Completions; gjson reads what it can from it. The same goes for a Claude `data:` line, and `serde_json` also rejects an unpaired surrogate escape such as `\ud800`, which gjson reads as U+FFFD. Both providers send valid JSON, so this only matters for corrupted streams. Likewise, a Chat Completions tool message's string content is read as JSON parts only if all of it is valid JSON, and a Responses custom tool call's arguments are read as JSON only if they are valid; otherwise only upstream's fallback scan for an `"input"` string reads them. A Claude web search whose streamed input isn't valid JSON gets an empty query.
+- **Malformed JSON is not read.** A Codex `data:` line that isn't valid JSON is treated as an event with no fields, or gives no chunk in Chat Completions; gjson reads what it can from it. The same goes for a Claude `data:` line, and `serde_json` also rejects an unpaired surrogate escape such as `\ud800`, which gjson reads as U+FFFD. Nor can `serde_json` read JSON nested more than 128 levels deep. A Claude `data:` line that is valid JSON but can't be read for one of these reasons, or because it isn't UTF-8, ends a Responses stream with `response.failed` when the request declares `apply_patch`, since it could carry part of a patch; otherwise it gives nothing. Providers don't send such lines, so this only matters for corrupted streams. Likewise, a Chat Completions tool message's string content is read as JSON parts only if all of it is valid JSON.
 - **Block order instead of Go map order.** Where upstream walks a Go map, whose order is random, and the output depends on it, we go in ascending order. When a Claude stream ends with tool calls still open, the Responses translator closes them in block order.
 - **Byte-length truncation keeps whole characters.** Upstream cuts names and IDs at 64 bytes and can split a UTF-8 character; we stop at the character boundary before it.
 - **Duplicate object keys: the last one wins.** gjson reads the first occurrence of a key and `serde_json` keeps the last. RFC 8259 leaves this to the parser. For the same reason, a Gemini part with two `thoughtSignature` keys counts as normalized; upstream re-sanitizes it.
@@ -70,9 +70,11 @@ Each ported file lists its deviations in its module docs. Most are byproducts of
 
 ## Other ported code
 
-Signature checks depend on details of two Go libraries, so the parts used are ported too:
+Some of upstream's behaviour comes from the details of Go libraries, so the parts it relies on are ported too:
 
 - `go::base64` from Go's `encoding/base64`, and a table generated from `strconv.IsPrint` (BSD-3-Clause, [licenses/Go-LICENSE](licenses/Go-LICENSE)).
+- `go::parse_float` from Go's `strconv/atof.go`, for numbers gjson reads from text, which may be hexadecimal floats or have underscores (BSD-3-Clause, [licenses/Go-LICENSE](licenses/Go-LICENSE)).
+- `json::lenient` from gjson v1.18.0's `Get` and `String()`, for a custom tool call's `input` and a Claude web search's query, which upstream reads from text that may be malformed (MIT, [licenses/gjson-LICENSE](licenses/gjson-LICENSE)).
 - `protowire` from protobuf-go's `encoding/protowire` v1.34.1 (BSD-3-Clause, [licenses/protobuf-go-LICENSE](licenses/protobuf-go-LICENSE)).
 
 The OpenAI translators share helpers with upstream's other translators, ported as far as they need them:

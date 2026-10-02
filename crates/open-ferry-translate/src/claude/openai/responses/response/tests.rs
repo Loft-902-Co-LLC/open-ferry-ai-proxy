@@ -1952,16 +1952,6 @@ fn apply_patch_snapshots_before_the_name_arrives_are_checked_later() {
             invalid: true,
             ..Default::default()
         },
-        // serde_json rejects the lone surrogate escape in the first line, so
-        // that line is dropped and the second snapshot stands alone.
-        // Upstream reads the line and fails the call.
-        DeferredSnapshotCase {
-            name: "early invalid surrogate",
-            first: r#"{"input":"\ud800"}"#,
-            second: r#"{"input":"replacement"}"#,
-            want: "replacement",
-            ..Default::default()
-        },
         DeferredSnapshotCase {
             name: "early invalid then placeholder",
             first: r#"{"input":null}"#,
@@ -2290,4 +2280,171 @@ fn complete_response_restores_a_shortened_custom_tool_name() {
     );
     assert_eq!(text(&out, "output.0.type"), "custom_tool_call", "{out}");
     assert_eq!(text(&out, "output.0.name"), tool1);
+}
+
+/// A block 0 `apply_patch` start whose input has an `extra` field nested in
+/// `depth` arrays: valid JSON, too deep for serde_json.
+fn deep_patch_start(depth: usize) -> String {
+    let extra = format!("{}0{}", "[".repeat(depth), "]".repeat(depth));
+    patch_snapshot(
+        "c1",
+        "apply_patch",
+        &format!(r#"{{"input":"patch","extra":{extra}}}"#),
+    )
+}
+
+/// Valid JSON lines serde_json can't read: too deep, with an unpaired
+/// surrogate escape, and with a byte that isn't UTF-8.
+fn unreadable_lines() -> Vec<Vec<u8>> {
+    let surrogate = format!("{}ud800", char::from(b'\\'));
+    let mut not_utf8 = br#"data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"x"#.to_vec();
+    not_utf8.extend_from_slice(b"\xff\"}}");
+    vec![
+        deep_patch_start(200).into_bytes(),
+        patch_fragment(0, "x").replace('x', &surrogate).into_bytes(),
+        not_utf8,
+    ]
+}
+
+#[test]
+fn unreadable_event_fails_an_apply_patch_stream() {
+    for line in unreadable_lines() {
+        let shown = String::from_utf8_lossy(&line).into_owned();
+        assert!(parse_data_line(&line).is_none(), "{shown}");
+        let mut stream = patch_stream(PATCH_REQUEST);
+        let mut events = data(&mut stream, MESSAGE_START);
+        events.extend(data(&mut stream, &patch_start(0, "c1", "apply_patch")));
+        events.extend(
+            sse_events(&stream.translate_line(&line))
+                .into_iter()
+                .map(|(_, data)| data),
+        );
+        events.extend(data(
+            &mut stream,
+            &patch_fragment(0, r#"{"input":"patch"}"#),
+        ));
+        events.extend(data_all(&mut stream, &patch_end()));
+        let ends: Vec<String> = events
+            .iter()
+            .map(kind)
+            .filter(|kind| {
+                [
+                    "response.failed",
+                    "response.completed",
+                    "response.incomplete",
+                ]
+                .contains(&kind.as_str())
+            })
+            .collect();
+        assert_eq!(ends, ["response.failed"], "{shown}");
+        let failed = events
+            .iter()
+            .find(|e| kind(e) == "response.failed")
+            .unwrap();
+        assert_eq!(text(failed, "response.id"), "msg_123", "{shown}");
+        assert_eq!(
+            text(failed, "response.error.code"),
+            "invalid_tool_arguments"
+        );
+        assert_eq!(
+            stream
+                .tool_input_error()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("unreadable upstream event in apply_patch stream"),
+            "{shown}"
+        );
+        // Nothing follows the failure, not even at the end of the stream.
+        assert_eq!(stream.finalize_tool_input(), "");
+    }
+}
+
+#[test]
+fn complete_response_unreadable_event_fails_an_apply_patch_call() {
+    for line in unreadable_lines() {
+        let shown = String::from_utf8_lossy(&line).into_owned();
+        let mut body = [MESSAGE_START, &patch_start(0, "c1", "apply_patch")]
+            .join("\n")
+            .into_bytes();
+        body.push(b'\n');
+        body.extend_from_slice(&line);
+        body.extend_from_slice(b"\n");
+        body.extend_from_slice(patch_fragment(0, r#"{"input":"patch"}"#).as_bytes());
+        body.extend_from_slice(b"\n");
+        body.extend_from_slice(MESSAGE_STOP.as_bytes());
+        let (out, error) = non_stream(&parse(PATCH_REQUEST), &Value::Null, &body);
+        assert_eq!(text(&out, "status"), "failed", "{shown}: {out}");
+        assert_eq!(text(&out, "id"), "msg_123");
+        assert_eq!(text(&out, "error.code"), "invalid_tool_arguments");
+        assert!(matches!(error, Some(ToolInputError::Unreadable)), "{shown}");
+    }
+}
+
+#[test]
+fn unreadable_event_is_skipped_without_apply_patch() {
+    let request = r#"{"tools":[{"type":"function","name":"apply_patch"}]}"#;
+    for line in unreadable_lines() {
+        let shown = String::from_utf8_lossy(&line).into_owned();
+        let mut stream = patch_stream(request);
+        data(&mut stream, MESSAGE_START);
+        assert_eq!(stream.translate_line(&line), "", "{shown}");
+        let events = data(&mut stream, MESSAGE_STOP);
+        assert_eq!(
+            kind(events.last().unwrap()),
+            "response.completed",
+            "{shown}"
+        );
+        assert!(stream.tool_input_error().is_none());
+
+        let mut body = MESSAGE_START.as_bytes().to_vec();
+        body.push(b'\n');
+        body.extend_from_slice(&line);
+        let (out, error) = non_stream(&parse(request), &Value::Null, &body);
+        assert_eq!(text(&out, "status"), "completed", "{shown}: {out}");
+        assert!(error.is_none());
+    }
+}
+
+#[test]
+fn invalid_json_is_skipped_in_an_apply_patch_stream() {
+    let mut stream = patch_stream(PATCH_REQUEST);
+    data(&mut stream, MESSAGE_START);
+    for line in [
+        "data: ping",
+        "data:",
+        r#"data: {"type":"content_block_delta""#,
+        "event: content_block_delta",
+        ": comment",
+    ] {
+        assert_eq!(stream.translate_line(line.as_bytes()), "", "{line}");
+    }
+    assert!(stream.tool_input_error().is_none());
+    let events = data(&mut stream, MESSAGE_STOP);
+    assert_eq!(kind(events.last().unwrap()), "response.completed");
+}
+
+#[test]
+fn unreadable_snapshot_fails_before_the_name_arrives() {
+    // serde_json rejects the lone surrogate escape. Upstream reads the
+    // snapshot and fails the call once its name arrives. The request declares
+    // `apply_patch`, so here the line fails the response at once.
+    let first = patch_snapshot("c1", "", r#"{"input":"\ud800"}"#);
+    let mut stream = patch_stream(PATCH_REQUEST);
+    let events = data(&mut stream, &first);
+    assert_eq!(
+        events.iter().map(kind).collect::<Vec<_>>(),
+        ["response.failed"]
+    );
+    let mut rest = vec![
+        patch_snapshot("c1", "", r#"{"input":"replacement"}"#),
+        patch_start(0, "c1", "apply_patch"),
+    ];
+    rest.extend(patch_end());
+    assert!(data_all(&mut stream, &rest).is_empty());
+    assert!(stream.tool_input_error().is_some());
+
+    let mut lines = vec![first];
+    lines.extend(rest);
+    let (out, error) = patch_complete(PATCH_REQUEST, &Value::Null, &lines);
+    assert_complete_failure(&out, error.as_ref(), "unreadable snapshot");
 }

@@ -2495,18 +2495,15 @@ fn custom_tool_input_unwraps_like_upstream() {
         (r#""input" : "abc"#, "abc"),
         (r#"{"input":"abc\u12"#, r"abc\u12"),
         ("", ""),
-    ];
-    for (arguments, want) in cases {
-        assert_eq!(unwrap_custom_tool_input(arguments), want, "{arguments}");
-    }
-
-    // gjson reads some malformed JSON that we only scan, so these differ
-    // from upstream (which gives "a", "\u{0}", "1" and "é").
-    let cases = [
-        (r#"{"input":"a\qb"}"#, r"a\qb"),
-        (r#"{"input":"\u00zz"}"#, r"\u00zz"),
-        (r#"{"input" 1}"#, r#"{"input" 1}"#),
-        (r#"{"input":"é\é"}"#, r"é\é"),
+        // gjson reads a field from malformed JSON too, and decodes a string
+        // up to an escape it doesn't know.
+        (r#"{"input":"a\qb"}"#, "a"),
+        (r#"{"input":"\u00zz"}"#, "\u{0}"),
+        (r#"{"input" 1}"#, "1"),
+        ("{\"input\":\"\u{e9}\\xc3\\xa9\"}", "\u{e9}"),
+        (r#"{"input":"cut.txt\+no end"}"#, "cut.txt"),
+        (r#"{"input":"first","input":"second"}"#, "first"),
+        (r#"{"input": {"b" : 1} }"#, r#"{"b" : 1}"#),
     ];
     for (arguments, want) in cases {
         assert_eq!(unwrap_custom_tool_input(arguments), want, "{arguments}");

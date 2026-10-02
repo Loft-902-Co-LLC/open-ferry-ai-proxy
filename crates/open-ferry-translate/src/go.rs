@@ -1,10 +1,26 @@
 //! Go standard library behaviour that upstream's output depends on.
 
 pub(crate) mod base64;
+mod float;
 mod printable;
+
+pub(crate) use float::parse_float;
 
 use std::cmp::Ordering;
 use std::fmt::Write as _;
+
+/// Go's `strconv.FormatFloat(f, 'f', -1, 64)`: the shortest decimal that
+/// reads back as `f`, with no exponent. Rust writes the same digits, but
+/// writes infinity as `inf` where Go writes `+Inf`.
+pub(crate) fn format_float(f: f64) -> String {
+    if f == f64::INFINITY {
+        "+Inf".to_owned()
+    } else if f == f64::NEG_INFINITY {
+        "-Inf".to_owned()
+    } else {
+        f.to_string()
+    }
+}
 
 /// Go's `strings.ToLower`: maps each character on its own by its simple Unicode
 /// mapping. Rust's `str::to_lowercase` differs for `İ` (to `i` plus a combining

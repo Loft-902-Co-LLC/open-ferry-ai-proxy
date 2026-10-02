@@ -20,11 +20,8 @@
 //! Upstream's stream translator finishes pending tool calls by ranging over a
 //! Go map, so with two or more pending at once its output order is random;
 //! streams where that can happen are regenerated (see [`map_order_hazard`]).
-//! So are streams whose tool input or search query, once lines are dropped or
-//! blocks share an index, is JSON that gjson reads part of and serde_json
-//! rejects (see [`reads_malformed_json`]).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::ops::{Deref, DerefMut};
 
 use base64::Engine as _;
@@ -60,7 +57,7 @@ pub fn event_cases(seed: u64, count: usize) -> (Vec<Case>, Vec<Case>) {
             let request = generator.original_request();
             let translated_request = generator.translated_request();
             let (events, lines) = generator.stream();
-            let body = generator.body(&events, &lines);
+            let body = generator.body(&events);
             let case = |events| Case {
                 translated_request: translated_request.clone(),
                 events,
@@ -1482,13 +1479,12 @@ impl Generator {
     }
 
     /// The events of a stream and the lines that carry them, drawn again while
-    /// upstream's output for them could depend on Go's map order, or on what
-    /// gjson reads from malformed JSON.
+    /// upstream's output for them could depend on Go's map order.
     fn stream(&mut self) -> (Vec<Value>, Vec<String>) {
         for _ in 0..8 {
             let events = self.events();
             let lines: Vec<String> = events.iter().map(|event| self.line(event)).collect();
-            if !map_order_hazard(&lines) && !reads_malformed_json(&lines) {
+            if !map_order_hazard(&lines) {
                 return (events, lines);
             }
         }
@@ -1961,21 +1957,8 @@ impl Generator {
         }
     }
 
-    /// The whole stream as one SSE body, for the non-streaming translator:
-    /// drawn again while gjson would read part of malformed JSON in it, and in
-    /// the end the stream's own lines.
-    fn body(&mut self, events: &[Value], stream_lines: &[String]) -> String {
-        for _ in 0..8 {
-            let body = self.draw_body(events);
-            let lines: Vec<&str> = body.split('\n').collect();
-            if !reads_malformed_json(&lines) {
-                return body;
-            }
-        }
-        stream_lines.join("\n")
-    }
-
-    fn draw_body(&mut self, events: &[Value]) -> String {
+    /// The whole stream as one SSE body, for the non-streaming translator.
+    fn body(&mut self, events: &[Value]) -> String {
         let newline = if self.rng.chance(10) { "\r\n" } else { "\n" };
         let mut lines = Vec::new();
         for event in events {
@@ -2082,85 +2065,6 @@ fn map_order_hazard(lines: &[String]) -> bool {
     false
 }
 
-/// Whether upstream would read a tool call's input or a web search's query
-/// from JSON that serde_json rejects.
-///
-/// gjson reads what it can from malformed JSON, and we read nothing: a
-/// deviation the port documents. Here that JSON comes from `partial_json`
-/// pieces when a line carrying one is dropped, or when blocks share an index
-/// and their pieces run together. Pieces are followed as upstream reads the
-/// lines, both since their block started and since the message did. The
-/// text so far is checked whenever an event other than a delta arrives, any
-/// of which may be where upstream reads it, and at the end. It is flagged if
-/// it is malformed and holds a `"query"` key, or an `"input"` key that the
-/// port's fallback scan, which only reads a string, can't read as gjson
-/// would.
-fn reads_malformed_json<S: AsRef<str>>(lines: &[S]) -> bool {
-    let misread =
-        |pieces: &BTreeMap<i64, String>| pieces.values().any(|text| gjson_reads_more(text));
-    let mut since_block: BTreeMap<i64, String> = BTreeMap::new();
-    let mut since_message: BTreeMap<i64, String> = BTreeMap::new();
-    for line in lines {
-        let Some(event) = data_event(line.as_ref()) else {
-            continue;
-        };
-        let index = gjson_int(event.get("index"));
-        let kind = event.get("type").and_then(Value::as_str);
-        if kind != Some("content_block_delta") && (misread(&since_block) || misread(&since_message))
-        {
-            return true;
-        }
-        match kind {
-            Some("message_start") if event.get("message").is_some() => {
-                since_block.clear();
-                since_message.clear();
-            }
-            Some("content_block_start") if event.get("content_block").is_some() => {
-                since_block.remove(&index);
-                // Upstream's non-streaming translator starts a search's
-                // input with the query its block starts with.
-                if block_type(&event) == Some("server_tool_use")
-                    && let Some(input) = event.pointer("/content_block/input")
-                    && input.get("query").is_some()
-                {
-                    since_block.insert(index, input.to_string());
-                    since_message
-                        .entry(index)
-                        .or_default()
-                        .push_str(&input.to_string());
-                }
-            }
-            Some("content_block_delta") => {
-                if let Some(piece) = event.pointer("/delta/partial_json").and_then(Value::as_str) {
-                    since_block.entry(index).or_default().push_str(piece);
-                    since_message.entry(index).or_default().push_str(piece);
-                }
-            }
-            _ => {}
-        }
-    }
-    misread(&since_block) || misread(&since_message)
-}
-
-/// Whether gjson might read a query or input from `text` that we don't.
-fn gjson_reads_more(text: &str) -> bool {
-    let text = text.trim();
-    if text.is_empty() || serde_json::from_str::<Value>(text).is_ok() {
-        return false;
-    }
-    if text.contains(r#""query""#) {
-        return true;
-    }
-    let Some(at) = text.find(r#""input""#) else {
-        return false;
-    };
-    let string_input = text[at + r#""input""#.len()..]
-        .trim_start()
-        .strip_prefix(':')
-        .is_some_and(|rest| rest.trim_start().starts_with('"'));
-    !string_input
-}
-
 /// The event on a line upstream reads, `data:` and JSON.
 fn data_event(line: &str) -> Option<Value> {
     serde_json::from_str(line.strip_prefix("data:")?.trim()).ok()
@@ -2230,17 +2134,8 @@ mod tests {
 
     #[test]
     fn streams_never_finish_two_calls_at_once() {
-        let (streams, finals) = event_cases(3, 2000);
+        let (streams, _) = event_cases(3, 2000);
         assert!(streams.iter().all(|case| !map_order_hazard(&case.events)));
-        assert!(
-            streams
-                .iter()
-                .all(|case| !reads_malformed_json(&case.events))
-        );
-        for case in &finals {
-            let lines: Vec<&str> = case.events[0].split('\n').collect();
-            assert!(!reads_malformed_json(&lines));
-        }
         let calls = streams
             .iter()
             .filter(|case| {
@@ -2298,43 +2193,6 @@ mod tests {
             tool(0),
             tool(1).replacen("data: ", "", 1),
             message_stop
-        ]));
-    }
-
-    #[test]
-    fn malformed_json_gjson_reads_is_flagged() {
-        let delta = |index: u64, piece: &str| {
-            format!(
-                "data: {}",
-                json!({ "type": "content_block_delta", "index": index, "delta": { "type": "input_json_delta", "partial_json": piece } })
-            )
-        };
-        // Whole, or cut inside a string the fallback scan reads.
-        assert!(!reads_malformed_json(&[
-            delta(0, r#"{"query":"#),
-            delta(0, r#""a"}"#)
-        ]));
-        assert!(!reads_malformed_json(&[delta(0, r#"{"input":"*** Begin"#)]));
-        // A query missing its last piece, and inputs run together.
-        assert!(reads_malformed_json(&[delta(0, r#"{"query":"a""#)]));
-        assert!(reads_malformed_json(&[
-            delta(0, r#"{"input":5}"#),
-            delta(0, r#"{"input":"x"}"#)
-        ]));
-        // Separate blocks don't run together.
-        assert!(!reads_malformed_json(&[
-            delta(0, r#"{"input":5}"#),
-            delta(1, r#"{"input":"x"}"#)
-        ]));
-        // A search that starts with its query, then gets more.
-        let search = format!(
-            "data: {}",
-            json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "server_tool_use", "name": "web_search", "input": { "query": "a" } } })
-        );
-        assert!(!reads_malformed_json(std::slice::from_ref(&search)));
-        assert!(reads_malformed_json(&[
-            search,
-            delta(0, r#"{"input":"x"}"#)
         ]));
     }
 
