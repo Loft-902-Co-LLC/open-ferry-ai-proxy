@@ -48,4 +48,4 @@ This tool lets you use your own subscription credentials through a local proxy. 
 
 ## License
 
-MIT. See [LICENSE](LICENSE). Portions are ported from CLIProxyAPI (MIT); its license is reproduced in [licenses/CLIProxyAPI-LICENSE](licenses/CLIProxyAPI-LICENSE).
+MIT. See [LICENSE](LICENSE). The Luis Pater and Router-For.ME copyright lines cover the portions ported from CLIProxyAPI (MIT); its original license is reproduced verbatim in [licenses/CLIProxyAPI-LICENSE](licenses/CLIProxyAPI-LICENSE).
