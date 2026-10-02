@@ -127,15 +127,32 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
     }
 
     let failures_dir = fresh_dir(&work_dir.join("failures"))?;
-    let (streams, finals) = generate::response::cases(args.seed, args.random);
+    let (seed, random) = (args.seed, args.random);
+    let (streams, finals) = generate::response::cases(seed, random);
+    let (responses_streams, responses_finals) = generate::responses::event_cases(seed, random);
     let suites = [
         (
             Translator::Request,
             cases::hand_written(),
-            generate::cases(args.seed, args.random),
+            generate::cases(seed, random),
         ),
         (Translator::Stream, cases::hand_written_streams(), streams),
         (Translator::NonStream, cases::hand_written_finals(), finals),
+        (
+            Translator::ResponsesRequest,
+            cases::responses::requests(),
+            generate::responses::request_cases(seed, random),
+        ),
+        (
+            Translator::ResponsesStream,
+            cases::responses::streams(),
+            responses_streams,
+        ),
+        (
+            Translator::ResponsesNonStream,
+            cases::responses::finals(),
+            responses_finals,
+        ),
     ];
 
     println!("open-ferry parity");
@@ -307,15 +324,17 @@ as expected {expected}/{}",
         cases.len()
     );
 
-    // The replies are real Codex event streams, which both response
-    // translators must handle exactly alike.
+    // The replies are real Codex event streams, which both sides of each
+    // response translator must handle exactly alike.
     let mut responses_match = true;
     for (translator, replies) in [
-        (Translator::Stream, streams),
-        (Translator::NonStream, finals),
+        (Translator::Stream, &streams),
+        (Translator::NonStream, &finals),
+        (Translator::ResponsesStream, &streams),
+        (Translator::ResponsesNonStream, &finals),
     ] {
         let dir = live_dir.join(translator.slug());
-        let tally = check(translator, &replies, upstream, work_dir, &dir)?;
+        let tally = check(translator, replies, upstream, work_dir, &dir)?;
         println!();
         println!("{}", translator.title());
         println!("cases       the {} replies above", replies.len());
@@ -445,8 +464,8 @@ impl Tally {
         };
 
         match (differences, case.known_difference) {
-            (None, Some(_)) => self.resolved.push(case.name.clone()),
-            (None, None) => {}
+            (None, Some(_)) if !case.may_match => self.resolved.push(case.name.clone()),
+            (None, _) => {}
             (Some(_), Some(reason)) => self.known.push((case.name.clone(), reason)),
             (Some(differences), None) => {
                 self.different += 1;

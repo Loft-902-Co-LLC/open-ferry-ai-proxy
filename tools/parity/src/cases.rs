@@ -5,6 +5,8 @@ use base64::engine::general_purpose::URL_SAFE;
 use open_ferry_translate::codex::claude::convert_claude_request_to_codex;
 use serde_json::{Value, json};
 
+pub mod responses;
+
 pub struct Case {
     pub name: String,
     /// The model name passed to the translator.
@@ -12,13 +14,22 @@ pub struct Case {
     /// The request body exactly as sent, so formatting and escapes are tested too.
     /// For a response translator, the client's original request.
     pub request: String,
+    /// For a response translator, the request as sent to Codex. Empty if not given.
+    pub translated_request: String,
     /// For a response translator, the Codex event stream lines, or the final
     /// event alone for the non-streaming one.
     pub events: Vec<String>,
     /// Why the outputs are expected to differ: behaviour not ported yet, or a
     /// difference between Go and Rust we accept (see UPSTREAM.md).
     pub known_difference: Option<&'static str>,
+    /// Set on a random case that may reach a known difference. Unlike a
+    /// hand-written case, matching upstream doesn't mean the difference is gone.
+    pub may_match: bool,
 }
+
+/// Upstream replays a thinking signature to a Grok-named model if it passes its
+/// Grok checks. We drop it, since the checks aren't ported.
+pub const GROK_REPLAY: &str = "Grok signature replay is not ported";
 
 impl Case {
     pub fn new(
@@ -30,8 +41,10 @@ impl Case {
             name: name.into(),
             model: model.into(),
             request: request.into(),
+            translated_request: String::new(),
             events: Vec::new(),
             known_difference: None,
+            may_match: false,
         }
     }
 
@@ -51,6 +64,12 @@ impl Case {
         self.known_difference = Some(reason);
         self
     }
+
+    /// Marks a random case that may reach a known difference.
+    pub fn may_differ(mut self, reason: &'static str) -> Self {
+        self.may_match = true;
+        self.known_difference(reason)
+    }
 }
 
 /// A Grok reasoning signature, from upstream's tests.
@@ -62,6 +81,14 @@ fn gpt_signature() -> String {
     raw[0] = 0x80;
     raw[8] = 1;
     URL_SAFE.encode(raw)
+}
+
+/// `c` as a JSON `\u` escape, or a surrogate pair of them.
+fn escaped(c: char) -> String {
+    c.encode_utf16(&mut [0; 2])
+        .iter()
+        .map(|unit| format!("{}u{unit:04x}", '\\'))
+        .collect()
 }
 
 fn with_thinking_signature(signature: &str) -> String {
@@ -97,7 +124,10 @@ pub fn hand_written() -> Vec<Case> {
         Case::new(
             "escaped-keys",
             "gpt-5",
-            r#"{"messages":[{"role":"user","content":"café 🚀"}]}"#,
+            r#"{"messages":[{"role":"user","content":"café 🚀"}]}"#
+                .replace("role", &format!("r{}le", escaped('o')))
+                .replace('é', &escaped('é'))
+                .replace('🚀', &escaped('🚀')),
         ),
         Case::new(
             "duplicate-keys",
@@ -168,7 +198,7 @@ pub fn hand_written() -> Vec<Case> {
             .to_string(),
         ),
         Case::new("grok-signature", "grok-4", with_thinking_signature(GROK_SIGNATURE))
-            .known_difference("Grok signature replay is not ported"),
+            .known_difference(GROK_REPLAY),
     ]
 }
 
@@ -609,4 +639,37 @@ pub fn hand_written_finals() -> Vec<Case> {
         ),
         Case::response("empty-event", plain.to_string(), vec![String::new()]),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escapes_parse_back_to_the_character() {
+        for c in ['b', 'é', '🚀'] {
+            let text = format!("\"{}\"", escaped(c));
+            assert!(text.is_ascii() && text.contains("\\u"), "{text}");
+            assert_eq!(
+                serde_json::from_str::<String>(&text).unwrap(),
+                c.to_string()
+            );
+        }
+    }
+
+    /// Escaped cases are only useful if the escapes survive editing.
+    #[test]
+    fn escaped_cases_hold_escapes() {
+        let all = hand_written()
+            .into_iter()
+            .chain(responses::requests())
+            .chain(responses::streams())
+            .chain(responses::finals());
+        let escaped: Vec<Case> = all.filter(|case| case.name.contains("escaped")).collect();
+        assert_eq!(escaped.len(), 5);
+        for case in escaped {
+            let text = case.events.first().unwrap_or(&case.request);
+            assert!(text.contains("\\u"), "{} has no \\u escape", case.name);
+        }
+    }
 }

@@ -10,9 +10,12 @@
 //	{"translator":"codex/claude/request","model":"gpt-5","request":"<request JSON as a string>"}
 //
 // Response translators also take "events": the Codex event stream lines for
-// codex/claude/response, or the final event alone for
-// codex/claude/response-non-stream. "request" is then the client's original
-// request. The stream translator's output for every line is concatenated.
+// the streaming translators, or the final event alone for the non-streaming
+// ones. "request" is then the client's original request, and
+// "translated_request", if given, the request as sent to Codex.
+// codex/claude/response concatenates its output for every line.
+// codex/openai-responses/response writes a JSON array with one string per
+// output chunk, or "=" for a chunk identical to its input line.
 //
 // Each output line is {"output":"<base64 of the translator's raw bytes>"},
 // or {"panic":"<message>"} if the translator panicked. Output is base64 so
@@ -21,18 +24,21 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 
 	codexclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/claude"
+	codexresponses "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/openai/responses"
 )
 
 type input struct {
 	Translator string   `json:"translator"`
 	Model      string   `json:"model"`
 	Request    string   `json:"request"`
+	Translated string   `json:"translated_request"`
 	Events     []string `json:"events"`
 }
 
@@ -57,12 +63,45 @@ var translators = map[string]func(in input) []byte{
 		return out
 	},
 	"codex/claude/response-non-stream": func(in input) []byte {
-		var event []byte
-		if len(in.Events) > 0 {
-			event = []byte(in.Events[0])
-		}
-		return codexclaude.ConvertCodexResponseToClaudeNonStream(context.Background(), in.Model, []byte(in.Request), nil, event, nil)
+		return codexclaude.ConvertCodexResponseToClaudeNonStream(context.Background(), in.Model, []byte(in.Request), nil, finalEvent(in), nil)
 	},
+	"codex/openai-responses/request": func(in input) []byte {
+		return codexresponses.ConvertOpenAIResponsesRequestToCodex(in.Model, []byte(in.Request), true)
+	},
+	"codex/openai-responses/response": func(in input) []byte {
+		chunks := []string{}
+		for _, event := range in.Events {
+			for _, chunk := range codexresponses.ConvertCodexResponseToOpenAIResponses(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), []byte(event), nil) {
+				if bytes.Equal(chunk, []byte(event)) {
+					chunks = append(chunks, "=")
+				} else {
+					chunks = append(chunks, string(chunk))
+				}
+			}
+		}
+		out, err := json.Marshal(chunks)
+		if err != nil {
+			panic(err)
+		}
+		return out
+	},
+	"codex/openai-responses/response-non-stream": func(in input) []byte {
+		return codexresponses.ConvertCodexResponseToOpenAIResponsesNonStream(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), nil)
+	},
+}
+
+func finalEvent(in input) []byte {
+	if len(in.Events) == 0 {
+		return nil
+	}
+	return []byte(in.Events[0])
+}
+
+func translatedRequest(in input) []byte {
+	if in.Translated == "" {
+		return nil
+	}
+	return []byte(in.Translated)
 }
 
 func main() {

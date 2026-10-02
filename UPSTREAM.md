@@ -33,7 +33,7 @@ Upstream translators live at `internal/translator/<upstream>/<client-format>/`. 
 |---|---|---|
 | `open-ferry-translate`: Claude client → Codex | `internal/translator/codex/claude` | Request and response ported (`codex::claude`) |
 | `open-ferry-translate`: Chat Completions → Codex | `internal/translator/codex/openai/chat-completions` | Planned |
-| `open-ferry-translate`: Responses → Codex | `internal/translator/codex/openai/responses` | Planned |
+| `open-ferry-translate`: Responses → Codex | `internal/translator/codex/openai/responses` | Request and response ported (`codex::openai::responses`), except the `apply_patch` bridge |
 | `open-ferry-translate`: Chat Completions → Claude | `internal/translator/claude/openai/chat-completions` | Planned |
 | `open-ferry-translate`: Responses → Claude | `internal/translator/claude/openai/responses` | Planned |
 | `open-ferry-translate`: registry | `sdk/translator` | Planned |
@@ -53,12 +53,14 @@ Each ported file lists its deviations in its module docs. Most are byproducts of
 - **Byte-length truncation keeps whole characters.** Upstream cuts names and IDs at 64 bytes and can split a UTF-8 character; we stop at the character boundary before it.
 - **Duplicate object keys: the last one wins.** gjson reads the first occurrence of a key and `serde_json` keeps the last. RFC 8259 leaves this to the parser.
 - **Out-of-range numbers saturate.** Where upstream converts a float such as `1e30` to an integer, Go's result depends on the CPU: amd64 gives the minimum int64, arm64 saturates. We saturate, so a huge thinking budget maps to the highest effort.
+- **Escaped cache breakpoint keys are removed too.** Upstream strips `prompt_cache_breakpoint` from Responses `input` only when the body holds the key unescaped. We strip it however it's written.
 - **Not yet ported in `codex::claude`:** replaying Grok reasoning signatures to Grok-named models, and the compatibility variant `ConvertClaudeRequestToCodexWithCompat`. The upstream Grok test is kept as an ignored test.
+- **Not yet ported in `codex::openai::responses`:** the `apply_patch` bridge. Only upstream's Codex executor turns it on, so it will come with the executor.
 - **The non-streaming response expects a complete final event.** Codex's `response.completed` often has an empty `output`. Upstream's executor fills it with the streamed items before calling the translator, and ours will do the same when the executor is ported.
 
 ## Checking parity
 
-`tools/parity` runs the same requests and Codex event streams through upstream's Go translators and through ours, then compares the output. It needs Go and a CLIProxyAPI checkout:
+`tools/parity` runs the same requests and Codex event streams through upstream's Go translators and through ours, then compares the output. It covers every translator ported so far. It needs Go and a CLIProxyAPI checkout:
 
 ```sh
 cargo run --release -p open-ferry-parity -- --upstream ../CLIProxyAPI

@@ -9,6 +9,7 @@
 
 mod claude;
 pub mod codex;
+mod common;
 mod go;
 mod json;
 mod schema;

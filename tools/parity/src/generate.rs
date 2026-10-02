@@ -5,15 +5,17 @@
 //! 64-byte limit, multi-byte characters at cut points, tool results out of
 //! order, and text that Go and Rust might case-map or trim differently.
 //!
-//! [`response`] generates Codex event streams for the response translators.
+//! [`response`] generates Codex event streams for the Claude response
+//! translators, and [`responses`] input for the Responses translators.
 
 pub mod response;
+pub mod responses;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
 use serde_json::{Value, json};
 
-use crate::cases::Case;
+use crate::cases::{Case, GROK_REPLAY};
 
 /// Builds `count` random cases. Each case depends only on `seed` and its index.
 pub fn cases(seed: u64, count: usize) -> Vec<Case> {
@@ -23,9 +25,40 @@ pub fn cases(seed: u64, count: usize) -> Vec<Case> {
             let model = generator.model();
             let request = generator.request();
             let text = generator.render(&request);
-            Case::new(format!("random-{seed}-{index}"), model, text)
+            let grok = may_replay_grok_signature(&model, &request);
+            let case = Case::new(format!("random-{seed}-{index}"), model, text);
+            if grok {
+                case.may_differ(GROK_REPLAY)
+            } else {
+                case
+            }
         })
         .collect()
+}
+
+/// Whether upstream may replay one of the request's signatures to a Grok
+/// model. This applies upstream's first Grok checks: unpadded standard base64,
+/// at least 32 bytes decoded, and no GPT prefix. Its entropy and other
+/// providers' envelope checks are left out, so the case may still match.
+fn may_replay_grok_signature(model: &str, request: &Value) -> bool {
+    if !model.to_lowercase().contains("grok") {
+        return false;
+    }
+    let Some(messages) = request.get("messages").and_then(Value::as_array) else {
+        return false;
+    };
+    messages
+        .iter()
+        .filter_map(|message| message.get("content").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|part| part.get("signature").and_then(Value::as_str))
+        .any(|signature| {
+            signature.len() >= 43
+                && !signature.starts_with("gAAAA")
+                && signature
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/')
+        })
 }
 
 const MODELS: &[&str] = &[
@@ -1268,5 +1301,28 @@ mod tests {
         let escaped = escape_text(&value.to_string());
         assert!(escaped.is_ascii());
         assert_eq!(serde_json::from_str::<Value>(&escaped).unwrap(), value);
+    }
+
+    #[test]
+    fn grok_replay_needs_a_grok_model_and_signature() {
+        let request = |signature: &str| {
+            json!({ "messages": [{ "role": "assistant", "content": [
+                { "type": "thinking", "thinking": "t", "signature": signature }
+            ]}]})
+        };
+        let grok = "HmlYdr2aCAqCYP/m9mr8PS6KOsdMs72FGDigmydR+Jsmuv8KX97yWPlb";
+        assert!(may_replay_grok_signature("grok-4", &request(grok)));
+        assert!(!may_replay_grok_signature("gpt-5", &request(grok)));
+
+        let mut raw = [0u8; 89];
+        raw[0] = 0x80;
+        let gpt = URL_SAFE_NO_PAD.encode(raw);
+        assert!(gpt.starts_with("gAAAA"));
+        assert!(!may_replay_grok_signature("grok-4", &request(&gpt)));
+        assert!(!may_replay_grok_signature(
+            "grok-4",
+            &request(&format!("{grok}="))
+        ));
+        assert!(!may_replay_grok_signature("grok-4", &request(&grok[..42])));
     }
 }

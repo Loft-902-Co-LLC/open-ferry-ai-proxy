@@ -91,6 +91,9 @@ impl Upstream {
         for case in cases {
             let mut line =
                 json!({ "translator": translator, "model": case.model, "request": case.request });
+            if !case.translated_request.is_empty() {
+                line["translated_request"] = json!(case.translated_request);
+            }
             if !case.events.is_empty() {
                 line["events"] = json!(case.events);
             }

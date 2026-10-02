@@ -5,12 +5,22 @@ use open_ferry_translate::codex::claude::{
     CodexToClaudeStream, convert_claude_request_to_codex,
     convert_codex_response_to_claude_non_stream,
 };
+use open_ferry_translate::codex::openai::responses::{
+    CodexToOpenAIResponsesStream, convert_codex_response_to_openai_responses_non_stream,
+    convert_openai_responses_request_to_codex,
+};
 use serde_json::{Value, json};
 
 use crate::cases::Case;
 
 /// What a generated tool ID is replaced with before comparing.
 const GENERATED_TOOL_ID: &str = "toolu_(generated)";
+
+/// How an empty non-streaming output reads, unlike any JSON a response holds.
+const NO_OUTPUT: &str = "(no output)";
+
+/// How the Responses stream translator's harness writes a line it returned unchanged.
+const UNCHANGED: &str = "=";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Translator {
@@ -20,6 +30,12 @@ pub enum Translator {
     Stream,
     /// The final Codex event → one Claude message.
     NonStream,
+    /// OpenAI Responses request → Codex request.
+    ResponsesRequest,
+    /// Codex event stream → Responses events.
+    ResponsesStream,
+    /// The final Codex event → one Responses response.
+    ResponsesNonStream,
 }
 
 impl Translator {
@@ -29,15 +45,21 @@ impl Translator {
             Self::Request => "codex/claude/request",
             Self::Stream => "codex/claude/response",
             Self::NonStream => "codex/claude/response-non-stream",
+            Self::ResponsesRequest => "codex/openai-responses/request",
+            Self::ResponsesStream => "codex/openai-responses/response",
+            Self::ResponsesNonStream => "codex/openai-responses/response-non-stream",
         }
     }
 
     /// A short name for directories.
     pub fn slug(self) -> &'static str {
         match self {
-            Self::Request => "request",
-            Self::Stream => "stream",
-            Self::NonStream => "non-stream",
+            Self::Request => "claude-request",
+            Self::Stream => "claude-stream",
+            Self::NonStream => "claude-non-stream",
+            Self::ResponsesRequest => "responses-request",
+            Self::ResponsesStream => "responses-stream",
+            Self::ResponsesNonStream => "responses-non-stream",
         }
     }
 
@@ -46,12 +68,21 @@ impl Translator {
             Self::Request => "Claude -> Codex request",
             Self::Stream => "Codex -> Claude response, streaming",
             Self::NonStream => "Codex -> Claude response, non-streaming",
+            Self::ResponsesRequest => "Responses -> Codex request",
+            Self::ResponsesStream => "Codex -> Responses response, streaming",
+            Self::ResponsesNonStream => "Codex -> Responses response, non-streaming",
         }
     }
 
     /// Runs our port on `case`, returning its output in the form [`Self::read`] gives.
     pub fn run_rust(self, case: &Case) -> Result<Value, String> {
         let request = serde_json::from_str::<Value>(&case.request);
+        let final_event = || {
+            case.events
+                .first()
+                .and_then(|event| serde_json::from_str(event).ok())
+                .unwrap_or_default()
+        };
         match self {
             Self::Request => {
                 let request = request
@@ -68,15 +99,47 @@ impl Translator {
                 Ok(self.read(output.as_bytes()).expect("streams always read"))
             }
             Self::NonStream => {
-                let event = case
-                    .events
-                    .first()
-                    .and_then(|event| serde_json::from_str(event).ok())
-                    .unwrap_or_default();
                 let output = convert_codex_response_to_claude_non_stream(
                     &request.unwrap_or_default(),
-                    &event,
+                    &final_event(),
                 );
+                let output = output.map(|value| value.to_string()).unwrap_or_default();
+                self.read(output.as_bytes())
+                    .ok_or_else(|| "output is not JSON".to_owned())
+            }
+            Self::ResponsesRequest => {
+                let request = request
+                    .map_err(|err| format!("case {} is not valid JSON: {err}", case.name))?;
+                Ok(convert_openai_responses_request_to_codex(
+                    &case.model,
+                    request,
+                ))
+            }
+            Self::ResponsesStream => {
+                let translated = serde_json::from_str(&case.translated_request).unwrap_or_default();
+                let stream = CodexToOpenAIResponsesStream::new(
+                    &case.model,
+                    &request.unwrap_or_default(),
+                    &translated,
+                );
+                // Written as the harness writes upstream's output.
+                let lines: Vec<String> = case
+                    .events
+                    .iter()
+                    .map(|line| {
+                        let output = stream.translate_line(line.as_bytes());
+                        if *output == *line.as_bytes() {
+                            UNCHANGED.to_owned()
+                        } else {
+                            String::from_utf8_lossy(&output).into_owned()
+                        }
+                    })
+                    .collect();
+                let output = serde_json::to_vec(&lines).expect("strings serialize");
+                Ok(self.read(&output).expect("streams always read"))
+            }
+            Self::ResponsesNonStream => {
+                let output = convert_codex_response_to_openai_responses_non_stream(final_event());
                 let output = output.map(|value| value.to_string()).unwrap_or_default();
                 self.read(output.as_bytes())
                     .ok_or_else(|| "output is not JSON".to_owned())
@@ -87,20 +150,50 @@ impl Translator {
     /// Reads a translator's raw output as JSON, or `None` if it isn't the
     /// kind of output the translator should produce.
     ///
-    /// A stream becomes an array of `{"event", "data"}` frames, and an empty
-    /// non-streaming output (no message) becomes null. In responses, tool IDs
-    /// generated for calls without one are masked, since they hold a timestamp.
+    /// A Claude stream becomes an array of `{"event", "data"}` frames, and a
+    /// Responses stream an array with an entry per line (see [`read_lines`]).
+    /// An empty non-streaming output (no response) reads as [`NO_OUTPUT`]. In
+    /// Claude responses, tool IDs generated for calls without one are masked,
+    /// since they hold a timestamp.
     pub fn read(self, output: &[u8]) -> Option<Value> {
         let text = String::from_utf8_lossy(output);
         let mut value = match self {
-            Self::Request => return serde_json::from_str(&text).ok(),
+            Self::Request | Self::ResponsesRequest => return serde_json::from_str(&text).ok(),
+            Self::ResponsesStream => return read_lines(&text),
+            Self::NonStream | Self::ResponsesNonStream if text.is_empty() => {
+                return Some(NO_OUTPUT.into());
+            }
+            Self::ResponsesNonStream => return serde_json::from_str(&text).ok(),
             Self::Stream => sse_frames(&text),
-            Self::NonStream if text.is_empty() => Value::Null,
             Self::NonStream => serde_json::from_str(&text).ok()?,
         };
         mask_generated_tool_ids(&mut value);
         Some(value)
     }
+}
+
+/// Reads the Responses stream translator's output: a JSON array with a
+/// string per output line, or `=` for a line returned unchanged. A changed
+/// line becomes `{"data": …}` for an SSE data line, `{"json": …}` for a bare
+/// JSON line, and `{"line": text}` for anything else.
+fn read_lines(text: &str) -> Option<Value> {
+    let lines: Vec<String> = serde_json::from_str(text).ok()?;
+    let json = |text: &str| serde_json::from_str::<Value>(text).ok();
+    let lines = lines
+        .into_iter()
+        .map(|line| {
+            if line == UNCHANGED {
+                Value::String(line)
+            } else if let Some(data) = line.strip_prefix("data: ").and_then(json) {
+                json!({ "data": data })
+            } else if let Some(value) = json(&line) {
+                json!({ "json": value })
+            } else {
+                json!({ "line": line })
+            }
+        })
+        .collect();
+    Some(Value::Array(lines))
 }
 
 /// Splits SSE text into `{"event": …, "data": …}` frames. Anything that isn't
@@ -156,6 +249,21 @@ mod tests {
             ])
         );
         assert_eq!(sse_frames(""), json!([]));
+    }
+
+    #[test]
+    fn responses_lines_read_by_kind() {
+        let text = json!(["=", "data: {\"x\":1}", "{\"y\":2}", "data: [DONE]"]).to_string();
+        assert_eq!(
+            read_lines(&text),
+            Some(json!([
+                "=",
+                { "data": { "x": 1 } },
+                { "json": { "y": 2 } },
+                { "line": "data: [DONE]" }
+            ]))
+        );
+        assert_eq!(read_lines("not json"), None);
     }
 
     #[test]
