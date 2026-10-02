@@ -16,6 +16,7 @@ mod go;
 mod json;
 pub mod models;
 mod protowire;
+pub mod registry;
 mod responses_tools;
 mod schema;
 pub mod signature;

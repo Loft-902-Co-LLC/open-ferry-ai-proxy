@@ -1257,6 +1257,20 @@ pub fn convert_claude_response_to_openai_responses_non_stream(
     non_stream(original_request, request, response).0
 }
 
+/// [`convert_claude_response_to_openai_responses_non_stream`], or `None` if
+/// an `apply_patch` call failed: upstream's registry returns nothing then,
+/// when its caller passes a parameter to keep the error in.
+pub(crate) fn convert_claude_response_to_openai_responses_non_stream_checked(
+    original_request: &Value,
+    request: &Value,
+    response: &[u8],
+) -> Option<Value> {
+    match non_stream(original_request, request, response) {
+        (response, None) => Some(response),
+        (_, Some(_)) => None,
+    }
+}
+
 /// One output item of a complete response.
 #[derive(Default)]
 struct OutputItem {

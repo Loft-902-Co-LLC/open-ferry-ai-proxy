@@ -9,6 +9,7 @@ pub use request::{
     convert_openai_responses_request_to_claude,
     convert_openai_responses_request_to_claude_with_compat,
 };
+pub(crate) use response::convert_claude_response_to_openai_responses_non_stream_checked;
 pub use response::{
     ClaudeToOpenAIResponsesStream, convert_claude_response_to_openai_responses_non_stream,
 };

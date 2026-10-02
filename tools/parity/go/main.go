@@ -24,6 +24,12 @@
 // the stream; claude/openai-responses/response-non-stream takes the whole
 // Claude SSE body as its one event.
 //
+// The registry/* entries run sdk/translator's default registry, which holds
+// the translators of the packages imported here, for the pair of formats in
+// "options" (see registryOptions). registry/response writes a JSON report of
+// the chunks TranslateStream returned for each event; the others write what
+// the registry returned.
+//
 // The signature/* entries run upstream's reasoning-signature package and write
 // a JSON report of what it returned. "options", a JSON object, holds inputs
 // other than the request; each entry documents its own. signature/inspect
@@ -48,6 +54,7 @@ import (
 	codexclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/claude"
 	codexchat "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/openai/chat-completions"
 	codexresponses "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/openai/responses"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 type input struct {
@@ -176,9 +183,13 @@ var translators = map[string]func(in input) []byte{
 	"claude/openai-responses/response-non-stream": func(in input) []byte {
 		return clauderesponses.ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), nil)
 	},
-	"signature/inspect":         inspectSignature,
-	"signature/claude-messages": sanitizeClaudeMessages,
-	"signature/gemini":          sanitizeGemini,
+	"registry/request":             registryRequest,
+	"registry/response":            registryResponse,
+	"registry/response-non-stream": registryResponseNonStream,
+	"registry/lookup":              registryLookup,
+	"signature/inspect":            inspectSignature,
+	"signature/claude-messages":    sanitizeClaudeMessages,
+	"signature/gemini":             sanitizeGemini,
 }
 
 func finalEvent(in input) []byte {
@@ -193,6 +204,111 @@ func translatedRequest(in input) []byte {
 		return nil
 	}
 	return []byte(in.Translated)
+}
+
+// registryOptions are the registry/* entries' options. For a request, From is
+// the client's format and To the provider's; for a response, From is the
+// provider's and To the client's, as the registry's methods take them.
+type registryOptions struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+	// Whether the request streams.
+	Stream bool `json:"stream"`
+	// Translate the request with a registry of its own, whose one translator
+	// returns the request unchanged, so what the registry does around a
+	// translator shows on its own for any pair.
+	Identity bool `json:"identity"`
+	// The token count registry/lookup translates.
+	Count int64 `json:"count"`
+}
+
+func (o registryOptions) formats() (sdktranslator.Format, sdktranslator.Format) {
+	return sdktranslator.FromString(o.From), sdktranslator.FromString(o.To)
+}
+
+// registry/request: TranslateRequest.
+func registryRequest(in input) []byte {
+	var options registryOptions
+	decodeOptions(in, &options)
+	from, to := options.formats()
+	if options.Identity {
+		registry := sdktranslator.NewRegistry()
+		identity := func(_ string, rawJSON []byte, _ bool) []byte { return rawJSON }
+		registry.Register(from, to, identity, sdktranslator.ResponseTransform{})
+		return registry.TranslateRequest(from, to, in.Model, []byte(in.Request), options.Stream)
+	}
+	return sdktranslator.TranslateRequest(from, to, in.Model, []byte(in.Request), options.Stream)
+}
+
+// registry/response: TranslateStream on each event in turn, with one
+// parameter for the stream, as upstream's executors call it, then what
+// FinalizeToolInput returns at the end of the stream. Writes {"events":
+// [[chunk, ...] for each event], "finish": [chunk, ...], "failed": whether
+// ToolInputError is set}. Empty chunks are left out, as open-ferry leaves
+// them out.
+func registryResponse(in input) []byte {
+	var options registryOptions
+	decodeOptions(in, &options)
+	from, to := options.formats()
+	report := struct {
+		Events [][]string `json:"events"`
+		Finish []string   `json:"finish"`
+		Failed bool       `json:"failed"`
+	}{Events: [][]string{}, Finish: []string{}}
+	var param any
+	for _, event := range in.Events {
+		chunks := sdktranslator.TranslateStream(context.Background(), from, to, in.Model, []byte(in.Request), translatedRequest(in), []byte(event), &param)
+		report.Events = append(report.Events, nonEmpty(chunks))
+	}
+	if state, ok := param.(interface{ FinalizeToolInput() [][]byte }); ok {
+		report.Finish = nonEmpty(state.FinalizeToolInput())
+	}
+	if state, ok := param.(interface{ ToolInputError() error }); ok {
+		report.Failed = state.ToolInputError() != nil
+	}
+	return marshal(report)
+}
+
+func nonEmpty(chunks [][]byte) []string {
+	out := []string{}
+	for _, chunk := range chunks {
+		if len(chunk) > 0 {
+			out = append(out, string(chunk))
+		}
+	}
+	return out
+}
+
+// registry/response-non-stream: TranslateNonStream on the final event, with a
+// parameter, as upstream's executors call it.
+func registryResponseNonStream(in input) []byte {
+	var options registryOptions
+	decodeOptions(in, &options)
+	from, to := options.formats()
+	var param any
+	return sdktranslator.TranslateNonStream(context.Background(), from, to, in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), &param)
+}
+
+// registry/lookup: which translators the registry has for the pair, and
+// TranslateTokenCount for options.count, with the request as the body it
+// falls back to.
+func registryLookup(in input) []byte {
+	var options registryOptions
+	decodeOptions(in, &options)
+	from, to := options.formats()
+	return marshal(struct {
+		Request    bool   `json:"request"`
+		Response   bool   `json:"response"`
+		Stream     bool   `json:"stream"`
+		NonStream  bool   `json:"non_stream"`
+		TokenCount string `json:"token_count"`
+	}{
+		Request:    sdktranslator.HasRequestTransformer(from, to),
+		Response:   sdktranslator.HasResponseTransformer(from, to),
+		Stream:     sdktranslator.HasStreamResponseTransformer(from, to),
+		NonStream:  sdktranslator.HasNonStreamResponseTransformer(from, to),
+		TokenCount: string(sdktranslator.TranslateTokenCount(context.Background(), from, to, options.Count, []byte(in.Request))),
+	})
 }
 
 // Every block kind, in the order reports list per-kind results.

@@ -341,6 +341,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    use crate::cases::Case;
     use crate::translator::Translator;
 
     /// Where the outputs below hold JSON, as a translator lists it.
@@ -407,7 +408,11 @@ mod tests {
         };
         let go = delta("prefix { \"a\": 1 }");
         let rust = delta("prefix {\"a\":1}");
-        let cmp = compare(&go, &rust, Translator::Stream.embedded_json());
+        let cmp = compare(
+            &go,
+            &rust,
+            Translator::Stream.embedded_json(&Case::new("", "", "")),
+        );
         assert_eq!(cmp.differences.len(), 1);
         assert_eq!(cmp.differences[0].path, "$[0].data.delta.text");
         assert!(cmp.deviations.is_empty());

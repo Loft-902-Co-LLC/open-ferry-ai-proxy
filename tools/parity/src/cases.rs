@@ -8,9 +8,11 @@ use serde_json::{Value, json};
 pub mod chat;
 pub mod claude_chat;
 pub mod claude_responses;
+pub mod registry;
 pub mod responses;
 pub mod signature;
 
+#[derive(Clone)]
 pub struct Case {
     pub name: String,
     /// The model name passed to the translator.

@@ -42,7 +42,7 @@ use crate::go;
 use crate::json::{int_of, object, path, str_of};
 use crate::models::ModelCatalog;
 use crate::schema::normalize_claude_tool_input_schema;
-use crate::thinking::summary::{apply_to_claude, openai_chat_explicit_summary};
+use crate::thinking::summary::apply_translated_to_claude;
 
 const DEFAULT_MAX_TOKENS: i64 = 32000;
 
@@ -168,9 +168,7 @@ fn convert(
     }
 
     let mut out = Value::Object(out);
-    if let Some(show) = openai_chat_explicit_summary(request) {
-        apply_to_claude(&mut out, show, model_name, models);
-    }
+    apply_translated_to_claude(&mut out, request, "openai", model_name, models);
     out
 }
 

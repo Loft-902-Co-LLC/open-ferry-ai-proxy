@@ -136,6 +136,7 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
         generate::claude_chat::event_cases(seed, random);
     let (claude_responses_streams, claude_responses_finals) =
         generate::claude_responses::event_cases(seed, random);
+    let (registry_streams, registry_finals) = generate::registry::response_cases(seed, random);
     let suites = [
         (
             Translator::Request,
@@ -229,6 +230,26 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
             Translator::GeminiSignatures,
             cases::signature::gemini(),
             generate::signature::gemini_cases(seed, random),
+        ),
+        (
+            Translator::RegistryRequest,
+            cases::registry::requests(),
+            generate::registry::request_cases(seed, random),
+        ),
+        (
+            Translator::RegistryStream,
+            cases::registry::streams(),
+            registry_streams,
+        ),
+        (
+            Translator::RegistryNonStream,
+            cases::registry::finals(),
+            registry_finals,
+        ),
+        (
+            Translator::RegistryLookup,
+            cases::registry::lookups(),
+            generate::registry::lookup_cases(seed, random),
         ),
     ];
 
@@ -473,7 +494,7 @@ fn evaluate(translator: Translator, case: &Case, go: &GoResult) -> Evaluated {
 
     let outcome = match (&go_value, &rust_output) {
         (Some(go), Ok(rust)) => {
-            let mut comparison = compare::compare(go, rust, translator.embedded_json());
+            let mut comparison = compare::compare(go, rust, translator.embedded_json(case));
             comparison.deviations.extend(omitted);
             if !comparison.differences.is_empty() {
                 Outcome::Different(comparison.differences)

@@ -2,6 +2,7 @@
 //! output as JSON so ours and upstream's can be compared.
 
 use std::cell::OnceCell;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use open_ferry_translate::claude::openai::chat_completions::{
@@ -29,6 +30,7 @@ use open_ferry_translate::codex::openai::responses::{
     convert_openai_responses_request_to_codex,
 };
 use open_ferry_translate::models::ModelCatalog;
+use open_ferry_translate::registry::{Format, Registry, ResponseContext, ResponseTransform};
 use serde_json::{Value, json};
 
 use crate::cases::Case;
@@ -89,6 +91,15 @@ pub enum Translator {
     ClaudeMessagesSignatures,
     /// A Gemini request → its thought signatures sanitized and validated.
     GeminiSignatures,
+    /// A request through the translator registry, between the pair of
+    /// formats in the case's options (see [`registry_formats`]).
+    RegistryRequest,
+    /// A provider's event stream through the translator registry.
+    RegistryStream,
+    /// A provider's whole response through the translator registry.
+    RegistryNonStream,
+    /// Which translators the registry has for a pair, and a token count.
+    RegistryLookup,
 }
 
 impl Translator {
@@ -116,6 +127,10 @@ impl Translator {
             Self::SignatureInspect => "signature/inspect",
             Self::ClaudeMessagesSignatures => "signature/claude-messages",
             Self::GeminiSignatures => "signature/gemini",
+            Self::RegistryRequest => "registry/request",
+            Self::RegistryStream => "registry/response",
+            Self::RegistryNonStream => "registry/response-non-stream",
+            Self::RegistryLookup => "registry/lookup",
         }
     }
 
@@ -143,6 +158,10 @@ impl Translator {
             Self::SignatureInspect => "signature-inspect",
             Self::ClaudeMessagesSignatures => "signature-claude-messages",
             Self::GeminiSignatures => "signature-gemini",
+            Self::RegistryRequest => "registry-request",
+            Self::RegistryStream => "registry-stream",
+            Self::RegistryNonStream => "registry-non-stream",
+            Self::RegistryLookup => "registry-lookup",
         }
     }
 
@@ -171,6 +190,10 @@ impl Translator {
             Self::SignatureInspect => "Signature checks and replay decisions",
             Self::ClaudeMessagesSignatures => "Claude Messages signature sanitizers",
             Self::GeminiSignatures => "Gemini thought signature sanitizer and validators",
+            Self::RegistryRequest => "Translator registry, requests",
+            Self::RegistryStream => "Translator registry, streaming responses",
+            Self::RegistryNonStream => "Translator registry, non-streaming responses",
+            Self::RegistryLookup => "Translator registry, lookups and token counts",
         }
     }
 
@@ -373,6 +396,94 @@ impl Translator {
                     .read(case, output.as_bytes())
                     .expect("streams always read"))
             }
+            Self::RegistryRequest => {
+                let request = request
+                    .map_err(|err| format!("case {} is not valid JSON: {err}", case.name))?;
+                let (from, to) = registry_formats(case);
+                let stream = case.options["stream"].as_bool().unwrap_or(false);
+                let output = if case.options["identity"].as_bool().unwrap_or(false) {
+                    let registry = Registry::new();
+                    registry.register(
+                        from.clone(),
+                        to.clone(),
+                        Some(Arc::new(|_, body, _| body)),
+                        ResponseTransform::default(),
+                    );
+                    registry.translate_request(&from, &to, &case.model, request, stream)
+                } else {
+                    Registry::global().translate_request(&from, &to, &case.model, request, stream)
+                };
+                // Read back, so generated IDs are masked as upstream's are.
+                Ok(self
+                    .read(case, output.to_string().as_bytes())
+                    .expect("requests always read"))
+            }
+            Self::RegistryStream => {
+                let (from, to) = registry_formats(case);
+                let original = request.unwrap_or_default();
+                let translated = serde_json::from_str(&case.translated_request).unwrap_or_default();
+                let context = ResponseContext {
+                    model: &case.model,
+                    original_request: &original,
+                    request: &translated,
+                };
+                let mut stream = Registry::global().response_stream(&from, &to, &context);
+                let text = |chunks: Vec<Vec<u8>>| -> Vec<String> {
+                    chunks
+                        .iter()
+                        .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
+                        .collect()
+                };
+                // Written as the harness writes upstream's output.
+                let events: Vec<Vec<String>> = case
+                    .events
+                    .iter()
+                    .map(|line| text(stream.translate(line.as_bytes())))
+                    .collect();
+                let finish = text(stream.finish());
+                let report = json!({
+                    "events": events,
+                    "finish": finish,
+                    "failed": stream.tool_input_error().is_some(),
+                });
+                Ok(self
+                    .read(case, report.to_string().as_bytes())
+                    .expect("streams always read"))
+            }
+            Self::RegistryNonStream => {
+                let (from, to) = registry_formats(case);
+                let original = request.unwrap_or_default();
+                let translated = serde_json::from_str(&case.translated_request).unwrap_or_default();
+                let context = ResponseContext {
+                    model: &case.model,
+                    original_request: &original,
+                    request: &translated,
+                };
+                let body = case
+                    .events
+                    .first()
+                    .map(|body| body.as_bytes().to_vec())
+                    .unwrap_or_default();
+                let output = Registry::global()
+                    .translate_non_stream(&from, &to, &context, body)
+                    .unwrap_or_default();
+                self.read(case, &output)
+                    .ok_or_else(|| "output is not JSON".to_owned())
+            }
+            Self::RegistryLookup => {
+                let (from, to) = registry_formats(case);
+                let registry = Registry::global();
+                let count = case.options["count"].as_i64().unwrap_or(0);
+                let body = case.request.as_bytes().to_vec();
+                let token_count = registry.translate_token_count(&from, &to, count, body);
+                Ok(json!({
+                    "request": registry.has_request_transformer(&from, &to),
+                    "response": registry.has_response_transformer(&from, &to),
+                    "stream": registry.has_stream_response_transformer(&from, &to),
+                    "non_stream": registry.has_non_stream_response_transformer(&from, &to),
+                    "token_count": String::from_utf8_lossy(&token_count),
+                }))
+            }
             Self::ClaudeResponsesNonStream => {
                 let translated = serde_json::from_str(&case.translated_request).unwrap_or_default();
                 let body = case.events.first().map_or(&b""[..], |body| body.as_bytes());
@@ -395,9 +506,13 @@ impl Translator {
     /// copies the JSON's text, and the form it takes there. Each place is a
     /// documented deviation (see UPSTREAM.md and the ported module's docs).
     /// JSON in any other string must match upstream's exactly.
-    pub fn embedded_json(self) -> &'static [JsonAt] {
+    pub fn embedded_json(self, case: &Case) -> &'static [JsonAt] {
         use JsonForm::{GoEscaped, InText, Whole};
         match self {
+            // Those of the translator the registry runs.
+            Self::RegistryRequest | Self::RegistryStream | Self::RegistryNonStream => self
+                .native(case)
+                .map_or(&[], |native| native.embedded_json(case)),
             // Function call arguments, a tool result that falls back to its
             // raw content, and a text that isn't a string, also when a system
             // reminder wraps it.
@@ -471,7 +586,46 @@ impl Translator {
             | Self::ClaudeChatNonStream
             | Self::SignatureInspect
             | Self::ClaudeMessagesSignatures
-            | Self::GeminiSignatures => &[],
+            | Self::GeminiSignatures
+            | Self::RegistryLookup => &[],
+        }
+    }
+
+    /// For a registry case, the translator the registry runs for the case's
+    /// pair of formats, whose output this one reads as its own. `None` for a
+    /// pair with none, or with a request translator of the case's own.
+    fn native(self, case: &Case) -> Option<Self> {
+        let pair = (
+            case.options["from"].as_str().unwrap_or_default(),
+            case.options["to"].as_str().unwrap_or_default(),
+        );
+        match self {
+            Self::RegistryRequest if case.options["identity"].as_bool() != Some(true) => match pair
+            {
+                ("claude", "codex") => Some(Self::Request),
+                ("openai-response", "codex") => Some(Self::ResponsesRequest),
+                ("openai", "codex") => Some(Self::ChatRequest),
+                ("openai", "claude") => Some(Self::ClaudeChatRequest),
+                ("openai-response", "claude") => Some(Self::ClaudeResponsesRequest),
+                _ => None,
+            },
+            Self::RegistryStream => match pair {
+                ("codex", "claude") => Some(Self::Stream),
+                ("codex", "openai-response") => Some(Self::ResponsesStream),
+                ("codex", "openai") => Some(Self::ChatStream),
+                ("claude", "openai") => Some(Self::ClaudeChatStream),
+                ("claude", "openai-response") => Some(Self::ClaudeResponsesStream),
+                _ => None,
+            },
+            Self::RegistryNonStream => match pair {
+                ("codex", "claude") => Some(Self::NonStream),
+                ("codex", "openai-response") => Some(Self::ResponsesNonStream),
+                ("codex", "openai") => Some(Self::ChatNonStream),
+                ("claude", "openai") => Some(Self::ClaudeChatNonStream),
+                ("claude", "openai-response") => Some(Self::ClaudeResponsesNonStream),
+                _ => None,
+            },
+            _ => None,
         }
     }
 
@@ -481,6 +635,9 @@ impl Translator {
     /// Upstream makes up a Claude `metadata.user_id` when the client sent
     /// none; we don't.
     pub fn drop_deliberate_omissions(self, case: &Case, go: &mut Value) -> Option<Deviation> {
+        if let Some(native) = self.native(case) {
+            return native.drop_deliberate_omissions(case, go);
+        }
         if !matches!(
             self,
             Self::ClaudeChatRequest
@@ -519,7 +676,20 @@ impl Translator {
     /// when it is the current time.
     pub fn read(self, case: &Case, output: &[u8]) -> Option<Value> {
         let text = String::from_utf8_lossy(output);
+        let native = self.native(case);
         let mut value = match self {
+            Self::RegistryStream => return read_registry_stream(case, native, &text),
+            Self::RegistryRequest | Self::RegistryNonStream if native.is_some() => {
+                return native?.read(case, output);
+            }
+            Self::RegistryNonStream if text.is_empty() => return Some(NO_OUTPUT.into()),
+            // A body passed through as it is, which need not be JSON.
+            Self::RegistryNonStream => {
+                return Some(serde_json::from_str(&text).unwrap_or_else(|_| text.into()));
+            }
+            Self::RegistryRequest | Self::RegistryLookup => {
+                return serde_json::from_str(&text).ok();
+            }
             Self::Request
             | Self::RequestCompat
             | Self::ResponsesRequest
@@ -603,6 +773,68 @@ fn read_lines(text: &str) -> Option<Value> {
         })
         .collect();
     Some(Value::Array(lines))
+}
+
+/// The pair of formats in a registry case's options: for a request, the
+/// client's format and the provider's; for a response, the provider's and the
+/// client's.
+fn registry_formats(case: &Case) -> (Format, Format) {
+    let format = |key: &str| Format::new(case.options[key].as_str().unwrap_or_default().to_owned());
+    (format("from"), format("to"))
+}
+
+/// Reads a registry stream's report, `{"events": [[chunk, …] for each
+/// event], "finish": [chunk, …], "failed": bool}`, as `native`'s harness entry
+/// would have written its chunks, followed by an entry for what the registry
+/// adds: how many chunks each event and the stream's end gave, and whether the
+/// stream failed. A stream with no translator reads as the Responses stream
+/// translator's does, its chunks passed through.
+fn read_registry_stream(case: &Case, native: Option<Translator>, text: &str) -> Option<Value> {
+    let report: Value = serde_json::from_str(text).ok()?;
+    let chunks = |value: &Value| -> Option<Vec<String>> {
+        value
+            .as_array()?
+            .iter()
+            .map(|chunk| chunk.as_str().map(str::to_owned))
+            .collect()
+    };
+    let events: Vec<Vec<String>> = report["events"]
+        .as_array()?
+        .iter()
+        .map(chunks)
+        .collect::<Option<_>>()?;
+    let finish = chunks(&report["finish"])?;
+    let failed = report["failed"].as_bool()?;
+    let all = || events.iter().flatten().chain(&finish);
+    let output = match native {
+        Some(Translator::Stream | Translator::ClaudeResponsesStream) => {
+            all().map(String::as_str).collect::<String>()
+        }
+        Some(Translator::ResponsesStream) | None => {
+            let mut lines: Vec<&str> = Vec::new();
+            for (event, chunks) in case.events.iter().zip(&events) {
+                lines.extend(chunks.iter().map(
+                    |chunk| {
+                        if chunk == event { UNCHANGED } else { chunk }
+                    },
+                ));
+            }
+            lines.extend(finish.iter().map(String::as_str));
+            serde_json::to_string(&lines).expect("strings serialize")
+        }
+        Some(_) => serde_json::to_string(&all().collect::<Vec<_>>()).expect("strings serialize"),
+    };
+    let mut value = match native {
+        Some(native) => native.read(case, output.as_bytes())?,
+        None => read_lines(&output)?,
+    };
+    let counts: Vec<usize> = events.iter().map(Vec::len).collect();
+    value.as_array_mut()?.push(json!({ "registry": {
+        "chunks": counts,
+        "finish": finish.len(),
+        "tool_input_failed": failed,
+    } }));
+    Some(value)
 }
 
 /// Splits SSE text into `{"event": …, "data": …}` frames. Anything that isn't

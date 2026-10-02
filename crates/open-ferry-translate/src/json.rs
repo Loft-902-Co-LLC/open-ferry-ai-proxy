@@ -6,7 +6,7 @@
 
 use std::borrow::Cow;
 
-use serde_json::{Number, Value};
+use serde_json::{Map, Number, Value};
 
 use crate::go;
 
@@ -48,6 +48,30 @@ pub(crate) fn path<'v>(value: &'v Value, path: &str) -> Option<&'v Value> {
 pub(crate) fn path_mut<'v>(value: &'v mut Value, path: &str) -> Option<&'v mut Value> {
     path.split('.')
         .try_fold(value, |value, key| value.get_mut(key))
+}
+
+/// sjson `Set` for a dotted path of object keys. A value on the way that isn't
+/// an object is replaced by one, except an array: sjson can't set a key in an
+/// array, so then nothing changes and this returns `false`. A new key goes
+/// last.
+pub(crate) fn set_path(value: &mut Value, path: &str, new: Value) -> bool {
+    let mut value = value;
+    for key in path.split('.') {
+        if value.is_array() {
+            // Only keys that were already there lead here, so nothing has
+            // changed yet.
+            return false;
+        }
+        if !value.is_object() {
+            *value = Value::Object(Map::new());
+        }
+        let Value::Object(object) = value else {
+            unreachable!("made an object above");
+        };
+        value = object.entry(key).or_insert(Value::Null);
+    }
+    *value = new;
+    true
 }
 
 /// sjson `Delete` for a dotted path of object keys. Returns whether a value was
@@ -212,6 +236,38 @@ mod tests {
         assert_eq!(path(&value, "a.b"), Some(&json!([1])));
         assert_eq!(path(&value, "a.b.0"), None);
         assert_eq!(path(&value, "a.x"), None);
+    }
+
+    #[test]
+    fn set_path_matches_sjson() {
+        let set = |text: &str| {
+            let mut value: Value = serde_json::from_str(text).unwrap();
+            let changed = set_path(&mut value, "a.b.c", json!(true));
+            (value.to_string(), changed)
+        };
+        let made = r#"{"a":{"b":{"c":true}}}"#;
+        for text in [
+            r#"{}"#,
+            r#"{"a":"s"}"#,
+            r#"{"a":null}"#,
+            r#"{"a":{"b":1}}"#,
+            r#""s""#,
+            "null",
+            "1",
+        ] {
+            assert_eq!(set(text), (made.to_owned(), true), "{text}");
+        }
+        assert_eq!(
+            set(r#"{"x":1,"a":{"b":{"d":2,"c":1}}}"#),
+            (r#"{"x":1,"a":{"b":{"d":2,"c":true}}}"#.to_owned(), true)
+        );
+        assert_eq!(
+            set(r#"{"a":{"y":1},"z":2}"#),
+            (r#"{"a":{"y":1,"b":{"c":true}},"z":2}"#.to_owned(), true)
+        );
+        for text in ["[1]", r#"{"a":[1]}"#, r#"{"a":{"b":[]}}"#] {
+            assert_eq!(set(text), (text.to_owned(), false), "{text}");
+        }
     }
 
     #[test]
