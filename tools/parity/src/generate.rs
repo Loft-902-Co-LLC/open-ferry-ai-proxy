@@ -6,10 +6,12 @@
 //! order, and text that Go and Rust might case-map or trim differently.
 //!
 //! [`response`] generates Codex event streams for the Claude response
-//! translators, [`responses`] input for the Responses translators, and
-//! [`signature`] reasoning signatures from every provider.
+//! translators, [`responses`] input for the Responses translators, [`chat`]
+//! and [`claude_chat`] input for the Chat Completions translators to Codex and
+//! Claude, and [`signature`] reasoning signatures from every provider.
 
 pub mod chat;
+pub mod claude_chat;
 pub mod response;
 pub mod responses;
 pub mod signature;

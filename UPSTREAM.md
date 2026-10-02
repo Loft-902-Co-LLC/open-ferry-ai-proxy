@@ -35,7 +35,7 @@ Upstream translators live at `internal/translator/<upstream>/<client-format>/`. 
 | `open-ferry-translate`: reasoning signatures | `internal/signature` | Ported (`signature`): checks for Claude, Gemini, GPT, Grok, Kimi and SWE signatures, replay decisions, and the Claude Messages and Gemini sanitizers |
 | `open-ferry-translate`: Chat Completions → Codex | `internal/translator/codex/openai/chat-completions` | Request and response ported (`codex::openai::chat_completions`), including the `apply_patch` bridge |
 | `open-ferry-translate`: Responses → Codex | `internal/translator/codex/openai/responses` | Request and response ported (`codex::openai::responses`), except the `apply_patch` bridge |
-| `open-ferry-translate`: Chat Completions → Claude | `internal/translator/claude/openai/chat-completions` | Planned |
+| `open-ferry-translate`: Chat Completions → Claude | `internal/translator/claude/openai/chat-completions` | Request (including compatibility mode) and response ported (`claude::openai::chat_completions`) |
 | `open-ferry-translate`: Responses → Claude | `internal/translator/claude/openai/responses` | Planned |
 | `open-ferry-translate`: registry | `sdk/translator` | Planned |
 | `open-ferry-server`: Responses WebSocket | `sdk/api/handlers/openai/openai_responses_websocket*.go` | Planned |
@@ -50,11 +50,14 @@ Each ported file lists its deviations in its module docs. Most are byproducts of
 
 - **Key order is kept.** Upstream round-trips tool schemas through Go maps, which sorts their keys. We keep the client's order (`serde_json` with `preserve_order`).
 - **Embedded JSON is re-serialized compactly.** Where upstream copies a client's raw JSON bytes into a string field (for example `function_call.arguments`), we write the same value as compact JSON. Number text is kept exactly (`arbitrary_precision`). In responses this affects a web search's `partial_json`, where Go's encoder also escapes `<`, `>` and `&`. Function call arguments are passed through byte for byte.
-- **Malformed JSON is not read.** A Codex `data:` line that isn't valid JSON is treated as an event with no fields, or gives no chunk in Chat Completions; gjson reads what it can from it. Codex sends valid JSON, so this only matters for corrupted streams. Likewise, a Chat Completions tool message's string content is read as JSON parts only if all of it is valid JSON.
+- **Malformed JSON is not read.** A Codex `data:` line that isn't valid JSON is treated as an event with no fields, or gives no chunk in Chat Completions; gjson reads what it can from it. The same goes for a Claude `data:` line. Both providers send valid JSON, so this only matters for corrupted streams. Likewise, a Chat Completions tool message's string content is read as JSON parts only if all of it is valid JSON.
 - **Byte-length truncation keeps whole characters.** Upstream cuts names and IDs at 64 bytes and can split a UTF-8 character; we stop at the character boundary before it.
 - **Duplicate object keys: the last one wins.** gjson reads the first occurrence of a key and `serde_json` keeps the last. RFC 8259 leaves this to the parser. For the same reason, a Gemini part with two `thoughtSignature` keys counts as normalized; upstream re-sanitizes it.
 - **Out-of-range numbers saturate.** Where upstream converts a float such as `1e30` to an integer, Go's result depends on the CPU: amd64 gives the minimum int64, arm64 saturates. We saturate, so a huge thinking budget maps to the highest effort, and a token count of `1e400` becomes the largest int64.
-- **Numbers beyond `f64` are kept as written.** Where upstream copies a value as a number, such as Chat Completions' `reasoning_effort`, Go writes `1e400` as `+Inf`, which isn't JSON. We keep the number's text. Negative zero becomes `0` there, where Go writes `-0`.
+- **Numbers beyond `f64` are kept as written.** Where upstream copies a value as a number, such as Chat Completions' `reasoning_effort`, Go writes `1e400` as `+Inf`, which isn't JSON. We keep the number's text. Negative zero becomes `0` there, where Go writes `-0`. Where upstream converts the value to a float first, as for a Claude request's `top_p`, we leave out a value that isn't finite.
+- **No made-up user IDs.** When a Chat Completions client sends no user ID, upstream fills the Claude request's `metadata.user_id` with a hash of the conversation. We pass on only an ID the client sent, in `metadata.user_id` or `user`, and otherwise send empty `metadata` (see [Deliberately not ported](#deliberately-not-ported)).
+- **Generated tool call IDs come from a keyed hasher.** A Chat Completions tool call without an ID gets one in upstream's form, `toolu_` and 24 letters and digits. Upstream draws them from the operating system's random source; we draw them from the standard library's randomly keyed hasher, so the crate needs no random-number dependency. The IDs only need to be unique within a conversation.
+- **Only the static model catalog.** Whether a Claude model takes adaptive thinking or a token budget comes from upstream's model registry, which holds the models of configured accounts and falls back to a static catalog. Only the static catalog is ported so far; the registry comes with accounts.
 - **Escaped cache breakpoint keys are removed too.** Upstream strips `prompt_cache_breakpoint` from Responses `input` only when the body holds the key unescaped. We strip it however it's written.
 - **The signature sanitizer's default target falls back to the model.** `ClaudeMessagesSanitizeOptions::default()` targets `Provider::Unknown`, which falls back to the target model's provider. Upstream's zero value is an empty provider, which skips that fallback.
 - **Protobuf errors always use a regular space.** Signature errors include protobuf-go's parse errors, which start with `proto:` and a space. protobuf-go makes that space a non-breaking one in some builds, chosen per binary so that callers don't compare error strings. We always write a regular space.
@@ -74,9 +77,16 @@ The Chat Completions translator shares two helpers with upstream's other transla
 - `apply_patch` from `internal/client/codex/apply-patch/tool.go`: Codex's custom `apply_patch` tool, carried as a function call with the arguments `{"input": "<patch>"}`.
 - `responses_tools` from `internal/util/responses_tools.go`: which declaration a tool name refers to, across top-level tools, `additional_tools` and namespaces.
 
+The Claude translators use more of upstream's shared code:
+
+- `models` from `internal/registry`: the static model catalog. `models/models.json` is upstream's `internal/registry/models/models.json`, copied unchanged.
+- `thinking` from `internal/thinking`: thinking budgets and levels, model-name suffixes, and whether a client asked to see reasoning summaries.
+- `common::cache_control` and `common::claude` from `internal/translator/common` and `internal/util`: `cache_control` markers, grouping messages into turns, structured output instructions, and tool name and ID sanitizing.
+- `schema` from `internal/util/claude_schema.go`: making a tool's JSON Schema fit for Claude.
+
 ## Checking parity
 
-`tools/parity` runs the same requests and Codex event streams through upstream's Go translators and through ours, then compares the output. It covers every translator ported so far. It needs Go and a CLIProxyAPI checkout:
+`tools/parity` runs the same requests and event streams through upstream's Go translators and through ours, then compares the output. It covers every translator ported so far. It needs Go and a CLIProxyAPI checkout:
 
 ```sh
 cargo run --release -p open-ferry-parity -- --upstream ../CLIProxyAPI

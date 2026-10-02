@@ -132,6 +132,8 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
     let (streams, finals) = generate::response::cases(seed, random);
     let (responses_streams, responses_finals) = generate::responses::event_cases(seed, random);
     let (chat_streams, chat_finals) = generate::chat::event_cases(seed, random);
+    let (claude_chat_streams, claude_chat_finals) =
+        generate::claude_chat::event_cases(seed, random);
     let suites = [
         (
             Translator::Request,
@@ -170,6 +172,26 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
             Translator::RequestCompat,
             cases::hand_written(),
             generate::cases(seed, random),
+        ),
+        (
+            Translator::ClaudeChatRequest,
+            cases::claude_chat::requests(),
+            generate::claude_chat::request_cases(seed, random),
+        ),
+        (
+            Translator::ClaudeChatRequestCompat,
+            cases::claude_chat::requests(),
+            generate::claude_chat::request_cases(seed, random),
+        ),
+        (
+            Translator::ClaudeChatStream,
+            cases::claude_chat::streams(),
+            claude_chat_streams,
+        ),
+        (
+            Translator::ClaudeChatNonStream,
+            cases::claude_chat::finals(),
+            claude_chat_finals,
         ),
         (
             Translator::SignatureInspect,
@@ -416,17 +438,21 @@ fn evaluate(translator: Translator, case: &Case, go: &GoResult) -> Evaluated {
             Err(format!("panic: {message}"))
         });
 
-    let (go_output, go_value) = match go {
+    let (go_output, mut go_value) = match go {
         GoResult::Panic(message) => (format!("panic: {message}"), None),
         GoResult::Output(bytes) => (
             String::from_utf8_lossy(bytes).into_owned(),
             translator.read(bytes),
         ),
     };
+    let omitted = go_value
+        .as_mut()
+        .and_then(|go| translator.drop_deliberate_omissions(case, go));
 
     let outcome = match (&go_value, &rust_output) {
         (Some(go), Ok(rust)) => {
-            let comparison = compare::compare(go, rust);
+            let mut comparison = compare::compare(go, rust);
+            comparison.deviations.extend(omitted);
             if !comparison.differences.is_empty() {
                 Outcome::Different(comparison.differences)
             } else if !comparison.deviations.is_empty() {

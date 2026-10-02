@@ -1,8 +1,12 @@
 // Ported from CLIProxyAPI internal/thinking/convert.go, suffix.go and types.go
 // (v8.0.10, MIT). https://github.com/router-for-me/CLIProxyAPI
 
-//! Thinking settings: model-name suffixes, and mapping token budgets to named
-//! reasoning levels.
+//! Thinking settings: model-name suffixes, mapping between token budgets and
+//! named reasoning levels, and whether reasoning summaries are shown.
+
+pub(crate) mod summary;
+
+use crate::go;
 
 pub(crate) const LEVEL_XHIGH: &str = "xhigh";
 
@@ -26,6 +30,43 @@ pub(crate) fn budget_to_level(budget: i64) -> Option<&'static str> {
     })
 }
 
+/// Converts a reasoning level, in any case, into a thinking token budget.
+pub(crate) fn level_to_budget(level: &str) -> Option<i64> {
+    Some(match go::to_lower(level).as_str() {
+        "none" => 0,
+        "auto" => -1,
+        "minimal" => 512,
+        "low" => 1024,
+        "medium" => 8192,
+        "high" => 24576,
+        "xhigh" => 32768,
+        // Claude's adaptive "max" effort, for models that only take a budget.
+        "max" => 128_000,
+        _ => return None,
+    })
+}
+
+/// Reports whether `levels` holds `target`, ignoring case and surrounding
+/// whitespace. `target` must be ASCII.
+pub(crate) fn has_level(levels: &[String], target: &str) -> bool {
+    levels
+        .iter()
+        .any(|level| level.trim().eq_ignore_ascii_case(target))
+}
+
+/// Maps a reasoning level onto a Claude adaptive thinking effort: `low`,
+/// `medium`, `high` or, when the model supports it, `max`.
+pub(crate) fn claude_effort(level: &str, supports_max: bool) -> Option<&'static str> {
+    Some(match go::to_lower(level.trim()).as_str() {
+        "minimal" | "low" => "low",
+        "medium" => "medium",
+        "high" | "auto" => "high",
+        "xhigh" | "max" if supports_max => "max",
+        "xhigh" | "max" => "high",
+        _ => return None,
+    })
+}
+
 /// The model name without a thinking suffix such as `(high)` or `(8192)`, as
 /// upstream's `ParseSuffix` returns it.
 pub(crate) fn base_model_name(model: &str) -> &str {
@@ -46,6 +87,30 @@ mod tests {
         assert_eq!(base_model_name("grok-4(high"), "grok-4(high");
         assert_eq!(base_model_name("grok-4)"), "grok-4)");
         assert_eq!(base_model_name("()"), "");
+    }
+
+    #[test]
+    fn levels_map_to_budgets_in_any_case() {
+        assert_eq!(level_to_budget("none"), Some(0));
+        assert_eq!(level_to_budget("AUTO"), Some(-1));
+        assert_eq!(level_to_budget("High"), Some(24576));
+        assert_eq!(level_to_budget("max"), Some(128_000));
+        assert_eq!(level_to_budget(" high"), None);
+        assert_eq!(level_to_budget("banana"), None);
+    }
+
+    #[test]
+    fn levels_map_to_claude_efforts() {
+        assert_eq!(claude_effort(" Minimal ", false), Some("low"));
+        assert_eq!(claude_effort("medium", false), Some("medium"));
+        assert_eq!(claude_effort("auto", false), Some("high"));
+        assert_eq!(claude_effort("xhigh", false), Some("high"));
+        assert_eq!(claude_effort("xhigh", true), Some("max"));
+        assert_eq!(claude_effort("max", true), Some("max"));
+        assert_eq!(claude_effort("none", true), None);
+        assert_eq!(claude_effort("", true), None);
+        assert!(has_level(&[" MAX ".to_owned()], "max"));
+        assert!(!has_level(&["xhigh".to_owned()], "max"));
     }
 
     #[test]

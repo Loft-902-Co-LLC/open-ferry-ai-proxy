@@ -5,14 +5,16 @@
 //! <https://github.com/router-for-me/CLIProxyAPI>
 //!
 //! Modules are named after upstream's layout: `codex::claude` converts between
-//! a Claude-format client and a Codex upstream.
+//! a Claude-format client and a Codex upstream, and `claude::openai` between
+//! an OpenAI-format client and a Claude upstream.
 
 mod apply_patch;
-mod claude;
+pub mod claude;
 pub mod codex;
 mod common;
 mod go;
 mod json;
+pub mod models;
 mod protowire;
 mod responses_tools;
 mod schema;

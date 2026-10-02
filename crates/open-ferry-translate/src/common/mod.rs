@@ -3,6 +3,9 @@
 
 //! Helpers shared by translators of every format.
 
+pub(crate) mod cache_control;
+pub(crate) mod claude;
+
 use serde_json::Value;
 
 use crate::json::path;

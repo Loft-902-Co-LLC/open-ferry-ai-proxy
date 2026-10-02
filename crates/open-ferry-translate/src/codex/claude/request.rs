@@ -20,7 +20,9 @@ use std::fmt::Write as _;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::claude::{align_tool_results, is_attribution_system_text, message_system_reminder_text};
+use crate::common::claude::{
+    align_tool_results, is_attribution_system_text, message_system_reminder_text,
+};
 use crate::go;
 use crate::json::{bool_of, int_of, object, str_of};
 use crate::schema::{MAP_KEYWORDS, VALUE_KEYWORDS, has_unsupported_unicode_property_escape};

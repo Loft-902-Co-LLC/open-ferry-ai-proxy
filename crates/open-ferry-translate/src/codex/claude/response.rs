@@ -22,7 +22,7 @@ use std::fmt::Write as _;
 use serde_json::{Map, Value, json};
 
 use super::request::{build_tool_name_map, shorten_call_id};
-use crate::claude::sanitize_tool_id;
+use crate::common::claude::sanitize_tool_id;
 use crate::json::{int_of, path, str_of};
 
 /// Stands in for a missing event or item, as an empty gjson result does upstream.

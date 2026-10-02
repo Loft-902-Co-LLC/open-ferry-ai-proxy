@@ -6,6 +6,7 @@ use open_ferry_translate::codex::claude::convert_claude_request_to_codex;
 use serde_json::{Value, json};
 
 pub mod chat;
+pub mod claude_chat;
 pub mod responses;
 pub mod signature;
 

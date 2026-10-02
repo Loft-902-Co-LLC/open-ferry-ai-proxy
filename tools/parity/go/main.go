@@ -17,6 +17,9 @@
 // codex/openai-responses/response writes a JSON array with one string per
 // output chunk, or "=" for a chunk identical to its input line.
 // codex/openai-chat/response writes a JSON array with one string per chunk.
+// claude/openai-chat/response does the same for Claude event lines, and
+// claude/openai-chat/response-non-stream takes the whole Claude SSE body as
+// its one event.
 //
 // The signature/* entries run upstream's reasoning-signature package and write
 // a JSON report of what it returned. "options", a JSON object, holds inputs
@@ -37,6 +40,7 @@ import (
 	"os"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	claudechat "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/claude/openai/chat-completions"
 	codexclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/claude"
 	codexchat "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/openai/chat-completions"
 	codexresponses "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/openai/responses"
@@ -119,6 +123,29 @@ var translators = map[string]func(in input) []byte{
 	},
 	"codex/openai-chat/response-non-stream": func(in input) []byte {
 		return codexchat.ConvertCodexResponseToOpenAINonStream(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), nil)
+	},
+	"claude/openai-chat/request": func(in input) []byte {
+		return claudechat.ConvertOpenAIRequestToClaude(in.Model, []byte(in.Request), true)
+	},
+	"claude/openai-chat/request-compat": func(in input) []byte {
+		return claudechat.ConvertOpenAIRequestToClaudeWithCompat(in.Model, []byte(in.Request), true)
+	},
+	"claude/openai-chat/response": func(in input) []byte {
+		var param any
+		chunks := []string{}
+		for _, event := range in.Events {
+			for _, chunk := range claudechat.ConvertClaudeResponseToOpenAI(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), []byte(event), &param) {
+				chunks = append(chunks, string(chunk))
+			}
+		}
+		out, err := json.Marshal(chunks)
+		if err != nil {
+			panic(err)
+		}
+		return out
+	},
+	"claude/openai-chat/response-non-stream": func(in input) []byte {
+		return claudechat.ConvertClaudeResponseToOpenAINonStream(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), nil)
 	},
 	"signature/inspect":         inspectSignature,
 	"signature/claude-messages": sanitizeClaudeMessages,

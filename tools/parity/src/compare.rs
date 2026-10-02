@@ -19,6 +19,8 @@ pub enum Deviation {
     /// Go converted a float too large for int64 as amd64 does, to the minimum
     /// int64; we saturate, as arm64 does.
     SaturatedInt,
+    /// Upstream made up a user ID for a client that sent none; we leave it out.
+    SyntheticUserId,
 }
 
 impl Deviation {
@@ -29,6 +31,7 @@ impl Deviation {
             Self::CharBoundary => "cut at a character boundary",
             Self::ProtoErrorPrefix => "protobuf error prefix space",
             Self::SaturatedInt => "out-of-range number saturated",
+            Self::SyntheticUserId => "made-up user ID left out",
         }
     }
 }
