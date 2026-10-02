@@ -464,7 +464,7 @@ fn evaluate(translator: Translator, case: &Case, go: &GoResult) -> Evaluated {
         GoResult::Panic(message) => (format!("panic: {message}"), None),
         GoResult::Output(bytes) => (
             String::from_utf8_lossy(bytes).into_owned(),
-            translator.read(bytes),
+            translator.read(case, bytes),
         ),
     };
     let omitted = go_value
@@ -473,7 +473,7 @@ fn evaluate(translator: Translator, case: &Case, go: &GoResult) -> Evaluated {
 
     let outcome = match (&go_value, &rust_output) {
         (Some(go), Ok(rust)) => {
-            let mut comparison = compare::compare(go, rust);
+            let mut comparison = compare::compare(go, rust, translator.embedded_json());
             comparison.deviations.extend(omitted);
             if !comparison.differences.is_empty() {
                 Outcome::Different(comparison.differences)

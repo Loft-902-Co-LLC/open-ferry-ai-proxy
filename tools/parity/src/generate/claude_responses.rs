@@ -2376,7 +2376,7 @@ mod tests {
                 r#""effort""#,
                 r#""speed":"fast""#,
                 r#""user_id""#,
-                "toolu_(generated)",
+                "toolu_(generated-1)",
                 "Tool result was empty.",
             ],
         );

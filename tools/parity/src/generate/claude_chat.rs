@@ -827,7 +827,7 @@ mod tests {
                 r#""tool_choice":{"type":"any""#,
                 r#""tool_choice":{"type":"tool""#,
                 r#""strict":true"#,
-                "toolu_(generated)",
+                "toolu_(generated-1)",
                 "JSON Schema:",
             ],
         );
