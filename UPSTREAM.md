@@ -31,7 +31,7 @@ Upstream translators live at `internal/translator/<upstream>/<client-format>/`. 
 
 | open-ferry module | Upstream source | Status |
 |---|---|---|
-| `open-ferry-translate`: Claude client → Codex | `internal/translator/codex/claude` | Planned |
+| `open-ferry-translate`: Claude client → Codex | `internal/translator/codex/claude` | Request ported (`codex::claude`); response planned |
 | `open-ferry-translate`: Chat Completions → Codex | `internal/translator/codex/openai/chat-completions` | Planned |
 | `open-ferry-translate`: Responses → Codex | `internal/translator/codex/openai/responses` | Planned |
 | `open-ferry-translate`: Chat Completions → Claude | `internal/translator/claude/openai/chat-completions` | Planned |
@@ -42,6 +42,17 @@ Upstream translators live at `internal/translator/<upstream>/<client-format>/`. 
 | `open-ferry-management`: `auth-files` | `internal/api/handlers/management/auth_files*.go` | Planned |
 | `open-ferry-management`: `api-call` | `internal/api/handlers/management/api_tools.go` | Planned |
 | `open-ferry-management`: `reset-quota` | `internal/api/server_management.go` | Planned |
+
+### Deviations so far
+
+Each ported file lists its deviations in its module docs. Most are byproducts of using `serde_json` rather than raw bytes:
+
+- **Key order is kept.** Upstream round-trips tool schemas through Go maps, which sorts their keys. We keep the client's order (`serde_json` with `preserve_order`).
+- **Embedded JSON is re-serialized compactly.** Where upstream copies a client's raw JSON bytes into a string field (for example `function_call.arguments`), we write the same value as compact JSON. Number text is kept exactly (`arbitrary_precision`).
+- **Byte-length truncation keeps whole characters.** Upstream cuts names and IDs at 64 bytes and can split a UTF-8 character; we stop at the character boundary before it.
+- **Duplicate object keys: the last one wins.** gjson reads the first occurrence of a key and `serde_json` keeps the last. RFC 8259 leaves this to the parser.
+- **Out-of-range numbers saturate.** Where upstream converts a float such as `1e30` to an integer, Go's result depends on the CPU: amd64 gives the minimum int64, arm64 saturates. We saturate, so a huge thinking budget maps to the highest effort.
+- **Not yet ported in `codex::claude`:** replaying Grok reasoning signatures to Grok-named models, and the compatibility variant `ConvertClaudeRequestToCodexWithCompat`. The upstream Grok test is kept as an ignored test.
 
 ## Deliberately not ported
 
