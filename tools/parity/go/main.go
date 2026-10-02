@@ -16,6 +16,7 @@
 // codex/claude/response concatenates its output for every line.
 // codex/openai-responses/response writes a JSON array with one string per
 // output chunk, or "=" for a chunk identical to its input line.
+// codex/openai-chat/response writes a JSON array with one string per chunk.
 //
 // The signature/* entries run upstream's reasoning-signature package and write
 // a JSON report of what it returned. "options", a JSON object, holds inputs
@@ -37,6 +38,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	codexclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/claude"
+	codexchat "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/openai/chat-completions"
 	codexresponses "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/openai/responses"
 )
 
@@ -97,6 +99,26 @@ var translators = map[string]func(in input) []byte{
 	},
 	"codex/openai-responses/response-non-stream": func(in input) []byte {
 		return codexresponses.ConvertCodexResponseToOpenAIResponsesNonStream(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), nil)
+	},
+	"codex/openai-chat/request": func(in input) []byte {
+		return codexchat.ConvertOpenAIRequestToCodex(in.Model, []byte(in.Request), true)
+	},
+	"codex/openai-chat/response": func(in input) []byte {
+		var param any
+		chunks := []string{}
+		for _, event := range in.Events {
+			for _, chunk := range codexchat.ConvertCodexResponseToOpenAI(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), []byte(event), &param) {
+				chunks = append(chunks, string(chunk))
+			}
+		}
+		out, err := json.Marshal(chunks)
+		if err != nil {
+			panic(err)
+		}
+		return out
+	},
+	"codex/openai-chat/response-non-stream": func(in input) []byte {
+		return codexchat.ConvertCodexResponseToOpenAINonStream(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), nil)
 	},
 	"signature/inspect":         inspectSignature,
 	"signature/claude-messages": sanitizeClaudeMessages,

@@ -51,6 +51,33 @@ pub(crate) fn quote(s: &str) -> String {
     out
 }
 
+/// Go's `json.Marshal` of a string: wrapped in double quotes, with the escapes
+/// JSON requires and, as Go adds for HTML, `<`, `>`, `&`, U+2028 and U+2029
+/// written as `\u` escapes too.
+pub(crate) fn json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' | '\\' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c < ' ' || matches!(c, '<' | '>' | '&' | '\u{2028}' | '\u{2029}') => {
+                let _ = write!(out, "\\u{:04x}", u32::from(c));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// Go's `strconv.IsPrint`.
 fn is_print(c: char) -> bool {
     let c = u32::from(c);
@@ -117,6 +144,20 @@ mod tests {
             "\"\u{5c}u00ad\u{5c}u2028\u{5c}U000f0000\""
         );
         assert_eq!(quote("\u{80}"), "\"\u{5c}u0080\"");
+    }
+
+    #[test]
+    fn json_string_matches_go() {
+        assert_eq!(json_string("a\"b\\c"), r#""a\"b\\c""#);
+        // DEL is left as it is.
+        assert_eq!(
+            json_string("\u{0}\u{8}\u{c}\n\r\t\u{1f}\u{7f}"),
+            "\"\\u0000\\b\\f\\n\\r\\t\\u001f\u{7f}\""
+        );
+        assert_eq!(
+            json_string("<a>&\u{2028}\u{2029}é🙂"),
+            r#""\u003ca\u003e\u0026\u2028\u2029é🙂""#
+        );
     }
 
     #[test]

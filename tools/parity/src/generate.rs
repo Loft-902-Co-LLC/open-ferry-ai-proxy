@@ -9,6 +9,7 @@
 //! translators, [`responses`] input for the Responses translators, and
 //! [`signature`] reasoning signatures from every provider.
 
+pub mod chat;
 pub mod response;
 pub mod responses;
 pub mod signature;

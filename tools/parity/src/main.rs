@@ -131,6 +131,7 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
     let (seed, random) = (args.seed, args.random);
     let (streams, finals) = generate::response::cases(seed, random);
     let (responses_streams, responses_finals) = generate::responses::event_cases(seed, random);
+    let (chat_streams, chat_finals) = generate::chat::event_cases(seed, random);
     let suites = [
         (
             Translator::Request,
@@ -153,6 +154,17 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
             Translator::ResponsesNonStream,
             cases::responses::finals(),
             responses_finals,
+        ),
+        (
+            Translator::ChatRequest,
+            cases::chat::requests(),
+            generate::chat::request_cases(seed, random),
+        ),
+        (Translator::ChatStream, cases::chat::streams(), chat_streams),
+        (
+            Translator::ChatNonStream,
+            cases::chat::finals(),
+            chat_finals,
         ),
         (
             Translator::RequestCompat,
@@ -353,6 +365,8 @@ as expected {expected}/{}",
         (Translator::NonStream, &finals),
         (Translator::ResponsesStream, &streams),
         (Translator::ResponsesNonStream, &finals),
+        (Translator::ChatStream, &streams),
+        (Translator::ChatNonStream, &finals),
     ] {
         let dir = live_dir.join(translator.slug());
         let tally = check(translator, replies, upstream, work_dir, &dir)?;

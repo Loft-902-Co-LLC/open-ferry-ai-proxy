@@ -5,6 +5,7 @@ use base64::engine::general_purpose::URL_SAFE;
 use open_ferry_translate::codex::claude::convert_claude_request_to_codex;
 use serde_json::{Value, json};
 
+pub mod chat;
 pub mod responses;
 pub mod signature;
 
@@ -59,6 +60,11 @@ impl Case {
 
     pub fn with_options(mut self, options: Value) -> Self {
         self.options = options;
+        self
+    }
+
+    fn with_events(mut self, events: Vec<String>) -> Self {
+        self.events = events;
         self
     }
 

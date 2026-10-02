@@ -6,7 +6,7 @@
 
 use std::borrow::Cow;
 
-use serde_json::Value;
+use serde_json::{Number, Value};
 
 use crate::go;
 
@@ -64,17 +64,20 @@ pub(crate) fn delete_path(value: &mut Value, path: &str) -> bool {
         .is_some_and(|object| object.shift_remove(key).is_some())
 }
 
-/// gjson `Int()`.
+/// gjson `Int()`. A float out of `i64`'s range saturates, where Go's result
+/// depends on the CPU (amd64 gives the minimum `i64`).
 pub(crate) fn int_of(value: &Value) -> i64 {
     match value {
         Value::Bool(true) => 1,
         Value::String(s) => parse_int(s).unwrap_or(0),
         Value::Number(n) => {
-            let f = n.as_f64().unwrap_or(0.0);
+            let text = n.to_string();
+            // Like Go's ParseFloat, a number too large for f64 reads as infinite.
+            let f = text.parse::<f64>().unwrap_or(0.0);
             if f.abs() <= 9_007_199_254_740_991.0 {
                 f as i64
             } else {
-                parse_int(&n.to_string()).unwrap_or(f as i64)
+                parse_int(&text).unwrap_or(f as i64)
             }
         }
         _ => 0,
@@ -101,6 +104,61 @@ pub(crate) fn object<const N: usize>(fields: [(&str, Value); N]) -> Value {
             .map(|(key, value)| (key.to_owned(), value))
             .collect(),
     )
+}
+
+/// gjson `Value()` as sjson then writes it. Numbers become `float64`, which
+/// sjson writes as plain decimals. Objects and arrays go through `json.Marshal`,
+/// which sorts object keys and writes numbers in exponent form below 1e-6 and
+/// from 1e21. A number beyond `f64`'s range is kept as written; Go can't write it.
+/// Negative zero comes out as `0` where Go writes `-0`: serde_json reads `-0`
+/// as the integer 0.
+pub(crate) fn go_value(value: &Value) -> Value {
+    match value {
+        Value::Number(number) => go_float(number, false),
+        _ => go_marshaled(value),
+    }
+}
+
+fn go_marshaled(value: &Value) -> Value {
+    match value {
+        Value::Number(number) => go_float(number, true),
+        Value::Array(items) => Value::Array(items.iter().map(go_marshaled).collect()),
+        Value::Object(fields) => {
+            let mut fields: Vec<(&String, &Value)> = fields.iter().collect();
+            fields.sort_by(|a, b| a.0.cmp(b.0));
+            Value::Object(
+                fields
+                    .into_iter()
+                    .map(|(key, value)| (key.clone(), go_marshaled(value)))
+                    .collect(),
+            )
+        }
+        other => other.clone(),
+    }
+}
+
+/// A number as Go writes a `float64`: `strconv.FormatFloat(f, 'f', -1, 64)`,
+/// or as `json.Marshal` writes it when `marshaled`.
+fn go_float(number: &Number, marshaled: bool) -> Value {
+    let f = match number.to_string().parse::<f64>() {
+        Ok(f) if f.is_finite() => f,
+        _ => return Value::Number(number.clone()),
+    };
+    let abs = f.abs();
+    let text = if marshaled && abs != 0.0 && !(1e-6..1e21).contains(&abs) {
+        // Rust writes `1e21` and `1.5e-7`; Go writes `1e+21` and `1.5e-07`,
+        // then drops the zero.
+        let text = format!("{f:e}");
+        match text.split_once('e') {
+            Some((mantissa, exponent)) if !exponent.starts_with('-') => {
+                format!("{mantissa}e+{exponent}")
+            }
+            _ => text,
+        }
+    } else {
+        f.to_string()
+    };
+    serde_json::from_str(&text).expect("a formatted float is valid JSON")
 }
 
 /// gjson's strict integer parser: optional `-`, then ASCII digits only.
@@ -176,6 +234,30 @@ mod tests {
         assert_eq!(int_of(&json!("5x")), 0);
         assert_eq!(int_of(&json!(true)), 1);
         assert_eq!(int_of(&json!(null)), 0);
+        let parse = |text: &str| serde_json::from_str::<Value>(text).unwrap();
+        assert_eq!(int_of(&parse("1e30")), i64::MAX);
+        assert_eq!(int_of(&parse("1e400")), i64::MAX);
+        assert_eq!(int_of(&parse("-1e400")), i64::MIN);
+        assert_eq!(int_of(&parse("9223372036854775808")), i64::MIN);
+    }
+
+    #[test]
+    fn go_value_matches_sjson() {
+        let parse = |text: &str| serde_json::from_str::<Value>(text).unwrap();
+        let written = |text: &str| go_value(&parse(text)).to_string();
+        assert_eq!(written("1.50"), "1.5");
+        assert_eq!(written("1E+2"), "100");
+        assert_eq!(written("-0.0"), "0");
+        assert_eq!(written("9007199254740993"), "9007199254740992");
+        assert_eq!(written("1e21"), "1000000000000000000000");
+        // Kept as serde_json read it, which adds the exponent's sign.
+        assert_eq!(written("1e400"), "1e+400");
+        assert_eq!(written(r#""x""#), r#""x""#);
+        assert_eq!(written("null"), "null");
+        assert_eq!(
+            written(r#"{"b":[1.50,1e21,1.5e-7,1e-6],"a":{"d":2,"c":0}}"#),
+            r#"{"a":{"c":0,"d":2},"b":[1.5,1e+21,1.5e-7,0.000001]}"#
+        );
     }
 
     #[test]

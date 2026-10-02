@@ -1,9 +1,16 @@
 //! The translators under test, run on our side, and how to read each one's
 //! output as JSON so ours and upstream's can be compared.
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use open_ferry_translate::codex::claude::{
     CodexToClaudeStream, convert_claude_request_to_codex,
     convert_claude_request_to_codex_with_compat, convert_codex_response_to_claude_non_stream,
+};
+use open_ferry_translate::codex::openai::chat_completions::{
+    CodexToOpenAIChatCompletionsStream,
+    convert_codex_response_to_openai_chat_completions_non_stream,
+    convert_openai_chat_completions_request_to_codex,
 };
 use open_ferry_translate::codex::openai::responses::{
     CodexToOpenAIResponsesStream, convert_codex_response_to_openai_responses_non_stream,
@@ -23,6 +30,10 @@ const NO_OUTPUT: &str = "(no output)";
 /// How the Responses stream translator's harness writes a line it returned unchanged.
 const UNCHANGED: &str = "=";
 
+/// What a Chat Completions response's `created` is replaced with when it is
+/// the current time, which upstream and we each read from the clock.
+const CREATED_NOW: &str = "(now)";
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Translator {
     /// Claude Messages request → Codex request.
@@ -39,6 +50,12 @@ pub enum Translator {
     ResponsesStream,
     /// The final Codex event → one Responses response.
     ResponsesNonStream,
+    /// OpenAI Chat Completions request → Codex request.
+    ChatRequest,
+    /// Codex event stream → Chat Completions chunks.
+    ChatStream,
+    /// The final Codex event → one Chat Completions response.
+    ChatNonStream,
     /// One reasoning signature → every check and replay decision on it.
     SignatureInspect,
     /// A Claude Messages request → its signed history stripped and sanitized.
@@ -58,6 +75,9 @@ impl Translator {
             Self::ResponsesRequest => "codex/openai-responses/request",
             Self::ResponsesStream => "codex/openai-responses/response",
             Self::ResponsesNonStream => "codex/openai-responses/response-non-stream",
+            Self::ChatRequest => "codex/openai-chat/request",
+            Self::ChatStream => "codex/openai-chat/response",
+            Self::ChatNonStream => "codex/openai-chat/response-non-stream",
             Self::SignatureInspect => "signature/inspect",
             Self::ClaudeMessagesSignatures => "signature/claude-messages",
             Self::GeminiSignatures => "signature/gemini",
@@ -74,6 +94,9 @@ impl Translator {
             Self::ResponsesRequest => "responses-request",
             Self::ResponsesStream => "responses-stream",
             Self::ResponsesNonStream => "responses-non-stream",
+            Self::ChatRequest => "chat-request",
+            Self::ChatStream => "chat-stream",
+            Self::ChatNonStream => "chat-non-stream",
             Self::SignatureInspect => "signature-inspect",
             Self::ClaudeMessagesSignatures => "signature-claude-messages",
             Self::GeminiSignatures => "signature-gemini",
@@ -89,6 +112,9 @@ impl Translator {
             Self::ResponsesRequest => "Responses -> Codex request",
             Self::ResponsesStream => "Codex -> Responses response, streaming",
             Self::ResponsesNonStream => "Codex -> Responses response, non-streaming",
+            Self::ChatRequest => "Chat Completions -> Codex request",
+            Self::ChatStream => "Codex -> Chat Completions response, streaming",
+            Self::ChatNonStream => "Codex -> Chat Completions response, non-streaming",
             Self::SignatureInspect => "Signature checks and replay decisions",
             Self::ClaudeMessagesSignatures => "Claude Messages signature sanitizers",
             Self::GeminiSignatures => "Gemini thought signature sanitizer and validators",
@@ -192,6 +218,39 @@ impl Translator {
                 self.read(output.as_bytes())
                     .ok_or_else(|| "output is not JSON".to_owned())
             }
+            Self::ChatRequest => {
+                let request = request
+                    .map_err(|err| format!("case {} is not valid JSON: {err}", case.name))?;
+                Ok(convert_openai_chat_completions_request_to_codex(
+                    &case.model,
+                    &request,
+                    true,
+                ))
+            }
+            Self::ChatStream => {
+                let mut stream = CodexToOpenAIChatCompletionsStream::new(
+                    &case.model,
+                    &request.unwrap_or_default(),
+                );
+                // Written as the harness writes upstream's output.
+                let chunks: Vec<String> = case
+                    .events
+                    .iter()
+                    .filter_map(|line| stream.translate_line(line.as_bytes()))
+                    .map(|chunk| chunk.to_string())
+                    .collect();
+                let output = serde_json::to_vec(&chunks).expect("strings serialize");
+                Ok(self.read(&output).expect("streams always read"))
+            }
+            Self::ChatNonStream => {
+                let output = convert_codex_response_to_openai_chat_completions_non_stream(
+                    &request.unwrap_or_default(),
+                    &final_event(),
+                );
+                let output = output.map(|value| value.to_string()).unwrap_or_default();
+                self.read(output.as_bytes())
+                    .ok_or_else(|| "output is not JSON".to_owned())
+            }
         }
     }
 
@@ -199,10 +258,11 @@ impl Translator {
     /// kind of output the translator should produce.
     ///
     /// A Claude stream becomes an array of `{"event", "data"}` frames, and a
-    /// Responses stream an array with an entry per line (see [`read_lines`]).
-    /// An empty non-streaming output (no response) reads as [`NO_OUTPUT`]. In
-    /// Claude responses, tool IDs generated for calls without one are masked,
-    /// since they hold a timestamp.
+    /// Responses or Chat Completions stream an array with an entry per line
+    /// (see [`read_lines`]). An empty non-streaming output (no response) reads
+    /// as [`NO_OUTPUT`]. In Claude responses, tool IDs generated for calls
+    /// without one are masked, since they hold a timestamp. So is a Chat
+    /// Completions response's `created` when it is the current time.
     pub fn read(self, output: &[u8]) -> Option<Value> {
         let text = String::from_utf8_lossy(output);
         let mut value = match self {
@@ -211,12 +271,18 @@ impl Translator {
             | Self::ResponsesRequest
             | Self::SignatureInspect
             | Self::ClaudeMessagesSignatures
-            | Self::GeminiSignatures => return serde_json::from_str(&text).ok(),
-            Self::ResponsesStream => return read_lines(&text),
-            Self::NonStream | Self::ResponsesNonStream if text.is_empty() => {
+            | Self::GeminiSignatures
+            | Self::ChatRequest => return serde_json::from_str(&text).ok(),
+            Self::ResponsesStream | Self::ChatStream => return read_lines(&text),
+            Self::NonStream | Self::ResponsesNonStream | Self::ChatNonStream if text.is_empty() => {
                 return Some(NO_OUTPUT.into());
             }
             Self::ResponsesNonStream => return serde_json::from_str(&text).ok(),
+            Self::ChatNonStream => {
+                let mut value: Value = serde_json::from_str(&text).ok()?;
+                mask_created_now(&mut value);
+                return Some(value);
+            }
             Self::Stream => sse_frames(&text),
             Self::NonStream => serde_json::from_str(&text).ok()?,
         };
@@ -269,6 +335,22 @@ fn sse_frames(text: &str) -> Value {
     Value::Array(frames)
 }
 
+/// Replaces a response's `created` time if it is within an hour of now.
+fn mask_created_now(value: &mut Value) {
+    let Some(created) = value.get_mut("created") else {
+        return;
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    if created
+        .as_u64()
+        .is_some_and(|created| created.abs_diff(now) < 3600)
+    {
+        *created = CREATED_NOW.into();
+    }
+}
+
 /// Replaces `toolu_<unix nanos>_<counter>`, the ID upstream and we generate for
 /// a call that has none.
 fn mask_generated_tool_ids(value: &mut Value) {
@@ -317,6 +399,20 @@ mod tests {
             ]))
         );
         assert_eq!(read_lines("not json"), None);
+    }
+
+    #[test]
+    fn only_a_current_created_time_is_masked() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut current = json!({ "created": now - 5 });
+        mask_created_now(&mut current);
+        assert_eq!(current["created"], CREATED_NOW);
+        let mut past = json!({ "created": 1_700_000_000 });
+        mask_created_now(&mut past);
+        assert_eq!(past["created"], 1_700_000_000);
     }
 
     #[test]

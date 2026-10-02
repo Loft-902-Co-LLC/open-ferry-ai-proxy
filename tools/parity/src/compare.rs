@@ -16,6 +16,9 @@ pub enum Deviation {
     /// protobuf-go's error prefix has a non-breaking space in some builds; ours
     /// always has a regular one.
     ProtoErrorPrefix,
+    /// Go converted a float too large for int64 as amd64 does, to the minimum
+    /// int64; we saturate, as arm64 does.
+    SaturatedInt,
 }
 
 impl Deviation {
@@ -25,12 +28,16 @@ impl Deviation {
             Self::EmbeddedJson => "embedded JSON re-serialized",
             Self::CharBoundary => "cut at a character boundary",
             Self::ProtoErrorPrefix => "protobuf error prefix space",
+            Self::SaturatedInt => "out-of-range number saturated",
         }
     }
 }
 
 /// protobuf-go's error prefix as some builds write it.
 const NBSP_PROTO_PREFIX: &str = "proto:\u{a0}";
+
+/// What amd64 Go gives for `int64(f)` when `f` is out of range.
+const GO_AMD64_OUT_OF_RANGE: &str = "-9223372036854775808";
 
 #[derive(Clone, Debug)]
 pub struct Difference {
@@ -113,6 +120,11 @@ impl<'a> Walker<'a> {
             }
             (Value::String(go), Value::String(rust)) => self.walk_strings(go, rust),
             (go, rust) if identical(go, rust) => {}
+            (Value::Number(go), Value::Number(rust))
+                if go.to_string() == GO_AMD64_OUT_OF_RANGE && rust.as_i64() == Some(i64::MAX) =>
+            {
+                self.out.deviations.insert(Deviation::SaturatedInt);
+            }
             (go, rust) => self.differ(go.to_string(), rust.to_string()),
         }
     }
@@ -323,6 +335,16 @@ mod tests {
 
         let rust = json!({ "error": "malformed protobuf tag: unexpected EOF" });
         assert_eq!(compare(&go, &rust).differences.len(), 1);
+    }
+
+    #[test]
+    fn a_saturated_number_is_equivalent_to_amd64_overflow() {
+        let go = parse(r#"{"n":-9223372036854775808}"#);
+        let cmp = compare(&go, &json!({ "n": i64::MAX }));
+        assert!(cmp.differences.is_empty());
+        assert_eq!(cmp.deviations, BTreeSet::from([Deviation::SaturatedInt]));
+
+        assert_eq!(compare(&go, &json!({ "n": 0 })).differences.len(), 1);
     }
 
     #[test]
