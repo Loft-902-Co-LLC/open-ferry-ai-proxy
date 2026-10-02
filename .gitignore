@@ -1,0 +1,11 @@
+/target
+node_modules/
+/ui/dist
+
+# Local config and credentials: never commit these
+/config.yaml
+/auths/
+*.auth.json
+.env
+*.db
+*.db-*

@@ -1,0 +1,64 @@
+# Upstream: CLIProxyAPI
+
+open-ferry-ai-proxy is a port of [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) (MIT).
+
+## Pinned reference
+
+| | |
+|---|---|
+| Version | `v8.0.10` |
+| Commit | `6fecc6e5567912661654a4eaf9b8f5436facd1c2` (2026-10-02) |
+| Location | `reference/cliproxyapi` (git submodule) |
+
+When we move the pin, we update this table and note behaviour changes in the PR.
+
+## Porting conventions
+
+- **Port behaviour, not lines.** Upstream manipulates raw JSON with gjson/sjson. We use `serde_json::Value` so unknown fields pass through untouched, and typed structs only where they help.
+- **Every ported file gets a header** naming its source, for example:
+
+  ```rust
+  // Ported from CLIProxyAPI internal/translator/codex/claude (v8.0.10, MIT).
+  // https://github.com/router-for-me/CLIProxyAPI
+  ```
+
+- **Deviations are documented** in the file, with the reason (usually an upstream issue number).
+- **Bugs we find upstream get reported upstream**, with a failing test case where we can.
+
+## Module map
+
+Upstream translators live at `internal/translator/<upstream>/<client-format>/`. For example, `codex/claude` turns a Claude Messages request into a Codex request and translates the response back.
+
+| open-ferry module | Upstream source | Status |
+|---|---|---|
+| `open-ferry-translate`: Claude client → Codex | `internal/translator/codex/claude` | Planned |
+| `open-ferry-translate`: Chat Completions → Codex | `internal/translator/codex/openai/chat-completions` | Planned |
+| `open-ferry-translate`: Responses → Codex | `internal/translator/codex/openai/responses` | Planned |
+| `open-ferry-translate`: Chat Completions → Claude | `internal/translator/claude/openai/chat-completions` | Planned |
+| `open-ferry-translate`: Responses → Claude | `internal/translator/claude/openai/responses` | Planned |
+| `open-ferry-translate`: registry | `sdk/translator` | Planned |
+| `open-ferry-server`: Responses WebSocket | `sdk/api/handlers/openai/openai_responses_websocket*.go` | Planned |
+| `open-ferry-core`: Codex and Claude OAuth | `internal/auth/codex`, `internal/auth/claude` | Planned |
+| `open-ferry-management`: `auth-files` | `internal/api/handlers/management/auth_files*.go` | Planned |
+| `open-ferry-management`: `api-call` | `internal/api/handlers/management/api_tools.go` | Planned |
+| `open-ferry-management`: `reset-quota` | `internal/api/server_management.go` | Planned |
+
+## Deliberately not ported
+
+- **Client impersonation:** TLS fingerprinting (uTLS), synthetic user IDs, forged client build fingerprints, and related "cloaking" code. We send each provider's documented OAuth headers and nothing that disguises the client.
+- **Providers beyond Codex and Claude** for now (Antigravity, Gemini, Vertex, xAI, Kimi, Meta, Devin, AI Studio relay).
+- **Plugin host and store**, **cluster mode** (CLIProxyAPIHome), **TUI**, **Realtime/WebRTC**, **images and video** endpoints.
+
+## Upstream issues we intend to address
+
+These come from CLIProxyAPI's tracker. Each is a test case for us, and a fix we'll offer back where it applies to the Go code.
+
+| Issue | Problem |
+|---|---|
+| [#2596](https://github.com/router-for-me/CLIProxyAPI/issues/2596) | `previous_response_id` not chained across WebSocket turns |
+| [#5413](https://github.com/router-for-me/CLIProxyAPI/issues/5413) | No WebSocket pings during long reasoning; Cloudflare drops the connection |
+| [#6006](https://github.com/router-for-me/CLIProxyAPI/issues/6006) | Warmup frames forwarded upstream as real generations |
+| [#5545](https://github.com/router-for-me/CLIProxyAPI/issues/5545) | Codex SSE streams die after ~30 s of upstream silence |
+| [#5360](https://github.com/router-for-me/CLIProxyAPI/issues/5360) | A stalled upstream never triggers credential rotation |
+| [#3783](https://github.com/router-for-me/CLIProxyAPI/issues/3783) | Concurrent token refreshes reuse the same refresh token |
+| [#3200](https://github.com/router-for-me/CLIProxyAPI/issues/3200) | Built-in usage statistics were removed |

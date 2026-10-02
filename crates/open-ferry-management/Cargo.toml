@@ -1,0 +1,11 @@
+[package]
+name = "open-ferry-management"
+description = "CLIProxyAPI-compatible management API for open-ferry-ai-proxy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+open-ferry-core.workspace = true

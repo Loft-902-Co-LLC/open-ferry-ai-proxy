@@ -1,0 +1,17 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy"
+publish = false
+
+[workspace.dependencies]
+open-ferry-core = { path = "crates/open-ferry-core" }
+open-ferry-translate = { path = "crates/open-ferry-translate" }
+open-ferry-server = { path = "crates/open-ferry-server" }
+open-ferry-management = { path = "crates/open-ferry-management" }
+serde_json = "1"

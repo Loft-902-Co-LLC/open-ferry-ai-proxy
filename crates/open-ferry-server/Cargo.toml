@@ -1,0 +1,12 @@
+[package]
+name = "open-ferry-server"
+description = "HTTP and WebSocket handlers for open-ferry-ai-proxy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+open-ferry-core.workspace = true
+open-ferry-translate.workspace = true

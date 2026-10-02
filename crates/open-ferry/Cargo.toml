@@ -1,0 +1,16 @@
+[package]
+name = "open-ferry"
+description = "A Rust port of CLIProxyAPI with a built-in UI and first-class WebSocket support"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "open-ferry"
+path = "src/main.rs"
+
+[dependencies]
+open-ferry-server.workspace = true
+open-ferry-management.workspace = true
