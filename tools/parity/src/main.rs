@@ -134,6 +134,8 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
     let (chat_streams, chat_finals) = generate::chat::event_cases(seed, random);
     let (claude_chat_streams, claude_chat_finals) =
         generate::claude_chat::event_cases(seed, random);
+    let (claude_responses_streams, claude_responses_finals) =
+        generate::claude_responses::event_cases(seed, random);
     let suites = [
         (
             Translator::Request,
@@ -192,6 +194,26 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
             Translator::ClaudeChatNonStream,
             cases::claude_chat::finals(),
             claude_chat_finals,
+        ),
+        (
+            Translator::ClaudeResponsesRequest,
+            cases::claude_responses::requests(),
+            generate::claude_responses::request_cases(seed, random),
+        ),
+        (
+            Translator::ClaudeResponsesRequestCompat,
+            cases::claude_responses::requests(),
+            generate::claude_responses::request_cases(seed, random),
+        ),
+        (
+            Translator::ClaudeResponsesStream,
+            cases::claude_responses::streams(),
+            claude_responses_streams,
+        ),
+        (
+            Translator::ClaudeResponsesNonStream,
+            cases::claude_responses::finals(),
+            claude_responses_finals,
         ),
         (
             Translator::SignatureInspect,

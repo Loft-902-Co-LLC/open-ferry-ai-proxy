@@ -1,19 +1,25 @@
 // Ported from CLIProxyAPI (v8.0.10, MIT): internal/translator/common/claude_system.go,
 // internal/translator/common/claude_messages.go, internal/util/claude_attribution.go
-// and internal/util/claude_tool_id.go.
+// and internal/util/claude_tool_id.go, and code repeated in
+// internal/translator/claude/openai/chat-completions/claude_openai_request.go and
+// internal/translator/claude/openai/responses/claude_openai-responses_request.go.
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Helpers for Claude Messages requests and responses, shared by translators
 //! that convert between them and other providers' formats.
 
 use std::borrow::Cow;
+use std::collections::hash_map::RandomState;
+use std::hash::BuildHasher;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde_json::Value;
+use serde_json::{Map, Value, json};
 
 use crate::go;
 use crate::json::{object, path, str_of};
+use crate::models::ModelCatalog;
+use crate::thinking::{claude_effort, has_level, level_to_budget};
 
 const SYSTEM_REMINDER_START: &str = "<system-reminder>";
 const SYSTEM_REMINDER_END: &str = "</system-reminder>";
@@ -21,6 +27,9 @@ const ATTRIBUTION_SYSTEM_PREFIX: &str = "x-anthropic-billing-header:";
 
 /// Claude's limit on tool name length.
 const FUNCTION_NAME_LIMIT: usize = 64;
+
+const TOOL_CALL_ID_LETTERS: &[u8; 62] =
+    b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
 const JSON_OBJECT_INSTRUCTION: &str = "You must format your entire response as a valid JSON object. Do not include any explanations, markdown code blocks (such as ```json), or any text outside of the JSON object.";
 const JSON_SCHEMA_INSTRUCTION: &str = "You must format your entire response as valid JSON that conforms strictly to the following JSON schema:\n";
@@ -232,6 +241,82 @@ pub(crate) fn sanitize_function_name(name: &str) -> String {
     sanitized
 }
 
+/// The client's own user ID: `metadata.user_id`, or else OpenAI's `user`, if
+/// either is a non-blank string. Upstream makes one up when there's none; we
+/// don't.
+pub(crate) fn client_user_id(request: &Value) -> Option<&str> {
+    [path(request, "metadata.user_id"), request.get("user")]
+        .into_iter()
+        .flatten()
+        .find_map(|id| id.as_str().filter(|id| !id.trim().is_empty()))
+}
+
+/// Sets Claude's thinking from a reasoning effort: Chat Completions'
+/// `reasoning_effort` or Responses' `reasoning.effort`. A model with effort levels
+/// gets adaptive thinking with an effort Claude knows; `none` turns thinking
+/// off. Other models get a thinking budget for the level, if it has one.
+pub(crate) fn apply_reasoning_effort(
+    out: &mut Map<String, Value>,
+    effort: &str,
+    model_name: &str,
+    models: &ModelCatalog,
+) {
+    let effort = go::to_lower(effort.trim());
+    if effort.is_empty() {
+        return;
+    }
+    let levels = models
+        .thinking(model_name)
+        .map(|support| &support.levels)
+        .filter(|levels| !levels.is_empty());
+    if let Some(levels) = levels {
+        let (kind, effort) = match effort.as_str() {
+            "none" => ("disabled", None),
+            "auto" => ("adaptive", None),
+            _ => {
+                let supports_max = has_level(levels, "max");
+                let mapped = claude_effort(&effort, supports_max).map(str::to_owned);
+                ("adaptive", Some(mapped.unwrap_or(effort)))
+            }
+        };
+        out.insert("thinking".into(), json!({"type": kind}));
+        if let Some(effort) = effort {
+            out.insert("output_config".into(), json!({"effort": effort}));
+        }
+        return;
+    }
+    let thinking = match level_to_budget(&effort) {
+        Some(0) => json!({"type": "disabled"}),
+        Some(-1) => json!({"type": "enabled"}),
+        Some(budget) if budget > 0 => json!({"type": "enabled", "budget_tokens": budget}),
+        _ => return,
+    };
+    out.insert("thinking".into(), thinking);
+}
+
+/// `toolu_` and 24 random letters and digits, the form of Claude's own IDs.
+pub(crate) fn generate_tool_call_id() -> String {
+    let state = RandomState::new();
+    let mut id = String::from("toolu_");
+    let mut draws = 0u64;
+    while id.len() < "toolu_".len() + 24 {
+        draws += 1;
+        let mut bits = state.hash_one(draws);
+        // Ten 6-bit draws per hash, rejecting the two values past the
+        // alphabet so every letter is as likely.
+        for _ in 0..10 {
+            let index = (bits & 63) as usize;
+            bits >>= 6;
+            if let Some(&letter) = TOOL_CALL_ID_LETTERS.get(index)
+                && id.len() < "toolu_".len() + 24
+            {
+                id.push(char::from(letter));
+            }
+        }
+    }
+    id
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,6 +329,15 @@ mod tests {
         let generated = sanitize_tool_id("");
         assert!(generated.starts_with("toolu_"), "{generated}");
         assert_ne!(generated, sanitize_tool_id(""));
+    }
+
+    #[test]
+    fn generated_tool_call_ids_look_like_claude_ids() {
+        let id = generate_tool_call_id();
+        let letters = id.strip_prefix("toolu_").unwrap();
+        assert_eq!(letters.len(), 24);
+        assert!(letters.bytes().all(|b| TOOL_CALL_ID_LETTERS.contains(&b)));
+        assert_ne!(id, generate_tool_call_id());
     }
 
     #[test]

@@ -7,7 +7,8 @@
 //!
 //! Some translators pick a request's shape from the target model's thinking
 //! support: Claude 4.6 and later take adaptive thinking with an effort level,
-//! older models a token budget. Upstream looks this up in a global registry,
+//! older models a token budget. Some also cap the output tokens a client asks
+//! for at the model's limit. Upstream looks this up in a global registry,
 //! which holds the models of configured accounts and falls back to a static
 //! catalog. Only the static catalog is ported so far.
 
@@ -33,29 +34,37 @@ const SECTIONS: [&str; 8] = [
     "xai",
 ];
 
-/// Searched after [`SECTIONS`], then `meta`.
-const BUILTIN_DEVIN_MODELS: [(&str, &[&str]); 12] = [
-    ("devin/swe-1-6-slow", &[]),
-    ("devin/swe-2", &["medium", "high", "max"]),
+/// Searched after [`SECTIONS`], then `meta`: each model's ID, effort levels
+/// and output token limit.
+const BUILTIN_DEVIN_MODELS: [(&str, &[&str], i64); 12] = [
+    ("devin/swe-1-6-slow", &[], 64000),
+    ("devin/swe-2", &["medium", "high", "max"], 128000),
     (
         "devin/claude-fable-5-1",
         &["low", "medium", "high", "xhigh", "max"],
+        64000,
     ),
     (
         "devin/gpt-6-astra",
         &["low", "medium", "high", "xhigh", "max"],
+        64000,
     ),
-    ("devin/glm-5-2", &["none", "high"]),
-    ("devin/glm-5-3", &["low", "high", "max"]),
-    ("devin/glm-5-3-flash", &["low", "high", "max"]),
+    ("devin/glm-5-2", &["none", "high"], 64000),
+    ("devin/glm-5-3", &["low", "high", "max"], 128000),
+    ("devin/glm-5-3-flash", &["low", "high", "max"], 128000),
     (
         "devin/gpt-5-6-sol",
         &["none", "low", "medium", "high", "xhigh", "max"],
+        128000,
     ),
-    ("devin/gemini-3-8-flash", &["low", "medium", "high"]),
-    ("devin/grok-4-6", &["low", "medium", "high", "xhigh"]),
-    ("devin/deepseek-v4-flash", &["high", "max"]),
-    ("devin/deepseek-v4-1-flash", &["high", "max"]),
+    ("devin/gemini-3-8-flash", &["low", "medium", "high"], 65536),
+    (
+        "devin/grok-4-6",
+        &["low", "medium", "high", "xhigh"],
+        131072,
+    ),
+    ("devin/deepseek-v4-flash", &["high", "max"], 64000),
+    ("devin/deepseek-v4-1-flash", &["high", "max"], 64000),
 ];
 
 /// A model's thinking settings (upstream's `ThinkingSupport`).
@@ -78,6 +87,9 @@ pub struct ThinkingSupport {
 pub struct ModelInfo {
     pub id: String,
     pub thinking: Option<ThinkingSupport>,
+    /// The most output tokens the model takes, or 0 if the catalog doesn't
+    /// say.
+    pub max_completion_tokens: i64,
 }
 
 /// Models by ID, each as the first section to list it describes it.
@@ -102,13 +114,17 @@ impl ModelCatalog {
             Some(Value::Array(models)) => models.iter().filter_map(model_info).collect(),
             _ => Vec::new(),
         };
-        let builtin_devin = BUILTIN_DEVIN_MODELS.iter().map(|(id, levels)| ModelInfo {
-            id: (*id).to_owned(),
-            thinking: (!levels.is_empty()).then(|| ThinkingSupport {
-                levels: levels.iter().map(|level| (*level).to_owned()).collect(),
-                ..ThinkingSupport::default()
-            }),
-        });
+        let builtin_devin =
+            BUILTIN_DEVIN_MODELS
+                .iter()
+                .map(|(id, levels, max_completion_tokens)| ModelInfo {
+                    id: (*id).to_owned(),
+                    thinking: (!levels.is_empty()).then(|| ThinkingSupport {
+                        levels: levels.iter().map(|level| (*level).to_owned()).collect(),
+                        ..ThinkingSupport::default()
+                    }),
+                    max_completion_tokens: *max_completion_tokens,
+                });
 
         let mut models = HashMap::new();
         let all = SECTIONS
@@ -158,7 +174,15 @@ fn model_info(model: &Value) -> Option<ModelInfo> {
         }
         _ => None,
     };
-    Some(ModelInfo { id, thinking })
+    let max_completion_tokens = model
+        .get("max_completion_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    Some(ModelInfo {
+        id,
+        thinking,
+        max_completion_tokens,
+    })
 }
 
 #[cfg(test)]
@@ -178,6 +202,16 @@ mod tests {
         assert_eq!(catalog.thinking("claude-3-5-haiku-20241022"), None);
         assert_eq!(catalog.lookup("claude-opus-4-6(high)"), None);
         assert_eq!(catalog.lookup(""), None);
+    }
+
+    #[test]
+    fn the_embedded_catalog_knows_output_limits() {
+        let catalog = ModelCatalog::embedded();
+        let limit = |id: &str| catalog.lookup(id).unwrap().max_completion_tokens;
+        assert_eq!(limit("claude-opus-4-6"), 128000);
+        assert_eq!(limit("claude-sonnet-4-5-20250929"), 64000);
+        assert_eq!(limit("claude-3-5-haiku-20241022"), 8192);
+        assert_eq!(limit("devin/grok-4-6"), 131072);
     }
 
     #[test]

@@ -10,6 +10,8 @@ use serde_json::{Number, Value};
 
 use crate::go;
 
+pub(crate) mod raw;
+
 /// gjson `String()`: strings as-is, missing/null as `""`, other scalars as text,
 /// objects and arrays as JSON (compact here; gjson returns the client's raw bytes).
 pub(crate) fn str_of(value: Option<&Value>) -> Cow<'_, str> {

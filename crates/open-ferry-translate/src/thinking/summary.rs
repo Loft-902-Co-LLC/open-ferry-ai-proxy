@@ -4,8 +4,8 @@
 //! Whether a client asked to see reasoning summaries, and asking the
 //! upstream for the same.
 //!
-//! Only reading a Chat Completions request and writing a Claude one are
-//! ported so far.
+//! Only reading Chat Completions and Responses requests and writing a Claude
+//! one are ported so far.
 
 use serde_json::{Map, Value};
 
@@ -53,6 +53,13 @@ pub(crate) fn openai_chat_explicit_summary(request: &Value) -> Option<bool> {
         .or_else(|| flag("reasoning.exclude").map(|exclude| !exclude))
         .or_else(|| flag("include_reasoning"))
         .or_else(|| flag("reasoning.enabled"))
+}
+
+/// Whether a Responses request asks to show reasoning summaries, in
+/// `reasoning.summary` or the older `reasoning.generate_summary`.
+pub(crate) fn openai_responses_explicit_summary(request: &Value) -> Option<bool> {
+    responses_summary(path(request, "reasoning.summary"))
+        .or_else(|| responses_summary(path(request, "reasoning.generate_summary")))
 }
 
 /// A Responses-style summary setting: `auto`, `concise` or `detailed` shows

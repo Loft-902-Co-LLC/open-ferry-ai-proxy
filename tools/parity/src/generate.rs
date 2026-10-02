@@ -8,10 +8,12 @@
 //! [`response`] generates Codex event streams for the Claude response
 //! translators, [`responses`] input for the Responses translators, [`chat`]
 //! and [`claude_chat`] input for the Chat Completions translators to Codex and
+//! Claude, [`claude_responses`] input for the Responses translators to
 //! Claude, and [`signature`] reasoning signatures from every provider.
 
 pub mod chat;
 pub mod claude_chat;
+pub mod claude_responses;
 pub mod response;
 pub mod responses;
 pub mod signature;

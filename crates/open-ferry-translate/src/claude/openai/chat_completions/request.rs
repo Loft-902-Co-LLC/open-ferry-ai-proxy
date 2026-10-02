@@ -29,26 +29,22 @@
 //! - Tool call arguments nested more than 128 levels deep read as `{}`, past
 //!   serde_json's limit.
 
-use std::collections::hash_map::RandomState;
 use std::collections::{HashMap, HashSet};
-use std::hash::BuildHasher;
 
 use serde_json::{Map, Value, json};
 
 use crate::common::cache_control;
 use crate::common::claude::{
-    MessageAccumulator, sanitize_function_name, sanitize_tool_id, structured_output_instruction,
+    MessageAccumulator, apply_reasoning_effort, client_user_id, generate_tool_call_id,
+    sanitize_function_name, sanitize_tool_id, structured_output_instruction,
 };
 use crate::go;
 use crate::json::{int_of, object, path, str_of};
 use crate::models::ModelCatalog;
 use crate::schema::normalize_claude_tool_input_schema;
 use crate::thinking::summary::{apply_to_claude, openai_chat_explicit_summary};
-use crate::thinking::{claude_effort, has_level, level_to_budget};
 
 const DEFAULT_MAX_TOKENS: i64 = 32000;
-const TOOL_CALL_ID_LETTERS: &[u8; 62] =
-    b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
 /// Converts a Chat Completions request body into a Claude Messages request
 /// body for `model_name`. `stream` is whether the client asked to stream.
@@ -176,57 +172,6 @@ fn convert(
         apply_to_claude(&mut out, show, model_name, models);
     }
     out
-}
-
-/// The client's own user ID: `metadata.user_id`, or else Chat Completions'
-/// `user`, if either is a non-blank string.
-fn client_user_id(request: &Value) -> Option<&str> {
-    [path(request, "metadata.user_id"), request.get("user")]
-        .into_iter()
-        .flatten()
-        .find_map(|id| id.as_str().filter(|id| !id.trim().is_empty()))
-}
-
-/// Sets Claude's thinking from `reasoning_effort`. A model with effort levels
-/// gets adaptive thinking with an effort Claude knows; `none` turns thinking
-/// off. Other models get a thinking budget for the level, if it has one.
-fn apply_reasoning_effort(
-    out: &mut Map<String, Value>,
-    effort: &str,
-    model_name: &str,
-    models: &ModelCatalog,
-) {
-    let effort = go::to_lower(effort.trim());
-    if effort.is_empty() {
-        return;
-    }
-    let levels = models
-        .thinking(model_name)
-        .map(|support| &support.levels)
-        .filter(|levels| !levels.is_empty());
-    if let Some(levels) = levels {
-        let (kind, effort) = match effort.as_str() {
-            "none" => ("disabled", None),
-            "auto" => ("adaptive", None),
-            _ => {
-                let supports_max = has_level(levels, "max");
-                let mapped = claude_effort(&effort, supports_max).map(str::to_owned);
-                ("adaptive", Some(mapped.unwrap_or(effort)))
-            }
-        };
-        out.insert("thinking".into(), json!({"type": kind}));
-        if let Some(effort) = effort {
-            out.insert("output_config".into(), json!({"effort": effort}));
-        }
-        return;
-    }
-    let thinking = match level_to_budget(&effort) {
-        Some(0) => json!({"type": "disabled"}),
-        Some(-1) => json!({"type": "enabled"}),
-        Some(budget) if budget > 0 => json!({"type": "enabled", "budget_tokens": budget}),
-        _ => return,
-    };
-    out.insert("thinking".into(), thinking);
 }
 
 /// gjson `Float()`, written as Go writes a float. `None` if it isn't finite.
@@ -379,29 +324,6 @@ fn tool_use(call: &Value) -> Value {
         ("name", sanitize_function_name(&name).into()),
         ("input", input),
     ])
-}
-
-/// `toolu_` and 24 random letters and digits, the form of Claude's own IDs.
-fn generate_tool_call_id() -> String {
-    let state = RandomState::new();
-    let mut id = String::from("toolu_");
-    let mut draws = 0u64;
-    while id.len() < "toolu_".len() + 24 {
-        draws += 1;
-        let mut bits = state.hash_one(draws);
-        // Ten 6-bit draws per hash, rejecting the two values past the
-        // alphabet so every letter is as likely.
-        for _ in 0..10 {
-            let index = (bits & 63) as usize;
-            bits >>= 6;
-            if let Some(&letter) = TOOL_CALL_ID_LETTERS.get(index)
-                && id.len() < "toolu_".len() + 24
-            {
-                id.push(char::from(letter));
-            }
-        }
-    }
-    id
 }
 
 /// A tool message's content as a `tool_result`'s: text stays text, and an

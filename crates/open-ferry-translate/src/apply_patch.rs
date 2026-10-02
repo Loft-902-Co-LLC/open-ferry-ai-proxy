@@ -5,20 +5,68 @@
 //!
 //! Codex declares `apply_patch` as a custom tool whose input is the raw patch
 //! text. A client that only knows function tools calls it as a function with
-//! the arguments `{"input": "<patch>"}`. These helpers wrap and unwrap that
-//! envelope.
-//!
-//! Not ported yet: the function's schema and description, which only upstream's
-//! Gemini translators use.
+//! the arguments `{"input": "<patch>"}`. These helpers declare that function,
+//! and wrap and unwrap the envelope. [`input`] decodes it as it streams in.
+
+pub(crate) mod input;
 
 use serde_json::Value;
 
 use crate::go;
-use crate::json::str_of;
+use crate::json::{path, str_of};
+
+/// `parametersJSON`: the function's schema.
+const PARAMETERS: &str = r#"{"type":"object","properties":{"input":{"type":"string","description":"The complete apply_patch patch text."}},"required":["input"],"additionalProperties":false}"#;
+
+/// The sentence Codex puts in the custom tool's description, which no longer
+/// holds for the function.
+const FREEFORM_NOTE: &str = "This is a FREEFORM tool, so do not wrap the patch in JSON.";
+
+const PATCH_INSTRUCTIONS: &str = "Call this function with a JSON object whose input field contains the complete patch text.
+Use the Codex apply_patch format, not a conventional git unified diff.
+Start with *** Begin Patch and end with *** End Patch.
+Use *** Add File: path, *** Delete File: path, or *** Update File: path.
+Every added-file content line starts with +.
+For updates, use @@; context lines start with one space, removed lines with -, and added lines with +.
+Use *** Move to: path for a rename and *** End of File when required by the patch grammar.
+Example input:
+*** Begin Patch
+*** Update File: src/main.go
+@@
+-old
++new
+*** End Patch";
 
 /// `IsCustomTool`: whether a tool declaration is the custom `apply_patch` tool.
 pub(crate) fn is_custom_tool(tool: &Value) -> bool {
     str_of(tool.get("type")) == "custom" && str_of(tool.get("name")).trim() == "apply_patch"
+}
+
+/// `Parameters`: the function's JSON Schema, one string field `input`.
+pub(crate) fn parameters() -> Value {
+    serde_json::from_str(PARAMETERS).expect("the schema is valid JSON")
+}
+
+/// `Description`: the function's description. It keeps the custom tool's own
+/// description, explains the JSON envelope, and ends with the tool's patch
+/// grammar.
+pub(crate) fn description(tool: &Value) -> String {
+    let original = str_of(tool.get("description")).replace(FREEFORM_NOTE, "");
+    let mut description = String::new();
+    if !original.trim().is_empty() {
+        description.push_str(&original);
+        description.push_str("\n\n");
+    }
+    description.push_str(PATCH_INSTRUCTIONS);
+    let grammar = str_of(path(tool, "format.definition"));
+    if !grammar.is_empty() {
+        if grammar.contains("*** Environment ID:") {
+            description.push_str("\n\nUse *** Environment ID: as specified by the patch grammar.");
+        }
+        description.push_str("\n\nOriginal patch grammar:\n");
+        description.push_str(&grammar);
+    }
+    description
 }
 
 /// `WrapInput`: the patch text as function arguments, `{"input":"…"}`,
@@ -49,6 +97,14 @@ pub(crate) fn unwrap_input(arguments: &str) -> Option<String> {
     json.expect(b'}')?;
     json.skip_whitespace();
     json.0.is_empty().then_some(input)
+}
+
+/// One JSON string, quotes included, decoded as Go decodes it. `None` if it
+/// isn't exactly one valid string.
+fn decode_string(raw: &str) -> Option<String> {
+    let mut json = Tokens(raw.as_bytes());
+    let decoded = json.string()?;
+    json.0.is_empty().then_some(decoded)
 }
 
 /// The JSON text still to read.
@@ -163,6 +219,28 @@ mod tests {
         for (tool, want) in cases {
             assert_eq!(is_custom_tool(&tool), want, "{tool}");
         }
+    }
+
+    #[test]
+    fn description_explains_the_envelope_and_keeps_the_grammar() {
+        let plain = description(&json!({"type": "custom", "name": "apply_patch"}));
+        assert_eq!(plain, PATCH_INSTRUCTIONS);
+
+        let tool = json!({
+            "description": "Edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.",
+            "format": {"definition": "start: *** Environment ID: x\n"}
+        });
+        assert_eq!(
+            description(&tool),
+            format!(
+                "Edit files. \n\n{PATCH_INSTRUCTIONS}\n\nUse *** Environment ID: as specified by the patch grammar.\n\nOriginal patch grammar:\nstart: *** Environment ID: x\n"
+            )
+        );
+
+        let only_note =
+            json!({"description": " This is a FREEFORM tool, so do not wrap the patch in JSON. "});
+        assert_eq!(description(&only_note), PATCH_INSTRUCTIONS);
+        assert_eq!(parameters()["required"], json!(["input"]));
     }
 
     #[test]

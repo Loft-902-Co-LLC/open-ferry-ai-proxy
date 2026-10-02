@@ -9,6 +9,11 @@ use open_ferry_translate::claude::openai::chat_completions::{
     convert_openai_chat_completions_request_to_claude,
     convert_openai_chat_completions_request_to_claude_with_compat,
 };
+use open_ferry_translate::claude::openai::responses::{
+    ClaudeToOpenAIResponsesStream, convert_claude_response_to_openai_responses_non_stream,
+    convert_openai_responses_request_to_claude,
+    convert_openai_responses_request_to_claude_with_compat,
+};
 use open_ferry_translate::codex::claude::{
     CodexToClaudeStream, convert_claude_request_to_codex,
     convert_claude_request_to_codex_with_compat, convert_codex_response_to_claude_non_stream,
@@ -38,7 +43,7 @@ const NO_OUTPUT: &str = "(no output)";
 /// How the Responses stream translator's harness writes a line it returned unchanged.
 const UNCHANGED: &str = "=";
 
-/// What a Chat Completions response's `created` is replaced with when it is
+/// What a response's `created` or `created_at` is replaced with when it is
 /// the current time, which upstream and we each read from the clock.
 const CREATED_NOW: &str = "(now)";
 
@@ -72,6 +77,14 @@ pub enum Translator {
     ClaudeChatStream,
     /// A whole Claude event stream → one Chat Completions response.
     ClaudeChatNonStream,
+    /// OpenAI Responses request → Claude Messages request.
+    ClaudeResponsesRequest,
+    /// The same in compatibility mode, which keeps more thinking blocks.
+    ClaudeResponsesRequestCompat,
+    /// Claude event stream → Responses events.
+    ClaudeResponsesStream,
+    /// A whole Claude event stream → one Responses response.
+    ClaudeResponsesNonStream,
     /// One reasoning signature → every check and replay decision on it.
     SignatureInspect,
     /// A Claude Messages request → its signed history stripped and sanitized.
@@ -98,6 +111,10 @@ impl Translator {
             Self::ClaudeChatRequestCompat => "claude/openai-chat/request-compat",
             Self::ClaudeChatStream => "claude/openai-chat/response",
             Self::ClaudeChatNonStream => "claude/openai-chat/response-non-stream",
+            Self::ClaudeResponsesRequest => "claude/openai-responses/request",
+            Self::ClaudeResponsesRequestCompat => "claude/openai-responses/request-compat",
+            Self::ClaudeResponsesStream => "claude/openai-responses/response",
+            Self::ClaudeResponsesNonStream => "claude/openai-responses/response-non-stream",
             Self::SignatureInspect => "signature/inspect",
             Self::ClaudeMessagesSignatures => "signature/claude-messages",
             Self::GeminiSignatures => "signature/gemini",
@@ -121,6 +138,10 @@ impl Translator {
             Self::ClaudeChatRequestCompat => "chat-to-claude-request-compat",
             Self::ClaudeChatStream => "claude-to-chat-stream",
             Self::ClaudeChatNonStream => "claude-to-chat-non-stream",
+            Self::ClaudeResponsesRequest => "responses-to-claude-request",
+            Self::ClaudeResponsesRequestCompat => "responses-to-claude-request-compat",
+            Self::ClaudeResponsesStream => "claude-to-responses-stream",
+            Self::ClaudeResponsesNonStream => "claude-to-responses-non-stream",
             Self::SignatureInspect => "signature-inspect",
             Self::ClaudeMessagesSignatures => "signature-claude-messages",
             Self::GeminiSignatures => "signature-gemini",
@@ -145,6 +166,10 @@ impl Translator {
             }
             Self::ClaudeChatStream => "Claude -> Chat Completions response, streaming",
             Self::ClaudeChatNonStream => "Claude -> Chat Completions response, non-streaming",
+            Self::ClaudeResponsesRequest => "Responses -> Claude request",
+            Self::ClaudeResponsesRequestCompat => "Responses -> Claude request, compatibility mode",
+            Self::ClaudeResponsesStream => "Claude -> Responses response, streaming",
+            Self::ClaudeResponsesNonStream => "Claude -> Responses response, non-streaming",
             Self::SignatureInspect => "Signature checks and replay decisions",
             Self::ClaudeMessagesSignatures => "Claude Messages signature sanitizers",
             Self::GeminiSignatures => "Gemini thought signature sanitizer and validators",
@@ -313,6 +338,54 @@ impl Translator {
                 self.read(output.to_string().as_bytes())
                     .ok_or_else(|| "output is not JSON".to_owned())
             }
+            Self::ClaudeResponsesRequest | Self::ClaudeResponsesRequestCompat => {
+                let request = request
+                    .map_err(|err| format!("case {} is not valid JSON: {err}", case.name))?;
+                let convert = if self == Self::ClaudeResponsesRequest {
+                    convert_openai_responses_request_to_claude
+                } else {
+                    convert_openai_responses_request_to_claude_with_compat
+                };
+                let output = convert(&case.model, &request, true, ModelCatalog::embedded());
+                // Read back, so generated IDs are masked as upstream's are.
+                Ok(self
+                    .read(output.to_string().as_bytes())
+                    .expect("requests always read"))
+            }
+            Self::ClaudeResponsesStream => {
+                // An original request that isn't JSON counts as absent, as
+                // upstream's pickRequestJSON skips it.
+                let translated = serde_json::from_str(&case.translated_request).unwrap_or_default();
+                let mut stream = ClaudeToOpenAIResponsesStream::new(
+                    &case.model,
+                    &request.unwrap_or_default(),
+                    &translated,
+                );
+                // The SSE frames for every line, then those for the stream's end,
+                // as the harness collects upstream's.
+                let mut output: String = case
+                    .events
+                    .iter()
+                    .map(|line| stream.translate_line(line.as_bytes()))
+                    .collect();
+                output.push_str(&stream.finalize_tool_input());
+                Ok(self.read(output.as_bytes()).expect("streams always read"))
+            }
+            Self::ClaudeResponsesNonStream => {
+                let translated = serde_json::from_str(&case.translated_request).unwrap_or_default();
+                let body = case.events.first().map_or(&b""[..], |body| body.as_bytes());
+                let output = convert_claude_response_to_openai_responses_non_stream(
+                    &request.unwrap_or_default(),
+                    &translated,
+                    body,
+                );
+                let output = match output {
+                    Value::Null => String::new(),
+                    output => output.to_string(),
+                };
+                self.read(output.as_bytes())
+                    .ok_or_else(|| "output is not JSON".to_owned())
+            }
         }
     }
 
@@ -324,7 +397,10 @@ impl Translator {
     pub fn drop_deliberate_omissions(self, case: &Case, go: &mut Value) -> Option<Deviation> {
         if !matches!(
             self,
-            Self::ClaudeChatRequest | Self::ClaudeChatRequestCompat
+            Self::ClaudeChatRequest
+                | Self::ClaudeChatRequestCompat
+                | Self::ClaudeResponsesRequest
+                | Self::ClaudeResponsesRequestCompat
         ) {
             return None;
         }
@@ -351,8 +427,9 @@ impl Translator {
     /// (see [`read_lines`]). An empty non-streaming output (no response) reads
     /// as [`NO_OUTPUT`]. In Claude responses and requests, tool IDs generated
     /// for calls without one are masked, since they hold a timestamp or random
-    /// letters. So is a Chat Completions response's `created` when it is the
-    /// current time.
+    /// letters. So is a Chat Completions response's `created`, or a Responses
+    /// response's `created_at` from a Claude stream, when it is the current
+    /// time.
     pub fn read(self, output: &[u8]) -> Option<Value> {
         let text = String::from_utf8_lossy(output);
         let mut value = match self {
@@ -368,15 +445,25 @@ impl Translator {
                 let mut lines = read_lines(&text)?;
                 for line in lines.as_array_mut().into_iter().flatten() {
                     if let Some(chunk) = line.get_mut("json") {
-                        mask_created_now(chunk);
+                        mask_time_now(chunk, "created");
                     }
                 }
                 return Some(lines);
+            }
+            Self::ClaudeResponsesStream => {
+                let mut frames = sse_frames(&text);
+                for frame in frames.as_array_mut().into_iter().flatten() {
+                    if let Some(response) = frame.pointer_mut("/data/response") {
+                        mask_time_now(response, "created_at");
+                    }
+                }
+                return Some(frames);
             }
             Self::NonStream
             | Self::ResponsesNonStream
             | Self::ChatNonStream
             | Self::ClaudeChatNonStream
+            | Self::ClaudeResponsesNonStream
                 if text.is_empty() =>
             {
                 return Some(NO_OUTPUT.into());
@@ -384,12 +471,18 @@ impl Translator {
             Self::ResponsesNonStream => return serde_json::from_str(&text).ok(),
             Self::ChatNonStream | Self::ClaudeChatNonStream => {
                 let mut value: Value = serde_json::from_str(&text).ok()?;
-                mask_created_now(&mut value);
+                mask_time_now(&mut value, "created");
                 return Some(value);
             }
-            Self::ClaudeChatRequest | Self::ClaudeChatRequestCompat => {
-                serde_json::from_str(&text).ok()?
+            Self::ClaudeResponsesNonStream => {
+                let mut value: Value = serde_json::from_str(&text).ok()?;
+                mask_time_now(&mut value, "created_at");
+                return Some(value);
             }
+            Self::ClaudeChatRequest
+            | Self::ClaudeChatRequestCompat
+            | Self::ClaudeResponsesRequest
+            | Self::ClaudeResponsesRequestCompat => serde_json::from_str(&text).ok()?,
             Self::Stream => sse_frames(&text),
             Self::NonStream => serde_json::from_str(&text).ok()?,
         };
@@ -442,9 +535,10 @@ fn sse_frames(text: &str) -> Value {
     Value::Array(frames)
 }
 
-/// Replaces a response's `created` time if it is within an hour of now.
-fn mask_created_now(value: &mut Value) {
-    let Some(created) = value.get_mut("created") else {
+/// Replaces a response's creation time, held in `key`, if it is within an
+/// hour of now.
+fn mask_time_now(value: &mut Value, key: &str) {
+    let Some(created) = value.get_mut(key) else {
         return;
     };
     let now = SystemTime::now()
@@ -520,11 +614,40 @@ mod tests {
             .unwrap()
             .as_secs();
         let mut current = json!({ "created": now - 5 });
-        mask_created_now(&mut current);
+        mask_time_now(&mut current, "created");
         assert_eq!(current["created"], CREATED_NOW);
         let mut past = json!({ "created": 1_700_000_000 });
-        mask_created_now(&mut past);
+        mask_time_now(&mut past, "created");
         assert_eq!(past["created"], 1_700_000_000);
+        let mut other_key = json!({ "created_at": now, "created": now });
+        mask_time_now(&mut other_key, "created_at");
+        assert_eq!(
+            other_key,
+            json!({ "created_at": CREATED_NOW, "created": now })
+        );
+    }
+
+    #[test]
+    fn responses_stream_creation_times_are_masked() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let created = json!({ "type": "response.created", "response": { "created_at": now } });
+        let delta = json!({ "type": "response.output_text.delta", "created_at": now });
+        let text = format!(
+            "event: response.created\ndata: {created}\n\nevent: response.output_text.delta\ndata: {delta}\n\n"
+        );
+        let frames = Translator::ClaudeResponsesStream
+            .read(text.as_bytes())
+            .unwrap();
+        assert_eq!(frames[0]["data"]["response"]["created_at"], CREATED_NOW);
+        assert_eq!(frames[1]["data"]["created_at"], now);
+        let body = json!({ "id": "msg_1", "created_at": now, "output": [] }).to_string();
+        let response = Translator::ClaudeResponsesNonStream
+            .read(body.as_bytes())
+            .unwrap();
+        assert_eq!(response["created_at"], CREATED_NOW);
     }
 
     #[test]

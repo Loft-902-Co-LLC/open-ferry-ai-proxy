@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 
 pub mod chat;
 pub mod claude_chat;
+pub mod claude_responses;
 pub mod responses;
 pub mod signature;
 

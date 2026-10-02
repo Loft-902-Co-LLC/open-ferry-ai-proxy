@@ -19,7 +19,10 @@
 // codex/openai-chat/response writes a JSON array with one string per chunk.
 // claude/openai-chat/response does the same for Claude event lines, and
 // claude/openai-chat/response-non-stream takes the whole Claude SSE body as
-// its one event.
+// its one event. claude/openai-responses/response concatenates its output for
+// every Claude event line, then what FinalizeToolInput returns at the end of
+// the stream; claude/openai-responses/response-non-stream takes the whole
+// Claude SSE body as its one event.
 //
 // The signature/* entries run upstream's reasoning-signature package and write
 // a JSON report of what it returned. "options", a JSON object, holds inputs
@@ -41,6 +44,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	claudechat "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/claude/openai/chat-completions"
+	clauderesponses "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/claude/openai/responses"
 	codexclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/claude"
 	codexchat "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/openai/chat-completions"
 	codexresponses "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/openai/responses"
@@ -146,6 +150,31 @@ var translators = map[string]func(in input) []byte{
 	},
 	"claude/openai-chat/response-non-stream": func(in input) []byte {
 		return claudechat.ConvertClaudeResponseToOpenAINonStream(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), nil)
+	},
+	"claude/openai-responses/request": func(in input) []byte {
+		return clauderesponses.ConvertOpenAIResponsesRequestToClaude(in.Model, []byte(in.Request), true)
+	},
+	"claude/openai-responses/request-compat": func(in input) []byte {
+		return clauderesponses.ConvertOpenAIResponsesRequestToClaudeWithCompat(in.Model, []byte(in.Request), true)
+	},
+	"claude/openai-responses/response": func(in input) []byte {
+		var param any
+		var out []byte
+		for _, event := range in.Events {
+			for _, chunk := range clauderesponses.ConvertClaudeResponseToOpenAIResponses(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), []byte(event), &param) {
+				out = append(out, chunk...)
+			}
+		}
+		// The state type is unexported; its FinalizeToolInput method isn't.
+		if state, ok := param.(interface{ FinalizeToolInput() [][]byte }); ok {
+			for _, chunk := range state.FinalizeToolInput() {
+				out = append(out, chunk...)
+			}
+		}
+		return out
+	},
+	"claude/openai-responses/response-non-stream": func(in input) []byte {
+		return clauderesponses.ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), nil)
 	},
 	"signature/inspect":         inspectSignature,
 	"signature/claude-messages": sanitizeClaudeMessages,
