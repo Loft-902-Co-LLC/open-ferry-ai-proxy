@@ -31,7 +31,7 @@ Upstream translators live at `internal/translator/<upstream>/<client-format>/`. 
 
 | open-ferry module | Upstream source | Status |
 |---|---|---|
-| `open-ferry-translate`: Claude client → Codex | `internal/translator/codex/claude` | Request ported (`codex::claude`); response planned |
+| `open-ferry-translate`: Claude client → Codex | `internal/translator/codex/claude` | Request and response ported (`codex::claude`) |
 | `open-ferry-translate`: Chat Completions → Codex | `internal/translator/codex/openai/chat-completions` | Planned |
 | `open-ferry-translate`: Responses → Codex | `internal/translator/codex/openai/responses` | Planned |
 | `open-ferry-translate`: Chat Completions → Claude | `internal/translator/claude/openai/chat-completions` | Planned |
@@ -48,15 +48,17 @@ Upstream translators live at `internal/translator/<upstream>/<client-format>/`. 
 Each ported file lists its deviations in its module docs. Most are byproducts of using `serde_json` rather than raw bytes:
 
 - **Key order is kept.** Upstream round-trips tool schemas through Go maps, which sorts their keys. We keep the client's order (`serde_json` with `preserve_order`).
-- **Embedded JSON is re-serialized compactly.** Where upstream copies a client's raw JSON bytes into a string field (for example `function_call.arguments`), we write the same value as compact JSON. Number text is kept exactly (`arbitrary_precision`).
+- **Embedded JSON is re-serialized compactly.** Where upstream copies a client's raw JSON bytes into a string field (for example `function_call.arguments`), we write the same value as compact JSON. Number text is kept exactly (`arbitrary_precision`). In responses this affects a web search's `partial_json`, where Go's encoder also escapes `<`, `>` and `&`. Function call arguments are passed through byte for byte.
+- **Malformed events carry no fields.** A Codex `data:` line that isn't valid JSON is treated as an event with no fields; gjson reads what it can from it. Codex sends valid JSON, so this only matters for corrupted streams.
 - **Byte-length truncation keeps whole characters.** Upstream cuts names and IDs at 64 bytes and can split a UTF-8 character; we stop at the character boundary before it.
 - **Duplicate object keys: the last one wins.** gjson reads the first occurrence of a key and `serde_json` keeps the last. RFC 8259 leaves this to the parser.
 - **Out-of-range numbers saturate.** Where upstream converts a float such as `1e30` to an integer, Go's result depends on the CPU: amd64 gives the minimum int64, arm64 saturates. We saturate, so a huge thinking budget maps to the highest effort.
 - **Not yet ported in `codex::claude`:** replaying Grok reasoning signatures to Grok-named models, and the compatibility variant `ConvertClaudeRequestToCodexWithCompat`. The upstream Grok test is kept as an ignored test.
+- **The non-streaming response expects a complete final event.** Codex's `response.completed` often has an empty `output`. Upstream's executor fills it with the streamed items before calling the translator, and ours will do the same when the executor is ported.
 
 ## Checking parity
 
-`tools/parity` runs the same requests through upstream's Go translators and through ours, then compares the output. It needs Go and a CLIProxyAPI checkout:
+`tools/parity` runs the same requests and Codex event streams through upstream's Go translators and through ours, then compares the output. It needs Go and a CLIProxyAPI checkout:
 
 ```sh
 cargo run --release -p open-ferry-parity -- --upstream ../CLIProxyAPI

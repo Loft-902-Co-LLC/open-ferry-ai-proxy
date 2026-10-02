@@ -1,11 +1,14 @@
 // Ported from CLIProxyAPI (v8.0.10, MIT): internal/translator/common/claude_system.go,
-// internal/translator/common/claude_messages.go and internal/util/claude_attribution.go.
+// internal/translator/common/claude_messages.go, internal/util/claude_attribution.go
+// and internal/util/claude_tool_id.go.
 // https://github.com/router-for-me/CLIProxyAPI
 
-//! Helpers for reading Claude Messages requests, shared by translators that
-//! convert them into other providers' formats.
+//! Helpers for Claude Messages requests and responses, shared by translators
+//! that convert between them and other providers' formats.
 
 use std::borrow::Cow;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
@@ -91,10 +94,40 @@ pub(crate) fn align_tool_results<'a>(
     Cow::Owned(aligned)
 }
 
+/// Makes `id` a valid Claude `tool_use` ID (`^[a-zA-Z0-9_-]+$`) by replacing
+/// every other character with `_`. An empty ID gets a generated one.
+pub(crate) fn sanitize_tool_id(id: &str) -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let sanitized: String = id
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '-' => c,
+            _ => '_',
+        })
+        .collect();
+    if !sanitized.is_empty() {
+        return sanitized;
+    }
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
+    format!("toolu_{nanos}_{n}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn sanitize_tool_id_replaces_each_invalid_character() {
+        assert_eq!(sanitize_tool_id("call_AB-9"), "call_AB-9");
+        assert_eq!(sanitize_tool_id("fc.1:é x"), "fc_1___x");
+        let generated = sanitize_tool_id("");
+        assert!(generated.starts_with("toolu_"), "{generated}");
+        assert_ne!(generated, sanitize_tool_id(""));
+    }
 
     #[test]
     fn attribution_detection_ignores_leading_whitespace() {

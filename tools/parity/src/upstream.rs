@@ -89,8 +89,11 @@ impl Upstream {
         let input_path = work_dir.join("input.jsonl");
         let mut input = BufWriter::new(File::create(&input_path)?);
         for case in cases {
-            let line =
+            let mut line =
                 json!({ "translator": translator, "model": case.model, "request": case.request });
+            if !case.events.is_empty() {
+                line["events"] = json!(case.events);
+            }
             serde_json::to_writer(&mut input, &line)?;
             input.write_all(b"\n")?;
         }

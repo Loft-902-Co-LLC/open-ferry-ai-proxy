@@ -13,7 +13,7 @@ A Rust port of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) with 
 
 ## Status
 
-**Pre-alpha. Nothing works yet.** This README describes what we're building, not what exists.
+**Pre-alpha. There is no server yet.** This README describes what we're building, not what exists. So far, the translators between Claude Messages and Codex are ported in both directions and checked against upstream's ([UPSTREAM.md](UPSTREAM.md#checking-parity)).
 
 ## Goals for v0.1
 

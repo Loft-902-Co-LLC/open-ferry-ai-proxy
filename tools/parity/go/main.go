@@ -1,4 +1,4 @@
-// Command open-ferry-parity runs upstream CLIProxyAPI translators on requests
+// Command open-ferry-parity runs upstream CLIProxyAPI translators on input
 // read from stdin, so open-ferry's Rust ports can be compared against them.
 //
 // The translators live in internal packages, so this file is compiled inside a
@@ -9,13 +9,19 @@
 //
 //	{"translator":"codex/claude/request","model":"gpt-5","request":"<request JSON as a string>"}
 //
-// and each output line is {"output":"<base64 of the translator's raw bytes>"},
+// Response translators also take "events": the Codex event stream lines for
+// codex/claude/response, or the final event alone for
+// codex/claude/response-non-stream. "request" is then the client's original
+// request. The stream translator's output for every line is concatenated.
+//
+// Each output line is {"output":"<base64 of the translator's raw bytes>"},
 // or {"panic":"<message>"} if the translator panicked. Output is base64 so
 // invalid UTF-8 survives the trip.
 package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -24,9 +30,10 @@ import (
 )
 
 type input struct {
-	Translator string `json:"translator"`
-	Model      string `json:"model"`
-	Request    string `json:"request"`
+	Translator string   `json:"translator"`
+	Model      string   `json:"model"`
+	Request    string   `json:"request"`
+	Events     []string `json:"events"`
 }
 
 type output struct {
@@ -34,9 +41,27 @@ type output struct {
 	Panic  string `json:"panic,omitempty"`
 }
 
-var translators = map[string]func(model string, request []byte) []byte{
-	"codex/claude/request": func(model string, request []byte) []byte {
-		return codexclaude.ConvertClaudeRequestToCodex(model, request, true)
+var translators = map[string]func(in input) []byte{
+	"codex/claude/request": func(in input) []byte {
+		return codexclaude.ConvertClaudeRequestToCodex(in.Model, []byte(in.Request), true)
+	},
+	"codex/claude/response": func(in input) []byte {
+		var param any
+		var out []byte
+		for _, event := range in.Events {
+			chunks := codexclaude.ConvertCodexResponseToClaude(context.Background(), in.Model, []byte(in.Request), nil, []byte(event), &param)
+			for _, chunk := range chunks {
+				out = append(out, chunk...)
+			}
+		}
+		return out
+	},
+	"codex/claude/response-non-stream": func(in input) []byte {
+		var event []byte
+		if len(in.Events) > 0 {
+			event = []byte(in.Events[0])
+		}
+		return codexclaude.ConvertCodexResponseToClaudeNonStream(context.Background(), in.Model, []byte(in.Request), nil, event, nil)
 	},
 }
 
@@ -67,13 +92,13 @@ func main() {
 	}
 }
 
-func run(translate func(string, []byte) []byte, in input) (out output) {
+func run(translate func(input) []byte, in input) (out output) {
 	defer func() {
 		if r := recover(); r != nil {
 			out = output{Panic: fmt.Sprint(r)}
 		}
 	}()
-	return output{Output: translate(in.Model, []byte(in.Request))}
+	return output{Output: translate(in)}
 }
 
 func fail(format string, args ...any) {

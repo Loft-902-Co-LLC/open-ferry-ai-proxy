@@ -34,7 +34,7 @@ const ID_LIMIT: usize = 64;
 const DEFAULT_REASONING_EFFORT: &str = "medium";
 const DEFAULT_STRUCTURED_OUTPUT_NAME: &str = "cli_proxy_structured_output";
 
-type ToolNameMap = HashMap<String, String>;
+pub(super) type ToolNameMap = HashMap<String, String>;
 
 /// Converts a Claude Messages request body into a Codex Responses request body
 /// for `model_name`. Codex requests always stream and are never stored.
@@ -602,7 +602,7 @@ fn strip_dialect_keywords_from_object(schema: &mut Map<String, Value>) {
 /// Maps each declared tool name to a unique name within the Responses limit.
 /// When two tools share a name, both end up with the later one's suffixed name,
 /// as upstream does.
-fn build_tool_name_map(tools: Option<&Value>) -> ToolNameMap {
+pub(super) fn build_tool_name_map(tools: Option<&Value>) -> ToolNameMap {
     let mut map = ToolNameMap::new();
     let Some(Value::Array(tools)) = tools else {
         return map;
@@ -661,7 +661,7 @@ fn unique_name(candidate: &str, used: &HashSet<String>) -> String {
 /// Keeps Claude tool IDs within the Responses `call_id` limit. A long ID becomes
 /// its first 47 bytes, `_`, and 16 hex digits of its SHA-256, so the mapping is
 /// stable across turns and a tool call still matches its result.
-fn shorten_call_id(id: &str) -> Cow<'_, str> {
+pub(super) fn shorten_call_id(id: &str) -> Cow<'_, str> {
     if id.len() <= ID_LIMIT {
         return Cow::Borrowed(id);
     }

@@ -38,6 +38,11 @@ pub(crate) fn str_of(value: Option<&Value>) -> Cow<'_, str> {
     }
 }
 
+/// gjson `Get` for a dotted path of object keys, such as `usage.input_tokens`.
+pub(crate) fn path<'v>(value: &'v Value, path: &str) -> Option<&'v Value> {
+    path.split('.').try_fold(value, |value, key| value.get(key))
+}
+
 /// gjson `Int()`.
 pub(crate) fn int_of(value: &Value) -> i64 {
     match value {
@@ -117,6 +122,15 @@ mod tests {
         let huge: Value = serde_json::from_str("-1e400").unwrap();
         assert_eq!(str_of(Some(&huge)), "-Inf");
         assert_eq!(str_of(Some(&json!([1, 2]))), "[1,2]");
+    }
+
+    #[test]
+    fn path_follows_object_keys() {
+        let value = json!({"a": {"b": [1], "c": null}});
+        assert_eq!(path(&value, "a.c"), Some(&Value::Null));
+        assert_eq!(path(&value, "a.b"), Some(&json!([1])));
+        assert_eq!(path(&value, "a.b.0"), None);
+        assert_eq!(path(&value, "a.x"), None);
     }
 
     #[test]

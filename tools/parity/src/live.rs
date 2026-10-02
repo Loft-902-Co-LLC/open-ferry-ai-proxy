@@ -4,7 +4,8 @@
 //! Each request is translated by upstream and by us, and both Codex bodies are
 //! posted to the proxy's `/v1/responses`. Model output varies from run to run,
 //! so we compare how the upstream API responded: HTTP status, the final event,
-//! and which output items came back.
+//! and which output items came back. The event streams that come back are then
+//! run through both response translators, which must agree on them exactly.
 
 use std::error::Error;
 use std::io::{BufRead as _, BufReader, Read as _};
@@ -190,9 +191,42 @@ pub struct Reply {
     pub elapsed: Duration,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// The event stream's lines as received.
+    pub lines: Vec<String>,
 }
 
 impl Reply {
+    /// The final event as upstream's executor gives it to the non-streaming
+    /// translator: an empty `output` is filled with the items from
+    /// `response.output_item.done` events, in `output_index` order.
+    pub fn final_event(&self) -> Option<Value> {
+        let mut items = Vec::new();
+        let mut last = None;
+        for line in &self.lines {
+            let Some(event) = line
+                .strip_prefix("data:")
+                .and_then(|data| serde_json::from_str::<Value>(data.trim()).ok())
+            else {
+                continue;
+            };
+            match event["type"].as_str() {
+                Some("response.output_item.done") => {
+                    let index = event["output_index"].as_i64().unwrap_or(i64::MAX);
+                    items.push((index, event["item"].clone()));
+                }
+                Some("response.completed" | "response.incomplete") => last = Some(event),
+                _ => {}
+            }
+        }
+        let mut event = last?;
+        let output = &mut event["response"]["output"];
+        if output.as_array().is_none_or(Vec::is_empty) && !items.is_empty() {
+            items.sort_by_key(|(index, _)| *index);
+            *output = items.into_iter().map(|(_, item)| item).collect();
+        }
+        Some(event)
+    }
+
     pub fn meets(&self, expect: Expect) -> bool {
         let has = |kind: &str| self.items.iter().any(|item| item == kind);
         self.status == 200
@@ -237,6 +271,7 @@ impl Reply {
             "elapsed_ms": self.elapsed.as_millis() as u64,
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
+            "lines": self.lines,
         })
     }
 }
@@ -280,6 +315,7 @@ impl Client {
             elapsed: Duration::ZERO,
             input_tokens: 0,
             output_tokens: 0,
+            lines: Vec::new(),
         };
         let reader = response.body_mut().as_reader();
         if reply.status != 200 {
@@ -292,6 +328,7 @@ impl Client {
 
         for line in BufReader::new(reader).lines() {
             let line = line?;
+            reply.lines.push(line.clone());
             let Some(data) = line.strip_prefix("data:") else {
                 continue;
             };

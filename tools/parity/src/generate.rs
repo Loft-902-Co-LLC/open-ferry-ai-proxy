@@ -4,6 +4,10 @@
 //! traffic: loosely typed fields that gjson coerces, names and IDs around the
 //! 64-byte limit, multi-byte characters at cut points, tool results out of
 //! order, and text that Go and Rust might case-map or trim differently.
+//!
+//! [`response`] generates Codex event streams for the response translators.
+
+pub mod response;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
