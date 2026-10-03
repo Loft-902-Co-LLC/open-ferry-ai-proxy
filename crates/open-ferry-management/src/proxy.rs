@@ -21,9 +21,13 @@
 //! - Upstream builds a new connection pool for every call; this port keeps
 //!   a client per proxy, at most 16, and starts over when that is reached.
 //!   Idle connections close after 90 seconds, as upstream's would.
-//! - The config has only `claude-api-key`, `codex-api-key` and
-//!   `openai-compatibility` lists so far, so a key of another provider never
-//!   finds a proxy in the config.
+//! - Of the API key lists upstream looks in, the `gemini-api-key`,
+//!   `claude-api-key`, `codex-api-key` and `openai-compatibility` ones are
+//!   ported; a key of the unported providers (Gemini interactions, xAI,
+//!   Meta) never finds a proxy in the config.
+//!
+//! As upstream, a `vertex-api-key` entry's proxy isn't looked up here: the
+//! credential made from it already carries that proxy.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
@@ -135,6 +139,18 @@ trait ApiKeyEntry {
     fn proxy_url(&self) -> &str;
 }
 
+impl ApiKeyEntry for open_ferry_core::config::GeminiKey {
+    fn api_key(&self) -> &str {
+        &self.api_key
+    }
+    fn base_url(&self) -> &str {
+        &self.base_url
+    }
+    fn proxy_url(&self) -> &str {
+        &self.proxy_url
+    }
+}
+
 impl ApiKeyEntry for open_ferry_core::config::ClaudeKey {
     fn api_key(&self) -> &str {
         &self.api_key
@@ -210,6 +226,9 @@ fn proxy_url_from_api_key_config(config: &Config, auth: &Auth) -> String {
         return resolve_openai_compat_api_key_proxy_url(config, auth, provider_key, compat_name);
     }
     let proxy = match open_ferry_translate::go::to_lower(provider).as_str() {
+        "gemini" => {
+            resolve_api_key_config(&config.gemini_api_key, auth).map(ApiKeyEntry::proxy_url)
+        }
         "claude" => {
             resolve_api_key_config(&config.claude_api_key, auth).map(ApiKeyEntry::proxy_url)
         }
@@ -314,7 +333,8 @@ impl std::fmt::Debug for Clients {
 #[cfg(test)]
 mod tests {
     use open_ferry_core::config::{
-        ClaudeKey, CodexKey, OpenAiCompatibility, OpenAiCompatibilityApiKey,
+        ClaudeKey, CodexKey, GeminiKey, OpenAiCompatibility, OpenAiCompatibilityApiKey,
+        VertexCompatKey,
     };
 
     use super::*;
@@ -422,10 +442,66 @@ mod tests {
         assert_eq!(proxy("claude", &[("api_key", "kx")]), "");
         assert_eq!(proxy("codex", &[("api_key", "c")]), "http://codex:1");
         assert_eq!(proxy("gemini", &[("api_key", "k1")]), "");
+        assert_eq!(proxy("aistudio", &[("api_key", "k1")]), "");
         assert_eq!(
             proxy("claude", &[("api_key", "k1"), ("compat_name", "x")]),
             ""
         );
+    }
+
+    // The gemini, claude and codex cases of
+    // TestAPICallTransportAPIKeyAuthFallsBackToConfigProxyURL (the xAI and
+    // Meta ones are dropped: those providers aren't ported), with a Vertex
+    // key, which upstream doesn't look up.
+    #[test]
+    fn api_key_auth_falls_back_to_config_proxy_url() {
+        let mut config = Config::default();
+        config.proxy_url = "http://global-proxy.example.com:8080".into();
+        config.gemini_api_key = vec![GeminiKey {
+            api_key: "gemini-key".into(),
+            proxy_url: "http://gemini-proxy.example.com:8080".into(),
+            ..GeminiKey::default()
+        }];
+        config.claude_api_key = vec![claude(
+            "claude-key",
+            "",
+            "http://claude-proxy.example.com:8080",
+        )];
+        config.codex_api_key = vec![CodexKey {
+            api_key: "codex-key".into(),
+            proxy_url: "http://codex-proxy.example.com:8080".into(),
+            ..CodexKey::default()
+        }];
+        config.vertex_api_key = vec![VertexCompatKey {
+            api_key: "vertex-key".into(),
+            proxy_url: "http://vertex-proxy.example.com:8080".into(),
+            ..VertexCompatKey::default()
+        }];
+        for (provider, key, want) in [
+            (
+                "gemini",
+                "gemini-key",
+                "http://gemini-proxy.example.com:8080",
+            ),
+            (
+                "claude",
+                "claude-key",
+                "http://claude-proxy.example.com:8080",
+            ),
+            ("codex", "codex-key", "http://codex-proxy.example.com:8080"),
+            (
+                "vertex",
+                "vertex-key",
+                "http://global-proxy.example.com:8080",
+            ),
+        ] {
+            let credential = auth(provider, &[("api_key", key)]);
+            assert_eq!(
+                api_call_route(&config, Some(&credential), ""),
+                Route::Proxy(want.into()),
+                "{provider}"
+            );
+        }
     }
 
     // The openai-compatibility case of
