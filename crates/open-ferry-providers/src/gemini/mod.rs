@@ -62,6 +62,7 @@ mod turns;
 mod vertex;
 
 pub use executor::GeminiExecutor;
+pub use token::normalize_service_account;
 pub use vertex::VertexExecutor;
 
 use bytes::Bytes;

@@ -186,6 +186,58 @@ fn decodes_pem_as_go_does() {
 }
 
 #[test]
+fn normalizes_keys_to_pkcs1() {
+    // As upstream's NormalizeServiceAccountMap writes them, checked with Go
+    // 1.26: the PKCS #1 key in a PEM block of 64-character lines.
+    let want = pem("RSA PRIVATE KEY", &test_key_pkcs1());
+    let pkcs8 = pem("PRIVATE KEY", test_key_pkcs8());
+    let cases = [
+        pkcs8.clone(),
+        want.clone(),
+        pem("KEY", test_key_pkcs8()),
+        pem("KEY", &test_key_pkcs1()),
+        format!("  {}\t", pkcs8.replace('\n', "\r\n")),
+        pkcs8.replace('\n', " "),
+    ];
+    for (index, key) in cases.iter().enumerate() {
+        let fields = account_with_key(key);
+        let normalized = normalize_service_account(&fields)
+            .unwrap_or_else(|error| panic!("case {index}: {error}"));
+        assert_eq!(normalized["private_key"], want.as_str(), "case {index}");
+        // The rest of the account is kept as it was.
+        let mut rest = normalized.clone();
+        let mut original = fields.clone();
+        rest.remove("private_key");
+        original.remove("private_key");
+        assert_eq!(rest, original, "case {index}");
+        // And the key is still taken for tokens.
+        let account = service_account(&normalized).unwrap();
+        assert_eq!(account.key.public_key().as_ref(), public_key().as_slice());
+    }
+}
+
+#[test]
+fn normalizing_fails_as_parsing_does() {
+    let ed25519 = Ed25519KeyPair::generate_pkcs8v1(&aws_lc_rs::rand::SystemRandom::new()).unwrap();
+    for key in [
+        Value::Null,
+        Value::from(" "),
+        Value::from("not a key"),
+        Value::from(pem("PRIVATE KEY", ed25519.as_ref())),
+        Value::from(pem("CERTIFICATE", &[1, 2, 3])),
+        Value::from(pem("RSA PRIVATE KEY", &[0x30, 0x03, 2, 1, 0])),
+    ] {
+        let mut fields = test_service_account("http://127.0.0.1:9/token");
+        fields.insert("private_key".into(), key.clone());
+        assert_eq!(
+            normalize_service_account(&fields).err(),
+            Some(key_error(key.clone())),
+            "{key}"
+        );
+    }
+}
+
+#[test]
 fn reads_the_account() {
     let exchange_error = |field: &str, value: Value| {
         let mut fields = test_service_account("");

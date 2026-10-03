@@ -14,7 +14,9 @@
 //! The account's `private_key` is cleaned up first: line endings become
 //! `\n`, terminal escape sequences go, and a key whose PEM framing was
 //! mangled is rebuilt from the base64 between its markers. It must be an
-//! RSA key, in PKCS #1 or PKCS #8.
+//! RSA key, in PKCS #1 or PKCS #8. [`normalize_service_account`] writes
+//! the account back with its key cleaned up so, as PKCS #1, for the
+//! management API's Vertex AI import.
 //!
 //! A token comes from the account's `token_uri` (Google's token endpoint by
 //! default) for the `cloud-platform` scope, in exchange for a JWT signed
@@ -92,14 +94,7 @@ pub(crate) struct ServiceAccount {
 /// `NormalizeServiceAccountMap`: the account in `fields`, with its
 /// `private_key` cleaned up and parsed.
 pub(crate) fn service_account(fields: &Map<String, Value>) -> Result<ServiceAccount, String> {
-    let raw = fields
-        .get("private_key")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if raw.trim().is_empty() {
-        return Err("service account missing private_key".to_owned());
-    }
-    let (key, key_der) = parse_private_key(raw)?;
+    let (key, key_der) = parse_private_key(private_key_text(fields)?)?;
     Ok(ServiceAccount {
         fields: fields.clone(),
         key,
@@ -107,21 +102,106 @@ pub(crate) fn service_account(fields: &Map<String, Value>) -> Result<ServiceAcco
     })
 }
 
+/// `NormalizeServiceAccountMap`: a copy of the service account `fields`
+/// whose `private_key` is cleaned up as for a token exchange and written
+/// again as a PKCS #1 PEM block (`RSA PRIVATE KEY`), as the management
+/// API's Vertex AI import saves it. Errors read as upstream's and never
+/// quote the key.
+///
+/// Deviations from upstream: the key's DER is written as it came (from
+/// inside the PKCS #8 structure for a PKCS #8 key), where upstream encodes
+/// the parsed key again, which gives the same bytes for a key in DER; and
+/// the headers of an `RSA PRIVATE KEY` block are dropped, where upstream
+/// keeps them.
+pub fn normalize_service_account(
+    fields: &Map<String, Value>,
+) -> Result<Map<String, Value>, String> {
+    let block = private_key_block(private_key_text(fields)?)?;
+    rsa_key(&block)?;
+    let der = match block.kind.as_str() {
+        "RSA PRIVATE KEY" => block.der,
+        "PRIVATE KEY" => pkcs8_private_key(&block.der)
+            .ok_or_else(|| "private_key invalid pkcs8: no private key".to_owned())?
+            .to_vec(),
+        // `rsa_key` took it as PKCS #1, else as PKCS #8.
+        _ => match pkcs8_private_key(&block.der) {
+            Some(key) => key.to_vec(),
+            None => block.der,
+        },
+    };
+    let mut normalized = fields.clone();
+    normalized.insert(
+        "private_key".to_owned(),
+        Value::String(pem_encode("RSA PRIVATE KEY", &der)),
+    );
+    Ok(normalized)
+}
+
+/// The account's `private_key`, which must be a string that isn't blank.
+fn private_key_text(fields: &Map<String, Value>) -> Result<&str, String> {
+    let raw = fields
+        .get("private_key")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if raw.trim().is_empty() {
+        return Err("service account missing private_key".to_owned());
+    }
+    Ok(raw)
+}
+
 /// `sanitizePrivateKey` and `ensureRSAPrivateKey`: the RSA key in `raw`, and
 /// its DER.
 fn parse_private_key(raw: &str) -> Result<(KeyPair, Vec<u8>), String> {
+    let block = private_key_block(raw)?;
+    let key = rsa_key(&block)?;
+    Ok((key, block.der))
+}
+
+/// `sanitizePrivateKey`: the PEM block in `raw`, cleaned up, or rebuilt
+/// from the base64 between its markers.
+fn private_key_block(raw: &str) -> Result<Pem, String> {
     let text = raw.replace("\r\n", "\n").replace('\r', "\n");
     let text = strip_ansi_escape(&text);
     let text = text.trim();
-    let block = match pem_decode(text.as_bytes()) {
-        Some(block) => block,
-        None => match rebuild_pem(text) {
-            Ok(block) => block,
-            Err(error) => return Err(format!("private_key is not valid pem: {error}")),
-        },
-    };
-    let key = rsa_key(&block)?;
-    Ok((key, block.der))
+    match pem_decode(text.as_bytes()) {
+        Some(block) => Ok(block),
+        None => rebuild_pem(text).map_err(|error| format!("private_key is not valid pem: {error}")),
+    }
+}
+
+/// The `privateKey` of a PKCS #8 `PrivateKeyInfo`, if `der` reads as one:
+/// for an RSA key, its PKCS #1 `RSAPrivateKey`.
+fn pkcs8_private_key(der: &[u8]) -> Option<&[u8]> {
+    let (tag, info, _) = der_element(der)?;
+    if tag != 0x30 {
+        return None;
+    }
+    let (tag, _version, rest) = der_element(info)?;
+    if tag != 0x02 {
+        return None;
+    }
+    let (tag, _algorithm, rest) = der_element(rest)?;
+    if tag != 0x30 {
+        return None;
+    }
+    let (tag, key, _) = der_element(rest)?;
+    (tag == 0x04).then_some(key)
+}
+
+/// Go's `pem.EncodeToMemory` for a block without headers: `der` in lines of
+/// 64 base64 characters between the markers, each line ended by `\n`.
+fn pem_encode(kind: &str, der: &[u8]) -> String {
+    let encoded = PEM_BASE64.encode(der);
+    let mut out = format!("-----BEGIN {kind}-----\n");
+    for line in encoded.as_bytes().chunks(64) {
+        // Base64 is ASCII.
+        out.push_str(&String::from_utf8_lossy(line));
+        out.push('\n');
+    }
+    out.push_str("-----END ");
+    out.push_str(kind);
+    out.push_str("-----\n");
+    out
 }
 
 /// A decoded PEM block.
