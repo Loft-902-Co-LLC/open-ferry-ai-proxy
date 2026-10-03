@@ -26,6 +26,86 @@ fn parts(content: &Value) -> &[Value] {
     content["parts"].as_array().unwrap()
 }
 
+/// The merge as upstream does it: each joined turn written out and, for
+/// [`Merge::Reordering`], reordered again.
+fn merge_one_join_at_a_time(contents: Vec<Value>, merge: Merge) -> Vec<Value> {
+    if contents.len() <= 1 {
+        return contents;
+    }
+    let mut merged: Vec<Value> = Vec::new();
+    for content in contents {
+        if !matches!(content.get("parts"), Some(Value::Array(parts)) if !parts.is_empty()) {
+            continue;
+        }
+        if let Some(last) = merged.last_mut()
+            && str_of(last.get("role")) == "user"
+            && str_of(content.get("role")) == "user"
+            && (merge == Merge::Reordering
+                || !(content_has_gemini_function_response(last)
+                    || content_has_gemini_function_response(&content)))
+        {
+            let mut parts = last["parts"].as_array().unwrap().clone();
+            parts.extend(content["parts"].as_array().unwrap().iter().cloned());
+            if merge == Merge::Reordering {
+                parts = reorder_gemini_user_parts(parts);
+            }
+            last["parts"] = Value::Array(parts);
+            continue;
+        }
+        merged.push(content);
+    }
+    merged
+}
+
+#[test]
+fn merges_as_upstream_joins_one_turn_at_a_time() {
+    let kinds = [
+        json!({"text": "t"}),
+        json!({"functionResponse": {"name": "f"}}),
+        json!({"function_response": {"name": "g"}}),
+        json!({"functionResponse": {"name": "h"}, "text": "both"}),
+        json!({"inlineData": {"data": "x"}}),
+        json!({"functionCall": {"name": "c"}}),
+        json!("not a part"),
+    ];
+    let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+    let mut next = |n: usize| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed % n as u64) as usize
+    };
+    for case in 0..3000 {
+        let contents: Vec<Value> = (0..next(12))
+            .map(|turn| {
+                let parts: Vec<Value> = (0..next(5))
+                    .map(|part| {
+                        let mut kind = kinds[next(kinds.len())].clone();
+                        if let Some(fields) = kind.as_object_mut() {
+                            fields.insert("n".into(), json!(format!("{turn}.{part}")));
+                        }
+                        kind
+                    })
+                    .collect();
+                let role = ["user", "user", "user", "model"][next(4)];
+                match next(10) {
+                    0 => json!({"role": role}),
+                    1 => json!({"parts": parts, "role": role}),
+                    _ => json!({"role": role, "parts": parts}),
+                }
+            })
+            .collect();
+        for merge in [Merge::Reordering, Merge::InOrder] {
+            assert_eq!(
+                merge_user_turns(contents.clone(), merge),
+                merge_one_join_at_a_time(contents.clone(), merge),
+                "case {case}, {}",
+                Value::Array(contents.clone())
+            );
+        }
+    }
+}
+
 #[test]
 fn merge_adjacent_gemini_contents_empty_and_single_item() {
     assert!(merge_adjacent_gemini_contents(Vec::new()).is_empty());

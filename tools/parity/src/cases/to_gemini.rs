@@ -960,8 +960,9 @@ pub fn gemini_finals() -> Vec<Case> {
     cases
 }
 
-/// Gemini streams as upstream's executor passes them to the Claude
-/// translator: each chunk's JSON, then `[DONE]`.
+/// Gemini streams as the Gemini executor passes them to the Claude
+/// translator, each chunk's JSON then `[DONE]`, and one as Vertex AI's
+/// passes them, each line as it came.
 pub fn claude_streams() -> Vec<Case> {
     let request = original_request(false);
     let mut cases: Vec<Case> = chunk_streams()
@@ -994,6 +995,19 @@ pub fn claude_streams() -> Vec<Case> {
             vec![
                 chunk(vec![text("Hi")]).to_string(),
                 last(vec![], "STOP", usage(1, 1, 0, 0)).to_string(),
+            ],
+        ),
+        Case::response(
+            "sse-lines",
+            &request,
+            vec![
+                format!("data: {}", chunk(vec![text("Hi")])),
+                String::new(),
+                ": keep-alive".to_owned(),
+                format!("data:{}", last(vec![text("!")], "STOP", usage(1, 1, 0, 0))),
+                String::new(),
+                "data: [DONE]".to_owned(),
+                "[DONE]".to_owned(),
             ],
         ),
         Case::response(

@@ -258,17 +258,9 @@ pub fn response_cases(seed: u64, count: usize) -> (Vec<Case>, Vec<Case>) {
         for (stream, last) in source_streams.into_iter().zip(source_finals) {
             let mut rng = rng(seed, index);
             index += 1;
-            // Now and then another pair, often one with no translator. Not
-            // the Gemini to Claude translator for another source's stream:
-            // it reads each line as JSON, where gjson skips a `data:` prefix
-            // (see the translator's deviations).
+            // Now and then another pair, often one with no translator.
             let (from, to) = if rng.chance(10) {
-                let pair = (rng.pick(&[from, to, "gemini", "Codex"]), rng.pick(FORMATS));
-                if pair == ("gemini", "claude") {
-                    (from, to)
-                } else {
-                    pair
-                }
+                (rng.pick(&[from, to, "gemini", "Codex"]), rng.pick(FORMATS))
             } else {
                 (from, to)
             };

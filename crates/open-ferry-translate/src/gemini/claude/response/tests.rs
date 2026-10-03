@@ -348,6 +348,45 @@ fn stream_without_content_has_no_stop() {
 }
 
 #[test]
+fn stream_reads_sse_lines() {
+    // Vertex AI's executor passes each line as it came, `data:` and all.
+    let output = stream(
+        &json!({}),
+        &[
+            r#"data: {"responseId":"r1","modelVersion":"gemini-2.5-pro","candidates":[{"index":0,"content":{"parts":[{"text":"Hello"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":1}}"#,
+            "",
+            ": keep-alive",
+            "[DONE]",
+        ],
+    );
+    let expected = [
+        message_start("r1", "gemini-2.5-pro")
+            + &events(&[
+                (
+                    "content_block_start",
+                    r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+                ),
+                (
+                    "content_block_delta",
+                    r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#,
+                ),
+                (
+                    "content_block_stop",
+                    r#"{"type":"content_block_stop","index":0}"#,
+                ),
+                (
+                    "message_delta",
+                    r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":2,"output_tokens":1}}"#,
+                ),
+            ]),
+        String::new(),
+        String::new(),
+        event("message_stop", r#"{"type":"message_stop"}"#),
+    ];
+    assert_eq!(output, expected);
+}
+
+#[test]
 fn stream_edge_cases() {
     let output = stream(
         &json!({}),

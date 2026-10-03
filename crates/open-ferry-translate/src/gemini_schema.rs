@@ -51,10 +51,20 @@
 //! - Upstream drops nullable properties from each object's `required` in Go's
 //!   random map order; we go in document order. The order only matters for a
 //!   `required` array that itself holds such a schema.
+//! - A `$ref`, `type` or description that is an object or array, read as
+//!   text by the passes that turn it into a hint or a type, is written as at
+//!   most its first 1,024 bytes of JSON. Upstream writes all of it: each
+//!   level of such values nested in one another escapes the text of the level
+//!   below once more, doubling it, so a 600-byte schema can come out as 16 MB.
+//! - Merging conditionals copies at most 65,536 more values than the schema
+//!   holds; once a branch's properties don't fit, that branch and those after
+//!   it, the shallower ones, add nothing to their parents. Upstream copies
+//!   all of them: a branch keeps what it gives its parent until the end, so
+//!   the copies double with each level of conditionals nested in a branch.
 
 use std::borrow::Cow;
 use std::cmp::Reverse;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::{Map, Value};
 
@@ -65,6 +75,14 @@ const PLACEHOLDER_REASON_DESCRIPTION: &str = "Brief explanation of why you are c
 
 /// The highest array index we pad to with nulls; see the module docs.
 const MAX_PADDED_INDEX: usize = 1024;
+
+/// The most bytes of JSON written for a value read as text where a string
+/// belongs; see the module docs and [`bounded_text`].
+const MAX_JSON_TEXT: usize = 1024;
+
+/// How many more values merging conditionals may copy than the schema holds;
+/// see the module docs.
+const CONDITIONAL_COPY_ALLOWANCE: usize = 1 << 16;
 
 /// Keywords Gemini rejects, removed wherever they are a keyword rather than a
 /// name. Upstream's list also has `additionalProperties`, which this cleaner
@@ -170,9 +188,7 @@ fn remove_keywords(doc: &mut Value, keywords: &[&str]) {
         }
     }
     sort_by_depth(&mut delete_paths);
-    for path in delete_paths {
-        delete(doc, &path);
-    }
+    delete_object_keys(doc, &delete_paths);
 }
 
 /// Removes the placeholder properties upstream adds for Claude: `_`, and a
@@ -378,9 +394,7 @@ fn repair_schema_node(node: &Map<String, Value>) -> (Map<String, Value>, bool) {
             .collect();
         if !bare.is_empty() {
             let (repaired, promoted, _) = repair_property_map(&bare);
-            for key in bare.keys() {
-                node.shift_remove(key);
-            }
+            node.retain(|key, _| !bare.contains_key(key));
             if let Some(Value::Object(existing)) = node.get_mut("properties") {
                 existing.extend(repaired);
             } else {
@@ -536,6 +550,7 @@ fn repair_schema_node(node: &Map<String, Value>) -> (Map<String, Value>, bool) {
 /// left.
 fn promote_required(node: &mut Map<String, Value>, promoted: &[String]) {
     let mut merged: Vec<String> = Vec::new();
+    let mut seen = HashSet::new();
     let existing = match node.get("required") {
         Some(Value::Array(items)) => items.iter().filter_map(Value::as_str).collect(),
         _ => Vec::new(),
@@ -544,7 +559,7 @@ fn promote_required(node: &mut Map<String, Value>, promoted: &[String]) {
         .into_iter()
         .chain(promoted.iter().map(String::as_str))
     {
-        if !name.is_empty() && !merged.iter().any(|seen| seen == name) {
+        if !name.is_empty() && seen.insert(name) {
             merged.push(name.to_owned());
         }
     }
@@ -623,10 +638,10 @@ fn convert_refs_to_hints(doc: &mut Value) {
     let mut paths = find_paths(doc, "$ref");
     sort_by_depth(&mut paths);
     for path in paths {
-        let name = ref_name(&str_of(get(doc, &path)));
+        let name = ref_name(&bounded_text(get(doc, &path)));
         let parent = trim_suffix(&path, ".$ref");
         let mut hint = format!("See: {name}");
-        let existing = str_of(get(doc, &description_path(&parent)));
+        let existing = bounded_text(get(doc, &description_path(&parent)));
         if !existing.is_empty() {
             hint = format!("{existing} ({hint})");
         }
@@ -693,6 +708,7 @@ fn add_enum_hints(doc: &mut Value) {
 /// Copies the properties of each `then` and `else` branch into the parent's
 /// `properties`, where it has none of that name.
 fn merge_conditionals(doc: &mut Value) {
+    let mut budget = value_count(doc, usize::MAX).saturating_add(CONDITIONAL_COPY_ALLOWANCE);
     let mut paths_by_field = find_paths_by_fields(doc, &["then", "else"]);
     let mut paths = Vec::new();
     for key in ["then", "else"] {
@@ -705,9 +721,18 @@ fn merge_conditionals(doc: &mut Value) {
     sort_by_depth(&mut paths);
 
     for path in paths {
-        let Some(Value::Object(properties)) = get(doc, &join_path(&path, "properties")).cloned()
-        else {
+        let Some(found @ Value::Object(_)) = get(doc, &join_path(&path, "properties")) else {
             continue;
+        };
+        // A branch keeps what it gives its parent, so an enclosing branch
+        // copies both.
+        let size = value_count(found, budget);
+        if size > budget {
+            break;
+        }
+        budget -= size;
+        let Value::Object(properties) = found.clone() else {
+            unreachable!("matched an object");
         };
         let parent = if path.ends_with(".then") {
             trim_suffix(&path, ".then")
@@ -738,6 +763,8 @@ fn merge_all_of(doc: &mut Value) {
             continue;
         };
         let parent = trim_suffix(&path, ".allOf");
+        let required_path = join_path(&parent, "required");
+        let mut required: Option<RequiredNames> = None;
         for branch in branches {
             let Value::Object(fields) = branch else {
                 continue;
@@ -748,15 +775,12 @@ fn merge_all_of(doc: &mut Value) {
                         let Value::Array(names) = value else {
                             continue;
                         };
-                        let required_path = join_path(&parent, "required");
-                        let mut current = get_strings(doc, &required_path);
-                        for name in &names {
-                            let name = str_of(Some(name));
-                            if !current.iter().any(|seen| *seen == name) {
-                                current.push(name.into_owned());
-                            }
-                        }
-                        set(doc, &required_path, strings(current));
+                        let mut current = required
+                            .take()
+                            .filter(|current| current.is_written(doc, &required_path))
+                            .unwrap_or_else(|| RequiredNames::read(doc, &required_path));
+                        current.add(doc, &required_path, &names);
+                        required = Some(current);
                     }
                     // A condition can't be expressed in the upstream schema.
                     "if" | "then" | "else" | "allOf" => {}
@@ -768,6 +792,55 @@ fn merge_all_of(doc: &mut Value) {
             }
         }
         delete(doc, &path);
+    }
+}
+
+/// A `required` list that `allOf` branches add names to. Each branch's names
+/// are written as upstream writes them, but appended to the list the last
+/// branch wrote rather than writing it all again.
+struct RequiredNames {
+    names: Vec<String>,
+    seen: HashSet<String>,
+    written: bool,
+}
+
+impl RequiredNames {
+    /// The list at `path`, as text.
+    fn read(doc: &Value, path: &str) -> Self {
+        let names = get_strings(doc, path);
+        let seen = names.iter().cloned().collect();
+        Self {
+            names,
+            seen,
+            written: false,
+        }
+    }
+
+    /// Whether `doc` still holds the list as [`Self::add`] last wrote it.
+    fn is_written(&self, doc: &Value, path: &str) -> bool {
+        self.written
+            && matches!(get(doc, path), Some(Value::Array(items)) if items.len() == self.names.len())
+    }
+
+    /// Adds the names in `new` the list doesn't have, and writes it at `path`.
+    fn add(&mut self, doc: &mut Value, path: &str, new: &[Value]) {
+        let start = self.names.len();
+        for name in new {
+            let name = str_of(Some(name));
+            if !self.seen.contains(name.as_ref()) {
+                self.seen.insert(name.clone().into_owned());
+                self.names.push(name.into_owned());
+            }
+        }
+        if self.written
+            && let Some(Value::Array(items)) = get_mut(doc, path)
+            && items.len() == start
+        {
+            items.extend(self.names[start..].iter().cloned().map(Value::String));
+            return;
+        }
+        set(doc, path, strings(self.names.clone()));
+        self.written = true;
     }
 }
 
@@ -835,7 +908,8 @@ fn flatten_any_of_one_of(doc: &mut Value) {
                 continue;
             }
 
-            let parent_description = str_of(get(doc, &description_path(&parent_path))).into_owned();
+            let parent_description =
+                bounded_text(get(doc, &description_path(&parent_path))).into_owned();
             let (best, types) = select_best(&items);
             let mut selected = items[best].clone();
             let has_null = items
@@ -863,7 +937,7 @@ fn select_best(items: &[Value]) -> (usize, Vec<String>) {
     let (mut best, mut best_score) = (0, -1);
     let mut types = Vec::new();
     for (index, item) in items.iter().enumerate() {
-        let mut kind = str_of(child(item, "type")).into_owned();
+        let mut kind = bounded_text(child(item, "type")).into_owned();
         let score = if kind == "object" || child(item, "properties").is_some() {
             if kind.is_empty() {
                 kind = "object".into();
@@ -897,7 +971,8 @@ fn flatten_type_arrays(doc: &mut Value) {
     let mut paths = find_paths(doc, "type");
     sort_by_depth(&mut paths);
 
-    let mut nullable_fields: Vec<(String, Vec<String>)> = Vec::new();
+    let mut nullable_fields: Vec<(String, HashSet<String>)> = Vec::new();
+    let mut nullable_objects: HashMap<String, usize> = HashMap::new();
     for path in paths {
         let Some(Value::Array(kinds)) = get(doc, &path) else {
             continue;
@@ -908,7 +983,7 @@ fn flatten_type_arrays(doc: &mut Value) {
         let mut has_null = false;
         let mut non_null = Vec::new();
         for kind in kinds {
-            let kind = str_of(Some(kind));
+            let kind = bounded_text(Some(kind));
             if kind == "null" {
                 has_null = true;
             } else if !kind.is_empty() {
@@ -940,13 +1015,13 @@ fn flatten_type_arrays(doc: &mut Value) {
                 let escaped = parts[parts.len() - 2];
                 let field = unescape_segment(escaped);
                 let object_path = parts[..parts.len() - 3].join(".");
-                match nullable_fields
-                    .iter_mut()
-                    .find(|(path, _)| *path == object_path)
-                {
-                    Some((_, fields)) => fields.push(field),
-                    None => nullable_fields.push((object_path.clone(), vec![field])),
-                }
+                let at = *nullable_objects
+                    .entry(object_path.clone())
+                    .or_insert_with(|| {
+                        nullable_fields.push((object_path.clone(), HashSet::new()));
+                        nullable_fields.len() - 1
+                    });
+                nullable_fields[at].1.insert(field);
                 let property = join_path(&object_path, &format!("properties.{escaped}"));
                 append_hint(doc, &property, "(nullable)");
             }
@@ -981,9 +1056,7 @@ fn remove_unsupported_keywords(doc: &mut Value) {
 fn remove_extension_fields(doc: &mut Value) {
     let mut paths = Vec::new();
     walk_for_extensions(doc, "", &mut paths);
-    for path in paths {
-        delete(doc, &path);
-    }
+    delete_object_keys(doc, &paths);
 }
 
 fn walk_for_extensions(value: &Value, path: &str, paths: &mut Vec<String>) {
@@ -1058,6 +1131,40 @@ fn get_strings(doc: &Value, path: &str) -> Vec<String> {
     }
 }
 
+/// [`str_of`], with an object or array written as at most its first
+/// [`MAX_JSON_TEXT`] bytes of JSON. Without the cut, each level of such values
+/// nested in one another would escape the text of the level below again.
+fn bounded_text(value: Option<&Value>) -> Cow<'_, str> {
+    let text = str_of(value);
+    if text.len() <= MAX_JSON_TEXT || !matches!(value, Some(Value::Object(_) | Value::Array(_))) {
+        return text;
+    }
+    let mut end = MAX_JSON_TEXT;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    Cow::Owned(text[..end].to_owned())
+}
+
+/// The number of values in `value`, itself included, counting no further
+/// than one past `limit`.
+fn value_count(value: &Value, limit: usize) -> usize {
+    let mut count = 0;
+    let mut stack = vec![value];
+    while let Some(value) = stack.pop() {
+        count += 1;
+        if count > limit {
+            break;
+        }
+        match value {
+            Value::Object(fields) => stack.extend(fields.values()),
+            Value::Array(items) => stack.extend(items),
+            _ => {}
+        }
+    }
+    count
+}
+
 /// Upstream's `mergeHint`: `hint` added to a description in parentheses,
 /// unless the description already has it.
 fn merge_hint(existing: &str, hint: &str) -> String {
@@ -1077,14 +1184,14 @@ fn merge_hint(existing: &str, hint: &str) -> String {
 /// root).
 fn append_hint(doc: &mut Value, parent: &str, hint: &str) {
     let path = description_path(parent);
-    let merged = merge_hint(&str_of(get(doc, &path)), hint);
+    let merged = merge_hint(&bounded_text(get(doc, &path)), hint);
     set(doc, &path, Value::from(merged));
 }
 
 /// Upstream's `mergeDescriptionRaw`: puts the parent's description on the
 /// branch replacing it, with the branch's own after it in parentheses.
 fn merge_description(schema: &mut Value, parent_description: &str) {
-    let own = str_of(get(schema, "description")).into_owned();
+    let own = bounded_text(get(schema, "description")).into_owned();
     if own.is_empty() {
         set(schema, "description", Value::from(parent_description));
     } else if own != parent_description {
@@ -1279,6 +1386,13 @@ fn child<'v>(value: &'v Value, key: &str) -> Option<&'v Value> {
     }
 }
 
+/// [`get`] for editing.
+fn get_mut<'v>(doc: &'v mut Value, path: &str) -> Option<&'v mut Value> {
+    keys(path)
+        .iter()
+        .try_fold(doc, |value, key| child_mut(value, key))
+}
+
 /// [`child`] for editing.
 fn child_mut<'v>(value: &'v mut Value, key: &str) -> Option<&'v mut Value> {
     match value {
@@ -1403,6 +1517,46 @@ fn delete(doc: &mut Value, path: &str) {
     if !path.is_empty() {
         delete_keys(doc, &keys(path));
     }
+}
+
+/// Deletes each of `paths` as [`delete`] would, where each ends in a key that
+/// isn't an array index: the same document comes out, since an object's keys
+/// are found by name whatever else it holds, but each object is rewritten
+/// once rather than once per key it loses.
+fn delete_object_keys(doc: &mut Value, paths: &[String]) {
+    let mut parents: Vec<(Vec<String>, HashSet<String>)> = Vec::new();
+    let mut found: HashMap<Vec<String>, usize> = HashMap::new();
+    for path in paths.iter().filter(|path| !path.is_empty()) {
+        let mut keys = keys(path);
+        let key = keys.pop().unwrap_or_default();
+        debug_assert!(index(&key).is_none() && key != "-1", "{path}");
+        let at = *found.entry(keys).or_insert_with_key(|keys| {
+            parents.push((keys.clone(), HashSet::new()));
+            parents.len() - 1
+        });
+        parents[at].1.insert(key);
+    }
+    for (keys, names) in parents {
+        if let Some(Value::Object(fields)) = deletion_parent(doc, &keys) {
+            fields.retain(|key, _| !names.contains(key));
+        }
+    }
+}
+
+/// The value [`delete_keys`] reaches through `keys`.
+fn deletion_parent<'v>(value: &'v mut Value, keys: &[String]) -> Option<&'v mut Value> {
+    keys.iter().try_fold(value, |value, key| match value {
+        Value::Object(fields) => fields.get_mut(key),
+        Value::Array(items) => {
+            let at = if key == "-1" {
+                items.len().checked_sub(1)
+            } else {
+                index(key).filter(|&at| at < items.len())
+            };
+            at.map(|at| &mut items[at])
+        }
+        _ => None,
+    })
 }
 
 fn delete_keys(value: &mut Value, keys: &[String]) {

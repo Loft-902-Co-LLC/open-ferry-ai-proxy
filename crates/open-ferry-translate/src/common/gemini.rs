@@ -65,7 +65,7 @@ pub(crate) fn is_gemini_thought_part(part: &Value) -> bool {
 /// Claude requests can carry system messages mid-conversation, which become
 /// user reminder turns; this joins them to the user turns around them.
 pub(crate) fn merge_adjacent_gemini_contents(contents: Vec<Value>) -> Vec<Value> {
-    merge_user_turns(contents, true, |_, _| true)
+    merge_user_turns(contents, Merge::Reordering)
 }
 
 /// Merges consecutive user turns into one, like
@@ -79,47 +79,166 @@ pub(crate) fn merge_adjacent_gemini_contents(contents: Vec<Value>) -> Vec<Value>
     )
 )]
 pub(crate) fn merge_adjacent_gemini_user_contents(contents: Vec<Value>) -> Vec<Value> {
-    merge_user_turns(contents, false, |last, content| {
-        !content_has_gemini_function_response(last)
-            && !content_has_gemini_function_response(content)
-    })
+    merge_user_turns(contents, Merge::InOrder)
 }
 
-/// Joins each user turn onto a user turn before it, when `may_merge` agrees.
-fn merge_user_turns(
-    contents: Vec<Value>,
-    reorder: bool,
-    may_merge: impl Fn(&Value, &Value) -> bool,
-) -> Vec<Value> {
+/// How [`merge_user_turns`] joins consecutive user turns.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Merge {
+    /// Joins them all, reordering the parts after each join
+    /// ([`reorder_gemini_user_parts`]).
+    Reordering,
+    /// Joins those without a function response, keeping the parts' order.
+    InOrder,
+}
+
+/// Joins each user turn onto the user turn before it, as `merge` says.
+///
+/// Upstream writes out and reorders all the joined turn's parts again for
+/// each turn it adds. This keeps them aside until the run of user turns ends,
+/// sorting only what each turn adds into place, for the same parts in time
+/// linear in their number.
+fn merge_user_turns(contents: Vec<Value>, merge: Merge) -> Vec<Value> {
     if contents.len() <= 1 {
         return contents;
     }
     let mut merged: Vec<Value> = Vec::with_capacity(contents.len());
-    for content in contents {
-        if !matches!(content.get("parts"), Some(Value::Array(parts)) if !parts.is_empty()) {
+    // The parts of the last turn in `merged` while it is a user turn, taken
+    // out of it until no more join it.
+    let mut run: Option<UserParts> = None;
+    for mut content in contents {
+        let parts = match content.get_mut("parts") {
+            Some(Value::Array(parts)) if !parts.is_empty() => std::mem::take(parts),
+            _ => continue,
+        };
+        let summary = PartsSummary::of(&parts);
+        let is_user = str_of(content.get("role")) == "user";
+        if is_user
+            && let Some(last) = run.as_mut()
+            && (merge == Merge::Reordering
+                || !(last.summary().has_response || summary.has_response))
+        {
+            last.join(parts, summary, merge);
             continue;
         }
-        if let Some(last) = merged.last_mut()
-            && str_of(last.get("role")) == "user"
-            && str_of(content.get("role")) == "user"
-            && may_merge(last, &content)
-        {
-            let mut parts = match last.get_mut("parts").map(Value::take) {
-                Some(Value::Array(parts)) => parts,
-                _ => Vec::new(),
-            };
-            if let Some(Value::Array(more)) = content.get("parts") {
-                parts.extend(more.iter().cloned());
-            }
-            if reorder {
-                parts = reorder_gemini_user_parts(parts);
-            }
-            last["parts"] = Value::Array(parts);
-            continue;
+        if let Some(last) = run.take() {
+            last.put_back(merged.last_mut());
+        }
+        if is_user {
+            run = Some(UserParts::new(parts, summary));
+        } else {
+            content["parts"] = Value::Array(parts);
         }
         merged.push(content);
     }
+    if let Some(last) = run {
+        last.put_back(merged.last_mut());
+    }
     merged
+}
+
+/// The parts of a user turn others join, as [`reorder_gemini_user_parts`]
+/// leaves them after each join: text parts, then the others, then those that
+/// haven't been reordered, each with its [`PartsSummary`].
+struct UserParts {
+    text: (Vec<Value>, PartsSummary),
+    other: (Vec<Value>, PartsSummary),
+    rest: (Vec<Value>, PartsSummary),
+}
+
+impl UserParts {
+    fn new(parts: Vec<Value>, summary: PartsSummary) -> Self {
+        Self {
+            text: Default::default(),
+            other: Default::default(),
+            rest: (parts, summary),
+        }
+    }
+
+    /// The summary of all the parts, in order.
+    fn summary(&self) -> PartsSummary {
+        self.text.1.then(self.other.1).then(self.rest.1)
+    }
+
+    /// Adds `parts`, reordering them all if `merge` says to and text then
+    /// follows a function response. As the parts ahead of `rest` are already
+    /// text, then not, only `rest` and `parts` need sorting into place.
+    fn join(&mut self, parts: Vec<Value>, summary: PartsSummary, merge: Merge) {
+        if merge == Merge::Reordering && self.summary().then(summary).text_after_response {
+            let (rest, _) = std::mem::take(&mut self.rest);
+            for part in rest.into_iter().chain(parts) {
+                let group = if part.get("text").is_some() {
+                    &mut self.text
+                } else {
+                    &mut self.other
+                };
+                group.1 = group.1.then(PartsSummary::of_part(&part));
+                group.0.push(part);
+            }
+        } else {
+            self.rest.0.extend(parts);
+            self.rest.1 = self.rest.1.then(summary);
+        }
+    }
+
+    /// Puts the parts back into their turn.
+    fn put_back(self, turn: Option<&mut Value>) {
+        let Self {
+            text: (mut parts, _),
+            other: (other, _),
+            rest: (rest, _),
+        } = self;
+        parts.extend(other);
+        parts.extend(rest);
+        if let Some(turn) = turn {
+            turn["parts"] = Value::Array(parts);
+        }
+    }
+}
+
+/// What reordering a run of parts depends on, which a longer run's can be
+/// worked out from ([`PartsSummary::then`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct PartsSummary {
+    /// A function response is among them.
+    has_response: bool,
+    /// A text part other than a function response is among them.
+    has_text: bool,
+    /// Such a text part follows a function response.
+    text_after_response: bool,
+}
+
+impl PartsSummary {
+    fn of(parts: &[Value]) -> Self {
+        parts.iter().fold(Self::default(), |summary, part| {
+            summary.then(Self::of_part(part))
+        })
+    }
+
+    fn of_part(part: &Value) -> Self {
+        if is_function_response(part) {
+            Self {
+                has_response: true,
+                ..Self::default()
+            }
+        } else {
+            Self {
+                has_text: part.get("text").is_some(),
+                ..Self::default()
+            }
+        }
+    }
+
+    /// The summary of these parts followed by `next`'s.
+    fn then(self, next: Self) -> Self {
+        Self {
+            has_response: self.has_response || next.has_response,
+            has_text: self.has_text || next.has_text,
+            text_after_response: self.text_after_response
+                || next.text_after_response
+                || (self.has_response && next.has_text),
+        }
+    }
 }
 
 /// Reports whether a Gemini turn holds a function response part

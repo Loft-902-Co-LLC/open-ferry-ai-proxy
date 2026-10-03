@@ -879,6 +879,35 @@ async fn streams_lines_as_they_come() {
 }
 
 #[tokio::test]
+async fn streams_to_claude_clients() {
+    // Each line reaches the translator as it came, `data:` and all.
+    let answer = r#"data: {"responseId":"r1","modelVersion":"gemini-2.5-pro","candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"Hello"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":1}}"#;
+    let mock = Mock::start(Reply::sse(&format!("{answer}\n\n"))).await;
+    let response = executor()
+        .execute_stream(
+            auth(&mock),
+            request(
+                "gemini-2.5-pro",
+                r#"{"model":"gemini-2.5-pro","max_tokens":16,"stream":true,"messages":[{"role":"user","content":"hi"}]}"#,
+            ),
+            stream_options(&Format::CLAUDE),
+        )
+        .await
+        .unwrap();
+    let (chunks, error) = collect(response).await;
+    assert!(error.is_none(), "{error:?}");
+    let streamed = chunks.concat();
+    for expected in [
+        r#""id":"r1","type":"message","role":"assistant","content":[],"model":"gemini-2.5-pro""#,
+        r#""delta":{"type":"text_delta","text":"Hello"}"#,
+        r#""delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":2,"output_tokens":1}"#,
+        "event: message_stop\ndata: {\"type\":\"message_stop\"}",
+    ] {
+        assert!(streamed.contains(expected), "{expected} not in {streamed}");
+    }
+}
+
+#[tokio::test]
 async fn stream_errors_hide_the_key_and_token() {
     let error = |secret: &str| {
         let error = format!(r#"{{"error":{{"code":401,"message":"bad credential {secret}"}}}}"#);

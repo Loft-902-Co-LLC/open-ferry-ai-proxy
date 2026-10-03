@@ -23,10 +23,10 @@
 //! with leading underscores. They hold text, thoughts, signatures alone,
 //! function calls under sanitized, declared or undeclared names, calls
 //! continued without a name, inline data, transcripts, several candidates,
-//! finish reasons, creation times and usage. Streams for the passthrough and
-//! Chat Completions translators come as `data:` lines or bare JSON, with
-//! blank lines, comments and `[DONE]`; those for the Claude translator as
-//! bare JSON then, usually, `[DONE]`, as upstream's executor passes them.
+//! finish reasons, creation times and usage. Streams come as `data:` lines
+//! or bare JSON, with blank lines, comments and `[DONE]`, as Vertex AI's
+//! executor passes them; half of those for the Claude translator come as
+//! bare JSON then, usually, `[DONE]`, as the Gemini executor passes them.
 
 use std::ops::{Deref, DerefMut};
 
@@ -97,7 +97,11 @@ pub fn claude_event_cases(seed: u64, count: usize) -> (Vec<Case>, Vec<Case>) {
             let (request, declared) = generator.original_request(false);
             let calls = generator.calls(&declared, true);
             let chunks = generator.chunks(&calls);
-            let lines = generator.bare_lines(&chunks);
+            let lines = if generator.rng.chance(50) {
+                generator.data_lines(&chunks, &calls)
+            } else {
+                generator.bare_lines(&chunks)
+            };
             let body = generator.body(&calls);
             let case = |events| Case::response(format!("random-{seed}-{index}"), &request, events);
             (case(lines), case(vec![body]))
@@ -1276,7 +1280,7 @@ impl Generator {
         lines
     }
 
-    /// A stream as upstream's executor passes it: each chunk's JSON, then
+    /// A stream as the Gemini executor passes it: each chunk's JSON, then
     /// usually `[DONE]`.
     fn bare_lines(&mut self, chunks: &[Value]) -> Vec<String> {
         let mut lines: Vec<String> = chunks.iter().map(|chunk| self.line(chunk)).collect();

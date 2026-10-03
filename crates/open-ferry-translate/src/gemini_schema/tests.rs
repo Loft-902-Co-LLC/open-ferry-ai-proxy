@@ -1339,3 +1339,128 @@ fn set_and_delete_edit_as_sjson_does() {
         assert_eq!(delete_text(doc, path), expected, "delete {doc} {path}");
     }
 }
+
+/// `depth` levels of `wrap` around a schema with a `$ref`.
+fn nested(depth: usize, wrap: fn(Value) -> Value) -> Value {
+    (0..depth).fold(json!({"type": "string", "$ref": "x"}), |schema, _| {
+        wrap(schema)
+    })
+}
+
+#[test]
+fn json_written_into_strings_is_cut() {
+    // Each level escapes the text of the level below once more, so upstream's
+    // doubles with each.
+    let wraps: [fn(Value) -> Value; 4] = [
+        |schema| json!({"type": "string", "$ref": schema}),
+        |schema| json!({"type": [schema, "integer"]}),
+        |schema| json!({"anyOf": [{"type": schema}, {"type": "string"}]}),
+        |schema| json!({"description": schema, "anyOf": [{"type": "string"}, {"type": "integer"}]}),
+    ];
+    for wrap in wraps {
+        let cleaned = clean_json_schema_for_gemini_json_schema(&nested(24, wrap)).to_string();
+        assert!(
+            cleaned.len() < 4 * MAX_JSON_TEXT,
+            "{} bytes: {cleaned}",
+            cleaned.len()
+        );
+    }
+
+    // Short of the limit, all of it is written.
+    assert_eq!(
+        clean(r##"{"type":"string","$ref":{"type":"string","$ref":"#/x"}}"##),
+        json!({"type": "object", "description": r#"See: {"type":"object","description":"See: x"}"#})
+    );
+
+    // Past it, the text ends at the last whole character.
+    let long = json!({"type": "string", "$ref": {"ab": "é".repeat(1000)}});
+    let description = text(
+        &clean_json_schema_for_gemini_json_schema(&long),
+        "description",
+    );
+    assert_eq!(description.len(), "See: ".len() + MAX_JSON_TEXT - 1);
+    assert!(
+        description.starts_with(r#"See: {"ab":"éé"#),
+        "{description}"
+    );
+}
+
+#[test]
+fn nested_conditionals_copy_within_a_budget() {
+    // Each branch keeps what it gives its parent, so upstream's copies double
+    // with each level.
+    let schema = (0..40).fold(
+        json!({"type": "string"}),
+        |schema, _| json!({"if": {}, "then": {"properties": {"a": schema}}}),
+    );
+    let cleaned = clean_json_schema_for_gemini_json_schema(&schema).to_string();
+    assert!(cleaned.len() < 1 << 16, "{} bytes", cleaned.len());
+
+    // A few levels are all copied.
+    let schema = (0..3).fold(
+        json!({"type": "string"}),
+        |schema, _| json!({"if": {}, "then": {"properties": {"a": schema}}}),
+    );
+    assert_eq!(
+        clean_json_schema_for_gemini_json_schema(&schema),
+        json!({"properties": {"a": {"properties": {"a": {"properties": {"a": {"type": "string"}}}}}}})
+    );
+}
+
+#[test]
+fn all_of_adds_required_names_across_branches() {
+    let cleaned = clean(
+        r#"{"type":"object","properties":{"a":{},"b":{},"c":{},"1":{}},"required":["a"],"allOf":[{"required":["b","a"]},{"required":"x"},{"required":["c","b",1]},{"description":"d"},{"required":[]}]}"#,
+    );
+    assert_eq!(list(&cleaned, "required"), ["a", "b", "c", "1"]);
+    assert_eq!(text(&cleaned, "description"), "d");
+
+    // Branches that add nothing to an empty list write upstream's `null`.
+    let cleaned = clean(r#"{"allOf":[{"required":[]},{"required":[]}]}"#);
+    assert_eq!(get(&cleaned, "required"), Some(&Value::Null), "{cleaned}");
+}
+
+#[test]
+fn deleting_object_keys_together_matches_one_at_a_time() {
+    let doc = parse(
+        r#"{"title":1,"a":{"title":2,"x-b":3,"properties":{"title":{"title":4,"x-c":[{"x-d":5,"title":6}]}}},"items":[{"title":7},{"nullable":true,"x-e":{"x-f":1}}],"x-g":{"title":8},"":{"title":9},"a.b":{"title":10,"c":{"nullable":1}},"-1":{"title":11}}"#,
+    );
+    let one_at_a_time = |paths: &[String]| {
+        let mut doc = doc.clone();
+        for path in paths {
+            delete(&mut doc, path);
+        }
+        doc
+    };
+    let together = |paths: &[String]| {
+        let mut doc = doc.clone();
+        delete_object_keys(&mut doc, paths);
+        doc
+    };
+    for fields in [
+        &["title"][..],
+        &["title", "nullable"],
+        &["nullable", "x-c", "title"],
+    ] {
+        let mut paths: Vec<String> = fields
+            .iter()
+            .flat_map(|field| find_paths(&doc, field))
+            .collect();
+        assert_eq!(together(&paths), one_at_a_time(&paths), "{fields:?}");
+        paths.reverse();
+        assert_eq!(
+            together(&paths),
+            one_at_a_time(&paths),
+            "{fields:?} reversed"
+        );
+        sort_by_depth(&mut paths);
+        assert_eq!(
+            together(&paths),
+            one_at_a_time(&paths),
+            "{fields:?} by depth"
+        );
+    }
+    let mut paths = Vec::new();
+    walk_for_extensions(&doc, "", &mut paths);
+    assert_eq!(together(&paths), one_at_a_time(&paths), "extensions");
+}

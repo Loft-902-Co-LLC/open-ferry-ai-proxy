@@ -87,7 +87,9 @@ impl GeminiToClaudeStream {
 
     /// Translates one chunk of the Gemini stream: a response's JSON, or
     /// `[DONE]` at the end. Returns the Claude SSE events it gives
-    /// (`event: …\ndata: …\n\n\n` each), possibly none.
+    /// (`event: …\ndata: …\n\n\n` each), possibly none. The JSON is read
+    /// from the chunk's first `{` or `[`, where gjson starts reading, so a
+    /// `data:` line as Vertex AI's executor passes it reads the same.
     pub fn translate(&mut self, chunk: &[u8]) -> String {
         let mut out = String::new();
         if chunk == b"[DONE]" {
@@ -97,7 +99,7 @@ impl GeminiToClaudeStream {
             }
             return out;
         }
-        let response: Value = serde_json::from_slice(chunk).unwrap_or(Value::Null);
+        let response: Value = serde_json::from_slice(json_start(chunk)).unwrap_or(Value::Null);
 
         if !self.has_first_response {
             let mut message = json!({
@@ -437,6 +439,14 @@ impl Blocks {
 
 fn push_event(out: &mut String, event: &str, data: &Value) {
     let _ = write!(out, "event: {event}\ndata: {data}\n\n\n");
+}
+
+/// `chunk` from its first `{` or `[`, or all of it if it has neither.
+fn json_start(chunk: &[u8]) -> &[u8] {
+    chunk
+        .iter()
+        .position(|&b| b == b'{' || b == b'[')
+        .map_or(chunk, |start| &chunk[start..])
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
