@@ -48,6 +48,7 @@ use std::io;
 
 use axum::extract::{RawQuery, State};
 use axum::response::Response;
+use axum::routing::get;
 use chrono::Utc;
 use http::StatusCode;
 use open_ferry_core::auth::weight::{parse_weight_str, parse_weight_value};
@@ -59,6 +60,7 @@ use open_ferry_providers::codex::jwt::parse_jwt_token;
 use open_ferry_translate::go::{to_lower, trim_space};
 use serde_json::Value;
 
+use crate::Route;
 use crate::go::{atoi, equal_fold, is_zero, parse_bool};
 use crate::json::{self, Json};
 use crate::query::Query;
@@ -69,6 +71,16 @@ const DEFAULT_PAGE_SIZE: i64 = 50;
 
 /// A `gin.H`.
 type Entry = BTreeMap<String, Json>;
+
+/// The routes this module serves.
+pub(crate) fn routes() -> Vec<Route> {
+    vec![
+        Route::key("/v0/management/auth-files", get(list)),
+        Route::key("/v8/management/credentials", get(list)),
+        Route::key("/v0/management/auth-files/models", get(models)),
+        Route::key("/v8/management/credentials/models", get(models)),
+    ]
+}
 
 /// `GET /v0/management/auth-files` (upstream's `ListAuthFiles`).
 pub(crate) async fn list(

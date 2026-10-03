@@ -94,6 +94,7 @@ use std::time::Duration;
 use axum::body::Body;
 use axum::extract::State;
 use axum::response::Response;
+use axum::routing::post;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
@@ -174,6 +175,14 @@ impl GoStruct for ApiCallRequest {
         }
         Ok(())
     }
+}
+
+/// The routes this module serves.
+pub(crate) fn routes() -> Vec<crate::Route> {
+    vec![
+        crate::Route::key("/v0/management/api-call", post(api_call)),
+        crate::Route::key("/v8/management/requests/api-call", post(api_call)),
+    ]
 }
 
 /// `POST /v0/management/api-call` (upstream's `APICall`).

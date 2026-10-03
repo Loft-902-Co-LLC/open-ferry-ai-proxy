@@ -19,11 +19,13 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::extract::State;
 use axum::response::Response;
+use axum::routing::post;
 use http::StatusCode;
 use open_ferry_core::auth::Auth;
 use open_ferry_core::manager::Manager;
 use serde::de::MapAccess;
 
+use crate::Route;
 use crate::auth_files::{auth_index, run_blocking};
 use crate::bind::{self, GoStruct, set_string};
 use crate::json::{self, Json};
@@ -54,6 +56,14 @@ pub(crate) fn auth_by_index(manager: &Manager, index: &str) -> Option<Arc<Auth>>
         .list()
         .into_iter()
         .find(|auth| auth_index(auth) == index)
+}
+
+/// The routes this module serves.
+pub(crate) fn routes() -> Vec<Route> {
+    vec![
+        Route::key("/v0/management/reset-quota", post(reset)),
+        Route::key("/v8/management/routing/cooldown/reset", post(reset)),
+    ]
 }
 
 /// `POST /v0/management/reset-quota` (upstream's `ResetQuota`).
