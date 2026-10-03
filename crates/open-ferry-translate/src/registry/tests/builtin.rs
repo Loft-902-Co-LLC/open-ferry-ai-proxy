@@ -4,15 +4,18 @@ use serde_json::{Value, json};
 
 use super::super::*;
 
-const PAIRS: [(Format, Format); 11] = [
+const PAIRS: [(Format, Format); 14] = [
     (Format::CLAUDE, Format::CODEX),
     (Format::OPENAI, Format::CODEX),
     (Format::OPENAI_RESPONSE, Format::CODEX),
+    (Format::GEMINI, Format::CODEX),
     (Format::OPENAI, Format::CLAUDE),
     (Format::OPENAI_RESPONSE, Format::CLAUDE),
+    (Format::GEMINI, Format::CLAUDE),
     (Format::CLAUDE, Format::OPENAI),
     (Format::OPENAI, Format::OPENAI),
     (Format::OPENAI_RESPONSE, Format::OPENAI),
+    (Format::GEMINI, Format::OPENAI),
     (Format::CLAUDE, Format::GEMINI),
     (Format::GEMINI, Format::GEMINI),
     (Format::OPENAI, Format::GEMINI),

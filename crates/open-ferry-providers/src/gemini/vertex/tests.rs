@@ -591,7 +591,10 @@ async fn service_accounts_call_their_project_with_a_cached_token() {
         )
         .await
         .unwrap();
-    assert_eq!(count.payload, r#"{"totalTokens":5}"#);
+    assert_eq!(
+        count.payload,
+        r#"{"totalTokens":5,"promptTokensDetails":[{"modality":"TEXT","tokenCount":5}]}"#
+    );
     assert_eq!(
         model.last().target(),
         "/v1/projects/proxy-test/locations/europe-west4/publishers/google/models/gemini-2.5-pro:countTokens"

@@ -220,7 +220,11 @@ async fn count_tokens_prepends_leading_user() {
     for field in ["tools", "generationConfig", "safetySettings"] {
         assert!(body.get(field).is_none(), "{field}: {body}");
     }
-    assert_eq!(response.payload, r#"{"totalTokens":7}"#);
+    // Written again by the Gemini translator, as upstream's is.
+    assert_eq!(
+        response.payload,
+        r#"{"totalTokens":7,"promptTokensDetails":[{"modality":"TEXT","tokenCount":7}]}"#
+    );
 }
 
 /// Upstream's `claudeRequestWithThinkingSignature`: a Claude request whose
@@ -249,9 +253,6 @@ fn assert_no_claude_signature(seen: &str) {
 
 #[tokio::test]
 async fn execute_sanitizes_claude_signature() {
-    if !translates_to_gemini(&Format::CLAUDE, "execute_sanitizes_claude_signature") {
-        return;
-    }
     let mock = Mock::start(Reply::json(OK_ANSWER)).await;
     executor()
         .execute(
@@ -272,9 +273,6 @@ async fn execute_sanitizes_claude_signature() {
 
 #[tokio::test]
 async fn execute_stream_sanitizes_claude_signature() {
-    if !translates_to_gemini(&Format::CLAUDE, "execute_stream_sanitizes_claude_signature") {
-        return;
-    }
     let mock = Mock::start(Reply::sse(OK_STREAM)).await;
     let response = executor()
         .execute_stream(
@@ -290,9 +288,6 @@ async fn execute_stream_sanitizes_claude_signature() {
 
 #[tokio::test]
 async fn count_tokens_sanitizes_claude_signature() {
-    if !translates_to_gemini(&Format::CLAUDE, "count_tokens_sanitizes_claude_signature") {
-        return;
-    }
     let mock = Mock::start(Reply::json(r#"{"totalTokens": 42}"#)).await;
     executor()
         .count_tokens(
