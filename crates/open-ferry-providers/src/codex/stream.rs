@@ -202,6 +202,9 @@ pub(crate) struct StreamSetup {
     pub(crate) preserve_native: bool,
     /// Whether the client is a Grok Build one.
     pub(crate) grok: bool,
+    /// The credential's token, redacted from the errors made from Codex's
+    /// events.
+    pub(crate) secret: String,
 }
 
 /// The state of one translated stream.
@@ -266,7 +269,7 @@ impl State {
             let data = trim_space(rest);
             let mut event: Value = serde_json::from_slice(data).unwrap_or(Value::Null);
             if let Some(error) = terminal_failure_error(&event) {
-                return Err(error.into());
+                return Err(error.redacted(&self.setup.secret).into());
             }
             if has_meaningful_output_delta(&event) {
                 self.saw_output_delta = true;

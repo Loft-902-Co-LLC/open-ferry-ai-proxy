@@ -28,7 +28,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::time::Duration;
 
-use open_ferry_translate::go::to_lower;
+use open_ferry_translate::go::{equal_fold, to_lower};
 use serde::Deserialize;
 
 use super::duration::parse_go_duration;
@@ -349,7 +349,7 @@ impl fmt::Debug for RemoteManagement {
             .field("disable_control_panel", &self.disable_control_panel)
             .field("disable_auto_update_panel", &self.disable_auto_update_panel)
             .field("panel_github_repository", &self.panel_github_repository)
-            .field("base_url", &self.base_url)
+            .field("base_url", &RedactedUrl(&self.base_url))
             .finish()
     }
 }
@@ -400,7 +400,7 @@ impl CodexConfig {
         const MAX_SECONDS: i64 = i64::MAX / 1_000_000_000;
         let raw = self.stream_bootstrap_timeout.trim();
         let off = ["none", "unlimited", "disabled", "off", "never"];
-        if raw.is_empty() || raw == "0" || off.iter().any(|word| raw.eq_ignore_ascii_case(word)) {
+        if raw.is_empty() || raw == "0" || off.iter().any(|word| equal_fold(raw, word)) {
             return Duration::ZERO;
         }
         if let Some(nanos) = parse_go_duration(raw)
@@ -479,7 +479,7 @@ impl fmt::Debug for CodexKey {
             .field("priority", &self.priority)
             .field("weight", &self.weight)
             .field("prefix", &self.prefix)
-            .field("base_url", &self.base_url)
+            .field("base_url", &RedactedUrl(&self.base_url))
             .field("websockets", &self.websockets)
             .field("alpha_search", &self.alpha_search)
             .field("proxy_url", &Redacted(&self.proxy_url))
@@ -554,7 +554,7 @@ impl fmt::Debug for ClaudeKey {
             .field("priority", &self.priority)
             .field("weight", &self.weight)
             .field("prefix", &self.prefix)
-            .field("base_url", &self.base_url)
+            .field("base_url", &RedactedUrl(&self.base_url))
             .field("proxy_url", &Redacted(&self.proxy_url))
             .field("models", &self.models)
             .field("headers", &RedactedMap(&self.headers))
@@ -633,7 +633,7 @@ impl fmt::Debug for OpenAiCompatibility {
             .field("priority", &self.priority)
             .field("disabled", &self.disabled)
             .field("prefix", &self.prefix)
-            .field("base_url", &self.base_url)
+            .field("base_url", &RedactedUrl(&self.base_url))
             .field("api_key_entries", &self.api_key_entries)
             .field("models", &self.models)
             .field("headers", &RedactedMap(&self.headers))
@@ -826,6 +826,36 @@ impl fmt::Debug for Redacted<'_> {
     }
 }
 
+/// A URL with its user info, query and fragment hidden, since they may
+/// hold secrets.
+struct RedactedUrl<'a>(&'a str);
+
+impl fmt::Debug for RedactedUrl<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (url, rest) = match self.0.find(['?', '#']) {
+            Some(at) => self.0.split_at(at),
+            None => (self.0, ""),
+        };
+        let authority = url.find("://").map_or(0, |at| at + 3);
+        let host_end = url[authority..]
+            .find('/')
+            .map_or(url.len(), |at| authority + at);
+        let mut shown = match url[authority..host_end].rfind('@') {
+            Some(at) => format!(
+                "{}<redacted>@{}",
+                &url[..authority],
+                &url[authority + at + 1..]
+            ),
+            None => url.to_owned(),
+        };
+        if let Some(delimiter) = rest.chars().next() {
+            shown.push(delimiter);
+            shown.push_str("<redacted>");
+        }
+        fmt::Debug::fmt(&shown, f)
+    }
+}
+
 struct RedactedList<'a>(&'a [String]);
 
 impl fmt::Debug for RedactedList<'_> {
@@ -850,6 +880,29 @@ impl fmt::Debug for RedactedMap<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debug_hides_what_a_base_url_may_hold() {
+        let entry = OpenAiCompatibility {
+            base_url: "https://review:URL-SECRET@example.invalid/v1?token=QUERY-SECRET#x".into(),
+            ..OpenAiCompatibility::default()
+        };
+        let shown = format!("{entry:?}");
+        assert!(!shown.contains("SECRET"), "{shown}");
+        assert!(
+            shown.contains(r#"base_url: "https://<redacted>@example.invalid/v1?<redacted>""#),
+            "{shown}"
+        );
+        for (url, want) in [
+            ("", ""),
+            ("http://host/v1", "http://host/v1"),
+            ("user:pw@host/v1", "<redacted>@host/v1"),
+            ("http://host/a@b", "http://host/a@b"),
+            ("http://host#k", "http://host#<redacted>"),
+        ] {
+            assert_eq!(format!("{:?}", RedactedUrl(url)), format!("{want:?}"));
+        }
+    }
 
     #[test]
     fn routing_strategy_lowercases_as_go_does() {

@@ -59,6 +59,13 @@ pub(crate) struct StatusError {
 }
 
 impl StatusError {
+    /// The error with every copy of the credential's `secret` in its
+    /// message redacted; see [`crate::redact`].
+    pub(crate) fn redacted(mut self, secret: &str) -> Self {
+        self.message = crate::redact::text(self.message, secret);
+        self
+    }
+
     pub(crate) fn new(status: u16, message: impl Into<String>) -> Self {
         Self {
             status,

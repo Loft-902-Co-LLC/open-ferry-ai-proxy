@@ -12,3 +12,4 @@ mod go_json;
 mod json;
 pub mod oauth;
 pub mod openai_compat;
+mod redact;

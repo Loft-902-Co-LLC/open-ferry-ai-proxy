@@ -707,6 +707,26 @@ async fn overloaded_and_unauthorized_pass_through() {
 }
 
 #[tokio::test]
+async fn errors_hide_the_key() {
+    for (auth, secret) in [(api_key_auth(), API_KEY), (oauth_auth(), OAUTH_TOKEN)] {
+        let body = format!(
+            r#"{{"type":"error","error":{{"type":"authentication_error","message":"invalid x-api-key {secret}"}}}}"#
+        );
+        let mock = Mock::start(Reply::error(401, &body)).await;
+        let error = mock
+            .executor()
+            .execute(auth, request(claude_payload()), options(Format::CLAUDE))
+            .await
+            .unwrap_err();
+        assert_eq!(error.status, 401);
+        assert_eq!(
+            error.message,
+            r#"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key [redacted]"}}"#
+        );
+    }
+}
+
+#[tokio::test]
 async fn compressed_success_fails() {
     let mock = Mock::start(Reply::json(MESSAGE).header("content-encoding", "gzip")).await;
     let error = mock

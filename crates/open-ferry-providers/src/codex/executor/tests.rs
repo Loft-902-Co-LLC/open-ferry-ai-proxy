@@ -649,6 +649,63 @@ async fn stream_explicit_terminal_failure() {
     assert_eq!(scope(&error), (false, false));
 }
 
+#[tokio::test]
+async fn errors_hide_the_token() {
+    let key = "sk-codex-secret";
+    let with_key = |url: &str| {
+        let mut auth = (*api_key_auth(url)).clone();
+        auth.attributes.insert("api_key".into(), key.into());
+        Arc::new(auth)
+    };
+    let payload = r#"{"model":"gpt-5.5","input":"hello"}"#;
+
+    let mock = Mock::start(Reply::error(
+        401,
+        r#"{"error":{"message":"bad key sk-codex-secret"}}"#,
+    ))
+    .await;
+    let error = executor()
+        .execute(
+            with_key(&mock.url),
+            request("gpt-5.5", payload),
+            options("openai-response"),
+        )
+        .await
+        .unwrap_err();
+    // A 401 comes back classified, with the provider's message in it.
+    assert!(!error.message.contains(key), "{error:?}");
+    assert!(error.message.contains("bad key [redacted]"), "{error:?}");
+
+    let failure = concat!(
+        r#"data: {"type":"response.failed","response":{"id":"resp_1","status":"failed","error":{"code":"server_error","message":"bad key sk-codex-secret"}}}"#,
+        "\n\n",
+    );
+    let mock = Mock::start(Reply::sse(failure)).await;
+    let error = executor()
+        .execute(
+            with_key(&mock.url),
+            request("gpt-5.5", payload),
+            options("openai-response"),
+        )
+        .await
+        .unwrap_err();
+    assert!(!error.message.contains(key), "{error:?}");
+    assert!(error.message.contains("bad key [redacted]"), "{error:?}");
+
+    let response = executor()
+        .execute_stream(
+            with_key(&mock.url),
+            request("gpt-5.5", payload),
+            stream_options("openai-response"),
+        )
+        .await
+        .unwrap();
+    let (_, error) = collect(response).await;
+    let error = error.expect("a terminal error");
+    assert!(!error.message.contains(key), "{error:?}");
+    assert!(error.message.contains("bad key [redacted]"), "{error:?}");
+}
+
 const CREATED_ONLY: &str = "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.5\"}}\n\n";
 
 // TestCodexExecutorExecuteMissingCompletionIsRequestScoped and

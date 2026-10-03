@@ -7,6 +7,10 @@
 //! takes the client's `Name` header, and the header is left out when the
 //! client sent none. Every provider applies them here.
 //!
+//! `Content-Length`, `Transfer-Encoding` and `Trailer` attributes are
+//! skipped, as Go's HTTP client ignores those headers and frames the body
+//! itself. A `Host` attribute sets the request's host, as upstream's does.
+//!
 //! Deviations from upstream:
 //! - A header that says which client is calling can't be set this way:
 //!   `User-Agent`, `X-App`, any `X-Stainless-*`, `Originator`, `Session_id`,
@@ -44,6 +48,16 @@ fn is_identity_header(name: &HeaderName) -> bool {
     IDENTITY_HEADERS.contains(&name) || name.starts_with("x-stainless-")
 }
 
+/// The headers that frame a request's body, which Go's HTTP client writes
+/// from the body and never from the headers it was given
+/// (`reqWriteExcludeHeader`, less the `Host` and `User-Agent` it handles
+/// apart).
+const FRAMING_HEADERS: [HeaderName; 3] = [
+    http::header::CONTENT_LENGTH,
+    http::header::TRANSFER_ENCODING,
+    http::header::TRAILER,
+];
+
 /// Applies the `header:<Name>` attributes in `attributes` to `target`, over
 /// what is already set (`ApplyCustomHeadersFromAttrs`). `client` is the
 /// client's request headers, for `$Name` values; `provider` starts the
@@ -72,6 +86,9 @@ pub(crate) fn apply(
             tracing::warn!(
                 "{provider}: custom header {name:?} would set the client's identity; skipped"
             );
+            continue;
+        }
+        if FRAMING_HEADERS.contains(&header) {
             continue;
         }
         let value: &[u8] = match value.strip_prefix('$') {
@@ -194,5 +211,25 @@ mod tests {
         assert_eq!(target.get("x-forward").unwrap(), "from-client");
         // Copying the client's own value into another header is fine.
         assert_eq!(target.get("x-agent-copy").unwrap(), "actual-client/1");
+    }
+
+    #[test]
+    fn skips_the_headers_that_frame_the_body() {
+        let mut target = HeaderMap::new();
+        apply(
+            &mut target,
+            &attributes(&[
+                ("header:Content-Length", "1"),
+                ("header:transfer-encoding", "chunked"),
+                ("header:TRAILER", "X-Checksum"),
+                ("header:Host", "upstream.example"),
+            ]),
+            &HeaderMap::new(),
+            "test",
+        );
+        for absent in ["content-length", "transfer-encoding", "trailer"] {
+            assert!(target.get(absent).is_none(), "{absent}");
+        }
+        assert_eq!(target.get("host").unwrap(), "upstream.example");
     }
 }

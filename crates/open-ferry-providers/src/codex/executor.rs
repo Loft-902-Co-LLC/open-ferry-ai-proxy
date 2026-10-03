@@ -26,6 +26,8 @@
 //!   same. Error bodies are read up to 4 MiB and compact bodies up to
 //!   50 MiB.
 //! - A dropped call or stream stops at once; upstream checks its context.
+//! - An error body or terminal failure event that quotes the credential's
+//!   token has it redacted (see the crate's `redact` module).
 //! - Usage reporting, request logging, model-level cooling and the
 //!   Home-service refresh aren't ported.
 //! - Deferred: the image generation endpoints, the reasoning replay cache,
@@ -54,8 +56,8 @@ use super::client::{Clients, error_chain, read_body, read_body_prefix};
 use super::jwt::{DEFAULT_PLAN_TYPE, parse_jwt_token};
 use super::oauth::{CodexAuth, Endpoints};
 use super::request::{
-    DEFAULT_BASE_URL, Kind, base_model, build_headers, endpoint, original_request, prepare_body,
-    response_format,
+    DEFAULT_BASE_URL, Kind, base_model, build_headers, credentials, endpoint, original_request,
+    prepare_body, response_format,
 };
 use super::stream::{self, LineReader, MAX_LINE, StreamSetup, is_grok_client};
 use super::terminal::{
@@ -67,6 +69,7 @@ use super::token::{CREDENTIAL_TYPE, now_rfc3339};
 use super::tokens::{count_input_tokens, tokenizer_for};
 use super::usage::ensure_responses_usage_details;
 use crate::json::str_at;
+use crate::redact;
 
 /// The `alt` of a `/responses/compact` call.
 const COMPACT_ALT: &str = "responses/compact";
@@ -147,6 +150,7 @@ impl CodexExecutor {
         if !(200..300).contains(&status) {
             let (body, _) = read_body_prefix(response, MAX_ERROR_BODY).await;
             tracing::debug!(status, "codex: compact request error");
+            let body = redact::bytes(&body, credentials(auth).0);
             return Err(status_error(status, &body).into());
         }
         let response_headers = response.headers().clone();
@@ -187,6 +191,7 @@ impl CodexExecutor {
         if !(200..300).contains(&status) {
             let (body, _) = read_body_prefix(response, MAX_ERROR_BODY).await;
             tracing::debug!(status, "codex: request error");
+            let body = redact::bytes(&body, credentials(auth).0);
             return Err(status_error(status, &body).into());
         }
         let response_headers = response.headers().clone();
@@ -211,7 +216,7 @@ impl CodexExecutor {
                 saw_output_delta = true;
             }
             if let Some(error) = terminal_failure_error(&event) {
-                return Err(error.into());
+                return Err(error.redacted(credentials(auth).0).into());
             }
             let event_type = str_at(&event, "type");
             if event_type == "response.output_item.done" {
@@ -270,6 +275,7 @@ impl CodexExecutor {
                 return Err(ExecError::new(ErrorKind::Upstream, error_chain(&error)));
             }
             tracing::debug!(status, "codex: request error");
+            let body = redact::bytes(&body, credentials(auth).0);
             return Err(status_error(status, &body).into());
         }
         let response_headers = response.headers().clone();
@@ -296,6 +302,7 @@ impl CodexExecutor {
             original: original_bytes,
             preserve_native: prepared.native,
             grok: is_grok_client(&options.headers),
+            secret: credentials(auth).0.to_owned(),
         };
         Ok(StreamResponse {
             headers: response_headers,

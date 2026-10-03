@@ -26,6 +26,12 @@
 //!   Error bodies are read up to 4 MiB and answers up to 50 MiB.
 //! - A dropped call or stream stops at once; upstream checks its context.
 //! - The body is written as `serde_json` writes it, compact.
+//! - The URL is parsed as WHATWG URLs are, so `.` and `..` segments of the
+//!   base URL are resolved, where Go sends them as written. A base URL with
+//!   an ASCII control character fails before anything is sent, as Go's
+//!   does, but the error doesn't quote the URL, which may hold a secret.
+//! - An error body that quotes the credential's API key has it redacted;
+//!   see [`crate::redact`].
 //! - Usage reporting, request logging and the Home service (its credential
 //!   options and refresh) aren't ported.
 //! - See also the module docs of [`super`].
@@ -63,6 +69,7 @@ use crate::codex::terminal::{APPLY_PATCH_ERROR_MESSAGE, StatusError};
 use crate::codex::usage::ensure_responses_usage_details;
 use crate::custom_headers;
 use crate::json::{delete, eq_fold, str_at};
+use crate::redact;
 
 /// The `alt` of a `/responses/compact` call.
 const COMPACT_ALT: &str = "responses/compact";
@@ -77,6 +84,11 @@ pub struct OpenAiCompatExecutor {
     provider: String,
     config: Arc<Config>,
     clients: Clients,
+}
+
+/// The credential's API key, sent as a bearer token unless it is empty.
+fn api_key(auth: &Auth) -> &str {
+    auth.attribute("api_key").unwrap_or_default().trim()
 }
 
 /// A request ready to send.
@@ -149,9 +161,16 @@ impl OpenAiCompatExecutor {
         stream: bool,
     ) -> Result<Prepared, ExecError> {
         let base_url = auth.attribute("base_url").unwrap_or_default().trim();
-        let api_key = auth.attribute("api_key").unwrap_or_default().trim();
+        let api_key = api_key(auth);
         if base_url.is_empty() {
             return Err(StatusError::new(401, "missing provider baseURL").into());
+        }
+        // Go's `url.Parse` refuses these; WHATWG parsing drops some of them.
+        if base_url.bytes().any(|b| b < 0x20 || b == 0x7f) {
+            return Err(ExecError::new(
+                ErrorKind::Upstream,
+                "net/url: invalid control character in URL",
+            ));
         }
         let compact = options.alt == COMPACT_ALT;
         let (to, path, translate_stream) = if stream {
@@ -225,6 +244,7 @@ impl OpenAiCompatExecutor {
         let headers = response.headers().clone();
         let (body, _) = read_body_prefix(response, MAX_ERROR_BODY).await;
         tracing::debug!(status, "{NAME}: request error");
+        let body = redact::bytes(&body, api_key(auth));
         Err(status_error(status, &headers, &body).into())
     }
 
@@ -293,6 +313,7 @@ impl OpenAiCompatExecutor {
             response_format: format,
             source_format: options.source_format.clone(),
             original: original_bytes,
+            secret: api_key(auth).to_owned(),
         };
         Ok(StreamResponse {
             headers: response_headers,

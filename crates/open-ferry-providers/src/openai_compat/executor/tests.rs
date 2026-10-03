@@ -1249,6 +1249,103 @@ async fn missing_base_url_is_unauthorized() {
 }
 
 #[tokio::test]
+async fn errors_hide_the_api_key() {
+    let mut auth = Auth::default();
+    let key = "sk-test-secret-key";
+    let mock = Mock::start(Reply::error(
+        401,
+        r#"{"error":{"message":"Incorrect API key provided: sk-test-secret-key"}}"#,
+    ))
+    .await;
+    auth.attributes.insert("base_url".into(), mock.base_url());
+    auth.attributes.insert("api_key".into(), key.into());
+    let auth = Arc::new(auth);
+    let error = executor(Vec::new())
+        .execute(auth.clone(), request("m", "{}"), options(&Format::OPENAI))
+        .await
+        .unwrap_err();
+    assert_eq!(error.status, 401);
+    assert_eq!(
+        error.message,
+        r#"{"error":{"message":"Incorrect API key provided: [redacted]"}}"#
+    );
+
+    let mock = Mock::start(Reply::sse(
+        "data: {\"error\":{\"message\":\"bad key sk-test-secret-key\"}}\n\n",
+    ))
+    .await;
+    let mut auth = (*auth).clone();
+    auth.attributes.insert("base_url".into(), mock.base_url());
+    let response = executor(Vec::new())
+        .execute_stream(
+            Arc::new(auth),
+            request("m", "{}"),
+            stream_options(&Format::OPENAI),
+        )
+        .await
+        .unwrap();
+    let (_, error) = collect(response).await;
+    let error = error.expect("the stream failed");
+    assert!(!error.message.contains(key), "{error:?}");
+    assert!(error.message.contains("bad key [redacted]"), "{error:?}");
+}
+
+#[tokio::test]
+async fn a_frame_too_large_fails() {
+    let line = format!("data: {}\n", "x".repeat(1 << 20));
+    let mock = Mock::start(Reply::sse(&line.repeat(51))).await;
+    let response = executor(Vec::new())
+        .execute_stream(
+            plain_auth(&mock.base_url()),
+            request("m", "{}"),
+            stream_options(&Format::OPENAI),
+        )
+        .await
+        .unwrap();
+    let (chunks, error) = collect(response).await;
+    assert!(chunks.is_empty(), "{}", chunks.len());
+    let error = error.expect("the stream failed");
+    assert_eq!(
+        (error.status, error.message.as_str()),
+        (502, "upstream SSE data frame is too large")
+    );
+}
+
+#[tokio::test]
+async fn a_control_character_in_the_base_url_fails() {
+    let mock = Mock::start(Reply::json("{}")).await;
+    let auth = plain_auth(&format!("{}/v\t1", mock.url));
+    let error = executor(Vec::new())
+        .execute(auth, request("m", "{}"), options(&Format::OPENAI))
+        .await
+        .unwrap_err();
+    assert_eq!(error.message, "net/url: invalid control character in URL");
+    assert!(mock.requests().is_empty(), "nothing is sent");
+}
+
+#[tokio::test]
+async fn a_configured_content_length_is_ignored() {
+    let mock = Mock::start(Reply::json(CHAT_ANSWER)).await;
+    let mut auth = (*plain_auth(&mock.base_url())).clone();
+    auth.attributes
+        .insert("header:Content-Length".into(), "1".into());
+    executor(Vec::new())
+        .execute(
+            Arc::new(auth),
+            request("m", r#"{"model":"m","messages":[]}"#),
+            options(&Format::OPENAI),
+        )
+        .await
+        .unwrap();
+    let seen = mock.last();
+    assert_eq!(seen.json()["model"], "m", "{}", seen.body);
+    assert_eq!(
+        seen.header("content-length"),
+        Some(seen.body.len().to_string().as_str())
+    );
+}
+
+#[tokio::test]
 async fn error_status_keeps_the_body() {
     let mock = Mock::start(Reply::error(400, r#"{"error":{"message":"bad"}}"#)).await;
     let error = executor(Vec::new())

@@ -32,6 +32,8 @@
 //! - Token counting for a credential that doesn't go to Anthropic's API,
 //!   which upstream estimates locally, fails with a 501.
 //! - A dropped call or stream stops at once; upstream checks its context.
+//! - An error body that quotes the credential's key or token has it
+//!   redacted (see the crate's `redact` module).
 //! - Usage reporting, request logging, payload config rules, the Home-service
 //!   refresh, OAuth cancellation errors, API-key model compatibility and
 //!   upstream model renaming aren't ported.
@@ -68,6 +70,7 @@ use super::thinking;
 use super::token::{CREDENTIAL_TYPE, now_rfc3339};
 use super::usage::ensure_responses_usage_details;
 use crate::json::{self, Body};
+use crate::redact;
 
 /// The `alt` of a `/responses/compact` call.
 const COMPACT_ALT: &str = "responses/compact";
@@ -197,11 +200,13 @@ impl ClaudeExecutor {
     }
 
     /// Claude's answer if its status is a success and its body is plain;
-    /// else the error, classified as upstream does.
+    /// else the error, classified as upstream does, with the credential's
+    /// `secret` redacted from it.
     async fn check(
         &self,
         response: reqwest::Response,
         fast: bool,
+        secret: &str,
     ) -> Result<reqwest::Response, ExecError> {
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {
@@ -215,6 +220,7 @@ impl ClaudeExecutor {
                 }
             };
             tracing::debug!(status, "claude: request error");
+            let body = redact::bytes(&body, secret);
             return Err(if fast {
                 fast_direct_error(status, &headers, &body)
             } else {
@@ -254,7 +260,7 @@ impl ClaudeExecutor {
             .send(auth, &url, headers, &prepared.upstream)
             .await
             .map_err(|error| wrap_fast(fast, 0, error))?;
-        let response = self.check(response, fast).await?;
+        let response = self.check(response, fast, &target.key).await?;
         let status = response.status().as_u16();
         let response_headers = response.headers().clone();
         let data = read_body(response, MAX_LINE)
@@ -304,7 +310,7 @@ impl ClaudeExecutor {
             .send(auth, &url, headers, &prepared.upstream)
             .await
             .map_err(|error| wrap_fast(fast, 0, error))?;
-        let response = self.check(response, fast).await?;
+        let response = self.check(response, fast, &target.key).await?;
         let status = response.status().as_u16();
         let response_headers = response.headers().clone();
 
@@ -374,7 +380,7 @@ impl ClaudeExecutor {
         });
 
         let response = self.send(auth, &url, headers, &body).await?;
-        let response = self.check(response, false).await?;
+        let response = self.check(response, false, &target.key).await?;
         let response_headers = response.headers().clone();
         let data = read_body(response, MAX_LINE)
             .await

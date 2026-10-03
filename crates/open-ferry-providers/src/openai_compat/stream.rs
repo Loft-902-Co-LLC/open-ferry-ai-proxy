@@ -25,6 +25,10 @@
 //! - Data that Go's `json.Valid` accepts but `serde_json` can't read
 //!   (invalid UTF-8, very deep nesting) is checked for an error as if it had
 //!   no fields; see [`super::status`].
+//! - A frame's data, joined, may hold at most 50 MiB, as one line may; a
+//!   bigger frame ends the stream with a 502. Upstream holds any amount.
+//! - An error that quotes the credential's API key has it redacted; see
+//!   [`crate::redact`].
 
 use std::collections::VecDeque;
 
@@ -36,9 +40,12 @@ use open_ferry_translate::registry::ResponseStream;
 
 use super::status::{is_error_event, stream_data_error};
 use crate::codex::claude_tokens;
-use crate::codex::stream::{LineError, LineReader};
+use crate::codex::stream::{LineError, LineReader, MAX_LINE};
 use crate::codex::terminal::{APPLY_PATCH_ERROR_MESSAGE, StatusError};
 use crate::codex::usage::ensure_responses_usage_details;
+
+/// The most data a frame may hold, joined: as much as one line may.
+const MAX_FRAME: usize = MAX_LINE;
 
 /// What a streaming call needs to translate the provider's events.
 pub(crate) struct StreamSetup {
@@ -50,6 +57,9 @@ pub(crate) struct StreamSetup {
     pub(crate) source_format: Format,
     /// The client's request as it came, for the Claude input estimate.
     pub(crate) original: Bytes,
+    /// The credential's API key, redacted from the errors made from the
+    /// provider's events.
+    pub(crate) secret: String,
 }
 
 /// The state of one translated stream.
@@ -59,8 +69,12 @@ struct State {
     claude: claude_tokens::State,
     /// The current frame's event name.
     event: String,
-    /// The current frame's data lines, trimmed.
-    data: Vec<Vec<u8>>,
+    /// The current frame's data lines, trimmed and joined with newlines.
+    data: Vec<u8>,
+    /// How many data lines the current frame has.
+    data_lines: usize,
+    /// Whether one of them is `[DONE]`.
+    data_done: bool,
     seen_done: bool,
     failed: bool,
     pending: VecDeque<Result<Bytes, ExecError>>,
@@ -80,6 +94,8 @@ pub(crate) fn translate(response: reqwest::Response, setup: StreamSetup) -> Chun
         claude,
         event: String::new(),
         data: Vec::new(),
+        data_lines: 0,
+        data_done: false,
         seen_done: false,
         failed: false,
         pending: VecDeque::new(),
@@ -113,7 +129,20 @@ impl State {
                 self.end(None).await;
             }
         } else if let Some(rest) = trimmed.strip_prefix(b"data:") {
-            self.data.push(trim_space(rest).to_vec());
+            let rest = trim_space(rest);
+            if self.data.len() + 1 + rest.len() > MAX_FRAME {
+                self.fail(StatusError::new(
+                    502,
+                    "upstream SSE data frame is too large",
+                ));
+                return self.end(None).await;
+            }
+            if self.data_lines > 0 {
+                self.data.push(b'\n');
+            }
+            self.data.extend_from_slice(rest);
+            self.data_lines += 1;
+            self.data_done |= rest == b"[DONE]";
         } else if let Some(rest) = trimmed.strip_prefix(b"event:") {
             self.event = String::from_utf8_lossy(trim_space(rest)).into_owned();
         } else if trimmed.starts_with(b":")
@@ -131,8 +160,10 @@ impl State {
     /// is over: it failed or sent `[DONE]`.
     async fn process_frame(&mut self) -> bool {
         let event = std::mem::take(&mut self.event);
-        let lines = std::mem::take(&mut self.data);
-        if lines.is_empty() {
+        let joined = std::mem::take(&mut self.data);
+        let lines = std::mem::take(&mut self.data_lines);
+        let has_done = std::mem::take(&mut self.data_done);
+        if lines == 0 {
             if is_error_event(&event) {
                 self.fail(StatusError::new(
                     502,
@@ -142,14 +173,13 @@ impl State {
             }
             return false;
         }
-        if lines.len() > 1 && lines.iter().any(|line| trim_space(line) == b"[DONE]") {
+        if lines > 1 && has_done {
             self.fail(StatusError::new(
                 502,
                 "upstream stream ended with incomplete data before [DONE]",
             ));
             return true;
         }
-        let joined = lines.join(&b'\n');
         let payload = trim_space(&joined);
         let done = payload == b"[DONE]";
         if done && is_error_event(&event) {
@@ -220,6 +250,7 @@ impl State {
     /// Queues an error, after which nothing more is sent.
     fn fail(&mut self, error: StatusError) {
         self.failed = true;
+        let error = error.redacted(&self.setup.secret);
         self.pending.push_back(Err(error.into()));
     }
 
@@ -229,7 +260,7 @@ impl State {
     /// final `[DONE]` or, for an OpenAI Responses client, an error.
     async fn end(&mut self, error: Option<LineError>) {
         self.finished = true;
-        if error.is_none() && !self.seen_done && !self.failed && !self.data.is_empty() {
+        if error.is_none() && !self.seen_done && !self.failed && self.data_lines > 0 {
             self.process_frame().await;
         }
         if self.failed {
