@@ -77,4 +77,10 @@ pub trait ModelCatalog: Send + Sync + 'static {
 
     /// The models available now, in no particular order.
     fn available_models(&self) -> Vec<ModelInfo>;
+
+    /// `model`'s details as registered under `provider`, or as last
+    /// registered at all (upstream's `GetModelInfo`). None by default.
+    fn model_info(&self, _model: &str, _provider: &str) -> Option<ModelInfo> {
+        None
+    }
 }

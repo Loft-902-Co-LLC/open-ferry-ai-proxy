@@ -13,14 +13,15 @@
 //! - The catalog isn't refreshed from the network (upstream's model updater
 //!   fetches a new `models.json` every three hours); the built-in copy is
 //!   used.
-//! - Only the Claude and Codex sections are kept. The others are decoded and
-//!   checked as upstream does, so a catalog upstream rejects is rejected
-//!   here, and [`StaticCatalog::models_for_channel`] has nothing for other
-//!   channels.
+//! - Only the Claude, Gemini, Vertex and Codex sections are served. The
+//!   others are decoded and checked as upstream does, so a catalog upstream
+//!   rejects is rejected here, and are kept only for [`StaticCatalog::lookup`];
+//!   [`StaticCatalog::models_for_channel`] has nothing for their channels.
+//! - [`StaticCatalog::lookup`] doesn't search upstream's built-in Devin
+//!   models, which no ported provider serves.
 //! - A model's `config.override_header` is checked, then dropped: it forces a
 //!   client's identity headers, which this project doesn't do. So are
-//!   `native_capabilities`, `supports_web_search` and the Gemini fields
-//!   `inputTokenLimit`, `outputTokenLimit` and `supportedGenerationMethods`.
+//!   `native_capabilities` and `supports_web_search`.
 //! - Decode errors are worded differently from Go's.
 //! - Where a key repeats, exactly or in another case, the last one replaces
 //!   the earlier ones; Go's decoder merges repeated objects and lists.
@@ -139,10 +140,15 @@ impl CodexPlan {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StaticCatalog {
     claude: Vec<ModelInfo>,
+    gemini: Vec<ModelInfo>,
+    vertex: Vec<ModelInfo>,
     codex_free: Vec<ModelInfo>,
     codex_team: Vec<ModelInfo>,
     codex_plus: Vec<ModelInfo>,
     codex_pro: Vec<ModelInfo>,
+    /// Every section but the Codex Free, Team and Plus ones, in the order
+    /// upstream's `LookupStaticModelInfo` searches them.
+    lookup: Vec<ModelInfo>,
 }
 
 impl StaticCatalog {
@@ -170,27 +176,70 @@ impl StaticCatalog {
         })?;
         let [
             claude,
-            _gemini,
-            _vertex,
-            _aistudio,
+            gemini,
+            vertex,
+            aistudio,
             codex_free,
             codex_team,
             codex_plus,
             codex_pro,
-            ..,
+            kimi,
+            antigravity,
+            xai,
+            devin,
+            meta,
         ] = sections.map(|models| models.into_iter().flatten().collect::<Vec<_>>());
+        let lookup = [
+            &claude,
+            &gemini,
+            &vertex,
+            &aistudio,
+            &codex_pro,
+            &kimi,
+            &antigravity,
+            &xai,
+            &devin,
+            &meta,
+        ]
+        .into_iter()
+        .flatten()
+        .cloned()
+        .collect();
         Ok(Self {
             claude,
+            gemini,
+            vertex,
             codex_free,
             codex_team,
             codex_plus,
             codex_pro,
+            lookup,
         })
+    }
+
+    /// The first model with ID `id`, searching every section the way
+    /// upstream's `LookupStaticModelInfo` does.
+    pub fn lookup(&self, id: &str) -> Option<ModelInfo> {
+        if id.is_empty() {
+            return None;
+        }
+        self.lookup.iter().find(|model| model.id == id).cloned()
     }
 
     /// The Claude models (upstream's `GetClaudeModels`).
     pub fn claude_models(&self) -> Vec<ModelInfo> {
         self.claude.clone()
+    }
+
+    /// The Gemini models (upstream's `GetGeminiModels`).
+    pub fn gemini_models(&self) -> Vec<ModelInfo> {
+        self.gemini.clone()
+    }
+
+    /// The Gemini models Vertex AI serves (upstream's
+    /// `GetGeminiVertexModels`).
+    pub fn vertex_models(&self) -> Vec<ModelInfo> {
+        self.vertex.clone()
     }
 
     /// The Codex models of `plan`, with the image models every plan serves
@@ -211,6 +260,8 @@ impl StaticCatalog {
     pub fn models_for_channel(&self, channel: &str) -> Vec<ModelInfo> {
         match go::to_lower(channel.trim()).as_str() {
             "claude" => self.claude_models(),
+            "gemini" | "gemini-interactions" => self.gemini_models(),
+            "vertex" => self.vertex_models(),
             "codex" => self.codex_models(CodexPlan::Pro),
             _ => Vec::new(),
         }
@@ -307,6 +358,8 @@ fn decode_model(path: &str, object: &Map<String, Value>) -> Result<ModelInfo, St
     let mut model = ModelInfo::default();
     let mut context_length = 0;
     let mut max_completion_tokens = 0;
+    let mut input_token_limit = 0;
+    let mut output_token_limit = 0;
     for (key, value) in object {
         let Some(field) = json::field(key, &MODEL_FIELDS) else {
             continue;
@@ -324,6 +377,11 @@ fn decode_model(path: &str, object: &Map<String, Value>) -> Result<ModelInfo, St
             "description" => json::string(&path, value, &mut model.description)?,
             "context_length" => json::int(&path, value, &mut context_length)?,
             "max_completion_tokens" => json::int(&path, value, &mut max_completion_tokens)?,
+            "inputTokenLimit" => json::int(&path, value, &mut input_token_limit)?,
+            "outputTokenLimit" => json::int(&path, value, &mut output_token_limit)?,
+            "supportedGenerationMethods" => {
+                json::strings(&path, value, &mut model.supported_generation_methods)?;
+            }
             "supported_parameters" => {
                 json::strings(&path, value, &mut model.supported_parameters)?;
             }
@@ -338,8 +396,6 @@ fn decode_model(path: &str, object: &Map<String, Value>) -> Result<ModelInfo, St
             }
             "thinking" => model.thinking = decode_thinking(&path, value)?,
             // Checked, then dropped.
-            "inputTokenLimit" | "outputTokenLimit" => json::int(&path, value, &mut 0)?,
-            "supportedGenerationMethods" => json::strings(&path, value, &mut Vec::new())?,
             "supports_web_search" => json::boolean(&path, value, &mut false)?,
             "native_capabilities" => check_native_capabilities(&path, value)?,
             "config" => check_config(&path, value)?,
@@ -349,6 +405,8 @@ fn decode_model(path: &str, object: &Map<String, Value>) -> Result<ModelInfo, St
     // A negative limit means none, as zero does.
     model.context_length = u64::try_from(context_length).unwrap_or(0);
     model.max_completion_tokens = u64::try_from(max_completion_tokens).unwrap_or(0);
+    model.input_token_limit = u64::try_from(input_token_limit).unwrap_or(0);
+    model.output_token_limit = u64::try_from(output_token_limit).unwrap_or(0);
     Ok(model)
 }
 

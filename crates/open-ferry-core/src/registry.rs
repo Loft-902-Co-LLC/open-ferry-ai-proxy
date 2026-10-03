@@ -846,6 +846,10 @@ impl ModelCatalog for ModelRegistry {
     fn available_models(&self) -> Vec<ModelInfo> {
         self.available_model_infos()
     }
+
+    fn model_info(&self, model: &str, provider: &str) -> Option<ModelInfo> {
+        Self::model_info(self, model, provider)
+    }
 }
 
 impl State {
@@ -1086,7 +1090,19 @@ fn model_to_map(model: &ModelInfo, handler_type: &str) -> Map<String, Value> {
                     map.insert(key, value.clone().into());
                 }
             }
+            for (key, value) in [
+                ("inputTokenLimit", model.input_token_limit),
+                ("outputTokenLimit", model.output_token_limit),
+            ] {
+                if value > 0 {
+                    map.insert(key, value.into());
+                }
+            }
             for (key, values) in [
+                (
+                    "supportedGenerationMethods",
+                    &model.supported_generation_methods,
+                ),
                 (
                     "supportedInputModalities",
                     &model.supported_input_modalities,

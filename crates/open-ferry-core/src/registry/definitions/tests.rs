@@ -150,7 +150,75 @@ fn the_embedded_catalog_loads() {
         catalog.models_for_channel("claude"),
         catalog.claude_models()
     );
-    assert!(catalog.models_for_channel("gemini").is_empty());
+    assert_eq!(
+        catalog.models_for_channel("gemini"),
+        catalog.gemini_models()
+    );
+    assert_eq!(
+        catalog.models_for_channel("Gemini-Interactions"),
+        catalog.gemini_models()
+    );
+    assert_eq!(
+        catalog.models_for_channel(" vertex"),
+        catalog.vertex_models()
+    );
+    assert!(catalog.models_for_channel("aistudio").is_empty());
+}
+
+#[test]
+fn gemini_models_keep_their_gemini_fields() {
+    let catalog = StaticCatalog::embedded();
+    let gemini = catalog.gemini_models();
+    assert!(!gemini.is_empty());
+    assert!(!catalog.vertex_models().is_empty());
+    let pro = gemini
+        .iter()
+        .find(|model| model.id == "gemini-2.5-pro")
+        .expect("gemini-2.5-pro in the catalog");
+    assert_eq!(pro.name, "models/gemini-2.5-pro");
+    assert!(pro.input_token_limit > 0);
+    assert!(pro.output_token_limit > 0);
+    assert!(
+        pro.supported_generation_methods
+            .iter()
+            .any(|method| method == "generateContent")
+    );
+    let catalog = StaticCatalog::from_json(
+        r#"{"gemini": [{"id": "g", "inputTokenLimit": -1, "outputTokenLimit": 8,
+            "supportedGenerationMethods": ["countTokens"]}]}"#,
+        "test",
+    )
+    .expect("catalog");
+    let model = catalog.gemini_models().remove(0);
+    assert_eq!(model.input_token_limit, 0);
+    assert_eq!(model.output_token_limit, 8);
+    assert_eq!(model.supported_generation_methods, ["countTokens"]);
+}
+
+// LookupStaticModelInfo: the first section that has the model wins, and
+// sections no provider serves here are searched too.
+#[test]
+fn lookup_searches_sections_in_upstream_order() {
+    let catalog = StaticCatalog::from_json(
+        r#"{
+            "codex-free": [{"id": "free-only", "type": "openai"}],
+            "kimi": [{"id": "shared", "type": "kimi"}, {"id": "k", "type": "kimi"}],
+            "vertex": [{"id": "shared", "type": "gemini"}]
+        }"#,
+        "test",
+    )
+    .expect("catalog");
+    assert_eq!(catalog.lookup("shared").unwrap().model_type, "gemini");
+    assert_eq!(catalog.lookup("k").unwrap().model_type, "kimi");
+    assert!(catalog.lookup("free-only").is_none());
+    assert!(catalog.lookup("").is_none());
+    assert!(catalog.lookup(" k").is_none());
+    let embedded = StaticCatalog::embedded();
+    assert_eq!(
+        embedded.lookup("gemini-2.5-pro").unwrap().model_type,
+        "gemini"
+    );
+    assert!(embedded.lookup("imagen-4.0-generate-001").is_some());
 }
 
 #[test]
