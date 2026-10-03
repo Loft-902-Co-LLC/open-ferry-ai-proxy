@@ -18,6 +18,9 @@
 //! | `openai-response` | `codex` |
 //! | `openai` | `claude` |
 //! | `openai-response` | `claude` |
+//! | `claude` | `openai` |
+//! | `openai` | `openai` |
+//! | `openai-response` | `openai` |
 //!
 //! Translating a request also carries over whether the client asked to see
 //! reasoning summaries, in the provider's own terms. With no translator, the
@@ -35,8 +38,9 @@
 //!   `apply_patch` call from it. The stream's translator is looked up when it
 //!   is made, not for each chunk.
 //! - Empty chunks are left out. Upstream's Codex to Claude translator returns
-//!   one, possibly empty, for each `data:` line; its handlers skip empty
-//!   chunks.
+//!   one, possibly empty, for each `data:` line, and its Chat Completions
+//!   passthrough one for each line but `[DONE]`; its stream manager drops
+//!   empty chunks before the handlers see them.
 //! - A non-streaming translator returns `None` where upstream's returns `nil`
 //!   or records a failed `apply_patch` call; both give `nil` from upstream's
 //!   registry when the caller passes a parameter, as its executors do.

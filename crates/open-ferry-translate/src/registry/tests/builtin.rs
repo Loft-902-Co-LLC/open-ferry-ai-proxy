@@ -4,12 +4,15 @@ use serde_json::{Value, json};
 
 use super::super::*;
 
-const PAIRS: [(Format, Format); 5] = [
+const PAIRS: [(Format, Format); 8] = [
     (Format::CLAUDE, Format::CODEX),
     (Format::OPENAI, Format::CODEX),
     (Format::OPENAI_RESPONSE, Format::CODEX),
     (Format::OPENAI, Format::CLAUDE),
     (Format::OPENAI_RESPONSE, Format::CLAUDE),
+    (Format::CLAUDE, Format::OPENAI),
+    (Format::OPENAI, Format::OPENAI),
+    (Format::OPENAI_RESPONSE, Format::OPENAI),
 ];
 
 fn context<'a>(
@@ -44,8 +47,9 @@ fn builtin_pairs_are_registered() {
             registry.has_non_stream_response_transformer(&client, &provider),
             "{client} -> {provider}"
         );
-        assert!(
-            !registry.has_request_transformer(&provider, &client),
+        assert_eq!(
+            registry.has_request_transformer(&provider, &client),
+            PAIRS.contains(&(provider.clone(), client.clone())),
             "{provider} -> {client}"
         );
     }
@@ -56,16 +60,27 @@ fn builtin_pairs_are_registered() {
 }
 
 #[test]
-fn only_claude_to_codex_counts_tokens() {
+fn only_claude_clients_count_tokens() {
     let registry = Registry::builtin();
-    assert_eq!(
-        registry.translate_token_count(&Format::CODEX, &Format::CLAUDE, 7, b"raw".to_vec()),
-        br#"{"input_tokens":7}"#
-    );
-    assert_eq!(
-        registry.translate_token_count(&Format::CODEX, &Format::OPENAI, 7, b"raw".to_vec()),
-        b"raw"
-    );
+    for provider in [Format::CODEX, Format::OPENAI] {
+        assert_eq!(
+            registry.translate_token_count(&provider, &Format::CLAUDE, 7, b"raw".to_vec()),
+            br#"{"input_tokens":7}"#,
+            "{provider}"
+        );
+    }
+    for (provider, client) in [
+        (Format::CODEX, Format::OPENAI),
+        (Format::OPENAI, Format::OPENAI),
+        (Format::CLAUDE, Format::OPENAI),
+        (Format::OPENAI, Format::OPENAI_RESPONSE),
+    ] {
+        assert_eq!(
+            registry.translate_token_count(&provider, &client, 7, b"raw".to_vec()),
+            b"raw",
+            "{provider} -> {client}"
+        );
+    }
 }
 
 #[test]
@@ -368,4 +383,167 @@ fn claude_to_responses_non_stream_fails_a_bad_patch() {
     let done = parse(&done);
     assert_eq!(done["object"], "response");
     assert_eq!(done["id"], "msg_1");
+}
+
+/// The event line of each chunk, checking that each holds one whole event.
+fn event_kinds(chunks: &[Vec<u8>]) -> Vec<String> {
+    chunks
+        .iter()
+        .map(|chunk| {
+            let text = std::str::from_utf8(chunk).expect("UTF-8");
+            assert!(text.ends_with("\n\n"), "{text}");
+            assert_eq!(text.matches("event: ").count(), 1, "{text}");
+            text.lines().next().expect("event line").to_owned()
+        })
+        .collect()
+}
+
+#[test]
+fn chat_to_claude_stream_gives_one_chunk_per_event() {
+    let registry = Registry::builtin();
+    let original = json!({"model": "claude-opus-5", "stream": true});
+    let ctx = context("gpt-5.6-luna", &original, &Value::Null);
+    let mut stream = registry.response_stream(&Format::OPENAI, &Format::CLAUDE, &ctx);
+    let chunks = stream.translate(CHAT_TEXT);
+    assert_eq!(
+        event_kinds(&chunks),
+        [
+            "event: message_start",
+            "event: content_block_start",
+            "event: content_block_delta"
+        ]
+    );
+    assert!(stream.translate(b"").is_empty());
+    assert!(stream.finish().is_empty());
+    assert!(stream.tool_input_error().is_none());
+}
+
+#[test]
+fn chat_to_claude_non_stream() {
+    let registry = Registry::builtin();
+    let original = json!({"model": "claude-opus-5"});
+    let ctx = context("gpt-5.6-luna", &original, &Value::Null);
+    let translate = |body: &[u8]| {
+        let done = registry
+            .translate_non_stream(&Format::OPENAI, &Format::CLAUDE, &ctx, body.to_vec())
+            .expect("translated");
+        parse(&done)
+    };
+    let done = translate(
+        br#"{"id":"chatcmpl-1","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}"#,
+    );
+    assert_eq!(done["type"], "message");
+    assert_eq!(done["content"][0]["text"], "hi");
+    assert_eq!(done["stop_reason"], "end_turn");
+    assert_eq!(translate(b"not json")["type"], "message");
+}
+
+#[test]
+fn chat_to_chat_passes_payloads_through() {
+    let registry = Registry::builtin();
+    let ctx = context("m", &Value::Null, &Value::Null);
+    let mut stream = registry.response_stream(&Format::OPENAI, &Format::OPENAI, &ctx);
+    assert!(stream.is_translated());
+    assert_eq!(stream.translate(br#"data: {"a":1} "#), [br#"{"a":1}"#]);
+    assert_eq!(stream.translate(b"not data"), [b"not data"]);
+    // Upstream gives an empty chunk for these, which its stream manager drops.
+    assert!(stream.translate(b"data:  ").is_empty());
+    assert!(stream.translate(b"").is_empty());
+    assert!(stream.translate(b"data: [DONE]").is_empty());
+    assert!(stream.translate(br#"data: {"b":2}"#).is_empty());
+    assert!(stream.finish().is_empty());
+
+    assert_eq!(
+        registry.translate_non_stream(&Format::OPENAI, &Format::OPENAI, &ctx, b"not json".to_vec()),
+        Some(b"not json".to_vec())
+    );
+}
+
+const CHAT_TEXT: &[u8] = br#"data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"}}]}"#;
+
+const CHAT_PATCH_START: &[u8] = br#"data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"apply_patch","arguments":""}}]}}]}"#;
+
+const CHAT_BAD_FRAGMENT: &[u8] = br#"data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{}"}}]}}]}"#;
+
+#[test]
+fn chat_to_responses_stream_gives_one_chunk_per_event() {
+    let registry = Registry::builtin();
+    let original = json!({"model": "gpt-5.6-luna"});
+    let ctx = context("gpt-5.6-luna", &original, &Value::Null);
+    let mut stream = registry.response_stream(&Format::OPENAI, &Format::OPENAI_RESPONSE, &ctx);
+    let chunks = stream.translate(CHAT_TEXT);
+    assert_eq!(
+        event_kinds(&chunks),
+        [
+            "event: response.created",
+            "event: response.in_progress",
+            "event: response.output_item.added",
+            "event: response.content_part.added",
+            "event: response.output_text.delta",
+        ]
+    );
+    assert!(stream.finish().is_empty(), "no apply_patch declared");
+    assert!(stream.tool_input_error().is_none());
+}
+
+#[test]
+fn chat_to_responses_stream_fails_a_bad_patch() {
+    let registry = Registry::builtin();
+    let original: Value = serde_json::from_str(PATCH_REQUEST).expect("JSON");
+    let ctx = context("gpt-5.6-luna", &original, &Value::Null);
+    let mut stream = registry.response_stream(&Format::OPENAI, &Format::OPENAI_RESPONSE, &ctx);
+    stream.translate(CHAT_PATCH_START);
+    let failed = stream.translate(CHAT_BAD_FRAGMENT);
+    assert!(
+        failed
+            .iter()
+            .any(|chunk| chunk.starts_with(b"event: response.failed\n")),
+        "{failed:?}"
+    );
+    assert!(stream.tool_input_error().is_some());
+    assert!(stream.translate(b"data: [DONE]").is_empty());
+    assert!(stream.finish().is_empty());
+}
+
+#[test]
+fn chat_to_responses_stream_fails_when_cut_short() {
+    let registry = Registry::builtin();
+    let original: Value = serde_json::from_str(PATCH_REQUEST).expect("JSON");
+    let ctx = context("gpt-5.6-luna", &original, &Value::Null);
+    let mut stream = registry.response_stream(&Format::OPENAI, &Format::OPENAI_RESPONSE, &ctx);
+    stream.translate(CHAT_TEXT);
+    let failed = stream.finish();
+    assert_eq!(failed.len(), 1);
+    assert!(failed[0].starts_with(b"event: response.failed\n"));
+    assert!(stream.tool_input_error().is_some());
+}
+
+#[test]
+fn chat_to_responses_non_stream_fails_a_bad_patch() {
+    let registry = Registry::builtin();
+    let original: Value = serde_json::from_str(PATCH_REQUEST).expect("JSON");
+    let ctx = context("gpt-5.6-luna", &original, &Value::Null);
+    let translate = |body: &[u8]| {
+        registry.translate_non_stream(
+            &Format::OPENAI,
+            &Format::OPENAI_RESPONSE,
+            &ctx,
+            body.to_vec(),
+        )
+    };
+    assert_eq!(
+        translate(
+            br#"{"id":"chatcmpl-1","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"apply_patch","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#
+        ),
+        None
+    );
+
+    let done = translate(
+        br#"{"id":"chatcmpl-1","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}"#,
+    )
+    .expect("translated");
+    let done = parse(&done);
+    assert_eq!(done["object"], "response");
+    assert_eq!(done["id"], "chatcmpl-1");
+    assert_eq!(done["output"][0]["content"][0]["text"], "hi");
 }

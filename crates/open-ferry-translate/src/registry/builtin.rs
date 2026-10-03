@@ -12,6 +12,9 @@ use crate::codex::claude as codex_claude;
 use crate::codex::openai::{chat_completions as codex_chat, responses as codex_responses};
 use crate::json::raw;
 use crate::json::str_of;
+use crate::openai::{
+    chat_completions as openai_chat, claude as openai_claude, responses as openai_responses,
+};
 
 pub(super) fn register(registry: &Registry) {
     let models = registry.models;
@@ -153,6 +156,82 @@ pub(super) fn register(registry: &Registry) {
             token_count: None,
         },
     );
+
+    // internal/translator/openai/claude/init.go
+    registry.register(
+        Format::CLAUDE,
+        Format::OPENAI,
+        Some(Arc::new(|model, body, stream| {
+            openai_claude::convert_claude_request_to_openai(model, &body, stream)
+        })),
+        ResponseTransform {
+            stream: Some(Arc::new(|context| {
+                Box::new(OpenAIToClaude(openai_claude::OpenAIToClaudeStream::new(
+                    context.original_request,
+                )))
+            })),
+            non_stream: Some(Arc::new(|context, body| {
+                let response = openai_claude::convert_openai_response_to_claude_non_stream(
+                    context.original_request,
+                    &parse(body),
+                );
+                Some(to_vec(&response))
+            })),
+            token_count: Some(Arc::new(|count| {
+                to_vec(&openai_claude::claude_token_count(count))
+            })),
+        },
+    );
+
+    // internal/translator/openai/openai/chat-completions/init.go
+    registry.register(
+        Format::OPENAI,
+        Format::OPENAI,
+        Some(Arc::new(|model, body, _stream| {
+            openai_chat::convert_openai_request_to_openai(model, body)
+        })),
+        ResponseTransform {
+            stream: Some(Arc::new(|_context| {
+                Box::new(OpenAIToChat(openai_chat::OpenAIToOpenAIStream::new()))
+            })),
+            non_stream: Some(Arc::new(|_context, body| {
+                Some(openai_chat::convert_openai_response_to_openai_non_stream(body).to_vec())
+            })),
+            token_count: None,
+        },
+    );
+
+    // internal/translator/openai/openai/responses/init.go
+    registry.register(
+        Format::OPENAI_RESPONSE,
+        Format::OPENAI,
+        Some(Arc::new(|model, body, stream| {
+            openai_responses::convert_openai_responses_request_to_openai_chat_completions(
+                model, &body, stream,
+            )
+        })),
+        ResponseTransform {
+            stream: Some(Arc::new(|context| {
+                Box::new(OpenAIToResponses(
+                    openai_responses::OpenAIToOpenAIResponsesStream::new(
+                        context.model,
+                        context.original_request,
+                        context.request,
+                    ),
+                ))
+            })),
+            non_stream: Some(Arc::new(|context, body| {
+                openai_responses::convert_openai_chat_completions_response_to_openai_responses_non_stream_checked(
+                    context.original_request,
+                    context.request,
+                    body,
+                )
+                .as_ref()
+                .map(to_vec)
+            })),
+            token_count: None,
+        },
+    );
 }
 
 fn to_vec(value: &Value) -> Vec<u8> {
@@ -238,6 +317,48 @@ impl StreamTranslator for ClaudeToChat {
 struct ClaudeToResponses(claude_responses::ClaudeToOpenAIResponsesStream);
 
 impl StreamTranslator for ClaudeToResponses {
+    fn translate(&mut self, chunk: &[u8]) -> Vec<Vec<u8>> {
+        events(&self.0.translate_line(chunk))
+    }
+
+    fn finish(&mut self) -> Vec<Vec<u8>> {
+        events(&self.0.finalize_tool_input())
+    }
+
+    fn tool_input_error(&self) -> Option<&(dyn Error + 'static)> {
+        self.0.tool_input_error()
+    }
+}
+
+/// Chat Completions → Claude Messages. Upstream returns one chunk per event.
+struct OpenAIToClaude(openai_claude::OpenAIToClaudeStream);
+
+impl StreamTranslator for OpenAIToClaude {
+    fn translate(&mut self, chunk: &[u8]) -> Vec<Vec<u8>> {
+        self.0
+            .translate_line(chunk)
+            .into_iter()
+            .map(String::into_bytes)
+            .collect()
+    }
+}
+
+/// Chat Completions → Chat Completions: each line's payload passes through.
+struct OpenAIToChat(openai_chat::OpenAIToOpenAIStream);
+
+impl StreamTranslator for OpenAIToChat {
+    fn translate(&mut self, chunk: &[u8]) -> Vec<Vec<u8>> {
+        self.0
+            .translate_line(chunk)
+            .map(|chunk| non_empty(chunk.to_vec()))
+            .unwrap_or_default()
+    }
+}
+
+/// Chat Completions → Responses. Upstream returns one chunk per event.
+struct OpenAIToResponses(openai_responses::OpenAIToOpenAIResponsesStream);
+
+impl StreamTranslator for OpenAIToResponses {
     fn translate(&mut self, chunk: &[u8]) -> Vec<Vec<u8>> {
         events(&self.0.translate_line(chunk))
     }
