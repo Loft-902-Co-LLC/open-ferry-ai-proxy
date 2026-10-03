@@ -1381,10 +1381,13 @@ dependencies = [
 name = "open-ferry-providers"
 version = "0.0.0"
 dependencies = [
+ "aws-lc-rs",
  "axum",
  "base64 0.23.1",
  "bytes",
  "chrono",
+ "crc32fast",
+ "flate2",
  "futures-util",
  "http",
  "open-ferry-core",
