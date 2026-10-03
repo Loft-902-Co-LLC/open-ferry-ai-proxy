@@ -182,7 +182,7 @@ fn classify(status: u16, body: &[u8], parsed: &Value) -> Option<String> {
 
 /// The code and type of a failure Codex clients handle
 /// (`codexStatusErrorClassification`).
-fn classification(
+pub(crate) fn classification(
     status: u16,
     body: &[u8],
     parsed: &Value,
@@ -427,21 +427,32 @@ fn stream_error_should_handle(body: &Value, raw: &[u8]) -> bool {
 }
 
 /// The error for a terminal failure event that clients handle as a bad
-/// request (`codexTerminalStreamErr`).
+/// request (`codexTerminalStreamErr`); [`terminal_failure`] gives it too.
+#[cfg(test)]
 pub(crate) fn terminal_stream_error(event: &Value) -> Option<StatusError> {
     let body = terminal_failure_body(event)?;
     let raw = body.to_string();
     stream_error_should_handle(&body, raw.as_bytes()).then(|| status_error(400, raw.as_bytes()))
 }
 
-/// The error for any terminal failure event (`codexTerminalFailureErr`).
-pub(crate) fn terminal_failure_error(event: &Value) -> Option<StatusError> {
-    if let Some(error) = terminal_stream_error(event) {
-        return Some(error);
-    }
+/// The error for any terminal failure event, with the failure's body as
+/// text (`codexTerminalFailureErr`).
+pub(crate) fn terminal_failure(event: &Value) -> Option<(StatusError, String)> {
     let body = terminal_failure_body(event)?;
     let raw = body.to_string();
-    Some(status_error(terminal_failure_status(&body), raw.as_bytes()))
+    let status = if stream_error_should_handle(&body, raw.as_bytes()) {
+        400
+    } else {
+        terminal_failure_status(&body)
+    };
+    let error = status_error(status, raw.as_bytes());
+    Some((error, raw))
+}
+
+/// [`terminal_failure`]'s error.
+#[cfg(test)]
+pub(crate) fn terminal_failure_error(event: &Value) -> Option<StatusError> {
+    terminal_failure(event).map(|(error, _)| error)
 }
 
 /// The status for a terminal failure's body (`codexTerminalFailureStatus`).

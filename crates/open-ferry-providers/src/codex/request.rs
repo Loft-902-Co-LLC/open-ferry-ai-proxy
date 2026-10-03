@@ -40,12 +40,15 @@
 
 use http::header::{self, HeaderMap, HeaderName, HeaderValue};
 use open_ferry_core::auth::Auth;
+use open_ferry_core::config::Config;
 use open_ferry_core::exec::{ErrorKind, ExecError, Format, Options, Request};
+use open_ferry_core::models::ModelCatalog;
 use open_ferry_translate::go::trim_space;
 use open_ferry_translate::registry::Registry;
 use serde_json::{Map, Value};
 
 use super::client::USER_AGENT;
+use super::ext::{self, Turn};
 use super::input_ids::sanitize_input_item_ids;
 use super::reasoning::sanitize_reasoning;
 use super::tool_schema::normalize_tool_schemas;
@@ -91,6 +94,19 @@ pub(crate) enum Kind {
     CountTokens,
 }
 
+/// What a call is prepared with besides the client's request: the
+/// credential it goes out with, and the executor's config and models.
+#[derive(Clone, Copy, Default)]
+#[expect(dead_code, reason = "for the Codex rewrites that aren't ported yet")]
+pub(crate) struct Context<'a> {
+    /// The credential.
+    pub(crate) auth: Option<&'a Auth>,
+    /// The proxy's config.
+    pub(crate) config: Option<&'a Config>,
+    /// The models the proxy serves.
+    pub(crate) models: Option<&'a dyn ModelCatalog>,
+}
+
 /// A prepared request body.
 #[derive(Debug)]
 pub(crate) struct Body {
@@ -101,6 +117,8 @@ pub(crate) struct Body {
     pub(crate) translated: Value,
     /// Whether a native Codex client sent it ([`is_native`]).
     pub(crate) native: bool,
+    /// What [`ext::prepare`] noted about it.
+    pub(crate) turn: Turn,
 }
 
 /// The model without a thinking suffix such as `(high)`
@@ -270,7 +288,12 @@ fn normalize_parallel_tool_calls_for_tools(body: &mut Value) {
 }
 
 /// Translates and adjusts the payload for a call of `kind`.
-pub(crate) fn prepare_body(kind: Kind, request: &Request, options: &Options) -> Body {
+pub(crate) fn prepare_body(
+    kind: Kind,
+    context: Context<'_>,
+    request: &Request,
+    options: &Options,
+) -> Result<Body, ExecError> {
     let base = base_model(&request.model);
     let payload = parse_object(&request.payload);
     let native = is_native(&payload, options);
@@ -321,26 +344,29 @@ pub(crate) fn prepare_body(kind: Kind, request: &Request, options: &Options) -> 
     normalize_instructions(&mut body, native);
     if kind == Kind::CountTokens {
         let translated = body.clone();
-        return Body {
+        return Ok(Body {
             body,
             translated,
             native,
-        };
+            turn: Turn::default(),
+        });
     }
     sanitize_reasoning(&mut body, false);
     normalize_parallel_tool_calls(&mut body, &options.headers);
     normalize_tool_schemas(&mut body);
+    let turn = ext::prepare(kind, context, request, options, &mut body);
 
     let translated = body.clone();
     if let Some(key) = client_prompt_cache_key(&options.source_format, &payload) {
         set_string_if_different(&mut body, "prompt_cache_key", &key);
     }
     sanitize_input_item_ids(&mut body);
-    Body {
+    Ok(Body {
         body,
         translated,
         native,
-    }
+        turn,
+    })
 }
 
 fn drop_fields(body: &mut Value) {

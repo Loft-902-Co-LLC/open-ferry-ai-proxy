@@ -1143,9 +1143,11 @@ async fn count_tokens_keeps_tool_number_types() {
     ] {
         let prepared = prepare_body(
             Kind::CountTokens,
+            Context::default(),
             &request("gpt-5.4", payload),
             &options(format),
-        );
+        )
+        .unwrap();
         assert_eq!(
             get(
                 &prepared.body,

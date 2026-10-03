@@ -34,7 +34,8 @@ impl Upstream {
     /// so they must be compiled as part of the CLIProxyAPI module. An overlay
     /// adds them as `cmd/open-ferry-parity` and `cmd/open-ferry-parity-completions`
     /// without touching the checkout, along with `go/openai/export.go`, which
-    /// exports the Completions conversions from their package.
+    /// exports the Completions conversions from their package. Each
+    /// `go/parity_*.go` joins `go/main.go` in `cmd/open-ferry-parity`.
     pub fn build(dir: &Path, go: &Path, work_dir: &Path) -> Result<Self, Box<dyn Error>> {
         let dir = std::path::absolute(dir)?;
         if !dir.join("go.mod").is_file() {
@@ -46,12 +47,17 @@ impl Upstream {
         }
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("go");
         let handlers = dir.join("sdk").join("api").join("handlers").join("openai");
+        let main = dir.join("cmd").join("open-ferry-parity");
+        let mut files = Vec::new();
+        for entry in fs::read_dir(&source)? {
+            let name = entry?.file_name().to_string_lossy().into_owned();
+            if name.starts_with("parity_") && name.ends_with(".go") {
+                files.push((main.join(&name), source.join(&name)));
+            }
+        }
         let mut replace = Map::new();
-        for (target, source) in [
-            (
-                dir.join("cmd").join("open-ferry-parity").join("main.go"),
-                source.join("main.go"),
-            ),
+        for (target, source) in files.into_iter().chain([
+            (main.join("main.go"), source.join("main.go")),
             (
                 dir.join("cmd")
                     .join("open-ferry-parity-completions")
@@ -62,7 +68,7 @@ impl Upstream {
                 handlers.join("zz_open_ferry_parity_export.go"),
                 source.join("openai").join("export.go"),
             ),
-        ] {
+        ]) {
             replace.insert(
                 target.to_string_lossy().into_owned(),
                 source.to_string_lossy().into_owned().into(),

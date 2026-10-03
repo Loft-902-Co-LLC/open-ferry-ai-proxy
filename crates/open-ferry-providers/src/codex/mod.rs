@@ -27,14 +27,16 @@
 //! Deferred:
 //! - The Responses WebSocket upstream (`codex_websockets_executor.go`),
 //!   which is a separate transport.
-//! - The reasoning replay cache, which keeps reasoning items across turns
-//!   for clients that drop them; it needs the session store.
+//! - The reasoning replay cache, which keeps a turn's reasoning items and
+//!   tool calls for Claude clients, which drop them, and puts them back in
+//!   the next request.
 //! - Image generation: the `image_generation` tool upstream adds, and the
 //!   OpenAI Images endpoints served through Codex.
 
 pub(crate) mod claude_tokens;
 pub(crate) mod client;
 mod executor;
+mod ext;
 mod input_ids;
 pub mod jwt;
 pub mod oauth;

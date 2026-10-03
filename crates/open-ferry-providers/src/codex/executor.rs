@@ -44,26 +44,29 @@ use futures_util::FutureExt as _;
 use futures_util::future::BoxFuture;
 use http::HeaderMap;
 use open_ferry_core::auth::Auth;
+use open_ferry_core::config::Config;
 use open_ferry_core::exec::{
     ErrorKind, ExecError, Format, Options, Request, Response, StreamResponse,
 };
 use open_ferry_core::executor::ProviderExecutor;
+use open_ferry_core::models::ModelCatalog;
 use open_ferry_translate::go::trim_space;
 use open_ferry_translate::registry::{Registry, ResponseContext};
 use serde_json::Value;
 
 use super::client::{Clients, error_chain, read_body, read_body_prefix};
+use super::ext;
 use super::jwt::{DEFAULT_PLAN_TYPE, parse_jwt_token};
 use super::oauth::{CodexAuth, Endpoints};
 use super::request::{
-    DEFAULT_BASE_URL, Kind, base_model, build_headers, credentials, endpoint, original_request,
-    prepare_body, response_format,
+    Context, DEFAULT_BASE_URL, Kind, base_model, build_headers, credentials, endpoint,
+    original_request, prepare_body, response_format,
 };
 use super::stream::{self, LineReader, MAX_LINE, StreamSetup, is_grok_client};
 use super::terminal::{
     APPLY_PATCH_ERROR_MESSAGE, OutputItems, StatusError, empty_incomplete_stream_error,
     has_meaningful_output_delta, incomplete_stream_error, is_terminal_empty_incomplete,
-    status_error, terminal_failure_error,
+    status_error, terminal_failure,
 };
 use super::token::{CREDENTIAL_TYPE, now_rfc3339};
 use super::tokens::{count_input_tokens, tokenizer_for};
@@ -83,6 +86,8 @@ const REFRESH_ATTEMPTS: u32 = 3;
 /// Calls Codex (upstream's `CodexExecutor`).
 pub struct CodexExecutor {
     clients: Clients,
+    config: Option<Arc<Config>>,
+    models: Option<Arc<dyn ModelCatalog>>,
     base_url: String,
     oauth_endpoints: Endpoints,
 }
@@ -94,9 +99,23 @@ impl CodexExecutor {
     pub fn new(global_proxy_url: impl Into<String>) -> Self {
         Self {
             clients: Clients::new(global_proxy_url),
+            config: None,
+            models: None,
             base_url: DEFAULT_BASE_URL.to_owned(),
             oauth_endpoints: Endpoints::default(),
         }
+    }
+
+    /// Follows `config` where upstream's executor reads its config.
+    pub fn with_config(mut self, config: Arc<Config>) -> Self {
+        self.config = Some(config);
+        self
+    }
+
+    /// Looks up the models the proxy serves in `models`.
+    pub fn with_models(mut self, models: Arc<dyn ModelCatalog>) -> Self {
+        self.models = Some(models);
+        self
     }
 
     /// Calls `base_url` for credentials without a `base_url` attribute,
@@ -110,6 +129,15 @@ impl CodexExecutor {
     pub fn with_oauth_endpoints(mut self, endpoints: Endpoints) -> Self {
         self.oauth_endpoints = endpoints;
         self
+    }
+
+    /// What a call with `auth` is prepared with.
+    fn context<'a>(&'a self, auth: &'a Auth) -> Context<'a> {
+        Context {
+            auth: Some(auth),
+            config: self.config.as_deref(),
+            models: self.models.as_deref(),
+        }
     }
 
     /// Posts `body` and returns Codex's answer if its status is a success.
@@ -141,7 +169,7 @@ impl CodexExecutor {
         request: &Request,
         options: &Options,
     ) -> Result<Response, ExecError> {
-        let prepared = prepare_body(Kind::Compact, request, options);
+        let prepared = prepare_body(Kind::Compact, self.context(auth), request, options)?;
         let format = response_format(options);
         let headers = build_headers(auth, &options.headers, false)?;
         let url = endpoint(auth, &self.base_url, true);
@@ -150,6 +178,7 @@ impl CodexExecutor {
         if !(200..300).contains(&status) {
             let (body, _) = read_body_prefix(response, MAX_ERROR_BODY).await;
             tracing::debug!(status, "codex: compact request error");
+            ext::on_failure(&prepared.turn, status, &body);
             let body = redact::bytes(&body, credentials(auth).0);
             return Err(status_error(status, &body).into());
         }
@@ -157,6 +186,7 @@ impl CodexExecutor {
         let data = read_body(response, MAX_LINE)
             .await
             .map_err(|error| ExecError::new(ErrorKind::Upstream, error.to_string()))?;
+        let data = ext::restore(&prepared.turn, &data).into_owned();
         let original = original_request(request, options);
         let context = ResponseContext {
             model: &request.model,
@@ -182,7 +212,7 @@ impl CodexExecutor {
         if options.alt == COMPACT_ALT {
             return self.execute_compact(auth, request, options).await;
         }
-        let prepared = prepare_body(Kind::Execute, request, options);
+        let prepared = prepare_body(Kind::Execute, self.context(auth), request, options)?;
         let format = response_format(options);
         let headers = build_headers(auth, &options.headers, true)?;
         let url = endpoint(auth, &self.base_url, false);
@@ -191,6 +221,7 @@ impl CodexExecutor {
         if !(200..300).contains(&status) {
             let (body, _) = read_body_prefix(response, MAX_ERROR_BODY).await;
             tracing::debug!(status, "codex: request error");
+            ext::on_failure(&prepared.turn, status, &body);
             let body = redact::bytes(&body, credentials(auth).0);
             return Err(status_error(status, &body).into());
         }
@@ -210,12 +241,13 @@ impl CodexExecutor {
             let Some(rest) = line.strip_prefix(b"data:") else {
                 continue;
             };
-            let data = trim_space(rest);
-            let mut event: Value = serde_json::from_slice(data).unwrap_or(Value::Null);
+            let data = ext::restore(&prepared.turn, trim_space(rest));
+            let mut event: Value = serde_json::from_slice(&data).unwrap_or(Value::Null);
             if has_meaningful_output_delta(&event) {
                 saw_output_delta = true;
             }
-            if let Some(error) = terminal_failure_error(&event) {
+            if let Some((error, body)) = terminal_failure(&event) {
+                ext::on_failure(&prepared.turn, error.status, body.as_bytes());
                 return Err(error.redacted(credentials(auth).0).into());
             }
             let event_type = str_at(&event, "type");
@@ -234,6 +266,7 @@ impl CodexExecutor {
             } else {
                 data.to_vec()
             };
+            ext::on_completed(&prepared.turn, &event);
             let original = original_request(request, options);
             let context = ResponseContext {
                 model: &request.model,
@@ -263,7 +296,7 @@ impl CodexExecutor {
                 StatusError::new(400, "streaming not supported for /responses/compact").into(),
             );
         }
-        let prepared = prepare_body(Kind::Stream, &request, &options);
+        let prepared = prepare_body(Kind::Stream, self.context(auth), &request, &options)?;
         let format = response_format(&options);
         let headers = build_headers(auth, &options.headers, true)?;
         let url = endpoint(auth, &self.base_url, false);
@@ -275,6 +308,7 @@ impl CodexExecutor {
                 return Err(ExecError::new(ErrorKind::Upstream, error_chain(&error)));
             }
             tracing::debug!(status, "codex: request error");
+            ext::on_failure(&prepared.turn, status, &body);
             let body = redact::bytes(&body, credentials(auth).0);
             return Err(status_error(status, &body).into());
         }
@@ -303,6 +337,7 @@ impl CodexExecutor {
             preserve_native: prepared.native,
             grok: is_grok_client(&options.headers),
             secret: credentials(auth).0.to_owned(),
+            turn: prepared.turn,
         };
         Ok(StreamResponse {
             headers: response_headers,
@@ -312,10 +347,11 @@ impl CodexExecutor {
 
     async fn count_tokens_inner(
         &self,
+        auth: &Auth,
         request: &Request,
         options: &Options,
     ) -> Result<Response, ExecError> {
-        let prepared = prepare_body(Kind::CountTokens, request, options);
+        let prepared = prepare_body(Kind::CountTokens, self.context(auth), request, options)?;
         let model = base_model(&request.model).to_owned();
         let body = prepared.body;
         let count =
@@ -416,11 +452,11 @@ impl ProviderExecutor for CodexExecutor {
 
     fn count_tokens(
         &self,
-        _auth: Arc<Auth>,
+        auth: Arc<Auth>,
         request: Request,
         options: Options,
     ) -> BoxFuture<'_, Result<Response, ExecError>> {
-        async move { self.count_tokens_inner(&request, &options).await }.boxed()
+        async move { self.count_tokens_inner(&auth, &request, &options).await }.boxed()
     }
 
     fn refresh(&self, auth: Arc<Auth>) -> BoxFuture<'_, Result<Auth, ExecError>> {

@@ -88,7 +88,7 @@ The exit status is 0 when every case is identical, equivalent or a known differe
 
 ## How it works
 
-Upstream's translators are in `internal/` packages, which only code inside the CLIProxyAPI module can import. `go/main.go` is a small harness that reads JSON lines from stdin and writes each translation to stdout. A line can carry `options`, a JSON object of inputs that aren't part of the request, such as a signature's target provider. The tool builds it with `go build -overlay`, which adds the file to the module as `cmd/open-ferry-parity` at build time. Your checkout is not modified.
+Upstream's translators are in `internal/` packages, which only code inside the CLIProxyAPI module can import. `go/main.go` is a small harness that reads JSON lines from stdin and writes each translation to stdout. A line can carry `options`, a JSON object of inputs that aren't part of the request, such as a signature's target provider. The tool builds it with `go build -overlay`, which adds the file to the module as `cmd/open-ferry-parity` at build time, along with each `go/parity_*.go`; such a file adds its translators to `go/main.go`'s from `init()`. Your checkout is not modified.
 
 The legacy Completions conversions are unexported functions in `sdk/api/handlers/openai`, so the overlay also adds `go/openai/export.go` to that package to export them. They get a second harness, `go/completions/main.go`, built as `cmd/open-ferry-parity-completions`: importing that package registers translators `go/main.go` doesn't import, which would change what the registry suites see.
 

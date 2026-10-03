@@ -315,8 +315,7 @@ impl Service {
     /// current config.
     fn register_native_executors(&self) {
         let proxy_url = self.config.proxy_url.clone();
-        self.manager
-            .register_executor(Arc::new(CodexExecutor::new(proxy_url.clone())));
+        self.register_codex_executor();
         self.manager.register_executor(Arc::new(
             ClaudeExecutor::new(proxy_url.clone())
                 .with_models(Arc::clone(&self.registry) as _)
@@ -327,6 +326,15 @@ impl Service {
         ));
         self.manager.register_executor(Arc::new(
             VertexExecutor::new(proxy_url).with_models(Arc::clone(&self.registry) as _),
+        ));
+    }
+
+    /// Registers the Codex executor for the current config.
+    fn register_codex_executor(&self) {
+        self.manager.register_executor(Arc::new(
+            CodexExecutor::new(self.config.proxy_url.clone())
+                .with_config(Arc::clone(&self.config))
+                .with_models(Arc::clone(&self.registry) as _),
         ));
     }
 
@@ -370,11 +378,10 @@ impl Service {
     /// Registers an OpenAI-compatible executor for `provider`, made for the
     /// current config.
     fn register_compat_executor(&self, provider: &str) {
-        self.manager
-            .register_executor(Arc::new(OpenAiCompatExecutor::new(
-                provider.to_owned(),
-                Arc::clone(&self.config),
-            )));
+        self.manager.register_executor(Arc::new(
+            OpenAiCompatExecutor::new(provider.to_owned(), Arc::clone(&self.config))
+                .with_models(Arc::clone(&self.registry) as _),
+        ));
     }
 
     /// Registers an OpenAI-compatible executor for `auth`'s provider, unless
@@ -557,6 +564,9 @@ impl Service {
             || previous.claude.model_level_cooling != config.claude.model_level_cooling
         {
             self.register_native_executors();
+        } else if previous != config {
+            // The Codex executor follows the whole config.
+            self.register_codex_executor();
         }
         // Made again before the credentials change, as upstream does, so no
         // credential of the new config is served by an executor of the old.

@@ -49,6 +49,7 @@ use open_ferry_core::exec::{
     ErrorKind, ExecError, Format, Options, Request, Response, StreamResponse,
 };
 use open_ferry_core::executor::ProviderExecutor;
+use open_ferry_core::models::ModelCatalog;
 use open_ferry_translate::go::trim_space;
 use open_ferry_translate::registry::{Registry, ResponseContext};
 use serde_json::Value;
@@ -83,6 +84,7 @@ const NAME: &str = "openai compat executor";
 pub struct OpenAiCompatExecutor {
     provider: String,
     config: Arc<Config>,
+    models: Option<Arc<dyn ModelCatalog>>,
     clients: Clients,
 }
 
@@ -111,8 +113,15 @@ impl OpenAiCompatExecutor {
         Self {
             provider: provider.into(),
             config,
+            models: None,
             clients,
         }
+    }
+
+    /// Looks up the models the proxy serves in `models`.
+    pub fn with_models(mut self, models: Arc<dyn ModelCatalog>) -> Self {
+        self.models = Some(models);
+        self
     }
 
     /// The `openai-compatibility` entry `auth` belongs to

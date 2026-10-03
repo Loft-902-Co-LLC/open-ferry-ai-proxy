@@ -37,10 +37,10 @@ use serde_json::Value;
 
 use super::claude_tokens;
 use super::client::error_chain;
+use super::ext::{self, Turn};
 use super::terminal::{
     OutputItems, empty_incomplete_stream_error, has_meaningful_output_delta,
-    incomplete_stream_error, is_terminal_empty_incomplete, normalize_completion,
-    terminal_failure_error,
+    incomplete_stream_error, is_terminal_empty_incomplete, normalize_completion, terminal_failure,
 };
 use super::usage::ensure_responses_usage_details;
 use crate::json::{get, str_at, str_of};
@@ -205,6 +205,8 @@ pub(crate) struct StreamSetup {
     /// The credential's token, redacted from the errors made from Codex's
     /// events.
     pub(crate) secret: String,
+    /// What the request's hooks noted ([`ext`]).
+    pub(crate) turn: Turn,
 }
 
 /// The state of one translated stream.
@@ -266,9 +268,10 @@ impl State {
         let translated_line = if self.setup.grok && is_keepalive_line(&line) {
             KEEPALIVE_COMMENT.to_vec()
         } else if let Some(rest) = line.strip_prefix(b"data:") {
-            let data = trim_space(rest);
-            let mut event: Value = serde_json::from_slice(data).unwrap_or(Value::Null);
-            if let Some(error) = terminal_failure_error(&event) {
+            let data = ext::restore(&self.setup.turn, trim_space(rest));
+            let mut event: Value = serde_json::from_slice(&data).unwrap_or(Value::Null);
+            if let Some((error, body)) = terminal_failure(&event) {
+                ext::on_failure(&self.setup.turn, error.status, body.as_bytes());
                 return Err(error.redacted(&self.setup.secret).into());
             }
             if has_meaningful_output_delta(&event) {
@@ -286,13 +289,14 @@ impl State {
                     if !self.setup.preserve_native {
                         changed |= self.items.patch(&mut event);
                     }
+                    ext::on_completed(&self.setup.turn, &event);
                     if changed {
                         rewritten = Some(event.to_string());
                     }
                 }
                 _ => {}
             }
-            let data = rewritten.as_ref().map_or(data, |text| text.as_bytes());
+            let data = rewritten.as_ref().map_or(&*data, |text| text.as_bytes());
             [b"data: ".as_slice(), data].concat()
         } else {
             line
