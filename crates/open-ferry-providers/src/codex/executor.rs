@@ -43,6 +43,8 @@
 //!   [`super`].
 //! - One executor makes both HTTP and WebSocket calls; upstream wraps an
 //!   HTTP and a WebSocket executor in a `CodexAutoExecutor`.
+//! - Plain HTTP requests, which Codex Alpha Search sends, are in the
+//!   `http_request` module.
 //! - Refresh returns a copy of the credential with new metadata; the
 //!   credential manager saves it. Upstream also updates the typed token
 //!   storage, which [`Auth`] doesn't have.
@@ -57,7 +59,7 @@ use http::HeaderMap;
 use open_ferry_core::auth::Auth;
 use open_ferry_core::config::Config;
 use open_ferry_core::exec::{
-    ErrorKind, ExecError, Format, Options, Request, Response, StreamResponse,
+    ErrorKind, ExecError, Format, HttpCall, HttpReply, Options, Request, Response, StreamResponse,
 };
 use open_ferry_core::executor::ProviderExecutor;
 use open_ferry_core::models::ModelCatalog;
@@ -563,7 +565,17 @@ impl ProviderExecutor for CodexExecutor {
     fn close_execution_session(&self, session_id: &str) {
         self.websockets.close(session_id);
     }
+
+    fn http_request(
+        &self,
+        auth: Arc<Auth>,
+        call: HttpCall,
+    ) -> BoxFuture<'_, Result<HttpReply, ExecError>> {
+        async move { self.http_request_inner(&auth, call).await }.boxed()
+    }
 }
+
+mod http_request;
 
 #[cfg(test)]
 mod bootstrap_tests;

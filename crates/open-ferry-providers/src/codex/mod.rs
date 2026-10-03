@@ -15,7 +15,8 @@
 //! are made locally with `tiktoken-rs`. For Claude clients, which drop
 //! Codex's reasoning items, each turn's reasoning and tool calls are kept
 //! by the session the client named and put back in its next request (the
-//! `replay` module).
+//! `replay` module). Codex Alpha Search payloads go out untranslated, as
+//! the executor's plain HTTP requests.
 //!
 //! Deviations from upstream (each module lists its own):
 //! - Our requests don't pass for Codex's own client: there is no
