@@ -698,6 +698,10 @@ fn client_supports_model_ignores_case_and_whitespace() {
     assert!(!registry.client_supports_model("a", "gpt-6"));
     assert!(!registry.client_supports_model("a", " "));
     assert!(!registry.client_supports_model("b", "gpt-5"));
+    // Go's strings.EqualFold keeps the dotless i apart from I.
+    registry.register_client("t", "claude", &[model("m\u{131}")]);
+    assert!(!registry.client_supports_model("t", "mI"));
+    assert!(registry.client_supports_model("t", "M\u{131}"));
 }
 
 #[test]
@@ -758,4 +762,7 @@ fn equal_fold_follows_simple_case_folding() {
     let kelvin = char::from_u32(0x212A).unwrap().to_string();
     assert!(equal_fold(&kelvin, "k"));
     assert!(equal_fold("", ""));
+    // Neither Turkish i is an ASCII one.
+    assert!(!equal_fold("m\u{131}", "mI"));
+    assert!(!equal_fold("m\u{130}", "mi"));
 }

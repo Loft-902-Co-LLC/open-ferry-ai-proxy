@@ -77,18 +77,48 @@ pub(crate) fn fold_field<'a>(map: &'a Map<String, Value>, name: &str) -> Option<
         .map(|(_, value)| value)
 }
 
-/// [`fold_field`] for an object Go writes back out before decoding it into
-/// a struct, as when it remarshals a decoded `map[string]any`: `json.Marshal`
-/// sorts the keys, so the match whose key sorts last wins, wherever it was in
-/// the file.
-pub(crate) fn remarshaled_fold_field<'a>(
-    map: &'a Map<String, Value>,
-    name: &str,
-) -> Option<&'a Value> {
+/// The values Go's `json.Unmarshal` meets for a struct field named `name`:
+/// those of the keys matching it without regard to case, in order. A key
+/// repeated exactly counts once, with its last value, at its first position.
+pub(crate) fn fold_values<'a>(map: &'a Map<String, Value>, name: &str) -> Vec<&'a Value> {
     map.iter()
         .filter(|(key, _)| equal_fold(key, name))
-        .max_by(|(a, _), (b, _)| a.as_bytes().cmp(b.as_bytes()))
         .map(|(_, value)| value)
+        .collect()
+}
+
+/// [`fold_values`] for an object Go writes back out before decoding it into
+/// a struct, as when it remarshals a decoded `map[string]any`: `json.Marshal`
+/// sorts the keys, so they come in sorted order, wherever they were in the
+/// file.
+pub(crate) fn remarshaled_fold_values<'a>(
+    map: &'a Map<String, Value>,
+    name: &str,
+) -> Vec<&'a Value> {
+    let mut matches: Vec<_> = map
+        .iter()
+        .filter(|(key, _)| equal_fold(key, name))
+        .collect();
+    matches.sort_by(|(a, _), (b, _)| a.as_bytes().cmp(b.as_bytes()));
+    matches.into_iter().map(|(_, value)| value).collect()
+}
+
+/// Go's `json.Unmarshal` into a string, number or bool struct field, from
+/// the `values` it meets for it: each decoded in turn by `decode`, a `null`
+/// leaving the field as it was. `None` when one has the wrong type, which
+/// fails Go's whole decode.
+pub(crate) fn decode_field<'a, T>(
+    values: impl IntoIterator<Item = &'a Value>,
+    unset: T,
+    decode: impl Fn(&'a Value) -> Option<T>,
+) -> Option<T> {
+    let mut field = unset;
+    for value in values {
+        if !value.is_null() {
+            field = decode(value)?;
+        }
+    }
+    Some(field)
 }
 
 /// Go's `json.Marshal` of a decoded JSON object: compact, keys sorted, and
@@ -216,24 +246,54 @@ mod tests {
     }
 
     #[test]
-    fn remarshaled_fold_field_takes_the_key_sorting_last() {
-        for text in [
+    fn fields_decode_every_matching_key_as_go_does() {
+        let text = |object: &str, remarshaled: bool| {
+            let map: Map<String, Value> = serde_json::from_str(object).unwrap();
+            let values = if remarshaled {
+                remarshaled_fold_values(&map, "name")
+            } else {
+                fold_values(&map, "name")
+            };
+            decode_field(values, String::new(), |value| {
+                value.as_str().map(str::to_owned)
+            })
+        };
+        // json.Marshal sorts the keys, so "name" comes after "Name"; read
+        // directly, they come as written.
+        for object in [
             r#"{"name":"upstream","Name":"other"}"#,
             r#"{"Name":"other","name":"upstream"}"#,
         ] {
-            let map: Map<String, Value> = serde_json::from_str(text).unwrap();
-            assert_eq!(
-                remarshaled_fold_field(&map, "name"),
-                Some(&Value::from("upstream")),
-                "{text}"
-            );
+            assert_eq!(text(object, true).as_deref(), Some("upstream"), "{object}");
         }
-        let map: Map<String, Value> = serde_json::from_str(r#"{"Name":"y","NAME":"x"}"#).unwrap();
         assert_eq!(
-            remarshaled_fold_field(&map, "name"),
-            Some(&Value::from("y"))
+            text(r#"{"name":"upstream","Name":"other"}"#, false).as_deref(),
+            Some("other")
         );
-        assert_eq!(remarshaled_fold_field(&map, "alias"), None);
+        // A null leaves what an earlier key set.
+        for object in [
+            r#"{"Name":"upstream","name":null}"#,
+            r#"{"name":null,"Name":"upstream"}"#,
+        ] {
+            assert_eq!(text(object, true).as_deref(), Some("upstream"), "{object}");
+        }
+        assert_eq!(
+            text(r#"{"name":"a","NAME":"b","Name":null}"#, true).as_deref(),
+            Some("a")
+        );
+        assert_eq!(
+            text(r#"{"name":"a","NAME":"b","Name":null}"#, false).as_deref(),
+            Some("b")
+        );
+        // A value of the wrong type under any matching key fails.
+        for object in [
+            r#"{"Name":42,"name":"upstream"}"#,
+            r#"{"name":"upstream","Name":42}"#,
+        ] {
+            assert_eq!(text(object, true), None, "{object}");
+            assert_eq!(text(object, false), None, "{object}");
+        }
+        assert_eq!(text(r#"{"alias":"x"}"#, true).as_deref(), Some(""));
     }
 
     #[test]

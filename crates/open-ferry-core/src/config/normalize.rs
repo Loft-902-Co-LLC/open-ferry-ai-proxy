@@ -34,6 +34,7 @@ use super::types::{
 use super::v8::check_weight;
 use super::yaml::go_quote;
 use super::{ConfigError, ConfigErrorKind};
+use crate::auth::equal_fold;
 
 impl Config {
     /// The config to use for a request made with an API key rather than an
@@ -344,11 +345,6 @@ fn sanitize_oauth_request_scoped_errors(
         }
     }
     out
-}
-
-/// Go's `strings.EqualFold`, approximated by comparing lower case.
-fn equal_fold(left: &str, right: &str) -> bool {
-    left == right || left.to_lowercase() == right.to_lowercase()
 }
 
 #[cfg(test)]

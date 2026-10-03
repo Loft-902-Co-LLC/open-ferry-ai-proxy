@@ -488,6 +488,11 @@ mod tests {
         assert_eq!(parse_jwt_exp(&payload("[1]")), None);
         assert_eq!(parse_jwt_exp("a.b"), None);
         assert_eq!(parse_jwt_exp("a.b.c.d"), None);
+        // Go's base64 decoders skip line breaks inside the payload.
+        assert_eq!(
+            parse_jwt_exp("h.eyJl\r\neHAiOiAxNzAwMDAwMDAwfQ.s"),
+            Some(at("2023-11-14T22:13:20Z"))
+        );
     }
 
     #[test]

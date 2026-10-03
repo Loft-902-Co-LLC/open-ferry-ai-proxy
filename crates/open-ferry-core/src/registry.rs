@@ -52,6 +52,7 @@ use std::time::{Duration, Instant};
 use open_ferry_translate::go;
 use serde_json::{Map, Value};
 
+use crate::auth::equal_fold;
 use crate::exec::ProviderId;
 use crate::models::{ModelCatalog, ModelInfo};
 
@@ -1153,28 +1154,4 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let year = yoe + era * 400 + i64::from(month <= 2);
     // Both are small and positive.
     (year, month as u32, day as u32)
-}
-
-/// Go's `strings.EqualFold` for the strings it meets here: equal under
-/// simple case folding, character by character.
-fn equal_fold(a: &str, b: &str) -> bool {
-    let (mut a, mut b) = (a.chars(), b.chars());
-    loop {
-        match (a.next(), b.next()) {
-            (None, None) => return true,
-            (Some(x), Some(y)) if chars_fold_equal(x, y) => {}
-            _ => return false,
-        }
-    }
-}
-
-fn chars_fold_equal(x: char, y: char) -> bool {
-    fn single(mut chars: impl Iterator<Item = char>) -> Option<char> {
-        let c = chars.next()?;
-        chars.next().is_none().then_some(c)
-    }
-    let same = |a: Option<char>, b: Option<char>| a.is_some() && a == b;
-    x == y
-        || same(single(x.to_lowercase()), single(y.to_lowercase()))
-        || same(single(x.to_uppercase()), single(y.to_uppercase()))
 }

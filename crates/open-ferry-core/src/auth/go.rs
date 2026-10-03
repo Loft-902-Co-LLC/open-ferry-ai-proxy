@@ -26,20 +26,27 @@ const URL_RAW: GeneralPurpose = GeneralPurpose::new(
 );
 
 /// Decodes a JWT segment as upstream's helpers do: the missing `=` padding is
-/// added and the result decoded with `base64.URLEncoding`.
+/// added (counting any line breaks, as Go counts them) and the result decoded
+/// with `base64.URLEncoding`.
 pub(crate) fn decode_jwt_segment_padded(segment: &str) -> Option<Vec<u8>> {
     let padded = match segment.len() % 4 {
         2 => format!("{segment}=="),
         3 => format!("{segment}="),
         _ => segment.to_owned(),
     };
-    URL_PADDED.decode(padded).ok()
+    URL_PADDED.decode(without_line_breaks(&padded)).ok()
 }
 
 /// [`decode_jwt_segment_padded`], falling back to `base64.RawURLEncoding` on
 /// the segment as it is, as upstream's `parseJWTExp` does.
 pub(crate) fn decode_jwt_segment(segment: &str) -> Option<Vec<u8>> {
-    decode_jwt_segment_padded(segment).or_else(|| URL_RAW.decode(segment).ok())
+    decode_jwt_segment_padded(segment).or_else(|| URL_RAW.decode(without_line_breaks(segment)).ok())
+}
+
+/// `text` without the `\r` and `\n` that Go's base64 decoders skip wherever
+/// they are.
+fn without_line_breaks(text: &str) -> String {
+    text.replace(['\r', '\n'], "")
 }
 
 /// Go's `strings.EqualFold`: whether `a` and `b` are equal under simple
@@ -101,12 +108,10 @@ pub(crate) fn atoi(s: &str) -> Option<i64> {
     s.parse().ok()
 }
 
-/// A JSON number as Go's `int64(float64)` gives it, saturating; an integer
-/// stays exact.
+/// A JSON number as Go's `int64(float64)` gives it once its decoder has read
+/// the number as a float64: an integer past 2^53 rounds as it does there,
+/// and a value outside `int64` saturates where Go's conversion is undefined.
 pub(crate) fn number_to_i64(number: &serde_json::Number) -> i64 {
-    if let Some(n) = number.as_i64() {
-        return n;
-    }
     number.as_f64().map_or(0, |f| f as i64)
 }
 
@@ -157,5 +162,25 @@ mod tests {
         );
         assert_eq!(decode_jwt_segment("e"), None);
         assert_eq!(decode_jwt_segment("e3+"), None);
+        // Go's decoders skip line breaks, but the padding counts them.
+        let crlf = "e3\r\n0";
+        assert_eq!(decode_jwt_segment(crlf).as_deref(), Some(&b"{}"[..]));
+        assert_eq!(decode_jwt_segment_padded(crlf), None);
+        assert_eq!(
+            decode_jwt_segment_padded("e30\r\n\r\n").as_deref(),
+            Some(&b"{}"[..])
+        );
+        assert_eq!(decode_jwt_segment("e3\r\n0="), None);
+    }
+
+    #[test]
+    fn numbers_convert_through_float64() {
+        let int = |text: &str| number_to_i64(&serde_json::from_str(text).unwrap());
+        assert_eq!(int("42"), 42);
+        assert_eq!(int("-3.9"), -3);
+        assert_eq!(int("9007199254740993"), 9_007_199_254_740_992);
+        assert_eq!(int("9223372036854775807"), i64::MAX);
+        assert_eq!(int("1e30"), i64::MAX);
+        assert_eq!(int("-1e30"), i64::MIN);
     }
 }

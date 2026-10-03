@@ -19,7 +19,7 @@ use super::credential::{KIND_OAUTH, auth_kind};
 use super::models::{config_index, resolve_openai_compat_config_for_auth};
 use super::settings::{RequestScopedErrorRule, Settings};
 use super::text::go_lower;
-use crate::auth::json::remarshaled_fold_field as go_field;
+use crate::auth::json::{decode_field, remarshaled_fold_values as go_values};
 use crate::auth::{Auth, AuthError};
 use crate::exec::ExecError;
 
@@ -64,8 +64,9 @@ impl ScopedAction {
 }
 
 /// The rules in a credential's `request_scoped_errors` metadata, decoded as
-/// Go decodes them after marshaling them again (so a field's key sorting
-/// last wins): a type mismatch anywhere drops them all.
+/// Go decodes them after marshaling them again (each key matching a field
+/// in sorted order, see [`decode_field`]): a type mismatch anywhere drops
+/// them all.
 fn rules_from_metadata(raw: &Value) -> Option<Vec<RequestScopedErrorRule>> {
     let Value::Array(items) = raw else {
         return None;
@@ -75,14 +76,12 @@ fn rules_from_metadata(raw: &Value) -> Option<Vec<RequestScopedErrorRule>> {
         match item {
             Value::Null => rules.push(RequestScopedErrorRule::default()),
             Value::Object(object) => rules.push(RequestScopedErrorRule {
-                status: decode_status(go_field(object, "status"))?,
-                matches: decode_strings(go_field(object, "match"))?,
-                match_regex: decode_strings(go_field(object, "match-regexr"))?,
-                action: match go_field(object, "action") {
-                    None | Some(Value::Null) => String::new(),
-                    Some(Value::String(text)) => text.clone(),
-                    Some(_) => return None,
-                },
+                status: decode_field(go_values(object, "status"), 0, status_value)?,
+                matches: decode_strings(go_values(object, "match"))?,
+                match_regex: decode_strings(go_values(object, "match-regexr"))?,
+                action: decode_field(go_values(object, "action"), String::new(), |value| {
+                    value.as_str().map(str::to_owned)
+                })?,
             }),
             _ => return None,
         }
@@ -90,42 +89,47 @@ fn rules_from_metadata(raw: &Value) -> Option<Vec<RequestScopedErrorRule>> {
     (!rules.is_empty()).then_some(rules)
 }
 
-/// An `int` field: a whole number, as a float64 round trip leaves it. Go
-/// writes the float64 back out and reads it as an `int64`, so a fraction or
-/// a value outside `int64` (written with an exponent from 1e21) fails and
-/// drops the list. One outside the range of statuses never matches.
-fn decode_status(value: Option<&Value>) -> Option<u16> {
+/// An `int` field's value: a whole number, as a float64 round trip leaves
+/// it. Go writes the float64 back out and reads it as an `int64`, so a
+/// fraction or a value outside `int64` (written with an exponent from 1e21)
+/// fails and drops the list. One outside the range of statuses never
+/// matches.
+fn status_value(value: &Value) -> Option<u16> {
     const INT64: std::ops::Range<f64> = -9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0;
-    match value {
-        None | Some(Value::Null) => Some(0),
-        Some(Value::Number(number)) => {
-            let n = number.as_f64()?;
-            if n.fract() != 0.0 || !INT64.contains(&n) {
-                return None;
-            }
-            Some(if (1.0..=f64::from(u16::MAX)).contains(&n) {
-                n as u16
-            } else {
-                0
-            })
-        }
-        Some(_) => None,
+    let Value::Number(number) = value else {
+        return None;
+    };
+    let n = number.as_f64()?;
+    if n.fract() != 0.0 || !INT64.contains(&n) {
+        return None;
     }
+    Some(if (1.0..=f64::from(u16::MAX)).contains(&n) {
+        n as u16
+    } else {
+        0
+    })
 }
 
-fn decode_strings(value: Option<&Value>) -> Option<Vec<String>> {
-    match value {
-        None | Some(Value::Null) => Some(Vec::new()),
-        Some(Value::Array(items)) => items
-            .iter()
-            .map(|item| match item {
-                Value::String(text) => Some(text.clone()),
-                Value::Null => Some(String::new()),
-                _ => None,
-            })
-            .collect(),
-        Some(_) => None,
+/// A `[]string` field from the values Go meets for it, in turn: a `null`
+/// empties it, as Go sets a slice to nil, and anything but a list of strings
+/// (a `null` among them reading as an empty one) fails.
+fn decode_strings<'a>(values: impl IntoIterator<Item = &'a Value>) -> Option<Vec<String>> {
+    let mut field = Vec::new();
+    for value in values {
+        field = match value {
+            Value::Null => Vec::new(),
+            Value::Array(items) => items
+                .iter()
+                .map(|item| match item {
+                    Value::String(text) => Some(text.clone()),
+                    Value::Null => Some(String::new()),
+                    _ => None,
+                })
+                .collect::<Option<_>>()?,
+            _ => return None,
+        };
     }
+    Some(field)
 }
 
 /// The rules that apply to a credential (upstream's
@@ -301,13 +305,35 @@ mod tests {
         ] {
             assert_eq!(status(value.clone()), None, "{value}");
         }
-        // Go marshals the rules again, sorting keys: "status" beats "Status".
-        for rules in [
-            json!([{"status": 400, "Status": 500}]),
-            json!([{"Status": 500, "status": 400}]),
+        // Go marshals the rules again, sorting keys, and decodes each key in
+        // turn: "status" comes after "Status", a null leaves the status as it
+        // was, and a value of the wrong type under either key fails.
+        for (rules, want) in [
+            (json!([{"status": 400, "Status": 500}]), Some(400)),
+            (json!([{"Status": 500, "status": 400}]), Some(400)),
+            (json!([{"Status": 500, "status": null}]), Some(500)),
+            (json!([{"Status": "500", "status": 400}]), None),
         ] {
-            assert_eq!(rules_from_metadata(&rules).map(|r| r[0].status), Some(400));
+            assert_eq!(
+                rules_from_metadata(&rules).map(|r| r[0].status),
+                want,
+                "{rules}"
+            );
         }
+        // A null list empties the one before it.
+        let matches = |rules: Value| rules_from_metadata(&rules).map(|r| r[0].matches.clone());
+        assert_eq!(
+            matches(json!([{"MATCH": ["a"], "match": null}])),
+            Some(vec![])
+        );
+        assert_eq!(
+            matches(json!([{"match": ["a"], "Match": null}])),
+            Some(vec!["a".to_owned()])
+        );
+        assert_eq!(
+            matches(json!([{"Match": ["a"], "match": ["b", null]}])),
+            Some(vec!["b".to_owned(), String::new()])
+        );
         // Within int64 but not a status: kept, and never matches.
         assert_eq!(status(json!(9.2e18)), Some(0));
         assert_eq!(status(json!(-5)), Some(0));

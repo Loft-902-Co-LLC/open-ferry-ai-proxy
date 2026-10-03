@@ -24,6 +24,7 @@ use super::credential::{KIND_API_KEY, SOURCE_CONFIG, attribute, auth_kind, auth_
 use super::settings::{ApiKeyEntry, ModelAlias, OpenAiCompat, Settings};
 use super::text::{atoi, canonical_model_key, equal_fold, go_lower, parse_suffix};
 use crate::auth::Auth;
+use crate::auth::json::{decode_field, fold_values};
 
 /// The upstream model an alias resolves to, and how responses should name
 /// it (upstream's `OAuthModelAliasResult`).
@@ -339,33 +340,17 @@ fn model_alias_channel(auth: &Auth) -> String {
     oauth_model_alias_channel(&auth.provider, auth_kind(auth))
 }
 
-/// A JSON string field as Go's decoder fills it: missing or null leaves it
-/// empty, another type is an error.
-fn decode_string(value: Option<&Value>) -> Option<String> {
-    match value {
-        None | Some(Value::Null) => Some(String::new()),
-        Some(Value::String(text)) => Some(text.clone()),
-        Some(_) => None,
-    }
+/// A string struct field as Go's decoder fills it from an object's keys
+/// (see [`decode_field`]).
+fn decode_string(object: &Map<String, Value>, name: &str) -> Option<String> {
+    decode_field(fold_values(object, name), String::new(), |value| {
+        value.as_str().map(str::to_owned)
+    })
 }
 
-/// A JSON bool field as Go's decoder fills it.
-fn decode_bool(value: Option<&Value>) -> Option<bool> {
-    match value {
-        None | Some(Value::Null) => Some(false),
-        Some(Value::Bool(flag)) => Some(*flag),
-        Some(_) => None,
-    }
-}
-
-/// An object's value for a struct field, as Go's decoder matches keys: in
-/// any case, the last match winning.
-pub(crate) fn go_field<'a>(object: &'a Map<String, Value>, name: &str) -> Option<&'a Value> {
-    object
-        .iter()
-        .filter(|(key, _)| equal_fold(key, name))
-        .map(|(_, value)| value)
-        .next_back()
+/// A bool struct field as Go's decoder fills it from an object's keys.
+fn decode_bool(object: &Map<String, Value>, name: &str) -> Option<bool> {
+    decode_field(fold_values(object, name), false, Value::as_bool)
 }
 
 /// The per-credential OAuth aliases in the `model_aliases` attribute,
@@ -388,11 +373,11 @@ fn oauth_model_aliases_from_attributes(auth: &Auth) -> Vec<ModelAlias> {
             Value::Null => aliases.push(ModelAlias::default()),
             Value::Object(object) => {
                 let (Some(name), Some(alias), Some(_fork), Some(_display), Some(force)) = (
-                    decode_string(go_field(object, "name")),
-                    decode_string(go_field(object, "alias")),
-                    decode_bool(go_field(object, "fork")),
-                    decode_string(go_field(object, "display-name")),
-                    decode_bool(go_field(object, "force-mapping")),
+                    decode_string(object, "name"),
+                    decode_string(object, "alias"),
+                    decode_bool(object, "fork"),
+                    decode_string(object, "display-name"),
+                    decode_bool(object, "force-mapping"),
                 ) else {
                     return Vec::new();
                 };
