@@ -19,10 +19,12 @@
 //! [`gemini_responses`] input for the translators between Responses and Gemini.
 //! [`thinking`] generates input for upstream's thinking settings on Codex
 //! and Chat Completions targets.
+//! [`codex_models`] generates registrations for the Codex client model list.
 
 pub mod chat;
 pub mod claude_chat;
 pub mod claude_responses;
+pub mod codex_models;
 pub mod completions;
 pub mod gemini;
 pub mod gemini_responses;

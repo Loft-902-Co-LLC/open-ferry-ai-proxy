@@ -81,6 +81,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::cases::Case;
+use crate::codex_models;
 use crate::compare::{self, Deviation, JsonAt, JsonForm};
 use crate::raw_json::{self, Raw};
 use crate::signature;
@@ -235,6 +236,9 @@ pub enum Translator {
     /// A request translated for Chat Completions → its thinking setting
     /// applied.
     ThinkingOpenAI,
+    /// Registered models → the Codex client model list, summarized (see
+    /// `go/parity_codex_models.go`).
+    CodexModels,
 }
 
 impl Translator {
@@ -304,6 +308,7 @@ impl Translator {
             Self::GeminiResponsesNonStream => "gemini/openai-responses/response-non-stream",
             Self::ThinkingCodex => "thinking/codex",
             Self::ThinkingOpenAI => "thinking/openai",
+            Self::CodexModels => "codex-models/list",
         }
     }
 
@@ -372,6 +377,7 @@ impl Translator {
             Self::GeminiResponsesNonStream => "gemini-to-responses-non-stream",
             Self::ThinkingCodex => "thinking-codex",
             Self::ThinkingOpenAI => "thinking-openai",
+            Self::CodexModels => "codex-models",
         }
     }
 
@@ -445,6 +451,7 @@ impl Translator {
             Self::GeminiResponsesNonStream => "Gemini -> Responses response, non-streaming",
             Self::ThinkingCodex => "Thinking settings for Codex and Responses",
             Self::ThinkingOpenAI => "Thinking settings for Chat Completions",
+            Self::CodexModels => "Codex client model list",
         }
     }
 
@@ -1099,6 +1106,7 @@ impl Translator {
                 .err();
                 Ok(json!({ "body": body, "error": error }))
             }
+            Self::CodexModels => Ok(codex_models::list(&case.options)),
         }
     }
 
@@ -1351,7 +1359,8 @@ impl Translator {
             | Self::GeminiGeminiNonStream
             | Self::GeminiClaudeNonStream
             | Self::ThinkingCodex
-            | Self::ThinkingOpenAI => &[],
+            | Self::ThinkingOpenAI
+            | Self::CodexModels => &[],
             Self::GeminiResponsesRequest => GEMINI_RESPONSES_REQUEST_JSON,
             Self::GeminiResponsesStream => GEMINI_RESPONSES_STREAM_JSON,
             Self::GeminiResponsesNonStream => GEMINI_RESPONSES_NON_STREAM_JSON,
@@ -1524,7 +1533,8 @@ impl Translator {
             | Self::GeminiChatRequest
             | Self::GeminiResponsesRequest
             | Self::ThinkingCodex
-            | Self::ThinkingOpenAI => return serde_json::from_str(&text).ok(),
+            | Self::ThinkingOpenAI
+            | Self::CodexModels => return serde_json::from_str(&text).ok(),
             Self::OpenAIGeminiRequest => {
                 let mut value: Value = serde_json::from_str(&text).ok()?;
                 replace_compact_call_ids(&mut value, case);

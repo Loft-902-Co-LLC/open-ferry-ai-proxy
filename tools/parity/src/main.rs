@@ -4,6 +4,7 @@
 //! and compares the results. See README.md.
 
 mod cases;
+mod codex_models;
 mod compare;
 mod generate;
 mod live;
@@ -455,6 +456,11 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
             Translator::GeminiResponsesNonStream,
             cases::gemini_responses::finals(),
             gemini_responses_finals,
+        ),
+        (
+            Translator::CodexModels,
+            cases::codex_models::lists(),
+            generate::codex_models::list_cases(seed, random),
         ),
     ];
 
