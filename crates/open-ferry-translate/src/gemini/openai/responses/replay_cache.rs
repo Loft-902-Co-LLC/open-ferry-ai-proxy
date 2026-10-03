@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/cache/antigravity_reasoning_replay_cache.go
 // (CacheAntigravityReasoningReplayItems, GetAntigravityReasoningReplayItems,
-// reserveAntigravityReasoningReplayAbsentLocked, antigravityReasoningReplayCacheKey,
+// antigravityReasoningReplayCacheKey,
 // normalizeAntigravityReasoningReplayItems, normalizeAntigravityReasoningReplayItem,
 // normalizeAntigravityThoughtSignatureReplayItem,
 // normalizeAntigravityFunctionCallPartReplayItem,
@@ -32,12 +32,19 @@
 //!   measures sjson's text, whose escaping differs slightly.
 //! - Entries are kept as JSON values, so an item's `args` is kept as a value
 //!   rather than as the text it was written as.
+//! - A read that finds nothing leaves nothing behind. Upstream marks the miss
+//!   for an hour so a later conditional write can tell; with no conditional
+//!   writes the mark has no use, and it would let a client fill the cache
+//!   with session IDs of its choosing.
+//! - Entries are keyed by a SHA-256 hash of the model and session, so a long
+//!   session ID takes no more room than a short one.
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 
 use crate::json::{int_of, str_of};
 
@@ -65,15 +72,15 @@ struct Entry {
     items: Vec<Value>,
     /// When the entry was written or last read.
     timestamp: Instant,
-    /// A marker that a read found nothing here, which upstream keeps so a
-    /// later conditional write can tell. It counts against the entry limit.
-    deleted: bool,
 }
+
+/// A hash of the model and session an entry is for.
+type Key = [u8; 32];
 
 /// One replay cache. The translator uses the process-wide one.
 #[derive(Default)]
 pub(super) struct ReplayCache {
-    entries: HashMap<String, Entry>,
+    entries: HashMap<Key, Entry>,
     last_purge: Option<Instant>,
 }
 
@@ -100,7 +107,6 @@ impl ReplayCache {
             Entry {
                 items,
                 timestamp: now,
-                deleted: false,
             },
         );
         if self.entries.len() > MAX_ENTRIES {
@@ -115,44 +121,21 @@ impl ReplayCache {
     pub(super) fn get(&mut self, model: &str, session: &str, now: Instant) -> Option<Vec<Value>> {
         let key = cache_key(model, session)?;
         self.purge_if_due(now);
-        match self.entries.get_mut(&key) {
-            Some(entry) if now.saturating_duration_since(entry.timestamp) <= TTL => {
-                entry.timestamp = now;
-                if entry.deleted || entry.items.is_empty() {
-                    return None;
-                }
-                return Some(entry.items.clone());
-            }
-            Some(_) => {
-                self.entries.remove(&key);
-            }
-            None => {}
+        let entry = self.entries.get_mut(&key)?;
+        if now.saturating_duration_since(entry.timestamp) > TTL {
+            self.entries.remove(&key);
+            return None;
         }
-        self.reserve_absent(key, now);
-        None
-    }
-
-    /// `reserveAntigravityReasoningReplayAbsentLocked`: marks a miss.
-    fn reserve_absent(&mut self, key: String, now: Instant) {
-        if self.entries.len() >= MAX_ENTRIES {
-            self.evict_oldest(EVICT_BATCH);
-        }
-        self.entries.insert(
-            key,
-            Entry {
-                items: Vec::new(),
-                timestamp: now,
-                deleted: true,
-            },
-        );
+        entry.timestamp = now;
+        Some(entry.items.clone())
     }
 
     /// `evictOldestAntigravityReasoningReplayEntries`.
     fn evict_oldest(&mut self, count: usize) {
-        let mut candidates: Vec<(Instant, String)> = self
+        let mut candidates: Vec<(Instant, Key)> = self
             .entries
             .iter()
-            .map(|(key, entry)| (entry.timestamp, key.clone()))
+            .map(|(key, entry)| (entry.timestamp, *key))
             .collect();
         candidates.sort_by_key(|(timestamp, _)| *timestamp);
         for (_, key) in candidates.into_iter().take(count) {
@@ -200,14 +183,15 @@ pub(super) fn get_items(model: &str, session: &str) -> Option<Vec<Value>> {
         .get(model, session, Instant::now())
 }
 
-/// `antigravityReasoningReplayCacheKey`, or `None` if the model or session is
-/// blank.
-fn cache_key(model: &str, session: &str) -> Option<String> {
+/// A hash of `antigravityReasoningReplayCacheKey`, or `None` if the model or
+/// session is blank.
+fn cache_key(model: &str, session: &str) -> Option<Key> {
     let (model, session) = (model.trim(), session.trim());
     if model.is_empty() || session.is_empty() {
         return None;
     }
-    Some(format!("antigravity-reasoning-replay\0{model}\0{session}"))
+    let key = format!("antigravity-reasoning-replay\0{model}\0{session}");
+    Some(Sha256::digest(key.as_bytes()).into())
 }
 
 /// `normalizeAntigravityReasoningReplayItems`: the items worth keeping, or

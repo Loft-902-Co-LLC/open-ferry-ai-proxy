@@ -314,10 +314,11 @@ pub(crate) fn build_gemini_function_declarations(root: &Value) -> GeminiDeclarat
 /// `sanitizeResponsesToolNames`: a Gemini name for each tool name. Names
 /// that sanitize alike, or to a name already taken, get a hash suffix.
 fn sanitize_tool_names(names: &[&str]) -> HashMap<String, String> {
+    let mut seen = HashSet::with_capacity(names.len());
     let mut unique = Vec::new();
     let mut base_counts = HashMap::<String, usize>::new();
     for &name in names {
-        if name.is_empty() || unique.contains(&name) {
+        if name.is_empty() || !seen.insert(name) {
             continue;
         }
         unique.push(name);
@@ -547,5 +548,24 @@ mod tests {
         let winner = &winners["n__x"];
         assert!(winner.direct);
         assert_eq!(winner.tool["type"], "custom");
+    }
+
+    #[test]
+    fn sanitized_names_skip_repeats_and_clashes() {
+        let sanitized = sanitize_tool_names(&["a.b", "a-b", "a.b", "", "c"]);
+        assert_eq!(sanitized.len(), 3);
+        assert_eq!(sanitized["c"], "c");
+        assert_ne!(sanitized["a.b"], sanitized["a-b"]);
+    }
+
+    #[test]
+    fn many_tool_names_are_sanitized() {
+        // Thousands of tools take one pass, not one per earlier name.
+        let names: Vec<String> = (0..20_000).map(|index| format!("tool_{index}")).collect();
+        let mut refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        refs.extend(names.iter().map(String::as_str));
+        let sanitized = sanitize_tool_names(&refs);
+        assert_eq!(sanitized.len(), names.len());
+        assert_eq!(sanitized["tool_19999"], "tool_19999");
     }
 }

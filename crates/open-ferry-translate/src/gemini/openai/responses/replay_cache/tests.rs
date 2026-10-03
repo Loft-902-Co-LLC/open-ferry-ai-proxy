@@ -2,8 +2,8 @@
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Tests for the in-process replay cache: a later write replacing an earlier
-//! one, eviction, the bound on entries that mark a miss, and items cut down as
-//! they are stored. Each test uses a `ReplayCache` of its own with an explicit
+//! one, eviction, misses leaving nothing behind, and items cut down as they
+//! are stored. Each test uses a `ReplayCache` of its own with an explicit
 //! clock, where upstream clears the process-wide cache.
 //!
 //! Dropped or changed tests:
@@ -25,10 +25,10 @@
 //!   dropped; snapshots, revisions and conditional replace and delete aren't
 //!   ported.
 //! - antigravity_reasoning_replay_unrelated_eviction_does_not_block_absent_snapshot:
-//!   changed; with no snapshot or conditional write, it checks that evicting
-//!   the oldest entry takes the older live entry rather than the newer marker
-//!   for the miss, and that a first write for the missed session is then
-//!   kept. The live entry is made older by moving the clock on, where
+//!   changed; with no snapshot or conditional write and no marker for a miss,
+//!   it checks that the miss leaves only the live entry, that evicting the
+//!   oldest entry takes it, and that a first write for the missed session is
+//!   then kept. The live entry is made older by moving the clock on, where
 //!   upstream backdates its timestamp.
 //! - antigravity_reasoning_replay_home_absent_snapshot_is_fenced: dropped; the
 //!   Home store isn't ported.
@@ -46,8 +46,10 @@
 //!   dropped; the Home store isn't ported.
 //! - antigravity_reasoning_replay_local_tombstones_stay_within_entry_bound:
 //!   dropped; deleting an entry isn't ported, as the translator never deletes
-//!   one. The same bound on markers is checked through misses by
-//!   antigravity_reasoning_replay_local_absence_reservations_stay_within_entry_bound.
+//!   one.
+//! - antigravity_reasoning_replay_local_absence_reservations_stay_within_entry_bound:
+//!   changed; a miss leaves no marker here, so it checks that more misses than
+//!   the entry limit leave the cache empty.
 //! - antigravity_reasoning_replay_home_writes_remain_legacy_array_readable:
 //!   dropped; the Home store isn't ported.
 //! - antigravity_reasoning_replay_home_read_normalizes_and_rejects_mixed_invalid_chain:
@@ -114,13 +116,9 @@ fn antigravity_reasoning_replay_unrelated_eviction_does_not_block_absent_snapsho
     let now = start + Duration::from_secs(60);
     let found = cache.get(MODEL, ABSENT_SESSION, now);
     assert!(found.is_none(), "initial absent read = {found:?}");
+    assert_eq!(cache.len(), 1, "the miss left an entry behind");
     cache.evict_oldest(1);
-    let key = cache_key(MODEL, ABSENT_SESSION).expect("the key is not blank");
-    assert!(
-        cache.len() == 1 && cache.entries.get(&key).is_some_and(|entry| entry.deleted),
-        "unrelated eviction removed the marker for the miss: {} entries left",
-        cache.len()
-    );
+    assert_eq!(cache.len(), 0, "eviction kept the live entry");
     let first_item = replay_test_item("first-write-after-unrelated-eviction-123456");
     assert!(
         cache.cache(MODEL, ABSENT_SESSION, &[first_item], now),
@@ -138,31 +136,36 @@ fn antigravity_reasoning_replay_unrelated_eviction_does_not_block_absent_snapsho
 
 #[test]
 fn antigravity_reasoning_replay_local_absence_reservations_stay_within_entry_bound() {
+    // Misses leave nothing behind here, so they can't fill the cache at all.
     let mut cache = ReplayCache::default();
     let start = Instant::now();
-    let mut latest_session = String::new();
     for index in 0..=MAX_ENTRIES {
-        latest_session = format!("absent-reservation-{index}");
+        let session = format!("absent-reservation-{index}");
         let now = start + Duration::from_millis(index as u64);
-        let found = cache.get(MODEL, &latest_session, now);
+        let found = cache.get(MODEL, &session, now);
         assert!(
             found.is_none(),
             "absence reservation {index} = found {found:?}"
         );
     }
-    let latest_key = cache_key(MODEL, &latest_session).expect("the key is not blank");
-    let entry_count = cache.len();
+    assert_eq!(cache.len(), 0, "misses left entries behind");
+}
+
+#[test]
+fn long_session_ids_are_hashed() {
+    let mut cache = ReplayCache::default();
+    let now = Instant::now();
+    let session = "x".repeat(1 << 20);
+    assert!(cache.get(MODEL, &session, now).is_none());
+    assert_eq!(cache.len(), 0, "a miss left an entry behind");
+    let item = replay_test_item("long-session-signature-123456");
+    assert!(cache.cache(MODEL, &session, &[item], now));
+    assert!(cache.get(MODEL, &session, now).is_some());
     assert!(
-        entry_count <= MAX_ENTRIES,
-        "local absence reservation count = {entry_count}, max {MAX_ENTRIES}"
+        cache.get(MODEL, &session[1..], now).is_none(),
+        "another session shares the entry"
     );
-    assert!(
-        cache
-            .entries
-            .get(&latest_key)
-            .is_some_and(|entry| entry.deleted),
-        "latest local absence reservation was evicted"
-    );
+    assert_eq!(cache.len(), 1);
 }
 
 #[test]
