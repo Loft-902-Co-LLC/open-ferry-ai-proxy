@@ -2,7 +2,7 @@
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! When the refresh loop next looks at a credential, and how long its timer
-//! sleeps.
+//! sleeps; and that dropping the manager stops it.
 //!
 //! Deviations from upstream:
 //! - `next_refresh_check_at` takes the executor's refresh lead where
@@ -19,6 +19,7 @@ use serde_json::json;
 
 use super::support::*;
 use crate::auth::{AuthError, Status, Timestamp};
+use crate::manager::Settings;
 use crate::manager::refresh::{LoopShared, next_refresh_check_at};
 
 fn april_12() -> Timestamp {
@@ -182,4 +183,43 @@ fn auth_auto_refresh_loop_pop_due_after_system_suspend_resume() {
     let after_resume = before_sleep + TimeDelta::hours(2);
     assert_eq!(queue.next_wait(after_resume), Some(Duration::ZERO));
     assert_eq!(queue.pop_due(after_resume), ["gemini-oauth"]);
+}
+
+/// Not an upstream test: dropping the last manager handle stops the loop
+/// while its workers are refreshing, though their own handles keep the
+/// manager alive until those refreshes finish.
+#[tokio::test(start_paused = true)]
+async fn dropping_the_manager_stops_the_loop() {
+    let settings = Settings {
+        refresh_workers: 2,
+        ..Settings::default()
+    };
+    let h = Harness::new(settings);
+    let executor = FakeExecutor::new("codex");
+    executor.set_refresh_delay(Duration::from_millis(20));
+    h.executor(&executor);
+    for id in ["drop-a", "drop-b", "drop-c"] {
+        h.add(
+            auth_with_metadata(
+                id,
+                "codex",
+                json!({"refresh_token": "r", "refresh_interval_seconds": 0.001}),
+            ),
+            &[],
+        );
+    }
+    h.manager
+        .start_auto_refresh(Duration::from_millis(1))
+        .expect("start auto refresh");
+    while executor.refresh_count() < 2 {
+        tokio::time::advance(Duration::from_millis(1)).await;
+        settle().await;
+    }
+
+    drop(h);
+    for _ in 0..150 {
+        tokio::time::advance(Duration::from_millis(1)).await;
+        settle().await;
+    }
+    assert_eq!(executor.refresh_count(), 2, "refreshes after the drop");
 }

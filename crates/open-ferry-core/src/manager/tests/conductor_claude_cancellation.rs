@@ -16,8 +16,9 @@
 //!   aren't ported, so "one failed result" is checked as one generation bump
 //!   (each recorded result bumps it once), and its request-scoped code and
 //!   status 0 through `result_error_from_error`, which builds the recorded
-//!   error. A second test covers a client that drops the stream before the
-//!   tail: nothing is recorded (the manager's listed stream deviation).
+//!   error. Two more tests cover a client that drops the stream before the
+//!   tail, and one that drops it as the source ends: nothing is recorded
+//!   (the manager's listed stream deviation).
 //! - `TestManagerClaudePrepareCancellationStopsWithoutCooldown` is dropped:
 //!   request preparation isn't ported.
 //! - `TestClaudeRequestCancellationDoesNotChangeOtherProviders` is dropped:
@@ -289,6 +290,28 @@ async fn manager_claude_stream_tail_after_client_drop_records_nothing() {
         "a result was recorded"
     );
     require_claude_cancellation_neutral(&h, CLAUDE_CANCEL_AUTH, CLAUDE_CANCEL_MODEL);
+}
+
+#[tokio::test(start_paused = true)]
+async fn manager_claude_stream_drop_as_source_ends_records_nothing() {
+    // The stream task finds both the client gone and the source ended; a
+    // success recorded here would clear a cooldown another call set.
+    for _ in 0..16 {
+        let (executor, source) = TailExecutor::new();
+        let h = new_claude_cancellation_harness(executor);
+        let stream = open_tail_stream(&h).await;
+        let before = h.versions(CLAUDE_CANCEL_AUTH);
+
+        drop(stream);
+        drop(source);
+        settle().await;
+
+        assert_eq!(
+            h.versions(CLAUDE_CANCEL_AUTH),
+            before,
+            "a result was recorded"
+        );
+    }
 }
 
 #[tokio::test(start_paused = true)]

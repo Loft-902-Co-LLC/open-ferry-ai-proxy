@@ -10,18 +10,21 @@
 //! - All tests: the registry is a `FakeModels`, so suspension and quota read
 //!   the last projection the manager published. `ModelAlias` has no `fork`
 //!   field, and upstream's manager doesn't read it either. The cooldown
-//!   state store isn't ported, because model states are saved with the
-//!   credential. So "the store has a record" here means the credential saved
-//!   in the `FakeStore` is in active cooldown, and those credentials carry
+//!   state store isn't ported (a deviation of the service), and `FileStore`
+//!   saves a credential's metadata, not its model states, so a cooldown
+//!   doesn't outlive the process. "The store has a record" here means the
+//!   credential the manager last handed the `FakeStore` is in active
+//!   cooldown: what it would hand a cooldown store. Those credentials carry
 //!   metadata so the manager saves them. Picks go through `execute` and
 //!   report the credential the executor got (upstream's
 //!   `scheduler.pickSingle`).
 //! - `cooldown_persistence_consistency`, `cleanup_after_alias_removed`,
 //!   `store_persistence_cleaned_when_alias_removed`: check the saved
 //!   credential, not the cooldown store's records.
-//! - `real_persistence_restore_bypasses_cooling_auth`: a second manager loads
-//!   the first one's saved credentials. Upstream registers fresh credentials
-//!   and restores the cooldown store's records.
+//! - `real_persistence_restore_bypasses_cooling_auth` is dropped: there is
+//!   no cooldown store to restore from. In its place,
+//!   `credentials_reloaded_from_files_start_without_cooldowns` checks that a
+//!   credential a new manager loads through `FileStore` has none.
 //! - `cancelled_context_reconcile_cooldown_store_cleaned`,
 //!   `strict_context_checking_store_reconcile_persists_under_cancelled_context`,
 //!   `reset_quota_cancelled_context_cleans_cooldown_store`: there is no
@@ -68,9 +71,8 @@
 //!   epoch, so stored credentials can't carry one. The epochs are 1 and 1,
 //!   then 2 and 2. Upstream's are 6 and 4, then 7 and 5: the same rule,
 //!   counted from stored epochs 5 and 3. The stale snapshot can't be sent.
-//! - Dropped `RealDiskFileStoreRestore_BypassesCoolingAuth`: it uses real
-//!   files and the file cooldown store. The in-memory restore test covers
-//!   the scenario.
+//! - Dropped `RealDiskFileStoreRestore_BypassesCoolingAuth`, for the same
+//!   reason.
 //! - Dropped `TestModelRegistry_Projection_GenerationProtection`,
 //!   `TestModelRegistry_UnregisterClient_TombstoneAndGhostProjectionProtection`,
 //!   `TestModelRegistry_UnregisterAndReRegister_ResetsTombstone` and
@@ -88,7 +90,9 @@ use std::time::Duration;
 use chrono::TimeDelta;
 use serde_json::json;
 
-use crate::auth::{Auth, AuthError, AuthStore, ModelState, QuotaState, Status, Timestamp};
+use crate::auth::{
+    Auth, AuthError, AuthStore, FileStore, ModelState, QuotaState, Status, Timestamp,
+};
 use crate::exec::Dispatcher;
 use crate::manager::cooldown::{is_model_state_active_cooldown, model_state_is_clean};
 use crate::manager::{CallResult, ClientModels, Manager, ModelAlias, ModelProjection, Settings};
@@ -511,58 +515,53 @@ async fn manager_no_fork_alias_per_auth_alias_retains_cooldown_after_reconcile()
     assert!(quota_exceeded(&h, ID, ROUTE));
 }
 
-// Test 10
+// In place of test 10
 #[tokio::test(start_paused = true)]
-async fn manager_no_fork_alias_real_persistence_restore_bypasses_cooling_auth() {
-    const ID1: &str = "restore-auth-1";
-    const ID2: &str = "restore-auth-2";
-    let h1 = Harness::with_store(route_settings());
-    h1.executor(&echo(ANTIGRAVITY));
-    h1.add(saved_active(ID1, ANTIGRAVITY), &[ROUTE]);
-    h1.add(saved_active(ID2, ANTIGRAVITY), &[ROUTE]);
+async fn credentials_reloaded_from_files_start_without_cooldowns() {
+    const ID: &str = "restore-auth-1.json";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let clock = TestClock::new();
+    let manager = || {
+        let store: Arc<dyn AuthStore> = Arc::new(FileStore::new(dir.path()));
+        Manager::with_clock(
+            route_settings(),
+            Arc::new(FakeModels::default()),
+            Some(store),
+            clock.clock(),
+        )
+    };
 
-    h1.manager.mark_result(&rate_limited(
-        ID1,
+    let first = manager();
+    let mut credential = saved_active(ID, ANTIGRAVITY);
+    credential.file_name = ID.to_owned();
+    first.register(credential).expect("register");
+    first.mark_result(&rate_limited(
+        ID,
         ANTIGRAVITY,
         TARGET,
         "",
         "429 rate limit",
         MIN30,
     ));
+    let cooled = first.get(ID).expect("registered");
     assert!(
-        stored_cooldown(&h1, ID1, TARGET),
-        "expected the cooldown saved"
+        cooled
+            .model_states
+            .get(TARGET)
+            .is_some_and(|s| is_model_state_active_cooldown(s, clock.now())),
+        "expected a cooldown: {:?}",
+        cooled.model_states
     );
 
-    // A fresh manager starting from what the first one saved.
-    let h2 = Harness::with_store(route_settings());
-    let exec2 = echo(ANTIGRAVITY);
-    h2.executor(&exec2);
-    for id in [ID1, ID2] {
-        h2.store.put(h1.store.stored(id).expect("saved credential"));
-    }
-    h2.manager.load().expect("load");
-    h2.models.register(ID1, &[ROUTE]);
-    h2.models.register(ID2, &[ROUTE]);
-    h2.manager.reconcile_registry_model_states(ID1);
-    h2.manager.reconcile_registry_model_states(ID2);
-
+    let second = manager();
+    second.load().expect("load");
+    let restored = second.get(ID).expect("restored credential");
     assert!(
-        suspended(&h2, ID1, ROUTE),
-        "routeModel should be suspended for restored auth1"
+        restored.model_states.is_empty(),
+        "restored model states: {:?}",
+        restored.model_states
     );
-
-    let resp = h2
-        .manager
-        .execute(&providers(&[ANTIGRAVITY]), request(ROUTE), options())
-        .await
-        .expect("execute");
-    assert_eq!(&resp.payload[..], TARGET.as_bytes());
-    assert_eq!(
-        exec2.ids(Kind::Execute).last().map(String::as_str),
-        Some(ID2)
-    );
-    assert_eq!(exec2.models(Kind::Execute), [TARGET]);
+    assert!(!restored.unavailable);
 }
 
 // Test 11

@@ -1164,6 +1164,9 @@ impl Manager {
             }
             loop {
                 let next = tokio::select! {
+                    // A client that left wins over a source that ended at
+                    // the same moment.
+                    biased;
                     () = forwarder.tx.closed() => return,
                     next = rest.next() => next,
                 };
@@ -1183,7 +1186,7 @@ impl Manager {
             if !tail.is_empty() && !forwarder.emit(Ok(Bytes::from(tail))).await {
                 return;
             }
-            if !forwarder.failed {
+            if !forwarder.failed && !forwarder.tx.is_closed() {
                 forwarder.manager.mark_result(&CallResult {
                     auth_id: forwarder.auth.id.clone(),
                     provider: forwarder.provider.clone(),

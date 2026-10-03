@@ -79,7 +79,7 @@ pub use settings::{
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::io;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use chrono::Utc;
 use futures_core::future::BoxFuture;
@@ -143,6 +143,25 @@ pub(crate) struct Shared {
 #[derive(Clone)]
 pub struct Manager {
     shared: Arc<Shared>,
+    /// Held by the handles given out, not by the refresh loop's own: when
+    /// the last one goes, the loop stops.
+    _owner: Option<Arc<Owner>>,
+}
+
+/// Stops the refresh loop when the last handle outside it is dropped, as
+/// [`Manager::stop_auto_refresh`] does. Refreshes already running finish.
+struct Owner(Weak<Shared>);
+
+impl Drop for Owner {
+    fn drop(&mut self) {
+        let Some(shared) = self.0.upgrade() else {
+            return;
+        };
+        let handle = lock(&shared.refresh_loop).take();
+        if let Some(handle) = handle {
+            handle.stop();
+        }
+    }
 }
 
 impl fmt::Debug for Manager {
@@ -216,16 +235,19 @@ impl Manager {
             pool_offsets: HashMap::new(),
             refresh_jobs: HashMap::new(),
         };
+        let shared = Arc::new(Shared {
+            state: Mutex::new(state),
+            store,
+            models,
+            clock,
+            persist_locks: Mutex::new(HashMap::new()),
+            refresh_locks: Mutex::new(HashMap::new()),
+            refresh_loop: Mutex::new(None),
+        });
+        let owner = Some(Arc::new(Owner(Arc::downgrade(&shared))));
         Self {
-            shared: Arc::new(Shared {
-                state: Mutex::new(state),
-                store,
-                models,
-                clock,
-                persist_locks: Mutex::new(HashMap::new()),
-                refresh_locks: Mutex::new(HashMap::new()),
-                refresh_loop: Mutex::new(None),
-            }),
+            shared,
+            _owner: owner,
         }
     }
 

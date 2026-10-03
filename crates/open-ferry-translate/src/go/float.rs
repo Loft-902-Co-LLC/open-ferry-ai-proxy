@@ -8,7 +8,7 @@
 /// `strconv.ParseFloat(s, 64)` with its error ignored, as gjson does: the
 /// nearest `f64`, or infinity or zero when out of range, or 0 if `s` isn't a
 /// Go floating-point literal.
-pub(crate) fn parse_float(s: &str) -> f64 {
+pub fn parse_float(s: &str) -> f64 {
     if let Some(special) = special(s) {
         return special;
     }

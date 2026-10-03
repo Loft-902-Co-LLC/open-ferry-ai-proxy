@@ -13,6 +13,7 @@
 //! [`refresh`](crate::executor::ProviderExecutor::refresh) and fold the result
 //! into the live credential, then save it. A failed refresh backs off: five
 //! minutes, or doubling from one minute up to thirty after `invalid_grant`.
+//! Dropping the last manager handle stops the loop, as stopping it does.
 //!
 //! Deviations from upstream:
 //! - The executor's refresh lead replaces upstream's registry of leads per
@@ -131,7 +132,7 @@ pub(crate) struct RefreshLoopHandle {
 }
 
 impl RefreshLoopHandle {
-    fn stop(&self) {
+    pub(super) fn stop(&self) {
         self.stop.send_replace(true);
     }
 }
@@ -367,8 +368,12 @@ enum AfterFailure {
     Nothing,
 }
 
+/// The loop's own handle to the manager, which doesn't keep the loop going.
 fn upgrade(weak: &Weak<Shared>) -> Option<Manager> {
-    weak.upgrade().map(|shared| Manager { shared })
+    weak.upgrade().map(|shared| Manager {
+        shared,
+        _owner: None,
+    })
 }
 
 fn is_stopped(stop: &watch::Receiver<bool>) -> bool {
@@ -386,8 +391,9 @@ async fn sleep_for(wait: Option<Duration>) {
     }
 }
 
-/// The loop itself (upstream's `run` and `loop`). It holds the manager
-/// weakly, so dropping the last manager handle ends it.
+/// The loop itself (upstream's `run` and `loop`). It and its workers hold
+/// the manager weakly, and their own handles don't count as the manager's:
+/// dropping the last handle given out stops them.
 pub(super) async fn run_loop(
     weak: Weak<Shared>,
     shared: Arc<LoopShared>,

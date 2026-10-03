@@ -38,7 +38,8 @@ pub(crate) fn str_of(value: Option<&Value>) -> String {
 }
 
 /// A positive duration from a Go duration such as `90s`, else a number of
-/// seconds (upstream's `parseDurationString`).
+/// seconds as Go's `strconv.ParseFloat` reads it, hexadecimal and
+/// underscores included (upstream's `parseDurationString`).
 pub(crate) fn parse_duration_string(raw: &str) -> Option<Duration> {
     let s = raw.trim();
     if s.is_empty() {
@@ -49,8 +50,8 @@ pub(crate) fn parse_duration_string(raw: &str) -> Option<Duration> {
     {
         return Some(Duration::from_nanos(nanos.unsigned_abs()));
     }
-    let seconds: f64 = s.parse().ok()?;
-    seconds_to_duration(seconds)
+    // Out of range reads as infinite or zero, which is no duration either.
+    seconds_to_duration(open_ferry_translate::go::parse_float(s))
 }
 
 /// A positive number of seconds as Go's `time.Duration(secs * 1e9)`.
@@ -162,5 +163,13 @@ mod tests {
         assert_eq!(parse_duration_string("-1s"), None);
         assert_eq!(parse_duration_string("0"), None);
         assert_eq!(parse_duration_string("inf"), None);
+        assert_eq!(
+            parse_duration_string("0x1p6"),
+            Some(Duration::from_secs(64))
+        );
+        assert_eq!(parse_duration_string("1_0"), Some(Duration::from_secs(10)));
+        assert_eq!(parse_duration_string("1__0"), None);
+        assert_eq!(parse_duration_string("1e400"), None);
+        assert_eq!(parse_duration_string("1e-400"), None);
     }
 }

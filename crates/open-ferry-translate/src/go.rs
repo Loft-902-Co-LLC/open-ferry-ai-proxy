@@ -6,7 +6,7 @@ pub(crate) mod base64;
 mod float;
 mod printable;
 
-pub(crate) use float::parse_float;
+pub use float::parse_float;
 
 use std::cmp::Ordering;
 use std::fmt::Write as _;

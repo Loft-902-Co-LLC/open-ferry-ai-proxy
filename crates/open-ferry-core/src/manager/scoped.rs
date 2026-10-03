@@ -88,14 +88,17 @@ fn rules_from_metadata(raw: &Value) -> Option<Vec<RequestScopedErrorRule>> {
     (!rules.is_empty()).then_some(rules)
 }
 
-/// An `int` field: a whole number, as a float64 round trip leaves it. One
-/// outside the range of statuses never matches.
+/// An `int` field: a whole number, as a float64 round trip leaves it. Go
+/// writes the float64 back out and reads it as an `int64`, so a fraction or
+/// a value outside `int64` (written with an exponent from 1e21) fails and
+/// drops the list. One outside the range of statuses never matches.
 fn decode_status(value: Option<&Value>) -> Option<u16> {
+    const INT64: std::ops::Range<f64> = -9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0;
     match value {
         None | Some(Value::Null) => Some(0),
         Some(Value::Number(number)) => {
             let n = number.as_f64()?;
-            if n.fract() != 0.0 || !n.is_finite() {
+            if n.fract() != 0.0 || !INT64.contains(&n) {
                 return None;
             }
             Some(if (1.0..=f64::from(u16::MAX)).contains(&n) {
@@ -276,6 +279,31 @@ mod tests {
             match_request_scoped_error_action(&auth, &err, &settings),
             None
         );
+    }
+
+    #[test]
+    fn metadata_statuses_decode_as_go_ints() {
+        let status = |value: Value| {
+            rules_from_metadata(&json!([{"status": value, "match": ["busy"]}]))
+                .map(|rules| rules[0].status)
+        };
+        // Past int64, or not whole: Go's decoding fails.
+        for value in [
+            json!(1e100),
+            json!(1e20),
+            json!(9.3e18),
+            json!(u64::MAX),
+            json!(i64::MAX),
+            json!(-1e19),
+            json!(1.5),
+        ] {
+            assert_eq!(status(value.clone()), None, "{value}");
+        }
+        // Within int64 but not a status: kept, and never matches.
+        assert_eq!(status(json!(9.2e18)), Some(0));
+        assert_eq!(status(json!(-5)), Some(0));
+        assert_eq!(status(json!(500.0)), Some(500));
+        assert_eq!(status(json!(null)), Some(0));
     }
 
     #[test]
