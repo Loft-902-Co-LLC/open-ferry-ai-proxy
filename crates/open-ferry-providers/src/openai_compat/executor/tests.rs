@@ -5,11 +5,6 @@
 //! and `openai_compat_executor_tool_results_test.go`, with checks of the
 //! request headers, credentials, refresh, token counts and entry lookup.
 //!
-//! Upstream's tests run with the OpenAI translators registered. Here a test
-//! that needs a translator this port doesn't have yet runs only once it is
-//! registered, and a check of a translated answer falls back to the
-//! untranslated chunk without one, so the tests hold either way.
-//!
 //! Dropped:
 //! - `openai_compat_executor_images_test.go`, the image tests in the compact
 //!   test file (`ImagesGenerationsPassthrough`, `ImagesGenerationsStreamsUpstream`,
@@ -32,16 +27,8 @@
 //!   `PromptCacheKeyExecuteStream` and `PromptCacheKeyStreamCompactSkipped`
 //!   give the client's own key (in the original request where the payload
 //!   would carry it through anyway) instead of a session to derive one from.
-//! - `MaxTokensNormalization` and `MaxTokensNormalizationStream`: the
-//!   OpenAI Responses requests run once the Responses to Chat Completions
-//!   request translator is registered.
-//! - The tool result tests send Claude requests, so they run once the
-//!   Claude to Chat Completions request translator is registered; an extra
-//!   test sends the same tool result as a Chat Completions request.
-//! - `StreamSkipsKeepAliveUntilDataLine`, `ResponsesStreamFailsOnEOFWithoutDone`
-//!   and `StreamDropsChunksAfterDone` check the translated chunks when the
-//!   Chat Completions stream translator for the client is registered, and
-//!   the chunks as the provider sent them otherwise.
+//! - An extra tool result test sends the same tool result as a Chat
+//!   Completions request.
 
 use std::io;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -257,14 +244,6 @@ async fn collect(response: StreamResponse) -> (Vec<String>, Option<ExecError>) {
         }
     }
     (out, error)
-}
-
-fn has_request_translator(from: &Format) -> bool {
-    Registry::global().has_request_transformer(from, &Format::OPENAI)
-}
-
-fn has_stream_translator(client: &Format) -> bool {
-    Registry::global().has_stream_response_transformer(client, &Format::OPENAI)
 }
 
 const CHAT_ANSWER: &str = r#"{"id":"chatcmpl_1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#;
@@ -621,28 +600,18 @@ async fn stream_skips_keep_alive_until_data_line() {
         format!("\n\n: openrouter processing\n\nevent: ping\nid: 1\nretry: 1000\ndata: {data}\n");
     let (chunks, error) = openai_stream(&body, "openrouter-model").await;
     assert!(error.is_none(), "unexpected stream error: {error:?}");
-    if has_stream_translator(&Format::OPENAI) {
-        let got: Value = serde_json::from_str(&chunks.concat()).unwrap_or(Value::Null);
-        assert_eq!(got["choices"][0]["delta"]["content"], "hello", "{chunks:?}");
-    } else {
-        // Untranslated, the frame passes as it came, and the stream that
-        // ended without [DONE] gets one.
-        assert_eq!(chunks, [format!("data: {data}"), "data: [DONE]".to_owned()]);
-    }
+    let got: Value = serde_json::from_str(&chunks.concat()).unwrap_or(Value::Null);
+    assert_eq!(got["choices"][0]["delta"]["content"], "hello", "{chunks:?}");
 }
 
 #[tokio::test]
 async fn responses_stream_fails_on_eof_without_done() {
     let (chunks, error) = responses_stream(&format!("{PARTIAL_CHUNK}\n\n")).await;
     let streamed = chunks.concat();
-    if has_stream_translator(&Format::OPENAI_RESPONSE) {
-        assert!(
-            streamed.contains("response.output_text.delta"),
-            "stream did not forward partial assistant output: {streamed:?}"
-        );
-    } else {
-        assert_eq!(chunks, [PARTIAL_CHUNK]);
-    }
+    assert!(
+        streamed.contains("response.output_text.delta"),
+        "stream did not forward partial assistant output: {streamed:?}"
+    );
     assert!(
         !streamed.contains("response.completed"),
         "clean EOF without [DONE] was finalized as response.completed: {streamed:?}"
@@ -766,29 +735,18 @@ async fn stream_drops_chunks_after_done() {
         chunks.iter().all(|chunk| !chunk.contains(r#""cost""#)),
         "post-DONE cost chunk was forwarded: {chunks:?}"
     );
-    if has_stream_translator(&Format::OPENAI) {
-        let payloads: Vec<&String> = chunks.iter().filter(|chunk| !chunk.is_empty()).collect();
-        assert_eq!(payloads.len(), 2, "want content + finish: {payloads:?}");
-        let parsed: Vec<Value> = payloads
-            .iter()
-            .map(|payload| serde_json::from_str(payload).unwrap())
-            .collect();
-        assert!(
-            parsed.iter().all(|payload| exists(payload, "id")),
-            "{payloads:?}"
-        );
-        assert_eq!(parsed[0]["choices"][0]["delta"]["content"], "hi");
-        assert_eq!(parsed[1]["choices"][0]["finish_reason"], "stop");
-    } else {
-        assert_eq!(
-            chunks,
-            [
-                format!("data: {first}"),
-                format!("data: {second}"),
-                "data: [DONE]".to_owned()
-            ]
-        );
-    }
+    let payloads: Vec<&String> = chunks.iter().filter(|chunk| !chunk.is_empty()).collect();
+    assert_eq!(payloads.len(), 2, "want content + finish: {payloads:?}");
+    let parsed: Vec<Value> = payloads
+        .iter()
+        .map(|payload| serde_json::from_str(payload).unwrap())
+        .collect();
+    assert!(
+        parsed.iter().all(|payload| exists(payload, "id")),
+        "{payloads:?}"
+    );
+    assert_eq!(parsed[0]["choices"][0]["delta"]["content"], "hi");
+    assert_eq!(parsed[1]["choices"][0]["finish_reason"], "stop");
 }
 
 fn max_tokens_models() -> Vec<OpenAiCompatibility> {
@@ -912,9 +870,6 @@ async fn max_tokens_normalization() {
         ),
     ];
     for (name, format, model, payload, want, value) in cases {
-        if !has_request_translator(&format) {
-            continue;
-        }
         executor
             .execute(auth.clone(), request(model, payload), options(&format))
             .await
@@ -984,9 +939,6 @@ async fn max_tokens_normalization_stream() {
         ),
     ];
     for (name, format, model, payload, want, value) in cases {
-        if !has_request_translator(&format) {
-            continue;
-        }
         let response = executor
             .execute_stream(
                 auth.clone(),
@@ -1104,9 +1056,6 @@ async fn send_tool_result(
 
 #[tokio::test]
 async fn tool_result_content_by_input_modalities() {
-    if !has_request_translator(&Format::CLAUDE) {
-        return;
-    }
     let cases: [(&str, bool, &[&str], bool); 4] = [
         ("non-stream text-only", false, &["text"], true),
         ("stream text-only", true, &["text"], true),
@@ -1137,9 +1086,6 @@ async fn tool_result_content_by_input_modalities() {
 
 #[tokio::test]
 async fn text_only_model_does_not_receive_image_url() {
-    if !has_request_translator(&Format::CLAUDE) {
-        return;
-    }
     let executor = modalities_executor(&["text"]);
     for stream in [false, true] {
         let seen = send_tool_result(&executor, &Format::CLAUDE, CLAUDE_TOOL_RESULT, stream).await;
@@ -1367,6 +1313,82 @@ async fn count_tokens() {
         )
     );
     assert!(response.headers.is_empty());
+}
+
+#[tokio::test]
+async fn count_tokens_for_a_claude_client() {
+    let payload = r#"{"model":"gpt-4o","system":"be brief","messages":[{"role":"user","content":"hello world"}]}"#;
+    let response = executor(Vec::new())
+        .count_tokens(
+            plain_auth(""),
+            request("gpt-4o", payload),
+            options(&Format::CLAUDE),
+        )
+        .await
+        .unwrap();
+    let count = tiktoken_rs::o200k_base_singleton()
+        .encode_ordinary("system\nbe brief\nuser\nhello world")
+        .len();
+    assert_eq!(
+        String::from_utf8_lossy(&response.payload),
+        format!(r#"{{"input_tokens":{count}}}"#)
+    );
+}
+
+#[tokio::test]
+async fn claude_client_gets_a_claude_message() {
+    let mock = Mock::start(Reply::json(CHAT_ANSWER)).await;
+    let payload = r#"{"model":"m","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}"#;
+    let response = executor(Vec::new())
+        .execute(
+            plain_auth(&mock.base_url()),
+            request("m", payload),
+            options(&Format::CLAUDE),
+        )
+        .await
+        .unwrap();
+    let sent = mock.last();
+    assert_eq!(sent.path, "/v1/chat/completions");
+    assert_eq!(sent.json()["messages"][0]["role"], "user", "{}", sent.body);
+    assert_eq!(sent.json()["max_tokens"], 64, "{}", sent.body);
+    let message: Value = serde_json::from_slice(&response.payload).unwrap();
+    assert_eq!(message["type"], "message", "{message}");
+    assert_eq!(message["role"], "assistant", "{message}");
+    assert_eq!(message["content"][0]["type"], "text", "{message}");
+    assert_eq!(message["content"][0]["text"], "ok", "{message}");
+    assert_eq!(message["stop_reason"], "end_turn", "{message}");
+}
+
+#[tokio::test]
+async fn claude_client_streams_claude_events() {
+    let body = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hel\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lo\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+    let mock = Mock::start(Reply::sse(body)).await;
+    let payload = r#"{"model":"m","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
+    let response = executor(Vec::new())
+        .execute_stream(
+            plain_auth(&mock.base_url()),
+            request("m", payload),
+            stream_options(&Format::CLAUDE),
+        )
+        .await
+        .unwrap();
+    let (chunks, error) = collect(response).await;
+    assert!(error.is_none(), "{error:?}");
+    let streamed = chunks.concat();
+    for event in [
+        "event: message_start",
+        "event: content_block_start",
+        "event: content_block_delta",
+        "event: message_delta",
+        "event: message_stop",
+    ] {
+        assert!(streamed.contains(event), "no {event}: {streamed}");
+    }
+    assert!(streamed.contains(r#""text":"hel""#), "{streamed}");
+    assert!(streamed.contains(r#""text":"lo""#), "{streamed}");
+    let sent = mock.last().json();
+    assert_eq!(sent["stream"], true);
+    assert_eq!(sent["stream_options"]["include_usage"], true);
 }
 
 #[test]
