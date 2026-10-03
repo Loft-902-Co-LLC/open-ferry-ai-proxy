@@ -45,6 +45,7 @@ use chrono::{Local, SecondsFormat, TimeDelta};
 use futures_util::FutureExt;
 use futures_util::future::{BoxFuture, Shared};
 use open_ferry_core::auth::Auth;
+use open_ferry_translate::go::to_lower;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
@@ -549,7 +550,7 @@ static REFRESHES: LazyLock<Mutex<HashMap<[u8; 32], SharedRefresh>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn is_non_retryable_refresh_error(error: &Error) -> bool {
-    error.0.to_lowercase().contains("refresh_token_reused")
+    to_lower(&error.0).contains("refresh_token_reused")
 }
 
 /// The token endpoint's answer.

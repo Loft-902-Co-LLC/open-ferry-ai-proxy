@@ -26,6 +26,8 @@ use std::collections::{BTreeMap, HashSet};
 use std::net::IpAddr;
 use std::path::PathBuf;
 
+use open_ferry_translate::go::to_lower;
+
 use super::paths::{self, Os};
 use super::types::{
     ClaudeKey, CodexKey, Config, DEFAULT_PANEL_GITHUB_REPOSITORY, OAuthModelAlias,
@@ -209,7 +211,7 @@ fn normalize_excluded_models(models: &[String]) -> Vec<String> {
     let mut seen = HashSet::new();
     models
         .iter()
-        .map(|model| model.trim().to_lowercase())
+        .map(|model| to_lower(model.trim()))
         .filter(|model| !model.is_empty() && seen.insert(model.clone()))
         .collect()
 }
@@ -220,7 +222,7 @@ fn normalize_oauth_excluded_models(
 ) -> BTreeMap<String, Vec<String>> {
     let mut out = BTreeMap::new();
     for (provider, models) in entries {
-        let key = provider.trim().to_lowercase();
+        let key = to_lower(provider.trim());
         let models = normalize_excluded_models(models);
         if !key.is_empty() && !models.is_empty() {
             out.insert(key, models);
@@ -268,7 +270,7 @@ fn sanitize_oauth_model_alias(
 ) -> BTreeMap<String, Vec<OAuthModelAlias>> {
     let mut out = BTreeMap::new();
     for (raw_channel, aliases) in channels {
-        let channel = raw_channel.trim().to_lowercase();
+        let channel = to_lower(raw_channel.trim());
         if channel.is_empty() || aliases.is_empty() {
             continue;
         }
@@ -280,7 +282,7 @@ fn sanitize_oauth_model_alias(
             if name.is_empty() || alias.is_empty() || equal_fold(name, alias) {
                 continue;
             }
-            if !seen.insert(alias.to_lowercase()) {
+            if !seen.insert(to_lower(alias)) {
                 continue;
             }
             clean.push(OAuthModelAlias {
@@ -306,7 +308,7 @@ fn sanitize_oauth_settings(
 ) -> BTreeMap<String, Vec<OAuthModelSetting>> {
     let mut out = BTreeMap::new();
     for (raw_channel, settings) in channels {
-        let channel = raw_channel.trim().to_lowercase();
+        let channel = to_lower(raw_channel.trim());
         if channel.is_empty() || settings.is_empty() {
             continue;
         }
@@ -318,7 +320,7 @@ fn sanitize_oauth_settings(
                 continue;
             }
             let alias = entry.alias.trim();
-            if !seen.insert(format!("{}->{}", name.to_lowercase(), alias.to_lowercase())) {
+            if !seen.insert(format!("{}->{}", to_lower(name), to_lower(alias))) {
                 continue;
             }
             reversed.push(OAuthModelSetting {
@@ -342,7 +344,7 @@ fn sanitize_oauth_request_scoped_errors(
 ) -> BTreeMap<String, Vec<RequestScopedErrorRule>> {
     let mut out = BTreeMap::new();
     for (raw_channel, rules) in channels {
-        let channel = raw_channel.trim().to_lowercase();
+        let channel = to_lower(raw_channel.trim());
         if channel.is_empty() || rules.is_empty() {
             continue;
         }
@@ -360,7 +362,7 @@ fn sanitize_oauth_request_scoped_errors(
                 status: rule.status,
                 matches: trimmed(&rule.matches),
                 match_regexr: trimmed(&rule.match_regexr),
-                action: rule.action.trim().to_lowercase(),
+                action: to_lower(rule.action.trim()),
             })
             .filter(|rule| {
                 rule.status > 0

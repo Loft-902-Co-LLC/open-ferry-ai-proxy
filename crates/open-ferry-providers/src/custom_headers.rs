@@ -23,6 +23,7 @@
 use std::collections::BTreeMap;
 
 use http::{HeaderMap, HeaderName, HeaderValue};
+use open_ferry_translate::go::to_upper;
 
 use crate::json::eq_fold;
 
@@ -75,7 +76,7 @@ pub(crate) fn apply(
         }
         let value: &[u8] = match value.strip_prefix('$') {
             Some(variable) if eq_fold(variable.trim(), "CPA-SESSION-ID") => continue,
-            _ if value.to_uppercase().contains("$CPA-SESSION-ID") => continue,
+            _ if to_upper(value).contains("$CPA-SESSION-ID") => continue,
             Some(variable) => {
                 let Some(client_value) = HeaderName::from_bytes(variable.trim().as_bytes())
                     .ok()

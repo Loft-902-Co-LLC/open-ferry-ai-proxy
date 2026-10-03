@@ -23,7 +23,7 @@ When we move the pin, we update this table and note behaviour changes in the PR.
   ```
 
 - **Deviations are documented** in the file, with the reason (usually an upstream issue number).
-- **Go means Go 1.26.** Upstream's releases are built with Go 1.26.4, so where its behaviour comes from Go's standard library we match Go 1.26, whatever version a ported file's header names. The difference shows in `encoding/json`, which from Go 1.27 runs on its v2 implementation, and in the Unicode tables: Go 1.26 has Unicode 15.0. Case mapping uses Rust's newer tables, so a letter added to Unicode since 15.0 may change case where upstream leaves it.
+- **Go means Go 1.26.** Upstream's releases are built with Go 1.26.4, so where its behaviour comes from Go's standard library we match Go 1.26, whatever version a ported file's header names. The difference shows in `encoding/json`, which from Go 1.27 runs on its v2 implementation, and in the Unicode tables: Go 1.26 has Unicode 15.0. Case mapping uses Rust's newer tables, so a letter added to Unicode since 15.0 may change case where upstream leaves it. Where upstream calls `strings.ToLower` or `ToUpper`, the port maps each character by its simple mapping as Go does (`open_ferry_translate::go::to_lower` and `to_upper`), not with `str::to_lowercase`, which differs for `İ`, a word-final `Σ` and `ß`.
 - **Bugs we find upstream get reported upstream**, with a failing test case where we can.
 
 ## Module map

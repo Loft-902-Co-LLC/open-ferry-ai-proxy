@@ -10,17 +10,12 @@
 //! `strings.EqualFold` and `ToUpper`, `strconv.ParseBool` and `Atoi`,
 //! `utf8.DecodeRune`, `textproto.CanonicalMIMEHeaderKey` and
 //! `time.Duration.String`.
-//!
-//! Deviations from upstream:
-//! - `ToUpper` leaves a character whose upper case is two characters or
-//!   more as it is; Go uses its simple mapping where there is one. Only
-//!   Greek letters with a subscript iota, such as U+1FB3, have one, and the
-//!   method they spell is refused either way.
 
 use std::fmt::Write as _;
 
 use chrono::{TimeZone, Utc};
 use open_ferry_core::auth::Timestamp;
+pub(crate) use open_ferry_translate::go::to_upper;
 
 /// Go's `strings.EqualFold`: whether `a` and `b` are equal under simple
 /// Unicode case folding.
@@ -64,11 +59,6 @@ fn simple_upper(c: char) -> char {
         (Some(upper), None) => upper,
         _ => c,
     }
-}
-
-/// Go's `strings.ToUpper`: each character by its simple uppercase mapping.
-pub(crate) fn to_upper(s: &str) -> String {
-    s.chars().map(simple_upper).collect()
 }
 
 /// Go's `strconv.ParseBool`.

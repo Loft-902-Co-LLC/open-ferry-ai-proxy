@@ -28,6 +28,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::time::Duration;
 
+use open_ferry_translate::go::to_lower;
 use serde::Deserialize;
 
 use super::duration::parse_go_duration;
@@ -177,7 +178,7 @@ impl Config {
 
     /// The credential selection strategy.
     pub fn routing_strategy(&self) -> RoutingStrategy {
-        match self.routing.strategy.trim().to_lowercase().as_str() {
+        match to_lower(self.routing.strategy.trim()).as_str() {
             "weighted-round-robin" | "weightedroundrobin" | "wrr" => {
                 RoutingStrategy::WeightedRoundRobin
             }
@@ -787,17 +788,17 @@ impl OAuthModelSetting {
         metadata_model_id: &str,
         model_name: &str,
     ) -> Option<&'a OAuthModelSetting> {
-        let id = model_id.trim().to_lowercase();
-        let meta_id = metadata_model_id.trim().to_lowercase();
-        let name = model_name.trim().to_lowercase();
+        let id = to_lower(model_id.trim());
+        let meta_id = to_lower(metadata_model_id.trim());
+        let name = to_lower(model_name.trim());
         let mut alias_match = None;
         let mut name_match = None;
         for entry in settings {
-            let entry_name = entry.name.trim().to_lowercase();
+            let entry_name = to_lower(entry.name.trim());
             if entry_name.is_empty() {
                 continue;
             }
-            let entry_alias = entry.alias.trim().to_lowercase();
+            let entry_alias = to_lower(entry.alias.trim());
             if !entry_alias.is_empty() && !id.is_empty() && id == entry_alias {
                 alias_match = Some(entry);
             } else if (entry_alias.is_empty() || entry_alias == id)
@@ -849,6 +850,14 @@ impl fmt::Debug for RedactedMap<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn routing_strategy_lowercases_as_go_does() {
+        // Go lowers the dotted capital I to a plain i; Rust adds a combining dot.
+        let mut config = Config::default();
+        config.routing.strategy = "F\u{130}LL-FIRST".to_owned();
+        assert_eq!(config.routing_strategy(), RoutingStrategy::FillFirst);
+    }
 
     #[test]
     fn debug_hides_secrets() {

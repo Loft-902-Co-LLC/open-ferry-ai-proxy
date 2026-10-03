@@ -64,6 +64,7 @@ use std::{fmt, fs, thread};
 
 use notify::event::{ModifyKind, RenameMode};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
+use open_ferry_translate::go::to_lower;
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -484,7 +485,7 @@ impl WatchState {
             .filter_map(Result::ok)
             .filter(|entry| !entry.file_type().is_ok_and(|kind| kind.is_dir()))
             .map(|entry| entry.file_name())
-            .filter(|name| name.to_string_lossy().to_lowercase().ends_with(".json"))
+            .filter(|name| to_lower(&name.to_string_lossy()).ends_with(".json"))
             .collect();
         names.sort();
         let mut events = Vec::new();
@@ -546,10 +547,7 @@ fn normalize_path(os: Os, path: &str) -> String {
     let cleaned = paths::clean(os, trimmed);
     match os {
         Os::Unix => cleaned,
-        Os::Windows => cleaned
-            .strip_prefix(r"\\?\")
-            .unwrap_or(&cleaned)
-            .to_lowercase(),
+        Os::Windows => to_lower(cleaned.strip_prefix(r"\\?\").unwrap_or(&cleaned)),
     }
 }
 

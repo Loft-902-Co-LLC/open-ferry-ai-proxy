@@ -35,6 +35,30 @@ pub fn to_lower(s: &str) -> String {
         .collect()
 }
 
+/// Go's `strings.ToUpper`: maps each character on its own by its simple Unicode
+/// mapping. Rust's `str::to_uppercase` uses the full mapping, which turns `ß`
+/// into `SS`; Go leaves a character with no one-character upper case as it is.
+pub fn to_upper(s: &str) -> String {
+    s.chars().map(simple_upper).collect()
+}
+
+/// The simple uppercase mapping of `c`, as Go's `unicode.ToUpper` gives it.
+fn simple_upper(c: char) -> char {
+    let mut mapped = c.to_uppercase();
+    if let (Some(upper), None) = (mapped.next(), mapped.next()) {
+        return upper;
+    }
+    // Of the characters whose full mapping is longer, only the Greek letters
+    // with a subscript iota have a simple one: the capital with the iota
+    // beside it.
+    let offset = match u32::from(c) {
+        0x1f80..=0x1f87 | 0x1f90..=0x1f97 | 0x1fa0..=0x1fa7 => 8,
+        0x1fb3 | 0x1fc3 | 0x1ff3 => 9,
+        _ => 0,
+    };
+    char::from_u32(u32::from(c) + offset).unwrap_or(c)
+}
+
 /// Go's `strconv.Quote`, which `%q` uses: wraps `s` in double quotes and
 /// escapes `"`, `\` and every character `strconv.IsPrint` rejects.
 pub fn quote(s: &str) -> String {
@@ -188,6 +212,22 @@ mod tests {
         assert_eq!(to_lower("OPENAİ"), "openai");
         assert_eq!(to_lower("ΑΣ"), "ασ");
         assert_eq!(to_lower("Straße ÀÉ"), "straße àé");
+    }
+
+    #[test]
+    fn to_upper_matches_go() {
+        assert_eq!(to_upper("post"), "POST");
+        // The long s and the dotless i upper-case to ASCII.
+        assert_eq!(to_upper("po\u{17f}t \u{131}"), "POST I");
+        // Sharp s and a ligature have no one-character upper case.
+        assert_eq!(to_upper("stra\u{df}e \u{fb00}"), "STRA\u{df}E \u{fb00}");
+        // Letters with a subscript iota take the iota beside them.
+        assert_eq!(
+            to_upper("\u{1f80}\u{1fa7}\u{1fb3}\u{1fc3}\u{1ff3}"),
+            "\u{1f88}\u{1faf}\u{1fbc}\u{1fcc}\u{1ffc}"
+        );
+        // Titlecase forms stay.
+        assert_eq!(to_upper("\u{1f88}\u{1fbc}"), "\u{1f88}\u{1fbc}");
     }
 
     #[test]
