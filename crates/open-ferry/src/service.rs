@@ -11,9 +11,10 @@
 
 //! Serving the proxy.
 //!
-//! At start the credentials in the auth directory, the config's API keys and
-//! its OpenAI-compatible providers' keys are registered with the credential
-//! manager, and each one's models with the model registry. Each
+//! At start the credentials in the auth directory, the config's API keys
+//! (Gemini, Claude, Codex and Vertex AI) and its OpenAI-compatible
+//! providers' keys are registered with the credential manager, and each
+//! one's models with the model registry. Each
 //! OpenAI-compatible provider gets an executor of its own, keyed by its
 //! provider key (`openai-compatible-<name>`), beside the baseline
 //! `openai-compatibility` one. Token refresh runs in the background every
@@ -31,14 +32,18 @@
 //! saves those it changes itself, as after a refresh.
 //!
 //! Deviations from upstream:
-//! - Only the Codex, Claude and OpenAI-compatible executors are registered.
-//!   Upstream gives a credential of a provider it has no executor for an
-//!   OpenAI-compatible executor keyed by that provider; here such a
-//!   credential has no executor, and isn't served.
+//! - Only the Codex, Claude, Gemini, Vertex AI and OpenAI-compatible
+//!   executors are registered, the native ones at start rather than as
+//!   their first credential comes. Upstream gives a credential of a provider
+//!   it has no executor for (such as `gemini-cli`, `aistudio` or
+//!   `gemini-interactions`) an OpenAI-compatible executor keyed by that
+//!   provider; here such a credential has no executor, and isn't served.
 //! - Executors are made again on a reload only when a setting they use
-//!   changed (`proxy-url`, `claude.model-level-cooling`, and for the
-//!   OpenAI-compatible ones `openai-compatibility`); upstream makes them
-//!   again on every reload, which ends their WebSocket sessions.
+//!   changed (for the native ones `proxy-url` or
+//!   `claude.model-level-cooling`, and for the OpenAI-compatible ones
+//!   `proxy-url` or `openai-compatibility`); upstream makes them again on
+//!   every reload, which ends their WebSocket sessions. Remaking the Vertex
+//!   AI executor drops the access tokens it cached.
 //! - An OpenAI-compatible executor that no credential uses any more after a
 //!   reload is unregistered; upstream keeps it.
 //! - With an empty `host` the server listens on every IPv6 and IPv4
@@ -63,10 +68,10 @@ use std::time::Duration;
 
 use chrono::Utc;
 use open_ferry_core::auth::compat::OPENAI_COMPATIBILITY;
-use open_ferry_core::auth::synthesizer::api_key::{ApiKeyEntry, synthesize_api_key_auths};
 use open_ferry_core::auth::synthesizer::file::{synthesize_auth_file, synthesize_file_auths};
-use open_ferry_core::auth::synthesizer::openai_compat::synthesize_openai_compat_auths;
-use open_ferry_core::auth::synthesizer::{StableIdGenerator, SynthesisContext};
+use open_ferry_core::auth::synthesizer::{
+    StableIdGenerator, SynthesisContext, synthesize_config_auths,
+};
 use open_ferry_core::auth::{Auth, FileStore, Status};
 use open_ferry_core::config::{AuthFile, Config, ConfigWatcher, WatchEvent};
 use open_ferry_core::manager::{Manager, Settings};
@@ -74,6 +79,7 @@ use open_ferry_core::registry::{ModelRegistry, RegistrationRules};
 use open_ferry_management::{ManagementState, management_password_from_env};
 use open_ferry_providers::claude::ClaudeExecutor;
 use open_ferry_providers::codex::CodexExecutor;
+use open_ferry_providers::gemini::{GeminiExecutor, VertexExecutor};
 use open_ferry_providers::openai_compat::OpenAiCompatExecutor;
 use open_ferry_server::{AppState, ServerConfig, router_with};
 use tokio::net::TcpListener;
@@ -297,22 +303,30 @@ impl Service {
         router_with(self.state.clone(), management)
     }
 
-    /// Registers the executors for the current config: Codex, Claude, and
-    /// the OpenAI-compatible ones (see [`Self::register_compat_executors`]).
+    /// Registers the executors for the current config: Codex, Claude,
+    /// Gemini, Vertex AI, and the OpenAI-compatible ones (see
+    /// [`Self::register_compat_executors`]).
     fn register_executors(&mut self) {
         self.register_native_executors();
         self.register_compat_executors();
     }
 
-    /// Registers the Codex and Claude executors for the current config.
+    /// Registers the Codex, Claude, Gemini and Vertex AI executors for the
+    /// current config.
     fn register_native_executors(&self) {
         let proxy_url = self.config.proxy_url.clone();
         self.manager
             .register_executor(Arc::new(CodexExecutor::new(proxy_url.clone())));
         self.manager.register_executor(Arc::new(
-            ClaudeExecutor::new(proxy_url)
+            ClaudeExecutor::new(proxy_url.clone())
                 .with_models(Arc::clone(&self.registry) as _)
                 .with_model_level_cooling(self.config.claude.model_level_cooling),
+        ));
+        self.manager.register_executor(Arc::new(
+            GeminiExecutor::new(proxy_url.clone()).with_models(Arc::clone(&self.registry) as _),
+        ));
+        self.manager.register_executor(Arc::new(
+            VertexExecutor::new(proxy_url).with_models(Arc::clone(&self.registry) as _),
         ));
     }
 
@@ -397,23 +411,16 @@ impl Service {
         }
     }
 
-    /// Registers a credential for each config API key and each key of an
-    /// enabled OpenAI-compatible provider, and unregisters those whose key
-    /// is gone (upstream's `registerConfigAPIKeyAuths` and the watcher's
-    /// diff of config credentials). An invalid weight anywhere leaves every
-    /// credential as it was, as upstream checks all weights first.
+    /// Registers a credential for each config API key (Gemini, Claude,
+    /// Codex and Vertex AI) and each key of an enabled OpenAI-compatible
+    /// provider, and unregisters those whose key is gone (upstream's
+    /// `registerConfigAPIKeyAuths` and the watcher's diff of config
+    /// credentials). An invalid weight anywhere leaves every credential as
+    /// it was, as upstream checks all weights first.
     fn sync_config_auths(&mut self) {
-        let claude: Vec<ApiKeyEntry> = self.config.claude_api_key.iter().map(Into::into).collect();
-        let codex: Vec<ApiKeyEntry> = self.config.codex_api_key.iter().map(Into::into).collect();
         let ctx = self.synthesis_context();
         let mut ids = StableIdGenerator::new();
-        let auths =
-            synthesize_api_key_auths(&claude, &codex, &ctx, &mut ids).and_then(|mut auths| {
-                let compat = &self.config.openai_compatibility;
-                auths.extend(synthesize_openai_compat_auths(compat, &ctx, &mut ids)?);
-                Ok(auths)
-            });
-        let auths = match auths {
+        let auths = match synthesize_config_auths(&self.config, &ctx, &mut ids) {
             Ok(auths) => auths,
             Err(error) => {
                 tracing::warn!("failed to synthesize config API key auths: {error}");
@@ -959,6 +966,60 @@ mod tests {
         );
     }
 
+    /// A config with a Gemini key at `gemini_url` and a Vertex AI key at
+    /// `vertex_url`, serving `gemini-2.5-flash` as `g1` and `gemini-2.5-pro`
+    /// as `v1`.
+    fn google_keys(gemini_url: &str, vertex_url: &str) -> String {
+        format!(
+            "gemini-api-key:\n  - api-key: gm-test\n    base-url: {gemini_url}\n    models:\n      - name: gemini-2.5-flash\n        alias: g1\nvertex-api-key:\n  - api-key: vx-test\n    base-url: {vertex_url}\n    models:\n      - name: gemini-2.5-pro\n        alias: v1\n"
+        )
+    }
+
+    /// A Vertex AI service-account file is served by the Vertex AI executor.
+    /// Its account holds no key: registering it doesn't read one.
+    #[tokio::test]
+    async fn vertex_service_account_files_are_registered() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = r#"{"type":"vertex","project_id":"proxy-test","location":"us-central1","email":"sa@proxy-test.iam.gserviceaccount.com","service_account":{"type":"service_account","client_email":"sa@proxy-test.iam.gserviceaccount.com"}}"#;
+        std::fs::write(dir.path().join("vertex-proxy-test.json"), body).unwrap();
+        let mut service = service(dir.path(), "");
+        service.load_file_auths();
+        let auths = service.manager.list();
+        assert_eq!(auths.len(), 1);
+        assert_eq!(auths[0].provider, "vertex");
+        assert!(!model_ids(&service, &auths[0].id).is_empty());
+        assert_eq!(executor_id(&service, "vertex").as_deref(), Some("vertex"));
+    }
+
+    #[tokio::test]
+    async fn gemini_and_vertex_api_keys_follow_reloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = google_keys("https://gemini.example.test", "https://vertex.example.test");
+        let mut service = service(dir.path(), &keys);
+        service.sync_config_auths();
+        let mut auths = service.manager.list();
+        auths.sort_by(|a, b| a.provider.cmp(&b.provider));
+        let providers: Vec<&str> = auths.iter().map(|auth| auth.provider.as_str()).collect();
+        assert_eq!(providers, ["gemini", "vertex"]);
+        assert_eq!(auths[0].attribute("api_key"), Some("gm-test"));
+        assert_eq!(model_ids(&service, &auths[0].id), ["g1"]);
+        assert_eq!(model_ids(&service, &auths[1].id), ["v1"]);
+        assert_eq!(service.config_auths.len(), 2);
+
+        // A reload without them removes both.
+        let none = Config::parse(format!("auth-dir: '{}'\n", dir.path().display())).unwrap();
+        service.handle(WatchEvent::ConfigChanged(Arc::new(none)), Path::new(""));
+        for auth in &auths {
+            assert!(service.manager.get(&auth.id).is_none());
+            assert!(model_ids(&service, &auth.id).is_empty());
+        }
+        assert!(service.config_auths.is_empty());
+        assert!(
+            dir.path().read_dir().unwrap().next().is_none(),
+            "a file was saved"
+        );
+    }
+
     /// An `openai-compatibility` config with `entries`.
     fn compat(entries: &[String]) -> String {
         format!("openai-compatibility:\n{}", entries.concat())
@@ -986,14 +1047,20 @@ mod tests {
 
     /// Ports `TestRegisterAvailableExecutors` of CLIProxyAPI
     /// sdk/cliproxy/service_executor_registration_test.go (v8.0.10, MIT)
-    /// for the executors ported: Codex, Claude and the baseline
-    /// OpenAI-compatible one. The plugin executor and the other providers'
-    /// aren't ported.
+    /// for the executors ported: Codex, Claude, Gemini, Vertex AI and the
+    /// baseline OpenAI-compatible one. The plugin executor and the other
+    /// providers' aren't ported.
     #[tokio::test]
     async fn registers_the_available_executors() {
         let dir = tempfile::tempdir().unwrap();
         let service = service(dir.path(), "");
-        for provider in ["codex", "claude", "openai-compatibility"] {
+        for provider in [
+            "codex",
+            "claude",
+            "gemini",
+            "vertex",
+            "openai-compatibility",
+        ] {
             assert_eq!(executor_id(&service, provider).as_deref(), Some(provider));
         }
         assert_eq!(executor_id(&service, "openai-compatible-x"), None);
@@ -1210,7 +1277,12 @@ mod tests {
 
         /// Sends `method path` with the client key and `body`, and returns
         /// the status and body of the answer.
-        async fn send(addr: SocketAddr, method: &str, path: &str, body: &str) -> (u16, String) {
+        pub(super) async fn send(
+            addr: SocketAddr,
+            method: &str,
+            path: &str,
+            body: &str,
+        ) -> (u16, String) {
             let mut stream = TcpStream::connect(addr).await.unwrap();
             let request = format!(
                 "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer client-key\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -1225,7 +1297,7 @@ mod tests {
             (status, body.to_owned())
         }
 
-        fn chat(model: &str) -> String {
+        pub(super) fn chat(model: &str) -> String {
             format!(r#"{{"model":"{model}","messages":[{{"role":"user","content":"hello"}}]}}"#)
         }
 
@@ -1272,6 +1344,87 @@ mod tests {
             let seen = seen.lock().unwrap();
             assert_eq!(seen.len(), 2);
             assert_eq!(seen[1].2, chat("up-2"));
+        }
+    }
+
+    /// A client's request reaches Gemini and Vertex AI through the server,
+    /// with the config's keys.
+    mod google_requests {
+        use std::sync::{Arc, Mutex};
+
+        use axum::http::{HeaderMap, Uri};
+        use tokio::net::TcpListener;
+        use tokio::sync::watch;
+
+        use super::super::serve;
+        use super::compat_requests::{chat, send};
+        use super::{google_keys, service};
+
+        const ANSWER: &str = r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}"#;
+
+        /// What the provider was sent: the path and query, and the
+        /// `x-goog-api-key` header.
+        type Seen = Arc<Mutex<Vec<(String, String)>>>;
+
+        /// A provider on a 127.0.0.1 ephemeral port that answers every
+        /// request with [`ANSWER`].
+        async fn provider() -> (String, Seen) {
+            let seen = Seen::default();
+            let record = Arc::clone(&seen);
+            let app = axum::Router::new().fallback(move |uri: Uri, headers: HeaderMap| {
+                let record = Arc::clone(&record);
+                async move {
+                    let key = headers
+                        .get("x-goog-api-key")
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or_default()
+                        .to_owned();
+                    record.lock().unwrap().push((uri.to_string(), key));
+                    ([("content-type", "application/json")], ANSWER)
+                }
+            });
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(listener, app).await });
+            (format!("http://{addr}"), seen)
+        }
+
+        #[tokio::test]
+        async fn requests_reach_gemini_and_vertex() {
+            let dir = tempfile::tempdir().unwrap();
+            let (gemini_url, gemini) = provider().await;
+            let (vertex_url, vertex) = provider().await;
+            let config = format!(
+                "api-keys: ['client-key']\n{}",
+                google_keys(&gemini_url, &vertex_url)
+            );
+            let mut service = service(dir.path(), &config);
+            service.sync_config_auths();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (_stop, stopped) = watch::channel(false);
+            tokio::spawn(serve(listener, None, service.app(), stopped));
+
+            let (status, models) = send(addr, "GET", "/v1/models", "").await;
+            assert_eq!(status, 200, "{models}");
+            assert!(models.contains(r#""id":"g1""#), "{models}");
+            assert!(models.contains(r#""id":"v1""#), "{models}");
+
+            let (status, body) = send(addr, "POST", "/v1/chat/completions", &chat("g1")).await;
+            assert_eq!(status, 200, "{body}");
+            let want = (
+                "/v1beta/models/gemini-2.5-flash:generateContent".to_owned(),
+                "gm-test".to_owned(),
+            );
+            assert_eq!(gemini.lock().unwrap().as_slice(), [want]);
+
+            let (status, body) = send(addr, "POST", "/v1/chat/completions", &chat("v1")).await;
+            assert_eq!(status, 200, "{body}");
+            let want = (
+                "/v1/publishers/google/models/gemini-2.5-pro:generateContent".to_owned(),
+                "vx-test".to_owned(),
+            );
+            assert_eq!(vertex.lock().unwrap().as_slice(), [want]);
         }
     }
 
