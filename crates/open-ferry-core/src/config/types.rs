@@ -1,0 +1,856 @@
+// Ported from CLIProxyAPI internal/config/config.go, sdk_config.go,
+// config_types.go and config_defaults.go, and the strategy names of
+// sdk/cliproxy/service_config.go (v8.0.10, MIT).
+// https://github.com/router-for-me/CLIProxyAPI
+
+//! The typed configuration.
+//!
+//! Field names are upstream's YAML keys in the legacy (pre-v8) layout; a v8
+//! document is flattened into that layout before it is decoded. Integers are
+//! `i64`, as Go's `int` is on 64-bit targets, and no range is enforced beyond
+//! what upstream enforces: a port of 65536 loads.
+//!
+//! `Debug` output leaves out secrets: API keys, the management key, header
+//! values and proxy URLs, which may carry credentials.
+//!
+//! Deviations from upstream:
+//! - Only the sections listed in the [module docs](super) are typed. The rest
+//!   (cloaking, fingerprints, other providers, plugins and so on) are read and
+//!   ignored, so values of the wrong type inside them are not errors.
+//! - `codex-header-defaults.user-agent` and per-key `disable-codex-cloaking`
+//!   are ignored: they only exist to present another client's identity.
+//! - Maps are `BTreeMap`s, so they iterate in key order where Go's maps
+//!   iterate in random order.
+//! - [`ThinkingSupport`] is defined here; upstream's lives in its model
+//!   registry.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+use std::time::Duration;
+
+use serde::Deserialize;
+
+use super::duration::parse_go_duration;
+
+/// The auth directory used when `auth-dir` is unset.
+pub const DEFAULT_AUTH_DIR: &str = "~/.cli-proxy-api";
+
+/// The repository the management panel is fetched from by default.
+pub const DEFAULT_PANEL_GITHUB_REPOSITORY: &str =
+    "https://github.com/router-for-me/Cli-Proxy-API-Management-Center";
+
+/// The proxy's configuration, loaded from YAML.
+#[derive(Clone, PartialEq, Deserialize)]
+#[serde(default, rename = "config.legacyConfig", rename_all = "kebab-case")]
+pub struct Config {
+    /// Client-facing compatibility behavior.
+    pub client: ClientConfig,
+    /// An optional proxy for outbound requests.
+    pub proxy_url: String,
+    /// Requires explicit model prefixes to reach prefixed credentials.
+    pub force_model_prefix: bool,
+    /// Enables detailed request logging.
+    pub request_log: bool,
+    /// Keys clients use to authenticate to this proxy.
+    pub api_keys: Vec<String>,
+    /// Forwards upstream response headers to clients.
+    pub passthrough_headers: bool,
+    /// Streaming keep-alives and bootstrap retries.
+    pub streaming: StreamingConfig,
+    /// Seconds between blank lines sent while a non-streaming response is
+    /// pending; `<= 0` disables them.
+    pub nonstream_keepalive_interval: i64,
+    /// The interface to bind; empty binds all interfaces.
+    pub host: String,
+    /// The port to listen on.
+    pub port: i64,
+    /// IPs or CIDRs allowed to set forwarded client IP headers. Loading
+    /// checks that each entry parses.
+    pub trusted_proxies: Vec<String>,
+    /// HTTPS settings.
+    pub tls: TlsConfig,
+    /// Management API settings.
+    pub remote_management: RemoteManagement,
+    /// Where credential files are stored, as written; see
+    /// [`Config::resolve_auth_dir`].
+    pub auth_dir: String,
+    /// Enables debug logging.
+    pub debug: bool,
+    /// Writes logs to rotating files instead of stdout.
+    pub logging_to_file: bool,
+    /// Disables credential and model cooldowns unless a credential overrides it.
+    pub disable_cooling: bool,
+    /// Cooldown for transient upstream errors: 0 keeps the default, negative
+    /// disables it.
+    pub transient_error_cooldown_seconds: i64,
+    /// Size of the auth refresh worker pool; `<= 0` uses the default.
+    pub auth_auto_refresh_workers: i64,
+    /// Additional credential retry rounds after the first.
+    pub request_retry: i64,
+    /// Most credentials tried per retry round; 0 tries all. Negative values
+    /// load as 0.
+    pub max_retry_credentials: i64,
+    /// Longest cooldown wait, in seconds, before another retry round.
+    pub max_retry_interval: i64,
+    /// What to do when a quota is exceeded.
+    pub quota_exceeded: QuotaExceeded,
+    /// Credential selection.
+    pub routing: RoutingConfig,
+    /// Requires authentication on the WebSocket API. Defaults to true.
+    pub ws_auth: bool,
+    /// Codex API keys.
+    pub codex_api_key: Vec<CodexKey>,
+    /// Provider-wide Codex behavior.
+    pub codex: CodexConfig,
+    /// Fallback headers for Codex OAuth requests.
+    pub codex_header_defaults: CodexHeaderDefaults,
+    /// Provider-wide Claude behavior.
+    pub claude: ClaudeConfig,
+    /// Claude API keys.
+    pub claude_api_key: Vec<ClaudeKey>,
+    /// Models excluded per OAuth channel; keys and models are lower case.
+    pub oauth_excluded_models: BTreeMap<String, Vec<String>>,
+    /// Model aliases per OAuth channel.
+    pub oauth_model_alias: BTreeMap<String, Vec<OAuthModelAlias>>,
+    /// Request-scoped error rules per OAuth channel.
+    pub oauth_request_scoped_errors: BTreeMap<String, Vec<RequestScopedErrorRule>>,
+    /// Model settings per OAuth channel.
+    pub oauth_settings: BTreeMap<String, Vec<OAuthModelSetting>>,
+    /// Legacy names of settings a v8 document placed under
+    /// `oauth.providers`, which don't apply to API-key credentials.
+    #[serde(skip)]
+    pub(crate) oauth_only_fields: BTreeSet<String>,
+}
+
+impl Default for Config {
+    /// The values upstream sets before decoding.
+    fn default() -> Self {
+        Self {
+            client: ClientConfig::default(),
+            proxy_url: String::new(),
+            force_model_prefix: false,
+            request_log: false,
+            api_keys: Vec::new(),
+            passthrough_headers: false,
+            streaming: StreamingConfig::default(),
+            nonstream_keepalive_interval: 0,
+            host: String::new(),
+            port: 0,
+            trusted_proxies: Vec::new(),
+            tls: TlsConfig::default(),
+            remote_management: RemoteManagement::default(),
+            auth_dir: String::new(),
+            debug: false,
+            logging_to_file: false,
+            disable_cooling: false,
+            transient_error_cooldown_seconds: 0,
+            auth_auto_refresh_workers: 0,
+            request_retry: 0,
+            max_retry_credentials: 0,
+            max_retry_interval: 0,
+            quota_exceeded: QuotaExceeded::default(),
+            routing: RoutingConfig::default(),
+            ws_auth: true,
+            codex_api_key: Vec::new(),
+            codex: CodexConfig::default(),
+            codex_header_defaults: CodexHeaderDefaults::default(),
+            claude: ClaudeConfig::default(),
+            claude_api_key: Vec::new(),
+            oauth_excluded_models: BTreeMap::new(),
+            oauth_model_alias: BTreeMap::new(),
+            oauth_request_scoped_errors: BTreeMap::new(),
+            oauth_settings: BTreeMap::new(),
+            oauth_only_fields: BTreeSet::new(),
+        }
+    }
+}
+
+impl Config {
+    /// Legacy names of the settings a v8 document set under
+    /// `oauth.providers`, such as `ws-auth`.
+    pub fn oauth_only_fields(&self) -> &BTreeSet<String> {
+        &self.oauth_only_fields
+    }
+
+    /// The credential selection strategy.
+    pub fn routing_strategy(&self) -> RoutingStrategy {
+        match self.routing.strategy.trim().to_lowercase().as_str() {
+            "weighted-round-robin" | "weightedroundrobin" | "wrr" => {
+                RoutingStrategy::WeightedRoundRobin
+            }
+            "fill-first" | "fillfirst" | "ff" => RoutingStrategy::FillFirst,
+            _ => RoutingStrategy::RoundRobin,
+        }
+    }
+}
+
+impl fmt::Debug for Config {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Config")
+            .field("client", &self.client)
+            .field("proxy_url", &Redacted(&self.proxy_url))
+            .field("force_model_prefix", &self.force_model_prefix)
+            .field("request_log", &self.request_log)
+            .field("api_keys", &RedactedList(&self.api_keys))
+            .field("passthrough_headers", &self.passthrough_headers)
+            .field("streaming", &self.streaming)
+            .field(
+                "nonstream_keepalive_interval",
+                &self.nonstream_keepalive_interval,
+            )
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("trusted_proxies", &self.trusted_proxies)
+            .field("tls", &self.tls)
+            .field("remote_management", &self.remote_management)
+            .field("auth_dir", &self.auth_dir)
+            .field("debug", &self.debug)
+            .field("logging_to_file", &self.logging_to_file)
+            .field("disable_cooling", &self.disable_cooling)
+            .field(
+                "transient_error_cooldown_seconds",
+                &self.transient_error_cooldown_seconds,
+            )
+            .field("auth_auto_refresh_workers", &self.auth_auto_refresh_workers)
+            .field("request_retry", &self.request_retry)
+            .field("max_retry_credentials", &self.max_retry_credentials)
+            .field("max_retry_interval", &self.max_retry_interval)
+            .field("quota_exceeded", &self.quota_exceeded)
+            .field("routing", &self.routing)
+            .field("ws_auth", &self.ws_auth)
+            .field("codex_api_key", &self.codex_api_key)
+            .field("codex", &self.codex)
+            .field("codex_header_defaults", &self.codex_header_defaults)
+            .field("claude", &self.claude)
+            .field("claude_api_key", &self.claude_api_key)
+            .field("oauth_excluded_models", &self.oauth_excluded_models)
+            .field("oauth_model_alias", &self.oauth_model_alias)
+            .field(
+                "oauth_request_scoped_errors",
+                &self.oauth_request_scoped_errors,
+            )
+            .field("oauth_settings", &self.oauth_settings)
+            .field("oauth_only_fields", &self.oauth_only_fields)
+            .finish()
+    }
+}
+
+/// How credentials are picked for a request.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum RoutingStrategy {
+    /// Each credential in turn (`round-robin`, the default).
+    #[default]
+    RoundRobin,
+    /// The first available credential (`fill-first`, `fillfirst`, `ff`).
+    FillFirst,
+    /// In turn, in proportion to each credential's weight
+    /// (`weighted-round-robin`, `weightedroundrobin`, `wrr`).
+    WeightedRoundRobin,
+}
+
+impl RoutingStrategy {
+    /// The canonical name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RoundRobin => "round-robin",
+            Self::FillFirst => "fill-first",
+            Self::WeightedRoundRobin => "weighted-round-robin",
+        }
+    }
+}
+
+/// Client-facing compatibility behavior.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, rename = "config.ClientConfig", rename_all = "kebab-case")]
+pub struct ClientConfig {
+    /// Codex client settings.
+    pub codex: CodexClientConfig,
+}
+
+/// Codex client compatibility.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(
+    default,
+    rename = "config.CodexClientConfig",
+    rename_all = "kebab-case"
+)]
+pub struct CodexClientConfig {
+    /// Optimizes official Codex multi-agent requests across providers.
+    pub optimize_multi_agent_v2: bool,
+    /// Advertises freeform `apply_patch` for supported models.
+    pub enable_apply_patch: bool,
+}
+
+/// Streaming behavior.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, rename = "config.StreamingConfig", rename_all = "kebab-case")]
+pub struct StreamingConfig {
+    /// Seconds between SSE heartbeats or WebSocket pings; `<= 0` disables them.
+    pub keepalive_seconds: i64,
+    /// Retries of a streaming request before any bytes are sent; `<= 0`
+    /// disables them.
+    pub bootstrap_retries: i64,
+}
+
+/// HTTPS server settings.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, rename = "config.TLSConfig", rename_all = "kebab-case")]
+pub struct TlsConfig {
+    /// Serves HTTPS.
+    pub enable: bool,
+    /// Certificate file path.
+    pub cert: String,
+    /// Private key file path.
+    pub key: String,
+}
+
+/// Management API settings.
+#[derive(Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, rename = "config.RemoteManagement", rename_all = "kebab-case")]
+pub struct RemoteManagement {
+    /// Allows management access from other hosts.
+    pub allow_remote: bool,
+    /// The management key as written: plaintext, or a bcrypt hash that
+    /// upstream wrote back.
+    pub secret_key: String,
+    /// Doesn't serve or sync the management panel.
+    pub disable_control_panel: bool,
+    /// Downloads the panel only when missing, without periodic updates.
+    pub disable_auto_update_panel: bool,
+    /// Where the panel is fetched from.
+    pub panel_github_repository: String,
+    /// The management API's base URL, for a remote client.
+    pub base_url: String,
+}
+
+impl Default for RemoteManagement {
+    fn default() -> Self {
+        Self {
+            allow_remote: false,
+            secret_key: String::new(),
+            disable_control_panel: false,
+            disable_auto_update_panel: false,
+            panel_github_repository: DEFAULT_PANEL_GITHUB_REPOSITORY.to_owned(),
+            base_url: String::new(),
+        }
+    }
+}
+
+impl fmt::Debug for RemoteManagement {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RemoteManagement")
+            .field("allow_remote", &self.allow_remote)
+            .field("secret_key", &Redacted(&self.secret_key))
+            .field("disable_control_panel", &self.disable_control_panel)
+            .field("disable_auto_update_panel", &self.disable_auto_update_panel)
+            .field("panel_github_repository", &self.panel_github_repository)
+            .field("base_url", &self.base_url)
+            .finish()
+    }
+}
+
+/// Behavior when a quota is exceeded.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, rename = "config.QuotaExceeded", rename_all = "kebab-case")]
+pub struct QuotaExceeded {
+    /// Switches to another project.
+    pub switch_project: bool,
+    /// Switches to a preview model.
+    pub switch_preview_model: bool,
+    /// Falls back to an Antigravity credential with credits.
+    pub antigravity_credits: bool,
+}
+
+/// Credential selection.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, rename = "config.RoutingConfig", rename_all = "kebab-case")]
+pub struct RoutingConfig {
+    /// The strategy as written; see [`Config::routing_strategy`].
+    pub strategy: String,
+}
+
+/// Provider-wide Codex behavior.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, rename = "config.CodexConfig", rename_all = "kebab-case")]
+pub struct CodexConfig {
+    /// Holds back stream frames that precede generation so an overloaded
+    /// upstream can be retried on another credential.
+    pub stream_bootstrap_buffering: bool,
+    /// Longest time to hold those frames, as written; see
+    /// [`CodexConfig::stream_bootstrap_timeout_duration`].
+    pub stream_bootstrap_timeout: String,
+    /// Opt-in compatibility for orphan Codex delegation outputs.
+    pub orphan_delegation_compatibility: bool,
+    /// Scopes quota cooldowns to the requested model.
+    pub model_level_cooling: bool,
+    /// Enables full-duplex Codex WebSockets.
+    pub response_steering: bool,
+}
+
+impl CodexConfig {
+    /// The bootstrap hold limit; zero means no time limit. Accepts Go
+    /// durations (`20s`, `500ms`) and whole seconds (`15`); anything else,
+    /// and words such as `none` or `off`, mean zero.
+    pub fn stream_bootstrap_timeout_duration(&self) -> Duration {
+        const MAX_SECONDS: i64 = i64::MAX / 1_000_000_000;
+        let raw = self.stream_bootstrap_timeout.trim();
+        let off = ["none", "unlimited", "disabled", "off", "never"];
+        if raw.is_empty() || raw == "0" || off.iter().any(|word| raw.eq_ignore_ascii_case(word)) {
+            return Duration::ZERO;
+        }
+        if let Some(nanos) = parse_go_duration(raw)
+            && let Ok(nanos) = u64::try_from(nanos)
+        {
+            return Duration::from_nanos(nanos);
+        }
+        match raw.parse::<i64>() {
+            Ok(seconds) if (0..=MAX_SECONDS).contains(&seconds) => {
+                Duration::from_secs(seconds.unsigned_abs())
+            }
+            _ => Duration::ZERO,
+        }
+    }
+}
+
+/// Fallback headers for Codex OAuth requests.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(
+    default,
+    rename = "config.CodexHeaderDefaults",
+    rename_all = "kebab-case"
+)]
+pub struct CodexHeaderDefaults {
+    /// Beta features sent on WebSocket requests when the client sends none.
+    pub beta_features: String,
+}
+
+/// Provider-wide Claude behavior.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, rename = "config.ClaudeConfig", rename_all = "kebab-case")]
+pub struct ClaudeConfig {
+    /// Scopes quota cooldowns to the requested model.
+    pub model_level_cooling: bool,
+}
+
+/// A Codex API key and its routing settings.
+#[derive(Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, rename = "config.CodexKey", rename_all = "kebab-case")]
+pub struct CodexKey {
+    /// The key.
+    pub api_key: String,
+    /// Selection preference; higher wins.
+    pub priority: i64,
+    /// Share under weighted round robin: unset means 1, `<= 0` excludes the
+    /// key, at most 1,000,000.
+    pub weight: Option<i64>,
+    /// Namespaces this key's models (`teamA/gpt-5-codex`).
+    pub prefix: String,
+    /// The endpoint. Keys without one are dropped when loading.
+    pub base_url: String,
+    /// Uses the Responses WebSocket transport.
+    pub websockets: bool,
+    /// Lets this key serve the Alpha Search endpoint.
+    pub alpha_search: bool,
+    /// A proxy for this key, overriding the global one.
+    pub proxy_url: String,
+    /// Upstream model names and their aliases.
+    pub models: Vec<CodexModel>,
+    /// Extra headers sent with this key.
+    pub headers: BTreeMap<String, String>,
+    /// Models this key doesn't serve; lower case.
+    pub excluded_models: Vec<String>,
+    /// Overrides `disable-cooling` for this key.
+    pub disable_cooling: Option<bool>,
+    /// Overrides `request-retry`; negative means the global value.
+    pub request_retry: Option<i64>,
+    /// How upstream errors are classified for this key.
+    pub request_scoped_errors: Vec<RequestScopedErrorRule>,
+}
+
+impl fmt::Debug for CodexKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CodexKey")
+            .field("api_key", &Redacted(&self.api_key))
+            .field("priority", &self.priority)
+            .field("weight", &self.weight)
+            .field("prefix", &self.prefix)
+            .field("base_url", &self.base_url)
+            .field("websockets", &self.websockets)
+            .field("alpha_search", &self.alpha_search)
+            .field("proxy_url", &Redacted(&self.proxy_url))
+            .field("models", &self.models)
+            .field("headers", &RedactedMap(&self.headers))
+            .field("excluded_models", &self.excluded_models)
+            .field("disable_cooling", &self.disable_cooling)
+            .field("request_retry", &self.request_retry)
+            .field("request_scoped_errors", &self.request_scoped_errors)
+            .finish()
+    }
+}
+
+/// A Codex model served by an API key.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, rename = "config.CodexModel", rename_all = "kebab-case")]
+pub struct CodexModel {
+    /// The upstream model name.
+    pub name: String,
+    /// The name clients use.
+    pub alias: String,
+    /// A name shown in model lists.
+    pub display_name: String,
+    /// The context window advertised to Codex clients.
+    pub max_context_length: i64,
+    /// Rewrites model names in responses back to the alias.
+    pub force_mapping: bool,
+    /// Converts multi-agent items for Responses-compatible endpoints.
+    pub is_compat: bool,
+    /// Enables `configuration_update` for this model.
+    pub support_configuration_update: bool,
+    /// Reasoning support.
+    pub thinking: Option<ThinkingSupport>,
+}
+
+/// A Claude API key and its routing settings.
+#[derive(Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, rename = "config.ClaudeKey", rename_all = "kebab-case")]
+pub struct ClaudeKey {
+    /// The key.
+    pub api_key: String,
+    /// Selection preference; higher wins.
+    pub priority: i64,
+    /// Share under weighted round robin, as for [`CodexKey::weight`].
+    pub weight: Option<i64>,
+    /// Namespaces this key's models.
+    pub prefix: String,
+    /// The endpoint; empty means the default Claude API.
+    pub base_url: String,
+    /// A proxy for this key, overriding the global one.
+    pub proxy_url: String,
+    /// Upstream model names and their aliases.
+    pub models: Vec<ClaudeModel>,
+    /// Extra headers sent with this key.
+    pub headers: BTreeMap<String, String>,
+    /// Models this key doesn't serve; lower case.
+    pub excluded_models: Vec<String>,
+    /// Moves mid-conversation system messages into the top-level system field.
+    pub rebuild_mid_system_message: bool,
+    /// Overrides `disable-cooling` for this key.
+    pub disable_cooling: Option<bool>,
+    /// Overrides `request-retry`; negative means the global value.
+    pub request_retry: Option<i64>,
+    /// How upstream errors are classified for this key.
+    pub request_scoped_errors: Vec<RequestScopedErrorRule>,
+}
+
+impl fmt::Debug for ClaudeKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ClaudeKey")
+            .field("api_key", &Redacted(&self.api_key))
+            .field("priority", &self.priority)
+            .field("weight", &self.weight)
+            .field("prefix", &self.prefix)
+            .field("base_url", &self.base_url)
+            .field("proxy_url", &Redacted(&self.proxy_url))
+            .field("models", &self.models)
+            .field("headers", &RedactedMap(&self.headers))
+            .field("excluded_models", &self.excluded_models)
+            .field(
+                "rebuild_mid_system_message",
+                &self.rebuild_mid_system_message,
+            )
+            .field("disable_cooling", &self.disable_cooling)
+            .field("request_retry", &self.request_retry)
+            .field("request_scoped_errors", &self.request_scoped_errors)
+            .finish()
+    }
+}
+
+/// A Claude model served by an API key.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, rename = "config.ClaudeModel", rename_all = "kebab-case")]
+pub struct ClaudeModel {
+    /// The upstream model name.
+    pub name: String,
+    /// The name clients use.
+    pub alias: String,
+    /// A name shown in model lists.
+    pub display_name: String,
+    /// The context window advertised to Codex clients.
+    pub max_context_length: i64,
+    /// Rewrites model names in responses back to the alias.
+    pub force_mapping: bool,
+    /// Keeps thinking blocks with empty signatures for compatible upstreams.
+    pub is_compat: bool,
+    /// Reasoning support.
+    pub thinking: Option<ThinkingSupport>,
+}
+
+/// A model's reasoning support.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(
+    default,
+    rename = "registry.ThinkingSupport",
+    rename_all = "kebab-case"
+)]
+pub struct ThinkingSupport {
+    /// The smallest thinking budget.
+    pub min: i64,
+    /// The largest thinking budget.
+    pub max: i64,
+    /// Whether a budget of 0 turns thinking off.
+    pub zero_allowed: bool,
+    /// Whether a budget of -1 lets the model decide.
+    pub dynamic_allowed: bool,
+    /// Named effort levels, when the model uses them.
+    pub levels: Vec<String>,
+}
+
+/// A rule classifying upstream errors.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(
+    default,
+    rename = "config.RequestScopedErrorRule",
+    rename_all = "kebab-case"
+)]
+pub struct RequestScopedErrorRule {
+    /// The upstream HTTP status.
+    pub status: i64,
+    /// Substrings of the error body.
+    #[serde(rename = "match")]
+    pub matches: Vec<String>,
+    /// Regular expressions over the error body.
+    pub match_regexr: Vec<String>,
+    /// `stop`, `stop-and-cooldown`, `continue` or `continue-and-cooldown`;
+    /// lower case.
+    pub action: String,
+}
+
+/// A model alias for an OAuth channel.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, rename = "config.OAuthModelAlias", rename_all = "kebab-case")]
+pub struct OAuthModelAlias {
+    /// The upstream model name.
+    pub name: String,
+    /// The name clients use.
+    pub alias: String,
+    /// Lists the alias next to the original model instead of replacing it.
+    pub fork: bool,
+    /// A name shown in model lists.
+    pub display_name: String,
+    /// Rewrites model names in responses back to the alias.
+    pub force_mapping: bool,
+}
+
+/// Model settings for an OAuth channel.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(
+    default,
+    rename = "config.OAuthModelSetting",
+    rename_all = "kebab-case"
+)]
+pub struct OAuthModelSetting {
+    /// The model name.
+    pub name: String,
+    /// An alias the setting is limited to.
+    pub alias: String,
+    /// The context window advertised to Codex clients.
+    pub max_context_length: i64,
+}
+
+impl OAuthModelSetting {
+    /// Upstream's `ResolveOAuthModelSetting`: the setting for a model. A
+    /// match on the alias beats a match on the name, and later entries beat
+    /// earlier ones. Comparisons ignore case and surrounding space.
+    pub fn resolve<'a>(
+        settings: &'a [OAuthModelSetting],
+        model_id: &str,
+        metadata_model_id: &str,
+        model_name: &str,
+    ) -> Option<&'a OAuthModelSetting> {
+        let id = model_id.trim().to_lowercase();
+        let meta_id = metadata_model_id.trim().to_lowercase();
+        let name = model_name.trim().to_lowercase();
+        let mut alias_match = None;
+        let mut name_match = None;
+        for entry in settings {
+            let entry_name = entry.name.trim().to_lowercase();
+            if entry_name.is_empty() {
+                continue;
+            }
+            let entry_alias = entry.alias.trim().to_lowercase();
+            if !entry_alias.is_empty() && !id.is_empty() && id == entry_alias {
+                alias_match = Some(entry);
+            } else if (entry_alias.is_empty() || entry_alias == id)
+                && (id == entry_name
+                    || (!meta_id.is_empty() && meta_id == entry_name)
+                    || (!name.is_empty() && name == entry_name))
+            {
+                name_match = Some(entry);
+            }
+        }
+        alias_match.or(name_match)
+    }
+}
+
+/// Shows whether a secret is set without showing it.
+struct Redacted<'a>(&'a str);
+
+impl fmt::Debug for Redacted<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0.is_empty() {
+            f.write_str("\"\"")
+        } else {
+            f.write_str("<redacted>")
+        }
+    }
+}
+
+struct RedactedList<'a>(&'a [String]);
+
+impl fmt::Debug for RedactedList<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list()
+            .entries(self.0.iter().map(|item| Redacted(item)))
+            .finish()
+    }
+}
+
+/// Header names with their values hidden.
+struct RedactedMap<'a>(&'a BTreeMap<String, String>);
+
+impl fmt::Debug for RedactedMap<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_map()
+            .entries(self.0.iter().map(|(key, value)| (key, Redacted(value))))
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_hides_secrets() {
+        let mut config = Config {
+            api_keys: vec!["sk-client-secret".to_owned()],
+            proxy_url: "http://user:pass@proxy".to_owned(),
+            ..Config::default()
+        };
+        config.remote_management.secret_key = "mgmt-secret".to_owned();
+        config.codex_api_key.push(CodexKey {
+            api_key: "sk-codex-secret".to_owned(),
+            headers: BTreeMap::from([("Authorization".to_owned(), "Bearer hdr-secret".to_owned())]),
+            ..CodexKey::default()
+        });
+        config.claude_api_key.push(ClaudeKey {
+            api_key: "sk-claude-secret".to_owned(),
+            proxy_url: "socks5://u:p@h".to_owned(),
+            ..ClaudeKey::default()
+        });
+        let text = format!("{config:?}");
+        for secret in [
+            "client-secret",
+            "user:pass",
+            "mgmt-secret",
+            "codex-secret",
+            "hdr-secret",
+            "claude-secret",
+            "u:p@h",
+        ] {
+            assert!(!text.contains(secret), "{secret} leaked");
+        }
+        assert!(text.contains("Authorization"));
+    }
+
+    #[test]
+    fn routing_strategy_names() {
+        let strategy = |name: &str| {
+            let mut config = Config::default();
+            config.routing.strategy = name.to_owned();
+            config.routing_strategy()
+        };
+        assert_eq!(strategy(""), RoutingStrategy::RoundRobin);
+        assert_eq!(strategy("round-robin"), RoutingStrategy::RoundRobin);
+        assert_eq!(strategy(" WRR "), RoutingStrategy::WeightedRoundRobin);
+        assert_eq!(
+            strategy("weightedroundrobin"),
+            RoutingStrategy::WeightedRoundRobin
+        );
+        assert_eq!(strategy("Fill-First"), RoutingStrategy::FillFirst);
+        assert_eq!(strategy("ff"), RoutingStrategy::FillFirst);
+        assert_eq!(strategy("random"), RoutingStrategy::RoundRobin);
+    }
+
+    #[test]
+    fn stream_bootstrap_timeout_parses_like_upstream() {
+        let timeout = |raw: &str| {
+            CodexConfig {
+                stream_bootstrap_timeout: raw.to_owned(),
+                ..CodexConfig::default()
+            }
+            .stream_bootstrap_timeout_duration()
+        };
+        assert_eq!(timeout(""), Duration::ZERO);
+        assert_eq!(timeout("0"), Duration::ZERO);
+        assert_eq!(timeout("Never"), Duration::ZERO);
+        assert_eq!(timeout("20s"), Duration::from_secs(20));
+        assert_eq!(timeout(" 500ms "), Duration::from_millis(500));
+        assert_eq!(timeout("1h30m"), Duration::from_secs(5400));
+        assert_eq!(timeout("15"), Duration::from_secs(15));
+        assert_eq!(timeout("+15"), Duration::from_secs(15));
+        assert_eq!(timeout("-5s"), Duration::ZERO);
+        assert_eq!(timeout("-5"), Duration::ZERO);
+        assert_eq!(timeout("soon"), Duration::ZERO);
+        assert_eq!(timeout("9223372037"), Duration::ZERO);
+    }
+
+    #[test]
+    fn oauth_model_setting_resolution() {
+        let setting = |name: &str, alias: &str, length: i64| OAuthModelSetting {
+            name: name.to_owned(),
+            alias: alias.to_owned(),
+            max_context_length: length,
+        };
+        let settings = vec![
+            setting("gpt-5", "", 1),
+            setting("gpt-5", "fast", 2),
+            setting("GPT-5", "", 3),
+            setting(" ", "fast", 4),
+        ];
+        let length = |id: &str, meta: &str, name: &str| {
+            OAuthModelSetting::resolve(&settings, id, meta, name).map(|s| s.max_context_length)
+        };
+        assert_eq!(length("gpt-5", "", ""), Some(3));
+        assert_eq!(length("FAST", "", ""), Some(2));
+        assert_eq!(length("other", "gpt-5", ""), Some(3));
+        assert_eq!(length("other", "", ""), None);
+        assert_eq!(length("", "gpt-5", ""), Some(3));
+        assert_eq!(length("", "", "gpt-5"), Some(3));
+        assert_eq!(length("nothing", "", ""), None);
+        assert_eq!(OAuthModelSetting::resolve(&[], "gpt-5", "", ""), None);
+    }
+
+    // oauth_settings_test.go: TestResolveOAuthModelSetting_Priority.
+    #[test]
+    fn oauth_model_setting_alias_beats_name() {
+        let settings = [
+            OAuthModelSetting {
+                name: "upstream".to_owned(),
+                max_context_length: 524_288,
+                ..OAuthModelSetting::default()
+            },
+            OAuthModelSetting {
+                name: "upstream".to_owned(),
+                alias: "public".to_owned(),
+                max_context_length: 1_048_576,
+            },
+        ];
+        let length = |id: &str, meta: &str| {
+            OAuthModelSetting::resolve(&settings, id, meta, "").map(|s| s.max_context_length)
+        };
+        assert_eq!(length("upstream", "upstream"), Some(524_288));
+        assert_eq!(length("public", "upstream"), Some(1_048_576));
+        assert_eq!(length("unknown", ""), None);
+    }
+}

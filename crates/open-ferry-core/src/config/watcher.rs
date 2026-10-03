@@ -1,0 +1,1265 @@
+// Ported from CLIProxyAPI internal/watcher (watcher.go, events.go,
+// config_reload.go, and the auth-file bookkeeping of clients.go;
+// dispatcher.go is replaced by the event channel) (v8.0.10, MIT).
+// https://github.com/router-for-me/CLIProxyAPI
+
+//! Watching the config file and the auth directory.
+//!
+//! [`ConfigWatcher::start`] watches both on a background thread and sends a
+//! [`WatchEvent`] on a bounded channel for each change, following upstream's
+//! rules:
+//! - Writes to the config file are debounced: it's reloaded once it has been
+//!   quiet for 150 ms, and only if its SHA-256 differs from the last config
+//!   that loaded. A config that doesn't load is reported and the caller keeps
+//!   the one it has; the next change is tried again.
+//! - A `.json` file directly inside the auth directory that is created or
+//!   written is reported when its contents are a JSON object and differ from
+//!   the last ones seen. Empty files are skipped.
+//! - A removed or renamed auth file is checked again after 50 ms (and, if it
+//!   was known, up to three more times 25 ms apart), so an atomic replace
+//!   counts as a change. Otherwise a known file is reported removed and an
+//!   unknown one ignored. Removes of one path are debounced for a second.
+//!
+//! At start the auth directory is scanned, as upstream's first client load
+//! does: each `.json` file that parses is reported as added, and every
+//! non-empty one is remembered, so later events with the same contents are
+//! skipped.
+//!
+//! The watcher stops when the [`ConfigWatcher`] is dropped or the receiver
+//! is closed. When the channel is full it waits for the consumer.
+//!
+//! Deviations from upstream:
+//! - Events go out on a channel; upstream calls a reload callback and builds
+//!   and dispatches auth records itself. The consumer reads the file named in
+//!   an auth event.
+//! - The directory holding the config file is watched rather than the file,
+//!   so an editor that saves by replacing the file is still followed. Events
+//!   for other files there are ignored, as upstream ignores them.
+//! - The auth directory is fixed at start. When a reloaded config names a
+//!   different `auth-dir`, upstream rescans the new directory but goes on
+//!   watching the old one; here the consumer restarts the watcher.
+//! - A reloaded config is decoded from the bytes that were hashed; upstream
+//!   reads the file again to load it, and again afterwards because loading
+//!   may rewrite it, which this port never does.
+//! - An auth file counts as parseable when it's a JSON object or `null`;
+//!   upstream also checks field types against its auth record.
+//! - Upstream's mirrored auth directory (from a token store) isn't ported.
+//! - Paths are made absolute before watching, as the file watcher reports
+//!   them that way, and events reported under a watched directory's canonical
+//!   path (macOS does this) are mapped back to the directory as given.
+
+use std::collections::HashMap;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::mpsc::{self as std_mpsc, RecvTimeoutError};
+use std::time::{Duration, Instant};
+use std::{fmt, fs, thread};
+
+use notify::event::{ModifyKind, RenameMode};
+use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
+use sha2::{Digest, Sha256};
+use tokio::sync::mpsc;
+use tracing::{debug, error, info, warn};
+
+use super::ConfigError;
+use super::load::load_bytes;
+use super::paths::{self, Os};
+use super::types::Config;
+
+/// How long a removed or renamed auth file gets to reappear before it
+/// counts as removed.
+const REPLACE_CHECK_DELAY: Duration = Duration::from_millis(50);
+/// The wait between further checks for a known auth file.
+const REPLACE_RETRY_DELAY: Duration = Duration::from_millis(25);
+/// How many further checks a known auth file gets.
+const REPLACE_RETRIES: usize = 3;
+/// How long the config file must be quiet before it's reloaded.
+const CONFIG_RELOAD_DEBOUNCE: Duration = Duration::from_millis(150);
+/// Removes of one auth file closer together than this are dropped.
+const AUTH_REMOVE_DEBOUNCE_WINDOW: Duration = Duration::from_secs(1);
+/// Past this many remembered removes, the stale ones are forgotten.
+const REMOVE_TIMES_LIMIT: usize = 128;
+/// Events waiting for the consumer.
+const EVENT_CAPACITY: usize = 64;
+
+/// A change to the config file or the auth directory.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum WatchEvent {
+    /// The config file changed and loaded. Its `auth_dir` is resolved
+    /// (`~` expanded, cleaned), as upstream stores it after a reload.
+    ConfigChanged(Arc<Config>),
+    /// The config file changed but didn't load. Keep the current config.
+    ConfigInvalid(ConfigError),
+    /// An auth file appeared, or was there at start. Load it.
+    AuthAdded(PathBuf),
+    /// A known auth file has new contents. Load it again.
+    AuthChanged(PathBuf),
+    /// A known auth file was removed. Drop what was loaded from it. Files
+    /// that never parsed are known too, so this may name a file that was
+    /// never added.
+    AuthRemoved(PathBuf),
+}
+
+/// Why a watcher couldn't start.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WatchError {
+    message: String,
+}
+
+impl WatchError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for WatchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for WatchError {}
+
+/// Watches the config file and the auth directory until dropped.
+pub struct ConfigWatcher {
+    config_path: PathBuf,
+    auth_dir: PathBuf,
+    stop: std_mpsc::Sender<Message>,
+    _watcher: RecommendedWatcher,
+}
+
+impl ConfigWatcher {
+    /// Starts watching the config file at `config_path` and the auth
+    /// directory `config` names.
+    ///
+    /// The receiver first gets a [`WatchEvent::AuthAdded`] for each auth file
+    /// already there, then the changes. Like upstream's watcher, this fails
+    /// when the config file or the auth directory doesn't exist.
+    pub fn start(
+        config_path: impl AsRef<Path>,
+        config: &Config,
+    ) -> Result<(Self, mpsc::Receiver<WatchEvent>), WatchError> {
+        let config_path = absolute(config_path.as_ref(), "config file")?;
+        if let Err(error) = fs::metadata(&config_path) {
+            return Err(WatchError::new(format!(
+                "watch config file {}: {error}",
+                config_path.display()
+            )));
+        }
+        let Some(config_dir) = config_path.parent().map(Path::to_path_buf) else {
+            return Err(WatchError::new(format!(
+                "watch config file {}: no parent directory",
+                config_path.display()
+            )));
+        };
+        let auth_dir = config
+            .resolve_auth_dir()
+            .map_err(|error| WatchError::new(error.to_string()))?;
+        let auth_dir = absolute(&auth_dir, "auth directory")?;
+        if !auth_dir.is_dir() {
+            return Err(WatchError::new(format!(
+                "watch auth directory {}: not an existing directory",
+                auth_dir.display()
+            )));
+        }
+
+        let (sender, messages) = std_mpsc::channel();
+        let notify_sender = sender.clone();
+        let mut watcher = notify::recommended_watcher(move |result| {
+            let _ = notify_sender.send(Message::Fs(result));
+        })
+        .map_err(|error| WatchError::new(format!("start file watcher: {error}")))?;
+        let mut dirs = vec![config_dir];
+        if dirs.iter().all(|dir| path_key(dir) != path_key(&auth_dir)) {
+            dirs.push(auth_dir.clone());
+        }
+        for dir in &dirs {
+            watcher
+                .watch(dir, RecursiveMode::NonRecursive)
+                .map_err(|error| {
+                    WatchError::new(format!("watch directory {}: {error}", dir.display()))
+                })?;
+        }
+
+        let aliases = Aliases::new(&dirs);
+        let state = WatchState::new(config_path.clone(), auth_dir.clone());
+        let (events, receiver) = mpsc::channel(EVENT_CAPACITY);
+        thread::Builder::new()
+            .name("open-ferry-config-watcher".to_owned())
+            .spawn(move || run(state, &aliases, &messages, &events))
+            .map_err(|error| WatchError::new(format!("start watcher thread: {error}")))?;
+        debug!(
+            config = %config_path.display(),
+            auth_dir = %auth_dir.display(),
+            "watching config file and auth directory"
+        );
+        let watcher = Self {
+            config_path,
+            auth_dir,
+            stop: sender,
+            _watcher: watcher,
+        };
+        Ok((watcher, receiver))
+    }
+
+    /// The config file being watched, made absolute.
+    pub fn config_path(&self) -> &Path {
+        &self.config_path
+    }
+
+    /// The auth directory being watched, resolved and made absolute.
+    pub fn auth_dir(&self) -> &Path {
+        &self.auth_dir
+    }
+}
+
+impl fmt::Debug for ConfigWatcher {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConfigWatcher")
+            .field("config_path", &self.config_path)
+            .field("auth_dir", &self.auth_dir)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for ConfigWatcher {
+    fn drop(&mut self) {
+        let _ = self.stop.send(Message::Stop);
+    }
+}
+
+/// What the watcher thread receives.
+enum Message {
+    Fs(notify::Result<notify::Event>),
+    Stop,
+}
+
+/// fsnotify's operations, which upstream's rules are written in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Op {
+    Create,
+    Write,
+    Remove,
+    Rename,
+}
+
+/// The fsnotify operation a notify event stands for, as fsnotify reports
+/// the same change. Metadata and access events are dropped, as upstream
+/// drops `Chmod`.
+fn op_of(kind: &EventKind) -> Option<Op> {
+    match kind {
+        EventKind::Create(_) | EventKind::Modify(ModifyKind::Name(RenameMode::To)) => {
+            Some(Op::Create)
+        }
+        // Sent after the `From` and `To` halves it pairs up.
+        EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => None,
+        EventKind::Modify(ModifyKind::Name(_)) => Some(Op::Rename),
+        EventKind::Modify(ModifyKind::Metadata(_)) | EventKind::Access(_) => None,
+        EventKind::Modify(_) | EventKind::Any | EventKind::Other => Some(Op::Write),
+        EventKind::Remove(_) => Some(Op::Remove),
+    }
+}
+
+/// What handling one event calls for.
+#[derive(Debug, PartialEq)]
+enum Step {
+    Nothing,
+    ScheduleConfigReload,
+    Send(WatchEvent),
+}
+
+type Hash = [u8; 32];
+
+fn sha256(data: &[u8]) -> Hash {
+    Sha256::digest(data).into()
+}
+
+/// The watcher's bookkeeping. Upstream keeps it on its `Watcher` behind
+/// mutexes; here one thread owns it.
+struct WatchState {
+    config_path: PathBuf,
+    config_key: String,
+    auth_dir: PathBuf,
+    auth_dir_key: String,
+    /// The hash of the last config that loaded; nothing before the first
+    /// reload, so the first config event always reloads, as upstream's does.
+    last_config_hash: Option<Hash>,
+    /// The last contents seen of each known auth file, by [`path_key`].
+    auth_hashes: HashMap<String, Hash>,
+    /// When each auth file was last seen removed, by [`path_key`].
+    remove_times: HashMap<String, Instant>,
+}
+
+impl WatchState {
+    fn new(config_path: PathBuf, auth_dir: PathBuf) -> Self {
+        Self {
+            config_key: path_key(&config_path),
+            config_path,
+            auth_dir_key: path_key(&auth_dir),
+            auth_dir,
+            last_config_hash: None,
+            auth_hashes: HashMap::new(),
+            remove_times: HashMap::new(),
+        }
+    }
+
+    /// Upstream's `handleEvent`.
+    fn handle_event(&mut self, path: &Path, op: Op, now: Instant) -> Step {
+        let key = path_key(path);
+        if key == self.config_key && op != Op::Remove {
+            debug!(?op, "config file event");
+            return Step::ScheduleConfigReload;
+        }
+        let is_auth_json =
+            paths::dir(Os::HOST, &key) == self.auth_dir_key && key.ends_with(".json");
+        if !is_auth_json {
+            return Step::Nothing;
+        }
+        debug!(?op, file = %file_name(path), "auth file event");
+        match op {
+            Op::Create | Op::Write => self.add_or_update(path, key),
+            Op::Remove | Op::Rename => self.remove_or_replace(path, key, now),
+        }
+    }
+
+    /// A removed or renamed auth file: upstream's check for an atomic
+    /// replace, then `removeClient`.
+    fn remove_or_replace(&mut self, path: &Path, key: String, now: Instant) -> Step {
+        if self.should_debounce_remove(&key, now) {
+            debug!(file = %file_name(path), "debouncing remove event");
+            return Step::Nothing;
+        }
+        thread::sleep(REPLACE_CHECK_DELAY);
+        let mut exists = fs::metadata(path).is_ok();
+        if !exists && self.auth_hashes.contains_key(&key) {
+            for _ in 0..REPLACE_RETRIES {
+                thread::sleep(REPLACE_RETRY_DELAY);
+                if fs::metadata(path).is_ok() {
+                    exists = true;
+                    break;
+                }
+            }
+        }
+        if exists {
+            return self.add_or_update(path, key);
+        }
+        if self.auth_hashes.remove(&key).is_none() {
+            debug!(file = %file_name(path), "ignoring remove for unknown auth file");
+            return Step::Nothing;
+        }
+        info!(file = %file_name(path), "auth file removed");
+        Step::Send(WatchEvent::AuthRemoved(path.to_path_buf()))
+    }
+
+    /// Upstream's `addOrUpdateClient`, with its `authFileUnchanged` check
+    /// folded in so the file is read once.
+    fn add_or_update(&mut self, path: &Path, key: String) -> Step {
+        let data = match fs::read(path) {
+            Ok(data) => data,
+            Err(error) => {
+                error!(file = %file_name(path), %error, "failed to read auth file");
+                return Step::Nothing;
+            }
+        };
+        if data.is_empty() {
+            debug!(file = %file_name(path), "ignoring empty auth file");
+            return Step::Nothing;
+        }
+        let hash = sha256(&data);
+        if self.auth_hashes.get(&key) == Some(&hash) {
+            debug!(file = %file_name(path), "auth file unchanged (hash match)");
+            return Step::Nothing;
+        }
+        if let Err(reason) = check_auth_json(&data) {
+            error!(file = %file_name(path), %reason, "failed to parse auth file");
+            return Step::Nothing;
+        }
+        let known = self.auth_hashes.insert(key, hash).is_some();
+        info!(file = %file_name(path), "auth file changed");
+        let path = path.to_path_buf();
+        Step::Send(if known {
+            WatchEvent::AuthChanged(path)
+        } else {
+            WatchEvent::AuthAdded(path)
+        })
+    }
+
+    /// Upstream's `shouldDebounceRemove`: whether `key` was removed less
+    /// than a second ago. Records `now` otherwise.
+    fn should_debounce_remove(&mut self, key: &str, now: Instant) -> bool {
+        if key.is_empty() {
+            return false;
+        }
+        if let Some(last) = self.remove_times.get(key)
+            && now.saturating_duration_since(*last) < AUTH_REMOVE_DEBOUNCE_WINDOW
+        {
+            return true;
+        }
+        self.remove_times.insert(key.to_owned(), now);
+        if self.remove_times.len() > REMOVE_TIMES_LIMIT {
+            self.remove_times.retain(|_, at| {
+                now.saturating_duration_since(*at) <= 2 * AUTH_REMOVE_DEBOUNCE_WINDOW
+            });
+        }
+        false
+    }
+
+    /// Upstream's `reloadConfigIfChanged` and `reloadConfig`.
+    fn reload_config_if_changed(&mut self) -> Option<WatchEvent> {
+        let data = match fs::read(&self.config_path) {
+            Ok(data) => data,
+            Err(error) => {
+                error!(%error, "failed to read config file for hash check");
+                return None;
+            }
+        };
+        if data.is_empty() {
+            debug!("ignoring empty config file write event");
+            return None;
+        }
+        let hash = sha256(&data);
+        if self.last_config_hash == Some(hash) {
+            debug!("config file content unchanged (hash match), skipping reload");
+            return None;
+        }
+        info!(path = %self.config_path.display(), "config file changed, reloading");
+        match load_bytes(&data) {
+            Ok(mut config) => {
+                match paths::resolve_auth_dir(Os::HOST, &config.auth_dir, paths::user_home_dir) {
+                    Ok(auth_dir) => config.auth_dir = auth_dir,
+                    Err(error) => error!(%error, "failed to resolve auth directory from config"),
+                }
+                self.last_config_hash = Some(hash);
+                Some(WatchEvent::ConfigChanged(Arc::new(config)))
+            }
+            Err(error) => {
+                error!(%error, "failed to reload config");
+                Some(WatchEvent::ConfigInvalid(error))
+            }
+        }
+    }
+
+    /// The auth-file part of upstream's first `reloadClients`: remembers
+    /// every non-empty `.json` file in the auth directory and reports those
+    /// that parse, in name order.
+    fn initial_scan(&mut self) -> Vec<WatchEvent> {
+        let entries = match fs::read_dir(&self.auth_dir) {
+            Ok(entries) => entries,
+            Err(error) => {
+                error!(dir = %self.auth_dir.display(), %error, "failed to read auth directory");
+                return Vec::new();
+            }
+        };
+        let mut names: Vec<OsString> = entries
+            .filter_map(Result::ok)
+            .filter(|entry| !entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .map(|entry| entry.file_name())
+            .filter(|name| name.to_string_lossy().to_lowercase().ends_with(".json"))
+            .collect();
+        names.sort();
+        let mut events = Vec::new();
+        for name in names {
+            let path = self.auth_dir.join(&name);
+            let data = match fs::read(&path) {
+                Ok(data) if !data.is_empty() => data,
+                _ => continue,
+            };
+            self.auth_hashes.insert(path_key(&path), sha256(&data));
+            match check_auth_json(&data) {
+                Ok(()) => events.push(WatchEvent::AuthAdded(path)),
+                Err(reason) => {
+                    warn!(file = %name.to_string_lossy(), %reason, "skipping auth file");
+                }
+            }
+        }
+        debug!(
+            files = self.auth_hashes.len(),
+            loaded = events.len(),
+            "auth directory scanned"
+        );
+        events
+    }
+}
+
+/// Whether an auth file's contents parse. The reason never quotes them.
+fn check_auth_json(data: &[u8]) -> Result<(), String> {
+    match serde_json::from_slice::<serde_json::Value>(data) {
+        Ok(value) if value.is_object() || value.is_null() => Ok(()),
+        Ok(_) => Err("not a JSON object".to_owned()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+/// The file name of `path`, for logs, as upstream logs `filepath.Base`.
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// `path` as upstream's `normalizeAuthPath` keys it on this platform.
+fn path_key(path: &Path) -> String {
+    normalize_path(Os::HOST, &path.to_string_lossy())
+}
+
+/// Upstream's `normalizeAuthPath`: trimmed and cleaned, and on Windows
+/// without a `\\?\` prefix and lower-cased.
+fn normalize_path(os: Os, path: &str) -> String {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let cleaned = paths::clean(os, trimmed);
+    match os {
+        Os::Unix => cleaned,
+        Os::Windows => cleaned
+            .strip_prefix(r"\\?\")
+            .unwrap_or(&cleaned)
+            .to_lowercase(),
+    }
+}
+
+/// `path` made absolute, as the file watcher makes it.
+fn absolute(path: &Path, what: &str) -> Result<PathBuf, WatchError> {
+    std::path::absolute(path)
+        .map_err(|error| WatchError::new(format!("{what} {}: {error}", path.display())))
+}
+
+/// Maps events under a watched directory's canonical path back to the
+/// directory as it was given.
+#[derive(Default)]
+struct Aliases(Vec<(String, PathBuf)>);
+
+impl Aliases {
+    fn new(dirs: &[PathBuf]) -> Self {
+        let mut aliases = Vec::new();
+        for dir in dirs {
+            if let Ok(canonical) = fs::canonicalize(dir) {
+                let key = path_key(&canonical);
+                if key != path_key(dir) {
+                    aliases.push((key, dir.clone()));
+                }
+            }
+        }
+        Self(aliases)
+    }
+
+    fn translate(&self, path: &Path) -> PathBuf {
+        if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
+            let key = path_key(parent);
+            if let Some((_, dir)) = self.0.iter().find(|(alias, _)| *alias == key) {
+                return dir.join(name);
+            }
+        }
+        path.to_path_buf()
+    }
+}
+
+/// The watcher thread: reports the auth files found at start, then handles
+/// events until stopped, reloading the config once it has been quiet for
+/// [`CONFIG_RELOAD_DEBOUNCE`].
+fn run(
+    mut state: WatchState,
+    aliases: &Aliases,
+    messages: &std_mpsc::Receiver<Message>,
+    events: &mpsc::Sender<WatchEvent>,
+) {
+    for event in state.initial_scan() {
+        if events.blocking_send(event).is_err() {
+            return;
+        }
+    }
+    let mut reload_at: Option<Instant> = None;
+    loop {
+        if let Some(at) = reload_at
+            && at <= Instant::now()
+        {
+            reload_at = None;
+            if let Some(event) = state.reload_config_if_changed()
+                && events.blocking_send(event).is_err()
+            {
+                return;
+            }
+        }
+        let message = match reload_at {
+            Some(at) => match messages.recv_timeout(at.saturating_duration_since(Instant::now())) {
+                Ok(message) => message,
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => return,
+            },
+            None => match messages.recv() {
+                Ok(message) => message,
+                Err(_) => return,
+            },
+        };
+        let event = match message {
+            Message::Stop => return,
+            Message::Fs(Err(error)) => {
+                warn!(%error, "file watcher error");
+                continue;
+            }
+            Message::Fs(Ok(event)) => event,
+        };
+        let Some(op) = op_of(&event.kind) else {
+            continue;
+        };
+        for path in &event.paths {
+            let path = aliases.translate(path);
+            match state.handle_event(&path, op, Instant::now()) {
+                Step::Nothing => {}
+                Step::ScheduleConfigReload => {
+                    reload_at = Some(Instant::now() + CONFIG_RELOAD_DEBOUNCE);
+                }
+                Step::Send(event) => {
+                    if events.blocking_send(event).is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+        if events.is_closed() {
+            return;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use notify::event::{AccessKind, CreateKind, DataChange, MetadataKind, RemoveKind};
+
+    use super::super::testing::TempDir;
+    use super::*;
+
+    const DEMO: &str = r#"{"type":"demo"}"#;
+
+    /// A temp dir holding `config.yaml` and an `auth` directory.
+    struct Fixture {
+        dir: TempDir,
+        config_path: PathBuf,
+        auth_dir: PathBuf,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let dir = TempDir::new();
+            let auth_dir = dir.mkdir("auth");
+            let config_path = dir.join("config.yaml");
+            let fixture = Self {
+                dir,
+                config_path,
+                auth_dir,
+            };
+            fixture.write_config("port: 8080\n");
+            fixture
+        }
+
+        fn write_config(&self, rest: &str) {
+            let body = format!("auth-dir: '{}'\n{rest}", self.auth_dir.display());
+            fs::write(&self.config_path, body).expect("write config");
+        }
+
+        fn state(&self) -> WatchState {
+            WatchState::new(self.config_path.clone(), self.auth_dir.clone())
+        }
+
+        fn auth(&self, name: &str) -> PathBuf {
+            self.auth_dir.join(name)
+        }
+
+        fn write_auth(&self, name: &str, contents: &str) -> PathBuf {
+            let path = self.auth(name);
+            fs::write(&path, contents).expect("write auth file");
+            path
+        }
+    }
+
+    fn known(state: &WatchState, path: &Path) -> Option<Hash> {
+        state.auth_hashes.get(&path_key(path)).copied()
+    }
+
+    fn remember(state: &mut WatchState, path: &Path, contents: &str) {
+        state
+            .auth_hashes
+            .insert(path_key(path), sha256(contents.as_bytes()));
+    }
+
+    fn config_of(event: Option<WatchEvent>) -> Arc<Config> {
+        match event {
+            Some(WatchEvent::ConfigChanged(config)) => config,
+            other => panic!("expected a config change, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reload_config_if_changed_triggers_on_change_and_skips_unchanged() {
+        let fixture = Fixture::new();
+        let mut state = fixture.state();
+        assert_eq!(config_of(state.reload_config_if_changed()).port, 8080);
+        assert_eq!(state.reload_config_if_changed(), None);
+
+        fixture.write_config("port: 9090\nremote-management:\n  allow-remote: true\n");
+        let config = config_of(state.reload_config_if_changed());
+        assert_eq!(config.port, 9090);
+        assert!(config.remote_management.allow_remote);
+    }
+
+    #[test]
+    fn reload_config_if_changed_handles_missing_and_empty() {
+        let fixture = Fixture::new();
+        let mut state = WatchState::new(fixture.dir.join("missing.yaml"), fixture.auth_dir.clone());
+        assert_eq!(state.reload_config_if_changed(), None);
+        let empty = fixture.dir.write("empty.yaml", "");
+        let mut state = WatchState::new(empty, fixture.auth_dir.clone());
+        assert_eq!(state.reload_config_if_changed(), None);
+        assert_eq!(state.last_config_hash, None);
+    }
+
+    #[test]
+    fn invalid_config_is_reported_and_retried() {
+        let fixture = Fixture::new();
+        let mut state = fixture.state();
+        fixture.write_config("port: [\n");
+        for _ in 0..2 {
+            match state.reload_config_if_changed() {
+                Some(WatchEvent::ConfigInvalid(error)) => {
+                    assert!(
+                        error
+                            .to_string()
+                            .starts_with("failed to parse config file: ")
+                    );
+                }
+                other => panic!("expected an invalid config, got {other:?}"),
+            }
+        }
+        assert_eq!(state.last_config_hash, None);
+        fixture.write_config("port: 1\n");
+        assert_eq!(config_of(state.reload_config_if_changed()).port, 1);
+    }
+
+    #[test]
+    fn reloaded_config_has_its_auth_dir_resolved() {
+        let fixture = Fixture::new();
+        let mut state = fixture.state();
+        let messy = fixture.dir.join("x").join("..").join("auth");
+        fs::write(
+            &fixture.config_path,
+            format!("auth-dir: '{}'\n", messy.display()),
+        )
+        .expect("write config");
+        let config = config_of(state.reload_config_if_changed());
+        assert_eq!(
+            path_key(Path::new(&config.auth_dir)),
+            path_key(&fixture.auth_dir)
+        );
+        assert!(!config.auth_dir.contains(".."));
+    }
+
+    #[test]
+    fn add_or_update_skips_unchanged() {
+        let fixture = Fixture::new();
+        let mut state = fixture.state();
+        let path = fixture.write_auth("sample.json", DEMO);
+        remember(&mut state, &path, DEMO);
+        assert_eq!(state.add_or_update(&path, path_key(&path)), Step::Nothing);
+    }
+
+    #[test]
+    fn add_or_update_reports_and_hashes() {
+        let fixture = Fixture::new();
+        let mut state = fixture.state();
+        let contents = r#"{"type":"demo","api_key":"k"}"#;
+        let path = fixture.write_auth("sample.json", contents);
+        assert_eq!(
+            state.add_or_update(&path, path_key(&path)),
+            Step::Send(WatchEvent::AuthAdded(path.clone()))
+        );
+        assert_eq!(known(&state, &path), Some(sha256(contents.as_bytes())));
+
+        // The same contents again are skipped; new ones are a change.
+        assert_eq!(state.add_or_update(&path, path_key(&path)), Step::Nothing);
+        fs::write(&path, r#"{"type":"demo","api_key":"k2"}"#).expect("rewrite");
+        assert_eq!(
+            state.add_or_update(&path, path_key(&path)),
+            Step::Send(WatchEvent::AuthChanged(path.clone()))
+        );
+    }
+
+    #[test]
+    fn add_or_update_edge_cases() {
+        let fixture = Fixture::new();
+        let mut state = fixture.state();
+        let missing = fixture.auth("missing.json");
+        let empty = fixture.write_auth("empty.json", "");
+        let broken = fixture.write_auth("broken.json", "{\"type\":");
+        let list = fixture.write_auth("list.json", "[1]");
+        for path in [&missing, &empty, &broken, &list] {
+            assert_eq!(
+                state.add_or_update(path, path_key(path)),
+                Step::Nothing,
+                "{path:?}"
+            );
+        }
+        assert!(state.auth_hashes.is_empty());
+
+        // `null` decodes into upstream's auth record, so it counts.
+        let null = fixture.write_auth("null.json", "null");
+        assert_eq!(
+            state.add_or_update(&null, path_key(&null)),
+            Step::Send(WatchEvent::AuthAdded(null.clone()))
+        );
+    }
+
+    #[test]
+    fn auth_json_errors_never_quote_contents() {
+        for contents in [
+            r#""secret-token""#,
+            "[\"secret-token\"]",
+            "secret-token",
+            "12",
+        ] {
+            let reason = check_auth_json(contents.as_bytes()).expect_err(contents);
+            assert!(!reason.contains("secret"), "{reason}");
+        }
+    }
+
+    #[test]
+    fn should_debounce_remove() {
+        let mut state = Fixture::new().state();
+        let start = Instant::now();
+        assert!(!state.should_debounce_remove("test.json", start));
+        assert!(state.should_debounce_remove("test.json", start));
+        assert!(
+            !state.should_debounce_remove("test.json", start + 2 * AUTH_REMOVE_DEBOUNCE_WINDOW)
+        );
+        assert!(!state.should_debounce_remove("", start));
+        assert!(!state.should_debounce_remove("", start));
+    }
+
+    #[test]
+    fn normalize_path_and_debounce_cleanup() {
+        assert_eq!(normalize_path(Os::HOST, "   "), "");
+        assert_eq!(
+            normalize_path(Os::HOST, "  a/../b  "),
+            paths::clean(Os::HOST, "a/../b")
+        );
+        assert_eq!(
+            normalize_path(Os::Windows, r"\\?\C:\Auth\X.JSON"),
+            r"c:\auth\x.json"
+        );
+        assert_eq!(
+            normalize_path(Os::Windows, "C:/Auth/./x.json"),
+            r"c:\auth\x.json"
+        );
+        assert_eq!(normalize_path(Os::Unix, "/Auth/./X.JSON"), "/Auth/X.JSON");
+
+        let mut state = Fixture::new().state();
+        let start = Instant::now();
+        for i in 0..129 {
+            state.remove_times.insert(format!("old-{i}"), start);
+        }
+        state.should_debounce_remove("new-path", start + 3 * AUTH_REMOVE_DEBOUNCE_WINDOW);
+        assert_eq!(state.remove_times.len(), 1);
+    }
+
+    #[test]
+    fn initial_scan_caches_auth_hashes() {
+        let fixture = Fixture::new();
+        let one = fixture.write_auth("one.json", DEMO);
+        let upper = fixture.write_auth("two.JSON", DEMO);
+        let broken = fixture.write_auth("bad.json", "not json");
+        fixture.write_auth("empty.json", "");
+        fixture.write_auth("note.txt", DEMO);
+        fs::create_dir(fixture.auth("sub.json")).expect("create dir");
+
+        let mut state = fixture.state();
+        assert_eq!(
+            state.initial_scan(),
+            [
+                WatchEvent::AuthAdded(one.clone()),
+                WatchEvent::AuthAdded(upper.clone())
+            ]
+        );
+        assert_eq!(state.auth_hashes.len(), 3);
+        assert!(known(&state, &broken).is_some());
+
+        // A known file that didn't parse is a change once it does.
+        assert_eq!(
+            state.handle_event(&broken, Op::Write, Instant::now()),
+            Step::Nothing
+        );
+        fs::write(&broken, DEMO).expect("fix auth file");
+        assert_eq!(
+            state.handle_event(&broken, Op::Write, Instant::now()),
+            Step::Send(WatchEvent::AuthChanged(broken.clone()))
+        );
+    }
+
+    #[test]
+    fn initial_scan_of_a_missing_dir_finds_nothing() {
+        let fixture = Fixture::new();
+        let mut state = WatchState::new(fixture.config_path.clone(), fixture.dir.join("gone"));
+        assert!(state.initial_scan().is_empty());
+    }
+
+    #[test]
+    fn handle_event_ignores_unrelated_files() {
+        let fixture = Fixture::new();
+        let mut state = fixture.state();
+        let now = Instant::now();
+        let note = fixture.dir.write("note.txt", "x");
+        let outside = fixture.dir.write("outside.json", DEMO);
+        let nested = fixture.dir.mkdir("auth/nested").join("deep.json");
+        let cookie = fixture.write_auth("session.cookie", "x");
+        for path in [&note, &outside, &nested, &cookie] {
+            for op in [Op::Create, Op::Write, Op::Remove, Op::Rename] {
+                assert_eq!(
+                    state.handle_event(path, op, now),
+                    Step::Nothing,
+                    "{path:?} {op:?}"
+                );
+            }
+        }
+        assert!(state.auth_hashes.is_empty());
+    }
+
+    #[test]
+    fn handle_event_config_change_schedules_reload() {
+        let fixture = Fixture::new();
+        let mut state = fixture.state();
+        let now = Instant::now();
+        for op in [Op::Write, Op::Create, Op::Rename] {
+            assert_eq!(
+                state.handle_event(&fixture.config_path, op, now),
+                Step::ScheduleConfigReload
+            );
+        }
+        assert_eq!(
+            state.handle_event(&fixture.config_path, Op::Remove, now),
+            Step::Nothing
+        );
+        // The same file spelled another way is still the config file.
+        let spelled = fixture.dir.join("auth").join("..").join("config.yaml");
+        assert_eq!(
+            state.handle_event(&spelled, Op::Write, now),
+            Step::ScheduleConfigReload
+        );
+    }
+
+    #[test]
+    fn handle_event_auth_write_triggers_update() {
+        let fixture = Fixture::new();
+        let mut state = fixture.state();
+        let path = fixture.write_auth("a.json", DEMO);
+        assert_eq!(
+            state.handle_event(&path, Op::Write, Instant::now()),
+            Step::Send(WatchEvent::AuthAdded(path.clone()))
+        );
+        assert!(known(&state, &path).is_some());
+    }
+
+    #[test]
+    fn handle_event_matches_json_suffix_like_upstream() {
+        let fixture = Fixture::new();
+        let mut state = fixture.state();
+        let path = fixture.write_auth("UPPER.JSON", DEMO);
+        let step = state.handle_event(&path, Op::Write, Instant::now());
+        // Upstream lower-cases paths only on Windows before the suffix check.
+        if cfg!(windows) {
+            assert_eq!(step, Step::Send(WatchEvent::AuthAdded(path)));
+        } else {
+            assert_eq!(step, Step::Nothing);
+        }
+    }
+
+    #[test]
+    fn handle_event_removes_auth_file() {
+        let fixture = Fixture::new();
+        let mut state = fixture.state();
+        let path = fixture.auth("remove.json");
+        remember(&mut state, &path, DEMO);
+        assert_eq!(
+            state.handle_event(&path, Op::Remove, Instant::now()),
+            Step::Send(WatchEvent::AuthRemoved(path.clone()))
+        );
+        assert_eq!(known(&state, &path), None);
+    }
+
+    #[test]
+    fn handle_event_remove_debounce_skips() {
+        let fixture = Fixture::new();
+        let mut state = fixture.state();
+        let path = fixture.auth("remove.json");
+        remember(&mut state, &path, DEMO);
+        let now = Instant::now();
+        state.remove_times.insert(path_key(&path), now);
+        assert_eq!(state.handle_event(&path, Op::Remove, now), Step::Nothing);
+        assert!(known(&state, &path).is_some());
+    }
+
+    #[test]
+    fn handle_event_atomic_replace_unchanged_skips() {
+        let fixture = Fixture::new();
+        let mut state = fixture.state();
+        let path = fixture.write_auth("same.json", DEMO);
+        remember(&mut state, &path, DEMO);
+        assert_eq!(
+            state.handle_event(&path, Op::Rename, Instant::now()),
+            Step::Nothing
+        );
+        assert!(known(&state, &path).is_some());
+    }
+
+    #[test]
+    fn handle_event_atomic_replace_changed_triggers_update() {
+        let fixture = Fixture::new();
+        let mut state = fixture.state();
+        let new = r#"{"type":"demo","v":2}"#;
+        let path = fixture.write_auth("change.json", new);
+        remember(&mut state, &path, r#"{"type":"demo","v":1}"#);
+        assert_eq!(
+            state.handle_event(&path, Op::Rename, Instant::now()),
+            Step::Send(WatchEvent::AuthChanged(path.clone()))
+        );
+        assert_eq!(known(&state, &path), Some(sha256(new.as_bytes())));
+    }
+
+    #[test]
+    fn handle_event_remove_unknown_file_ignored() {
+        let fixture = Fixture::new();
+        let mut state = fixture.state();
+        let path = fixture.auth("unknown.json");
+        assert_eq!(
+            state.handle_event(&path, Op::Remove, Instant::now()),
+            Step::Nothing
+        );
+        assert!(state.auth_hashes.is_empty());
+    }
+
+    #[test]
+    fn handle_event_atomic_replace_delayed_stat_preserves_client() {
+        let fixture = Fixture::new();
+        let mut state = fixture.state();
+        let path = fixture.auth("token.json");
+        remember(&mut state, &path, r#"{"type":"demo","v":1}"#);
+        let new = r#"{"type":"demo","v":2}"#;
+
+        // Written after the first check, within the retries.
+        let writer = {
+            let path = path.clone();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(60));
+                fs::write(&path, new)
+            })
+        };
+        let step = state.handle_event(&path, Op::Rename, Instant::now());
+        writer
+            .join()
+            .expect("writer thread")
+            .expect("write replacement");
+        assert_eq!(step, Step::Send(WatchEvent::AuthChanged(path.clone())));
+        assert_eq!(known(&state, &path), Some(sha256(new.as_bytes())));
+    }
+
+    #[test]
+    fn handle_event_remove_known_file_deletes() {
+        let fixture = Fixture::new();
+        let mut state = fixture.state();
+        let path = fixture.auth("known.json");
+        remember(&mut state, &path, DEMO);
+        assert_eq!(
+            state.handle_event(&path, Op::Rename, Instant::now()),
+            Step::Send(WatchEvent::AuthRemoved(path.clone()))
+        );
+        assert_eq!(known(&state, &path), None);
+    }
+
+    #[test]
+    fn notify_events_map_to_fsnotify_ops() {
+        use notify::event::RenameMode as R;
+        let name = |mode| EventKind::Modify(ModifyKind::Name(mode));
+        for (kind, want) in [
+            (EventKind::Create(CreateKind::File), Some(Op::Create)),
+            (EventKind::Modify(ModifyKind::Any), Some(Op::Write)),
+            (
+                EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+                Some(Op::Write),
+            ),
+            (
+                EventKind::Modify(ModifyKind::Metadata(MetadataKind::Permissions)),
+                None,
+            ),
+            (name(R::From), Some(Op::Rename)),
+            (name(R::To), Some(Op::Create)),
+            (name(R::Any), Some(Op::Rename)),
+            (name(R::Both), None),
+            (EventKind::Remove(RemoveKind::File), Some(Op::Remove)),
+            (EventKind::Access(AccessKind::Any), None),
+            (EventKind::Any, Some(Op::Write)),
+        ] {
+            assert_eq!(op_of(&kind), want, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn aliases_map_canonical_parents_back() {
+        let dir = PathBuf::from("/given/auth");
+        let aliases = Aliases(vec![(path_key(Path::new("/real/auth")), dir.clone())]);
+        assert_eq!(
+            aliases.translate(Path::new("/real/auth/a.json")),
+            dir.join("a.json")
+        );
+        assert_eq!(
+            aliases.translate(Path::new("/other/a.json")),
+            Path::new("/other/a.json")
+        );
+        assert_eq!(aliases.translate(Path::new("/")), Path::new("/"));
+    }
+
+    fn fs_event(kind: EventKind, path: &Path) -> Message {
+        Message::Fs(Ok(notify::Event::new(kind).add_path(path.to_path_buf())))
+    }
+
+    #[test]
+    fn schedule_config_reload_debounces() {
+        let fixture = Fixture::new();
+        let auth = fixture.write_auth("a.json", DEMO);
+        let (sender, messages) = std_mpsc::channel();
+        let (events, mut receiver) = mpsc::channel(8);
+        let state = fixture.state();
+        let thread = thread::spawn(move || run(state, &Aliases::default(), &messages, &events));
+        assert_eq!(receiver.blocking_recv(), Some(WatchEvent::AuthAdded(auth)));
+
+        fixture.write_config("port: 7\n");
+        let write = EventKind::Modify(ModifyKind::Any);
+        sender
+            .send(fs_event(write, &fixture.config_path))
+            .expect("send");
+        thread::sleep(Duration::from_millis(50));
+        let last = Instant::now();
+        sender
+            .send(fs_event(write, &fixture.config_path))
+            .expect("send");
+        let config = config_of(receiver.blocking_recv());
+        assert!(last.elapsed() >= CONFIG_RELOAD_DEBOUNCE);
+        assert_eq!(config.port, 7);
+
+        sender.send(Message::Stop).expect("send stop");
+        thread.join().expect("watcher thread");
+        assert!(receiver.try_recv().is_err(), "a single reload");
+    }
+
+    #[test]
+    fn run_stops_when_the_receiver_is_dropped() {
+        let fixture = Fixture::new();
+        let (sender, messages) = std_mpsc::channel();
+        let (events, receiver) = mpsc::channel(8);
+        let state = fixture.state();
+        let thread = thread::spawn(move || run(state, &Aliases::default(), &messages, &events));
+        drop(receiver);
+        let path = fixture.write_auth("a.json", DEMO);
+        sender
+            .send(fs_event(EventKind::Create(CreateKind::File), &path))
+            .expect("send");
+        thread.join().expect("watcher thread");
+    }
+
+    #[test]
+    fn start_fails_when_config_missing() {
+        let fixture = Fixture::new();
+        let config = Config {
+            auth_dir: fixture.auth_dir.display().to_string(),
+            ..Config::default()
+        };
+        let error = ConfigWatcher::start(fixture.dir.join("missing-config.yaml"), &config)
+            .expect_err("missing config file");
+        assert!(
+            error.to_string().starts_with("watch config file "),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn start_fails_when_auth_dir_missing() {
+        let fixture = Fixture::new();
+        let missing = fixture.dir.join("missing-auth");
+        let config = Config {
+            auth_dir: missing.display().to_string(),
+            ..Config::default()
+        };
+        let error =
+            ConfigWatcher::start(&fixture.config_path, &config).expect_err("missing auth dir");
+        assert!(
+            error.to_string().starts_with("watch auth directory "),
+            "{error}"
+        );
+    }
+
+    async fn next(receiver: &mut mpsc::Receiver<WatchEvent>) -> WatchEvent {
+        tokio::time::timeout(Duration::from_secs(10), receiver.recv())
+            .await
+            .expect("timed out waiting for a watch event")
+            .expect("watcher stopped")
+    }
+
+    fn key_of(event: &WatchEvent) -> (&'static str, String) {
+        match event {
+            WatchEvent::AuthAdded(path) => ("added", path_key(path)),
+            WatchEvent::AuthChanged(path) => ("changed", path_key(path)),
+            WatchEvent::AuthRemoved(path) => ("removed", path_key(path)),
+            WatchEvent::ConfigChanged(_) => ("config", String::new()),
+            WatchEvent::ConfigInvalid(_) => ("invalid", String::new()),
+        }
+    }
+
+    #[tokio::test]
+    async fn start_and_watch_end_to_end() {
+        let fixture = Fixture::new();
+        let first = fixture.write_auth("a.json", DEMO);
+        let config = Config::load(&fixture.config_path).expect("load config");
+        let (watcher, mut receiver) =
+            ConfigWatcher::start(&fixture.config_path, &config).expect("start watcher");
+        assert_eq!(path_key(watcher.auth_dir()), path_key(&fixture.auth_dir));
+        assert_eq!(
+            key_of(&next(&mut receiver).await),
+            ("added", path_key(&first))
+        );
+
+        let second = fixture.write_auth("b.json", DEMO);
+        assert_eq!(
+            key_of(&next(&mut receiver).await),
+            ("added", path_key(&second))
+        );
+
+        // Saved by writing a temporary file and renaming it over the config.
+        let temporary = fixture.dir.join("config.yaml.tmp");
+        let body = format!("auth-dir: '{}'\nport: 2\n", fixture.auth_dir.display());
+        fs::write(&temporary, body).expect("write temporary config");
+        fs::rename(&temporary, &fixture.config_path).expect("replace config");
+        match next(&mut receiver).await {
+            WatchEvent::ConfigChanged(config) => assert_eq!(config.port, 2),
+            other => panic!("expected a config change, got {other:?}"),
+        }
+
+        fs::remove_file(&second).expect("remove auth file");
+        assert_eq!(
+            key_of(&next(&mut receiver).await),
+            ("removed", path_key(&second))
+        );
+
+        fs::write(&first, r#"{"type":"demo","v":2}"#).expect("rewrite auth file");
+        assert_eq!(
+            key_of(&next(&mut receiver).await),
+            ("changed", path_key(&first))
+        );
+
+        drop(watcher);
+        let drained = tokio::time::timeout(Duration::from_secs(10), async {
+            while receiver.recv().await.is_some() {}
+        });
+        drained.await.expect("watcher thread should stop");
+    }
+}
