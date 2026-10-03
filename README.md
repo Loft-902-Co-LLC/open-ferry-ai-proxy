@@ -13,7 +13,7 @@ A Rust port of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) with 
 
 ## Status
 
-**Pre-alpha. The proxy can't reach a provider yet.** This README describes what we're building, not what exists. The HTTP server is ported: Chat Completions, legacy Completions, Claude Messages, and OpenAI Responses over HTTP and WebSocket, with upstream's routing, errors, streaming and keep-alives. The credential manager and the Codex and Claude executors behind it come next. The translators between Codex and three client formats, Claude Messages, OpenAI Responses and OpenAI Chat Completions, are ported in both directions, as are those between Claude and the two OpenAI formats, along with upstream's checks of every provider's reasoning signatures. So is the conversion of an OpenAI Responses request to Chat Completions, for upstreams that only speak Chat Completions. The translators are checked against upstream's ([UPSTREAM.md](UPSTREAM.md#checking-parity)).
+**Pre-alpha.** This README describes what we're building, not all of what exists. `open-ferry` reads CLIProxyAPI's `config.yaml` and auth directory, signs in to Codex and Claude with their OAuth logins (`-codex-login`, `-codex-device-login`, `-claude-login`), and serves Chat Completions, legacy Completions, Claude Messages, and OpenAI Responses over HTTP and WebSocket, with upstream's routing, errors, streaming and keep-alives. Behind the server, upstream's credential manager picks an account per request, with its retries, cooldowns and model aliases, refreshes tokens in the background, and follows changes to the config and auth files. The `/v0/management` API comes next. The translators between Codex and three client formats, Claude Messages, OpenAI Responses and OpenAI Chat Completions, are ported in both directions, as are those between Claude and the two OpenAI formats, along with upstream's checks of every provider's reasoning signatures. So is the conversion of an OpenAI Responses request to Chat Completions, for upstreams that only speak Chat Completions. The translators are checked against upstream's ([UPSTREAM.md](UPSTREAM.md#checking-parity)).
 
 ## Goals for v0.1
 
@@ -36,7 +36,8 @@ A Rust port of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) with 
 | Path | Purpose |
 |---|---|
 | `crates/open-ferry` | Binary: CLI and server entry point |
-| `crates/open-ferry-core` | Config, accounts, credential store, routing |
+| `crates/open-ferry-core` | Config, credentials and their store, the model registry, and the credential manager that routes calls |
+| `crates/open-ferry-providers` | The Codex and Claude OAuth logins and executors |
 | `crates/open-ferry-translate` | Format translators between OpenAI, Anthropic and Gemini. Pure functions with no I/O, publishable on its own |
 | `crates/open-ferry-server` | HTTP and WebSocket handlers for `/v1/*` |
 | `crates/open-ferry-management` | CLIProxyAPI-compatible `/v0/management` API |
@@ -48,4 +49,4 @@ This tool lets you use your own subscription credentials through a local proxy. 
 
 ## License
 
-MIT. See [LICENSE](LICENSE). The Luis Pater and Router-For.ME copyright lines cover the portions ported from CLIProxyAPI (MIT); its original license is reproduced verbatim in [licenses/CLIProxyAPI-LICENSE](licenses/CLIProxyAPI-LICENSE). Small parts of Go's standard library, protobuf-go, gjson, sjson and gorilla/websocket are ported too, under their BSD and MIT licenses in [licenses/](licenses).
+MIT. See [LICENSE](LICENSE). The Luis Pater and Router-For.ME copyright lines cover the portions ported from CLIProxyAPI (MIT); its original license is reproduced verbatim in [licenses/CLIProxyAPI-LICENSE](licenses/CLIProxyAPI-LICENSE). Small parts of Go's standard library, protobuf-go, gjson, sjson and gorilla/websocket are ported too, under their BSD and MIT licenses, as are yaml.v3's decoding rules, under the Apache License 2.0 with its NOTICE; all are in [licenses/](licenses).

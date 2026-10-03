@@ -13,9 +13,9 @@
 //!   the field into the line's original text.
 //! - A `data:` line that is not valid JSON passes through unchanged. gjson
 //!   reads what it can from malformed JSON, so upstream may still add a model.
-//! - Not ported yet: the `apply_patch` bridge. Only upstream's Codex executor
-//!   turns it on, through a parameter the translator doesn't otherwise use, so
-//!   it will come with the executor.
+//! - Not ported yet: the `apply_patch` bridge, which only upstream's Codex
+//!   executor turns on, through a parameter the translator doesn't otherwise
+//!   use. Our Codex executor doesn't ask for it.
 
 use std::borrow::Cow;
 
