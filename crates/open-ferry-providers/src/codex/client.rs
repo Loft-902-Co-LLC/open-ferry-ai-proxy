@@ -2,7 +2,8 @@
 // Redact) and internal/runtime/executor/helps/proxy_helpers.go (v8.0.10, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
-//! HTTP clients for Codex calls, one per proxy, and bounded body reads.
+//! HTTP clients for Codex calls, one per proxy, and bounded body reads. The
+//! OpenAI-compatible executor uses them too.
 //!
 //! A credential's `proxy_url` wins over the global one. A proxy setting is
 //! empty (use the environment's proxy, as Go's default transport does),
@@ -110,6 +111,8 @@ fn build_client(setting: &ProxySetting) -> reqwest::Result<reqwest::Client> {
 /// HTTP clients by proxy URL, built on first use and then shared.
 pub(crate) struct Clients {
     global_proxy_url: String,
+    /// Which executor the log lines name.
+    provider: &'static str,
     clients: Mutex<HashMap<String, reqwest::Client>>,
 }
 
@@ -118,8 +121,15 @@ impl Clients {
     pub(crate) fn new(global_proxy_url: impl Into<String>) -> Self {
         Self {
             global_proxy_url: global_proxy_url.into().trim().to_owned(),
+            provider: "codex",
             clients: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The same clients, with log lines that name `provider`.
+    pub(crate) fn for_provider(mut self, provider: &'static str) -> Self {
+        self.provider = provider;
+        self
     }
 
     /// The client for a credential with `proxy_url`, or for the global proxy
@@ -140,7 +150,8 @@ impl Clients {
             Ok(client) => client,
             Err(error) => {
                 tracing::error!(
-                    "codex: proxy {} can't be used: {error}",
+                    "{}: proxy {} can't be used: {error}",
+                    self.provider,
                     redact_proxy_url(effective)
                 );
                 if effective == self.global_proxy_url {
@@ -170,7 +181,11 @@ impl Clients {
             return client;
         }
         let client = build_client(&ProxySetting::Inherit).unwrap_or_else(|error| {
-            tracing::error!("codex: HTTP client setup failed: {}", error_chain(&error));
+            tracing::error!(
+                "{}: HTTP client setup failed: {}",
+                self.provider,
+                error_chain(&error)
+            );
             reqwest::Client::new()
         });
         self.store(KEY, client)

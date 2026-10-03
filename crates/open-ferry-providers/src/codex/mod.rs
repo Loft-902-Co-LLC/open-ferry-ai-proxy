@@ -32,20 +32,20 @@
 //! - Image generation: the `image_generation` tool upstream adds, and the
 //!   OpenAI Images endpoints served through Codex.
 
-mod claude_tokens;
-mod client;
+pub(crate) mod claude_tokens;
+pub(crate) mod client;
 mod executor;
 mod input_ids;
 pub mod jwt;
 pub mod oauth;
-mod reasoning;
-mod request;
-mod stream;
-mod terminal;
+pub(crate) mod reasoning;
+pub(crate) mod request;
+pub(crate) mod stream;
+pub(crate) mod terminal;
 pub mod token;
 mod tokens;
 mod tool_schema;
-mod usage;
+pub(crate) mod usage;
 
 pub use client::USER_AGENT;
 pub use executor::CodexExecutor;

@@ -36,7 +36,7 @@ mod client;
 mod executor;
 mod headers;
 pub mod oauth;
-mod ratelimit;
+pub(crate) mod ratelimit;
 mod request;
 mod stream;
 mod thinking;
