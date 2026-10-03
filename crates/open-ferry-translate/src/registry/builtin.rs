@@ -16,8 +16,11 @@ use crate::openai::{
     chat_completions as openai_chat, claude as openai_claude, responses as openai_responses,
 };
 
+mod from_gemini;
+
 pub(super) fn register(registry: &Registry) {
     let models = registry.models;
+    from_gemini::register(registry);
 
     // internal/translator/codex/claude/init.go
     registry.register(
