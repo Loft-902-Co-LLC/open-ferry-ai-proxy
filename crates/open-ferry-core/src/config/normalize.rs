@@ -13,8 +13,8 @@
 //!   `codex`, or header names that differ only in surrounding space), the
 //!   one that sorts last wins rather than an arbitrary one.
 //! - Lower-casing uses Rust's Unicode rules, which differ from Go's
-//!   `strings.ToLower` and `strings.EqualFold` for a few characters (such as
-//!   U+0130 and the final sigma).
+//!   `strings.ToLower` for a few characters (such as U+0130 and the final
+//!   sigma).
 //! - The management key isn't hashed with bcrypt or written back; it stays
 //!   as written.
 //! - Steps for sections this port ignores (other providers, plugins, pprof,

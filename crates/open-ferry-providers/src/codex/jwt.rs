@@ -291,26 +291,7 @@ fn decode_organization(value: &Value) -> Result<Organization, String> {
     Ok(organization)
 }
 
-/// The field `key` decodes into, matched exactly or else ignoring case, as
-/// Go's decoder matches.
-pub(super) fn key_of(key: &str, fields: &[&'static str]) -> Option<&'static str> {
-    fields
-        .iter()
-        .find(|field| **field == key)
-        .or_else(|| fields.iter().find(|field| fold_eq(field, key)))
-        .copied()
-}
-
-/// Whether `a` and `b` are equal under simple case folding.
-fn fold_eq(a: &str, b: &str) -> bool {
-    let fold = |s: &str| -> String {
-        s.chars()
-            .flat_map(char::to_uppercase)
-            .flat_map(char::to_lowercase)
-            .collect()
-    };
-    fold(a) == fold(b)
-}
+pub(super) use crate::json::key_of;
 
 fn type_error(value: &Value, field: &str, go_type: &str) -> String {
     let kind = match value {

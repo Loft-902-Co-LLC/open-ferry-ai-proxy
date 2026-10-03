@@ -209,9 +209,15 @@ pub(crate) fn delete(value: &mut Value, path: &str) -> bool {
 
 /// Go's `strings.EqualFold`.
 pub(crate) fn eq_fold(a: &str, b: &str) -> bool {
+    // The dotted and dotless Turkish i fold only to themselves in Go.
+    let turkish = |c: char| matches!(c, '\u{130}' | '\u{131}');
     a.chars().count() == b.chars().count()
         && a.chars().zip(b.chars()).all(|(x, y)| {
-            x == y || x.to_lowercase().eq(y.to_lowercase()) || x.to_uppercase().eq(y.to_uppercase())
+            x == y
+                || (!turkish(x)
+                    && !turkish(y)
+                    && (x.to_lowercase().eq(y.to_lowercase())
+                        || x.to_uppercase().eq(y.to_uppercase())))
         })
 }
 
@@ -351,6 +357,16 @@ mod tests {
     fn folds_case_like_go() {
         assert!(eq_fold("Codex", "codex"));
         assert!(!eq_fold("codexx", "codex"));
+        // The long s and the Kelvin sign fold to ASCII letters; neither
+        // Turkish i folds to an ASCII i, and sharp s isn't "ss".
+        assert!(eq_fold("\u{17f}", "S"));
+        assert!(eq_fold("\u{212a}", "k"));
+        assert!(!eq_fold("\u{131}", "i"));
+        assert!(!eq_fold("\u{131}", "I"));
+        assert!(!eq_fold("\u{130}", "i"));
+        assert!(!eq_fold("\u{df}", "ss"));
+        assert_eq!(key_of("\u{131}d", &["id"]), None);
+        assert_eq!(key_of("ID", &["id"]), Some("id"));
         assert_eq!(lower_trim(" TRUE "), "true");
     }
 }
