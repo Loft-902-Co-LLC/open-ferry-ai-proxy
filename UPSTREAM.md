@@ -40,7 +40,7 @@ Upstream translators live at `internal/translator/<upstream>/<client-format>/`. 
 | `open-ferry-translate`: Responses → Chat Completions | `internal/translator/openai/openai/responses` | Request ported (`openai::responses`), for a Chat Completions upstream that is sent a Responses body. Not in `registry` yet: upstream registers it together with the response half, which is not ported |
 | `open-ferry-translate`: registry | `sdk/translator` | Ported (`registry`): the built-in translators above, the fallback for pairs with none, and reasoning summary settings carried between formats. Plugin hooks and middleware are not ported |
 | `open-ferry-translate`: legacy Completions | `sdk/api/handlers/openai/openai_handlers.go` | Ported (`completions`): the request, response and stream chunk conversions the `/v1/completions` handler uses. The handler itself comes with the server |
-| `open-ferry-server`: routes and middleware | `internal/api/server_routes.go`, `server_middleware.go`, `internal/access`, `sdk/access` | Ported (`app`, `auth`): `/healthz`, `/v1/models`, Chat Completions, legacy Completions, Claude Messages and token counts, and Responses with compact, also under `/backend-api/codex`; client keys, safe mode and CORS. The management API and other providers' routes are not ported yet |
+| `open-ferry-server`: routes and middleware | `internal/api/server_routes.go`, `server_middleware.go`, `internal/access`, `sdk/access` | Ported (`app`, `auth`): `/healthz`, `/v1/models`, Chat Completions, legacy Completions, Claude Messages and token counts, and Responses with compact, also under `/backend-api/codex`; client keys, safe mode and CORS. Other providers' routes are not ported yet. `router_with` serves another router beside these routes, inside the same CORS, logging and panic handling, which is how the binary mounts the management API |
 | `open-ferry-server`: handler plumbing | `sdk/api/handlers/handlers*.go`, `request_body.go`, `model_execution.go`, `internal/util/provider.go`, `internal/thinking/suffix.go` | Ported: reading and decoding bodies, model routing (`auto` and thinking suffixes), error bodies, bootstrap retries, stream forwarding and keep-alives. Calls go to a `Dispatcher` (`open-ferry-core::exec`) |
 | `open-ferry-server`: OpenAI and Claude handlers | `sdk/api/handlers/openai/openai_handlers.go`, `sdk/api/handlers/claude/code_handlers.go` | Ported (`handlers::openai`, `handlers::claude`). Chat Completions takes Responses bodies too, through the Responses to Chat Completions translator |
 | `open-ferry-server`: Responses over HTTP | `sdk/api/handlers/openai/openai_responses_handlers.go` | Ported (`handlers::responses`), except Codex multi-agent v2 tools and orphan delegation |
@@ -52,10 +52,11 @@ Upstream translators live at `internal/translator/<upstream>/<client-format>/`. 
 | `open-ferry-core`: credential manager | `sdk/cliproxy/auth` (`conductor*.go`, `scheduler.go`, `selector.go`, `oauth_model_alias.go`, `auto_refresh_loop.go` and the rest) | Ported (`manager`): picking a credential (round robin, fill first, priorities, weights), retries across credentials, cooldowns and quota, model aliases and force mapping, request-scoped error rules, token refresh and auto refresh; and what the management API reads: each credential's index, call counts and recent calls, and its cooldowns. Session affinity, Home, plugin schedulers, the cooldown state store and request preparation aren't ported |
 | `open-ferry-providers`: Codex | `internal/auth/codex`, `sdk/auth/codex*.go`, `internal/runtime/executor/codex_executor*.go` | Ported (`codex`): the OAuth and device logins, token refresh, and the HTTP executor for Responses, compact and local token counts. Deferred: the Responses WebSocket upstream, the reasoning replay cache, image generation and the `apply_patch` bridge |
 | `open-ferry-providers`: Claude | `internal/auth/claude`, `internal/runtime/executor/claude_executor*.go` | Ported (`claude`): the OAuth login, token refresh, and the executor for Messages and token counts, with rate-limit cooldowns. The Claude Code profile is not ported (see [below](#deliberately-not-ported)) |
-| `open-ferry`: the binary | `cmd/server/main.go`, `sdk/cliproxy/service*.go`, `internal/cmd` (logins), the TLS half of `internal/api/server.go` | Ported: the flags, the Codex and Claude logins, and serving with background refresh, config and auth file reloads, graceful shutdown and TLS. Logs go to standard output only, and nothing looks up the public IP |
-| `open-ferry-management`: `auth-files` | `internal/api/handlers/management/auth_files*.go` | Planned |
-| `open-ferry-management`: `api-call` | `internal/api/handlers/management/api_tools.go` | Planned |
-| `open-ferry-management`: `reset-quota` | `internal/api/server_management.go` | Planned |
+| `open-ferry`: the binary | `cmd/server/main.go`, `sdk/cliproxy/service*.go`, `internal/cmd` (logins), the TLS half of `internal/api/server.go` | Ported: the flags, the Codex and Claude logins, and serving with background refresh, config and auth file reloads, graceful shutdown and TLS, with the management API beside the proxy's routes. Logs go to standard output only, and nothing looks up the public IP |
+| `open-ferry-management`: access | `internal/api/server_management.go`, `server_management_v8.go`, `internal/api/handlers/management/handler.go`, and gin's `ClientIP` as `internal/api/server.go` sets it up | Ported (`access`, `client_ip`, `state`): the API answers only while `remote-management.secret-key` or `MANAGEMENT_PASSWORD` is set, following config reloads; the key from `Authorization` (bearer or bare) or `X-Management-Key`, plain or bcrypt, compared in constant time; only 127.0.0.1 and ::1 count as local unless `allow-remote` is on, with `trusted-proxies` deciding whose forwarding headers count; five failures ban an address for thirty minutes; and the `X-CPA-*` headers. The local management password, Home mode and the plugin header are not ported |
+| `open-ferry-management`: `auth-files` | `internal/api/handlers/management/auth_files*.go` | Ported (`auth_files`): `GET auth-files` and `GET auth-files/models` (v8: `credentials`, `credentials/models`), with the `name` and `auth_index` filters, paging, states, cooldowns, call counts and recent requests. The other `auth-files` routes (upload, download, delete, status, fields, refresh) are not ported, nor is the listing from disk when there is no credential manager |
+| `open-ferry-management`: `api-call` | `internal/api/handlers/management/api_tools.go`, `sdk/proxyutil/proxy.go` | Ported (`api_call`, `proxy`, and the parts of Go's HTTP client the result depends on): `POST api-call` (v8: `requests/api-call`), with `$TOKEN$` substitution, the proxy choice and Go's redirect rules. Token refresh for Antigravity, Meta and xAI credentials is not ported |
+| `open-ferry-management`: `reset-quota` | `internal/api/handlers/management/quota.go` | Ported (`quota`): `POST reset-quota` (v8: `routing/cooldown/reset`) |
 
 ### Deviations so far
 
@@ -82,6 +83,47 @@ Each ported file lists its deviations in its module docs. Most are byproducts of
 - **Not ported in `signature`:** upstream's debug logging when it sanitizes Gemini signatures. Its tests of that logging are not ported, nor are tests that read captured signature corpora, which aren't in its repository.
 - **Not yet ported in `codex::openai::responses`:** the `apply_patch` bridge. Only upstream's Codex executor turns it on, and ours doesn't yet.
 - **The non-streaming response expects a complete final event.** Codex's `response.completed` often has an empty `output`. The Codex executor fills it with the streamed items before calling the translator, as upstream's does.
+
+### The management API
+
+`open-ferry-management` serves four of upstream's management routes, under both of their names:
+
+| Route | v8 route |
+|---|---|
+| `GET /v0/management/auth-files` | `GET /v8/management/credentials` |
+| `GET /v0/management/auth-files/models` | `GET /v8/management/credentials/models` |
+| `POST /v0/management/api-call` | `POST /v8/management/requests/api-call` |
+| `POST /v0/management/reset-quota` | `POST /v8/management/routing/cooldown/reset` |
+
+Bodies, statuses and headers are written as gin and Go's `encoding/json` write them, and request bodies, query strings, URLs and client addresses are read as gin and Go read them. The tests check them against answers recorded from Go programs built with upstream's `go.mod` (gin v1.10.1, Go 1.26 language settings). The config is never written.
+
+**Not ported: every other management route.** It answers an empty 404, as upstream answers a path it has no route for, whatever the method; so does a ported path with another method. This covers, under `/v0/management` and their v8 names under `/v8/management`:
+
+- the config: `config`, `config.yaml`, v8's `config/*path`, and each setting upstream exposes on its own (`debug`, `logging-to-file`, `logs-max-total-size-mb`, `error-logs-max-files`, `usage-statistics-enabled`, `proxy-url`, `quota-exceeded/*`, `request-log`, `ws-auth`, `request-retry`, `max-retry-credentials`, `max-retry-interval`, `force-model-prefix`, `routing/strategy`);
+- the key lists (`api-keys`, and `gemini-`, `interactions-`, `claude-`, `codex-`, `xai-`, `meta-` and `vertex-api-key`, `openai-compatibility`) and the OAuth lists (`oauth-excluded-models`, `oauth-model-alias`, `oauth-request-scoped-errors`);
+- the rest of `auth-files` (upload, download, delete, `status`, `fields`, `refresh`), `vertex/import` and v8's `oauth/import`;
+- the logins: each provider's `*-auth-url`, v8's `oauth/auth-url`, `get-auth-status`, `oauth-session` and the OAuth callbacks;
+- logs and usage: `logs`, `request-error-logs`, `request-log-by-id`, `api-key-usage`, `usage-queue`;
+- quota: `quota/providers`, `quota/fetch`, `quota/reset`;
+- `latest-version`, `model-definitions/:channel`, and the plugins and plugin store.
+
+Nor are the management control panel (`/management.html`), the local management password, Home mode or the plugin host's management routes.
+
+Deviations, each also noted in its module:
+
+- **Paths match exactly.** While a key is set, gin redirects a ported path with a trailing slash (301 for `GET`, else 307) and matches a percent-encoded path decoded. Both get the empty 404 here, as they do on the server's other routes.
+- **The config is never written.** Upstream hashes a plain `secret-key` with bcrypt when it loads the config and writes the hash back. We compare a plain key as written, in constant time and in full; upstream's bcrypt reads only the first 72 bytes, and a longer plain key fails to load.
+- **The failed-attempt record is bounded.** It holds at most 4096 addresses; when it's full, the address least recently active is forgotten, which ends any ban on it early. Idle entries are purged when the record is next written, at most hourly, rather than by an hourly timer. Upstream's record has no bound.
+- **`X-CPA-VERSION` is this crate's version.** `X-CPA-COMMIT` and `X-CPA-BUILD-DATE` come from `OPEN_FERRY_COMMIT` and `OPEN_FERRY_BUILD_DATE` at build time, else `none` and `unknown`. `X-CPA-SUPPORT-PLUGIN` isn't sent.
+- **`auth-files` shows no quota observations.** The credential manager doesn't record them yet, so `quota` is always `{"signals":{}}` and `model_quotas` never appears. `supports_quota` and `quota_provider` come only from a `quota_probe` in a credential's metadata, since there is no plugin host.
+- **`auth-files` times are in UTC.** Upstream writes some, such as file times and times read from files, in the server's time zone. One clock reading serves a whole listing, where upstream reads the clock for each credential. Unpaged, credentials whose names differ only in case keep the manager's order (by ID); upstream's sort isn't stable.
+- **`api-call` never refreshes a credential.** An Antigravity, Meta or xAI credential's token is looked up as any other's. Upstream refreshes an Antigravity or xAI token about to expire, mints a Meta key from its `dca_token`, and answers `auth token refresh failed` when that fails; it also never takes an xAI credential's `id_token`.
+- **`api-call` sends `User-Agent: open-ferry/<version>`** when the caller sends none, where upstream sends Go's `Go-http-client/1.1` (or `/2.0`). An empty `User-Agent` from the caller sends none, as upstream. Without an `Accept` from the caller, the HTTP client sends `Accept: */*`; upstream sends none. Otherwise the request carries exactly the caller's headers and what HTTP needs.
+- **`api-call` reads at most 16 MiB of a response**, compressed or not; a larger one gives a 502 `failed to read response`. Upstream reads any size. Request bodies over 16 MiB get a 413 before they are read; upstream reads any size.
+- **`api-call` uses Rust's HTTP stack.** The header map is applied in the order of its names (upstream's order is random, which matters only for names that differ in case alone). A request with a `Host` header goes over HTTP/1.1 so the header is sent as given; upstream may send it over HTTP/2 as `:authority`. A `Host` outside ASCII gives a 502, where upstream converts it to Punycode. The URL sent, a redirect's target and its `Referer` are the `url` crate's reading of the URL, which may normalize differently from Go's; a URL that the `url` crate refuses, such as one with an IPv6 zone, gives a 502. `Expect: 100-continue` is sent but not waited on. SOCKS5 proxies are accepted but a call through one fails with a 502. A client is kept per proxy, at most 16, where upstream builds a connection pool per call.
+- **Only Claude and Codex API keys have proxies in the config**, so a credential from another provider's key never finds its proxy there.
+- **`reset-quota` picks the first credential by ID** when two share an index; upstream takes whichever its map yields first.
+- **JSON corner cases.** A request body string holding an unpaired surrogate escape such as `\ud800` fails to decode; Go reads U+FFFD. A value from a credential's metadata is held by `serde_json`, so an integer `-0` is written back as `0`, and a number beyond `f64`'s range, which Go fails to decode, is written as it was read. `ToUpper` on a method leaves a Greek letter with a subscript iota unchanged; the method is refused either way.
 
 ## Other ported code
 
@@ -113,6 +155,13 @@ The Claude translators use more of upstream's shared code:
 - `schema` from `internal/util/claude_schema.go`: making a tool's JSON Schema fit for Claude.
 
 The server edits some client JSON in place, as upstream does with gjson and sjson, so that the bytes a client sent go on as they came. Its `json` module (`crates/open-ferry-server/src/json.rs`) ports the parts of gjson v1.18.0 and sjson v1.2.5 that its Responses handlers need (MIT, [licenses/gjson-LICENSE](licenses/gjson-LICENSE) and [licenses/sjson-LICENSE](licenses/sjson-LICENSE)). The WebSocket handshake is checked as gorilla/websocket v1.5.3's `Upgrader` checks it (BSD-2-Clause, [licenses/gorilla-websocket-LICENSE](licenses/gorilla-websocket-LICENSE)).
+
+The management API reads requests and writes answers as gin v1.10.1 and Go's standard library do in upstream, so `open-ferry-management` ports the parts of them it relies on (gin: MIT, [licenses/gin-LICENSE](licenses/gin-LICENSE); Go: BSD-3-Clause, [licenses/Go-LICENSE](licenses/Go-LICENSE)):
+
+- `client_ip` from gin's `ClientIP` and trusted proxy checks, with Go's `net.ParseIP`, `ParseCIDR` and `IP.String`: the address a request comes from, which decides whether it is local and which address a ban falls on.
+- `bind` from gin's `ShouldBindJSON` over Go's `encoding/json` decoder, `json` from gin's `c.JSON` over its encoder, and `query` from gin's `c.Query` over Go's `url.ParseQuery`.
+- `go_url` from Go's `url.Parse` and `netip.ParseAddr`, and `go` from `strings.EqualFold` and `ToUpper`, `strconv.ParseBool` and `Atoi`, `utf8.DecodeRune`, `textproto.CanonicalMIMEHeaderKey` and `time.Duration.String`.
+- In `api_call`, what of Go's `net/http` client decides what is sent and answered: valid methods, the `Host` header, `Content-Length` and `Transfer-Encoding`, gzip, basic auth from the URL, and the redirect rules, including which headers a redirect keeps.
 
 ## Checking parity
 
