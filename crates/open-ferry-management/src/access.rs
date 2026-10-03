@@ -1,7 +1,10 @@
 // Ported from CLIProxyAPI internal/api/handlers/management/handler.go
 // (Middleware, AuthenticateManagementKey, purgeStaleAttempts) and
-// internal/api/server_management.go (managementAvailable) (v8.0.10, MIT).
+// internal/api/server_management.go (managementAvailable) (v8.0.10, MIT),
+// with how golang.org/x/crypto/bcrypt reads a hash (CompareHashAndPassword,
+// newFromHash, decodeVersion, decodeCost; v0.54.0, BSD-3-Clause).
 // https://github.com/router-for-me/CLIProxyAPI
+// https://cs.opensource.google/go/x/crypto
 
 //! Who may use the management API.
 //!
@@ -17,7 +20,9 @@
 //! `secret-key` may be a bcrypt hash or the key itself. Upstream hashes a
 //! plain key when it loads the config and writes the hash back to the
 //! file; this port never writes the config, and compares a plain key as
-//! written instead.
+//! written instead. A hash is read as Go's bcrypt reads it: whatever
+//! follows its 60 characters, such as the line break a YAML block scalar
+//! leaves, is ignored.
 //!
 //! Every answer past the availability check carries `X-CPA-VERSION`,
 //! `X-CPA-COMMIT` and `X-CPA-BUILD-DATE`.
@@ -45,6 +50,9 @@ use std::time::{Duration, Instant};
 use axum::extract::{ConnectInfo, Request, State};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use base64::Engine as _;
+use base64::alphabet::BCRYPT;
+use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
 use http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use subtle::ConstantTimeEq as _;
 
@@ -64,6 +72,15 @@ const PURGE_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const MAX_IDLE: Duration = Duration::from_secs(2 * 60 * 60);
 /// The most addresses the record holds.
 const MAX_ENTRIES: usize = 4096;
+/// Go's bcrypt alphabet, read leniently as Go's `base64.Encoding` reads it
+/// and written without padding.
+const BCRYPT_BASE64: GeneralPurpose = GeneralPurpose::new(
+    &BCRYPT,
+    GeneralPurposeConfig::new()
+        .with_encode_padding(false)
+        .with_decode_padding_mode(DecodePaddingMode::Indifferent)
+        .with_decode_allow_trailing_bits(true),
+);
 
 /// The build headers set on every management answer.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -290,11 +307,60 @@ async fn key_matches(secret: &str, provided: &[u8]) -> bool {
     if !looks_like_bcrypt(secret) {
         return bool::from(provided.ct_eq(secret.as_bytes()));
     }
-    let hash = secret.to_owned();
+    let hash = secret.as_bytes().to_vec();
     let provided = provided.to_vec();
-    tokio::task::spawn_blocking(move || bcrypt::verify(provided, &hash).unwrap_or(false))
+    tokio::task::spawn_blocking(move || bcrypt_matches(&hash, &provided))
         .await
         .unwrap_or(false)
+}
+
+/// Whether `password` matches the bcrypt `hash`, read as Go's
+/// `bcrypt.CompareHashAndPassword` reads it: `$`, a version, two
+/// characters `strconv.Atoi` reads as the cost and one more, the
+/// 22-character salt, then the hash, of which only the first 31 characters
+/// count.
+fn bcrypt_matches(hash: &[u8], password: &[u8]) -> bool {
+    // Go's minHashSize.
+    if hash.len() < 59 || hash[0] != b'$' || hash[1] > b'2' {
+        return false;
+    }
+    let rest = if hash[2] == b'$' {
+        &hash[3..]
+    } else {
+        &hash[4..]
+    };
+    let Some(cost) = go_atoi(&rest[..2]).filter(|cost| (4..=31).contains(cost)) else {
+        return false;
+    };
+    let (salt, expected) = rest[3..].split_at(22);
+    // A shorter hash leaves Go comparing against a zero byte, which no
+    // computed hash holds.
+    let Some(expected) = expected.get(..31) else {
+        return false;
+    };
+    let Ok(salt) = <[u8; 16]>::try_from(BCRYPT_BASE64.decode(salt).unwrap_or_default()) else {
+        return false;
+    };
+    // Go keys Blowfish with the password and a zero byte, of which it reads
+    // the first 72 bytes.
+    let mut key = password.to_vec();
+    key.push(0);
+    key.truncate(72);
+    let computed = bcrypt::bcrypt(cost, salt, &key);
+    let computed = BCRYPT_BASE64.encode(&computed[..23]);
+    computed.as_bytes().ct_eq(expected).into()
+}
+
+/// Go's `strconv.Atoi` on a bcrypt cost: an optional sign, then digits.
+fn go_atoi(text: &[u8]) -> Option<u32> {
+    let digits = match text.first() {
+        Some(b'+') => &text[1..],
+        _ => text,
+    };
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    std::str::from_utf8(digits).ok()?.parse().ok()
 }
 
 /// Whether `secret` reads as a bcrypt hash (upstream's `looksLikeBcrypt`,
@@ -409,6 +475,37 @@ mod tests {
         assert!(!attempts.entries.contains_key("10.0.0.0"));
         assert!(attempts.entries.contains_key("10.0.0.1"));
         assert!(attempts.entries.contains_key("192.0.2.1"));
+    }
+
+    #[test]
+    fn bcrypt_hashes_are_read_as_go_reads_them() {
+        // Go's bcrypt hash of "review-key" at cost 4.
+        let hash = "$2a$04$GEhBc0Dc6cUAAOKCj7D9tux.Of9JT.btaZAYnKgWmvU2aM4fzMhUy";
+        let matches = |hash: &str, key: &str| bcrypt_matches(hash.as_bytes(), key.as_bytes());
+        assert!(matches(hash, "review-key"));
+        assert!(!matches(hash, "review-kez"));
+        assert!(!matches(hash, ""));
+        // What follows the hash is ignored, as a YAML block scalar's line
+        // break is.
+        assert!(matches(&format!("{hash}\n"), "review-key"));
+        assert!(matches(&format!("{hash}junk"), "review-key"));
+        // strconv.Atoi takes a sign, and the byte after the cost is skipped.
+        assert!(matches(&hash.replacen("$04$", "$+4$", 1), "review-key"));
+        assert!(matches(&hash.replacen("$04$", "$04x", 1), "review-key"));
+        assert!(!matches(&hash.replacen("$04$", "$-4$", 1), "review-key"));
+        assert!(!matches(&hash.replacen("$04$", "$03$", 1), "review-key"));
+        // Too short, or with a broken salt or hash.
+        assert!(!matches(&hash[..59], "review-key"));
+        assert!(!matches(&hash.replacen("GEhB", "G!hB", 1), "review-key"));
+        assert!(!matches(&hash.replacen("MhUy", "MhUz", 1), "review-key"));
+        // Keys past 72 bytes count only their first 72, as in Go.
+        let long = "k".repeat(80);
+        let long_hash = bcrypt::hash_with_salt(&long, 4, [7; 16])
+            .unwrap()
+            .to_string();
+        assert!(matches(&long_hash, &long));
+        assert!(matches(&long_hash, &"k".repeat(72)));
+        assert!(!matches(&long_hash, &"k".repeat(71)));
     }
 
     #[test]
