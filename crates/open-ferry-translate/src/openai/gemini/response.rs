@@ -392,7 +392,7 @@ fn args_object(arguments: &str) -> Value {
         return Value::Object(Map::new());
     }
     if trimmed.starts_with('{')
-        && go::json_valid(trimmed.as_bytes())
+        && go::gjson_valid(trimmed.as_bytes())
         && let Ok(object @ Value::Object(_)) = serde_json::from_str(trimmed)
     {
         return object;
@@ -468,7 +468,7 @@ fn tolerant_object(text: &str) -> Map<String, Value> {
             },
             '{' | '[' => match bracketed(&chars, i) {
                 Some((segment, next)) => {
-                    let value = go::json_valid(segment.as_bytes())
+                    let value = go::gjson_valid(segment.as_bytes())
                         .then(|| serde_json::from_str(&segment).ok())
                         .flatten()
                         .unwrap_or(Value::String(segment));
