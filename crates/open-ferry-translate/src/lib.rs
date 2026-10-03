@@ -6,7 +6,9 @@
 //!
 //! Modules are named after upstream's layout: `codex::claude` converts between
 //! a Claude-format client and a Codex upstream, and `claude::openai` between
-//! an OpenAI-format client and a Claude upstream.
+//! an OpenAI-format client and a Claude upstream. `openai::responses` converts
+//! a Responses client's request for an OpenAI Chat Completions upstream
+//! (upstream's `openai/openai/responses`).
 
 mod apply_patch;
 pub mod claude;
@@ -16,6 +18,7 @@ pub mod completions;
 pub mod go;
 mod json;
 pub mod models;
+pub mod openai;
 mod protowire;
 pub mod registry;
 mod responses_tools;

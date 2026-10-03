@@ -27,7 +27,9 @@
 //
 // The registry/* entries run sdk/translator's default registry, which holds
 // the translators of the packages imported here, for the pair of formats in
-// "options" (see registryOptions). registry/response writes a JSON report of
+// "options" (see registryOptions). The openai/openai/responses package is
+// imported only for its request translator: init takes its pair out of the
+// default registry, as open-ferry's registry doesn't have it yet. registry/response writes a JSON report of
 // the chunks TranslateStream returned for each event, and
 // registry/response-non-stream one of what TranslateNonStream returned;
 // registry/request writes the translated request.
@@ -56,6 +58,7 @@ import (
 	codexclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/claude"
 	codexchat "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/openai/chat-completions"
 	codexresponses "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/openai/responses"
+	openairesponses "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/openai/openai/responses"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
@@ -185,6 +188,9 @@ var translators = map[string]func(in input) []byte{
 	"claude/openai-responses/response-non-stream": func(in input) []byte {
 		return clauderesponses.ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), nil)
 	},
+	"openai/openai-responses/request": func(in input) []byte {
+		return openairesponses.ConvertOpenAIResponsesRequestToOpenAIChatCompletions(in.Model, []byte(in.Request), true)
+	},
 	"registry/request":             registryRequest,
 	"registry/response":            registryResponse,
 	"registry/response-non-stream": registryResponseNonStream,
@@ -192,6 +198,11 @@ var translators = map[string]func(in input) []byte{
 	"signature/inspect":            inspectSignature,
 	"signature/claude-messages":    sanitizeClaudeMessages,
 	"signature/gemini":             sanitizeGemini,
+}
+
+// init runs after the imported packages register their translators.
+func init() {
+	sdktranslator.Unregister(sdktranslator.FormatOpenAIResponse, sdktranslator.FormatOpenAI)
 }
 
 func finalEvent(in input) []byte {

@@ -1975,7 +1975,7 @@ impl Generator {
 }
 
 /// `qualifyResponsesNamespaceToolName`: a namespace child's full name.
-fn qualify(namespace: &str, child: &str) -> String {
+pub(super) fn qualify(namespace: &str, child: &str) -> String {
     let child = child.trim();
     if child.is_empty()
         || namespace.is_empty()

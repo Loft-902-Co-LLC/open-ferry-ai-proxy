@@ -5,6 +5,7 @@
 
 pub(crate) mod cache_control;
 pub(crate) mod claude;
+pub(crate) mod openai_tools;
 pub(crate) mod responses;
 
 use serde_json::Value;

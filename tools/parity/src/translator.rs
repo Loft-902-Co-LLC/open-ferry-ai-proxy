@@ -35,6 +35,7 @@ use open_ferry_translate::completions::{
     convert_completions_request_to_chat_completions,
 };
 use open_ferry_translate::models::ModelCatalog;
+use open_ferry_translate::openai::responses::convert_openai_responses_request_to_openai_chat_completions;
 use open_ferry_translate::registry::{Format, Registry, ResponseContext, ResponseTransform};
 use serde_json::{Value, json};
 
@@ -94,6 +95,8 @@ pub enum Translator {
     ClaudeResponsesStream,
     /// A whole Claude event stream → one Responses response.
     ClaudeResponsesNonStream,
+    /// OpenAI Responses request → OpenAI Chat Completions request.
+    OpenAIResponsesRequest,
     /// One reasoning signature → every check and replay decision on it.
     SignatureInspect,
     /// A Claude Messages request → its signed history stripped and sanitized.
@@ -141,6 +144,7 @@ impl Translator {
             Self::ClaudeResponsesRequestCompat => "claude/openai-responses/request-compat",
             Self::ClaudeResponsesStream => "claude/openai-responses/response",
             Self::ClaudeResponsesNonStream => "claude/openai-responses/response-non-stream",
+            Self::OpenAIResponsesRequest => "openai/openai-responses/request",
             Self::SignatureInspect => "signature/inspect",
             Self::ClaudeMessagesSignatures => "signature/claude-messages",
             Self::GeminiSignatures => "signature/gemini",
@@ -175,6 +179,7 @@ impl Translator {
             Self::ClaudeResponsesRequestCompat => "responses-to-claude-request-compat",
             Self::ClaudeResponsesStream => "claude-to-responses-stream",
             Self::ClaudeResponsesNonStream => "claude-to-responses-non-stream",
+            Self::OpenAIResponsesRequest => "responses-to-chat-request",
             Self::SignatureInspect => "signature-inspect",
             Self::ClaudeMessagesSignatures => "signature-claude-messages",
             Self::GeminiSignatures => "signature-gemini",
@@ -210,6 +215,7 @@ impl Translator {
             Self::ClaudeResponsesRequestCompat => "Responses -> Claude request, compatibility mode",
             Self::ClaudeResponsesStream => "Claude -> Responses response, streaming",
             Self::ClaudeResponsesNonStream => "Claude -> Responses response, non-streaming",
+            Self::OpenAIResponsesRequest => "Responses -> Chat Completions request",
             Self::SignatureInspect => "Signature checks and replay decisions",
             Self::ClaudeMessagesSignatures => "Claude Messages signature sanitizers",
             Self::GeminiSignatures => "Gemini thought signature sanitizer and validators",
@@ -422,6 +428,19 @@ impl Translator {
                     .read(case, output.as_bytes())
                     .expect("streams always read"))
             }
+            Self::OpenAIResponsesRequest => {
+                let request = request
+                    .map_err(|err| format!("case {} is not valid JSON: {err}", case.name))?;
+                let output = convert_openai_responses_request_to_openai_chat_completions(
+                    &case.model,
+                    &request,
+                    true,
+                );
+                // Read back, as upstream's output is.
+                Ok(self
+                    .read(case, output.to_string().as_bytes())
+                    .expect("requests always read"))
+            }
             Self::RegistryRequest => {
                 let request = request
                     .map_err(|err| format!("case {} is not valid JSON: {err}", case.name))?;
@@ -572,6 +591,12 @@ impl Translator {
             ],
             // A web search's query, which Go's encoder escapes.
             Self::Stream => &[("$[*].data.delta.partial_json", GoEscaped)],
+            // Reasoning summary and message content parts that aren't strings,
+            // joined into one text.
+            Self::NonStream => &[
+                ("$.content[*].thinking", InText),
+                ("$.content[*].text", InText),
+            ],
             // A tool message's content that is neither a string nor an array,
             // a tool output part it doesn't recognize, and call arguments,
             // custom tool input and text that aren't strings.
@@ -639,8 +664,21 @@ impl Translator {
                 ("$[*].choices[*].text", Whole),
                 ("$[*].choices[*].finish_reason", Whole),
             ],
-            Self::NonStream
-            | Self::ResponsesRequest
+            // Values read as text that aren't strings: message content and
+            // its text, reasoning, image URLs, call arguments and tool
+            // outputs, and the names and descriptions of tools.
+            Self::OpenAIResponsesRequest => &[
+                ("$.messages[*].content", InText),
+                ("$.messages[*].content[*].text", Whole),
+                ("$.messages[*].content[*].image_url.url", Whole),
+                ("$.messages[*].reasoning_content", InText),
+                ("$.messages[*].role", Whole),
+                ("$.messages[*].tool_calls[*].function.arguments", Whole),
+                ("$.messages[*].tool_calls[*].function.name", Whole),
+                ("$.tools[*].function.description", Whole),
+                ("$.tool_choice.function.name", Whole),
+            ],
+            Self::ResponsesRequest
             | Self::ResponsesStream
             | Self::ResponsesNonStream
             | Self::ChatStream
@@ -750,6 +788,7 @@ impl Translator {
             Self::Request
             | Self::RequestCompat
             | Self::ResponsesRequest
+            | Self::OpenAIResponsesRequest
             | Self::SignatureInspect
             | Self::ClaudeMessagesSignatures
             | Self::GeminiSignatures

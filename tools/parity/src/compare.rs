@@ -9,6 +9,9 @@ use serde_json::{Map, Value};
 pub enum Deviation {
     /// Upstream sorts tool parameter schema keys; we keep the client's order.
     ParametersKeyOrder,
+    /// Upstream writes tool parameter schema numbers as Go writes a float64;
+    /// we keep the client's text, which is the same number.
+    ParametersNumberText,
     /// JSON held in a string, whole or in part, is the same JSON written
     /// compactly by us. Only where the translator does so (see [`JsonForm`]).
     EmbeddedJson,
@@ -28,6 +31,7 @@ impl Deviation {
     pub fn describe(self) -> &'static str {
         match self {
             Self::ParametersKeyOrder => "tool parameter key order",
+            Self::ParametersNumberText => "tool parameter number text",
             Self::EmbeddedJson => "embedded JSON re-serialized",
             Self::CharBoundary => "cut at a character boundary",
             Self::ProtoErrorPrefix => "protobuf error prefix space",
@@ -169,6 +173,11 @@ impl<'a> Walker<'a> {
             (Value::String(go), Value::String(rust)) => self.walk_strings(go, rust),
             (go, rust) if identical(go, rust) => {}
             (Value::Number(go), Value::Number(rust))
+                if self.in_tool_parameters() && same_float(go, rust) =>
+            {
+                self.out.deviations.insert(Deviation::ParametersNumberText);
+            }
+            (Value::Number(go), Value::Number(rust))
                 if go.to_string() == GO_AMD64_OUT_OF_RANGE && rust.as_i64() == Some(i64::MAX) =>
             {
                 self.out.deviations.insert(Deviation::SaturatedInt);
@@ -243,13 +252,20 @@ impl<'a> Walker<'a> {
             .map(|&(_, form)| form)
     }
 
-    /// Reports whether the walk is inside `tools[i].parameters`.
+    /// Reports whether the walk is inside `tools[i].parameters`, or a Chat
+    /// Completions request's `tools[i].function.parameters`.
     fn in_tool_parameters(&self) -> bool {
         matches!(
             self.path.as_slice(),
             [
                 Segment::Key("tools"),
                 Segment::Index(_),
+                Segment::Key("parameters"),
+                ..
+            ] | [
+                Segment::Key("tools"),
+                Segment::Index(_),
+                Segment::Key("function"),
                 Segment::Key("parameters"),
                 ..
             ]
@@ -319,6 +335,13 @@ fn go_escaped(json: &str) -> String {
     escaped
 }
 
+/// Whether two numbers, written differently, are the same finite float64.
+fn same_float(a: &serde_json::Number, b: &serde_json::Number) -> bool {
+    a.as_f64()
+        .zip(b.as_f64())
+        .is_some_and(|(a, b)| a.is_finite() && a == b)
+}
+
 /// Exact equality: object key order and number text count, unlike `Value`'s `==`.
 fn identical(a: &Value, b: &Value) -> bool {
     match (a, b) {
@@ -366,6 +389,36 @@ mod tests {
         );
         assert_eq!(cmp.differences.len(), 1);
         assert_eq!(cmp.differences[0].path, "$.x");
+
+        // A Chat Completions function's parameters too.
+        let go = parse(r#"{"tools":[{"function":{"parameters":{"a":1,"b":2}}}]}"#);
+        let rust = parse(r#"{"tools":[{"function":{"parameters":{"b":2,"a":1}}}]}"#);
+        let cmp = compare(&go, &rust, JSON_AT);
+        assert!(cmp.differences.is_empty());
+        assert_eq!(
+            cmp.deviations,
+            BTreeSet::from([Deviation::ParametersKeyOrder])
+        );
+    }
+
+    #[test]
+    fn number_text_is_a_deviation_only_inside_tool_parameters() {
+        let go = parse(r#"{"tools":[{"function":{"parameters":{"max":100,"min":0.5}}}]}"#);
+        let rust = parse(r#"{"tools":[{"function":{"parameters":{"max":1e2,"min":0.50}}}]}"#);
+        let cmp = compare(&go, &rust, JSON_AT);
+        assert!(cmp.differences.is_empty());
+        assert_eq!(
+            cmp.deviations,
+            BTreeSet::from([Deviation::ParametersNumberText])
+        );
+
+        // A different number is still a difference.
+        let rust = parse(r#"{"tools":[{"function":{"parameters":{"max":101,"min":0.5}}}]}"#);
+        assert_eq!(compare(&go, &rust, JSON_AT).differences.len(), 1);
+        // And so is other number text.
+        let go = parse(r#"{"x":{"n":100}}"#);
+        let rust = parse(r#"{"x":{"n":1e2}}"#);
+        assert_eq!(compare(&go, &rust, JSON_AT).differences.len(), 1);
     }
 
     #[test]

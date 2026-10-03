@@ -217,6 +217,11 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
             claude_responses_finals,
         ),
         (
+            Translator::OpenAIResponsesRequest,
+            cases::openai_responses::requests(),
+            generate::openai_responses::request_cases(seed, random),
+        ),
+        (
             Translator::SignatureInspect,
             cases::signature::inspect(),
             generate::signature::inspect_cases(seed, random),

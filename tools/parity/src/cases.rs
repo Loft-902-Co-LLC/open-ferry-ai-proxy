@@ -9,6 +9,7 @@ pub mod chat;
 pub mod claude_chat;
 pub mod claude_responses;
 pub mod completions;
+pub mod openai_responses;
 pub mod registry;
 pub mod responses;
 pub mod signature;
