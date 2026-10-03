@@ -16,9 +16,10 @@ use serde_json::Value;
 
 use super::classify::{CODE_FORCE_COOLDOWN, CODE_REQUEST_SCOPED, ErrView};
 use super::credential::{KIND_OAUTH, auth_kind};
-use super::models::{config_index, go_field, resolve_openai_compat_config_for_auth};
+use super::models::{config_index, resolve_openai_compat_config_for_auth};
 use super::settings::{RequestScopedErrorRule, Settings};
 use super::text::go_lower;
+use crate::auth::json::remarshaled_fold_field as go_field;
 use crate::auth::{Auth, AuthError};
 use crate::exec::ExecError;
 
@@ -63,7 +64,8 @@ impl ScopedAction {
 }
 
 /// The rules in a credential's `request_scoped_errors` metadata, decoded as
-/// Go decodes them: a type mismatch anywhere drops them all.
+/// Go decodes them after marshaling them again (so a field's key sorting
+/// last wins): a type mismatch anywhere drops them all.
 fn rules_from_metadata(raw: &Value) -> Option<Vec<RequestScopedErrorRule>> {
     let Value::Array(items) = raw else {
         return None;
@@ -298,6 +300,13 @@ mod tests {
             json!(1.5),
         ] {
             assert_eq!(status(value.clone()), None, "{value}");
+        }
+        // Go marshals the rules again, sorting keys: "status" beats "Status".
+        for rules in [
+            json!([{"status": 400, "Status": 500}]),
+            json!([{"Status": 500, "status": 400}]),
+        ] {
+            assert_eq!(rules_from_metadata(&rules).map(|r| r[0].status), Some(400));
         }
         // Within int64 but not a status: kept, and never matches.
         assert_eq!(status(json!(9.2e18)), Some(0));

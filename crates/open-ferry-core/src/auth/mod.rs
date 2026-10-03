@@ -32,7 +32,7 @@ mod expiry;
 pub mod file_store;
 mod go;
 mod index;
-mod json;
+pub(crate) mod json;
 pub mod metadata;
 mod path;
 pub mod synthesizer;

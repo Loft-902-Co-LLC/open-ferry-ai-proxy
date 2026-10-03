@@ -514,9 +514,10 @@ impl WatchState {
     }
 }
 
-/// Whether an auth file's contents parse. The reason never quotes them.
+/// Whether an auth file's contents parse, invalid UTF-8 reading as U+FFFD
+/// as Go's decoder reads it. The reason never quotes them.
 fn check_auth_json(data: &[u8]) -> Result<(), String> {
-    match serde_json::from_slice::<serde_json::Value>(data) {
+    match serde_json::from_str::<serde_json::Value>(&String::from_utf8_lossy(data)) {
         Ok(value) if value.is_object() || value.is_null() => Ok(()),
         Ok(_) => Err("not a JSON object".to_owned()),
         Err(error) => Err(error.to_string()),
@@ -1256,6 +1257,24 @@ mod tests {
         };
         assert_eq!(&*file.data, valid.as_bytes());
         assert_eq!(state.add_or_update(&path, path_key(&path)), Step::Nothing);
+    }
+
+    #[test]
+    fn auth_files_with_invalid_utf8_load() {
+        let fixture = Fixture::new();
+        let mut state = fixture.state();
+        let mut data = br#"{"type":"demo","note":"a"#.to_vec();
+        data.push(0xff);
+        data.extend_from_slice(br#"b"}"#);
+        let path = fixture.auth("bad.json");
+        fs::write(&path, &data).expect("write");
+        let step = state.add_or_update(&path, path_key(&path));
+        let Step::Send(WatchEvent::AuthAdded(file)) = step else {
+            panic!("expected an added event, got {step:?}");
+        };
+        assert_eq!(&*file.data, &data[..]);
+        // Outside a string it is still a syntax error.
+        assert!(check_auth_json(&[b'{', 0xff, b'}']).is_err());
     }
 
     #[test]

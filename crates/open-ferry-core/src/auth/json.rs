@@ -77,6 +77,20 @@ pub(crate) fn fold_field<'a>(map: &'a Map<String, Value>, name: &str) -> Option<
         .map(|(_, value)| value)
 }
 
+/// [`fold_field`] for an object Go writes back out before decoding it into
+/// a struct, as when it remarshals a decoded `map[string]any`: `json.Marshal`
+/// sorts the keys, so the match whose key sorts last wins, wherever it was in
+/// the file.
+pub(crate) fn remarshaled_fold_field<'a>(
+    map: &'a Map<String, Value>,
+    name: &str,
+) -> Option<&'a Value> {
+    map.iter()
+        .filter(|(key, _)| equal_fold(key, name))
+        .max_by(|(a, _), (b, _)| a.as_bytes().cmp(b.as_bytes()))
+        .map(|(_, value)| value)
+}
+
 /// Go's `json.Marshal` of a decoded JSON object: compact, keys sorted, and
 /// strings escaped for HTML as Go escapes them. Numbers keep their text.
 pub(crate) fn marshal_map(map: &Map<String, Value>) -> String {
@@ -199,6 +213,27 @@ mod tests {
         assert_eq!(fold_field(&map, "exp"), Some(&Value::from(2)));
         assert_eq!(fold_field(&map, "Other"), Some(&Value::from(3)));
         assert_eq!(fold_field(&map, "missing"), None);
+    }
+
+    #[test]
+    fn remarshaled_fold_field_takes_the_key_sorting_last() {
+        for text in [
+            r#"{"name":"upstream","Name":"other"}"#,
+            r#"{"Name":"other","name":"upstream"}"#,
+        ] {
+            let map: Map<String, Value> = serde_json::from_str(text).unwrap();
+            assert_eq!(
+                remarshaled_fold_field(&map, "name"),
+                Some(&Value::from("upstream")),
+                "{text}"
+            );
+        }
+        let map: Map<String, Value> = serde_json::from_str(r#"{"Name":"y","NAME":"x"}"#).unwrap();
+        assert_eq!(
+            remarshaled_fold_field(&map, "name"),
+            Some(&Value::from("y"))
+        );
+        assert_eq!(remarshaled_fold_field(&map, "alias"), None);
     }
 
     #[test]

@@ -47,7 +47,7 @@ use super::super::classification::{
 };
 use super::super::file_store::{clean_prefix, id_for, read_capped};
 use super::super::go::{decode_jwt_segment_padded, equal_fold};
-use super::super::json::{fold_field, unmarshal_object};
+use super::super::json::{fold_field, remarshaled_fold_field, unmarshal_object};
 use super::super::metadata::{
     apply_auth_priority_metadata, apply_custom_headers_from_metadata, normalize_credential_metadata,
 };
@@ -303,16 +303,17 @@ fn extract_model_aliases(metadata: &Map<String, Value>) -> Vec<ModelAlias> {
     }
 }
 
-/// Go's `json.Unmarshal` into `[]OAuthModelAlias`: fields matched without
-/// regard to case, `null` leaving a field unset, and any value of the wrong
-/// type failing the whole list.
+/// Go's `json.Unmarshal` into `[]OAuthModelAlias` of the list it marshaled
+/// again: fields matched without regard to case, the key sorting last
+/// winning, `null` leaving a field unset, and any value of the wrong type
+/// failing the whole list.
 fn decode_model_aliases(items: &[Value]) -> Option<Vec<ModelAlias>> {
-    let text = |item: &Map<String, Value>, field: &str| match fold_field(item, field) {
+    let text = |item: &Map<String, Value>, field: &str| match remarshaled_fold_field(item, field) {
         None | Some(Value::Null) => Some(String::new()),
         Some(Value::String(value)) => Some(value.clone()),
         Some(_) => None,
     };
-    let flag = |item: &Map<String, Value>, field: &str| match fold_field(item, field) {
+    let flag = |item: &Map<String, Value>, field: &str| match remarshaled_fold_field(item, field) {
         None | Some(Value::Null) => Some(false),
         Some(Value::Bool(value)) => Some(*value),
         Some(_) => None,
@@ -714,6 +715,14 @@ mod tests {
     #[test]
     fn model_alias_decoding_matches_go() {
         let decode = |value: Value| extract_model_aliases(value.as_object().unwrap());
+        // Go marshals the list again, sorting keys: "name" beats "Name".
+        for aliases in [
+            json!([{"name": "upstream", "Name": "other", "alias": "public"}]),
+            json!([{"Name": "other", "name": "upstream", "alias": "public"}]),
+        ] {
+            let decoded = decode(json!({"model_aliases": aliases}));
+            assert_eq!(decoded[0].name, "upstream", "{decoded:?}");
+        }
         // Case-insensitive fields, nulls, legacy key, extra fields ignored.
         let aliases = decode(json!({"model-aliases": [
             {"NAME": "m", "Alias": "a", "Display-Name": " Shown ", "force-mapping": true, "x": 1},
