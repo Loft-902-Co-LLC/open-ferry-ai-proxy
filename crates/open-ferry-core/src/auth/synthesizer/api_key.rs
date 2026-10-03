@@ -1,16 +1,18 @@
 // Ported from CLIProxyAPI internal/watcher/synthesizer/config.go (the
-// claude-api-key and codex-api-key parts), addRequestRetryToMetadata and
-// addRequestScopedErrorsToMetadata in helpers.go, ComputeClaudeModelsHash and
-// ComputeCodexModelsHash in internal/modelconfig/model_hash.go, and
-// ValidateCredentialWeights in internal/config/weight.go (v8.0.10, MIT).
+// gemini-api-key, claude-api-key and codex-api-key parts, including
+// synthesizeGeminiKeyEntries), addRequestRetryToMetadata and
+// addRequestScopedErrorsToMetadata in helpers.go, ComputeGeminiModelsHash,
+// ComputeClaudeModelsHash and ComputeCodexModelsHash in
+// internal/modelconfig/model_hash.go, and ValidateCredentialWeights in
+// internal/config/weight.go (v8.0.10, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
-//! Records for the API keys in the config's `claude-api-key` and
-//! `codex-api-key` lists.
+//! Records for the API keys in the config's `gemini-api-key`,
+//! `claude-api-key` and `codex-api-key` lists.
 //!
-//! The config module parses those lists into [`CodexKey`] and [`ClaudeKey`]
-//! entries; each converts into an [`ApiKeyEntry`], and [`api_key_auth`]
-//! builds its record:
+//! The config module parses those lists into [`GeminiKey`], [`CodexKey`]
+//! and [`ClaudeKey`] entries; each converts into an [`ApiKeyEntry`], and
+//! [`api_key_auth`] builds its record:
 //!
 //! - The ID is `<provider>:apikey:<hash>`, from a hash of the key, base URL,
 //!   proxy URL, prefix and headers, so it survives reloads without showing
@@ -33,8 +35,9 @@
 //! - Request-scoped error rules are stored in the metadata as JSON objects,
 //!   the form a credential file holds them in, where upstream stores Go
 //!   structs.
-//! - Gemini, interactions, xAI, Meta and Vertex keys aren't ported. The
-//!   OpenAI-compatible providers are in [`super::openai_compat`].
+//! - Interactions, xAI and Meta keys aren't ported. The OpenAI-compatible
+//!   providers are in [`super::openai_compat`] and the Vertex keys in
+//!   [`super::vertex`].
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -51,12 +54,14 @@ use super::{
     StableIdGenerator, SynthesisContext, SynthesisError, add_config_headers_to_attrs,
     apply_auth_excluded_models_meta, format_sorted_headers, sha256_hex,
 };
-use crate::config::{ClaudeKey, CodexKey};
+use crate::config::{ClaudeKey, CodexKey, GeminiKey};
 pub use crate::config::{RequestScopedErrorRule, ThinkingSupport};
 
 /// Which config list an API key comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ApiKeyProvider {
+    /// `gemini-api-key`.
+    Gemini,
     /// `claude-api-key`.
     Claude,
     /// `codex-api-key`.
@@ -64,9 +69,10 @@ pub enum ApiKeyProvider {
 }
 
 impl ApiKeyProvider {
-    /// The provider name: `claude` or `codex`.
+    /// The provider name: `gemini`, `claude` or `codex`.
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Gemini => "gemini",
             Self::Claude => "claude",
             Self::Codex => "codex",
         }
@@ -75,14 +81,16 @@ impl ApiKeyProvider {
     /// The config list's name, as error messages give it.
     pub fn config_key(self) -> &'static str {
         match self {
+            Self::Gemini => "gemini-api-key",
             Self::Claude => "claude-api-key",
             Self::Codex => "codex-api-key",
         }
     }
 }
 
-/// One entry of a `claude-api-key` or `codex-api-key` list, as parsed from
-/// the config (upstream's `ClaudeKey` and `CodexKey`).
+/// One entry of a `gemini-api-key`, `claude-api-key` or `codex-api-key`
+/// list, as parsed from the config (upstream's `GeminiKey`, `ClaudeKey` and
+/// `CodexKey`).
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct ApiKeyEntry {
     /// The API key. Secret.
@@ -130,8 +138,8 @@ impl fmt::Debug for ApiKeyEntry {
     }
 }
 
-/// A model offered through an API key (upstream's `ClaudeModel` and
-/// `CodexModel`).
+/// A model offered through an API key (upstream's `GeminiModel`,
+/// `ClaudeModel` and `CodexModel`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ApiKeyModel {
     /// The upstream model.
@@ -146,6 +154,39 @@ pub struct ApiKeyModel {
     pub is_compat: bool,
     /// The model's thinking limits, if set.
     pub thinking: Option<ThinkingSupport>,
+}
+
+impl From<&GeminiKey> for ApiKeyEntry {
+    fn from(key: &GeminiKey) -> Self {
+        Self {
+            api_key: key.api_key.clone(),
+            base_url: key.base_url.clone(),
+            proxy_url: key.proxy_url.clone(),
+            prefix: key.prefix.clone(),
+            priority: key.priority,
+            weight: key.weight,
+            headers: key.headers.clone(),
+            models: key
+                .models
+                .iter()
+                .map(|model| ApiKeyModel {
+                    name: model.name.clone(),
+                    alias: model.alias.clone(),
+                    display_name: model.display_name.clone(),
+                    force_mapping: model.force_mapping,
+                    is_compat: model.is_compat,
+                    thinking: model.thinking.clone(),
+                })
+                .collect(),
+            excluded_models: key.excluded_models.clone(),
+            disable_cooling: key.disable_cooling,
+            request_retry: key.request_retry,
+            request_scoped_errors: key.request_scoped_errors.clone(),
+            rebuild_mid_system_message: false,
+            websockets: false,
+            alpha_search: false,
+        }
+    }
 }
 
 impl From<&ClaudeKey> for ApiKeyEntry {
@@ -328,6 +369,7 @@ pub fn api_key_auth(
         attrs.insert("base_url".to_owned(), base_url.to_owned());
     }
     match provider {
+        ApiKeyProvider::Gemini => {}
         ApiKeyProvider::Claude => {
             if entry.rebuild_mid_system_message {
                 attrs.insert("rebuild_mid_system_message".to_owned(), "true".to_owned());
@@ -400,6 +442,7 @@ pub(super) fn retry_metadata(
 
 /// A hash of a key's model list, to notice when it changes: the SHA-256, in
 /// hex, of one line per model with a name or alias. Empty for no models.
+/// Upstream's Gemini, Claude and Codex hashes are alike.
 pub fn compute_models_hash(models: &[ApiKeyModel]) -> String {
     let lines: Vec<String> = models
         .iter()
@@ -605,6 +648,7 @@ mod tests {
             let auths = match provider {
                 ApiKeyProvider::Claude => synth(&entries, &[]),
                 ApiKeyProvider::Codex => synth(&[], &entries),
+                ApiKeyProvider::Gemini => unreachable!("gemini keys are tested below"),
             }
             .unwrap();
             assert_eq!(auths.len(), 2);
@@ -836,6 +880,158 @@ mod tests {
         );
     }
 
+    // config_test.go: TestConfigSynthesizer_GeminiKeys,
+    // TestConfigSynthesizer_GeminiKeys_AllowsEmptyAPIKeyWithBaseURL (minus
+    // the interactions key), TestConfigSynthesizer_IDStability,
+    // TestConfigSynthesizer_OmittedWeightRemainsUnset,
+    // TestConfigSynthesizer_NormalizesNonPositiveWeightToZero and the Gemini
+    // part of TestConfigSynthesizer_RequestScopedErrors.
+
+    fn gemini(keys: Vec<GeminiKey>) -> Vec<Auth> {
+        let config = crate::config::Config {
+            gemini_api_key: keys,
+            ..crate::config::Config::default()
+        };
+        super::super::synthesize_config_auths(&config, &ctx(), &mut StableIdGenerator::new())
+            .unwrap()
+    }
+
+    fn gemini_key(api_key: &str) -> GeminiKey {
+        GeminiKey {
+            api_key: api_key.to_owned(),
+            ..GeminiKey::default()
+        }
+    }
+
+    #[test]
+    fn gemini_keys() {
+        let auths = gemini(vec![GeminiKey {
+            prefix: "team-a".to_owned(),
+            ..gemini_key("test-key-123")
+        }]);
+        assert_eq!(auths.len(), 1);
+        let auth = &auths[0];
+        assert_eq!(auth.provider, "gemini");
+        assert_eq!(auth.prefix, "team-a");
+        assert_eq!(auth.label, "gemini-apikey");
+        assert_eq!(auth.attribute("api_key"), Some("test-key-123"));
+        assert!(auth.metadata.is_empty());
+        assert_eq!(auth.status, Status::Active);
+        let token = auth.id.strip_prefix("gemini:apikey:").expect("gemini ID");
+        assert_eq!(
+            auth.attribute("source"),
+            Some(format!("config:gemini[{token}]").as_str())
+        );
+        assert_eq!(auth.attribute("rebuild_mid_system_message"), None);
+
+        let auths = gemini(vec![GeminiKey {
+            prefix: "team-a".to_owned(),
+            disable_cooling: Some(true),
+            ..gemini_key("test-key-123")
+        }]);
+        assert_eq!(auths[0].metadata["disable_cooling"], Value::Bool(true));
+
+        let auths = gemini(vec![GeminiKey {
+            base_url: "https://custom.api.com".to_owned(),
+            proxy_url: "http://proxy.local:8080".to_owned(),
+            prefix: "custom".to_owned(),
+            ..gemini_key("api-key")
+        }]);
+        assert_eq!(
+            auths[0].attribute("base_url"),
+            Some("https://custom.api.com")
+        );
+        assert_eq!(auths[0].proxy_url, "http://proxy.local:8080");
+
+        let auths = gemini(vec![GeminiKey {
+            headers: BTreeMap::from([("X-Custom".to_owned(), "value".to_owned())]),
+            ..gemini_key("api-key")
+        }]);
+        assert_eq!(auths[0].attribute("header:X-Custom"), Some("value"));
+
+        let auths = gemini(vec![
+            gemini_key(""),
+            gemini_key("  "),
+            gemini_key("valid-key"),
+        ]);
+        assert_eq!(auths.len(), 1);
+
+        let auths = gemini(
+            ["a", "b", "c"]
+                .iter()
+                .map(|prefix| GeminiKey {
+                    prefix: (*prefix).to_owned(),
+                    ..gemini_key(&format!("key-{prefix}"))
+                })
+                .collect(),
+        );
+        assert_eq!(auths.len(), 3);
+    }
+
+    #[test]
+    fn gemini_keys_allow_empty_api_key_with_base_url() {
+        let auths = gemini(vec![GeminiKey {
+            base_url: "https://custom-gemini.example.com".to_owned(),
+            headers: BTreeMap::from([("Custom-Auth".to_owned(), "secret".to_owned())]),
+            ..GeminiKey::default()
+        }]);
+        assert_eq!(auths.len(), 1);
+        assert_eq!(
+            auths[0].attribute("base_url"),
+            Some("https://custom-gemini.example.com")
+        );
+        assert_eq!(auths[0].attribute("header:Custom-Auth"), Some("secret"));
+        assert_eq!(auths[0].attribute("auth_kind"), Some("apikey"));
+        assert_eq!(auths[0].attribute("api_key"), None);
+    }
+
+    #[test]
+    fn gemini_ids_are_stable_and_weights_optional() {
+        let entry = GeminiKey {
+            prefix: "test".to_owned(),
+            ..gemini_key("stable-key")
+        };
+        assert_eq!(
+            gemini(vec![entry.clone()])[0].id,
+            gemini(vec![entry.clone()])[0].id
+        );
+        // The ID covers the headers, as for claude.
+        let mut with_header = entry.clone();
+        with_header.headers = BTreeMap::from([("X".to_owned(), "1".to_owned())]);
+        assert_ne!(gemini(vec![entry])[0].id, gemini(vec![with_header])[0].id);
+
+        assert_eq!(
+            gemini(vec![gemini_key("key")])[0].attribute(ATTRIBUTE_WEIGHT),
+            None
+        );
+        let negative = GeminiKey {
+            weight: Some(-5),
+            ..gemini_key("key")
+        };
+        assert_eq!(
+            gemini(vec![negative])[0].attribute(ATTRIBUTE_WEIGHT),
+            Some("0")
+        );
+    }
+
+    #[test]
+    fn gemini_request_scoped_errors() {
+        let rules = vec![RequestScopedErrorRule {
+            status: 400,
+            matches: vec!["maximum_context_length".into()],
+            action: "stop".into(),
+            ..RequestScopedErrorRule::default()
+        }];
+        let auths = gemini(vec![GeminiKey {
+            request_scoped_errors: rules,
+            ..gemini_key("gemini-key")
+        }]);
+        assert_eq!(
+            auths[0].metadata["request_scoped_errors"],
+            serde_json::json!([{"status": 400, "match": ["maximum_context_length"], "action": "stop"}])
+        );
+    }
+
     #[test]
     fn debug_hides_the_key() {
         let entry = ApiKeyEntry {
@@ -862,5 +1058,16 @@ mod tests {
         let codex = ApiKeyEntry::from(&config.codex_api_key[0]);
         assert!(codex.websockets && !codex.rebuild_mid_system_message);
         assert_eq!((codex.api_key.as_str(), codex.priority), ("k", 2));
+        let config = crate::config::Config::parse(concat!(
+            "gemini-api-key:\n  - api-key: g\n    weight: 3\n    request-retry: 1\n",
+            "    models:\n      - name: gemini-2.5-pro\n        alias: pro\n        is-compat: true\n",
+        ))
+        .unwrap();
+        let gemini = ApiKeyEntry::from(&config.gemini_api_key[0]);
+        assert_eq!(
+            (gemini.api_key.as_str(), gemini.weight, gemini.request_retry),
+            ("g", Some(3), Some(1))
+        );
+        assert!(gemini.models[0].is_compat && !gemini.rebuild_mid_system_message);
     }
 }

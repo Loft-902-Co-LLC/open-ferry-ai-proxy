@@ -1,12 +1,14 @@
-// Ported from CLIProxyAPI internal/watcher/synthesizer/context.go and
-// helpers.go, ComputeExcludedModelsHash in internal/watcher/diff/model_hash.go
-// and FormatSortedHeaders in internal/config/config_normalization.go
-// (v8.0.10, MIT).
+// Ported from CLIProxyAPI internal/watcher/synthesizer/context.go,
+// helpers.go and config.go (Synthesize), ComputeExcludedModelsHash in
+// internal/watcher/diff/model_hash.go and FormatSortedHeaders in
+// internal/config/config_normalization.go (v8.0.10, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Synthesizers: build [`Auth`] records from credential files
-//! ([`file`](mod@file)), from API keys in the config ([`api_key`]) and from
-//! the config's OpenAI-compatible providers ([`openai_compat`]).
+//! ([`file`](mod@file)), from API keys in the config ([`api_key`]), from
+//! the config's OpenAI-compatible providers ([`openai_compat`]) and from its
+//! Vertex AI keys ([`vertex`]). [`synthesize_config_auths`] makes every
+//! config record.
 //!
 //! Records from files and API keys get the same settings as attributes:
 //! excluded models (`excluded_models`, comma-joined and lowercased, and a
@@ -24,6 +26,7 @@
 pub mod api_key;
 pub mod file;
 pub mod openai_compat;
+pub mod vertex;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
@@ -33,6 +36,8 @@ use sha2::{Digest, Sha256};
 
 use super::classification::ATTRIBUTE_AUTH_KIND;
 use super::{Auth, Timestamp};
+use crate::config::Config;
+use api_key::{ApiKeyEntry, ApiKeyProvider, api_key_auth, validate_api_key_weights};
 
 /// What a synthesizer needs besides its input (upstream's
 /// `SynthesisContext`).
@@ -76,6 +81,47 @@ impl fmt::Display for SynthesisError {
 }
 
 impl std::error::Error for SynthesisError {}
+
+/// Records for every API key and OpenAI-compatible provider in `config`
+/// (upstream's `ConfigSynthesizer.Synthesize`): the Gemini keys, then the
+/// Claude, Codex, OpenAI-compatible and Vertex ones. Every weight is checked
+/// first, in upstream's order; an invalid one fails the whole lot, naming
+/// the entry.
+pub fn synthesize_config_auths(
+    config: &Config,
+    ctx: &SynthesisContext,
+    ids: &mut StableIdGenerator,
+) -> Result<Vec<Auth>, SynthesisError> {
+    let gemini: Vec<ApiKeyEntry> = config.gemini_api_key.iter().map(Into::into).collect();
+    let claude: Vec<ApiKeyEntry> = config.claude_api_key.iter().map(Into::into).collect();
+    let codex: Vec<ApiKeyEntry> = config.codex_api_key.iter().map(Into::into).collect();
+    validate_api_key_weights(ApiKeyProvider::Gemini, &gemini)?;
+    validate_api_key_weights(ApiKeyProvider::Claude, &claude)?;
+    vertex::validate_vertex_weights(&config.vertex_api_key)?;
+    validate_api_key_weights(ApiKeyProvider::Codex, &codex)?;
+    openai_compat::validate_openai_compat_weights(&config.openai_compatibility)?;
+    let mut out = Vec::new();
+    for (provider, entries) in [
+        (ApiKeyProvider::Gemini, &gemini),
+        (ApiKeyProvider::Claude, &claude),
+        (ApiKeyProvider::Codex, &codex),
+    ] {
+        for (index, entry) in entries.iter().enumerate() {
+            out.extend(api_key_auth(provider, index, entry, ctx, ids));
+        }
+    }
+    out.extend(openai_compat::synthesize_openai_compat_auths(
+        &config.openai_compatibility,
+        ctx,
+        ids,
+    )?);
+    out.extend(vertex::synthesize_vertex_auths(
+        &config.vertex_api_key,
+        ctx,
+        ids,
+    )?);
+    Ok(out)
+}
 
 /// Makes IDs for config credentials that stay the same from one reload to
 /// the next (upstream's `StableIDGenerator`). One generator should serve a

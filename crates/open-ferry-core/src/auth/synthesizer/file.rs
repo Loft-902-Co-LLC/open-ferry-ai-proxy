@@ -24,7 +24,11 @@
 //! - A codex file's `plan_type`, or else the plan in its ID token, becomes
 //!   the `plan_type` attribute (`free` when the token has none).
 //!
-//! Files of type `gemini` and files without a type are skipped.
+//! Files of type `gemini` and files without a type are skipped. A Vertex AI
+//! service-account file (type `vertex`, as upstream's
+//! `VertexCredentialStorage` writes it) is read like any other: its
+//! `service_account`, `project_id` and `location` stay in the metadata for
+//! the Vertex executor, and its `email` is the label.
 //!
 //! Deviations from upstream:
 //! - Plugin auth parsers, the fingerprint-profile attribute and Kimi's
@@ -502,6 +506,39 @@ mod tests {
             &json!({"type": "gemini-cli"}),
         );
         assert!(synthesize_file_auths(&ctx(dir.path())).is_empty());
+    }
+
+    // No upstream test: a file as vertex_credentials.go's SaveTokenToFile
+    // writes it.
+    #[test]
+    fn vertex_service_account_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let service_account = json!({
+            "type": "service_account",
+            "project_id": "vertex-project",
+            "private_key": "not-a-real-key",
+            "client_email": "sa@vertex-project.iam.gserviceaccount.com",
+        });
+        let auth = one(
+            dir.path(),
+            json!({
+                "service_account": service_account,
+                "project_id": "vertex-project",
+                "email": "sa@vertex-project.iam.gserviceaccount.com",
+                "location": "europe-west4",
+                "type": "vertex",
+                "prefix": "team",
+            }),
+        );
+        assert_eq!(auth.provider, "vertex");
+        assert_eq!(auth.label, "sa@vertex-project.iam.gserviceaccount.com");
+        assert_eq!(auth.prefix, "team");
+        assert_eq!(auth.metadata["service_account"], service_account);
+        assert_eq!(auth.metadata["location"], "europe-west4");
+        assert_eq!(auth.attribute("auth_kind"), Some("oauth"));
+        assert_eq!(auth.attribute("api_key"), None);
+        let text = format!("{auth:?}");
+        assert!(!text.contains("not-a-real-key"), "{text}");
     }
 
     #[test]
