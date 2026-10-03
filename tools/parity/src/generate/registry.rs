@@ -193,7 +193,7 @@ pub fn request_cases(seed: u64, count: usize) -> Vec<Case> {
 /// Builds `count` stream cases and as many non-streaming cases.
 pub fn response_cases(seed: u64, count: usize) -> (Vec<Case>, Vec<Case>) {
     let source_seed = derived(seed);
-    let counts = split(count);
+    let counts: [usize; 14] = split(count);
     let sources = [
         (
             ("codex", "claude"),
@@ -239,6 +239,18 @@ pub fn response_cases(seed: u64, count: usize) -> (Vec<Case>, Vec<Case>) {
             ("openai", "gemini"),
             super::gemini::openai_event_cases(source_seed, counts[10]),
         ),
+        (
+            ("gemini", "gemini"),
+            super::to_gemini::event_cases(source_seed, counts[11]),
+        ),
+        (
+            ("gemini", "claude"),
+            super::to_gemini::claude_event_cases(source_seed, counts[12]),
+        ),
+        (
+            ("gemini", "openai"),
+            super::to_gemini::chat_event_cases(source_seed, counts[13]),
+        ),
     ];
     let (mut streams, mut finals) = (Vec::new(), Vec::new());
     let mut index = 0;
@@ -246,9 +258,17 @@ pub fn response_cases(seed: u64, count: usize) -> (Vec<Case>, Vec<Case>) {
         for (stream, last) in source_streams.into_iter().zip(source_finals) {
             let mut rng = rng(seed, index);
             index += 1;
-            // Now and then a pair with no translator.
+            // Now and then another pair, often one with no translator. Not
+            // the Gemini to Claude translator for another source's stream:
+            // it reads each line as JSON, where gjson skips a `data:` prefix
+            // (see the translator's deviations).
             let (from, to) = if rng.chance(10) {
-                (rng.pick(&[from, to, "gemini", "Codex"]), rng.pick(FORMATS))
+                let pair = (rng.pick(&[from, to, "gemini", "Codex"]), rng.pick(FORMATS));
+                if pair == ("gemini", "claude") {
+                    (from, to)
+                } else {
+                    pair
+                }
             } else {
                 (from, to)
             };
@@ -301,17 +321,17 @@ fn rng(seed: u64, index: u64) -> Rng {
     Rng(derived(seed) ^ index.wrapping_mul(0x9E37_79B9_7F4A_7C15))
 }
 
-/// `count` split across the eleven sources.
-fn split(count: usize) -> [usize; 11] {
-    let mut counts = [count / 11; 11];
-    counts[0] += count % 11;
+/// `count` split across `N` sources.
+fn split<const N: usize>(count: usize) -> [usize; N] {
+    let mut counts = [count / N; N];
+    counts[0] += count % N;
     counts
 }
 
 /// Requests from the other generators through the built-in translators.
 fn builtin_requests(seed: u64, count: usize) -> Vec<Case> {
     let source_seed = derived(seed);
-    let counts = split(count);
+    let counts: [usize; 14] = split(count);
     let sources = [
         (("claude", "codex"), super::cases(source_seed, counts[0])),
         (
@@ -354,6 +374,18 @@ fn builtin_requests(seed: u64, count: usize) -> Vec<Case> {
             ("gemini", "openai"),
             super::gemini::request_cases(source_seed.rotate_left(2), counts[10]),
         ),
+        (
+            ("gemini", "gemini"),
+            super::to_gemini::request_cases(source_seed, counts[11]),
+        ),
+        (
+            ("claude", "gemini"),
+            super::to_gemini::claude_request_cases(source_seed, counts[12]),
+        ),
+        (
+            ("openai", "gemini"),
+            super::to_gemini::chat_request_cases(source_seed, counts[13]),
+        ),
     ];
     let mut cases = Vec::with_capacity(count);
     for ((from, to), source) in sources {
@@ -386,6 +418,17 @@ fn builtin_requests(seed: u64, count: usize) -> Vec<Case> {
                         set(&mut body, path, value);
                     }
                     case.request = Value::Object(body).to_string();
+                }
+            }
+            if (from, to) == ("openai", "gemini") {
+                // Upstream copies tool call arguments that aren't JSON into
+                // its output (see `to_gemini::json_arguments`).
+                if let Ok(mut body) = serde_json::from_str::<Value>(&case.request) {
+                    let original = body.clone();
+                    super::to_gemini::json_arguments(&mut body);
+                    if body != original {
+                        case.request = body.to_string();
+                    }
                 }
             }
             let stream = rng.chance(50);

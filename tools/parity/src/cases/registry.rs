@@ -61,6 +61,9 @@ pub fn requests() -> Vec<Case> {
         (("gemini", "codex"), super::gemini::requests()),
         (("gemini", "claude"), super::gemini::requests()),
         (("gemini", "openai"), super::gemini::requests()),
+        (("gemini", "gemini"), super::to_gemini::gemini_requests()),
+        (("claude", "gemini"), super::to_gemini::claude_requests()),
+        (("openai", "gemini"), super::to_gemini::chat_requests()),
     ] {
         cases.extend(
             source
@@ -101,7 +104,7 @@ pub fn requests() -> Vec<Case> {
     ];
     for case in fallback {
         for (from, to) in [
-            ("claude", "gemini"),
+            ("claude", "openai-response"),
             ("claude", "claude"),
             ("codex", "openai"),
             ("Claude", "codex"),
@@ -115,7 +118,7 @@ pub fn requests() -> Vec<Case> {
     let spaced = Case::new("spaced-object-model", "{}", r#"{"model":{ }}"#)
         .known_difference("an object model is compared as compact JSON; gjson reads its text");
     for case in [compact, spaced] {
-        cases.push(through(case, "claude", "gemini", stream()));
+        cases.push(through(case, "claude", "openai-response", stream()));
     }
 
     // Summary settings carried from the client's format to the provider's.
@@ -399,7 +402,7 @@ pub fn requests() -> Vec<Case> {
 
 /// Response cases, for the pairs whose translators they were written for,
 /// and every fifth also for the `fallback` pairs, which have no translator.
-fn responses(sources: [Vec<Case>; 11], fallback: &[(&str, &str)]) -> Vec<Case> {
+fn responses(sources: [Vec<Case>; 14], fallback: &[(&str, &str)]) -> Vec<Case> {
     let pairs = [
         ("codex", "claude"),
         ("codex", "openai-response"),
@@ -412,6 +415,9 @@ fn responses(sources: [Vec<Case>; 11], fallback: &[(&str, &str)]) -> Vec<Case> {
         ("codex", "gemini"),
         ("claude", "gemini"),
         ("openai", "gemini"),
+        ("gemini", "gemini"),
+        ("gemini", "claude"),
+        ("gemini", "openai"),
     ];
     let mut cases = Vec::new();
     for ((from, to), source) in pairs.into_iter().zip(sources) {
@@ -441,6 +447,9 @@ pub fn streams() -> Vec<Case> {
             super::gemini::codex_streams(),
             super::gemini::claude_streams(),
             super::gemini::openai_streams(),
+            super::to_gemini::gemini_streams(),
+            super::to_gemini::claude_streams(),
+            super::to_gemini::chat_streams(),
         ],
         &[("codex", "interactions"), ("Codex", "claude")],
     );
@@ -450,11 +459,7 @@ pub fn streams() -> Vec<Case> {
         "event: ping".to_owned(),
         "data: [DONE]".to_owned(),
     ];
-    for (from, to) in [
-        ("codex", "codex"),
-        ("claude", "codex"),
-        ("gemini", "openai"),
-    ] {
+    for (from, to) in [("codex", "codex"), ("claude", "codex"), ("gemini", "codex")] {
         let case = Case::response("blank-lines", "{}", lines.clone());
         cases.push(through(case, from, to, json!({})));
     }
@@ -475,6 +480,9 @@ pub fn finals() -> Vec<Case> {
             super::gemini::codex_finals(),
             super::gemini::claude_finals(),
             super::gemini::openai_finals(),
+            super::to_gemini::gemini_finals(),
+            super::to_gemini::claude_finals(),
+            super::to_gemini::chat_finals(),
         ],
         &[("claude", "claude")],
     );

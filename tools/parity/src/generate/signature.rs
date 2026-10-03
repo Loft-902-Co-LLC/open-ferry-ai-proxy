@@ -569,7 +569,7 @@ impl Generator {
     /// Gemini `contents`. A model turn's function calls are usually answered
     /// by the next content, sometimes with responses missing, out of order or
     /// misnamed.
-    fn gemini_contents(&mut self) -> Value {
+    pub(super) fn gemini_contents(&mut self) -> Value {
         let count = self.rng.below(7);
         let mut calls = Vec::new();
         let mut contents = Vec::with_capacity(count);

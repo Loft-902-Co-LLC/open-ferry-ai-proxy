@@ -16,6 +16,7 @@ pub mod openai_responses;
 pub mod registry;
 pub mod responses;
 pub mod signature;
+pub mod to_gemini;
 
 #[derive(Clone)]
 pub struct Case {

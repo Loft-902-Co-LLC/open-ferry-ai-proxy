@@ -91,7 +91,21 @@ fn compact(value: &Value) -> String {
 
 /// A string where a translator writes JSON in a [`JsonForm`]: its path, with
 /// `[*]` for every array index as [`Difference::shape`] writes it, and the form.
+/// `**` in a path stands for any run of keys and indices, none included, for
+/// strings at any depth of a schema.
 pub type JsonAt = (&'static str, JsonForm);
+
+/// Whether `shape`, a path as [`Difference::shape`] writes it, is `path`.
+fn path_matches(path: &str, shape: &str) -> bool {
+    match path.split_once("**") {
+        Some((prefix, suffix)) => {
+            shape.len() >= prefix.len() + suffix.len()
+                && shape.starts_with(prefix)
+                && shape.ends_with(suffix)
+        }
+        None => path == shape,
+    }
+}
 
 /// protobuf-go's error prefix as some builds write it.
 const NBSP_PROTO_PREFIX: &str = "proto:\u{a0}";
@@ -292,7 +306,7 @@ impl<'a> Walker<'a> {
         let shape = self.path_text(false);
         self.embedded_json
             .iter()
-            .find(|(path, _)| *path == shape)
+            .find(|(path, _)| path_matches(path, &shape))
             .map(|&(_, form)| form)
     }
 
@@ -771,5 +785,19 @@ mod tests {
             rust: String::new(),
         };
         assert_eq!(difference.shape(), "$.input[*].content[*].text");
+    }
+
+    #[test]
+    fn a_double_star_matches_any_run_of_segments() {
+        let path = "$.tools[*].schema**.description";
+        assert!(path_matches(path, "$.tools[*].schema.description"));
+        assert!(path_matches(
+            path,
+            "$.tools[*].schema.properties.a.items[*].description"
+        ));
+        assert!(!path_matches(path, "$.tools[*].description"));
+        assert!(!path_matches(path, "$.tools[*].schema.title"));
+        assert!(path_matches("$.a[*].b", "$.a[*].b"));
+        assert!(!path_matches("$.a[*].b", "$.a[*].b.c"));
     }
 }

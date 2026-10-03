@@ -29,6 +29,7 @@ pub mod registry;
 pub mod response;
 pub mod responses;
 pub mod signature;
+pub mod to_gemini;
 
 use serde_json::{Value, json};
 

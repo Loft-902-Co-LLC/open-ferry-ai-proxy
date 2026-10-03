@@ -150,6 +150,11 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
     let (openai_gemini_streams, openai_gemini_finals) =
         generate::gemini::openai_event_cases(seed, random);
     let (registry_streams, registry_finals) = generate::registry::response_cases(seed, random);
+    let (gemini_streams, gemini_finals) = generate::to_gemini::event_cases(seed, random);
+    let (gemini_claude_streams, gemini_claude_finals) =
+        generate::to_gemini::claude_event_cases(seed, random);
+    let (gemini_chat_streams, gemini_chat_finals) =
+        generate::to_gemini::chat_event_cases(seed, random);
     let suites = [
         (
             Translator::Request,
@@ -373,6 +378,56 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
             Translator::CompletionsStreamChunk,
             cases::completions::stream_chunks(),
             generate::completions::chunk_cases(seed, random),
+        ),
+        (
+            Translator::GeminiGeminiRequest,
+            cases::to_gemini::gemini_requests(),
+            generate::to_gemini::request_cases(seed, random),
+        ),
+        (
+            Translator::GeminiGeminiStream,
+            cases::to_gemini::gemini_streams(),
+            gemini_streams,
+        ),
+        (
+            Translator::GeminiGeminiNonStream,
+            cases::to_gemini::gemini_finals(),
+            gemini_finals,
+        ),
+        (
+            Translator::GeminiClaudeRequest,
+            cases::to_gemini::claude_requests(),
+            generate::to_gemini::claude_request_cases(seed, random),
+        ),
+        (
+            Translator::GeminiClaudeRequestCompat,
+            cases::to_gemini::claude_requests(),
+            generate::to_gemini::claude_request_cases(seed, random),
+        ),
+        (
+            Translator::GeminiClaudeStream,
+            cases::to_gemini::claude_streams(),
+            gemini_claude_streams,
+        ),
+        (
+            Translator::GeminiClaudeNonStream,
+            cases::to_gemini::claude_finals(),
+            gemini_claude_finals,
+        ),
+        (
+            Translator::GeminiChatRequest,
+            cases::to_gemini::chat_requests(),
+            generate::to_gemini::chat_request_cases(seed, random),
+        ),
+        (
+            Translator::GeminiChatStream,
+            cases::to_gemini::chat_streams(),
+            gemini_chat_streams,
+        ),
+        (
+            Translator::GeminiChatNonStream,
+            cases::to_gemini::chat_finals(),
+            gemini_chat_finals,
         ),
     ];
 
