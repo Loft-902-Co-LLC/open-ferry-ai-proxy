@@ -227,6 +227,12 @@ fn refused(result: Result<StreamResponse, ExecError>) -> ExecError {
     }
 }
 
+/// The error's credential and request scope flags (upstream's
+/// `IsCredentialScoped` and `IsRequestScoped`).
+fn scope(error: &ExecError) -> (bool, bool) {
+    (error.credential_scoped, error.request_scoped)
+}
+
 /// The JSON of each `data:` line in SSE text.
 fn sse_events(text: &str) -> Vec<Value> {
     text.lines()
@@ -605,8 +611,7 @@ const INVALID_INPUT: &str = concat!(
     "\n\n",
 );
 
-// TestCodexExecutorExecuteExplicitTerminalFailureIsNotRequestScoped. The
-// request scope isn't part of ExecError; the status is.
+// TestCodexExecutorExecuteExplicitTerminalFailureIsNotRequestScoped.
 #[tokio::test]
 async fn execute_explicit_terminal_failure() {
     let mock = Mock::start(Reply::sse(INVALID_INPUT)).await;
@@ -619,6 +624,7 @@ async fn execute_explicit_terminal_failure() {
         .await
         .unwrap_err();
     assert_eq!(error.status, 400, "{error:?}");
+    assert_eq!(scope(&error), (false, false));
 }
 
 // TestCodexExecutorExecuteStreamExplicitTerminalFailureIsNotSuccessful.
@@ -638,7 +644,9 @@ async fn stream_explicit_terminal_failure() {
         .await
         .unwrap();
     let (_, error) = collect(response).await;
-    assert_eq!(error.expect("a terminal error").status, 400);
+    let error = error.expect("a terminal error");
+    assert_eq!(error.status, 400);
+    assert_eq!(scope(&error), (false, false));
 }
 
 const CREATED_ONLY: &str = "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.5\"}}\n\n";
@@ -662,6 +670,7 @@ async fn missing_completion_is_a_timeout() {
         error.message,
         crate::codex::terminal::INCOMPLETE_STREAM_MESSAGE
     );
+    assert_eq!(scope(&error), (false, true));
 
     let response = executor()
         .execute_stream(
@@ -673,7 +682,9 @@ async fn missing_completion_is_a_timeout() {
         .unwrap();
     let (text, error) = collect(response).await;
     assert!(text.contains("response.created"), "{text}");
-    assert_eq!(error.expect("a stream error").status, 408);
+    let error = error.expect("a stream error");
+    assert_eq!(error.status, 408);
+    assert_eq!(scope(&error), (false, true));
 }
 
 // TestCodexExecutorTransportFailureBeforeTerminalIsRequestScoped.
@@ -690,6 +701,7 @@ async fn transport_failure_before_terminal_is_a_timeout() {
         .await
         .unwrap_err();
     assert_eq!(error.status, 408, "{error:?}");
+    assert_eq!(scope(&error), (false, true));
 
     let response = executor()
         .execute_stream(
@@ -700,7 +712,9 @@ async fn transport_failure_before_terminal_is_a_timeout() {
         .await
         .unwrap();
     let (_, error) = collect(response).await;
-    assert_eq!(error.expect("a stream error").status, 408);
+    let error = error.expect("a stream error");
+    assert_eq!(error.status, 408);
+    assert_eq!(scope(&error), (false, true));
 }
 
 const COMPLETED_RESP_1: &str = "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.5\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n";
@@ -817,6 +831,7 @@ async fn zero_token_incomplete_streams() {
         error.message,
         crate::codex::terminal::EMPTY_INCOMPLETE_STREAM_MESSAGE
     );
+    assert_eq!(scope(&error), (false, true));
 
     let partial = format!(
         "data: {{\"type\":\"response.output_text.delta\",\"delta\":\"Hello world\"}}\n\n{ZERO_TOKEN_INCOMPLETE}"
@@ -844,6 +859,7 @@ async fn zero_token_incomplete_streams() {
         .await
         .unwrap_err();
     assert_eq!(error.status, 502);
+    assert_eq!(scope(&error), (false, true));
 }
 
 // TestCodexExecutorSimplifiesComplexOneOfToolSchema.
@@ -1514,6 +1530,7 @@ async fn maps_error_statuses() {
     assert_eq!(error.status, 429, "{error:?}");
     assert_eq!(error.retry_after, Some(Duration::from_secs(30)));
     assert_eq!(error.message, usage_limit);
+    assert_eq!(scope(&error), (true, false));
 
     let error = executor()
         .execute_stream(
@@ -1524,6 +1541,20 @@ async fn maps_error_statuses() {
         .await;
     let error = refused(error);
     assert_eq!(error.status, 429);
+    assert_eq!(error.retry_after, Some(Duration::from_secs(30)));
+    assert_eq!(scope(&error), (true, false));
+
+    let error = executor()
+        .execute(
+            api_key_auth(&mock.url),
+            request("gpt-5.4", payload),
+            compact_options("openai-response"),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.status, 429);
+    assert_eq!(error.retry_after, Some(Duration::from_secs(30)));
+    assert_eq!(scope(&error), (true, false));
 
     let mock = Mock::start(Reply::error(401, "")).await;
     let error = executor()
@@ -1537,6 +1568,7 @@ async fn maps_error_statuses() {
     assert_eq!(error.status, 401);
     let body: Value = serde_json::from_str(&error.message).unwrap();
     assert_eq!(get(&body, "error.code"), Some(&json!("auth_unavailable")));
+    assert_eq!(scope(&error), (false, false));
 
     let mock = Mock::start(Reply::error(500, "")).await;
     let error = executor()
@@ -1548,6 +1580,80 @@ async fn maps_error_statuses() {
         .await
         .unwrap_err();
     assert_eq!((error.status, error.message.as_str()), (500, "status 500"));
+    assert_eq!(scope(&error), (false, false));
+}
+
+// A reset time too far ahead for Go's clock: upstream gives the 429 with no
+// retry delay, on every path.
+#[tokio::test]
+async fn oversized_reset_time_has_no_retry_delay() {
+    let body = r#"{"error":{"type":"usage_limit_reached","resets_at":9223372036854775807}}"#;
+    let mock = Mock::start(Reply::error(429, body)).await;
+    let payload = r#"{"input":"hi"}"#;
+    let mut errors = Vec::new();
+    for options in [
+        options("openai-response"),
+        compact_options("openai-response"),
+    ] {
+        let result = executor()
+            .execute(
+                api_key_auth(&mock.url),
+                request("gpt-5.4", payload),
+                options,
+            )
+            .await;
+        errors.push(result.unwrap_err());
+    }
+    let result = executor()
+        .execute_stream(
+            api_key_auth(&mock.url),
+            request("gpt-5.4", payload),
+            stream_options("openai-response"),
+        )
+        .await;
+    errors.push(refused(result));
+    for error in errors {
+        assert_eq!(error.status, 429, "{error:?}");
+        assert_eq!(error.retry_after, None);
+        assert_eq!(scope(&error), (true, false));
+    }
+}
+
+// A usage limit that arrives as a stream's terminal event is the credential's
+// too (newCodexStatusErr through codexTerminalStreamErr).
+#[tokio::test]
+async fn usage_limit_events_are_scoped_to_the_credential() {
+    let event = concat!(
+        r#"data: {"type":"error","error":{"type":"usage_limit_reached","message":"limit","resets_in_seconds":300}}"#,
+        "\n\n",
+    );
+    let mock = Mock::start(Reply::sse(event)).await;
+    let payload = r#"{"model":"gpt-5.5","input":"hello"}"#;
+    let error = executor()
+        .execute(
+            api_key_auth(&mock.url),
+            request("gpt-5.5", payload),
+            options("openai-response"),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.status, 429, "{error:?}");
+    assert_eq!(error.retry_after, Some(Duration::from_secs(300)));
+    assert_eq!(scope(&error), (true, false));
+
+    let response = executor()
+        .execute_stream(
+            api_key_auth(&mock.url),
+            request("gpt-5.5", payload),
+            stream_options("openai-response"),
+        )
+        .await
+        .unwrap();
+    let (_, error) = collect(response).await;
+    let error = error.expect("a terminal error");
+    assert_eq!(error.status, 429);
+    assert_eq!(error.retry_after, Some(Duration::from_secs(300)));
+    assert_eq!(scope(&error), (true, false));
 }
 
 #[tokio::test]

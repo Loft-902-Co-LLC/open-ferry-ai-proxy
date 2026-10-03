@@ -476,6 +476,35 @@ mod tests {
         );
     }
 
+    // Reset times past what Go's or chrono's clock holds are passed over or
+    // kept as a long wait, without overflowing.
+    #[test]
+    fn extreme_resets_dont_overflow() {
+        let rejected = "anthropic-ratelimit-unified-5h-status";
+        for raw in [
+            "9223372036854775807",
+            "9223372036854775808",
+            "9223371974719179007",
+            "8210266876800",
+            "1e300",
+            "9999-12-31T23:59:59Z",
+        ] {
+            for name in ["retry-after", "anthropic-ratelimit-unified-reset"] {
+                let _ = reset(&[(name, raw)]);
+            }
+            let _ = reset(&[
+                (rejected, "rejected"),
+                ("anthropic-ratelimit-unified-5h-reset", raw),
+            ]);
+            let _ = rate_limit_reset(&headers(&[("retry-after", raw)]), now());
+        }
+        assert_eq!(reset(&[("retry-after", "1e300")]), None);
+        assert_eq!(
+            reset(&[("retry-after", "9223372036")]),
+            Some(Duration::from_secs(9_223_372_036))
+        );
+    }
+
     #[test]
     fn reset_adds_a_bounded_grace() {
         let pairs = [("retry-after", "10")];

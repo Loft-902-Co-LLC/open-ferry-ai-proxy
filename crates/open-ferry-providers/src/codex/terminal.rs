@@ -11,16 +11,17 @@
 //! response's `output`.
 //!
 //! Deviations from upstream:
-//! - Upstream's errors say whether they are scoped to the credential (a
-//!   usage limit) or to the request (a stream that broke off). [`ExecError`]
-//!   has no field for that, so [`StatusError`] keeps it and the conversion
-//!   drops it.
 //! - Model-level cooling, a config option, isn't ported, so a usage limit is
 //!   always scoped to the credential.
 //! - Bodies built from a stream event are written by `serde_json`, whose
 //!   escapes and spacing may differ from sjson's.
 //! - The stream-bootstrap helpers (overload probing while buffering) aren't
 //!   ported, as bootstrap buffering isn't.
+//! - Go can't hand on a negative wait here, so where its
+//!   `resets_in_seconds` arithmetic wraps below zero the wait is zero; the
+//!   auth manager treats both the same way. And a `resets_in_seconds` too big
+//!   for an int64 reads as the largest one here (see `json::int_of`) and the
+//!   smallest in Go, so it gives that zero wait where Go gives none.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -82,6 +83,8 @@ impl From<StatusError> for ExecError {
     fn from(error: StatusError) -> Self {
         let mut exec = ExecError::upstream(error.status, error.text());
         exec.retry_after = error.retry_after;
+        exec.credential_scoped = error.credential_scoped;
+        exec.request_scoped = error.request_scoped;
         exec
     }
 }
@@ -250,7 +253,19 @@ fn is_usage_limit(parsed: &Value) -> bool {
         .any(|path| eq_fold(str_at(parsed, path).trim(), "usage_limit_reached"))
 }
 
+const NANOS_PER_SECOND: i64 = 1_000_000_000;
+
+/// The latest Unix time Go's `time.Unix` holds: it counts seconds from year 1
+/// in an int64, so anything later wraps into the distant past.
+const GO_MAX_UNIX_SECONDS: i64 = i64::MAX - 62_135_596_800;
+
 /// How long until a usage limit resets, for a 429 (`parseCodexRetryAfter`).
+///
+/// The arithmetic is Go's, without overflowing: a `resets_at` past what
+/// `time.Unix` holds wraps into the past there, so it's passed over; a wait
+/// past Go's longest duration (about 292 years) is cut to it, as `Time.Sub`
+/// does; and `resets_in_seconds` wraps as `time.Duration` multiplication
+/// does.
 fn parse_retry_after(status: u16, body: &str, parsed: &Value, now: SystemTime) -> Option<Duration> {
     if status != 429 || body.is_empty() {
         return None;
@@ -260,21 +275,36 @@ fn parse_retry_after(status: u16, body: &str, parsed: &Value, now: SystemTime) -
         if !eq_fold(str_at(quota, "type").trim(), "usage_limit_reached") {
             continue;
         }
-        let resets_at = int_at(quota, "resets_at");
-        if resets_at > 0 {
-            let reset = UNIX_EPOCH + Duration::from_secs(resets_at.unsigned_abs());
-            if let Ok(wait) = reset.duration_since(now)
-                && !wait.is_zero()
-            {
-                return Some(wait);
-            }
+        if let Some(wait) = wait_until(int_at(quota, "resets_at"), now) {
+            return Some(wait);
         }
         let resets_in = int_at(quota, "resets_in_seconds");
         if resets_in > 0 {
-            return Some(Duration::from_secs(resets_in.unsigned_abs()));
+            // Go's product can wrap below zero; a negative wait is a zero one.
+            let nanos = resets_in.wrapping_mul(NANOS_PER_SECOND);
+            return Some(Duration::from_nanos(u64::try_from(nanos).unwrap_or(0)));
         }
     }
     None
+}
+
+/// The wait from `now` until the Unix time `resets_at`, if that's ahead, as
+/// Go's `time.Unix(resets_at, 0)` with `After` and `Sub` gives it.
+fn wait_until(resets_at: i64, now: SystemTime) -> Option<Duration> {
+    if !(1..=GO_MAX_UNIX_SECONDS).contains(&resets_at) {
+        return None;
+    }
+    let now = match now.duration_since(UNIX_EPOCH) {
+        Ok(since) => i128::try_from(since.as_nanos()).unwrap_or(i128::MAX),
+        Err(before) => i128::try_from(before.duration().as_nanos()).map_or(i128::MIN, |n| -n),
+    };
+    let wait = (i128::from(resets_at) * i128::from(NANOS_PER_SECOND)).saturating_sub(now);
+    if wait <= 0 {
+        return None;
+    }
+    u64::try_from(wait.min(i128::from(i64::MAX)))
+        .ok()
+        .map(Duration::from_nanos)
 }
 
 /// The error body of a terminal failure event, `error` or
@@ -641,6 +671,79 @@ mod tests {
         }
     }
 
+    // What Go's parseCodexRetryAfter gives at the same clock, for times and
+    // waits its arithmetic can't hold. Its negative waits are zero here.
+    #[test]
+    fn retry_after_overflows_as_go_does() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let go_max = i64::MAX.unsigned_abs();
+        let cases = [
+            (format!(r#""resets_at":{}"#, i64::MAX), None),
+            (
+                format!(r#""resets_at":{},"resets_in_seconds":30"#, i64::MAX),
+                Some(30_000_000_000),
+            ),
+            (
+                format!(r#""resets_at":{GO_MAX_UNIX_SECONDS}"#),
+                Some(go_max),
+            ),
+            (
+                format!(
+                    r#""resets_at":{},"resets_in_seconds":30"#,
+                    GO_MAX_UNIX_SECONDS + 1
+                ),
+                Some(30_000_000_000),
+            ),
+            (r#""resets_at":1000000000000000"#.to_owned(), Some(go_max)),
+            (
+                r#""resets_at":10923372036"#.to_owned(),
+                Some(9_223_372_036_000_000_000),
+            ),
+            (r#""resets_at":10923372037"#.to_owned(), Some(go_max)),
+            (r#""resets_at":1700000001"#.to_owned(), Some(1_000_000_000)),
+            (
+                r#""resets_at":1700000000,"resets_in_seconds":7"#.to_owned(),
+                Some(7_000_000_000),
+            ),
+            (
+                r#""resets_at":-5,"resets_in_seconds":7"#.to_owned(),
+                Some(7_000_000_000),
+            ),
+            (format!(r#""resets_at":{}"#, i64::MIN), None),
+            (r#""resets_at":1e300"#.to_owned(), None),
+            // Go: -1s.
+            (format!(r#""resets_in_seconds":{}"#, i64::MAX), Some(0)),
+            (
+                r#""resets_in_seconds":9223372036"#.to_owned(),
+                Some(9_223_372_036_000_000_000),
+            ),
+            // Go: -9223372036709551616ns.
+            (r#""resets_in_seconds":9223372037"#.to_owned(), Some(0)),
+            (
+                r#""resets_in_seconds":18446744074"#.to_owned(),
+                Some(290_448_384),
+            ),
+        ];
+        for (fields, want) in cases {
+            let body = format!(r#"{{"error":{{"type":"usage_limit_reached",{fields}}}}}"#);
+            assert_eq!(
+                parse_retry_after(429, &body, &parse(body.as_bytes()), now),
+                want.map(Duration::from_nanos),
+                "{body}"
+            );
+        }
+        // Go's 429 for the review's body: no retry delay, and no panic.
+        let body = br#"{"error":{"type":"usage_limit_reached","resets_at":9223372036854775807}}"#;
+        let error = status_error_at(429, body, now);
+        assert_eq!(error.status, 429);
+        assert_eq!(error.retry_after, None);
+        assert!(error.credential_scoped);
+        assert_eq!(status_error(429, body).retry_after, None);
+        // A clock before 1970 still counts the wait.
+        let early = UNIX_EPOCH - Duration::from_secs(10);
+        assert_eq!(wait_until(1, early), Some(Duration::from_secs(11)));
+    }
+
     #[test]
     fn retry_after_needs_429_and_a_usage_limit() {
         let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
@@ -921,13 +1024,32 @@ mod tests {
         assert_eq!(error.status, 429);
         assert_eq!(error.message, "slow");
         assert_eq!(error.retry_after, Some(Duration::from_secs(5)));
+        assert!(!error.credential_scoped);
+        assert!(!error.request_scoped);
         assert_eq!(
             ExecError::from(StatusError::new(500, "")).message,
             "status 500"
         );
-        assert!(incomplete_stream_error().request_scoped);
-        assert_eq!(incomplete_stream_error().status, 408);
-        assert_eq!(empty_incomplete_stream_error().status, 502);
+
+        // The scope flags carry over, as upstream's error interfaces report
+        // them: a usage limit is the credential's, a broken stream the
+        // request's.
+        let body = br#"{"error":{"type":"usage_limit_reached","resets_in_seconds":30}}"#;
+        let error = ExecError::from(status_error(403, body));
+        assert_eq!(error.status, 429);
+        assert_eq!(error.retry_after, Some(Duration::from_secs(30)));
+        assert!(error.credential_scoped);
+        assert!(!error.request_scoped);
+        for (error, status) in [
+            (incomplete_stream_error(), 408),
+            (empty_incomplete_stream_error(), 502),
+        ] {
+            let error = ExecError::from(error);
+            assert_eq!(error.status, status);
+            assert!(error.request_scoped);
+            assert!(!error.credential_scoped);
+            assert_eq!(error.retry_after, None);
+        }
     }
 
     // TestCodexTerminalFailureErrClassifiesStatus.
