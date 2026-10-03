@@ -184,7 +184,26 @@ Deviations, each also noted in its module:
 
 #### Credential files
 
-Not ported yet: downloading, uploading and deleting `auth-files`, `vertex/import` and v8's `oauth/import`.
+| Route | v8 route |
+|---|---|
+| `GET /v0/management/auth-files/download` | `GET /v8/management/credentials/download` |
+| `POST /v0/management/auth-files` | `POST /v8/management/credentials` |
+| `DELETE /v0/management/auth-files` | `DELETE /v8/management/credentials` |
+| `POST /v0/management/vertex/import` | `POST /v8/management/oauth/import?provider=vertex` |
+
+Deviations, each also noted in its module:
+
+- **Names are checked as Windows needs them, on every system.** A name holding `/`, `\` or `:` (so no path, drive, UNC share or NTFS stream), a control character or one of `<>"|?*`, ending in `.` or a space, or naming a Windows device such as `CON` or `nul.json`, answers 400 `invalid name`. Upstream refuses only a blank name, a separator and, on Windows, a volume name, and checks an uploaded file's name for `.json` only. An uploaded file's name is what follows the last `/` or `\` of its `filename` on every system; Go splits only at `/` outside Windows. On Windows a delete matches a credential's ID or file name regardless of case when nothing matches exactly, as the file system does. A Vertex `project_id` that gives a file name Windows can't hold answers 400 `invalid service account`.
+
+- **An upload must hold a credential the service serves.** It is written only if the core's file synthesizer reads a credential from it (a JSON object with a type the service serves), so a file that doesn't parse never replaces the one there. Upstream also writes `null`, a file without a type (registering it as provider `unknown`) and a Gemini CLI file. The reason after `invalid auth file: `, and the `message` of the Vertex import's `invalid json`, may read differently from Go's.
+
+- **Nothing is written through a symlink.** Uploads and imports are written atomically, as every auth file is. A symlink where the file would go is refused, checked just before the write: an upload with `failed to write file: ... is a symlink`, an import with 500 `save_failed`. Upstream writes through it, in place. The Vertex credential is written compact, as the store writes every credential, rather than indented; its service account's numbers are written as they came, where Go writes them as float64, and its key's PEM headers are dropped.
+
+- **Sizes are bounded.** A form or body over 32 MiB answers 413 `request body too large`, a file over 8 MiB (the most the service reads) 413 `auth file too large`, and a form of more than 1000 parts 400 `invalid multipart form: multipart: message too large`, as Go's does; the reason after `invalid multipart form: ` is the form parser's. A download of a file over 8 MiB fails with a 500. Upstream takes any size.
+
+- **Deletes stay at the top of the auth directory.** A delete removes only a `*.json` file there. When the credential named has its file elsewhere, the delete answers 409 `auth file is outside the auth directory` and nothing changes, and one whose file isn't `*.json` answers 400 `name must end with .json`; upstream removes the file wherever it is. `?all=true` deletes in name order, skips names that aren't valid UTF-8, and stops at the first file the service can't be told of. The plugin host isn't ported, so there are no plugin credentials to refuse deleting.
+
+- **A change the service can't be told of answers 503.** When the service has stopped, an upload, delete or import answers 503 with the reason, and the file stays written or removed; upstream registers the credential itself. Without a credential store the Vertex import answers 503 `credential store unavailable` before reading the form, where upstream answers 500 `save_failed`.
 
 #### Credential state
 
