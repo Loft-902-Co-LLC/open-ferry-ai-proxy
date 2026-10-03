@@ -1,10 +1,12 @@
-// Ported from CLIProxyAPI internal/thinking/convert.go, suffix.go and types.go
+// Ported from CLIProxyAPI internal/thinking/convert.go, suffix.go, text.go and types.go
 // (v8.0.10, MIT). https://github.com/router-for-me/CLIProxyAPI
 
 //! Thinking settings: model-name suffixes, mapping between token budgets and
 //! named reasoning levels, and whether reasoning summaries are shown.
 
 pub mod summary;
+
+use serde_json::Value;
 
 use crate::go;
 
@@ -28,6 +30,23 @@ pub fn budget_to_level(budget: i64) -> Option<&'static str> {
         b if b <= THRESHOLD_HIGH => "high",
         _ => LEVEL_XHIGH,
     })
+}
+
+/// `GetThinkingText`: the text of a thinking block. A string `text` comes
+/// first; else `thinking`, a string or an object with a string `text` or
+/// `thinking` inside. Empty if there is none.
+pub(crate) fn thinking_text(part: &Value) -> &str {
+    if let Some(Value::String(text)) = part.get("text") {
+        return text;
+    }
+    match part.get("thinking") {
+        Some(Value::String(text)) => text,
+        Some(inner @ Value::Object(_)) => ["text", "thinking"]
+            .into_iter()
+            .find_map(|key| inner.get(key).and_then(Value::as_str))
+            .unwrap_or_default(),
+        _ => "",
+    }
 }
 
 /// Converts a reasoning level, in any case, into a thinking token budget.
