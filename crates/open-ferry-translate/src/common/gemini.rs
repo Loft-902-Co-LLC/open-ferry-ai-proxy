@@ -1,17 +1,23 @@
 // Ported from CLIProxyAPI internal/translator/common/gemini.go (IsGeminiThoughtPart,
 // MergeAdjacentGeminiContents, ContentHasGeminiFunctionResponse, ReorderGeminiUserParts,
 // MergeAdjacentGeminiUserContents, ContainsJSONRef, SetGeminiFunctionResponseResult and
-// SetGeminiFunctionResponseRaw) (v8.0.10, MIT).
+// SetGeminiFunctionResponseRaw), internal/util/util.go (SanitizeFunctionName) and
+// internal/util/translator.go (SanitizedToolNameMap and RestoreSanitizedToolName)
+// (v8.0.10, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Helpers for the `contents` of Gemini requests, shared by the translators
-//! that build them.
+//! that build them, and for the function names Gemini accepts.
 //!
 //! Gemini wants user and model turns to alternate, and rejects a user turn
 //! whose text comes after a function response. These helpers merge
 //! consecutive user turns and move text ahead of function responses. Model
 //! turns are never merged: that would shift part indices, which thought
 //! signatures depend on.
+//!
+//! Gemini function names allow fewer characters than clients' tool names, so
+//! requests carry [`sanitize_gemini_function_name`]d names and responses map
+//! them back ([`sanitized_tool_name_map`]).
 //!
 //! Upstream's `SplitGeminiFunctionResponseTurns` and
 //! `ContentHasGeminiFunctionCall` are not ported: only the Antigravity
@@ -27,10 +33,20 @@
 //! - [`set_gemini_function_response_raw`] stores `""` for text that isn't
 //!   valid JSON. Upstream stores whatever gjson makes of it, which can leave
 //!   the request invalid JSON.
+//! - Upstream logs a warning when two tool names sanitize to the same name;
+//!   [`sanitized_tool_name_map`] logs nothing.
+
+use std::collections::HashMap;
 
 use serde_json::Value;
 
 use crate::json::{bool_of, set_path, str_of};
+
+/// Gemini's limit on function name length.
+const GEMINI_FUNCTION_NAME_LIMIT: usize = 64;
+
+/// Sanitized tool names, each with the name the client declared.
+pub(crate) type SanitizedToolNames = HashMap<String, String>;
 
 /// Reports whether a Gemini part holds the model's hidden thoughts.
 #[cfg_attr(
@@ -210,6 +226,65 @@ fn set_ref_result(part: &mut Value, path: &str, text: String) {
         path.to_owned()
     };
     set_path(part, &target, Value::String(text));
+}
+
+/// `SanitizeFunctionName`: `name` made a valid Gemini function name. Each
+/// character other than an ASCII letter, digit, `_`, `.`, `:` or `-` becomes
+/// `_`; a name that doesn't start with a letter or `_` gets a leading `_`;
+/// and the result is cut to 64 bytes. An empty name stays empty.
+pub(crate) fn sanitize_gemini_function_name(name: &str) -> String {
+    if name.is_empty() {
+        return String::new();
+    }
+    let mut sanitized: String = name
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '.' | ':' | '-' => c,
+            _ => '_',
+        })
+        .collect();
+    // Every character is ASCII now, so any byte is a boundary.
+    if !matches!(sanitized.as_bytes()[0], b'a'..=b'z' | b'A'..=b'Z' | b'_') {
+        sanitized.truncate(GEMINI_FUNCTION_NAME_LIMIT - 1);
+        sanitized.insert(0, '_');
+    }
+    sanitized.truncate(GEMINI_FUNCTION_NAME_LIMIT);
+    sanitized
+}
+
+/// `SanitizedToolNameMap`: the tools a request declares whose names
+/// [`sanitize_gemini_function_name`] changes, by sanitized name, each with
+/// the name as declared (trimmed). The first of two names that sanitize alike
+/// wins. `None` if there are none.
+pub(crate) fn sanitized_tool_name_map(request: &Value) -> Option<SanitizedToolNames> {
+    let Some(Value::Array(tools)) = request.get("tools") else {
+        return None;
+    };
+    let mut names = SanitizedToolNames::new();
+    for tool in tools {
+        let name = str_of(tool.get("name"));
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let sanitized = sanitize_gemini_function_name(name);
+        if sanitized != name {
+            names.entry(sanitized).or_insert_with(|| name.to_owned());
+        }
+    }
+    (!names.is_empty()).then_some(names)
+}
+
+/// `RestoreSanitizedToolName`: the declared name a sanitized function name
+/// stands for, or the name itself.
+pub(crate) fn restore_sanitized_tool_name(
+    names: Option<&SanitizedToolNames>,
+    name: &str,
+) -> String {
+    names
+        .filter(|_| !name.is_empty())
+        .and_then(|names| names.get(name))
+        .map_or_else(|| name.to_owned(), Clone::clone)
 }
 
 #[cfg(test)]

@@ -1261,8 +1261,9 @@ fn walk(value: &Value, path: &str, visit: &mut dyn FnMut(&str, &str)) {
     }
 }
 
-/// gjson `Get`: the value at `path`, if there is one.
-fn get<'v>(doc: &'v Value, path: &str) -> Option<&'v Value> {
+/// gjson `Get`: the value at `path`, if there is one. A key that is an index
+/// reads an array's item, and an object's field of that name.
+pub(crate) fn get<'v>(doc: &'v Value, path: &str) -> Option<&'v Value> {
     keys(path)
         .iter()
         .try_fold(doc, |value, key| child(value, key))
@@ -1308,11 +1309,16 @@ fn build_index(key: &str) -> Option<usize> {
     })
 }
 
-/// sjson `Set`. A missing key is added last, a missing array index is padded
-/// to with nulls, and a value in the way that is neither an object nor an
-/// array is replaced by one. sjson fails, changing nothing, on an empty path
-/// and on a key in an array that isn't an index (`-1` appends).
-fn set(doc: &mut Value, path: &str, new: Value) {
+/// sjson `Set` for a gjson path, whose keys are separated by dots and may be
+/// escaped with backslashes. A missing key is added last, a missing array
+/// index is padded to with nulls (up to [`MAX_PADDED_INDEX`]), and a value in
+/// the way that is neither an object nor an array is replaced by one. sjson
+/// fails, changing nothing, on an empty path and on a key in an array that
+/// isn't an index (`-1` appends).
+///
+/// The Gemini passthrough uses it too, where upstream builds paths from
+/// indices and object keys alike.
+pub(crate) fn set(doc: &mut Value, path: &str, new: Value) {
     if !path.is_empty() {
         set_keys(doc, &keys(path), new);
     }

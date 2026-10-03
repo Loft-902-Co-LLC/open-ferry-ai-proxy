@@ -18,10 +18,6 @@ pub mod codex;
 mod common;
 pub mod completions;
 pub mod gemini;
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "the Gemini translators that call it land next")
-)]
 mod gemini_schema;
 pub mod go;
 mod json;

@@ -1,7 +1,13 @@
-//! Translators to a Gemini upstream (upstream's `internal/translator/gemini`).
+//! Translators for a Gemini upstream (upstream's `internal/translator/gemini`),
+//! named after the client's format: `claude` for Claude Messages clients,
+//! `openai` for OpenAI clients and `gemini` for Gemini clients, whose
+//! requests are only normalized.
 
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "the translators that call it land next")
-)]
+pub mod claude;
 pub(crate) mod common;
+#[allow(
+    clippy::module_inception,
+    reason = "named after the client's format, as the other modules here are"
+)]
+pub mod gemini;
+pub mod openai;

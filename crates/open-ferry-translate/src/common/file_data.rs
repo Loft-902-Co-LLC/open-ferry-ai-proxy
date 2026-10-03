@@ -22,13 +22,6 @@ pub(crate) struct FileData {
 /// The MIME type and base64 payload of `file_data`: a `data:` URL marked
 /// `base64`, or bare base64 typed by `fallback_mime_type`, or else by the
 /// extension of `filename`. `None` if it is empty, or the type can't be told.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "the OpenAI to Gemini translators that call it land next"
-    )
-)]
 pub(crate) fn normalize_openai_file_data(
     filename: &str,
     fallback_mime_type: &str,

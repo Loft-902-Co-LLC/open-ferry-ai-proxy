@@ -341,3 +341,126 @@ fn is_gemini_thought_part_reads_thought_as_gjson_bool() {
     assert!(!thought(r#"{"text":"x"}"#));
     assert!(!thought(r#"[{"thought":true}]"#));
 }
+
+// The tests below port TestSanitizeFunctionName, TestSanitizedToolNameMap and
+// TestRestoreSanitizedToolName from internal/util/sanitize_test.go. The other
+// tests there cover functions not ported here.
+
+#[test]
+fn sanitize_gemini_function_name_cases() {
+    let long = "this_is_a_very_long_name_that_exactly_reaches_sixty_four_charact";
+    for (input, expected) in [
+        ("valid_name", "valid_name"),
+        ("name.with.dots", "name.with.dots"),
+        ("name:with:colons", "name:with:colons"),
+        ("name-with-dashes", "name-with-dashes"),
+        (
+            "name.with_dots:colons-dashes",
+            "name.with_dots:colons-dashes",
+        ),
+        ("name!with@invalid#chars", "name_with_invalid_chars"),
+        ("name with spaces", "name_with_spaces"),
+        ("name_with_\u{4f60}\u{597d}_chars", "name_with____chars"),
+        ("123name", "_123name"),
+        (".name", "_.name"),
+        (":name", "_:name"),
+        ("-name", "_-name"),
+        ("!name", "_name"),
+        (long, long),
+        (&format!("{long}X"), long),
+        (
+            "this_is_a_very_long_name_that_exceeds_the_sixty_four_character_limit_for_function_names",
+            "this_is_a_very_long_name_that_exceeds_the_sixty_four_character_l",
+        ),
+        (
+            "1234567890123456789012345678901234567890123456789012345678901234",
+            "_123456789012345678901234567890123456789012345678901234567890123",
+        ),
+        (
+            "!234567890123456789012345678901234567890123456789012345678901234",
+            "_234567890123456789012345678901234567890123456789012345678901234",
+        ),
+        ("", ""),
+        ("@", "_"),
+        ("a", "a"),
+        ("1", "_1"),
+        ("_", "_"),
+    ] {
+        let got = sanitize_gemini_function_name(input);
+        assert_eq!(got, expected, "{input}");
+        assert!(got.len() <= 64, "{input}");
+        assert!(
+            got.is_empty() || matches!(got.as_bytes()[0], b'a'..=b'z' | b'A'..=b'Z' | b'_'),
+            "{input}"
+        );
+    }
+}
+
+#[test]
+fn sanitized_tool_name_map_cases() {
+    let names = sanitized_tool_name_map(&json!({"tools": [
+        {"name": "valid_tool", "input_schema": {}},
+        {"name": "mcp/server/read", "input_schema": {}},
+        {"name": "tool@v2", "input_schema": {}}
+    ]}))
+    .unwrap();
+    assert_eq!(names["mcp_server_read"], "mcp/server/read");
+    assert_eq!(names["tool_v2"], "tool@v2");
+    assert!(!names.contains_key("valid_tool"));
+
+    assert!(
+        sanitized_tool_name_map(&json!({"tools": [
+            {"name": "Read", "input_schema": {}},
+            {"name": "Write", "input_schema": {}}
+        ]}))
+        .is_none()
+    );
+    assert!(sanitized_tool_name_map(&json!({})).is_none());
+    assert!(sanitized_tool_name_map(&Value::Null).is_none());
+    assert!(
+        sanitized_tool_name_map(&json!({"tools": [
+            {"type": "function", "function": {"name": "web/search"}},
+            {"type": "web_search", "name": "web_search"}
+        ]}))
+        .is_none()
+    );
+
+    let names = sanitized_tool_name_map(&json!({"tools": [
+        {"name": "read/file", "input_schema": {}},
+        {"name": "read@file", "input_schema": {}}
+    ]}))
+    .unwrap();
+    assert_eq!(names["read_file"], "read/file");
+}
+
+#[test]
+fn sanitized_tool_name_map_trims_and_reads_names_as_text() {
+    let names = sanitized_tool_name_map(&json!({"tools": [
+        {"name": "  a/b  "},
+        {"name": 12},
+        {"name": " "},
+        "x"
+    ]}))
+    .unwrap();
+    assert_eq!(names.len(), 2);
+    assert_eq!(names["a_b"], "a/b");
+    assert_eq!(names["_12"], "12");
+}
+
+#[test]
+fn restore_sanitized_tool_name_cases() {
+    let names = SanitizedToolNames::from([
+        ("mcp_server_read".to_owned(), "mcp/server/read".to_owned()),
+        ("tool_v2".to_owned(), "tool@v2".to_owned()),
+    ]);
+    assert_eq!(
+        restore_sanitized_tool_name(Some(&names), "mcp_server_read"),
+        "mcp/server/read"
+    );
+    assert_eq!(
+        restore_sanitized_tool_name(Some(&names), "unknown"),
+        "unknown"
+    );
+    assert_eq!(restore_sanitized_tool_name(None, "name"), "name");
+    assert_eq!(restore_sanitized_tool_name(Some(&names), ""), "");
+}
