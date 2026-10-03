@@ -1237,9 +1237,9 @@ mod tests {
         });
         drop(receiver);
         let path = fixture.write_auth("a.json", DEMO);
-        sender
-            .send(fs_event(EventKind::Create(CreateKind::File), &path))
-            .expect("send");
+        // The thread may already have stopped, if its first scan saw the
+        // file; either way it must stop.
+        let _ = sender.send(fs_event(EventKind::Create(CreateKind::File), &path));
         thread.join().expect("watcher thread");
     }
 
