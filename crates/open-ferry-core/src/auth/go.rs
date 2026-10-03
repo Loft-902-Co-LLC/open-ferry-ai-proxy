@@ -1,6 +1,7 @@
 //! Go standard library behaviour the credential code depends on:
-//! `strings.EqualFold`, `strconv.ParseBool` and `strconv.Atoi`, and the JWT
-//! payload decoding upstream does with `encoding/base64`.
+//! `strings.EqualFold`, `strconv.ParseBool` and `strconv.Atoi`, a JSON
+//! number's conversion to `int64`, and the JWT payload decoding upstream
+//! does with `encoding/base64`.
 
 use base64::Engine;
 use base64::alphabet::URL_SAFE;
@@ -98,6 +99,15 @@ pub(crate) fn parse_bool(s: &str) -> Option<bool> {
 /// digits, nothing else.
 pub(crate) fn atoi(s: &str) -> Option<i64> {
     s.parse().ok()
+}
+
+/// A JSON number as Go's `int64(float64)` gives it, saturating; an integer
+/// stays exact.
+pub(crate) fn number_to_i64(number: &serde_json::Number) -> i64 {
+    if let Some(n) = number.as_i64() {
+        return n;
+    }
+    number.as_f64().map_or(0, |f| f as i64)
 }
 
 #[cfg(test)]

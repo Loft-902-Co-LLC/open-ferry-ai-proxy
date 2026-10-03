@@ -509,7 +509,7 @@ fn label_for(metadata: &serde_json::Map<String, Value>) -> String {
 }
 
 /// Reads a file of at most [`MAX_AUTH_FILE_SIZE`] bytes.
-pub(crate) fn read_capped(path: &Path) -> io::Result<Vec<u8>> {
+pub fn read_capped(path: &Path) -> io::Result<Vec<u8>> {
     let mut data = Vec::new();
     fs::File::open(path)?
         .take(MAX_AUTH_FILE_SIZE + 1)

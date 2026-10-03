@@ -25,6 +25,9 @@
 //!   session-affinity and usage-logging keys, which aren't ported.
 //! - Errors are one type, [`ExecError`], where upstream checks an error for
 //!   optional methods (`StatusCode`, `Headers`, `IsTerminalAuth` and so on).
+//!   An executor's error carries no code of its own (upstream's `Error.Code`),
+//!   so a credential's recorded error has a code only for the manager's own
+//!   errors; no upstream executor sets one.
 //! - The Responses WebSocket learns what it needs about credentials from one
 //!   query, [`Dispatcher::websocket_support`], where upstream's handler reads
 //!   the auth manager's credentials and the model registry itself.
@@ -39,7 +42,7 @@ use futures_core::future::BoxFuture;
 use futures_core::stream::BoxStream;
 use http::HeaderMap;
 
-pub use error::{ErrorKind, ExecError, WsClose};
+pub use error::{ErrorKind, ExecError, TransportFault, WsClose};
 pub use open_ferry_translate::registry::Format;
 
 /// A provider's identifier, such as `codex` or `claude`.

@@ -30,6 +30,9 @@ pub enum ErrorKind {
     Canceled,
     /// A deadline passed (upstream's `context.DeadlineExceeded`).
     DeadlineExceeded,
+    /// No executor is registered for the credential's provider
+    /// (`executor_not_found`).
+    ExecutorNotFound,
 }
 
 impl ErrorKind {
@@ -40,6 +43,7 @@ impl ErrorKind {
             Self::AuthUnavailable => "auth_unavailable",
             Self::ProviderNotFound => "provider_not_found",
             Self::EmptyStream => "empty_stream",
+            Self::ExecutorNotFound => "executor_not_found",
             _ => return None,
         })
     }
@@ -60,6 +64,18 @@ pub enum WsClose {
     MessageTooBig(String),
 }
 
+/// A connection failure the provider never answered, for executors that can
+/// tell; upstream recognizes these by their error text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransportFault {
+    /// A network error that may clear on its own, such as a refused or reset
+    /// connection or a TLS handshake timeout.
+    Transient,
+    /// The connection or call ended early, such as an unexpected EOF or a
+    /// WebSocket closing.
+    Lifecycle,
+}
+
 /// A failed call.
 #[derive(Clone, Debug)]
 pub struct ExecError {
@@ -78,6 +94,8 @@ pub struct ExecError {
     /// When a credential frees up, for [`ErrorKind::AuthUnavailable`] and
     /// [`ErrorKind::ModelCooldown`].
     pub retry_after: Option<Duration>,
+    /// Whether, and how, the connection to the provider failed.
+    pub transport: Option<TransportFault>,
     /// Whether the provider rejected the credential for good, so the client
     /// must sign in again.
     pub terminal_auth: bool,
@@ -102,6 +120,7 @@ impl ExecError {
             cause: None,
             headers: HeaderMap::new(),
             retry_after: None,
+            transport: None,
             terminal_auth: false,
             ws_close: None,
             credential_scoped: false,
@@ -203,6 +222,12 @@ impl ExecError {
     /// Sets the summary of the provider error behind this one.
     pub fn with_cause(mut self, cause: impl Into<String>) -> Self {
         self.cause = Some(cause.into());
+        self
+    }
+
+    /// Marks the error as a failed connection to the provider.
+    pub fn with_transport(mut self, fault: TransportFault) -> Self {
+        self.transport = Some(fault);
         self
     }
 

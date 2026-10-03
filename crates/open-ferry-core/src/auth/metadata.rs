@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use serde_json::{Map, Value};
 
 use super::Auth;
-use super::go::{atoi, parse_bool};
+use super::go::{atoi, equal_fold, number_to_i64, parse_bool};
 
 /// Marks a priority attribute that came from the credential's own file.
 pub const ATTRIBUTE_FILE_PRIORITY: &str = "file_priority";
@@ -82,8 +82,9 @@ pub fn is_auth_token_payload_key(key: &str) -> bool {
 }
 
 /// Copies settings from an existing credential file into a fresh login's
-/// record: every key the record doesn't have, except tokens. The file's
-/// `disabled` flag carries over unless the record sets its own.
+/// record: every key the record doesn't have, except tokens, and for Meta
+/// the old login's API key and DCA token. The file's `disabled` flag carries
+/// over unless the record sets its own.
 pub fn merge_existing_auth_metadata(target: &mut Auth, existing: &Map<String, Value>) {
     if existing.is_empty() {
         return;
@@ -93,8 +94,17 @@ pub fn merge_existing_auth_metadata(target: &mut Auth, existing: &Map<String, Va
     {
         target.disabled = *disabled;
     }
+    let meta = equal_fold(target.provider.trim(), "meta");
     for (key, value) in existing {
         if is_auth_token_payload_key(key) || target.metadata.contains_key(key) {
+            continue;
+        }
+        if meta
+            && matches!(
+                canonical_credential_metadata_key(key),
+                "api_key" | "dca_token" | "dca_expired" | "dca_expires_at"
+            )
+        {
             continue;
         }
         target.metadata.insert(key.clone(), value.clone());
@@ -208,11 +218,11 @@ pub(crate) fn parse_bool_any(value: &Value) -> Option<bool> {
     }
 }
 
-/// Upstream's `parseIntAny`: a number, truncated, or a string holding an
-/// integer.
+/// Upstream's `parseIntAny`: a number, truncated toward zero, or a string
+/// holding an integer.
 pub(crate) fn parse_int_any(value: &Value) -> Option<i64> {
     match value {
-        Value::Number(number) => number.as_f64().map(|n| n as i64),
+        Value::Number(number) => Some(number_to_i64(number)),
         Value::String(text) => {
             let trimmed = text.trim();
             if trimmed.is_empty() {
@@ -322,6 +332,26 @@ mod tests {
             target.metadata.get("claude_device_ids"),
             Some(&json!({"opaque": [1, 2]}))
         );
+    }
+
+    #[test]
+    fn merge_meta_does_not_restore_old_key() {
+        // A new device login can succeed while API key minting fails; its
+        // DCA credential must not inherit the previous login's API key.
+        let mut target = with_metadata(json!({"access_token": "dca:new", "dca_token": "dca:new"}));
+        target.provider = "meta".into();
+        let existing = map(json!({
+            "api_key": "LLM|old",
+            "dca_expired": "old expiry",
+            "dca_expires_at": 42,
+            "priority": 3,
+        }));
+        merge_existing_auth_metadata(&mut target, &existing);
+        for key in ["api_key", "dca_expired", "dca_expires_at"] {
+            assert!(!target.metadata.contains_key(key), "restored {key}");
+        }
+        assert_eq!(target.metadata.get("priority"), Some(&json!(3)));
+        assert_eq!(target.metadata_str("dca_token"), Some("dca:new"));
     }
 
     #[test]

@@ -46,7 +46,10 @@ use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
 
 pub use classification::{AuthKind, AuthSource};
+pub(crate) use expiry::{parse_time_value, zero_time};
 pub use file_store::FileStore;
+pub(crate) use go::{atoi, equal_fold, parse_bool};
+pub(crate) use metadata::{parse_bool_any, parse_int_any};
 
 /// A point in time, in UTC.
 pub type Timestamp = DateTime<Utc>;
