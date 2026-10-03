@@ -41,6 +41,8 @@ mod input_ids;
 pub mod jwt;
 pub mod oauth;
 pub(crate) mod reasoning;
+mod replay;
+mod replay_cache;
 pub(crate) mod request;
 pub(crate) mod stream;
 pub(crate) mod terminal;

@@ -13,32 +13,39 @@
 //! call's answer, before anything reads it; and [`on_completed`] and
 //! [`on_failure`] see how the call ended.
 //!
-//! None of those rewrites is ported yet, so each hook leaves things as they
-//! are.
+//! The reasoning replay cache is ported, in [`super::replay`]: [`prepare`]
+//! replays a Claude client's earlier turns, [`on_completed`] saves its turn
+//! and [`on_failure`] clears them. Multi-agent v2 isn't ported yet, so
+//! [`restore`] leaves things as they are.
 
 use std::borrow::Cow;
 
 use open_ferry_core::exec::{Options, Request};
 use serde_json::Value;
 
+use super::replay;
 use super::request::{Context, Kind};
 
 /// What [`prepare`] noted about a request, for the hooks that see its
 /// response.
 #[derive(Debug, Default)]
-pub(crate) struct Turn {}
+pub(crate) struct Turn {
+    /// Where the reasoning replay reads and saves the turn.
+    replay: replay::Scope,
+}
 
 /// Rewrites the body of a call of `kind` other than a token count once it
 /// is otherwise prepared, as upstream does after normalizing its tool
 /// schemas, before the response translators' copy of it is taken.
 pub(crate) fn prepare(
-    _kind: Kind,
+    kind: Kind,
     _context: Context<'_>,
-    _request: &Request,
-    _options: &Options,
-    _body: &mut Value,
+    request: &Request,
+    options: &Options,
+    body: &mut Value,
 ) -> Turn {
-    Turn::default()
+    let replay = replay::prepare(kind, request, options, body);
+    Turn { replay }
 }
 
 /// The data of one of Codex's events, or a compact call's answer, as the
@@ -49,8 +56,12 @@ pub(crate) fn restore<'d>(_turn: &Turn, data: &'d [u8]) -> Cow<'d, [u8]> {
 
 /// Sees the terminal event of a call that succeeded (`response.completed`,
 /// `response.incomplete` or `response.done`) as the executor passes it on.
-pub(crate) fn on_completed(_turn: &Turn, _event: &Value) {}
+pub(crate) fn on_completed(turn: &Turn, event: &Value) {
+    replay::on_completed(&turn.replay, event);
+}
 
 /// Sees a call that failed with `status` and `body`: Codex's error status
 /// and body, or a terminal failure event's status and error.
-pub(crate) fn on_failure(_turn: &Turn, _status: u16, _body: &[u8]) {}
+pub(crate) fn on_failure(turn: &Turn, status: u16, body: &[u8]) {
+    replay::on_failure(&turn.replay, status, body);
+}

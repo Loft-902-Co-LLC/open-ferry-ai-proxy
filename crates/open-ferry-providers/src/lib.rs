@@ -8,6 +8,7 @@
 //! service accounts.
 
 pub mod claude;
+mod claude_code_session;
 pub mod codex;
 mod custom_headers;
 pub mod gemini;
