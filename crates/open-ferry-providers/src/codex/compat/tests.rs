@@ -36,10 +36,11 @@
 //! - `TestTranslateRequestWithAPIKeyModelCompatibility_InvokesPluginNormalizers`:
 //!   the translator plugin hooks aren't ported.
 //!
-//! Added: how compatibility models are found, orphan delegation in the
-//! executor and in token counts, the other executors without a config, and
-//! the Claude, Gemini, Vertex AI and OpenAI-compatible executors readying a
-//! Codex client's request.
+//! Added: how compatibility models are found, including through the route
+//! model, orphan delegation in the executor and in token counts, the other
+//! executors without a config, and the Claude, Gemini, Vertex AI and
+//! OpenAI-compatible executors readying a Codex client's request, before
+//! translation and after it.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -984,6 +985,20 @@ fn other_executors_keep_explicit_claude_visibility() {
 
 // How compatibility models are found.
 
+/// Whether the model of `request` is a compatibility model, in a call the
+/// credential manager didn't make.
+fn compat(context: Context<'_>, request: &Request) -> bool {
+    is_compat(context, request, &options("openai-response", &[]))
+}
+
+/// The same, in a call the credential manager made for the route model
+/// `route`.
+fn routed_compat(context: Context<'_>, route: &str, request: &Request) -> bool {
+    let mut options = options("openai-response", &[]);
+    options.metadata.requested_model = route.into();
+    is_compat(context, request, &options)
+}
+
 #[test]
 fn compatibility_models_by_name_alias_and_suffix() {
     let keys = vec![codex_key(
@@ -1006,26 +1021,26 @@ fn compatibility_models_by_name_alias_and_suffix() {
         ("unknown", false),
     ] {
         assert_eq!(
-            is_compat(context(&config, &auth), &request(model, "{}")),
+            compat(context(&config, &auth), &request(model, "{}")),
             want,
             "{model}"
         );
     }
 
     // Without a config, a credential or a matching entry there is none.
-    let compat = request("deepseek-v4-flash", "{}");
-    assert!(!is_compat(Context::default(), &compat));
-    assert!(!is_compat(
+    let flagged = request("deepseek-v4-flash", "{}");
+    assert!(!compat(Context::default(), &flagged));
+    assert!(!compat(
         Context {
             auth: None,
             config: Some(&config),
             models: None
         },
-        &compat
+        &flagged
     ));
-    assert!(!is_compat(
+    assert!(!compat(
         context(&config, &auth_with(&[("api_key", "other")])),
-        &compat
+        &flagged
     ));
 }
 
@@ -1051,19 +1066,19 @@ fn compatibility_models_follow_the_credentials_entry() {
 
     // By key and base URL, regardless of case.
     let by_url = auth_with(&[("api_key", "SHARED"), ("base_url", "https://TWO.example")]);
-    assert!(is_compat(context(&config, &by_url), &model));
+    assert!(compat(context(&config, &by_url), &model));
     // By its index in the config, when its key and URL agree.
     let by_index = auth_with(&[("api_key", "shared"), ("config_index", " 1 ")]);
-    assert!(is_compat(context(&config, &by_index), &model));
+    assert!(compat(context(&config, &by_index), &model));
     let disagreeing = auth_with(&[
         ("api_key", "shared"),
         ("base_url", "https://one.example"),
         ("config_index", "1"),
     ]);
-    assert!(!is_compat(context(&config, &disagreeing), &model));
+    assert!(!compat(context(&config, &disagreeing), &model));
     // By key alone, the first with it.
     let by_key = auth_with(&[("api_key", "shared")]);
-    assert!(!is_compat(context(&config, &by_key), &model));
+    assert!(!compat(context(&config, &by_key), &model));
 }
 
 #[test]
@@ -1075,11 +1090,11 @@ fn compatibility_models_fall_back_to_the_credential_managers_entry() {
     let with_models = codex_key("https://compat.example", &[("", "compat-alias", true)]);
     let config = config(false, vec![without_models, with_models]);
     let auth = auth("https://compat.example");
-    assert!(is_compat(
+    assert!(compat(
         context(&config, &auth),
         &request("compat-alias", "{}")
     ));
-    assert!(is_compat(
+    assert!(compat(
         context(&config, &auth),
         &request("compat-alias(low)", "{}")
     ));
@@ -1087,10 +1102,96 @@ fn compatibility_models_fall_back_to_the_credential_managers_entry() {
     // Only for a `codex` credential.
     let mut other = auth.clone();
     other.provider = "openai".into();
-    assert!(!is_compat(
+    assert!(!compat(
         context(&config, &other),
         &request("compat-alias", "{}")
     ));
+}
+
+// Not upstream's: two aliases of one model keep their own flags, as the
+// credential manager binds the configured model the route model was
+// resolved through.
+#[test]
+fn compatibility_models_follow_the_route_model() {
+    let reordered = config(
+        false,
+        vec![codex_key(
+            "https://compat.example",
+            &[
+                ("model", "compat-alias", true),
+                ("model", "native-alias", false),
+            ],
+        )],
+    );
+    let keys = vec![codex_key(
+        "https://compat.example",
+        &[
+            ("model", "native-alias", false),
+            ("model", "compat-alias", true),
+        ],
+    )];
+    let config = config(false, keys);
+    let auth = auth("https://compat.example");
+    let model = request("model", "{}");
+    assert!(routed_compat(
+        context(&config, &auth),
+        "compat-alias",
+        &model
+    ));
+    assert!(!routed_compat(
+        context(&config, &auth),
+        "native-alias",
+        &model
+    ));
+    // Without the route model, the first entry named the model decides.
+    assert!(!compat(context(&config, &auth), &model));
+
+    // Through the credential's prefix and a thinking suffix.
+    let mut prefixed = auth.clone();
+    prefixed.prefix = "team".into();
+    let suffixed = request("model(high)", "{}");
+    assert!(routed_compat(
+        context(&config, &prefixed),
+        "team/compat-alias(high)",
+        &suffixed
+    ));
+    assert!(!routed_compat(
+        context(&config, &prefixed),
+        "team/native-alias(high)",
+        &suffixed
+    ));
+
+    // A route model the entry doesn't list takes the flag of the first model
+    // named the upstream model, for an API key with the entry's key.
+    assert!(!routed_compat(context(&config, &auth), "unlisted", &model));
+    assert!(routed_compat(
+        context(&reordered, &auth),
+        "unlisted",
+        &model
+    ));
+    assert!(!routed_compat(
+        context(&reordered, &auth),
+        "unlisted",
+        &request("other", "{}")
+    ));
+}
+
+// Not upstream's: when the credential was picked by another model and the
+// client's restored, the client's model is the route model too.
+#[test]
+fn compatibility_models_after_another_selection_model() {
+    let keys = vec![codex_key(
+        "https://compat.example",
+        &[("model", "other", true), ("model", "pool", false)],
+    )];
+    let config = config(false, keys);
+    let auth = auth("https://compat.example");
+    let model = request("model", "{}");
+    let mut options = options("openai-response", &[]);
+    options.metadata.requested_model = "pool".into();
+    assert!(!is_compat(context(&config, &auth), &model, &options));
+    options.metadata.auth_selection_model = Some(" pool ".into());
+    assert!(is_compat(context(&config, &auth), &model, &options));
 }
 
 #[test]
@@ -1135,12 +1236,17 @@ fn claude_requests_to_compatibility_models_use_their_translator() {
 
 /// The `type` of the first `yield_time_ms` property anywhere in `value`.
 fn yield_time_type(value: &Value) -> Option<&Value> {
+    property_type(value, "yield_time_ms")
+}
+
+/// The `type` of the first property `name` anywhere in `value`.
+fn property_type<'v>(value: &'v Value, name: &str) -> Option<&'v Value> {
     match value {
         Value::Object(fields) => fields
-            .get("yield_time_ms")
+            .get(name)
             .and_then(|property| property.get("type"))
-            .or_else(|| fields.values().find_map(yield_time_type)),
-        Value::Array(items) => items.iter().find_map(yield_time_type),
+            .or_else(|| fields.values().find_map(|field| property_type(field, name))),
+        Value::Array(items) => items.iter().find_map(|item| property_type(item, name)),
         _ => None,
     }
 }
@@ -1277,4 +1383,126 @@ async fn openai_compatible_executor_readies_codex_clients_requests() {
     assert_eq!(yield_time_type(&body), Some(&json!("integer")), "{body}");
     assert_eq!(body["input"][0]["type"], "message", "{body}");
     assert_eq!(body["input"][1]["type"], "agent_message", "{body}");
+}
+
+/// A Codex client's request in `format` (`openai-response` or `openai`)
+/// with `exec_command` parameters under a root `combinator`, which the
+/// integer pass before translation doesn't look into.
+fn codex_client_union(format: &str, combinator: &str) -> String {
+    let parameters =
+        json!({combinator: [{"type": "object", "properties": {"timeout_ms": {"type": "number"}}}]});
+    let body = if format == "openai" {
+        json!({"model": "model", "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {"name": "exec_command", "parameters": parameters}}]})
+    } else {
+        json!({"model": "model", "input": "hi",
+            "tools": [{"type": "function", "name": "exec_command", "parameters": parameters}]})
+    };
+    body.to_string()
+}
+
+// Not upstream's: the Claude executor gives a Codex client's tools integer
+// types again after translation, which takes a root union's properties out
+// of it (`TestNormalizesCodexToolTypes` sends a schema the first pass finds).
+#[tokio::test]
+async fn claude_executor_normalizes_root_union_schemas_after_translation() {
+    let mock = Mock::completing().await;
+    let mut auth = auth(&mock.url);
+    auth.provider = "claude".into();
+    let executor = crate::claude::ClaudeExecutor::new("direct").with_config(codex_client_config());
+    for combinator in ["anyOf", "oneOf", "allOf"] {
+        let _ = executor
+            .execute(
+                Arc::new(auth.clone()),
+                request(
+                    "claude-sonnet-4-5",
+                    &codex_client_union("openai-response", combinator),
+                ),
+                codex_client_options("openai-response"),
+            )
+            .await;
+        let body = mock.last();
+        assert_eq!(
+            body["tools"][0]["input_schema"]["properties"]["timeout_ms"]["type"], "integer",
+            "{combinator}: {body}"
+        );
+    }
+
+    // Not for a client that isn't Codex.
+    let _ = executor
+        .execute(
+            Arc::new(auth),
+            request(
+                "claude-sonnet-4-5",
+                &codex_client_union("openai-response", "anyOf"),
+            ),
+            options("openai-response", &[("user-agent", "curl/8.7.1")]),
+        )
+        .await;
+    let body = mock.last();
+    assert_eq!(
+        property_type(&body, "timeout_ms"),
+        Some(&json!("number")),
+        "{body}"
+    );
+}
+
+// Not upstream's: as above, for the Gemini, Vertex AI and OpenAI-compatible
+// executors.
+#[tokio::test]
+async fn other_executors_normalize_root_union_schemas_after_translation() {
+    let mock = Mock::completing().await;
+    let mut auth = auth(&mock.url);
+    auth.provider = "gemini".into();
+    let gemini = crate::gemini::GeminiExecutor::new("direct").with_config(codex_client_config());
+    let _ = gemini
+        .execute(
+            Arc::new(auth.clone()),
+            request("gemini-2.5-flash", &codex_client_union("openai", "anyOf")),
+            codex_client_options("openai"),
+        )
+        .await;
+    let body = mock.last();
+    assert_eq!(
+        property_type(&body, "timeout_ms"),
+        Some(&json!("integer")),
+        "{body}"
+    );
+
+    auth.provider = "vertex".into();
+    let vertex = crate::gemini::VertexExecutor::new("direct").with_config(codex_client_config());
+    let _ = vertex
+        .execute(
+            Arc::new(auth.clone()),
+            request("gemini-2.5-flash", &codex_client_union("openai", "anyOf")),
+            codex_client_options("openai"),
+        )
+        .await;
+    let body = mock.last();
+    assert_eq!(
+        property_type(&body, "timeout_ms"),
+        Some(&json!("integer")),
+        "{body}"
+    );
+
+    auth.provider = "openai-compatibility".into();
+    let compatible = crate::openai_compat::OpenAiCompatExecutor::new(
+        "openai-compatibility",
+        codex_client_config(),
+    );
+    let _ = compatible
+        .execute(
+            Arc::new(auth),
+            request("model", &codex_client_union("openai-response", "anyOf")),
+            codex_client_options("openai-response"),
+        )
+        .await;
+    // Chat Completions keeps the union as it is, so neither pass finds the
+    // property, as upstream's don't.
+    let body = mock.last();
+    assert_eq!(
+        body["tools"][0]["function"]["parameters"]["anyOf"][0]["properties"]["timeout_ms"]["type"],
+        "number",
+        "{body}"
+    );
 }

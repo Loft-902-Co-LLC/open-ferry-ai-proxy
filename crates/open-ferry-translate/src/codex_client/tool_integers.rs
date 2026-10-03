@@ -22,6 +22,8 @@
 //!   an object or array among them is written as compact JSON rather than
 //!   as the client wrote it.
 
+use std::collections::HashSet;
+
 use serde_json::{Map, Value};
 
 use crate::go;
@@ -181,6 +183,7 @@ fn normalize_properties(properties: &mut Map<String, Value>, fields: &[&str]) ->
             }
             Value::Array(items) => {
                 let mut has_number = false;
+                let mut seen = HashSet::with_capacity(items.len());
                 let mut kinds: Vec<String> = Vec::with_capacity(items.len());
                 for item in items.iter() {
                     let mut text = str_of(Some(item)).into_owned();
@@ -188,7 +191,7 @@ fn normalize_properties(properties: &mut Map<String, Value>, fields: &[&str]) ->
                         has_number = true;
                         text = "integer".to_owned();
                     }
-                    if !kinds.contains(&text) {
+                    if seen.insert(text.clone()) {
                         kinds.push(text);
                     }
                 }

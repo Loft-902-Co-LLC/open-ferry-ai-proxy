@@ -37,20 +37,22 @@
 //! Codex client's own tools get integer parameter types, and a Responses
 //! request has its orphan delegation outputs and, unless it stays in a
 //! Responses format, its `agent_message` items rewritten.
+//! [`after_translation`] gives the tools integer types again in the
+//! translated body of a call or a stream, but not of a token count.
 //!
 //! Deviations from upstream:
-//! - Whether a model is a compatibility model is read from the config for
-//!   every call, token counts included. Upstream first reads the model the
-//!   credential manager resolved for the call, and for token counts reads
-//!   only that; the manager doesn't resolve models that way here, and what
-//!   it would resolve for a `codex-api-key` model is the config's flag. The
-//!   Home service's credential options aren't ported.
+//! - The credential manager doesn't bind the model it resolved to the call,
+//!   so [`is_compat`] resolves it again, from the config and the route model
+//!   in the call's metadata, as the manager would have bound it. When
+//!   nothing resolves, upstream reads the credential's entry, except for
+//!   token counts, which then take no model as a compatibility model; here
+//!   token counts read the entry too. The Home service's credential options
+//!   aren't ported.
 //! - The other executors take the path upstream takes for models that
 //!   aren't compatibility models, as they don't resolve the flag.
 //! - Upstream normalizes the integer types of a Codex client's tools again
-//!   after translation, as it applies the payload config, which isn't
-//!   ported. Translation copies the types the pass before it set, so that
-//!   pass gives the same result.
+//!   as it applies the payload config, which isn't ported;
+//!   [`after_translation`] is that pass alone.
 //! - The translator plugin hooks aren't ported, so a compatibility
 //!   translation isn't passed to them.
 //! - Upstream v8.0.10 keeps a v8 document's
@@ -62,7 +64,7 @@
 
 use http::HeaderMap;
 use http::header::{self, HeaderValue};
-use open_ferry_core::auth::{Auth, AuthSource};
+use open_ferry_core::auth::{Auth, AuthKind, AuthSource};
 use open_ferry_core::codex_models::spawn_agent::spawn_agent_model_list;
 use open_ferry_core::config::{CodexKey, Config};
 use open_ferry_core::exec::{Format, Options, Request};
@@ -70,6 +72,7 @@ use open_ferry_translate::codex::claude::convert_claude_request_to_codex_with_co
 use open_ferry_translate::codex_client::{
     header_value, multi_agent_v2, orphan_delegation, tool_integers,
 };
+use open_ferry_translate::go;
 use open_ferry_translate::models::ModelCatalog as Catalog;
 use open_ferry_translate::registry::Registry;
 use open_ferry_translate::thinking::summary;
@@ -84,13 +87,32 @@ fn header(headers: &HeaderMap, name: &str) -> String {
 }
 
 /// Whether the model of `request` is one of the credential's compatibility
-/// models (`resolveCodexModelIsCompat`): by the models of the credential's
-/// `codex-api-key` entry, matching the model with or without its thinking
-/// suffix by name or alias, regardless of case.
-pub(crate) fn is_compat(context: Context<'_>, request: &Request) -> bool {
+/// models (`resolveCodexModelIsCompat`): as the credential manager resolved
+/// the model of the call ([`resolved_compat`]), for a call it made, which
+/// carries the client's route model as `requested_model`, or, when it picked
+/// the credential by another model and restored the client's, the model of
+/// `request`; else by the models of the credential's `codex-api-key` entry,
+/// matching the model with or without its thinking suffix by name or alias,
+/// regardless of case.
+pub(crate) fn is_compat(context: Context<'_>, request: &Request, options: &Options) -> bool {
     let (Some(config), Some(auth)) = (context.config, context.auth) else {
         return false;
     };
+    let selection = options
+        .metadata
+        .auth_selection_model
+        .as_deref()
+        .map_or("", str::trim);
+    let route = if selection.is_empty() || selection == request.model.trim() {
+        options.metadata.requested_model.trim()
+    } else {
+        request.model.trim()
+    };
+    if !route.is_empty()
+        && let Some(compat) = resolved_compat(config, auth, route, &request.model)
+    {
+        return compat;
+    }
     let base = base_model(&request.model);
     if let Some(entry) = codex_key_config(config, auth)
         && !entry.models.is_empty()
@@ -111,6 +133,149 @@ pub(crate) fn is_compat(context: Context<'_>, request: &Request) -> bool {
     }
     api_key_model_is_compat(config, auth, base)
         || api_key_model_is_compat(config, auth, &request.model)
+}
+
+/// The compatibility flag the credential manager binds to a call of a
+/// `codex` credential (`attachResolvedAPIKeyModelInfo`, read back by
+/// `ResolvedModelInfo`), if it binds one: that of the configured model the
+/// client's `route_model` was resolved through
+/// (`lookupAPIKeyModelCapability`), else, for an API key whose entry has its
+/// key and base URL, that of the configured model named `upstream_model`,
+/// or none (`lookupUnlistedCodexAPIKeyModelCapability`). Upstream also binds
+/// an OAuth credential's model from the static Codex models, which are
+/// never compatibility models, as the config gives for such a credential.
+fn resolved_compat(
+    config: &Config,
+    auth: &Auth,
+    route_model: &str,
+    upstream_model: &str,
+) -> Option<bool> {
+    if !eq_fold(auth.provider.trim(), "codex") {
+        return None;
+    }
+    let entry = api_key_config(&config.codex_api_key, auth)?;
+    if configured_model_routing(auth)
+        && let Some(compat) = route_compat(entry, auth, route_model, upstream_model)
+    {
+        return Some(compat);
+    }
+    unlisted_compat(entry, auth, upstream_model)
+}
+
+/// Whether the credential's models come from the config: an API key, or a
+/// config-made OpenAI-compatible entry (`isConfiguredModelRoutingAuth`).
+fn configured_model_routing(auth: &Auth) -> bool {
+    auth.auth_kind() == Some(AuthKind::ApiKey)
+        || (auth.auth_source_kind() == Some(AuthSource::Config)
+            && !attribute(auth, "compat_name").is_empty())
+}
+
+/// The compatibility flag of the entry model that `route_model` routes to
+/// `upstream_model` through (`lookupAPIKeyModelCapability` over the table
+/// `compileAPIKeyModelCapabilitiesForAuth` makes): the models whose alias
+/// or name, with or without a thinking suffix, is the route model without
+/// the credential's `prefix/`, or failing that its base, listed once for
+/// each name; of those, the first named `upstream_model`, else the first
+/// whose name has no suffix and is the upstream model without its suffix.
+fn route_compat(
+    entry: &CodexKey,
+    auth: &Auth,
+    route_model: &str,
+    upstream_model: &str,
+) -> Option<bool> {
+    let route = route_model.trim();
+    let prefix = auth.prefix.trim();
+    let route = match route.strip_prefix(prefix) {
+        Some(rest) if !prefix.is_empty() => rest.strip_prefix('/').unwrap_or(route),
+        _ => route,
+    };
+    let mut routes: Vec<(&str, bool)> = Vec::new();
+    for candidate in lookup_candidates(route) {
+        let key = go::to_lower(candidate.trim());
+        let start = routes.len();
+        for configured in &entry.models {
+            let (mut name, mut alias) = (configured.name.trim(), configured.alias.trim());
+            if name.is_empty() {
+                name = alias;
+            }
+            if alias.is_empty() {
+                alias = name;
+            }
+            if name.is_empty() {
+                continue;
+            }
+            let routed = [alias, name]
+                .into_iter()
+                .flat_map(lookup_candidates)
+                .any(|known| go::to_lower(known.trim()) == key);
+            let listed = routes
+                .get(start..)
+                .unwrap_or_default()
+                .iter()
+                .any(|(upstream, _)| eq_fold(upstream, name));
+            if routed && !listed {
+                routes.push((name, configured.is_compat));
+            }
+        }
+    }
+    let selected = upstream_model.trim();
+    routes
+        .iter()
+        .find(|(upstream, _)| eq_fold(upstream, selected))
+        .or_else(|| {
+            routes
+                .iter()
+                .find(|(upstream, _)| fallback_matches(upstream, selected))
+        })
+        .map(|(_, compat)| *compat)
+}
+
+/// The compatibility flag of a `codex` API key's model that its entry may
+/// not route to by name (`lookupUnlistedCodexAPIKeyModelCapability`): when
+/// the credential has the entry's key, and its base URL if the entry has
+/// one, that of the first model named `upstream_model`, or with no suffix
+/// and named the upstream model without its suffix; else none.
+fn unlisted_compat(entry: &CodexKey, auth: &Auth, upstream_model: &str) -> Option<bool> {
+    let upstream = upstream_model.trim();
+    if auth.auth_kind() != Some(AuthKind::ApiKey) || upstream.is_empty() {
+        return None;
+    }
+    let (key, base) = (attribute(auth, "api_key"), attribute(auth, "base_url"));
+    let entry_base = entry.base_url.trim();
+    if (key.is_empty() && base.is_empty())
+        || !eq_fold(key, entry.api_key.trim())
+        || (!entry_base.is_empty() && !eq_fold(base, entry_base))
+    {
+        return None;
+    }
+    let configured = entry.models.iter().find(|configured| {
+        eq_fold(configured.name.trim(), upstream) || fallback_matches(&configured.name, upstream)
+    });
+    Some(configured.is_some_and(|configured| configured.is_compat))
+}
+
+/// The model and, when it has a thinking suffix, the model without it
+/// (`modelAliasLookupCandidates`).
+fn lookup_candidates(model: &str) -> Vec<&str> {
+    let model = model.trim();
+    if model.is_empty() {
+        return Vec::new();
+    }
+    match base_model(model) {
+        "" => vec![model],
+        base if base == model => vec![model],
+        base => vec![model, base],
+    }
+}
+
+/// Whether a configured model with no thinking suffix is `selected`
+/// without its suffix (`configuredUpstreamFallbackMatches`).
+fn fallback_matches(configured: &str, selected: &str) -> bool {
+    let configured = configured.trim();
+    if base_model(configured) != configured {
+        return false;
+    }
+    eq_fold(configured, base_model(selected.trim()).trim())
 }
 
 /// The trimmed attribute `key` of `auth`.
@@ -275,7 +440,7 @@ pub(crate) fn translate(
     {
         rewrite_orphans(&mut payload, &options.headers);
     }
-    if *source == Format::CLAUDE && *to == Format::CODEX && is_compat(context, request) {
+    if *source == Format::CLAUDE && *to == Format::CODEX && is_compat(context, request, options) {
         let summary = summary::extract_translated(&payload, source.as_str(), to.as_str());
         let mut body = convert_claude_request_to_codex_with_compat(base, &payload);
         summary::apply_for_model(&mut body, to.as_str(), base, summary, Catalog::embedded());
@@ -323,7 +488,7 @@ pub(crate) fn prepare(
             .unwrap_or_default()
     };
     let optimized = multi_agent_v2::optimize(body, &user_agent, enabled, models);
-    if is_compat(context, request) {
+    if is_compat(context, request, options) {
         multi_agent_v2::rewrite_input(body, &user_agent, enabled, true);
     }
     optimized
@@ -357,6 +522,19 @@ pub(crate) fn before_translation(
     if *to != Format::CODEX && *to != Format::OPENAI_RESPONSE {
         let enabled = config.client.codex.optimize_multi_agent_v2;
         multi_agent_v2::rewrite_input(payload, &user_agent, enabled, false);
+    }
+}
+
+/// Declares a Codex client's whole-number tool parameters `integer` again in
+/// the body another executor translated for a call or a stream, as upstream
+/// does when it applies the payload config
+/// (`ApplyPayloadConfigWithTrackedPathsForExecutor` for a target that isn't
+/// Codex): translation can move a tool's parameters to where the pass before
+/// it didn't look, such as out of a root `anyOf`.
+pub(crate) fn after_translation(options: &Options, body: &mut Value) {
+    let user_agent = header(&options.headers, header::USER_AGENT.as_str());
+    if tool_integers::normalize(body, &user_agent) {
+        tracing::debug!("codex: normalized target tool number types to integer");
     }
 }
 

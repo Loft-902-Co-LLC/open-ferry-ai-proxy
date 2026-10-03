@@ -154,6 +154,26 @@ fn array_type_with_number_and_integer_deduplicates() {
     );
 }
 
+// Not upstream's: a long type array is deduplicated with a set, as
+// upstream's is, rather than by scanning what is kept for each member.
+#[test]
+fn long_type_arrays_are_deduplicated_in_one_pass() {
+    let mut kinds: Vec<Value> = (0..50_000)
+        .map(|n| Value::from(format!("type_{n:06}")))
+        .collect();
+    kinds.push(Value::from("number"));
+    kinds.push(Value::from("type_000000"));
+    let mut body = serde_json::json!({"tools": [{"type": "function", "name": "sleep",
+        "parameters": {"properties": {"duration_ms": {"type": kinds}}}}]});
+    assert!(normalize(&mut body, TUI));
+    let kinds = body["tools"][0]["parameters"]["properties"]["duration_ms"]["type"]
+        .as_array()
+        .unwrap();
+    assert_eq!(kinds.len(), 50_001);
+    assert_eq!(kinds[0], "type_000000");
+    assert_eq!(kinds[50_000], "integer");
+}
+
 #[test]
 fn claude_input_schema_format_supported() {
     let body = normalized(

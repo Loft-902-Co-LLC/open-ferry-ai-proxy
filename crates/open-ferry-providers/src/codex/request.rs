@@ -368,7 +368,7 @@ pub(crate) fn prepare_body(
             turn: Turn::default(),
         });
     }
-    sanitize_reasoning(&mut body, compat::is_compat(context, request));
+    sanitize_reasoning(&mut body, compat::is_compat(context, request, options));
     normalize_parallel_tool_calls(&mut body, &options.headers);
     normalize_tool_schemas(&mut body);
     let turn = ext::prepare(kind, context, request, options, &mut body);

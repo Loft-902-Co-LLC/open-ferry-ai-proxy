@@ -212,6 +212,7 @@ impl OpenAiCompatExecutor {
             translate_stream,
         );
         self.apply_thinking(&mut body, request, options, &to)?;
+        compat::after_translation(options, &mut body);
 
         let compat = self.compat_config(auth);
         let requested = requested_model(request, options);

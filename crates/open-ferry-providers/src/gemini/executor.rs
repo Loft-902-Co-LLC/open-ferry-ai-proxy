@@ -36,6 +36,7 @@ use super::{
     thinking, translate_answer, translate_count, translate_request, translate_stream, turns,
 };
 use crate::codex::client::Clients;
+use crate::codex::compat;
 use crate::codex::request::{base_model, set_string_if_different};
 use crate::json;
 
@@ -101,6 +102,7 @@ impl GeminiExecutor {
             self.models(),
             PROVIDER,
         )?;
+        compat::after_translation(options, &mut body);
         set_string_if_different(&mut body, "model", base);
         cap_max_output_tokens(&mut body, base, self.models());
         sanitize_gemini_request_thought_signatures(&mut body, "contents");

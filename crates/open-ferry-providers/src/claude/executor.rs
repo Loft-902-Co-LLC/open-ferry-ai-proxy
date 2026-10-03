@@ -173,6 +173,7 @@ impl ClaudeExecutor {
     ) -> Result<Prepared, ExecError> {
         let config = self.config.as_deref();
         let mut body = translate_request(config, request, options, base_model, upstream_stream)?;
+        compat::after_translation(options, &mut body);
         ensure_model_max_tokens(&mut body, base_model, self.models.as_deref());
         disable_thinking_if_tool_choice_forced(&mut body);
         normalize_sampling(&mut body);

@@ -53,6 +53,7 @@ use super::{
     translate_answer, translate_count, translate_request, translate_stream, turns,
 };
 use crate::codex::client::Clients;
+use crate::codex::compat;
 use crate::codex::request::{base_model, set_string_if_different};
 use crate::codex::terminal::StatusError;
 use crate::json;
@@ -148,6 +149,7 @@ impl VertexExecutor {
             self.models(),
             PROVIDER,
         )?;
+        compat::after_translation(options, &mut body);
         set_string_if_different(&mut body, "model", base);
         turns::strip_vertex_tool_call_ids(&mut body, options.source_format.as_str());
         sanitize_gemini_request_thought_signatures(&mut body, "contents");
