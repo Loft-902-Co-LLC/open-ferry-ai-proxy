@@ -42,6 +42,7 @@ use super::requests::{
 use super::writer::{Conn, Socket};
 use crate::errors::ErrorMessage;
 use crate::exec::{Call, ClientRequest, Started};
+use crate::handlers::codex_client;
 use crate::json::{self, Val, str_at};
 use crate::routing::{parse_suffix, resolve_model, route};
 use crate::state::AppState;
@@ -294,6 +295,14 @@ impl<S: Socket> Session<S> {
                 return ControlFlow::Continue(());
             }
         };
+        if let Some(prepared) = codex_client::prepare(
+            &self.state.settings().config,
+            &self.client.headers,
+            &request,
+            true,
+        ) {
+            request = prepared;
+        }
 
         if is_prewarm {
             request = json::delete(&request, "generate");

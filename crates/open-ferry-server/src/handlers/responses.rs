@@ -13,9 +13,8 @@
 //! event: the provider's, or a failure the client can read.
 //!
 //! Deviations from upstream:
-//! - Codex multi-agent v2 tools (`prepareCodexMultiAgentV2Tools`) and
-//!   orphan delegation (`prepareCodexOrphanDelegation`) aren't ported: the
-//!   body goes to the provider as the client sent it.
+//! - A Codex client's body is readied as [`codex_client`] says, without
+//!   step 2 of multi-agent v2.
 //! - Errors aren't kept for the request log or usage records
 //!   (`LoggingAPIResponseError`). A stream's errors are logged with
 //!   `tracing` at debug level, as upstream words them for its request log.
@@ -58,7 +57,7 @@ use serde_json::Value;
 
 use self::framer::Framer;
 use self::stream_error::{error_chunk, failed_chunk, sanitize_error, stream_error_text};
-use super::{gjson_string, parse_body};
+use super::{codex_client, gjson_string, parse_body};
 use crate::body;
 use crate::errors::{ErrorMessage, local_error, openai_error_response};
 use crate::exec::{Call, ClientRequest, Started};
@@ -74,10 +73,15 @@ pub(crate) async fn responses(
     body: Body,
 ) -> Response {
     let limit = state.settings().config.body_limit;
-    let raw = match body::read_decoded(&client.headers, body, limit).await {
+    let mut raw = match body::read_decoded(&client.headers, body, limit).await {
         Ok(raw) => raw,
         Err(response) => return response,
     };
+    if let Some(prepared) =
+        codex_client::prepare(&state.settings().config, &client.headers, &raw, true)
+    {
+        raw = Bytes::from(prepared);
+    }
     let parsed = parse_body(&raw);
     let model = gjson_string(parsed.get("model"));
     if parsed.get("stream") == Some(&Value::Bool(true)) {
@@ -99,6 +103,13 @@ pub(crate) async fn compact(
         Ok(raw) => raw,
         Err(response) => return response,
     };
+    // Only orphan delegation, as upstream: the tools are left for the
+    // executor.
+    if let Some(prepared) =
+        codex_client::prepare(&state.settings().config, &client.headers, &raw, false)
+    {
+        raw = Bytes::from(prepared);
+    }
     let parsed = parse_body(&raw);
     let stream = parsed.get("stream");
     if stream == Some(&Value::Bool(true)) {

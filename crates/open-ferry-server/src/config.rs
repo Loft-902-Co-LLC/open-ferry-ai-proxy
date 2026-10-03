@@ -29,8 +29,12 @@ pub struct ServerConfig {
     /// Upstream has no limit.
     pub body_limit: usize,
     /// Codex client settings (`client.codex`), which shape the model list
-    /// Codex clients fetch.
+    /// Codex clients fetch and whether their collaboration tools are readied
+    /// at the Responses boundary.
     pub codex_client: CodexClientConfig,
+    /// Whether a Codex sub-agent's orphan delegation outputs become user
+    /// messages (`codex.orphan-delegation-compatibility`).
+    pub codex_orphan_delegation: bool,
 }
 
 impl Default for ServerConfig {
@@ -42,6 +46,7 @@ impl Default for ServerConfig {
             streaming: StreamingConfig::default(),
             body_limit: DEFAULT_BODY_LIMIT,
             codex_client: CodexClientConfig::default(),
+            codex_orphan_delegation: false,
         }
     }
 }
@@ -79,6 +84,7 @@ impl From<&Config> for ServerConfig {
             },
             body_limit: DEFAULT_BODY_LIMIT,
             codex_client: config.client.codex.clone(),
+            codex_orphan_delegation: config.codex.orphan_delegation_compatibility,
         }
     }
 }
@@ -110,5 +116,22 @@ mod tests {
         assert_eq!(server.nonstream_keepalive, Some(Duration::from_secs(5)));
         assert_eq!(server.streaming.keepalive, None);
         assert_eq!(server.streaming.bootstrap_retries, 2);
+    }
+
+    // Added: upstream reads the setting as its config loader does, which
+    // core's tests cover.
+    #[test]
+    fn reads_the_orphan_delegation_setting() {
+        for (text, want) in [
+            ("{}", false),
+            ("codex: {orphan-delegation-compatibility: true}", true),
+            (
+                "oauth: {providers: {codex: {orphan-delegation-compatibility: true}}}",
+                true,
+            ),
+        ] {
+            let server = ServerConfig::from(&Config::parse(text).unwrap());
+            assert_eq!(server.codex_orphan_delegation, want, "{text}");
+        }
     }
 }
