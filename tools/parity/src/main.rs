@@ -8,6 +8,7 @@ mod codex_models;
 mod compare;
 mod generate;
 mod live;
+mod multi_agent;
 mod raw_json;
 mod signature;
 mod translator;
@@ -461,6 +462,31 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
             Translator::CodexModels,
             cases::codex_models::lists(),
             generate::codex_models::list_cases(seed, random),
+        ),
+        (
+            Translator::MultiAgentPrepare,
+            cases::multi_agent::prepares(),
+            generate::multi_agent::prepare_cases(seed, random),
+        ),
+        (
+            Translator::MultiAgentOptimize,
+            cases::multi_agent::optimizes(),
+            generate::multi_agent::optimize_cases(seed, random),
+        ),
+        (
+            Translator::MultiAgentInput,
+            cases::multi_agent::inputs(),
+            generate::multi_agent::input_cases(seed, random),
+        ),
+        (
+            Translator::MultiAgentOrphan,
+            cases::multi_agent::orphans(),
+            generate::multi_agent::orphan_cases(seed, random),
+        ),
+        (
+            Translator::MultiAgentRestore,
+            cases::multi_agent::restores(),
+            generate::multi_agent::restore_cases(seed, random),
         ),
     ];
 

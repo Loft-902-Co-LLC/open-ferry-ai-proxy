@@ -12,6 +12,7 @@ pub mod codex_models;
 pub mod completions;
 pub mod gemini;
 pub mod gemini_responses;
+pub mod multi_agent;
 pub mod openai_chat;
 pub mod openai_claude;
 pub mod openai_responses;

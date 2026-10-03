@@ -83,6 +83,7 @@ use sha2::{Digest, Sha256};
 use crate::cases::Case;
 use crate::codex_models;
 use crate::compare::{self, Deviation, JsonAt, JsonForm};
+use crate::multi_agent;
 use crate::raw_json::{self, Raw};
 use crate::signature;
 
@@ -239,6 +240,20 @@ pub enum Translator {
     /// Registered models → the Codex client model list, summarized (see
     /// `go/parity_codex_models.go`).
     CodexModels,
+    /// A Codex client's Responses request → its collaboration tools readied
+    /// at the Responses API boundary (see `go/parity_multi_agent.go`).
+    MultiAgentPrepare,
+    /// A Codex client's Responses request → as the Codex executor sends it
+    /// to another upstream, and whether its namespace was renamed.
+    MultiAgentOptimize,
+    /// A Codex client's Responses request → its agent messages rewritten for
+    /// another format or a compatibility model.
+    MultiAgentInput,
+    /// A Codex sub-agent's Responses request → its orphan delegation outputs
+    /// as user messages.
+    MultiAgentOrphan,
+    /// An upstream's event → the optimized namespace renamed back, as text.
+    MultiAgentRestore,
 }
 
 impl Translator {
@@ -309,6 +324,11 @@ impl Translator {
             Self::ThinkingCodex => "thinking/codex",
             Self::ThinkingOpenAI => "thinking/openai",
             Self::CodexModels => "codex-models/list",
+            Self::MultiAgentPrepare => "multi-agent/prepare",
+            Self::MultiAgentOptimize => "multi-agent/optimize",
+            Self::MultiAgentInput => "multi-agent/input",
+            Self::MultiAgentOrphan => "multi-agent/orphan",
+            Self::MultiAgentRestore => "multi-agent/restore",
         }
     }
 
@@ -378,6 +398,11 @@ impl Translator {
             Self::ThinkingCodex => "thinking-codex",
             Self::ThinkingOpenAI => "thinking-openai",
             Self::CodexModels => "codex-models",
+            Self::MultiAgentPrepare => "multi-agent-prepare",
+            Self::MultiAgentOptimize => "multi-agent-optimize",
+            Self::MultiAgentInput => "multi-agent-input",
+            Self::MultiAgentOrphan => "multi-agent-orphan",
+            Self::MultiAgentRestore => "multi-agent-restore",
         }
     }
 
@@ -452,6 +477,11 @@ impl Translator {
             Self::ThinkingCodex => "Thinking settings for Codex and Responses",
             Self::ThinkingOpenAI => "Thinking settings for Chat Completions",
             Self::CodexModels => "Codex client model list",
+            Self::MultiAgentPrepare => "Codex multi-agent v2 tools readied",
+            Self::MultiAgentOptimize => "Codex multi-agent v2 request optimized",
+            Self::MultiAgentInput => "Codex agent messages for other formats",
+            Self::MultiAgentOrphan => "Codex orphan delegation outputs",
+            Self::MultiAgentRestore => "Codex multi-agent v2 namespace restored",
         }
     }
 
@@ -1107,6 +1137,21 @@ impl Translator {
                 Ok(json!({ "body": body, "error": error }))
             }
             Self::CodexModels => Ok(codex_models::list(&case.options)),
+            Self::MultiAgentPrepare
+            | Self::MultiAgentOptimize
+            | Self::MultiAgentInput
+            | Self::MultiAgentOrphan => {
+                let body = request
+                    .map_err(|err| format!("case {} is not valid JSON: {err}", case.name))?;
+                let run = match self {
+                    Self::MultiAgentPrepare => multi_agent::prepare,
+                    Self::MultiAgentOptimize => multi_agent::optimize,
+                    Self::MultiAgentInput => multi_agent::input,
+                    _ => multi_agent::orphan,
+                };
+                Ok(run(body, &case.options))
+            }
+            Self::MultiAgentRestore => Ok(multi_agent::restore(&case.request, &case.options)),
         }
     }
 
@@ -1360,7 +1405,12 @@ impl Translator {
             | Self::GeminiClaudeNonStream
             | Self::ThinkingCodex
             | Self::ThinkingOpenAI
-            | Self::CodexModels => &[],
+            | Self::CodexModels
+            | Self::MultiAgentPrepare
+            | Self::MultiAgentOptimize
+            | Self::MultiAgentInput
+            | Self::MultiAgentOrphan
+            | Self::MultiAgentRestore => &[],
             Self::GeminiResponsesRequest => GEMINI_RESPONSES_REQUEST_JSON,
             Self::GeminiResponsesStream => GEMINI_RESPONSES_STREAM_JSON,
             Self::GeminiResponsesNonStream => GEMINI_RESPONSES_NON_STREAM_JSON,
@@ -1534,7 +1584,12 @@ impl Translator {
             | Self::GeminiResponsesRequest
             | Self::ThinkingCodex
             | Self::ThinkingOpenAI
-            | Self::CodexModels => return serde_json::from_str(&text).ok(),
+            | Self::CodexModels
+            | Self::MultiAgentPrepare
+            | Self::MultiAgentOptimize
+            | Self::MultiAgentInput
+            | Self::MultiAgentOrphan
+            | Self::MultiAgentRestore => return serde_json::from_str(&text).ok(),
             Self::OpenAIGeminiRequest => {
                 let mut value: Value = serde_json::from_str(&text).ok()?;
                 replace_compact_call_ids(&mut value, case);

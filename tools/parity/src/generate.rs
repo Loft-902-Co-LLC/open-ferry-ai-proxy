@@ -20,6 +20,8 @@
 //! [`thinking`] generates input for upstream's thinking settings on Codex
 //! and Chat Completions targets.
 //! [`codex_models`] generates registrations for the Codex client model list.
+//! [`multi_agent`] generates Codex clients' multi-agent v2 requests, Codex
+//! sub-agents' delegation outputs, and upstream events to restore.
 
 pub mod chat;
 pub mod claude_chat;
@@ -28,6 +30,7 @@ pub mod codex_models;
 pub mod completions;
 pub mod gemini;
 pub mod gemini_responses;
+pub mod multi_agent;
 pub mod openai_chat;
 pub mod openai_claude;
 pub mod openai_responses;
