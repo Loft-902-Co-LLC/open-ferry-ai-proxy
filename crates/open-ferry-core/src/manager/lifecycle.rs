@@ -27,11 +27,13 @@
 //!   loop after loading. It restarts the rotation, as upstream's scheduler
 //!   rebuild does.
 //! - A new ID is a random version 4 UUID made with `rand`.
-//! - Not ported: the auth index, hooks, the scheduler index, API-key model
-//!   alias rebuilds, the cooldown state store, plugin virtual credentials,
-//!   the Meta key mint save inside the lock, result policies, quota
-//!   observation from response headers and the success and failure
-//!   counters.
+//! - An update with an empty index keeps the old one. Upstream doesn't for
+//!   a copy whose index was set and then cleared (its private
+//!   `indexAssigned` flag).
+//! - Not ported: hooks, the scheduler index, API-key model alias rebuilds,
+//!   the cooldown state store, plugin virtual credentials, the Meta key mint
+//!   save inside the lock, result policies and quota observation from
+//!   response headers.
 
 use std::sync::Arc;
 
@@ -74,6 +76,17 @@ fn new_uuid() -> String {
 
 fn is_disabled(auth: &Auth) -> bool {
     auth.disabled || auth.status == Status::Disabled
+}
+
+/// Counts a call's outcome on its credential: in its recent-request window,
+/// and in the success or failure total.
+fn count_result(auth: &mut Auth, result: &CallResult, now: Timestamp) {
+    auth.record_recent_request(now, result.success);
+    if result.success {
+        auth.success = auth.success.saturating_add(1);
+    } else {
+        auth.failed = auth.failed.saturating_add(1);
+    }
 }
 
 /// Clears the cooldowns of every credential that no longer cools down:
@@ -164,8 +177,9 @@ impl Manager {
     }
 
     /// Adds a credential, or registers its ID again (upstream's `Register`).
-    /// A credential without an ID gets a random one. The credential is saved
-    /// to the store; a failed save is logged, not returned.
+    /// A credential without an ID gets a random one, and one without an
+    /// index gets one derived (see [`Auth::ensure_index`]). The credential is
+    /// saved to the store; a failed save is logged, not returned.
     pub fn register(&self, auth: Auth) -> Result<Arc<Auth>, ManagerError> {
         self.register_with(auth, Save::Yes)
     }
@@ -192,6 +206,7 @@ impl Manager {
         if cooldown_disabled_for_auth(&settings, &auth) || is_disabled(&auth) {
             clear_cooldown_state_for_auth(&mut auth, now);
         }
+        auth.ensure_index();
         let snapshot = Arc::new(auth);
         let epoch = {
             let mut guard = self.lock();
@@ -226,10 +241,11 @@ impl Manager {
     /// Replaces a registered credential (upstream's `Update`). Returns
     /// `None` when no credential has its ID.
     ///
-    /// While neither the old nor the new credential is disabled, the new
-    /// one keeps the old model states when it has none, an active
-    /// credential-wide quota cooldown carries over, and new tokens clear a
-    /// recorded 401.
+    /// The new credential keeps the old one's call counts, and its index
+    /// when it has none. While neither the old nor the new credential is
+    /// disabled, the new one keeps the old model states when it has none, an
+    /// active credential-wide quota cooldown carries over, and new tokens
+    /// clear a recorded 401.
     pub fn update(&self, auth: Auth) -> Result<Option<Arc<Auth>>, ManagerError> {
         Ok(self
             .update_internal(UpdateMode::Replace, auth, Save::Yes)?
@@ -305,6 +321,12 @@ impl Manager {
                     existing_failures
                 }
             };
+            if auth.index.is_empty() {
+                auth.index = existing_auth.index.clone();
+            }
+            auth.success = existing_auth.success;
+            auth.failed = existing_auth.failed;
+            auth.recent_requests = existing_auth.recent_requests.clone();
             let mut generation = existing_generation.saturating_add(1);
             if !is_disabled(&existing_auth) && !is_disabled(&auth) {
                 if auth.model_states.is_empty() && !existing_auth.model_states.is_empty() {
@@ -339,6 +361,7 @@ impl Manager {
             {
                 generation = generation.saturating_add(1);
             }
+            auth.ensure_index();
             let snapshot = Arc::new(auth);
             state.auths.insert(
                 snapshot.id.clone(),
@@ -410,6 +433,7 @@ impl Manager {
             if validate_weight(&auth).is_err() {
                 continue;
             }
+            auth.ensure_index();
             let slot = state.epochs.entry(auth.id.clone()).or_insert(0);
             *slot = slot.saturating_add(1);
             let epoch = *slot;
@@ -480,10 +504,10 @@ impl Manager {
         store.save(auth).map(drop).map_err(ManagerError::Store)
     }
 
-    /// Records a call's outcome on its credential: cools the model or the
-    /// credential down after a failure, clears it after a success, saves the
-    /// credential, and publishes its models' availability (upstream's
-    /// `MarkResult`).
+    /// Records a call's outcome on its credential: counts it, cools the
+    /// model or the credential down after a failure, clears it after a
+    /// success, saves the credential, and publishes its models' availability
+    /// (upstream's `MarkResult`).
     pub fn mark_result(&self, result: &CallResult) {
         if result.auth_id.is_empty() {
             return;
@@ -507,6 +531,7 @@ impl Manager {
                 }
             }
             let auth = Arc::make_mut(&mut entry.auth);
+            count_result(auth, result, now);
             apply_result(&state.settings, auth, result, &model_key, now);
             auth.updated_at = Some(now);
             entry.generation = entry.generation.saturating_add(1);
@@ -519,8 +544,8 @@ impl Manager {
     }
 
     /// Records an outcome that says nothing about the credential's health:
-    /// only the generation moves, and the credential is saved (upstream's
-    /// `recordAvailabilityNeutralResult`).
+    /// it is counted and the generation moves, and the credential is saved
+    /// (upstream's `recordAvailabilityNeutralResult`).
     pub(crate) fn record_availability_neutral_result(&self, result: &CallResult) {
         if result.auth_id.is_empty() {
             return;
@@ -531,7 +556,9 @@ impl Manager {
             let Some(entry) = state.auths.get_mut(&result.auth_id) else {
                 return;
             };
-            Arc::make_mut(&mut entry.auth).updated_at = Some(now);
+            let auth = Arc::make_mut(&mut entry.auth);
+            count_result(auth, result, now);
+            auth.updated_at = Some(now);
             entry.generation = entry.generation.saturating_add(1);
             (entry.auth.clone(), entry.epoch, entry.generation)
         };

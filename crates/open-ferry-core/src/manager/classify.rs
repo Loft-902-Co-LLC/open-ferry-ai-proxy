@@ -324,8 +324,8 @@ pub(crate) fn is_unauthorized_error(err: ErrView<'_>) -> bool {
 }
 
 /// Whether the credential's last failure was a 401 with no refresh pending
-/// (upstream's `hasUnauthorizedAuthFailure`).
-pub(crate) fn has_unauthorized_auth_failure(auth: &Auth) -> bool {
+/// (upstream's `hasUnauthorizedAuthFailure` and `HasUnauthorizedAuthFailure`).
+pub fn has_unauthorized_auth_failure(auth: &Auth) -> bool {
     let Some(last) = &auth.last_error else {
         return false;
     };

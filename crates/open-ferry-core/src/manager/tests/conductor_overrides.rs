@@ -15,9 +15,9 @@
 //!   straight to the query rather than through the options' metadata.
 //! - `IgnoresRequestIneligibleOverrides` keeps the pinned-credential case
 //!   only; credential policies aren't ported.
-//! - Upstream's `Failed` counters and result hooks aren't ported. Where
-//!   upstream counts a failure or captures the hook's result, the tests
-//!   check the credential and model state that result left instead.
+//! - Result hooks aren't ported. Where upstream captures the hook's result,
+//!   the tests check the credential and model state that result left
+//!   instead.
 //! - `DeepSeekInsufficientBalanceRotatesCredentialAndRebindsSession` runs
 //!   with the default selector: session affinity isn't ported (policy). It
 //!   still checks the rotation, the second call's credential and the
@@ -1185,10 +1185,9 @@ async fn manager_request_scoped_error_stops_credential_fallback_without_suspendi
             "{name}: no model cooldown state, got {:?}",
             bad.model_states.get(model)
         );
-        // Upstream also counts one failure on the bad credential and none on
-        // the good one; the counters aren't ported, so the good credential's
-        // state is checked to be untouched.
+        assert_eq!(bad.failed, 1, "{name}: failed count");
         let good = h.get("bb-good-auth");
+        assert_eq!(good.failed, 0, "{name}: fallback auth failed count");
         assert!(good.last_error.is_none(), "{name}: fallback auth error");
         assert!(good.model_states.is_empty(), "{name}: fallback auth states");
     }
@@ -1398,11 +1397,12 @@ async fn manager_execute_count_generic_route_not_found_does_not_suspend_model() 
     let err = run(&h, Kind::Count, &["claude"], model, options())
         .await
         .expect_err("want the count_tokens route 404");
-    // Upstream also checks the failure counter and the one failed 404 result
-    // its hook saw; neither is ported.
+    // Upstream also checks the one failed 404 result its hook saw; hooks
+    // aren't ported.
     assert_eq!(err.http_status(), 404);
 
     let updated = h.get(id);
+    assert_eq!(updated.failed, 1, "failed request count");
     assert!(!updated.unavailable, "a route 404 keeps the auth available");
     assert!(
         !updated.model_states.contains_key(model),
@@ -1739,10 +1739,11 @@ async fn manager_record_result_availability_neutral_skips_scheduler_update() {
         failure(404, "404 page not found"),
     ));
 
-    // Upstream checks one recorded failure and an unchanged scheduler
-    // snapshot. Neither the counter nor the scheduler index is ported; the
-    // result must leave availability alone and publish nothing.
+    // Upstream also checks an unchanged scheduler snapshot. The scheduler
+    // index isn't ported; the result must leave availability alone and
+    // publish nothing.
     let updated = h.get(id);
+    assert_eq!(updated.failed, 1, "recorded failures");
     assert_eq!(updated.status, before.status);
     assert!(!updated.unavailable);
     assert_eq!(updated.next_retry_after, None);

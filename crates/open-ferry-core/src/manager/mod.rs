@@ -43,14 +43,15 @@
 //!   registry of refresh leads.
 //! - The selected credential goes to the `selected_auth` callback only;
 //!   there is no metadata map to publish it in.
-//! - Not ported: the auth index, recent-request counters, hooks, error
-//!   events, result policies, quota observation from headers, the cooldown
-//!   state store, request preparation and interceptors, the round tripper,
-//!   the Antigravity credits fallback and API-key capability metadata.
+//! - Not ported: hooks, error events, result policies, quota observation
+//!   from headers, the cooldown state store, request preparation and
+//!   interceptors, the round tripper, the Antigravity credits fallback and
+//!   API-key capability metadata.
 
 mod classify;
 pub mod clienterror;
 mod cooldown;
+mod cooldown_view;
 mod credential;
 mod execute;
 mod lifecycle;
@@ -68,7 +69,9 @@ mod text;
 #[cfg(test)]
 mod tests;
 
+pub use classify::has_unauthorized_auth_failure;
 pub use cooldown::CallResult;
+pub use cooldown_view::{CooldownView, cooldown_snapshot_for_auth};
 pub use lifecycle::QuotaReset;
 pub use refresh::ForceRefreshResult;
 pub use select::{ClientModels, ModelProjection};

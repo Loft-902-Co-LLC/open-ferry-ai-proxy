@@ -20,9 +20,9 @@
 //! Deviations from upstream:
 //! - Times are `Option`s, where upstream uses Go's zero time for "never".
 //! - `Debug` leaves out metadata and attribute values, which hold secrets.
-//! - Upstream's recent-request ring, registration epoch, generation and
-//!   plugin fields aren't ported; nor is `Runtime`, nor `Storage`: a
-//!   record's tokens live in its metadata.
+//! - Upstream's registration epoch, generation and plugin fields aren't
+//!   ported; nor is `Runtime`, nor `Storage`: a record's tokens live in its
+//!   metadata.
 //! - Upstream's store takes a context and tells a login apart from a
 //!   runtime save by a flag on it; here a login calls
 //!   [`AuthStore::save_new`].
@@ -35,6 +35,7 @@ mod index;
 pub(crate) mod json;
 pub mod metadata;
 mod path;
+mod recent;
 pub mod synthesizer;
 pub mod weight;
 
@@ -50,6 +51,7 @@ pub(crate) use expiry::{parse_time_value, zero_time};
 pub use file_store::FileStore;
 pub(crate) use go::{atoi, equal_fold, parse_bool};
 pub(crate) use metadata::{parse_bool_any, parse_int_any};
+pub use recent::{RecentRequestBucket, RecentRequests};
 
 /// A point in time, in UTC.
 pub type Timestamp = DateTime<Utc>;
@@ -185,6 +187,12 @@ pub struct Auth {
     pub next_retry_after: Option<Timestamp>,
     /// State per model.
     pub model_states: BTreeMap<String, ModelState>,
+    /// How many calls with the credential succeeded (upstream's `Success`).
+    pub success: i64,
+    /// How many calls with the credential failed (upstream's `Failed`).
+    pub failed: i64,
+    /// Calls per 10-minute window, for the last twenty windows.
+    pub recent_requests: RecentRequests,
 }
 
 impl Auth {

@@ -11,9 +11,10 @@
 //!   the wall clock.
 //! - `TestToolPrefixDisabled` is in `auth/metadata.rs`, with
 //!   `Auth::tool_prefix_disabled`.
-//! - Dropped: the two `EnsureIndex` tests (the auth index), the three `RecentRequestsSnapshot` tests (recent-request
-//!   counters), and `TestAuthClone_EmptyMapsIsolation` (Go map aliasing;
-//!   Rust's `Clone` copies the maps).
+//! - The two `EnsureIndex` tests are in `auth/index.rs`, and the three
+//!   `RecentRequestsSnapshot` tests in `auth/recent.rs`, beside the code.
+//! - Dropped: `TestAuthClone_EmptyMapsIsolation` (Go map aliasing; Rust's
+//!   `Clone` copies the maps).
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
