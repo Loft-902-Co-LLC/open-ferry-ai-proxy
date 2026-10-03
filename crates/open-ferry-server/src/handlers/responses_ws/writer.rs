@@ -14,8 +14,8 @@ use bytes::Bytes;
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use open_ferry_core::exec::WsClose;
 
-use super::json;
 use crate::errors::ErrorMessage;
+use crate::json;
 
 /// The close reason for an upstream that needs the turn replayed over HTTP
 /// (`wsHTTPReplayRequiredCloseReason`).

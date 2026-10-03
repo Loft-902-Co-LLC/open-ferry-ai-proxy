@@ -101,7 +101,7 @@ The Claude translators use more of upstream's shared code:
 - `common::cache_control` and `common::claude` from `internal/translator/common` and `internal/util`: `cache_control` markers, grouping messages into turns, structured output instructions, and tool name and ID sanitizing.
 - `schema` from `internal/util/claude_schema.go`: making a tool's JSON Schema fit for Claude.
 
-The server edits some client JSON in place, as upstream does with gjson and sjson, so that the bytes a client sent go on as they came. `handlers::responses::json` and `handlers::responses_ws::json` port the parts of gjson v1.18.0 and sjson v1.2.5 they need (MIT, [licenses/gjson-LICENSE](licenses/gjson-LICENSE) and [licenses/sjson-LICENSE](licenses/sjson-LICENSE)). The WebSocket handshake is checked as gorilla/websocket v1.5.3's `Upgrader` checks it (BSD-2-Clause, [licenses/gorilla-websocket-LICENSE](licenses/gorilla-websocket-LICENSE)).
+The server edits some client JSON in place, as upstream does with gjson and sjson, so that the bytes a client sent go on as they came. Its `json` module (`crates/open-ferry-server/src/json.rs`) ports the parts of gjson v1.18.0 and sjson v1.2.5 that its Responses handlers need (MIT, [licenses/gjson-LICENSE](licenses/gjson-LICENSE) and [licenses/sjson-LICENSE](licenses/sjson-LICENSE)). The WebSocket handshake is checked as gorilla/websocket v1.5.3's `Upgrader` checks it (BSD-2-Clause, [licenses/gorilla-websocket-LICENSE](licenses/gorilla-websocket-LICENSE)).
 
 ## Checking parity
 

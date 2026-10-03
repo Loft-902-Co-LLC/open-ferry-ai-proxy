@@ -4,7 +4,6 @@
 // responsesWebsocketNativePassthroughAllowed and
 // responsesWebsocketPreviousResponseNotFoundError in CLIProxyAPI
 // sdk/api/handlers/openai/openai_responses_websocket.go,
-// responsesWebsocketResolvedModelName and
 // responsesWebsocketProviderSetForModel in
 // sdk/api/handlers/openai/openai_responses_websocket_session.go, and
 // IsCodexResponsesLiteRequest in internal/util/codex.go (v8.0.10, MIT).
@@ -34,18 +33,17 @@ use super::forward::{
     ForwardOptions, Forwarded, error_payload, forward, should_release_pinned,
     should_replay_pinned_failure,
 };
-use super::json::{self, Val};
 use super::prewarm::{normalize_followup, should_handle_locally, synthetic_payloads};
 use super::repair::{caches, prepare_fallback_turn, session_key};
 use super::requests::{
     Normalized, TYPE_APPEND, TYPE_CREATE, input_contains_full_transcript, input_not_array,
-    normalize, normalize_create, normalize_passthrough, request_type, str_at,
-    transcript_replacement,
+    normalize, normalize_create, normalize_passthrough, request_type, transcript_replacement,
 };
 use super::writer::{Conn, Socket};
 use crate::errors::ErrorMessage;
 use crate::exec::{Call, ClientRequest, Started};
-use crate::routing::{parse_suffix, route};
+use crate::json::{self, Val, str_at};
+use crate::routing::{parse_suffix, resolve_model, route};
 use crate::state::AppState;
 
 /// The body of the error that has the client replay the turn over a new
@@ -569,22 +567,6 @@ impl<S: Socket> Session<S> {
         if !self.conn.close_for_upstream_error(&replay_required()).await {
             self.conn.close_without_error();
         }
-    }
-}
-
-/// The model `model` names, with `auto` resolved and any suffix kept
-/// (`responsesWebsocketResolvedModelName`).
-fn resolve_model(catalog: &dyn ModelCatalog, model: &str) -> String {
-    let (base, suffix) = parse_suffix(model);
-    if base != "auto" {
-        return model.to_owned();
-    }
-    let first = catalog
-        .first_available_model()
-        .unwrap_or_else(|| "auto".to_owned());
-    match suffix {
-        Some(raw) => format!("{first}({raw})"),
-        None => first,
     }
 }
 

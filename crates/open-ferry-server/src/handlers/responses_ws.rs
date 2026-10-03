@@ -55,7 +55,6 @@
 
 mod client_error;
 mod forward;
-mod json;
 mod prewarm;
 mod repair;
 mod requests;

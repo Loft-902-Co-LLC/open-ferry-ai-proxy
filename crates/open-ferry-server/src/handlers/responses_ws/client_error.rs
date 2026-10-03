@@ -9,7 +9,7 @@
 
 use open_ferry_translate::go;
 
-use super::json;
+use crate::json;
 
 /// Codes that mean the request is at fault (`requestFaultCodes`).
 const REQUEST_FAULT_CODES: [&str; 9] = [

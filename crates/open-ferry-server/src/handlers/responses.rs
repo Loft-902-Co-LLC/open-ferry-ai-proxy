@@ -32,7 +32,6 @@
 //!   from a malformed one too.
 
 mod framer;
-mod json;
 mod stream_error;
 #[cfg(test)]
 mod tests;
@@ -55,6 +54,7 @@ use super::{gjson_string, parse_body};
 use crate::body;
 use crate::errors::{ErrorMessage, local_error, openai_error_response};
 use crate::exec::{Call, ClientRequest, Started};
+use crate::json;
 use crate::state::AppState;
 use crate::stream::{StreamWriter, forward, json_response, keep_alive, sse_response};
 
@@ -100,7 +100,7 @@ pub(crate) async fn compact(
         );
     }
     if stream.is_some()
-        && let Some(updated) = json::delete(&raw, "stream")
+        && let Some(updated) = json::try_delete(&raw, "stream")
     {
         raw = Bytes::from(updated);
     }
@@ -328,7 +328,7 @@ impl StreamWriter for ResponsesWriter {
             return;
         }
         let sequence = json::find(err_text.as_bytes(), "sequence_number")
-            .map_or(self.framer.data_frames, json::int);
+            .map_or(self.framer.data_frames, |sequence| sequence.int());
         let event = if self.framer.is_codex_client {
             let chunk = failed_chunk(status, &err_text, sequence);
             format!("\nevent: response.failed\ndata: {chunk}\n\n")

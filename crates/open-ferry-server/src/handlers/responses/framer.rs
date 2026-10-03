@@ -12,11 +12,12 @@ use std::collections::HashMap;
 use bytes::BytesMut;
 use open_ferry_translate::go;
 
-use super::json;
 use super::stream_error::{
     error_chunk, failed_chunk, sanitize_error, sanitize_event_name, stream_error_text,
 };
 use crate::errors::ErrorMessage;
+use crate::json;
+use crate::sse_check::{data_lines_valid, data_payload};
 
 /// Where a Responses stream is (`responsesSSEFramer`).
 #[derive(Debug, Default)]
@@ -151,9 +152,7 @@ impl Framer {
             return Cow::Borrowed(frame);
         }
 
-        let payload_type = json::get(&payload, &["type"])
-            .map(json::string)
-            .unwrap_or_default();
+        let payload_type = json::str_at(&payload, "type");
         if self.should_filter_private_event(&stream_event, &payload_type) {
             return Cow::Borrowed(&[]);
         }
@@ -206,10 +205,10 @@ impl Framer {
             "error"
         };
         failure_event.clone_into(&mut self.terminal_event);
-        let sequence = if let Some(sequence) = json::get(payload, &["sequence_number"]) {
-            json::int(sequence)
+        let sequence = if let Some(sequence) = json::get(payload, "sequence_number") {
+            sequence.int()
         } else if let Some(sequence) = json::find(err_text.as_bytes(), "sequence_number") {
-            json::int(sequence)
+            sequence.int()
         } else if self.data_frames > 0 {
             self.data_frames - 1
         } else {
@@ -226,26 +225,27 @@ impl Framer {
     /// Keeps a finished output item for [`Framer::repair_completed_payload`]
     /// (`recordOutputItem`).
     fn record_output_item(&mut self, payload: &[u8]) {
-        let Some(item) = json::get(payload, &["item"]) else {
+        let Some(item) = json::get(payload, "item") else {
             return;
         };
-        if !json::is_object(item)
-            || json::get(item, &["type"])
-                .map(json::string)
+        if !item.is_object()
+            || item
+                .get("type")
+                .map(|kind| kind.str())
                 .unwrap_or_default()
                 .is_empty()
         {
             return;
         }
-        if let Some(index) = json::get(payload, &["output_index"]) {
-            let index = json::int(index);
+        if let Some(index) = json::get(payload, "output_index") {
+            let index = index.int();
             if !self.output_items.contains_key(&index) {
                 self.output_order.push(index);
             }
-            self.output_items.insert(index, item.to_vec());
+            self.output_items.insert(index, item.raw.to_vec());
             return;
         }
-        self.unindexed_output_items.push(item.to_vec());
+        self.unindexed_output_items.push(item.raw.to_vec());
     }
 
     /// A `response.completed` payload with the finished items as its output,
@@ -254,9 +254,7 @@ impl Framer {
         if self.output_order.is_empty() && self.unindexed_output_items.is_empty() {
             return None;
         }
-        if json::get(payload, &["response", "output"])
-            .is_some_and(|output| !json::is_empty_array(output))
-        {
+        if json::get(payload, "response.output").is_some_and(|output| !output.is_empty_array()) {
             return None;
         }
         let mut indexes = self.output_order.clone();
@@ -273,7 +271,8 @@ impl Framer {
             output.extend_from_slice(item);
         }
         output.push(b']');
-        json::set_response_output(payload, &output).filter(|repaired| repaired != payload)
+        json::try_set_raw(payload, "response.output", &output)
+            .filter(|repaired| repaired != payload)
     }
 }
 
@@ -300,17 +299,17 @@ fn write_sse_chunk(out: &mut BytesMut, chunk: &[u8]) {
 /// The error a payload carries, with the first status from 400 to 599 it
 /// gives, otherwise 502 (`responsesSSEPayloadErrorMessage`).
 fn payload_error_message(payload: &[u8]) -> ErrorMessage {
-    let paths: [&[&str]; 6] = [
-        &["status"],
-        &["status_code"],
-        &["error", "status"],
-        &["error", "status_code"],
-        &["response", "error", "status"],
-        &["response", "error", "status_code"],
+    let paths = [
+        "status",
+        "status_code",
+        "error.status",
+        "error.status_code",
+        "response.error.status",
+        "response.error.status_code",
     ];
     let status = paths
         .iter()
-        .map(|path| json::get(payload, path).map_or(0, json::int))
+        .map(|path| json::get(payload, path).map_or(0, |status| status.int()))
         .find(|status| (400..=599).contains(status))
         .map_or(502, |status| status as u16);
     sanitize_error(ErrorMessage::new(
@@ -339,31 +338,10 @@ fn is_terminal_event(event: &str) -> bool {
 
 /// Whether a payload carries an error (`responsesSSEPayloadHasError`).
 fn payload_has_error(payload: &[u8]) -> bool {
-    let has_error = [&["error"][..], &["response", "error"]]
+    let has_error = ["error", "response.error"]
         .iter()
-        .any(|path| json::get(payload, path).is_some_and(|error| error != b"null"));
-    has_error
-        || (json::get(payload, &["code"]).is_some() && json::get(payload, &["message"]).is_some())
-}
-
-/// The `data:` lines of an event, each trimmed and joined with `\n`, or
-/// `None` when it has none (`responsesSSEDataPayload`).
-fn data_payload(frame: &[u8]) -> Option<Vec<u8>> {
-    let mut payload: Option<Vec<u8>> = None;
-    for line in frame.split(|&b| b == b'\n') {
-        let Some(data) = go::trim_space(line).strip_prefix(b"data:") else {
-            continue;
-        };
-        let payload = match &mut payload {
-            Some(payload) => {
-                payload.push(b'\n');
-                payload
-            }
-            None => payload.insert(Vec::new()),
-        };
-        payload.extend_from_slice(go::trim_space(data));
-    }
-    payload
+        .any(|path| json::get(payload, path).is_some_and(|error| error.raw != b"null"));
+    has_error || (json::get(payload, "code").is_some() && json::get(payload, "message").is_some())
 }
 
 /// An event with its data lines replaced by `payload`'s lines
@@ -466,16 +444,6 @@ fn event_name(frame: &[u8]) -> String {
         .find_map(|line| go::trim_space(line).strip_prefix(b"event:"))
         .map(|name| String::from_utf8_lossy(name).trim().to_owned())
         .unwrap_or_default()
-}
-
-/// Whether an event's data, if it has any, is nothing, `[DONE]` or JSON
-/// (`responsesSSEDataLinesValid`).
-fn data_lines_valid(chunk: &[u8]) -> bool {
-    let Some(payload) = data_payload(chunk) else {
-        return true;
-    };
-    let payload = go::trim_space(&payload);
-    payload.is_empty() || payload == b"[DONE]" || go::json_valid(payload)
 }
 
 /// Whether a newline has to go between held-back text and a chunk that

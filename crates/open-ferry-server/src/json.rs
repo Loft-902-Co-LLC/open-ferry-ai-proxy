@@ -1,34 +1,50 @@
-// Ported from the parts of gjson (v1.18.0) and sjson (v1.2.5) that
-// CLIProxyAPI sdk/api/handlers/openai/openai_responses_websocket*.go relies
-// on (v8.0.10, MIT): Get, Parse, Result's String, Int, Bool, Array and
-// ForEach, unescape, SetBytes, SetRawBytes, DeleteBytes, appendRawPaths,
-// appendBuild, appendStringify and deleteTailItem.
+// Ported from tidwall/gjson v1.18.0 gjson.go and tidwall/sjson v1.2.5
+// sjson.go (MIT), as CLIProxyAPI uses them in
+// sdk/api/handlers/openai/openai_responses_handlers.go and
+// openai_responses_websocket*.go (v8.0.10, MIT): Get, Parse, Result's
+// String, Int, Bool, Array and ForEach, unescape, SetBytes, SetRawBytes,
+// DeleteBytes, appendRawPaths, appendBuild, appendStringify and
+// deleteTailItem.
 // https://github.com/router-for-me/CLIProxyAPI
 // https://github.com/tidwall/gjson
 // https://github.com/tidwall/sjson
 
-//! JSON as upstream reads and edits it: values found by path in the bytes as
-//! written, and edits that splice those bytes, so numbers, key order and
-//! escapes the client wrote survive.
+//! JSON as the Responses handlers read and edit it, as upstream does with
+//! gjson and sjson: values found by path in the bytes as written, the first
+//! entry for a key winning, and edits that splice those bytes, so numbers,
+//! key order and escapes the client wrote survive. Also the parts of Go's
+//! `encoding/json` the handlers' output depends on.
 //!
-//! Paths are object keys joined by dots, as upstream's are. The scanner is a
-//! private copy of `open_ferry_translate`'s, which that crate doesn't export.
+//! Lookups don't check that the text is JSON, as gjson's don't. Where
+//! upstream checks, the caller does too, with [`valid`].
+//!
+//! Deviations from upstream:
+//! - Paths are object keys joined by dots. gjson's escapes, wildcards, array
+//!   indexes and modifiers aren't read; no caller uses them.
+//! - In text that isn't JSON, a lookup stops at the first entry that isn't
+//!   a quoted key, a colon and a value, and a value that isn't a string or
+//!   in brackets runs to the next delimiter; gjson reads on as best it can.
+//!   [`Val::parse`] takes the first value to its end, where gjson `Parse`
+//!   takes the rest of the text after an opening bracket.
+//! - Go's conversion of a float beyond an `int64` depends on the platform;
+//!   [`Val::int`] gives what amd64 gives.
 
 use std::fmt::Write as _;
 
+use serde_json::{Map, Value};
+
 /// A value found in a document: its text as written, and where it starts.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct Val<'a> {
+pub(crate) struct Val<'a> {
     /// The value as written.
-    pub(super) raw: &'a [u8],
+    pub(crate) raw: &'a [u8],
     /// Where [`Val::raw`] starts in the document it was found in.
-    pub(super) index: usize,
+    pub(crate) index: usize,
 }
 
 impl<'a> Val<'a> {
-    /// The first value in `doc`, after white space (gjson `Parse`), when it
-    /// is valid.
-    pub(super) fn parse(doc: &'a [u8]) -> Option<Self> {
+    /// The first value in `doc`, after white space (gjson `Parse`).
+    pub(crate) fn parse(doc: &'a [u8]) -> Option<Self> {
         let start = skip_space(doc, 0);
         let end = scan_value(doc, start)?;
         Some(Self {
@@ -39,7 +55,7 @@ impl<'a> Val<'a> {
 
     /// The value at `path` inside this one (gjson `Result.Get`), indexed in
     /// this value's document.
-    pub(super) fn get(&self, path: &str) -> Option<Val<'a>> {
+    pub(crate) fn get(&self, path: &str) -> Option<Val<'a>> {
         let found = get(self.raw, path)?;
         Some(Val {
             raw: found.raw,
@@ -47,30 +63,37 @@ impl<'a> Val<'a> {
         })
     }
 
-    pub(super) fn is_object(&self) -> bool {
+    pub(crate) fn is_object(&self) -> bool {
         self.raw.first() == Some(&b'{')
     }
 
-    pub(super) fn is_array(&self) -> bool {
+    pub(crate) fn is_array(&self) -> bool {
         self.raw.first() == Some(&b'[')
     }
 
-    pub(super) fn is_null(&self) -> bool {
+    pub(crate) fn is_null(&self) -> bool {
         self.raw.first() == Some(&b'n')
     }
 
-    pub(super) fn is_string(&self) -> bool {
+    pub(crate) fn is_string(&self) -> bool {
         self.raw.first() == Some(&b'"')
     }
 
-    /// gjson `String`: a string unescaped, `null` as empty, an integer as
-    /// written, another number in Go's shortest form, and anything else as
-    /// written.
-    pub(super) fn str(&self) -> String {
+    /// Whether this is an array with nothing in it.
+    pub(crate) fn is_empty_array(&self) -> bool {
+        self.is_array() && self.raw.get(skip_space(self.raw, 1)) == Some(&b']')
+    }
+
+    /// gjson `String`: a string unescaped, `null` as empty, `true` and
+    /// `false`, an integer as written, another number in Go's shortest form,
+    /// and an object or array as written.
+    pub(crate) fn str(&self) -> String {
         match self.raw.first() {
             None | Some(b'n') => String::new(),
+            Some(b't') => "true".to_owned(),
+            Some(b'f') => "false".to_owned(),
             Some(b'"') => String::from_utf8_lossy(&string_value(self.raw)).into_owned(),
-            Some(b't' | b'f' | b'{' | b'[') => String::from_utf8_lossy(self.raw).into_owned(),
+            Some(b'{' | b'[') => String::from_utf8_lossy(self.raw).into_owned(),
             Some(_) => {
                 let digits = self.raw.strip_prefix(b"-").unwrap_or(self.raw);
                 if digits.iter().all(u8::is_ascii_digit) {
@@ -82,22 +105,18 @@ impl<'a> Val<'a> {
         }
     }
 
-    /// gjson `Int`: `true` as 1, a string or a number as an integer, and
-    /// anything else as 0.
-    pub(super) fn int(&self) -> i64 {
+    /// gjson `Int`: `true` as 1, a string read as an integer, a number
+    /// truncated, and anything else as 0.
+    pub(crate) fn int(&self) -> i64 {
         match self.raw.first() {
             Some(b't') => 1,
             Some(b'"') => parse_int(&string_value(self.raw)).unwrap_or(0),
             Some(b'-' | b'0'..=b'9') => {
                 let f = self.num();
                 if (-9_007_199_254_740_991.0..=9_007_199_254_740_991.0).contains(&f) {
-                    // In range, so the cast only truncates.
-                    #[allow(clippy::cast_possible_truncation)]
                     return f as i64;
                 }
-                // Out of range: Go's conversion is undefined; this saturates.
-                #[allow(clippy::cast_possible_truncation)]
-                parse_int(self.raw).unwrap_or(f as i64)
+                parse_int(self.raw).unwrap_or_else(|| go_int64(f))
             }
             _ => 0,
         }
@@ -105,7 +124,7 @@ impl<'a> Val<'a> {
 
     /// gjson `Bool`: `true`, a string Go's `ParseBool` reads as true once
     /// lowercased, or a non-zero number.
-    pub(super) fn bool(&self) -> bool {
+    pub(crate) fn bool(&self) -> bool {
         match self.raw.first() {
             Some(b't') => true,
             Some(b'"') => {
@@ -122,7 +141,7 @@ impl<'a> Val<'a> {
 
     /// gjson `Array`: an array's items, nothing for `null`, and the value
     /// itself for anything else.
-    pub(super) fn array(&self) -> Vec<Val<'a>> {
+    pub(crate) fn array(&self) -> Vec<Val<'a>> {
         if self.is_null() {
             return Vec::new();
         }
@@ -150,7 +169,7 @@ impl<'a> Val<'a> {
 
     /// An object's members, keys unescaped, in order (gjson `ForEach` on an
     /// object). Anything else has none.
-    pub(super) fn members(&self) -> Vec<(String, Val<'a>)> {
+    pub(crate) fn members(&self) -> Vec<(String, Val<'a>)> {
         object_members(self.raw, 0)
             .map(|(key, start, end)| {
                 let key = String::from_utf8_lossy(&string_value(&self.raw[key])).into_owned();
@@ -173,7 +192,7 @@ impl<'a> Val<'a> {
 }
 
 /// gjson `GetBytes(doc, path)`.
-pub(super) fn get<'a>(doc: &'a [u8], path: &str) -> Option<Val<'a>> {
+pub(crate) fn get<'a>(doc: &'a [u8], path: &str) -> Option<Val<'a>> {
     let mut found: Option<(usize, usize)> = None;
     for key in path.split('.') {
         let at = found.map_or_else(|| skip_space(doc, 0), |(start, _)| start);
@@ -184,6 +203,22 @@ pub(super) fn get<'a>(doc: &'a [u8], path: &str) -> Option<Val<'a>> {
         raw: &doc[start..end],
         index: start,
     })
+}
+
+/// gjson `Get(text, key)` on text that need not be JSON: the value at `key`
+/// in the object at the first `{`, unless a `[` comes first.
+pub(crate) fn find<'a>(text: &'a [u8], key: &str) -> Option<Val<'a>> {
+    let at = text.iter().position(|&c| c == b'{' || c == b'[')?;
+    let (start, end) = member(text, at, key)?;
+    Some(Val {
+        raw: &text[start..end],
+        index: start,
+    })
+}
+
+/// gjson `GetBytes(doc, path).String()`: empty when `path` is missing.
+pub(crate) fn str_at(doc: &[u8], path: &str) -> String {
+    get(doc, path).map(|value| value.str()).unwrap_or_default()
 }
 
 /// The span of the first value whose key is `key` in the object at `i`.
@@ -299,11 +334,14 @@ fn unescape(text: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Four hex digits, or 0 when they aren't (gjson `runeit`).
+/// Four hex digits, or 0 when they aren't (gjson `runeit`, which takes no
+/// sign).
 fn hex4(digits: &[u8]) -> u32 {
-    std::str::from_utf8(digits)
-        .ok()
-        .and_then(|digits| u32::from_str_radix(digits, 16).ok())
+    digits
+        .iter()
+        .try_fold(0, |code, &digit| {
+            Some(code << 4 | char::from(digit).to_digit(16)?)
+        })
         .unwrap_or(0)
 }
 
@@ -325,6 +363,16 @@ fn parse_int(text: &[u8]) -> Option<i64> {
         n = n.wrapping_mul(10).wrapping_add(i64::from(digit - b'0'));
     }
     Some(if negative { n.wrapping_neg() } else { n })
+}
+
+/// Go's `int64(f)` on amd64, which gives the lowest `int64` for a float out
+/// of range.
+fn go_int64(f: f64) -> i64 {
+    if f.is_nan() || !(-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&f) {
+        i64::MIN
+    } else {
+        f as i64
+    }
 }
 
 /// Go's `strconv.FormatFloat(f, 'f', -1, 64)` (a private copy of
@@ -351,29 +399,29 @@ enum New<'v> {
 /// sjson `SetRawBytes(doc, path, raw)`, or `None` where sjson fails: when
 /// the key is missing and the document, or the value holding the key, is an
 /// array.
-pub(super) fn try_set_raw(doc: &[u8], path: &str, raw: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn try_set_raw(doc: &[u8], path: &str, raw: &[u8]) -> Option<Vec<u8>> {
     set(doc, path, New::Raw(raw))
 }
 
 /// [`try_set_raw`], keeping `doc` as it is where sjson fails, as upstream
 /// does where it ignores the error.
-pub(super) fn set_raw(doc: &[u8], path: &str, raw: &[u8]) -> Vec<u8> {
+pub(crate) fn set_raw(doc: &[u8], path: &str, raw: &[u8]) -> Vec<u8> {
     try_set_raw(doc, path, raw).unwrap_or_else(|| doc.to_vec())
 }
 
 /// sjson `SetBytes(doc, path, value)` for a string; see [`try_set_raw`].
-pub(super) fn try_set_str(doc: &[u8], path: &str, value: &str) -> Option<Vec<u8>> {
+pub(crate) fn try_set_str(doc: &[u8], path: &str, value: &str) -> Option<Vec<u8>> {
     set(doc, path, New::Str(value))
 }
 
 /// [`try_set_str`], keeping `doc` where sjson fails.
-pub(super) fn set_str(doc: &[u8], path: &str, value: &str) -> Vec<u8> {
+pub(crate) fn set_str(doc: &[u8], path: &str, value: &str) -> Vec<u8> {
     try_set_str(doc, path, value).unwrap_or_else(|| doc.to_vec())
 }
 
 /// sjson `SetBytes(doc, path, value)` for a bool, keeping `doc` where sjson
 /// fails.
-pub(super) fn set_bool(doc: &[u8], path: &str, value: bool) -> Vec<u8> {
+pub(crate) fn set_bool(doc: &[u8], path: &str, value: bool) -> Vec<u8> {
     let raw: &[u8] = if value { b"true" } else { b"false" };
     set_raw(doc, path, raw)
 }
@@ -461,14 +509,19 @@ fn append_stringify(buf: &mut Vec<u8>, value: &str) {
     }
 }
 
-/// sjson `DeleteBytes(doc, path)`. A missing key leaves `doc` as it is.
-pub(super) fn delete(doc: &[u8], path: &str) -> Vec<u8> {
+/// sjson `DeleteBytes(doc, path)`: `doc` without the path's first entry
+/// and the comma that went with it, or `None` when it isn't there.
+pub(crate) fn try_delete(doc: &[u8], path: &str) -> Option<Vec<u8>> {
     let keys: Vec<&str> = path.split('.').collect();
     let mut buf = Vec::with_capacity(doc.len());
-    match delete_paths(&mut buf, doc, &keys) {
-        Some(()) => buf,
-        None => doc.to_vec(),
-    }
+    delete_paths(&mut buf, doc, &keys)?;
+    Some(buf)
+}
+
+/// [`try_delete`], keeping `doc` as it is when the path isn't there, as
+/// sjson does.
+pub(crate) fn delete(doc: &[u8], path: &str) -> Vec<u8> {
+    try_delete(doc, path).unwrap_or_else(|| doc.to_vec())
 }
 
 /// sjson `appendRawPaths` for a delete.
@@ -546,7 +599,7 @@ fn delete_tail_item(buf: &[u8]) -> (usize, bool) {
 /// Go's `json.Marshal` of `[]json.RawMessage`: the items compacted, with
 /// `<`, `>`, `&`, U+2028 and U+2029 escaped, in an array. `None` when an
 /// item isn't valid JSON.
-pub(super) fn compact_html(items: &[&[u8]]) -> Option<Vec<u8>> {
+pub(crate) fn compact_html(items: &[&[u8]]) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(items.iter().map(|item| item.len() + 1).sum::<usize>() + 2);
     out.push(b'[');
     for (n, item) in items.iter().enumerate() {
@@ -609,7 +662,7 @@ fn compact_into(out: &mut Vec<u8>, item: &[u8]) {
 /// Go's `encoding/json` key match: `key` equals the ASCII `target` once
 /// both are case-folded, where the long s (U+017F) folds with `s` and the
 /// Kelvin sign (U+212A) with `k`.
-pub(super) fn fold_eq(key: &str, target: &str) -> bool {
+pub(crate) fn fold_eq(key: &str, target: &str) -> bool {
     let mut target = target.bytes();
     for c in key.chars() {
         let folded = match c {
@@ -627,7 +680,7 @@ pub(super) fn fold_eq(key: &str, target: &str) -> bool {
 
 /// Go's `json.Marshal` of a string (a private copy of
 /// `open_ferry_translate::go::json_string`).
-pub(super) fn json_string(s: &str) -> String {
+pub(crate) fn json_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for c in s.chars() {
@@ -652,145 +705,221 @@ pub(super) fn json_string(s: &str) -> String {
 }
 
 /// gjson `Valid` (`open_ferry_translate::go::json_valid`, which is public).
-pub(super) fn valid(bytes: &[u8]) -> bool {
+pub(crate) fn valid(bytes: &[u8]) -> bool {
     open_ferry_translate::go::json_valid(bytes)
 }
 
-/// The end of the JSON value at `i`, if it is valid. Nesting is tracked on
-/// the heap, so deep input can't overflow the stack.
-fn scan_value(bytes: &[u8], mut i: usize) -> Option<usize> {
-    // The open containers; `true` for an object.
-    let mut open: Vec<bool> = Vec::new();
-    loop {
-        i = skip_space(bytes, i);
-        match *bytes.get(i)? {
-            b'{' => {
-                i = skip_space(bytes, i + 1);
-                if bytes.get(i) == Some(&b'}') {
-                    i += 1;
-                } else {
-                    open.push(true);
-                    i = scan_key(bytes, i)?;
-                    continue;
-                }
-            }
-            b'[' => {
-                i = skip_space(bytes, i + 1);
-                if bytes.get(i) == Some(&b']') {
-                    i += 1;
-                } else {
-                    open.push(false);
-                    continue;
-                }
-            }
-            b'"' => i = scan_string(bytes, i)?,
-            b't' => i = scan_literal(bytes, i, b"true")?,
-            b'f' => i = scan_literal(bytes, i, b"false")?,
-            b'n' => i = scan_literal(bytes, i, b"null")?,
-            _ => i = scan_number(bytes, i)?,
-        }
-        loop {
-            let Some(&object) = open.last() else {
-                return Some(i);
-            };
-            i = skip_space(bytes, i);
-            match *bytes.get(i)? {
-                b',' => {
-                    i += 1;
-                    if object {
-                        i = scan_key(bytes, skip_space(bytes, i))?;
-                    }
-                    break;
-                }
-                b'}' if object => {
-                    open.pop();
-                    i += 1;
-                }
-                b']' if !object => {
-                    open.pop();
-                    i += 1;
-                }
-                _ => return None,
-            }
-        }
+/// `value` with each object's keys in the order Go's `json.Marshal` writes
+/// a map's.
+pub(crate) fn sorted(value: &Value) -> Value {
+    match value {
+        Value::Object(fields) => Value::Object(sorted_map(fields)),
+        Value::Array(items) => Value::Array(items.iter().map(sorted).collect()),
+        other => other.clone(),
     }
 }
 
-/// The position after `"key":` at `i`.
-fn scan_key(bytes: &[u8], i: usize) -> Option<usize> {
-    if bytes.get(i) != Some(&b'"') {
-        return None;
-    }
-    let i = skip_space(bytes, scan_string(bytes, i)?);
-    (bytes.get(i) == Some(&b':')).then_some(i + 1)
+/// [`sorted`] for an object.
+pub(crate) fn sorted_map(fields: &Map<String, Value>) -> Map<String, Value> {
+    let mut entries: Vec<(&String, &Value)> = fields.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    entries
+        .into_iter()
+        .map(|(key, value)| (key.clone(), sorted(value)))
+        .collect()
 }
 
-/// The end of the string whose opening quote is at `i`.
-fn scan_string(bytes: &[u8], mut i: usize) -> Option<usize> {
+/// The index past the white space at `i`.
+fn skip_space(text: &[u8], mut i: usize) -> usize {
+    while text
+        .get(i)
+        .is_some_and(|c| matches!(c, b' ' | b'\t' | b'\n' | b'\r'))
+    {
+        i += 1;
+    }
+    i
+}
+
+/// The index past the string that starts at `i`.
+fn scan_string(text: &[u8], mut i: usize) -> Option<usize> {
     i += 1;
     loop {
-        match *bytes.get(i)? {
+        match *text.get(i)? {
             b'"' => return Some(i + 1),
-            b'\\' => match *bytes.get(i + 1)? {
-                b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't' => i += 2,
-                b'u' => {
-                    if !bytes.get(i + 2..i + 6)?.iter().all(u8::is_ascii_hexdigit) {
-                        return None;
-                    }
-                    i += 6;
-                }
-                _ => return None,
-            },
-            c if c < b' ' => return None,
+            b'\\' => i += 2,
             _ => i += 1,
         }
     }
 }
 
-fn scan_literal(bytes: &[u8], i: usize, literal: &[u8]) -> Option<usize> {
-    bytes[i..].starts_with(literal).then_some(i + literal.len())
+/// The index past the value that starts at `i`. Objects and arrays are
+/// matched by their brackets, outside strings; anything else runs to the
+/// next delimiter.
+fn scan_value(text: &[u8], mut i: usize) -> Option<usize> {
+    match *text.get(i)? {
+        b'"' => scan_string(text, i),
+        b'{' | b'[' => {
+            let mut depth = 0usize;
+            loop {
+                match *text.get(i)? {
+                    b'"' => {
+                        i = scan_string(text, i)?;
+                        continue;
+                    }
+                    b'{' | b'[' => depth += 1,
+                    b'}' | b']' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(i + 1);
+                        }
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+        }
+        _ => {
+            let len = text[i..]
+                .iter()
+                .take_while(|&&c| !matches!(c, b',' | b'}' | b']' | b' ' | b'\t' | b'\n' | b'\r'))
+                .count();
+            (len > 0).then_some(i + len)
+        }
+    }
 }
 
-fn scan_number(bytes: &[u8], mut i: usize) -> Option<usize> {
-    if bytes.get(i) == Some(&b'-') {
-        i += 1;
-    }
-    match *bytes.get(i)? {
-        b'0' => i += 1,
-        b'1'..=b'9' => i = skip_digits(bytes, i),
-        _ => return None,
-    }
-    if bytes.get(i) == Some(&b'.') {
-        let end = skip_digits(bytes, i + 1);
-        if end == i + 1 {
-            return None;
-        }
-        i = end;
-    }
-    if matches!(bytes.get(i), Some(b'e' | b'E')) {
-        i += 1;
-        if matches!(bytes.get(i), Some(b'+' | b'-')) {
-            i += 1;
-        }
-        let end = skip_digits(bytes, i);
-        if end == i {
-            return None;
-        }
-        i = end;
-    }
-    Some(i)
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn skip_digits(bytes: &[u8], mut i: usize) -> usize {
-    while bytes.get(i).is_some_and(u8::is_ascii_digit) {
-        i += 1;
+    /// The value `raw`, as a lookup finds it.
+    fn val(raw: &str) -> Val<'_> {
+        Val {
+            raw: raw.as_bytes(),
+            index: 0,
+        }
     }
-    i
-}
 
-fn skip_space(bytes: &[u8], mut i: usize) -> usize {
-    while matches!(bytes.get(i), Some(b' ' | b'\t' | b'\n' | b'\r')) {
-        i += 1;
+    /// What a lookup found, as written.
+    fn raw(found: Option<Val<'_>>) -> Option<&[u8]> {
+        found.map(|value| value.raw)
     }
-    i
+
+    #[test]
+    fn finds_the_first_entry_for_a_key() {
+        let text = br#" { "a" : 1 , "b":{"c":[1,"]"]}, "a":2, "esc":"x\"y" }"#;
+        assert_eq!(raw(get(text, "a")), Some(&b"1"[..]));
+        assert_eq!(raw(get(text, "b.c")), Some(&br#"[1,"]"]"#[..]));
+        assert_eq!(raw(get(text, "esc")), Some(&br#""x\"y""#[..]));
+        assert_eq!(raw(get(text, "b.x")), None);
+        assert_eq!(raw(get(b"[1]", "a")), None);
+        assert_eq!(
+            raw(find(
+                br#"oops {"sequence_number":5} more"#,
+                "sequence_number"
+            )),
+            Some(&b"5"[..])
+        );
+        assert_eq!(
+            raw(find(br#"[{"sequence_number":5}]"#, "sequence_number")),
+            None
+        );
+        assert_eq!(raw(find(b"no json", "sequence_number")), None);
+    }
+
+    #[test]
+    fn reads_values_as_gjson_does() {
+        let ints = [
+            ("true", 1),
+            ("false", 0),
+            ("null", 0),
+            (r#""429""#, 429),
+            (r#"" 429""#, 0),
+            ("429.9", 429),
+            ("-3.5", -3),
+            ("1e3", 1000),
+            ("9007199254740993", 9_007_199_254_740_993),
+            ("{}", 0),
+        ];
+        for (raw, want) in ints {
+            assert_eq!(val(raw).int(), want, "{raw}");
+        }
+        let strings = [
+            (r#""a\nb""#, "a\nb"),
+            ("1.50", "1.5"),
+            ("-12", "-12"),
+            ("1e2", "100"),
+            ("true", "true"),
+            ("null", ""),
+            (r#"{ "a":1 }"#, r#"{ "a":1 }"#),
+        ];
+        for (raw, want) in strings {
+            assert_eq!(val(raw).str(), want, "{raw}");
+        }
+        assert!(val("[ ]").is_empty_array());
+        assert!(!val("[0]").is_empty_array());
+    }
+
+    #[test]
+    fn deletes_as_sjson_does() {
+        let cases = [
+            (r#"{"stream":false,"model":"x"}"#, r#"{"model":"x"}"#),
+            (r#"{"model":"x","stream":false}"#, r#"{"model":"x"}"#),
+            (
+                r#"{"model":"x","stream":null,"input":[]}"#,
+                r#"{"model":"x","input":[]}"#,
+            ),
+            (r#"{ "stream": false , "a":1}"#, r#"{ "a":1}"#),
+            (r#"{"stream":{"a":[1]}}"#, "{}"),
+            (
+                "{\n  \"model\": \"x\",\n  \"stream\": false\n}",
+                "{\n  \"model\": \"x\"\n}",
+            ),
+            (r#"{"stream":1,"stream":2}"#, r#"{"stream":2}"#),
+        ];
+        for (text, want) in cases {
+            let got = try_delete(text.as_bytes(), "stream").unwrap();
+            assert_eq!(String::from_utf8(got).unwrap(), want, "{text}");
+        }
+        assert_eq!(try_delete(br#"{"model":"x"}"#, "stream"), None);
+    }
+
+    #[test]
+    fn sets_the_response_output_as_sjson_does() {
+        let set = |text: &str| {
+            try_set_raw(text.as_bytes(), "response.output", b"[1]")
+                .map(|out| String::from_utf8(out).unwrap())
+        };
+        assert_eq!(
+            set(r#"{"type":"t","response":{"id":"r","output":[]}}"#).unwrap(),
+            r#"{"type":"t","response":{"id":"r","output":[1]}}"#
+        );
+        assert_eq!(
+            set(r#"{"type":"t","response":{"id":"r"}}"#).unwrap(),
+            r#"{"type":"t","response":{"id":"r","output":[1]}}"#
+        );
+        assert_eq!(
+            set(r#"{"response":{ }}"#).unwrap(),
+            r#"{"response":{ "output":[1]}}"#
+        );
+        assert_eq!(
+            set(r#"{"response":null}"#).unwrap(),
+            r#"{"response":{"output":[1]}}"#
+        );
+        assert_eq!(
+            set(r#"{"type":"t"}"#).unwrap(),
+            r#"{"type":"t","response":{"output":[1]}}"#
+        );
+        assert_eq!(set(r#"{"response":[]}"#), None);
+        assert_eq!(set("[]"), None);
+    }
+
+    #[test]
+    fn sorts_keys_as_go_marshals_maps() {
+        let value: Value = serde_json::from_str(r#"{"b":[{"d":1,"c":2}],"a":null}"#).unwrap();
+        assert_eq!(
+            sorted(&value).to_string(),
+            r#"{"a":null,"b":[{"c":2,"d":1}]}"#
+        );
+    }
 }

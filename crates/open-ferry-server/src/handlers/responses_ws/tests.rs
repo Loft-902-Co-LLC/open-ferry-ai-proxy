@@ -45,7 +45,6 @@ use super::forward::{
     error_payload, forward, payloads_from_chunk, record_pending_call_ids,
     restore_completion_output, should_expose, should_release_pinned, should_replay_pinned_failure,
 };
-use super::json::{self, Val};
 use super::repair::{
     ToolCache, ToolCacheTurn, ToolCaches, caches, is_complete_tool_call, prepare_fallback_turn,
     record_tool_calls_from_payload, repair,
@@ -62,6 +61,7 @@ use super::writer::{Closed, Conn, close_frame_for, truncate_close_reason};
 use super::{check_handshake, is_valid_challenge_key, token_list_contains};
 use crate::config::ServerConfig;
 use crate::errors::ErrorMessage;
+use crate::json::{self, Val};
 use crate::status::status_text;
 use crate::testing::{FakeCatalog, FakeDispatcher, Outcome};
 

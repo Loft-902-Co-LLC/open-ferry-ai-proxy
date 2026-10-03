@@ -1,5 +1,7 @@
 // Ported from CLIProxyAPI sseJSONValidationState in
-// sdk/api/handlers/handlers_stream.go (v8.0.10, MIT).
+// sdk/api/handlers/handlers_stream.go, and responsesSSEDataPayload and
+// responsesSSEDataLinesValid in
+// sdk/api/handlers/openai/openai_responses_handlers.go (v8.0.10, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Checks that each `data:` payload of a Responses event stream is JSON
@@ -71,7 +73,7 @@ impl SseCheck {
             return Ok(output);
         }
         // An incomplete event goes on now if its data is already whole.
-        if payload_ok(data_payload(&self.pending).as_deref()) {
+        if data_lines_valid(&self.pending) {
             output.append(&mut self.pending);
         }
         Ok(output)
@@ -107,8 +109,9 @@ fn normalize_newlines(chunk: &[u8]) -> Vec<u8> {
 }
 
 /// The `data:` lines of an event, each trimmed and joined with `\n`, or
-/// `None` when it has none.
-fn data_payload(frame: &[u8]) -> Option<Vec<u8>> {
+/// `None` when it has none (`sseJSONValidationDataPayload`, and
+/// `responsesSSEDataPayload`, which reads them the same way).
+pub(crate) fn data_payload(frame: &[u8]) -> Option<Vec<u8>> {
     let mut payload: Option<Vec<u8>> = None;
     for line in frame.split(|&b| b == b'\n') {
         let Some(data) = go::trim_space(line).strip_prefix(b"data:") else {
@@ -127,22 +130,23 @@ fn data_payload(frame: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Whether an event's data, if it has any, may go to the client: nothing,
-/// `[DONE]`, or JSON.
-fn payload_ok(payload: Option<&[u8]>) -> bool {
-    let Some(payload) = payload else {
+/// `[DONE]`, or JSON (`responsesSSEDataLinesValid`, and the check in
+/// `validateSSEFrameDataJSON`).
+pub(crate) fn data_lines_valid(frame: &[u8]) -> bool {
+    let Some(payload) = data_payload(frame) else {
         return true;
     };
-    let payload = go::trim_space(payload);
+    let payload = go::trim_space(&payload);
     payload.is_empty() || payload == b"[DONE]" || go::json_valid(payload)
 }
 
-/// Checks one event.
+/// Checks one event (`validateSSEFrameDataJSON`).
 fn validate_frame(frame: &[u8]) -> Result<(), String> {
-    let payload = data_payload(frame);
-    if payload_ok(payload.as_deref()) {
+    if data_lines_valid(frame) {
         return Ok(());
     }
-    let payload = go::trim_space(payload.as_deref().unwrap_or_default());
+    let payload = data_payload(frame).unwrap_or_default();
+    let payload = go::trim_space(&payload);
     let preview = &payload[..payload.len().min(PREVIEW_LIMIT)];
     Err(format!(
         "invalid SSE data JSON (len={}): {}",

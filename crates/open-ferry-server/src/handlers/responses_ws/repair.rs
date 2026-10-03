@@ -23,7 +23,7 @@ use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
 use http::HeaderMap;
 use open_ferry_translate::go;
 
-use super::json::{self, Val};
+use crate::json::{self, Val};
 
 /// The most items a cache keeps per session
 /// (`websocketToolOutputCacheMaxPerSession`).
@@ -176,7 +176,7 @@ impl InputItem {
             ..Self::default()
         };
         let trimmed = go::trim_space(raw);
-        if trimmed.first() != Some(&b'{') {
+        if trimmed.first() != Some(&b'{') || !json::valid(trimmed) {
             return item;
         }
         let Some(object) = Val::parse(trimmed) else {

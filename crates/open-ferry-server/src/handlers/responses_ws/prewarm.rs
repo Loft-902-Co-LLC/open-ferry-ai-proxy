@@ -13,12 +13,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use uuid::Uuid;
 
-use super::json::{self, Val};
 use super::requests::{
     Normalized, TYPE_APPEND, TYPE_CREATE, bad_request, input_not_array, merge_input, request_type,
-    str_at, transcript_replacement, unsupported_type,
+    transcript_replacement, unsupported_type,
 };
 use crate::errors::ErrorMessage;
+use crate::json::{self, Val, str_at};
 
 /// The `response.created` a warm-up is answered with.
 const CREATED_TEMPLATE: &[u8] = br#"{"type":"response.created","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"in_progress","background":false,"error":null,"output":[]}}"#;

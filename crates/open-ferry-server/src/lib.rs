@@ -34,6 +34,7 @@ mod errors;
 mod exec;
 mod handlers;
 mod headers;
+mod json;
 mod query;
 mod routing;
 mod sse_check;

@@ -29,15 +29,14 @@ use open_ferry_translate::go;
 use tokio::time::{Instant, Interval, MissedTickBehavior};
 
 use super::client_error::is_request_fault;
-use super::json::{self, Val};
 use super::repair::{
     ToolCacheTurn, caches, is_complete_tool_call, is_tool_call, is_tool_output,
     record_tool_calls_from_payload,
 };
-use super::requests::str_at;
 use super::writer::{Conn, Socket};
 use crate::errors::{ErrorMessage, openai_body};
 use crate::exec::HandlerStream;
+use crate::json::{self, Val, str_at};
 use crate::status::status_text;
 
 /// The event that ends a turn with an error (`wsEventTypeError`).

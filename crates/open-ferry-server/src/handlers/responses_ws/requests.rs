@@ -20,9 +20,9 @@ use std::fmt;
 
 use open_ferry_translate::go;
 
-use super::json::{self, Val};
 use super::repair::{InputItem, dedupe_input_items, is_tool_call, is_tool_output};
 use crate::errors::ErrorMessage;
+use crate::json::{self, Val, str_at};
 
 /// A request that starts a turn (`wsRequestTypeCreate`).
 pub(super) const TYPE_CREATE: &str = "response.create";
@@ -53,13 +53,6 @@ pub(super) fn unsupported_type(request_type: &str) -> ErrorMessage {
     bad_request(format!(
         "unsupported websocket request type: {request_type}"
     ))
-}
-
-/// gjson's `String()` of `path` in `doc`, or empty when it's missing.
-pub(super) fn str_at(doc: &[u8], path: &str) -> String {
-    json::get(doc, path)
-        .map(|value| value.str())
-        .unwrap_or_default()
 }
 
 /// The request's `type`, trimmed.

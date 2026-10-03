@@ -17,8 +17,8 @@ use open_ferry_translate::go;
 use regex::Regex;
 use serde_json::{Map, Value, json};
 
-use super::json::{sorted, sorted_map};
 use crate::errors::ErrorMessage;
+use crate::json::{sorted, sorted_map};
 use crate::status::status_text;
 
 /// How many characters of an error's text, or of a string in it, are kept.

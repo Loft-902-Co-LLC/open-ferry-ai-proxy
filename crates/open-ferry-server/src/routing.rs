@@ -1,5 +1,7 @@
 // Ported from CLIProxyAPI getRequestDetailsWithOptions and
 // validateImageOnlyModel in sdk/api/handlers/handlers_routing.go,
+// responsesWebsocketResolvedModelName in
+// sdk/api/handlers/openai/openai_responses_websocket_session.go,
 // GetProviderName and ResolveAutoModel in internal/util/provider.go, and
 // ParseSuffix in internal/thinking/suffix.go (v8.0.10, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
@@ -35,22 +37,28 @@ pub(crate) struct Route {
     pub(crate) model: String,
 }
 
+/// `model` with `auto` resolved to the first model available and any
+/// thinking suffix kept (`ResolveAutoModel`, as
+/// `getRequestDetailsWithOptions` and `responsesWebsocketResolvedModelName`
+/// call it).
+pub(crate) fn resolve_model(catalog: &dyn ModelCatalog, model: &str) -> String {
+    let (base, suffix) = parse_suffix(model);
+    if base != "auto" {
+        return model.to_owned();
+    }
+    let first = catalog
+        .first_available_model()
+        .unwrap_or_else(|| "auto".to_owned());
+    match suffix {
+        Some(raw) => format!("{first}({raw})"),
+        None => first,
+    }
+}
+
 /// Routes `model`: resolves `auto`, turns away image-only models, and finds
 /// the providers that serve it.
 pub(crate) fn route(catalog: &dyn ModelCatalog, model: &str) -> Result<Route, ErrorMessage> {
-    let (base, suffix) = parse_suffix(model);
-    let resolved = if base == "auto" {
-        let first = catalog
-            .first_available_model()
-            .unwrap_or_else(|| "auto".to_owned());
-        match suffix {
-            Some(raw) => format!("{first}({raw})"),
-            None => first,
-        }
-    } else {
-        model.to_owned()
-    };
-
+    let resolved = resolve_model(catalog, model);
     let base_model = parse_suffix(&resolved).0.trim();
     check_image_only(base_model)?;
 
