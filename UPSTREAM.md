@@ -192,7 +192,38 @@ Not ported yet: `auth-files/status`, `auth-files/fields` and `auth-files/refresh
 
 #### OAuth logins
 
-Not ported yet: `anthropic-auth-url`, `codex-auth-url`, `get-auth-status`, `oauth-session` and `oauth-callback`, v8's `oauth/auth-url`, `oauth/status`, `oauth/session` and `oauth/callback`, and the main server's `/anthropic/callback` and `/codex/callback`.
+Claude and Codex logins, with the providers' official OAuth flows only:
+
+| Route | v8 route | Access |
+|---|---|---|
+| `GET /v0/management/anthropic-auth-url` | `GET /v8/management/oauth/auth-url?provider=claude` | `Key` |
+| `GET /v0/management/codex-auth-url` | `GET /v8/management/oauth/auth-url?provider=codex` | `Key` |
+| `GET /v0/management/get-auth-status` | `GET /v8/management/oauth/status` | `Key` |
+| `DELETE /v0/management/oauth-session` | `DELETE /v8/management/oauth/session` | `Key` |
+| `GET`, `POST /v0/management/oauth-callback` | `GET`, `POST /v8/management/oauth/callback` | `Availability` |
+| `GET /anthropic/callback`, `GET /codex/callback` (the main server) | | `Open` |
+
+A login answers its authorization URL and `state` at once, then waits up to 5 minutes for its callback. It exchanges the code at the provider's token endpoint, through the config's `proxy-url` and with `User-Agent: open-ferry/<version>`, and saves the credential as other saved logins are saved (above). With `is_webui`, a callback forwarder on the redirect URI's port (54545 for Claude, 1455 for Codex) sends the browser on to the main server's callback page, over `https` when TLS is on; while that port is held elsewhere, the login answers 500 `{"error":"failed to start callback server"}`. The callback routes only look up a `state` of 1 to 128 letters, digits, `-`, `_` and `.`, without `..`.
+
+Deviations, each also noted in its module:
+
+- **A callback reaches its login in memory.** Upstream writes it to `.oauth-<provider>-<state>.oauth` in the auth directory, which the login polls twice a second. Nothing is written here, and no directory made, so `oauth-callback` never answers 500 `failed to persist oauth callback`. A session takes its first callback; a later one, while it is still pending, is answered `ok` and dropped, where upstream's login reads whichever file was written last before it looks.
+
+- **Sessions are bounded.** At most 1024 are kept; past that, a login answers 429 `{"error":"too many oauth sessions"}` until some expire. Upstream keeps any number.
+
+- **A cancelled login stops at once.** Cancelling a session wakes its login, which stops its forwarder, and a login cancelled while it exchanges the code saves nothing. Upstream's login notices on its next poll.
+
+- **A login that can't start its forwarder, or can't tell the server's port, drops its session**, where upstream leaves it pending with nothing waiting on it.
+
+- **Forwarders listen on 127.0.0.1 only**, where upstream listens on every interface. A connection is closed 5 seconds after it connected or was last answered; upstream gives 5 seconds each to send a request's headers and to take the answer, and leaves an idle connection open. A stopped forwarder closes its listener at once and leaves its open connections to their deadline, where upstream gives them up to 2 seconds.
+
+- **The `state` is 32 random bytes in unpadded URL-safe base64**; upstream's is 16 in hex.
+
+- **A credential without an email isn't saved.** The session fails with `Failed to save authentication tokens:` and the reason, where upstream saves it under a name without an email. A Codex account ID is trimmed before it is hashed for the file name. A Claude login saves no device IDs.
+
+- **There is no `State code error` status**, as a callback can't carry another login's state, and a login's status never polls a plugin.
+
+- **A code that isn't UTF-8**, once decoded from the query, is read with each bad byte as U+FFFD; Go keeps its bytes.
 
 #### Config and info reads
 
@@ -206,7 +237,7 @@ Until the parts above port them, their routes answer the empty 404, and so does 
 
 - the settings that come with request logging and usage statistics (`usage-statistics-enabled`, `logs-max-total-size-mb`, `error-logs-max-files`), and the `xai-`, `meta-` and `interactions-api-key` lists;
 
-- the logins of other providers (`kimi`, `kimi-ai`, `xai`, `meta`, `antigravity` and `devin`, and plugins' logins through v8's `oauth/auth-url`);
+- the logins of other providers: `kimi-auth-url`, `kimi-ai-auth-url`, `xai-auth-url`, `meta-auth-url`, `antigravity-auth-url` and `devin-auth-url`. v8's `oauth/auth-url` answers 404 `{"error":"provider_not_found"}` for these providers and for plugins, as upstream answers a provider it doesn't know, and the main server's `/antigravity/callback`, `/devin/callback` and `/callback` answer the server's `404 page not found`;
 
 - logs and usage: `logs`, `request-error-logs`, `request-log-by-id`, `api-key-usage`, `usage-queue`;
 
@@ -228,6 +259,7 @@ Some of upstream's behaviour comes from the details of Go libraries, so the part
 - `gemini::token` in `open-ferry-providers` from golang.org/x/oauth2 v0.30.0 (the service-account JWT-bearer exchange and its errors) and Go's `encoding/pem` and `encoding/base64` (where a key's PEM or base64 is bad), so a broken key is reported as upstream reports it (BSD-3-Clause, under the same license as Go, [licenses/Go-LICENSE](licenses/Go-LICENSE)).
 - `go_json` in `open-ferry-providers` from Go's `encoding/json` decoder, for a Codex ID token's claims: a repeated object merges into its struct, a slice reuses its spare elements, and invalid UTF-8 and lone surrogates read as U+FFFD (BSD-3-Clause, [licenses/Go-LICENSE](licenses/Go-LICENSE)).
 - `handlers::gemini::sniff` in `open-ferry-server` from Go's `net/http/sniff.go`, for the `Content-Type` Go's server gives a raw Gemini stream that upstream leaves untyped (BSD-3-Clause, [licenses/Go-LICENSE](licenses/Go-LICENSE)).
+- `oauth::forwarder` in `open-ferry-management` from Go's `net/http/server.go` (`Redirect` and `htmlEscape`), for the redirect an OAuth callback forwarder answers with (BSD-3-Clause, [licenses/Go-LICENSE](licenses/Go-LICENSE)).
 
 The config loader in `open-ferry-core` reads YAML as upstream's yaml.v3 does, since that decides which settings a file holds:
 
