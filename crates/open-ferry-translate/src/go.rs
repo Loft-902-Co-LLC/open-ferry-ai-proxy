@@ -202,6 +202,8 @@ mod tests {
             "\"\u{5c}u00ad\u{5c}u2028\u{5c}U000f0000\""
         );
         assert_eq!(quote("\u{80}"), "\"\u{5c}u0080\"");
+        // A letter from Unicode 16, which Go 1.26 (Unicode 15) doesn't know.
+        assert_eq!(quote("\u{10d50}"), "\"\u{5c}U00010d50\"");
     }
 
     #[test]
