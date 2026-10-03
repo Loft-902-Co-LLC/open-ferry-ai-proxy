@@ -2,21 +2,28 @@
 // Shutdown), service_auth.go (prepareCoreAuthForModelRegistration,
 // completeModelRegistrationForAuth and applyCoreAuthRemoval),
 // service_config.go (applyConfigRuntime and registerConfigAPIKeyAuths),
-// service_executors.go, and the auth dispatch of internal/watcher's
-// clients.go and config_reload.go (v8.0.10, MIT).
+// service_executors.go (registerAvailableExecutors,
+// registerExecutorForAuth and registerOpenAICompatProviderExecutor), the
+// order of internal/watcher/synthesizer/config.go (Synthesize), and the
+// auth dispatch of internal/watcher's clients.go and config_reload.go
+// (v8.0.10, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Serving the proxy.
 //!
-//! At start the credentials in the auth directory and the config's API keys
-//! are registered with the credential manager, and each one's models with
-//! the model registry. Token refresh runs in the background every fifteen
-//! minutes. Then the server listens, serving the management API beside the
-//! proxy, and a watcher follows the config file and the auth directory:
+//! At start the credentials in the auth directory, the config's API keys and
+//! its OpenAI-compatible providers' keys are registered with the credential
+//! manager, and each one's models with the model registry. Each
+//! OpenAI-compatible provider gets an executor of its own, keyed by its
+//! provider key (`openai-compatible-<name>`), beside the baseline
+//! `openai-compatibility` one. Token refresh runs in the background every
+//! fifteen minutes. Then the server listens, serving the management API
+//! beside the proxy, and a watcher follows the config file and the auth
+//! directory:
 //! - A config that changes is applied to the manager, the server, the
-//!   management API and the executors; the API-key credentials are made
-//!   again from it, and every credential's models registered again, as
-//!   aliases and exclusions may have changed.
+//!   management API and the executors; the API-key and OpenAI-compatible
+//!   credentials are made again from it, and every credential's models
+//!   registered again, as aliases and exclusions may have changed.
 //! - An auth file that is added or changes is registered from the contents
 //!   the watcher read; one that is removed is unregistered.
 //!
@@ -24,10 +31,16 @@
 //! saves those it changes itself, as after a refresh.
 //!
 //! Deviations from upstream:
-//! - Only the Codex and Claude executors are registered.
+//! - Only the Codex, Claude and OpenAI-compatible executors are registered.
+//!   Upstream gives a credential of a provider it has no executor for an
+//!   OpenAI-compatible executor keyed by that provider; here such a
+//!   credential has no executor, and isn't served.
 //! - Executors are made again on a reload only when a setting they use
-//!   (`proxy-url`, `claude.model-level-cooling`) changed; upstream makes
-//!   them again on every reload, which ends their WebSocket sessions.
+//!   changed (`proxy-url`, `claude.model-level-cooling`, and for the
+//!   OpenAI-compatible ones `openai-compatibility`); upstream makes them
+//!   again on every reload, which ends their WebSocket sessions.
+//! - An OpenAI-compatible executor that no credential uses any more after a
+//!   reload is unregistered; upstream keeps it.
 //! - With an empty `host` the server listens on every IPv6 and IPv4
 //!   interface, as Go does; an IPv6 `host` is bracketed, where upstream's
 //!   address fails to parse.
@@ -49,8 +62,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
+use open_ferry_core::auth::compat::OPENAI_COMPATIBILITY;
 use open_ferry_core::auth::synthesizer::api_key::{ApiKeyEntry, synthesize_api_key_auths};
 use open_ferry_core::auth::synthesizer::file::{synthesize_auth_file, synthesize_file_auths};
+use open_ferry_core::auth::synthesizer::openai_compat::synthesize_openai_compat_auths;
 use open_ferry_core::auth::synthesizer::{StableIdGenerator, SynthesisContext};
 use open_ferry_core::auth::{Auth, FileStore, Status};
 use open_ferry_core::config::{AuthFile, Config, ConfigWatcher, WatchEvent};
@@ -59,6 +74,7 @@ use open_ferry_core::registry::{ModelRegistry, RegistrationRules};
 use open_ferry_management::{ManagementState, management_password_from_env};
 use open_ferry_providers::claude::ClaudeExecutor;
 use open_ferry_providers::codex::CodexExecutor;
+use open_ferry_providers::openai_compat::OpenAiCompatExecutor;
 use open_ferry_server::{AppState, ServerConfig, router_with};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch};
@@ -234,6 +250,8 @@ struct Service {
     config_auths: BTreeSet<String>,
     /// The credential ID registered for each auth file.
     file_auths: HashMap<PathBuf, String>,
+    /// The provider keys OpenAI-compatible executors are registered for.
+    compat_executors: BTreeSet<String>,
 }
 
 impl Service {
@@ -269,6 +287,7 @@ impl Service {
             watcher: None,
             config_auths: BTreeSet::new(),
             file_auths: HashMap::new(),
+            compat_executors: BTreeSet::new(),
         }
     }
 
@@ -278,8 +297,15 @@ impl Service {
         router_with(self.state.clone(), management)
     }
 
+    /// Registers the executors for the current config: Codex, Claude, and
+    /// the OpenAI-compatible ones (see [`Self::register_compat_executors`]).
+    fn register_executors(&mut self) {
+        self.register_native_executors();
+        self.register_compat_executors();
+    }
+
     /// Registers the Codex and Claude executors for the current config.
-    fn register_executors(&self) {
+    fn register_native_executors(&self) {
         let proxy_url = self.config.proxy_url.clone();
         self.manager
             .register_executor(Arc::new(CodexExecutor::new(proxy_url.clone())));
@@ -288,6 +314,49 @@ impl Service {
                 .with_models(Arc::clone(&self.registry) as _)
                 .with_model_level_cooling(self.config.claude.model_level_cooling),
         ));
+    }
+
+    /// Registers OpenAI-compatible executors made for the current config,
+    /// replacing those registered: the baseline `openai-compatibility` one,
+    /// and one for each provider an enabled credential belongs to. Those no
+    /// credential uses any more are unregistered.
+    fn register_compat_executors(&mut self) {
+        let mut providers = BTreeSet::from([OPENAI_COMPATIBILITY.to_owned()]);
+        providers.extend(
+            self.manager
+                .list()
+                .iter()
+                .filter_map(|auth| compat_provider(auth)),
+        );
+        for provider in &providers {
+            self.register_compat_executor(provider);
+        }
+        for stale in self.compat_executors.difference(&providers) {
+            self.manager.unregister_executor(stale);
+        }
+        self.compat_executors = providers;
+    }
+
+    /// Registers an OpenAI-compatible executor for `provider`, made for the
+    /// current config.
+    fn register_compat_executor(&self, provider: &str) {
+        self.manager
+            .register_executor(Arc::new(OpenAiCompatExecutor::new(
+                provider.to_owned(),
+                Arc::clone(&self.config),
+            )));
+    }
+
+    /// Registers an OpenAI-compatible executor for `auth`'s provider, unless
+    /// one is registered already or `auth` isn't an enabled OpenAI-compatible
+    /// credential (upstream's `ensureExecutorsForAuth`).
+    fn ensure_executor(&mut self, auth: &Auth) {
+        if let Some(provider) = compat_provider(auth)
+            && !self.compat_executors.contains(&provider)
+        {
+            self.register_compat_executor(&provider);
+            self.compat_executors.insert(provider);
+        }
     }
 
     fn synthesis_context(&self) -> SynthesisContext {
@@ -312,21 +381,29 @@ impl Service {
         }
     }
 
-    /// Registers a credential for each config API key, and unregisters
-    /// those whose key is gone (upstream's `registerConfigAPIKeyAuths` and
-    /// the watcher's diff of config credentials).
+    /// Registers a credential for each config API key and each key of an
+    /// enabled OpenAI-compatible provider, and unregisters those whose key
+    /// is gone (upstream's `registerConfigAPIKeyAuths` and the watcher's
+    /// diff of config credentials). An invalid weight anywhere leaves every
+    /// credential as it was, as upstream checks all weights first.
     fn sync_config_auths(&mut self) {
         let claude: Vec<ApiKeyEntry> = self.config.claude_api_key.iter().map(Into::into).collect();
         let codex: Vec<ApiKeyEntry> = self.config.codex_api_key.iter().map(Into::into).collect();
         let ctx = self.synthesis_context();
+        let mut ids = StableIdGenerator::new();
         let auths =
-            match synthesize_api_key_auths(&claude, &codex, &ctx, &mut StableIdGenerator::new()) {
-                Ok(auths) => auths,
-                Err(error) => {
-                    tracing::warn!("failed to synthesize config API key auths: {error}");
-                    return;
-                }
-            };
+            synthesize_api_key_auths(&claude, &codex, &ctx, &mut ids).and_then(|mut auths| {
+                let compat = &self.config.openai_compatibility;
+                auths.extend(synthesize_openai_compat_auths(compat, &ctx, &mut ids)?);
+                Ok(auths)
+            });
+        let auths = match auths {
+            Ok(auths) => auths,
+            Err(error) => {
+                tracing::warn!("failed to synthesize config API key auths: {error}");
+                return;
+            }
+        };
         let rules = self.rules();
         let mut ids = BTreeSet::new();
         for auth in auths {
@@ -339,11 +416,12 @@ impl Service {
         self.config_auths = ids;
     }
 
-    /// Registers or updates `auth`, then its models (upstream's
-    /// `prepareCoreAuthForModelRegistration` and
+    /// Registers or updates `auth`, once its provider has an executor, then
+    /// its models (upstream's `prepareCoreAuthForModelRegistration` and
     /// `completeModelRegistrationForAuth`). Returns whether it is
     /// registered.
-    fn upsert(&self, mut auth: Auth, rules: &RegistrationRules) -> bool {
+    fn upsert(&mut self, mut auth: Auth, rules: &RegistrationRules) -> bool {
+        self.ensure_executor(&auth);
         let (op, result) = match self.manager.get(&auth.id) {
             Some(existing) => {
                 auth.created_at = existing.created_at;
@@ -432,7 +510,8 @@ impl Service {
             self.remove(&previous);
         }
         let id = auth.id.clone();
-        if self.upsert(auth, &self.rules()) {
+        let rules = self.rules();
+        if self.upsert(auth, &rules) {
             self.file_auths.insert(path.to_owned(), id);
         }
     }
@@ -454,7 +533,7 @@ impl Service {
         if previous.proxy_url != config.proxy_url
             || previous.claude.model_level_cooling != config.claude.model_level_cooling
         {
-            self.register_executors();
+            self.register_native_executors();
         }
 
         let mut watching = Watching::Same;
@@ -491,6 +570,13 @@ impl Service {
         }
 
         self.sync_config_auths();
+        // New providers got executors as their credentials were registered;
+        // the others are made again with the new config.
+        if previous.proxy_url != config.proxy_url
+            || previous.openai_compatibility != config.openai_compatibility
+        {
+            self.register_compat_executors();
+        }
         let rules = self.rules();
         for auth in self.manager.list() {
             self.registry.register_auth(&auth, &rules);
@@ -503,6 +589,15 @@ impl Service {
 
 fn is_disabled(auth: &Auth) -> bool {
     auth.disabled || auth.status == Status::Disabled
+}
+
+/// The provider key of `auth`'s OpenAI-compatible executor, unless `auth`
+/// is disabled or isn't an OpenAI-compatible credential.
+fn compat_provider(auth: &Auth) -> Option<String> {
+    if auth.disabled {
+        return None;
+    }
+    auth.openai_compat_info().map(|(provider, _)| provider)
 }
 
 /// `dir` made absolute against the current directory, as the watcher makes
@@ -627,12 +722,14 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
+    use open_ferry_core::auth::weight::MAX_WEIGHT;
+
     use super::*;
 
     /// A service over `dir` with `extra` config, its executors registered.
     fn service(dir: &Path, extra: &str) -> Service {
         let config = Config::parse(format!("auth-dir: '{}'\n{extra}", dir.display())).unwrap();
-        let service = Service::new(Arc::new(config), dir.to_owned(), LogLevel::detached());
+        let mut service = Service::new(Arc::new(config), dir.to_owned(), LogLevel::detached());
         service.register_executors();
         service
     }
@@ -842,6 +939,322 @@ mod tests {
             dir.path().read_dir().unwrap().next().is_none(),
             "a file was saved"
         );
+    }
+
+    /// An `openai-compatibility` config with `entries`.
+    fn compat(entries: &[String]) -> String {
+        format!("openai-compatibility:\n{}", entries.concat())
+    }
+
+    /// A provider entry named `name` with one key, serving `model` as
+    /// `alias`.
+    fn compat_entry(name: &str, base_url: &str, model: &str, alias: &str) -> String {
+        format!(
+            "  - name: {name}\n    base-url: {base_url}\n    api-key-entries:\n      - api-key: sk-{name}\n    models:\n      - name: {model}\n        alias: {alias}\n"
+        )
+    }
+
+    /// The IDs of the models registered for credential `id`.
+    fn model_ids(service: &Service, id: &str) -> Vec<String> {
+        let models = service.registry.models_for_client(id);
+        models.into_iter().map(|model| model.id).collect()
+    }
+
+    /// The ID of the executor registered for `provider`.
+    fn executor_id(service: &Service, provider: &str) -> Option<String> {
+        let executor = service.manager.executor(provider)?;
+        Some(executor.id().to_owned())
+    }
+
+    /// Ports `TestRegisterAvailableExecutors` of CLIProxyAPI
+    /// sdk/cliproxy/service_executor_registration_test.go (v8.0.10, MIT)
+    /// for the executors ported: Codex, Claude and the baseline
+    /// OpenAI-compatible one. The plugin executor and the other providers'
+    /// aren't ported.
+    #[tokio::test]
+    async fn registers_the_available_executors() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = service(dir.path(), "");
+        for provider in ["codex", "claude", "openai-compatibility"] {
+            assert_eq!(executor_id(&service, provider).as_deref(), Some(provider));
+        }
+        assert_eq!(executor_id(&service, "openai-compatible-x"), None);
+    }
+
+    /// Ports `TestRegisterExecutorForAuth_OpenAICompatUsesNamespacedProviderKey`
+    /// of the same file, with Codex as the native provider, as Kimi isn't
+    /// ported: an OpenAI-compatible provider named after a native one gets
+    /// an executor of its own, whichever credential comes first. Executors
+    /// can't be told apart by type here; the native one is the one
+    /// registered at start, and the other answers to the namespaced key.
+    #[tokio::test]
+    async fn compat_executor_uses_namespaced_provider_key() {
+        for compat_first in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut service = service(dir.path(), "");
+            let native_executor = service.manager.executor("codex").unwrap();
+            let native = Auth {
+                id: "native-codex".into(),
+                provider: "codex".into(),
+                ..Auth::default()
+            };
+            let mut compat = Auth {
+                id: "compat-codex".into(),
+                provider: "openai-compatibility".into(),
+                label: "codex".into(),
+                ..Auth::default()
+            };
+            compat
+                .attributes
+                .insert("compat_name".into(), "codex".into());
+            compat
+                .attributes
+                .insert("provider_key".into(), "codex".into());
+            let mut auths = vec![native, compat];
+            if compat_first {
+                auths.reverse();
+            }
+            let rules = service.rules();
+            for auth in auths {
+                assert!(service.upsert(auth, &rules));
+            }
+
+            let resolved = service.manager.executor("codex").unwrap();
+            assert!(Arc::ptr_eq(&resolved, &native_executor), "{compat_first}");
+            assert_eq!(
+                executor_id(&service, "openai-compatible-codex").as_deref(),
+                Some("openai-compatible-codex"),
+                "{compat_first}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn disabled_compat_credentials_get_no_executor() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut service = service(dir.path(), "");
+        let mut auth = Auth {
+            id: "compat-off".into(),
+            provider: "openai-compatible-off".into(),
+            disabled: true,
+            ..Auth::default()
+        };
+        auth.attributes.insert("compat_name".into(), "off".into());
+        service.upsert(auth, &service.rules());
+        assert_eq!(executor_id(&service, "openai-compatible-off"), None);
+    }
+
+    #[tokio::test]
+    async fn openai_compat_providers_follow_reloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let reload = |service: &mut Service, extra: &str| {
+            let text = format!("auth-dir: '{}'\n{extra}", dir.path().display());
+            let config = Arc::new(Config::parse(text).unwrap());
+            service.handle(WatchEvent::ConfigChanged(config), Path::new(""))
+        };
+        let alpha = |model: &str, alias: &str| {
+            compat_entry("alpha", "https://alpha.example.test/v1", model, alias)
+        };
+        let beta = compat_entry("beta", "https://beta.example.test/v1", "up-b", "b");
+
+        let first = compat(&[alpha("up-1", "a1")]);
+        let mut service = service(dir.path(), &first);
+        service.sync_config_auths();
+        let auths = service.manager.list();
+        assert_eq!(auths.len(), 1);
+        let alpha_id = auths[0].id.clone();
+        assert!(
+            alpha_id.starts_with("openai-compatibility:alpha:"),
+            "{alpha_id}"
+        );
+        assert_eq!(auths[0].provider, "openai-compatible-alpha");
+        assert_eq!(
+            auths[0].attribute("base_url"),
+            Some("https://alpha.example.test/v1")
+        );
+        assert_eq!(model_ids(&service, &alpha_id), ["a1"]);
+        let alpha_executor = service.manager.executor("openai-compatible-alpha").unwrap();
+        assert_eq!(alpha_executor.id(), "openai-compatible-alpha");
+
+        // An unchanged reload keeps the credential and the executor.
+        assert!(matches!(reload(&mut service, &first), Watching::Same));
+        assert!(service.manager.get(&alpha_id).is_some());
+        let same = service.manager.executor("openai-compatible-alpha").unwrap();
+        assert!(Arc::ptr_eq(&same, &alpha_executor));
+
+        // Changed models keep the credential, register the new models, and
+        // make the executor again for the new config; a new entry gets a
+        // credential and an executor.
+        reload(&mut service, &compat(&[alpha("up-2", "a2"), beta.clone()]));
+        assert!(service.manager.get(&alpha_id).is_some());
+        assert_eq!(model_ids(&service, &alpha_id), ["a2"]);
+        let remade = service.manager.executor("openai-compatible-alpha").unwrap();
+        assert!(!Arc::ptr_eq(&remade, &alpha_executor));
+        let beta_auth = service
+            .manager
+            .list()
+            .into_iter()
+            .find(|auth| auth.provider == "openai-compatible-beta")
+            .unwrap();
+        assert_eq!(model_ids(&service, &beta_auth.id), ["b"]);
+        assert_eq!(
+            executor_id(&service, "openai-compatible-beta").as_deref(),
+            Some("openai-compatible-beta")
+        );
+        assert_eq!(service.config_auths.len(), 2);
+
+        // A removed entry takes its credential, models and executor with it.
+        reload(&mut service, &compat(std::slice::from_ref(&beta)));
+        assert!(service.manager.get(&alpha_id).is_none());
+        assert!(model_ids(&service, &alpha_id).is_empty());
+        assert_eq!(executor_id(&service, "openai-compatible-alpha"), None);
+        assert!(service.manager.get(&beta_auth.id).is_some());
+
+        // So does a disabled one; the baseline executor stays.
+        let disabled = beta.replace("  - name: beta\n", "  - name: beta\n    disabled: true\n");
+        reload(&mut service, &compat(&[disabled]));
+        assert!(service.manager.list().is_empty());
+        assert!(service.config_auths.is_empty());
+        assert_eq!(executor_id(&service, "openai-compatible-beta"), None);
+        assert_eq!(
+            executor_id(&service, "openai-compatibility").as_deref(),
+            Some("openai-compatibility")
+        );
+
+        // An invalid weight anywhere leaves the credentials as they were, as
+        // upstream checks every weight before making any. The config's
+        // loader rejects one, so it is set after.
+        reload(&mut service, &compat(std::slice::from_ref(&beta)));
+        assert_eq!(service.config_auths.len(), 1);
+        let entries = compat(&[alpha("up-1", "a1"), beta.clone()]);
+        let text = format!("auth-dir: '{}'\n{entries}", dir.path().display());
+        let mut invalid = Config::parse(text).unwrap();
+        invalid.openai_compatibility[1].api_key_entries[0].weight = Some(MAX_WEIGHT + 1);
+        service.handle(WatchEvent::ConfigChanged(Arc::new(invalid)), Path::new(""));
+        assert_eq!(service.manager.list().len(), 1);
+        assert!(service.manager.get(&beta_auth.id).is_some());
+        assert!(
+            dir.path().read_dir().unwrap().next().is_none(),
+            "a file was saved"
+        );
+    }
+
+    /// A client's request reaches an OpenAI-compatible provider through the
+    /// server, under the model's alias, before and after a reload.
+    mod compat_requests {
+        use std::net::SocketAddr;
+        use std::path::Path;
+        use std::sync::{Arc, Mutex};
+
+        use axum::body::Bytes;
+        use axum::http::{HeaderMap, Uri};
+        use open_ferry_core::config::{Config, WatchEvent};
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        use tokio::net::{TcpListener, TcpStream};
+        use tokio::sync::watch;
+
+        use super::super::serve;
+        use super::{compat, compat_entry, service};
+
+        const ANSWER: &str = r#"{"id":"chatcmpl-1","object":"chat.completion","created":1,"model":"up-1","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}"#;
+
+        /// What the provider was sent: the path, the `Authorization` header
+        /// and the body.
+        type Seen = Arc<Mutex<Vec<(String, String, String)>>>;
+
+        /// A provider on a 127.0.0.1 ephemeral port that answers every
+        /// request with [`ANSWER`].
+        async fn provider() -> (String, Seen) {
+            let seen = Seen::default();
+            let record = Arc::clone(&seen);
+            let app =
+                axum::Router::new().fallback(move |uri: Uri, headers: HeaderMap, body: Bytes| {
+                    let record = Arc::clone(&record);
+                    async move {
+                        let authorization = headers
+                            .get("authorization")
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or_default()
+                            .to_owned();
+                        let body = String::from_utf8_lossy(&body).into_owned();
+                        record
+                            .lock()
+                            .unwrap()
+                            .push((uri.path().to_owned(), authorization, body));
+                        ([("content-type", "application/json")], ANSWER)
+                    }
+                });
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(listener, app).await });
+            (format!("http://{addr}/v1"), seen)
+        }
+
+        /// Sends `method path` with the client key and `body`, and returns
+        /// the status and body of the answer.
+        async fn send(addr: SocketAddr, method: &str, path: &str, body: &str) -> (u16, String) {
+            let mut stream = TcpStream::connect(addr).await.unwrap();
+            let request = format!(
+                "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer client-key\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(request.as_bytes()).await.unwrap();
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).await.unwrap();
+            let response = String::from_utf8(response).unwrap();
+            let (head, body) = response.split_once("\r\n\r\n").unwrap();
+            let status = head.split(' ').nth(1).unwrap().parse().unwrap();
+            (status, body.to_owned())
+        }
+
+        fn chat(model: &str) -> String {
+            format!(r#"{{"model":"{model}","messages":[{{"role":"user","content":"hello"}}]}}"#)
+        }
+
+        #[tokio::test]
+        async fn requests_reach_the_provider() {
+            let dir = tempfile::tempdir().unwrap();
+            let (base_url, seen) = provider().await;
+            let config = |model: &str, alias: &str| {
+                let entry = compat_entry("alpha", &base_url, model, alias);
+                format!("api-keys: ['client-key']\n{}", compat(&[entry]))
+            };
+            let mut service = service(dir.path(), &config("up-1", "a1"));
+            service.sync_config_auths();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (_stop, stopped) = watch::channel(false);
+            tokio::spawn(serve(listener, None, service.app(), stopped));
+
+            let (status, models) = send(addr, "GET", "/v1/models", "").await;
+            assert_eq!(status, 200, "{models}");
+            assert!(models.contains(r#""id":"a1""#), "{models}");
+
+            let (status, body) = send(addr, "POST", "/v1/chat/completions", &chat("a1")).await;
+            assert_eq!((status, body.as_str()), (200, ANSWER));
+            let want = (
+                "/v1/chat/completions".to_owned(),
+                "Bearer sk-alpha".to_owned(),
+                chat("up-1"),
+            );
+            assert_eq!(seen.lock().unwrap().as_slice(), [want]);
+
+            // After a reload the new alias is served, and the old one isn't.
+            let text = format!(
+                "auth-dir: '{}'\n{}",
+                dir.path().display(),
+                config("up-2", "a2")
+            );
+            let reloaded = Arc::new(Config::parse(text).unwrap());
+            service.handle(WatchEvent::ConfigChanged(reloaded), Path::new(""));
+            let (status, body) = send(addr, "POST", "/v1/chat/completions", &chat("a2")).await;
+            assert_eq!((status, body.as_str()), (200, ANSWER));
+            let (status, body) = send(addr, "POST", "/v1/chat/completions", &chat("a1")).await;
+            assert_ne!(status, 200, "{body}");
+            let seen = seen.lock().unwrap();
+            assert_eq!(seen.len(), 2);
+            assert_eq!(seen[1].2, chat("up-2"));
+        }
     }
 
     /// The management API as the binary serves it, over TCP.
