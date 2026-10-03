@@ -42,6 +42,15 @@ pub struct ModelInfo {
     pub supported_input_modalities: Vec<String>,
     /// The kinds of output it gives.
     pub supported_output_modalities: Vec<String>,
+    /// The most input tokens it takes, for Gemini model lists, or 0 when
+    /// unknown (upstream's `InputTokenLimit`).
+    pub input_token_limit: u64,
+    /// The most output tokens it gives, for Gemini model lists, or 0 when
+    /// unknown (upstream's `OutputTokenLimit`).
+    pub output_token_limit: u64,
+    /// The Gemini methods it takes, such as `generateContent`
+    /// (upstream's `SupportedGenerationMethods`).
+    pub supported_generation_methods: Vec<String>,
     /// Its thinking settings, if it thinks.
     pub thinking: Option<ThinkingSupport>,
     /// The thinking settings were set in the config. Internal.
