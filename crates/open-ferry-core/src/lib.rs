@@ -1,9 +1,11 @@
 //! Config, accounts, credential store and routing.
 //!
-//! So far this holds the seam between the HTTP layer and provider execution:
-//! [`exec`] describes a call and its result, and [`models`] which providers
-//! serve a model. The credential manager and the provider executors behind
-//! them come next.
+//! [`exec`] describes a call and its result, as the HTTP layer hands it to a
+//! [`exec::Dispatcher`], and [`models`] which providers serve a model.
+//! Behind them, [`auth`] holds credentials and [`executor`] the trait each
+//! provider's executor implements.
 
+pub mod auth;
 pub mod exec;
+pub mod executor;
 pub mod models;

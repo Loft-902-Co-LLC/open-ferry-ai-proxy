@@ -1,0 +1,67 @@
+// Ported from the ProviderExecutor and ExecutionSessionCloser interfaces in
+// CLIProxyAPI sdk/cliproxy/auth/conductor.go (v8.0.10, MIT).
+// https://github.com/router-for-me/CLIProxyAPI
+
+//! What calls a provider: a [`ProviderExecutor`] for each provider, which
+//! the credential manager hands a credential and a call.
+//!
+//! An executor translates the payload from [`Options::source_format`] to
+//! its provider's format, sends it with the credential, and translates the
+//! answer to [`Options::response_format`], chunk by chunk when streaming
+//! (see [`crate::exec`] for each format's chunks). It reports a provider's
+//! failure as an [`ExecError`] with the provider's status, body and headers,
+//! and leaves retries and cooldowns to the manager.
+//!
+//! Deviations from upstream:
+//! - `HttpRequest`, which the management API's `api-call` uses, isn't part of
+//!   the trait yet.
+//! - Upstream's optional interfaces (`ExecutionSessionCloser` and others) are
+//!   methods with defaults.
+
+use std::sync::Arc;
+
+use futures_core::future::BoxFuture;
+
+use crate::auth::Auth;
+use crate::exec::{ExecError, Options, Request, Response, StreamResponse};
+
+/// Calls one provider with a credential (upstream's `ProviderExecutor`).
+pub trait ProviderExecutor: Send + Sync + 'static {
+    /// The provider served, such as `codex`; [`Auth::provider`] of the
+    /// credentials it takes.
+    fn id(&self) -> &str;
+
+    /// A non-streaming call.
+    fn execute(
+        &self,
+        auth: Arc<Auth>,
+        request: Request,
+        options: Options,
+    ) -> BoxFuture<'_, Result<Response, ExecError>>;
+
+    /// A streaming call. It returns once the provider has answered with a
+    /// success status, before reading the body.
+    fn execute_stream(
+        &self,
+        auth: Arc<Auth>,
+        request: Request,
+        options: Options,
+    ) -> BoxFuture<'_, Result<StreamResponse, ExecError>>;
+
+    /// Counts the request's input tokens.
+    fn count_tokens(
+        &self,
+        auth: Arc<Auth>,
+        request: Request,
+        options: Options,
+    ) -> BoxFuture<'_, Result<Response, ExecError>>;
+
+    /// Refreshes the credential's tokens, and returns the record with the new
+    /// ones in its metadata. A credential with nothing to refresh, such as an
+    /// API key, comes back unchanged.
+    fn refresh(&self, auth: Arc<Auth>) -> BoxFuture<'_, Result<Auth, ExecError>>;
+
+    /// Ends a Responses WebSocket session's state, when the socket closes
+    /// (upstream's `ExecutionSessionCloser`).
+    fn close_execution_session(&self, _session_id: &str) {}
+}
