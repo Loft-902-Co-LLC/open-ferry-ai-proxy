@@ -15,6 +15,7 @@ use open_ferry_translate::completions::{
     convert_chat_completions_stream_chunk_to_completions,
     convert_completions_request_to_chat_completions,
 };
+use open_ferry_translate::openai::responses::convert_openai_responses_request_to_openai_chat_completions;
 use serde_json::Value;
 
 use super::{gjson_string, parse_body};
@@ -195,15 +196,6 @@ impl StreamWriter for ChatWriter {
     fn write_done(&mut self, out: &mut BytesMut) {
         out.extend_from_slice(b"data: [DONE]\n\n");
     }
-}
-
-// TEMPORARY-RESPONSES-CHAT: replaced by the translator once it lands.
-fn convert_openai_responses_request_to_openai_chat_completions(
-    _model: &str,
-    request: &Value,
-    _stream: bool,
-) -> Value {
-    request.clone()
 }
 
 #[cfg(test)]

@@ -506,3 +506,27 @@ async fn streams_keep_alive_while_the_provider_is_quiet() {
     assert_eq!(next().await, ": keep-alive\n\n");
     assert_eq!(next().await, ": keep-alive\n\n");
 }
+
+#[tokio::test]
+async fn chat_completions_take_responses_bodies() {
+    let (app, dispatcher) = app(
+        ServerConfig::default(),
+        vec![Outcome::chunks(&[r#"{"n":1}"#])],
+    );
+    let body = r#"{"model":"gpt-5","instructions":"be brief","input":"hi","stream":true}"#;
+    let (status, _, body) = send(&app, authed(Method::POST, "/v1/chat/completions", body)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "data: {\"n\":1}\n\ndata: [DONE]\n\n");
+
+    let call = &dispatcher.calls()[0];
+    assert!(call.options.stream);
+    let sent: Value = serde_json::from_slice(&call.request.payload).unwrap();
+    assert_eq!(sent["stream"], true);
+    assert_eq!(
+        sent["messages"],
+        json!([
+            {"role": "system", "content": "be brief"},
+            {"role": "user", "content": "hi"},
+        ])
+    );
+}
