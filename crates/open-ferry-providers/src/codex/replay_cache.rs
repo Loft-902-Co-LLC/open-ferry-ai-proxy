@@ -29,6 +29,8 @@
 //!   `GetCodexReasoningReplayItem` are only used by tests, so they are only
 //!   built for tests. `ClearCodexReasoningReplayCache` isn't ported: tests
 //!   that share the process's cache use sessions of their own instead.
+//! - Entries are keyed by a SHA-256 hash of the model and session, so a long
+//!   session key takes no more room than a short one.
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex, PoisonError};
@@ -36,6 +38,7 @@ use std::time::{Duration, Instant};
 
 use open_ferry_translate::signature::inspect_gpt_reasoning_signature;
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 
 use crate::json::{get, str_at, str_of};
 
@@ -74,9 +77,12 @@ struct Entry {
     used: Instant,
 }
 
+/// A hash of the model and session an entry is for.
+type Key = [u8; 32];
+
 #[derive(Default)]
 struct State {
-    entries: HashMap<String, Entry>,
+    entries: HashMap<Key, Entry>,
     last_purge: Option<Instant>,
 }
 
@@ -193,7 +199,7 @@ impl ReplayCache {
 
 impl State {
     /// Stores an entry and evicts the oldest if the cache is over its bound.
-    fn insert(&mut self, key: String, entry: Entry) {
+    fn insert(&mut self, key: Key, entry: Entry) {
         self.entries.insert(key, entry);
         if self.entries.len() > MAX_ENTRIES {
             self.evict_oldest(EVICT_BATCH);
@@ -202,10 +208,10 @@ impl State {
 
     /// `evictOldestCodexReasoningReplayEntries`.
     fn evict_oldest(&mut self, count: usize) {
-        let mut candidates: Vec<(Instant, String)> = self
+        let mut candidates: Vec<(Instant, Key)> = self
             .entries
             .iter()
-            .map(|(key, entry)| (entry.used, key.clone()))
+            .map(|(key, entry)| (entry.used, *key))
             .collect();
         candidates.sort_unstable();
         for (_, key) in candidates.into_iter().take(count) {
@@ -232,15 +238,16 @@ fn expired(used: Instant, now: Instant) -> bool {
     now.saturating_duration_since(used) > TTL
 }
 
-/// `codexReasoningReplayCacheKey`: none if the model or session is blank.
-/// The session is the boundary, not the Codex credential, so a request that
-/// fails over to another credential still finds its turns.
-fn cache_key(model: &str, session: &str) -> Option<String> {
+/// A hash of `codexReasoningReplayCacheKey`: none if the model or session is
+/// blank. The session is the boundary, not the Codex credential, so a
+/// request that fails over to another credential still finds its turns.
+fn cache_key(model: &str, session: &str) -> Option<Key> {
     let (model, session) = (model.trim(), session.trim());
     if model.is_empty() || session.is_empty() {
         return None;
     }
-    Some(format!("codex-reasoning-replay\0{model}\0{session}"))
+    let key = format!("codex-reasoning-replay\0{model}\0{session}");
+    Some(Sha256::digest(key.as_bytes()).into())
 }
 
 /// `appendCodexReasoningReplayTurn`: existing items that don't start with a
@@ -497,6 +504,19 @@ pub(crate) mod tests {
         }
         assert!(cache.len() < MAX_ENTRIES);
         assert_eq!(cache.len(), MAX_ENTRIES + 1 - EVICT_BATCH);
+    }
+
+    // Not upstream's: a long session key is hashed, and doesn't share its
+    // entry with a session it starts with.
+    #[test]
+    fn long_session_keys_are_hashed() {
+        let cache = ReplayCache::default();
+        let session = "s".repeat(1 << 20);
+        let item = reasoning(4);
+        assert!(cache.store("m", &session, &[&item]));
+        assert!(cache.get_item("m", &session).is_some());
+        assert_eq!(cache.get_item("m", &session[1..]), None);
+        assert_eq!(cache.len(), 1);
     }
 
     // Not upstream's: the shapes items are normalized to, and what is
