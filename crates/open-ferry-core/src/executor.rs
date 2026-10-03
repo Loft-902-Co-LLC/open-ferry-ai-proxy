@@ -19,6 +19,7 @@
 //!   methods with defaults.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures_core::future::BoxFuture;
 
@@ -60,6 +61,12 @@ pub trait ProviderExecutor: Send + Sync + 'static {
     /// ones in its metadata. A credential with nothing to refresh, such as an
     /// API key, comes back unchanged.
     fn refresh(&self, auth: Arc<Auth>) -> BoxFuture<'_, Result<Auth, ExecError>>;
+
+    /// How long before its tokens expire to refresh a credential, or `None`
+    /// to not refresh ahead (upstream's `RefreshLead`).
+    fn refresh_lead(&self) -> Option<Duration> {
+        None
+    }
 
     /// Ends a Responses WebSocket session's state, when the socket closes
     /// (upstream's `ExecutionSessionCloser`).
