@@ -339,7 +339,7 @@ fn vertex_base_url(location: &str) -> String {
 
 /// `isImagenModel`.
 fn is_imagen(model: &str) -> bool {
-    model.to_lowercase().contains("imagen")
+    open_ferry_translate::go::to_lower(model).contains("imagen")
 }
 
 /// `getVertexAction`.

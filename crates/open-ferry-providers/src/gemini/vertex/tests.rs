@@ -480,6 +480,52 @@ async fn api_key_calls_go_to_the_global_endpoint_or_base_url() {
 }
 
 #[tokio::test]
+async fn errors_hide_the_key_or_token() {
+    let payload = r#"{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}"#;
+    let mock = Mock::start(Reply::error(
+        403,
+        r#"{"error":{"message":"key test-vertex-key is not allowed"}}"#,
+    ))
+    .await;
+    let error = executor()
+        .execute(
+            auth(&mock),
+            request("gemini-2.5-pro", payload),
+            options(&Format::GEMINI),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (error.status, error.message.as_str()),
+        (
+            403,
+            r#"{"error":{"message":"key [redacted] is not allowed"}}"#
+        )
+    );
+
+    let tokens = token_endpoint().await;
+    let model = Mock::start(Reply::error(
+        401,
+        r#"{"error":{"message":"token sa-token expired"}}"#,
+    ))
+    .await;
+    let executor = executor().with_service_account_base_url(model.url.clone());
+    let auth = Arc::new(service_account_auth(&format!("{}/token", tokens.url), ""));
+    let error = executor
+        .execute(
+            auth,
+            request("gemini-2.5-pro", payload),
+            options(&Format::GEMINI),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (error.status, error.message.as_str()),
+        (401, r#"{"error":{"message":"token [redacted] expired"}}"#)
+    );
+}
+
+#[tokio::test]
 async fn service_accounts_call_their_project_with_a_cached_token() {
     let tokens = token_endpoint().await;
     let model = Mock::answering(|seen| {

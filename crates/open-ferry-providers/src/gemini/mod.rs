@@ -46,6 +46,8 @@
 //!   can't pass for one of Google's client libraries; upstream sets it.
 //! - The body is written as `serde_json` writes it, compact.
 //! - A dropped call or stream stops at once; upstream checks its context.
+//! - An error body that quotes the API key or access token the request
+//!   carried has it redacted (see the crate's `redact` module).
 
 mod executor;
 mod image;
@@ -83,6 +85,7 @@ use crate::codex::terminal::{APPLY_PATCH_ERROR_MESSAGE, StatusError};
 use crate::codex::usage::ensure_responses_usage_details;
 use crate::custom_headers;
 use crate::json::{self, Body};
+use crate::redact;
 
 /// The `alt` of a `/responses/compact` call, which Gemini can't serve.
 const COMPACT_ALT: &str = "responses/compact";
@@ -204,8 +207,24 @@ fn build_headers(
     Ok(headers)
 }
 
+/// The API key and bearer token `headers` carry, to keep out of errors.
+fn sent_secrets(headers: &HeaderMap) -> [String; 2] {
+    let key = headers
+        .get(API_KEY_HEADER)
+        .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned())
+        .unwrap_or_default();
+    let token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .unwrap_or_default()
+        .to_owned();
+    [key, token]
+}
+
 /// Posts `body` and returns the answer if its status is a success, else
-/// the status and body as an error.
+/// the status and body as an error, without the credential it was sent
+/// with.
 async fn post(
     client: &reqwest::Client,
     url: &str,
@@ -213,6 +232,7 @@ async fn post(
     body: &Value,
     name: &str,
 ) -> Result<reqwest::Response, ExecError> {
+    let [key, token] = sent_secrets(&headers);
     let response = client
         .post(url)
         .headers(headers)
@@ -226,6 +246,8 @@ async fn post(
     }
     let (body, _) = read_body_prefix(response, MAX_ERROR_BODY).await;
     tracing::debug!(status, "{name}: request error");
+    let body = redact::bytes(&body, &key);
+    let body = redact::bytes(&body, &token);
     Err(StatusError::new(status, String::from_utf8_lossy(&body)).into())
 }
 

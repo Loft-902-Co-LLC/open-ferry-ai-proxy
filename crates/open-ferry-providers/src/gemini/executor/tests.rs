@@ -576,6 +576,26 @@ async fn returns_upstream_errors() {
 }
 
 #[tokio::test]
+async fn errors_hide_the_key() {
+    let body = r#"{"error":{"code":400,"message":"API key not valid: test-key-secret","status":"INVALID_ARGUMENT"}}"#;
+    let mock = Mock::start(Reply::error(400, body)).await;
+    let payload = r#"{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}"#;
+    let error = executor()
+        .execute(
+            key_auth("gemini", "test-key-secret", &mock.url),
+            request("gemini-2.5-flash", payload),
+            options(&Format::GEMINI),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.status, 400);
+    assert_eq!(
+        error.message,
+        r#"{"error":{"code":400,"message":"API key not valid: [redacted]","status":"INVALID_ARGUMENT"}}"#
+    );
+}
+
+#[tokio::test]
 async fn streams_the_answer() {
     let mock = Mock::start(Reply::sse(OK_STREAM)).await;
     let response = executor()
