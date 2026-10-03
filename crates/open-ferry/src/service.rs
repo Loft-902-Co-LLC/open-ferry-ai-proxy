@@ -3,7 +3,8 @@
 // completeModelRegistrationForAuth and applyCoreAuthRemoval),
 // service_config.go (applyConfigRuntime and registerConfigAPIKeyAuths),
 // service_executors.go (registerAvailableExecutors,
-// registerExecutorForAuth and registerOpenAICompatProviderExecutor), the
+// registerExecutorForAuth and registerOpenAICompatProviderExecutor),
+// builder.go (runtimeAuthSyncHook), the
 // order of internal/watcher/synthesizer/config.go (Synthesize), and the
 // auth dispatch of internal/watcher's clients.go and config_reload.go
 // (v8.0.10, MIT).
@@ -26,7 +27,16 @@
 //!   credentials are made again from it, and every credential's models
 //!   registered again, as aliases and exclusions may have changed.
 //! - An auth file that is added or changes is registered from the contents
-//!   the watcher read; one that is removed is unregistered.
+//!   the watcher read; one that is removed is unregistered. An event for a
+//!   file that is gone by the time it is applied unregisters its
+//!   credential, so a credential the management API deleted isn't brought
+//!   back by an event from before.
+//!
+//! A credential the management API saves, changes or removes is applied
+//! by the same loop at once, as upstream's `runtimeAuthSyncHook` applies
+//! it, and the API waits until it is; the watcher's report of the same
+//! file a moment later changes nothing more. Once the loop has stopped,
+//! the API's changes fail, and it answers 503.
 //!
 //! Credentials read from files or the config aren't saved back; the manager
 //! saves those it changes itself, as after a refresh.
@@ -76,14 +86,16 @@ use open_ferry_core::auth::{Auth, FileStore, Status};
 use open_ferry_core::config::{AuthFile, Config, ConfigWatcher, WatchEvent};
 use open_ferry_core::manager::{Manager, Settings};
 use open_ferry_core::registry::{ModelRegistry, RegistrationRules};
-use open_ferry_management::{ManagementState, management_password_from_env};
+use open_ferry_management::{
+    CredentialSync, ManagementState, SyncError, SyncFuture, management_password_from_env,
+};
 use open_ferry_providers::claude::ClaudeExecutor;
 use open_ferry_providers::codex::CodexExecutor;
 use open_ferry_providers::gemini::{GeminiExecutor, VertexExecutor};
 use open_ferry_providers::openai_compat::OpenAiCompatExecutor;
 use open_ferry_server::{AppState, ServerConfig, router_with};
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::logging::LogLevel;
 use crate::tls::{self, TlsListener, TlsPeer};
@@ -93,6 +105,10 @@ const AUTO_REFRESH_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
 /// How long shutdown waits for open requests.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How many credential changes from the management API may wait for the
+/// service loop.
+const SYNC_QUEUE: usize = 32;
 
 /// Serves until a shutdown signal, or until the server fails.
 pub async fn run(
@@ -115,7 +131,12 @@ pub async fn run(
         );
     }
     let config = Arc::new(config);
-    let mut service = Service::new(Arc::clone(&config), auth_dir, log_level);
+    let mut service = Service::new(
+        Arc::clone(&config),
+        config_path.clone(),
+        auth_dir,
+        log_level,
+    );
     service.register_executors();
     service.load_file_auths();
     service.sync_config_auths();
@@ -157,6 +178,7 @@ pub async fn run(
         }
         Err(error) => {
             tracing::error!("failed to create watcher: {error}");
+            service.close_sync();
             shut_down(&service, &stop, server).await;
             return ExitCode::FAILURE;
         }
@@ -186,8 +208,10 @@ pub async fn run(
                     events = None;
                 }
             },
+            Some(request) = service.sync_requests.recv() => service.apply_sync(request),
         }
     }
+    service.close_sync();
     shut_down(&service, &stop, server).await
 }
 
@@ -240,6 +264,57 @@ enum Watching {
     Stopped,
 }
 
+/// A credential change from the management API, and where to say it was
+/// applied.
+struct SyncRequest {
+    change: SyncChange,
+    applied: oneshot::Sender<()>,
+}
+
+/// A credential change from the management API.
+enum SyncChange {
+    /// A credential to register or update.
+    Upsert(Box<Auth>),
+    /// An auth file written, with its contents.
+    FileWritten(AuthFile),
+    /// An auth file removed.
+    FileRemoved(PathBuf),
+}
+
+/// The service's [`CredentialSync`], which the management API holds: each
+/// change waits in a bounded queue for the service loop, which applies it
+/// and says so. The loop never waits for a change itself.
+struct SyncSender {
+    requests: mpsc::Sender<SyncRequest>,
+}
+
+impl SyncSender {
+    /// Queues `change` and waits until the loop has applied it; fails once
+    /// the loop has stopped.
+    async fn send(&self, change: SyncChange) -> Result<(), SyncError> {
+        let (applied, done) = oneshot::channel();
+        self.requests
+            .send(SyncRequest { change, applied })
+            .await
+            .map_err(|_| SyncError::Stopped)?;
+        done.await.map_err(|_| SyncError::Stopped)
+    }
+}
+
+impl CredentialSync for SyncSender {
+    fn upsert(&self, auth: Auth) -> SyncFuture<'_> {
+        Box::pin(self.send(SyncChange::Upsert(Box::new(auth))))
+    }
+
+    fn file_written(&self, file: AuthFile) -> SyncFuture<'_> {
+        Box::pin(self.send(SyncChange::FileWritten(file)))
+    }
+
+    fn file_removed(&self, path: PathBuf) -> SyncFuture<'_> {
+        Box::pin(self.send(SyncChange::FileRemoved(path)))
+    }
+}
+
 /// The credential manager, the model registry, the server and management
 /// state, and what was registered from the config and the auth directory.
 struct Service {
@@ -258,10 +333,17 @@ struct Service {
     file_auths: HashMap<PathBuf, String>,
     /// The provider keys OpenAI-compatible executors are registered for.
     compat_executors: BTreeSet<String>,
+    /// The management API's credential changes, waiting for the loop.
+    sync_requests: mpsc::Receiver<SyncRequest>,
 }
 
 impl Service {
-    fn new(config: Arc<Config>, auth_dir: PathBuf, log_level: LogLevel) -> Self {
+    fn new(
+        config: Arc<Config>,
+        config_path: PathBuf,
+        auth_dir: PathBuf,
+        log_level: LogLevel,
+    ) -> Self {
         let auth_dir = absolute_dir(auth_dir);
         let registry = Arc::new(ModelRegistry::new());
         let store = Arc::new(FileStore::new(&auth_dir));
@@ -275,12 +357,16 @@ impl Service {
             Arc::new(manager.clone()),
             Arc::clone(&registry) as _,
         );
+        let (requests, sync_requests) = mpsc::channel(SYNC_QUEUE);
         let management = ManagementState::new(
             Arc::clone(&config),
             manager.clone(),
             Arc::clone(&registry),
             management_password_from_env(),
-        );
+        )
+        .with_store(Arc::clone(&store))
+        .with_sync(Arc::new(SyncSender { requests }))
+        .with_config_path(config_path);
         Self {
             config,
             auth_dir,
@@ -294,6 +380,7 @@ impl Service {
             config_auths: BTreeSet::new(),
             file_auths: HashMap::new(),
             compat_executors: BTreeSet::new(),
+            sync_requests,
         }
     }
 
@@ -511,20 +598,59 @@ impl Service {
             WatchEvent::AuthAdded(file) | WatchEvent::AuthChanged(file) => {
                 self.load_auth_file(&file)
             }
-            WatchEvent::AuthRemoved(path) => {
-                if let Some(id) = self.file_auths.remove(&path) {
-                    self.remove(&id);
-                }
-            }
+            WatchEvent::AuthRemoved(path) => self.remove_auth_file(&path),
             _ => {}
         }
         Watching::Same
     }
 
+    /// Applies a credential change from the management API, then says so.
+    fn apply_sync(&mut self, request: SyncRequest) {
+        match request.change {
+            SyncChange::Upsert(auth) => {
+                let path = PathBuf::from(auth.attribute("path").unwrap_or_default());
+                let id = auth.id.clone();
+                let rules = self.rules();
+                if self.upsert(*auth, &rules)
+                    && !path.as_os_str().is_empty()
+                    && let Some(previous) = self.file_auths.insert(path, id.clone())
+                    && previous != id
+                {
+                    self.remove(&previous);
+                }
+            }
+            SyncChange::FileWritten(file) => self.load_auth_file(&file),
+            SyncChange::FileRemoved(path) => self.remove_auth_file(&path),
+        }
+        // The change stands even if its handler has gone.
+        let _ = request.applied.send(());
+    }
+
+    /// Takes no more credential changes from the management API, and
+    /// applies those already waiting.
+    fn close_sync(&mut self) {
+        self.sync_requests.close();
+        while let Ok(request) = self.sync_requests.try_recv() {
+            self.apply_sync(request);
+        }
+    }
+
+    /// Unregisters the credential registered for the auth file at `path`.
+    fn remove_auth_file(&mut self, path: &Path) {
+        if let Some(id) = self.file_auths.remove(path) {
+            self.remove(&id);
+        }
+    }
+
     /// Registers the credential in an auth file, from the contents the
-    /// watcher read.
+    /// watcher read. A file that is gone unregisters its credential
+    /// instead: the event is older than the removal.
     fn load_auth_file(&mut self, file: &AuthFile) {
         let path = file.path.as_path();
+        if matches!(path.try_exists(), Ok(false)) {
+            self.remove_auth_file(path);
+            return;
+        }
         let auth = match synthesize_auth_file(&self.synthesis_context(), path, &file.data) {
             Ok(auth) => auth,
             Err(error) => {
@@ -777,7 +903,12 @@ mod tests {
     /// A service over `dir` with `extra` config, its executors registered.
     fn service(dir: &Path, extra: &str) -> Service {
         let config = Config::parse(format!("auth-dir: '{}'\n{extra}", dir.display())).unwrap();
-        let mut service = Service::new(Arc::new(config), dir.to_owned(), LogLevel::detached());
+        let mut service = Service::new(
+            Arc::new(config),
+            dir.join("config.yaml"),
+            dir.to_owned(),
+            LogLevel::detached(),
+        );
         service.register_executors();
         service
     }
@@ -884,6 +1015,132 @@ mod tests {
         assert_eq!(service.file_auths.get(&path), Some(&auths[0].id));
     }
 
+    #[tokio::test]
+    async fn an_event_for_a_file_that_is_gone_unregisters_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = codex_file(dir.path(), "codex-a.json", "");
+        let mut service = service(dir.path(), "");
+        let stale = auth_file(&path);
+        service.handle(WatchEvent::AuthAdded(stale.clone()), Path::new(""));
+        let id = service.manager.list()[0].id.clone();
+
+        // The file is deleted before the watcher's report of a change to it
+        // is applied.
+        std::fs::remove_file(&path).unwrap();
+        service.handle(WatchEvent::AuthChanged(stale.clone()), Path::new(""));
+        assert!(service.manager.get(&id).is_none());
+        assert!(service.registry.models_for_client(&id).is_empty());
+        assert!(service.file_auths.is_empty());
+        service.handle(WatchEvent::AuthAdded(stale), Path::new(""));
+        assert!(service.manager.list().is_empty());
+    }
+
+    /// The service's sync over a queue of one, which `service` now takes
+    /// its requests from.
+    fn sync_sender(service: &mut Service) -> Arc<SyncSender> {
+        let (requests, receiver) = mpsc::channel(1);
+        service.sync_requests = receiver;
+        Arc::new(SyncSender { requests })
+    }
+
+    /// Sends a change through `sync` with `send`, applies it as the loop
+    /// would, and returns what the sender was answered.
+    async fn apply_next<F, Fut>(
+        service: &mut Service,
+        sync: &Arc<SyncSender>,
+        send: F,
+    ) -> Result<(), SyncError>
+    where
+        F: FnOnce(Arc<SyncSender>) -> Fut,
+        Fut: Future<Output = Result<(), SyncError>> + Send + 'static,
+    {
+        let sent = tokio::spawn(send(Arc::clone(sync)));
+        let request = service.sync_requests.recv().await.unwrap();
+        service.apply_sync(request);
+        sent.await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn management_changes_are_applied_by_the_loop() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut service = service(dir.path(), "");
+        let sync = sync_sender(&mut service);
+
+        // A written file is registered from the contents sent.
+        let path = codex_file(dir.path(), "codex-a.json", r#","prefix":"team""#);
+        let file = auth_file(&path);
+        let sent = apply_next(&mut service, &sync, |sync| async move {
+            sync.file_written(file).await
+        });
+        sent.await.unwrap();
+        let auths = service.manager.list();
+        assert_eq!(auths.len(), 1);
+        let id = auths[0].id.clone();
+        assert_eq!(auths[0].prefix, "team");
+        assert!(!service.registry.models_for_client(&id).is_empty());
+        assert_eq!(service.file_auths.get(&path), Some(&id));
+
+        // A credential upserted for the same file under another ID takes
+        // its place.
+        let mut renamed = Auth::clone(&service.manager.get(&id).unwrap());
+        renamed.id = "codex-renamed".into();
+        renamed.prefix = "other".into();
+        let sent = apply_next(&mut service, &sync, |sync| async move {
+            sync.upsert(renamed).await
+        });
+        sent.await.unwrap();
+        assert!(service.manager.get(&id).is_none());
+        assert_eq!(
+            service.manager.get("codex-renamed").unwrap().prefix,
+            "other"
+        );
+        assert_eq!(
+            service.file_auths.get(&path).map(String::as_str),
+            Some("codex-renamed")
+        );
+
+        // A removed file's credential is unregistered.
+        std::fs::remove_file(&path).unwrap();
+        let removed = path.clone();
+        let sent = apply_next(&mut service, &sync, |sync| async move {
+            sync.file_removed(removed).await
+        });
+        sent.await.unwrap();
+        assert!(service.manager.list().is_empty());
+        assert!(service.file_auths.is_empty());
+    }
+
+    #[tokio::test]
+    async fn management_changes_fail_once_the_loop_stops() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = codex_file(dir.path(), "codex-a.json", "");
+        let mut service = service(dir.path(), "");
+        let sync = sync_sender(&mut service);
+
+        // A change taken but dropped unapplied.
+        let sent = tokio::spawn({
+            let sync = Arc::clone(&sync);
+            async move { sync.file_removed(PathBuf::from("gone.json")).await }
+        });
+        drop(service.sync_requests.recv().await.unwrap());
+        assert_eq!(sent.await.unwrap(), Err(SyncError::Stopped));
+
+        // A change still waiting when the loop stops is applied; later ones
+        // fail.
+        let (applied, done) = oneshot::channel();
+        let change = SyncChange::FileWritten(auth_file(&path));
+        sync.requests
+            .try_send(SyncRequest { change, applied })
+            .unwrap_or_else(|_| panic!("the queue is full"));
+        service.close_sync();
+        assert_eq!(done.await, Ok(()));
+        assert_eq!(service.manager.list().len(), 1);
+        let error = sync.file_removed(path).await.unwrap_err();
+        assert_eq!(error, SyncError::Stopped);
+        assert_eq!(error.status().as_u16(), 503);
+        assert_eq!(service.manager.list().len(), 1);
+    }
+
     /// `path` relative to the current directory, when they share a root.
     fn relative_to_cwd(path: &Path) -> Option<PathBuf> {
         let cwd = std::env::current_dir().ok()?;
@@ -920,7 +1177,12 @@ mod tests {
         std::fs::write(&config_path, &yaml).unwrap();
         let config = Arc::new(Config::parse(yaml).unwrap());
 
-        let mut service = Service::new(Arc::clone(&config), relative, LogLevel::detached());
+        let mut service = Service::new(
+            Arc::clone(&config),
+            config_path.clone(),
+            relative,
+            LogLevel::detached(),
+        );
         service.register_executors();
         service.load_file_auths();
         let auths = service.manager.list();
@@ -1595,7 +1857,7 @@ mod tests {
 
             // Unported management routes answer an empty 404, other
             // unknown paths the server's 404; CORS answers OPTIONS.
-            let answer = fetch(addr, "GET", "/v0/management/config", &[key]).await;
+            let answer = fetch(addr, "GET", "/v0/management/logs", &[key]).await;
             assert_eq!((answer.status, answer.body.as_str()), (404, ""));
             assert_eq!(answer.header("access-control-allow-origin"), Some("*"));
             let answer = fetch(addr, "GET", "/v0/other", &[key]).await;
