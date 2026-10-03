@@ -12,10 +12,10 @@
 //! Deviations from upstream:
 //! - Where upstream copies the client's JSON text into a string, we write the
 //!   same JSON compactly. This applies to a tool call's `arguments`, a tool
-//!   message's `content`, and text read from a value that isn't a string. A
-//!   call or response ID derived from that JSON is then derived from the
-//!   compact JSON, so it differs from upstream's when the client's JSON isn't
-//!   compact.
+//!   message's `content`, and text, a tool description or a stop sequence
+//!   read from a value that isn't a string. A call or response ID derived
+//!   from that JSON is then derived from the compact JSON, so it differs from
+//!   upstream's when the client's JSON isn't compact.
 //! - A `temperature` or `topP` that isn't a finite number, such as `1e400` or
 //!   the string `"NaN"`, is left out. Go writes it as `+Inf` or `NaN`, which
 //!   isn't JSON.

@@ -6,8 +6,9 @@
 //! Deviations from upstream:
 //! - Where upstream copies the client's raw JSON into a string, we write compact
 //!   re-serialized JSON. The values are the same JSON. This applies to
-//!   `function_call.arguments`, and to a `function_call_output.output` taken
-//!   from a whole `response` or from a `response.result` that isn't a string.
+//!   `function_call.arguments`, to a `function_call_output.output` taken
+//!   from a whole `response` or from a `response.result` that isn't a string,
+//!   and to text and tool descriptions read from a value that isn't a string.
 //! - Tool names cut to 64 bytes are cut at a UTF-8 character boundary.
 //!   Upstream slices bytes and can split a character.
 //! - Every `type` string in the tools is lowercased. Upstream finds them by

@@ -18,8 +18,10 @@
 //!   `"NaN"`, is left out. Go writes it as `+Inf` or `NaN`, which isn't JSON.
 //! - Where upstream copies the client's JSON text into a string, we write the
 //!   same JSON compactly. This applies to a `tool_result` taken from a whole
-//!   `response` or from a `response.result` that isn't a string, and to a
-//!   schema `type` that isn't a string, which is lowercased as text.
+//!   `response` or from a `response.result` that isn't a string; to text, a
+//!   tool description or a stop sequence read from a value that isn't a
+//!   string; and to a schema `type` that isn't a string, which is lowercased
+//!   as text.
 //! - Lowercasing a schema `type` follows sjson's rules for setting a path
 //!   where the value on the way was replaced by text, except two. sjson pads
 //!   an array with nulls up to a numeric key; we pad with at most 1,024, and
