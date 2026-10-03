@@ -637,7 +637,7 @@ impl fmt::Debug for GeminiKey {
             .field("priority", &self.priority)
             .field("weight", &self.weight)
             .field("prefix", &self.prefix)
-            .field("base_url", &self.base_url)
+            .field("base_url", &RedactedUrl(&self.base_url))
             .field("proxy_url", &Redacted(&self.proxy_url))
             .field("models", &self.models)
             .field("headers", &RedactedMap(&self.headers))
@@ -708,7 +708,7 @@ impl fmt::Debug for VertexCompatKey {
             .field("priority", &self.priority)
             .field("weight", &self.weight)
             .field("prefix", &self.prefix)
-            .field("base_url", &self.base_url)
+            .field("base_url", &RedactedUrl(&self.base_url))
             .field("proxy_url", &Redacted(&self.proxy_url))
             .field("headers", &RedactedMap(&self.headers))
             .field("models", &self.models)
@@ -963,7 +963,7 @@ impl OAuthModelSetting {
 }
 
 /// Shows whether a secret is set without showing it.
-struct Redacted<'a>(&'a str);
+pub(crate) struct Redacted<'a>(pub(crate) &'a str);
 
 impl fmt::Debug for Redacted<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -977,7 +977,7 @@ impl fmt::Debug for Redacted<'_> {
 
 /// A URL with its user info, query and fragment hidden, since they may
 /// hold secrets.
-struct RedactedUrl<'a>(&'a str);
+pub(crate) struct RedactedUrl<'a>(pub(crate) &'a str);
 
 impl fmt::Debug for RedactedUrl<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1036,12 +1036,26 @@ mod tests {
             base_url: "https://review:URL-SECRET@example.invalid/v1?token=QUERY-SECRET#x".into(),
             ..OpenAiCompatibility::default()
         };
-        let shown = format!("{entry:?}");
-        assert!(!shown.contains("SECRET"), "{shown}");
-        assert!(
-            shown.contains(r#"base_url: "https://<redacted>@example.invalid/v1?<redacted>""#),
-            "{shown}"
-        );
+        let url = "https://review:URL-SECRET@example.invalid/v1?token=QUERY-SECRET#x";
+        let gemini = GeminiKey {
+            base_url: url.into(),
+            ..GeminiKey::default()
+        };
+        let vertex = VertexCompatKey {
+            base_url: url.into(),
+            ..VertexCompatKey::default()
+        };
+        for shown in [
+            format!("{entry:?}"),
+            format!("{gemini:?}"),
+            format!("{vertex:?}"),
+        ] {
+            assert!(!shown.contains("SECRET"), "{shown}");
+            assert!(
+                shown.contains(r#"base_url: "https://<redacted>@example.invalid/v1?<redacted>""#),
+                "{shown}"
+            );
+        }
         for (url, want) in [
             ("", ""),
             ("http://host/v1", "http://host/v1"),

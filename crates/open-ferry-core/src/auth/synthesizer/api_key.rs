@@ -54,7 +54,7 @@ use super::{
     StableIdGenerator, SynthesisContext, SynthesisError, add_config_headers_to_attrs,
     apply_auth_excluded_models_meta, format_sorted_headers, sha256_hex,
 };
-use crate::config::{ClaudeKey, CodexKey, GeminiKey};
+use crate::config::{ClaudeKey, CodexKey, GeminiKey, RedactedUrl};
 pub use crate::config::{RequestScopedErrorRule, ThinkingSupport};
 
 /// Which config list an API key comes from.
@@ -128,7 +128,7 @@ pub struct ApiKeyEntry {
 impl fmt::Debug for ApiKeyEntry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ApiKeyEntry")
-            .field("base_url", &self.base_url)
+            .field("base_url", &RedactedUrl(&self.base_url))
             .field("prefix", &self.prefix)
             .field("priority", &self.priority)
             .field("weight", &self.weight)
@@ -1036,11 +1036,16 @@ mod tests {
     fn debug_hides_the_key() {
         let entry = ApiKeyEntry {
             headers: BTreeMap::from([("X-Secret".to_owned(), "hidden-value".to_owned())]),
+            base_url: "https://gateway.example/?key=sk-hidden".to_owned(),
             ..key("sk-hidden")
         };
         let text = format!("{entry:?}");
         assert!(!text.contains("sk-hidden"), "{text}");
         assert!(!text.contains("hidden-value"), "{text}");
+        assert!(
+            text.contains(r#""https://gateway.example/?<redacted>""#),
+            "{text}"
+        );
     }
 
     #[test]

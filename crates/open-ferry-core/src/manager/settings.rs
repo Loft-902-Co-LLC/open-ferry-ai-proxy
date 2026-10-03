@@ -18,7 +18,7 @@ use std::fmt;
 use std::time::Duration;
 
 use super::text::go_lower;
-use crate::config::{self, Config};
+use crate::config::{self, Config, Redacted, RedactedUrl};
 
 /// How the manager picks among ready credentials of the same priority.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -92,9 +92,9 @@ impl fmt::Debug for ApiKeyEntry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ApiKeyEntry")
             .field("api_key", &"<redacted>")
-            .field("base_url", &self.base_url)
+            .field("base_url", &RedactedUrl(&self.base_url))
             .field("prefix", &self.prefix)
-            .field("proxy_url", &self.proxy_url)
+            .field("proxy_url", &Redacted(&self.proxy_url))
             .field("models", &self.models)
             .field("request_scoped_errors", &self.request_scoped_errors)
             .finish()
@@ -487,8 +487,15 @@ openai-compatibility:
     fn debug_hides_api_keys() {
         let entry = ApiKeyEntry {
             api_key: "sk-secret".into(),
+            base_url: "https://gateway.example/v1?key=sk-secret".into(),
+            proxy_url: "http://user:sk-secret@proxy.example:8080".into(),
             ..ApiKeyEntry::default()
         };
-        assert!(!format!("{entry:?}").contains("sk-secret"));
+        let shown = format!("{entry:?}");
+        assert!(!shown.contains("sk-secret"), "{shown}");
+        assert!(
+            shown.contains(r#""https://gateway.example/v1?<redacted>""#),
+            "{shown}"
+        );
     }
 }

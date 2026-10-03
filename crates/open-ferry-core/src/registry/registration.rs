@@ -74,7 +74,9 @@ use super::{ModelRegistry, equal_fold, json};
 use crate::auth::Auth;
 use crate::auth::classification::{AUTH_KIND_API_KEY, AuthKind, AuthSource};
 use crate::auth::compat::OPENAI_COMPATIBILITY;
-use crate::config::{Config, OAuthModelAlias, OAuthModelSetting, OpenAiCompatibilityModel};
+use crate::config::{
+    Config, OAuthModelAlias, OAuthModelSetting, OpenAiCompatibilityModel, RedactedUrl,
+};
 use crate::models::{ModelInfo, ThinkingSupport};
 
 /// The type of a configured OpenAI-compatible model the image endpoints
@@ -178,7 +180,7 @@ pub struct ApiKeyEntry {
 impl fmt::Debug for ApiKeyEntry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ApiKeyEntry")
-            .field("base_url", &self.base_url)
+            .field("base_url", &RedactedUrl(&self.base_url))
             .field("models", &self.models)
             .field("excluded_models", &self.excluded_models)
             .finish_non_exhaustive()

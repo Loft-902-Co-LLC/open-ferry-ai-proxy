@@ -291,13 +291,14 @@ fn translate_answer(
     })
 }
 
-/// Translates Gemini's stream in `response`, to the request `sent`, into
-/// the client's format.
+/// Translates Gemini's stream in `response`, to the request `sent` with
+/// `secrets` (see [`sent_secrets`]), into the client's format.
 fn translate_stream(
     response: reqwest::Response,
     request: &Request,
     options: &Options,
     sent: &Value,
+    secrets: [String; 2],
     lines: Lines,
     name: &'static str,
 ) -> StreamResponse {
@@ -324,6 +325,7 @@ fn translate_stream(
         source_format: options.source_format.clone(),
         original: original_bytes,
         lines,
+        secrets,
         name,
     };
     StreamResponse {

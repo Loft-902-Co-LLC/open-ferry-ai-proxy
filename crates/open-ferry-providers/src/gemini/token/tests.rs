@@ -11,7 +11,7 @@ use aws_lc_rs::signature::{
 use base64::engine::general_purpose::STANDARD;
 
 use super::*;
-use crate::gemini::testing::{Mock, Reply, pem, test_key_pkcs8, test_service_account};
+use crate::gemini::testing::{Mock, Reply, Seen, pem, test_key_pkcs8, test_service_account};
 
 /// The PKCS #1 `RSAPrivateKey` inside the test key's PKCS #8 DER.
 fn test_key_pkcs1() -> Vec<u8> {
@@ -357,6 +357,47 @@ async fn reports_failures_without_the_answer() {
             error,
             format!("vertex executor: get access token failed: oauth2: cannot fetch token: {want}")
         );
+    }
+
+    // An endpoint that quotes the assertion, or its signature, which could
+    // make it again, gets neither into the error.
+    let quote_assertion = |whole: bool| {
+        move |seen: &Seen| {
+            let form: HashMap<String, String> = url::form_urlencoded::parse(seen.body.as_bytes())
+                .into_owned()
+                .collect();
+            let assertion = form["assertion"].as_str();
+            let quoted = if whole {
+                assertion
+            } else {
+                assertion.rsplit('.').next().unwrap()
+            };
+            let answer = json!({"error": "invalid_grant", "error_description": format!("bad assertion: {quoted}")});
+            Reply::error(400, &answer.to_string())
+        }
+    };
+    for whole in [true, false] {
+        let endpoint = Mock::answering(quote_assertion(whole)).await;
+        let account =
+            service_account(&test_service_account(&format!("{}/token", endpoint.url))).unwrap();
+        let error = TokenCache::default()
+            .token(&client(), &account)
+            .await
+            .unwrap_err();
+        let form: HashMap<String, String> =
+            url::form_urlencoded::parse(endpoint.last().body.as_bytes())
+                .into_owned()
+                .collect();
+        let assertion = form["assertion"].as_str();
+        let signature = assertion.rsplit('.').next().unwrap();
+        assert!(!error.contains(signature), "{error}");
+        let header_and_claims = &assertion[..assertion.len() - signature.len()];
+        let want = if whole {
+            format!("(invalid_grant: bad assertion: {header_and_claims}[redacted])")
+        } else {
+            "(invalid_grant: bad assertion: [redacted])".to_owned()
+        };
+        assert!(error.ends_with(&want), "{error}");
     }
 
     // An account that can't be exchanged is a parse error.

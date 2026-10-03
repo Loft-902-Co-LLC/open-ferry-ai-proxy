@@ -1553,8 +1553,14 @@ fn registration_applies_aliases_settings_then_prefixes() {
 
 #[test]
 fn api_key_entries_hide_the_key_when_debugged() {
-    let entry = api_key_entry("sk-fictional-test-key", Vec::new());
-    assert!(!format!("{entry:?}").contains("sk-fictional-test-key"));
+    let mut entry = api_key_entry("sk-fictional-test-key", Vec::new());
+    entry.base_url = "https://gateway.example/?key=sk-fictional-test-key".into();
+    let shown = format!("{entry:?}");
+    assert!(!shown.contains("sk-fictional-test-key"), "{shown}");
+    assert!(
+        shown.contains(r#""https://gateway.example/?<redacted>""#),
+        "{shown}"
+    );
 }
 
 #[test]

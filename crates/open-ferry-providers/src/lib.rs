@@ -16,4 +16,5 @@ mod json;
 pub mod oauth;
 pub mod openai_compat;
 mod redact;
+mod redirect;
 mod thinking;

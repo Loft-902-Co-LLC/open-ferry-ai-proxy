@@ -37,7 +37,10 @@
 //! - The token endpoint's `id_token` isn't read; upstream takes a token's
 //!   expiry from it when there is one.
 //! - A failed exchange is reported with the endpoint's status and its OAuth
-//!   `error` and `error_description`, never its whole body.
+//!   `error` and `error_description`, never its whole body, and with the
+//!   assertion's signature redacted where they quote it: the assertion
+//!   grants a token until it expires, and the rest of it can be rebuilt.
+//!   Upstream logs the description as it came.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -53,6 +56,7 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest as _, Sha256};
 
 use crate::codex::client::{error_chain, read_body_prefix};
+use crate::redact;
 
 /// Google's token endpoint, for an account without a `token_uri`.
 const DEFAULT_TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
@@ -572,9 +576,10 @@ impl Exchange<'_> {
             ));
         }
         if !status.is_success() {
+            let signature = assertion.rsplit('.').next().unwrap_or_default();
             return Err(format!(
                 "oauth2: cannot fetch token: {status}{}",
-                oauth_error(&body)
+                redact::text(oauth_error(&body), signature)
             ));
         }
         let answer: TokenAnswer = serde_json::from_slice(&body)

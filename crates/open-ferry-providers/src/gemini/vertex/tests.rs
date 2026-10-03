@@ -876,6 +876,56 @@ async fn streams_lines_as_they_come() {
 }
 
 #[tokio::test]
+async fn stream_errors_hide_the_key_and_token() {
+    let error = |secret: &str| {
+        let error = format!(r#"{{"error":{{"code":401,"message":"bad credential {secret}"}}}}"#);
+        Reply::sse(&format!("data: {error}\n\n"))
+    };
+    let payload = r#"{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}"#;
+
+    // An express API key.
+    let mock = Mock::start(error("test-vertex-key")).await;
+    let response = executor()
+        .execute_stream(
+            auth(&mock),
+            request("gemini-2.5-flash", payload),
+            stream_options(&Format::GEMINI),
+        )
+        .await
+        .unwrap();
+    let streamed = collect(response).await.0.concat();
+    assert!(streamed.contains("bad credential [redacted]"), "{streamed}");
+    assert!(!streamed.contains("test-vertex-key"), "{streamed}");
+
+    // A service account's token.
+    let tokens = Mock::start(Reply::json(
+        r#"{"access_token":"sa-token-secret","expires_in":3600,"token_type":"Bearer"}"#,
+    ))
+    .await;
+    let model = Mock::start(error("sa-token-secret")).await;
+    let executor = executor().with_service_account_base_url(model.url.clone());
+    let auth = Arc::new(service_account_auth(
+        &format!("{}/token", tokens.url),
+        "us-central1",
+    ));
+    let response = executor
+        .execute_stream(
+            auth,
+            request("gemini-2.5-pro", payload),
+            stream_options(&Format::GEMINI),
+        )
+        .await
+        .unwrap();
+    let streamed = collect(response).await.0.concat();
+    assert_eq!(
+        model.last().header("authorization"),
+        Some("Bearer sa-token-secret")
+    );
+    assert!(streamed.contains("bad credential [redacted]"), "{streamed}");
+    assert!(!streamed.contains("sa-token-secret"), "{streamed}");
+}
+
+#[tokio::test]
 async fn rejects_compact_calls_and_returns_upstream_errors() {
     let body = r#"{"error":{"code":403,"message":"denied"}}"#;
     let mock = Mock::start(Reply::error(403, body)).await;

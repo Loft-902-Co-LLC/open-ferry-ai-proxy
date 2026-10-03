@@ -10,6 +10,8 @@
 //! `direct` or `none` (no proxy), or an `http` or `https` proxy URL.
 //!
 //! Deviations from upstream:
+//! - Redirects are followed only within the first request's origin; see
+//!   [`crate::redirect`].
 //! - Clients are kept and shared per proxy URL; upstream builds a client per
 //!   request.
 //! - `socks5` and `socks5h` proxies aren't supported yet: the client is
@@ -98,6 +100,7 @@ pub(crate) fn redact_proxy_url(raw: &str) -> String {
 fn build_client(setting: &ProxySetting) -> reqwest::Result<reqwest::Client> {
     let builder = reqwest::Client::builder()
         .user_agent(USER_AGENT)
+        .redirect(crate::redirect::policy())
         .connect_timeout(CONNECT_TIMEOUT)
         .pool_idle_timeout(POOL_IDLE_TIMEOUT)
         .tcp_keepalive(TCP_KEEPALIVE);
@@ -186,7 +189,11 @@ impl Clients {
                 self.provider,
                 error_chain(&error)
             );
-            reqwest::Client::new()
+            // As `Client::new` does, which follows every redirect.
+            reqwest::Client::builder()
+                .redirect(crate::redirect::policy())
+                .build()
+                .expect("an HTTP client without settings")
         });
         self.store(KEY, client)
     }
@@ -285,6 +292,12 @@ pub(crate) async fn read_body_prefix(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn clients_stay_within_the_origin() {
+        let client = Clients::new("direct").get("");
+        assert!(!crate::redirect::tests::crosses_origins(&client).await);
+    }
 
     #[test]
     fn parses_proxy_settings() {

@@ -48,7 +48,7 @@ use serde_json::{Map, Value, json};
 use super::stream::Lines;
 use super::token::{ServiceAccount, TokenCache, service_account};
 use super::{
-    Credential, build_headers, post, prepare_count_body, read_answer, reject_compact,
+    Credential, build_headers, post, prepare_count_body, read_answer, reject_compact, sent_secrets,
     translate_answer, translate_count, translate_request, translate_stream, turns,
 };
 use crate::codex::client::Clients;
@@ -243,6 +243,7 @@ impl VertexExecutor {
             }
         }
         let headers = self.headers(auth, options, &target).await?;
+        let secrets = sent_secrets(&headers);
         let client = self.clients.get(&auth.proxy_url);
         let response = post(&client, &url, headers, &body, NAME).await?;
         Ok(translate_stream(
@@ -250,6 +251,7 @@ impl VertexExecutor {
             request,
             options,
             &body,
+            secrets,
             Lines::Raw,
             NAME,
         ))

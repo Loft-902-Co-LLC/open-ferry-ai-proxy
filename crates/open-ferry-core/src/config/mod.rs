@@ -85,6 +85,7 @@ pub use types::{
     RemoteManagement, RequestScopedErrorRule, RoutingConfig, RoutingStrategy, StreamingConfig,
     ThinkingSupport, TlsConfig, VertexCompatKey, VertexCompatModel,
 };
+pub(crate) use types::{Redacted, RedactedUrl};
 pub use watcher::{AuthFile, ConfigWatcher, WatchError, WatchEvent};
 
 /// What kind of problem stopped a config from loading.
