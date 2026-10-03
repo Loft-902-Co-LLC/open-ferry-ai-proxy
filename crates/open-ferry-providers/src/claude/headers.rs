@@ -33,6 +33,9 @@
 //!   executor reads uncompressed bodies only.
 //! - `X-Claude-Code-Session-Id` is never set, and a custom header whose value
 //!   names `$CPA-SESSION-ID` is skipped, as there are no session IDs.
+//! - A custom header can't set `User-Agent`, `X-App`, `X-Stainless-*`, a
+//!   session ID or another client identity header; see
+//!   [`crate::custom_headers`].
 //! - The beta removals that copy Claude Code's gating (effort on models
 //!   without it, display updates, server-side fallback on Haiku, probe and
 //!   subagent heuristics) aren't ported: the client's betas stay as sent.
@@ -41,7 +44,7 @@
 
 use std::collections::BTreeMap;
 
-use http::{HeaderMap, HeaderName, HeaderValue};
+use http::{HeaderMap, HeaderValue};
 use serde_json::Value;
 
 use super::client;
@@ -49,6 +52,7 @@ use super::request::{
     ADVISOR_TOOL_BETA, AFTER_ADVISOR_BETAS, CLAUDE_CODE_BETA, EXTENDED_CACHE_TTL_BETA,
     FAST_MODE_BETA, OAUTH_BETA, is_oauth_token, payload_has_1h_ttl,
 };
+use crate::custom_headers;
 use crate::json;
 
 const ANTHROPIC_BETA: &str = "anthropic-beta";
@@ -111,7 +115,7 @@ pub(crate) fn build(inputs: &Inputs<'_>) -> HeaderMap {
     ensure_header(&mut headers, inputs.client, ACCEPT, default_accept);
     ensure_header(&mut headers, inputs.client, USER_AGENT, client::USER_AGENT);
     apply_betas(&mut headers, &betas);
-    apply_custom_headers(&mut headers, inputs.attributes, inputs.client);
+    custom_headers::apply(&mut headers, inputs.attributes, inputs.client, "claude");
     if inputs.first_party {
         apply_betas(&mut headers, &betas);
         reset_header(&mut headers, inputs.client, ACCEPT, default_accept);
@@ -321,54 +325,10 @@ fn trimmed(headers: &HeaderMap, name: &str) -> Option<HeaderValue> {
     HeaderValue::from_bytes(text.as_bytes()).ok()
 }
 
-/// `ApplyCustomHeadersFromAttrs`: the credential's `header:<Name>`
-/// attributes override what is set. A value of `$Name` takes the client's
-/// `Name` header, and is skipped when the client sent none.
-fn apply_custom_headers(
-    target: &mut HeaderMap,
-    attributes: &BTreeMap<String, String>,
-    client: &HeaderMap,
-) {
-    for (key, value) in attributes {
-        let Some(name) = key.strip_prefix("header:") else {
-            continue;
-        };
-        let (name, value) = (name.trim(), value.trim());
-        if name.is_empty() || value.is_empty() {
-            continue;
-        }
-        let value: &[u8] = match value.strip_prefix('$') {
-            Some(variable) if json::eq_fold(variable.trim(), "CPA-SESSION-ID") => continue,
-            _ if value.to_uppercase().contains("$CPA-SESSION-ID") => continue,
-            Some(variable) => {
-                let Some(client_value) = HeaderName::from_bytes(variable.trim().as_bytes())
-                    .ok()
-                    .and_then(|variable| client.get(variable))
-                    .filter(|value| !value.is_empty())
-                else {
-                    continue;
-                };
-                client_value.as_bytes()
-            }
-            None => value.as_bytes(),
-        };
-        match (
-            HeaderName::from_bytes(name.as_bytes()),
-            HeaderValue::from_bytes(value),
-        ) {
-            (Ok(name), Ok(value)) => {
-                target.insert(name, value);
-            }
-            _ => tracing::warn!(
-                "claude: custom header attribute {key:?} isn't a valid HTTP header; skipped"
-            ),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http::HeaderName;
     use serde_json::json;
 
     struct Case {
@@ -705,6 +665,78 @@ mod tests {
         .build();
         assert_eq!(get(&headers, "anthropic-beta"), Some("custom-beta"));
         assert_eq!(get(&headers, "accept"), Some("text/event-stream"));
+    }
+
+    // No attribute makes the request pass for another client, in any case:
+    // the client's own identity headers stay, or this project's user agent
+    // and nothing else. Other custom headers still apply.
+    #[test]
+    fn custom_headers_cannot_set_the_clients_identity() {
+        let attributes = vec![
+            ("header:User-Agent", "claude-cli/2.1.280 (external, cli)"),
+            ("header:user-agent ", "claude-cli/2.1.280"),
+            ("header:USER-AGENT", "made-up/1"),
+            ("header:X-App", "cli"),
+            ("header:x-APP", "cli"),
+            ("header:X-Stainless-Runtime", "node"),
+            ("header:x-stainless-lang", "js"),
+            ("header:X-STAINLESS-PACKAGE-VERSION", "0.70.0"),
+            ("header:Originator", "codex-tui"),
+            ("header:Session_id", "synthetic-session"),
+            ("header:SESSION-ID", "synthetic-session"),
+            ("header:X-Claude-Code-Session-Id", "synthetic-session"),
+            ("header:x-claude-code-SESSION-id", "$X-Source"),
+            ("header:X-Team", "blue"),
+            ("header:X-Forward", "$X-Source"),
+        ];
+        let made_up = [
+            "x-app",
+            "x-stainless-runtime",
+            "x-stainless-lang",
+            "x-stainless-package-version",
+            "originator",
+            "session_id",
+            "session-id",
+            "x-claude-code-session-id",
+        ];
+        for first_party in [true, false] {
+            let headers = Case {
+                first_party,
+                attributes: attributes.clone(),
+                client: vec![("x-source", "from-client")],
+                ..Case::default()
+            }
+            .build();
+            assert_eq!(get(&headers, "user-agent"), Some(client::USER_AGENT));
+            for absent in made_up {
+                assert_eq!(get(&headers, absent), None, "{absent}");
+            }
+            assert_eq!(get(&headers, "x-team"), Some("blue"));
+            assert_eq!(get(&headers, "x-forward"), Some("from-client"));
+
+            let headers = Case {
+                first_party,
+                attributes: attributes.clone(),
+                client: vec![
+                    ("user-agent", "actual-client/1"),
+                    ("x-app", "actual-app"),
+                    ("x-stainless-lang", "python"),
+                    ("x-source", "from-client"),
+                ],
+                ..Case::default()
+            }
+            .build();
+            assert_eq!(get(&headers, "user-agent"), Some("actual-client/1"));
+            assert_eq!(get(&headers, "x-app"), Some("actual-app"));
+            assert_eq!(get(&headers, "x-stainless-lang"), Some("python"));
+            for absent in made_up
+                .iter()
+                .filter(|name| !["x-app", "x-stainless-lang"].contains(name))
+            {
+                assert_eq!(get(&headers, absent), None, "{absent}");
+            }
+            assert_eq!(get(&headers, "x-team"), Some("blue"));
+        }
     }
 
     #[test]

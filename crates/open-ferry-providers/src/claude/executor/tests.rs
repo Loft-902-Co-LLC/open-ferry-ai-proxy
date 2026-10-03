@@ -749,6 +749,96 @@ async fn gateway_gets_a_bearer() {
     assert_eq!(seen.header("accept"), Some("text/event-stream"));
 }
 
+/// `header:` attributes that would make a request pass for another client,
+/// in several cases, and the headers they name.
+const IDENTITY_ATTRIBUTES: [(&str, &str); 9] = [
+    ("header:User-Agent", "claude-cli/2.1.280 (external, cli)"),
+    ("header:X-App", "cli"),
+    ("header:x-stainless-runtime", "node"),
+    ("header:X-STAINLESS-LANG", "js"),
+    ("header:X-Stainless-Package-Version", "0.70.0"),
+    ("header:Originator", "codex-tui"),
+    ("header:Session_id", "synthetic-session"),
+    ("header:SESSION-ID", "synthetic-session"),
+    ("header:x-claude-code-session-id", "synthetic-session"),
+];
+const IDENTITY_HEADERS: [&str; 8] = [
+    "x-app",
+    "x-stainless-runtime",
+    "x-stainless-lang",
+    "x-stainless-package-version",
+    "originator",
+    "session_id",
+    "session-id",
+    "x-claude-code-session-id",
+];
+
+fn with_identity_attributes(auth: Arc<Auth>) -> Arc<Auth> {
+    let mut auth = (*auth).clone();
+    for (key, value) in IDENTITY_ATTRIBUTES {
+        auth.attributes.insert(key.into(), value.into());
+    }
+    auth.attributes
+        .insert("header:X-Team".into(), "blue".into());
+    Arc::new(auth)
+}
+
+// No custom header makes a call pass for another client, on any path: Claude
+// gets the client's own user agent or this project's, and none of the made-up
+// identity headers. Other custom headers still go through.
+#[tokio::test]
+async fn custom_headers_cannot_set_the_clients_identity() {
+    let check = |seen: Seen, user_agent: &str| {
+        assert_eq!(seen.header("user-agent"), Some(user_agent), "{}", seen.path);
+        seen.assert_absent(&IDENTITY_HEADERS);
+        assert_eq!(seen.header("x-team"), Some("blue"), "{}", seen.path);
+    };
+    let mock = Mock::start(Reply::json(MESSAGE)).await;
+    let executor = mock.executor();
+    for auth in [api_key_auth(), oauth_auth(), gateway_auth(&mock.url)] {
+        let auth = with_identity_attributes(auth);
+        executor
+            .execute(
+                auth.clone(),
+                request(claude_payload()),
+                options(Format::CLAUDE),
+            )
+            .await
+            .unwrap();
+        check(mock.last(), USER_AGENT);
+        let client = with_header(options(Format::CLAUDE), "user-agent", "actual-client/1");
+        executor
+            .execute(auth, request(claude_payload()), client)
+            .await
+            .unwrap();
+        check(mock.last(), "actual-client/1");
+    }
+
+    let mock = Mock::start(Reply::sse(SSE)).await;
+    let response = mock
+        .executor()
+        .execute_stream(
+            with_identity_attributes(oauth_auth()),
+            request(claude_payload()),
+            stream_options(Format::CLAUDE),
+        )
+        .await
+        .unwrap();
+    assert!(collect(response).await.iter().all(Result::is_ok));
+    check(mock.last(), USER_AGENT);
+
+    let mock = Mock::start(Reply::json(r#"{"input_tokens":1}"#)).await;
+    mock.executor()
+        .count_tokens(
+            with_identity_attributes(api_key_auth()),
+            request(claude_payload()),
+            options(Format::CLAUDE),
+        )
+        .await
+        .unwrap();
+    check(mock.last(), USER_AGENT);
+}
+
 #[tokio::test]
 async fn compact_is_not_supported() {
     let executor = ClaudeExecutor::new("direct").with_base_url("http://127.0.0.1:9");

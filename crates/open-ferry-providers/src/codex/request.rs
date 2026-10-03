@@ -25,10 +25,9 @@
 //! - `prompt_cache_key` is only the one the client sent. Upstream makes one
 //!   up from the Claude Code prompt cache, a provider session, or a hash of
 //!   the client's API key, and sends it as `Session-Id` too.
-//! - A `header:` attribute whose value names `$CPA-SESSION-ID` is skipped,
-//!   since session IDs aren't derived.
-//! - A `header:` attribute whose name or value isn't a valid HTTP header is
-//!   skipped with a warning; upstream's request would fail.
+//! - A `header:` attribute can't set `User-Agent`, `Originator`, a session
+//!   ID or another client identity header, and one that names
+//!   `$CPA-SESSION-ID` is skipped; see [`crate::custom_headers`].
 //! - The config's `codex-header-defaults` user agent, models.json
 //!   `override_header`, cloaking and `Connection: Keep-Alive` aren't ported.
 //! - A payload that isn't a JSON object is translated as an empty object.
@@ -38,8 +37,6 @@
 //!   aren't ported.
 //! - The image generation tool isn't added, and multi-agent v2 and the
 //!   reasoning replay cache aren't ported.
-
-use std::collections::BTreeMap;
 
 use http::header::{self, HeaderMap, HeaderName, HeaderValue};
 use open_ferry_core::auth::Auth;
@@ -52,6 +49,7 @@ use super::client::USER_AGENT;
 use super::input_ids::sanitize_input_item_ids;
 use super::reasoning::sanitize_reasoning;
 use super::tool_schema::normalize_tool_schemas;
+use crate::custom_headers;
 use crate::json::{delete, eq_fold, exists, get, set, str_of};
 
 /// Codex's API, for credentials that name no `base_url`.
@@ -426,7 +424,7 @@ pub(crate) fn build_headers(
             ),
         }
     }
-    apply_custom_headers(&mut headers, &auth.attributes, client);
+    custom_headers::apply(&mut headers, &auth.attributes, client, "codex");
     Ok(headers)
 }
 
@@ -446,52 +444,6 @@ fn ensure_header(target: &mut HeaderMap, client: &HeaderMap, name: HeaderName) -
             true
         }
         Err(_) => false,
-    }
-}
-
-/// Applies the credential's `header:<Name>` attributes, which override what
-/// is already set (`ApplyCustomHeadersFromAttrs`). A value of `$Name` takes
-/// the client's `Name` header, and is skipped when the client sent none.
-fn apply_custom_headers(
-    target: &mut HeaderMap,
-    attributes: &BTreeMap<String, String>,
-    client: &HeaderMap,
-) {
-    for (key, value) in attributes {
-        let Some(name) = key.strip_prefix("header:") else {
-            continue;
-        };
-        let (name, value) = (name.trim(), value.trim());
-        if name.is_empty() || value.is_empty() {
-            continue;
-        }
-        let value: &[u8] = match value.strip_prefix('$') {
-            Some(variable) if eq_fold(variable.trim(), "CPA-SESSION-ID") => continue,
-            _ if value.to_uppercase().contains("$CPA-SESSION-ID") => continue,
-            Some(variable) => {
-                let variable = variable.trim();
-                let Some(client_value) = HeaderName::from_bytes(variable.as_bytes())
-                    .ok()
-                    .and_then(|variable| client.get(variable))
-                    .filter(|value| !value.is_empty())
-                else {
-                    continue;
-                };
-                client_value.as_bytes()
-            }
-            None => value.as_bytes(),
-        };
-        match (
-            HeaderName::from_bytes(name.as_bytes()),
-            HeaderValue::from_bytes(value),
-        ) {
-            (Ok(name), Ok(value)) => {
-                target.insert(name, value);
-            }
-            _ => tracing::warn!(
-                "codex: custom header attribute {key:?} isn't a valid HTTP header; skipped"
-            ),
-        }
     }
 }
 
@@ -704,7 +656,6 @@ mod tests {
             ("header:X-Session-Embedded", "prefix-$cpa-session-id"),
             ("header:Bad Name", "x"),
             ("header:  ", "x"),
-            ("header:User-Agent", "operator-agent/2"),
             ("other", "x"),
         ] {
             auth.attributes.insert(key.into(), value.into());
@@ -714,10 +665,75 @@ mod tests {
         let headers = build_headers(&auth, &client, true).unwrap();
         assert_eq!(headers.get("x-static").unwrap(), "static");
         assert_eq!(headers.get("x-from-client").unwrap(), "tenant-1");
-        assert_eq!(headers.get(header::USER_AGENT).unwrap(), "operator-agent/2");
         for absent in ["x-missing", "x-session", "x-session-embedded", "other"] {
             assert!(headers.get(absent).is_none(), "{absent}");
         }
+    }
+
+    /// `header:` attributes for client identity headers, in several cases.
+    const IDENTITY_ATTRIBUTES: [(&str, &str); 16] = [
+        ("header:User-Agent", "codex_cli_rs/0.200.0"),
+        ("header:user-agent ", "claude-cli/2.1.280"),
+        ("header:USER-AGENT", "made-up/1"),
+        ("header:X-App", "cli"),
+        ("header:x-APP", "cli"),
+        ("header:X-Stainless-Runtime", "node"),
+        ("header:x-stainless-lang", "js"),
+        ("header:X-STAINLESS-OS", "MacOS"),
+        ("header:Originator", "codex-tui"),
+        ("header:ORIGINATOR", "codex_cli_rs"),
+        ("header:Session_id", "synthetic-session"),
+        ("header:SESSION_ID", "synthetic-session"),
+        ("header:Session-Id", "synthetic-session"),
+        ("header:session-ID", "$X-Tenant"),
+        ("header:X-Claude-Code-Session-Id", "synthetic-session"),
+        ("header:x-claude-code-session-id", "synthetic-session"),
+    ];
+
+    /// The headers [`IDENTITY_ATTRIBUTES`] name that the client didn't send.
+    const IDENTITY_HEADERS: [&str; 7] = [
+        "x-app",
+        "x-stainless-runtime",
+        "x-stainless-lang",
+        "x-stainless-os",
+        "session_id",
+        "session-id",
+        "x-claude-code-session-id",
+    ];
+
+    // No attribute makes the request pass for another client: the client's
+    // own user agent and originator stay, or this project's user agent and
+    // none. Other custom headers still apply.
+    #[test]
+    fn custom_headers_cannot_set_the_clients_identity() {
+        let mut auth = Auth::default();
+        for (key, value) in IDENTITY_ATTRIBUTES {
+            auth.attributes.insert(key.into(), value.into());
+        }
+        auth.attributes
+            .insert("header:X-Team".into(), "blue".into());
+        let mut client = HeaderMap::new();
+        client.insert("x-tenant", HeaderValue::from_static("tenant-1"));
+        let headers = build_headers(&auth, &client, true).unwrap();
+        assert_eq!(headers.get(header::USER_AGENT).unwrap(), USER_AGENT);
+        assert!(headers.get("originator").is_none());
+        for absent in IDENTITY_HEADERS {
+            assert!(headers.get(absent).is_none(), "{absent}");
+        }
+        assert_eq!(headers.get("x-team").unwrap(), "blue");
+
+        client.insert(
+            header::USER_AGENT,
+            HeaderValue::from_static("actual-client/1"),
+        );
+        client.insert("originator", HeaderValue::from_static("actual_originator"));
+        let headers = build_headers(&auth, &client, true).unwrap();
+        assert_eq!(headers.get(header::USER_AGENT).unwrap(), "actual-client/1");
+        assert_eq!(headers.get("originator").unwrap(), "actual_originator");
+        for absent in IDENTITY_HEADERS {
+            assert!(headers.get(absent).is_none(), "{absent}");
+        }
+        assert_eq!(headers.get("x-team").unwrap(), "blue");
     }
 
     #[test]

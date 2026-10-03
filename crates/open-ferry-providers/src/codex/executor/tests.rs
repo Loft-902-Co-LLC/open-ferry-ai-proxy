@@ -1656,6 +1656,104 @@ async fn usage_limit_events_are_scoped_to_the_credential() {
     assert_eq!(scope(&error), (true, false));
 }
 
+/// `header:` attributes that would make a request pass for another client,
+/// in several cases.
+const IDENTITY_ATTRIBUTES: [(&str, &str); 9] = [
+    ("header:User-Agent", "codex_cli_rs/0.200.0"),
+    ("header:ORIGINATOR", "codex-tui"),
+    ("header:Session_id", "synthetic-session"),
+    ("header:session-ID", "synthetic-session"),
+    ("header:X-App", "cli"),
+    ("header:x-stainless-lang", "js"),
+    ("header:X-Stainless-Runtime", "node"),
+    ("header:X-Claude-Code-Session-Id", "synthetic-session"),
+    ("header:user-agent ", "claude-cli/2.1.280"),
+];
+
+// No custom header makes a call pass for another client, on any path: Codex
+// gets the client's own user agent or this project's, and none of the
+// made-up identity headers. Other custom headers still go through.
+#[tokio::test]
+async fn custom_headers_cannot_set_the_clients_identity() {
+    let mock = Mock::start(Reply::sse(COMPLETED_WITH_USAGE)).await;
+    let compact = Mock::start(Reply::json(COMPACTION)).await;
+    let with_attributes = |url: &str| {
+        let mut auth = (*api_key_auth(url)).clone();
+        for (key, value) in IDENTITY_ATTRIBUTES {
+            auth.attributes.insert(key.into(), value.into());
+        }
+        auth.attributes
+            .insert("header:X-Team".into(), "blue".into());
+        Arc::new(auth)
+    };
+    let payload = r#"{"model":"gpt-5.4","input":"hello"}"#;
+    let check = |seen: Seen, user_agent: Option<&str>| {
+        match user_agent {
+            Some(user_agent) => {
+                assert_eq!(seen.header("user-agent"), Some(user_agent));
+                assert_eq!(seen.header("originator"), Some("actual_originator"));
+            }
+            None => assert_own_identity(&seen),
+        }
+        for name in [
+            "session_id",
+            "session-id",
+            "x-app",
+            "x-stainless-lang",
+            "x-stainless-runtime",
+            "x-claude-code-session-id",
+        ] {
+            assert!(seen.header(name).is_none(), "{name} was sent");
+        }
+        assert_eq!(seen.header("x-team"), Some("blue"));
+    };
+    for client in [false, true] {
+        let dress = |options: Options| {
+            if client {
+                with_header(
+                    with_header(options, "user-agent", "actual-client/1"),
+                    "originator",
+                    "actual_originator",
+                )
+            } else {
+                options
+            }
+        };
+        let user_agent = client.then_some("actual-client/1");
+        executor()
+            .execute(
+                with_attributes(&mock.url),
+                request("gpt-5.4", payload),
+                dress(options("openai-response")),
+            )
+            .await
+            .unwrap();
+        check(mock.last(), user_agent);
+
+        let response = executor()
+            .execute_stream(
+                with_attributes(&mock.url),
+                request("gpt-5.4", payload),
+                dress(stream_options("openai-response")),
+            )
+            .await
+            .unwrap();
+        let (_, error) = collect(response).await;
+        assert!(error.is_none(), "{error:?}");
+        check(mock.last(), user_agent);
+
+        executor()
+            .execute(
+                with_attributes(&compact.url),
+                request("gpt-5.4", payload),
+                dress(compact_options("openai-response")),
+            )
+            .await
+            .unwrap();
+        check(compact.last(), user_agent);
+    }
+}
+
 #[tokio::test]
 async fn connection_failures_are_upstream_errors() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
