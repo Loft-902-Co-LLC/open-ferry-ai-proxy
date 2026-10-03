@@ -54,6 +54,10 @@ use open_ferry_translate::gemini::openai::chat_completions::{
     GeminiToOpenAIStream, convert_gemini_response_to_openai_non_stream,
     convert_openai_request_to_gemini,
 };
+use open_ferry_translate::gemini::openai::responses::{
+    GeminiToOpenAIResponsesStream, convert_gemini_response_to_openai_responses_non_stream,
+    convert_openai_responses_request_to_gemini,
+};
 use open_ferry_translate::models::ModelCatalog;
 use open_ferry_translate::openai::chat_completions::{
     OpenAIToOpenAIStream, convert_openai_request_to_openai,
@@ -218,6 +222,12 @@ pub enum Translator {
     /// Chat Completions stream chunks → legacy Completions chunks, each one
     /// on its own.
     CompletionsStreamChunk,
+    /// OpenAI Responses request → Gemini request.
+    GeminiResponsesRequest,
+    /// Gemini stream → Responses events.
+    GeminiResponsesStream,
+    /// A whole Gemini response → one Responses response.
+    GeminiResponsesNonStream,
 }
 
 impl Translator {
@@ -282,6 +292,9 @@ impl Translator {
             Self::CompletionsRequest => "completions/request",
             Self::CompletionsResponse => "completions/response",
             Self::CompletionsStreamChunk => "completions/stream-chunk",
+            Self::GeminiResponsesRequest => "gemini/openai-responses/request",
+            Self::GeminiResponsesStream => "gemini/openai-responses/response",
+            Self::GeminiResponsesNonStream => "gemini/openai-responses/response-non-stream",
         }
     }
 
@@ -345,6 +358,9 @@ impl Translator {
             Self::CompletionsRequest => "completions-request",
             Self::CompletionsResponse => "completions-response",
             Self::CompletionsStreamChunk => "completions-stream-chunk",
+            Self::GeminiResponsesRequest => "responses-to-gemini-request",
+            Self::GeminiResponsesStream => "gemini-to-responses-stream",
+            Self::GeminiResponsesNonStream => "gemini-to-responses-non-stream",
         }
     }
 
@@ -413,6 +429,9 @@ impl Translator {
             Self::CompletionsRequest => "Completions -> Chat Completions request",
             Self::CompletionsResponse => "Chat Completions -> Completions response",
             Self::CompletionsStreamChunk => "Chat Completions -> Completions stream chunks",
+            Self::GeminiResponsesRequest => "Responses -> Gemini request",
+            Self::GeminiResponsesStream => "Gemini -> Responses response, streaming",
+            Self::GeminiResponsesNonStream => "Gemini -> Responses response, non-streaming",
         }
     }
 
@@ -1003,6 +1022,49 @@ impl Translator {
                 let output = serde_json::to_vec(&chunks).expect("strings serialize");
                 Ok(self.read(case, &output).expect("chunks always read"))
             }
+            Self::GeminiResponsesRequest => {
+                let request = request
+                    .map_err(|err| format!("case {} is not valid JSON: {err}", case.name))?;
+                let output =
+                    convert_openai_responses_request_to_gemini(&case.model, &request, true);
+                // Read back, as upstream's output is.
+                Ok(self
+                    .read(case, output.to_string().as_bytes())
+                    .expect("requests always read"))
+            }
+            Self::GeminiResponsesStream => {
+                // An original request that isn't JSON counts as absent, as
+                // upstream's pickRequestJSON skips it.
+                let translated = serde_json::from_str(&case.translated_request).unwrap_or_default();
+                let mut stream = GeminiToOpenAIResponsesStream::new(
+                    &case.model,
+                    &request.unwrap_or_default(),
+                    &translated,
+                );
+                // The SSE frames for every line, then those for the stream's end,
+                // as the harness collects upstream's.
+                let mut output: String = case
+                    .events
+                    .iter()
+                    .map(|line| stream.translate_line(line.as_bytes()))
+                    .collect();
+                output.push_str(&stream.finalize_tool_input());
+                Ok(self
+                    .read(case, output.as_bytes())
+                    .expect("streams always read"))
+            }
+            Self::GeminiResponsesNonStream => {
+                let translated = serde_json::from_str(&case.translated_request).unwrap_or_default();
+                let body = case.events.first().map_or(&b""[..], |body| body.as_bytes());
+                let output = convert_gemini_response_to_openai_responses_non_stream(
+                    &request.unwrap_or_default(),
+                    &translated,
+                    body,
+                );
+                let output = output.map(|value| value.to_string()).unwrap_or_default();
+                self.read(case, output.as_bytes())
+                    .ok_or_else(|| "output is not JSON".to_owned())
+            }
         }
     }
 
@@ -1254,6 +1316,9 @@ impl Translator {
             | Self::GeminiGeminiStream
             | Self::GeminiGeminiNonStream
             | Self::GeminiClaudeNonStream => &[],
+            Self::GeminiResponsesRequest => GEMINI_RESPONSES_REQUEST_JSON,
+            Self::GeminiResponsesStream => GEMINI_RESPONSES_STREAM_JSON,
+            Self::GeminiResponsesNonStream => GEMINI_RESPONSES_NON_STREAM_JSON,
         }
     }
 
@@ -1282,6 +1347,7 @@ impl Translator {
                 ("gemini", "gemini") => Some(Self::GeminiGeminiRequest),
                 ("claude", "gemini") => Some(Self::GeminiClaudeRequest),
                 ("openai", "gemini") => Some(Self::GeminiChatRequest),
+                ("openai-response", "gemini") => Some(Self::GeminiResponsesRequest),
                 _ => None,
             },
             Self::RegistryStream => match pair {
@@ -1299,6 +1365,7 @@ impl Translator {
                 ("gemini", "gemini") => Some(Self::GeminiGeminiStream),
                 ("gemini", "claude") => Some(Self::GeminiClaudeStream),
                 ("gemini", "openai") => Some(Self::GeminiChatStream),
+                ("gemini", "openai-response") => Some(Self::GeminiResponsesStream),
                 _ => None,
             },
             Self::RegistryNonStream => match pair {
@@ -1316,6 +1383,7 @@ impl Translator {
                 ("gemini", "gemini") => Some(Self::GeminiGeminiNonStream),
                 ("gemini", "claude") => Some(Self::GeminiClaudeNonStream),
                 ("gemini", "openai") => Some(Self::GeminiChatNonStream),
+                ("gemini", "openai-response") => Some(Self::GeminiResponsesNonStream),
                 _ => None,
             },
             _ => None,
@@ -1417,7 +1485,8 @@ impl Translator {
             | Self::GeminiGeminiRequest
             | Self::GeminiClaudeRequest
             | Self::GeminiClaudeRequestCompat
-            | Self::GeminiChatRequest => return serde_json::from_str(&text).ok(),
+            | Self::GeminiChatRequest
+            | Self::GeminiResponsesRequest => return serde_json::from_str(&text).ok(),
             Self::OpenAIGeminiRequest => {
                 let mut value: Value = serde_json::from_str(&text).ok()?;
                 replace_compact_call_ids(&mut value, case);
@@ -1542,6 +1611,19 @@ impl Translator {
             | Self::ClaudeGeminiRequest => serde_json::from_str(&text).ok()?,
             Self::Stream => sse_frames(&text),
             Self::NonStream => serde_json::from_str(&text).ok()?,
+            Self::GeminiResponsesStream => {
+                let mut frames = sse_frames(&text);
+                mask_gemini_responses_ids(&mut frames, case);
+                return Some(frames);
+            }
+            Self::GeminiResponsesNonStream if text.is_empty() => {
+                return Some(NO_OUTPUT.into());
+            }
+            Self::GeminiResponsesNonStream => {
+                let mut value: Value = serde_json::from_str(&text).ok()?;
+                mask_gemini_responses_ids(&mut value, case);
+                return Some(value);
+            }
         };
         let input = OnceCell::new();
         mask_generated_tool_ids(&mut value, &|id| {
@@ -1651,7 +1733,8 @@ fn read_registry_stream(case: &Case, native: Option<Translator>, text: &str) -> 
             Translator::Stream
             | Translator::ClaudeResponsesStream
             | Translator::OpenAIResponsesStream
-            | Translator::GeminiClaudeStream,
+            | Translator::GeminiClaudeStream
+            | Translator::GeminiResponsesStream,
         ) => all().map(String::as_str).collect::<String>(),
         Some(Translator::ResponsesStream) | None => {
             let mut lines: Vec<&str> = Vec::new();
@@ -1678,6 +1761,7 @@ fn read_registry_stream(case: &Case, native: Option<Translator>, text: &str) -> 
                 | Translator::ClaudeResponsesStream
                 | Translator::OpenAIResponsesStream
                 | Translator::GeminiClaudeStream
+                | Translator::GeminiResponsesStream
         )
     );
     let shape = |chunks: &[String]| -> Value {
@@ -2147,6 +2231,119 @@ fn is_generated_tool_id(text: &str) -> bool {
         || rest
             .split_once('_')
             .is_some_and(|(nanos, counter)| digits(nanos) && digits(counter))
+}
+
+/// Where the Responses → Gemini request translator writes JSON it read
+/// compactly while upstream copies the JSON's text (see
+/// [`Translator::embedded_json`]).
+const GEMINI_RESPONSES_REQUEST_JSON: &[JsonAt] = &[];
+
+/// The same for the Gemini → Responses stream translator.
+const GEMINI_RESPONSES_STREAM_JSON: &[JsonAt] = &[];
+
+/// The same for the Gemini → Responses non-streaming translator.
+const GEMINI_RESPONSES_NON_STREAM_JSON: &[JsonAt] = &[];
+
+/// Masks what the Gemini → Responses translators take from the clock and
+/// their counters, in a stream's frames or a whole response: `created_at`
+/// when it is the current time, a response ID made up for a response
+/// without one (`resp_<unix nanos in hex>_<count>`), wherever an item ID
+/// repeats it, and call IDs made up for calls (`call_<unix nanos>_<count>`,
+/// the nanos in decimal in a stream and in hex in a whole response), also
+/// as `fc_` and `ctc_` item IDs. IDs found in `case`'s input are kept.
+fn mask_gemini_responses_ids(value: &mut Value, case: &Case) {
+    let input = OnceCell::new();
+    let from_client = |id: &str| input.get_or_init(|| input_text(case)).contains(id);
+
+    // The response, or each frame's.
+    let mut responses: Vec<&mut Value> = match &mut *value {
+        Value::Array(frames) => frames
+            .iter_mut()
+            .filter_map(|frame| frame.pointer_mut("/data/response"))
+            .collect(),
+        response => vec![response],
+    };
+    for response in &mut responses {
+        mask_time_now(response, "created_at");
+    }
+    let generated = responses
+        .iter()
+        .filter_map(|response| response.get("id").and_then(Value::as_str))
+        .find_map(|id| {
+            let generated = id.strip_prefix("resp_")?;
+            (is_made_up_call_suffix(generated) && !from_client(id)).then(|| generated.to_owned())
+        });
+
+    // Call IDs first: on a coarse clock a call ID can repeat the response
+    // ID's made-up part when both counters happen to agree.
+    let mut seen = Vec::new();
+    mask_made_up_call_ids(value, &from_client, &mut seen);
+    if let Some(generated) = generated {
+        replace_in_strings(value, &generated, GENERATED_RESPONSE_ID);
+    }
+}
+
+/// Whether `text` is `<hex>_<decimal>`, the made-up part of an ID.
+fn is_made_up_call_suffix(text: &str) -> bool {
+    text.split_once('_').is_some_and(|(nanos, count)| {
+        !nanos.is_empty()
+            && nanos
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+            && !count.is_empty()
+            && count.bytes().all(|b| b.is_ascii_digit())
+    })
+}
+
+/// Replaces `from` with `to` in every string in `value`.
+fn replace_in_strings(value: &mut Value, from: &str, to: &str) {
+    match value {
+        Value::String(text) if text.contains(from) => *text = text.replace(from, to),
+        Value::Array(items) => items
+            .iter_mut()
+            .for_each(|item| replace_in_strings(item, from, to)),
+        Value::Object(fields) => fields
+            .values_mut()
+            .for_each(|field| replace_in_strings(field, from, to)),
+        _ => {}
+    }
+}
+
+/// Replaces each made-up call ID, `call_<nanos>_<count>` alone or after
+/// `fc_` or `ctc_`, with `call_(generated-<n>)`, numbering IDs in the order
+/// they first appear, so an item keeps pointing at its call.
+fn mask_made_up_call_ids(
+    value: &mut Value,
+    from_client: &dyn Fn(&str) -> bool,
+    seen: &mut Vec<String>,
+) {
+    match value {
+        Value::String(text) => {
+            let (prefix, id) = ["fc_", "ctc_", ""]
+                .into_iter()
+                .find_map(|prefix| Some((prefix, text.strip_prefix(prefix)?)))
+                .expect("the empty prefix always matches");
+            let made_up = id.strip_prefix("call_").is_some_and(is_made_up_call_suffix);
+            if !made_up || from_client(id) {
+                return;
+            }
+            let n = match seen.iter().position(|seen| seen == id) {
+                Some(index) => index + 1,
+                None => {
+                    seen.push(id.to_owned());
+                    seen.len()
+                }
+            };
+            *text = format!("{prefix}call_(generated-{n})");
+        }
+        Value::Array(items) => items
+            .iter_mut()
+            .for_each(|item| mask_made_up_call_ids(item, from_client, seen)),
+        Value::Object(fields) => fields
+            .values_mut()
+            .for_each(|field| mask_made_up_call_ids(field, from_client, seen)),
+        _ => {}
+    }
 }
 
 #[cfg(test)]

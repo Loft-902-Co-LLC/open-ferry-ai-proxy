@@ -193,7 +193,7 @@ pub fn request_cases(seed: u64, count: usize) -> Vec<Case> {
 /// Builds `count` stream cases and as many non-streaming cases.
 pub fn response_cases(seed: u64, count: usize) -> (Vec<Case>, Vec<Case>) {
     let source_seed = derived(seed);
-    let counts: [usize; 14] = split(count);
+    let counts: [usize; 15] = split(count);
     let sources = [
         (
             ("codex", "claude"),
@@ -251,6 +251,10 @@ pub fn response_cases(seed: u64, count: usize) -> (Vec<Case>, Vec<Case>) {
             ("gemini", "openai"),
             super::to_gemini::chat_event_cases(source_seed, counts[13]),
         ),
+        (
+            ("gemini", "openai-response"),
+            super::gemini_responses::event_cases(source_seed, counts[14]),
+        ),
     ];
     let (mut streams, mut finals) = (Vec::new(), Vec::new());
     let mut index = 0;
@@ -259,19 +263,33 @@ pub fn response_cases(seed: u64, count: usize) -> (Vec<Case>, Vec<Case>) {
             let mut rng = rng(seed, index);
             index += 1;
             // Now and then another pair, often one with no translator.
+            let source = (from, to);
             let (from, to) = if rng.chance(10) {
                 (rng.pick(&[from, to, "gemini", "Codex"]), rng.pick(FORMATS))
             } else {
                 (from, to)
             };
+            // The Gemini to Responses suite's `data:` bodies, which its
+            // translator reads as nothing, are read past the prefix by gjson
+            // in the others.
+            let last = if source == ("gemini", "openai-response") && (from, to) != source {
+                super::gemini_responses::without_data_prefix(last)
+            } else {
+                last
+            };
             // Upstream copies some broken tool arguments into its output as
-            // they are, whichever pair the events were made for.
+            // they are, whichever pair the events were made for; and the
+            // Gemini to Responses port fails on lines it can't read when
+            // `apply_patch` may be declared.
             let (stream, last) = match (from, to) {
                 ("codex", "gemini") => (
                     super::gemini::repair_codex_case(stream),
                     super::gemini::repair_codex_final(last),
                 ),
                 ("claude", "gemini") => super::gemini::repair_claude_input(stream, last),
+                ("gemini", "openai-response") => {
+                    super::gemini_responses::readable_with_patch(stream, last)
+                }
                 _ => (stream, last),
             };
             let options = json!({ "from": from, "to": to });
@@ -323,7 +341,7 @@ fn split<const N: usize>(count: usize) -> [usize; N] {
 /// Requests from the other generators through the built-in translators.
 fn builtin_requests(seed: u64, count: usize) -> Vec<Case> {
     let source_seed = derived(seed);
-    let counts: [usize; 14] = split(count);
+    let counts: [usize; 15] = split(count);
     let sources = [
         (("claude", "codex"), super::cases(source_seed, counts[0])),
         (
@@ -378,6 +396,10 @@ fn builtin_requests(seed: u64, count: usize) -> Vec<Case> {
             ("openai", "gemini"),
             super::to_gemini::chat_request_cases(source_seed, counts[13]),
         ),
+        (
+            ("openai-response", "gemini"),
+            super::gemini_responses::request_cases(source_seed, counts[14]),
+        ),
     ];
     let mut cases = Vec::with_capacity(count);
     for ((from, to), source) in sources {
@@ -412,15 +434,21 @@ fn builtin_requests(seed: u64, count: usize) -> Vec<Case> {
                     case.request = Value::Object(body).to_string();
                 }
             }
-            if (from, to) == ("openai", "gemini") {
-                // Upstream copies tool call arguments that aren't JSON into
-                // its output (see `to_gemini::json_arguments`).
-                if let Ok(mut body) = serde_json::from_str::<Value>(&case.request) {
-                    let original = body.clone();
-                    super::to_gemini::json_arguments(&mut body);
-                    if body != original {
-                        case.request = body.to_string();
-                    }
+            // Upstream copies tool call arguments that aren't JSON into its
+            // output (see `to_gemini::json_arguments` and
+            // `gemini_responses::json_arguments`).
+            let repair: Option<fn(&mut Value)> = match (from, to) {
+                ("openai", "gemini") => Some(super::to_gemini::json_arguments),
+                ("openai-response", "gemini") => Some(super::gemini_responses::json_arguments),
+                _ => None,
+            };
+            if let Some(repair) = repair
+                && let Ok(mut body) = serde_json::from_str::<Value>(&case.request)
+            {
+                let original = body.clone();
+                repair(&mut body);
+                if body != original {
+                    case.request = body.to_string();
                 }
             }
             let stream = rng.chance(50);

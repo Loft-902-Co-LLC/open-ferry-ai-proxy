@@ -61,6 +61,11 @@
 // other than the request; each entry documents its own. signature/inspect
 // takes the raw signature as "request".
 //
+// The gemini/openai-responses/* entries take Gemini stream lines, or a
+// whole Gemini response as the one event. gemini/openai-responses/response
+// concatenates its output for every line, then what FinalizeToolInput
+// returns at the end of the stream.
+//
 // Each output line is {"output":"<base64 of the translator's raw bytes>"},
 // or {"panic":"<message>"} if the translator panicked. Output is base64 so
 // invalid UTF-8 survives the trip.
@@ -85,6 +90,7 @@ import (
 	geminiclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/gemini/claude"
 	geminigemini "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/gemini/gemini"
 	geminichat "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/gemini/openai/chat-completions"
+	geminiresponses "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/gemini/openai/responses"
 	openaiclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/openai/claude"
 	openaigemini "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/openai/gemini"
 	openaichat "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/openai/openai/chat-completions"
@@ -379,6 +385,27 @@ var translators = map[string]func(in input) []byte{
 	"signature/inspect":            inspectSignature,
 	"signature/claude-messages":    sanitizeClaudeMessages,
 	"signature/gemini":             sanitizeGemini,
+	"gemini/openai-responses/request": func(in input) []byte {
+		return geminiresponses.ConvertOpenAIResponsesRequestToGemini(in.Model, []byte(in.Request), true)
+	},
+	"gemini/openai-responses/response": func(in input) []byte {
+		var param any
+		var out []byte
+		for _, event := range in.Events {
+			for _, chunk := range geminiresponses.ConvertGeminiResponseToOpenAIResponses(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), []byte(event), &param) {
+				out = append(out, chunk...)
+			}
+		}
+		if state, ok := param.(interface{ FinalizeToolInput() [][]byte }); ok {
+			for _, chunk := range state.FinalizeToolInput() {
+				out = append(out, chunk...)
+			}
+		}
+		return out
+	},
+	"gemini/openai-responses/response-non-stream": func(in input) []byte {
+		return geminiresponses.ConvertGeminiResponseToOpenAIResponsesNonStream(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), nil)
+	},
 }
 
 func finalEvent(in input) []byte {

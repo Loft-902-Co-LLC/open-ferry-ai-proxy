@@ -14,14 +14,16 @@
 //! [`openai_chat`] the Chat Completions responses those read and input for
 //! the Chat Completions passthrough, [`completions`] input for the legacy
 //! Completions conversions, [`gemini`] input for the translators from Gemini
-//! clients, [`signature`] reasoning signatures from every provider, and
-//! [`registry`] input for the translator registry.
+//! clients, [`signature`] reasoning signatures from every provider,
+//! [`registry`] input for the translator registry, and
+//! [`gemini_responses`] input for the translators between Responses and Gemini.
 
 pub mod chat;
 pub mod claude_chat;
 pub mod claude_responses;
 pub mod completions;
 pub mod gemini;
+pub mod gemini_responses;
 pub mod openai_chat;
 pub mod openai_claude;
 pub mod openai_responses;

@@ -64,6 +64,10 @@ pub fn requests() -> Vec<Case> {
         (("gemini", "gemini"), super::to_gemini::gemini_requests()),
         (("claude", "gemini"), super::to_gemini::claude_requests()),
         (("openai", "gemini"), super::to_gemini::chat_requests()),
+        (
+            ("openai-response", "gemini"),
+            super::gemini_responses::requests(),
+        ),
     ] {
         cases.extend(
             source
@@ -402,7 +406,7 @@ pub fn requests() -> Vec<Case> {
 
 /// Response cases, for the pairs whose translators they were written for,
 /// and every fifth also for the `fallback` pairs, which have no translator.
-fn responses(sources: [Vec<Case>; 14], fallback: &[(&str, &str)]) -> Vec<Case> {
+fn responses(sources: [Vec<Case>; 15], fallback: &[(&str, &str)]) -> Vec<Case> {
     let pairs = [
         ("codex", "claude"),
         ("codex", "openai-response"),
@@ -418,6 +422,7 @@ fn responses(sources: [Vec<Case>; 14], fallback: &[(&str, &str)]) -> Vec<Case> {
         ("gemini", "gemini"),
         ("gemini", "claude"),
         ("gemini", "openai"),
+        ("gemini", "openai-response"),
     ];
     let mut cases = Vec::new();
     for ((from, to), source) in pairs.into_iter().zip(sources) {
@@ -450,6 +455,7 @@ pub fn streams() -> Vec<Case> {
             super::to_gemini::gemini_streams(),
             super::to_gemini::claude_streams(),
             super::to_gemini::chat_streams(),
+            super::gemini_responses::streams(),
         ],
         &[("codex", "interactions"), ("Codex", "claude")],
     );
@@ -483,6 +489,7 @@ pub fn finals() -> Vec<Case> {
             super::to_gemini::gemini_finals(),
             super::to_gemini::claude_finals(),
             super::to_gemini::chat_finals(),
+            super::gemini_responses::finals(),
         ],
         &[("claude", "claude")],
     );

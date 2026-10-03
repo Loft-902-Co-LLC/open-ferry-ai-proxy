@@ -155,6 +155,8 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
         generate::to_gemini::claude_event_cases(seed, random);
     let (gemini_chat_streams, gemini_chat_finals) =
         generate::to_gemini::chat_event_cases(seed, random);
+    let (gemini_responses_streams, gemini_responses_finals) =
+        generate::gemini_responses::event_cases(seed, random);
     let suites = [
         (
             Translator::Request,
@@ -428,6 +430,21 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
             Translator::GeminiChatNonStream,
             cases::to_gemini::chat_finals(),
             gemini_chat_finals,
+        ),
+        (
+            Translator::GeminiResponsesRequest,
+            cases::gemini_responses::requests(),
+            generate::gemini_responses::request_cases(seed, random),
+        ),
+        (
+            Translator::GeminiResponsesStream,
+            cases::gemini_responses::streams(),
+            gemini_responses_streams,
+        ),
+        (
+            Translator::GeminiResponsesNonStream,
+            cases::gemini_responses::finals(),
+            gemini_responses_finals,
         ),
     ];
 
