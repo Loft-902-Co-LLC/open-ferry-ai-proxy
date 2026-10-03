@@ -3,15 +3,17 @@
 // and codex_executor_tokens.go, codexCreds in codex_executor_auth.go,
 // codexAuthUsesAPIKey in codex_websockets_request.go, helps/codex_native.go,
 // helps/payload_mutations.go, internal/util/codex.go,
-// internal/util/header_helpers.go, internal/misc/header_utils.go and
-// internal/thinking/suffix.go (v8.0.10, MIT).
+// internal/util/header_helpers.go, internal/misc/header_utils.go,
+// internal/thinking/suffix.go and helps/model_capabilities.go
+// (ApplyRequestThinking) (v8.0.10, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The body, headers and URL of a Codex request.
 //!
 //! The client's payload is translated to Codex's Responses format (or, for
-//! `responses/compact`, to OpenAI's), then adjusted as upstream does: the
-//! model without its thinking suffix, `stream` forced, fields Codex refuses
+//! `responses/compact`, to OpenAI's), its thinking setting is applied (see
+//! [`super::thinking`]), and it is adjusted as upstream does: the model
+//! without its thinking suffix, `stream` forced, fields Codex refuses
 //! dropped, `instructions` filled in, reasoning items and tool schemas
 //! cleaned, `parallel_tool_calls` matched to the tools, and input item IDs
 //! made acceptable.
@@ -31,10 +33,9 @@
 //! - The config's `codex-header-defaults` user agent, models.json
 //!   `override_header`, cloaking and `Connection: Keep-Alive` aren't ported.
 //! - A payload that isn't a JSON object is translated as an empty object.
-//! - The thinking suffix is stripped from the model but not applied, payload
-//!   config rules aren't applied, and the original request isn't translated
-//!   alongside the payload, as the thinking and payload-config modules
-//!   aren't ported.
+//! - Payload config rules aren't applied, and the original request isn't
+//!   translated alongside the payload, as the payload-config module isn't
+//!   ported.
 //! - The image generation tool isn't added, and multi-agent v2 isn't
 //!   ported.
 
@@ -51,9 +52,11 @@ use super::client::USER_AGENT;
 use super::ext::{self, Turn};
 use super::input_ids::sanitize_input_item_ids;
 use super::reasoning::sanitize_reasoning;
+use super::thinking;
 use super::tool_schema::normalize_tool_schemas;
 use crate::custom_headers;
-use crate::json::{delete, eq_fold, exists, get, set, str_of};
+use crate::json::{self, delete, eq_fold, exists, get, set, str_of};
+use crate::thinking::Route;
 
 /// Codex's API, for credentials that name no `base_url`.
 pub(crate) const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
@@ -309,6 +312,19 @@ pub(crate) fn prepare_body(
         payload.clone(),
         stream,
     );
+    let route = Route {
+        model: &request.model,
+        from: options.source_format.as_str(),
+        to: to.as_str(),
+        provider: "codex",
+    };
+    thinking::apply_request(
+        &mut body,
+        route,
+        &json::Body::parse(&request.payload),
+        &json::Body::parse(&options.original_request),
+        context.models,
+    )?;
 
     match kind {
         Kind::Execute => {

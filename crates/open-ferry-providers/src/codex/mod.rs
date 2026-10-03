@@ -5,13 +5,15 @@
 //! in the `api_key` attribute with an optional `base_url`.
 //!
 //! The executor translates the client's request to Codex's Responses
-//! format, adjusts it as upstream does, and translates Codex's server-sent
-//! events back, chunk by chunk when streaming and from the completed
-//! response otherwise. `responses/compact` calls go to Codex's compact
-//! endpoint. Token counts are made locally with `tiktoken-rs`. For Claude
-//! clients, which drop Codex's reasoning items, each turn's reasoning and
-//! tool calls are kept by the session the client named and put back in its
-//! next request (the `replay` module).
+//! format, applies the thinking setting of a model suffix such as
+//! `gpt-5(high)` or of the request ([`thinking`]), adjusts it as upstream
+//! does, and translates Codex's server-sent events back, chunk by chunk
+//! when streaming and from the completed response otherwise.
+//! `responses/compact` calls go to Codex's compact endpoint. Token counts
+//! are made locally with `tiktoken-rs`. For Claude clients, which drop
+//! Codex's reasoning items, each turn's reasoning and tool calls are kept
+//! by the session the client named and put back in its next request (the
+//! `replay` module).
 //!
 //! Deviations from upstream (each module lists its own):
 //! - Our requests don't pass for Codex's own client: there is no
@@ -46,6 +48,7 @@ mod replay_cache;
 pub(crate) mod request;
 pub(crate) mod stream;
 pub(crate) mod terminal;
+pub mod thinking;
 pub mod token;
 mod tokens;
 mod tool_schema;

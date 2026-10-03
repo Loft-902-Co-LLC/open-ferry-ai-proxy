@@ -12,18 +12,35 @@
 //! its provider takes it. Whether reasoning summaries are shown is kept from
 //! the client's request.
 //!
-//! [`crate::claude::thinking`] and [`crate::gemini::thinking`] are the
-//! targets.
+//! A request going to a Responses target (Codex, or OpenAI Responses for a
+//! compact call) may carry `configuration_update` input items, which change
+//! the effort mid-conversation. A model that can't take them has them
+//! removed, and its setting is read from the last of them. A Responses
+//! client's request to a model that can take them goes on as it is, unless
+//! a suffix overrides it.
+//!
+//! [`crate::claude::thinking`], [`crate::gemini::thinking`],
+//! [`crate::codex::thinking`] (`reasoning.effort`) and
+//! [`crate::openai_compat::thinking`] (`reasoning_effort`) are the targets.
 //!
 //! Deviations from upstream:
 //! - The caller looks the model up (see each target); upstream asks its
 //!   model registry, falling back to the built-in catalog, or takes the
 //!   model the credential manager resolved for an API key
-//!   (`ResolvedModelInfo`), which isn't ported. Without that, upstream's
-//!   mapping of an `xhigh` or `max` level onto a configured model's levels
-//!   (`mapConfiguredHighIntent`) never applies, as upstream's doesn't
-//!   without it.
-//! - Only the Claude and Gemini targets are ported.
+//!   (`ResolvedModelInfo`), which isn't ported, so the executors never
+//!   bind a model to a request. [`apply_with_model`] is upstream's
+//!   `ApplyThinkingWithModelInfo` for such a model, with its mapping of an
+//!   `xhigh` or `max` level onto the model's levels
+//!   (`mapConfiguredHighIntent`); only the parity harness calls it, for the
+//!   Codex and OpenAI targets. It reads a Responses client's request that
+//!   isn't valid JSON as having no effort, where upstream's
+//!   `extractCodexConfig` reads what gjson finds in it. A Claude model bound
+//!   to a request would also need `stripInferredClaudeSummaryActivation`,
+//!   which isn't ported.
+//! - The xAI, Kimi and Antigravity targets aren't ported.
+//! - A plugin's request normalizer (`normalizedUpdatesChanged`) isn't
+//!   ported, so the client's Responses request is always read for its
+//!   effort updates.
 
 use open_ferry_core::exec::ExecError;
 use open_ferry_translate::go;
@@ -118,6 +135,8 @@ pub(crate) struct Model {
     pub(crate) user_defined: bool,
     /// The most output tokens it gives, or 0 if unknown.
     pub(crate) max_completion_tokens: i64,
+    /// Takes a Responses request's `configuration_update` input items.
+    pub(crate) support_configuration_update: bool,
 }
 
 /// A provider format that thinking settings are written for (upstream's
@@ -136,6 +155,27 @@ pub(crate) trait Target {
     /// `Apply` for a model the catalog doesn't know or the user defined: the
     /// setting as it is.
     fn apply_compatible(body: &mut Value, config: &Config);
+
+    /// `applySummaryConfigForProvider`: shows or hides summaries as `summary`
+    /// says, for a request for `model` going to `provider` (upstream's
+    /// provider key). Only a Chat Completions provider's name matters.
+    fn apply_summary(body: &mut Value, model: &str, _provider: &str, summary: Summary) {
+        summary::apply_for_model(body, Self::NAME, model, summary, ModelCatalog::embedded());
+    }
+}
+
+/// Where a request goes, as upstream's `ApplyThinking` is told.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Route<'a> {
+    /// The model as the client named it, with any suffix.
+    pub(crate) model: &'a str,
+    /// The client's format.
+    pub(crate) from: &'a str,
+    /// The format the body was translated to: the target's, or
+    /// `openai-response` for the Codex target on a compact call.
+    pub(crate) to: &'a str,
+    /// The executor's provider, which upstream looks models up by.
+    pub(crate) provider: &'a str,
 }
 
 /// `ApplyRequestThinking` for a request translated from `from` into the
@@ -153,6 +193,24 @@ pub(crate) fn apply_request<T: Target>(
     original_request: &Body,
     lookup: impl FnOnce(&str) -> Option<Model>,
 ) -> Result<(), ExecError> {
+    let route = Route {
+        model,
+        from,
+        to: T::NAME,
+        provider: T::NAME,
+    };
+    apply_request_to::<T>(body, route, payload, original_request, lookup)
+}
+
+/// [`apply_request`] for a body translated to `route.to`, which may name the
+/// target differently, for an executor of `route.provider`.
+pub(crate) fn apply_request_to<T: Target>(
+    body: &mut Value,
+    route: Route<'_>,
+    payload: &Body,
+    original_request: &Body,
+    lookup: impl FnOnce(&str) -> Option<Model>,
+) -> Result<(), ExecError> {
     let original_source = if original_request.is_empty() {
         payload
     } else {
@@ -163,25 +221,57 @@ pub(crate) fn apply_request<T: Target>(
     } else {
         payload
     };
-    let summary =
-        translated_summary::<T>(body, payload.json(), original_source.json(), model, from);
-    apply::<T>(body, source, model, from, summary, lookup)
+    let summary = translated_summary(body, payload.json(), original_source.json(), &route);
+    apply::<T>(body, source, route, summary, lookup, false)
+}
+
+/// `ApplyThinkingWithModelInfo`: applies the thinking setting to a `T`
+/// body for `model`, the model bound to the request, or for an unknown
+/// model if `None`. `source` is the client's request; summaries are shown
+/// as it asks, or as the body does if it is empty.
+///
+/// A setting the model can't take is an error, with the body changed only
+/// by removing the effort updates the model can't take.
+pub(crate) fn apply_with_model<T: Target>(
+    body: &mut Value,
+    source: &Body,
+    route: Route<'_>,
+    model: Option<Model>,
+) -> Result<(), ExecError> {
+    let summary = match source {
+        Body::Empty => summary::extract(body, route.to),
+        Body::Json(source) => summary::extract(source, route.from),
+        Body::Invalid => Summary::Unspecified,
+    };
+    apply::<T>(body, source, route, summary, |_| model, true)
+}
+
+/// `ApplyThinking`, which upstream's conversion matrix calls: the body alone
+/// says whether summaries are shown, and there is no client request to read.
+#[cfg(test)]
+pub(crate) fn apply_thinking<T: Target>(
+    body: &mut Value,
+    route: Route<'_>,
+    lookup: impl FnOnce(&str) -> Option<Model>,
+) -> Result<(), ExecError> {
+    let summary = summary::extract(body, route.to);
+    apply::<T>(body, &Body::Empty, route, summary, lookup, false)
 }
 
 /// `translatedRequestSummaryConfig`: whether to show summaries, from the
 /// translated body or else from the client's request.
-fn translated_summary<T: Target>(
+fn translated_summary(
     body: &Value,
     current: Option<&Value>,
     original: Option<&Value>,
-    model: &str,
-    from: &str,
+    route: &Route<'_>,
 ) -> Summary {
-    let from = json::lower_trim(from);
-    let target = if from == T::NAME {
-        summary::extract(body, T::NAME)
+    let from = json::lower_trim(route.from);
+    let to = json::lower_trim(route.to);
+    let target = if from == to {
+        summary::extract(body, &to)
     } else {
-        summary::extract_explicit(body, T::NAME)
+        summary::extract_explicit(body, &to)
     };
     if target != Summary::Unspecified {
         return target;
@@ -189,7 +279,7 @@ fn translated_summary<T: Target>(
 
     let translated = |source: Option<&Value>| {
         source.map_or(Summary::Unspecified, |source| {
-            summary::extract_translated(source, &from, T::NAME)
+            summary::extract_translated(source, &from, &to)
         })
     };
     let current = translated(current);
@@ -197,9 +287,7 @@ fn translated_summary<T: Target>(
     if current == Summary::Unspecified {
         return original;
     }
-    if !Registry::global()
-        .has_request_transformer(&Format::new(from), &Format::from_static(T::NAME))
-    {
+    if !Registry::global().has_request_transformer(&Format::new(from), &Format::new(to.clone())) {
         return Summary::Unspecified;
     }
     // If the translated body could say it but doesn't, the translation
@@ -207,35 +295,59 @@ fn translated_summary<T: Target>(
     let mut candidate = body.clone();
     summary::apply_for_model(
         &mut candidate,
-        T::NAME,
-        model,
+        &to,
+        route.model,
         current,
         ModelCatalog::embedded(),
     );
-    if summary::extract_explicit(&candidate, T::NAME) != Summary::Unspecified {
+    if summary::extract_explicit(&candidate, &to) != Summary::Unspecified {
         return Summary::Unspecified;
     }
     current
 }
 
-/// `applyThinking` with `T` as the target.
+/// What `applyThinking` settles about a request before applying it.
+struct Plan<'a> {
+    /// The model without its suffix.
+    base: &'a str,
+    /// What is inside the model's suffix, if it has one.
+    suffix: Option<&'a str>,
+    /// The client's format, in lower case.
+    from: String,
+    /// The executor's provider, in lower case.
+    provider: String,
+    /// Whether to show summaries.
+    summary: Summary,
+    /// A Responses client's request to a Responses model that takes its
+    /// effort updates, whose summary settings are left alone.
+    native_responses: bool,
+}
+
+/// `applyThinking` with `T` as the target. `resolved` says the model was
+/// bound to the request rather than looked up.
 fn apply<T: Target>(
     body: &mut Value,
     source: &Body,
-    model: &str,
-    from: &str,
+    route: Route<'_>,
     summary: Summary,
     lookup: impl FnOnce(&str) -> Option<Model>,
+    resolved: bool,
 ) -> Result<(), ExecError> {
-    let mut from = json::lower_trim(from);
+    let mut from = json::lower_trim(route.from);
     if from.is_empty() {
         T::NAME.clone_into(&mut from);
     }
-    let (base, suffix) = parse_suffix(model);
+    let mut provider = json::lower_trim(route.provider);
+    if provider.is_empty() {
+        T::NAME.clone_into(&mut provider);
+    }
+    let (base, suffix) = parse_suffix(route.model);
     let info = lookup(base);
 
-    // A Responses request may change its effort mid-conversation.
-    let source_config = if from == "codex" || from == "openai-response" {
+    // A Responses request may change its effort mid-conversation; the
+    // client's request says so before updates are removed from the body.
+    let responses_source = is_responses_format(&from);
+    let source_config = if responses_source {
         let request = if source.is_empty() {
             Some(&*body)
         } else {
@@ -245,11 +357,34 @@ fn apply<T: Target>(
     } else {
         Config::unset()
     };
+    let response_target = matches!(T::NAME, "codex" | "xai");
+    let supports_updates = info
+        .as_ref()
+        .is_some_and(|info| info.support_configuration_update);
+    if response_target && !supports_updates {
+        strip_configuration_updates(body);
+    }
+    let native_responses = response_target && responses_source && supports_updates;
+    if native_responses && suffix.is_none() {
+        // The request's own effort and updates go on as they are.
+        if let Some(info) = &info {
+            log_native_effort(body, info, T::NAME);
+        }
+        return Ok(());
+    }
 
+    let plan = Plan {
+        base,
+        suffix,
+        from,
+        provider,
+        summary,
+        native_responses,
+    };
     let info = match info {
         Some(info) if !info.user_defined => info,
-        _ => {
-            apply_user_defined::<T>(body, base, &from, suffix, source_config, summary);
+        info => {
+            apply_user_defined::<T>(body, info.as_ref(), &plan, source_config);
             return Ok(());
         }
     };
@@ -265,20 +400,39 @@ fn apply<T: Target>(
         return Ok(());
     };
 
-    let config = match suffix {
+    let mut config = match suffix {
         Some(raw) => suffix_config(raw),
-        None if source_config.is_set() => source_config,
-        None => extract_config(body, T::NAME),
+        None => {
+            let mut config = source_config;
+            if !config.is_set() && resolved {
+                // `extractSourceThinkingConfig`.
+                if let Some(source) = source.json() {
+                    config = if plan.from == "openai-response" {
+                        codex_config(source)
+                    } else {
+                        extract_config(source, &plan.from)
+                    };
+                }
+            }
+            if !config.is_set() {
+                config = extract_config(body, T::NAME);
+            }
+            config
+        }
     };
     if !config.is_set() {
-        apply_summary::<T>(body, base, summary);
+        if !native_responses {
+            T::apply_summary(body, base, &plan.provider, summary);
+        }
         return Ok(());
     }
-    let config = validate(config, &info, support, &from, T::NAME, suffix.is_some()).inspect_err(
-        |error| {
+    if resolved && config.mode == Mode::Level && maps_high_intent(&plan.from, T::NAME, &info) {
+        config.level = map_high_intent(&config.level, support);
+    }
+    let config = validate(config, &info, support, &plan.from, T::NAME, suffix.is_some())
+        .inspect_err(|error| {
             warn!(model = %info.id, provider = T::NAME, error = %error.message, "thinking: validation failed");
-        },
-    )?;
+        })?;
     debug!(
         model = %info.id,
         provider = T::NAME,
@@ -289,43 +443,99 @@ fn apply<T: Target>(
     );
     T::apply_known(body, config.clone(), &info, support);
     // A setting that turns thinking off wins over showing summaries.
-    if !config.fully_disabled() {
-        apply_summary::<T>(body, base, summary);
+    if !config.fully_disabled() && !native_responses {
+        T::apply_summary(body, base, &plan.provider, summary);
     }
     Ok(())
+}
+
+/// Logs the effort a native Responses request goes on with, which isn't
+/// checked or rewritten.
+fn log_native_effort(body: &Value, info: &Model, provider: &str) {
+    if !tracing::enabled!(tracing::Level::DEBUG) || (info.thinking.is_none() && !info.user_defined)
+    {
+        return;
+    }
+    let config = codex_usage_config(body);
+    if !config.is_set() {
+        return;
+    }
+    let baseline = codex_config(body);
+    let baseline_level = (baseline.mode == Mode::Level).then_some(baseline.level.as_str());
+    for message in [
+        "thinking: original config from request",
+        "thinking: processed config to apply",
+    ] {
+        debug!(
+            provider,
+            model = %info.id,
+            mode = ?config.mode,
+            budget = config.budget,
+            level = %config.level,
+            baseline_level,
+            "{message}"
+        );
+    }
+}
+
+/// `shouldMapConfiguredHighIntent`: whether a level from another format, or
+/// for a model of another family, is mapped onto the model's own levels.
+fn maps_high_intent(from: &str, to: &str, model: &Model) -> bool {
+    if from != to {
+        return true;
+    }
+    let model_type = json::lower_trim(&model.model_type);
+    !model_type.is_empty() && !same_family(to, &model_type)
+}
+
+/// `mapConfiguredHighIntent`: `xhigh` or `max` becomes the first of itself,
+/// the other and `high` that the model has. Other levels are lowercased.
+fn map_high_intent(level: &str, support: &ThinkingSupport) -> String {
+    if support.levels.is_empty() {
+        return level.to_owned();
+    }
+    let level = json::lower_trim(level);
+    let candidates: [&str; 3] = match level.as_str() {
+        "xhigh" => ["xhigh", "max", "high"],
+        "max" => ["max", "xhigh", "high"],
+        _ => return level,
+    };
+    candidates
+        .into_iter()
+        .find(|candidate| level_supported(candidate, &support.levels))
+        .map_or(level, str::to_owned)
 }
 
 /// `applyUserDefinedModel`: a model the catalog doesn't know, or one the
 /// user defined, gets the setting unchecked, and the provider judges it.
 fn apply_user_defined<T: Target>(
     body: &mut Value,
-    model: &str,
-    from: &str,
-    suffix: Option<&str>,
+    info: Option<&Model>,
+    plan: &Plan<'_>,
     source_config: Config,
-    summary: Summary,
 ) {
-    let config = match suffix {
+    let model = info.map_or(plan.base, |info| info.id.as_str());
+    let config = match plan.suffix {
         Some(raw) => suffix_config(raw),
         None => {
             let mut config = source_config;
             if !config.is_set() {
-                config = extract_config(body, from);
+                config = extract_config(body, &plan.from);
             }
-            if !config.is_set() && from != T::NAME {
+            if !config.is_set() && plan.from != T::NAME {
                 config = extract_config(body, T::NAME);
             }
             config
         }
     };
     if !config.is_set() {
-        apply_summary::<T>(body, model, summary);
+        T::apply_summary(body, model, &plan.provider, plan.summary);
         return;
     }
     let config = normalize_user_defined(config, T::NAME);
     T::apply_compatible(body, &config);
-    if !config.fully_disabled() {
-        apply_summary::<T>(body, model, summary);
+    if !config.fully_disabled() && !plan.native_responses {
+        T::apply_summary(body, model, &plan.provider, plan.summary);
     }
 }
 
@@ -344,10 +554,6 @@ fn normalize_user_defined(config: Config, target: &str) -> Config {
 /// `isBudgetCapableProvider`.
 fn budget_capable(provider: &str) -> bool {
     matches!(provider, "gemini" | "antigravity" | "claude")
-}
-
-fn apply_summary<T: Target>(body: &mut Value, model: &str, summary: Summary) {
-    summary::apply_for_model(body, T::NAME, model, summary, ModelCatalog::embedded());
 }
 
 /// `ParseSuffix`: the model name and what is inside a trailing `(...)`.
@@ -538,12 +744,22 @@ fn kimi_config(body: &Value) -> Config {
 
 /// `extractCodexUsageConfig`: the last effort a Responses request changes
 /// to, else its top-level effort.
-fn codex_usage_config(body: &Value) -> Config {
+pub(crate) fn codex_usage_config(body: &Value) -> Config {
     let update = configuration_update_config(body);
     if update.is_set() {
         return update;
     }
     codex_config(body)
+}
+
+/// `isResponsesFormat`.
+fn is_responses_format(format: &str) -> bool {
+    matches!(format, "codex" | "openai-response")
+}
+
+/// Whether an input item is a `configuration_update`.
+fn is_configuration_update(item: &Value) -> bool {
+    json::str_at(item, "type") == "configuration_update"
 }
 
 /// `extractConfigurationUpdateConfig`: the last non-empty effort among the
@@ -554,11 +770,33 @@ fn configuration_update_config(body: &Value) -> Config {
     };
     let effort = input
         .iter()
-        .filter(|item| json::str_at(item, "type") == "configuration_update")
+        .filter(|item| is_configuration_update(item))
         .filter_map(|item| json::string_at(item, "reasoning.effort"))
         .map(json::lower_trim)
         .rfind(|effort| !effort.is_empty());
     effort.map_or_else(Config::unset, effort_config)
+}
+
+/// `stripConfigurationUpdates`: removes the `configuration_update` input
+/// items, leaving the others as they are.
+pub(crate) fn strip_configuration_updates(body: &mut Value) {
+    if let Some(Value::Array(input)) = body.get_mut("input") {
+        input.retain(|item| !is_configuration_update(item));
+    }
+}
+
+/// `stripResponsesEffort`: removes `reasoning.effort`, and `reasoning` if
+/// nothing else is left in it, keeping the summary settings.
+pub(crate) fn strip_responses_effort(body: &mut Value) {
+    if !json::delete(body, "reasoning.effort") {
+        return;
+    }
+    if body
+        .get("reasoning")
+        .is_some_and(|reasoning| reasoning.as_object().is_some_and(serde_json::Map::is_empty))
+    {
+        json::delete(body, "reasoning");
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -789,7 +1027,9 @@ pub(crate) fn clamp_budget(value: i64, support: &ThinkingSupport) -> i64 {
     value.min(max)
 }
 
-fn level_supported(level: &str, supported: &[String]) -> bool {
+/// `isLevelSupported` (and `HasLevel`): whether `supported` has `level`,
+/// whatever their case and the spaces around a supported one.
+pub(crate) fn level_supported(level: &str, supported: &[String]) -> bool {
     supported
         .iter()
         .any(|candidate| json::eq_fold(level, candidate.trim()))
@@ -1017,6 +1257,96 @@ mod tests {
         assert_eq!(clamp_level("max", &support), "high");
         assert_eq!(clamp_level("High", &support), "High");
         assert_eq!(clamp_level("turbo", &support), "turbo");
+    }
+
+    // configuration_update.go: only the update items go, the rest keep
+    // their order, and input that isn't an array is left alone.
+    #[test]
+    fn strips_configuration_updates() {
+        let mut body = json!({"input": [
+            {"role": "user", "content": "a"},
+            {"type": "configuration_update", "reasoning": {"effort": "low"}},
+            {"type": "message", "role": "user", "content": "b"},
+            {"type": "configuration_update"}
+        ]});
+        strip_configuration_updates(&mut body);
+        assert_eq!(
+            body,
+            json!({"input": [
+                {"role": "user", "content": "a"},
+                {"type": "message", "role": "user", "content": "b"}
+            ]})
+        );
+        let mut body = json!({"input": {"type": "configuration_update"}});
+        strip_configuration_updates(&mut body);
+        assert_eq!(body, json!({"input": {"type": "configuration_update"}}));
+    }
+
+    #[test]
+    fn strips_a_responses_effort() {
+        let mut body = json!({"reasoning": {"effort": "high", "summary": "auto"}});
+        strip_responses_effort(&mut body);
+        assert_eq!(body, json!({"reasoning": {"summary": "auto"}}));
+        let mut body = json!({"reasoning": {"effort": "high"}, "n": 1});
+        strip_responses_effort(&mut body);
+        assert_eq!(body, json!({"n": 1}));
+        // Without an effort, nothing changes.
+        let mut body = json!({"reasoning": {}});
+        strip_responses_effort(&mut body);
+        assert_eq!(body, json!({"reasoning": {}}));
+    }
+
+    // mapConfiguredHighIntent.
+    #[test]
+    fn maps_high_levels_onto_the_models() {
+        let support = |levels: &[&str]| ThinkingSupport {
+            levels: levels.iter().map(|level| (*level).to_owned()).collect(),
+            ..ThinkingSupport::default()
+        };
+        assert_eq!(map_high_intent("xhigh", &support(&["low", "max"])), "max");
+        assert_eq!(map_high_intent(" MAX ", &support(&["xhigh"])), "xhigh");
+        assert_eq!(map_high_intent("max", &support(&["low", "high"])), "high");
+        assert_eq!(map_high_intent("max", &support(&["low"])), "max");
+        assert_eq!(map_high_intent("Medium", &support(&["low"])), "medium");
+        assert_eq!(map_high_intent("Max", &support(&[])), "Max");
+
+        let model = |model_type: &str| Model {
+            model_type: model_type.into(),
+            ..Model::default()
+        };
+        assert!(maps_high_intent("claude", "codex", &model("")));
+        assert!(!maps_high_intent("codex", "codex", &model("openai")));
+        assert!(maps_high_intent("codex", "codex", &model("claude")));
+        assert!(!maps_high_intent("openai", "openai", &model("")));
+    }
+
+    // helps/thinking_test.go
+    // (TestApplyThinkingWithSourcePayloadPreservesOriginalOnlySummary): a
+    // summary setting only the client's original request has still counts.
+    // The test that a plugin's normalizer can remove the summary, and the
+    // Antigravity one, are dropped: neither is ported.
+    #[test]
+    fn keeps_a_summary_only_the_original_request_has() {
+        let current = Body::Json(json!({"model": "gemini-3.6-flash", "input": "hi"}));
+        let original = Body::Json(
+            json!({"model": "gemini-3.6-flash", "reasoning": {"summary": null}, "input": "hi"}),
+        );
+        let mut body = json!({"generationConfig": {"thinkingConfig": {"thinkingLevel": "high"}}});
+        crate::gemini::thinking::apply_request(
+            &mut body,
+            "gemini-3.6-flash",
+            "openai-response",
+            &current,
+            &original,
+            None,
+            "gemini",
+        )
+        .unwrap();
+        assert_eq!(
+            json::get(&body, "generationConfig.thinkingConfig.includeThoughts"),
+            Some(&Value::Bool(false)),
+            "{body}"
+        );
     }
 
     #[test]

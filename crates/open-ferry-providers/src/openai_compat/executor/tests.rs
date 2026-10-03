@@ -16,8 +16,8 @@
 //! - `openai_compat_home_options_test.go`: the Home service isn't ported.
 //! - `openai_compat_executor_reasoning_test.go`: the `is-compat` flag isn't
 //!   passed to translators.
-//! - `PayloadOverrideWinsOverThinkingSuffix`: payload rules and thinking
-//!   suffixes aren't applied.
+//! - `PayloadOverrideWinsOverThinkingSuffix`: payload rules aren't
+//!   applied.
 //! - `PromptCacheKeyIsModelAndProtocolScoped`: it checks derived keys.
 //!
 //! Changed:
@@ -1152,9 +1152,10 @@ async fn chat_request_goes_out_as_sent() {
         seen.path, "/v1/chat/completions",
         "one trailing slash is dropped"
     );
+    // The suffix's level goes out as the effort.
     assert_eq!(
         seen.body,
-        r#"{"model":"upstream-model","messages":[{"role":"user","content":"hi"}],"max_tokens":5,"stream":false}"#
+        r#"{"model":"upstream-model","messages":[{"role":"user","content":"hi"}],"max_tokens":5,"stream":false,"reasoning_effort":"high"}"#
     );
     assert_eq!(response.headers.get("x-upstream").unwrap(), "yes");
     let answer: Value = serde_json::from_slice(&response.payload).unwrap();

@@ -86,6 +86,7 @@ pub(crate) fn apply_request(
             thinking: info.thinking,
             user_defined: info.user_defined,
             max_completion_tokens: i64::try_from(info.max_completion_tokens).unwrap_or(i64::MAX),
+            support_configuration_update: info.support_configuration_update,
         })
     })
 }

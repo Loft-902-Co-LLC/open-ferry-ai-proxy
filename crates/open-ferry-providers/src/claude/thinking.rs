@@ -70,6 +70,7 @@ fn lookup(id: &str) -> Option<Model> {
         thinking: info.thinking.clone(),
         user_defined: false,
         max_completion_tokens: info.max_completion_tokens,
+        support_configuration_update: false,
     })
 }
 

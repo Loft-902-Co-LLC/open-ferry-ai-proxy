@@ -1,7 +1,8 @@
 // Ported from CLIProxyAPI internal/runtime/executor/openai_compat_executor.go
 // (OpenAICompatExecutor: Execute, ExecuteStream, CountTokens, Refresh,
-// applyPromptCacheKey, resolveCredentials, resolveCompatConfig) and
-// helps/payload_helpers.go (PayloadRequestedModel) (v8.0.10, MIT).
+// applyPromptCacheKey, resolveCredentials, resolveCompatConfig),
+// helps/payload_helpers.go (PayloadRequestedModel) and
+// helps/model_capabilities.go (ApplyRequestThinking) (v8.0.10, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! [`OpenAiCompatExecutor`], which calls a provider configured under
@@ -14,11 +15,13 @@
 //! 401. A `responses/compact` call goes to `<base_url>/responses/compact` as
 //! OpenAI Responses, without `stream`, and answers with JSON.
 //!
-//! Before the request goes out, the model's entry in the provider's
-//! `models` decides whether its limit is `max_tokens` or
+//! Before the request goes out, its thinking setting is applied (see
+//! [`super::thinking`]; a compact call's as for Codex), the model's entry
+//! in the provider's `models` decides whether its limit is `max_tokens` or
 //! `max_completion_tokens` and whether its tool results go as plain text,
 //! and a provider with `support-prompt-cache-key` gets the client's
-//! `prompt_cache_key`. A stream asks for usage in its last chunk.
+//! `prompt_cache_key`. A stream asks for usage in its last chunk. A token
+//! count is made on the request with its thinking setting applied.
 //!
 //! Deviations from upstream:
 //! - Requests go through `reqwest` with rustls, one shared client per proxy;
@@ -57,6 +60,7 @@ use serde_json::Value;
 use super::max_tokens::{normalize_max_tokens, should_use_max_completion_tokens};
 use super::status::status_error;
 use super::stream::{self, StreamSetup};
+use super::thinking;
 use super::tokens::{count_chat_tokens, tokenizer_for, usage_json};
 use super::tool_results::{normalize_tool_results_text_only, should_normalize_tool_results};
 use crate::codex::client::{Clients, USER_AGENT, error_chain, read_body, read_body_prefix};
@@ -67,10 +71,12 @@ use crate::codex::request::{
 };
 use crate::codex::stream::MAX_LINE;
 use crate::codex::terminal::{APPLY_PATCH_ERROR_MESSAGE, StatusError};
+use crate::codex::thinking as responses_thinking;
 use crate::codex::usage::ensure_responses_usage_details;
 use crate::custom_headers;
-use crate::json::{delete, eq_fold, str_at};
+use crate::json::{Body, delete, eq_fold, str_at};
 use crate::redact;
+use crate::thinking::Route;
 
 /// The `alt` of a `/responses/compact` call.
 const COMPACT_ALT: &str = "responses/compact";
@@ -202,6 +208,7 @@ impl OpenAiCompatExecutor {
             payload.clone(),
             translate_stream,
         );
+        self.apply_thinking(&mut body, request, options, &to)?;
 
         let compat = self.compat_config(auth);
         let requested = requested_model(request, options);
@@ -230,6 +237,32 @@ impl OpenAiCompatExecutor {
             body,
             headers,
         })
+    }
+
+    /// Applies the thinking setting of the model's suffix or of the request
+    /// to `body`, translated to `to`: Chat Completions, or OpenAI Responses
+    /// for a compact call.
+    pub(super) fn apply_thinking(
+        &self,
+        body: &mut Value,
+        request: &Request,
+        options: &Options,
+        to: &Format,
+    ) -> Result<(), ExecError> {
+        let route = Route {
+            model: &request.model,
+            from: options.source_format.as_str(),
+            to: to.as_str(),
+            provider: &self.provider,
+        };
+        let payload = Body::parse(&request.payload);
+        let original = Body::parse(&options.original_request);
+        let models = self.models.as_deref();
+        if *to == Format::OPENAI_RESPONSE {
+            responses_thinking::apply_request(body, route, &payload, &original, models)
+        } else {
+            thinking::apply_request(body, route, &payload, &original, models)
+        }
     }
 
     /// Posts the prepared request and returns the provider's answer if its
@@ -336,13 +369,14 @@ impl OpenAiCompatExecutor {
         options: &Options,
     ) -> Result<Response, ExecError> {
         let model = base_model(&request.model).to_owned();
-        let body = Registry::global().translate_request(
+        let mut body = Registry::global().translate_request(
             &options.source_format,
             &Format::OPENAI,
             &model,
             parse_object(&request.payload),
             false,
         );
+        self.apply_thinking(&mut body, request, options, &Format::OPENAI)?;
         let count =
             tokio::task::spawn_blocking(move || count_chat_tokens(tokenizer_for(&model), &body))
                 .await
