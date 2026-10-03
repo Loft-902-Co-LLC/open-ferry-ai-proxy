@@ -40,6 +40,10 @@ use crate::signature;
 /// How an empty non-streaming output reads, unlike any JSON a response holds.
 const NO_OUTPUT: &str = "(no output)";
 
+/// What a registry non-streaming case reads as when the translation failed:
+/// upstream's registry returned nil, and ours `None`.
+const FAILED: &str = "(failed)";
+
 /// How the Responses stream translator's harness writes a line it returned unchanged.
 const UNCHANGED: &str = "=";
 
@@ -466,8 +470,8 @@ impl Translator {
                     .unwrap_or_default();
                 let output = Registry::global()
                     .translate_non_stream(&from, &to, &context, body)
-                    .unwrap_or_default();
-                self.read(case, &output)
+                    .map(|output| String::from_utf8_lossy(&output).into_owned());
+                self.read(case, json!({ "output": output }).to_string().as_bytes())
                     .ok_or_else(|| "output is not JSON".to_owned())
             }
             Self::RegistryLookup => {
@@ -679,14 +683,8 @@ impl Translator {
         let native = self.native(case);
         let mut value = match self {
             Self::RegistryStream => return read_registry_stream(case, native, &text),
-            Self::RegistryRequest | Self::RegistryNonStream if native.is_some() => {
-                return native?.read(case, output);
-            }
-            Self::RegistryNonStream if text.is_empty() => return Some(NO_OUTPUT.into()),
-            // A body passed through as it is, which need not be JSON.
-            Self::RegistryNonStream => {
-                return Some(serde_json::from_str(&text).unwrap_or_else(|_| text.into()));
-            }
+            Self::RegistryNonStream => return read_registry_non_stream(case, native, &text),
+            Self::RegistryRequest if native.is_some() => return native?.read(case, output),
             Self::RegistryRequest | Self::RegistryLookup => {
                 return serde_json::from_str(&text).ok();
             }
@@ -775,6 +773,22 @@ fn read_lines(text: &str) -> Option<Value> {
     Some(Value::Array(lines))
 }
 
+/// Reads a registry non-streaming report, `{"output": text}`, as `native`
+/// reads its output, or as a body passed through as it is, which need not be
+/// JSON. `{"output": null}`, a failed translation, reads as [`FAILED`].
+fn read_registry_non_stream(case: &Case, native: Option<Translator>, text: &str) -> Option<Value> {
+    let report: Value = serde_json::from_str(text).ok()?;
+    let output = match &report["output"] {
+        Value::Null => return Some(FAILED.into()),
+        output => output.as_str()?,
+    };
+    match native {
+        Some(native) => native.read(case, output.as_bytes()),
+        None if output.is_empty() => Some(NO_OUTPUT.into()),
+        None => Some(serde_json::from_str(output).unwrap_or_else(|_| output.into())),
+    }
+}
+
 /// The pair of formats in a registry case's options: for a request, the
 /// client's format and the provider's; for a response, the provider's and the
 /// client's.
@@ -786,9 +800,15 @@ fn registry_formats(case: &Case) -> (Format, Format) {
 /// Reads a registry stream's report, `{"events": [[chunk, …] for each
 /// event], "finish": [chunk, …], "failed": bool}`, as `native`'s harness entry
 /// would have written its chunks, followed by an entry for what the registry
-/// adds: how many chunks each event and the stream's end gave, and whether the
+/// adds: the chunks each event and the stream's end gave, and whether the
 /// stream failed. A stream with no translator reads as the Responses stream
 /// translator's does, its chunks passed through.
+///
+/// The SSE translators' chunks are read joined, as their harness entries
+/// write them, so for those each chunk is listed by its frames (see
+/// [`sse_chunk`]): where a chunk splits a frame, or a frame isn't ended,
+/// shows. The other translators' chunks are read one by one, so they are only
+/// counted.
 fn read_registry_stream(case: &Case, native: Option<Translator>, text: &str) -> Option<Value> {
     let report: Value = serde_json::from_str(text).ok()?;
     let chunks = |value: &Value| -> Option<Vec<String>> {
@@ -828,13 +848,41 @@ fn read_registry_stream(case: &Case, native: Option<Translator>, text: &str) -> 
         Some(native) => native.read(case, output.as_bytes())?,
         None => read_lines(&output)?,
     };
-    let counts: Vec<usize> = events.iter().map(Vec::len).collect();
+    let sse = matches!(
+        native,
+        Some(Translator::Stream | Translator::ClaudeResponsesStream)
+    );
+    let shape = |chunks: &[String]| -> Value {
+        if sse {
+            chunks.iter().map(|chunk| sse_chunk(chunk)).collect()
+        } else {
+            chunks.len().into()
+        }
+    };
+    let shapes: Vec<Value> = events.iter().map(|chunks| shape(chunks)).collect();
     value.as_array_mut()?.push(json!({ "registry": {
-        "chunks": counts,
-        "finish": finish.len(),
+        "chunks": shapes,
+        "finish": shape(&finish),
         "tool_input_failed": failed,
     } }));
     Some(value)
+}
+
+/// An SSE chunk as a list of its frames, each given by its `event:` line
+/// (or `(no event)`), then `{"unended": text}` for any text after the last
+/// blank line. The frames' data is compared elsewhere.
+fn sse_chunk(chunk: &str) -> Value {
+    let mut frames = Vec::new();
+    let mut rest = chunk;
+    while let Some((frame, after)) = rest.split_once("\n\n") {
+        let event = frame.lines().find(|line| line.starts_with("event:"));
+        frames.push(event.unwrap_or("(no event)").into());
+        rest = after;
+    }
+    if !rest.is_empty() {
+        frames.push(json!({ "unended": rest }));
+    }
+    Value::Array(frames)
 }
 
 /// Splits SSE text into `{"event": …, "data": …}` frames. Anything that isn't

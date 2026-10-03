@@ -27,8 +27,9 @@
 // The registry/* entries run sdk/translator's default registry, which holds
 // the translators of the packages imported here, for the pair of formats in
 // "options" (see registryOptions). registry/response writes a JSON report of
-// the chunks TranslateStream returned for each event; the others write what
-// the registry returned.
+// the chunks TranslateStream returned for each event, and
+// registry/response-non-stream one of what TranslateNonStream returned;
+// registry/request writes the translated request.
 //
 // The signature/* entries run upstream's reasoning-signature package and write
 // a JSON report of what it returned. "options", a JSON object, holds inputs
@@ -280,13 +281,28 @@ func nonEmpty(chunks [][]byte) []string {
 }
 
 // registry/response-non-stream: TranslateNonStream on the final event, with a
-// parameter, as upstream's executors call it.
+// parameter, as upstream's executors call it. It writes {"output": text}, or
+// {"output": null} for nil, which upstream's executors read as a failure. A
+// case with no events passes an empty body, not nil, since executors always
+// have one.
 func registryResponseNonStream(in input) []byte {
 	var options registryOptions
 	decodeOptions(in, &options)
 	from, to := options.formats()
+	body := finalEvent(in)
+	if body == nil {
+		body = []byte{}
+	}
 	var param any
-	return sdktranslator.TranslateNonStream(context.Background(), from, to, in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), &param)
+	out := sdktranslator.TranslateNonStream(context.Background(), from, to, in.Model, []byte(in.Request), translatedRequest(in), body, &param)
+	var report struct {
+		Output *string `json:"output"`
+	}
+	if out != nil {
+		text := string(out)
+		report.Output = &text
+	}
+	return marshal(report)
 }
 
 // registry/lookup: which translators the registry has for the pair, and

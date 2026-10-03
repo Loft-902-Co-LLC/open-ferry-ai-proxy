@@ -25,7 +25,10 @@
 //!
 //! Deviations from upstream:
 //! - Request bodies are parsed JSON. Response chunks and bodies are bytes, as
-//!   upstream's are.
+//!   upstream's are. So with no translator, a `model` that is an object or
+//!   array is compared with the model as compact JSON, where upstream
+//!   compares the text as the client wrote it: for the model `{}`, upstream
+//!   replaces `{ }` with the string, and we leave it.
 //! - A response stream is an object, [`ResponseStream`], made once per
 //!   response. Upstream passes the same `*any` to every call, which the
 //!   translator fills on the first one; its executors then read a failed

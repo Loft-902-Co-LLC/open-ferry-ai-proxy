@@ -122,6 +122,14 @@ fn fallback_sets_model_as_sjson_does() {
     assert_eq!(translate(json!("s")), json!({"model": "m"}));
     assert_eq!(translate(Value::Null), json!({"model": "m"}));
     assert_eq!(translate(json!([1])), json!([1]));
+    // An object or array model reads as compact JSON. Upstream reads the text
+    // as the client wrote it, so `{ }` would be replaced there.
+    for model in [json!({}), json!([1])] {
+        let name = model.to_string();
+        let body = json!({ "model": model });
+        let got = registry.translate_request(&"a".into(), &"b".into(), &name, body.clone(), false);
+        assert_eq!(got, body);
+    }
 }
 
 #[test]

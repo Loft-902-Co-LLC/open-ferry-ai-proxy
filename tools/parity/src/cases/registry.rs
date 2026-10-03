@@ -100,6 +100,14 @@ pub fn requests() -> Vec<Case> {
             cases.push(through(case.clone(), from, to, stream()));
         }
     }
+    // An object model named as its compact JSON. Upstream compares the text as
+    // written, so it replaces the spaced one.
+    let compact = Case::new("compact-object-model", "{}", r#"{"model":{}}"#);
+    let spaced = Case::new("spaced-object-model", "{}", r#"{"model":{ }}"#)
+        .known_difference("an object model is compared as compact JSON; gjson reads its text");
+    for case in [compact, spaced] {
+        cases.push(through(case, "claude", "gemini", stream()));
+    }
 
     // Summary settings carried from the client's format to the provider's.
     let summaries = [
@@ -453,6 +461,18 @@ pub fn finals() -> Vec<Case> {
         cases.push(through(case.clone(), "codex", "gemini", json!({})));
         cases.push(through(case, "codex", "claude", json!({})));
     }
+    // An apply_patch call whose input isn't a patch: the translator fails, and
+    // the registry returns nothing.
+    let body = [
+        r#"data: {"type":"message_start","message":{"id":"m"}}"#,
+        r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"c","name":"apply_patch","input":{}}}"#,
+        r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}"#,
+        r#"data: {"type":"message_stop"}"#,
+    ]
+    .join("\n");
+    let request = r#"{"tools":[{"type":"custom","name":"apply_patch"}]}"#;
+    let case = Case::response("apply-patch-failed", request, vec![body]);
+    cases.push(through(case, "claude", "openai-response", json!({})));
     cases
 }
 
