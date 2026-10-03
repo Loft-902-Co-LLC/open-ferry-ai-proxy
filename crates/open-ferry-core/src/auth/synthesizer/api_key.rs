@@ -8,8 +8,9 @@
 //! Records for the API keys in the config's `claude-api-key` and
 //! `codex-api-key` lists.
 //!
-//! The config module parses those lists; it hands each entry here as an
-//! [`ApiKeyEntry`], and [`api_key_auth`] builds its record:
+//! The config module parses those lists into [`CodexKey`] and [`ClaudeKey`]
+//! entries; each converts into an [`ApiKeyEntry`], and [`api_key_auth`]
+//! builds its record:
 //!
 //! - The ID is `<provider>:apikey:<hash>`, from a hash of the key, base URL,
 //!   proxy URL, prefix and headers, so it survives reloads without showing
@@ -50,6 +51,8 @@ use super::{
     StableIdGenerator, SynthesisContext, SynthesisError, add_config_headers_to_attrs,
     apply_auth_excluded_models_meta, format_sorted_headers, sha256_hex,
 };
+use crate::config::{ClaudeKey, CodexKey};
+pub use crate::config::{RequestScopedErrorRule, ThinkingSupport};
 
 /// Which config list an API key comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -145,34 +148,70 @@ pub struct ApiKeyModel {
     pub thinking: Option<ThinkingSupport>,
 }
 
-/// A model's thinking limits (upstream's `registry.ThinkingSupport`).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ThinkingSupport {
-    /// The smallest thinking budget.
-    pub min: i64,
-    /// The largest thinking budget.
-    pub max: i64,
-    /// Whether a budget of 0 turns thinking off.
-    pub zero_allowed: bool,
-    /// Whether a budget of -1 lets the model choose.
-    pub dynamic_allowed: bool,
-    /// Named effort levels, used instead of budgets when set.
-    pub levels: Vec<String>,
+impl From<&ClaudeKey> for ApiKeyEntry {
+    fn from(key: &ClaudeKey) -> Self {
+        Self {
+            api_key: key.api_key.clone(),
+            base_url: key.base_url.clone(),
+            proxy_url: key.proxy_url.clone(),
+            prefix: key.prefix.clone(),
+            priority: key.priority,
+            weight: key.weight,
+            headers: key.headers.clone(),
+            models: key
+                .models
+                .iter()
+                .map(|model| ApiKeyModel {
+                    name: model.name.clone(),
+                    alias: model.alias.clone(),
+                    display_name: model.display_name.clone(),
+                    force_mapping: model.force_mapping,
+                    is_compat: model.is_compat,
+                    thinking: model.thinking.clone(),
+                })
+                .collect(),
+            excluded_models: key.excluded_models.clone(),
+            disable_cooling: key.disable_cooling,
+            request_retry: key.request_retry,
+            request_scoped_errors: key.request_scoped_errors.clone(),
+            rebuild_mid_system_message: key.rebuild_mid_system_message,
+            websockets: false,
+            alpha_search: false,
+        }
+    }
 }
 
-/// How to treat an upstream error that concerns one request only
-/// (upstream's `RequestScopedErrorRule`).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct RequestScopedErrorRule {
-    /// The HTTP status to match; 0 matches any.
-    pub status: i64,
-    /// Substrings of the error body to match.
-    pub matches: Vec<String>,
-    /// Regular expressions to match against the error body.
-    pub match_regexr: Vec<String>,
-    /// What to do: `stop`, `stop-and-cooldown`, `continue` or
-    /// `continue-and-cooldown`.
-    pub action: String,
+impl From<&CodexKey> for ApiKeyEntry {
+    fn from(key: &CodexKey) -> Self {
+        Self {
+            api_key: key.api_key.clone(),
+            base_url: key.base_url.clone(),
+            proxy_url: key.proxy_url.clone(),
+            prefix: key.prefix.clone(),
+            priority: key.priority,
+            weight: key.weight,
+            headers: key.headers.clone(),
+            models: key
+                .models
+                .iter()
+                .map(|model| ApiKeyModel {
+                    name: model.name.clone(),
+                    alias: model.alias.clone(),
+                    display_name: model.display_name.clone(),
+                    force_mapping: model.force_mapping,
+                    is_compat: model.is_compat,
+                    thinking: model.thinking.clone(),
+                })
+                .collect(),
+            excluded_models: key.excluded_models.clone(),
+            disable_cooling: key.disable_cooling,
+            request_retry: key.request_retry,
+            request_scoped_errors: key.request_scoped_errors.clone(),
+            rebuild_mid_system_message: false,
+            websockets: key.websockets,
+            alpha_search: key.alpha_search,
+        }
+    }
 }
 
 impl RequestScopedErrorRule {
@@ -790,5 +829,22 @@ mod tests {
         let text = format!("{entry:?}");
         assert!(!text.contains("sk-hidden"), "{text}");
         assert!(!text.contains("hidden-value"), "{text}");
+    }
+
+    #[test]
+    fn entries_come_from_the_config() {
+        let config = crate::config::Config::parse(concat!(
+            "claude-api-key:\n  - api-key: c\n    rebuild-mid-system-message: true\n",
+            "    models:\n      - name: claude-opus\n        alias: opus\n",
+            "codex-api-key:\n  - api-key: k\n    base-url: https://example.test\n    websockets: true\n    priority: 2\n",
+        ))
+        .unwrap();
+        let claude = ApiKeyEntry::from(&config.claude_api_key[0]);
+        assert_eq!(claude.api_key, "c");
+        assert!(claude.rebuild_mid_system_message && !claude.websockets);
+        assert_eq!(claude.models[0].alias, "opus");
+        let codex = ApiKeyEntry::from(&config.codex_api_key[0]);
+        assert!(codex.websockets && !codex.rebuild_mid_system_message);
+        assert_eq!((codex.api_key.as_str(), codex.priority), ("k", 2));
     }
 }

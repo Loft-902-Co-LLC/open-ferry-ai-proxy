@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI sdk/cliproxy/service_models.go and
 // registerResolvedModelsForAuth in sdk/cliproxy/service_executors.go,
-// sdk/cliproxy/auth/classification.go and the alias helpers in
+// the alias helpers in
 // sdk/cliproxy/auth/oauth_model_alias.go, ResolveOAuthModelSetting in
 // internal/config/config_types.go, SanitizeOAuthModelAlias in
 // internal/config/config_normalization.go, internal/modelconfig/model_info.go,
@@ -59,25 +59,9 @@ use serde_json::Value;
 use super::definitions::{CodexPlan, StaticCatalog};
 use super::{ModelRegistry, equal_fold, json};
 use crate::auth::Auth;
+use crate::auth::classification::{AUTH_KIND_API_KEY, AuthKind, AuthSource};
+use crate::config::{Config, OAuthModelAlias, OAuthModelSetting};
 use crate::models::{ModelInfo, ThinkingSupport};
-
-/// The kind of a credential that is an API key.
-pub const AUTH_KIND_API_KEY: &str = "apikey";
-/// The kind of a credential that is an OAuth account.
-pub const AUTH_KIND_OAUTH: &str = "oauth";
-
-/// A credential from the config file.
-pub const AUTH_SOURCE_CONFIG: &str = "config";
-/// A credential from a file.
-pub const AUTH_SOURCE_FILE: &str = "file";
-/// A credential from a git store.
-pub const AUTH_SOURCE_GIT: &str = "git";
-/// A credential that lives only in memory.
-pub const AUTH_SOURCE_MEMORY: &str = "memory";
-/// A credential from an object store.
-pub const AUTH_SOURCE_OBJECT_STORE: &str = "objectstore";
-/// A credential from a Postgres store.
-pub const AUTH_SOURCE_POSTGRES: &str = "postgres";
 
 /// The plan a Codex account has when its token doesn't say.
 const DEFAULT_CODEX_PLAN_TYPE: &str = "free";
@@ -180,6 +164,100 @@ pub struct ConfiguredModel {
     pub support_configuration_update: bool,
 }
 
+impl From<&Config> for RegistrationRules {
+    fn from(config: &Config) -> Self {
+        fn alias(alias: &OAuthModelAlias) -> ModelAlias {
+            ModelAlias {
+                name: alias.name.clone(),
+                alias: alias.alias.clone(),
+                fork: alias.fork,
+                display_name: alias.display_name.clone(),
+            }
+        }
+        fn setting(setting: &OAuthModelSetting) -> ModelSetting {
+            ModelSetting {
+                name: setting.name.clone(),
+                alias: setting.alias.clone(),
+                max_context_length: context_length(setting.max_context_length),
+            }
+        }
+        fn by_channel<T, U>(
+            map: &BTreeMap<String, Vec<T>>,
+            convert: fn(&T) -> U,
+        ) -> BTreeMap<String, Vec<U>> {
+            map.iter()
+                .map(|(channel, entries)| (channel.clone(), entries.iter().map(convert).collect()))
+                .collect()
+        }
+        Self {
+            force_model_prefix: config.force_model_prefix,
+            oauth_excluded_models: config.oauth_excluded_models.clone(),
+            oauth_model_alias: by_channel(&config.oauth_model_alias, alias),
+            oauth_settings: by_channel(&config.oauth_settings, setting),
+            claude_keys: config
+                .claude_api_key
+                .iter()
+                .map(|key| ApiKeyEntry {
+                    api_key: key.api_key.clone(),
+                    base_url: key.base_url.clone(),
+                    models: key
+                        .models
+                        .iter()
+                        .map(|model| ConfiguredModel {
+                            name: model.name.clone(),
+                            alias: model.alias.clone(),
+                            display_name: model.display_name.clone(),
+                            max_context_length: context_length(model.max_context_length),
+                            is_compat: model.is_compat,
+                            thinking: model.thinking.as_ref().map(thinking),
+                            support_configuration_update: false,
+                        })
+                        .collect(),
+                    excluded_models: key.excluded_models.clone(),
+                })
+                .collect(),
+            codex_keys: config
+                .codex_api_key
+                .iter()
+                .map(|key| ApiKeyEntry {
+                    api_key: key.api_key.clone(),
+                    base_url: key.base_url.clone(),
+                    models: key
+                        .models
+                        .iter()
+                        .map(|model| ConfiguredModel {
+                            name: model.name.clone(),
+                            alias: model.alias.clone(),
+                            display_name: model.display_name.clone(),
+                            max_context_length: context_length(model.max_context_length),
+                            is_compat: model.is_compat,
+                            thinking: model.thinking.as_ref().map(thinking),
+                            support_configuration_update: model.support_configuration_update,
+                        })
+                        .collect(),
+                    excluded_models: key.excluded_models.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// A configured context window: none when not positive, as upstream only
+/// applies one above 0.
+fn context_length(length: i64) -> u64 {
+    u64::try_from(length).unwrap_or(0)
+}
+
+fn thinking(support: &crate::config::ThinkingSupport) -> ThinkingSupport {
+    ThinkingSupport {
+        min: support.min,
+        max: support.max,
+        zero_allowed: support.zero_allowed,
+        dynamic_allowed: support.dynamic_allowed,
+        levels: support.levels.clone(),
+    }
+}
+
 /// What to do with a credential's registration.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AuthModels {
@@ -227,7 +305,7 @@ pub fn auth_models_with(
     if auth.disabled {
         return AuthModels::Unregister;
     }
-    let kind = auth_kind(auth);
+    let kind = auth.auth_kind().map_or("", AuthKind::as_str);
     let provider = go::to_lower(auth.provider.trim());
     let mut excluded = oauth_excluded_models(rules, &provider, kind);
     if let Some(list) = credential_excluded_models(auth, rules, &provider) {
@@ -287,98 +365,6 @@ pub fn auth_models_with(
         return AuthModels::Unregister;
     }
     AuthModels::Register { provider, models }
-}
-
-/// The credential's kind, [`AUTH_KIND_API_KEY`] or [`AUTH_KIND_OAUTH`], or
-/// empty when it can't be told (upstream's `Auth.AuthKind`). An `auth_kind`
-/// attribute or metadata value decides; failing that, an `api_key` attribute
-/// makes an API key, and OAuth token fields an OAuth account.
-pub fn auth_kind(auth: &Auth) -> &'static str {
-    let kind = normalize_auth_kind(attribute(auth, "auth_kind"));
-    if !kind.is_empty() {
-        return kind;
-    }
-    let kind = normalize_auth_kind(metadata_string(auth, "auth_kind"));
-    if !kind.is_empty() {
-        return kind;
-    }
-    if !attribute(auth, "api_key").is_empty() {
-        return AUTH_KIND_API_KEY;
-    }
-    if has_oauth_metadata(auth) {
-        return AUTH_KIND_OAUTH;
-    }
-    ""
-}
-
-/// Where the credential came from, such as [`AUTH_SOURCE_CONFIG`], or empty
-/// when it can't be told (upstream's `Auth.AuthSourceKind`).
-pub fn auth_source_kind(auth: &Auth) -> &'static str {
-    if equal_fold(attribute(auth, "runtime_only"), "true") {
-        return AUTH_SOURCE_MEMORY;
-    }
-    let backend = normalize_auth_source_kind(attribute(auth, "source_backend"));
-    if !backend.is_empty() {
-        return backend;
-    }
-    let source = attribute(auth, "source");
-    if !source.is_empty() {
-        if go::to_lower(source).starts_with("config:") {
-            return AUTH_SOURCE_CONFIG;
-        }
-        let source = normalize_auth_source_kind(source);
-        return if source.is_empty() {
-            AUTH_SOURCE_FILE
-        } else {
-            source
-        };
-    }
-    if !attribute(auth, "path").is_empty() || !auth.file_name.trim().is_empty() {
-        return AUTH_SOURCE_FILE;
-    }
-    ""
-}
-
-fn normalize_auth_kind(kind: &str) -> &'static str {
-    match go::to_lower(kind.trim()).as_str() {
-        "apikey" | "api_key" | "api-key" => AUTH_KIND_API_KEY,
-        "oauth" | "oauth2" => AUTH_KIND_OAUTH,
-        _ => "",
-    }
-}
-
-fn normalize_auth_source_kind(source: &str) -> &'static str {
-    match go::to_lower(source.trim()).as_str() {
-        "config" => AUTH_SOURCE_CONFIG,
-        "file" | "filesystem" => AUTH_SOURCE_FILE,
-        "git" => AUTH_SOURCE_GIT,
-        "memory" | "runtime" | "runtime_only" => AUTH_SOURCE_MEMORY,
-        "objectstore" | "object-store" => AUTH_SOURCE_OBJECT_STORE,
-        "postgres" | "postgresql" | "database" | "db" => AUTH_SOURCE_POSTGRES,
-        _ => "",
-    }
-}
-
-fn has_oauth_metadata(auth: &Auth) -> bool {
-    if auth.metadata.is_empty() {
-        return false;
-    }
-    let token_fields = [
-        "access_token",
-        "refresh_token",
-        "id_token",
-        "email",
-        "token_type",
-        "expires_at",
-        "expired",
-    ];
-    if token_fields
-        .iter()
-        .any(|key| !metadata_string(auth, key).is_empty())
-    {
-        return true;
-    }
-    matches!(auth.metadata.get("token"), Some(Value::Object(token)) if !token.is_empty())
 }
 
 /// The attribute at `key`, trimmed, or empty.
@@ -450,7 +436,7 @@ fn credential_excluded_models(
 /// The entry `entries[i]` for a credential from the config with
 /// `config_index` i (upstream's `configEntryForAuthIndex`).
 fn config_entry_for_auth_index<'a, T>(auth: &Auth, entries: &'a [T]) -> Option<&'a T> {
-    if auth_source_kind(auth) != AUTH_SOURCE_CONFIG {
+    if auth.auth_source_kind() != Some(AuthSource::Config) {
         return None;
     }
     let index: i64 = attribute(auth, "config_index").parse().ok()?;

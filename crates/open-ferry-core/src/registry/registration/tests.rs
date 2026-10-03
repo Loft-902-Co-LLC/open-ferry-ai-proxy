@@ -1041,111 +1041,6 @@ fn claude_api_keys_use_their_entry() {
 }
 
 #[test]
-fn auth_kind_classification() {
-    let with_metadata = |metadata: Value| Auth {
-        metadata: object(metadata),
-        ..Auth::default()
-    };
-    let cases = [
-        (
-            "explicit api key attribute",
-            auth("", "", &[("auth_kind", "api_key")]),
-            AUTH_KIND_API_KEY,
-        ),
-        (
-            "explicit oauth attribute wins over api key fallback",
-            auth("", "", &[("auth_kind", "oauth"), ("api_key", "k")]),
-            AUTH_KIND_OAUTH,
-        ),
-        (
-            "explicit oauth metadata",
-            with_metadata(json!({"auth_kind": "oauth"})),
-            AUTH_KIND_OAUTH,
-        ),
-        (
-            "legacy api key attribute",
-            auth("", "", &[("api_key", "k")]),
-            AUTH_KIND_API_KEY,
-        ),
-        (
-            "legacy oauth metadata",
-            with_metadata(json!({"access_token": "token"})),
-            AUTH_KIND_OAUTH,
-        ),
-        (
-            "unknown metadata shape",
-            with_metadata(json!({"type": "test"})),
-            "",
-        ),
-    ];
-    for (name, auth, want) in cases {
-        assert_eq!(auth_kind(&auth), want, "{name}");
-    }
-}
-
-#[test]
-fn auth_source_kind_classification() {
-    let cases = [
-        (
-            "runtime only memory",
-            auth(
-                "",
-                "",
-                &[("runtime_only", "true"), ("source_backend", "postgres")],
-            ),
-            AUTH_SOURCE_MEMORY,
-        ),
-        (
-            "backend postgres",
-            auth(
-                "",
-                "",
-                &[("source_backend", "postgresql"), ("path", "/tmp/auth.json")],
-            ),
-            AUTH_SOURCE_POSTGRES,
-        ),
-        (
-            "backend object store",
-            auth(
-                "",
-                "",
-                &[
-                    ("source_backend", "object-store"),
-                    ("path", "/tmp/auth.json"),
-                ],
-            ),
-            AUTH_SOURCE_OBJECT_STORE,
-        ),
-        (
-            "config source",
-            auth("", "", &[("source", "config:codex[abc]")]),
-            AUTH_SOURCE_CONFIG,
-        ),
-        (
-            "path source",
-            auth("", "", &[("source", "/tmp/auth.json")]),
-            AUTH_SOURCE_FILE,
-        ),
-        (
-            "path attribute",
-            auth("", "", &[("path", "/tmp/auth.json")]),
-            AUTH_SOURCE_FILE,
-        ),
-        (
-            "filename fallback",
-            Auth {
-                file_name: "codex.json".to_owned(),
-                ..Auth::default()
-            },
-            AUTH_SOURCE_FILE,
-        ),
-    ];
-    for (name, auth, want) in cases {
-        assert_eq!(auth_source_kind(&auth), want, "{name}");
-    }
-}
-
-#[test]
 fn resolve_model_info_uses_suffix_free_static_capabilities() {
     assert!(resolve_thinking("claude-opus-4-6(high)", None).is_some());
 }
@@ -1497,4 +1392,44 @@ fn registration_applies_aliases_settings_then_prefixes() {
 fn api_key_entries_hide_the_key_when_debugged() {
     let entry = api_key_entry("sk-fictional-test-key", Vec::new());
     assert!(!format!("{entry:?}").contains("sk-fictional-test-key"));
+}
+
+#[test]
+fn rules_come_from_the_config() {
+    let config = Config::parse(concat!(
+        "force-model-prefix: true\n",
+        "oauth-excluded-models:\n  codex: [gpt-5-mini]\n",
+        "oauth-model-alias:\n  claude:\n    - name: claude-opus\n      alias: opus\n      fork: true\n",
+        "oauth-settings:\n  claude:\n    - name: claude-opus\n      max-context-length: -5\n",
+        "codex-api-key:\n  - api-key: k\n    base-url: https://example.test\n",
+        "    excluded-models: [x]\n    models:\n      - name: gpt-5\n        alias: g5\n",
+        "        max-context-length: 1000\n        support-configuration-update: true\n",
+    ))
+    .unwrap();
+    let rules = RegistrationRules::from(&config);
+    assert!(rules.force_model_prefix);
+    assert_eq!(rules.oauth_excluded_models["codex"], ["gpt-5-mini"]);
+    let alias = &rules.oauth_model_alias["claude"][0];
+    assert_eq!(
+        (alias.name.as_str(), alias.alias.as_str(), alias.fork),
+        ("claude-opus", "opus", true)
+    );
+    assert_eq!(rules.oauth_settings["claude"][0].max_context_length, 0);
+    assert!(rules.claude_keys.is_empty());
+    let key = &rules.codex_keys[0];
+    assert_eq!(
+        (key.api_key.as_str(), key.base_url.as_str()),
+        ("k", "https://example.test")
+    );
+    assert_eq!(key.excluded_models, ["x"]);
+    let model = &key.models[0];
+    assert_eq!(
+        (
+            model.name.as_str(),
+            model.alias.as_str(),
+            model.max_context_length
+        ),
+        ("gpt-5", "g5", 1000)
+    );
+    assert!(model.support_configuration_update);
 }
