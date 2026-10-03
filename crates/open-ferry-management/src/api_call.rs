@@ -4,12 +4,14 @@
 // (v8.0.10, MIT), with what of Go's net/http client it relies on
 // (client.go: Client.do, redirectBehavior, makeHeadersCopier,
 // shouldCopyHeaderOnRedirect, isDomainOrSubdomain, refererForURL, send's
-// basic auth; request.go: validMethod, Request.write's Host handling,
-// removeZone; response.go: fixPragmaCacheControl; transfer.go:
-// shouldSendContentLength, shouldClose, parseTransferEncoding, fixLength,
-// fixTrailer; transport.go: the gzip request and decoding; the HTTP/2
-// client's handling of Trailer; httpguts: headerValueContainsToken;
-// textproto: TrimString) (go1.27, BSD-3-Clause).
+// basic auth; request.go: validMethod, Request.write's Host handling and
+// request target, removeZone; response.go: fixPragmaCacheControl,
+// isProtocolSwitchResponse; transfer.go: shouldSendContentLength,
+// shouldClose, parseTransferEncoding, fixLength, parseContentLength,
+// fixTrailer, readTransfer's body framing; transport.go: the gzip request
+// and decoding, the body of a protocol switch; the HTTP/2 client's handling
+// of Trailer; httpguts: headerValueContainsToken; textproto: TrimString)
+// (go1.27, BSD-3-Clause).
 // https://github.com/router-for-me/CLIProxyAPI
 // https://github.com/golang/go
 
@@ -40,7 +42,9 @@
 //! The answer is 200 with the response's `status_code`, its `header` (each
 //! name as Go writes it, with its values) and its `body` as text, whatever
 //! the response's status; or 502 when the request fails or its body can't
-//! be read.
+//! be read. The body of a switch of protocols (a 101 with an `Upgrade` and
+//! a `Connection: upgrade`) is all the connection sends until it closes;
+//! that of a 2xx answer to `CONNECT` is read as any other's.
 //!
 //! Deviations from upstream:
 //! - Credentials are never refreshed or minted here: an Antigravity, Meta
@@ -63,12 +67,25 @@
 //! - A `Host` header with characters outside ASCII gives a 502; upstream
 //!   converts it to Punycode. A host outside ASCII is never treated as the
 //!   same domain on a redirect, so credentials are dropped.
+//! - Through a forwarding proxy (an HTTP or HTTPS proxy, for an `http`
+//!   URL), the request line names the `Host` header's host, as upstream's
+//!   does, but as the `url` crate reads it (lowercased, without a default
+//!   port, an all-numeric host as an IPv4 address); a host it can't read
+//!   gives a 502.
+//! - A `CONNECT` request names a host and port alone: the URL's, or through
+//!   a forwarding proxy the `Host` header's. Upstream names the URL's path
+//!   when it has one, else the `Host` header's host or the URL's, and
+//!   through a forwarding proxy the whole URL.
 //! - The URL sent, a redirect's target and the `Referer` on a redirect are
 //!   the `url` crate's reading of the URL, which may differ from Go's in
 //!   normalization (a default port, an empty path); a URL Go accepts and
 //!   the `url` crate doesn't, such as one with an IPv6 zone, gives a 502.
 //! - `Expect: 100-continue` is sent but not waited on; the body goes at
 //!   once.
+//! - A 2xx answer to `CONNECT` with a chunked body gives a 502; upstream
+//!   reads the body.
+//! - An HTTP/1.0 response with a `Transfer-Encoding` gives a 502, as this
+//!   port's HTTP client rejects it; upstream ignores the header.
 
 use std::collections::BTreeMap;
 use std::io::Read as _;
@@ -89,6 +106,7 @@ use open_ferry_core::auth::Auth;
 use open_ferry_translate::go::{json_string, json_valid};
 use serde::de::MapAccess;
 use serde_json::{Map, Value};
+use tokio::io::AsyncReadExt as _;
 use tokio::time::{Instant, timeout_at};
 
 use crate::auth_files::run_blocking;
@@ -721,6 +739,10 @@ async fn send(
 
     let mut headers = HeaderMap::new();
     let http1_only = !hop.host.is_empty();
+    let forwards = route.forwards(&hop.go.scheme);
+    // The host the request line names through a forwarding proxy, when the
+    // caller set one.
+    let mut target_host = None;
     if http1_only {
         let host = hop.host.as_bytes();
         if !host.is_ascii() {
@@ -728,12 +750,15 @@ async fn send(
         }
         let host = if valid_host_header(host) {
             remove_zone(host)
-        } else if route.forwards(&hop.go.scheme) {
+        } else if forwards {
             return Err(CallError::request("http: invalid Host header"));
         } else {
             // Go sends an empty Host rather than an invalid one.
             Vec::new()
         };
+        if forwards {
+            target_host = Some(String::from_utf8_lossy(&host).into_owned());
+        }
         let host = HeaderValue::from_bytes(&host)
             .map_err(|_| CallError::request("invalid header field value"))?;
         headers.insert(HOST, host);
@@ -770,6 +795,17 @@ async fn send(
     }
     let _ = url.set_username("");
     let _ = url.set_password(None);
+    // Through a forwarding proxy, Go's request line is the URL with the
+    // Host's host in it; the proxy is reached whatever the URL names.
+    if let Some(host) = target_host {
+        let target = format!(
+            "{}://{host}{}",
+            url.scheme(),
+            &url[url::Position::BeforePath..url::Position::AfterQuery]
+        );
+        url = url::Url::parse(&target)
+            .map_err(|_| CallError::request("Host unreadable as a URL's host"))?;
+    }
 
     let client = state
         .clients()
@@ -843,6 +879,12 @@ async fn read(
             }
             *lengths = vec![first];
         }
+        // Go's parseContentLength, which hyper skips where it reads no body.
+        if let Some(lengths) = headers.get("Content-Length")
+            && content_length(&lengths[0]).is_none()
+        {
+            return Err(CallError::request("bad Content-Length"));
+        }
         if chunked && !no_body {
             headers.remove("Content-Length");
         }
@@ -868,12 +910,7 @@ async fn read(
     let declared_empty = headers
         .get("Content-Length")
         .and_then(|lengths| lengths.first())
-        .and_then(|length| {
-            std::str::from_utf8(length.trim_ascii())
-                .ok()?
-                .parse::<u64>()
-                .ok()
-        })
+        .and_then(|length| content_length(length))
         == Some(0);
     let has_body = !no_body && (chunked || !declared_empty);
     let gunzip = requested_gzip
@@ -887,13 +924,20 @@ async fn read(
         headers.remove("Content-Length");
     }
 
-    let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|_| CallError::Read)? {
-        if body.len() + chunk.len() > MAX_RESPONSE_BODY {
-            return Err(CallError::Read);
+    let mut body = match body_reader(status, method, &headers, chunked)? {
+        BodyReader::Hyper => {
+            let mut body = Vec::new();
+            while let Some(chunk) = response.chunk().await.map_err(|_| CallError::Read)? {
+                if body.len() + chunk.len() > MAX_RESPONSE_BODY {
+                    return Err(CallError::Read);
+                }
+                body.extend_from_slice(&chunk);
+            }
+            body
         }
-        body.extend_from_slice(&chunk);
-    }
+        BodyReader::ToClose => read_handed_over(response, None).await?,
+        BodyReader::Length(length) => read_handed_over(response, Some(length)).await?,
+    };
     if gunzip && !body.is_empty() {
         body = run_blocking(move || gunzip_capped(&body)).await?;
     }
@@ -902,6 +946,88 @@ async fn read(
         headers,
         body,
     })
+}
+
+/// A `Content-Length` as Go reads it (`parseContentLength`): digits, spaces
+/// aside, for a number below 2^63.
+fn content_length(value: &[u8]) -> Option<u64> {
+    let digits = value.trim_ascii();
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    std::str::from_utf8(digits)
+        .ok()?
+        .parse::<u64>()
+        .ok()
+        .filter(|&length| length < 1 << 63)
+}
+
+/// Who reads a response's body, and how far.
+enum BodyReader {
+    /// Hyper, as the response frames it (or there is none).
+    Hyper,
+    /// This module, from the connection hyper hands over, to its close.
+    ToClose,
+    /// This module, from the connection hyper hands over, this many bytes.
+    Length(u64),
+}
+
+/// Who reads the body. Hyper hands the connection over rather than read a
+/// body after any 101 and after a 2xx answer to `CONNECT`. Go reads the
+/// body of a switch of protocols (a 101 with an `Upgrade` and a
+/// `Connection: upgrade`) to the connection's close, finds none in another
+/// 101, and reads a 2xx answer to `CONNECT` as any response.
+fn body_reader(
+    status: u16,
+    method: &Method,
+    headers: &BTreeMap<String, Vec<Vec<u8>>>,
+    chunked: bool,
+) -> Result<BodyReader, CallError> {
+    if status == 101 {
+        let upgrade = headers
+            .get("Upgrade")
+            .and_then(|values| values.first())
+            .is_some_and(|value| !value.is_empty());
+        let connection = headers
+            .get("Connection")
+            .is_some_and(|values| values.iter().any(|value| contains_token(value, b"upgrade")));
+        return Ok(if upgrade && connection {
+            BodyReader::ToClose
+        } else {
+            BodyReader::Hyper
+        });
+    }
+    if *method != Method::CONNECT || !(200..300).contains(&status) {
+        return Ok(BodyReader::Hyper);
+    }
+    if chunked {
+        return Err(CallError::request("chunked body after CONNECT"));
+    }
+    let length = headers
+        .get("Content-Length")
+        .and_then(|lengths| lengths.first())
+        .and_then(|length| content_length(length));
+    Ok(length.map_or(BodyReader::ToClose, BodyReader::Length))
+}
+
+/// Reads the body from the connection hyper hands over: `length` bytes, or
+/// all until it closes, at most [`MAX_RESPONSE_BODY`].
+async fn read_handed_over(
+    response: reqwest::Response,
+    length: Option<u64>,
+) -> Result<Vec<u8>, CallError> {
+    let connection = response.upgrade().await.map_err(|_| CallError::Read)?;
+    let cap = MAX_RESPONSE_BODY as u64 + 1;
+    let mut body = Vec::new();
+    connection
+        .take(length.map_or(cap, |length| length.min(cap)))
+        .read_to_end(&mut body)
+        .await
+        .map_err(|_| CallError::Read)?;
+    if body.len() > MAX_RESPONSE_BODY || length.is_some_and(|length| body.len() as u64 != length) {
+        return Err(CallError::Read);
+    }
+    Ok(body)
 }
 
 /// Whether `value`, a comma-separated list, holds `token`, ASCII case

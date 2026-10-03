@@ -8,10 +8,10 @@
 //! the credential.
 //!
 //! Claims are decoded as Go's `encoding/json` decodes them, which upstream
-//! relies on (see [`crate::go_json`]): keys match their field ignoring case,
-//! `null` leaves a field as it was, a key that repeats decodes into its
-//! field again, and a value of the wrong type fails the whole parse. The
-//! payload's base64 may hold line breaks, which Go skips.
+//! relies on (see the crate's `go_json` module): keys match their field
+//! ignoring case, `null` leaves a field as it was, a key that repeats
+//! decodes into its field again, and a value of the wrong type fails the
+//! whole parse. The payload's base64 may hold line breaks, which Go skips.
 //!
 //! Deviations from upstream:
 //! - Error texts after the prefixes upstream writes (`failed to decode JWT

@@ -585,3 +585,105 @@ async fn api_call_failures_never_show_the_token() {
         .await;
     answer.assert(StatusCode::BAD_GATEWAY, r#"{"error":"request failed"}"#);
 }
+
+#[tokio::test]
+async fn api_call_names_the_host_to_a_forwarding_proxy() {
+    let proxy = Upstream::answering(http_response("200 OK", &[], b"proxied")).await;
+    let api = Api::new();
+    let call = |host: &str| {
+        json!({
+            "method": "GET",
+            "url": "http://upstream.invalid/path?q=1#part",
+            "header": { "Host": host },
+            "proxy_url": proxy.url,
+        })
+    };
+
+    // Go's request line names the Host's host, its zone taken out, as the
+    // Host header does.
+    let cases = [
+        ("override.test:8080", "override.test:8080"),
+        ("[fe80::1%en0]:8080", "[fe80::1]:8080"),
+    ];
+    for (host, sent) in cases {
+        api.api_call(&call(host)).await.expect(StatusCode::OK);
+        let requests = proxy.requests();
+        let request = requests.last().unwrap();
+        assert_eq!(
+            head(request)[0],
+            format!("GET http://{sent}/path?q=1 HTTP/1.1")
+        );
+        assert_eq!(header(request, "host"), Some(sent));
+    }
+    // A Host Go finds invalid fails, as does one the url crate can't read.
+    for host in ["a b", "["] {
+        api.api_call(&call(host))
+            .await
+            .assert(StatusCode::BAD_GATEWAY, r#"{"error":"request failed"}"#);
+    }
+    assert_eq!(proxy.requests().len(), 2);
+}
+
+#[tokio::test]
+async fn api_call_reads_bodies_after_a_handover_as_go_does() {
+    let upstream = Upstream::start(|n, _| {
+        let response: &[u8] = match n {
+            0 => {
+                b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\n\
+                   Upgrade: websocket\r\n\r\nhello"
+            }
+            1 => b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\nhello",
+            2 => b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok and more",
+            3 => b"HTTP/1.1 200 Connection Established\r\n\r\nall of it",
+            4 => b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nok",
+            5 => b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\n\r\n",
+            _ => b"HTTP/1.1 204 No Content\r\nContent-Length: x\r\nConnection: close\r\n\r\n",
+        };
+        response.to_vec()
+    })
+    .await;
+    let api = Api::new();
+    let get = json!({ "method": "GET", "url": upstream.url });
+    let connect = json!({ "method": "CONNECT", "url": format!("{}/path", upstream.url) });
+
+    // A switch of protocols has all the connection sends until it closes;
+    // another 101 has no body.
+    api.api_call(&get).await.assert(
+        StatusCode::OK,
+        r#"{"status_code":101,"header":{"Connection":["Upgrade"],"Upgrade":["websocket"]},"body":"hello"}"#,
+    );
+    api.api_call(&get).await.assert(
+        StatusCode::OK,
+        r#"{"status_code":101,"header":{"Upgrade":["websocket"]},"body":""}"#,
+    );
+
+    // A 2xx answer to CONNECT has its length, or all until the close.
+    api.api_call(&connect).await.assert(
+        StatusCode::OK,
+        r#"{"status_code":200,"header":{"Content-Length":["2"]},"body":"ok"}"#,
+    );
+    api.api_call(&connect).await.assert(
+        StatusCode::OK,
+        r#"{"status_code":200,"header":{},"body":"all of it"}"#,
+    );
+    api.api_call(&connect).await.assert(
+        StatusCode::BAD_GATEWAY,
+        r#"{"error":"failed to read response"}"#,
+    );
+    // This port's deviation: a chunked one fails.
+    api.api_call(&connect)
+        .await
+        .assert(StatusCode::BAD_GATEWAY, r#"{"error":"request failed"}"#);
+
+    // Go refuses a Content-Length that isn't a number, body or not.
+    api.api_call(&get)
+        .await
+        .assert(StatusCode::BAD_GATEWAY, r#"{"error":"request failed"}"#);
+
+    let requests = upstream.requests();
+    let authority = upstream.url.trim_start_matches("http://");
+    assert_eq!(
+        head(&requests[2])[0],
+        format!("CONNECT {authority} HTTP/1.1")
+    );
+}
