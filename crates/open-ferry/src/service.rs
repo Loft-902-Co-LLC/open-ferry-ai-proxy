@@ -1869,6 +1869,55 @@ mod tests {
             assert_eq!((answer.status, answer.body.as_str()), (204, ""));
         }
 
+        /// The main server serves the OAuth callback pages to anyone, for
+        /// `GET` only, even without a management key set, ahead of the
+        /// proxy's client keys; the management API's callback route needs
+        /// a key set.
+        #[tokio::test]
+        async fn oauth_callback_pages_are_served_beside_the_proxy() {
+            let dir = tempfile::tempdir().unwrap();
+            let service = service(
+                dir.path(),
+                "api-keys: ['client-key']
+",
+            );
+            let (addr, _stop) = start(&service).await;
+            let page = concat!(
+                r#"<html><head><meta charset="utf-8"><title>Authentication successful</title>"#,
+                "<script>setTimeout(function(){window.close();},5000);</script></head>",
+                "<body><h1>Authentication successful!</h1><p>You can close this window.</p>",
+                "<p>This window will close automatically in 5 seconds.</p></body></html>",
+            );
+
+            for path in ["/anthropic/callback", "/codex/callback"] {
+                let query = format!("{path}?state=unknown-state&code=c");
+                let answer = fetch(addr, "GET", &query, &[]).await;
+                assert_eq!((answer.status, answer.body.as_str()), (200, page), "{path}");
+                assert_eq!(
+                    answer.header("content-type"),
+                    Some("text/html; charset=utf-8")
+                );
+                let answer = fetch(addr, "POST", path, &[]).await;
+                assert_eq!(
+                    (answer.status, answer.body.as_str()),
+                    (404, "404 page not found"),
+                    "POST {path}"
+                );
+                assert_eq!(fetch(addr, "HEAD", path, &[]).await.status, 404, "{path}");
+            }
+            for path in ["/antigravity/callback", "/devin/callback", "/callback"] {
+                let answer = fetch(addr, "GET", path, &[]).await;
+                assert_eq!(
+                    (answer.status, answer.body.as_str()),
+                    (404, "404 page not found"),
+                    "{path}"
+                );
+            }
+            let path = "/v0/management/oauth-callback?state=s&code=c";
+            let answer = fetch(addr, "GET", path, &[]).await;
+            assert_eq!((answer.status, answer.body.as_str()), (404, ""));
+        }
+
         #[tokio::test]
         async fn management_follows_config_reloads() {
             let dir = tempfile::tempdir().unwrap();
