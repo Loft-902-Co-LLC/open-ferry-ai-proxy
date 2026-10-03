@@ -24,6 +24,13 @@
 //!   that isn't JSON gives no session either.
 //! - `HeaderValueCaseInsensitive` and `HeaderValuesCaseInsensitive` aren't
 //!   exported: nothing else uses them here.
+//! - A `%` or `:` in the session or agent is percent-encoded in the scope,
+//!   so two different pairs never make the same scope. Upstream's scope for
+//!   session `s:agent:a` and agent `main` is also its scope for session `s`
+//!   and agent `a:agent:main`, so one could be given the other's replayed
+//!   reasoning and tool calls.
+
+use std::borrow::Cow;
 
 use http::HeaderMap;
 use serde::Deserialize;
@@ -72,13 +79,27 @@ pub(crate) fn agent_id(headers: &HeaderMap) -> String {
 }
 
 /// `claude:<session>:agent:<agent>`, if the request names a session
-/// (`ClaudeCodeExecutionScope`).
+/// (`ClaudeCodeExecutionScope`), with any `%` or `:` in the two escaped.
 pub(crate) fn execution_scope(payload: &[u8], headers: &HeaderMap) -> Option<String> {
     let session = session_id(payload, headers);
     if session.is_empty() {
         return None;
     }
-    Some(format!("claude:{session}:agent:{}", agent_id(headers)))
+    let agent = agent_id(headers);
+    Some(format!(
+        "claude:{}:agent:{}",
+        escape_scope_part(&session),
+        escape_scope_part(&agent)
+    ))
+}
+
+/// `part` with `%` and `:` percent-encoded.
+fn escape_scope_part(part: &str) -> Cow<'_, str> {
+    if part.contains(['%', ':']) {
+        Cow::Owned(part.replace('%', "%25").replace(':', "%3A"))
+    } else {
+        Cow::Borrowed(part)
+    }
 }
 
 /// The first of the header's values that isn't blank, trimmed, or `""`
@@ -206,6 +227,27 @@ mod tests {
         assert_eq!(child_a, "claude:session-agents:agent:agent-a");
         assert_eq!(child_b, "claude:session-agents:agent:agent-b");
         assert!(root != child_a && child_a != child_b && root != child_b);
+    }
+
+    // Not upstream's: a session and agent that would share a scope if they
+    // were joined as they are.
+    #[test]
+    fn execution_scope_escapes_its_parts() {
+        let first = headers(&[
+            (SESSION_HEADER, "scope:agent:child"),
+            (AGENT_HEADER, "main"),
+        ]);
+        let second = headers(&[
+            (SESSION_HEADER, "scope"),
+            (AGENT_HEADER, "child:agent:main"),
+        ]);
+        let first = execution_scope(&[], &first).unwrap();
+        let second = execution_scope(&[], &second).unwrap();
+        assert_eq!(first, "claude:scope%3Aagent%3Achild:agent:main");
+        assert_eq!(second, "claude:scope:agent:child%3Aagent%3Amain");
+        let percent = headers(&[(SESSION_HEADER, "s%3A"), (AGENT_HEADER, "a")]);
+        let colon = headers(&[(SESSION_HEADER, "s:"), (AGENT_HEADER, "a")]);
+        assert_ne!(execution_scope(&[], &percent), execution_scope(&[], &colon));
     }
 
     // Not upstream's: the legacy user ID, blank headers, and a user ID that

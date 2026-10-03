@@ -29,8 +29,9 @@
 //!   `GetCodexReasoningReplayItem` are only used by tests, so they are only
 //!   built for tests. `ClearCodexReasoningReplayCache` isn't ported: tests
 //!   that share the process's cache use sessions of their own instead.
-//! - Entries are keyed by a SHA-256 hash of the model and session, so a long
-//!   session key takes no more room than a short one.
+//! - Entries are keyed by a SHA-256 hash of the model and session, each with
+//!   its length, so a long session key takes no more room than a short one,
+//!   and a model or session holding a NUL can't stand for another pair.
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex, PoisonError};
@@ -246,8 +247,18 @@ fn cache_key(model: &str, session: &str) -> Option<Key> {
     if model.is_empty() || session.is_empty() {
         return None;
     }
-    let key = format!("codex-reasoning-replay\0{model}\0{session}");
-    Some(Sha256::digest(key.as_bytes()).into())
+    Some(hash_parts(&["codex-reasoning-replay", model, session]))
+}
+
+/// A SHA-256 hash of `parts`, each led by its length, so that no two lists
+/// of parts hash alike whatever they hold.
+fn hash_parts(parts: &[&str]) -> Key {
+    let mut hash = Sha256::new();
+    for part in parts {
+        hash.update((part.len() as u64).to_be_bytes());
+        hash.update(part.as_bytes());
+    }
+    hash.finalize().into()
 }
 
 /// `appendCodexReasoningReplayTurn`: existing items that don't start with a
@@ -517,6 +528,17 @@ pub(crate) mod tests {
         assert!(cache.get_item("m", &session).is_some());
         assert_eq!(cache.get_item("m", &session[1..]), None);
         assert_eq!(cache.len(), 1);
+    }
+
+    // Not upstream's: a NUL in the model or session can't make two pairs
+    // share an entry.
+    #[test]
+    fn keys_keep_model_and_session_apart() {
+        assert_ne!(cache_key("m\0a", "s"), cache_key("m", "a\0s"));
+        let cache = ReplayCache::default();
+        let item = reasoning(5);
+        assert!(cache.store("m\0a", "s", &[&item]));
+        assert_eq!(cache.get_item("m", "a\0s"), None);
     }
 
     // Not upstream's: the shapes items are normalized to, and what is

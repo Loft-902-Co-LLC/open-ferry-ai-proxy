@@ -306,6 +306,25 @@ async fn buffer_limit_releases_stream() {
     );
 }
 
+// Not upstream's: a stream that ends while only a handshake is held fails
+// with a 408 when upstream's translation of the held lines gave a chunk,
+// even an empty one, as a Claude client's does for every `data:` line; it is
+// an empty stream when it gave none, as Chat Completions does for
+// `response.created`.
+#[tokio::test]
+async fn ending_during_bootstrap_counts_empty_chunks_as_upstream() {
+    let url = serve_events(&[IN_PROGRESS_EVENT]).await;
+    let error = failed_over(start_as(&buffering(true), &url, "claude").await);
+    assert_eq!(error.status, 408, "{error:?}");
+
+    let url = serve_events(&[CREATED_EVENT]).await;
+    let (combined, error) = drain(started(start_as(&buffering(true), &url, "openai").await)).await;
+    assert!(
+        combined.is_empty() && error.is_none(),
+        "{combined} {error:?}"
+    );
+}
+
 // TestCodexBootstrapBudgetsStaySmall: pinned, as the framing tests scale
 // with them and config.example.yaml quotes them.
 #[test]

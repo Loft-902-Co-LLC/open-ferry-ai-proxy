@@ -36,8 +36,9 @@
 //!   for an hour so a later conditional write can tell; with no conditional
 //!   writes the mark has no use, and it would let a client fill the cache
 //!   with session IDs of its choosing.
-//! - Entries are keyed by a SHA-256 hash of the model and session, so a long
-//!   session ID takes no more room than a short one.
+//! - Entries are keyed by a SHA-256 hash of the model and session, each with
+//!   its length, so a long session ID takes no more room than a short one,
+//!   and a model or session holding a NUL can't stand for another pair.
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex, PoisonError};
@@ -190,8 +191,22 @@ fn cache_key(model: &str, session: &str) -> Option<Key> {
     if model.is_empty() || session.is_empty() {
         return None;
     }
-    let key = format!("antigravity-reasoning-replay\0{model}\0{session}");
-    Some(Sha256::digest(key.as_bytes()).into())
+    Some(hash_parts(&[
+        "antigravity-reasoning-replay",
+        model,
+        session,
+    ]))
+}
+
+/// A SHA-256 hash of `parts`, each led by its length, so that no two lists
+/// of parts hash alike whatever they hold.
+fn hash_parts(parts: &[&str]) -> Key {
+    let mut hash = Sha256::new();
+    for part in parts {
+        hash.update((part.len() as u64).to_be_bytes());
+        hash.update(part.as_bytes());
+    }
+    hash.finalize().into()
 }
 
 /// `normalizeAntigravityReasoningReplayItems`: the items worth keeping, or

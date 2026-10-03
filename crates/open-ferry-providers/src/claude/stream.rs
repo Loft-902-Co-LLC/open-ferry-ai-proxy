@@ -24,7 +24,6 @@
 //!   aren't ported.
 
 use std::collections::VecDeque;
-use std::fmt;
 
 use bytes::Bytes;
 use futures_util::StreamExt as _;
@@ -33,13 +32,11 @@ use open_ferry_translate::go::trim_space;
 use open_ferry_translate::registry::ResponseStream;
 use serde_json::Value;
 
-use super::client::error_chain;
 use super::ratelimit::{plain_error, wrap_fast};
 use super::usage::ensure_responses_usage_details;
+pub(crate) use crate::codex::stream::MAX_LINE;
+use crate::codex::stream::{LineError, LineReader};
 use crate::json::str_at;
-
-/// The longest line read, as upstream's scanner allows.
-pub(crate) const MAX_LINE: usize = 52_428_800;
 
 /// The error for a tool call whose input couldn't be translated
 /// (`ApplyPatchUpstreamErrorMessage`).
@@ -49,116 +46,6 @@ pub(crate) const APPLY_PATCH_ERROR_MESSAGE: &str =
 /// The 502 for a tool call whose input couldn't be translated.
 pub(crate) fn apply_patch_error() -> ExecError {
     ExecError::upstream(502, APPLY_PATCH_ERROR_MESSAGE)
-}
-
-/// Why a line couldn't be read.
-#[derive(Debug)]
-pub(crate) enum LineError {
-    /// The connection failed.
-    Read(reqwest::Error),
-    /// A line was longer than [`MAX_LINE`].
-    TooLong,
-}
-
-impl fmt::Display for LineError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Read(error) => f.write_str(&error_chain(error)),
-            Self::TooLong => f.write_str("bufio.Scanner: token too long"),
-        }
-    }
-}
-
-#[derive(Debug)]
-enum ReaderState {
-    Reading,
-    Failed(reqwest::Error),
-    Done,
-}
-
-/// Reads a body a line at a time, as Go's `bufio.Scanner` with `ScanLines`
-/// does: a line loses its `\n` and one trailing `\r`, and the last line
-/// needs no `\n`. When the connection fails, what was read of the last line
-/// comes first, then the error.
-pub(crate) struct LineReader {
-    response: reqwest::Response,
-    buffer: Vec<u8>,
-    /// Where the unread data starts.
-    start: usize,
-    /// How much of the unread data is known to hold no `\n`.
-    scanned: usize,
-    state: ReaderState,
-}
-
-impl LineReader {
-    pub(crate) fn new(response: reqwest::Response) -> Self {
-        Self {
-            response,
-            buffer: Vec::new(),
-            start: 0,
-            scanned: 0,
-            state: ReaderState::Reading,
-        }
-    }
-
-    /// The next line, or `None` at the end.
-    pub(crate) async fn next_line(&mut self) -> Option<Result<Vec<u8>, LineError>> {
-        loop {
-            let unread = self.buffer.get(self.start..).unwrap_or_default();
-            if let Some(offset) = unread
-                .get(self.scanned..)
-                .and_then(|rest| rest.iter().position(|&b| b == b'\n'))
-            {
-                let end = self.scanned + offset;
-                let line = drop_cr(unread.get(..end).unwrap_or_default()).to_vec();
-                self.start += end + 1;
-                self.scanned = 0;
-                return Some(Ok(line));
-            }
-            self.scanned = unread.len();
-            match std::mem::replace(&mut self.state, ReaderState::Done) {
-                ReaderState::Reading => self.state = ReaderState::Reading,
-                ReaderState::Failed(error) => {
-                    if let Some(line) = self.take_rest() {
-                        self.state = ReaderState::Failed(error);
-                        return Some(Ok(line));
-                    }
-                    return Some(Err(LineError::Read(error)));
-                }
-                ReaderState::Done => return self.take_rest().map(Ok),
-            }
-            if self.scanned > MAX_LINE {
-                self.state = ReaderState::Done;
-                self.buffer = Vec::new();
-                self.start = 0;
-                self.scanned = 0;
-                return Some(Err(LineError::TooLong));
-            }
-            if self.start > 0 {
-                self.buffer.drain(..self.start);
-                self.start = 0;
-            }
-            match self.response.chunk().await {
-                Ok(Some(chunk)) => self.buffer.extend_from_slice(&chunk),
-                Ok(None) => self.state = ReaderState::Done,
-                Err(error) => self.state = ReaderState::Failed(error.without_url()),
-            }
-        }
-    }
-
-    /// The unread rest as a last line, if there is any.
-    fn take_rest(&mut self) -> Option<Vec<u8>> {
-        let rest = self.buffer.get(self.start..).unwrap_or_default();
-        let line = (!rest.is_empty()).then(|| drop_cr(rest).to_vec());
-        self.buffer = Vec::new();
-        self.start = 0;
-        self.scanned = 0;
-        line
-    }
-}
-
-fn drop_cr(line: &[u8]) -> &[u8] {
-    line.strip_suffix(b"\r").unwrap_or(line)
 }
 
 /// The JSON of a `data:` line, if it has valid JSON.

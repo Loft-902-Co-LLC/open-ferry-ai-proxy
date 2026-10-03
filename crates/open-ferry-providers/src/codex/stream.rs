@@ -113,7 +113,9 @@ impl LineReader {
         }
     }
 
-    /// The next line, or `None` at the end.
+    /// The next line, or `None` at the end. A line that wouldn't fit in
+    /// [`MAX_LINE`] bytes with its `\n` is an error, as it is for Go's
+    /// scanner, and ends the reading.
     pub(crate) async fn next_line(&mut self) -> Option<Result<Vec<u8>, LineError>> {
         loop {
             let unread = self.buffer.get(self.start..).unwrap_or_default();
@@ -122,12 +124,18 @@ impl LineReader {
                 .and_then(|rest| rest.iter().position(|&b| b == b'\n'))
             {
                 let end = self.scanned + offset;
+                if end >= MAX_LINE {
+                    return Some(Err(self.too_long()));
+                }
                 let line = drop_cr(unread.get(..end).unwrap_or_default()).to_vec();
                 self.start += end + 1;
                 self.scanned = 0;
                 return Some(Ok(line));
             }
             self.scanned = unread.len();
+            if self.scanned > MAX_LINE {
+                return Some(Err(self.too_long()));
+            }
             match std::mem::replace(&mut self.state, ReaderState::Done) {
                 ReaderState::Reading => self.state = ReaderState::Reading,
                 ReaderState::Failed(error) => {
@@ -139,12 +147,8 @@ impl LineReader {
                 }
                 ReaderState::Done => return self.take_rest().map(Ok),
             }
-            if self.scanned > MAX_LINE {
-                self.state = ReaderState::Done;
-                self.buffer = Vec::new();
-                self.start = 0;
-                self.scanned = 0;
-                return Some(Err(LineError::TooLong));
+            if self.scanned == MAX_LINE {
+                return Some(Err(self.too_long()));
             }
             if self.start > 0 {
                 self.buffer.drain(..self.start);
@@ -156,6 +160,15 @@ impl LineReader {
                 Err(error) => self.state = ReaderState::Failed(error.without_url()),
             }
         }
+    }
+
+    /// Drops what is left and ends the reading, for a line over the limit.
+    fn too_long(&mut self) -> LineError {
+        self.state = ReaderState::Done;
+        self.buffer = Vec::new();
+        self.start = 0;
+        self.scanned = 0;
+        LineError::TooLong
     }
 
     /// The unread rest as a last line, if there is any.
@@ -375,7 +388,7 @@ impl State {
                 ExecError::new(ErrorKind::Upstream, error.to_string())
             })?;
             let line_len = line.len();
-            let blank = line.is_empty();
+            let gives_chunk = self.upstream_gives_chunk(&line);
             let frame = match self.process(line).await {
                 Ok(frame) => frame,
                 Err(failure) => {
@@ -407,7 +420,7 @@ impl State {
                 {
                     frames += 1;
                     bytes += frame_bytes;
-                    held_any |= !frame.chunks.is_empty() || (blank && self.passes_lines_through());
+                    held_any |= !frame.chunks.is_empty() || gives_chunk;
                     held.extend(frame.chunks);
                     continue;
                 }
@@ -437,13 +450,21 @@ impl State {
         Ok(())
     }
 
-    /// Whether every line becomes a chunk as it is: the client speaks
-    /// Codex's own format or OpenAI Responses. Upstream then gives a blank
-    /// line an empty chunk, which ours leaves out; bootstrap buffering
-    /// counts it as held all the same, as upstream does.
-    fn passes_lines_through(&self) -> bool {
-        !self.setup.translator.is_translated()
+    /// Whether upstream's translation of `line` gives a chunk even when it
+    /// is empty, which ours leaves out; bootstrap buffering counts the line
+    /// as held all the same, as upstream does. Every line does when the
+    /// client speaks Codex's own format or OpenAI Responses, as each line
+    /// becomes a chunk as it is. Every `data:` line does for a Claude client,
+    /// whose translator gives one chunk per `data:` line, empty for an event
+    /// such as `response.in_progress`; it only holds an event back while a
+    /// tool call is open, which can't happen before generation starts.
+    fn upstream_gives_chunk(&self, line: &[u8]) -> bool {
+        if !self.setup.translator.is_translated()
             || self.setup.response_format == Format::OPENAI_RESPONSE
+        {
+            return true;
+        }
+        self.setup.response_format == Format::CLAUDE && line.starts_with(b"data:")
     }
 
     /// Checks and translates one line.
@@ -545,6 +566,31 @@ impl State {
 mod tests {
     use super::*;
     use http::HeaderValue;
+
+    // Not upstream's: a line must fit in the scanner's buffer with its
+    // `\n`, as Go's `bufio.Scanner` with a 50 MiB limit needs.
+    #[tokio::test]
+    async fn lines_must_fit_the_scanner_limit() {
+        for (len, newline, fits) in [
+            (MAX_LINE - 1, true, true),
+            (MAX_LINE, true, false),
+            (MAX_LINE + 1, false, false),
+        ] {
+            let mut body = vec![b'x'; len];
+            if newline {
+                body.push(b'\n');
+            }
+            let mut reader = LineReader::new(reqwest::Response::from(http::Response::new(body)));
+            match reader.next_line().await {
+                Some(Ok(line)) => assert!(fits && line.len() == len, "{len} bytes read"),
+                Some(Err(LineError::TooLong)) => assert!(!fits, "{len} bytes refused"),
+                other => panic!("{len} bytes: {other:?}"),
+            }
+            if !fits {
+                assert!(reader.next_line().await.is_none(), "reading goes on");
+            }
+        }
+    }
 
     // TestIsGrokClientUserAgent and TestIsGrokClientHeaders.
     #[test]
