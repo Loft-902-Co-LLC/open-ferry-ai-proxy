@@ -14,16 +14,13 @@
 //! tool.
 //!
 //! Deviations from upstream:
-//! - Whether a provider takes the tool goes by its name: `codex`, `claude`
-//!   and the OpenAI-compatible providers (`openai-compatibility` and
-//!   `openai-compatible-<name>`) do. Upstream asks the provider's executor,
-//!   which would take a new executor method, and says no when none is
-//!   registered; here those executors are registered at start, or with the
-//!   first credential of an OpenAI-compatible provider.
-//! - `gemini` and `vertex` don't take the tool here, though upstream's
-//!   executors for them say they do: a Codex client's Responses request
-//!   reaches them through a translator from Responses to Gemini, which this
-//!   port doesn't have yet. They can be added once it does.
+//! - Whether a provider takes the tool goes by its name: `codex`, `claude`,
+//!   `gemini`, `vertex` and the OpenAI-compatible providers
+//!   (`openai-compatibility` and `openai-compatible-<name>`) do, the
+//!   providers whose executors say so upstream and are ported. Upstream asks
+//!   the provider's executor, which would take a new executor method, and
+//!   says no when none is registered; here those executors are registered at
+//!   start, or with the first credential of an OpenAI-compatible provider.
 //! - No web search capability is given, as `cpa_capabilities` isn't ported.
 //! - The models come sorted by ID. Upstream's order varies, and decides the
 //!   order of models with the same priority.
@@ -32,6 +29,7 @@
 mod tests;
 
 use open_ferry_core::auth::compat::OPENAI_COMPATIBILITY;
+use open_ferry_core::auth::synthesizer::vertex::VERTEX;
 use open_ferry_core::codex_models::{
     ApplyPatchCapability, ProvidersForModel, build_response, marshal_compact,
 };
@@ -40,6 +38,9 @@ use open_ferry_translate::go;
 
 use crate::routing;
 use crate::state::AppState;
+
+/// The provider of Gemini API keys, as the Gemini executor names it.
+const GEMINI: &str = "gemini";
 
 /// The prefix of a named OpenAI-compatible provider's key.
 const OPENAI_COMPATIBLE_PREFIX: &str = "openai-compatible-";
@@ -82,12 +83,13 @@ fn supports_apply_patch_for_providers(providers: &[String]) -> bool {
             .all(|provider| provider_supports_apply_patch(provider))
 }
 
-/// Whether `provider` takes the tool. Names match as upstream looks up
-/// executors: trimmed, and in any case.
+/// Whether `provider` takes the tool, as upstream's executors for it say
+/// (`SupportsApplyPatch`). Names match as upstream looks up executors:
+/// trimmed, and in any case.
 fn provider_supports_apply_patch(provider: &str) -> bool {
     let provider = go::to_lower(provider.trim());
     match provider.as_str() {
-        "codex" | "claude" | OPENAI_COMPATIBILITY => true,
+        "codex" | "claude" | GEMINI | VERTEX | OPENAI_COMPATIBILITY => true,
         name => name
             .strip_prefix(OPENAI_COMPATIBLE_PREFIX)
             .is_some_and(|rest| !rest.is_empty()),

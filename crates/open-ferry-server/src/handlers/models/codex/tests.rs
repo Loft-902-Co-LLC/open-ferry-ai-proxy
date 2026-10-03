@@ -11,13 +11,14 @@
 //! Whether a provider takes `apply_patch` goes by its name here (see the
 //! module docs), so upstream's test executors become provider names: one
 //! that supports the tool becomes `codex` or `openai-compatible-custom`, one
-//! that doesn't becomes `vertex`, and one without the capability, or
-//! without an executor, becomes `gemini`.
+//! that says it doesn't becomes `denied`, one without the capability
+//! becomes `remote`, and a provider without an executor becomes `unknown`.
+//! Nothing serves those last three, so none of them takes the tool.
 //!
 //! Changed:
 //! - `TestModelsWithClientVersionApplyPatchRequiresExecutor` serves its
-//!   models through `gemini` rather than through `codex` without an
-//!   executor, as every provider here has one.
+//!   models through `unknown` rather than through `codex` without an
+//!   executor, as `codex` always takes the tool here.
 //! - The config tests replace the config, as a reload does, and only their
 //!   `local` case is ported: Home isn't.
 //! - `TestCodexClientModelsApplyPatchRouting` doesn't check a provider
@@ -27,6 +28,10 @@
 //! - `TestApplyPatchManagerAllCandidates` checks provider names, and also
 //!   how they match; the nil manager case is dropped.
 //! - `TestApplyPatchModelExactPublicRoute` drops its absent handler case.
+//!
+//! Added: `apply_patch_routing` and `apply_patch_needs_every_provider` also
+//! check that `gemini` and `vertex` take the tool, as upstream's Gemini and
+//! Vertex AI executors say they do.
 //!
 //! Dropped: `TestCodexClientModelsResponse_DevinDisplayName` and
 //! `TestModelsWithClientVersion_DevinDisplayName`, as Devin isn't ported, and
@@ -289,7 +294,7 @@ async fn apply_patch_needs_providers_that_take_it() {
     let registry = Arc::new(ModelRegistry::new());
     registry.register_client(
         "http-patch-missing-executor",
-        "gemini",
+        "unknown",
         &[model("gpt-5.5"), model("http-patch-synthetic")],
     );
     let state = state(&registry, codex_config(true, false));
@@ -326,7 +331,7 @@ async fn apply_patch_follows_config_reloads() {
     );
     registry.register_client(
         "config-patch-unknown",
-        "gemini",
+        "unknown",
         &[model("config-patch-unknown")],
     );
     let state = state(&registry, ServerConfig::default());
@@ -574,14 +579,22 @@ fn apply_patch_routing() {
             ],
         ),
         (
-            "gemini",
+            "remote",
             vec![
                 model("catalog-patch-partial"),
                 unknown,
                 model("team/gpt-5.5"),
             ],
         ),
-        ("vertex", vec![model("catalog-patch-disabled")]),
+        ("denied", vec![model("catalog-patch-disabled")]),
+        (
+            "gemini",
+            vec![model("catalog-patch-gemini"), model("catalog-patch-google")],
+        ),
+        (
+            "vertex",
+            vec![model("catalog-patch-vertex"), model("catalog-patch-google")],
+        ),
     ];
     for (provider, models) in &registrations {
         registry.register_client(&format!("sdk-patch-{provider}"), provider, models);
@@ -592,6 +605,9 @@ fn apply_patch_routing() {
         "catalog-patch-synthetic",
         "catalog-patch-alias",
         "catalog-patch-mixed",
+        "catalog-patch-gemini",
+        "catalog-patch-vertex",
+        "catalog-patch-google",
     ];
     let unsupported = [
         "gpt-image-2",
@@ -656,7 +672,7 @@ fn apply_patch_model_exact_public_route() {
     );
     registry.register_client(
         "patch-route-unsupported",
-        "gemini",
+        "denied",
         &[
             model("mixed-patch-alias"),
             ModelInfo {
@@ -686,15 +702,21 @@ fn apply_patch_needs_every_provider() {
     for (providers, want) in [
         (&[][..], false),
         (&["unknown"][..], false),
-        (&["gemini"][..], false),
+        (&["remote"][..], false),
         (&[custom][..], true),
         (&[custom, custom][..], true),
-        (&[custom, "vertex"][..], false),
+        (&[custom, "denied"][..], false),
         (&[custom, "unknown"][..], false),
-        (&[custom, "gemini"][..], false),
+        (&[custom, "remote"][..], false),
+        // Gemini and Vertex AI take the tool.
+        (&["gemini"][..], true),
+        (&["vertex"][..], true),
+        (&[custom, "gemini", "vertex"][..], true),
+        (&["gemini", "denied"][..], false),
         // How names match.
         (&["codex", "claude", "openai-compatibility"][..], true),
         (&[" Codex ", "CLAUDE", "OpenAI-Compatible-Custom"][..], true),
+        (&[" Gemini ", "VERTEX"][..], true),
         (&[""][..], false),
         (&["openai-compatible-"][..], false),
         (&["openai"][..], false),
