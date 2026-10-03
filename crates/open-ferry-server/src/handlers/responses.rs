@@ -26,7 +26,9 @@
 //!   U+2029. Invalid UTF-8 in an event or error becomes U+FFFD as Rust
 //!   replaces it, where Go replaces each bad byte.
 //! - JSON with an escaped lone surrogate, which Go reads as U+FFFD, is
-//!   taken for text that isn't JSON.
+//!   taken for text that isn't JSON. An error's text that is such an object,
+//!   or one nested more than 128 deep, is reported as its status's text
+//!   alone, as it can't be redacted field by field.
 //! - A `sequence_number` in an error's text that isn't JSON is read only
 //!   from a well-formed object after the first `{`; gjson reads what it can
 //!   from a malformed one too.

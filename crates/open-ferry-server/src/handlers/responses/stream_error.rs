@@ -10,6 +10,13 @@
 
 //! Errors in a Responses stream: their text with secrets taken out, and the
 //! `error` and `response.failed` events that carry them.
+//!
+//! Deviations from upstream:
+//! - An error's text that is a JSON object serde_json can't read, though Go
+//!   can, is reported as its status's text alone. Such an object has an
+//!   escaped lone surrogate, or is nested more than 128 deep. Go redacts it
+//!   field by field; matching it with the patterns, as upstream does for
+//!   text that isn't JSON, would miss escaped keys and keys like `password`.
 
 use std::sync::LazyLock;
 
@@ -123,7 +130,8 @@ fn sanitize_node(value: &Value) -> Value {
 
 /// The text a stream error is reported with (`responsesStreamErrorText`). A
 /// JSON object keeps its error, or all of it, with secrets redacted; other
-/// text is redacted and cut.
+/// text is redacted and cut. An object serde_json can't read is reported as
+/// the status's text, since it can't be redacted field by field.
 pub(super) fn stream_error_text(error: &ErrorMessage, status: u16) -> String {
     let text = match error.text.trim() {
         "" => status_text(status),
@@ -133,9 +141,14 @@ pub(super) fn stream_error_text(error: &ErrorMessage, status: u16) -> String {
     if !go::json_valid(text.as_bytes()) {
         return plain();
     }
-    let root = match serde_json::from_str::<Value>(text) {
-        Ok(Value::Object(root)) => root,
-        Ok(Value::Null) => Map::new(),
+    // Go decodes the text into a map, which takes an object or `null` and
+    // turns anything else down.
+    let root = match text.as_bytes().first() {
+        Some(b'{') => match serde_json::from_str::<Map<String, Value>>(text) {
+            Ok(root) => root,
+            Err(_) => return status_text(status).to_owned(),
+        },
+        Some(b'n') => Map::new(),
         _ => return plain(),
     };
     let error_node = match root.get("error") {
@@ -385,6 +398,56 @@ mod tests {
         assert_eq!(
             out,
             r#"{"error":{"access_token":"[REDACTED]","input_tokens":42,"request_id":9007199254740993,"token_limit":8192}}"#
+        );
+    }
+
+    #[test]
+    fn error_text_redacts_escaped_keys() {
+        let out = text(
+            502,
+            r#"{"error":{"message":"oops","api\u005fkey":"SECRET","pass\u0077ord":"SECRET"}}"#,
+        );
+        assert_eq!(
+            out,
+            r#"{"error":{"api_key":"[REDACTED]","message":"oops","password":"[REDACTED]"}}"#
+        );
+    }
+
+    /// An object 2 levels deep, then `arrays` nested arrays around one with
+    /// a password.
+    fn nested(arrays: usize) -> String {
+        format!(
+            r#"{{"error":{{"message":"oops","extra":{}{{"password":"SECRET"}}{}}}}}"#,
+            "[".repeat(arrays),
+            "]".repeat(arrays)
+        )
+    }
+
+    #[test]
+    fn error_text_fails_closed_on_objects_serde_cannot_read() {
+        let review = r#"{"error":{"message":"oops","api\u005fkey":"SECRET","note":"\ud800"}}"#;
+        let lone = r#"{"error":{"message":"oops","password":"SECRET","note":"\udc00x"}}"#;
+        let deep = nested(126);
+        for raw in [review, lone, deep.as_str()] {
+            assert!(go::json_valid(raw.as_bytes()), "{raw}");
+            assert!(serde_json::from_str::<Value>(raw).is_err(), "{raw}");
+            assert_eq!(text(502, raw), "Bad Gateway", "{raw}");
+            assert_eq!(text(429, raw), "Too Many Requests", "{raw}");
+            let safe = sanitize_error(ErrorMessage::new(503, raw));
+            assert_eq!(safe.status, 503);
+            assert_eq!(safe.text, "Service Unavailable");
+            let fallback = sanitize_error(ErrorMessage::new(200, raw));
+            assert_eq!(fallback.status, 500);
+            assert_eq!(fallback.text, "Internal Server Error");
+        }
+        // Nesting serde_json can read is still redacted field by field.
+        assert_eq!(
+            text(502, &nested(100)),
+            format!(
+                r#"{{"error":{{"extra":{}{{"password":"[REDACTED]"}}{},"message":"oops"}}}}"#,
+                "[".repeat(100),
+                "]".repeat(100)
+            )
         );
     }
 

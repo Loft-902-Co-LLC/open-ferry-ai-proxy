@@ -872,6 +872,55 @@ async fn keeps_an_error_before_the_first_payload() {
     );
 }
 
+/// review3's error: serde_json can't read it, for its lone surrogate, so
+/// its escaped `api_key` can't be redacted field by field.
+const UNREADABLE_ERROR: &str =
+    r#"{"error":{"message":"oops","api\u005fkey":"SECRET","note":"\ud800"}}"#;
+
+#[tokio::test]
+async fn fails_closed_on_an_error_it_cannot_redact() {
+    let (app, _) = app(
+        ServerConfig::default(),
+        vec![Outcome::Fail(ExecError::upstream(502, UNREADABLE_ERROR))],
+    );
+    let request = post(
+        "/v1/responses",
+        r#"{"model":"gpt-5","stream":true,"input":[]}"#,
+        None,
+    );
+    let (status, headers, body) = send(&app, request).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(content_type(&headers), "application/json");
+    assert_eq!(
+        body,
+        r#"{"error":{"message":"Bad Gateway","type":"server_error","code":"internal_server_error"}}"#
+    );
+}
+
+#[tokio::test]
+async fn fails_closed_on_an_error_it_cannot_redact_mid_stream() {
+    let (framer, _) = primed(false, CREATED);
+    let body = run(framer, vec![failed(502, UNREADABLE_ERROR)]).await;
+    assert!(!body.contains("SECRET"), "{body}");
+    assert_eq!(last_payload(&body)["error"]["message"], "Bad Gateway");
+
+    let event = concat!(
+        "event: error\n",
+        r#"data: {"type":"error","status":503,"error":{"password":"SECRET","note":"\ud800"}}"#,
+        "\n\n"
+    );
+    let (framer, written) = primed(true, event);
+    assert!(!written.contains("SECRET"), "{written}");
+    assert_eq!(
+        last_payload(&written)["response"]["error"]["message"],
+        "Service Unavailable"
+    );
+    assert_eq!(
+        framer.terminal_error.map(|error| error.text).as_deref(),
+        Some("Service Unavailable")
+    );
+}
+
 // TestResponsesHandlerSanitizesErrorBeforeFirstFrame
 #[tokio::test]
 async fn sanitizes_an_error_before_the_first_event() {
