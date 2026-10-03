@@ -16,6 +16,9 @@
 //! sends a [`WatchEvent`] when the config changes or an auth file is added,
 //! changed or removed.
 //!
+//! [`V8Document`] reads a config file into the v8 layout, as the v8
+//! management API shows it.
+//!
 //! Typed sections: `host`, `port`, `trusted-proxies`, `tls`,
 //! `remote-management`, `auth-dir`, `api-keys`, `debug`, `logging-to-file`,
 //! `request-log`, `proxy-url`, `passthrough-headers`, `streaming`,
@@ -62,6 +65,7 @@
 
 mod decode;
 mod duration;
+mod layout;
 mod load;
 mod normalize;
 mod paths;
@@ -76,6 +80,7 @@ mod yaml;
 use std::fmt;
 
 pub(crate) use duration::parse_go_duration;
+pub use layout::{AnyValue, V8Document};
 pub use safe_mode::example_api_key_warning_page;
 pub use types::{
     ClaudeConfig, ClaudeKey, ClaudeModel, ClientConfig, CodexClientConfig, CodexConfig,

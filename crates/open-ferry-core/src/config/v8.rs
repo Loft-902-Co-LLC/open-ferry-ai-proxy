@@ -37,7 +37,7 @@ pub(crate) const MAX_CREDENTIAL_WEIGHT: i64 = 1_000_000;
 
 /// Every legacy setting with its v8 path, as `(legacy, v8)`, in upstream's
 /// field order.
-const V8_PATHS: &[(&str, &str)] = &[
+pub(crate) const V8_PATHS: &[(&str, &str)] = &[
     ("proxy-url", "requests.proxy-url"),
     (
         "disable-image-generation",
@@ -376,7 +376,7 @@ const V8_PATHS: &[(&str, &str)] = &[
 ];
 
 /// Earlier spellings of client settings, most preferred first.
-const V8_CLIENT_PATHS: &[(&str, &str)] = &[
+pub(crate) const V8_CLIENT_PATHS: &[(&str, &str)] = &[
     (
         "oauth.providers.codex.optimize-multi-agent-v2",
         "client.codex.optimize-multi-agent-v2",
@@ -393,7 +393,7 @@ const V8_CLIENT_PATHS: &[(&str, &str)] = &[
 
 /// Settings an earlier v8 layout placed under `oauth.providers` that now
 /// apply to every credential.
-const V8_SHARED_PATHS: &[(&str, &str)] = &[
+pub(crate) const V8_SHARED_PATHS: &[(&str, &str)] = &[
     (
         "oauth.providers.codex.disable-codex-cloaking",
         "upstream.codex.disable-codex-cloaking",
@@ -469,7 +469,7 @@ const V8_SHARED_PATHS: &[(&str, &str)] = &[
 ];
 
 /// Sections of the earlier layout that may be left behind empty.
-const V8_SHARED_STRUCT_PATHS: &[(&str, &str)] = &[
+pub(crate) const V8_SHARED_STRUCT_PATHS: &[(&str, &str)] = &[
     (
         "oauth.providers.claude.header-defaults",
         "upstream.claude.header-defaults",
@@ -480,7 +480,7 @@ const V8_SHARED_STRUCT_PATHS: &[(&str, &str)] = &[
 ];
 
 /// API-key families: the legacy list and its group under `api-keys`.
-const V8_KEY_FAMILIES: &[(&str, &str)] = &[
+pub(crate) const V8_KEY_FAMILIES: &[(&str, &str)] = &[
     ("gemini-api-key", "gemini"),
     ("interactions-api-key", "interactions"),
     ("vertex-api-key", "vertex"),
@@ -492,7 +492,7 @@ const V8_KEY_FAMILIES: &[(&str, &str)] = &[
 ];
 
 /// Group fields every key in a v8 group inherits.
-const SHARED_KEY_FIELDS: &[&str] = &[
+pub(crate) const SHARED_KEY_FIELDS: &[&str] = &[
     "priority",
     "prefix",
     "proxy-url",
@@ -630,7 +630,7 @@ pub(crate) fn flatten_v8(original: &Node) -> Result<Flattened, ConfigError> {
 
 /// Upstream's `normalizeV8PrivateIPAlias` as loading runs it: the deprecated
 /// allow flag becomes the inverted disable flag unless that is set.
-fn normalize_private_ip_alias(root: &mut Node) -> Result<(), ConfigError> {
+pub(crate) fn normalize_private_ip_alias(root: &mut Node) -> Result<(), ConfigError> {
     const OLD: &str = "codex.live-media-relay.allow-private-remote-ips";
     const CANONICAL: &str = "codex.live-media-relay.disable-private-remote-ips";
     let Some(value) = yaml_path(root, OLD) else {
