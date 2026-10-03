@@ -15,7 +15,8 @@ pub enum Deviation {
     /// JSON held in a string, whole or in part, is the same JSON written
     /// compactly by us. Only where the translator does so (see [`JsonForm`]).
     EmbeddedJson,
-    /// Upstream cut a string in the middle of a character; we cut before it.
+    /// Upstream cut a name or ID to 64 bytes in the middle of a character; we
+    /// cut at a character boundary.
     CharBoundary,
     /// protobuf-go's error prefix has a non-breaking space in some builds; ours
     /// always has a regular one.
@@ -87,6 +88,9 @@ const NBSP_PROTO_PREFIX: &str = "proto:\u{a0}";
 /// What amd64 Go gives for `int64(f)` when `f` is out of range.
 const GO_AMD64_OUT_OF_RANGE: &str = "-9223372036854775808";
 
+/// The bytes upstream cuts names and IDs to.
+const CUT_LIMIT: usize = 64;
+
 #[derive(Clone, Debug)]
 pub struct Difference {
     /// Where the outputs differ, for example `$.input[2].content[0].text`.
@@ -145,6 +149,31 @@ pub fn compare(go: &Value, rust: &Value, embedded_json: &[JsonAt]) -> Comparison
 enum Segment<'a> {
     Key(&'a str),
     Index(usize),
+}
+
+/// Whether `go` is a name or ID upstream cut to [`CUT_LIMIT`] bytes in the
+/// middle of a character, and `rust` the same one cut at a character
+/// boundary. Go's JSON encoder writes each byte of the partial character as
+/// U+FFFD, so `go` holds one run of one to three of them, and was
+/// [`CUT_LIMIT`] bytes long with the partial character's bytes in their
+/// place. Without the run, `go` must be `rust`.
+fn cut_in_a_character(go: &str, rust: &str) -> bool {
+    const REPLACEMENT: char = '\u{FFFD}';
+    let Some(start) = go.find(REPLACEMENT) else {
+        return false;
+    };
+    let run = go[start..]
+        .chars()
+        .take_while(|&c| c == REPLACEMENT)
+        .count();
+    let end = start + run * REPLACEMENT.len_utf8();
+    let held = go.len() - run * (REPLACEMENT.len_utf8() - 1);
+    (1..=3).contains(&run)
+        && held == CUT_LIMIT
+        && !go[end..].contains(REPLACEMENT)
+        && rust.len() == start + (go.len() - end)
+        && rust.starts_with(&go[..start])
+        && rust.ends_with(&go[end..])
 }
 
 struct Walker<'a> {
@@ -222,12 +251,7 @@ impl<'a> Walker<'a> {
         if go == rust {
             return;
         }
-        // Upstream's byte cut leaves a partial character, which reaches us as
-        // U+FFFD. Without it the strings match if we cut at the boundary before.
-        if go.contains('\u{FFFD}')
-            && !rust.contains('\u{FFFD}')
-            && go.replace('\u{FFFD}', "") == rust
-        {
+        if cut_in_a_character(go, rust) {
             self.out.deviations.insert(Deviation::CharBoundary);
             return;
         }
@@ -515,11 +539,42 @@ mod tests {
 
     #[test]
     fn a_split_character_is_equivalent_to_cutting_before_it() {
-        let go = json!({ "name": "aé\u{FFFD}_1" });
-        let rust = json!({ "name": "aé_1" });
+        // Cut at the end: 61 bytes, two bytes of a three-byte character, and
+        // a suffix added after the cut.
+        let head = "a".repeat(60);
+        let go = json!({ "name": format!("{head}\u{FFFD}\u{FFFD}_1") });
+        let rust = json!({ "name": format!("{head}_1") });
         let cmp = compare(&go, &rust, JSON_AT);
-        assert!(cmp.differences.is_empty());
+        assert!(cmp.differences.is_empty(), "{:?}", cmp.differences);
         assert_eq!(cmp.deviations, BTreeSet::from([Deviation::CharBoundary]));
+
+        // Cut at the start: the last byte of a character, then 63 bytes.
+        let tail = "b".repeat(63);
+        let go = json!({ "name": format!("\u{FFFD}{tail}") });
+        let rust = json!({ "name": tail });
+        let cmp = compare(&go, &rust, JSON_AT);
+        assert!(cmp.differences.is_empty(), "{:?}", cmp.differences);
+        assert_eq!(cmp.deviations, BTreeSet::from([Deviation::CharBoundary]));
+    }
+
+    #[test]
+    fn replacement_characters_elsewhere_still_differ() {
+        // Text that isn't a 64-byte cut: losing its U+FFFD is a difference.
+        let go = json!({ "delta": { "text": "a\u{FFFD}b" } });
+        let rust = json!({ "delta": { "text": "ab" } });
+        assert_eq!(compare(&go, &rust, JSON_AT).differences.len(), 1);
+
+        // A cut name that lost more than the partial character.
+        let head = "a".repeat(62);
+        let go = json!({ "name": format!("{head}\u{FFFD}\u{FFFD}") });
+        let rust = json!({ "name": "a".repeat(61) });
+        assert_eq!(compare(&go, &rust, JSON_AT).differences.len(), 1);
+
+        // Two runs, one of them not from the cut.
+        let rest = "a".repeat(60);
+        let go = json!({ "name": format!("\u{FFFD}{rest}\u{FFFD}") });
+        let rust = json!({ "name": format!("{rest}\u{FFFD}") });
+        assert_eq!(compare(&go, &rust, JSON_AT).differences.len(), 1);
     }
 
     #[test]

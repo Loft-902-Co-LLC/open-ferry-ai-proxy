@@ -1243,22 +1243,26 @@ fn sse_chunk(chunk: &str) -> Value {
 }
 
 /// Splits SSE text into `{"event": …, "data": …}` frames. Anything that isn't
-/// an `event: …\ndata: <JSON>\n\n` frame is kept as `{"unparsed": text}`, so
-/// it shows up as a difference.
+/// an `event: …\ndata: <JSON>\n\n` frame is kept as `{"unparsed": text}`, and
+/// text after the last blank line as `{"unended": text}`, so they show up as
+/// differences.
 fn sse_frames(text: &str) -> Value {
-    let frames = text
-        .split_terminator("\n\n")
-        .map(|frame| {
-            frame
-                .strip_prefix("event: ")
-                .and_then(|rest| rest.split_once("\ndata: "))
-                .and_then(|(event, data)| {
-                    let data: Value = serde_json::from_str(data).ok()?;
-                    Some(json!({ "event": event, "data": data }))
-                })
-                .unwrap_or_else(|| json!({ "unparsed": frame }))
-        })
-        .collect();
+    let mut frames = Vec::new();
+    let mut rest = text;
+    while let Some((frame, after)) = rest.split_once("\n\n") {
+        let parsed = frame
+            .strip_prefix("event: ")
+            .and_then(|rest| rest.split_once("\ndata: "))
+            .and_then(|(event, data)| {
+                let data: Value = serde_json::from_str(data).ok()?;
+                Some(json!({ "event": event, "data": data }))
+            });
+        frames.push(parsed.unwrap_or_else(|| json!({ "unparsed": frame })));
+        rest = after;
+    }
+    if !rest.is_empty() {
+        frames.push(json!({ "unended": rest }));
+    }
     Value::Array(frames)
 }
 
@@ -1423,6 +1427,16 @@ mod tests {
             ])
         );
         assert_eq!(sse_frames(""), json!([]));
+        // A last frame without its blank line differs from one with it.
+        let text = "event: a\ndata: {\"x\":1}";
+        assert_eq!(
+            sse_frames(text),
+            json!([{ "unended": "event: a\ndata: {\"x\":1}" }])
+        );
+        assert_ne!(
+            sse_frames(text),
+            sse_frames("event: a\ndata: {\"x\":1}\n\n")
+        );
     }
 
     #[test]
@@ -1544,7 +1558,7 @@ mod tests {
             json!([
                 { "sse": [{ "event": "message_stop", "data": { "type": "message_stop" } }] },
                 { "json": { "id": "x" } },
-                { "sse": [{ "unparsed": "event: a\ndata: {" }] }
+                { "sse": [{ "unended": "event: a\ndata: {" }] }
             ])
         );
     }
