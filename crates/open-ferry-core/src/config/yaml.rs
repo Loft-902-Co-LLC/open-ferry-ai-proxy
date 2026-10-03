@@ -33,6 +33,10 @@
 //!   characters, white space other than U+0020 and the common format
 //!   characters are escaped.
 //! - `!!binary` values that don't decode to UTF-8 are converted lossily.
+//! - A character yaml.v3's reader refuses (`control characters are not
+//!   allowed`) is an error anywhere in the input. yaml.v3 reads ahead in
+//!   chunks and only refuses what it reads, so one deep in a second
+//!   document can go unnoticed there.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -519,6 +523,13 @@ pub(crate) fn parse_document(text: &str) -> Result<Option<Node>, YamlError> {
     let text = text
         .strip_prefix(|c: char| c as u32 == 0xFEFF)
         .unwrap_or(text);
+    // saphyr would stop at a NUL and read what came before as the whole
+    // document.
+    if !text.chars().all(reader_accepts) {
+        return Err(YamlError::Syntax(
+            "yaml: control characters are not allowed".to_owned(),
+        ));
+    }
     let mut builder = Builder::new(text);
     for item in Parser::new_from_str(text) {
         let (event, span) = match item {
@@ -540,6 +551,20 @@ pub(crate) fn parse_document(text: &str) -> Result<Option<Node>, YamlError> {
         poisoned: false,
     };
     expander.node(root, 1).map(Some)
+}
+
+/// Whether yaml.v3's reader accepts `c` (`yaml_parser_update_buffer`).
+fn reader_accepts(c: char) -> bool {
+    matches!(
+        u32::from(c),
+        0x09 | 0x0A
+            | 0x0D
+            | 0x20..=0x7E
+            | 0x85
+            | 0xA0..=0xD7FF
+            | 0xE000..=0xFFFD
+            | 0x10000..=0x10_FFFF
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1557,6 +1582,30 @@ mod tests {
         assert_eq!(b.alias.as_ref().map(|a| a.name.as_str()), Some("x"));
         assert_eq!(parse_document(""), Ok(None));
         assert_eq!(parse_document("# only a comment\n"), Ok(None));
+        // yaml.v3 refuses these characters wherever they are; the rest are
+        // read as they are.
+        let refused = Err(YamlError::Syntax(
+            "yaml: control characters are not allowed".to_owned(),
+        ));
+        for text in [
+            "port: 1235\n\0api-keys: [new]\n",
+            "port: 1\u{1}\n",
+            "port: 1\u{7f}\n",
+            "port: \"a\u{80}b\"\n",
+            "port: \"a\u{ffff}b\"\n",
+            "a: |\n  x\n  y\u{c}\n",
+            "port: 1\n---\nb: \0\n",
+        ] {
+            assert_eq!(parse_document(text), refused, "{text:?}");
+        }
+        for text in [
+            "a: \"x\u{85}y\"\n",
+            "a: \"x\u{feff}y\"\n",
+            "a: 'x\ty'\n",
+            "a: x\r\n",
+        ] {
+            assert!(matches!(parse_document(text), Ok(Some(_))), "{text:?}");
+        }
         assert_eq!(
             parse_document("a: *nope\n"),
             Err(YamlError::Syntax(
