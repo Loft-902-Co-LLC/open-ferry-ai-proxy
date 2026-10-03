@@ -7,9 +7,11 @@
 //! provider's executor implements, and [`manager`] is the dispatcher: it
 //! picks credentials, calls executors, and tracks cooldowns and refreshes.
 //! [`config`] loads the proxy's config file and watches it and the auth
-//! directory for changes.
+//! directory for changes. [`codex_models`] builds the model list Codex
+//! clients fetch.
 
 pub mod auth;
+pub mod codex_models;
 pub mod config;
 pub mod exec;
 pub mod executor;

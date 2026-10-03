@@ -55,6 +55,8 @@ pub struct ModelInfo {
     pub thinking: Option<ThinkingSupport>,
     /// The thinking settings were set in the config. Internal.
     pub explicit_thinking: bool,
+    /// The input modalities were set in the config. Internal.
+    pub explicit_input_modalities: bool,
     /// The model whose metadata this one uses, when this one is an alias or
     /// a prefixed name. Internal; model lists don't show it.
     pub metadata_model_id: String,

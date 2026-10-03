@@ -35,8 +35,6 @@
 //! - Upstream caches the OpenAI-compatible entries' models while it
 //!   registers many credentials at once; they are built for each credential
 //!   here, which gives the same models.
-//! - A configured model's `ExplicitInputModalities` flag isn't kept: only
-//!   upstream's Codex client model list reads it, and that isn't ported.
 //! - Upstream skips a credential its credential manager no longer holds, or
 //!   no longer holds enabled; that check is the caller's. Unregistering a
 //!   legacy runtime client ID isn't ported.
@@ -667,6 +665,7 @@ fn build_openai_compat_models(entry: &OpenAiCompatEntry) -> Vec<ModelInfo> {
             None => None,
         };
         info.explicit_thinking = model.thinking.is_some();
+        info.explicit_input_modalities = !model.input_modalities.is_empty();
         info.thinking = thinking.as_ref().map(normalize_thinking);
         info.supported_input_modalities = normalize_modalities(&model.input_modalities);
         info.supported_output_modalities = normalize_modalities(&model.output_modalities);

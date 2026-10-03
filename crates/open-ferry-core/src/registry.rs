@@ -11,8 +11,9 @@
 //! its own state into the registry with
 //! [`ModelRegistry::apply_client_model_projections`].
 //!
-//! [`definitions`] holds the static model catalog, and [`registration`]
-//! works out which models a credential serves.
+//! [`definitions`] holds the static model catalog, [`registration`] works
+//! out which models a credential serves, and [`codex_client`] holds the
+//! catalog Codex clients' model list is made from.
 //!
 //! Deviations from upstream:
 //! - There is no global registry; callers share a [`ModelRegistry`].
@@ -30,11 +31,13 @@
 //!   ported; nor are the Gemini-only fields `inputTokenLimit`,
 //!   `outputTokenLimit` and `supportedGenerationMethods`, so Gemini model
 //!   lists leave them out.
-//! - `LookupModelInfo` and `ModelOverrideHeaders` aren't ported. The latter
-//!   serves the catalog's `override_header`, which forces a client identity
-//!   and is left out by policy.
+//! - `LookupModelInfo` is ported inside [`crate::codex_models`], its only
+//!   user here. `ModelOverrideHeaders` isn't ported: it serves the catalog's
+//!   `override_header`, which forces a client identity and is left out by
+//!   policy.
 //! - A registration's `LastUpdated` time isn't kept; nothing reads it.
 
+pub mod codex_client;
 pub mod definitions;
 mod json;
 pub mod registration;
