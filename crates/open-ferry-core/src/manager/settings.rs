@@ -167,6 +167,52 @@ impl From<&Config> for Settings {
         };
         let mut api_keys = BTreeMap::new();
         api_keys.insert(
+            "gemini".to_owned(),
+            config
+                .gemini_api_key
+                .iter()
+                .map(|key| ApiKeyEntry {
+                    api_key: key.api_key.clone(),
+                    base_url: key.base_url.clone(),
+                    prefix: key.prefix.clone(),
+                    proxy_url: key.proxy_url.clone(),
+                    models: key
+                        .models
+                        .iter()
+                        .map(|model| ModelAlias {
+                            name: model.name.clone(),
+                            alias: model.alias.clone(),
+                            force_mapping: model.force_mapping,
+                        })
+                        .collect(),
+                    request_scoped_errors: rules(&key.request_scoped_errors),
+                })
+                .collect(),
+        );
+        api_keys.insert(
+            "vertex".to_owned(),
+            config
+                .vertex_api_key
+                .iter()
+                .map(|key| ApiKeyEntry {
+                    api_key: key.api_key.clone(),
+                    base_url: key.base_url.clone(),
+                    prefix: key.prefix.clone(),
+                    proxy_url: key.proxy_url.clone(),
+                    models: key
+                        .models
+                        .iter()
+                        .map(|model| ModelAlias {
+                            name: model.name.clone(),
+                            alias: model.alias.clone(),
+                            force_mapping: model.force_mapping,
+                        })
+                        .collect(),
+                    request_scoped_errors: Vec::new(),
+                })
+                .collect(),
+        );
+        api_keys.insert(
             "claude".to_owned(),
             config
                 .claude_api_key
@@ -379,6 +425,8 @@ openai-compatibility:
         assert_eq!(claude[0].base_url, "https://example.test");
         assert_eq!(claude[0].models[0].alias, "cx");
         assert!(settings.api_key_entries("codex").is_empty());
+        assert!(settings.api_key_entries("gemini").is_empty());
+
         assert_eq!(
             settings.openai_compatibility,
             [OpenAiCompat {
@@ -398,6 +446,41 @@ openai-compatibility:
                 }],
             }]
         );
+        let keyed = Config::parse(
+            "gemini-api-key:\n  - api-key: g\n    prefix: team\n    proxy-url: direct\n    \
+             models: [{name: gemini-2.5-pro, alias: pro, force-mapping: true}]\n    \
+             request-scoped-errors: [{status: 400, match: [long], action: stop}]\n\
+             vertex-api-key:\n  - api-key: v\n    base-url: https://vertex.example.test\n    \
+             models: [{name: gemini-2.5-flash, alias: flash}]\n",
+        )
+        .unwrap();
+        let keyed = Settings::from(&keyed);
+        assert_eq!(
+            keyed.api_key_entries("gemini"),
+            [ApiKeyEntry {
+                api_key: "g".into(),
+                prefix: "team".into(),
+                proxy_url: "direct".into(),
+                models: vec![ModelAlias {
+                    name: "gemini-2.5-pro".into(),
+                    alias: "pro".into(),
+                    force_mapping: true,
+                }],
+                request_scoped_errors: vec![RequestScopedErrorRule {
+                    status: 400,
+                    matches: vec!["long".into()],
+                    match_regex: Vec::new(),
+                    action: "stop".into(),
+                }],
+                ..ApiKeyEntry::default()
+            }]
+        );
+        let vertex = keyed.api_key_entries("vertex");
+        assert_eq!(
+            (vertex[0].api_key.as_str(), vertex[0].base_url.as_str()),
+            ("v", "https://vertex.example.test")
+        );
+        assert_eq!(vertex[0].models[0].alias, "flash");
     }
 
     #[test]

@@ -23,8 +23,8 @@
 //! registration the cache feeds, as the cache isn't ported.
 //!
 //! Dropped:
-//! - The Gemini, Vertex, xAI and interactions cases of the display name and
-//!   context length tests: those providers aren't ported.
+//! - The xAI and interactions cases of the display name and context length
+//!   tests: those providers aren't ported.
 //! - `AntigravityFetchesWebSearchCapability` and `DevinSWE16SlowIncluded`:
 //!   Antigravity and Devin aren't ported.
 //! - `ApplyOAuthSettings_CodexCatalogPipeline`: it needs the Codex client
@@ -885,6 +885,29 @@ fn build_config_models_display_name() {
         StaticCatalog::embedded(),
     );
     assert_eq!(codex[0].display_name, "Codex Catalog Name");
+
+    let gemini = build_config_models(
+        &[ConfiguredModel {
+            display_name: "Gemini Catalog Name".to_owned(),
+            ..configured("gemini-upstream", "gemini-catalog")
+        }],
+        "google",
+        "gemini",
+    );
+    assert_eq!(gemini[0].display_name, "Gemini Catalog Name");
+    let vertex = build_config_models(
+        &[ConfiguredModel {
+            display_name: "Vertex Catalog Name".to_owned(),
+            ..configured("vertex-upstream", "vertex-catalog")
+        }],
+        "google",
+        "vertex",
+    );
+    assert_eq!(vertex[0].display_name, "Vertex Catalog Name");
+    assert_eq!(
+        (vertex[0].owned_by.as_str(), vertex[0].model_type.as_str()),
+        ("google", "vertex")
+    );
 }
 
 #[test]
@@ -944,9 +967,18 @@ fn build_config_models_propagates_max_context_length() {
         }],
         ..OpenAiCompatEntry::default()
     });
+    let gemini = build_config_models(
+        &[ConfiguredModel {
+            max_context_length: WANT,
+            ..configured("gemini-upstream", "gemini-alias")
+        }],
+        "google",
+        "gemini",
+    );
     for (name, model) in [
         ("codex", &codex[0]),
         ("claude", &claude[0]),
+        ("gemini", &gemini[0]),
         ("openai-compatibility", &compat[0]),
     ] {
         assert_eq!(model.context_length, WANT, "{name}");
@@ -1053,6 +1085,122 @@ fn claude_api_keys_use_their_entry() {
         id_set(&registered(&listed_key, &rules)),
         BTreeSet::from(["opus".to_owned()])
     );
+}
+
+// service_models.go: the gemini and vertex cases of registerModelsForAuth,
+// resolveConfigGeminiKey and resolveConfigVertexCompatKey (no upstream
+// test).
+#[test]
+fn gemini_and_vertex_keys_use_their_entry() {
+    let rules = RegistrationRules {
+        oauth_excluded_models: channel("gemini", vec!["gemini-2.5-pro".to_owned()]),
+        gemini_keys: vec![
+            ApiKeyEntry {
+                excluded_models: vec!["gemini-2.5-flash*".to_owned()],
+                ..api_key_entry("gemini-key", Vec::new())
+            },
+            api_key_entry("listed-key", vec![configured("gemini-2.5-pro", "pro")]),
+        ],
+        vertex_keys: vec![api_key_entry(
+            "vertex-key",
+            vec![configured("gemini-2.5-pro", "vertex-pro")],
+        )],
+        ..RegistrationRules::default()
+    };
+
+    // The catalog's models, without the entry's exclusions; the global
+    // OAuth exclusions don't apply to API keys.
+    let catalog_key = auth(
+        "gemini-catalog-key",
+        "gemini",
+        &[("api_key", "gemini-key"), ("auth_kind", "apikey")],
+    );
+    let got = id_set(&registered(&catalog_key, &rules));
+    assert!(got.contains("gemini-2.5-pro"));
+    assert!(!got.iter().any(|id| id.starts_with("gemini-2.5-flash")));
+    let catalog_ids = id_set(&StaticCatalog::embedded().gemini_models());
+    assert!(got.is_subset(&catalog_ids));
+
+    let listed_key = auth("gemini-listed-key", "gemini", &[("api_key", "listed-key")]);
+    let models = registered(&listed_key, &rules);
+    assert_eq!(ids(&models), ["pro"]);
+    assert_eq!(
+        (models[0].owned_by.as_str(), models[0].model_type.as_str()),
+        ("google", "gemini")
+    );
+    assert!(models[0].user_defined);
+    assert!(models[0].thinking.is_some(), "the catalog's thinking");
+
+    // A key without an entry gets the whole catalog; any other credential
+    // gets it under the global exclusions.
+    let unknown = auth("gemini-other", "gemini", &[("api_key", "other")]);
+    assert_eq!(id_set(&registered(&unknown, &rules)), catalog_ids);
+    let oauth = auth("gemini-oauth", "gemini", &[]);
+    let got = id_set(&registered(&oauth, &rules));
+    assert!(!got.is_empty() && !got.contains("gemini-2.5-pro"));
+
+    let vertex = auth("vertex-key", "vertex", &[("api_key", "vertex-key")]);
+    match auth_models(&vertex, &rules) {
+        AuthModels::Register { provider, models } => {
+            assert_eq!(provider, "vertex");
+            assert_eq!(ids(&models), ["vertex-pro"]);
+            assert_eq!(models[0].model_type, "vertex");
+        }
+        other => panic!("{other:?}"),
+    }
+    let service_account = auth("vertex.json", "vertex", &[]);
+    assert_eq!(
+        id_set(&registered(&service_account, &rules)),
+        id_set(&StaticCatalog::embedded().vertex_models())
+    );
+}
+
+#[test]
+fn resolve_config_gemini_and_vertex_keys() {
+    let entries = [
+        ApiKeyEntry {
+            base_url: "https://a.example.com".to_owned(),
+            ..api_key_entry("shared", vec![configured("a", "")])
+        },
+        ApiKeyEntry {
+            base_url: "https://b.example.com".to_owned(),
+            ..api_key_entry("shared", vec![configured("b", "")])
+        },
+        ApiKeyEntry {
+            base_url: "https://keyless.example.com".to_owned(),
+            ..api_key_entry("", vec![configured("keyless", "")])
+        },
+    ];
+    let first = |auth: &Auth| {
+        resolve_config_gemini_key(auth, &entries).map(|entry| entry.models[0].name.clone())
+    };
+    let with = |attrs: &[(&str, &str)]| auth("x", "gemini", attrs);
+    assert_eq!(
+        first(&with(&[
+            ("api_key", "SHARED"),
+            ("base_url", "https://b.example.com")
+        ])),
+        Some("b".to_owned())
+    );
+    assert_eq!(
+        first(&with(&[("base_url", "https://keyless.example.com")])),
+        Some("keyless".to_owned())
+    );
+    // The key matches, but no base URL does: Gemini finds nothing, Vertex
+    // falls back to the first with the key.
+    let stray = with(&[("api_key", "shared"), ("base_url", "https://c.example.com")]);
+    assert_eq!(first(&stray), None);
+    assert_eq!(
+        resolve_config_vertex_key(&stray, &entries).map(|entry| entry.models[0].name.as_str()),
+        Some("a")
+    );
+    // A config credential goes by its index.
+    let indexed = with(&[
+        ("api_key", "shared"),
+        ("source", "config:gemini[token]"),
+        ("config_index", "1"),
+    ]);
+    assert_eq!(first(&indexed), Some("b".to_owned()));
 }
 
 #[test]
@@ -1356,7 +1504,7 @@ fn registration_skips_and_unregisters() {
     };
     assert_eq!(auth_models(&disabled, &rules), AuthModels::Unregister);
     assert_eq!(
-        auth_models(&auth("gemini.json", "gemini", &[]), &rules),
+        auth_models(&auth("aistudio.json", "aistudio", &[]), &rules),
         AuthModels::Unregister
     );
     // A Codex API key without a matching entry serves nothing.
@@ -1447,6 +1595,39 @@ fn rules_come_from_the_config() {
         ("gpt-5", "g5", 1000)
     );
     assert!(model.support_configuration_update);
+
+    let config = Config::parse(concat!(
+        "gemini-api-key:\n  - api-key: g\n    excluded-models: [y]\n    models:\n",
+        "      - name: gemini-2.5-pro\n        alias: pro\n        max-context-length: 7\n",
+        "        is-compat: true\n",
+        "vertex-api-key:\n  - api-key: v\n    base-url: https://vertex.example.test\n",
+        "    models:\n      - name: gemini-2.5-flash\n        alias: flash\n",
+        "        display-name: Flash\n",
+    ))
+    .unwrap();
+    let rules = RegistrationRules::from(&config);
+    let gemini = &rules.gemini_keys[0];
+    assert_eq!(
+        (gemini.api_key.as_str(), gemini.excluded_models.as_slice()),
+        ("g", ["y".to_owned()].as_slice())
+    );
+    assert_eq!(
+        gemini.models,
+        [ConfiguredModel {
+            max_context_length: 7,
+            is_compat: true,
+            ..configured("gemini-2.5-pro", "pro")
+        }]
+    );
+    let vertex = &rules.vertex_keys[0];
+    assert_eq!(vertex.base_url, "https://vertex.example.test");
+    assert_eq!(
+        vertex.models,
+        [ConfiguredModel {
+            display_name: "Flash".to_owned(),
+            ..configured("gemini-2.5-flash", "flash")
+        }]
+    );
 }
 
 // OpenAI-compatible providers: openai_compat_config_models_test.go,
@@ -1774,6 +1955,7 @@ fn other_providers_take_a_compatible_entry_by_name() {
     let rules = compat_rules(vec![
         compat_entry("custom", vec![compat_model("m", "")]),
         compat_entry("gemini", vec![compat_model("g", "")]),
+        compat_entry("aistudio", vec![compat_model("s", "")]),
     ]);
     assert_eq!(
         registration(&auth("a", " Custom ", &[]), &rules),
@@ -1785,10 +1967,13 @@ fn other_providers_take_a_compatible_entry_by_name() {
         AuthModels::Unregister
     );
     assert_eq!(
-        auth_models(&auth("c", "gemini", &[]), &rules),
+        auth_models(&auth("c", "aistudio", &[]), &rules),
         AuthModels::Unregister,
         "a provider upstream lists models of its own for isn't compatible"
     );
+    let gemini = registration(&auth("c", "gemini", &[]), &rules).expect("gemini models");
+    assert_eq!(gemini.0, "gemini");
+    assert!(!gemini.1.contains(&"g".to_owned()));
     assert_eq!(
         registration(
             &auth("d", "openai-compatibility", &[("compat_name", "custom")]),

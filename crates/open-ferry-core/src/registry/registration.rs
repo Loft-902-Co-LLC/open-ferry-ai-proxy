@@ -13,8 +13,10 @@
 //! Which models a credential serves, and registering them.
 //!
 //! A Claude credential serves the catalog's Claude models, or the models its
-//! config entry lists. A Codex account serves its ChatGPT plan's models; a
-//! Codex API key serves the models its config entry lists, or the Pro models.
+//! config entry lists; so do Gemini and Vertex credentials, with the
+//! catalog's Gemini and Vertex models. A Codex account serves its ChatGPT
+//! plan's models; a Codex API key serves the models its config entry lists,
+//! or the Pro models.
 //! Then exclusions take models out (`*` matches any text), aliases rename
 //! models or, with `fork`, add names for them, settings set context windows,
 //! and a prefix namespaces them, as in `team-a/gpt-5`.
@@ -27,9 +29,9 @@
 //! The config settings involved come in a [`RegistrationRules`].
 //!
 //! Deviations from upstream:
-//! - Only Claude, Codex and OpenAI-compatible credentials get models; a
-//!   credential of any other provider is unregistered. Plugin models and
-//!   Antigravity capability probing aren't ported.
+//! - Only Gemini, Vertex, Claude, Codex and OpenAI-compatible credentials
+//!   get models; a credential of any other provider is unregistered. Plugin
+//!   models and Antigravity capability probing aren't ported.
 //! - Upstream caches the OpenAI-compatible entries' models while it
 //!   registers many credentials at once; they are built for each credential
 //!   here, which gives the same models.
@@ -82,10 +84,8 @@ pub const OPENAI_IMAGE_MODEL_TYPE: &str = "openai-image";
 /// Providers upstream lists models of their own for, none of which are
 /// ported: their credentials get no models, rather than an OpenAI-compatible
 /// provider's of the same name.
-const UNPORTED_PROVIDERS: [&str; 12] = [
-    "gemini",
+const UNPORTED_PROVIDERS: [&str; 10] = [
     "gemini-interactions",
-    "vertex",
     "aistudio",
     "antigravity",
     "kimi",
@@ -125,6 +125,10 @@ pub struct RegistrationRules {
     pub oauth_model_alias: BTreeMap<String, Vec<ModelAlias>>,
     /// Settings for OAuth credentials' models, by channel (`oauth-settings`).
     pub oauth_settings: BTreeMap<String, Vec<ModelSetting>>,
+    /// The `gemini-api-key` entries.
+    pub gemini_keys: Vec<ApiKeyEntry>,
+    /// The `vertex-api-key` entries.
+    pub vertex_keys: Vec<ApiKeyEntry>,
     /// The `claude-api-key` entries.
     pub claude_keys: Vec<ApiKeyEntry>,
     /// The `codex-api-key` entries.
@@ -157,7 +161,8 @@ pub struct ModelSetting {
     pub max_context_length: u64,
 }
 
-/// A `claude-api-key` or `codex-api-key` entry, as far as models go.
+/// A `gemini-api-key`, `vertex-api-key`, `claude-api-key` or
+/// `codex-api-key` entry, as far as models go.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct ApiKeyEntry {
     /// The API key.
@@ -232,8 +237,8 @@ impl From<&OpenAiCompatibilityModel> for CompatModel {
     }
 }
 
-/// A model in an API key entry's list (upstream's `ClaudeModel` and
-/// `CodexModel`).
+/// A model in an API key entry's list (upstream's `GeminiModel`,
+/// `VertexCompatModel`, `ClaudeModel` and `CodexModel`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ConfiguredModel {
     /// The provider's name for the model.
@@ -242,9 +247,9 @@ pub struct ConfiguredModel {
     pub alias: String,
     /// A display name, or empty.
     pub display_name: String,
-    /// The context window to list, or 0 for none.
+    /// The context window to list, or 0 for none. Not for Vertex.
     pub max_context_length: u64,
-    /// Turn on compatibility handling for the model.
+    /// Turn on compatibility handling for the model. Not for Vertex.
     pub is_compat: bool,
     /// Its thinking settings, or `None` for the catalog's.
     pub thinking: Option<ThinkingSupport>,
@@ -282,6 +287,48 @@ impl From<&Config> for RegistrationRules {
             oauth_excluded_models: config.oauth_excluded_models.clone(),
             oauth_model_alias: by_channel(&config.oauth_model_alias, alias),
             oauth_settings: by_channel(&config.oauth_settings, setting),
+            gemini_keys: config
+                .gemini_api_key
+                .iter()
+                .map(|key| ApiKeyEntry {
+                    api_key: key.api_key.clone(),
+                    base_url: key.base_url.clone(),
+                    models: key
+                        .models
+                        .iter()
+                        .map(|model| ConfiguredModel {
+                            name: model.name.clone(),
+                            alias: model.alias.clone(),
+                            display_name: model.display_name.clone(),
+                            max_context_length: context_length(model.max_context_length),
+                            is_compat: model.is_compat,
+                            thinking: model.thinking.as_ref().map(thinking),
+                            support_configuration_update: false,
+                        })
+                        .collect(),
+                    excluded_models: key.excluded_models.clone(),
+                })
+                .collect(),
+            vertex_keys: config
+                .vertex_api_key
+                .iter()
+                .map(|key| ApiKeyEntry {
+                    api_key: key.api_key.clone(),
+                    base_url: key.base_url.clone(),
+                    models: key
+                        .models
+                        .iter()
+                        .map(|model| ConfiguredModel {
+                            name: model.name.clone(),
+                            alias: model.alias.clone(),
+                            display_name: model.display_name.clone(),
+                            thinking: model.thinking.as_ref().map(thinking),
+                            ..ConfiguredModel::default()
+                        })
+                        .collect(),
+                    excluded_models: key.excluded_models.clone(),
+                })
+                .collect(),
             claude_keys: config
                 .claude_api_key
                 .iter()
@@ -415,6 +462,31 @@ pub fn auth_models_with(
     }
 
     let models = match provider.as_str() {
+        "gemini" => {
+            let mut models = catalog.gemini_models();
+            if let Some(entry) = resolve_config_gemini_key(auth, &rules.gemini_keys) {
+                if !entry.models.is_empty() {
+                    models = build_config_models(&entry.models, "google", "gemini");
+                }
+                if kind == AUTH_KIND_API_KEY {
+                    excluded.clone_from(&entry.excluded_models);
+                }
+            }
+            apply_excluded_models(models, &excluded)
+        }
+        // Vertex AI serves the same model names as Gemini.
+        "vertex" => {
+            let mut models = catalog.vertex_models();
+            if let Some(entry) = resolve_config_vertex_key(auth, &rules.vertex_keys) {
+                if !entry.models.is_empty() {
+                    models = build_config_models(&entry.models, "google", "vertex");
+                }
+                if kind == AUTH_KIND_API_KEY {
+                    excluded.clone_from(&entry.excluded_models);
+                }
+            }
+            apply_excluded_models(models, &excluded)
+        }
         "claude" => {
             let mut models = catalog.claude_models();
             if let Some(entry) = resolve_config_claude_key(auth, &rules.claude_keys) {
@@ -720,6 +792,47 @@ fn resolve_config_claude_key<'a>(
             return Some(entry);
         }
     }
+    if key.is_empty() {
+        return None;
+    }
+    entries
+        .iter()
+        .find(|entry| equal_fold(entry.api_key.trim(), key))
+}
+
+/// The `gemini-api-key` entry for `auth`: by config index, else the first
+/// whose key matches and whose base URL is empty or matches, or, for a
+/// keyless credential, whose base URL matches (upstream's
+/// `resolveConfigGeminiKey`).
+fn resolve_config_gemini_key<'a>(
+    auth: &Auth,
+    entries: &'a [ApiKeyEntry],
+) -> Option<&'a ApiKeyEntry> {
+    if let Some(entry) = config_entry_for_auth_index(auth, entries) {
+        return Some(entry);
+    }
+    let key = attribute(auth, "api_key");
+    let base = attribute(auth, "base_url");
+    entries.iter().find(|entry| {
+        let entry_key = entry.api_key.trim();
+        let entry_base = entry.base_url.trim();
+        if !key.is_empty() && equal_fold(entry_key, key) {
+            return entry_base.is_empty() || equal_fold(entry_base, base);
+        }
+        key.is_empty() && !base.is_empty() && equal_fold(entry_base, base)
+    })
+}
+
+/// The `vertex-api-key` entry for `auth`: as for a Gemini key, else the
+/// first with its key (upstream's `resolveConfigVertexCompatKey`).
+fn resolve_config_vertex_key<'a>(
+    auth: &Auth,
+    entries: &'a [ApiKeyEntry],
+) -> Option<&'a ApiKeyEntry> {
+    if let Some(entry) = resolve_config_gemini_key(auth, entries) {
+        return Some(entry);
+    }
+    let key = attribute(auth, "api_key");
     if key.is_empty() {
         return None;
     }
