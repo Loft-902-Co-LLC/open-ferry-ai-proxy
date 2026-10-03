@@ -104,6 +104,7 @@ Each ported file lists its deviations in its module docs. Most are byproducts of
 - **Secrets stay out of logs and `Debug` output.** A failed Vertex AI token exchange is logged with the endpoint's OAuth `error` and `error_description`, but with the signature of the assertion it was sent redacted, since the assertion grants a token until it expires; upstream logs the description as it came. The `Debug` output of a config entry, a synthesized credential's entry and a registration entry shows a base URL without its user info, query and fragment, and no proxy URL.
 - **OpenAI-compatible streams are bounded.** A frame's `data:` lines, joined, may hold at most 50 MiB, as one line may; a bigger frame ends the stream with a 502, `upstream SSE data frame is too large`. Upstream holds any amount.
 - **OpenAI-compatible base URLs are read as WHATWG URLs.** Their `.` and `..` segments are resolved, where Go sends them as written. A base URL with an ASCII control character fails before anything is sent, as in Go, with Go's message but without the URL, which may hold a secret. As with Go's HTTP client, a custom `Content-Length`, `Transfer-Encoding` or `Trailer` header is ignored.
+- **The Gemini schema cleaner takes path syntax in keys literally.** Upstream's cleaner builds gjson paths from schema keys without escaping `|`, `#`, `@` or a leading `[`, `{`, `!` or `:`, so its edits through such a key resolve as queries or not at all. We edit the key itself. It also drops nullable properties from `required` in document order, where upstream walks a Go map.
 
 ### The management API
 
@@ -180,6 +181,13 @@ The Claude translators use more of upstream's shared code:
 - `thinking` from `internal/thinking`: thinking budgets and levels, model-name suffixes, and whether a client asked to see reasoning summaries.
 - `common::cache_control` and `common::claude` from `internal/translator/common` and `internal/util`: `cache_control` markers, grouping messages into turns, structured output instructions, and tool name and ID sanitizing.
 - `schema` from `internal/util/claude_schema.go`: making a tool's JSON Schema fit for Claude.
+
+The Gemini translators use more still:
+
+- `gemini_schema` from `internal/util/gemini_schema.go` (`CleanJSONSchemaForGeminiJSONSchema`): making a tool's JSON Schema fit for a Gemini `parametersJsonSchema`. It resolves gjson and sjson paths over parsed JSON as upstream's passes do over text. The Antigravity cleaners and the legacy `CleanJSONSchemaForGemini` are not ported.
+- `common::gemini` from `internal/translator/common/gemini.go`: merging consecutive user turns, moving text ahead of function responses, and storing function results. `SplitGeminiFunctionResponseTurns` is not ported: only Antigravity uses it.
+- `common::file_data` and `common::mime_types` from `internal/translator/common/file_data.go` and `internal/misc/mime-type.go`: reading the file data OpenAI clients send, typed by its file extension when it has no type.
+- `gemini::common` from `internal/translator/gemini/common/safety.go`: the default safety settings added to Gemini requests.
 
 The server edits some client JSON in place, as upstream does with gjson and sjson, so that the bytes a client sent go on as they came. Its `json` module (`crates/open-ferry-server/src/json.rs`) ports the parts of gjson v1.18.0 and sjson v1.2.5 that its Responses handlers need (MIT, [licenses/gjson-LICENSE](licenses/gjson-LICENSE) and [licenses/sjson-LICENSE](licenses/sjson-LICENSE)). The WebSocket handshake is checked as gorilla/websocket v1.5.3's `Upgrader` checks it (BSD-2-Clause, [licenses/gorilla-websocket-LICENSE](licenses/gorilla-websocket-LICENSE)).
 

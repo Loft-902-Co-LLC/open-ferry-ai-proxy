@@ -5,7 +5,14 @@
 
 pub(crate) mod cache_control;
 pub(crate) mod claude;
+pub(crate) mod file_data;
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "the translators that call it land next")
+)]
+pub(crate) mod gemini;
 pub(crate) mod gemini_response;
+pub(crate) mod mime_types;
 pub(crate) mod openai_tools;
 pub(crate) mod responses;
 pub(crate) mod tool_names;
