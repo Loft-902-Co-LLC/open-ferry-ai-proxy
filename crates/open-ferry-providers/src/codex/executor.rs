@@ -1,0 +1,429 @@
+// Ported from CLIProxyAPI internal/runtime/executor/codex_executor.go,
+// codex_executor_execute.go, codex_executor_stream.go,
+// codex_executor_tokens.go and codex_executor_auth.go (v8.0.10, MIT).
+// https://github.com/router-for-me/CLIProxyAPI
+
+//! [`CodexExecutor`], which calls Codex with a ChatGPT sign-in or an API
+//! key.
+//!
+//! A call goes to `<base>/responses`, where `<base>` is the credential's
+//! `base_url` attribute or ChatGPT's Codex API. Codex always streams: a
+//! non-streaming call reads the stream to its `response.completed` (or
+//! `response.incomplete`) event and translates that. `responses/compact`
+//! goes to `<base>/responses/compact`, as OpenAI Responses, and answers
+//! with JSON.
+//!
+//! The token is the `api_key` attribute, or else the OAuth access token,
+//! which [`refresh`](CodexExecutor::refresh) renews 24 hours before it
+//! expires.
+//!
+//! Deviations from upstream:
+//! - Requests go through `reqwest` with rustls, one shared client per proxy;
+//!   upstream builds a client per request, with a uTLS fingerprint for
+//!   ChatGPT. The request headers are in [`super::request`].
+//! - A non-streaming call reads the stream a line at a time, up to 50 MiB a
+//!   line, where upstream reads the whole body first; the outcome is the
+//!   same. Error bodies are read up to 4 MiB and compact bodies up to
+//!   50 MiB.
+//! - A dropped call or stream stops at once; upstream checks its context.
+//! - Usage reporting, request logging, model-level cooling and the
+//!   Home-service refresh aren't ported.
+//! - Deferred: the image generation endpoints, the reasoning replay cache,
+//!   and multi-agent v2. See also the module docs of [`super`].
+//! - Refresh returns a copy of the credential with new metadata; the
+//!   credential manager saves it. Upstream also updates the typed token
+//!   storage, which [`Auth`] doesn't have.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use bytes::Bytes;
+use futures_util::FutureExt as _;
+use futures_util::future::BoxFuture;
+use http::HeaderMap;
+use open_ferry_core::auth::Auth;
+use open_ferry_core::exec::{
+    ErrorKind, ExecError, Format, Options, Request, Response, StreamResponse,
+};
+use open_ferry_core::executor::ProviderExecutor;
+use open_ferry_translate::go::trim_space;
+use open_ferry_translate::registry::{Registry, ResponseContext};
+use serde_json::Value;
+
+use super::client::{Clients, error_chain, read_body, read_body_prefix};
+use super::gjson::str_at;
+use super::jwt::{DEFAULT_PLAN_TYPE, parse_jwt_token};
+use super::oauth::{CodexAuth, Endpoints};
+use super::request::{
+    DEFAULT_BASE_URL, Kind, base_model, build_headers, endpoint, original_request, prepare_body,
+    response_format,
+};
+use super::stream::{self, LineReader, MAX_LINE, StreamSetup, is_grok_client};
+use super::terminal::{
+    APPLY_PATCH_ERROR_MESSAGE, OutputItems, StatusError, empty_incomplete_stream_error,
+    has_meaningful_output_delta, incomplete_stream_error, is_terminal_empty_incomplete,
+    status_error, terminal_failure_error,
+};
+use super::token::{CREDENTIAL_TYPE, now_rfc3339};
+use super::tokens::{count_input_tokens, tokenizer_for};
+use super::usage::ensure_responses_usage_details;
+
+/// The `alt` of a `/responses/compact` call.
+const COMPACT_ALT: &str = "responses/compact";
+/// How much of an error body is read.
+const MAX_ERROR_BODY: usize = 4 << 20;
+/// How long before its tokens expire a credential is refreshed.
+const REFRESH_LEAD: Duration = Duration::from_secs(24 * 60 * 60);
+/// How many times a refresh is tried.
+const REFRESH_ATTEMPTS: u32 = 3;
+
+/// Calls Codex (upstream's `CodexExecutor`).
+pub struct CodexExecutor {
+    clients: Clients,
+    base_url: String,
+    oauth_endpoints: Endpoints,
+}
+
+impl CodexExecutor {
+    /// An executor whose credentials without a `proxy_url` go through
+    /// `global_proxy_url`: empty for the environment's proxy, `direct` or
+    /// `none` for no proxy, or an `http` or `https` proxy URL.
+    pub fn new(global_proxy_url: impl Into<String>) -> Self {
+        Self {
+            clients: Clients::new(global_proxy_url),
+            base_url: DEFAULT_BASE_URL.to_owned(),
+            oauth_endpoints: Endpoints::default(),
+        }
+    }
+
+    /// Calls `base_url` for credentials without a `base_url` attribute,
+    /// instead of ChatGPT's Codex API.
+    pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.base_url = base_url.into();
+        self
+    }
+
+    /// Refreshes tokens at `endpoints` instead of OpenAI's auth server.
+    pub fn with_oauth_endpoints(mut self, endpoints: Endpoints) -> Self {
+        self.oauth_endpoints = endpoints;
+        self
+    }
+
+    /// Posts `body` and returns Codex's answer if its status is a success.
+    async fn send(
+        &self,
+        auth: &Auth,
+        url: &str,
+        headers: HeaderMap,
+        body: &Value,
+    ) -> Result<reqwest::Response, ExecError> {
+        let response = self
+            .clients
+            .get(&auth.proxy_url)
+            .post(url)
+            .headers(headers)
+            .body(body.to_string())
+            .send()
+            .await
+            .map_err(|error| {
+                ExecError::new(ErrorKind::Upstream, error_chain(&error.without_url()))
+            })?;
+        Ok(response)
+    }
+
+    /// `Execute` for `responses/compact` (`executeCompact`).
+    async fn execute_compact(
+        &self,
+        auth: &Auth,
+        request: &Request,
+        options: &Options,
+    ) -> Result<Response, ExecError> {
+        let prepared = prepare_body(Kind::Compact, request, options);
+        let format = response_format(options);
+        let headers = build_headers(auth, &options.headers, false)?;
+        let url = endpoint(auth, &self.base_url, true);
+        let response = self.send(auth, &url, headers, &prepared.body).await?;
+        let status = response.status().as_u16();
+        if !(200..300).contains(&status) {
+            let (body, _) = read_body_prefix(response, MAX_ERROR_BODY).await;
+            tracing::debug!(status, "codex: compact request error");
+            return Err(status_error(status, &body).into());
+        }
+        let response_headers = response.headers().clone();
+        let data = read_body(response, MAX_LINE)
+            .await
+            .map_err(|error| ExecError::new(ErrorKind::Upstream, error.to_string()))?;
+        let original = original_request(request, options);
+        let context = ResponseContext {
+            model: &request.model,
+            original_request: &original,
+            request: &prepared.translated,
+        };
+        let out = Registry::global()
+            .translate_non_stream(&Format::OPENAI_RESPONSE, &format, &context, data)
+            .filter(|out| !out.is_empty())
+            .ok_or_else(|| StatusError::new(502, APPLY_PATCH_ERROR_MESSAGE))?;
+        Ok(Response {
+            payload: Bytes::from(finish_payload(&format, out)),
+            headers: response_headers,
+        })
+    }
+
+    async fn execute_inner(
+        &self,
+        auth: &Auth,
+        request: &Request,
+        options: &Options,
+    ) -> Result<Response, ExecError> {
+        if options.alt == COMPACT_ALT {
+            return self.execute_compact(auth, request, options).await;
+        }
+        let prepared = prepare_body(Kind::Execute, request, options);
+        let format = response_format(options);
+        let headers = build_headers(auth, &options.headers, true)?;
+        let url = endpoint(auth, &self.base_url, false);
+        let response = self.send(auth, &url, headers, &prepared.body).await?;
+        let status = response.status().as_u16();
+        if !(200..300).contains(&status) {
+            let (body, _) = read_body_prefix(response, MAX_ERROR_BODY).await;
+            tracing::debug!(status, "codex: request error");
+            return Err(status_error(status, &body).into());
+        }
+        let response_headers = response.headers().clone();
+
+        let mut reader = LineReader::new(response);
+        let mut items = OutputItems::default();
+        let mut saw_output_delta = false;
+        while let Some(line) = reader.next_line().await {
+            let line = match line {
+                Ok(line) => line,
+                Err(error) => {
+                    tracing::debug!("codex: response read failed: {error}");
+                    break;
+                }
+            };
+            let Some(rest) = line.strip_prefix(b"data:") else {
+                continue;
+            };
+            let data = trim_space(rest);
+            let mut event: Value = serde_json::from_slice(data).unwrap_or(Value::Null);
+            if has_meaningful_output_delta(&event) {
+                saw_output_delta = true;
+            }
+            if let Some(error) = terminal_failure_error(&event) {
+                return Err(error.into());
+            }
+            let event_type = str_at(&event, "type");
+            if event_type == "response.output_item.done" {
+                items.collect(&event);
+                continue;
+            }
+            if event_type != "response.completed" && event_type != "response.incomplete" {
+                continue;
+            }
+            if is_terminal_empty_incomplete(&event, items.len(), saw_output_delta) {
+                return Err(empty_incomplete_stream_error().into());
+            }
+            let completed = if items.patch(&mut event) {
+                event.to_string().into_bytes()
+            } else {
+                data.to_vec()
+            };
+            let original = original_request(request, options);
+            let context = ResponseContext {
+                model: &request.model,
+                original_request: &original,
+                request: &prepared.translated,
+            };
+            let out = Registry::global()
+                .translate_non_stream(&Format::CODEX, &format, &context, completed)
+                .filter(|out| !out.is_empty())
+                .ok_or_else(|| StatusError::new(502, APPLY_PATCH_ERROR_MESSAGE))?;
+            return Ok(Response {
+                payload: Bytes::from(finish_payload(&format, out)),
+                headers: response_headers,
+            });
+        }
+        Err(incomplete_stream_error().into())
+    }
+
+    async fn execute_stream_inner(
+        &self,
+        auth: &Auth,
+        request: Request,
+        options: Options,
+    ) -> Result<StreamResponse, ExecError> {
+        if options.alt == COMPACT_ALT {
+            return Err(
+                StatusError::new(400, "streaming not supported for /responses/compact").into(),
+            );
+        }
+        let prepared = prepare_body(Kind::Stream, &request, &options);
+        let format = response_format(&options);
+        let headers = build_headers(auth, &options.headers, true)?;
+        let url = endpoint(auth, &self.base_url, false);
+        let response = self.send(auth, &url, headers, &prepared.body).await?;
+        let status = response.status().as_u16();
+        if !(200..300).contains(&status) {
+            let (body, error) = read_body_prefix(response, MAX_ERROR_BODY).await;
+            if let Some(error) = error {
+                return Err(ExecError::new(ErrorKind::Upstream, error_chain(&error)));
+            }
+            tracing::debug!(status, "codex: request error");
+            return Err(status_error(status, &body).into());
+        }
+        let response_headers = response.headers().clone();
+
+        let original = original_request(&request, &options);
+        let translator = Registry::global().response_stream(
+            &Format::CODEX,
+            &format,
+            &ResponseContext {
+                model: &request.model,
+                original_request: &original,
+                request: &prepared.translated,
+            },
+        );
+        let original_bytes = if options.original_request.is_empty() {
+            request.payload.clone()
+        } else {
+            options.original_request.clone()
+        };
+        let setup = StreamSetup {
+            translator,
+            response_format: format,
+            source_format: options.source_format.clone(),
+            original: original_bytes,
+            preserve_native: prepared.native,
+            grok: is_grok_client(&options.headers),
+        };
+        Ok(StreamResponse {
+            headers: response_headers,
+            chunks: stream::translate(response, setup),
+        })
+    }
+
+    async fn count_tokens_inner(
+        &self,
+        request: &Request,
+        options: &Options,
+    ) -> Result<Response, ExecError> {
+        let prepared = prepare_body(Kind::CountTokens, request, options);
+        let model = base_model(&request.model).to_owned();
+        let body = prepared.body;
+        let count =
+            tokio::task::spawn_blocking(move || count_input_tokens(tokenizer_for(&model), &body))
+                .await
+                .map_err(|_| {
+                    ExecError::new(ErrorKind::Upstream, "codex executor: token counting failed")
+                })?;
+        let usage = format!(
+            r#"{{"response":{{"usage":{{"input_tokens":{count},"output_tokens":0,"total_tokens":{count}}}}}}}"#
+        );
+        let payload = Registry::global().translate_token_count(
+            &Format::CODEX,
+            &response_format(options),
+            count,
+            usage.into_bytes(),
+        );
+        Ok(Response {
+            payload: Bytes::from(payload),
+            headers: HeaderMap::new(),
+        })
+    }
+
+    async fn refresh_inner(&self, auth: Arc<Auth>) -> Result<Auth, ExecError> {
+        tracing::debug!("codex executor: refresh called");
+        let refresh_token = auth.metadata_str("refresh_token").unwrap_or_default();
+        if refresh_token.is_empty() {
+            return Ok((*auth).clone());
+        }
+        let tokens = CodexAuth::new(self.clients.get(&auth.proxy_url))
+            .with_endpoints(self.oauth_endpoints.clone())
+            .refresh_tokens_with_retry(refresh_token, REFRESH_ATTEMPTS)
+            .await
+            .map_err(|error| ExecError::new(ErrorKind::Upstream, error.message()))?;
+
+        let mut refreshed = (*auth).clone();
+        let metadata = &mut refreshed.metadata;
+        metadata.insert("id_token".into(), tokens.id_token.clone().into());
+        metadata.insert("access_token".into(), tokens.access_token.into());
+        if !tokens.refresh_token.is_empty() {
+            metadata.insert("refresh_token".into(), tokens.refresh_token.into());
+        }
+        if !tokens.account_id.is_empty() {
+            metadata.insert("account_id".into(), tokens.account_id.into());
+        }
+        metadata.insert("email".into(), tokens.email.into());
+        metadata.insert("expired".into(), tokens.expire.into());
+        metadata.insert("type".into(), CREDENTIAL_TYPE.into());
+        metadata.insert("last_refresh".into(), now_rfc3339().into());
+
+        let mut plan_type = tokens.plan_type.trim().to_owned();
+        if plan_type.is_empty()
+            && !tokens.id_token.is_empty()
+            && let Ok(claims) = parse_jwt_token(&tokens.id_token)
+        {
+            plan_type = claims.plan_type();
+        }
+        if plan_type.is_empty() {
+            plan_type = DEFAULT_PLAN_TYPE.to_owned();
+        }
+        metadata.insert("plan_type".into(), plan_type.clone().into());
+        refreshed.attributes.insert("plan_type".into(), plan_type);
+        Ok(refreshed)
+    }
+}
+
+/// Fills in usage details an OpenAI Responses client expects.
+fn finish_payload(format: &Format, out: Vec<u8>) -> Vec<u8> {
+    if *format == Format::OPENAI_RESPONSE {
+        ensure_responses_usage_details(out)
+    } else {
+        out
+    }
+}
+
+impl ProviderExecutor for CodexExecutor {
+    fn id(&self) -> &str {
+        "codex"
+    }
+
+    fn execute(
+        &self,
+        auth: Arc<Auth>,
+        request: Request,
+        options: Options,
+    ) -> BoxFuture<'_, Result<Response, ExecError>> {
+        async move { self.execute_inner(&auth, &request, &options).await }.boxed()
+    }
+
+    fn execute_stream(
+        &self,
+        auth: Arc<Auth>,
+        request: Request,
+        options: Options,
+    ) -> BoxFuture<'_, Result<StreamResponse, ExecError>> {
+        async move { self.execute_stream_inner(&auth, request, options).await }.boxed()
+    }
+
+    fn count_tokens(
+        &self,
+        _auth: Arc<Auth>,
+        request: Request,
+        options: Options,
+    ) -> BoxFuture<'_, Result<Response, ExecError>> {
+        async move { self.count_tokens_inner(&request, &options).await }.boxed()
+    }
+
+    fn refresh(&self, auth: Arc<Auth>) -> BoxFuture<'_, Result<Auth, ExecError>> {
+        self.refresh_inner(auth).boxed()
+    }
+
+    fn refresh_lead(&self) -> Option<Duration> {
+        Some(REFRESH_LEAD)
+    }
+}
+
+#[cfg(test)]
+mod tests;
