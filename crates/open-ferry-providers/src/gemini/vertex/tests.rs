@@ -10,22 +10,16 @@
 //!   rather than fetching a token alone, and has no request proxy, since a
 //!   proxy per request isn't ported. Its token endpoint is plain HTTP, so the
 //!   credential's proxy sees the token request itself.
-//! - `TestGeminiVertexApplyPatchExecutorReuse` needs the Responses
-//!   translators to and from Gemini, and is skipped until they are
-//!   registered; so is the check that tool call IDs are stripped from a
-//!   Responses request.
 //! - `CountTokens_GeminiPayload_SanitizesClaudeCAISSignature` doesn't check
 //!   the upstream-attempt tracker, which isn't ported.
 
 use open_ferry_core::exec::Format;
-use open_ferry_translate::registry::Registry;
 use serde_json::json;
 
 use super::*;
 use crate::gemini::testing::{
     CLAUDE_SIGNATURE, Mock, OK_ANSWER, OK_STREAM, Reply, collect, function_call_payload, key_auth,
     native_gemini_signature, options, request, stream_options, test_service_account,
-    translates_to_gemini,
 };
 
 /// An executor that doesn't use the environment's proxy.
@@ -236,16 +230,6 @@ fn assert_patch_stream(chunks: &[String]) {
 
 #[tokio::test]
 async fn apply_patch_reuses_the_executor() {
-    let registry = Registry::global();
-    if !translates_to_gemini(&Format::OPENAI_RESPONSE, "apply_patch_reuses_the_executor") {
-        return;
-    }
-    if !registry.has_response_transformer(&Format::OPENAI_RESPONSE, &Format::GEMINI) {
-        eprintln!(
-            "apply_patch_reuses_the_executor: skipped, no gemini to openai-response response translator"
-        );
-        return;
-    }
     let mock = Mock::answering(|seen| {
         if seen.path.contains("streamGenerateContent") {
             Reply::sse(&format!("data: {PATCH_RESPONSE}\n\n"))
@@ -280,12 +264,6 @@ async fn apply_patch_reuses_the_executor() {
 
 #[tokio::test]
 async fn strips_tool_call_ids_from_responses_requests() {
-    if !translates_to_gemini(
-        &Format::OPENAI_RESPONSE,
-        "strips_tool_call_ids_from_responses_requests",
-    ) {
-        return;
-    }
     let mock = Mock::start(Reply::json(r#"{"totalTokens":3}"#)).await;
     let payload = json!({
         "input": [

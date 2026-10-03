@@ -17,7 +17,6 @@ use futures_util::StreamExt as _;
 use http::HeaderMap;
 use open_ferry_core::auth::Auth;
 use open_ferry_core::exec::{ExecError, Format, Options, Request, StreamResponse};
-use open_ferry_translate::registry::Registry;
 use serde_json::{Map, Value, json};
 
 /// One request a mock received.
@@ -177,19 +176,6 @@ pub(crate) fn function_call_payload(signature: &str) -> String {
         ]
     })
     .to_string()
-}
-
-/// Whether requests from `from` can be translated to Gemini yet. A test
-/// that needs it is skipped, and says so, until the translator is ported.
-pub(crate) fn translates_to_gemini(from: &Format, test: &str) -> bool {
-    let ready = Registry::global().has_request_transformer(from, &Format::GEMINI);
-    if !ready {
-        eprintln!(
-            "{test}: skipped, no {} to gemini request translator",
-            from.as_str()
-        );
-    }
-    ready
 }
 
 pub(crate) fn request(model: &str, payload: &str) -> Request {

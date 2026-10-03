@@ -17,10 +17,6 @@
 //!   action, which isn't either.
 //! - `PrepareRequest_EmptyAPIKey_OmitsAuthHeaders` checks a call, since
 //!   `PrepareRequest` isn't ported.
-//! - The Claude signature tests and
-//!   `ExecutePrependsLeadingUserForIssue4959ResponsesHistory` need the Claude
-//!   and Responses request translators to Gemini, and are skipped until they
-//!   are registered.
 //! - The Claude signature tests don't pass the resolved model info of an
 //!   API key, which isn't ported.
 
@@ -34,7 +30,7 @@ use serde_json::json;
 use super::*;
 use crate::gemini::testing::{
     CLAUDE_SIGNATURE, Mock, OK_ANSWER, OK_STREAM, Reply, collect, function_call_payload, key_auth,
-    native_gemini_signature, options, request, stream_options, translates_to_gemini,
+    native_gemini_signature, options, request, stream_options,
 };
 
 /// An executor that doesn't use the environment's proxy.
@@ -150,12 +146,6 @@ fn has_named_part(content: &Value, kind: &str, name: &str) -> bool {
 
 #[tokio::test]
 async fn execute_prepends_leading_user_for_issue_4959_responses_history() {
-    if !translates_to_gemini(
-        &Format::OPENAI_RESPONSE,
-        "execute_prepends_leading_user_for_issue_4959_responses_history",
-    ) {
-        return;
-    }
     let mock = Mock::start(Reply::json(OK_ANSWER)).await;
     executor()
         .execute(

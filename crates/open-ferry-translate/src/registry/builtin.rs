@@ -19,6 +19,7 @@ use crate::openai::{
 };
 
 mod from_gemini;
+mod gemini_responses;
 
 pub(super) fn register(registry: &Registry) {
     let models = registry.models;
@@ -239,6 +240,7 @@ pub(super) fn register(registry: &Registry) {
     );
 
     gemini::register(registry);
+    gemini_responses::register(registry);
 }
 
 fn to_vec(value: &Value) -> Vec<u8> {
