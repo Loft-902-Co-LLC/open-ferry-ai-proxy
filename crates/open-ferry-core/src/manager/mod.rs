@@ -255,7 +255,10 @@ impl Manager {
         let strategy_changed = state.settings.routing_strategy != settings.routing_strategy;
         state.oauth = Arc::new(OAuthAliasTable::compile(&settings.oauth_model_alias));
         state.settings = Arc::new(settings);
-        lifecycle::clear_disabled_cooldown_states(&mut state, now);
+        let models = self.models();
+        for id in lifecycle::clear_disabled_cooldown_states(&mut state, now) {
+            state.sync_scheduler(models, &id, now);
+        }
         if strategy_changed {
             state.selector.reset_strategy();
         }

@@ -14,10 +14,13 @@
 //! model instead.
 //!
 //! Deviations from upstream:
-//! - The scheduler isn't a cache updated on every change. Each pick works
-//!   out the credentials' states there and then and keeps only the rotation
-//!   cursors, which it reconciles as upstream's rebuild does when it finds
-//!   the entries changed since the last pick.
+//! - The scheduler isn't a cache of the credentials' states. Each pick
+//!   works them out there and then and keeps only the rotation cursors.
+//!   The cursors are reconciled as upstream's rebuild does whenever the
+//!   manager changes a credential, so a cooldown that starts and ends
+//!   between two picks still drops the weighted credit upstream drops, and
+//!   again when a pick finds the entries changed by time alone (a cooldown
+//!   that ran out).
 //! - Model states are checked in key order, where Go's map order is random.
 //! - The scheduler's cursor maps are capped at 4096 keys and cleared when
 //!   full; upstream's grow without bound.
@@ -675,6 +678,18 @@ struct Signature {
     ws: bool,
 }
 
+impl Signature {
+    fn of(entry: &Sched<'_>) -> Self {
+        Self {
+            id: entry.auth.id.clone(),
+            state: entry.state,
+            next: entry.next,
+            priority: entry.priority,
+            ws: entry.ws,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct ViewCursor {
     last_picked: String,
@@ -727,6 +742,26 @@ impl SelectorState {
             self.shards.clear();
         }
         self.shards.entry(key).or_default()
+    }
+}
+
+impl super::State {
+    /// Upstream's scheduler update after the manager changed credential
+    /// `id` (see [`Selection::sync_auth`]). Call it with the lock held,
+    /// after the change.
+    pub(crate) fn sync_scheduler(&mut self, models: &dyn ClientModels, id: &str, now: Timestamp) {
+        let selection = Selection {
+            auths: &self.auths,
+            executors: &self.executors,
+            models,
+            resolver: Resolver {
+                settings: &self.settings,
+                oauth: &self.oauth,
+            },
+            strategy: self.settings.routing_strategy,
+            now,
+        };
+        selection.sync_auth(&mut self.selector, id);
     }
 }
 
@@ -785,16 +820,7 @@ impl ShardCursors {
     /// Reconciles the cursors with the shard's entries, as upstream's
     /// `rebuildIndexesLocked` does when an entry changes.
     fn sync(&mut self, shard: &[Sched<'_>]) {
-        let signature: Vec<Signature> = shard
-            .iter()
-            .map(|e| Signature {
-                id: e.auth.id.clone(),
-                state: e.state,
-                next: e.next,
-                priority: e.priority,
-                ws: e.ws,
-            })
-            .collect();
+        let signature: Vec<Signature> = shard.iter().map(Signature::of).collect();
         if signature == self.signature {
             return;
         }
@@ -990,40 +1016,87 @@ impl<'a> Selection<'a> {
         let mut out = Vec::new();
         for entry in self.auths.values() {
             let auth = &entry.auth;
-            if !schedulable(auth) {
+            if !schedulable(auth) || executor_key_from_auth(auth) != provider {
                 continue;
             }
-            let key = executor_key_from_auth(auth);
-            if key.is_empty() || key != provider {
-                continue;
-            }
-            if !model_key.is_empty()
-                && !self
-                    .models
-                    .models_for_client(&auth.id)
-                    .iter()
-                    .any(|m| canonical_model_key(m) == model_key)
-            {
-                continue;
-            }
-            let (blocked, reason, next) = is_auth_blocked_for_model(auth, model_key, self.now);
-            let (state, next) = match (blocked, reason) {
-                (false, _) => (SchedState::Ready, None),
-                (true, BlockReason::Cooldown) => (SchedState::Cooldown, next),
-                (true, BlockReason::Disabled) => (SchedState::Disabled, None),
-                (true, _) => (SchedState::Blocked, next),
+            let models = if model_key.is_empty() {
+                Vec::new()
+            } else {
+                self.models.models_for_client(&auth.id)
             };
-            out.push(Sched {
-                auth,
-                provider: key,
-                state,
-                next,
-                priority: priority(auth),
-                weight: weight(auth),
-                ws: websockets_enabled(auth),
-            });
+            out.extend(self.sched(auth, provider, model_key, &models));
         }
         out
+    }
+
+    /// Credential `auth`'s entry in the shard for `provider` and
+    /// `model_key`, given the models the registry lists for it, or `None`
+    /// when it isn't in that shard.
+    fn sched(
+        &self,
+        auth: &'a Arc<Auth>,
+        provider: &str,
+        model_key: &str,
+        models: &[String],
+    ) -> Option<Sched<'a>> {
+        if provider.is_empty() || !schedulable(auth) || executor_key_from_auth(auth) != provider {
+            return None;
+        }
+        if !model_key.is_empty() && !models.iter().any(|m| canonical_model_key(m) == model_key) {
+            return None;
+        }
+        let (blocked, reason, next) = is_auth_blocked_for_model(auth, model_key, self.now);
+        let (state, next) = match (blocked, reason) {
+            (false, _) => (SchedState::Ready, None),
+            (true, BlockReason::Cooldown) => (SchedState::Cooldown, next),
+            (true, BlockReason::Disabled) => (SchedState::Disabled, None),
+            (true, _) => (SchedState::Blocked, next),
+        };
+        Some(Sched {
+            auth,
+            provider: provider.to_owned(),
+            state,
+            next,
+            priority: priority(auth),
+            weight: weight(auth),
+            ws: websockets_enabled(auth),
+        })
+    }
+
+    /// Reconciles the cursors of each shard credential `id` is or was in
+    /// after it changed, as upstream's scheduler rebuilds a shard when one
+    /// of its entries changes (`upsertEntryLocked`, `removeEntryLocked`).
+    /// Shards where the credential's entry is unchanged are left alone.
+    pub(crate) fn sync_auth(&self, state: &mut SelectorState, id: &str) {
+        let auth = self.auths.get(id).map(|entry| &entry.auth);
+        let provider = auth
+            .map(|auth| executor_key_from_auth(auth))
+            .unwrap_or_default();
+        let models = match auth {
+            Some(auth) if !provider.is_empty() && schedulable(auth) => {
+                self.models.models_for_client(id)
+            }
+            _ => Vec::new(),
+        };
+        let stale: Vec<(String, String)> = state
+            .shards
+            .iter()
+            .filter(|((shard_provider, model_key), cursors)| {
+                let old = cursors.signature.iter().find(|s| s.id == id);
+                let new = auth
+                    .filter(|_| *shard_provider == provider)
+                    .and_then(|auth| self.sched(auth, &provider, model_key, &models))
+                    .map(|entry| Signature::of(&entry));
+                old != new.as_ref()
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in stale {
+            let shard = self.shard(&key.0, &key.1);
+            if let Some(cursors) = state.shards.get_mut(&key) {
+                cursors.sync(&shard);
+            }
+        }
     }
 
     fn predicate<'p>(

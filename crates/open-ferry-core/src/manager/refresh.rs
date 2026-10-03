@@ -1008,6 +1008,7 @@ impl Manager {
                 AfterFailure::Reschedule
             };
             entry.refresh_failures = failures;
+            state.sync_scheduler(self.models(), id, now);
             after
         };
         match after {

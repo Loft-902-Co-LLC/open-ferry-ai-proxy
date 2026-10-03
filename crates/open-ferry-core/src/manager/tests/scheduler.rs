@@ -615,6 +615,71 @@ async fn manager_round_robin_preserves_successor_across_cooldown() {
     );
 }
 
+/// Not an upstream test: a cooldown that starts and ends between two picks
+/// still drops the cooled credential's weighted credit, as upstream's
+/// rebuild on each change does. The sequences are upstream's, from running
+/// the same steps against it.
+#[tokio::test(start_paused = true)]
+async fn weighted_credit_drops_with_a_cooldown_between_picks() {
+    fn overloaded(id: &str, model: &str) -> CallResult {
+        CallResult {
+            error: Some(AuthError {
+                http_status: 503,
+                message: "overloaded".into(),
+                ..AuthError::default()
+            }),
+            ..failure(id, model, "")
+        }
+    }
+    fn picks(h: &Harness, model: &str, n: usize) -> Vec<String> {
+        (0..n).map(|_| pick(h, "gemini", model)).collect()
+    }
+
+    // A 503, then a success.
+    let model = "weighted-transition-1";
+    let h = harness(RoutingStrategy::Weighted, &["gemini"]);
+    h.add(cred("a", "gemini", &[("weight", "1")]), &[model]);
+    h.add(cred("b", "gemini", &[("weight", "3")]), &[model]);
+    assert_eq!(picks(&h, model, 1), ["b"]);
+    h.manager.mark_result(&overloaded("b", model));
+    h.manager.mark_result(&success("b", model));
+    assert_eq!(
+        picks(&h, model, 8),
+        ["b", "a", "b", "b", "b", "a", "b", "b"]
+    );
+
+    // A cooldown and a recovery through update, with a pick between.
+    let model = "weighted-transition-2";
+    let h = harness(RoutingStrategy::Weighted, &["gemini"]);
+    h.add(cred("c", "gemini", &[("weight", "1")]), &[model]);
+    h.add(cred("d", "gemini", &[("weight", "3")]), &[model]);
+    assert_eq!(picks(&h, model, 1), ["d"]);
+    cool(&h, "d");
+    assert_eq!(picks(&h, model, 1), ["c"]);
+    update(&h, "d", |auth| {
+        auth.unavailable = false;
+        auth.next_retry_after = None;
+    });
+    assert_eq!(
+        picks(&h, model, 8),
+        ["d", "c", "d", "d", "d", "c", "d", "d"]
+    );
+
+    // Three credentials; the middle one fails and recovers twice.
+    let model = "weighted-transition-3";
+    let h = harness(RoutingStrategy::Weighted, &["gemini"]);
+    h.add(cred("e", "gemini", &[("weight", "5")]), &[model]);
+    h.add(cred("f", "gemini", &[("weight", "3")]), &[model]);
+    h.add(cred("g", "gemini", &[("weight", "2")]), &[model]);
+    let mut seq = picks(&h, model, 3);
+    for _ in 0..2 {
+        h.manager.mark_result(&overloaded("f", model));
+        h.manager.mark_result(&success("f", model));
+        seq.extend(picks(&h, model, 3));
+    }
+    assert_eq!(seq, ["e", "f", "g", "e", "f", "e", "e", "f", "g"]);
+}
+
 #[tokio::test(start_paused = true)]
 async fn scheduler_pick_round_robin_preserves_websocket_successor_across_cooldown() {
     let h = harness(RoutingStrategy::RoundRobin, &["codex"]);

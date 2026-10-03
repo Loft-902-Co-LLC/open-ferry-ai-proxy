@@ -78,17 +78,21 @@ fn is_disabled(auth: &Auth) -> bool {
 
 /// Clears the cooldowns of every credential that no longer cools down:
 /// cooling is off for it under the current settings, or it is disabled
-/// (upstream's `clearDisabledCooldownStates`).
-pub(crate) fn clear_disabled_cooldown_states(state: &mut State, now: Timestamp) {
+/// (upstream's `clearDisabledCooldownStates`). Returns the IDs of the
+/// credentials it changed.
+pub(crate) fn clear_disabled_cooldown_states(state: &mut State, now: Timestamp) -> Vec<String> {
     let settings = state.settings.clone();
-    for entry in state.auths.values_mut() {
+    let mut cleared = Vec::new();
+    for (id, entry) in &mut state.auths {
         if !cooldown_disabled_for_auth(&settings, &entry.auth) && !is_disabled(&entry.auth) {
             continue;
         }
         if clear_cooldown_state_for_auth(Arc::make_mut(&mut entry.auth), now) {
             entry.generation += 1;
+            cleared.push(id.clone());
         }
     }
+    cleared
 }
 
 /// What [`Manager::reset_quota`] cleared.
@@ -205,6 +209,7 @@ impl Manager {
                     refresh_failures: 0,
                 },
             );
+            state.sync_scheduler(self.models(), &snapshot.id, now);
             epoch
         };
         self.queue_refresh_reschedule(&snapshot.id);
@@ -344,6 +349,7 @@ impl Manager {
                     refresh_failures,
                 },
             );
+            state.sync_scheduler(self.models(), &snapshot.id, now);
             (snapshot, live_epoch, generation)
         };
         self.queue_refresh_reschedule(&snapshot.id);
@@ -372,6 +378,7 @@ impl Manager {
                 return;
             };
             state.pool_offsets.remove(id);
+            state.sync_scheduler(self.models(), id, self.now());
             let slot = state.epochs.entry(id.to_owned()).or_insert(0);
             *slot = (*slot).max(existing.epoch).saturating_add(1);
             existing.auth.provider.trim().to_owned()
@@ -503,7 +510,9 @@ impl Manager {
             apply_result(&state.settings, auth, result, &model_key, now);
             auth.updated_at = Some(now);
             entry.generation = entry.generation.saturating_add(1);
-            (entry.auth.clone(), entry.epoch, entry.generation)
+            let committed = (entry.auth.clone(), entry.epoch, entry.generation);
+            state.sync_scheduler(self.models(), &result.auth_id, now);
+            committed
         };
         let _ = self.persist(&snapshot, epoch, generation, Save::Yes);
         self.publish_projections(&snapshot, generation, now, true);
@@ -554,7 +563,9 @@ impl Manager {
             let (models, cleared) = reset_quota(Arc::make_mut(&mut entry.auth), &registered, now);
             let bumps = if cleared { 2 } else { 1 };
             entry.generation = entry.generation.saturating_add(bumps);
-            (entry.auth.clone(), models, entry.epoch, entry.generation)
+            let committed = (entry.auth.clone(), models, entry.epoch, entry.generation);
+            state.sync_scheduler(self.models(), id, now);
+            committed
         };
         let persisted = self.persist(&snapshot, epoch, generation, Save::Yes);
         self.publish_projections(&snapshot, generation, now, false);
@@ -615,6 +626,9 @@ impl Manager {
                     reg_epoch,
                 ));
                 break;
+            }
+            if committed.is_some() {
+                state.sync_scheduler(models, id, now);
             }
         }
         let Some((snapshot, epoch, generation, changed, supported, reg_epoch)) = committed else {
