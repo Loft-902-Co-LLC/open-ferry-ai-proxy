@@ -21,8 +21,8 @@
 //!   catch an overload, isn't ported; chunks go out as they come.
 //! - A rewritten terminal event is written by `serde_json`.
 //! - Dropping the stream stops reading, where upstream watches its context.
-//! - Usage reporting, request logging, multi-agent v2, the reasoning
-//!   replay cache and image tool usage aren't ported.
+//! - Usage reporting, request logging, multi-agent v2 and image tool usage
+//!   aren't ported.
 
 use std::collections::VecDeque;
 use std::fmt;

@@ -30,8 +30,8 @@
 //!   token has it redacted (see the crate's `redact` module).
 //! - Usage reporting, request logging, model-level cooling and the
 //!   Home-service refresh aren't ported.
-//! - Deferred: the image generation endpoints, the reasoning replay cache,
-//!   and multi-agent v2. See also the module docs of [`super`].
+//! - Deferred: the image generation endpoints and multi-agent v2. See also
+//!   the module docs of [`super`].
 //! - Refresh returns a copy of the credential with new metadata; the
 //!   credential manager saves it. Upstream also updates the typed token
 //!   storage, which [`Auth`] doesn't have.

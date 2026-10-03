@@ -35,8 +35,8 @@
 //!   config rules aren't applied, and the original request isn't translated
 //!   alongside the payload, as the thinking and payload-config modules
 //!   aren't ported.
-//! - The image generation tool isn't added, and multi-agent v2 and the
-//!   reasoning replay cache aren't ported.
+//! - The image generation tool isn't added, and multi-agent v2 isn't
+//!   ported.
 
 use http::header::{self, HeaderMap, HeaderName, HeaderValue};
 use open_ferry_core::auth::Auth;

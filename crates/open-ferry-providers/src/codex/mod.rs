@@ -8,7 +8,10 @@
 //! format, adjusts it as upstream does, and translates Codex's server-sent
 //! events back, chunk by chunk when streaming and from the completed
 //! response otherwise. `responses/compact` calls go to Codex's compact
-//! endpoint. Token counts are made locally with `tiktoken-rs`.
+//! endpoint. Token counts are made locally with `tiktoken-rs`. For Claude
+//! clients, which drop Codex's reasoning items, each turn's reasoning and
+//! tool calls are kept by the session the client named and put back in its
+//! next request (the `replay` module).
 //!
 //! Deviations from upstream (each module lists its own):
 //! - Our requests don't pass for Codex's own client: there is no
@@ -27,9 +30,6 @@
 //! Deferred:
 //! - The Responses WebSocket upstream (`codex_websockets_executor.go`),
 //!   which is a separate transport.
-//! - The reasoning replay cache, which keeps a turn's reasoning items and
-//!   tool calls for Claude clients, which drop them, and puts them back in
-//!   the next request.
 //! - Image generation: the `image_generation` tool upstream adds, and the
 //!   OpenAI Images endpoints served through Codex.
 
