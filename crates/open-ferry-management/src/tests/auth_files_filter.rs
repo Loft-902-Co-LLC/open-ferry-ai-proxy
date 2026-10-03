@@ -9,8 +9,9 @@
 //! - `TestListAuthFilesFromDiskFiltersByNameAndRejectsAuthIndex` is
 //!   dropped: this port has no disk listing for a missing manager.
 //! - `TestPatchAuthFileStatusVerifiesAuthIndex` and
-//!   `TestPatchAuthFileStatusRejectsMismatchedAuthIndex` are dropped:
-//!   `PATCH /v0/management/auth-files/status` isn't ported.
+//!   `TestPatchAuthFileStatusRejectsMismatchedAuthIndex` turn credentials
+//!   on and off through the router, over an [`AuthDir`]: the status route
+//!   needs a credential store.
 //! - `TestAuthFileLookupAndEntryBuildConcurrentEnsureIndex` calls
 //!   `matchesAuthFileLookup` and `buildAuthFileEntry` from 32 goroutines on
 //!   a credential outside the manager. Here 32 tasks list one credential by
@@ -18,9 +19,11 @@
 
 use std::sync::Arc;
 
+use http::{Method, StatusCode};
+use open_ferry_core::auth::Status;
 use serde_json::json;
 
-use super::{Api, file_auth};
+use super::{Api, AuthDir, file_auth, keyed};
 
 #[tokio::test]
 async fn list_auth_files_filters_by_name_and_auth_index() {
@@ -36,6 +39,48 @@ async fn list_auth_files_filters_by_name_and_auth_index() {
     assert_eq!(files.len(), 1, "{files:?}");
     assert_eq!(files[0]["id"], json!("auth-b"));
     assert_eq!(files[0]["auth_index"], json!("idx-b"));
+}
+
+/// An API over `dir` with an active Codex credential for each `(id, index)`,
+/// all from file `shared-codex.json`.
+fn shared_credentials(dir: &AuthDir, credentials: &[(&str, &str)]) -> Api {
+    let api = Api::over(dir);
+    for (id, index) in credentials {
+        let mut auth = file_auth(&dir.path(), id, "shared-codex.json", "{}");
+        auth.index = (*index).into();
+        api.register(auth);
+    }
+    api
+}
+
+// TestPatchAuthFileStatusVerifiesAuthIndex
+#[tokio::test]
+async fn patch_auth_file_status_verifies_auth_index() {
+    let dir = AuthDir::new();
+    let api = shared_credentials(&dir, &[("auth-a", "idx-a"), ("auth-b", "idx-b")]);
+
+    let body = r#"{"name":"shared-codex.json","auth_index":"idx-b","disabled":true}"#;
+    let request = keyed(Method::PATCH, "/v0/management/auth-files/status", body);
+    api.send(request).await.expect(StatusCode::OK);
+
+    let auth_a = api.manager.get("auth-a").unwrap();
+    let auth_b = api.manager.get("auth-b").unwrap();
+    assert!(!auth_a.disabled && auth_a.status != Status::Disabled);
+    assert!(auth_b.disabled && auth_b.status == Status::Disabled);
+}
+
+// TestPatchAuthFileStatusRejectsMismatchedAuthIndex
+#[tokio::test]
+async fn patch_auth_file_status_rejects_mismatched_auth_index() {
+    let dir = AuthDir::new();
+    let api = shared_credentials(&dir, &[("auth-a", "idx-a")]);
+
+    let body = r#"{"name":"shared-codex.json","auth_index":"idx-missing","disabled":true}"#;
+    let request = keyed(Method::PATCH, "/v0/management/auth-files/status", body);
+    api.send(request).await.expect(StatusCode::NOT_FOUND);
+
+    let auth_a = api.manager.get("auth-a").unwrap();
+    assert!(!auth_a.disabled && auth_a.status != Status::Disabled);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
