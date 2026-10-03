@@ -24,20 +24,25 @@ use crate::thinking::base_model_name;
 
 /// Whether to show reasoning summaries (upstream's `SummaryConfig`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum Summary {
+pub enum Summary {
     /// The request doesn't say.
     #[default]
     Unspecified,
+    /// Summaries are hidden.
     Hidden,
+    /// Summaries are shown, in this much detail.
     Shown(Detail),
 }
 
 /// How much a shown summary says, where the format can tell.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum Detail {
+pub enum Detail {
+    /// The upstream decides.
     #[default]
     Auto,
+    /// Short summaries.
     Concise,
+    /// Long summaries.
     Detailed,
 }
 
@@ -106,7 +111,7 @@ const INTERACTIONS_BOOL_PATHS: [&str; 4] = [
 /// has no summary field, and clients sending `reasoning_effort` have always
 /// got summaries. The other formats have a summary field, so effort alone
 /// says nothing.
-pub(crate) fn extract(body: &Value, format: &str) -> Summary {
+pub fn extract(body: &Value, format: &str) -> Summary {
     let bools = |paths: &[&str]| paths.iter().find_map(|key| bool_summary(path(body, key)));
     let summary = match normalize(format).as_str() {
         "openai" => openai_explicit(body).or_else(|| match body.get("reasoning_effort") {
@@ -143,7 +148,7 @@ pub(crate) fn extract(body: &Value, format: &str) -> Summary {
 
 /// `ExtractExplicitSummaryConfig`: [`extract`], except that a Chat
 /// Completions `reasoning_effort` doesn't count.
-pub(crate) fn extract_explicit(body: &Value, format: &str) -> Summary {
+pub fn extract_explicit(body: &Value, format: &str) -> Summary {
     if normalize(format) != "openai" {
         return extract(body, format);
     }
@@ -154,7 +159,7 @@ pub(crate) fn extract_explicit(body: &Value, format: &str) -> Summary {
 /// being translated to `target`, asks to show summaries. A Chat Completions
 /// `reasoning_effort` sets how hard Claude thinks, not what it shows, so it
 /// doesn't count when translating Chat Completions to Claude.
-pub(crate) fn extract_translated(body: &Value, source: &str, target: &str) -> Summary {
+pub fn extract_translated(body: &Value, source: &str, target: &str) -> Summary {
     if normalize(target) == "claude" && normalize(source) == "openai" {
         return extract_explicit(body, source);
     }
@@ -179,7 +184,7 @@ pub(crate) fn apply_translated_to_claude(
 /// `ApplySummaryConfigForModel`: asks a request in `format` to show or hide
 /// summaries, as `summary` says. `model`'s settings in `models` decide how to
 /// turn Claude's thinking on, where summaries need it.
-pub(crate) fn apply_for_model(
+pub fn apply_for_model(
     body: &mut Value,
     format: &str,
     model: &str,

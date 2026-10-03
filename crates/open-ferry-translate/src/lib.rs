@@ -24,4 +24,4 @@ pub mod registry;
 mod responses_tools;
 mod schema;
 pub mod signature;
-mod thinking;
+pub mod thinking;

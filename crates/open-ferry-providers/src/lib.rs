@@ -4,5 +4,6 @@
 //! executor that implements [`open_ferry_core::executor::ProviderExecutor`].
 //! [`oauth`] holds what the logins share.
 
+pub mod claude;
 pub mod codex;
 pub mod oauth;

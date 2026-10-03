@@ -4,7 +4,7 @@
 //! Thinking settings: model-name suffixes, mapping between token budgets and
 //! named reasoning levels, and whether reasoning summaries are shown.
 
-pub(crate) mod summary;
+pub mod summary;
 
 use crate::go;
 
@@ -17,7 +17,7 @@ const THRESHOLD_HIGH: i64 = 24576;
 
 /// Converts a thinking token budget into a reasoning level. `-1` means "auto"
 /// and `0` means "none"; anything below `-1` is invalid.
-pub(crate) fn budget_to_level(budget: i64) -> Option<&'static str> {
+pub fn budget_to_level(budget: i64) -> Option<&'static str> {
     Some(match budget {
         ..-1 => return None,
         -1 => "auto",
@@ -31,7 +31,7 @@ pub(crate) fn budget_to_level(budget: i64) -> Option<&'static str> {
 }
 
 /// Converts a reasoning level, in any case, into a thinking token budget.
-pub(crate) fn level_to_budget(level: &str) -> Option<i64> {
+pub fn level_to_budget(level: &str) -> Option<i64> {
     Some(match go::to_lower(level).as_str() {
         "none" => 0,
         "auto" => -1,
@@ -48,7 +48,7 @@ pub(crate) fn level_to_budget(level: &str) -> Option<i64> {
 
 /// Reports whether `levels` holds `target`, ignoring case and surrounding
 /// whitespace. `target` must be ASCII.
-pub(crate) fn has_level(levels: &[String], target: &str) -> bool {
+pub fn has_level(levels: &[String], target: &str) -> bool {
     levels
         .iter()
         .any(|level| level.trim().eq_ignore_ascii_case(target))
@@ -69,7 +69,7 @@ pub(crate) fn claude_effort(level: &str, supports_max: bool) -> Option<&'static 
 
 /// The model name without a thinking suffix such as `(high)` or `(8192)`, as
 /// upstream's `ParseSuffix` returns it.
-pub(crate) fn base_model_name(model: &str) -> &str {
+pub fn base_model_name(model: &str) -> &str {
     match model.rfind('(') {
         Some(open) if model.ends_with(')') => &model[..open],
         _ => model,

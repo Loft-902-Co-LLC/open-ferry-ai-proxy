@@ -84,6 +84,12 @@ pub struct ExecError {
     /// How the Responses WebSocket closes after this error, when it doesn't
     /// close the usual way.
     pub ws_close: Option<WsClose>,
+    /// Whether the failure is the credential's as a whole, such as a usage
+    /// limit across all its models (upstream's `IsCredentialScoped`).
+    pub credential_scoped: bool,
+    /// Whether the failure is this request's only, so the credential stays
+    /// usable (upstream's `IsRequestScoped`).
+    pub request_scoped: bool,
 }
 
 impl ExecError {
@@ -98,6 +104,8 @@ impl ExecError {
             retry_after: None,
             terminal_auth: false,
             ws_close: None,
+            credential_scoped: false,
+            request_scoped: false,
         }
     }
 
@@ -201,6 +209,18 @@ impl ExecError {
     /// Marks the error as the provider rejecting the credential for good.
     pub fn with_terminal_auth(mut self) -> Self {
         self.terminal_auth = true;
+        self
+    }
+
+    /// Marks the failure as the credential's as a whole.
+    pub fn with_credential_scoped(mut self) -> Self {
+        self.credential_scoped = true;
+        self
+    }
+
+    /// Marks the failure as this request's only.
+    pub fn with_request_scoped(mut self) -> Self {
+        self.request_scoped = true;
         self
     }
 
