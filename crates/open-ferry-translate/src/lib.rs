@@ -15,6 +15,7 @@
 mod apply_patch;
 pub mod claude;
 pub mod codex;
+pub mod codex_client;
 mod common;
 pub mod completions;
 pub mod gemini;
