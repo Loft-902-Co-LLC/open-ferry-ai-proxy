@@ -13,7 +13,7 @@ pub mod claude;
 pub mod codex;
 mod common;
 pub mod completions;
-mod go;
+pub mod go;
 mod json;
 pub mod models;
 mod protowire;

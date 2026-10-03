@@ -1,4 +1,6 @@
 //! Go standard library behaviour that upstream's output depends on.
+//!
+//! A few of these are public for the crates that build on this one.
 
 pub(crate) mod base64;
 mod float;
@@ -25,7 +27,7 @@ pub(crate) fn format_float(f: f64) -> String {
 /// Go's `strings.ToLower`: maps each character on its own by its simple Unicode
 /// mapping. Rust's `str::to_lowercase` differs for `İ` (to `i` plus a combining
 /// dot) and for a word-final `Σ` (to `ς`); Go gives `i` and `σ`.
-pub(crate) fn to_lower(s: &str) -> String {
+pub fn to_lower(s: &str) -> String {
     // `char::to_lowercase` yields the full mapping. Only `İ` has more than one
     // character, and the first is its simple mapping.
     s.chars()
@@ -35,36 +37,76 @@ pub(crate) fn to_lower(s: &str) -> String {
 
 /// Go's `strconv.Quote`, which `%q` uses: wraps `s` in double quotes and
 /// escapes `"`, `\` and every character `strconv.IsPrint` rejects.
-pub(crate) fn quote(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
+pub fn quote(s: &str) -> String {
+    quote_bytes(s.as_bytes())
+}
+
+/// [`quote`] for bytes that may not be UTF-8, as `%q` quotes a `[]byte`:
+/// each byte that isn't part of a valid character is written `\xNN`.
+pub fn quote_bytes(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() + 2);
     out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' | '\\' => {
-                out.push('\\');
-                out.push(c);
-            }
-            c if is_print(c) => out.push(c),
-            '\u{7}' => out.push_str("\\a"),
-            '\u{8}' => out.push_str("\\b"),
-            '\u{c}' => out.push_str("\\f"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{b}' => out.push_str("\\v"),
-            c if c < ' ' || c == '\u{7f}' => {
-                let _ = write!(out, "\\x{:02x}", u32::from(c));
-            }
-            c if u32::from(c) < 0x10000 => {
-                let _ = write!(out, "\\u{:04x}", u32::from(c));
-            }
-            c => {
-                let _ = write!(out, "\\U{:08x}", u32::from(c));
-            }
+    for chunk in bytes.utf8_chunks() {
+        for c in chunk.valid().chars() {
+            push_quoted(&mut out, c);
+        }
+        for byte in chunk.invalid() {
+            let _ = write!(out, "\\x{byte:02x}");
         }
     }
     out.push('"');
     out
+}
+
+/// Writes `c` as `strconv.Quote` does.
+fn push_quoted(out: &mut String, c: char) {
+    match c {
+        '"' | '\\' => {
+            out.push('\\');
+            out.push(c);
+        }
+        c if is_print(c) => out.push(c),
+        '\u{7}' => out.push_str("\\a"),
+        '\u{8}' => out.push_str("\\b"),
+        '\u{c}' => out.push_str("\\f"),
+        '\n' => out.push_str("\\n"),
+        '\r' => out.push_str("\\r"),
+        '\t' => out.push_str("\\t"),
+        '\u{b}' => out.push_str("\\v"),
+        c if c < ' ' || c == '\u{7f}' => {
+            let _ = write!(out, "\\x{:02x}", u32::from(c));
+        }
+        c if u32::from(c) < 0x10000 => {
+            let _ = write!(out, "\\u{:04x}", u32::from(c));
+        }
+        c => {
+            let _ = write!(out, "\\U{:08x}", u32::from(c));
+        }
+    }
+}
+
+/// Go's `bytes.TrimSpace`: `bytes` without the white space characters at
+/// either end. Like Go, it stops at a byte that isn't part of a valid
+/// character.
+pub fn trim_space(bytes: &[u8]) -> &[u8] {
+    let mut chunks = bytes.utf8_chunks();
+    let Some(first) = chunks.next() else {
+        return bytes;
+    };
+    let start = first.valid().len() - first.valid().trim_start().len();
+    let last = chunks.last().unwrap_or(first);
+    let end = if last.invalid().is_empty() {
+        bytes.len() - (last.valid().len() - last.valid().trim_end().len())
+    } else {
+        bytes.len()
+    };
+    bytes.get(start..end).unwrap_or_default()
+}
+
+/// Go's `json.Valid`: whether `bytes` is one JSON value. Like Go, it
+/// doesn't check that strings are UTF-8.
+pub fn json_valid(bytes: &[u8]) -> bool {
+    crate::json::raw::valid_bytes(bytes)
 }
 
 /// Go's `json.Marshal` of a string: wrapped in double quotes, with the escapes
@@ -160,6 +202,19 @@ mod tests {
             "\"\u{5c}u00ad\u{5c}u2028\u{5c}U000f0000\""
         );
         assert_eq!(quote("\u{80}"), "\"\u{5c}u0080\"");
+    }
+
+    #[test]
+    fn trim_space_matches_go() {
+        assert_eq!(trim_space(b" \t\r\n a b \x0b\x0c"), b"a b");
+        assert_eq!(trim_space(b"   "), b"");
+        assert_eq!(trim_space(b""), b"");
+        // U+00A0, U+0085 and U+3000 are white space.
+        assert_eq!(trim_space("\u{a0}\u{85}x\u{3000}".as_bytes()), b"x");
+        // Trimming stops at an invalid byte.
+        assert_eq!(trim_space(b" \xff x \xff "), b"\xff x \xff");
+        assert_eq!(trim_space(b" \xe2\x80 "), b"\xe2\x80");
+        assert_eq!(trim_space(b" x\xe2\x80\x80\x80"), b"x\xe2\x80\x80\x80");
     }
 
     #[test]

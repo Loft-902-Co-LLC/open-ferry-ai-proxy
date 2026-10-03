@@ -38,7 +38,11 @@ fn key_is(raw: &str, key: &str) -> bool {
 /// gjson `Valid`: whether `text` is one JSON value. Unlike serde_json, it
 /// accepts an unpaired surrogate escape.
 pub(crate) fn valid(text: &str) -> bool {
-    let bytes = text.as_bytes();
+    valid_bytes(text.as_bytes())
+}
+
+/// [`valid`] for bytes that may not be UTF-8.
+pub(crate) fn valid_bytes(bytes: &[u8]) -> bool {
     scan_value(bytes, skip_space(bytes, 0)).is_some_and(|end| skip_space(bytes, end) == bytes.len())
 }
 

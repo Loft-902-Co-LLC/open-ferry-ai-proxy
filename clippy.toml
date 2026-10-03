@@ -1,0 +1,5 @@
+# Errors carry a provider's status, body and headers. They are built after a
+# network call has failed, so moving them is cheap next to what came before;
+# boxing every one would only add noise.
+large-error-threshold = 512
+enum-variant-size-threshold = 512
