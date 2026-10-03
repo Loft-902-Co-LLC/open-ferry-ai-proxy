@@ -10,9 +10,10 @@
 //! Also the `response.output_item.done` items that fill in a completed
 //! response's `output`.
 //!
+//! A usage limit is scoped to the credential unless the config's
+//! `codex.model-level-cooling` is on, when it cools only the model.
+//!
 //! Deviations from upstream:
-//! - Model-level cooling, a config option, isn't ported, so a usage limit is
-//!   always scoped to the credential.
 //! - Bodies built from a stream event are written by `serde_json`, whose
 //!   escapes and spacing may differ from sjson's.
 //! - The stream-bootstrap helpers (overload probing while buffering) aren't
@@ -134,14 +135,32 @@ fn lower_trim(text: &str) -> String {
     open_ferry_translate::go::to_lower(text.trim())
 }
 
-/// The error for Codex's error status and body (`newCodexStatusErr`). A
-/// usage limit or a model at capacity becomes 429, and known failures get a
-/// classified body.
+/// The error for Codex's error status and body (`newCodexStatusErr`): a
+/// [`status_error_with_cooling`] without model-level cooling.
+#[cfg(test)]
 pub(crate) fn status_error(status: u16, body: &[u8]) -> StatusError {
-    status_error_at(status, body, SystemTime::now())
+    status_error_with_cooling(status, body, false)
 }
 
-pub(crate) fn status_error_at(status: u16, body: &[u8], now: SystemTime) -> StatusError {
+/// The error for Codex's error status and body
+/// (`newCodexStatusErrWithCooling`). A usage limit or a model at capacity
+/// becomes 429, and known failures get a classified body. A usage limit is
+/// scoped to the credential, unless `model_level_cooling` keeps it to the
+/// model.
+pub(crate) fn status_error_with_cooling(
+    status: u16,
+    body: &[u8],
+    model_level_cooling: bool,
+) -> StatusError {
+    status_error_at(status, body, model_level_cooling, SystemTime::now())
+}
+
+pub(crate) fn status_error_at(
+    status: u16,
+    body: &[u8],
+    model_level_cooling: bool,
+    now: SystemTime,
+) -> StatusError {
     let parsed = parse(body);
     let usage_limit = !body.is_empty() && is_usage_limit(&parsed);
     let status = if usage_limit || is_model_capacity(body, &parsed) {
@@ -158,7 +177,7 @@ pub(crate) fn status_error_at(status: u16, body: &[u8], now: SystemTime) -> Stat
     };
     StatusError {
         retry_after: parse_retry_after(status, &message, &parsed, now),
-        credential_scoped: usage_limit,
+        credential_scoped: usage_limit && !model_level_cooling,
         ..StatusError::new(status, message)
     }
 }
@@ -430,14 +449,29 @@ fn stream_error_should_handle(body: &Value, raw: &[u8]) -> bool {
 /// request (`codexTerminalStreamErr`); [`terminal_failure`] gives it too.
 #[cfg(test)]
 pub(crate) fn terminal_stream_error(event: &Value) -> Option<StatusError> {
+    terminal_stream_error_with_cooling(event, false)
+}
+
+/// [`terminal_stream_error`] with model-level cooling as `model_level_cooling`
+/// says (`codexTerminalStreamErrWithCooling`).
+#[cfg(test)]
+pub(crate) fn terminal_stream_error_with_cooling(
+    event: &Value,
+    model_level_cooling: bool,
+) -> Option<StatusError> {
     let body = terminal_failure_body(event)?;
     let raw = body.to_string();
-    stream_error_should_handle(&body, raw.as_bytes()).then(|| status_error(400, raw.as_bytes()))
+    stream_error_should_handle(&body, raw.as_bytes())
+        .then(|| status_error_with_cooling(400, raw.as_bytes(), model_level_cooling))
 }
 
 /// The error for any terminal failure event, with the failure's body as
-/// text (`codexTerminalFailureErr`).
-pub(crate) fn terminal_failure(event: &Value) -> Option<(StatusError, String)> {
+/// text (`codexTerminalFailureErrWithCooling`). A usage limit is scoped as
+/// [`status_error_with_cooling`] says.
+pub(crate) fn terminal_failure(
+    event: &Value,
+    model_level_cooling: bool,
+) -> Option<(StatusError, String)> {
     let body = terminal_failure_body(event)?;
     let raw = body.to_string();
     let status = if stream_error_should_handle(&body, raw.as_bytes()) {
@@ -445,14 +479,15 @@ pub(crate) fn terminal_failure(event: &Value) -> Option<(StatusError, String)> {
     } else {
         terminal_failure_status(&body)
     };
-    let error = status_error(status, raw.as_bytes());
+    let error = status_error_with_cooling(status, raw.as_bytes(), model_level_cooling);
     Some((error, raw))
 }
 
-/// [`terminal_failure`]'s error.
+/// [`terminal_failure`]'s error without model-level cooling
+/// (`codexTerminalFailureErr`).
 #[cfg(test)]
 pub(crate) fn terminal_failure_error(event: &Value) -> Option<StatusError> {
-    terminal_failure(event).map(|(error, _)| error)
+    terminal_failure(event, false).map(|(error, _)| error)
 }
 
 /// The status for a terminal failure's body (`codexTerminalFailureStatus`).
@@ -647,6 +682,40 @@ mod tests {
         }
     }
 
+    // TestCodexQuotaErrorModelLevelCooling, without the WebSocket paths.
+    #[test]
+    fn model_level_cooling_keeps_quota_errors_to_the_model() {
+        let quota = quota();
+        let http_cases = [
+            format!(r#"{{"error":{quota}}}"#),
+            quota.to_owned(),
+            r#"{"error":{"type":"usage_limit_reached"}}"#.to_owned(),
+        ];
+        for body in http_cases {
+            let error = status_error_with_cooling(429, body.as_bytes(), true);
+            assert!(!error.credential_scoped, "{body}");
+            if body.contains("resets_in_seconds") {
+                assert_eq!(error.retry_after, Some(Duration::from_secs(3600)), "{body}");
+            }
+        }
+        let terminal_cases = [
+            format!(r#"{{"type":"error","error":{quota}}}"#),
+            format!(r#"{{"type":"response.failed","response":{{"error":{quota}}}}}"#),
+        ];
+        for event in terminal_cases {
+            let error = terminal_stream_error_with_cooling(&parse(event.as_bytes()), true)
+                .expect("recognized");
+            assert!(!error.credential_scoped, "{event}");
+            assert_eq!(
+                error.retry_after,
+                Some(Duration::from_secs(3600)),
+                "{event}"
+            );
+            let (error, _) = terminal_failure(&parse(event.as_bytes()), true).expect("recognized");
+            assert!(!error.credential_scoped, "{event}");
+        }
+    }
+
     #[test]
     fn retry_after_quota_layouts() {
         let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
@@ -752,7 +821,7 @@ mod tests {
         }
         // Go's 429 for the review's body: no retry delay, and no panic.
         let body = br#"{"error":{"type":"usage_limit_reached","resets_at":9223372036854775807}}"#;
-        let error = status_error_at(429, body, now);
+        let error = status_error_at(429, body, false, now);
         assert_eq!(error.status, 429);
         assert_eq!(error.retry_after, None);
         assert!(error.credential_scoped);
@@ -783,7 +852,7 @@ mod tests {
         // Through the status error, with the clock injected.
         let body = br#"{"error":{"type":"usage_limit_reached","resets_at":1700000300,"resets_in_seconds":1}}"#;
         assert_eq!(
-            status_error_at(429, body, now).retry_after,
+            status_error_at(429, body, false, now).retry_after,
             Some(Duration::from_secs(300))
         );
     }

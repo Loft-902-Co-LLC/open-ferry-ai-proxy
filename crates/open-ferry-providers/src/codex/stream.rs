@@ -205,6 +205,9 @@ pub(crate) struct StreamSetup {
     /// The credential's token, redacted from the errors made from Codex's
     /// events.
     pub(crate) secret: String,
+    /// Whether a usage limit cools only the model
+    /// (`codex.model-level-cooling`).
+    pub(crate) model_level_cooling: bool,
     /// What the request's hooks noted ([`ext`]).
     pub(crate) turn: Turn,
 }
@@ -270,7 +273,7 @@ impl State {
         } else if let Some(rest) = line.strip_prefix(b"data:") {
             let data = ext::restore(&self.setup.turn, trim_space(rest));
             let mut event: Value = serde_json::from_slice(&data).unwrap_or(Value::Null);
-            if let Some((error, body)) = terminal_failure(&event) {
+            if let Some((error, body)) = terminal_failure(&event, self.setup.model_level_cooling) {
                 ext::on_failure(&self.setup.turn, error.status, body.as_bytes());
                 return Err(error.redacted(&self.setup.secret).into());
             }

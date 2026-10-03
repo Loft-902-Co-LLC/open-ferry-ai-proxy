@@ -17,6 +17,9 @@
 //! which [`refresh`](CodexExecutor::refresh) renews 24 hours before it
 //! expires.
 //!
+//! The config's `codex.model-level-cooling` keeps a usage limit to the
+//! model rather than the credential.
+//!
 //! Deviations from upstream:
 //! - Requests go through `reqwest` with rustls, one shared client per proxy;
 //!   upstream builds a client per request, with a uTLS fingerprint for
@@ -28,8 +31,8 @@
 //! - A dropped call or stream stops at once; upstream checks its context.
 //! - An error body or terminal failure event that quotes the credential's
 //!   token has it redacted (see the crate's `redact` module).
-//! - Usage reporting, request logging, model-level cooling and the
-//!   Home-service refresh aren't ported.
+//! - Usage reporting, request logging and the Home-service refresh aren't
+//!   ported.
 //! - Deferred: the image generation endpoints and multi-agent v2. See also
 //!   the module docs of [`super`].
 //! - Refresh returns a copy of the credential with new metadata; the
@@ -66,7 +69,7 @@ use super::stream::{self, LineReader, MAX_LINE, StreamSetup, is_grok_client};
 use super::terminal::{
     APPLY_PATCH_ERROR_MESSAGE, OutputItems, StatusError, empty_incomplete_stream_error,
     has_meaningful_output_delta, incomplete_stream_error, is_terminal_empty_incomplete,
-    status_error, terminal_failure,
+    status_error_with_cooling, terminal_failure,
 };
 use super::token::{CREDENTIAL_TYPE, now_rfc3339};
 use super::tokens::{count_input_tokens, tokenizer_for};
@@ -131,6 +134,14 @@ impl CodexExecutor {
         self
     }
 
+    /// Whether a usage limit cools only the model, not the whole credential
+    /// (`codex.model-level-cooling`, upstream's `modelLevelCooling`).
+    fn model_level_cooling(&self) -> bool {
+        self.config
+            .as_deref()
+            .is_some_and(|config| config.codex.model_level_cooling)
+    }
+
     /// What a call with `auth` is prepared with.
     fn context<'a>(&'a self, auth: &'a Auth) -> Context<'a> {
         Context {
@@ -180,7 +191,9 @@ impl CodexExecutor {
             tracing::debug!(status, "codex: compact request error");
             ext::on_failure(&prepared.turn, status, &body);
             let body = redact::bytes(&body, credentials(auth).0);
-            return Err(status_error(status, &body).into());
+            return Err(
+                status_error_with_cooling(status, &body, self.model_level_cooling()).into(),
+            );
         }
         let response_headers = response.headers().clone();
         let data = read_body(response, MAX_LINE)
@@ -223,7 +236,9 @@ impl CodexExecutor {
             tracing::debug!(status, "codex: request error");
             ext::on_failure(&prepared.turn, status, &body);
             let body = redact::bytes(&body, credentials(auth).0);
-            return Err(status_error(status, &body).into());
+            return Err(
+                status_error_with_cooling(status, &body, self.model_level_cooling()).into(),
+            );
         }
         let response_headers = response.headers().clone();
 
@@ -246,7 +261,7 @@ impl CodexExecutor {
             if has_meaningful_output_delta(&event) {
                 saw_output_delta = true;
             }
-            if let Some((error, body)) = terminal_failure(&event) {
+            if let Some((error, body)) = terminal_failure(&event, self.model_level_cooling()) {
                 ext::on_failure(&prepared.turn, error.status, body.as_bytes());
                 return Err(error.redacted(credentials(auth).0).into());
             }
@@ -310,7 +325,9 @@ impl CodexExecutor {
             tracing::debug!(status, "codex: request error");
             ext::on_failure(&prepared.turn, status, &body);
             let body = redact::bytes(&body, credentials(auth).0);
-            return Err(status_error(status, &body).into());
+            return Err(
+                status_error_with_cooling(status, &body, self.model_level_cooling()).into(),
+            );
         }
         let response_headers = response.headers().clone();
 
@@ -337,6 +354,7 @@ impl CodexExecutor {
             preserve_native: prepared.native,
             grok: is_grok_client(&options.headers),
             secret: credentials(auth).0.to_owned(),
+            model_level_cooling: self.model_level_cooling(),
             turn: prepared.turn,
         };
         Ok(StreamResponse {
@@ -468,5 +486,7 @@ impl ProviderExecutor for CodexExecutor {
     }
 }
 
+#[cfg(test)]
+mod manager_tests;
 #[cfg(test)]
 mod tests;
