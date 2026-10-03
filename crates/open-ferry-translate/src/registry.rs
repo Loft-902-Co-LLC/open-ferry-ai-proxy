@@ -21,6 +21,9 @@
 //! | `claude` | `openai` |
 //! | `openai` | `openai` |
 //! | `openai-response` | `openai` |
+//! | `claude` | `gemini` |
+//! | `gemini` | `gemini` |
+//! | `openai` | `gemini` |
 //!
 //! Translating a request also carries over whether the client asked to see
 //! reasoning summaries, in the provider's own terms. With no translator, the

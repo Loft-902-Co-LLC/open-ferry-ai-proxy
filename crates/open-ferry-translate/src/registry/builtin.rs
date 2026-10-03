@@ -1,6 +1,8 @@
 //! The built-in translators, registered as upstream's `init` functions
 //! register them, and the adapters between their APIs and the registry's.
 
+mod gemini;
+
 use std::error::Error;
 use std::sync::Arc;
 
@@ -235,6 +237,8 @@ pub(super) fn register(registry: &Registry) {
             token_count: None,
         },
     );
+
+    gemini::register(registry);
 }
 
 fn to_vec(value: &Value) -> Vec<u8> {

@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 
 use super::super::*;
 
-const PAIRS: [(Format, Format); 8] = [
+const PAIRS: [(Format, Format); 11] = [
     (Format::CLAUDE, Format::CODEX),
     (Format::OPENAI, Format::CODEX),
     (Format::OPENAI_RESPONSE, Format::CODEX),
@@ -13,6 +13,9 @@ const PAIRS: [(Format, Format); 8] = [
     (Format::CLAUDE, Format::OPENAI),
     (Format::OPENAI, Format::OPENAI),
     (Format::OPENAI_RESPONSE, Format::OPENAI),
+    (Format::CLAUDE, Format::GEMINI),
+    (Format::GEMINI, Format::GEMINI),
+    (Format::OPENAI, Format::GEMINI),
 ];
 
 fn context<'a>(
@@ -54,7 +57,6 @@ fn builtin_pairs_are_registered() {
         );
     }
     assert!(!registry.has_request_transformer(&Format::CLAUDE, &Format::CLAUDE));
-    assert!(!registry.has_request_transformer(&Format::CLAUDE, &Format::GEMINI));
     assert!(Registry::global().has_request_transformer(&Format::CLAUDE, &Format::CODEX));
     assert!(!Registry::new().has_response_transformer(&Format::CLAUDE, &Format::CODEX));
 }
@@ -546,4 +548,99 @@ fn chat_to_responses_non_stream_fails_a_bad_patch() {
     assert_eq!(done["object"], "response");
     assert_eq!(done["id"], "chatcmpl-1");
     assert_eq!(done["output"][0]["content"][0]["text"], "hi");
+}
+
+#[test]
+fn gemini_upstream_counts_tokens_for_claude_and_gemini_clients() {
+    let registry = Registry::builtin();
+    let count = |client: &Format| {
+        registry.translate_token_count(&Format::GEMINI, client, 7, b"raw".to_vec())
+    };
+    assert_eq!(count(&Format::CLAUDE), br#"{"input_tokens":7}"#);
+    assert_eq!(
+        parse(&count(&Format::GEMINI)),
+        json!({"totalTokens": 7, "promptTokensDetails": [{"modality": "TEXT", "tokenCount": 7}]})
+    );
+    assert_eq!(count(&Format::OPENAI), b"raw");
+}
+
+#[test]
+fn gemini_to_gemini_normalizes_requests_and_passes_responses_through() {
+    let registry = Registry::builtin();
+    let request = registry.translate_request(
+        &Format::GEMINI,
+        &Format::GEMINI,
+        "gemini-2.5-pro",
+        json!({"contents": [{"parts": [{"text": "hi"}]}]}),
+        true,
+    );
+    assert_eq!(request["contents"][0]["role"], "user");
+    assert!(request["safetySettings"].is_array(), "{request}");
+
+    let ctx = context("gemini-2.5-pro", &Value::Null, &Value::Null);
+    let mut stream = registry.response_stream(&Format::GEMINI, &Format::GEMINI, &ctx);
+    assert_eq!(
+        stream.translate(br#"data: {"a":1} "#),
+        [br#"{"a":1}"#.to_vec()]
+    );
+    assert!(stream.translate(b"data: [DONE]").is_empty());
+    assert!(stream.translate(b"data: ").is_empty());
+    assert_eq!(
+        registry.translate_non_stream(&Format::GEMINI, &Format::GEMINI, &ctx, b"not json".to_vec()),
+        Some(b"not json".to_vec())
+    );
+}
+
+#[test]
+fn gemini_to_claude_stream_and_non_stream() {
+    let registry = Registry::builtin();
+    let original = json!({"tools": [{"name": "a b"}]});
+    let ctx = context("gemini-2.5-pro", &original, &Value::Null);
+    let mut stream = registry.response_stream(&Format::GEMINI, &Format::CLAUDE, &ctx);
+    let chunks = stream.translate(
+        br#"{"responseId":"r","modelVersion":"gemini-2.5-pro","candidates":[{"content":{"parts":[{"text":"hi"}]}}]}"#,
+    );
+    assert_eq!(chunks.len(), 1);
+    let text = String::from_utf8(chunks[0].clone()).unwrap();
+    assert!(text.starts_with("event: message_start\n"), "{text}");
+    assert!(text.contains(r#""text":"hi""#), "{text}");
+
+    let done = registry
+        .translate_non_stream(
+            &Format::GEMINI,
+            &Format::CLAUDE,
+            &ctx,
+            br#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"a_b","args":{}}}]},"finishReason":"STOP"}]}"#.to_vec(),
+        )
+        .expect("translated");
+    let done = parse(&done);
+    assert_eq!(done["content"][0]["name"], "a b");
+    assert_eq!(done["stop_reason"], "tool_use");
+}
+
+#[test]
+fn gemini_to_chat_stream_gives_one_chunk_per_candidate() {
+    let registry = Registry::builtin();
+    let ctx = context("gemini-2.5-pro", &Value::Null, &Value::Null);
+    let mut stream = registry.response_stream(&Format::GEMINI, &Format::OPENAI, &ctx);
+    let chunks = stream.translate(
+        br#"data: {"candidates":[{"content":{"parts":[{"text":"a"}]}},{"index":1,"content":{"parts":[{"text":"b"}]}}]}"#,
+    );
+    assert_eq!(chunks.len(), 2);
+    assert_eq!(parse(&chunks[0])["choices"][0]["delta"]["content"], "a");
+    assert_eq!(parse(&chunks[1])["choices"][0]["index"], 1);
+    assert!(stream.translate(b"data: [DONE]").is_empty());
+
+    let done = registry
+        .translate_non_stream(
+            &Format::GEMINI,
+            &Format::OPENAI,
+            &ctx,
+            br#"{"candidates":[{"content":{"parts":[{"text":"hi"}]},"finishReason":"STOP"}]}"#
+                .to_vec(),
+        )
+        .expect("translated");
+    let done = parse(&done);
+    assert_eq!(done["choices"][0]["message"]["content"], "hi");
+    assert_eq!(done["choices"][0]["finish_reason"], "stop");
 }
