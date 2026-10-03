@@ -32,6 +32,12 @@
 //! - A `sequence_number` in an error's text that isn't JSON is read only
 //!   from a well-formed object after the first `{`; gjson reads what it can
 //!   from a malformed one too.
+//! - What is held back is bounded. The framer holds back at most
+//!   [`MAX_EVENT_BYTES`] of an event, and at most that much more is held
+//!   back before the first data event. Past either, the call is dropped and
+//!   the stream fails with a 502: a JSON error before the first data event,
+//!   and otherwise the failure event that ends a stream. Upstream holds
+//!   both back without limit.
 
 mod framer;
 mod stream_error;
@@ -57,6 +63,7 @@ use crate::body;
 use crate::errors::{ErrorMessage, local_error, openai_error_response};
 use crate::exec::{Call, ClientRequest, Started};
 use crate::json;
+use crate::sse_check::MAX_EVENT_BYTES;
 use crate::state::AppState;
 use crate::stream::{StreamWriter, forward, json_response, keep_alive, sse_response};
 
@@ -168,11 +175,22 @@ async fn respond_streaming(
     };
     let mut framer = Framer::new(is_codex_client(&client.headers));
     let mut initial = BytesMut::new();
-    loop {
+    let error = loop {
         match items.next().await {
             Some(Ok(chunk)) => {
-                framer.write_chunk(&mut initial, &chunk);
+                if let Err(error) = framer.write_chunk(&mut initial, &chunk) {
+                    break error;
+                }
                 if framer.data_frames == 0 {
+                    if initial.len() > MAX_EVENT_BYTES {
+                        let error = sanitize_error(ErrorMessage::new(
+                            502,
+                            format!(
+                                "upstream stream sent more than {MAX_EVENT_BYTES} bytes before its first payload"
+                            ),
+                        ));
+                        return openai_error_response(&error, passthrough);
+                    }
                     continue;
                 }
                 if let Some(error) = &framer.terminal_error {
@@ -182,17 +200,7 @@ async fn respond_streaming(
                 let rest = forward(items, ResponsesWriter::new(framer), keepalive);
                 return sse_response(&headers, prepend(initial.freeze(), rest));
             }
-            Some(Err(error)) => {
-                framer.flush(&mut initial);
-                let error = sanitize_error(error);
-                if framer.data_frames == 0 {
-                    return openai_error_response(&error, passthrough);
-                }
-                let mut writer = ResponsesWriter::new(framer);
-                let error = writer.normalize_terminal_error(error);
-                writer.write_terminal_error(&error, &mut initial);
-                return sse_response(&headers, Body::from(initial.freeze()));
-            }
+            Some(Err(error)) => break error,
             None => {
                 framer.flush(&mut initial);
                 if framer.data_frames == 0 {
@@ -216,7 +224,18 @@ async fn respond_streaming(
                 return sse_response(&headers, Body::from(initial.freeze()));
             }
         }
+    };
+    // The call goes now, before the client hears of the error.
+    drop(items);
+    framer.flush(&mut initial);
+    let error = sanitize_error(error);
+    if framer.data_frames == 0 {
+        return openai_error_response(&error, passthrough);
     }
+    let mut writer = ResponsesWriter::new(framer);
+    let error = writer.normalize_terminal_error(error);
+    writer.write_terminal_error(&error, &mut initial);
+    sse_response(&headers, Body::from(initial.freeze()))
 }
 
 /// `first`, then `rest`.
@@ -289,6 +308,8 @@ struct ResponsesWriter {
     framer: Framer,
     /// What [`StreamWriter::close_error`] flushed, written next.
     flushed: BytesMut,
+    /// The error the framer stopped the stream with, already written.
+    failed: Option<ErrorMessage>,
 }
 
 impl ResponsesWriter {
@@ -296,6 +317,7 @@ impl ResponsesWriter {
         Self {
             framer,
             flushed: BytesMut::new(),
+            failed: None,
         }
     }
 
@@ -308,10 +330,17 @@ impl ResponsesWriter {
 
 impl StreamWriter for ResponsesWriter {
     fn write_chunk(&mut self, chunk: Bytes, out: &mut BytesMut) {
-        self.framer.write_chunk(out, &chunk);
+        if let Err(error) = self.framer.write_chunk(out, &chunk) {
+            let error = self.normalize_terminal_error(error);
+            self.write_terminal_error(&error, out);
+            self.failed = Some(error);
+        }
     }
 
     fn chunk_error(&mut self) -> Option<ErrorMessage> {
+        if let Some(error) = self.failed.take() {
+            return Some(error);
+        }
         let error = self.framer.terminal_error.clone()?;
         log_stream_error(&self.framer, &error);
         Some(error)

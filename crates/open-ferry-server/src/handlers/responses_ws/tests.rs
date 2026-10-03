@@ -3321,3 +3321,43 @@ async fn tool_caches_are_shared_without_api_keys() {
     let input = orphan_turn(&url, &dispatcher, None, 1).await;
     assert_eq!(item_ids(&input), ["fc-1", "fco-2"]);
 }
+
+// An event that grows past the limit ends the turn, and the call is dropped
+// while the provider is still sending.
+#[tokio::test]
+async fn ends_the_turn_when_an_event_grows_past_the_limit() {
+    let mib = Bytes::from(vec![b'x'; 1 << 20]);
+    let mut chunks = vec![
+        Ok(Bytes::from(sse(
+            r#"{"type":"response.created","response":{"id":"resp-1"}}"#,
+        ))),
+        Ok(Bytes::from_static(b"data: {\"delta\":\"")),
+    ];
+    chunks.extend((0..=crate::sse_check::MAX_EVENT_BYTES >> 20).map(|_| Ok(mib.clone())));
+    let (url, dispatcher) = serve(
+        test_catalog(),
+        vec![Outcome::Hang(HeaderMap::new(), chunks)],
+    )
+    .await;
+    let mut ws = connect(&url, &[]).await;
+    send(
+        &mut ws,
+        r#"{"type":"response.create","model":"test-model","input":[{"type":"message","id":"msg-1"}]}"#,
+    )
+    .await;
+    assert_eq!(recv(&mut ws).await["type"], "response.created");
+    // The 502 is the server's own, which the client isn't told: the socket
+    // just ends.
+    let end = tokio::time::timeout(Duration::from_secs(300), async {
+        loop {
+            match ws.next().await {
+                Some(Ok(tungstenite::Message::Ping(_) | tungstenite::Message::Pong(_))) => {}
+                end => return end,
+            }
+        }
+    })
+    .await
+    .expect("the turn never ended");
+    assert!(matches!(end, None | Some(Err(_))), "{end:?}");
+    eventually(|| dispatcher.live_streams() == 0).await;
+}

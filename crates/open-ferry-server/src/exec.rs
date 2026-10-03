@@ -381,10 +381,14 @@ impl Producer {
                 Source::Closed => return self.close(),
                 Source::Open => {}
             }
+            if let Some(err) = self.checker.as_mut().and_then(SseCheck::take_overflow) {
+                self.stop();
+                return Some(Err(ErrorMessage::new(502, err)));
+            }
             let chunk = match self.chunks.next().await {
                 None => return self.close(),
                 Some(Err(err)) => {
-                    self.source = Source::Done;
+                    self.stop();
                     return Some(Err(ErrorMessage::from_exec(err)));
                 }
                 Some(Ok(chunk)) if chunk.is_empty() => continue,
@@ -394,7 +398,7 @@ impl Producer {
                 Ok(Some(payload)) => return Some(Ok(payload)),
                 Ok(None) => {}
                 Err(error) => {
-                    self.source = Source::Done;
+                    self.stop();
                     return Some(Err(error));
                 }
             }
@@ -403,9 +407,16 @@ impl Producer {
 
     /// Ends the stream, with an error if what the checker held back is bad.
     fn close(&mut self) -> Option<Result<Bytes, ErrorMessage>> {
-        self.source = Source::Done;
+        self.stop();
         let err = self.checker.as_mut()?.finish().err()?;
         Some(Err(ErrorMessage::new(502, err)))
+    }
+
+    /// Ends the stream, dropping the provider's chunks now, which cancels the
+    /// call, rather than when the client's response is done with this.
+    fn stop(&mut self) {
+        self.source = Source::Done;
+        self.chunks = stream::empty().boxed();
     }
 }
 

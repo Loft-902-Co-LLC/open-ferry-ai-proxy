@@ -97,26 +97,33 @@ impl<W: StreamWriter> Pump<W> {
                         if let Some(error) = self.writer.chunk_error() {
                             let error = self.writer.normalize_terminal_error(error);
                             tracing::debug!(status = error.status, "stream stopped: {}", error.text);
-                            self.done = true;
+                            self.stop();
                         }
                     }
                     Some(Err(error)) => {
                         let error = self.writer.normalize_terminal_error(error);
                         self.writer.write_terminal_error(&error, &mut out);
-                        self.done = true;
+                        self.stop();
                     }
                     None => {
                         match self.writer.close_error() {
                             Some(error) => self.writer.write_terminal_error(&error, &mut out),
                             None => self.writer.write_done(&mut out),
                         }
-                        self.done = true;
+                        self.stop();
                     }
                 },
                 () = tick(&mut self.ticker) => self.writer.write_keep_alive(&mut out),
             }
         }
         (!out.is_empty()).then(|| out.freeze())
+    }
+
+    /// Ends the stream, dropping the payloads now, which cancels the call,
+    /// rather than once the client has read what is left.
+    fn stop(&mut self) {
+        self.done = true;
+        self.items = stream::empty().boxed();
     }
 }
 

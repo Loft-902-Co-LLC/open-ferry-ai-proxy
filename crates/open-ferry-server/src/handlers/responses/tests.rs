@@ -25,6 +25,7 @@ use super::{ResponsesWriter, is_codex_client, stream_error_diagnostic};
 use crate::config::{ServerConfig, StreamingConfig};
 use crate::errors::ErrorMessage;
 use crate::router;
+use crate::sse_check::MAX_EVENT_BYTES;
 use crate::stream::{StreamWriter, forward};
 use crate::testing::{FakeCatalog, FakeDispatcher, Outcome, state};
 
@@ -58,7 +59,7 @@ async fn run(framer: Framer, items: Vec<Result<Bytes, ErrorMessage>>) -> String 
 fn primed(codex: bool, chunk: &str) -> (Framer, String) {
     let mut framer = Framer::new(codex);
     let mut out = BytesMut::new();
-    framer.write_chunk(&mut out, chunk.as_bytes());
+    framer.write_chunk(&mut out, chunk.as_bytes()).unwrap();
     (framer, String::from_utf8(out.to_vec()).unwrap())
 }
 
@@ -599,6 +600,59 @@ async fn send(app: &Router, request: Request<Body>) -> (StatusCode, HeaderMap, S
     )
 }
 
+/// The status and body of `request`'s response, and how many of the
+/// dispatcher's streams were still held when the body's last bytes came.
+/// Fails rather than waiting for ever on a body that doesn't end.
+async fn send_to_end(
+    app: &Router,
+    dispatcher: &FakeDispatcher,
+    request: Request<Body>,
+) -> (StatusCode, String, usize) {
+    tokio::time::timeout(Duration::from_secs(300), async {
+        let response = app.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let mut body = response.into_body();
+        let mut bytes = Vec::new();
+        let mut live = dispatcher.live_streams();
+        while let Some(frame) = body.frame().await {
+            bytes.extend_from_slice(&frame.unwrap().into_data().unwrap());
+            live = dispatcher.live_streams();
+        }
+        (status, String::from_utf8(bytes).unwrap(), live)
+    })
+    .await
+    .expect("the response never ended")
+}
+
+/// A stream of `first`, then 1 MiB chunks of `fill` until past
+/// [`MAX_EVENT_BYTES`], that never ends.
+fn overflowing(first: &[&str], fill: &[u8]) -> Outcome {
+    let mut chunks: Vec<Result<Bytes, ExecError>> = first
+        .iter()
+        .map(|chunk| Ok(Bytes::copy_from_slice(chunk.as_bytes())))
+        .collect();
+    let mut mib = fill.repeat((1 << 20) / fill.len());
+    mib.resize(1 << 20, b'x');
+    let mib = Bytes::from(mib);
+    chunks.extend((0..=MAX_EVENT_BYTES >> 20).map(|_| Ok(mib.clone())));
+    Outcome::Hang(HeaderMap::new(), chunks)
+}
+
+/// The 502 JSON error with `message`.
+fn bad_gateway(message: &str) -> String {
+    format!(
+        r#"{{"error":{{"message":"{message}","type":"server_error","code":"internal_server_error"}}}}"#
+    )
+}
+
+/// The `error` event ending a stream after one payload with `message`.
+fn error_event(message: &str) -> String {
+    format!(
+        "\nevent: error\ndata: {{\"type\":\"error\",\"error\":{{\"code\":\"internal_server_error\",\
+         \"message\":\"{message}\",\"param\":null,\"type\":\"server_error\"}},\"sequence_number\":1}}\n\n"
+    )
+}
+
 fn content_type(headers: &HeaderMap) -> &str {
     headers
         .get(header::CONTENT_TYPE)
@@ -985,6 +1039,128 @@ async fn streams_keep_alive_while_the_provider_is_quiet() {
     assert_eq!(next().await, CREATED);
     assert_eq!(next().await, ": keep-alive\n\n");
     assert_eq!(next().await, ": keep-alive\n\n");
+}
+
+// An event the provider's stream is checked for that grows past the limit
+// fails the stream, and the call is dropped while the provider is still
+// sending: with a 502 before the first payload, and with the stream's
+// failure event after it.
+#[tokio::test]
+async fn fails_a_checked_event_past_the_limit() {
+    let too_large = format!("upstream SSE event exceeds {MAX_EVENT_BYTES} bytes");
+    let data = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"";
+    let (app, dispatcher) = app(
+        ServerConfig::default(),
+        vec![
+            overflowing(&[data], b"x"),
+            overflowing(&[CREATED, data], b"x"),
+        ],
+    );
+    let request = || post("/v1/responses", STREAM, None);
+    let (status, body, live) = send_to_end(&app, &dispatcher, request()).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(body, bad_gateway(&too_large));
+    assert_eq!(live, 0);
+
+    let (status, body, live) = send_to_end(&app, &dispatcher, request()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, format!("{CREATED}{}", error_event(&too_large)));
+    assert_eq!(live, 0);
+}
+
+// Good events in the chunk that takes an event past the limit go first, and
+// the stream fails at once, without waiting for the provider's next chunk.
+#[tokio::test]
+async fn fails_at_once_after_good_events_in_the_same_chunk() {
+    let mut chunk = format!("{CREATED}data: {{\"delta\":\"").into_bytes();
+    chunk.resize(chunk.len() + MAX_EVENT_BYTES + 1, b'x');
+    let (app, dispatcher) = app(
+        ServerConfig::default(),
+        vec![Outcome::Hang(
+            HeaderMap::new(),
+            vec![Ok(Bytes::from(chunk))],
+        )],
+    );
+    let request = post("/v1/responses", STREAM, None);
+    let (status, body, live) = send_to_end(&app, &dispatcher, request).await;
+    assert_eq!(status, StatusCode::OK);
+    let too_large = format!("upstream SSE event exceeds {MAX_EVENT_BYTES} bytes");
+    assert_eq!(body, format!("{CREATED}{}", error_event(&too_large)));
+    assert_eq!(live, 0);
+}
+
+// The same for an event the framer holds back: data that is whole, waiting
+// for its name, followed by text that is no event.
+#[tokio::test]
+async fn fails_a_framed_event_past_the_limit() {
+    let too_large = format!("upstream SSE event exceeds {MAX_EVENT_BYTES} bytes");
+    let (app, dispatcher) = app(
+        ServerConfig::default(),
+        vec![
+            overflowing(&["data: {}"], b"x"),
+            overflowing(&[CREATED, "data: {}"], b"x"),
+        ],
+    );
+    let request = || post("/v1/responses", STREAM, None);
+    let (status, body, live) = send_to_end(&app, &dispatcher, request()).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(body, bad_gateway(&too_large));
+    assert_eq!(live, 0);
+
+    let (status, body, live) = send_to_end(&app, &dispatcher, request()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, format!("{CREATED}{}", error_event(&too_large)));
+    assert_eq!(live, 0);
+}
+
+// What comes before the first payload is held back up to the limit too.
+#[tokio::test]
+async fn fails_a_stream_with_too_much_before_its_first_payload() {
+    let mut comment = b": ".to_vec();
+    comment.resize((1 << 20) - 2, b'x');
+    comment.extend_from_slice(b"\n\n");
+    let (app, dispatcher) = app(ServerConfig::default(), vec![overflowing(&[], &comment)]);
+    let request = post("/v1/responses", STREAM, None);
+    let (status, body, live) = send_to_end(&app, &dispatcher, request).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(
+        body,
+        bad_gateway(&format!(
+            "upstream stream sent more than {MAX_EVENT_BYTES} bytes before its first payload"
+        ))
+    );
+    assert_eq!(live, 0);
+}
+
+// A large event under the limit, in small chunks, goes through whole.
+#[tokio::test]
+async fn passes_a_large_event() {
+    let mut event = b"event: response.output_text.delta\n\
+        data: {\"type\":\"response.output_text.delta\",\"delta\":\""
+        .to_vec();
+    event.resize((8 << 20) - 4, b'x');
+    event.extend_from_slice(b"\"}\n\n");
+    let event = Bytes::from(event);
+    let mut chunks = vec![Ok(Bytes::from_static(CREATED.as_bytes()))];
+    chunks.extend(
+        (0..event.len())
+            .step_by(1024)
+            .map(|at| Ok(event.slice(at..at + 1024))),
+    );
+    chunks.push(Ok(Bytes::from_static(COMPLETED.as_bytes())));
+    let (app, dispatcher) = app(
+        ServerConfig::default(),
+        vec![Outcome::Stream(HeaderMap::new(), chunks)],
+    );
+    let request = post("/v1/responses", STREAM, None);
+    let (status, body, _) = send_to_end(&app, &dispatcher, request).await;
+    assert_eq!(status, StatusCode::OK);
+    let event = std::str::from_utf8(&event).unwrap();
+    assert!(
+        body == format!("{CREATED}{event}{COMPLETED}\n"),
+        "{}",
+        body.len()
+    );
 }
 
 // TestOpenAIResponsesCompactRejectsStream

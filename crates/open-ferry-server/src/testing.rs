@@ -5,7 +5,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use bytes::Bytes;
 use futures_util::future::BoxFuture;
-use futures_util::{FutureExt, StreamExt, stream};
+use futures_util::stream::BoxStream;
+use futures_util::{FutureExt, Stream, StreamExt, stream};
 use http::HeaderMap;
 use open_ferry_core::exec::{
     Dispatcher, ExecError, Options, ProviderId, Request, Response, StreamResponse, WebsocketSupport,
@@ -126,6 +127,8 @@ pub(crate) struct FakeDispatcher {
     calls: Mutex<Vec<Recorded>>,
     support: Mutex<Option<Arc<SupportFn>>>,
     closed: Mutex<Vec<String>>,
+    /// Held by each stream this has given, until it is dropped.
+    live: Arc<()>,
 }
 
 impl FakeDispatcher {
@@ -150,6 +153,26 @@ impl FakeDispatcher {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// How many of the streams this has given are still held: those whose
+    /// calls haven't been cancelled.
+    pub(crate) fn live_streams(&self) -> usize {
+        Arc::strong_count(&self.live) - 1
+    }
+
+    /// `chunks`, counted in [`FakeDispatcher::live_streams`] until dropped.
+    fn held<S>(&self, chunks: S) -> BoxStream<'static, S::Item>
+    where
+        S: Stream + Send + 'static,
+    {
+        let live = Arc::clone(&self.live);
+        chunks
+            .map(move |chunk| {
+                let _live = &live;
+                chunk
+            })
+            .boxed()
     }
 
     /// The calls made so far.
@@ -240,11 +263,11 @@ impl Dispatcher for FakeDispatcher {
         let result = match self.take("execute_stream", providers, request, options) {
             Outcome::Stream(headers, chunks) => Ok(StreamResponse {
                 headers,
-                chunks: stream::iter(chunks).boxed(),
+                chunks: self.held(stream::iter(chunks)),
             }),
             Outcome::Hang(headers, chunks) => Ok(StreamResponse {
                 headers,
-                chunks: stream::iter(chunks).chain(stream::pending()).boxed(),
+                chunks: self.held(stream::iter(chunks).chain(stream::pending())),
             }),
             Outcome::Fail(error) => Err(error),
             Outcome::Reply(_) => panic!("execute_stream was given a reply"),
