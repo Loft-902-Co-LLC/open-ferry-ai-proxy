@@ -26,6 +26,13 @@ pub enum Deviation {
     SaturatedInt,
     /// Upstream made up a user ID for a client that sent none; we leave it out.
     SyntheticUserId,
+    /// A Gemini response's `createTime` is the same instant, which upstream
+    /// writes in the local time zone and we in UTC.
+    UtcCreateTime,
+    /// A Chat Completions call ID derived from a Gemini call's JSON is
+    /// derived from the JSON written compactly, where the client's text
+    /// isn't. Such IDs are masked on both sides (see `translator.rs`).
+    CompactCallIdSource,
 }
 
 impl Deviation {
@@ -38,6 +45,8 @@ impl Deviation {
             Self::ProtoErrorPrefix => "protobuf error prefix space",
             Self::SaturatedInt => "out-of-range number saturated",
             Self::SyntheticUserId => "made-up user ID left out",
+            Self::UtcCreateTime => "createTime written in UTC",
+            Self::CompactCallIdSource => "call ID derived from compact JSON",
         }
     }
 }
@@ -259,6 +268,13 @@ impl<'a> Walker<'a> {
             self.out.deviations.insert(Deviation::ProtoErrorPrefix);
             return;
         }
+        if matches!(self.path.last(), Some(Segment::Key("createTime")))
+            && rust.ends_with('Z')
+            && rfc3339_seconds(go).is_some_and(|go| rfc3339_seconds(rust) == Some(go))
+        {
+            self.out.deviations.insert(Deviation::UtcCreateTime);
+            return;
+        }
         if self.json_form().is_some_and(|form| form.matches(go, rust)) {
             self.out.deviations.insert(Deviation::EmbeddedJson);
             return;
@@ -317,6 +333,69 @@ impl<'a> Walker<'a> {
         }
         path
     }
+}
+
+/// The Unix time in seconds of an RFC 3339 time as Go's `time.RFC3339Nano`
+/// layout writes a whole second, `[-]YYYY-MM-DDTHH:MM:SS` then `Z` or a
+/// `+HH:MM` or `-HH:MM` offset, with a year of four digits or more.
+pub fn rfc3339_seconds(text: &str) -> Option<i64> {
+    let (negative, text) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text),
+    };
+    let (date, rest) = text.split_once('T')?;
+    let (year, month_day) = date.split_once('-')?;
+    let (month, day) = month_day.split_once('-')?;
+    let (time, offset) = match rest.strip_suffix('Z') {
+        Some(time) => (time, 0),
+        None => {
+            let at = rest.len().checked_sub(6)?;
+            let (time, offset) = rest.split_at_checked(at)?;
+            let sign = match offset.as_bytes()[0] {
+                b'+' => 1,
+                b'-' => -1,
+                _ => return None,
+            };
+            let (hours, minutes) = offset[1..].split_once(':')?;
+            (time, sign * (number(hours)? * 3600 + number(minutes)? * 60))
+        }
+    };
+    let mut clock = time.split(':');
+    let (hour, minute, second) = (clock.next()?, clock.next()?, clock.next()?);
+    if clock.next().is_some()
+        || year.len() < 4
+        || [month, day, hour, minute, second]
+            .iter()
+            .any(|part| part.len() != 2)
+    {
+        return None;
+    }
+    let year = if negative {
+        -number(year)?
+    } else {
+        number(year)?
+    };
+    let days = days_from_civil(year, number(month)?, number(day)?);
+    Some(days * 86_400 + number(hour)? * 3600 + number(minute)? * 60 + number(second)? - offset)
+}
+
+fn number(digits: &str) -> Option<i64> {
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// Days from 1970-01-01 to a proleptic Gregorian date, by Howard Hinnant's
+/// `days_from_civil`.
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let year_of_era = year.rem_euclid(400);
+    let month_index = if month > 2 { month - 3 } else { month + 9 };
+    let day_of_year = (153 * month_index + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
 }
 
 /// Splits `text` into the JSON objects and arrays embedded in it, each with

@@ -9,6 +9,7 @@ pub mod chat;
 pub mod claude_chat;
 pub mod claude_responses;
 pub mod completions;
+pub mod gemini;
 pub mod openai_chat;
 pub mod openai_claude;
 pub mod openai_responses;

@@ -58,6 +58,9 @@ pub fn requests() -> Vec<Case> {
             ("openai-response", "openai"),
             super::openai_responses::requests(),
         ),
+        (("gemini", "codex"), super::gemini::requests()),
+        (("gemini", "claude"), super::gemini::requests()),
+        (("gemini", "openai"), super::gemini::requests()),
     ] {
         cases.extend(
             source
@@ -396,7 +399,7 @@ pub fn requests() -> Vec<Case> {
 
 /// Response cases, for the pairs whose translators they were written for,
 /// and every fifth also for the `fallback` pairs, which have no translator.
-fn responses(sources: [Vec<Case>; 8], fallback: &[(&str, &str)]) -> Vec<Case> {
+fn responses(sources: [Vec<Case>; 11], fallback: &[(&str, &str)]) -> Vec<Case> {
     let pairs = [
         ("codex", "claude"),
         ("codex", "openai-response"),
@@ -406,6 +409,9 @@ fn responses(sources: [Vec<Case>; 8], fallback: &[(&str, &str)]) -> Vec<Case> {
         ("openai", "claude"),
         ("openai", "openai"),
         ("openai", "openai-response"),
+        ("codex", "gemini"),
+        ("claude", "gemini"),
+        ("openai", "gemini"),
     ];
     let mut cases = Vec::new();
     for ((from, to), source) in pairs.into_iter().zip(sources) {
@@ -432,8 +438,11 @@ pub fn streams() -> Vec<Case> {
             super::openai_claude::streams(),
             super::openai_chat::streams(),
             super::openai_responses::streams(),
+            super::gemini::codex_streams(),
+            super::gemini::claude_streams(),
+            super::gemini::openai_streams(),
         ],
-        &[("codex", "gemini"), ("Codex", "claude")],
+        &[("codex", "interactions"), ("Codex", "claude")],
     );
     let lines = vec![
         "data: {\"type\":\"response.created\"}".to_owned(),
@@ -463,6 +472,9 @@ pub fn finals() -> Vec<Case> {
             super::openai_claude::finals(),
             super::openai_chat::finals(),
             super::openai_responses::finals(),
+            super::gemini::codex_finals(),
+            super::gemini::claude_finals(),
+            super::gemini::openai_finals(),
         ],
         &[("claude", "claude")],
     );

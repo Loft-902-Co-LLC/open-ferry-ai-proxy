@@ -13,13 +13,15 @@
 //! translators between Chat Completions and Responses or Claude,
 //! [`openai_chat`] the Chat Completions responses those read and input for
 //! the Chat Completions passthrough, [`completions`] input for the legacy
-//! Completions conversions, [`signature`] reasoning signatures from every
-//! provider, and [`registry`] input for the translator registry.
+//! Completions conversions, [`gemini`] input for the translators from Gemini
+//! clients, [`signature`] reasoning signatures from every provider, and
+//! [`registry`] input for the translator registry.
 
 pub mod chat;
 pub mod claude_chat;
 pub mod claude_responses;
 pub mod completions;
+pub mod gemini;
 pub mod openai_chat;
 pub mod openai_claude;
 pub mod openai_responses;

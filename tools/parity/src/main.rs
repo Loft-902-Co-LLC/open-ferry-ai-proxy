@@ -142,6 +142,12 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
         generate::openai_claude::event_cases(seed, random);
     let (openai_chat_streams, openai_chat_finals) =
         generate::openai_chat::event_cases(seed, random);
+    let (codex_gemini_streams, codex_gemini_finals) =
+        generate::gemini::codex_event_cases(seed, random);
+    let (claude_gemini_streams, claude_gemini_finals) =
+        generate::gemini::claude_event_cases(seed, random);
+    let (openai_gemini_streams, openai_gemini_finals) =
+        generate::gemini::openai_event_cases(seed, random);
     let (registry_streams, registry_finals) = generate::registry::response_cases(seed, random);
     let suites = [
         (
@@ -271,6 +277,51 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
             Translator::OpenAIChatNonStream,
             cases::openai_chat::finals(),
             openai_chat_finals,
+        ),
+        (
+            Translator::CodexGeminiRequest,
+            cases::gemini::requests(),
+            generate::gemini::request_cases(seed, random),
+        ),
+        (
+            Translator::CodexGeminiStream,
+            cases::gemini::codex_streams(),
+            codex_gemini_streams,
+        ),
+        (
+            Translator::CodexGeminiNonStream,
+            cases::gemini::codex_finals(),
+            codex_gemini_finals,
+        ),
+        (
+            Translator::ClaudeGeminiRequest,
+            cases::gemini::requests(),
+            generate::gemini::request_cases(seed.rotate_left(1), random),
+        ),
+        (
+            Translator::ClaudeGeminiStream,
+            cases::gemini::claude_streams(),
+            claude_gemini_streams,
+        ),
+        (
+            Translator::ClaudeGeminiNonStream,
+            cases::gemini::claude_finals(),
+            claude_gemini_finals,
+        ),
+        (
+            Translator::OpenAIGeminiRequest,
+            cases::gemini::requests(),
+            generate::gemini::request_cases(seed.rotate_left(2), random),
+        ),
+        (
+            Translator::OpenAIGeminiStream,
+            cases::gemini::openai_streams(),
+            openai_gemini_streams,
+        ),
+        (
+            Translator::OpenAIGeminiNonStream,
+            cases::gemini::openai_finals(),
+            openai_gemini_finals,
         ),
         (
             Translator::SignatureInspect,

@@ -227,6 +227,18 @@ pub fn response_cases(seed: u64, count: usize) -> (Vec<Case>, Vec<Case>) {
             ("openai", "openai-response"),
             super::openai_responses::event_cases(source_seed, counts[7]),
         ),
+        (
+            ("codex", "gemini"),
+            super::gemini::codex_event_cases(source_seed, counts[8]),
+        ),
+        (
+            ("claude", "gemini"),
+            super::gemini::claude_event_cases(source_seed, counts[9]),
+        ),
+        (
+            ("openai", "gemini"),
+            super::gemini::openai_event_cases(source_seed, counts[10]),
+        ),
     ];
     let (mut streams, mut finals) = (Vec::new(), Vec::new());
     let mut index = 0;
@@ -239,6 +251,16 @@ pub fn response_cases(seed: u64, count: usize) -> (Vec<Case>, Vec<Case>) {
                 (rng.pick(&[from, to, "gemini", "Codex"]), rng.pick(FORMATS))
             } else {
                 (from, to)
+            };
+            // Upstream copies some broken tool arguments into its output as
+            // they are, whichever pair the events were made for.
+            let (stream, last) = match (from, to) {
+                ("codex", "gemini") => (
+                    super::gemini::repair_codex_case(stream),
+                    super::gemini::repair_codex_final(last),
+                ),
+                ("claude", "gemini") => super::gemini::repair_claude_input(stream, last),
+                _ => (stream, last),
             };
             let options = json!({ "from": from, "to": to });
             streams.push(stream.with_options(options.clone()));
@@ -279,10 +301,10 @@ fn rng(seed: u64, index: u64) -> Rng {
     Rng(derived(seed) ^ index.wrapping_mul(0x9E37_79B9_7F4A_7C15))
 }
 
-/// `count` split across the eight sources.
-fn split(count: usize) -> [usize; 8] {
-    let mut counts = [count / 8; 8];
-    counts[0] += count % 8;
+/// `count` split across the eleven sources.
+fn split(count: usize) -> [usize; 11] {
+    let mut counts = [count / 11; 11];
+    counts[0] += count % 11;
     counts
 }
 
@@ -319,6 +341,18 @@ fn builtin_requests(seed: u64, count: usize) -> Vec<Case> {
         (
             ("openai-response", "openai"),
             super::openai_responses::request_cases(source_seed, counts[7]),
+        ),
+        (
+            ("gemini", "codex"),
+            super::gemini::request_cases(source_seed, counts[8]),
+        ),
+        (
+            ("gemini", "claude"),
+            super::gemini::request_cases(source_seed.rotate_left(1), counts[9]),
+        ),
+        (
+            ("gemini", "openai"),
+            super::gemini::request_cases(source_seed.rotate_left(2), counts[10]),
         ),
     ];
     let mut cases = Vec::with_capacity(count);
@@ -366,6 +400,7 @@ fn source_paths(format: &str) -> &'static [&'static str] {
     match format {
         "openai" => OPENAI_PATHS,
         "claude" => CLAUDE_PATHS,
+        "gemini" => GEMINI_PATHS,
         _ => RESPONSES_PATHS,
     }
 }

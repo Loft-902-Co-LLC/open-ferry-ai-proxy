@@ -33,6 +33,13 @@
 // concatenates its output for every line, then what FinalizeToolInput returns
 // at the end of the stream.
 //
+// The */gemini entries translate a Gemini generateContent client's requests
+// to Codex, Claude and Chat Completions, and those providers' replies back.
+// Each request entry reads {"stream": bool} from "options". Each response
+// entry writes a JSON array with one string per output chunk; the
+// non-streaming ones take the final Codex event, the whole Claude SSE body or
+// the whole Chat Completions response as their one event.
+//
 // The registry/* entries run sdk/translator's default registry, which holds
 // the translators of the packages imported here, for the pair of formats in
 // "options" (see registryOptions). registry/response writes a JSON report of
@@ -61,10 +68,13 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	claudechat "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/claude/openai/chat-completions"
 	clauderesponses "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/claude/openai/responses"
+	claudegemini "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/claude/gemini"
 	codexclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/claude"
+	codexgemini "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/gemini"
 	codexchat "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/openai/chat-completions"
 	codexresponses "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/openai/responses"
 	openaiclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/openai/claude"
+	openaigemini "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/openai/gemini"
 	openaichat "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/openai/openai/chat-completions"
 	openairesponses "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/openai/openai/responses"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
@@ -251,6 +261,54 @@ var translators = map[string]func(in input) []byte{
 	},
 	"openai/openai-chat/response-non-stream": func(in input) []byte {
 		return openaichat.ConvertOpenAIResponseToOpenAINonStream(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), nil)
+	},
+	"codex/gemini/request": func(in input) []byte {
+		return codexgemini.ConvertGeminiRequestToCodex(in.Model, []byte(in.Request), streamOption(in))
+	},
+	"codex/gemini/response": func(in input) []byte {
+		var param any
+		chunks := []string{}
+		for _, event := range in.Events {
+			for _, chunk := range codexgemini.ConvertCodexResponseToGemini(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), []byte(event), &param) {
+				chunks = append(chunks, string(chunk))
+			}
+		}
+		return marshal(chunks)
+	},
+	"codex/gemini/response-non-stream": func(in input) []byte {
+		return codexgemini.ConvertCodexResponseToGeminiNonStream(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), nil)
+	},
+	"claude/gemini/request": func(in input) []byte {
+		return claudegemini.ConvertGeminiRequestToClaude(in.Model, []byte(in.Request), streamOption(in))
+	},
+	"claude/gemini/response": func(in input) []byte {
+		var param any
+		chunks := []string{}
+		for _, event := range in.Events {
+			for _, chunk := range claudegemini.ConvertClaudeResponseToGemini(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), []byte(event), &param) {
+				chunks = append(chunks, string(chunk))
+			}
+		}
+		return marshal(chunks)
+	},
+	"claude/gemini/response-non-stream": func(in input) []byte {
+		return claudegemini.ConvertClaudeResponseToGeminiNonStream(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), nil)
+	},
+	"openai/gemini/request": func(in input) []byte {
+		return openaigemini.ConvertGeminiRequestToOpenAI(in.Model, []byte(in.Request), streamOption(in))
+	},
+	"openai/gemini/response": func(in input) []byte {
+		var param any
+		chunks := []string{}
+		for _, event := range in.Events {
+			for _, chunk := range openaigemini.ConvertOpenAIResponseToGemini(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), []byte(event), &param) {
+				chunks = append(chunks, string(chunk))
+			}
+		}
+		return marshal(chunks)
+	},
+	"openai/gemini/response-non-stream": func(in input) []byte {
+		return openaigemini.ConvertOpenAIResponseToGeminiNonStream(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), nil)
 	},
 	"registry/request":             registryRequest,
 	"registry/response":            registryResponse,

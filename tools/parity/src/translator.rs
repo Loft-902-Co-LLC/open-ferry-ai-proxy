@@ -5,6 +5,10 @@ use std::cell::OnceCell;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use open_ferry_translate::claude::gemini::{
+    ClaudeToGeminiStream, convert_claude_response_to_gemini_non_stream,
+    convert_gemini_request_to_claude,
+};
 use open_ferry_translate::claude::openai::chat_completions::{
     ClaudeToOpenAIChatCompletionsStream,
     convert_claude_response_to_openai_chat_completions_non_stream,
@@ -19,6 +23,10 @@ use open_ferry_translate::claude::openai::responses::{
 use open_ferry_translate::codex::claude::{
     CodexToClaudeStream, convert_claude_request_to_codex,
     convert_claude_request_to_codex_with_compat, convert_codex_response_to_claude_non_stream,
+};
+use open_ferry_translate::codex::gemini::{
+    CodexToGeminiStream, convert_codex_response_to_gemini_non_stream,
+    convert_gemini_request_to_codex,
 };
 use open_ferry_translate::codex::openai::chat_completions::{
     CodexToOpenAIChatCompletionsStream,
@@ -42,6 +50,10 @@ use open_ferry_translate::openai::chat_completions::{
 use open_ferry_translate::openai::claude::{
     OpenAIToClaudeStream, convert_claude_request_to_openai,
     convert_claude_request_to_openai_with_compat, convert_openai_response_to_claude_non_stream,
+};
+use open_ferry_translate::openai::gemini::{
+    OpenAIToGeminiStream, convert_gemini_request_to_openai,
+    convert_openai_response_to_gemini_non_stream,
 };
 use open_ferry_translate::openai::responses::{
     OpenAIToOpenAIResponsesStream,
@@ -132,6 +144,24 @@ pub enum Translator {
     OpenAIChatStream,
     /// A whole Chat Completions response, passed through.
     OpenAIChatNonStream,
+    /// Gemini request → Codex request.
+    CodexGeminiRequest,
+    /// Codex event stream → Gemini responses.
+    CodexGeminiStream,
+    /// The final Codex event → one Gemini response.
+    CodexGeminiNonStream,
+    /// Gemini request → Claude Messages request.
+    ClaudeGeminiRequest,
+    /// Claude event stream → Gemini responses.
+    ClaudeGeminiStream,
+    /// A whole Claude event stream → one Gemini response.
+    ClaudeGeminiNonStream,
+    /// Gemini request → Chat Completions request.
+    OpenAIGeminiRequest,
+    /// Chat Completions stream → Gemini responses.
+    OpenAIGeminiStream,
+    /// A whole Chat Completions response → one Gemini response.
+    OpenAIGeminiNonStream,
     /// One reasoning signature → every check and replay decision on it.
     SignatureInspect,
     /// A Claude Messages request → its signed history stripped and sanitized.
@@ -189,6 +219,15 @@ impl Translator {
             Self::OpenAIChatRequest => "openai/openai-chat/request",
             Self::OpenAIChatStream => "openai/openai-chat/response",
             Self::OpenAIChatNonStream => "openai/openai-chat/response-non-stream",
+            Self::CodexGeminiRequest => "codex/gemini/request",
+            Self::CodexGeminiStream => "codex/gemini/response",
+            Self::CodexGeminiNonStream => "codex/gemini/response-non-stream",
+            Self::ClaudeGeminiRequest => "claude/gemini/request",
+            Self::ClaudeGeminiStream => "claude/gemini/response",
+            Self::ClaudeGeminiNonStream => "claude/gemini/response-non-stream",
+            Self::OpenAIGeminiRequest => "openai/gemini/request",
+            Self::OpenAIGeminiStream => "openai/gemini/response",
+            Self::OpenAIGeminiNonStream => "openai/gemini/response-non-stream",
             Self::SignatureInspect => "signature/inspect",
             Self::ClaudeMessagesSignatures => "signature/claude-messages",
             Self::GeminiSignatures => "signature/gemini",
@@ -233,6 +272,15 @@ impl Translator {
             Self::OpenAIChatRequest => "chat-to-chat-request",
             Self::OpenAIChatStream => "chat-to-chat-stream",
             Self::OpenAIChatNonStream => "chat-to-chat-non-stream",
+            Self::CodexGeminiRequest => "gemini-to-codex-request",
+            Self::CodexGeminiStream => "codex-to-gemini-stream",
+            Self::CodexGeminiNonStream => "codex-to-gemini-non-stream",
+            Self::ClaudeGeminiRequest => "gemini-to-claude-request",
+            Self::ClaudeGeminiStream => "claude-to-gemini-stream",
+            Self::ClaudeGeminiNonStream => "claude-to-gemini-non-stream",
+            Self::OpenAIGeminiRequest => "gemini-to-chat-request",
+            Self::OpenAIGeminiStream => "chat-to-gemini-stream",
+            Self::OpenAIGeminiNonStream => "chat-to-gemini-non-stream",
             Self::SignatureInspect => "signature-inspect",
             Self::ClaudeMessagesSignatures => "signature-claude-messages",
             Self::GeminiSignatures => "signature-gemini",
@@ -282,6 +330,15 @@ impl Translator {
             Self::OpenAIChatRequest => "Chat Completions passthrough request",
             Self::OpenAIChatStream => "Chat Completions passthrough response, streaming",
             Self::OpenAIChatNonStream => "Chat Completions passthrough response, non-streaming",
+            Self::CodexGeminiRequest => "Gemini -> Codex request",
+            Self::CodexGeminiStream => "Codex -> Gemini response, streaming",
+            Self::CodexGeminiNonStream => "Codex -> Gemini response, non-streaming",
+            Self::ClaudeGeminiRequest => "Gemini -> Claude request",
+            Self::ClaudeGeminiStream => "Claude -> Gemini response, streaming",
+            Self::ClaudeGeminiNonStream => "Claude -> Gemini response, non-streaming",
+            Self::OpenAIGeminiRequest => "Gemini -> Chat Completions request",
+            Self::OpenAIGeminiStream => "Chat Completions -> Gemini response, streaming",
+            Self::OpenAIGeminiNonStream => "Chat Completions -> Gemini response, non-streaming",
             Self::SignatureInspect => "Signature checks and replay decisions",
             Self::ClaudeMessagesSignatures => "Claude Messages signature sanitizers",
             Self::GeminiSignatures => "Gemini thought signature sanitizer and validators",
@@ -593,6 +650,76 @@ impl Translator {
                 let output = convert_openai_response_to_openai_non_stream(body);
                 Ok(self.read(case, output).expect("bodies always read"))
             }
+            Self::CodexGeminiRequest => {
+                let request = request
+                    .map_err(|err| format!("case {} is not valid JSON: {err}", case.name))?;
+                Ok(convert_gemini_request_to_codex(&case.model, &request))
+            }
+            Self::ClaudeGeminiRequest | Self::OpenAIGeminiRequest => {
+                let request = request
+                    .map_err(|err| format!("case {} is not valid JSON: {err}", case.name))?;
+                let stream = case.options["stream"].as_bool().unwrap_or(false);
+                let output = if self == Self::ClaudeGeminiRequest {
+                    convert_gemini_request_to_claude(
+                        &case.model,
+                        &request,
+                        stream,
+                        ModelCatalog::embedded(),
+                    )
+                } else {
+                    convert_gemini_request_to_openai(&case.model, &request, stream)
+                };
+                // Read back, so derived IDs are masked as upstream's are.
+                Ok(self
+                    .read(case, output.to_string().as_bytes())
+                    .expect("requests always read"))
+            }
+            Self::CodexGeminiStream | Self::ClaudeGeminiStream | Self::OpenAIGeminiStream => {
+                let original = request.unwrap_or_default();
+                let mut translate: LineTranslator = match self {
+                    Self::CodexGeminiStream => {
+                        let mut stream = CodexToGeminiStream::new(&case.model, &original);
+                        Box::new(move |line| stream.translate_line(line))
+                    }
+                    Self::ClaudeGeminiStream => {
+                        let mut stream = ClaudeToGeminiStream::new(&case.model);
+                        Box::new(move |line| stream.translate_line(line))
+                    }
+                    _ => {
+                        let mut stream = OpenAIToGeminiStream::new();
+                        Box::new(move |line| stream.translate_line(line))
+                    }
+                };
+                // Written as the harness writes upstream's output.
+                let chunks: Vec<String> = case
+                    .events
+                    .iter()
+                    .flat_map(|line| translate(line.as_bytes()))
+                    .map(|chunk| chunk.to_string())
+                    .collect();
+                let output = serde_json::to_vec(&chunks).expect("strings serialize");
+                Ok(self.read(case, &output).expect("streams always read"))
+            }
+            Self::CodexGeminiNonStream => {
+                let output = convert_codex_response_to_gemini_non_stream(
+                    &case.model,
+                    &request.unwrap_or_default(),
+                    &final_event(),
+                );
+                let output = output.map(|value| value.to_string()).unwrap_or_default();
+                self.read(case, output.as_bytes())
+                    .ok_or_else(|| "output is not JSON".to_owned())
+            }
+            Self::ClaudeGeminiNonStream | Self::OpenAIGeminiNonStream => {
+                let body = case.events.first().map_or(&b""[..], |body| body.as_bytes());
+                let output = if self == Self::ClaudeGeminiNonStream {
+                    convert_claude_response_to_gemini_non_stream(&case.model, body)
+                } else {
+                    convert_openai_response_to_gemini_non_stream(body)
+                };
+                self.read(case, output.to_string().as_bytes())
+                    .ok_or_else(|| "output is not JSON".to_owned())
+            }
             Self::RegistryRequest => {
                 let request = request
                     .map_err(|err| format!("case {} is not valid JSON: {err}", case.name))?;
@@ -863,6 +990,42 @@ impl Translator {
                 ("$.output[*].arguments", Whole),
                 ("$.output[*].input", Whole),
             ],
+            // Function call arguments, and a function response's output taken
+            // from the whole response or a result that isn't a string.
+            // Call arguments and outputs, and text and tool descriptions read
+            // from a value that isn't a string.
+            Self::CodexGeminiRequest => &[
+                ("$.input[*].arguments", Whole),
+                ("$.input[*].output", Whole),
+                ("$.input[*].content[*].text", Whole),
+                ("$.tools[*].description", Whole),
+            ],
+            // A tool result taken from the whole response or a result that
+            // isn't a string, and text, tool descriptions and stop sequences
+            // read from a value that isn't a string. System text is joined.
+            Self::ClaudeGeminiRequest => &[
+                ("$.messages[*].content[*].content", Whole),
+                ("$.messages[*].content[*].text", InText),
+                ("$.tools[*].description", Whole),
+                ("$.stop_sequences[*]", Whole),
+            ],
+            // Call arguments, a tool message's content, and text, tool
+            // descriptions and stop sequences read from a value that isn't a
+            // string. A message's text parts are joined.
+            Self::OpenAIGeminiRequest => &[
+                ("$.messages[*].tool_calls[*].function.arguments", Whole),
+                ("$.messages[*].content", InText),
+                ("$.messages[*].content[*].text", InText),
+                ("$.tools[*].function.description", Whole),
+                ("$.stop[*]", Whole),
+            ],
+            // Content and reasoning that aren't strings.
+            Self::OpenAIGeminiStream => &[("$[*].candidates[*].content.parts[*].text", Whole)],
+            Self::OpenAIGeminiNonStream => &[("$.candidates[*].content.parts[*].text", Whole)],
+            Self::CodexGeminiStream
+            | Self::CodexGeminiNonStream
+            | Self::ClaudeGeminiStream
+            | Self::ClaudeGeminiNonStream => &[],
             Self::ResponsesRequest
             | Self::ResponsesStream
             | Self::ResponsesNonStream
@@ -901,6 +1064,9 @@ impl Translator {
                 ("claude", "openai") => Some(Self::OpenAIClaudeRequest),
                 ("openai", "openai") => Some(Self::OpenAIChatRequest),
                 ("openai-response", "openai") => Some(Self::OpenAIResponsesRequest),
+                ("gemini", "codex") => Some(Self::CodexGeminiRequest),
+                ("gemini", "claude") => Some(Self::ClaudeGeminiRequest),
+                ("gemini", "openai") => Some(Self::OpenAIGeminiRequest),
                 _ => None,
             },
             Self::RegistryStream => match pair {
@@ -912,6 +1078,9 @@ impl Translator {
                 ("openai", "claude") => Some(Self::OpenAIClaudeStream),
                 ("openai", "openai") => Some(Self::OpenAIChatStream),
                 ("openai", "openai-response") => Some(Self::OpenAIResponsesStream),
+                ("codex", "gemini") => Some(Self::CodexGeminiStream),
+                ("claude", "gemini") => Some(Self::ClaudeGeminiStream),
+                ("openai", "gemini") => Some(Self::OpenAIGeminiStream),
                 _ => None,
             },
             Self::RegistryNonStream => match pair {
@@ -923,6 +1092,9 @@ impl Translator {
                 ("openai", "claude") => Some(Self::OpenAIClaudeNonStream),
                 ("openai", "openai") => Some(Self::OpenAIChatNonStream),
                 ("openai", "openai-response") => Some(Self::OpenAIResponsesNonStream),
+                ("codex", "gemini") => Some(Self::CodexGeminiNonStream),
+                ("claude", "gemini") => Some(Self::ClaudeGeminiNonStream),
+                ("openai", "gemini") => Some(Self::OpenAIGeminiNonStream),
                 _ => None,
             },
             _ => None,
@@ -933,10 +1105,17 @@ impl Translator {
     /// the deviation that accounts for it.
     ///
     /// Upstream makes up a Claude `metadata.user_id` when the client sent
-    /// none; we don't.
+    /// none; we don't. The Gemini to Chat Completions translator derives call
+    /// IDs from JSON text, which we write compactly: where the request's
+    /// text isn't compact, [`Self::read`] masks the derived IDs on both
+    /// sides, and that is accounted for here.
     pub fn drop_deliberate_omissions(self, case: &Case, go: &mut Value) -> Option<Deviation> {
         if let Some(native) = self.native(case) {
             return native.drop_deliberate_omissions(case, go);
+        }
+        if self == Self::OpenAIGeminiRequest {
+            return contains_string(go, &|text| text.starts_with(DERIVED_CALL_ID))
+                .then_some(Deviation::CompactCallIdSource);
         }
         if !matches!(
             self,
@@ -944,6 +1123,7 @@ impl Translator {
                 | Self::ClaudeChatRequestCompat
                 | Self::ClaudeResponsesRequest
                 | Self::ClaudeResponsesRequestCompat
+                | Self::ClaudeGeminiRequest
         ) {
             return None;
         }
@@ -979,6 +1159,15 @@ impl Translator {
     /// or a Chat Completions response, when it is the current time, and a
     /// response ID made up for a Chat Completions response without one (see
     /// [`mask_generated_response_id`]).
+    ///
+    /// A Gemini stream is an array with an entry per chunk, read as JSON or
+    /// kept as text if it isn't JSON. A Gemini response's `createTime` from a
+    /// Claude stream is masked when it is the current time (see
+    /// [`mask_create_time_now`]), and the function calls in a chunk from a
+    /// Chat Completions stream are sorted (see [`sort_function_calls`]). In
+    /// a Chat Completions request from a Gemini one whose text isn't compact,
+    /// call IDs derived from its JSON text are masked (see
+    /// [`mask_derived_call_ids`]).
     pub fn read(self, case: &Case, output: &[u8]) -> Option<Value> {
         let text = String::from_utf8_lossy(output);
         let native = self.native(case);
@@ -1001,7 +1190,32 @@ impl Translator {
             | Self::GeminiSignatures
             | Self::ChatRequest
             | Self::CompletionsRequest
-            | Self::CompletionsResponse => return serde_json::from_str(&text).ok(),
+            | Self::CompletionsResponse
+            | Self::CodexGeminiRequest => return serde_json::from_str(&text).ok(),
+            Self::OpenAIGeminiRequest => {
+                let mut value: Value = serde_json::from_str(&text).ok()?;
+                if !is_compact(&case.request) {
+                    mask_derived_call_ids(&mut value, case);
+                }
+                return Some(value);
+            }
+            Self::CodexGeminiStream | Self::ClaudeGeminiStream | Self::OpenAIGeminiStream => {
+                let chunks: Vec<String> = serde_json::from_str(&text).ok()?;
+                let chunks = chunks
+                    .into_iter()
+                    .map(|chunk| {
+                        let mut value =
+                            serde_json::from_str(&chunk).unwrap_or(Value::String(chunk));
+                        match self {
+                            Self::ClaudeGeminiStream => mask_create_time_now(&mut value),
+                            Self::OpenAIGeminiStream => sort_function_calls(&mut value),
+                            _ => {}
+                        }
+                        value
+                    })
+                    .collect();
+                return Some(Value::Array(chunks));
+            }
             Self::ResponsesStream | Self::ChatStream => return read_lines(&text),
             Self::OpenAIChatStream => {
                 let chunks: Vec<String> = serde_json::from_str(&text).ok()?;
@@ -1035,11 +1249,21 @@ impl Translator {
             | Self::ClaudeResponsesNonStream
             | Self::OpenAIResponsesNonStream
             | Self::OpenAIClaudeNonStream
+            | Self::CodexGeminiNonStream
+            | Self::ClaudeGeminiNonStream
+            | Self::OpenAIGeminiNonStream
                 if text.is_empty() =>
             {
                 return Some(NO_OUTPUT.into());
             }
-            Self::ResponsesNonStream => return serde_json::from_str(&text).ok(),
+            Self::ResponsesNonStream | Self::CodexGeminiNonStream | Self::OpenAIGeminiNonStream => {
+                return serde_json::from_str(&text).ok();
+            }
+            Self::ClaudeGeminiNonStream => {
+                let mut value: Value = serde_json::from_str(&text).ok()?;
+                mask_create_time_now(&mut value);
+                return Some(value);
+            }
             Self::ChatNonStream | Self::ClaudeChatNonStream => {
                 let mut value: Value = serde_json::from_str(&text).ok()?;
                 mask_time_now(&mut value, "created");
@@ -1070,7 +1294,8 @@ impl Translator {
             Self::ClaudeChatRequest
             | Self::ClaudeChatRequestCompat
             | Self::ClaudeResponsesRequest
-            | Self::ClaudeResponsesRequestCompat => serde_json::from_str(&text).ok()?,
+            | Self::ClaudeResponsesRequestCompat
+            | Self::ClaudeGeminiRequest => serde_json::from_str(&text).ok()?,
             Self::Stream => sse_frames(&text),
             Self::NonStream => serde_json::from_str(&text).ok()?,
         };
@@ -1280,6 +1505,105 @@ fn mask_time_now(value: &mut Value, key: &str) {
         .is_some_and(|created| created.abs_diff(now) < 3600)
     {
         *created = CREATED_NOW.into();
+    }
+}
+
+/// Replaces a Gemini response's `createTime`, an RFC 3339 time, if it is
+/// within an hour of now. Upstream writes it in the local time zone and we
+/// in UTC, so both are read as instants.
+fn mask_create_time_now(value: &mut Value) {
+    let Some(created) = value.get_mut("createTime") else {
+        return;
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    let current = created
+        .as_str()
+        .and_then(compare::rfc3339_seconds)
+        .and_then(|created| u64::try_from(created).ok())
+        .is_some_and(|created| created.abs_diff(now) < 3600);
+    if current {
+        *created = CREATED_NOW.into();
+    }
+}
+
+/// Sorts the parts of each candidate in a Gemini chunk by their JSON text, if
+/// every one is a function call. A Chat Completions stream's calls come out
+/// together when it finishes; upstream keeps them in a Go map until then, so
+/// their order changes from run to run, and we write them in the order of
+/// their index.
+fn sort_function_calls(chunk: &mut Value) {
+    let candidates = chunk.get_mut("candidates").and_then(Value::as_array_mut);
+    for candidate in candidates.into_iter().flatten() {
+        let Some(parts) = candidate
+            .pointer_mut("/content/parts")
+            .and_then(Value::as_array_mut)
+        else {
+            continue;
+        };
+        if parts.iter().all(|part| part.get("functionCall").is_some()) {
+            parts.sort_by_cached_key(Value::to_string);
+        }
+    }
+}
+
+/// One of our Gemini response stream translators, taking a line at a time.
+type LineTranslator<'a> = Box<dyn FnMut(&[u8]) -> Vec<Value> + 'a>;
+
+/// Whether `text` is JSON written compactly, as we write it.
+fn is_compact(text: &str) -> bool {
+    serde_json::from_str::<Value>(text)
+        .and_then(|value| serde_json::to_string(&value))
+        .is_ok_and(|compact| compact == text)
+}
+
+/// What the `n`th distinct derived call ID in an output starts with once
+/// masked.
+const DERIVED_CALL_ID: &str = "call_(derived-";
+
+/// Replaces `call_` and 24 hex digits, the IDs the Gemini to Chat Completions
+/// translator derives from a hash of a call's name and JSON text, where the
+/// request's text isn't compact: upstream hashes the text as the client wrote
+/// it, and we the same JSON written compactly. Each distinct ID gets the next
+/// number in the order it first appears, so a tool message still has to
+/// answer the right call. IDs found in `case`'s input are kept.
+fn mask_derived_call_ids(value: &mut Value, case: &Case) {
+    fn mask(value: &mut Value, input: &str, seen: &mut Vec<String>) {
+        match value {
+            Value::String(id) if is_derived_call_id(id) && !input.contains(id.as_str()) => {
+                let n = match seen.iter().position(|seen| seen == id) {
+                    Some(index) => index + 1,
+                    None => {
+                        seen.push(id.clone());
+                        seen.len()
+                    }
+                };
+                *id = format!("{DERIVED_CALL_ID}{n})");
+            }
+            Value::Array(items) => items.iter_mut().for_each(|item| mask(item, input, seen)),
+            Value::Object(fields) => fields
+                .values_mut()
+                .for_each(|field| mask(field, input, seen)),
+            _ => {}
+        }
+    }
+    mask(value, &input_text(case), &mut Vec::new());
+}
+
+fn is_derived_call_id(text: &str) -> bool {
+    text.strip_prefix("call_").is_some_and(|hash| {
+        hash.len() == 24 && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    })
+}
+
+/// Whether any string in `value` satisfies `matches`.
+fn contains_string(value: &Value, matches: &dyn Fn(&str) -> bool) -> bool {
+    match value {
+        Value::String(text) => matches(text),
+        Value::Array(items) => items.iter().any(|item| contains_string(item, matches)),
+        Value::Object(fields) => fields.values().any(|field| contains_string(field, matches)),
+        _ => false,
     }
 }
 
