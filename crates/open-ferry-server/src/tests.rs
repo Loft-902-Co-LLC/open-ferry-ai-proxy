@@ -178,8 +178,21 @@ async fn lists_models_in_either_format() {
     assert_eq!(list["data"][0]["max_input_tokens"], 1_000_000);
     assert_eq!(list["first_id"], "claude-sonnet");
 
-    let (_, _, body) = send(&app, authed(Method::GET, "/v1/models?client_version=1", "")).await;
-    assert_eq!(body, r#"{"models":[]}"#);
+    // Codex clients get the Codex list; models without a template of their
+    // own follow the catalog's, by display name.
+    let (status, headers, body) =
+        send(&app, authed(Method::GET, "/v1/models?client_version=1", "")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(content_type(&headers), "application/json; charset=utf-8");
+    let list: Value = serde_json::from_str(&body).unwrap();
+    let slugs: Vec<&str> = list["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["slug"].as_str().unwrap())
+        .collect();
+    assert_eq!(slugs, ["claude-sonnet", "gpt-5"]);
+    assert!(list.get("object").is_none());
 }
 
 #[tokio::test]

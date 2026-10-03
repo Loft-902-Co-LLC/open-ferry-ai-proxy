@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use open_ferry_core::config::Config;
+use open_ferry_core::config::{CodexClientConfig, Config};
 
 /// The default for [`ServerConfig::body_limit`]: 64 MiB.
 pub const DEFAULT_BODY_LIMIT: usize = 64 << 20;
@@ -28,6 +28,9 @@ pub struct ServerConfig {
     /// The most bytes a request body may have, before and after decoding.
     /// Upstream has no limit.
     pub body_limit: usize,
+    /// Codex client settings (`client.codex`), which shape the model list
+    /// Codex clients fetch.
+    pub codex_client: CodexClientConfig,
 }
 
 impl Default for ServerConfig {
@@ -38,6 +41,7 @@ impl Default for ServerConfig {
             nonstream_keepalive: None,
             streaming: StreamingConfig::default(),
             body_limit: DEFAULT_BODY_LIMIT,
+            codex_client: CodexClientConfig::default(),
         }
     }
 }
@@ -74,6 +78,7 @@ impl From<&Config> for ServerConfig {
                 bootstrap_retries: usize::try_from(config.streaming.bootstrap_retries).unwrap_or(0),
             },
             body_limit: DEFAULT_BODY_LIMIT,
+            codex_client: config.client.codex.clone(),
         }
     }
 }

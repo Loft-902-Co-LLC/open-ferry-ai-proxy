@@ -5,16 +5,19 @@
 // internal/registry/model_registry.go (v8.0.10, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
-//! `GET /v1/models`, in the OpenAI or the Anthropic format.
+//! `GET /v1/models`, in the OpenAI or the Anthropic format, or as the Codex
+//! client model list ([`codex`]) for a request with a `client_version`
+//! parameter, which Codex sends.
 //!
 //! Deviations from upstream:
-//! - A request with a `client_version` parameter, which Codex sends, gets an
-//!   empty Codex model list for now. Upstream builds one from its catalog.
-//! - The Grok shell's model list isn't served yet; it gets the OpenAI list.
+//! - The Grok shell's model list isn't served yet; it gets the OpenAI list,
+//!   or the Codex one with a `client_version`.
 //! - The OpenAI list is sorted by ID. Upstream's order varies.
 //! - Model IDs in the Anthropic list are as they are. Upstream disguises
 //!   IDs that don't start with `claude-` unless told not to, which is a
 //!   client impersonation measure and isn't ported.
+
+mod codex;
 
 use axum::extract::State;
 use axum::response::Response;
@@ -41,8 +44,8 @@ pub(crate) async fn unified(
     uri: Uri,
 ) -> Response {
     let params = query::parse(uri.query().unwrap_or(""));
-    if params.iter().any(|(name, _)| name == "client_version") {
-        return json_utf8(json!({"models": []}).to_string());
+    if let Some(client_version) = query::first(&params, "client_version") {
+        return json_utf8(codex::response(&state, client_version));
     }
     let models = state.catalog().available_models();
     if is_anthropic_request(&headers) {
