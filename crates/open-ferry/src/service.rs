@@ -321,20 +321,36 @@ impl Service {
     /// and one for each provider an enabled credential belongs to. Those no
     /// credential uses any more are unregistered.
     fn register_compat_executors(&mut self) {
-        let mut providers = BTreeSet::from([OPENAI_COMPATIBILITY.to_owned()]);
-        providers.extend(
-            self.manager
-                .list()
-                .iter()
-                .filter_map(|auth| compat_provider(auth)),
-        );
+        let providers = self.compat_providers();
         for provider in &providers {
             self.register_compat_executor(provider);
         }
-        for stale in self.compat_executors.difference(&providers) {
-            self.manager.unregister_executor(stale);
-        }
-        self.compat_executors = providers;
+        self.compat_executors.extend(providers);
+        self.prune_compat_executors();
+    }
+
+    /// Unregisters the OpenAI-compatible executors no enabled credential
+    /// uses any more, keeping the baseline one.
+    fn prune_compat_executors(&mut self) {
+        let providers = self.compat_providers();
+        let manager = &self.manager;
+        self.compat_executors.retain(|provider| {
+            let used = providers.contains(provider);
+            if !used {
+                manager.unregister_executor(provider);
+            }
+            used
+        });
+    }
+
+    /// The provider keys OpenAI-compatible executors are wanted for: the
+    /// baseline `openai-compatibility` one, and that of each provider an
+    /// enabled credential belongs to.
+    fn compat_providers(&self) -> BTreeSet<String> {
+        let mut providers = BTreeSet::from([OPENAI_COMPATIBILITY.to_owned()]);
+        let auths = self.manager.list();
+        providers.extend(auths.iter().filter_map(|auth| compat_provider(auth)));
+        providers
     }
 
     /// Registers an OpenAI-compatible executor for `provider`, made for the
@@ -535,6 +551,13 @@ impl Service {
         {
             self.register_native_executors();
         }
+        // Made again before the credentials change, as upstream does, so no
+        // credential of the new config is served by an executor of the old.
+        if previous.proxy_url != config.proxy_url
+            || previous.openai_compatibility != config.openai_compatibility
+        {
+            self.register_compat_executors();
+        }
 
         let mut watching = Watching::Same;
         match config.resolve_auth_dir().map(absolute_dir) {
@@ -569,14 +592,9 @@ impl Service {
             Err(error) => tracing::error!("failed to resolve auth directory: {error}"),
         }
 
+        // New providers get executors as their credentials are registered.
         self.sync_config_auths();
-        // New providers got executors as their credentials were registered;
-        // the others are made again with the new config.
-        if previous.proxy_url != config.proxy_url
-            || previous.openai_compatibility != config.openai_compatibility
-        {
-            self.register_compat_executors();
-        }
+        self.prune_compat_executors();
         let rules = self.rules();
         for auth in self.manager.list() {
             self.registry.register_auth(&auth, &rules);
