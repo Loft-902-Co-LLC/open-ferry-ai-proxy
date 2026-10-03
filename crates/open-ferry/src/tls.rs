@@ -7,6 +7,8 @@
 //! The certificate chain and key are PEM files, as Go's
 //! `tls.LoadX509KeyPair` reads them, and ALPN offers HTTP/2 and HTTP/1.1.
 //! They are read once, when the server starts, as upstream reads them.
+//! Handlers see a client's address as `ConnectInfo<SocketAddr>`, as over
+//! plain HTTP.
 //!
 //! Deviations from upstream:
 //! - Handshakes run on their own tasks and one that takes over ten seconds
@@ -17,6 +19,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::Router;
+use axum::extract::Request;
+use axum::extract::connect_info::{ConnectInfo, Connected};
+use axum::middleware::{self, Next};
+use axum::response::Response;
+use axum::serve::IncomingStream;
 use rustls::ServerConfig;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -124,6 +132,31 @@ impl axum::serve::Listener for TlsListener {
     }
 }
 
+/// A TLS client's address, which axum hands to handlers as
+/// `ConnectInfo<TlsPeer>`.
+#[derive(Clone, Copy, Debug)]
+pub struct TlsPeer(SocketAddr);
+
+impl Connected<IncomingStream<'_, TlsListener>> for TlsPeer {
+    fn connect_info(stream: IncomingStream<'_, TlsListener>) -> Self {
+        Self(*stream.remote_addr())
+    }
+}
+
+/// `app`, with a TLS client's address also given to handlers as
+/// `ConnectInfo<SocketAddr>`. Serve it with
+/// `into_make_service_with_connect_info::<TlsPeer>()`.
+pub fn with_peer_addr(app: Router) -> Router {
+    app.layer(middleware::from_fn(copy_peer_addr))
+}
+
+async fn copy_peer_addr(mut request: Request, next: Next) -> Response {
+    if let Some(&ConnectInfo(TlsPeer(addr))) = request.extensions().get::<ConnectInfo<TlsPeer>>() {
+        request.extensions_mut().insert(ConnectInfo(addr));
+    }
+    next.run(request).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,7 +190,13 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let listener = TlsListener::new(listener, config).unwrap();
         let addr = axum::serve::Listener::local_addr(&listener).unwrap();
-        let app = axum::Router::new().route("/", axum::routing::get(|| async { "hello" }));
+        let app = axum::Router::new().route(
+            "/",
+            axum::routing::get(|ConnectInfo(peer): ConnectInfo<SocketAddr>| async move {
+                format!("hello {}", peer.ip())
+            }),
+        );
+        let app = with_peer_addr(app).into_make_service_with_connect_info::<TlsPeer>();
         tokio::spawn(async move { axum::serve(listener, app).await });
 
         // A client that stalls its handshake holds up no one.
@@ -182,6 +221,6 @@ mod tests {
         let mut response = String::new();
         stream.read_to_string(&mut response).await.unwrap();
         assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
-        assert!(response.ends_with("hello"), "{response}");
+        assert!(response.ends_with("hello 127.0.0.1"), "{response}");
     }
 }

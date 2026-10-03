@@ -11,12 +11,12 @@
 //! At start the credentials in the auth directory and the config's API keys
 //! are registered with the credential manager, and each one's models with
 //! the model registry. Token refresh runs in the background every fifteen
-//! minutes. Then the server listens, and a watcher follows the config file
-//! and the auth directory:
-//! - A config that changes is applied to the manager, the server and the
-//!   executors; the API-key credentials are made again from it, and every
-//!   credential's models registered again, as aliases and exclusions may
-//!   have changed.
+//! minutes. Then the server listens, serving the management API beside the
+//! proxy, and a watcher follows the config file and the auth directory:
+//! - A config that changes is applied to the manager, the server, the
+//!   management API and the executors; the API-key credentials are made
+//!   again from it, and every credential's models registered again, as
+//!   aliases and exclusions may have changed.
 //! - An auth file that is added or changes is registered from the contents
 //!   the watcher read; one that is removed is unregistered.
 //!
@@ -56,14 +56,15 @@ use open_ferry_core::auth::{Auth, FileStore, Status};
 use open_ferry_core::config::{AuthFile, Config, ConfigWatcher, WatchEvent};
 use open_ferry_core::manager::{Manager, Settings};
 use open_ferry_core::registry::{ModelRegistry, RegistrationRules};
+use open_ferry_management::{ManagementState, management_password_from_env};
 use open_ferry_providers::claude::ClaudeExecutor;
 use open_ferry_providers::codex::CodexExecutor;
-use open_ferry_server::{AppState, ServerConfig, router};
+use open_ferry_server::{AppState, ServerConfig, router_with};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch};
 
 use crate::logging::LogLevel;
-use crate::tls::{self, TlsListener};
+use crate::tls::{self, TlsListener, TlsPeer};
 
 /// How often background refresh looks for tokens to renew.
 const AUTO_REFRESH_INTERVAL: Duration = Duration::from_secs(15 * 60);
@@ -120,9 +121,8 @@ pub async fn run(
     } else {
         None
     };
-    let app = router(service.state.clone());
     let (stop, stopped) = watch::channel(false);
-    let mut server = tokio::spawn(serve(listener, tls_config, app, stopped));
+    let mut server = tokio::spawn(serve(listener, tls_config, service.app(), stopped));
     println!(
         "API server started successfully on: {}:{}",
         config.host, config.port
@@ -218,8 +218,8 @@ enum Watching {
     Stopped,
 }
 
-/// The credential manager, the model registry and the server state, and
-/// what was registered from the config and the auth directory.
+/// The credential manager, the model registry, the server and management
+/// state, and what was registered from the config and the auth directory.
 struct Service {
     config: Arc<Config>,
     auth_dir: PathBuf,
@@ -228,6 +228,7 @@ struct Service {
     manager: Manager,
     registry: Arc<ModelRegistry>,
     state: AppState,
+    management: ManagementState,
     watcher: Option<ConfigWatcher>,
     /// The IDs of the credentials made from config API keys.
     config_auths: BTreeSet<String>,
@@ -250,6 +251,12 @@ impl Service {
             Arc::new(manager.clone()),
             Arc::clone(&registry) as _,
         );
+        let management = ManagementState::new(
+            Arc::clone(&config),
+            manager.clone(),
+            Arc::clone(&registry),
+            management_password_from_env(),
+        );
         Self {
             config,
             auth_dir,
@@ -258,10 +265,17 @@ impl Service {
             manager,
             registry,
             state,
+            management,
             watcher: None,
             config_auths: BTreeSet::new(),
             file_auths: HashMap::new(),
         }
+    }
+
+    /// The proxy's routes, with the management API's beside them.
+    fn app(&self) -> axum::Router {
+        let management = open_ferry_management::router(self.management.clone());
+        router_with(self.state.clone(), management)
     }
 
     /// Registers the Codex and Claude executors for the current config.
@@ -436,6 +450,7 @@ impl Service {
         }
         self.manager.set_settings(Settings::from(&*config));
         self.state.set_config(ServerConfig::from(&*config));
+        self.management.set_config(Arc::clone(&config));
         if previous.proxy_url != config.proxy_url
             || previous.claude.model_level_cooling != config.claude.model_level_cooling
         {
@@ -568,14 +583,20 @@ async fn serve(
     match tls_config {
         Some(tls_config) => {
             let listener = TlsListener::new(listener, tls_config)?;
-            axum::serve(listener, app)
-                .with_graceful_shutdown(stop)
-                .await
+            axum::serve(
+                listener,
+                tls::with_peer_addr(app).into_make_service_with_connect_info::<TlsPeer>(),
+            )
+            .with_graceful_shutdown(stop)
+            .await
         }
         None => {
-            axum::serve(listener, app)
-                .with_graceful_shutdown(stop)
-                .await
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(stop)
+            .await
         }
     }
 }
@@ -821,5 +842,227 @@ mod tests {
             dir.path().read_dir().unwrap().next().is_none(),
             "a file was saved"
         );
+    }
+
+    /// The management API as the binary serves it, over TCP.
+    ///
+    /// Ports the management parts of CLIProxyAPI
+    /// internal/api/server_test.go (v8.0.10, MIT):
+    /// - `TestManagementResponseExposesPluginSupportHeaderForCORS`, without
+    ///   its `X-CPA-SUPPORT-PLUGIN` check: the plugin host isn't ported and
+    ///   the header isn't sent.
+    /// - `TestExampleAPIKeySafeModeShowsWarningAndKeepsManagement`, without
+    ///   its warning page and control panel checks, as neither is ported,
+    ///   and with the credential list in place of the unported config
+    ///   route.
+    /// - `TestNewServerAppliesTrustedProxyConfiguration`, through what the
+    ///   management API makes of a client's address.
+    ///
+    /// `TestHomeEnabledHidesManagementEndpointsAndControlPanel`,
+    /// `TestManagementPluginsRouteRegistered`,
+    /// `TestManagementUsageRequiresManagementAuthAndPopsArray` and
+    /// `TestOAuthCallbackRouteSkipsManagementKeyMiddleware` are dropped:
+    /// Home mode, plugins, usage and the OAuth callbacks aren't ported.
+    mod management {
+        use std::fmt::Write as _;
+        use std::net::SocketAddr;
+        use std::path::Path;
+        use std::sync::Arc;
+
+        use open_ferry_core::config::{Config, WatchEvent};
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        use tokio::net::{TcpListener, TcpStream};
+        use tokio::sync::watch;
+
+        use super::super::{Service, serve};
+        use super::service;
+
+        const KEYED: &str = "remote-management:\n  secret-key: test-secret\n";
+        const LIST: &str = "/v0/management/auth-files";
+
+        /// A response, read.
+        struct Answer {
+            status: u16,
+            head: String,
+            body: String,
+        }
+
+        impl Answer {
+            /// The value of header `name`, if there is one.
+            fn header(&self, name: &str) -> Option<&str> {
+                self.head.lines().skip(1).find_map(|line| {
+                    let (key, value) = line.split_once(':')?;
+                    key.eq_ignore_ascii_case(name).then(|| value.trim())
+                })
+            }
+        }
+
+        /// Serves `service` as `run` does, on a 127.0.0.1 ephemeral port,
+        /// until the sender is dropped or sends true.
+        async fn start(service: &Service) -> (SocketAddr, watch::Sender<bool>) {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (stop, stopped) = watch::channel(false);
+            tokio::spawn(serve(listener, None, service.app(), stopped));
+            (addr, stop)
+        }
+
+        /// Sends `method path` with `headers` and no body, and reads the
+        /// answer.
+        async fn fetch(
+            addr: SocketAddr,
+            method: &str,
+            path: &str,
+            headers: &[(&str, &str)],
+        ) -> Answer {
+            let mut stream = TcpStream::connect(addr).await.unwrap();
+            let mut request = format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\n");
+            for (name, value) in headers {
+                let _ = write!(request, "{name}: {value}\r\n");
+            }
+            request.push_str("Connection: close\r\n\r\n");
+            stream.write_all(request.as_bytes()).await.unwrap();
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).await.unwrap();
+            let response = String::from_utf8(response).unwrap();
+            let (head, body) = response.split_once("\r\n\r\n").unwrap();
+            assert!(
+                !head.to_ascii_lowercase().contains("transfer-encoding"),
+                "{head}"
+            );
+            Answer {
+                status: head.split(' ').nth(1).unwrap().parse().unwrap(),
+                head: head.to_owned(),
+                body: body.to_owned(),
+            }
+        }
+
+        /// The config in `dir` with `extra`, as the watcher reports it.
+        fn config(dir: &Path, extra: &str) -> WatchEvent {
+            let text = format!("auth-dir: '{}'\n{extra}", dir.display());
+            WatchEvent::ConfigChanged(Arc::new(Config::parse(text).unwrap()))
+        }
+
+        #[tokio::test]
+        async fn management_is_served_beside_the_proxy() {
+            let dir = tempfile::tempdir().unwrap();
+            let extra = format!("api-keys: ['client-key']\n{KEYED}");
+            let service = service(dir.path(), &extra);
+            let (addr, _stop) = start(&service).await;
+            let origin = ("Origin", "http://127.0.0.1:5173");
+
+            // A management answer carries CORS headers, and exposes the
+            // build headers.
+            let answer = fetch(addr, "GET", LIST, &[origin]).await;
+            assert_eq!(answer.status, 401, "{}", answer.body);
+            assert_eq!(answer.body, r#"{"error":"missing management key"}"#);
+            assert_eq!(answer.header("access-control-allow-origin"), Some("*"));
+            let exposed = answer.header("access-control-expose-headers").unwrap();
+            let exposed: Vec<_> = exposed.split(',').map(str::trim).collect();
+            for name in ["X-CPA-VERSION", "X-CPA-COMMIT", "X-CPA-BUILD-DATE"] {
+                assert!(exposed.contains(&name), "{name}: {exposed:?}");
+                assert!(answer.header(name).is_some(), "{name}");
+            }
+
+            // The key is the management key; the client keys don't apply.
+            let key = ("Authorization", "Bearer test-secret");
+            let answer = fetch(addr, "GET", LIST, &[key]).await;
+            assert_eq!(answer.status, 200, "{}", answer.body);
+            assert!(answer.body.starts_with(r#"{"files":[],"observed_at":""#));
+            assert_eq!(
+                answer.header("content-type"),
+                Some("application/json; charset=utf-8")
+            );
+            let client = ("Authorization", "Bearer client-key");
+            let answer = fetch(addr, "GET", LIST, &[client]).await;
+            assert_eq!(answer.status, 401);
+            assert_eq!(answer.body, r#"{"error":"invalid management key"}"#);
+            assert_eq!(fetch(addr, "GET", "/v1/models", &[key]).await.status, 401);
+            let answer = fetch(addr, "GET", "/v1/models", &[client]).await;
+            assert_eq!(answer.status, 200);
+
+            // Without trusted proxies, a forwarded address is ignored.
+            let forwarded = ("X-Forwarded-For", "203.0.113.5");
+            let answer = fetch(addr, "GET", LIST, &[key, forwarded]).await;
+            assert_eq!(answer.status, 200, "{}", answer.body);
+
+            // Unported management routes answer an empty 404, other
+            // unknown paths the server's 404; CORS answers OPTIONS.
+            let answer = fetch(addr, "GET", "/v0/management/config", &[key]).await;
+            assert_eq!((answer.status, answer.body.as_str()), (404, ""));
+            assert_eq!(answer.header("access-control-allow-origin"), Some("*"));
+            let answer = fetch(addr, "GET", "/v0/other", &[key]).await;
+            assert_eq!(
+                (answer.status, answer.body.as_str()),
+                (404, "404 page not found")
+            );
+            let answer = fetch(addr, "OPTIONS", LIST, &[origin]).await;
+            assert_eq!((answer.status, answer.body.as_str()), (204, ""));
+        }
+
+        #[tokio::test]
+        async fn management_follows_config_reloads() {
+            let dir = tempfile::tempdir().unwrap();
+            let trusted = "trusted-proxies: ['127.0.0.1']\n";
+            let mut service = service(dir.path(), trusted);
+            let (addr, _stop) = start(&service).await;
+            let key = ("Authorization", "Bearer test-secret");
+            let forwarded = ("X-Forwarded-For", "203.0.113.5");
+
+            let answer = fetch(addr, "GET", LIST, &[key]).await;
+            assert_eq!((answer.status, answer.body.as_str()), (404, ""));
+            assert_eq!(answer.header("x-cpa-version"), None);
+
+            // A trusted proxy speaks for its client, which isn't local.
+            service.handle(
+                config(dir.path(), &format!("{KEYED}{trusted}")),
+                Path::new(""),
+            );
+            let answer = fetch(addr, "GET", LIST, &[key]).await;
+            assert_eq!(answer.status, 200, "{}", answer.body);
+            let answer = fetch(addr, "GET", LIST, &[key, forwarded]).await;
+            assert_eq!(answer.status, 403);
+            assert_eq!(answer.body, r#"{"error":"remote management disabled"}"#);
+
+            let remote = format!("{KEYED}  allow-remote: true\n{trusted}");
+            service.handle(config(dir.path(), &remote), Path::new(""));
+            let answer = fetch(addr, "GET", LIST, &[key, forwarded]).await;
+            assert_eq!(answer.status, 200, "{}", answer.body);
+
+            // The trusted proxies are read once, at start, as upstream
+            // reads them.
+            service.handle(config(dir.path(), KEYED), Path::new(""));
+            let answer = fetch(addr, "GET", LIST, &[key, forwarded]).await;
+            assert_eq!(answer.status, 403, "{}", answer.body);
+
+            service.handle(config(dir.path(), ""), Path::new(""));
+            let answer = fetch(addr, "GET", LIST, &[key]).await;
+            assert_eq!((answer.status, answer.body.as_str()), (404, ""));
+        }
+
+        #[tokio::test]
+        async fn safe_mode_shuts_the_proxy_but_not_management() {
+            let dir = tempfile::tempdir().unwrap();
+            let example = format!("api-keys: ['your-api-key-1']\n{KEYED}");
+            let mut service = service(dir.path(), &example);
+            let (addr, _stop) = start(&service).await;
+            let key = ("Authorization", "Bearer test-secret");
+
+            let client = ("Authorization", "Bearer your-api-key-1");
+            let answer = fetch(addr, "GET", "/v1/models", &[client]).await;
+            assert_eq!(answer.status, 403);
+            assert_eq!(answer.header("x-cpa-safe-mode"), Some("example-api-key"));
+            assert!(answer.body.contains("unsafe_example_api_key"));
+
+            let answer = fetch(addr, "GET", LIST, &[key]).await;
+            assert_eq!(answer.status, 200, "{}", answer.body);
+            assert_eq!(answer.header("x-cpa-safe-mode"), None);
+
+            let real = format!("api-keys: ['real-key']\n{KEYED}");
+            service.handle(config(dir.path(), &real), Path::new(""));
+            let client = ("Authorization", "Bearer real-key");
+            let answer = fetch(addr, "GET", "/v1/models", &[client]).await;
+            assert_eq!(answer.status, 200, "{}", answer.body);
+        }
     }
 }

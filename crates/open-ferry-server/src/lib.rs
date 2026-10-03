@@ -5,6 +5,8 @@
 //! that says which providers serve a model. Handlers read the client's body,
 //! route its model, hand the call to the dispatcher, and write the result in
 //! the client's format, as upstream's handlers in `sdk/api/handlers` do.
+//! [`router_with`] serves other routes beside them, such as the management
+//! API's, which this crate doesn't depend on.
 //!
 //! Deviations from upstream, besides those noted on each module:
 //! - Routes match paths exactly. Gin redirects a path with a trailing slash,
@@ -46,7 +48,7 @@ mod testing;
 #[cfg(test)]
 mod tests;
 
-pub use app::router;
+pub use app::{router, router_with};
 pub use config::{DEFAULT_BODY_LIMIT, ServerConfig, StreamingConfig};
 pub use errors::ErrorMessage;
 pub use state::AppState;

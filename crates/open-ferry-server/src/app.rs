@@ -36,6 +36,14 @@ const SAFE_MODE_PREFIXES: [&str; 4] = ["/v1", "/v1beta", "/openai/v1", "/backend
 /// The proxy's routes. Every response gets CORS headers, an `OPTIONS`
 /// request gets 204, and a path or method with no route gets 404.
 pub fn router(state: AppState) -> Router {
+    router_with(state, Router::new())
+}
+
+/// The proxy's routes, as [`router`] serves them, with `extra` routes
+/// beside them, such as the management API's. The extra routes pass
+/// through the same logging, CORS, panic handling and safe mode, but not the
+/// client-key check, and must not set a fallback.
+pub fn router_with(state: AppState, extra: Router) -> Router {
     let auth = middleware::from_fn_with_state(state.clone(), require_key);
     let responses_routes = || {
         get(responses_ws::websocket.layer(auth.clone()))
@@ -67,13 +75,14 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/responses/compact", compact_route())
         .route("/backend-api/codex/responses", responses_routes())
         .route("/backend-api/codex/responses/compact", compact_route())
-        .fallback(not_found)
         .method_not_allowed_fallback(not_found)
-        .layer(middleware::from_fn_with_state(state.clone(), safe_mode))
+        .with_state(state.clone())
+        .merge(extra)
+        .fallback(not_found)
+        .layer(middleware::from_fn_with_state(state, safe_mode))
         .layer(CatchPanicLayer::custom(panicked))
         .layer(middleware::from_fn(cors))
         .layer(middleware::from_fn(log_request))
-        .with_state(state)
 }
 
 /// Gin's 404.
