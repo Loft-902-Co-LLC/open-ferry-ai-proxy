@@ -13,8 +13,10 @@
 //! and leaves retries and cooldowns to the manager.
 //!
 //! Deviations from upstream:
-//! - `HttpRequest`, which the management API's `api-call` uses, isn't part of
-//!   the trait yet.
+//! - `HttpRequest` is [`ProviderExecutor::http_request`], which takes an
+//!   [`HttpCall`] and reads the answer's body; only Codex Alpha Search uses
+//!   it, and executors that don't need it keep the default, which refuses.
+//!   The management API's `api-call` doesn't go through it.
 //! - Upstream's optional interfaces (`ExecutionSessionCloser` and others) are
 //!   methods with defaults.
 
@@ -24,7 +26,9 @@ use std::time::Duration;
 use futures_core::future::BoxFuture;
 
 use crate::auth::Auth;
-use crate::exec::{ExecError, Options, Request, Response, StreamResponse};
+use crate::exec::{
+    ErrorKind, ExecError, HttpCall, HttpReply, Options, Request, Response, StreamResponse,
+};
 
 /// Calls one provider with a credential (upstream's `ProviderExecutor`).
 pub trait ProviderExecutor: Send + Sync + 'static {
@@ -72,6 +76,21 @@ pub trait ProviderExecutor: Send + Sync + 'static {
     /// (upstream's `ExecutionSessionCloser`). The session ID
     /// [`CLOSE_ALL_EXECUTION_SESSIONS`] asks for all of them to end.
     fn close_execution_session(&self, _session_id: &str) {}
+
+    /// Sends `call` with the credential's token and custom headers, and
+    /// returns the answer whatever its status (upstream's `HttpRequest`). An
+    /// error means no answer came. The default sends nothing.
+    fn http_request(
+        &self,
+        _auth: Arc<Auth>,
+        _call: HttpCall,
+    ) -> BoxFuture<'_, Result<HttpReply, ExecError>> {
+        let message = format!(
+            "{} executor: plain HTTP requests aren't supported",
+            self.id()
+        );
+        Box::pin(async move { Err(ExecError::new(ErrorKind::Upstream, message)) })
+    }
 }
 
 /// The session ID that asks an executor to close all its sessions

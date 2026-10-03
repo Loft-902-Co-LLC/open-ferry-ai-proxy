@@ -26,9 +26,11 @@
 //! - Manager_SchedulerSharesThinkingSuffixCooldownAndRegistryState: the
 //!   registry's model count is counted from the projections the manager
 //!   published to the fake registry.
+//! - The Codex Alpha Search credential policy tests are in
+//!   `credential_policy`.
 //! - Dropped: the plugin scheduler tests (not ported), the Home dispatcher
-//!   tests (not ported), the auth kind, credential policy and free-plan
-//!   tests (eligibility filters aren't ported, see manager/mod.rs), and
+//!   tests (not ported), the auth kind and free-plan tests (eligibility
+//!   filters aren't ported, see manager/mod.rs), and
 //!   CustomSelector_FallsBackToLegacyPath (the port has no pluggable
 //!   selector, only the routing strategy setting).
 

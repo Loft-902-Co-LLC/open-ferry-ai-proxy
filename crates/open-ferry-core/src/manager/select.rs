@@ -1425,12 +1425,35 @@ impl<'a> Selection<'a> {
             return Err(ExecError::auth_not_found());
         }
         let available = self.available_auths_for_route_model(&candidates, "mixed", args.model)?;
+        let selected = self.pick_legacy(state, &available, "mixed", args.model)?;
+        let provider = executor_key_from_auth(selected);
+        let executor = lookup_executor(self.executors, &provider).ok_or_else(|| {
+            ExecError::new(ErrorKind::ExecutorNotFound, "executor not registered")
+        })?;
+        Ok(Picked {
+            auth: selected.clone(),
+            executor,
+            provider,
+        })
+    }
+
+    /// The built-in selector's pick among the `available` credentials, with
+    /// its rotation kept under `scope`, the provider or `mixed` (upstream's
+    /// `RoundRobinSelector`, `FillFirstSelector` and
+    /// `WeightedRoundRobinSelector` as the legacy picks call them).
+    pub(super) fn pick_legacy<'c>(
+        &self,
+        state: &mut SelectorState,
+        available: &[&'c Arc<Auth>],
+        scope: &str,
+        model: &str,
+    ) -> Result<&'c Arc<Auth>, ExecError> {
         let selected = match self.strategy {
             RoutingStrategy::FillFirst => available.first().copied(),
             RoutingStrategy::RoundRobin => {
-                let key = "mixed:";
+                let key = format!("{scope}:");
                 let ids: Vec<&str> = available.iter().map(|a| a.id.as_str()).collect();
-                let last = capped(&mut state.legacy_last_picked, key);
+                let last = capped(&mut state.legacy_last_picked, &key);
                 let picked = available.get(successor_index(&ids, last)).copied();
                 if let Some(auth) = picked {
                     *last = auth.id.clone();
@@ -1449,7 +1472,7 @@ impl<'a> Selection<'a> {
                         "no auth candidates",
                     ));
                 }
-                let key = format!("mixed:{}", canonical_model_key(args.model));
+                let key = format!("{scope}:{}", canonical_model_key(model));
                 let weighted = capped(&mut state.legacy_weighted, &key);
                 let weights: HashMap<String, i64> =
                     positive.iter().map(|a| (a.id.clone(), weight(a))).collect();
@@ -1466,21 +1489,7 @@ impl<'a> Selection<'a> {
                 }
             }
         };
-        let Some(selected) = selected else {
-            return Err(ExecError::new(
-                ErrorKind::AuthNotFound,
-                "selector returned no auth",
-            ));
-        };
-        let provider = executor_key_from_auth(selected);
-        let executor = lookup_executor(self.executors, &provider).ok_or_else(|| {
-            ExecError::new(ErrorKind::ExecutorNotFound, "executor not registered")
-        })?;
-        Ok(Picked {
-            auth: selected.clone(),
-            executor,
-            provider,
-        })
+        selected.ok_or_else(|| ExecError::new(ErrorKind::AuthNotFound, "selector returned no auth"))
     }
 
     /// The highest priority ready candidates, by ID, or why there are none

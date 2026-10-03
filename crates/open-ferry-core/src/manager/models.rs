@@ -584,6 +584,35 @@ impl Resolver<'_> {
         (candidates, pooled, alias_result)
     }
 
+    /// The upstream models to try with a credential (upstream's
+    /// `executionModelCandidates`, without the Home dispatcher's model):
+    /// the route model without the credential's prefix, through its OAuth
+    /// alias, then its OpenAI-compatible pool or API-key alias. `pool_offset`
+    /// gives the rotation for a pool's key and size.
+    pub(crate) fn execution_model_candidates(
+        &self,
+        auth: &Auth,
+        route_model: &str,
+        pool_offset: impl FnOnce(&str, usize) -> usize,
+    ) -> Vec<String> {
+        let requested = rewrite_model_for_auth(route_model, auth);
+        let requested = self.apply_oauth_model_alias(auth, &requested);
+        let pool = self.resolve_openai_compat_upstream_model_pool(auth, &requested);
+        if pool.len() > 1 {
+            let offset = pool_offset(&openai_compat_model_pool_key(auth, &requested), pool.len());
+            return rotate_strings(pool, offset);
+        }
+        if !pool.is_empty() {
+            return pool;
+        }
+        let resolved = self.apply_api_key_model_alias(auth, &requested);
+        if resolved.trim().is_empty() {
+            vec![requested]
+        } else {
+            vec![resolved]
+        }
+    }
+
     /// The alias behind the upstream model one attempt used (upstream's
     /// `resolveAttemptAliasResult` and `resolveModelAliasResultForUpstream`):
     /// for an API key or OpenAI-compatible credential, the configured entry

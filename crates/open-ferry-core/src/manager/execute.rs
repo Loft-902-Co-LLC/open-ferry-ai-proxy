@@ -245,7 +245,11 @@ fn publish_selected(opts: &Options, auth_id: &str) {
 
 /// The rotation for a model pool, advancing it (upstream's
 /// `nextModelPoolOffset`).
-fn next_model_pool_offset(offsets: &mut HashMap<String, usize>, key: &str, size: usize) -> usize {
+pub(super) fn next_model_pool_offset(
+    offsets: &mut HashMap<String, usize>,
+    key: &str,
+    size: usize,
+) -> usize {
     if size <= 1 {
         return 0;
     }

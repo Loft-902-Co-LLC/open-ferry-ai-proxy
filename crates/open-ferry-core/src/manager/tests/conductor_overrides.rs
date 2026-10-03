@@ -14,7 +14,8 @@
 //!   `None` is upstream's `(0, false)`. The pinned credential is passed
 //!   straight to the query rather than through the options' metadata.
 //! - `IgnoresRequestIneligibleOverrides` keeps the pinned-credential case
-//!   only; credential policies aren't ported.
+//!   only; a credential policy only narrows Codex Alpha Search's pick, which
+//!   doesn't retry.
 //! - Result hooks aren't ported. Where upstream captures the hook's result,
 //!   the tests check the credential and model state that result left
 //!   instead.
@@ -453,8 +454,9 @@ async fn manager_should_retry_after_error_ignores_non_round_cooldown_overrides()
 
 #[tokio::test(start_paused = true)]
 async fn manager_should_retry_after_error_ignores_request_ineligible_overrides() {
-    // Upstream's "credential policy" case is left out: credential policies
-    // aren't ported. This is the "pinned credential" case.
+    // Upstream's "credential policy" case is left out: a credential policy
+    // only narrows Codex Alpha Search's pick, which doesn't retry. This is
+    // the "pinned credential" case.
     let h = Harness::new(retry_settings(0, Duration::ZERO, 0));
     let model = "retry-eligibility";
     h.add(

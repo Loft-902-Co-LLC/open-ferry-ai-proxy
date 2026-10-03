@@ -31,8 +31,12 @@
 //! - The Responses WebSocket learns what it needs about credentials from one
 //!   query, [`Dispatcher::websocket_support`], where upstream's handler reads
 //!   the auth manager's credentials and the model registry itself.
+//! - Codex Alpha Search is one call, [`Dispatcher::codex_alpha_search`],
+//!   where upstream's handler picks the credential and sends the request
+//!   through the auth manager itself.
 
 mod error;
+mod http_call;
 
 use std::fmt;
 use std::sync::Arc;
@@ -43,6 +47,7 @@ use futures_core::stream::BoxStream;
 use http::HeaderMap;
 
 pub use error::{ErrorKind, ExecError, TransportFault, WsClose};
+pub use http_call::{AlphaSearch, HttpCall, HttpReply, HttpTarget};
 pub use open_ferry_translate::registry::Format;
 
 /// A provider's identifier, such as `codex` or `claude`.
@@ -216,6 +221,23 @@ pub trait Dispatcher: Send + Sync + 'static {
         _auth_id: Option<&str>,
     ) -> WebsocketSupport {
         WebsocketSupport::default()
+    }
+
+    /// A Codex Alpha Search call: picks a credential the
+    /// `codex_alpha_search_v1` policy allows and sends it the client's
+    /// payload (upstream's `codexAlphaSearch` handler, past reading the
+    /// body). The reply comes back whatever its status; an error carries the
+    /// status to answer with. The default has no credentials: 503.
+    fn codex_alpha_search(
+        &self,
+        _request: AlphaSearch,
+    ) -> BoxFuture<'_, Result<HttpReply, ExecError>> {
+        Box::pin(async {
+            Err(
+                ExecError::new(ErrorKind::Upstream, "Codex auth manager unavailable")
+                    .with_status(503),
+            )
+        })
     }
 }
 

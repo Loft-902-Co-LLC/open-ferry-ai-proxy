@@ -57,6 +57,7 @@ mod connection_lifecycle_cooldown;
 mod cooldown_backoff;
 mod cooldown_state;
 mod cooldown_view;
+mod credential_policy;
 mod force_refresh;
 mod meta_refresh;
 mod metadata_keys;

@@ -24,8 +24,9 @@
 //! Deviations from upstream:
 //! - Session affinity, the plugin scheduler, the Home dispatcher, derived
 //!   session IDs and fingerprints aren't ported, by policy or scope.
-//! - Eligibility filters, credential policies and free-account rules aren't
-//!   ported: every credential is eligible.
+//! - Eligibility filters and free-account rules aren't ported: every
+//!   credential is eligible, except where a credential policy narrows
+//!   them (only Codex Alpha Search's; see `policy`).
 //! - The scheduler isn't a separate index kept in step with every change;
 //!   picks read the credentials as they are, and keep only the rotation
 //!   cursors between calls.
@@ -47,6 +48,7 @@
 //!   interceptors, the round tripper, the Antigravity credits fallback and
 //!   API-key capability metadata.
 
+mod alpha_search;
 mod classify;
 pub mod clienterror;
 mod cooldown;
@@ -56,6 +58,7 @@ mod execute;
 mod lifecycle;
 mod merge;
 mod models;
+mod policy;
 mod refresh;
 mod retry;
 mod rewrite;
@@ -89,7 +92,8 @@ use futures_core::future::BoxFuture;
 
 use crate::auth::{Auth, AuthStore, Timestamp};
 use crate::exec::{
-    Dispatcher, ExecError, Options, ProviderId, Request, Response, StreamResponse, WebsocketSupport,
+    AlphaSearch, Dispatcher, ExecError, HttpReply, Options, ProviderId, Request, Response,
+    StreamResponse, WebsocketSupport,
 };
 use crate::executor::ProviderExecutor;
 use models::OAuthAliasTable;
@@ -371,5 +375,12 @@ impl Dispatcher for Manager {
         auth_id: Option<&str>,
     ) -> WebsocketSupport {
         self.websocket_support_for(providers, model, auth_id)
+    }
+
+    fn codex_alpha_search(
+        &self,
+        request: AlphaSearch,
+    ) -> BoxFuture<'_, Result<HttpReply, ExecError>> {
+        Box::pin(self.alpha_search(request))
     }
 }
