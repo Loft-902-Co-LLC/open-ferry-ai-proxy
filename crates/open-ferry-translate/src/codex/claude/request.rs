@@ -694,7 +694,7 @@ fn shorten_name(name: &str) -> Cow<'_, str> {
 /// Keeps Claude tool IDs within the Responses `call_id` limit. A long ID becomes
 /// its first 47 bytes, `_`, and 16 hex digits of its SHA-256, so the mapping is
 /// stable across turns and a tool call still matches its result.
-pub(super) fn shorten_call_id(id: &str) -> Cow<'_, str> {
+pub fn shorten_call_id(id: &str) -> Cow<'_, str> {
     if id.len() <= ID_LIMIT {
         return Cow::Borrowed(id);
     }

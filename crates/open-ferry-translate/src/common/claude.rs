@@ -113,7 +113,7 @@ pub(crate) fn align_tool_results<'a>(
 
 /// Makes `id` a valid Claude `tool_use` ID (`^[a-zA-Z0-9_-]+$`) by replacing
 /// every other character with `_`. An empty ID gets a generated one.
-pub(crate) fn sanitize_tool_id(id: &str) -> String {
+pub fn sanitize_tool_id(id: &str) -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let sanitized: String = id
         .chars()
