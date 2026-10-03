@@ -127,7 +127,35 @@ Each ported file lists its deviations in its module docs. Most are byproducts of
 
 ### The management API
 
-`open-ferry-management` serves four of upstream's management routes, under both of their names:
+`open-ferry-management` serves upstream's management routes in parts, each route under both of its names: its v0 path under `/v0/management` and its v8 path under `/v8/management`. Each module documents the routes it serves. Bodies, statuses and headers are written as gin and Go's `encoding/json` write them, and request bodies, query strings, URLs and client addresses are read as gin and Go read them. The tests check them against answers recorded from Go programs built with upstream's `go.mod` (gin v1.10.1, Go 1.26 language settings).
+
+The config is never written. Upstream's routes that change the config are not ported, and a route that upstream answers partly by writing the config refuses that part.
+
+#### The foundation
+
+What every part shares, and the deviations that apply to all of them:
+
+- **Routes are registered by module.** Each module gives its routes with their access: `Key` (the management key must be set and offered, as upstream's management routes), `Availability` (the key must be set, as upstream's OAuth callback) or `Open` (nothing, as the main server's OAuth callback pages). Routes on one path are served together, each with its own access.
+
+- **Unported paths answer an empty 404.** Every other path under `/v0/management` or `/v8/management`, and every other method on a management path, `HEAD` included, answers an empty 404, as upstream answers a path it has no route for, whatever the method. Another method on an `Open` route outside those paths answers the server's `404 page not found`, as gin does.
+
+- **Credentials reach the service through its loop.** A credential the management API saves, changes or removes is applied by the service's event loop, which the handler waits for, where upstream's `runtimeAuthSyncHook` calls the credential manager directly. Once the loop has stopped, as on shutdown, the change fails with a 503 (`credential sync unavailable: the service has stopped`); a handler that writes credentials while the API has no credential store answers 503 `{"error":"credential store unavailable"}`. The watcher's report of the same file a moment later changes nothing more, and a report for a file that is gone by the time it is applied unregisters its credential rather than bringing it back.
+
+- **Saved logins and imports keep the settings of the file they replace** (upstream's `saveTokenRecord` and `mergeExistingAuthFileMetadata`), and a Claude login replaces the file of the same account saved under an older name, as the `login` command does. The file is read from and saved in the service's auth directory, where upstream points its token store at the config's `auth-dir` on each save. When there is no file, a registered credential lends its settings only if its metadata isn't empty, matched by ID and then by a file name that isn't empty, the first by ID; upstream also takes empty metadata, matches an empty file name, and takes whichever its map yields first. The service makes the credential from the saved file and logs a file it can't read one from, where upstream makes it first and fails with `synthesize persisted auth failed`. Upstream's post-auth hook, which only plugins and embedders set, isn't ported.
+
+- **Auth files are written atomically.** Writing a file in the auth directory writes a temporary file there and renames it over the target, where upstream's `os.WriteFile` truncates the file and writes it in place. A symlink is written through to its target, as `os.WriteFile` does, but a dangling one is replaced by the file, where `os.WriteFile` creates the file it points to. Removing a file removes a symlink itself.
+
+- **Paths match exactly.** While a key is set, gin redirects a ported path with a trailing slash (301 for `GET`, else 307) and matches a percent-encoded path decoded. Both get the empty 404 here, as they do on the server's other routes.
+
+- **The config is never written.** Upstream hashes a plain `secret-key` with bcrypt when it loads the config and writes the hash back. We compare a plain key as written, in constant time and in full; upstream's bcrypt reads only the first 72 bytes, and a longer plain key fails to load.
+
+- **The failed-attempt record is bounded.** It holds at most 4096 addresses; when it's full, the address least recently active is forgotten, which ends any ban on it early. Idle entries are purged when the record is next written, at most hourly, rather than by an hourly timer. Upstream's record has no bound.
+
+- **`X-CPA-VERSION` is this crate's version.** `X-CPA-COMMIT` and `X-CPA-BUILD-DATE` come from `OPEN_FERRY_COMMIT` and `OPEN_FERRY_BUILD_DATE` at build time, else `none` and `unknown`. `X-CPA-SUPPORT-PLUGIN` isn't sent.
+
+- **JSON corner cases.** A request body string holding an unpaired surrogate escape such as `\ud800` fails to decode; Go reads U+FFFD. A value from a credential's metadata is held by `serde_json`, so an integer `-0` is written back as `0`, and a number beyond `f64`'s range, which Go fails to decode, is written as it was read. `ToUpper` on a method leaves a Greek letter with a subscript iota unchanged; the method is refused either way.
+
+#### Listing, API calls and quota
 
 | Route | v8 route |
 |---|---|
@@ -136,35 +164,57 @@ Each ported file lists its deviations in its module docs. Most are byproducts of
 | `POST /v0/management/api-call` | `POST /v8/management/requests/api-call` |
 | `POST /v0/management/reset-quota` | `POST /v8/management/routing/cooldown/reset` |
 
-Bodies, statuses and headers are written as gin and Go's `encoding/json` write them, and request bodies, query strings, URLs and client addresses are read as gin and Go read them. The tests check them against answers recorded from Go programs built with upstream's `go.mod` (gin v1.10.1, Go 1.26 language settings). The config is never written.
-
-**Not ported: every other management route.** It answers an empty 404, as upstream answers a path it has no route for, whatever the method; so does a ported path with another method. This covers, under `/v0/management` and their v8 names under `/v8/management`:
-
-- the config: `config`, `config.yaml`, v8's `config/*path`, and each setting upstream exposes on its own (`debug`, `logging-to-file`, `logs-max-total-size-mb`, `error-logs-max-files`, `usage-statistics-enabled`, `proxy-url`, `quota-exceeded/*`, `request-log`, `ws-auth`, `request-retry`, `max-retry-credentials`, `max-retry-interval`, `force-model-prefix`, `routing/strategy`);
-- the key lists (`api-keys`, and `gemini-`, `interactions-`, `claude-`, `codex-`, `xai-`, `meta-` and `vertex-api-key`, `openai-compatibility`) and the OAuth lists (`oauth-excluded-models`, `oauth-model-alias`, `oauth-request-scoped-errors`);
-- the rest of `auth-files` (upload, download, delete, `status`, `fields`, `refresh`), `vertex/import` and v8's `oauth/import`;
-- the logins: each provider's `*-auth-url`, v8's `oauth/auth-url`, `get-auth-status`, `oauth-session` and the OAuth callbacks;
-- logs and usage: `logs`, `request-error-logs`, `request-log-by-id`, `api-key-usage`, `usage-queue`;
-- quota: `quota/providers`, `quota/fetch`, `quota/reset`;
-- `latest-version`, `model-definitions/:channel`, and the plugins and plugin store.
-
-Nor are the management control panel (`/management.html`), the local management password, Home mode or the plugin host's management routes.
-
 Deviations, each also noted in its module:
 
-- **Paths match exactly.** While a key is set, gin redirects a ported path with a trailing slash (301 for `GET`, else 307) and matches a percent-encoded path decoded. Both get the empty 404 here, as they do on the server's other routes.
-- **The config is never written.** Upstream hashes a plain `secret-key` with bcrypt when it loads the config and writes the hash back. We compare a plain key as written, in constant time and in full; upstream's bcrypt reads only the first 72 bytes, and a longer plain key fails to load.
-- **The failed-attempt record is bounded.** It holds at most 4096 addresses; when it's full, the address least recently active is forgotten, which ends any ban on it early. Idle entries are purged when the record is next written, at most hourly, rather than by an hourly timer. Upstream's record has no bound.
-- **`X-CPA-VERSION` is this crate's version.** `X-CPA-COMMIT` and `X-CPA-BUILD-DATE` come from `OPEN_FERRY_COMMIT` and `OPEN_FERRY_BUILD_DATE` at build time, else `none` and `unknown`. `X-CPA-SUPPORT-PLUGIN` isn't sent.
 - **`auth-files` shows no quota observations.** The credential manager doesn't record them yet, so `quota` is always `{"signals":{}}` and `model_quotas` never appears. `supports_quota` and `quota_provider` come only from a `quota_probe` in a credential's metadata, since there is no plugin host.
+
 - **`auth-files` times are in UTC.** Upstream writes some, such as file times and times read from files, in the server's time zone. One clock reading serves a whole listing, where upstream reads the clock for each credential. Unpaged, credentials whose names differ only in case keep the manager's order (by ID); upstream's sort isn't stable.
+
 - **`api-call` never refreshes a credential.** An Antigravity, Meta or xAI credential's token is looked up as any other's. Upstream refreshes an Antigravity or xAI token about to expire, mints a Meta key from its `dca_token`, and answers `auth token refresh failed` when that fails; it also never takes an xAI credential's `id_token`.
+
 - **`api-call` sends `User-Agent: open-ferry/<version>`** when the caller sends none, where upstream sends Go's `Go-http-client/1.1` (or `/2.0`). An empty `User-Agent` from the caller sends none, as upstream. Without an `Accept` from the caller, the HTTP client sends `Accept: */*`; upstream sends none. Otherwise the request carries exactly the caller's headers and what HTTP needs.
+
 - **`api-call` reads at most 16 MiB of a response**, compressed or not; a larger one gives a 502 `failed to read response`. Upstream reads any size. Request bodies over 16 MiB get a 413 before they are read; upstream reads any size.
+
 - **`api-call` uses Rust's HTTP stack.** The header map is applied in the order of its names (upstream's order is random, which matters only for names that differ in case alone). A request with a `Host` header goes over HTTP/1.1 so the header is sent as given; upstream may send it over HTTP/2 as `:authority`. A `Host` outside ASCII gives a 502, where upstream converts it to Punycode. The URL sent, a redirect's target and its `Referer` are the `url` crate's reading of the URL, which may normalize differently from Go's; a URL that the `url` crate refuses, such as one with an IPv6 zone, gives a 502. Through a forwarding proxy the request line names the `Host` header's host, as upstream's does, but as the `url` crate reads it (lowercased, without a default port), and one it refuses gives a 502. A `CONNECT` names a host and port alone, where upstream names the URL's path when it has one, and the whole URL through a forwarding proxy. A 2xx answer to `CONNECT` with a chunked body, and an HTTP/1.0 response with a `Transfer-Encoding`, give a 502; upstream reads them. `Expect: 100-continue` is sent but not waited on. SOCKS5 proxies are accepted but a call through one fails with a 502. A client is kept per proxy, at most 16, where upstream builds a connection pool per call.
+
 - **Only Gemini, Claude, Codex and OpenAI-compatible API keys have proxies in the config**, so a credential from another provider's key never finds its proxy there. As upstream, a Vertex AI key's proxy isn't looked up there either; its credential carries it.
+
 - **`reset-quota` picks the first credential by ID** when two share an index; upstream takes whichever its map yields first.
-- **JSON corner cases.** A request body string holding an unpaired surrogate escape such as `\ud800` fails to decode; Go reads U+FFFD. A value from a credential's metadata is held by `serde_json`, so an integer `-0` is written back as `0`, and a number beyond `f64`'s range, which Go fails to decode, is written as it was read. `ToUpper` on a method leaves a Greek letter with a subscript iota unchanged; the method is refused either way.
+
+#### Credential files
+
+Not ported yet: downloading, uploading and deleting `auth-files`, `vertex/import` and v8's `oauth/import`.
+
+#### Credential state
+
+Not ported yet: `auth-files/status`, `auth-files/fields` and `auth-files/refresh`.
+
+#### OAuth logins
+
+Not ported yet: `anthropic-auth-url`, `codex-auth-url`, `get-auth-status`, `oauth-session` and `oauth-callback`, v8's `oauth/auth-url`, `oauth/status`, `oauth/session` and `oauth/callback`, and the main server's `/anthropic/callback` and `/codex/callback`.
+
+#### Config and info reads
+
+Not ported yet: reading the config (`config`, `config.yaml` and v8's `config/*path`), the settings, key lists and OAuth lists it holds, `latest-version` and `model-definitions/:channel`.
+
+#### Not ported
+
+Until the parts above port them, their routes answer the empty 404, and so does every other management route. This covers, under `/v0/management` and their v8 names under `/v8/management`:
+
+- writing the config: `PUT config.yaml`, v8's `PUT` and `PATCH config` and `config/*path`, and the `PUT`, `PATCH` and `DELETE` routes of each setting, key list and OAuth list;
+
+- the settings that come with request logging and usage statistics (`usage-statistics-enabled`, `logs-max-total-size-mb`, `error-logs-max-files`), and the `xai-`, `meta-` and `interactions-api-key` lists;
+
+- the logins of other providers (`kimi`, `kimi-ai`, `xai`, `meta`, `antigravity` and `devin`, and plugins' logins through v8's `oauth/auth-url`);
+
+- logs and usage: `logs`, `request-error-logs`, `request-log-by-id`, `api-key-usage`, `usage-queue`;
+
+- quota: `quota/providers`, `quota/fetch`, `quota/reset`;
+
+- the plugins and plugin store.
+
+Nor are the management control panel (`/management.html`), the local management password, Home mode or the plugin host's management routes.
 
 ## Other ported code
 
