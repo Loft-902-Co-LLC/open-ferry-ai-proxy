@@ -63,6 +63,8 @@ Sixty suites are covered so far:
 | `gemini::openai::chat_completions` | Request | an OpenAI Chat Completions request | the Gemini request |
 | | Response, streaming | a Gemini stream | Chat Completions chunks |
 | | Response, non-streaming | a Gemini response | one Chat Completions response |
+| `providers::codex::thinking` | Thinking settings | a request translated for Codex or Responses, the client's request, both formats, the provider and the model the request is bound to | the request with the model's suffix or the requested effort applied, or the error |
+| `providers::openai_compat::thinking` | Thinking settings | the same, for a request translated for Chat Completions | the same |
 | `gemini::openai::responses` | Request | an OpenAI Responses request | the Gemini request |
 | | Response, streaming | a Gemini stream, the original request and the translated one | Responses events, then those given at the end |
 | | Response, non-streaming | a whole Gemini response and both requests | one Responses response |

@@ -1372,6 +1372,8 @@ name = "open-ferry-parity"
 version = "0.0.0"
 dependencies = [
  "base64 0.23.1",
+ "open-ferry-core",
+ "open-ferry-providers",
  "open-ferry-translate",
  "serde_json",
  "sha2",

@@ -432,6 +432,16 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
             gemini_chat_finals,
         ),
         (
+            Translator::ThinkingCodex,
+            cases::thinking::codex(),
+            generate::thinking::codex_cases(seed, random),
+        ),
+        (
+            Translator::ThinkingOpenAI,
+            cases::thinking::openai(),
+            generate::thinking::openai_cases(seed, random),
+        ),
+        (
             Translator::GeminiResponsesRequest,
             cases::gemini_responses::requests(),
             generate::gemini_responses::request_cases(seed, random),

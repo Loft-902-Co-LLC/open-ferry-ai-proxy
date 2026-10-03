@@ -17,6 +17,8 @@
 //! clients, [`signature`] reasoning signatures from every provider,
 //! [`registry`] input for the translator registry, and
 //! [`gemini_responses`] input for the translators between Responses and Gemini.
+//! [`thinking`] generates input for upstream's thinking settings on Codex
+//! and Chat Completions targets.
 
 pub mod chat;
 pub mod claude_chat;
@@ -31,6 +33,7 @@ pub mod registry;
 pub mod response;
 pub mod responses;
 pub mod signature;
+pub mod thinking;
 pub mod to_gemini;
 
 use serde_json::{Value, json};

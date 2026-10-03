@@ -228,6 +228,13 @@ pub enum Translator {
     GeminiResponsesStream,
     /// A whole Gemini response → one Responses response.
     GeminiResponsesNonStream,
+    /// A request translated for Codex or Responses → its thinking setting
+    /// applied, for the model in the case's options (see
+    /// [`crate::cases::thinking`]).
+    ThinkingCodex,
+    /// A request translated for Chat Completions → its thinking setting
+    /// applied.
+    ThinkingOpenAI,
 }
 
 impl Translator {
@@ -295,6 +302,8 @@ impl Translator {
             Self::GeminiResponsesRequest => "gemini/openai-responses/request",
             Self::GeminiResponsesStream => "gemini/openai-responses/response",
             Self::GeminiResponsesNonStream => "gemini/openai-responses/response-non-stream",
+            Self::ThinkingCodex => "thinking/codex",
+            Self::ThinkingOpenAI => "thinking/openai",
         }
     }
 
@@ -361,6 +370,8 @@ impl Translator {
             Self::GeminiResponsesRequest => "responses-to-gemini-request",
             Self::GeminiResponsesStream => "gemini-to-responses-stream",
             Self::GeminiResponsesNonStream => "gemini-to-responses-non-stream",
+            Self::ThinkingCodex => "thinking-codex",
+            Self::ThinkingOpenAI => "thinking-openai",
         }
     }
 
@@ -432,6 +443,8 @@ impl Translator {
             Self::GeminiResponsesRequest => "Responses -> Gemini request",
             Self::GeminiResponsesStream => "Gemini -> Responses response, streaming",
             Self::GeminiResponsesNonStream => "Gemini -> Responses response, non-streaming",
+            Self::ThinkingCodex => "Thinking settings for Codex and Responses",
+            Self::ThinkingOpenAI => "Thinking settings for Chat Completions",
         }
     }
 
@@ -1065,6 +1078,27 @@ impl Translator {
                 self.read(case, output.as_bytes())
                     .ok_or_else(|| "output is not JSON".to_owned())
             }
+            Self::ThinkingCodex | Self::ThinkingOpenAI => {
+                let mut body = request
+                    .map_err(|err| format!("case {} is not valid JSON: {err}", case.name))?;
+                let apply = if self == Self::ThinkingCodex {
+                    open_ferry_providers::codex::thinking::apply_with_model_info
+                } else {
+                    open_ferry_providers::openai_compat::thinking::apply_with_model_info
+                };
+                let option = |key: &str| case.options[key].as_str().unwrap_or_default();
+                let error = apply(
+                    &mut body,
+                    option("source").as_bytes(),
+                    &case.model,
+                    option("from"),
+                    option("to"),
+                    option("provider"),
+                    crate::cases::thinking::model_info(&case.options["model_info"]),
+                )
+                .err();
+                Ok(json!({ "body": body, "error": error }))
+            }
         }
     }
 
@@ -1315,7 +1349,9 @@ impl Translator {
             | Self::OpenAIChatNonStream
             | Self::GeminiGeminiStream
             | Self::GeminiGeminiNonStream
-            | Self::GeminiClaudeNonStream => &[],
+            | Self::GeminiClaudeNonStream
+            | Self::ThinkingCodex
+            | Self::ThinkingOpenAI => &[],
             Self::GeminiResponsesRequest => GEMINI_RESPONSES_REQUEST_JSON,
             Self::GeminiResponsesStream => GEMINI_RESPONSES_STREAM_JSON,
             Self::GeminiResponsesNonStream => GEMINI_RESPONSES_NON_STREAM_JSON,
@@ -1486,7 +1522,9 @@ impl Translator {
             | Self::GeminiClaudeRequest
             | Self::GeminiClaudeRequestCompat
             | Self::GeminiChatRequest
-            | Self::GeminiResponsesRequest => return serde_json::from_str(&text).ok(),
+            | Self::GeminiResponsesRequest
+            | Self::ThinkingCodex
+            | Self::ThinkingOpenAI => return serde_json::from_str(&text).ok(),
             Self::OpenAIGeminiRequest => {
                 let mut value: Value = serde_json::from_str(&text).ok()?;
                 replace_compact_call_ids(&mut value, case);

@@ -17,6 +17,7 @@ pub mod openai_responses;
 pub mod registry;
 pub mod responses;
 pub mod signature;
+pub mod thinking;
 pub mod to_gemini;
 
 #[derive(Clone)]
