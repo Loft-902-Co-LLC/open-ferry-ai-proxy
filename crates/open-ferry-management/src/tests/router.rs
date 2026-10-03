@@ -1,14 +1,20 @@
 //! The router as a whole: unported paths, access control over the network
-//! and config reloads, and the model list. No upstream test covers these;
-//! the expected answers follow upstream's code.
+//! and config reloads, the model list, and how the route registry applies
+//! each route's access. No upstream test covers these; the expected
+//! answers follow upstream's code.
 
 use std::sync::Arc;
 
+use axum::extract::{Multipart, Path};
+use axum::response::IntoResponse as _;
+use axum::routing::{get, post};
 use http::{Method, StatusCode, header};
 use open_ferry_core::auth::Auth;
+use open_ferry_core::config::Config;
 use open_ferry_core::models::ModelInfo;
 
 use super::{Answer, Api, KEY, LOCAL, keyed, keyed_config, request_from};
+use crate::{Route, router_from};
 
 const LIST: &str = "/v0/management/auth-files";
 const REMOTE: &str = "203.0.113.7:4000";
@@ -29,13 +35,13 @@ fn error(message: &str) -> String {
 async fn unported_paths_answer_an_empty_404() {
     let api = Api::new();
     for (method, path) in [
-        (Method::GET, "/v0/management/config"),
+        (Method::GET, "/v0/management/logs"),
         (Method::GET, "/v0/management"),
         (Method::GET, "/v0/management/"),
         (Method::GET, "/v8/management"),
-        (Method::GET, "/v8/management/oauth/status"),
-        (Method::DELETE, "/v0/management/auth-files"),
-        (Method::PATCH, "/v0/management/auth-files/status"),
+        (Method::PUT, "/v0/management/config.yaml"),
+        (Method::GET, "/v8/management/plugins"),
+        (Method::GET, "/v0/management/xai-auth-url"),
         (Method::GET, "/v0/management/api-call"),
         (Method::PUT, "/v8/management/credentials"),
         (Method::GET, "/v8/management/routing/cooldown/reset"),
@@ -317,4 +323,206 @@ async fn auth_file_models_lists_a_credentials_models() {
             .await
             .assert(StatusCode::BAD_REQUEST, &error("name is required"));
     }
+}
+
+/// A handler that answers `ok`.
+async fn ok() -> &'static str {
+    "ok"
+}
+
+/// The API with `config`, serving only the test routes of the registry
+/// tests.
+fn registry_api(config: Config) -> Api {
+    let mut api = Api::with(config, None);
+    let tree = |Path(path): Path<String>| async move { path };
+    let routes = vec![
+        Route::key("/v0/management/test-key", get(ok)),
+        Route::availability("/v0/management/test-availability", get(ok)),
+        Route::open("/v8/management/test-open", get(ok)),
+        Route::open("/test/callback", get(ok)),
+        Route::key("/v0/management/test-merged", get(ok)),
+        Route::key("/v0/management/test-merged", post(ok)),
+        Route::availability("/v8/management/test-mixed", get(ok)),
+        Route::key("/v8/management/test-mixed", post(ok)),
+        Route::key("/v8/management/test-tree/{*path}", get(tree)),
+    ];
+    api.router = router_from(api.state.clone(), routes);
+    api
+}
+
+/// Checks `answer` is the empty 404, with no version headers.
+fn assert_unported(answer: &Answer, what: &str) {
+    assert_eq!(
+        (answer.status, answer.body.as_str()),
+        (StatusCode::NOT_FOUND, ""),
+        "{what}"
+    );
+    assert_eq!(answer.header("x-cpa-version"), None, "{what}");
+}
+
+// Not upstream's: each access gets its checks, whatever the order routes
+// on one path come in.
+#[tokio::test]
+async fn routes_get_the_checks_of_their_access() {
+    let api = registry_api(keyed_config());
+    let unkeyed = |method: Method, path: &str| request_from(LOCAL, method, path, "");
+
+    // Key: the availability check, then the key.
+    let answer = api
+        .send(unkeyed(Method::GET, "/v0/management/test-key"))
+        .await;
+    answer.assert(StatusCode::UNAUTHORIZED, &error("missing management key"));
+    let answer = api.get("/v0/management/test-key").await;
+    answer.assert(StatusCode::OK, "ok");
+    assert!(answer.header("x-cpa-version").is_some());
+
+    // Availability and Open: anyone, from anywhere, without version headers.
+    for path in [
+        "/v0/management/test-availability",
+        "/v8/management/test-open",
+        "/test/callback",
+    ] {
+        for request in [
+            unkeyed(Method::GET, path),
+            request_from(REMOTE, Method::GET, path, ""),
+        ] {
+            let answer = api.send(request).await;
+            answer.assert(StatusCode::OK, "ok");
+            assert_eq!(answer.header("x-cpa-version"), None, "{path}");
+        }
+    }
+
+    // Two methods on one path, and two accesses on one path.
+    let answer = api.post("/v0/management/test-merged", "").await;
+    answer.assert(StatusCode::OK, "ok");
+    api.get("/v0/management/test-merged")
+        .await
+        .assert(StatusCode::OK, "ok");
+    let answer = api
+        .send(unkeyed(Method::GET, "/v8/management/test-mixed"))
+        .await;
+    answer.assert(StatusCode::OK, "ok");
+    let answer = api
+        .send(unkeyed(Method::POST, "/v8/management/test-mixed"))
+        .await;
+    answer.assert(StatusCode::UNAUTHORIZED, &error("missing management key"));
+    api.post("/v8/management/test-mixed", "")
+        .await
+        .assert(StatusCode::OK, "ok");
+
+    // A catch-all route beside the prefix's.
+    api.get("/v8/management/test-tree/a/b")
+        .await
+        .assert(StatusCode::OK, "a/b");
+    assert_unported(
+        &api.get("/v8/management/test-treeless").await,
+        "beside a catch-all",
+    );
+
+    // Other methods: the empty 404 under the prefixes, unchecked, and the
+    // server's 404 elsewhere.
+    for (method, path) in [
+        (Method::POST, "/v0/management/test-key"),
+        (Method::HEAD, "/v0/management/test-key"),
+        (Method::DELETE, "/v0/management/test-availability"),
+        (Method::HEAD, "/v8/management/test-open"),
+        (Method::PUT, "/v0/management/test-merged"),
+        (Method::HEAD, "/v8/management/test-mixed"),
+        (Method::PATCH, "/v8/management/test-mixed"),
+    ] {
+        for request in [
+            keyed(method.clone(), path, ""),
+            request_from(REMOTE, method.clone(), path, ""),
+        ] {
+            assert_unported(&api.send(request).await, &format!("{method} {path}"));
+        }
+    }
+    for method in [Method::POST, Method::HEAD] {
+        let answer = api.send(unkeyed(method.clone(), "/test/callback")).await;
+        assert_eq!(answer.status, StatusCode::NOT_FOUND, "{method}");
+        if method != Method::HEAD {
+            assert_eq!(answer.body, "404 page not found");
+        }
+        assert_eq!(answer.header("content-type"), Some("text/plain"));
+    }
+}
+
+// Not upstream's: without a management key, only Open routes answer.
+#[tokio::test]
+async fn only_open_routes_answer_without_a_management_key() {
+    let api = registry_api(Config::default());
+    for path in [
+        "/v0/management/test-key",
+        "/v0/management/test-availability",
+        "/v8/management/test-mixed",
+    ] {
+        assert_unported(&api.get(path).await, path);
+    }
+    for path in ["/v8/management/test-open", "/test/callback"] {
+        api.get(path).await.assert(StatusCode::OK, "ok");
+    }
+}
+
+// Not upstream's: the test helpers' multipart bodies reach a handler
+// through axum's multipart extractor.
+#[tokio::test]
+async fn multipart_bodies_reach_handlers() {
+    async fn fields(mut form: Multipart) -> String {
+        let mut out = String::new();
+        while let Some(field) = form.next_field().await.unwrap() {
+            let name = field.name().unwrap_or_default().to_owned();
+            let file_name = field.file_name().unwrap_or("-").to_owned();
+            let text = field.text().await.unwrap();
+            out.push_str(&format!("{name} {file_name} {text}\n"));
+        }
+        out
+    }
+    let mut api = Api::new();
+    let routes = vec![Route::key("/v0/management/test-upload", post(fields))];
+    api.router = router_from(api.state.clone(), routes);
+    let form = super::Multipart::new().text("note", "hello").file(
+        "file",
+        "codex-a.json",
+        br#"{"type":"codex"}"#,
+    );
+    let answer = api
+        .send(form.request(Method::POST, "/v0/management/test-upload"))
+        .await;
+    answer.assert(
+        StatusCode::OK,
+        "note - hello\nfile codex-a.json {\"type\":\"codex\"}\n",
+    );
+}
+
+// Not upstream's: the builders set what the service sets on a clone of the
+// state, and the clones share the rest.
+#[tokio::test]
+async fn state_builders_set_what_the_service_sets() {
+    let plain = Api::new().state;
+    assert!(plain.store().is_none());
+    assert!(plain.sync().is_none());
+    assert_eq!(plain.config_path(), None);
+    let unavailable = plain.credential_store().err().unwrap().into_response();
+    assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        plain.latest_release_url(),
+        crate::latest_version::LATEST_RELEASE_URL
+    );
+
+    let auth_dir = super::AuthDir::new();
+    let built = Api::over(&auth_dir).state;
+    assert!(built.credential_store().is_ok());
+    assert_eq!(built.config_path(), Some(auth_dir.config_path().as_path()));
+    let built = built.with_latest_release_url("http://127.0.0.1:1/latest");
+    assert_eq!(built.latest_release_url(), "http://127.0.0.1:1/latest");
+
+    let clone = built.clone().with_config_path("elsewhere.yaml".into());
+    assert_eq!(
+        clone.config_path(),
+        Some(std::path::Path::new("elsewhere.yaml"))
+    );
+    assert_eq!(built.config_path(), Some(auth_dir.config_path().as_path()));
+    let _held = clone.credential_lock().lock().await;
+    assert!(built.credential_lock().try_lock().is_err());
+    assert!(std::ptr::eq(clone.oauth_sessions(), built.oauth_sessions()));
 }

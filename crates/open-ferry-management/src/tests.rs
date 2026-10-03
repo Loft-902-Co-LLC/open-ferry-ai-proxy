@@ -1,10 +1,19 @@
 //! Tests ported from upstream, and tests of the router.
 //!
-//! Each module under `tests/` but `router` ports one upstream test file and
-//! names the tests it drops or changes; `router` tests what no upstream test
-//! covers. Every test drives the real router, from a client at 127.0.0.1
+//! Each module under `tests/` named after an upstream test file ports it
+//! and names the tests it drops or changes; `router` tests what no upstream
+//! test covers. The modules named after a module of this crate
+//! (`credential_files`, `vertex_import`, `credential_state`, `oauth`,
+//! `config_read`, `model_definitions` and `latest_version`) hold the tests
+//! of that module's routes, each saying which upstream test files it
+//! ports. Every test drives the real router, from a client at 127.0.0.1
 //! unless it says otherwise, and every upstream a call reaches is a server
 //! on a 127.0.0.1 ephemeral port.
+//!
+//! The routes that write credentials are tested over an [`AuthDir`]: a
+//! temporary auth directory, with the store the manager saves to, and a
+//! [`FakeSync`] standing in for the service. [`Multipart`] builds the
+//! bodies of uploads.
 
 mod api_tools;
 mod auth_files_cooldown;
@@ -13,15 +22,24 @@ mod auth_files_pagination;
 mod auth_files_project_id;
 mod auth_files_quota;
 mod auth_files_recent_requests;
+mod auth_files_relogin_preserve;
+mod config_read;
+mod credential_files;
+mod credential_state;
 mod handler;
+mod latest_version;
+mod model_definitions;
+mod oauth;
 mod quota;
 mod router;
 mod server_management_v8;
+mod vertex_import;
 
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
@@ -30,8 +48,10 @@ use axum::extract::ConnectInfo;
 use chrono::{DateTime, Utc};
 use http::{HeaderMap, Method, Request, StatusCode, header};
 use http_body_util::BodyExt as _;
-use open_ferry_core::auth::{Auth, AuthStore, Status, Timestamp};
-use open_ferry_core::config::Config;
+use open_ferry_core::auth::synthesizer::SynthesisContext;
+use open_ferry_core::auth::synthesizer::file::synthesize_auth_file;
+use open_ferry_core::auth::{Auth, AuthStore, FileStore, Status, Timestamp};
+use open_ferry_core::config::{AuthFile, Config};
 use open_ferry_core::manager::{Manager, Settings};
 use open_ferry_core::registry::ModelRegistry;
 use serde_json::Value;
@@ -39,7 +59,7 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 use tower::ServiceExt as _;
 
-use crate::{ManagementState, router};
+use crate::{CredentialSync, ManagementState, SyncError, SyncFuture, router};
 
 /// The management key the tests set.
 const KEY: &str = "test-secret";
@@ -53,6 +73,9 @@ struct Api {
     registry: Arc<ModelRegistry>,
     state: ManagementState,
     router: Router,
+    /// What stands in for the service; the state uses it only when made
+    /// over an [`AuthDir`].
+    sync: Arc<FakeSync>,
 }
 
 impl Api {
@@ -73,19 +96,51 @@ impl Api {
         password: Option<&str>,
         store: Option<Arc<dyn AuthStore>>,
     ) -> Self {
+        Self::build(config, password, store, |state, _| state)
+    }
+
+    /// The API with management key [`KEY`], keeping credentials in
+    /// `auth_dir`: its manager saves there, and the state has the
+    /// directory's store, the [`FakeSync`] and the config path.
+    fn over(auth_dir: &AuthDir) -> Self {
+        Self::over_with(auth_dir, auth_dir.config(), None)
+    }
+
+    /// [`Api::over`], with `config` and, if given, `MANAGEMENT_PASSWORD`.
+    fn over_with(auth_dir: &AuthDir, config: Config, password: Option<&str>) -> Self {
+        let store = Arc::clone(&auth_dir.store);
+        Self::build(config, password, Some(store as _), |state, sync| {
+            state
+                .with_store(Arc::clone(&auth_dir.store))
+                .with_sync(sync)
+                .with_config_path(auth_dir.config_path())
+        })
+    }
+
+    /// The API, its state made by `configure` from the plain state and the
+    /// [`FakeSync`].
+    fn build(
+        config: Config,
+        password: Option<&str>,
+        store: Option<Arc<dyn AuthStore>>,
+        configure: impl FnOnce(ManagementState, Arc<dyn CredentialSync>) -> ManagementState,
+    ) -> Self {
         let registry = Arc::new(ModelRegistry::new());
         let manager = Manager::new(Settings::default(), Arc::clone(&registry) as _, store);
+        let sync = Arc::new(FakeSync::new(manager.clone()));
         let state = ManagementState::new(
             Arc::new(config),
             manager.clone(),
             Arc::clone(&registry),
             password.map(OsString::from),
         );
+        let state = configure(state, Arc::clone(&sync) as _);
         Self {
             router: router(state.clone()),
             manager,
             registry,
             state,
+            sync,
         }
     }
 
@@ -189,6 +244,208 @@ fn keyed(method: Method, path: &str, body: &str) -> Request<Body> {
     let value = format!("Bearer {KEY}").parse().unwrap();
     request.headers_mut().insert(header::AUTHORIZATION, value);
     request
+}
+
+/// A temporary directory holding an auth directory, `auths`, and where a
+/// config file would be, `config.yaml` (not written).
+struct AuthDir {
+    dir: tempfile::TempDir,
+    /// The store over the auth directory.
+    store: Arc<FileStore>,
+}
+
+impl AuthDir {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let auths = dir.path().join("auths");
+        std::fs::create_dir(&auths).unwrap();
+        Self {
+            store: Arc::new(FileStore::new(&auths)),
+            dir,
+        }
+    }
+
+    /// The auth directory.
+    fn path(&self) -> PathBuf {
+        self.dir.path().join("auths")
+    }
+
+    /// Where the config file would be.
+    fn config_path(&self) -> PathBuf {
+        self.dir.path().join("config.yaml")
+    }
+
+    /// [`keyed_config`], with this auth directory.
+    fn config(&self) -> Config {
+        let mut config = keyed_config();
+        config.auth_dir = self.path().to_str().unwrap().to_owned();
+        config
+    }
+
+    /// Writes file `name` in the auth directory with `contents`, and
+    /// returns its path.
+    fn write(&self, name: &str, contents: &str) -> PathBuf {
+        let path = self.path().join(name);
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    /// File `name` of the auth directory, as JSON.
+    fn read_json(&self, name: &str) -> Value {
+        let data = std::fs::read(self.path().join(name)).unwrap();
+        serde_json::from_slice(&data).unwrap()
+    }
+}
+
+/// A call [`FakeSync`] took.
+#[derive(Clone, Debug)]
+enum SyncCall {
+    Upsert(Box<Auth>),
+    FileWritten(AuthFile),
+    FileRemoved(PathBuf),
+}
+
+/// A [`CredentialSync`] that stands in for the service: it records each
+/// call and applies it to its manager, much as the service would, without
+/// the model registry; once stopped, it fails every call as a stopped
+/// service does, and records nothing.
+struct FakeSync {
+    manager: Manager,
+    calls: Mutex<Vec<SyncCall>>,
+    stopped: AtomicBool,
+}
+
+impl FakeSync {
+    fn new(manager: Manager) -> Self {
+        Self {
+            manager,
+            calls: Mutex::new(Vec::new()),
+            stopped: AtomicBool::new(false),
+        }
+    }
+
+    /// The calls taken so far.
+    fn calls(&self) -> Vec<SyncCall> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    /// Fails every later call with [`SyncError::Stopped`].
+    fn stop(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
+    }
+
+    fn call(&self, call: SyncCall) -> SyncFuture<'_> {
+        let result = if self.stopped.load(Ordering::SeqCst) {
+            Err(SyncError::Stopped)
+        } else {
+            self.apply(&call);
+            self.calls.lock().unwrap().push(call);
+            Ok(())
+        };
+        Box::pin(std::future::ready(result))
+    }
+
+    fn apply(&self, call: &SyncCall) {
+        match call {
+            SyncCall::Upsert(auth) => self.upsert(Auth::clone(auth)),
+            SyncCall::FileWritten(file) => {
+                let dir = file.path.parent().unwrap_or(Path::new(""));
+                let ctx = SynthesisContext::new(dir, Utc::now());
+                match synthesize_auth_file(&ctx, &file.path, &file.data) {
+                    Ok(Some(auth)) => self.upsert(auth),
+                    _ => self.remove_file(&file.path),
+                }
+            }
+            SyncCall::FileRemoved(path) => self.remove_file(path),
+        }
+    }
+
+    fn upsert(&self, auth: Auth) {
+        if self.manager.get(&auth.id).is_some() {
+            self.manager.update_unsaved(auth).unwrap();
+        } else {
+            self.manager.register_unsaved(auth).unwrap();
+        }
+    }
+
+    /// Removes every credential from the file at `path`.
+    fn remove_file(&self, path: &Path) {
+        for auth in self.manager.list() {
+            if auth.attribute("path").map(Path::new) == Some(path) {
+                self.manager.remove(&auth.id);
+            }
+        }
+    }
+}
+
+impl CredentialSync for FakeSync {
+    fn upsert(&self, auth: Auth) -> SyncFuture<'_> {
+        self.call(SyncCall::Upsert(Box::new(auth)))
+    }
+
+    fn file_written(&self, file: AuthFile) -> SyncFuture<'_> {
+        self.call(SyncCall::FileWritten(file))
+    }
+
+    fn file_removed(&self, path: PathBuf) -> SyncFuture<'_> {
+        self.call(SyncCall::FileRemoved(path))
+    }
+}
+
+/// A `multipart/form-data` body, built a part at a time, as Go's
+/// `multipart.Writer` writes one.
+struct Multipart {
+    boundary: String,
+    body: Vec<u8>,
+}
+
+impl Multipart {
+    fn new() -> Self {
+        Self {
+            boundary: "open-ferry-test-boundary-6f1c2a".to_owned(),
+            body: Vec::new(),
+        }
+    }
+
+    /// Adds field `name` with `value` (`CreateFormField`).
+    fn text(self, name: &str, value: &str) -> Self {
+        let disposition = format!("form-data; name=\"{name}\"");
+        self.part(&disposition, None, value.as_bytes())
+    }
+
+    /// Adds file `file_name` as field `name` (`CreateFormFile`).
+    fn file(self, name: &str, file_name: &str, contents: &[u8]) -> Self {
+        let disposition = format!("form-data; name=\"{name}\"; filename=\"{file_name}\"");
+        self.part(&disposition, Some("application/octet-stream"), contents)
+    }
+
+    fn part(mut self, disposition: &str, content_type: Option<&str>, contents: &[u8]) -> Self {
+        let mut head = format!(
+            "--{}\r\nContent-Disposition: {disposition}\r\n",
+            self.boundary
+        );
+        if let Some(content_type) = content_type {
+            let _ = write!(head, "Content-Type: {content_type}\r\n");
+        }
+        head.push_str("\r\n");
+        self.body.extend_from_slice(head.as_bytes());
+        self.body.extend_from_slice(contents);
+        self.body.extend_from_slice(b"\r\n");
+        self
+    }
+
+    /// A request from [`LOCAL`] with the key, sending the body.
+    fn request(mut self, method: Method, path: &str) -> Request<Body> {
+        let end = format!("--{}--\r\n", self.boundary);
+        self.body.extend_from_slice(end.as_bytes());
+        let mut request = keyed(method, path, "");
+        let content_type = format!("multipart/form-data; boundary={}", self.boundary);
+        request
+            .headers_mut()
+            .insert(header::CONTENT_TYPE, content_type.parse().unwrap());
+        *request.body_mut() = Body::from(self.body);
+        request
+    }
 }
 
 /// A Codex credential with `id` and `attributes`.
