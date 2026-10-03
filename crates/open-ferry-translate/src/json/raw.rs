@@ -27,6 +27,30 @@ pub(crate) fn member<'t>(object: &'t str, key: &str) -> Option<&'t str> {
     None
 }
 
+/// gjson `Get("N").Raw` on the JSON array `array`: element `index` as
+/// written. `array` must be valid JSON.
+pub(crate) fn element(array: &str, index: usize) -> Option<&str> {
+    let bytes = array.as_bytes();
+    let mut i = skip_space(bytes, 0);
+    if bytes.get(i) != Some(&b'[') {
+        return None;
+    }
+    i = skip_space(bytes, i + 1);
+    let mut at = 0;
+    while bytes.get(i).is_some_and(|&b| b != b']') {
+        let end = scan_value(bytes, i, usize::MAX)?;
+        if at == index {
+            return Some(&array[i..end]);
+        }
+        at += 1;
+        i = skip_space(bytes, end);
+        if bytes.get(i) == Some(&b',') {
+            i = skip_space(bytes, i + 1);
+        }
+    }
+    None
+}
+
 /// Whether the quoted, possibly escaped key `raw` is `key`.
 fn key_is(raw: &str, key: &str) -> bool {
     match raw.get(1..raw.len() - 1) {
@@ -208,6 +232,17 @@ mod tests {
         assert_eq!(member(object, "b"), None);
         assert_eq!(member("[1]", "a"), None);
         assert_eq!(member("{}", "a"), None);
+    }
+
+    #[test]
+    fn element_is_the_value_as_written() {
+        let array = r#" [ {"a": "]"} , 1.50,"x" ] "#;
+        assert_eq!(element(array, 0), Some(r#"{"a": "]"}"#));
+        assert_eq!(element(array, 1), Some("1.50"));
+        assert_eq!(element(array, 2), Some(r#""x""#));
+        assert_eq!(element(array, 3), None);
+        assert_eq!(element("[]", 0), None);
+        assert_eq!(element("{}", 0), None);
     }
 
     #[test]

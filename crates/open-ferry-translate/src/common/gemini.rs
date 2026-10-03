@@ -42,8 +42,8 @@ use serde_json::Value;
 
 use crate::json::{bool_of, set_path, str_of};
 
-/// Gemini's limit on function name length.
-const GEMINI_FUNCTION_NAME_LIMIT: usize = 64;
+/// Gemini's limit on function name length, in bytes.
+pub(crate) const GEMINI_FUNCTION_NAME_LIMIT: usize = 64;
 
 /// Sanitized tool names, each with the name the client declared.
 pub(crate) type SanitizedToolNames = HashMap<String, String>;
