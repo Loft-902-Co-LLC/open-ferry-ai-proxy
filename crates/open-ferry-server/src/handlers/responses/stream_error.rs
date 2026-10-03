@@ -17,6 +17,10 @@
 //!   escaped lone surrogate, or is nested more than 128 deep. Go redacts it
 //!   field by field; matching it with the patterns, as upstream does for
 //!   text that isn't JSON, would miss escaped keys and keys like `password`.
+//! - An error's text that is a JSON array is redacted field by field, as an
+//!   object's fields are, then by the patterns and cut. Upstream only
+//!   matches it with the patterns. An array serde_json can't read is
+//!   reported as its status's text.
 
 use std::sync::LazyLock;
 
@@ -130,8 +134,9 @@ fn sanitize_node(value: &Value) -> Value {
 
 /// The text a stream error is reported with (`responsesStreamErrorText`). A
 /// JSON object keeps its error, or all of it, with secrets redacted; other
-/// text is redacted and cut. An object serde_json can't read is reported as
-/// the status's text, since it can't be redacted field by field.
+/// text is redacted and cut, and an array is redacted field by field, then
+/// cut. An object or array serde_json can't read is reported as the status's
+/// text, since it can't be redacted field by field.
 pub(super) fn stream_error_text(error: &ErrorMessage, status: u16) -> String {
     let text = match error.text.trim() {
         "" => status_text(status),
@@ -149,6 +154,12 @@ pub(super) fn stream_error_text(error: &ErrorMessage, status: u16) -> String {
             Err(_) => return status_text(status).to_owned(),
         },
         Some(b'n') => Map::new(),
+        Some(b'[') => {
+            return match serde_json::from_str::<Value>(text) {
+                Ok(array) => truncate(&redact(&sanitize_node(&array).to_string()), MESSAGE_LIMIT),
+                Err(_) => status_text(status).to_owned(),
+            };
+        }
         _ => return plain(),
     };
     let error_node = match root.get("error") {
@@ -449,6 +460,21 @@ mod tests {
                 "]".repeat(100)
             )
         );
+    }
+
+    #[test]
+    fn error_text_redacts_arrays_by_field() {
+        assert_eq!(
+            text(502, r#"[{"password":"SECRET","message":"token=abc"},1]"#),
+            r#"[{"message":"token=[REDACTED]","password":"[REDACTED]"},1]"#
+        );
+        let deep = format!(
+            r#"[{}{{"password":"SECRET"}}{}]"#,
+            "[".repeat(130),
+            "]".repeat(130)
+        );
+        assert!(go::json_valid(deep.as_bytes()));
+        assert_eq!(text(502, &deep), "Bad Gateway");
     }
 
     #[test]
