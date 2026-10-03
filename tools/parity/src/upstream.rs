@@ -1,4 +1,5 @@
-//! Builds and runs the Go harness (`go/main.go`) inside a CLIProxyAPI checkout.
+//! Builds and runs the Go harnesses (`go/main.go`, and `go/completions/main.go`
+//! for the legacy Completions conversions) inside a CLIProxyAPI checkout.
 
 use std::env;
 use std::error::Error;
@@ -24,12 +25,16 @@ pub struct Upstream {
     pub version: String,
     pub commit: String,
     harness: PathBuf,
+    /// The harness for the `completions/` translators.
+    completions_harness: PathBuf,
 }
 
 impl Upstream {
-    /// Compiles the harness into `work_dir`. The harness imports internal
-    /// packages, so it must be compiled as part of the CLIProxyAPI module. An
-    /// overlay adds it as `cmd/open-ferry-parity` without touching the checkout.
+    /// Compiles the harnesses into `work_dir`. They import internal packages,
+    /// so they must be compiled as part of the CLIProxyAPI module. An overlay
+    /// adds them as `cmd/open-ferry-parity` and `cmd/open-ferry-parity-completions`
+    /// without touching the checkout, along with `go/openai/export.go`, which
+    /// exports the Completions conversions from their package.
     pub fn build(dir: &Path, go: &Path, work_dir: &Path) -> Result<Self, Box<dyn Error>> {
         let dir = std::path::absolute(dir)?;
         if !dir.join("go.mod").is_file() {
@@ -39,36 +44,60 @@ impl Upstream {
             )
             .into());
         }
-        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("go")
-            .join("main.go");
-        let target = dir.join("cmd").join("open-ferry-parity").join("main.go");
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("go");
+        let handlers = dir.join("sdk").join("api").join("handlers").join("openai");
         let mut replace = Map::new();
-        replace.insert(
-            target.to_string_lossy().into_owned(),
-            source.to_string_lossy().into_owned().into(),
-        );
+        for (target, source) in [
+            (
+                dir.join("cmd").join("open-ferry-parity").join("main.go"),
+                source.join("main.go"),
+            ),
+            (
+                dir.join("cmd")
+                    .join("open-ferry-parity-completions")
+                    .join("main.go"),
+                source.join("completions").join("main.go"),
+            ),
+            (
+                handlers.join("zz_open_ferry_parity_export.go"),
+                source.join("openai").join("export.go"),
+            ),
+        ] {
+            replace.insert(
+                target.to_string_lossy().into_owned(),
+                source.to_string_lossy().into_owned().into(),
+            );
+        }
         let overlay = work_dir.join("overlay.json");
         fs::write(&overlay, json!({ "Replace": replace }).to_string())?;
 
         let harness = work_dir.join(format!("upstream-harness{}", env::consts::EXE_SUFFIX));
-        let status = Command::new(go)
-            .current_dir(&dir)
-            .arg("build")
-            .arg("-overlay")
-            .arg(&overlay)
-            .arg("-o")
-            .arg(&harness)
-            .arg("./cmd/open-ferry-parity")
-            .status()
-            .map_err(|err| {
-                format!(
-                    "could not run {}: {err} (install Go or pass --go)",
-                    go.display()
-                )
-            })?;
-        if !status.success() {
-            return Err(format!("go build failed ({status})").into());
+        let completions_harness = work_dir.join(format!(
+            "upstream-completions-harness{}",
+            env::consts::EXE_SUFFIX
+        ));
+        for (binary, package) in [
+            (&harness, "./cmd/open-ferry-parity"),
+            (&completions_harness, "./cmd/open-ferry-parity-completions"),
+        ] {
+            let status = Command::new(go)
+                .current_dir(&dir)
+                .arg("build")
+                .arg("-overlay")
+                .arg(&overlay)
+                .arg("-o")
+                .arg(binary)
+                .arg(package)
+                .status()
+                .map_err(|err| {
+                    format!(
+                        "could not run {}: {err} (install Go or pass --go)",
+                        go.display()
+                    )
+                })?;
+            if !status.success() {
+                return Err(format!("go build of {package} failed ({status})").into());
+            }
         }
 
         Ok(Self {
@@ -76,6 +105,7 @@ impl Upstream {
             commit: git(&dir, &["rev-parse", "HEAD"]),
             dir,
             harness,
+            completions_harness,
         })
     }
 
@@ -108,7 +138,14 @@ impl Upstream {
             .map_err(|err| err.into_error())?
             .sync_all()?;
 
-        let output = Command::new(&self.harness)
+        // The Completions conversions have a harness of their own (see
+        // go/completions/main.go).
+        let harness = if translator.starts_with("completions/") {
+            &self.completions_harness
+        } else {
+            &self.harness
+        };
+        let output = Command::new(harness)
             .stdin(File::open(&input_path)?)
             .stderr(Stdio::inherit())
             .output()?;

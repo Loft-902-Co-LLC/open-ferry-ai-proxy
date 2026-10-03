@@ -12,6 +12,7 @@ mod apply_patch;
 pub mod claude;
 pub mod codex;
 mod common;
+pub mod completions;
 mod go;
 mod json;
 pub mod models;

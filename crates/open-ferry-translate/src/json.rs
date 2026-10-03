@@ -109,6 +109,22 @@ pub(crate) fn int_of(value: &Value) -> i64 {
     }
 }
 
+/// gjson `Float()`, written as sjson writes a `float64`. `None` if it isn't
+/// finite, which sjson writes as `+Inf`, `-Inf` or `NaN`: not JSON.
+pub(crate) fn float_of(value: &Value) -> Option<Value> {
+    let float: f64 = match value {
+        Value::Number(number) => number.to_string().parse().unwrap_or(0.0),
+        Value::String(text) => go::parse_float(text),
+        Value::Bool(true) => 1.0,
+        _ => 0.0,
+    };
+    if !float.is_finite() {
+        return None;
+    }
+    // Rust and Go both write the shortest decimal that reads back the same.
+    serde_json::from_str(&float.to_string()).ok()
+}
+
 /// gjson `Bool()`.
 pub(crate) fn bool_of(value: &Value) -> bool {
     match value {
@@ -145,7 +161,10 @@ pub(crate) fn go_value(value: &Value) -> Value {
     }
 }
 
-fn go_marshaled(value: &Value) -> Value {
+/// gjson `Value()` inside a value `json.Marshal` writes, such as a field of a
+/// Go map: as [`go_value`], but a number is written as `json.Marshal` writes
+/// it too.
+pub(crate) fn go_marshaled(value: &Value) -> Value {
     match value {
         Value::Number(number) => go_float(number, true),
         Value::Array(items) => Value::Array(items.iter().map(go_marshaled).collect()),

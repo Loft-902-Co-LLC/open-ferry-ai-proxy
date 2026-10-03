@@ -251,6 +251,21 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
             cases::registry::lookups(),
             generate::registry::lookup_cases(seed, random),
         ),
+        (
+            Translator::CompletionsRequest,
+            cases::completions::requests(),
+            generate::completions::request_cases(seed, random),
+        ),
+        (
+            Translator::CompletionsResponse,
+            cases::completions::responses(),
+            generate::completions::response_cases(seed, random),
+        ),
+        (
+            Translator::CompletionsStreamChunk,
+            cases::completions::stream_chunks(),
+            generate::completions::chunk_cases(seed, random),
+        ),
     ];
 
     println!("open-ferry parity");

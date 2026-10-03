@@ -29,6 +29,11 @@ use open_ferry_translate::codex::openai::responses::{
     CodexToOpenAIResponsesStream, convert_codex_response_to_openai_responses_non_stream,
     convert_openai_responses_request_to_codex,
 };
+use open_ferry_translate::completions::{
+    convert_chat_completions_response_to_completions,
+    convert_chat_completions_stream_chunk_to_completions,
+    convert_completions_request_to_chat_completions,
+};
 use open_ferry_translate::models::ModelCatalog;
 use open_ferry_translate::registry::{Format, Registry, ResponseContext, ResponseTransform};
 use serde_json::{Value, json};
@@ -104,10 +109,18 @@ pub enum Translator {
     RegistryNonStream,
     /// Which translators the registry has for a pair, and a token count.
     RegistryLookup,
+    /// Legacy Completions request → Chat Completions request.
+    CompletionsRequest,
+    /// A Chat Completions response → a legacy Completions response.
+    CompletionsResponse,
+    /// Chat Completions stream chunks → legacy Completions chunks, each one
+    /// on its own.
+    CompletionsStreamChunk,
 }
 
 impl Translator {
-    /// The harness's name for the translator (see `go/main.go`).
+    /// The harness's name for the translator (see `go/main.go`, and
+    /// `go/completions/main.go` for the `completions/` ones).
     pub fn key(self) -> &'static str {
         match self {
             Self::Request => "codex/claude/request",
@@ -135,6 +148,9 @@ impl Translator {
             Self::RegistryStream => "registry/response",
             Self::RegistryNonStream => "registry/response-non-stream",
             Self::RegistryLookup => "registry/lookup",
+            Self::CompletionsRequest => "completions/request",
+            Self::CompletionsResponse => "completions/response",
+            Self::CompletionsStreamChunk => "completions/stream-chunk",
         }
     }
 
@@ -166,6 +182,9 @@ impl Translator {
             Self::RegistryStream => "registry-stream",
             Self::RegistryNonStream => "registry-non-stream",
             Self::RegistryLookup => "registry-lookup",
+            Self::CompletionsRequest => "completions-request",
+            Self::CompletionsResponse => "completions-response",
+            Self::CompletionsStreamChunk => "completions-stream-chunk",
         }
     }
 
@@ -198,6 +217,9 @@ impl Translator {
             Self::RegistryStream => "Translator registry, streaming responses",
             Self::RegistryNonStream => "Translator registry, non-streaming responses",
             Self::RegistryLookup => "Translator registry, lookups and token counts",
+            Self::CompletionsRequest => "Completions -> Chat Completions request",
+            Self::CompletionsResponse => "Chat Completions -> Completions response",
+            Self::CompletionsStreamChunk => "Chat Completions -> Completions stream chunks",
         }
     }
 
@@ -503,6 +525,28 @@ impl Translator {
                 self.read(case, output.as_bytes())
                     .ok_or_else(|| "output is not JSON".to_owned())
             }
+            Self::CompletionsRequest => {
+                let request = request
+                    .map_err(|err| format!("case {} is not valid JSON: {err}", case.name))?;
+                Ok(convert_completions_request_to_chat_completions(&request))
+            }
+            Self::CompletionsResponse => {
+                let body = case.events.first().map_or(&b""[..], |body| body.as_bytes());
+                Ok(convert_chat_completions_response_to_completions(body))
+            }
+            Self::CompletionsStreamChunk => {
+                // Written as the harness writes upstream's output.
+                let chunks: Vec<Option<String>> = case
+                    .events
+                    .iter()
+                    .map(|chunk| {
+                        convert_chat_completions_stream_chunk_to_completions(chunk.as_bytes())
+                            .map(|chunk| chunk.to_string())
+                    })
+                    .collect();
+                let output = serde_json::to_vec(&chunks).expect("strings serialize");
+                Ok(self.read(case, &output).expect("chunks always read"))
+            }
         }
     }
 
@@ -579,6 +623,21 @@ impl Translator {
                 ("$.previous_response_id", Whole),
                 ("$.prompt_cache_key", Whole),
                 ("$.safety_identifier", Whole),
+            ],
+            // Values read as text that aren't strings: the prompt and model,
+            // and in responses the ID, model, text and finish reasons.
+            Self::CompletionsRequest => &[("$.model", Whole), ("$.messages[*].content", Whole)],
+            Self::CompletionsResponse => &[
+                ("$.id", Whole),
+                ("$.model", Whole),
+                ("$.choices[*].text", Whole),
+                ("$.choices[*].finish_reason", Whole),
+            ],
+            Self::CompletionsStreamChunk => &[
+                ("$[*].id", Whole),
+                ("$[*].model", Whole),
+                ("$[*].choices[*].text", Whole),
+                ("$[*].choices[*].finish_reason", Whole),
             ],
             Self::NonStream
             | Self::ResponsesRequest
@@ -694,8 +753,11 @@ impl Translator {
             | Self::SignatureInspect
             | Self::ClaudeMessagesSignatures
             | Self::GeminiSignatures
-            | Self::ChatRequest => return serde_json::from_str(&text).ok(),
+            | Self::ChatRequest
+            | Self::CompletionsRequest
+            | Self::CompletionsResponse => return serde_json::from_str(&text).ok(),
             Self::ResponsesStream | Self::ChatStream => return read_lines(&text),
+            Self::CompletionsStreamChunk => return read_chunks(&text),
             Self::ClaudeChatStream => {
                 let mut lines = read_lines(&text)?;
                 for line in lines.as_array_mut().into_iter().flatten() {
@@ -771,6 +833,24 @@ fn read_lines(text: &str) -> Option<Value> {
         })
         .collect();
     Some(Value::Array(lines))
+}
+
+/// Reads the Completions chunk translator's output: a JSON array with a
+/// string per chunk, or `null` for a chunk that was skipped. Each chunk is
+/// read as JSON, or kept as text if it isn't JSON.
+fn read_chunks(text: &str) -> Option<Value> {
+    let chunks: Vec<Option<String>> = serde_json::from_str(text).ok()?;
+    let chunks = chunks
+        .into_iter()
+        .map(|chunk| match chunk {
+            None => Value::Null,
+            Some(chunk) => match serde_json::from_str(&chunk) {
+                Ok(value) => value,
+                Err(_) => Value::String(chunk),
+            },
+        })
+        .collect();
+    Some(Value::Array(chunks))
 }
 
 /// Reads a registry non-streaming report, `{"output": text}`, as `native`

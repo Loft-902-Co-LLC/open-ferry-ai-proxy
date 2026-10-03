@@ -20,8 +20,6 @@
 //!   hasher rather than the operating system's random source.
 //! - A `top_p` that isn't a finite number, such as `1e400` or the string
 //!   `"NaN"`, is left out. Go writes it as `+Inf` or `NaN`, which isn't JSON.
-//!   A string `top_p` is read as Rust reads a float, which takes neither Go's
-//!   hexadecimal form nor digit separators.
 //! - Where upstream copies the client's JSON text into a string, we write the
 //!   same JSON compactly. This applies to the schema in a structured output
 //!   instruction, a tool message's content that can't be converted, and a
@@ -39,7 +37,7 @@ use crate::common::claude::{
     sanitize_function_name, sanitize_tool_id, structured_output_instruction,
 };
 use crate::go;
-use crate::json::{int_of, object, path, str_of};
+use crate::json::{float_of, int_of, object, path, str_of};
 use crate::models::ModelCatalog;
 use crate::schema::normalize_claude_tool_input_schema;
 use crate::thinking::summary::apply_translated_to_claude;
@@ -170,21 +168,6 @@ fn convert(
     let mut out = Value::Object(out);
     apply_translated_to_claude(&mut out, request, "openai", model_name, models);
     out
-}
-
-/// gjson `Float()`, written as Go writes a float. `None` if it isn't finite.
-fn float_of(value: &Value) -> Option<Value> {
-    let float: f64 = match value {
-        Value::Number(number) => number.to_string().parse().unwrap_or(0.0),
-        Value::String(text) => go::parse_float(text),
-        Value::Bool(true) => 1.0,
-        _ => 0.0,
-    };
-    if !float.is_finite() {
-        return None;
-    }
-    // Rust and Go both write the shortest decimal that reads back the same.
-    serde_json::from_str(&float.to_string()).ok()
 }
 
 /// Converts the messages into Claude turns, collecting system blocks into
