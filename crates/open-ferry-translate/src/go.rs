@@ -28,11 +28,7 @@ pub(crate) fn format_float(f: f64) -> String {
 /// mapping. Rust's `str::to_lowercase` differs for `İ` (to `i` plus a combining
 /// dot) and for a word-final `Σ` (to `ς`); Go gives `i` and `σ`.
 pub fn to_lower(s: &str) -> String {
-    // `char::to_lowercase` yields the full mapping. Only `İ` has more than one
-    // character, and the first is its simple mapping.
-    s.chars()
-        .map(|c| c.to_lowercase().next().unwrap_or(c))
-        .collect()
+    s.chars().map(simple_lower).collect()
 }
 
 /// Go's `strings.ToUpper`: maps each character on its own by its simple Unicode
@@ -57,6 +53,153 @@ fn simple_upper(c: char) -> char {
         _ => 0,
     };
     char::from_u32(u32::from(c) + offset).unwrap_or(c)
+}
+
+/// Go's `strings.EqualFold`: whether `a` and `b` are equal under simple
+/// Unicode case folding, each character against the one in the same place.
+pub fn equal_fold(a: &str, b: &str) -> bool {
+    let mut left = a.chars();
+    let mut right = b.chars();
+    loop {
+        match (left.next(), right.next()) {
+            (None, None) => return true,
+            (Some(x), Some(y)) if fold_eq(x, y) => {}
+            _ => return false,
+        }
+    }
+}
+
+/// Whether `a` and `b` are in the same case-folding orbit, as `EqualFold`
+/// decides it for one pair of characters.
+fn fold_eq(a: char, b: char) -> bool {
+    if a == b {
+        return true;
+    }
+    let (low, high) = if a < b { (a, b) } else { (b, a) };
+    if high.is_ascii() {
+        return low.is_ascii_uppercase() && high == low.to_ascii_lowercase();
+    }
+    // Go walks the orbit from the lower character until it passes the higher.
+    let mut next = simple_fold(low);
+    while next != low && next < high {
+        next = simple_fold(next);
+    }
+    next == high
+}
+
+/// Go's `unicode.SimpleFold`: the next character after `c` in its orbit of
+/// characters equal under simple case folding, wrapping round to the
+/// lowest; `c` itself when it has no other case.
+pub fn simple_fold(c: char) -> char {
+    if let Ok(index) = CASE_ORBIT.binary_search_by_key(&u32::from(c), |&(from, _)| from) {
+        return char::from_u32(CASE_ORBIT[index].1).unwrap_or(c);
+    }
+    let lower = simple_lower(c);
+    if lower != c {
+        return lower;
+    }
+    simple_upper(c)
+}
+
+/// Go's `caseOrbit` (Unicode 15.0): the orbits of more than two characters,
+/// and the two Turkish i's, each character with the next in its orbit.
+/// Every other character's orbit is itself and its lower or upper case.
+const CASE_ORBIT: [(u32, u32); 88] = [
+    (0x004b, 0x006b),
+    (0x0053, 0x0073),
+    (0x006b, 0x212a),
+    (0x0073, 0x017f),
+    (0x00b5, 0x039c),
+    (0x00c5, 0x00e5),
+    (0x00df, 0x1e9e),
+    (0x00e5, 0x212b),
+    (0x0130, 0x0130),
+    (0x0131, 0x0131),
+    (0x017f, 0x0053),
+    (0x01c4, 0x01c5),
+    (0x01c5, 0x01c6),
+    (0x01c6, 0x01c4),
+    (0x01c7, 0x01c8),
+    (0x01c8, 0x01c9),
+    (0x01c9, 0x01c7),
+    (0x01ca, 0x01cb),
+    (0x01cb, 0x01cc),
+    (0x01cc, 0x01ca),
+    (0x01f1, 0x01f2),
+    (0x01f2, 0x01f3),
+    (0x01f3, 0x01f1),
+    (0x0345, 0x0399),
+    (0x0392, 0x03b2),
+    (0x0395, 0x03b5),
+    (0x0398, 0x03b8),
+    (0x0399, 0x03b9),
+    (0x039a, 0x03ba),
+    (0x039c, 0x03bc),
+    (0x03a0, 0x03c0),
+    (0x03a1, 0x03c1),
+    (0x03a3, 0x03c2),
+    (0x03a6, 0x03c6),
+    (0x03a9, 0x03c9),
+    (0x03b2, 0x03d0),
+    (0x03b5, 0x03f5),
+    (0x03b8, 0x03d1),
+    (0x03b9, 0x1fbe),
+    (0x03ba, 0x03f0),
+    (0x03bc, 0x00b5),
+    (0x03c0, 0x03d6),
+    (0x03c1, 0x03f1),
+    (0x03c2, 0x03c3),
+    (0x03c3, 0x03a3),
+    (0x03c6, 0x03d5),
+    (0x03c9, 0x2126),
+    (0x03d0, 0x0392),
+    (0x03d1, 0x03f4),
+    (0x03d5, 0x03a6),
+    (0x03d6, 0x03a0),
+    (0x03f0, 0x039a),
+    (0x03f1, 0x03a1),
+    (0x03f4, 0x0398),
+    (0x03f5, 0x0395),
+    (0x0412, 0x0432),
+    (0x0414, 0x0434),
+    (0x041e, 0x043e),
+    (0x0421, 0x0441),
+    (0x0422, 0x0442),
+    (0x042a, 0x044a),
+    (0x0432, 0x1c80),
+    (0x0434, 0x1c81),
+    (0x043e, 0x1c82),
+    (0x0441, 0x1c83),
+    (0x0442, 0x1c84),
+    (0x044a, 0x1c86),
+    (0x0462, 0x0463),
+    (0x0463, 0x1c87),
+    (0x1c80, 0x0412),
+    (0x1c81, 0x0414),
+    (0x1c82, 0x041e),
+    (0x1c83, 0x0421),
+    (0x1c84, 0x1c85),
+    (0x1c85, 0x0422),
+    (0x1c86, 0x042a),
+    (0x1c87, 0x0462),
+    (0x1c88, 0xa64a),
+    (0x1e60, 0x1e61),
+    (0x1e61, 0x1e9b),
+    (0x1e9b, 0x1e60),
+    (0x1e9e, 0x00df),
+    (0x1fbe, 0x0345),
+    (0x2126, 0x03a9),
+    (0x212a, 0x004b),
+    (0x212b, 0x00c5),
+    (0xa64a, 0xa64b),
+    (0xa64b, 0x1c88),
+];
+
+/// The simple lowercase mapping of `c`, as Go's `unicode.ToLower` gives it.
+fn simple_lower(c: char) -> char {
+    // `char::to_lowercase` yields the full mapping. Only `İ` has more than one
+    // character, and the first is its simple mapping.
+    c.to_lowercase().next().unwrap_or(c)
 }
 
 /// Go's `strconv.Quote`, which `%q` uses: wraps `s` in double quotes and
@@ -127,9 +270,19 @@ pub fn trim_space(bytes: &[u8]) -> &[u8] {
     bytes.get(start..end).unwrap_or_default()
 }
 
-/// Go's `json.Valid`: whether `bytes` is one JSON value. Like Go, it
-/// doesn't check that strings are UTF-8.
+/// How deep Go's `encoding/json` lets arrays and objects nest
+/// (`maxNestingDepth`).
+pub const MAX_NESTING_DEPTH: usize = 10_000;
+
+/// Go's `json.Valid`: whether `bytes` is one JSON value, nested at most
+/// [`MAX_NESTING_DEPTH`] deep. Like Go, it doesn't check that strings are
+/// UTF-8.
 pub fn json_valid(bytes: &[u8]) -> bool {
+    crate::json::raw::valid_within(bytes, MAX_NESTING_DEPTH)
+}
+
+/// gjson's `Valid`: [`json_valid`] without a limit on nesting.
+pub fn gjson_valid(bytes: &[u8]) -> bool {
     crate::json::raw::valid_bytes(bytes)
 }
 
@@ -228,6 +381,77 @@ mod tests {
         );
         // Titlecase forms stay.
         assert_eq!(to_upper("\u{1f88}\u{1fbc}"), "\u{1f88}\u{1fbc}");
+    }
+
+    #[test]
+    fn json_valid_limits_nesting_as_go_does() {
+        let nested = |depth: usize, inner: &str| {
+            format!("{}{inner}{}", "[".repeat(depth), "]".repeat(depth))
+        };
+        assert!(json_valid(nested(MAX_NESTING_DEPTH, "0").as_bytes()));
+        assert!(!json_valid(nested(MAX_NESTING_DEPTH + 1, "0").as_bytes()));
+        // An empty array or object is a level too.
+        assert!(json_valid(nested(MAX_NESTING_DEPTH - 1, "[]").as_bytes()));
+        assert!(!json_valid(nested(MAX_NESTING_DEPTH, "[]").as_bytes()));
+        assert!(!json_valid(nested(MAX_NESTING_DEPTH, "{}").as_bytes()));
+        let objects = format!(
+            "{}0{}",
+            r#"{"a":"#.repeat(MAX_NESTING_DEPTH + 1),
+            "}".repeat(MAX_NESTING_DEPTH + 1)
+        );
+        assert!(!json_valid(objects.as_bytes()));
+        // gjson has no limit.
+        assert!(gjson_valid(nested(MAX_NESTING_DEPTH + 1, "[]").as_bytes()));
+        assert!(gjson_valid(objects.as_bytes()));
+    }
+
+    #[test]
+    fn equal_fold_matches_go() {
+        assert!(equal_fold("Gemini", "gemini"));
+        assert!(equal_fold("", ""));
+        assert!(!equal_fold("gemini-cli", "gemini"));
+        assert!(!equal_fold("ab", "a"));
+        // The Kelvin and Angstrom signs, the long s and the micro sign are in
+        // orbits of three.
+        assert!(equal_fold("\u{212a}\u{212b}", "k\u{e5}"));
+        assert!(equal_fold("\u{17f}\u{b5}", "S\u{39c}"));
+        // Every theta is one orbit, though no one mapping joins the symbol
+        // and the capital symbol.
+        for (a, b) in [
+            ('\u{398}', '\u{3d1}'),
+            ('\u{3d1}', '\u{3f4}'),
+            ('\u{3b8}', '\u{3f4}'),
+        ] {
+            assert!(fold_eq(a, b) && fold_eq(b, a), "{a} {b}");
+        }
+        // Sharp s and capital sharp s; the titlecase digraphs.
+        assert!(equal_fold("\u{df}", "\u{1e9e}"));
+        assert!(equal_fold("\u{1c4}\u{1c5}", "\u{1c6}\u{1c6}"));
+        // The combining iota is an iota; the old Cyrillic forms fold too.
+        assert!(equal_fold("\u{345}\u{1fbe}", "\u{399}\u{3b9}"));
+        assert!(equal_fold("\u{1c80}\u{1c88}", "\u{432}\u{a64b}"));
+        // Neither Turkish i folds to an ASCII one.
+        assert!(!equal_fold("\u{130}", "i") && !equal_fold("\u{130}", "I"));
+        assert!(!equal_fold("\u{131}", "I") && !equal_fold("\u{131}", "i"));
+        // Ligatures with no one-character case are only themselves, though
+        // both upper-case in full to "ST".
+        assert!(!equal_fold("\u{fb05}", "\u{fb06}"));
+        assert!(!equal_fold("\u{fb05}", "st"));
+        // Upper case past ASCII against an ASCII letter.
+        assert!(!equal_fold("\u{c0}", "a"));
+    }
+
+    #[test]
+    fn simple_fold_matches_go() {
+        // unicode.SimpleFold's documented examples.
+        assert_eq!(simple_fold('A'), 'a');
+        assert_eq!(simple_fold('a'), 'A');
+        assert_eq!(simple_fold('K'), 'k');
+        assert_eq!(simple_fold('k'), '\u{212a}');
+        assert_eq!(simple_fold('\u{212a}'), 'K');
+        assert_eq!(simple_fold('1'), '1');
+        assert_eq!(simple_fold('\u{10ffff}'), '\u{10ffff}');
+        assert_eq!(simple_fold('\u{130}'), '\u{130}');
     }
 
     #[test]

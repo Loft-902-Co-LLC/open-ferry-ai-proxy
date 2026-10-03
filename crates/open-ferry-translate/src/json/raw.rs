@@ -15,7 +15,7 @@ pub(crate) fn member<'t>(object: &'t str, key: &str) -> Option<&'t str> {
         let raw_key = &object[i..key_end];
         // Past the colon.
         let start = skip_space(bytes, skip_space(bytes, key_end) + 1);
-        let end = scan_value(bytes, start)?;
+        let end = scan_value(bytes, start, usize::MAX)?;
         if key_is(raw_key, key) {
             return Some(&object[start..end]);
         }
@@ -43,18 +43,27 @@ pub(crate) fn valid(text: &str) -> bool {
 
 /// [`valid`] for bytes that may not be UTF-8.
 pub(crate) fn valid_bytes(bytes: &[u8]) -> bool {
-    scan_value(bytes, skip_space(bytes, 0)).is_some_and(|end| skip_space(bytes, end) == bytes.len())
+    valid_within(bytes, usize::MAX)
 }
 
-/// The end of the JSON value at `i`, if it is valid. Nesting is tracked on
-/// the heap, so deep input can't overflow the stack.
-fn scan_value(bytes: &[u8], mut i: usize) -> Option<usize> {
+/// [`valid_bytes`] for a value nested at most `max_depth` deep, counting
+/// every array and object, empty or not, as Go's scanner does.
+pub(crate) fn valid_within(bytes: &[u8], max_depth: usize) -> bool {
+    scan_value(bytes, skip_space(bytes, 0), max_depth)
+        .is_some_and(|end| skip_space(bytes, end) == bytes.len())
+}
+
+/// The end of the JSON value at `i`, if it is valid and nested at most
+/// `max_depth` deep. Nesting is tracked on the heap, so deep input can't
+/// overflow the stack.
+fn scan_value(bytes: &[u8], mut i: usize, max_depth: usize) -> Option<usize> {
     // The open containers; `true` for an object.
     let mut open: Vec<bool> = Vec::new();
     loop {
         // A value starts here.
         i = skip_space(bytes, i);
         match *bytes.get(i)? {
+            b'{' | b'[' if open.len() >= max_depth => return None,
             b'{' => {
                 i = skip_space(bytes, i + 1);
                 if bytes.get(i) == Some(&b'}') {

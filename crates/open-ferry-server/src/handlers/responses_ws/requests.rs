@@ -442,7 +442,7 @@ pub(super) fn merge_input(
         b"" => b"[]".as_slice(),
         trimmed => trimmed,
     };
-    let appended = if json::valid(append) {
+    let appended = if json::gjson_valid(append) {
         Val::parse(append)
     } else {
         None

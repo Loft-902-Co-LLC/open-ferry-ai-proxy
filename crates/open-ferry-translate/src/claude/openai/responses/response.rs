@@ -42,6 +42,10 @@
 //!   CPU; amd64 gives the minimum `i64`.
 //! - Upstream closes open tool calls by walking a Go map, in random order.
 //!   They are closed here in block index order.
+//! - A client's request that is JSON `null` counts as missing, so the
+//!   translated request supplies the tools and the repeated fields. Upstream
+//!   takes `null` as the request. The server routes no such request, since it
+//!   names no model.
 //! - The request's tool declarations, and the fields the final event repeats
 //!   from it, are read once, when the stream is created.
 //! - A `temperature` or `top_p` that reads as infinite or NaN is written as
@@ -1804,14 +1808,7 @@ fn incomplete_details() -> Value {
 /// `strings.EqualFold(strings.TrimSpace(stop_reason), "max_tokens")`. Go's
 /// case folding also matches the Kelvin sign with `k` and the long s with `s`.
 fn is_max_tokens(stop_reason: &str) -> bool {
-    let reason = stop_reason.trim();
-    reason.chars().count() == "max_tokens".len()
-        && reason.chars().zip("max_tokens".chars()).all(|(c, lower)| {
-            c == lower
-                || c == lower.to_ascii_uppercase()
-                || (lower == 'k' && c == '\u{212A}')
-                || (lower == 's' && c == '\u{17F}')
-        })
+    crate::go::equal_fold(stop_reason.trim(), "max_tokens")
 }
 
 /// A reasoning output item with one summary part.

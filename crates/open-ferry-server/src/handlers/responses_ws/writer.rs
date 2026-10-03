@@ -166,7 +166,7 @@ pub(super) fn close_frame_for(error: &ErrorMessage) -> Option<(u16, String)> {
             // Only a call's error carries the status upstream checks here.
             let status = error.source.as_ref()?.http_status();
             let text = error.text.as_bytes();
-            if !json::valid(text) {
+            if !json::gjson_valid(text) {
                 return None;
             }
             let code = json::get(text, "error.code").map(|code| code.str());

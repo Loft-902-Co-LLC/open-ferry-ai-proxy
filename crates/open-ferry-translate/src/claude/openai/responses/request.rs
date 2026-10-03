@@ -773,9 +773,7 @@ fn reasoning_parts_text(parts: Option<&Value>) -> String {
 }
 
 fn is_assistant(message: &Value) -> bool {
-    str_of(message.get("role"))
-        .trim()
-        .eq_ignore_ascii_case("assistant")
+    go::equal_fold(str_of(message.get("role")).trim(), "assistant")
 }
 
 /// A message's content blocks; none if its content is text.

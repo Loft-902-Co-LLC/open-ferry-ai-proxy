@@ -208,18 +208,7 @@ pub(crate) fn delete(value: &mut Value, path: &str) -> bool {
 }
 
 /// Go's `strings.EqualFold`.
-pub(crate) fn eq_fold(a: &str, b: &str) -> bool {
-    // The dotted and dotless Turkish i fold only to themselves in Go.
-    let turkish = |c: char| matches!(c, '\u{130}' | '\u{131}');
-    a.chars().count() == b.chars().count()
-        && a.chars().zip(b.chars()).all(|(x, y)| {
-            x == y
-                || (!turkish(x)
-                    && !turkish(y)
-                    && (x.to_lowercase().eq(y.to_lowercase())
-                        || x.to_uppercase().eq(y.to_uppercase())))
-        })
-}
+pub(crate) use open_ferry_translate::go::equal_fold as eq_fold;
 
 /// Go's `strings.ToLower(strings.TrimSpace(text))`.
 pub(crate) fn lower_trim(text: &str) -> String {

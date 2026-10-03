@@ -175,7 +175,8 @@ pub(crate) fn normalize_responses_tool_call_outputs(items: &[Value]) -> Vec<Cow<
 }
 
 /// `pickRequestJSON`: the client's request, else the translated one. `Null`
-/// counts as absent.
+/// counts as absent, where upstream takes a request that is JSON `null`; the
+/// server routes no such request, since it names no model.
 pub(crate) fn pick_request<'r>(
     original_request: &'r Value,
     request: &'r Value,

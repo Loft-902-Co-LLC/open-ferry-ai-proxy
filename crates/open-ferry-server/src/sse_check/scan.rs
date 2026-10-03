@@ -382,6 +382,9 @@ impl JsonCheck {
     /// The start of a value.
     fn value(&mut self, byte: u8) -> Json {
         match byte {
+            b'{' | b'[' if self.open.len() >= open_ferry_translate::go::MAX_NESTING_DEPTH => {
+                Json::Invalid
+            }
             b'{' => {
                 self.open.push(true);
                 Json::KeyOrEnd
@@ -654,6 +657,12 @@ mod tests {
         let deep = format!("{}1{}", "[".repeat(10_000), "]".repeat(10_000));
         assert!(json_valid(deep.as_bytes()));
         assert!(!json_valid(&deep.as_bytes()[1..]));
+        // Go's scanner allows 10,000 levels, an empty array among them.
+        for (depth, inner) in [(10_001, "1"), (10_000, "[]"), (10_000, "{}")] {
+            let deep = format!("{}{inner}{}", "[".repeat(depth), "]".repeat(depth));
+            assert!(!json_valid(deep.as_bytes()), "{depth} {inner}");
+            assert!(!go::json_valid(deep.as_bytes()), "{depth} {inner}");
+        }
     }
 
     #[test]

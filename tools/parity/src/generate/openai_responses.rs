@@ -222,7 +222,9 @@ impl Generator {
     /// unless it is missing or not JSON.
     fn requests(&mut self, original: &Value, model: &str) -> (String, String) {
         let original_text = match self.rng.below(100) {
-            // Absent. Not "null": upstream would take that as a request.
+            // Absent. Not "null": upstream would take that as a request,
+            // where the port counts it as absent (a documented deviation; the
+            // server routes no such request).
             0..=14 => String::new(),
             15 | 16 => "{not json".to_owned(),
             17 => "[]".to_owned(),

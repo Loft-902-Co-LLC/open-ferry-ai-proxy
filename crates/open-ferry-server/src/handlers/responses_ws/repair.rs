@@ -202,7 +202,7 @@ pub(super) fn session_key(headers: &HeaderMap) -> String {
         return request_id;
     }
     let metadata = header("x-codex-turn-metadata");
-    if !metadata.is_empty() && json::valid(metadata.as_bytes()) {
+    if !metadata.is_empty() && json::gjson_valid(metadata.as_bytes()) {
         let session_id = json::get(metadata.as_bytes(), "session_id")
             .map(|id| id.str().trim().to_owned())
             .unwrap_or_default();

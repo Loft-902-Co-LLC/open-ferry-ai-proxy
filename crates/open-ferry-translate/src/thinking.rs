@@ -65,12 +65,12 @@ pub fn level_to_budget(level: &str) -> Option<i64> {
     })
 }
 
-/// Reports whether `levels` holds `target`, ignoring case and surrounding
-/// whitespace. `target` must be ASCII.
+/// Reports whether `levels` holds `target`, ignoring case as Go's
+/// `strings.EqualFold` does, and surrounding whitespace.
 pub fn has_level(levels: &[String], target: &str) -> bool {
     levels
         .iter()
-        .any(|level| level.trim().eq_ignore_ascii_case(target))
+        .any(|level| go::equal_fold(level.trim(), target))
 }
 
 /// Maps a reasoning level onto a Claude adaptive thinking effort: `low`,

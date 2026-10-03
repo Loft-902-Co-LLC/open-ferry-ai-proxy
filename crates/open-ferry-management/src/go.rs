@@ -15,51 +15,7 @@ use std::fmt::Write as _;
 
 use chrono::{TimeZone, Utc};
 use open_ferry_core::auth::Timestamp;
-pub(crate) use open_ferry_translate::go::to_upper;
-
-/// Go's `strings.EqualFold`: whether `a` and `b` are equal under simple
-/// Unicode case folding.
-pub(crate) fn equal_fold(a: &str, b: &str) -> bool {
-    let mut left = a.chars();
-    let mut right = b.chars();
-    loop {
-        match (left.next(), right.next()) {
-            (None, None) => return true,
-            (Some(x), Some(y)) if fold_eq(x, y) => {}
-            _ => return false,
-        }
-    }
-}
-
-/// Whether two characters are in the same simple case-folding orbit.
-fn fold_eq(a: char, b: char) -> bool {
-    if a == b {
-        return true;
-    }
-    // The dotted and dotless Turkish i fold only to themselves in Go.
-    if matches!(a, '\u{130}' | '\u{131}') || matches!(b, '\u{130}' | '\u{131}') {
-        return false;
-    }
-    simple_lower(a) == simple_lower(b) || simple_upper(a) == simple_upper(b)
-}
-
-/// The lowercase of `c` when it is one character, else `c`.
-fn simple_lower(c: char) -> char {
-    let mut mapped = c.to_lowercase();
-    match (mapped.next(), mapped.next()) {
-        (Some(lower), None) => lower,
-        _ => c,
-    }
-}
-
-/// The uppercase of `c` when it is one character, else `c`.
-fn simple_upper(c: char) -> char {
-    let mut mapped = c.to_uppercase();
-    match (mapped.next(), mapped.next()) {
-        (Some(upper), None) => upper,
-        _ => c,
-    }
-}
+pub(crate) use open_ferry_translate::go::{equal_fold, to_upper};
 
 /// Go's `strconv.ParseBool`.
 pub(crate) fn parse_bool(s: &str) -> Option<bool> {

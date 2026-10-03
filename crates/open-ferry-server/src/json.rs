@@ -704,9 +704,16 @@ pub(crate) fn json_string(s: &str) -> String {
     out
 }
 
-/// gjson `Valid` (`open_ferry_translate::go::json_valid`, which is public).
+/// Go's `json.Valid` (`open_ferry_translate::go::json_valid`, which is
+/// public).
 pub(crate) fn valid(bytes: &[u8]) -> bool {
     open_ferry_translate::go::json_valid(bytes)
+}
+
+/// gjson `Valid`, which has no limit on nesting
+/// (`open_ferry_translate::go::gjson_valid`).
+pub(crate) fn gjson_valid(bytes: &[u8]) -> bool {
+    open_ferry_translate::go::gjson_valid(bytes)
 }
 
 /// `value` with each object's keys in the order Go's `json.Marshal` writes

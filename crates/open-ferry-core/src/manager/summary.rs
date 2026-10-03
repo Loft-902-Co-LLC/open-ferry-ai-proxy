@@ -128,7 +128,7 @@ pub(crate) fn extract_upstream_error_summary(raw: &str) -> String {
     {
         json_part = raw.get(index + 2..).unwrap_or_default().trim();
     }
-    if open_ferry_translate::go::json_valid(json_part.as_bytes())
+    if open_ferry_translate::go::gjson_valid(json_part.as_bytes())
         && let Ok(parsed) = serde_json::from_str::<Value>(json_part)
     {
         let (mut code, mut message) = (String::new(), String::new());
