@@ -51,7 +51,6 @@ use open_ferry_translate::registry::{Registry, ResponseContext};
 use serde_json::Value;
 
 use super::client::{Clients, error_chain, read_body, read_body_prefix};
-use super::gjson::str_at;
 use super::jwt::{DEFAULT_PLAN_TYPE, parse_jwt_token};
 use super::oauth::{CodexAuth, Endpoints};
 use super::request::{
@@ -67,6 +66,7 @@ use super::terminal::{
 use super::token::{CREDENTIAL_TYPE, now_rfc3339};
 use super::tokens::{count_input_tokens, tokenizer_for};
 use super::usage::ensure_responses_usage_details;
+use crate::json::str_at;
 
 /// The `alt` of a `/responses/compact` call.
 const COMPACT_ALT: &str = "responses/compact";

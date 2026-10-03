@@ -25,7 +25,7 @@ use std::collections::HashSet;
 
 use serde_json::{Map, Value};
 
-use super::gjson::str_of;
+use crate::json::str_of;
 
 /// How many branches a union needs before it is turned into an enum.
 const COMPLEX_UNION_BRANCHES: usize = 8;
@@ -332,7 +332,7 @@ fn equal_canonical_sets(a: &[String], b: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codex::gjson::{exists, get, str_at};
+    use crate::json::{exists, get, str_at};
     use serde_json::json;
 
     fn normalized(body: Value) -> Value {

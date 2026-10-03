@@ -17,7 +17,7 @@ use std::fmt::Write as _;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::gjson::{set, str_of};
+use crate::json::{set, str_of};
 
 /// The longest ID Codex takes, in characters.
 const ID_LIMIT: usize = 64;
@@ -171,7 +171,7 @@ fn with_hash_suffix(id: &str, attempt: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codex::gjson::str_at;
+    use crate::json::str_at;
     use serde_json::json;
 
     fn sanitized(body: &str) -> Value {

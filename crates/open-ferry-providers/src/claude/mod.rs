@@ -35,7 +35,6 @@
 mod client;
 mod executor;
 mod headers;
-mod json;
 pub mod oauth;
 mod ratelimit;
 mod request;

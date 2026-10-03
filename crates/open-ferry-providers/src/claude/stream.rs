@@ -34,9 +34,9 @@ use open_ferry_translate::registry::ResponseStream;
 use serde_json::Value;
 
 use super::client::error_chain;
-use super::json::str_at;
 use super::ratelimit::{plain_error, wrap_fast};
 use super::usage::ensure_responses_usage_details;
+use crate::json::str_at;
 
 /// The longest line read, as upstream's scanner allows.
 pub(crate) const MAX_LINE: usize = 52_428_800;

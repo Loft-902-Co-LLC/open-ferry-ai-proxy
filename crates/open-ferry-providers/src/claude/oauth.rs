@@ -61,12 +61,13 @@ use futures_util::FutureExt;
 use futures_util::future::{BoxFuture, Shared};
 use http::HeaderMap;
 use open_ferry_core::auth::Auth;
+use open_ferry_translate::go::json_string;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 use super::client::{Clients, error_chain, read_body};
-use super::json::{go_json_string, key_of, object_or_null, set_int, set_string};
 use super::token::{AuthBundle, TokenData, create_token_storage, credential_file_name, expiry};
+use crate::json::{key_of, object_or_null, set_int, set_string};
 use crate::oauth::{CallbackError, CallbackResult, CallbackServer, Pkce, generate_state};
 
 /// Claude's OAuth client ID.
@@ -360,11 +361,11 @@ impl ClaudeAuth {
         let body = format!(
             "{{\"grant_type\":\"authorization_code\",\"code\":{},\"redirect_uri\":{},\
              \"client_id\":{},\"code_verifier\":{},\"state\":{}}}",
-            go_json_string(code),
-            go_json_string(REDIRECT_URI),
-            go_json_string(CLIENT_ID),
-            go_json_string(&pkce.verifier),
-            go_json_string(state),
+            json_string(code),
+            json_string(REDIRECT_URI),
+            json_string(CLIENT_ID),
+            json_string(&pkce.verifier),
+            json_string(state),
         );
         let response = self.json_request(body).send().await.map_err(|e| {
             Error::new(format!(
@@ -448,9 +449,9 @@ impl ClaudeAuth {
         // Keys in the order Go writes a map.
         let body = format!(
             "{{\"client_id\":{},\"grant_type\":\"refresh_token\",\"refresh_token\":{},\"scope\":{}}}",
-            go_json_string(CLIENT_ID),
-            go_json_string(refresh_token),
-            go_json_string(SCOPE),
+            json_string(CLIENT_ID),
+            json_string(refresh_token),
+            json_string(SCOPE),
         );
         let response = self
             .json_request(body)
@@ -646,7 +647,7 @@ async fn read_oauth_body(response: reqwest::Response) -> Result<Vec<u8>, String>
         .map_err(|e| e.to_string())?;
     let joined = encodings.join(",");
     for encoding in joined.split(',').rev() {
-        let encoding = super::json::lower_trim(encoding);
+        let encoding = crate::json::lower_trim(encoding);
         if encoding.is_empty() || encoding == "identity" {
             continue;
         }

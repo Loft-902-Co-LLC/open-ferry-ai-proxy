@@ -17,7 +17,7 @@
 use open_ferry_translate::signature::inspect_gpt_reasoning_signature;
 use serde_json::{Map, Value, json};
 
-use super::gjson::{bool_of, get, str_at, str_of};
+use crate::json::{bool_of, get, str_at, str_of};
 
 /// Sanitizes the reasoning items of `body`'s `input`
 /// (`sanitizeOpenAIResponsesReasoningEncryptedContentWithCompat`). With

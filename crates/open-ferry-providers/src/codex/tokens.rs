@@ -17,7 +17,7 @@ use open_ferry_translate::go::to_lower;
 use serde_json::Value;
 use tiktoken_rs::CoreBPE;
 
-use super::gjson::{get, str_of};
+use crate::json::{get, str_of};
 
 /// The tokenizer for `model` (`tokenizerForCodexModel`).
 pub(crate) fn tokenizer_for(model: &str) -> &'static CoreBPE {

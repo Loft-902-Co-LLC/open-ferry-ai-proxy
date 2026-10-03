@@ -28,7 +28,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use open_ferry_core::exec::ExecError;
 use serde_json::{Value, json};
 
-use super::gjson::{eq_fold_trim, exists, get, int_at, int_of, set, str_at, str_of};
+use crate::json::{eq_fold, exists, get, int_at, int_of, set, str_at, str_of};
 
 /// The error for a stream that ended before its terminal event.
 pub(crate) const INCOMPLETE_STREAM_MESSAGE: &str =
@@ -247,7 +247,7 @@ fn is_model_capacity(body: &[u8], parsed: &Value) -> bool {
 fn is_usage_limit(parsed: &Value) -> bool {
     ["error.type", "type"]
         .iter()
-        .any(|path| eq_fold_trim(&str_at(parsed, path), "usage_limit_reached"))
+        .any(|path| eq_fold(str_at(parsed, path).trim(), "usage_limit_reached"))
 }
 
 /// How long until a usage limit resets, for a 429 (`parseCodexRetryAfter`).
@@ -257,7 +257,7 @@ fn parse_retry_after(status: u16, body: &str, parsed: &Value, now: SystemTime) -
     }
     let quotas = [get(parsed, "error"), Some(parsed)];
     for quota in quotas.into_iter().flatten() {
-        if !eq_fold_trim(&str_at(quota, "type"), "usage_limit_reached") {
+        if !eq_fold(str_at(quota, "type").trim(), "usage_limit_reached") {
             continue;
         }
         let resets_at = int_at(quota, "resets_at");

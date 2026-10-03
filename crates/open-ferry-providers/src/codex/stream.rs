@@ -37,13 +37,13 @@ use serde_json::Value;
 
 use super::claude_tokens;
 use super::client::error_chain;
-use super::gjson::{get, str_at, str_of};
 use super::terminal::{
     OutputItems, empty_incomplete_stream_error, has_meaningful_output_delta,
     incomplete_stream_error, is_terminal_empty_incomplete, normalize_completion,
     terminal_failure_error,
 };
 use super::usage::ensure_responses_usage_details;
+use crate::json::{get, str_at, str_of};
 
 /// The longest line read, as upstream's scanner allows.
 pub(crate) const MAX_LINE: usize = 52_428_800;

@@ -17,8 +17,8 @@ use serde_json::{Value, json};
 
 use super::*;
 use crate::codex::client::USER_AGENT;
-use crate::codex::gjson::{exists, get};
 use crate::codex::reasoning::tests::valid_signature;
+use crate::json::{exists, get};
 
 /// One request the mock received.
 #[derive(Clone, Debug)]

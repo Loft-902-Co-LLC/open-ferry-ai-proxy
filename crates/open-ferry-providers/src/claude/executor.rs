@@ -54,7 +54,6 @@ use serde_json::{Map, Value};
 
 use super::client::{Clients, error_chain, read_body, read_body_prefix};
 use super::headers::{self, Inputs};
-use super::json::{self, Body};
 use super::oauth::{ClaudeAuth, Endpoints, REFRESH_LEAD};
 use super::ratelimit::{classify, fast_direct_error, plain_error, wrap_fast};
 use super::request::{
@@ -68,6 +67,7 @@ use super::stream::{self, MAX_LINE, StreamSetup, apply_patch_error};
 use super::thinking;
 use super::token::{CREDENTIAL_TYPE, now_rfc3339};
 use super::usage::ensure_responses_usage_details;
+use crate::json::{self, Body};
 
 /// The `alt` of a `/responses/compact` call.
 const COMPACT_ALT: &str = "responses/compact";

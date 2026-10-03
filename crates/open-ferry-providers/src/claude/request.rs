@@ -29,7 +29,7 @@ use open_ferry_core::auth::Auth;
 use open_ferry_core::models::ModelCatalog;
 use open_ferry_translate::signature::{Provider, sanitize_claude_messages_for_claude_upstream};
 
-use super::json;
+use crate::json;
 
 pub(crate) const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 

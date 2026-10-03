@@ -13,7 +13,7 @@
 use open_ferry_translate::go::trim_space;
 use serde_json::{Value, json};
 
-use super::json::{get_mut, str_at};
+use crate::json::{get_mut, str_at};
 
 /// Adds `output_tokens_details.reasoning_tokens` and
 /// `input_tokens_details.cached_tokens`, as 0, to a Responses body's or SSE
@@ -115,13 +115,13 @@ fn ensure_at(value: &mut Value, path: &str) -> bool {
 /// Whether `path` holds a usage object; for tests.
 #[cfg(test)]
 fn has_usage(value: &Value, path: &str) -> bool {
-    super::json::get(value, path).is_some_and(Value::is_object)
+    crate::json::get(value, path).is_some_and(Value::is_object)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::claude::json::int_at;
+    use crate::json::int_at;
 
     fn ensure(raw: &str) -> String {
         String::from_utf8(ensure_responses_usage_details(raw.as_bytes().to_vec())).unwrap()

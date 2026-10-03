@@ -17,7 +17,7 @@
 use open_ferry_core::exec::Format;
 use serde_json::Value;
 
-use super::gjson::{get, int_of, set, str_of};
+use crate::json::{get, int_of, set, str_of};
 
 /// Per-stream state: whether the `message_start` still needs looking at
 /// (`ClaudeInputTokenState`).
@@ -323,7 +323,7 @@ impl Segments {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codex::gjson::int_at;
+    use crate::json::int_at;
 
     fn state() -> State {
         State::new(&Format::CLAUDE, &Format::OPENAI, &Format::CLAUDE)

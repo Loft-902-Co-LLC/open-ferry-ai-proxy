@@ -32,7 +32,7 @@ use open_ferry_translate::thinking::{budget_to_level, level_to_budget};
 use serde_json::Value;
 use tracing::{debug, warn};
 
-use super::json::{self, Body};
+use crate::json::{self, Body};
 
 const TARGET: &str = "claude";
 

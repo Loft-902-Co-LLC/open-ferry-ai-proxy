@@ -1,16 +1,40 @@
-//! The gjson, sjson and Go JSON behaviour that upstream's Codex code relies
-//! on, over `serde_json` values.
+//! The gjson, sjson and Go JSON behaviour that upstream's Codex and Claude
+//! code relies on, over `serde_json` values.
 //!
-//! These repeat a few crate-private helpers of `open_ferry_translate`
-//! (`json::str_of`, `int_of`, `bool_of`, `go::json_string`), so that this
-//! module doesn't change that crate.
+//! These repeat a few crate-private helpers of `open_ferry_translate`, so
+//! that this module doesn't change that crate.
 //!
 //! Paths are dotted, as gjson's: each part is an object key or, on an array,
 //! an index.
 
-use std::fmt::Write as _;
-
 use serde_json::{Map, Value};
+
+/// A request body as upstream holds it, in bytes: empty, not JSON, or JSON.
+pub(crate) enum Body {
+    Empty,
+    Invalid,
+    Json(Value),
+}
+
+impl Body {
+    pub(crate) fn parse(bytes: &[u8]) -> Self {
+        if bytes.is_empty() {
+            return Self::Empty;
+        }
+        serde_json::from_slice(bytes).map_or(Self::Invalid, Self::Json)
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        matches!(self, Self::Empty)
+    }
+
+    pub(crate) fn json(&self) -> Option<&Value> {
+        match self {
+            Self::Json(value) => Some(value),
+            _ => None,
+        }
+    }
+}
 
 /// gjson `Get` for a dotted path of object keys and array indexes.
 pub(crate) fn get<'v>(value: &'v Value, path: &str) -> Option<&'v Value> {
@@ -33,14 +57,13 @@ pub(crate) fn get_mut<'v>(value: &'v mut Value, path: &str) -> Option<&'v mut Va
     })
 }
 
-/// gjson `Exists`.
+/// gjson `Exists`: true for a `null` too.
 pub(crate) fn exists(value: &Value, path: &str) -> bool {
     get(value, path).is_some()
 }
 
 /// gjson `String()`: a string as it is, missing or null as `""`, other
-/// scalars as text, and objects and arrays as compact JSON (gjson gives the
-/// raw text).
+/// scalars as text, and objects and arrays as compact JSON.
 pub(crate) fn str_of(value: Option<&Value>) -> String {
     match value {
         None | Some(Value::Null) => String::new(),
@@ -68,6 +91,11 @@ pub(crate) fn str_of(value: Option<&Value>) -> String {
 /// [`str_of`] at `path`.
 pub(crate) fn str_at(value: &Value, path: &str) -> String {
     str_of(get(value, path))
+}
+
+/// The string at `path`, if it is one (gjson's `Type == String`).
+pub(crate) fn string_at<'v>(value: &'v Value, path: &str) -> Option<&'v str> {
+    get(value, path).and_then(Value::as_str)
 }
 
 /// gjson `Int()`. A float out of `i64`'s range saturates.
@@ -164,8 +192,8 @@ pub(crate) fn set(value: &mut Value, path: &str, new: Value) -> bool {
     true
 }
 
-/// sjson `Delete` for a dotted path of object keys. Returns whether a value
-/// was removed; the remaining keys keep their order.
+/// sjson `Delete` for a dotted path. Returns whether a value was removed;
+/// the remaining keys keep their order.
 pub(crate) fn delete(value: &mut Value, path: &str) -> bool {
     let (parent, key) = match path.rsplit_once('.') {
         Some((parent, key)) => match get_mut(value, parent) {
@@ -179,38 +207,79 @@ pub(crate) fn delete(value: &mut Value, path: &str) -> bool {
         .is_some_and(|object| object.shift_remove(key).is_some())
 }
 
-/// Go's `json.Marshal` of a string, with its HTML escapes.
-pub(crate) fn json_string(text: &str) -> String {
-    let mut out = String::with_capacity(text.len() + 2);
-    out.push('"');
-    for c in text.chars() {
-        match c {
-            '"' | '\\' => {
-                out.push('\\');
-                out.push(c);
-            }
-            '\u{8}' => out.push_str("\\b"),
-            '\u{c}' => out.push_str("\\f"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c < ' ' || matches!(c, '<' | '>' | '&' | '\u{2028}' | '\u{2029}') => {
-                let _ = write!(out, "\\u{:04x}", u32::from(c));
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
-/// Go's `strings.EqualFold` of `a`, trimmed, and `b`.
-pub(crate) fn eq_fold_trim(a: &str, b: &str) -> bool {
-    let a = a.trim();
+/// Go's `strings.EqualFold`.
+pub(crate) fn eq_fold(a: &str, b: &str) -> bool {
     a.chars().count() == b.chars().count()
         && a.chars().zip(b.chars()).all(|(x, y)| {
             x == y || x.to_lowercase().eq(y.to_lowercase()) || x.to_uppercase().eq(y.to_uppercase())
         })
+}
+
+/// Go's `strings.ToLower(strings.TrimSpace(text))`.
+pub(crate) fn lower_trim(text: &str) -> String {
+    open_ferry_translate::go::to_lower(text.trim())
+}
+
+/// What Go's `json.Unmarshal` into a struct needs: the struct's object, or
+/// `None` for `null`, or Go's error for anything else.
+pub(crate) fn object_or_null<'v>(
+    value: &'v Value,
+    field: &str,
+) -> Result<Option<&'v Map<String, Value>>, String> {
+    match value {
+        Value::Null => Ok(None),
+        Value::Object(object) => Ok(Some(object)),
+        _ => Err(type_error(value, field, "struct")),
+    }
+}
+
+/// The struct field a JSON key fills: an exact match first, then one equal
+/// under case folding, as Go's decoder matches.
+pub(crate) fn key_of(key: &str, fields: &[&'static str]) -> Option<&'static str> {
+    fields
+        .iter()
+        .find(|field| **field == key)
+        .or_else(|| fields.iter().find(|field| eq_fold(field, key)))
+        .copied()
+}
+
+/// Sets a Go `string` field: `null` leaves it.
+pub(crate) fn set_string(target: &mut String, value: &Value, field: &str) -> Result<(), String> {
+    match value {
+        Value::Null => Ok(()),
+        Value::String(text) => {
+            text.clone_into(target);
+            Ok(())
+        }
+        _ => Err(type_error(value, field, "string")),
+    }
+}
+
+/// Sets a Go `int` field: only an integer literal in range fits.
+pub(crate) fn set_int(target: &mut i64, value: &Value, field: &str) -> Result<(), String> {
+    match value {
+        Value::Null => Ok(()),
+        Value::Number(number) => {
+            *target = number
+                .to_string()
+                .parse()
+                .map_err(|_| type_error(value, field, "int"))?;
+            Ok(())
+        }
+        _ => Err(type_error(value, field, "int")),
+    }
+}
+
+fn type_error(value: &Value, field: &str, go_type: &str) -> String {
+    let kind = match value {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    };
+    format!("json: cannot unmarshal {kind} into Go struct field {field} of type {go_type}")
 }
 
 #[cfg(test)]
@@ -229,12 +298,15 @@ mod tests {
         assert_eq!(str_at(&value, "a.b.1"), r#"{"c":"x"}"#);
         assert!(exists(&value, "z"));
         assert!(!exists(&value, "a.b.2"));
+        assert!(!exists(&value, "i.x"));
         assert_eq!(int_at(&value, "n"), 1);
         assert_eq!(int_of(Some(&json!("12"))), 12);
         assert_eq!(int_of(Some(&json!("1.2"))), 0);
         assert!(bool_of(get(&value, "t")));
         assert!(bool_of(Some(&json!(2))));
         assert!(!bool_of(Some(&json!("yes"))));
+        assert_eq!(string_at(&value, "a.b.1.c"), Some("x"));
+        assert_eq!(string_at(&value, "i"), None);
     }
 
     #[test]
@@ -251,18 +323,34 @@ mod tests {
         assert!(delete(&mut value, "a"));
         assert!(!delete(&mut value, "a"));
         assert!(delete(&mut value, "b.c"));
-        assert_eq!(value.to_string(), r#"{"list":[{"id":"x"}],"b":{}}"#);
+        assert!(delete(&mut value, "list.0.id"));
+        assert_eq!(value.to_string(), r#"{"list":[{}],"b":{}}"#);
     }
 
     #[test]
-    fn marshals_strings_like_go() {
-        assert_eq!(json_string("a<b>&\"\n"), r#""a\u003cb\u003e\u0026\"\n""#);
+    fn decodes_fields_like_go() {
+        assert_eq!(
+            key_of("ACCESS_TOKEN", &["access_token"]),
+            Some("access_token")
+        );
+        let mut text = String::from("keep");
+        set_string(&mut text, &Value::Null, "t.f").unwrap();
+        assert_eq!(text, "keep");
+        assert_eq!(
+            set_string(&mut text, &json!(1), "t.f").unwrap_err(),
+            "json: cannot unmarshal number into Go struct field t.f of type string"
+        );
+        let mut number = 0;
+        set_int(&mut number, &json!(3600), "t.n").unwrap();
+        assert_eq!(number, 3600);
+        assert!(set_int(&mut number, &json!(1.5), "t.n").is_err());
+        assert!(object_or_null(&json!([]), "t").is_err());
     }
 
     #[test]
     fn folds_case_like_go() {
-        assert!(eq_fold_trim(" TRUE ", "true"));
-        assert!(eq_fold_trim("Codex", "codex"));
-        assert!(!eq_fold_trim("codexx", "codex"));
+        assert!(eq_fold("Codex", "codex"));
+        assert!(!eq_fold("codexx", "codex"));
+        assert_eq!(lower_trim(" TRUE "), "true");
     }
 }

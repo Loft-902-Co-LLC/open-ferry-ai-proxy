@@ -30,7 +30,7 @@ use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 use http::HeaderMap;
 use open_ferry_core::exec::{ErrorKind, ExecError};
 
-use super::json::{lower_trim, str_at};
+use crate::json::{lower_trim, str_at};
 
 /// The random grace added to a reset, in whole seconds.
 const FUZZ_MIN_SECONDS: u64 = 1;

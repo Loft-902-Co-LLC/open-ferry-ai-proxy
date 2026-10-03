@@ -49,11 +49,11 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 use super::client::{Clients, error_chain, read_body};
+use super::jwt;
 use super::jwt::{DEFAULT_PLAN_TYPE, parse_jwt_token, plan_type_or_default};
 use super::token::{
     AuthBundle, TokenData, create_token_storage, credential_file_name, now_rfc3339,
 };
-use super::{gjson, jwt};
 use crate::oauth::{CallbackError, CallbackResult, CallbackServer, Pkce, generate_state};
 
 /// OpenAI's OAuth client ID for Codex.
@@ -788,7 +788,10 @@ struct DeviceUserCode {
 }
 
 async fn request_device_user_code(auth: &CodexAuth) -> Result<DeviceUserCode, Error> {
-    let body = format!("{{\"client_id\":{}}}", gjson::json_string(CLIENT_ID));
+    let body = format!(
+        "{{\"client_id\":{}}}",
+        open_ferry_translate::go::json_string(CLIENT_ID)
+    );
     let response = auth
         .post_json(&auth.endpoints.device_user_code_url, body)
         .await
@@ -875,8 +878,8 @@ async fn poll_device_token(
     let deadline = tokio::time::Instant::now() + DEVICE_TIMEOUT;
     let body = format!(
         "{{\"device_auth_id\":{},\"user_code\":{}}}",
-        gjson::json_string(device_auth_id),
-        gjson::json_string(user_code)
+        open_ferry_translate::go::json_string(device_auth_id),
+        open_ferry_translate::go::json_string(user_code)
     );
     loop {
         if tokio::time::Instant::now() > deadline {

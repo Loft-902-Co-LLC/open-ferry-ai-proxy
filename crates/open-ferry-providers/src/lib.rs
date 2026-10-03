@@ -6,4 +6,5 @@
 
 pub mod claude;
 pub mod codex;
+mod json;
 pub mod oauth;

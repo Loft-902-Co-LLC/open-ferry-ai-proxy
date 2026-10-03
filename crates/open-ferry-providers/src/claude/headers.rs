@@ -45,11 +45,11 @@ use http::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::Value;
 
 use super::client;
-use super::json;
 use super::request::{
     ADVISOR_TOOL_BETA, AFTER_ADVISOR_BETAS, CLAUDE_CODE_BETA, EXTENDED_CACHE_TTL_BETA,
     FAST_MODE_BETA, OAUTH_BETA, is_oauth_token, payload_has_1h_ttl,
 };
+use crate::json;
 
 const ANTHROPIC_BETA: &str = "anthropic-beta";
 const ANTHROPIC_VERSION: &str = "anthropic-version";

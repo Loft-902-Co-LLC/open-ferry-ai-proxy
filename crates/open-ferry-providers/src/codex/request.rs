@@ -49,10 +49,10 @@ use open_ferry_translate::registry::Registry;
 use serde_json::{Map, Value};
 
 use super::client::USER_AGENT;
-use super::gjson::{delete, eq_fold_trim, exists, get, set, str_of};
 use super::input_ids::sanitize_input_item_ids;
 use super::reasoning::sanitize_reasoning;
 use super::tool_schema::normalize_tool_schemas;
+use crate::json::{delete, eq_fold, exists, get, set, str_of};
 
 /// Codex's API, for credentials that name no `base_url`.
 pub(crate) const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
@@ -126,7 +126,7 @@ pub(crate) fn response_format(options: &Options) -> Format {
 /// Whether `format`, trimmed, is `want` regardless of case
 /// (`sourceFormatEqual`).
 pub(crate) fn format_is(format: &Format, want: &Format) -> bool {
-    eq_fold_trim(format.as_str(), want.as_str())
+    eq_fold(format.as_str().trim(), want.as_str())
 }
 
 /// A JSON payload as an object; anything else is an empty one.
@@ -203,7 +203,7 @@ pub(crate) fn endpoint(auth: &Auth, default_base: &str, compact: bool) -> String
 pub(crate) fn is_responses_lite(body: &Value, headers: &HeaderMap) -> bool {
     if headers
         .get(RESPONSES_LITE_HEADER)
-        .is_some_and(|value| eq_fold_trim(&String::from_utf8_lossy(value.as_bytes()), "true"))
+        .is_some_and(|value| eq_fold(String::from_utf8_lossy(value.as_bytes()).trim(), "true"))
     {
         return true;
     }
@@ -212,7 +212,7 @@ pub(crate) fn is_responses_lite(body: &Value, headers: &HeaderMap) -> bool {
         "client_metadata.ws_request_header_x_openai_internal_codex_responses_lite",
     ) {
         Some(Value::Bool(flag)) => *flag,
-        Some(Value::String(text)) => eq_fold_trim(text, "true"),
+        Some(Value::String(text)) => eq_fold(text.trim(), "true"),
         _ => false,
     }
 }
@@ -466,7 +466,7 @@ fn apply_custom_headers(
             continue;
         }
         let value: &[u8] = match value.strip_prefix('$') {
-            Some(variable) if eq_fold_trim(variable, "CPA-SESSION-ID") => continue,
+            Some(variable) if eq_fold(variable.trim(), "CPA-SESSION-ID") => continue,
             _ if value.to_uppercase().contains("$CPA-SESSION-ID") => continue,
             Some(variable) => {
                 let variable = variable.trim();
@@ -498,7 +498,7 @@ fn apply_custom_headers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codex::gjson::bool_of;
+    use crate::json::bool_of;
     use serde_json::json;
 
     fn truthy(body: &Value, path: &str) -> bool {

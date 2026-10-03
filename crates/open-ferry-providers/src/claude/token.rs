@@ -29,7 +29,7 @@ use open_ferry_core::auth::{Auth, AuthStore};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
-use super::json::eq_fold;
+use crate::json::eq_fold;
 
 /// The `type` of a Claude credential file.
 pub const CREDENTIAL_TYPE: &str = "claude";
