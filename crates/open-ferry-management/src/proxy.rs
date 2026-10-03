@@ -21,8 +21,9 @@
 //! - Upstream builds a new connection pool for every call; this port keeps
 //!   a client per proxy, at most 16, and starts over when that is reached.
 //!   Idle connections close after 90 seconds, as upstream's would.
-//! - The config has only `claude-api-key` and `codex-api-key` lists so far,
-//!   so a key of another provider never finds a proxy in the config.
+//! - The config has only `claude-api-key`, `codex-api-key` and
+//!   `openai-compatibility` lists so far, so a key of another provider never
+//!   finds a proxy in the config.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
@@ -205,8 +206,8 @@ fn proxy_url_from_api_key_config(config: &Config, auth: &Auth) -> String {
     let compat_name = auth.attribute("compat_name").unwrap_or_default().trim();
     let provider = auth.provider.trim();
     if !compat_name.is_empty() || equal_fold(provider, "openai-compatibility") {
-        // No OpenAI-compatible providers are configurable yet.
-        return String::new();
+        let provider_key = auth.attribute("provider_key").unwrap_or_default().trim();
+        return resolve_openai_compat_api_key_proxy_url(config, auth, provider_key, compat_name);
     }
     let proxy = match open_ferry_translate::go::to_lower(provider).as_str() {
         "claude" => {
@@ -216,6 +217,43 @@ fn proxy_url_from_api_key_config(config: &Config, auth: &Auth) -> String {
         _ => None,
     };
     proxy.unwrap_or_default().trim().to_owned()
+}
+
+/// The proxy of an OpenAI-compatible credential's API key: that of the
+/// matching key in the first enabled provider named by the credential's
+/// `compat_name`, `provider_key` or provider, or empty (upstream's
+/// `resolveOpenAICompatAPIKeyProxyURL`).
+fn resolve_openai_compat_api_key_proxy_url(
+    config: &Config,
+    auth: &Auth,
+    provider_key: &str,
+    compat_name: &str,
+) -> String {
+    let api_key = auth.attribute("api_key").unwrap_or_default().trim();
+    if api_key.is_empty() {
+        return String::new();
+    }
+    let candidates: Vec<&str> = [compat_name, provider_key, auth.provider.trim()]
+        .into_iter()
+        .filter(|candidate| !candidate.is_empty())
+        .collect();
+    for compat in &config.openai_compatibility {
+        if compat.disabled {
+            continue;
+        }
+        if candidates
+            .iter()
+            .any(|candidate| equal_fold(candidate, &compat.name))
+        {
+            return compat
+                .api_key_entries
+                .iter()
+                .find(|entry| equal_fold(entry.api_key.trim(), api_key))
+                .map(|entry| entry.proxy_url.trim().to_owned())
+                .unwrap_or_default();
+        }
+    }
+    String::new()
 }
 
 /// The HTTP clients for `api-call`, one per route and HTTP version policy.
@@ -275,7 +313,9 @@ impl std::fmt::Debug for Clients {
 
 #[cfg(test)]
 mod tests {
-    use open_ferry_core::config::{ClaudeKey, CodexKey};
+    use open_ferry_core::config::{
+        ClaudeKey, CodexKey, OpenAiCompatibility, OpenAiCompatibilityApiKey,
+    };
 
     use super::*;
 
@@ -386,6 +426,74 @@ mod tests {
             proxy("claude", &[("api_key", "k1"), ("compat_name", "x")]),
             ""
         );
+    }
+
+    // The openai-compatibility case of
+    // TestAPICallTransportAPIKeyAuthFallsBackToConfigProxyURL, with the
+    // lookup's other rules.
+    #[test]
+    fn openai_compatible_keys_use_their_entry() {
+        let entry = |key: &str, proxy: &str| OpenAiCompatibilityApiKey {
+            api_key: key.into(),
+            proxy_url: proxy.into(),
+            ..OpenAiCompatibilityApiKey::default()
+        };
+        let mut config = Config::default();
+        config.openai_compatibility = vec![
+            OpenAiCompatibility {
+                name: "off".into(),
+                disabled: true,
+                api_key_entries: vec![entry("compat-key", "http://disabled:1")],
+                ..OpenAiCompatibility::default()
+            },
+            OpenAiCompatibility {
+                name: "bohe".into(),
+                base_url: "https://bohe.example.com".into(),
+                api_key_entries: vec![entry(
+                    "compat-key",
+                    " http://compat-proxy.example.com:8080 ",
+                )],
+                ..OpenAiCompatibility::default()
+            },
+            OpenAiCompatibility {
+                name: "Off".into(),
+                api_key_entries: vec![entry("compat-key", "http://second-off:1")],
+                ..OpenAiCompatibility::default()
+            },
+        ];
+        let proxy = |provider, attrs: &[(&str, &str)]| {
+            proxy_url_from_api_key_config(&config, &auth(provider, attrs))
+        };
+        assert_eq!(
+            proxy(
+                "bohe",
+                &[
+                    ("api_key", "compat-key"),
+                    ("compat_name", "bohe"),
+                    ("provider_key", "bohe"),
+                ]
+            ),
+            "http://compat-proxy.example.com:8080"
+        );
+        assert_eq!(
+            proxy(
+                "openai-compatibility",
+                &[("api_key", "COMPAT-KEY"), ("provider_key", "BOHE")]
+            ),
+            "http://compat-proxy.example.com:8080",
+            "the provider key names the provider; keys match in any case"
+        );
+        assert_eq!(
+            proxy("x", &[("api_key", "other"), ("compat_name", "bohe")]),
+            "",
+            "the first provider named decides"
+        );
+        assert_eq!(
+            proxy("x", &[("api_key", "compat-key"), ("compat_name", "off")]),
+            "http://second-off:1",
+            "disabled providers are passed over"
+        );
+        assert_eq!(proxy("x", &[("compat_name", "bohe")]), "", "no key");
     }
 
     #[test]
