@@ -25,6 +25,9 @@
 //!   session-affinity and usage-logging keys, which aren't ported.
 //! - Errors are one type, [`ExecError`], where upstream checks an error for
 //!   optional methods (`StatusCode`, `Headers`, `IsTerminalAuth` and so on).
+//! - The Responses WebSocket learns what it needs about credentials from one
+//!   query, [`Dispatcher::websocket_support`], where upstream's handler reads
+//!   the auth manager's credentials and the model registry itself.
 
 mod error;
 
@@ -192,4 +195,55 @@ pub trait Dispatcher: Send + Sync + 'static {
 
     /// Ends a WebSocket session's executor state, when the socket closes.
     fn close_execution_session(&self, _session_id: &str) {}
+
+    /// What the Responses WebSocket may rely on for `model` among
+    /// `providers`, and, with `auth_id`, what it needs to know about that
+    /// credential (the credential lookups in upstream's
+    /// `openai_responses_websocket_session.go`).
+    ///
+    /// `model` is the routed model without its thinking suffix, and
+    /// `providers` the providers that serve it, which may be none. The
+    /// WebSocket asks after a call too, about each credential the call's
+    /// [`Metadata::selected_auth`] was given. The default supports nothing,
+    /// so every turn goes over HTTP.
+    fn websocket_support(
+        &self,
+        _providers: &[ProviderId],
+        _model: &str,
+        _auth_id: Option<&str>,
+    ) -> WebsocketSupport {
+        WebsocketSupport::default()
+    }
+}
+
+/// What the Responses WebSocket may rely on for a model, and what it knows
+/// about one credential ([`Dispatcher::websocket_support`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WebsocketSupport {
+    /// The model's available credentials are all of one provider, `codex` or
+    /// `xai`, and all have websockets on, so the WebSocket may hand a
+    /// session's requests on as they are
+    /// (`responsesWebsocketUsesUpstreamWebsocketPassthrough`).
+    pub upstream_passthrough: bool,
+    /// The model has an available credential and all of them are `codex`,
+    /// whose upstream reads a compacted transcript as it is
+    /// (`websocketUpstreamSupportsCompactionReplayForModel`).
+    pub compaction_replay: bool,
+    /// The credential asked about, unless the dispatcher doesn't know it.
+    pub auth: Option<WebsocketAuth>,
+}
+
+/// A credential, as the Responses WebSocket sees it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WebsocketAuth {
+    /// Its provider, in lower case.
+    pub provider: ProviderId,
+    /// Whether it may serve the model now: its provider is one of those
+    /// asked about, it is registered for the model, and it is neither
+    /// disabled nor cooling down for it
+    /// (`responsesWebsocketPinnedAuthMatchesModel`).
+    pub serves_model: bool,
+    /// Whether its `websockets` attribute is on
+    /// (`websocketUpstreamSupportsIncrementalInput`).
+    pub websockets: bool,
 }

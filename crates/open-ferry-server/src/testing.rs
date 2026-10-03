@@ -8,7 +8,7 @@ use futures_util::future::BoxFuture;
 use futures_util::{FutureExt, StreamExt, stream};
 use http::HeaderMap;
 use open_ferry_core::exec::{
-    Dispatcher, ExecError, Options, ProviderId, Request, Response, StreamResponse,
+    Dispatcher, ExecError, Options, ProviderId, Request, Response, StreamResponse, WebsocketSupport,
 };
 use open_ferry_core::models::{ModelCatalog, ModelInfo};
 
@@ -72,6 +72,9 @@ pub(crate) enum Outcome {
     Hang(HeaderMap, Vec<Result<Bytes, ExecError>>),
     /// An error.
     Fail(ExecError),
+    /// This outcome, after telling the call it was given these credentials
+    /// in turn.
+    Via(Vec<String>, Box<Outcome>),
 }
 
 impl Outcome {
@@ -93,6 +96,14 @@ impl Outcome {
                 .collect(),
         )
     }
+
+    /// `outcome`, after the call is given `auths` in turn.
+    pub(crate) fn via(auths: &[&str], outcome: Self) -> Self {
+        Self::Via(
+            auths.iter().map(|&auth| auth.to_owned()).collect(),
+            Box::new(outcome),
+        )
+    }
 }
 
 /// A call a [`FakeDispatcher`] was given.
@@ -105,19 +116,40 @@ pub(crate) struct Recorded {
     pub(crate) options: Options,
 }
 
+/// What a [`FakeDispatcher`] answers [`Dispatcher::websocket_support`] with.
+type SupportFn = dyn Fn(&[ProviderId], &str, Option<&str>) -> WebsocketSupport + Send + Sync;
+
 /// A dispatcher that gives scripted outcomes, in order, and records calls.
 #[derive(Default)]
 pub(crate) struct FakeDispatcher {
     outcomes: Mutex<VecDeque<Outcome>>,
     calls: Mutex<Vec<Recorded>>,
+    support: Mutex<Option<Arc<SupportFn>>>,
+    closed: Mutex<Vec<String>>,
 }
 
 impl FakeDispatcher {
     pub(crate) fn new(outcomes: impl IntoIterator<Item = Outcome>) -> Arc<Self> {
         Arc::new(Self {
             outcomes: Mutex::new(outcomes.into_iter().collect()),
-            calls: Mutex::default(),
+            ..Self::default()
         })
+    }
+
+    /// Has [`Dispatcher::websocket_support`] answer with `support`.
+    pub(crate) fn websocket(
+        &self,
+        support: impl Fn(&[ProviderId], &str, Option<&str>) -> WebsocketSupport + Send + Sync + 'static,
+    ) {
+        *self.support.lock().unwrap_or_else(PoisonError::into_inner) = Some(Arc::new(support));
+    }
+
+    /// The WebSocket sessions closed so far.
+    pub(crate) fn closed_sessions(&self) -> Vec<String> {
+        self.closed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// The calls made so far.
@@ -135,6 +167,7 @@ impl FakeDispatcher {
         request: Request,
         options: Options,
     ) -> Outcome {
+        let selected = options.metadata.selected_auth.clone();
         self.calls
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -144,11 +177,21 @@ impl FakeDispatcher {
                 request,
                 options,
             });
-        self.outcomes
+        let mut outcome = self
+            .outcomes
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .pop_front()
-            .unwrap_or_else(|| panic!("no outcome left for {method}"))
+            .unwrap_or_else(|| panic!("no outcome left for {method}"));
+        while let Outcome::Via(auths, inner) = outcome {
+            for auth in &auths {
+                if let Some(selected) = &selected {
+                    selected(auth);
+                }
+            }
+            outcome = *inner;
+        }
+        outcome
     }
 
     fn once(
@@ -162,6 +205,7 @@ impl FakeDispatcher {
             Outcome::Reply(response) => Ok(response),
             Outcome::Fail(error) => Err(error),
             Outcome::Stream(..) | Outcome::Hang(..) => panic!("{method} was given a stream"),
+            Outcome::Via(..) => unreachable!("take unwraps credentials"),
         }
     }
 }
@@ -204,8 +248,32 @@ impl Dispatcher for FakeDispatcher {
             }),
             Outcome::Fail(error) => Err(error),
             Outcome::Reply(_) => panic!("execute_stream was given a reply"),
+            Outcome::Via(..) => unreachable!("take unwraps credentials"),
         };
         async move { result }.boxed()
+    }
+
+    fn close_execution_session(&self, session_id: &str) {
+        self.closed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(session_id.to_owned());
+    }
+
+    fn websocket_support(
+        &self,
+        providers: &[ProviderId],
+        model: &str,
+        auth_id: Option<&str>,
+    ) -> WebsocketSupport {
+        let support = self
+            .support
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        support.map_or_else(WebsocketSupport::default, |support| {
+            support(providers, model, auth_id)
+        })
     }
 }
 
