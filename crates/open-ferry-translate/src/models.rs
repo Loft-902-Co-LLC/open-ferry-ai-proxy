@@ -82,6 +82,11 @@ pub struct ThinkingSupport {
     pub levels: Vec<String>,
 }
 
+/// The text of upstream's static catalog, `models.json`, as built in.
+pub fn embedded_catalog_json() -> &'static str {
+    EMBEDDED_CATALOG
+}
+
 /// One model in the catalog.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelInfo {

@@ -1,0 +1,256 @@
+// Ported from CLIProxyAPI internal/registry/model_definitions_test.go
+// (v8.0.10, MIT).
+// https://github.com/router-for-me/CLIProxyAPI
+
+//! Tests for the static catalog.
+//!
+//! `TestValidateModelsCatalog_Meta` runs through [`StaticCatalog::from_json`],
+//! as the checks aren't public. Dropped: the Gemini, Vertex, Kimi, xAI,
+//! Antigravity, Devin and Meta tests (those providers aren't ported) and
+//! `TestModelOverrideHeadersFromEmbeddedModels` (left out by policy). The
+//! check that `support_configuration_update` stays out of a model's JSON has
+//! no counterpart: `ModelInfo` isn't serialized.
+
+use super::*;
+
+#[test]
+fn codex_configuration_update_capability() {
+    let catalog = StaticCatalog::embedded();
+    let tiers: [(CodexPlan, &[&str]); 4] = [
+        (CodexPlan::Free, &["gpt-6-luna"]),
+        (CodexPlan::Team, &["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"]),
+        (CodexPlan::Plus, &["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"]),
+        (CodexPlan::Pro, &["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"]),
+    ];
+    for (plan, capable) in tiers {
+        let models = catalog.codex_models(plan);
+        for id in std::iter::once(&"gpt-5.5").chain(capable) {
+            let model = models
+                .iter()
+                .find(|model| model.id == *id)
+                .unwrap_or_else(|| panic!("{plan:?}: {id} is missing"));
+            assert_eq!(
+                model.support_configuration_update,
+                *id != "gpt-5.5",
+                "{plan:?}: {id}"
+            );
+        }
+    }
+
+    for (raw, want) in [
+        (r#"{"id":"test","support_configuration_update":true}"#, true),
+        (
+            r#"{"id":"test","support_configuration_update":false}"#,
+            false,
+        ),
+        (r#"{"id":"test"}"#, false),
+    ] {
+        let catalog =
+            StaticCatalog::from_json(&format!(r#"{{"codex-pro":[{raw}]}}"#), "test").unwrap();
+        let model = &catalog.codex_models(CodexPlan::Pro)[0];
+        assert_eq!(model.support_configuration_update, want, "{raw}");
+    }
+}
+
+#[test]
+fn validate_models_catalog() {
+    let load = |meta: &str| StaticCatalog::from_json(&format!(r#"{{"meta":{meta}}}"#), "test");
+    assert!(load(r#"[{"id":"muse-spark-1.3"}]"#).is_ok());
+    assert_eq!(
+        load("[null]").unwrap_err().to_string(),
+        "test: validate models catalog: meta[0] is null"
+    );
+    assert_eq!(
+        load(r#"[{"id":" "}]"#).unwrap_err().to_string(),
+        "test: validate models catalog: meta[0] has empty id"
+    );
+    assert_eq!(
+        load(r#"[{"id":"muse-spark-1.3"},{"id":" muse-spark-1.3 "}]"#)
+            .unwrap_err()
+            .to_string(),
+        "test: validate models catalog: meta contains duplicate model id \"muse-spark-1.3\""
+    );
+    // Upstream doesn't check the Devin section, and allows empty sections.
+    assert!(StaticCatalog::from_json(r#"{"devin":[null,{"id":""}],"claude":[]}"#, "test").is_ok());
+}
+
+#[test]
+fn with_codex_builtins_includes_image_25_models() {
+    let models = with_codex_builtins(Vec::new());
+    for (id, display_name) in [
+        ("gpt-image-2.5-flare", "GPT Image 2.5 Flare"),
+        ("gpt-image-2.5-sunburst", "GPT Image 2.5 Sunburst"),
+        ("gpt-image-2.5", "GPT Image 2.5"),
+    ] {
+        let model = models
+            .iter()
+            .find(|model| model.id == id)
+            .unwrap_or_else(|| panic!("{id} is missing"));
+        assert_eq!(model.display_name, display_name);
+        assert_eq!(model.object, "model");
+        assert_eq!(model.owned_by, "openai");
+        assert_eq!(model.model_type, "openai");
+        assert_eq!(model.version, id);
+        assert_eq!(model.created, 1_704_067_200);
+    }
+}
+
+#[test]
+fn with_codex_builtins_replaces_models_of_the_same_id() {
+    let models = with_codex_builtins(vec![
+        ModelInfo {
+            id: " GPT-IMAGE-2 ".into(),
+            display_name: "old".into(),
+            ..ModelInfo::default()
+        },
+        ModelInfo {
+            id: " ".into(),
+            ..ModelInfo::default()
+        },
+        ModelInfo {
+            id: "gpt-5".into(),
+            ..ModelInfo::default()
+        },
+    ]);
+    let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        [
+            "gpt-5",
+            "gpt-image-1.5",
+            "gpt-image-2",
+            "gpt-image-2.5-flare",
+            "gpt-image-2.5-sunburst",
+            "gpt-image-2.5",
+        ]
+    );
+}
+
+#[test]
+fn the_embedded_catalog_loads() {
+    let text = embedded_catalog_json();
+    let catalog = StaticCatalog::from_json(text, "embed").unwrap();
+    assert_eq!(&catalog, StaticCatalog::embedded());
+    assert!(!catalog.claude_models().is_empty());
+    for plan in [
+        CodexPlan::Free,
+        CodexPlan::Team,
+        CodexPlan::Plus,
+        CodexPlan::Pro,
+    ] {
+        let models = catalog.codex_models(plan);
+        assert!(models.len() > CODEX_BUILTINS.len(), "{plan:?}");
+        assert!(models.iter().any(|model| model.id == "gpt-image-2"));
+    }
+    assert_eq!(
+        catalog.models_for_channel(" CODEX "),
+        catalog.codex_models(CodexPlan::Pro)
+    );
+    assert_eq!(
+        catalog.models_for_channel("claude"),
+        catalog.claude_models()
+    );
+    assert!(catalog.models_for_channel("gemini").is_empty());
+}
+
+#[test]
+fn plan_types_pick_codex_plans() {
+    for (plan_type, plan) in [
+        ("pro", CodexPlan::Pro),
+        ("PLUS", CodexPlan::Plus),
+        ("team", CodexPlan::Team),
+        ("Business", CodexPlan::Team),
+        ("go", CodexPlan::Team),
+        ("free", CodexPlan::Free),
+        ("", CodexPlan::Pro),
+        ("enterprise", CodexPlan::Pro),
+    ] {
+        assert_eq!(CodexPlan::from_plan_type(plan_type), plan, "{plan_type}");
+    }
+}
+
+#[test]
+fn models_decode_as_go_decodes_them() {
+    let catalog = StaticCatalog::from_json(
+        r#"{
+            "CLAUDE": [{
+                "ID": "c1",
+                "object": "model",
+                "created": 5,
+                "owned_by": null,
+                "type": "claude",
+                "context_length": -1,
+                "max_completion_tokens": 8192,
+                "supported_parameters": ["a", null],
+                "thinking": {"MIN": 1024, "levels": ["low"], "zero_allowed": true},
+                "config": {"override_header": {"user-agent": "ignored"}},
+                "native_capabilities": {"web_search": null},
+                "unknown": [1, 2]
+            }],
+            "codex-pro": null
+        }"#,
+        "test",
+    )
+    .unwrap();
+    let models = catalog.claude_models();
+    assert_eq!(models.len(), 1);
+    let model = &models[0];
+    assert_eq!(model.id, "c1");
+    assert_eq!(model.created, 5);
+    assert_eq!(model.owned_by, "");
+    assert_eq!(model.model_type, "claude");
+    assert_eq!(model.context_length, 0);
+    assert_eq!(model.max_completion_tokens, 8192);
+    assert_eq!(model.supported_parameters, ["a", ""]);
+    assert_eq!(
+        model.thinking,
+        Some(ThinkingSupport {
+            min: 1024,
+            zero_allowed: true,
+            levels: vec!["low".into()],
+            ..ThinkingSupport::default()
+        })
+    );
+    assert_eq!(
+        StaticCatalog::from_json("null", "test"),
+        Ok(StaticCatalog::default())
+    );
+}
+
+#[test]
+fn decode_errors_name_the_value() {
+    let error = |text: &str| {
+        StaticCatalog::from_json(text, "remote")
+            .unwrap_err()
+            .to_string()
+    };
+    assert_eq!(
+        error("[]"),
+        "remote: decode models catalog: catalog: want an object, found an array"
+    );
+    assert_eq!(
+        error(r#"{"claude": {}}"#),
+        "remote: decode models catalog: claude: want an array, found an object"
+    );
+    assert_eq!(
+        error(r#"{"claude": [1]}"#),
+        "remote: decode models catalog: claude[0]: want an object, found a number"
+    );
+    assert_eq!(
+        error(r#"{"claude": [{"id": 1}]}"#),
+        "remote: decode models catalog: claude[0].id: want a string, found a number"
+    );
+    assert_eq!(
+        error(r#"{"gemini": [{"id": "g", "inputTokenLimit": 1.5}]}"#),
+        "remote: decode models catalog: gemini[0].inputTokenLimit: 1.5 is not a 64-bit integer"
+    );
+    assert_eq!(
+        error(r#"{"claude": [{"id": "c", "config": {"override_header": {"a": 1}}}]}"#),
+        "remote: decode models catalog: claude[0].config.override_header.a: want a string, found a number"
+    );
+    assert_eq!(
+        error(r#"{"claude": [{"id": "c", "thinking": {"levels": "high"}}]}"#),
+        "remote: decode models catalog: claude[0].thinking.levels: want an array, found a string"
+    );
+    assert!(error("{").starts_with("remote: decode models catalog: "));
+}

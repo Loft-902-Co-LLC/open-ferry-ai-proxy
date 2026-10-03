@@ -3,12 +3,13 @@
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Which models the configured credentials serve, and through which
-//! providers.
+//! providers. [`crate::registry`] keeps them.
+
+pub use open_ferry_translate::models::ThinkingSupport;
 
 use crate::exec::ProviderId;
 
-/// A model a credential serves (upstream's `ModelInfo`, as far as model
-/// lists show it).
+/// A model a credential serves (upstream's `ModelInfo`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ModelInfo {
     /// The model's ID.
@@ -23,6 +24,37 @@ pub struct ModelInfo {
     pub context_length: u64,
     /// The most output tokens it gives, or 0 when unknown.
     pub max_completion_tokens: u64,
+    /// The object type, usually `model`, or empty.
+    pub object: String,
+    /// The model's family, such as `claude` or `openai` (upstream's `Type`).
+    pub model_type: String,
+    /// A Gemini-style name such as `models/gemini-2.5-pro`, or empty.
+    pub name: String,
+    /// The model's version, or empty.
+    pub version: String,
+    /// A description, or empty.
+    pub description: String,
+    /// A context window set in the config, or 0.
+    pub max_context_length: u64,
+    /// The request parameters the model takes.
+    pub supported_parameters: Vec<String>,
+    /// The kinds of input it takes, such as `TEXT` and `IMAGE`.
+    pub supported_input_modalities: Vec<String>,
+    /// The kinds of output it gives.
+    pub supported_output_modalities: Vec<String>,
+    /// Its thinking settings, if it thinks.
+    pub thinking: Option<ThinkingSupport>,
+    /// The thinking settings were set in the config. Internal.
+    pub explicit_thinking: bool,
+    /// The model whose metadata this one uses, when this one is an alias or
+    /// a prefixed name. Internal; model lists don't show it.
+    pub metadata_model_id: String,
+    /// Defined in the config's model list rather than the static catalog.
+    pub user_defined: bool,
+    /// Compatibility handling is on for this configured API-key model.
+    pub is_compat: bool,
+    /// The model takes Codex's `configuration_update`. Internal.
+    pub support_configuration_update: bool,
 }
 
 /// The models the configured credentials serve (upstream's model registry).
