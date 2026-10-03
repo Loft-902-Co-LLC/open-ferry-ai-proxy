@@ -171,11 +171,14 @@ pub(crate) fn extract_upstream_error_summary(raw: &str) -> String {
     sanitize_upstream_error_summary(raw)
 }
 
+/// The most characters a summary keeps before it is cut to 253 and "...".
+const SUMMARY_LIMIT: usize = 256;
+
 /// Redacts secrets and paths and bounds the length to 256 characters
 /// (upstream's `SanitizeUpstreamErrorSummary`).
 pub(crate) fn sanitize_upstream_error_summary(s: &str) -> String {
     let s = sanitize_no_truncate(s);
-    if s.chars().count() > 256 {
+    if s.chars().count() > SUMMARY_LIMIT {
         let mut out: String = s.chars().take(253).collect();
         out.push_str("...");
         return out;
@@ -183,7 +186,41 @@ pub(crate) fn sanitize_upstream_error_summary(s: &str) -> String {
     s
 }
 
+/// Upstream's `sanitizeUpstreamErrorSummaryNoTruncate`, except that it may
+/// stop early once the text passes [`SUMMARY_LIMIT`] characters: the caller
+/// then keeps only the first 253, which are already final.
+///
+/// Upstream recurses on the text after each connector ("copy /a to /b"),
+/// so a long run of connectors recursed once per connector and rescanned
+/// the rest each time. Here the connectors are a loop, and the early stop
+/// bounds how many times the rest is rescanned.
 fn sanitize_no_truncate(s: &str) -> String {
+    let mut out = String::new();
+    let mut out_chars = 0;
+    let mut rest = s.to_owned();
+    loop {
+        let s = pre_redact(&rest);
+        // Connector-separated paths, as in "copy /tmp/a TO /tmp/b: denied":
+        // the text before the connector is sanitized on its own, and the
+        // text after it, from the path's slash, goes round again.
+        let Some(found) = PATH_CONNECTOR.find(&s) else {
+            out.push_str(&post_redact(s));
+            return out;
+        };
+        let first = sanitize_no_truncate(s.get(..found.start()).unwrap_or_default());
+        let connector = s.get(found.start()..found.end() - 1).unwrap_or_default();
+        out.push_str(&first);
+        out.push_str(connector);
+        out_chars += first.chars().count() + connector.chars().count();
+        if out_chars > SUMMARY_LIMIT {
+            return out;
+        }
+        rest = format!("/{}", s.get(found.end()..).unwrap_or_default());
+    }
+}
+
+/// The redactions applied before looking for a path connector.
+fn pre_redact(s: &str) -> String {
     let s = s.trim();
     if s.is_empty() {
         return String::new();
@@ -202,22 +239,16 @@ fn sanitize_no_truncate(s: &str) -> String {
         .replace_all(&s, "`[REDACTED_PATH]`")
         .into_owned();
     s = WINDOWS_PATH.replace_all(&s, "[REDACTED_PATH]").into_owned();
-    s = WINDOWS_UNC_PATH
+    WINDOWS_UNC_PATH
         .replace_all(&s, "[REDACTED_PATH]")
-        .into_owned();
+        .into_owned()
+}
 
-    // Connector-separated paths, as in "copy /tmp/a TO /tmp/b: denied".
-    if let Some(found) = PATH_CONNECTOR.find(&s) {
-        let first = s.get(..found.start()).unwrap_or_default();
-        let connector = s.get(found.start()..found.end() - 1).unwrap_or_default();
-        let second = format!("/{}", s.get(found.end()..).unwrap_or_default());
-        return format!(
-            "{}{connector}{}",
-            sanitize_no_truncate(first),
-            sanitize_no_truncate(&second)
-        );
+/// The redactions applied to text with no path connector left.
+fn post_redact(mut s: String) -> String {
+    if s.is_empty() {
+        return s;
     }
-
     // A path before the colon of an error: the first known error word, or
     // else the first ": ".
     let lower = go_lower(&s);
@@ -670,6 +701,46 @@ mod tests {
             }
             assert!(got.chars().count() <= 256, "{input:?}");
         }
+    }
+
+    /// Outputs of upstream's ExtractUpstreamErrorSummary, from Go.
+    #[test]
+    fn connectors_match_upstream() {
+        let mut want = "[REDACTED_PATH] to ".repeat(13);
+        want.push_str("[REDAC...");
+        let cases = [
+            (format!("{}/a: denied", "/a to ".repeat(3000)), want),
+            (
+                "copy /tmp/a TO /tmp/b: denied".to_owned(),
+                "copy [REDACTED_PATH] TO [REDACTED_PATH]: denied".to_owned(),
+            ),
+            (
+                format!("{} to /a to /b", "x".repeat(300)),
+                format!("{}...", "x".repeat(253)),
+            ),
+            (
+                format!("cp {} to /b with /c: failed", "/abcdefghij".repeat(30)),
+                "cp [REDACTED_PATH] to [REDACTED_PATH] with [REDACTED_PATH]: failed".to_owned(),
+            ),
+            (
+                "err for /a/b and /c/d via 'x' with QQ/qQQ to /z token=abc: error"
+                    .replace("QQ", "\""),
+                "err for [REDACTED_PATH] and [REDACTED_PATH] via 'x' with QQ[REDACTED_PATH]QQ to [REDACTED_PATH]: error"
+                    .replace("QQ", "\""),
+            ),
+        ];
+        for (input, want) in cases {
+            assert_eq!(extract_upstream_error_summary(&input), want, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn many_connectors_stay_fast() {
+        let input = "/ to ".repeat(200_000);
+        let started = std::time::Instant::now();
+        let got = extract_upstream_error_summary(&input);
+        assert!(got.ends_with("..."), "{got}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
     }
 
     #[test]
