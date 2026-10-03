@@ -64,6 +64,7 @@ mod select;
 mod settings;
 mod summary;
 mod text;
+mod websocket;
 
 #[cfg(test)]
 mod tests;
@@ -87,7 +88,9 @@ use chrono::Utc;
 use futures_core::future::BoxFuture;
 
 use crate::auth::{Auth, AuthStore, Timestamp};
-use crate::exec::{Dispatcher, ExecError, Options, ProviderId, Request, Response, StreamResponse};
+use crate::exec::{
+    Dispatcher, ExecError, Options, ProviderId, Request, Response, StreamResponse, WebsocketSupport,
+};
 use crate::executor::ProviderExecutor;
 use models::OAuthAliasTable;
 use refresh::{RefreshJob, RefreshLoopHandle};
@@ -359,5 +362,14 @@ impl Dispatcher for Manager {
 
     fn close_execution_session(&self, session_id: &str) {
         Manager::close_execution_session(self, session_id);
+    }
+
+    fn websocket_support(
+        &self,
+        providers: &[ProviderId],
+        model: &str,
+        auth_id: Option<&str>,
+    ) -> WebsocketSupport {
+        self.websocket_support_for(providers, model, auth_id)
     }
 }

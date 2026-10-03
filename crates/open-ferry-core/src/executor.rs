@@ -69,6 +69,11 @@ pub trait ProviderExecutor: Send + Sync + 'static {
     }
 
     /// Ends a Responses WebSocket session's state, when the socket closes
-    /// (upstream's `ExecutionSessionCloser`).
+    /// (upstream's `ExecutionSessionCloser`). The session ID
+    /// [`CLOSE_ALL_EXECUTION_SESSIONS`] asks for all of them to end.
     fn close_execution_session(&self, _session_id: &str) {}
 }
+
+/// The session ID that asks an executor to close all its sessions
+/// (upstream's `CloseAllExecutionSessionsID`).
+pub const CLOSE_ALL_EXECUTION_SESSIONS: &str = "__all_execution_sessions__";

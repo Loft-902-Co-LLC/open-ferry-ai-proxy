@@ -43,9 +43,7 @@ use crate::exec::{ErrorKind, ExecError};
 use crate::executor::ProviderExecutor;
 use crate::registry::ModelRegistry;
 
-/// The session ID that asks an executor to close all its sessions
-/// (upstream's `CloseAllExecutionSessionsID`).
-pub(crate) const CLOSE_ALL_EXECUTION_SESSIONS: &str = "__all_execution_sessions__";
+pub(crate) use crate::executor::CLOSE_ALL_EXECUTION_SESSIONS;
 
 /// The most keys a cursor map holds before it is cleared.
 pub(super) const MAX_CURSOR_KEYS: usize = 4096;
