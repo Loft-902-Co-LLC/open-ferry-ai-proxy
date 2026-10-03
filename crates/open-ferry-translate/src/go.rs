@@ -112,7 +112,7 @@ pub fn json_valid(bytes: &[u8]) -> bool {
 /// Go's `json.Marshal` of a string: wrapped in double quotes, with the escapes
 /// JSON requires and, as Go adds for HTML, `<`, `>`, `&`, U+2028 and U+2029
 /// written as `\u` escapes too.
-pub(crate) fn json_string(s: &str) -> String {
+pub fn json_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for c in s.chars() {

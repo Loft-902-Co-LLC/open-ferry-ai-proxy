@@ -1,0 +1,215 @@
+// Ported from CLIProxyAPI sdk/auth/filestore.go (jsonEqual) (v8.0.10, MIT).
+// https://github.com/router-for-me/CLIProxyAPI
+
+//! Credential JSON as upstream reads, writes and compares it: Go's
+//! `json.Unmarshal` into a map or a struct field, `json.Marshal` of a
+//! decoded map, and `jsonEqual` from `sdk/auth/filestore.go`.
+//!
+//! Deviations from upstream:
+//! - Numbers keep their text when written back, where Go re-encodes the
+//!   float64 (`1.50` stays `1.50`, not `1.5`).
+//! - Invalid UTF-8 becomes one U+FFFD per invalid sequence, where Go has one
+//!   per byte.
+//! - Nesting deeper than 128 levels doesn't decode (serde_json's limit; Go
+//!   allows 10000).
+
+use std::fmt;
+
+use open_ferry_translate::go::json_string;
+use serde_json::{Map, Value};
+
+use super::go::equal_fold;
+
+/// Why a credential file didn't decode. Holds no file content.
+#[derive(Debug)]
+pub(crate) struct DecodeError(String);
+
+impl fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for DecodeError {}
+
+/// Go's `json.Unmarshal` of a document into `map[string]any`: the object,
+/// or `None` for `null`. Anything else, and a number a float64 can't hold,
+/// is an error.
+///
+/// Invalid UTF-8 becomes U+FFFD, as Go does, though one per invalid sequence
+/// where Go has one per byte.
+pub(crate) fn unmarshal_object(data: &[u8]) -> Result<Option<Map<String, Value>>, DecodeError> {
+    let text = String::from_utf8_lossy(data);
+    let value: Value = serde_json::from_str(&text).map_err(|err| DecodeError(err.to_string()))?;
+    if !decodable(&value) {
+        return Err(DecodeError("number out of float64 range".to_owned()));
+    }
+    match value {
+        Value::Object(map) => Ok(Some(map)),
+        Value::Null => Ok(None),
+        _ => Err(DecodeError(
+            "json: cannot unmarshal non-object into Go value of type map[string]interface {}"
+                .to_owned(),
+        )),
+    }
+}
+
+/// Whether Go could decode every number in `value` into a float64.
+pub(crate) fn decodable(value: &Value) -> bool {
+    match value {
+        Value::Number(number) => number.as_f64().is_some(),
+        Value::Array(items) => items.iter().all(decodable),
+        Value::Object(map) => map.values().all(decodable),
+        _ => true,
+    }
+}
+
+/// The value Go's `json.Unmarshal` puts in a struct field named `name`: that
+/// of the last key matching it without regard to case.
+///
+/// A key repeated exactly keeps its first position here, so where it is
+/// interleaved with a case variant the variant may win where Go would take
+/// the repeat.
+pub(crate) fn fold_field<'a>(map: &'a Map<String, Value>, name: &str) -> Option<&'a Value> {
+    map.iter()
+        .rev()
+        .find(|(key, _)| equal_fold(key, name))
+        .map(|(_, value)| value)
+}
+
+/// Go's `json.Marshal` of a decoded JSON object: compact, keys sorted, and
+/// strings escaped for HTML as Go escapes them. Numbers keep their text.
+pub(crate) fn marshal_map(map: &Map<String, Value>) -> String {
+    let mut out = String::new();
+    write_map(&mut out, map);
+    out
+}
+
+/// [`marshal_map`] for any JSON value.
+#[cfg(test)]
+pub(crate) fn marshal(value: &Value) -> String {
+    let mut out = String::new();
+    write_value(&mut out, value);
+    out
+}
+
+fn write_value(out: &mut String, value: &Value) {
+    match value {
+        Value::Null => out.push_str("null"),
+        Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        Value::Number(n) => out.push_str(&n.to_string()),
+        Value::String(s) => out.push_str(&json_string(s)),
+        Value::Array(items) => {
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_value(out, item);
+            }
+            out.push(']');
+        }
+        Value::Object(map) => write_map(out, map),
+    }
+}
+
+fn write_map(out: &mut String, map: &Map<String, Value>) {
+    let mut entries: Vec<(&String, &Value)> = map.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    out.push('{');
+    for (i, (key, value)) in entries.into_iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&json_string(key));
+        out.push(':');
+        write_value(out, value);
+    }
+    out.push('}');
+}
+
+/// Upstream's `jsonEqual`: whether two JSON documents hold the same value,
+/// comparing numbers as float64. A document that doesn't parse equals
+/// nothing.
+pub(crate) fn json_equal(a: &[u8], b: &[u8]) -> bool {
+    match (
+        serde_json::from_str::<Value>(&String::from_utf8_lossy(a)),
+        serde_json::from_str::<Value>(&String::from_utf8_lossy(b)),
+    ) {
+        (Ok(a), Ok(b)) => deep_equal(&a, &b),
+        _ => false,
+    }
+}
+
+fn deep_equal(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Object(a), Value::Object(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .all(|(key, a)| b.get(key).is_some_and(|b| deep_equal(a, b)))
+        }
+        (Value::Array(a), Value::Array(b)) => {
+            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| deep_equal(a, b))
+        }
+        (Value::Number(a), Value::Number(b)) => match (a.as_f64(), b.as_f64()) {
+            (Some(a), Some(b)) => a == b,
+            _ => false,
+        },
+        (Value::String(a), Value::String(b)) => a == b,
+        (Value::Bool(a), Value::Bool(b)) => a == b,
+        (Value::Null, Value::Null) => true,
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn marshal_sorts_keys_and_escapes_like_go() {
+        let value: Value = serde_json::from_str(
+            r#"{"b":1.0,"a":{"z":[true,null],"y":"<&>"},"c":12345678901234567890}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            marshal(&value),
+            r#"{"a":{"y":"\u003c\u0026\u003e","z":[true,null]},"b":1.0,"c":12345678901234567890}"#
+        );
+    }
+
+    #[test]
+    fn unmarshal_object_matches_go() {
+        assert!(unmarshal_object(br#"{"a":1}"#).unwrap().is_some());
+        assert!(unmarshal_object(b" null ").unwrap().is_none());
+        assert!(unmarshal_object(b"[1]").is_err());
+        assert!(unmarshal_object(b"not json").is_err());
+        assert!(unmarshal_object(br#"{"a":[1e400]}"#).is_err());
+        let mut data = br#"{"a":"x"#.to_vec();
+        data.push(0xff);
+        data.extend_from_slice(br#"y"}"#);
+        let map = unmarshal_object(&data).unwrap().unwrap();
+        assert_eq!(map["a"], Value::from("x\u{fffd}y"));
+    }
+
+    #[test]
+    fn fold_field_takes_the_last_match() {
+        let map: Map<String, Value> =
+            serde_json::from_str(r#"{"exp":1,"EXP":2,"other":3}"#).unwrap();
+        assert_eq!(fold_field(&map, "exp"), Some(&Value::from(2)));
+        assert_eq!(fold_field(&map, "Other"), Some(&Value::from(3)));
+        assert_eq!(fold_field(&map, "missing"), None);
+    }
+
+    #[test]
+    fn json_equal_compares_numbers_as_floats() {
+        assert!(json_equal(
+            br#"{"a":1,"b":[1.0]}"#,
+            br#"{"b":[1],"a":1.00}"#
+        ));
+        assert!(!json_equal(br#"{"a":1}"#, br#"{"a":"1"}"#));
+        assert!(!json_equal(br#"{"a":1}"#, br#"{"a":1,"b":null}"#));
+        assert!(!json_equal(b"not json", b"not json"));
+        assert!(json_equal(b"null", b" null "));
+    }
+}

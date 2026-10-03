@@ -11,11 +11,32 @@
 //! from the config, such as an API key and its base URL. The rest is runtime
 //! state the credential manager keeps.
 //!
+//! [`FileStore`] keeps credentials as files in the auth directory, and the
+//! [`synthesizer`] module builds records from those files and from the API
+//! keys in the config. The other modules hold the settings records carry:
+//! [`classification`] (kinds, sources and attribute names), [`metadata`]
+//! (settings in a credential's file) and [`weight`] (routing weights).
+//!
 //! Deviations from upstream:
 //! - Times are `Option`s, where upstream uses Go's zero time for "never".
 //! - `Debug` leaves out metadata and attribute values, which hold secrets.
 //! - Upstream's recent-request ring, registration epoch, generation and
-//!   plugin fields aren't ported; nor is `Runtime`.
+//!   plugin fields aren't ported; nor is `Runtime`, nor `Storage`: a
+//!   record's tokens live in its metadata.
+//! - Upstream's store takes a context and tells a login apart from a
+//!   runtime save by a flag on it; here a login calls
+//!   [`AuthStore::save_new`].
+
+pub mod classification;
+mod expiry;
+pub mod file_store;
+mod go;
+mod index;
+mod json;
+pub mod metadata;
+mod path;
+pub mod synthesizer;
+pub mod weight;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -23,6 +44,9 @@ use std::io;
 
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
+
+pub use classification::{AuthKind, AuthSource};
+pub use file_store::FileStore;
 
 /// A point in time, in UTC.
 pub type Timestamp = DateTime<Utc>;
@@ -123,6 +147,9 @@ pub struct Auth {
     pub prefix: String,
     /// The credential's file, or empty when it comes from the config.
     pub file_name: String,
+    /// A short stable ID for the management API and usage records, or empty
+    /// until [`Auth::ensure_index`] derives it (upstream's `Index`).
+    pub index: String,
     /// A name for logs, or empty.
     pub label: String,
     /// Where it is in its life.
@@ -176,6 +203,7 @@ impl fmt::Debug for Auth {
             .field("provider", &self.provider)
             .field("prefix", &self.prefix)
             .field("file_name", &self.file_name)
+            .field("index", &self.index)
             .field("label", &self.label)
             .field("status", &self.status)
             .field("disabled", &self.disabled)
@@ -191,8 +219,16 @@ pub trait AuthStore: Send + Sync + 'static {
     /// Every credential the store holds.
     fn list(&self) -> io::Result<Vec<Auth>>;
 
-    /// Saves `auth`, and returns where it went, such as a file path.
+    /// Saves `auth`, and returns where it went, such as a file path. A
+    /// store may decline to bring back a disabled credential that was
+    /// removed, and return an empty string.
     fn save(&self, auth: &Auth) -> io::Result<String>;
+
+    /// Saves a credential from a login or migration: as
+    /// [`save`](Self::save), but always creating it, even when disabled.
+    fn save_new(&self, auth: &Auth) -> io::Result<String> {
+        self.save(auth)
+    }
 
     /// Removes the credential with `id`. Removing one that isn't there is
     /// not an error.
