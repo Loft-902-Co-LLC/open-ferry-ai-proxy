@@ -201,6 +201,13 @@ fn parse_layouts(text: &str) -> Option<Timestamp> {
         .or_else(|| parse_go_time(text, Layout::Minutes))
 }
 
+/// Go's `time.Parse(time.RFC3339, text)`, which `time.Time` reads JSON
+/// with: the time `text` names, if it is one in the layout
+/// `2006-01-02T15:04:05Z07:00`, with or without fractional seconds.
+pub fn parse_go_rfc3339(text: &str) -> Option<Timestamp> {
+    parse_go_time(text, Layout::Rfc3339)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Layout {
     /// `2006-01-02T15:04:05Z07:00`.

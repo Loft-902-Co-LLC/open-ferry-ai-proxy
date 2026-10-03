@@ -7,19 +7,26 @@
 //! from OpenAI's token endpoint over TLS, and is only read to name and file
 //! the credential.
 //!
-//! Claims are decoded with Go's `encoding/json` rules, which upstream relies
-//! on: keys match their field ignoring case, `null` leaves a field empty, and
-//! a value of the wrong type fails the whole parse.
+//! Claims are decoded as Go's `encoding/json` decodes them, which upstream
+//! relies on (see [`crate::go_json`]): keys match their field ignoring case,
+//! `null` leaves a field as it was, a key that repeats decodes into its
+//! field again, and a value of the wrong type fails the whole parse. The
+//! payload's base64 may hold line breaks, which Go skips.
 //!
 //! Deviations from upstream:
 //! - Error texts after the prefixes upstream writes (`failed to decode JWT
 //!   claims: `, `failed to unmarshal JWT claims: `) are this module's own.
+//! - A `chatgpt_subscription_active_start`, `chatgpt_subscription_active_until`
+//!   or `groups` claim nested more than 128 deep fails the parse; Go reads it.
 
 use base64::Engine;
 use base64::alphabet::URL_SAFE;
 use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
-use chrono::{DateTime, FixedOffset};
-use serde_json::{Map, Value};
+use open_ferry_core::auth::{Timestamp, parse_go_rfc3339};
+use serde_json::Value;
+
+use crate::go_json::{self, Raw, Slice, any_value, object_or_null, set_bool, set_int, set_string};
+use crate::json::key_of;
 
 /// The plan of an account whose token names none.
 pub const DEFAULT_PLAN_TYPE: &str = "free";
@@ -76,8 +83,8 @@ pub struct CodexAuthInfo {
     pub chatgpt_subscription_active_start: Value,
     /// `chatgpt_subscription_active_until`, as sent.
     pub chatgpt_subscription_active_until: Value,
-    /// `chatgpt_subscription_last_checked`.
-    pub chatgpt_subscription_last_checked: Option<DateTime<FixedOffset>>,
+    /// `chatgpt_subscription_last_checked`, in UTC.
+    pub chatgpt_subscription_last_checked: Option<Timestamp>,
     /// `chatgpt_user_id`.
     pub chatgpt_user_id: String,
     /// `groups`.
@@ -143,85 +150,108 @@ pub fn parse_jwt_token(token: &str) -> Result<JwtClaims, String> {
     decode_claims(&data).map_err(|e| format!("failed to unmarshal JWT claims: {e}"))
 }
 
-/// Pads unpadded base64url and decodes it.
+/// Pads unpadded base64url and decodes it, skipping line breaks as Go's
+/// decoder does. The padding goes by the length with the line breaks.
 fn base64_url_decode(data: &str) -> Result<Vec<u8>, base64::DecodeError> {
     let padding = match data.len() % 4 {
         2 => "==",
         3 => "=",
         _ => "",
     };
-    GO_URL_ENCODING.decode(format!("{data}{padding}"))
+    let data: String = format!("{data}{padding}")
+        .chars()
+        .filter(|c| !matches!(c, '\r' | '\n'))
+        .collect();
+    GO_URL_ENCODING.decode(data)
+}
+
+/// The claims as Go's decoder builds them, with their slices' spare
+/// elements.
+#[derive(Default)]
+struct Decoding {
+    claims: JwtClaims,
+    aud: Slice<String>,
+    organizations: Slice<Organization>,
 }
 
 fn decode_claims(data: &[u8]) -> Result<JwtClaims, String> {
-    let value: Value = serde_json::from_slice(data).map_err(|e| e.to_string())?;
-    let mut claims = JwtClaims::default();
-    let Some(object) = object_or_null(&value, "JWTClaims")? else {
-        return Ok(claims);
-    };
-    for (key, value) in object {
-        let field = format!("JWTClaims.{key}");
-        let field = field.as_str();
-        match key_of(
-            key,
-            &[
-                "at_hash",
-                "aud",
-                "auth_provider",
-                "auth_time",
-                "email",
-                "email_verified",
-                "exp",
-                "https://api.openai.com/auth",
-                "iat",
-                "iss",
-                "jti",
-                "rat",
-                "sid",
-                "sub",
-            ],
-        ) {
-            Some("at_hash") => set_string(&mut claims.at_hash, value, field)?,
-            Some("aud") => {
-                if let Some(items) = array_or_null(value, field)? {
-                    claims.aud = items
-                        .iter()
-                        .map(|item| {
-                            let mut text = String::new();
-                            set_string(&mut text, item, field).map(|()| text)
-                        })
-                        .collect::<Result<_, _>>()?;
-                }
-            }
-            Some("auth_provider") => set_string(&mut claims.auth_provider, value, field)?,
-            Some("auth_time") => set_int(&mut claims.auth_time, value, field)?,
-            Some("email") => set_string(&mut claims.email, value, field)?,
-            Some("email_verified") => set_bool(&mut claims.email_verified, value, field)?,
-            Some("exp") => set_int(&mut claims.exp, value, field)?,
-            Some("https://api.openai.com/auth") => {
-                decode_auth_info(&mut claims.codex_auth_info, value)?;
-            }
-            Some("iat") => set_int(&mut claims.iat, value, field)?,
-            Some("iss") => set_string(&mut claims.iss, value, field)?,
-            Some("jti") => set_string(&mut claims.jti, value, field)?,
-            Some("rat") => set_int(&mut claims.rat, value, field)?,
-            Some("sid") => set_string(&mut claims.sid, value, field)?,
-            Some("sub") => set_string(&mut claims.sub, value, field)?,
-            _ => {}
+    let text = go_json::check(data)?;
+    let mut decoding = Decoding::default();
+    if let Some(members) = object_or_null(Raw::of(&text), "JWTClaims")? {
+        for (key, value) in members {
+            decode_claim(&mut decoding, &key, value)?;
         }
     }
+    let Decoding {
+        mut claims,
+        aud,
+        organizations,
+    } = decoding;
+    claims.aud = aud.into_vec();
+    claims.codex_auth_info.organizations = organizations.into_vec();
     Ok(claims)
 }
 
-fn decode_auth_info(info: &mut CodexAuthInfo, value: &Value) -> Result<(), String> {
-    let Some(object) = object_or_null(value, "JWTClaims.https://api.openai.com/auth")? else {
+fn decode_claim(decoding: &mut Decoding, key: &str, value: Raw<'_>) -> Result<(), String> {
+    let claims = &mut decoding.claims;
+    let field = format!("JWTClaims.{key}");
+    let field = field.as_str();
+    match key_of(
+        key,
+        &[
+            "at_hash",
+            "aud",
+            "auth_provider",
+            "auth_time",
+            "email",
+            "email_verified",
+            "exp",
+            "https://api.openai.com/auth",
+            "iat",
+            "iss",
+            "jti",
+            "rat",
+            "sid",
+            "sub",
+        ],
+    ) {
+        Some("at_hash") => set_string(&mut claims.at_hash, value, field),
+        Some("aud") => decoding.aud.decode(value, field, "[]string", |aud, item| {
+            set_string(aud, item, field)
+        }),
+        Some("auth_provider") => set_string(&mut claims.auth_provider, value, field),
+        Some("auth_time") => set_int(&mut claims.auth_time, value, field),
+        Some("email") => set_string(&mut claims.email, value, field),
+        Some("email_verified") => set_bool(&mut claims.email_verified, value, field),
+        Some("exp") => set_int(&mut claims.exp, value, field),
+        Some("https://api.openai.com/auth") => decode_auth_info(
+            &mut claims.codex_auth_info,
+            &mut decoding.organizations,
+            value,
+        ),
+        Some("iat") => set_int(&mut claims.iat, value, field),
+        Some("iss") => set_string(&mut claims.iss, value, field),
+        Some("jti") => set_string(&mut claims.jti, value, field),
+        Some("rat") => set_int(&mut claims.rat, value, field),
+        Some("sid") => set_string(&mut claims.sid, value, field),
+        Some("sub") => set_string(&mut claims.sub, value, field),
+        _ => Ok(()),
+    }
+}
+
+fn decode_auth_info(
+    info: &mut CodexAuthInfo,
+    organizations: &mut Slice<Organization>,
+    value: Raw<'_>,
+) -> Result<(), String> {
+    let Some(members) = object_or_null(value, "JWTClaims.https://api.openai.com/auth")? else {
         return Ok(());
     };
-    for (key, value) in object {
+    for (key, value) in members {
         let field = format!("CodexAuthInfo.{key}");
         let field = field.as_str();
         match key_of(
-            key,
+            &key,
             &[
                 "chatgpt_account_id",
                 "chatgpt_plan_type",
@@ -237,33 +267,25 @@ fn decode_auth_info(info: &mut CodexAuthInfo, value: &Value) -> Result<(), Strin
             Some("chatgpt_account_id") => set_string(&mut info.chatgpt_account_id, value, field)?,
             Some("chatgpt_plan_type") => set_string(&mut info.chatgpt_plan_type, value, field)?,
             Some("chatgpt_subscription_active_start") => {
-                info.chatgpt_subscription_active_start = value.clone();
+                info.chatgpt_subscription_active_start = any_value(value)?;
             }
             Some("chatgpt_subscription_active_until") => {
-                info.chatgpt_subscription_active_until = value.clone();
+                info.chatgpt_subscription_active_until = any_value(value)?;
             }
-            Some("chatgpt_subscription_last_checked") => match value {
-                Value::Null => {}
-                Value::String(text) => {
-                    let time = DateTime::parse_from_rfc3339(text)
-                        .map_err(|e| format!("parsing time {text:?}: {e}"))?;
-                    info.chatgpt_subscription_last_checked = Some(time);
-                }
-                _ => return Err("Time.UnmarshalJSON: input is not a JSON string".to_owned()),
-            },
+            Some("chatgpt_subscription_last_checked") => {
+                set_time(&mut info.chatgpt_subscription_last_checked, value)?;
+            }
             Some("chatgpt_user_id") => set_string(&mut info.chatgpt_user_id, value, field)?,
             Some("groups") => {
-                if let Some(items) = array_or_null(value, field)? {
-                    info.groups = items.clone();
-                }
+                let mut groups = Slice::default();
+                groups.decode(value, field, "[]interface {}", |group, item| {
+                    *group = any_value(item)?;
+                    Ok(())
+                })?;
+                info.groups = groups.into_vec();
             }
             Some("organizations") => {
-                if let Some(items) = array_or_null(value, field)? {
-                    info.organizations = items
-                        .iter()
-                        .map(decode_organization)
-                        .collect::<Result<_, _>>()?;
-                }
+                organizations.decode(value, field, "[]codex.Organizations", decode_organization)?;
             }
             Some("user_id") => set_string(&mut info.user_id, value, field)?,
             _ => {}
@@ -272,15 +294,16 @@ fn decode_auth_info(info: &mut CodexAuthInfo, value: &Value) -> Result<(), Strin
     Ok(())
 }
 
-fn decode_organization(value: &Value) -> Result<Organization, String> {
-    let mut organization = Organization::default();
-    let Some(object) = object_or_null(value, "CodexAuthInfo.organizations")? else {
-        return Ok(organization);
+/// Decodes an organization into the one already there, as Go merges an
+/// object into a struct.
+fn decode_organization(organization: &mut Organization, value: Raw<'_>) -> Result<(), String> {
+    let Some(members) = object_or_null(value, "CodexAuthInfo.organizations")? else {
+        return Ok(());
     };
-    for (key, value) in object {
+    for (key, value) in members {
         let field = format!("Organizations.{key}");
         let field = field.as_str();
-        match key_of(key, &["id", "is_default", "role", "title"]) {
+        match key_of(&key, &["id", "is_default", "role", "title"]) {
             Some("id") => set_string(&mut organization.id, value, field)?,
             Some("is_default") => set_bool(&mut organization.is_default, value, field)?,
             Some("role") => set_string(&mut organization.role, value, field)?,
@@ -288,77 +311,26 @@ fn decode_organization(value: &Value) -> Result<Organization, String> {
             _ => {}
         }
     }
-    Ok(organization)
+    Ok(())
 }
 
-pub(super) use crate::json::key_of;
-
-fn type_error(value: &Value, field: &str, go_type: &str) -> String {
-    let kind = match value {
-        Value::Null => "null",
-        Value::Bool(_) => "bool",
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
+/// Sets a Go `time.Time` as its `UnmarshalJSON` does: `null` leaves it, and
+/// a string must hold an RFC 3339 time as written, its escapes unread.
+fn set_time(target: &mut Option<Timestamp>, value: Raw<'_>) -> Result<(), String> {
+    if value.is_null() {
+        return Ok(());
+    }
+    let text = value.text();
+    let Some(time) = text
+        .strip_prefix('"')
+        .and_then(|text| text.strip_suffix('"'))
+    else {
+        return Err("Time.UnmarshalJSON: input is not a JSON string".to_owned());
     };
-    format!("json: cannot unmarshal {kind} into Go struct field {field} of type {go_type}")
-}
-
-pub(super) fn object_or_null<'v>(
-    value: &'v Value,
-    field: &str,
-) -> Result<Option<&'v Map<String, Value>>, String> {
-    match value {
-        Value::Null => Ok(None),
-        Value::Object(object) => Ok(Some(object)),
-        _ => Err(type_error(value, field, "struct")),
-    }
-}
-
-fn array_or_null<'v>(value: &'v Value, field: &str) -> Result<Option<&'v Vec<Value>>, String> {
-    match value {
-        Value::Null => Ok(None),
-        Value::Array(items) => Ok(Some(items)),
-        _ => Err(type_error(value, field, "slice")),
-    }
-}
-
-pub(super) fn set_string(target: &mut String, value: &Value, field: &str) -> Result<(), String> {
-    match value {
-        Value::Null => Ok(()),
-        Value::String(text) => {
-            text.clone_into(target);
-            Ok(())
-        }
-        _ => Err(type_error(value, field, "string")),
-    }
-}
-
-fn set_bool(target: &mut bool, value: &Value, field: &str) -> Result<(), String> {
-    match value {
-        Value::Null => Ok(()),
-        Value::Bool(flag) => {
-            *target = *flag;
-            Ok(())
-        }
-        _ => Err(type_error(value, field, "bool")),
-    }
-}
-
-/// Sets a Go `int`: only an integer literal in range fits.
-pub(super) fn set_int(target: &mut i64, value: &Value, field: &str) -> Result<(), String> {
-    match value {
-        Value::Null => Ok(()),
-        Value::Number(number) => {
-            *target = number
-                .to_string()
-                .parse()
-                .map_err(|_| type_error(value, field, "int"))?;
-            Ok(())
-        }
-        _ => Err(type_error(value, field, "int")),
-    }
+    let time = parse_go_rfc3339(time)
+        .ok_or_else(|| format!("parsing time {text} as RFC 3339: cannot parse"))?;
+    *target = Some(time);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -452,6 +424,188 @@ pub(crate) mod tests {
             parse_jwt_token(&make_test_jwt(&Value::Null)).unwrap(),
             JwtClaims::default()
         );
+    }
+
+    /// A backslash, so that escapes are built rather than written.
+    const BS: &str = "\\";
+    const AUTH: &str = "\"https://api.openai.com/auth\"";
+
+    /// An unsigned JWT with exactly `payload` as its claims.
+    fn token_of(payload: &[u8]) -> String {
+        format!("e30.{}.sig", URL_SAFE_NO_PAD.encode(payload))
+    }
+
+    fn parse(payload: &str) -> Result<JwtClaims, String> {
+        parse_jwt_token(&token_of(payload.as_bytes()))
+    }
+
+    /// What upstream's parser makes of these, as built with Go 1.26.
+    #[test]
+    fn decodes_odd_json_as_go_does() {
+        let info = |payload: &str| parse(payload).unwrap().codex_auth_info;
+        // A repeated struct merges; a `null` leaves it.
+        let merged = info(&format!(
+            r#"{{{AUTH}:{{"chatgpt_account_id":"account"}},{AUTH}:{{"chatgpt_plan_type":"team"}}}}"#
+        ));
+        assert_eq!(merged.chatgpt_account_id, "account");
+        assert_eq!(merged.chatgpt_plan_type, "team");
+        let kept = info(&format!(
+            r#"{{{AUTH}:{{"chatgpt_account_id":"account"}},{AUTH}:null}}"#
+        ));
+        assert_eq!(kept.chatgpt_account_id, "account");
+
+        // A repeated array reuses the elements a shorter one left.
+        let aud = |payload: &str| parse(payload).unwrap().aud;
+        assert_eq!(
+            aud(r#"{"aud":["a","b"],"aud":["c"],"aud":["x",null]}"#),
+            ["x", "b"]
+        );
+        assert_eq!(
+            aud(r#"{"aud":["a","b"],"aud":[],"aud":[null,null]}"#),
+            ["", ""]
+        );
+        assert_eq!(aud(r#"{"aud":["a"],"aud":null,"aud":[null]}"#), [""]);
+        let organizations = info(&format!(
+            r#"{{{AUTH}:{{"organizations":[{{"id":"a"}},{{"id":"b"}}]}},{AUTH}:{{"organizations":[{{"role":"r"}}]}},{AUTH}:{{"organizations":[{{}},null]}}}}"#
+        ))
+        .organizations;
+        assert_eq!(
+            organizations,
+            [
+                Organization {
+                    id: "a".into(),
+                    role: "r".into(),
+                    ..Organization::default()
+                },
+                Organization {
+                    id: "b".into(),
+                    ..Organization::default()
+                },
+            ]
+        );
+
+        // An `any` is replaced each time.
+        let groups = info(&format!(
+            r#"{{{AUTH}:{{"groups":[{{"a":1}},2]}},{AUTH}:{{"groups":[{{"b":1}},null,3]}}}}"#
+        ))
+        .groups;
+        assert_eq!(groups, [json!({"b": 1}), Value::Null, json!(3)]);
+        let start = info(&format!(
+            r#"{{{AUTH}:{{"chatgpt_subscription_active_start":{{"a":1,"a":2}},"chatgpt_subscription_active_start":{{"z":null}}}}}}"#
+        ))
+        .chatgpt_subscription_active_start;
+        assert_eq!(start, json!({"z": null}));
+        let start = info(&format!(
+            r#"{{{AUTH}:{{"chatgpt_subscription_active_start":1,"chatgpt_subscription_active_start":null}}}}"#
+        ))
+        .chatgpt_subscription_active_start;
+        assert_eq!(start, Value::Null);
+        // Its numbers must fit a float64.
+        let until = info(&format!(
+            r#"{{{AUTH}:{{"chatgpt_subscription_active_until":[1e-400]}}}}"#
+        ))
+        .chatgpt_subscription_active_until;
+        assert_eq!(until[0].as_f64(), Some(0.0));
+        for bad in [
+            format!(r#"{{{AUTH}:{{"chatgpt_subscription_active_until":1e400}}}}"#),
+            format!(r#"{{{AUTH}:{{"groups":[{{"x":-1e309}}]}}}}"#),
+        ] {
+            assert!(parse(&bad).is_err(), "{bad}");
+        }
+
+        // Lone surrogates and invalid UTF-8 read as U+FFFD; keys are
+        // unescaped before they're matched.
+        let r = char::REPLACEMENT_CHARACTER;
+        let grin = char::from_u32(0x1f600).unwrap();
+        let email = parse(&format!(
+            r#"{{"email":"{BS}ud800x{BS}ud83d{BS}ude00{BS}udc00{BS}ud800{BS}ud800{BS}n"}}"#
+        ))
+        .unwrap()
+        .email;
+        assert_eq!(email, format!("{r}x{grin}{r}{r}{r}\n"));
+        let invalid = token_of(b"{\"email\":\"a\xe2\x82b\xed\xa0\x80c\xc0\x80\xffd\"}");
+        assert_eq!(
+            parse_jwt_token(&invalid).unwrap().email,
+            format!("a{r}{r}b{r}{r}{r}c{r}{r}{r}d")
+        );
+        assert!(parse_jwt_token(&token_of(b"{\"email\":\"a\"\xff}")).is_err());
+        let claims = parse(&format!(r#"{{"{BS}u0065MAIL":"k","EXP":-0}}"#)).unwrap();
+        assert_eq!((claims.email.as_str(), claims.exp), ("k", 0));
+        let start = info(&format!(
+            r#"{{{AUTH}:{{"chatgpt_subscription_active_start":{{"k{BS}udfff":"{BS}ud800"}}}}}}"#
+        ))
+        .chatgpt_subscription_active_start;
+        let want = serde_json::Map::from_iter([(format!("k{r}"), Value::String(r.into()))]);
+        assert_eq!(start, Value::Object(want));
+
+        // Values nest up to 10000 deep, even where nothing reads them.
+        let deep = |depth: usize| {
+            format!(
+                r#"{{"x":{}{},"email":"e"}}"#,
+                "[".repeat(depth),
+                "]".repeat(depth)
+            )
+        };
+        assert_eq!(parse(&deep(140)).unwrap().email, "e");
+        assert!(parse(&deep(9_999)).is_ok());
+        assert!(parse(&deep(10_000)).is_err());
+
+        // A time is read as written, escapes and all, and the parse is
+        // strict about case.
+        let time = |text: &str| {
+            parse(&format!(
+                r#"{{{AUTH}:{{"chatgpt_subscription_last_checked":{text}}}}}"#
+            ))
+            .map(|claims| claims.codex_auth_info.chatgpt_subscription_last_checked)
+        };
+        assert!(time(r#""2026-10-03T12:00:00Z""#).unwrap().is_some());
+        assert!(time(r#""2026-10-03T2:00:00,5+24:60""#).unwrap().is_some());
+        assert_eq!(time("null").unwrap(), None);
+        let escaped = format!(r#""2026-10-03T12:00:00{BS}u005a""#);
+        for bad in [
+            r#""2026-10-03t12:00:00z""#,
+            escaped.as_str(),
+            r#""2026-02-30T12:00:00Z""#,
+            "5",
+        ] {
+            assert!(time(bad).is_err(), "{bad}");
+        }
+
+        let wrong_kinds = [
+            format!(r#"{{{AUTH}:{{"organizations":["a"]}}}}"#),
+            format!("{{{AUTH}:[]}}"),
+            format!(r#"{{"email":"{BS}x"}}"#),
+        ];
+        for bad in wrong_kinds.iter().map(String::as_str).chain([
+            r#"{"exp":1e3}"#,
+            r#"{"exp":9223372036854775808}"#,
+            r#""x""#,
+            "{} x",
+            r#"{"email":{"a":1}}"#,
+            r#"{"aud":"a"}"#,
+            r#"{"email":true}"#,
+            r#"{"email_verified":"true"}"#,
+            "{\"email\":\"a\x01\"}",
+            r#"{"email":"a",}"#,
+            r#"{"exp":01}"#,
+        ]) {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
+        assert_eq!(parse(" {\"email\":\"w\"} \r\n\t").unwrap().email, "w");
+    }
+
+    #[test]
+    fn skips_line_breaks_in_the_payload_as_go_does() {
+        let payload = URL_SAFE_NO_PAD.encode(r#"{"email":"crlf@example.com"}"#);
+        assert_eq!(payload.len() % 4, 2);
+        let token = format!("e30.{}\r\n\r\n{}.sig", &payload[..4], &payload[4..]);
+        assert_eq!(parse_jwt_token(&token).unwrap().email, "crlf@example.com");
+        // The padding goes by the length with the line breaks, which here
+        // leaves it wrong.
+        let token = format!("e30.{}\n{}.sig", &payload[..4], &payload[4..]);
+        assert!(parse_jwt_token(&token).is_err());
+        // The unused bits of the last character are ignored.
+        assert!(parse_jwt_token("e30.e31.sig").is_ok());
     }
 
     #[test]

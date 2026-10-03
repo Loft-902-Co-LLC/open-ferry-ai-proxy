@@ -49,11 +49,11 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 use super::client::{Clients, error_chain, read_body};
-use super::jwt;
 use super::jwt::{DEFAULT_PLAN_TYPE, parse_jwt_token, plan_type_or_default};
 use super::token::{
     AuthBundle, TokenData, create_token_storage, credential_file_name, now_rfc3339,
 };
+use crate::json;
 use crate::oauth::{CallbackError, CallbackResult, CallbackServer, Pkce, generate_state};
 
 /// OpenAI's OAuth client ID for Codex.
@@ -566,13 +566,13 @@ fn decode_token_response(body: &[u8]) -> Result<TokenResponse, String> {
     let value: Value = serde_json::from_slice(body).map_err(|e| e.to_string())?;
     let mut tokens = TokenResponse::default();
     let mut token_type = String::new();
-    let Some(object) = jwt::object_or_null(&value, "tokenResponse")? else {
+    let Some(object) = json::object_or_null(&value, "tokenResponse")? else {
         return Ok(tokens);
     };
     for (key, value) in object {
         let field = format!(".{key}");
         let field = field.as_str();
-        match jwt::key_of(
+        match json::key_of(
             key,
             &[
                 "access_token",
@@ -582,11 +582,11 @@ fn decode_token_response(body: &[u8]) -> Result<TokenResponse, String> {
                 "expires_in",
             ],
         ) {
-            Some("access_token") => jwt::set_string(&mut tokens.access_token, value, field)?,
-            Some("refresh_token") => jwt::set_string(&mut tokens.refresh_token, value, field)?,
-            Some("id_token") => jwt::set_string(&mut tokens.id_token, value, field)?,
-            Some("token_type") => jwt::set_string(&mut token_type, value, field)?,
-            Some("expires_in") => jwt::set_int(&mut tokens.expires_in, value, field)?,
+            Some("access_token") => json::set_string(&mut tokens.access_token, value, field)?,
+            Some("refresh_token") => json::set_string(&mut tokens.refresh_token, value, field)?,
+            Some("id_token") => json::set_string(&mut tokens.id_token, value, field)?,
+            Some("token_type") => json::set_string(&mut token_type, value, field)?,
+            Some("expires_in") => json::set_int(&mut tokens.expires_in, value, field)?,
             _ => {}
         }
     }
@@ -828,19 +828,19 @@ fn decode_device_user_code(body: &[u8]) -> Result<DeviceUserCode, String> {
         user_code_alt: String::new(),
         interval: DEVICE_DEFAULT_POLL_INTERVAL,
     };
-    let Some(object) = jwt::object_or_null(&value, "codexDeviceUserCodeResponse")? else {
+    let Some(object) = json::object_or_null(&value, "codexDeviceUserCodeResponse")? else {
         return Ok(code);
     };
     for (key, value) in object {
         let field = format!("codexDeviceUserCodeResponse.{key}");
         let field = field.as_str();
-        match jwt::key_of(
+        match json::key_of(
             key,
             &["device_auth_id", "user_code", "usercode", "interval"],
         ) {
-            Some("device_auth_id") => jwt::set_string(&mut code.device_auth_id, value, field)?,
-            Some("user_code") => jwt::set_string(&mut code.user_code, value, field)?,
-            Some("usercode") => jwt::set_string(&mut code.user_code_alt, value, field)?,
+            Some("device_auth_id") => json::set_string(&mut code.device_auth_id, value, field)?,
+            Some("user_code") => json::set_string(&mut code.user_code, value, field)?,
+            Some("usercode") => json::set_string(&mut code.user_code_alt, value, field)?,
             Some("interval") => code.interval = poll_interval(value),
             _ => {}
         }
@@ -920,21 +920,21 @@ async fn poll_device_token(
 fn decode_device_token(body: &[u8]) -> Result<DeviceToken, String> {
     let value: Value = serde_json::from_slice(body).map_err(|e| e.to_string())?;
     let mut token = DeviceToken::default();
-    let Some(object) = jwt::object_or_null(&value, "codexDeviceTokenResponse")? else {
+    let Some(object) = json::object_or_null(&value, "codexDeviceTokenResponse")? else {
         return Ok(token);
     };
     for (key, value) in object {
         let field = format!("codexDeviceTokenResponse.{key}");
         let field = field.as_str();
-        match jwt::key_of(
+        match json::key_of(
             key,
             &["authorization_code", "code_verifier", "code_challenge"],
         ) {
             Some("authorization_code") => {
-                jwt::set_string(&mut token.authorization_code, value, field)?;
+                json::set_string(&mut token.authorization_code, value, field)?;
             }
-            Some("code_verifier") => jwt::set_string(&mut token.code_verifier, value, field)?,
-            Some("code_challenge") => jwt::set_string(&mut token.code_challenge, value, field)?,
+            Some("code_verifier") => json::set_string(&mut token.code_verifier, value, field)?,
+            Some("code_challenge") => json::set_string(&mut token.code_challenge, value, field)?,
             _ => {}
         }
     }

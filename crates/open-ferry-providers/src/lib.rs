@@ -7,5 +7,6 @@
 pub mod claude;
 pub mod codex;
 mod custom_headers;
+mod go_json;
 mod json;
 pub mod oauth;

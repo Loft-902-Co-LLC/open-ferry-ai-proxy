@@ -47,6 +47,7 @@ use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
 
 pub use classification::{AuthKind, AuthSource};
+pub use expiry::parse_go_rfc3339;
 pub(crate) use expiry::{parse_time_value, zero_time};
 pub use file_store::FileStore;
 pub(crate) use go::{atoi, equal_fold, parse_bool};
