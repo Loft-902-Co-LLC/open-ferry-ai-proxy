@@ -1,15 +1,24 @@
-// Ported from CLIProxyAPI internal/translator/common/responses.go (v8.0.10, MIT).
+// Ported from CLIProxyAPI internal/translator/common/responses.go, and the
+// request handling the Responses response translators repeat
+// (pickRequestJSON and the fields buildResponsesCompletedEvent echoes, in
+// internal/translator/claude/openai/responses and
+// internal/translator/openai/openai/responses) (v8.0.10, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Helpers for reading OpenAI Responses requests, shared by translators that
-//! turn them into other providers' formats.
+//! turn them into other providers' formats and turn the answers back.
+//!
+//! Deviations from upstream:
+//! - A `temperature` or `top_p` that reads as infinite or NaN is echoed as
+//!   `null`. Upstream writes `+Inf` or `NaN`, which isn't JSON.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
 
 use serde_json::Value;
 
-use crate::json::str_of;
+use crate::go;
+use crate::json::{bool_of, go_value, int_of, str_of};
 
 /// `ExtractResponsesCallID`: the tool call an input item belongs to, from
 /// `call_id`, `tool_call_id`, `callId` or else `id`. An `fco_` ID names the
@@ -163,6 +172,88 @@ pub(crate) fn normalize_responses_tool_call_outputs(items: &[Value]) -> Vec<Cow<
         }
     }
     normalized
+}
+
+/// `pickRequestJSON`: the client's request, else the translated one. `Null`
+/// counts as absent.
+pub(crate) fn pick_request<'r>(
+    original_request: &'r Value,
+    request: &'r Value,
+) -> Option<&'r Value> {
+    [original_request, request]
+        .into_iter()
+        .find(|request| !request.is_null())
+}
+
+/// How upstream reads each repeated request field.
+#[derive(Clone, Copy)]
+enum Read {
+    Text,
+    Int,
+    Bool,
+    Float,
+    Value,
+}
+
+/// The request fields a finished Responses response repeats, in upstream's
+/// order, each read as upstream reads it. For a field the request doesn't
+/// have, `fallback` can name another value to read in its place.
+pub(crate) fn echo_fields<'v>(
+    request: &'v Value,
+    fallback: impl Fn(&str) -> Option<&'v Value>,
+) -> Vec<(&'static str, Value)> {
+    const FIELDS: [(&str, Read); 20] = [
+        ("instructions", Read::Text),
+        ("max_output_tokens", Read::Int),
+        ("max_tool_calls", Read::Int),
+        ("model", Read::Text),
+        ("parallel_tool_calls", Read::Bool),
+        ("previous_response_id", Read::Text),
+        ("prompt_cache_key", Read::Text),
+        ("reasoning", Read::Value),
+        ("safety_identifier", Read::Text),
+        ("service_tier", Read::Text),
+        ("store", Read::Bool),
+        ("temperature", Read::Float),
+        ("text", Read::Value),
+        ("tool_choice", Read::Value),
+        ("tools", Read::Value),
+        ("top_logprobs", Read::Int),
+        ("top_p", Read::Float),
+        ("truncation", Read::Text),
+        ("user", Read::Value),
+        ("metadata", Read::Value),
+    ];
+    FIELDS
+        .iter()
+        .filter_map(|&(key, read)| {
+            let value = request.get(key).or_else(|| fallback(key))?;
+            let value = match read {
+                Read::Text => Value::String(str_of(Some(value)).into_owned()),
+                Read::Int => int_of(value).into(),
+                Read::Bool => bool_of(value).into(),
+                Read::Float => float_of(value),
+                Read::Value => go_value(value),
+            };
+            Some((key, value))
+        })
+        .collect()
+}
+
+/// gjson `Float()`, as sjson writes it. A value that reads as infinite or
+/// NaN, which sjson writes as invalid JSON, gives `null`.
+fn float_of(value: &Value) -> Value {
+    let float: f64 = match value {
+        Value::Bool(true) => 1.0,
+        Value::String(text) => go::parse_float(text),
+        Value::Number(number) => number.to_string().parse().unwrap_or(0.0),
+        _ => 0.0,
+    };
+    if float.is_finite() {
+        go_value(&Value::from(float))
+    } else {
+        Value::Null
+    }
 }
 
 #[cfg(test)]

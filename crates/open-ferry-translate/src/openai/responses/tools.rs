@@ -11,8 +11,11 @@
 //! that only collide once cut get `_1`-style suffixes. A custom (freeform) tool
 //! becomes a function with one string argument, `input`.
 //!
-//! Only what the request translator needs is ported; the rest of upstream's
-//! file maps names back for the response translator.
+//! The lookups by name, including those that map a call's name back for the
+//! response translator, are in [`super::tool_index`].
+//!
+//! Deviations from upstream:
+//! - Names cut to 64 bytes start at a character boundary (see [`cap`]).
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -20,6 +23,7 @@ use std::collections::{HashMap, HashSet};
 use serde_json::{Value, json};
 
 use crate::apply_patch;
+use crate::json::lenient::{self, Found};
 use crate::json::{go_value, object, path, str_of};
 
 /// `responsesChatToolNameLimit`: the longest function name strict Chat
@@ -252,6 +256,18 @@ pub(super) fn tool_output_text(output: &Value) -> String {
             })
             .collect(),
         other => other.to_string(),
+    }
+}
+
+/// `unwrapCustomToolInput`: the freeform input in the arguments
+/// `{"input": "..."}` of a call to a custom tool, read as gjson reads it,
+/// even from malformed JSON. An `input` that isn't a string is kept as
+/// written. Arguments gjson finds no `input` in are returned as they are.
+pub(super) fn unwrap_custom_tool_input(arguments: &str) -> String {
+    match lenient::get(arguments, "input") {
+        Some(Found::String(input)) => input,
+        Some(Found::Number(input) | Found::Literal(input) | Found::Json(input)) => input.to_owned(),
+        None => arguments.to_owned(),
     }
 }
 

@@ -2,15 +2,22 @@
 // (v8.0.10, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
-// The request-side tests of custom_tool_namespace_recovery_test.go,
-// openai_openai-responses_video_test.go and
-// responses_compatibility_digest_test.go are ported here too.
+// All 64 tests are ported, with the request-side tests of
+// custom_tool_namespace_recovery_test.go, the two in
+// openai_openai-responses_video_test.go, and the one in
+// responses_compatibility_digest_test.go, which hashes response streams too.
+// Table-driven tests run their cases in a loop rather than as subtests.
+// `responsesCustomToolNames`, `responsesSingleCustomToolName` and
+// `splitResponsesQualifiedFunctionCallFromRequest` are asked of the request's
+// `ToolNames`, which the response translator uses for them.
 
 use sha2::{Digest, Sha256};
 
+use super::super::tool_index::ToolNames;
 use super::super::tools::{cap, raw_qualified_name};
 use super::*;
 use crate::json::int_of;
+use crate::openai::responses::OpenAIToOpenAIResponsesStream;
 
 /// `responsesChatToolNameLimit`.
 const NAME_LIMIT: usize = 64;
@@ -1328,10 +1335,97 @@ fn keeps_distinct_tools_from_both_sources() {
     );
 }
 
-// From TestSplitResponsesQualifiedFunctionCallFromRequest_MatchesMergedToolIdentity:
-// only the merge is ported; the split is response-side.
 #[test]
-fn merge_keeps_one_tool_for_a_flat_tool_and_its_namespaced_twin() {
+fn responses_single_custom_tool_name_counts_deduplicated_tools() {
+    let request = json!({
+        "input": [
+            {"role": "user", "content": "Patch the file."},
+            {
+                "type": "additional_tools",
+                "tools": [{"type": "custom", "name": "apply_patch", "description": "copy"}]
+            }
+        ],
+        "tools": [
+            {"type": "custom", "name": "apply_patch", "description": "authoritative"}
+        ]
+    });
+
+    assert_eq!(
+        ToolNames::new(&request).single_custom_name(),
+        ("apply_patch", true),
+        "the only tool, given in both sources"
+    );
+}
+
+/// `splitResponsesQualifiedFunctionCallFromRequest`.
+fn split<'n>(names: &'n ToolNames, qualified: &'n str) -> (&'n str, &'n str) {
+    names.identity(qualified)
+}
+
+#[test]
+fn split_responses_qualified_function_call_first_declaration_wins() {
+    let flat_first = json!({
+        "tools": [
+            {"type": "function", "name": "editor__apply_patch", "parameters": {"type": "object"}},
+            {"type": "namespace", "name": "editor", "tools": [{"type": "function", "name": "apply_patch", "parameters": {"type": "object"}}]}
+        ]
+    });
+    let namespace_first = json!({
+        "tools": [
+            {"type": "namespace", "name": "editor", "tools": [{"type": "function", "name": "apply_patch", "parameters": {"type": "object"}}]},
+            {"type": "function", "name": "editor__apply_patch", "parameters": {"type": "object"}}
+        ]
+    });
+    let namespace_only = json!({
+        "tools": [
+            {"type": "namespace", "name": "mcp__github", "tools": [{"type": "function", "name": "get_me", "parameters": {"type": "object"}}]}
+        ]
+    });
+
+    let cases = [
+        // The flat tool is the one that survives merging, so it must stay
+        // flat.
+        (
+            "flat declared first",
+            &flat_first,
+            "editor__apply_patch",
+            ("editor__apply_patch", ""),
+        ),
+        // The namespace child survives here, so the call splits back into it.
+        (
+            "namespace declared first",
+            &namespace_first,
+            "editor__apply_patch",
+            ("apply_patch", "editor"),
+        ),
+        // No collision: unchanged behaviour.
+        (
+            "namespace only",
+            &namespace_only,
+            "mcp__github__get_me",
+            ("get_me", "mcp__github"),
+        ),
+        // An unknown name falls through untouched.
+        (
+            "unknown name",
+            &flat_first,
+            "something_else",
+            ("something_else", ""),
+        ),
+    ];
+    for (name, request, qualified, want) in cases {
+        let names = ToolNames::new(request);
+        assert_eq!(
+            split(&names, qualified),
+            want,
+            "{name}: split({qualified:?})"
+        );
+    }
+}
+
+#[test]
+fn split_responses_qualified_function_call_matches_merged_tool_identity() {
+    // Whatever survives the merge must be what reverse translation reports.
     let request = json!({
         "tools": [
             {"type": "function", "name": "editor__apply_patch", "parameters": {"type": "object"}},
@@ -1339,15 +1433,24 @@ fn merge_keeps_one_tool_for_a_flat_tool_and_its_namespaced_twin() {
         ]
     });
 
-    let merged = ToolIndex::new(&request).chat_tools();
+    let index = ToolIndex::new(&request);
+    let merged = index.chat_tools();
     assert_eq!(merged.len(), 1, "merged tool count: {merged:?}");
+    let emitted = text_at(&merged[0], "function.name");
+    assert_eq!(
+        split(&index, &emitted),
+        (emitted.as_str(), ""),
+        "{emitted:?} came from a flat declaration"
+    );
 }
 
-// From TestResponsesCustomToolNames_FollowsMergedDeclaration: only the merge is
-// ported; responsesCustomToolNames and responsesSingleCustomToolName are
-// response-side.
 #[test]
-fn merge_follows_the_first_declarations_kind() {
+fn responses_custom_tool_names_follows_merged_declaration() {
+    // Declarations delivered through the two channels may differ in type: a
+    // top-level function and an "additional_tools" custom tool can flatten to
+    // the same Chat Completions name. Only the winner may decide whether the
+    // tool is freeform, otherwise a plain function call comes back as a
+    // custom_tool_call with unwrapped arguments.
     let function_first = json!({
         "input": [
             {"type": "additional_tools", "tools": [{"type": "custom", "name": "exec", "description": "copy"}]}
@@ -1369,7 +1472,8 @@ fn merge_follows_the_first_declarations_kind() {
         ("function declaration wins", function_first, false),
         ("custom declaration wins", custom_first, true),
     ] {
-        let merged = ToolIndex::new(&request).chat_tools();
+        let index = ToolIndex::new(&request);
+        let merged = index.chat_tools();
         assert_eq!(merged.len(), 1, "{name}: merged tool count: {merged:?}");
         // Freeform tools are the ones converted to the single-string shape.
         let merged_is_custom = at(&merged[0], "function.parameters.properties.input").is_some();
@@ -1378,13 +1482,25 @@ fn merge_follows_the_first_declarations_kind() {
             "{name}: merged tool custom: {}",
             merged[0]
         );
+
+        assert_eq!(
+            index.is_custom("exec"),
+            want_custom,
+            "{name}: responsesCustomToolNames classified exec as custom"
+        );
+
+        let (single, ok) = index.single_custom_name();
+        assert_eq!(ok, want_custom, "{name}: responsesSingleCustomToolName ok");
+        if ok {
+            assert_eq!(single, "exec", "{name}: responsesSingleCustomToolName name");
+        }
     }
 }
 
-// From TestResponsesCustomToolNames_OnlyReportsMergedTools: only the merge is
-// ported; responsesCustomToolNames is response-side.
 #[test]
-fn merge_emits_reachable_namespace_children() {
+fn responses_custom_tool_names_only_reports_merged_tools() {
+    // Nested namespaces are not converted, so their children never reach the
+    // upstream request and must not be classified as freeform tools either.
     let request = json!({
         "tools": [
             {"type": "namespace", "name": "outer", "tools": [
@@ -1394,7 +1510,8 @@ fn merge_emits_reachable_namespace_children() {
         ]
     });
 
-    let merged_names: Vec<String> = ToolIndex::new(&request)
+    let index = ToolIndex::new(&request);
+    let merged_names: Vec<String> = index
         .chat_tools()
         .iter()
         .map(|tool| text_at(tool, "function.name"))
@@ -1403,6 +1520,13 @@ fn merge_emits_reachable_namespace_children() {
         merged_names.iter().any(|name| name == "outer__reachable"),
         "merged tool names = {merged_names:?}, want outer__reachable"
     );
+
+    for name in index.custom_names() {
+        assert!(
+            merged_names.iter().any(|merged| merged == name),
+            "responsesCustomToolNames reported {name:?}, which the merge never emits"
+        );
+    }
 }
 
 #[test]
@@ -2406,8 +2530,6 @@ fn maps_max_output_tokens_to_max_tokens() {
     );
 }
 
-// The checks of splitResponsesQualifiedFunctionCallFromRequest are
-// response-side and not ported.
 #[test]
 fn namespace_tool_prefix_collision() {
     let cases = [
@@ -2426,19 +2548,24 @@ fn namespace_tool_prefix_collision() {
         );
     }
 
-    let out = convert(json!({
+    let request = json!({
         "model": "gpt-5.4",
         "tools": [
             {"type": "function", "name": "fs_read", "parameters": {"type": "object"}},
             {"type": "namespace", "name": "fs", "tools": [{"type": "function", "name": "fs_read", "parameters": {"type": "object"}}]}
         ],
         "input": []
-    }));
+    });
+    let out = convert(request.clone());
     assert_eq!(
         tool_names(&out),
         ["fs_read", "fs__fs_read"],
         "emitted tool names: {out}"
     );
+
+    let names = ToolNames::new(&request);
+    assert_eq!(split(&names, "fs__fs_read"), ("fs_read", "fs"));
+    assert_eq!(split(&names, "fs_read"), ("fs_read", ""));
 }
 
 #[test]
@@ -2664,13 +2791,11 @@ fn mixed_video_input_order() {
     );
 }
 
-// Ported from responses_compatibility_digest_test.go. Upstream hashes these
-// requests' conversions together with response streams; only the requests are
-// hashed here. The expected digest is what upstream v8.0.10 gives for the
-// requests alone, computed with a test added through `go test -overlay`, so no
-// upstream file was changed.
+// From responses_compatibility_digest_test.go: hashes the requests'
+// conversions and the response stream each gives a call to each of a few
+// names.
 #[test]
-fn request_compatibility_digest() {
+fn responses_compatibility_digest() {
     let requests = [
         responses_perf_request(0),
         responses_perf_request(10),
@@ -2696,6 +2821,23 @@ fn request_compatibility_digest() {
         let out =
             convert_openai_responses_request_to_openai_chat_completions("test", request, true);
         hash.update(out.to_string().as_bytes());
+        for name in ["editor__read", "read", "editor__patch", "patch", "unknown"] {
+            let mut stream = OpenAIToOpenAIResponsesStream::new("test", request, request);
+            let chunks = [
+                r#"{"id":"r-test","created":1,"choices":[{"index":0,"delta":{"content":"hello"}}]}"#.to_owned(),
+                format!(
+                    r#"{{"id":"r-test","created":1,"choices":[{{"index":0,"delta":{{"tool_calls":[{{"index":0,"id":"call-test","function":{{"name":{},"arguments":""}}}}]}}}}]}}"#,
+                    Value::from(name)
+                ),
+                r#"{"id":"r-test","created":1,"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"input\":\"hello\"}"}}]}}]}"#.to_owned(),
+                r#"{"id":"r-test","created":1,"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110}}"#.to_owned(),
+                "[DONE]".to_owned(),
+            ];
+            for chunk in chunks {
+                let events = stream.translate_line(format!("data: {chunk}").as_bytes());
+                hash.update(events.as_bytes());
+            }
+        }
     }
     let digest: String = hash
         .finalize()
@@ -2703,7 +2845,7 @@ fn request_compatibility_digest() {
         .map(|byte| format!("{byte:02x}"))
         .collect();
     assert_eq!(
-        digest, "13137bbf6f1f19f6607ac0d85fba615c2e5edd0fe24d879d5334bc2947dca95e",
-        "request compatibility digest"
+        digest, "be3fc19eade4e6aff373fdfdd0192d586b5aa83e01a6b22884456396443f8411",
+        "compatibility digest"
     );
 }

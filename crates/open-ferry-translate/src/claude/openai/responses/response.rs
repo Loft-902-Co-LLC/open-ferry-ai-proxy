@@ -63,8 +63,8 @@ use super::web_search::{
 use crate::apply_patch::input::{CallState, InputError, failure};
 use crate::apply_patch::is_custom_tool;
 use crate::common::request_model_name;
-use crate::go;
-use crate::json::{bool_of, go_value, int_of, path, raw, str_of};
+use crate::common::responses::{echo_fields, pick_request};
+use crate::json::{go_value, int_of, path, raw, str_of};
 
 /// Translates a Claude event stream into Responses events, one line at a
 /// time. Keep one per response.
@@ -224,7 +224,7 @@ impl ClaudeToOpenAIResponsesStream {
                 .unwrap_or(model)
                 .to_owned(),
             tools: RequestTools::new(picked.unwrap_or(&Value::Null)),
-            echo: picked.map(echo_fields),
+            echo: picked.map(|request| echo_fields(request, |_| None)),
             error: None,
             completed: false,
             seq: 0,
@@ -1551,7 +1551,7 @@ fn non_stream(
         },
     });
     if let Some(request) = picked {
-        for (key, value) in echo_fields(request) {
+        for (key, value) in echo_fields(request, |_| None) {
             out[key] = value;
         }
     }
@@ -1725,80 +1725,6 @@ fn parse_data_line(line: &[u8]) -> Option<(&str, Value)> {
 fn unreadable(line: &[u8]) -> bool {
     line.strip_prefix(b"data:")
         .is_some_and(|data| raw::valid(String::from_utf8_lossy(data).trim()))
-}
-
-/// `pickRequestJSON`: the client's request, else the translated one. `Null`
-/// counts as absent.
-fn pick_request<'r>(original_request: &'r Value, request: &'r Value) -> Option<&'r Value> {
-    [original_request, request]
-        .into_iter()
-        .find(|request| !request.is_null())
-}
-
-/// How upstream reads each repeated request field.
-#[derive(Clone, Copy)]
-enum Read {
-    Text,
-    Int,
-    Bool,
-    Float,
-    Value,
-}
-
-/// The request fields a finished response repeats, in upstream's order.
-fn echo_fields(request: &Value) -> Vec<(&'static str, Value)> {
-    const FIELDS: [(&str, Read); 20] = [
-        ("instructions", Read::Text),
-        ("max_output_tokens", Read::Int),
-        ("max_tool_calls", Read::Int),
-        ("model", Read::Text),
-        ("parallel_tool_calls", Read::Bool),
-        ("previous_response_id", Read::Text),
-        ("prompt_cache_key", Read::Text),
-        ("reasoning", Read::Value),
-        ("safety_identifier", Read::Text),
-        ("service_tier", Read::Text),
-        ("store", Read::Bool),
-        ("temperature", Read::Float),
-        ("text", Read::Value),
-        ("tool_choice", Read::Value),
-        ("tools", Read::Value),
-        ("top_logprobs", Read::Int),
-        ("top_p", Read::Float),
-        ("truncation", Read::Text),
-        ("user", Read::Value),
-        ("metadata", Read::Value),
-    ];
-    FIELDS
-        .iter()
-        .filter_map(|&(key, read)| {
-            let value = request.get(key)?;
-            let value = match read {
-                Read::Text => Value::String(str_of(Some(value)).into_owned()),
-                Read::Int => int_of(value).into(),
-                Read::Bool => bool_of(value).into(),
-                Read::Float => float_of(value),
-                Read::Value => go_value(value),
-            };
-            Some((key, value))
-        })
-        .collect()
-}
-
-/// gjson `Float()`, as sjson writes it. A value that reads as infinite or
-/// NaN, which sjson writes as invalid JSON, gives `null`.
-fn float_of(value: &Value) -> Value {
-    let float: f64 = match value {
-        Value::Bool(true) => 1.0,
-        Value::String(text) => go::parse_float(text),
-        Value::Number(number) => number.to_string().parse().unwrap_or(0.0),
-        _ => 0.0,
-    };
-    if float.is_finite() {
-        go_value(&Value::from(float))
-    } else {
-        Value::Null
-    }
 }
 
 /// `isApplyPatch`: whether the request's winning declaration of the tool
