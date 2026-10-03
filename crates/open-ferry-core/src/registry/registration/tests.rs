@@ -2,7 +2,8 @@
 // service_excluded_models_test.go, service_oauth_model_alias_test.go,
 // service_oauth_settings_test.go, config_model_display_name_test.go,
 // config_model_max_context_length_test.go,
-// service_models_config_index_test.go, sdk/cliproxy/auth/classification_test.go
+// service_models_config_index_test.go, openai_compat_config_models_test.go,
+// sdk/cliproxy/auth/classification_test.go
 // and oauth_model_alias_test.go, internal/config/oauth_model_alias_test.go
 // and oauth_settings_test.go, internal/modelconfig/model_info_test.go,
 // internal/auth/codex/jwt_parser_test.go and
@@ -12,18 +13,18 @@
 //! Tests of registration.
 //!
 //! Upstream's tests that use the global registry use a fresh `ModelRegistry`
-//! here. Those for Gemini, Vertex, xAI, Meta, Devin, plugin providers and
-//! OpenAI-compatible providers run against Claude or Codex where the rule
-//! tested is provider-neutral (`MetaOAuthAliasAndExcludedModels`,
+//! here. Those for Gemini, Vertex, xAI, Meta, Devin and plugin providers
+//! run against Claude or Codex where the rule tested is provider-neutral
+//! (`MetaOAuthAliasAndExcludedModels`,
 //! `UsesPreMergedExcludedModelsAttribute`), and as written where it is (the
 //! alias and channel tests). `RegisterConfigAPIKeyAuthsCodexModelModes`
 //! builds the credential the config loader would.
+//! `OpenAICompatibilityRegistrationCacheUsesConfigIndex` checks the
+//! registration the cache feeds, as the cache isn't ported.
 //!
 //! Dropped:
-//! - `OpenAICompatibilityImageModelType`, `OpenAICompatibilityInputModalities`,
-//!   `OpenAICompatibilityRegistrationCacheUsesConfigIndex` and the Gemini,
-//!   Vertex, xAI, interactions and OpenAI-compatible cases of the display
-//!   name and context length tests: those providers aren't ported.
+//! - The Gemini, Vertex, xAI and interactions cases of the display name and
+//!   context length tests: those providers aren't ported.
 //! - `AntigravityFetchesWebSearchCapability` and `DevinSWE16SlowIncluded`:
 //!   Antigravity and Devin aren't ported.
 //! - `ApplyOAuthSettings_CodexCatalogPipeline`: it needs the Codex client
@@ -933,7 +934,21 @@ fn build_config_models_propagates_max_context_length() {
         "anthropic",
         "claude",
     );
-    for (name, model) in [("codex", &codex[0]), ("claude", &claude[0])] {
+    let compat = build_openai_compat_models(&OpenAiCompatEntry {
+        name: "compat".to_owned(),
+        models: vec![CompatModel {
+            name: "compat-upstream".to_owned(),
+            alias: "compat-alias".to_owned(),
+            max_context_length: WANT,
+            ..CompatModel::default()
+        }],
+        ..OpenAiCompatEntry::default()
+    });
+    for (name, model) in [
+        ("codex", &codex[0]),
+        ("claude", &claude[0]),
+        ("openai-compatibility", &compat[0]),
+    ] {
         assert_eq!(model.context_length, WANT, "{name}");
         assert_eq!(model.max_context_length, WANT, "{name}");
     }
@@ -1432,4 +1447,398 @@ fn rules_come_from_the_config() {
         ("gpt-5", "g5", 1000)
     );
     assert!(model.support_configuration_update);
+}
+
+// OpenAI-compatible providers: openai_compat_config_models_test.go,
+// TestRegisterModelsForAuth_OpenAICompatibilityImageModelType and
+// _OpenAICompatibilityInputModalities in service_excluded_models_test.go,
+// TestOpenAICompatibilityRegistrationCacheUsesConfigIndex, and the
+// OpenAI-compatible case of TestBuildConfigModelsPropagateMaxContextLength.
+
+fn compat_model(name: &str, alias: &str) -> CompatModel {
+    CompatModel {
+        name: name.to_owned(),
+        alias: alias.to_owned(),
+        ..CompatModel::default()
+    }
+}
+
+fn compat_entry(name: &str, models: Vec<CompatModel>) -> OpenAiCompatEntry {
+    OpenAiCompatEntry {
+        name: name.to_owned(),
+        models,
+        ..OpenAiCompatEntry::default()
+    }
+}
+
+fn compat_rules(entries: Vec<OpenAiCompatEntry>) -> RegistrationRules {
+    RegistrationRules {
+        openai_compatibility: entries,
+        ..RegistrationRules::default()
+    }
+}
+
+/// The provider and model IDs `auth` registers under `rules`, or `None`
+/// when it registers nothing.
+fn registration(auth: &Auth, rules: &RegistrationRules) -> Option<(String, Vec<String>)> {
+    match auth_models(auth, rules) {
+        AuthModels::Register { provider, models } => {
+            Some((provider, models.into_iter().map(|model| model.id).collect()))
+        }
+        _ => None,
+    }
+}
+
+fn model_named<'a>(models: &'a [ModelInfo], id: &str) -> &'a ModelInfo {
+    models
+        .iter()
+        .find(|model| model.id == id)
+        .unwrap_or_else(|| panic!("{id} is missing"))
+}
+
+#[test]
+fn build_openai_compatibility_config_models_input_modalities() {
+    let models = build_openai_compat_models(&compat_entry(
+        "mimo",
+        vec![
+            CompatModel {
+                display_name: "Mimo Vision".to_owned(),
+                input_modalities: vec!["TEXT".into(), "image".into(), "image".into()],
+                ..compat_model("upstream-vision", "mimo-v2.5-pro")
+            },
+            CompatModel {
+                image: true,
+                ..compat_model("upstream-image", "compat-image")
+            },
+        ],
+    ));
+    assert_eq!(models.len(), 2);
+    let vision = model_named(&models, "mimo-v2.5-pro");
+    assert_eq!(vision.display_name, "Mimo Vision");
+    assert_eq!(vision.supported_input_modalities, ["text", "image"]);
+    let image = model_named(&models, "compat-image");
+    assert_eq!(image.display_name, "compat-image");
+    assert_eq!(image.model_type, OPENAI_IMAGE_MODEL_TYPE);
+    assert!(image.supported_input_modalities.is_empty());
+}
+
+#[test]
+fn build_openai_compatibility_config_models_details() {
+    let models = build_openai_compat_models(&compat_entry(
+        "Kimi",
+        vec![
+            CompatModel {
+                max_context_length: 1_048_576,
+                is_compat: true,
+                output_modalities: vec![" Text ".into(), "".into()],
+                ..compat_model(" kimi-k2 ", "")
+            },
+            compat_model("", ""),
+            CompatModel {
+                thinking: Some(ThinkingSupport {
+                    levels: vec![" None ".into(), "HIGH".into(), "high".into()],
+                    ..ThinkingSupport::default()
+                }),
+                ..compat_model("kimi-k2", "k2")
+            },
+            compat_model("kimi-k2", "K2"),
+        ],
+    ));
+    assert_eq!(
+        ids(&models),
+        ["kimi-k2", "k2", "K2"],
+        "nameless models are skipped, and an alias may repeat"
+    );
+    let first = &models[0];
+    assert_eq!(
+        (first.context_length, first.max_context_length),
+        (1_048_576, 1_048_576)
+    );
+    assert_eq!(first.display_name, "kimi-k2", "no alias: the name");
+    assert_eq!(first.metadata_model_id, "kimi-k2");
+    assert_eq!(first.owned_by, "Kimi");
+    assert_eq!(first.model_type, "openai-compatibility");
+    assert_eq!(first.object, "model");
+    assert!(first.is_compat && !first.user_defined && !first.explicit_thinking);
+    assert_eq!(first.supported_output_modalities, ["text"]);
+    assert!(first.supported_input_modalities.is_empty());
+    assert_eq!(
+        first.thinking,
+        Some(ThinkingSupport {
+            levels: vec!["low".into(), "medium".into(), "high".into()],
+            ..ThinkingSupport::default()
+        })
+    );
+    let explicit = &models[1];
+    assert_eq!(explicit.display_name, "k2");
+    assert!(explicit.explicit_thinking);
+    assert_eq!(
+        explicit.thinking,
+        Some(ThinkingSupport {
+            levels: vec!["none".into(), "high".into()],
+            zero_allowed: true,
+            ..ThinkingSupport::default()
+        })
+    );
+}
+
+#[test]
+fn register_models_for_auth_openai_compatibility_image_model_type() {
+    let rules = compat_rules(vec![compat_entry(
+        "images",
+        vec![
+            CompatModel {
+                image: true,
+                ..compat_model("upstream-image", "compat-image")
+            },
+            compat_model("upstream-chat", "compat-chat"),
+        ],
+    )]);
+    let auth = auth(
+        "auth-openai-compat-image",
+        "openai-compatibility",
+        &[
+            ("auth_kind", "api_key"),
+            ("compat_name", "images"),
+            ("provider_key", "images"),
+        ],
+    );
+    let models = registered(&auth, &rules);
+    let image = model_named(&models, "compat-image");
+    assert_eq!(image.model_type, OPENAI_IMAGE_MODEL_TYPE);
+    assert_eq!(image.thinking, None);
+    let chat = model_named(&models, "compat-chat");
+    assert_eq!(chat.model_type, "openai-compatibility");
+    assert!(chat.thinking.is_some());
+}
+
+#[test]
+fn register_models_for_auth_openai_compatibility_input_modalities() {
+    let rules = compat_rules(vec![compat_entry(
+        "mimo",
+        vec![
+            CompatModel {
+                input_modalities: vec!["text".into(), "image".into()],
+                output_modalities: vec!["text".into()],
+                ..compat_model("mimo-v2.5-pro", "mimo-v2.5-pro")
+            },
+            CompatModel {
+                image: true,
+                ..compat_model("upstream-image", "compat-image")
+            },
+        ],
+    )]);
+    let auth = auth(
+        "auth-openai-compat-modalities",
+        "openai-compatibility",
+        &[
+            ("auth_kind", "api_key"),
+            ("compat_name", "mimo"),
+            ("provider_key", "mimo"),
+        ],
+    );
+    let models = registered(&auth, &rules);
+    let vision = model_named(&models, "mimo-v2.5-pro");
+    assert_eq!(vision.model_type, "openai-compatibility");
+    assert_eq!(vision.supported_input_modalities, ["text", "image"]);
+    assert_eq!(vision.supported_output_modalities, ["text"]);
+    let image = model_named(&models, "compat-image");
+    assert_eq!(image.model_type, OPENAI_IMAGE_MODEL_TYPE);
+    assert!(image.supported_input_modalities.is_empty());
+}
+
+#[test]
+fn openai_compatibility_registration_uses_config_index() {
+    let rules = compat_rules(vec![
+        compat_entry("shared", vec![compat_model("first", "")]),
+        compat_entry("shared", vec![compat_model("second", "")]),
+    ]);
+    let config_auth = |index: &str| {
+        auth(
+            "shared-auth",
+            "openai-compatible-shared",
+            &[
+                ("source", "config:shared[token-1]"),
+                ("config_index", index),
+                ("compat_name", "shared"),
+                ("provider_key", "openai-compatible-shared"),
+            ],
+        )
+    };
+    assert_eq!(
+        registration(&config_auth("1"), &rules),
+        Some((
+            "openai-compatible-shared".to_owned(),
+            vec!["second".to_owned()]
+        ))
+    );
+    assert_eq!(ids(&registered(&config_auth("0"), &rules)), ["first"]);
+    assert_eq!(
+        ids(&registered(&config_auth("7"), &rules)),
+        ["first"],
+        "an index out of range falls back to the name"
+    );
+
+    let mut disabled = rules.clone();
+    disabled.openai_compatibility[1].disabled = true;
+    assert_eq!(
+        ids(&registered(&config_auth("1"), &disabled)),
+        ["first"],
+        "a disabled entry falls back to the first enabled one with the name"
+    );
+
+    let mut file_auth = config_auth("1");
+    file_auth.attributes.remove("source");
+    assert_eq!(
+        ids(&registered(&file_auth, &rules)),
+        ["first"],
+        "only a config credential is found by index"
+    );
+}
+
+#[test]
+fn openai_compatibility_registers_under_the_provider_key_with_prefix() {
+    let rules = RegistrationRules {
+        force_model_prefix: true,
+        ..compat_rules(vec![compat_entry(
+            "Kimi",
+            vec![compat_model("kimi-k2", "k2")],
+        )])
+    };
+    let mut auth = auth(
+        "kimi-auth",
+        "openai-compatible-kimi",
+        &[
+            ("source", "config:kimi[abc]"),
+            ("config_index", "0"),
+            ("compat_name", "Kimi"),
+            ("provider_key", "openai-compatible-kimi"),
+            ("api_key", "sk-compat"),
+            ("excluded_models", "k2"),
+        ],
+    );
+    auth.prefix = "team".to_owned();
+    let AuthModels::Register { provider, models } = auth_models(&auth, &rules) else {
+        panic!("expected a registration");
+    };
+    assert_eq!(provider, "openai-compatible-kimi");
+    assert_eq!(
+        ids(&models),
+        ["team/k2"],
+        "exclusions don't apply; a forced prefix replaces the plain name"
+    );
+    assert_eq!(models[0].metadata_model_id, "kimi-k2");
+
+    let registry = ModelRegistry::new();
+    registry.register_auth(&auth, &rules);
+    assert_eq!(
+        registry.providers_for_model("team/k2"),
+        ["openai-compatible-kimi"]
+    );
+}
+
+#[test]
+fn openai_compatibility_without_an_entry_is_unregistered() {
+    let auth = auth(
+        "gone",
+        "openai-compatible-gone",
+        &[
+            ("source", "config:gone[abc]"),
+            ("config_index", "0"),
+            ("compat_name", "gone"),
+            ("provider_key", "openai-compatible-gone"),
+        ],
+    );
+    assert_eq!(
+        auth_models(&auth, &RegistrationRules::default()),
+        AuthModels::Unregister
+    );
+    let disabled = compat_rules(vec![OpenAiCompatEntry {
+        disabled: true,
+        ..compat_entry("gone", vec![compat_model("m", "")])
+    }]);
+    assert_eq!(auth_models(&auth, &disabled), AuthModels::Unregister);
+    let empty = compat_rules(vec![compat_entry("gone", Vec::new())]);
+    assert_eq!(auth_models(&auth, &empty), AuthModels::Unregister);
+
+    let registry = ModelRegistry::new();
+    let rules = compat_rules(vec![compat_entry("gone", vec![compat_model("m", "")])]);
+    registry.register_auth(&auth, &rules);
+    assert_eq!(ids(&registry.models_for_client("gone")), ["m"]);
+    registry.register_auth(&auth, &RegistrationRules::default());
+    assert!(registry.models_for_client("gone").is_empty());
+}
+
+#[test]
+fn other_providers_take_a_compatible_entry_by_name() {
+    let rules = compat_rules(vec![
+        compat_entry("custom", vec![compat_model("m", "")]),
+        compat_entry("gemini", vec![compat_model("g", "")]),
+    ]);
+    assert_eq!(
+        registration(&auth("a", " Custom ", &[]), &rules),
+        Some(("custom".to_owned(), vec!["m".to_owned()])),
+        "the provider is the key, as upstream's default case gives"
+    );
+    assert_eq!(
+        auth_models(&auth("b", "unknown", &[]), &rules),
+        AuthModels::Unregister
+    );
+    assert_eq!(
+        auth_models(&auth("c", "gemini", &[]), &rules),
+        AuthModels::Unregister,
+        "a provider upstream lists models of its own for isn't compatible"
+    );
+    assert_eq!(
+        registration(
+            &auth("d", "openai-compatibility", &[("compat_name", "custom")]),
+            &rules
+        ),
+        Some(("openai-compatible-custom".to_owned(), vec!["m".to_owned()]))
+    );
+    let labelled = Auth {
+        label: "Custom".to_owned(),
+        ..auth("e", "openai-compatibility", &[])
+    };
+    assert_eq!(
+        registration(&labelled, &rules),
+        Some(("openai-compatible-custom".to_owned(), vec!["m".to_owned()])),
+        "a credential of the plain provider goes by its label"
+    );
+}
+
+#[test]
+fn rules_carry_openai_compatibility() {
+    let config = Config::parse(concat!(
+        "openai-compatibility:\n",
+        "  - name: kimi\n",
+        "    base-url: https://kimi.example.test/v1\n",
+        "    disabled: true\n",
+        "    models:\n",
+        "      - name: kimi-k2\n",
+        "        alias: k2\n",
+        "        image: true\n",
+        "        max-context-length: 2048\n",
+        "        input-modalities: [text]\n",
+        "        thinking: {levels: [low]}\n",
+    ))
+    .unwrap();
+    let rules = RegistrationRules::from(&config);
+    assert_eq!(
+        rules.openai_compatibility,
+        [OpenAiCompatEntry {
+            name: "kimi".to_owned(),
+            disabled: true,
+            models: vec![CompatModel {
+                max_context_length: 2048,
+                image: true,
+                input_modalities: vec!["text".to_owned()],
+                thinking: Some(ThinkingSupport {
+                    levels: vec!["low".to_owned()],
+                    ..ThinkingSupport::default()
+                }),
+                ..compat_model("kimi-k2", "k2")
+            }],
+        }]
+    );
 }

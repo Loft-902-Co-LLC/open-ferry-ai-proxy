@@ -1,4 +1,5 @@
-// Ported from CLIProxyAPI sdk/cliproxy/service_models.go and
+// Ported from CLIProxyAPI sdk/cliproxy/service_models.go (with
+// buildOpenAICompatibilityConfigModels and normalizeCompatConfigModalities),
 // registerResolvedModelsForAuth in sdk/cliproxy/service_executors.go,
 // the alias helpers in
 // sdk/cliproxy/auth/oauth_model_alias.go, ResolveOAuthModelSetting in
@@ -18,12 +19,22 @@
 //! models or, with `fork`, add names for them, settings set context windows,
 //! and a prefix namespaces them, as in `team-a/gpt-5`.
 //!
+//! A credential of an OpenAI-compatible provider serves the models its
+//! `openai-compatibility` entry lists, under the provider's key (such as
+//! `openai-compatible-kimi`), with the prefix but no exclusions, aliases or
+//! settings. One whose entry is gone or disabled is unregistered.
+//!
 //! The config settings involved come in a [`RegistrationRules`].
 //!
 //! Deviations from upstream:
-//! - Only Claude and Codex credentials get models; a credential of any other
-//!   provider is unregistered. OpenAI-compatible providers, plugin models and
+//! - Only Claude, Codex and OpenAI-compatible credentials get models; a
+//!   credential of any other provider is unregistered. Plugin models and
 //!   Antigravity capability probing aren't ported.
+//! - Upstream caches the OpenAI-compatible entries' models while it
+//!   registers many credentials at once; they are built for each credential
+//!   here, which gives the same models.
+//! - A configured model's `ExplicitInputModalities` flag isn't kept: only
+//!   upstream's Codex client model list reads it, and that isn't ported.
 //! - Upstream skips a credential its credential manager no longer holds, or
 //!   no longer holds enabled; that check is the caller's. Unregistering a
 //!   legacy runtime client ID isn't ported.
@@ -60,8 +71,31 @@ use super::definitions::{CodexPlan, StaticCatalog};
 use super::{ModelRegistry, equal_fold, json};
 use crate::auth::Auth;
 use crate::auth::classification::{AUTH_KIND_API_KEY, AuthKind, AuthSource};
-use crate::config::{Config, OAuthModelAlias, OAuthModelSetting};
+use crate::auth::compat::OPENAI_COMPATIBILITY;
+use crate::config::{Config, OAuthModelAlias, OAuthModelSetting, OpenAiCompatibilityModel};
 use crate::models::{ModelInfo, ThinkingSupport};
+
+/// The type of a configured OpenAI-compatible model the image endpoints
+/// serve (upstream's `registry.OpenAIImageModelType`).
+pub const OPENAI_IMAGE_MODEL_TYPE: &str = "openai-image";
+
+/// Providers upstream lists models of their own for, none of which are
+/// ported: their credentials get no models, rather than an OpenAI-compatible
+/// provider's of the same name.
+const UNPORTED_PROVIDERS: [&str; 12] = [
+    "gemini",
+    "gemini-interactions",
+    "vertex",
+    "aistudio",
+    "antigravity",
+    "kimi",
+    "kimi-ai",
+    "kimi.ai",
+    "kimi.com",
+    "xai",
+    "devin",
+    "meta",
+];
 
 /// The plan a Codex account has when its token doesn't say.
 const DEFAULT_CODEX_PLAN_TYPE: &str = "free";
@@ -95,6 +129,8 @@ pub struct RegistrationRules {
     pub claude_keys: Vec<ApiKeyEntry>,
     /// The `codex-api-key` entries.
     pub codex_keys: Vec<ApiKeyEntry>,
+    /// The `openai-compatibility` entries.
+    pub openai_compatibility: Vec<OpenAiCompatEntry>,
 }
 
 /// Another name for a model (upstream's `OAuthModelAlias`).
@@ -141,6 +177,58 @@ impl fmt::Debug for ApiKeyEntry {
             .field("models", &self.models)
             .field("excluded_models", &self.excluded_models)
             .finish_non_exhaustive()
+    }
+}
+
+/// An `openai-compatibility` entry, as far as models go.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OpenAiCompatEntry {
+    /// The provider's name, which its models are listed as owned by.
+    pub name: String,
+    /// Whether the provider is off.
+    pub disabled: bool,
+    /// The models the provider serves.
+    pub models: Vec<CompatModel>,
+}
+
+/// A model in an `openai-compatibility` entry's list (upstream's
+/// `OpenAICompatibilityModel`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CompatModel {
+    /// The provider's name for the model.
+    pub name: String,
+    /// The name to list it under, or empty for `name`.
+    pub alias: String,
+    /// A display name, or empty for the alias.
+    pub display_name: String,
+    /// The context window to list, or 0 for none.
+    pub max_context_length: u64,
+    /// Turn on compatibility handling for the model.
+    pub is_compat: bool,
+    /// The model is for the image endpoints.
+    pub image: bool,
+    /// What the model takes, such as `text` and `image`; empty for unknown.
+    pub input_modalities: Vec<String>,
+    /// What the model gives; empty for unknown.
+    pub output_modalities: Vec<String>,
+    /// Its thinking settings, or `None` for the low, medium and high levels
+    /// (none for an image model).
+    pub thinking: Option<ThinkingSupport>,
+}
+
+impl From<&OpenAiCompatibilityModel> for CompatModel {
+    fn from(model: &OpenAiCompatibilityModel) -> Self {
+        Self {
+            name: model.name.clone(),
+            alias: model.alias.clone(),
+            display_name: model.display_name.clone(),
+            max_context_length: context_length(model.max_context_length),
+            is_compat: model.is_compat,
+            image: model.image,
+            input_modalities: model.input_modalities.clone(),
+            output_modalities: model.output_modalities.clone(),
+            thinking: model.thinking.as_ref().map(thinking),
+        }
     }
 }
 
@@ -238,6 +326,15 @@ impl From<&Config> for RegistrationRules {
                     excluded_models: key.excluded_models.clone(),
                 })
                 .collect(),
+            openai_compatibility: config
+                .openai_compatibility
+                .iter()
+                .map(|compat| OpenAiCompatEntry {
+                    name: compat.name.clone(),
+                    disabled: compat.disabled,
+                    models: compat.models.iter().map(CompatModel::from).collect(),
+                })
+                .collect(),
         }
     }
 }
@@ -306,7 +403,12 @@ pub fn auth_models_with(
         return AuthModels::Unregister;
     }
     let kind = auth.auth_kind().map_or("", AuthKind::as_str);
-    let provider = go::to_lower(auth.provider.trim());
+    let compat = auth.openai_compat_info();
+    let provider = if compat.is_some() {
+        OPENAI_COMPATIBILITY.to_owned()
+    } else {
+        go::to_lower(auth.provider.trim())
+    };
     let mut excluded = oauth_excluded_models(rules, &provider, kind);
     if let Some(list) = credential_excluded_models(auth, rules, &provider) {
         excluded = list;
@@ -337,7 +439,13 @@ pub fn auth_models_with(
             let plan = CodexPlan::from_plan_type(&codex_plan_type(auth));
             apply_excluded_models(catalog.codex_models(plan), &excluded)
         }
-        _ => Vec::new(),
+        name if UNPORTED_PROVIDERS.contains(&name) => Vec::new(),
+        _ => {
+            if let Some(registration) = openai_compat_registration(auth, rules, &provider, compat) {
+                return registration;
+            }
+            Vec::new()
+        }
     };
 
     let models = apply_model_aliases(rules, &provider, kind, auth, models);
@@ -346,7 +454,14 @@ pub fn auth_models_with(
     }
     let models = apply_model_settings(rules, &provider, kind, models);
     let models = apply_model_prefixes(models, &auth.prefix, rules.force_model_prefix);
+    resolved_models(&provider, models)
+}
 
+/// The registration of `models` under `provider`, each ID trimmed, or
+/// unregistering when there's no provider or no model with an ID (upstream's
+/// `registerResolvedModelsForAuth`).
+fn resolved_models(provider: &str, models: Vec<ModelInfo>) -> AuthModels {
+    let provider = go::to_lower(provider.trim());
     if provider.is_empty() {
         return AuthModels::Unregister;
     }
@@ -365,6 +480,138 @@ pub fn auth_models_with(
         return AuthModels::Unregister;
     }
     AuthModels::Register { provider, models }
+}
+
+/// The registration of an OpenAI-compatible credential, or `None` for a
+/// credential that isn't one (the default case of upstream's
+/// `registerModelsForAuthWithCache`). `provider` is the credential's
+/// provider in lower case, or `openai-compatibility` when `compat`, its
+/// [`Auth::openai_compat_info`], says it is OpenAI-compatible.
+///
+/// The entry is the one at the credential's `config_index`, or else the
+/// first with its provider's name, skipping disabled ones; its models are
+/// registered under the provider key.
+fn openai_compat_registration(
+    auth: &Auth,
+    rules: &RegistrationRules,
+    provider: &str,
+    compat: Option<(String, String)>,
+) -> Option<AuthModels> {
+    let mut provider_key = provider.to_owned();
+    let mut compat_name = auth.provider.trim().to_owned();
+    let mut is_compat = false;
+    if let Some((key, name)) = compat {
+        if !key.is_empty() {
+            provider_key = key;
+        }
+        if !name.is_empty() {
+            compat_name = name;
+        }
+        is_compat = true;
+    }
+    let name_attribute = attribute(auth, "compat_name");
+    let key_attribute = attribute(auth, "provider_key");
+    if equal_fold(&provider_key, OPENAI_COMPATIBILITY) {
+        is_compat = true;
+        if !name_attribute.is_empty() {
+            name_attribute.clone_into(&mut compat_name);
+        }
+        if !key_attribute.is_empty() {
+            provider_key = go::to_lower(key_attribute);
+        }
+        if provider_key == OPENAI_COMPATIBILITY && !compat_name.is_empty() {
+            provider_key = go::to_lower(&compat_name);
+        }
+    } else {
+        if !name_attribute.is_empty() {
+            name_attribute.clone_into(&mut compat_name);
+            is_compat = true;
+        }
+        if !key_attribute.is_empty() {
+            provider_key = go::to_lower(key_attribute);
+            is_compat = true;
+        }
+    }
+
+    let entries = &rules.openai_compatibility;
+    let entry = config_entry_for_auth_index(auth, entries)
+        .filter(|entry| !entry.disabled)
+        .or_else(|| {
+            entries
+                .iter()
+                .find(|entry| !entry.disabled && equal_fold(&entry.name, &compat_name))
+        });
+    let Some(entry) = entry else {
+        return is_compat.then_some(AuthModels::Unregister);
+    };
+    if provider_key.is_empty() {
+        OPENAI_COMPATIBILITY.clone_into(&mut provider_key);
+    }
+    let models = build_openai_compat_models(entry);
+    let models = apply_model_prefixes(models, &auth.prefix, rules.force_model_prefix);
+    Some(resolved_models(&provider_key, models))
+}
+
+/// An OpenAI-compatible provider's models, owned by the provider, in the
+/// order configured (upstream's `buildOpenAICompatibilityConfigModels`).
+/// A model without thinking settings gets the low, medium and high levels,
+/// unless it is an image model; modalities are trimmed, in lower case and
+/// each listed once.
+fn build_openai_compat_models(entry: &OpenAiCompatEntry) -> Vec<ModelInfo> {
+    let now = chrono::Utc::now().timestamp();
+    let mut out = Vec::with_capacity(entry.models.len());
+    for model in &entry.models {
+        let model_type = if model.image {
+            OPENAI_IMAGE_MODEL_TYPE
+        } else {
+            OPENAI_COMPATIBILITY
+        };
+        let configured = ConfiguredModel {
+            name: model.name.clone(),
+            alias: model.alias.clone(),
+            display_name: model.display_name.clone(),
+            max_context_length: model.max_context_length,
+            is_compat: model.is_compat,
+            ..ConfiguredModel::default()
+        };
+        let Some(mut info) = build_configured_model_info(
+            &configured,
+            &entry.name,
+            model_type,
+            now,
+            model.alias.trim(),
+            false,
+        ) else {
+            continue;
+        };
+        let thinking = match &model.thinking {
+            Some(thinking) => Some(thinking.clone()),
+            None if !model.image => Some(ThinkingSupport {
+                levels: vec!["low".to_owned(), "medium".to_owned(), "high".to_owned()],
+                ..ThinkingSupport::default()
+            }),
+            None => None,
+        };
+        info.explicit_thinking = model.thinking.is_some();
+        info.thinking = thinking.as_ref().map(normalize_thinking);
+        info.supported_input_modalities = normalize_modalities(&model.input_modalities);
+        info.supported_output_modalities = normalize_modalities(&model.output_modalities);
+        out.push(info);
+    }
+    out
+}
+
+/// Modalities trimmed and in lower case, without blanks or repeats
+/// (upstream's `normalizeCompatConfigModalities`).
+fn normalize_modalities(raw: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(raw.len());
+    for value in raw {
+        let value = go::to_lower(value.trim());
+        if !value.is_empty() && !out.contains(&value) {
+            out.push(value);
+        }
+    }
+    out
 }
 
 /// The attribute at `key`, trimmed, or empty.
