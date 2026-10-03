@@ -207,7 +207,29 @@ Deviations, each also noted in its module:
 
 #### Credential state
 
-Not ported yet: `auth-files/status`, `auth-files/fields` and `auth-files/refresh`.
+| Route | v8 route |
+|---|---|
+| `PATCH /v0/management/auth-files/status` | `PATCH /v8/management/credentials/status` |
+| `PATCH /v0/management/auth-files/fields` | `PATCH /v8/management/credentials/fields` |
+| `POST /v0/management/auth-files/refresh` | `POST /v8/management/credentials/refresh` |
+
+A status or field change is saved to the credential's file, then applied by the service, which registers the credential's models again, so a credential turned back on gets its models back. The credential lock is never held while the service applies a change. A refresh refreshes one credential at a time per ID, and refreshing all of them runs at most the manager's `refresh_workers` at once. As upstream, the refresh answer holds the refreshed credential's tokens; the route is behind the management key.
+
+Deviations, each also noted in its module:
+
+- **A credential from a config API key is never turned on or off.** `auth-files/status` answers 409 `{"error":"config API key credentials are managed in the config file, which is never written"}` and changes nothing; upstream adds `*` to the key's `excluded-models` and saves the config. As upstream, `auth-files/fields` on such a credential changes it in the running service only.
+
+- **Status and field changes answer 503 when the service can't take them**, as the foundation's other writes do: `credential store unavailable` without a credential store, and the service's error once it has stopped. Upstream answers 500 when its hook fails.
+
+- **Fields are applied in body order**, and the first bad one is reported. Upstream walks a Go map, so with two bad fields the one it reports varies, as does which of two headers that trim to the same name wins.
+
+- **A field change holds the credential lock**, as a status change does; upstream takes none. A change to a credential removed meanwhile answers 404 `auth file not found`, where upstream hands its stale copy to the hook and registers it again.
+
+- **Lookups take the first credential by ID** when two match a name; upstream takes whichever its map yields first. A refresh body that fails to decode answers 400 `invalid request body` without Go's decoder error after it. A field body nested more than 128 deep is refused; Go allows 10000. A refresh's query value that isn't UTF-8 has each bad byte read as U+FFFD.
+
+- **The refreshed credential is written field by field as Go writes upstream's `Auth`**, but without `registration_epoch` and `generation`, which the manager doesn't keep, with the quota's `observed_at` always Go's zero time and no `signals`, and with `"unknown"` for a status that isn't known, where Go writes `""`.
+
+- **There are no plugin virtual credentials**, since there is no plugin host, so none of upstream's handling of them is ported (409 for a virtual child, turning every credential of a source file on or off).
 
 #### OAuth logins
 
