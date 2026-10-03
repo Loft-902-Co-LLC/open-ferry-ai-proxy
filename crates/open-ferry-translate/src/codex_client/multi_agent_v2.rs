@@ -2,7 +2,8 @@
 // optimize_multi_agent_v2.go (IsCodexClientUserAgent,
 // PrepareCodexMultiAgentV2Tools, OptimizeCodexMultiAgentV2Request,
 // RewriteCodexMultiAgentV2Input, HasCodexMultiAgentV2NamespaceConflict,
-// RestoreCodexMultiAgentV2Response and their helpers) (v8.0.10, MIT).
+// RestoreCodexMultiAgentV2Response, formatCodexSpawnAgentModels,
+// replaceCodexSpawnAgentModels and their helpers) (v8.0.10, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Codex's multi-agent v2 requests, readied for upstreams other than the
@@ -15,9 +16,12 @@
 //! agents said to each other as `agent_message` items with encrypted content.
 //! When the setting is on:
 //! - [`prepare_tools`], at the Responses API boundary, drops the `encrypted`
-//!   marks so the messages arrive readable;
-//! - [`optimize`], in the Codex executor, also turns the encrypted content
-//!   of `agent_message` items into plain `input_text`, and renames a
+//!   marks so the messages arrive readable, and puts the models
+//!   `spawn_agent` may pick in its description. The caller makes that list,
+//!   with `open_ferry_core::codex_models::spawn_agent` and
+//!   [`format_spawn_agent_models`];
+//! - [`optimize`], in the Codex executor, does the same, turns the encrypted
+//!   content of `agent_message` items into plain `input_text`, and renames a
 //!   `collaboration` namespace holding `spawn_agent` to
 //!   `collaboration-optimize`; [`restore_response`] renames it back in what
 //!   the upstream answers;
@@ -29,13 +33,13 @@
 //! ([`has_namespace_conflict`]) keeps its namespace.
 //!
 //! Deviations from upstream:
-//! - Only step 1 is ported. Step 2, listing the models `spawn_agent` may
-//!   pick in its description, waits for the Codex client model catalog;
-//!   descriptions are left as they are, which is what upstream does when it
-//!   has no models to list. The Home model fetch isn't ported.
+//! - The Home model fetch isn't ported, so the model list is always made
+//!   from the proxy's own models.
 //! - Upstream notes in the Gin context that the Responses handler prepared
-//!   the tools, and then doesn't prepare them again. Without step 2 both
-//!   ways give the same body, so no such note is kept.
+//!   the tools, and then [`optimize`] doesn't list the models again. No such
+//!   note is kept: [`optimize`] always prepares the tools, which puts the
+//!   same list in place of the one the handler wrote, unless the models
+//!   changed in between.
 //! - [`restore_response`] reads and writes JSON as Go does, but leaves alone
 //!   data nested more than 128 deep, where Go reads up to 10,000, so that
 //!   its recursion can't overflow the stack.
@@ -65,6 +69,32 @@ const OPTIMIZED_DOT_PREFIX: &str = "collaboration-optimize.";
 const MESSAGE_TOOLS: [&str; 3] = ["spawn_agent", "send_message", "followup_task"];
 /// The tool whose namespace is renamed.
 const SPAWN_TOOLS: [&str; 1] = ["spawn_agent"];
+/// The text `spawn_agent`'s instructions start with; the model list goes on
+/// the line before (`codexSpawnAgentDescriptionMarker`).
+const SPAWN_AGENT_DESCRIPTION_MARKER: &str = "Spawns an agent";
+/// The model list's heading (`codexSpawnAgentModelsHeading`).
+pub const SPAWN_AGENT_MODELS_HEADING: &str =
+    "Available model overrides (optional; inherited parent model is preferred):";
+
+/// A model `spawn_agent` may pick, as its description lists it
+/// (`codexSpawnAgentModel`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SpawnAgentModel {
+    /// The model's ID.
+    pub id: String,
+    /// What the model is for.
+    pub description: String,
+    /// The reasoning efforts it takes, in order.
+    pub reasoning_efforts: Vec<String>,
+    /// The one of [`Self::reasoning_efforts`] it uses by default.
+    pub default_reasoning_effort: String,
+    /// The service tiers it is offered in.
+    pub service_tiers: Vec<String>,
+    /// Where its catalog entry sorts, lowest first.
+    pub priority: i64,
+    /// Its name for people.
+    pub display_name: String,
+}
 
 /// Whether `user_agent` is an official Codex client's
 /// (`IsCodexClientUserAgent`): Codex Desktop, the TUI, the CLI or `codex
@@ -82,30 +112,48 @@ pub fn is_codex_client_user_agent(user_agent: &str) -> bool {
 /// API boundary, without renaming their namespace
 /// (`PrepareCodexMultiAgentV2Tools`): with the setting `enabled` and an
 /// official Codex client's `user_agent`, the `encrypted` mark is dropped
-/// from the `message` parameter of each collaboration tool. Returns whether
-/// the body changed.
-pub fn prepare_tools(body: &mut Value, user_agent: &str, enabled: bool) -> bool {
+/// from the `message` parameter of each collaboration tool, and the model
+/// list from `models`, unless it is empty, takes the place of any in each
+/// `spawn_agent` tool's description (see [`format_spawn_agent_models`]).
+/// `models` is called only for a request with a `spawn_agent` tool, and not
+/// for one that uses the optimized namespace's name
+/// ([`has_namespace_conflict`]), whose descriptions are kept. Returns
+/// whether the body changed.
+pub fn prepare_tools(
+    body: &mut Value,
+    user_agent: &str,
+    enabled: bool,
+    models: impl FnOnce() -> String,
+) -> bool {
     if !enabled || !is_codex_client_user_agent(user_agent) {
         return false;
     }
-    // Step 2 would also list models in `spawn_agent`'s description, unless
-    // the namespace conflicts; without it both cases only drop the marks.
-    remove_message_encryption(body)
+    if has_namespace_conflict(body) {
+        return remove_message_encryption(body);
+    }
+    let changed = rewrite_spawn_agent_descriptions(body, models);
+    remove_message_encryption(body) || changed
 }
 
 /// Rewrites an eligible request for Codex (`OptimizeCodexMultiAgentV2Request`):
 /// with the setting `enabled` and an official Codex client's `user_agent`,
-/// encrypted `agent_message` content becomes `input_text`, the collaboration
-/// tools lose their `encrypted` marks, and a `collaboration` namespace that
-/// holds `spawn_agent` is renamed `collaboration-optimize`, unless the
-/// request already uses that name. Returns whether a namespace was renamed,
-/// so the response must be restored with [`restore_response`].
-pub fn optimize(body: &mut Value, user_agent: &str, enabled: bool) -> bool {
+/// encrypted `agent_message` content becomes `input_text`, the tools are
+/// readied as [`prepare_tools`] readies them with `models`, and a
+/// `collaboration` namespace that holds `spawn_agent` is renamed
+/// `collaboration-optimize`, unless the request already uses that name.
+/// Returns whether a namespace was renamed, so the response must be
+/// restored with [`restore_response`].
+pub fn optimize(
+    body: &mut Value,
+    user_agent: &str,
+    enabled: bool,
+    models: impl FnOnce() -> String,
+) -> bool {
     if !enabled || !is_codex_client_user_agent(user_agent) {
         return false;
     }
     rewrite_agent_message_content(body);
-    remove_message_encryption(body);
+    prepare_tools(body, user_agent, enabled, models);
     if has_namespace_conflict(body) {
         return false;
     }
@@ -239,6 +287,170 @@ fn remove_message_encryption(body: &mut Value) -> bool {
         }
     });
     changed
+}
+
+/// Puts the model list from `models` in place of any in each `spawn_agent`
+/// tool's string description (the first half of
+/// `rewriteCodexCollaborationTools`). `models` is called once, at the first
+/// `spawn_agent` tool, and an empty list changes nothing. Returns whether
+/// any description changed.
+fn rewrite_spawn_agent_descriptions(body: &mut Value, models: impl FnOnce() -> String) -> bool {
+    let mut models = Some(models);
+    let mut model_list: Option<String> = None;
+    let mut changed = false;
+    for_each_tool(body, &SPAWN_TOOLS, &mut |tool, _| {
+        let list = model_list.get_or_insert_with(|| models.take().map(|f| f()).unwrap_or_default());
+        if list.is_empty() {
+            return;
+        }
+        let Some(Value::String(description)) = tool.get_mut("description") else {
+            return;
+        };
+        let rewritten = replace_spawn_agent_models(description, list);
+        if rewritten != *description {
+            *description = rewritten;
+            changed = true;
+        }
+    });
+    changed
+}
+
+/// Writes the models `spawn_agent` may pick as a Markdown list
+/// (`formatCodexSpawnAgentModels`), one line per model:
+/// ``- `id`: Description. Reasoning efforts: low, medium (default). Service
+/// tiers: priority.``, each part left out when it is empty. Runs of white
+/// space in the ID and description become one space, and a model without
+/// an ID is skipped.
+pub fn format_spawn_agent_models(models: &[SpawnAgentModel]) -> String {
+    let mut list = String::new();
+    for model in models {
+        let id = model.id.split_whitespace().collect::<Vec<_>>().join(" ");
+        if id.is_empty() {
+            continue;
+        }
+        list.push_str("- ");
+        push_markdown_code(&mut list, &id);
+        list.push_str(": ");
+        let mut has_details = false;
+        let description = model
+            .description
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !description.is_empty() {
+            push_sentence(&mut list, &description);
+            has_details = true;
+        }
+        if !model.reasoning_efforts.is_empty() {
+            if has_details {
+                list.push(' ');
+            }
+            list.push_str("Reasoning efforts: ");
+            for (index, effort) in model.reasoning_efforts.iter().enumerate() {
+                if index > 0 {
+                    list.push_str(", ");
+                }
+                list.push_str(effort);
+                if *effort == model.default_reasoning_effort {
+                    list.push_str(" (default)");
+                }
+            }
+            list.push('.');
+            has_details = true;
+        }
+        if !model.service_tiers.is_empty() {
+            if has_details {
+                list.push(' ');
+            }
+            list.push_str("Service tiers: ");
+            list.push_str(&model.service_tiers.join(", "));
+            list.push('.');
+        }
+        list.push('\n');
+    }
+    if list.ends_with('\n') {
+        list.pop();
+    }
+    list
+}
+
+/// `value` as inline Markdown code (`markdownCode`).
+fn push_markdown_code(out: &mut String, value: &str) {
+    if value.contains('`') {
+        out.push_str("`` ");
+        out.push_str(value);
+        out.push_str(" ``");
+    } else {
+        out.push('`');
+        out.push_str(value);
+        out.push('`');
+    }
+}
+
+/// `value`, which isn't empty, ended with a full stop unless it already ends
+/// a sentence (`writeSentence`).
+fn push_sentence(out: &mut String, value: &str) {
+    out.push_str(value);
+    if !value.ends_with(['.', '!', '?']) {
+        out.push('.');
+    }
+}
+
+/// `description` with `model_list` under its heading in place of any model
+/// lists it had (`replaceCodexSpawnAgentModels`): on the line before the
+/// instructions (`Spawns an agent`), or else at the end after a blank line.
+fn replace_spawn_agent_models(description: &str, model_list: &str) -> String {
+    if model_list.is_empty() {
+        return description.to_owned();
+    }
+    let (cleaned, indent) = remove_spawn_agent_model_sections(description);
+    let section = format!("{indent}{SPAWN_AGENT_MODELS_HEADING}\n{model_list}\n");
+    if let Some(marker) = cleaned.find(SPAWN_AGENT_DESCRIPTION_MARKER) {
+        let line_start = cleaned[..marker].rfind('\n').map_or(0, |at| at + 1);
+        return format!(
+            "{}{section}{}",
+            &cleaned[..line_start],
+            &cleaned[line_start..]
+        );
+    }
+    let separator = if !cleaned.is_empty() && !cleaned.ends_with('\n') {
+        "\n\n"
+    } else {
+        ""
+    };
+    format!(
+        "{cleaned}{separator}{}",
+        section.strip_suffix('\n').unwrap_or(&section)
+    )
+}
+
+/// `description` without its model lists, each a heading line and the
+/// `- ` lines after it, and the indent of the first indented heading
+/// (`removeCodexSpawnAgentModelSections`).
+fn remove_spawn_agent_model_sections(description: &str) -> (String, &str) {
+    if !description.contains(SPAWN_AGENT_MODELS_HEADING) {
+        return (description.to_owned(), "");
+    }
+    let mut cleaned = String::with_capacity(description.len());
+    let mut indent = "";
+    let mut lines = description.split_inclusive('\n').peekable();
+    while let Some(line) = lines.next() {
+        if line.trim() != SPAWN_AGENT_MODELS_HEADING {
+            cleaned.push_str(line);
+            continue;
+        }
+        if indent.is_empty()
+            && let Some(at) = line.find(SPAWN_AGENT_MODELS_HEADING)
+            && at > 0
+        {
+            indent = &line[..at];
+        }
+        while lines
+            .next_if(|line| line.trim().starts_with("- "))
+            .is_some()
+        {}
+    }
+    (cleaned, indent)
 }
 
 /// Renames each `collaboration` namespace that directly holds `spawn_agent`

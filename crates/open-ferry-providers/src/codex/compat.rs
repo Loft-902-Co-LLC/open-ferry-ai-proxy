@@ -27,8 +27,10 @@
 //! (`OptimizeCodexMultiAgentV2RequestForAuth`): orphan delegation outputs
 //! become user messages (`codex.orphan-delegation-compatibility`), an
 //! official Codex client's multi-agent v2 request is optimized
-//! (`client.codex.optimize-multi-agent-v2`), and a compatibility model's
-//! `agent_message` items are rewritten.
+//! (`client.codex.optimize-multi-agent-v2`), with the models the executor
+//! knows listed for `spawn_agent`
+//! ([`open_ferry_core::codex_models::spawn_agent`]), and a compatibility
+//! model's `agent_message` items are rewritten.
 //!
 //! [`before_translation`] is what the other executors do to a request before
 //! they translate it (`TranslateRequestWithCodexMultiAgentV2ForExecutor`): a
@@ -55,10 +57,13 @@
 //!   `oauth.providers.codex.orphan-delegation-compatibility` from API key
 //!   credentials. The config here, as v8.0.11's, applies it to every
 //!   credential, so API keys get orphan delegation compatibility too.
+//! - An executor without a model catalog lists no models for `spawn_agent`,
+//!   which leaves its description as it is.
 
 use http::HeaderMap;
 use http::header::{self, HeaderValue};
 use open_ferry_core::auth::{Auth, AuthSource};
+use open_ferry_core::codex_models::spawn_agent::spawn_agent_model_list;
 use open_ferry_core::config::{CodexKey, Config};
 use open_ferry_core::exec::{Format, Options, Request};
 use open_ferry_translate::codex::claude::convert_claude_request_to_codex_with_compat;
@@ -311,7 +316,13 @@ pub(crate) fn prepare(
     }
     let user_agent = header(&options.headers, header::USER_AGENT.as_str());
     let enabled = config.client.codex.optimize_multi_agent_v2;
-    let optimized = multi_agent_v2::optimize(body, &user_agent, enabled);
+    let models = || {
+        context
+            .models
+            .map(spawn_agent_model_list)
+            .unwrap_or_default()
+    };
+    let optimized = multi_agent_v2::optimize(body, &user_agent, enabled, models);
     if is_compat(context, request) {
         multi_agent_v2::rewrite_input(body, &user_agent, enabled, true);
     }

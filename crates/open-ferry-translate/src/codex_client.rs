@@ -13,8 +13,9 @@
 //!   the request goes to another provider.
 //!
 //! They work on parsed JSON and take what they need from the request's
-//! headers and the config as plain values, so the server and the executors
-//! can both call them.
+//! headers and the config as plain values, and the models `spawn_agent` may
+//! pick as a function that writes their list, so the server and the
+//! executors can both call them.
 //!
 //! Deviations from upstream:
 //! - Edits are made on parsed JSON rather than spliced into the bytes, so a

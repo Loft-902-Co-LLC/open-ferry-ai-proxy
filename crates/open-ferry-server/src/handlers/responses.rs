@@ -13,8 +13,8 @@
 //! event: the provider's, or a failure the client can read.
 //!
 //! Deviations from upstream:
-//! - A Codex client's body is readied as [`codex_client`] says, without
-//!   step 2 of multi-agent v2.
+//! - A Codex client's body is readied as [`codex_client`] says, and nothing
+//!   notes that it was.
 //! - Errors aren't kept for the request log or usage records
 //!   (`LoggingAPIResponseError`). A stream's errors are logged with
 //!   `tracing` at debug level, as upstream words them for its request log.
@@ -77,9 +77,13 @@ pub(crate) async fn responses(
         Ok(raw) => raw,
         Err(response) => return response,
     };
-    if let Some(prepared) =
-        codex_client::prepare(&state.settings().config, &client.headers, &raw, true)
-    {
+    if let Some(prepared) = codex_client::prepare(
+        &state.settings().config,
+        state.catalog(),
+        &client.headers,
+        &raw,
+        true,
+    ) {
         raw = Bytes::from(prepared);
     }
     let parsed = parse_body(&raw);
@@ -105,9 +109,13 @@ pub(crate) async fn compact(
     };
     // Only orphan delegation, as upstream: the tools are left for the
     // executor.
-    if let Some(prepared) =
-        codex_client::prepare(&state.settings().config, &client.headers, &raw, false)
-    {
+    if let Some(prepared) = codex_client::prepare(
+        &state.settings().config,
+        state.catalog(),
+        &client.headers,
+        &raw,
+        false,
+    ) {
         raw = Bytes::from(prepared);
     }
     let parsed = parse_body(&raw);

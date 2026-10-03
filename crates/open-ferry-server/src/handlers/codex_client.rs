@@ -7,15 +7,19 @@
 //!
 //! With `client.codex.optimize-multi-agent-v2`, an official Codex client's
 //! collaboration tools lose the `encrypted` mark on their `message`
-//! parameter; with `codex.orphan-delegation-compatibility`, a sub-agent's
-//! delegation outputs without their call become user messages. The
-//! rewrites themselves are in `open_ferry_translate::codex_client`; the
-//! executors make them again where upstream's do.
+//! parameter, and `spawn_agent`'s description lists the models the proxy
+//! serves ([`open_ferry_core::codex_models::spawn_agent`]); with
+//! `codex.orphan-delegation-compatibility`, a sub-agent's delegation outputs
+//! without their call become user messages. The rewrites themselves are in
+//! `open_ferry_translate::codex_client`; the executors make them again where
+//! upstream's do.
 //!
 //! Deviations from upstream:
 //! - Nothing notes for the Codex executor that the tools were prepared
-//!   (`CodexMultiAgentV2ToolsPreparedContextKey`): without step 2 of
-//!   multi-agent v2, preparing them again gives the same body.
+//!   (`CodexMultiAgentV2ToolsPreparedContextKey`), so it prepares them
+//!   again. That writes the same model list over the one written here,
+//!   unless the models changed in between, when the newer list wins where
+//!   upstream keeps the older.
 //! - Upstream v8.0.10 skips orphan delegation here when a v8 document put
 //!   the setting under `oauth.providers`. The config here, as v8.0.11's,
 //!   shares that spelling with API keys, and v8.0.11 drops the check.
@@ -25,6 +29,8 @@
 
 use http::HeaderMap;
 use http::header::{HeaderValue, USER_AGENT};
+use open_ferry_core::codex_models::spawn_agent::spawn_agent_model_list;
+use open_ferry_core::models::ModelCatalog;
 use open_ferry_translate::codex_client::{header_value, multi_agent_v2, orphan_delegation};
 use serde_json::Value;
 
@@ -36,10 +42,12 @@ fn header(headers: &HeaderMap, name: &str) -> String {
 }
 
 /// `raw` readied as `config` says for a client that sent `headers`: its
-/// collaboration tools when `tools` (not for `responses/compact`), then
-/// its orphan delegation outputs. `None` when nothing changes.
+/// collaboration tools when `tools` (not for `responses/compact`), with the
+/// models of `catalog`, then its orphan delegation outputs. `None` when
+/// nothing changes.
 pub(crate) fn prepare(
     config: &ServerConfig,
+    catalog: &dyn ModelCatalog,
     headers: &HeaderMap,
     raw: &[u8],
     tools: bool,
@@ -60,7 +68,8 @@ pub(crate) fn prepare(
     };
     let mut changed = false;
     if tools {
-        changed |= multi_agent_v2::prepare_tools(&mut body, &user_agent, optimize);
+        let models = || spawn_agent_model_list(catalog);
+        changed |= multi_agent_v2::prepare_tools(&mut body, &user_agent, optimize, models);
     }
     changed |= orphan_delegation::rewrite(&mut body, &subagent, orphans);
     changed.then(|| body.to_string().into_bytes())

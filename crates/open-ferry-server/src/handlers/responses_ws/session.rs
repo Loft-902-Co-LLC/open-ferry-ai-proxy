@@ -297,6 +297,7 @@ impl<S: Socket> Session<S> {
         };
         if let Some(prepared) = codex_client::prepare(
             &self.state.settings().config,
+            self.state.catalog(),
             &self.client.headers,
             &request,
             true,

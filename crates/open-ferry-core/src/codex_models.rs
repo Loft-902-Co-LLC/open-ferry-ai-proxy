@@ -40,6 +40,8 @@
 //! - [`marshal_compact`] can't fail. Numbers keep their text; the built-in
 //!   catalog's are all whole numbers, which Go writes the same way.
 
+pub mod spawn_agent;
+
 #[cfg(test)]
 mod apply_patch_tests;
 #[cfg(test)]

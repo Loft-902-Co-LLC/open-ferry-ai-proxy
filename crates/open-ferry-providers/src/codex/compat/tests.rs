@@ -13,9 +13,8 @@
 //!   Gin request and another in the call's headers, and the Gin request's
 //!   wins. The executor here has only the call's headers, which are the
 //!   client's, so the tests send the Codex client's `User-Agent` there.
-//! - `TestCodexExecutorOptimizeMultiAgentV2` checks that `spawn_agent`'s
-//!   description is left as the client sent it, in place of the model list
-//!   step 2 writes there; step 2 isn't ported.
+//! - `TestCodexExecutorOptimizeMultiAgentV2` registers its model in a
+//!   registry the executor is given, rather than the global one.
 //! - `TestTranslateRequestCompatibilityForExecutorToolIntegerTypes` runs the
 //!   Codex targets through the Codex executor's translation, with and
 //!   without a compatibility model, and the other targets through what the
@@ -28,7 +27,6 @@
 //! Dropped:
 //! - `TestCodexExecutorsMultiAgentV2UsesSelectedHomeModel`: the Home
 //!   service isn't ported.
-//! - `TestCodexExecutorOptimizeMultiAgentV2`'s model descriptions (step 2).
 //! - `TestNormalizesCodexToolTypes`' Gemini half: there is no Responses to
 //!   Gemini translator here.
 //! - `TestTranslateRequestPair*`, `TestSameByteSlice` and
@@ -53,6 +51,8 @@ use http::HeaderValue;
 use open_ferry_core::config::CodexModel;
 use open_ferry_core::exec::Response;
 use open_ferry_core::executor::ProviderExecutor;
+use open_ferry_core::models::{ModelInfo, ThinkingSupport};
+use open_ferry_core::registry::ModelRegistry;
 use serde_json::{Value, json};
 
 use super::*;
@@ -312,21 +312,29 @@ fn assert_request_message(body: &Value, enabled: bool) {
     );
 }
 
-/// `assertCodexSpawnAgentOptimization`, without step 2's model list.
-fn assert_optimization(body: &Value, enabled: bool) {
+/// `assertCodexSpawnAgentOptimization`. `model`, when given, is the line
+/// the model list should have in place of the old one.
+fn assert_optimization(body: &Value, enabled: bool, model: Option<&str>) {
     let namespace = str_at(body, "input.0.tools.0.name");
     let description = str_at(body, "input.0.tools.0.tools.0.description");
     let encrypted = get(
         body,
         "input.0.tools.0.tools.0.parameters.properties.message.encrypted",
     );
-    assert!(description.contains("- old-model"), "{description:?}");
     if enabled {
         assert_eq!(namespace, "collaboration-optimize");
+        match model {
+            Some(model) => {
+                assert!(description.contains(model), "{description:?}");
+                assert!(!description.contains("old-model"), "{description:?}");
+            }
+            None => assert!(description.contains("- old-model"), "{description:?}"),
+        }
         assert!(encrypted.is_none(), "message encrypted was not removed");
         return;
     }
     assert_eq!(namespace, "collaboration");
+    assert!(description.contains("- old-model"), "{description:?}");
     assert_eq!(encrypted, Some(&json!(true)));
 }
 
@@ -348,11 +356,30 @@ fn assert_compat_message(message: &Value) {
 
 #[tokio::test]
 async fn executor_optimizes_multi_agent_v2() {
+    let model_id = "codex-executor-spawn-agent-test-model";
+    let registry = Arc::new(ModelRegistry::new());
+    registry.register_client(
+        "codex-executor-spawn-agent-test-client",
+        "codex",
+        &[ModelInfo {
+            id: model_id.into(),
+            description: "Executor test model.".into(),
+            thinking: Some(ThinkingSupport {
+                levels: vec!["low".into(), "medium".into(), "high".into()],
+                ..ThinkingSupport::default()
+            }),
+            ..ModelInfo::default()
+        }],
+    );
+    let want_model = format!(
+        "- `{model_id}`: Executor test model. Reasoning efforts: low, medium (default), high."
+    );
     let mock = Mock::echoing_namespace().await;
     for mode in [Mode::Execute, Mode::Stream, Mode::Compact] {
         for enabled in [true, false] {
-            let executor =
-                CodexExecutor::new("direct").with_config(Arc::new(config(enabled, Vec::new())));
+            let executor = CodexExecutor::new("direct")
+                .with_config(Arc::new(config(enabled, Vec::new())))
+                .with_models(Arc::clone(&registry) as _);
             let options = options("openai-response", &[("user-agent", CODEX_TUI)]);
             let client = call(
                 &executor,
@@ -363,7 +390,7 @@ async fn executor_optimizes_multi_agent_v2() {
             )
             .await;
             let body = mock.last();
-            assert_optimization(&body, enabled);
+            assert_optimization(&body, enabled, Some(&want_model));
             assert_request_message(&body, enabled);
             assert_client_namespace(&client);
         }
@@ -384,7 +411,7 @@ async fn executor_leaves_other_clients_alone() {
     )
     .await;
     let body = mock.last();
-    assert_optimization(&body, false);
+    assert_optimization(&body, false, None);
     assert_request_message(&body, false);
 }
 

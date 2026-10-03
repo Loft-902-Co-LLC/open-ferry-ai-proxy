@@ -26,6 +26,8 @@ use axum::body::Body;
 use futures_util::{SinkExt, StreamExt};
 use http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
+use open_ferry_core::models::ModelInfo;
+use open_ferry_translate::codex_client::multi_agent_v2::SPAWN_AGENT_MODELS_HEADING;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite;
@@ -101,6 +103,7 @@ fn readies_collaboration_tools_at_the_boundary() {
     }"#;
     let got = prepare(
         &config(true, false),
+        &FakeCatalog::new(),
         &headers(&[("user-agent", CODEX_CLI)]),
         payload,
         true,
@@ -114,12 +117,55 @@ fn readies_collaboration_tools_at_the_boundary() {
     }
 }
 
+#[test]
+fn lists_the_models_for_spawn_agent() {
+    let catalog = FakeCatalog::new().models(vec![ModelInfo {
+        id: "boundary-model".into(),
+        description: "Boundary model.".into(),
+        ..ModelInfo::default()
+    }]);
+    let payload = json!({"tools": collaboration_tools()}).to_string();
+    let codex = headers(&[("user-agent", CODEX_CLI)]);
+    let got = prepare(
+        &config(true, false),
+        &catalog,
+        &codex,
+        payload.as_bytes(),
+        true,
+    )
+    .unwrap();
+    let description = parse(&got)["tools"][0]["tools"][0]["description"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        description.starts_with(&format!(
+            "{SPAWN_AGENT_MODELS_HEADING}\n- `boundary-model`: Boundary model."
+        )),
+        "{description}"
+    );
+    assert!(description.ends_with("\nSpawns an agent."), "{description}");
+
+    // Not for `responses/compact`.
+    assert_eq!(
+        prepare(
+            &config(true, false),
+            &catalog,
+            &codex,
+            payload.as_bytes(),
+            false
+        ),
+        None
+    );
+}
+
 // TestPrepareCodexMultiAgentV2ToolsAtResponsesBoundarySkipsOtherClients
 #[test]
 fn leaves_other_clients_alone() {
     let payload = br#"{"tools":[{"type":"function","name":"send_message","parameters":{"properties":{"message":{"encrypted":true}}}}]}"#;
     let got = prepare(
         &config(true, false),
+        &FakeCatalog::new(),
         &headers(&[("user-agent", "curl/8.7.1")]),
         payload,
         true,
@@ -134,6 +180,7 @@ fn readies_tools_and_orphans_together() {
     let payload = br#"{"input":[{"type":"function_call_output","name":"create_thread","namespace":"codex_app","output":"<codex_delegation>task</codex_delegation>"}],"tools":[{"type":"function","name":"send_message","parameters":{"properties":{"message":{"encrypted":true}}}}]}"#;
     let got = prepare(
         &config(true, true),
+        &FakeCatalog::new(),
         &headers(&[
             ("user-agent", CODEX_CLI),
             ("x-openai-subagent", "collab_spawn"),
@@ -158,22 +205,53 @@ fn leaves_the_body_alone_while_the_settings_are_off() {
         ("x-openai-subagent", "collab_spawn"),
     ]);
     assert_eq!(
-        prepare(&config(false, false), &codex, payload.as_bytes(), true),
+        prepare(
+            &config(false, false),
+            &FakeCatalog::new(),
+            &codex,
+            payload.as_bytes(),
+            true
+        ),
         None
     );
     // Neither applies to a body that isn't an object.
-    assert_eq!(prepare(&config(true, true), &codex, b"[]", true), None);
-    assert_eq!(prepare(&config(true, true), &codex, b"{", true), None);
+    assert_eq!(
+        prepare(
+            &config(true, true),
+            &FakeCatalog::new(),
+            &codex,
+            b"[]",
+            true
+        ),
+        None
+    );
+    assert_eq!(
+        prepare(&config(true, true), &FakeCatalog::new(), &codex, b"{", true),
+        None
+    );
     // Nor to one with nothing to change.
     assert_eq!(
-        prepare(&config(true, true), &codex, br#"{"input":"hi"}"#, true),
+        prepare(
+            &config(true, true),
+            &FakeCatalog::new(),
+            &codex,
+            br#"{"input":"hi"}"#,
+            true
+        ),
         None
     );
 }
 
-/// A server that serves [`MODEL`] through `codex` with `config`.
+/// A server that serves [`MODEL`] through `codex` with `config`, and lists
+/// it with the description "Test model.".
 fn app(config: ServerConfig, outcomes: Vec<Outcome>) -> (Router, Arc<FakeDispatcher>) {
-    let catalog = FakeCatalog::new().serve(MODEL, &["codex"]);
+    let catalog = FakeCatalog::new()
+        .serve(MODEL, &["codex"])
+        .models(vec![ModelInfo {
+            id: MODEL.into(),
+            description: "Test model.".into(),
+            ..ModelInfo::default()
+        }]);
     let dispatcher = FakeDispatcher::new(outcomes);
     (router(state(config, catalog, &dispatcher)), dispatcher)
 }
@@ -197,7 +275,8 @@ async fn post(app: &Router, uri: &str, body: &Value, extra: &[(&str, &str)]) -> 
     status
 }
 
-// TestResponsesPreparesCodexMultiAgentV2ToolsForHTTPAndSSE
+// TestResponsesPreparesCodexMultiAgentV2ToolsForHTTPAndSSE, which also
+// checks the model list here.
 #[tokio::test]
 async fn responses_ready_tools_for_http_and_sse() {
     for stream in [false, true] {
@@ -219,6 +298,12 @@ async fn responses_ready_tools_for_http_and_sse() {
             tool["tools"][0]["parameters"]["properties"]["message"],
             json!({}),
             "stream={stream}"
+        );
+        let description = tool["tools"][0]["description"].as_str().unwrap();
+        let want = format!("- `{MODEL}`: Test model.");
+        assert!(
+            description.contains(&want),
+            "stream={stream}: {description}"
         );
     }
 }
