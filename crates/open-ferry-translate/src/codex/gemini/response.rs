@@ -9,6 +9,8 @@
 //! - Function call arguments that start like a JSON object but aren't valid
 //!   JSON are left out, so `args` stays `{}`. Upstream copies them in as they
 //!   are and writes invalid JSON.
+//! - A non-string value read as text, such as a reasoning item's `content`
+//!   array, is written as compact JSON, where upstream uses its JSON text.
 
 use std::collections::HashMap;
 

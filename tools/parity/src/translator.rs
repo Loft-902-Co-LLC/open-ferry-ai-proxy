@@ -1240,10 +1240,10 @@ impl Translator {
             // Content and reasoning that aren't strings.
             Self::OpenAIGeminiStream => &[("$[*].candidates[*].content.parts[*].text", Whole)],
             Self::OpenAIGeminiNonStream => &[("$.candidates[*].content.parts[*].text", Whole)],
-            Self::CodexGeminiStream
-            | Self::CodexGeminiNonStream
-            | Self::ClaudeGeminiStream
-            | Self::ClaudeGeminiNonStream => &[],
+            // Text that isn't a string, such as a reasoning item's content.
+            Self::CodexGeminiStream => &[("$[*].candidates[*].content.parts[*].text", Whole)],
+            Self::CodexGeminiNonStream => &[("$.candidates[*].content.parts[*].text", Whole)],
+            Self::ClaudeGeminiStream | Self::ClaudeGeminiNonStream => &[],
             // Values read as text that aren't strings: text (also when a
             // system reminder wraps it), tool names, a tool result stored as
             // text, and the hint the schema cleaner adds for a type that is
