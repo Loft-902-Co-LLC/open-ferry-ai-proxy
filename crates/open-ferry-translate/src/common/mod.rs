@@ -5,6 +5,7 @@
 
 pub(crate) mod cache_control;
 pub(crate) mod claude;
+pub(crate) mod gemini_response;
 pub(crate) mod openai_tools;
 pub(crate) mod responses;
 pub(crate) mod tool_names;
