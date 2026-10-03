@@ -16,21 +16,31 @@
 //! Grok Build clients (`grok-pager`, `grok-shell`) get Codex's `keepalive`
 //! events as SSE comments, which they expect.
 //!
+//! Chunks go out as they come, unless the config's
+//! `codex.stream-bootstrap-buffering` is on. Then [`translate_buffered`]
+//! holds back the lines before generation starts (the handshake,
+//! keepalives, and items announced with no content yet), up to 48 lines,
+//! 1 MiB and the config's `codex.stream-bootstrap-timeout`. An overload
+//! among them fails the call before it starts, with a 503 or 429, so that
+//! the credential manager can try another credential; any other failure
+//! comes after the held chunks, as it would have without the buffering.
+//!
 //! Deviations from upstream:
-//! - Bootstrap buffering, a config option that holds the first events to
-//!   catch an overload, isn't ported; chunks go out as they come.
 //! - A rewritten terminal event is written by `serde_json`.
-//! - Dropping the stream stops reading, where upstream watches its context.
+//! - Dropping the stream, or the call while lines are held back, stops
+//!   reading, where upstream watches its context.
 //! - Usage reporting, request logging, multi-agent v2 and image tool usage
 //!   aren't ported.
 
 use std::collections::VecDeque;
 use std::fmt;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use futures_util::StreamExt as _;
 use http::HeaderMap;
-use open_ferry_core::exec::{ChunkStream, ExecError, Format};
+use open_ferry_core::exec::{ChunkStream, ErrorKind, ExecError, Format};
 use open_ferry_translate::go::trim_space;
 use open_ferry_translate::registry::ResponseStream;
 use serde_json::Value;
@@ -39,8 +49,10 @@ use super::claude_tokens;
 use super::client::error_chain;
 use super::ext::{self, Turn};
 use super::terminal::{
-    OutputItems, empty_incomplete_stream_error, has_meaningful_output_delta,
-    incomplete_stream_error, is_terminal_empty_incomplete, normalize_completion, terminal_failure,
+    MAX_BOOTSTRAP_BYTES, MAX_BOOTSTRAP_FRAMES, OutputItems, bootstrap_overload_error,
+    empty_incomplete_stream_error, has_meaningful_output_delta, incomplete_stream_error,
+    is_bootstrap_bufferable_event, is_overload_bootstrap_failure, is_terminal_empty_incomplete,
+    normalize_completion, terminal_failure,
 };
 use super::usage::ensure_responses_usage_details;
 use crate::json::{get, str_at, str_of};
@@ -212,6 +224,39 @@ pub(crate) struct StreamSetup {
     pub(crate) turn: Turn,
 }
 
+/// The clock bootstrap buffering's time limit is measured on
+/// (upstream's `nowCodexBootstrap`).
+pub(crate) type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
+
+/// How long [`translate_buffered`] may hold lines back.
+pub(crate) struct Bootstrap {
+    /// The config's `codex.stream-bootstrap-timeout`; zero for no limit.
+    pub(crate) timeout: Duration,
+    /// The time now.
+    pub(crate) now: Clock,
+}
+
+/// One line of Codex's stream, checked and translated.
+struct Frame {
+    /// The chunks for the client.
+    chunks: Vec<Vec<u8>>,
+    /// Whether the line may be held back while the stream starts: it isn't
+    /// a `data:` line, or its event is one [`is_bootstrap_bufferable_event`]
+    /// allows.
+    handshake: bool,
+    /// Whether it was the terminal success, which ends the stream.
+    terminal: bool,
+}
+
+/// A line that ends the stream with an error.
+struct Failure {
+    /// The error, with the credential's token redacted.
+    error: ExecError,
+    /// A terminal failure event's error body, which says whether it was an
+    /// overload; `None` for an empty `response.incomplete`.
+    body: Option<String>,
+}
+
 /// The state of one translated stream.
 struct State {
     reader: LineReader,
@@ -221,41 +266,78 @@ struct State {
     saw_output_delta: bool,
     emitted: usize,
     pending: VecDeque<Bytes>,
+    /// An error to end the stream with once `pending` is sent.
+    failure: Option<ExecError>,
     finished: bool,
 }
 
 /// Translates Codex's stream in `response` to the client's format.
 pub(crate) fn translate(response: reqwest::Response, setup: StreamSetup) -> ChunkStream {
-    let claude =
-        claude_tokens::State::new(&setup.source_format, &Format::CODEX, &setup.response_format);
-    let state = State {
-        reader: LineReader::new(response),
-        setup,
-        claude,
-        items: OutputItems::default(),
-        saw_output_delta: false,
-        emitted: 0,
-        pending: VecDeque::new(),
-        finished: false,
-    };
-    futures_util::stream::unfold(state, |mut state| async move {
-        loop {
-            if let Some(chunk) = state.pending.pop_front() {
-                return Some((Ok(chunk), state));
-            }
-            if state.finished {
-                return None;
-            }
-            if let Err(error) = state.step().await {
-                state.finished = true;
-                return Some((Err(error), state));
-            }
-        }
-    })
-    .boxed()
+    State::new(response, setup).into_stream()
+}
+
+/// Translates Codex's stream in `response` to the client's format, holding
+/// back the lines before generation starts (`codex.stream-bootstrap-buffering`).
+///
+/// A line is held while it is a handshake line and the lines held so far
+/// stay within [`MAX_BOOTSTRAP_FRAMES`] lines, [`MAX_BOOTSTRAP_BYTES`]
+/// bytes (each line with its chunks) and the time limit. The first line
+/// that isn't held starts the stream, after the held chunks. Before then:
+/// - an overload ([`is_overload_bootstrap_failure`]) within the time limit
+///   is the call's error, a 503 or 429;
+/// - another failure, or an overload after the time limit, ends the stream
+///   after the held chunks;
+/// - a read error is the call's error;
+/// - the end of the stream gives an empty stream if nothing was held, else
+///   a 408 for the call.
+pub(crate) async fn translate_buffered(
+    response: reqwest::Response,
+    setup: StreamSetup,
+    bootstrap: Bootstrap,
+) -> Result<ChunkStream, ExecError> {
+    let mut state = State::new(response, setup);
+    state.bootstrap(&bootstrap).await?;
+    Ok(state.into_stream())
 }
 
 impl State {
+    fn new(response: reqwest::Response, setup: StreamSetup) -> Self {
+        let claude =
+            claude_tokens::State::new(&setup.source_format, &Format::CODEX, &setup.response_format);
+        Self {
+            reader: LineReader::new(response),
+            setup,
+            claude,
+            items: OutputItems::default(),
+            saw_output_delta: false,
+            emitted: 0,
+            pending: VecDeque::new(),
+            failure: None,
+            finished: false,
+        }
+    }
+
+    fn into_stream(self) -> ChunkStream {
+        futures_util::stream::unfold(self, |mut state| async move {
+            loop {
+                if let Some(chunk) = state.pending.pop_front() {
+                    return Some((Ok(chunk), state));
+                }
+                if let Some(error) = state.failure.take() {
+                    state.finished = true;
+                    return Some((Err(error), state));
+                }
+                if state.finished {
+                    return None;
+                }
+                if let Err(error) = state.step().await {
+                    state.failure = Some(error);
+                }
+            }
+        })
+        .boxed()
+    }
+
     /// Reads and translates one line. An error ends the stream.
     async fn step(&mut self) -> Result<(), ExecError> {
         let line = match self.reader.next_line().await {
@@ -266,8 +348,108 @@ impl State {
             }
             None => return self.end_early(),
         };
+        let frame = self.process(line).await.map_err(|failure| failure.error)?;
+        self.send(frame.chunks);
+        if frame.terminal {
+            self.finished = true;
+        }
+        Ok(())
+    }
 
-        let mut terminal_success = false;
+    /// Holds back the lines before generation starts; see
+    /// [`translate_buffered`]. Returns the call's error, or leaves the
+    /// stream to go on from where it started.
+    async fn bootstrap(&mut self, bootstrap: &Bootstrap) -> Result<(), ExecError> {
+        let start = (bootstrap.now)();
+        let timed_out = || {
+            !bootstrap.timeout.is_zero()
+                && (bootstrap.now)().saturating_duration_since(start) >= bootstrap.timeout
+        };
+        let mut held = Vec::new();
+        let mut held_any = false;
+        let mut frames = 0;
+        let mut bytes = 0;
+        while let Some(line) = self.reader.next_line().await {
+            let line = line.map_err(|error| {
+                tracing::debug!("codex: stream read failed: {error}");
+                ExecError::new(ErrorKind::Upstream, error.to_string())
+            })?;
+            let line_len = line.len();
+            let blank = line.is_empty();
+            let frame = match self.process(line).await {
+                Ok(frame) => frame,
+                Err(failure) => {
+                    if let Some(body) = &failure.body
+                        && is_overload_bootstrap_failure(body.as_bytes())
+                    {
+                        if !timed_out() {
+                            tracing::debug!(
+                                "codex executor: bootstrap overload rejection after {frames} buffered lines, failing over"
+                            );
+                            let error = bootstrap_overload_error(body.as_bytes());
+                            return Err(error.redacted(&self.setup.secret).into());
+                        }
+                        tracing::debug!(
+                            "codex executor: bootstrap overload rejection after {frames} lines, time budget exhausted; delivering in-stream"
+                        );
+                    }
+                    self.send(held);
+                    self.failure = Some(failure.error);
+                    return Ok(());
+                }
+            };
+            if frame.handshake && !frame.terminal {
+                let frame_bytes = line_len + frame.chunks.iter().map(Vec::len).sum::<usize>();
+                let timed_out = timed_out();
+                if !timed_out
+                    && frames < MAX_BOOTSTRAP_FRAMES
+                    && bytes + frame_bytes <= MAX_BOOTSTRAP_BYTES
+                {
+                    frames += 1;
+                    bytes += frame_bytes;
+                    held_any |= !frame.chunks.is_empty() || (blank && self.passes_lines_through());
+                    held.extend(frame.chunks);
+                    continue;
+                }
+                let exhausted = if timed_out {
+                    "time budget"
+                } else if frames < MAX_BOOTSTRAP_FRAMES {
+                    "byte budget"
+                } else {
+                    "frame budget"
+                };
+                tracing::debug!(
+                    "codex executor: bootstrap {exhausted} exhausted after {frames} lines / {bytes} bytes, releasing stream without overload probing"
+                );
+            }
+            self.send(held);
+            self.send(frame.chunks);
+            if frame.terminal {
+                self.finished = true;
+            }
+            return Ok(());
+        }
+        if held_any {
+            return Err(incomplete_stream_error().into());
+        }
+        tracing::debug!("codex: upstream stream closed before first payload");
+        self.finished = true;
+        Ok(())
+    }
+
+    /// Whether every line becomes a chunk as it is: the client speaks
+    /// Codex's own format or OpenAI Responses. Upstream then gives a blank
+    /// line an empty chunk, which ours leaves out; bootstrap buffering
+    /// counts it as held all the same, as upstream does.
+    fn passes_lines_through(&self) -> bool {
+        !self.setup.translator.is_translated()
+            || self.setup.response_format == Format::OPENAI_RESPONSE
+    }
+
+    /// Checks and translates one line.
+    async fn process(&mut self, line: Vec<u8>) -> Result<Frame, Failure> {
+        let mut terminal = false;
+        let mut handshake = true;
         let translated_line = if self.setup.grok && is_keepalive_line(&line) {
             KEEPALIVE_COMMENT.to_vec()
         } else if let Some(rest) = line.strip_prefix(b"data:") {
@@ -275,19 +457,27 @@ impl State {
             let mut event: Value = serde_json::from_slice(&data).unwrap_or(Value::Null);
             if let Some((error, body)) = terminal_failure(&event, self.setup.model_level_cooling) {
                 ext::on_failure(&self.setup.turn, error.status, body.as_bytes());
-                return Err(error.redacted(&self.setup.secret).into());
+                return Err(Failure {
+                    error: error.redacted(&self.setup.secret).into(),
+                    body: Some(body),
+                });
             }
             if has_meaningful_output_delta(&event) {
                 self.saw_output_delta = true;
             }
             if is_terminal_empty_incomplete(&event, self.items.len(), self.saw_output_delta) {
-                return Err(empty_incomplete_stream_error().into());
+                return Err(Failure {
+                    error: empty_incomplete_stream_error().into(),
+                    body: None,
+                });
             }
+            let event_type = str_at(&event, "type");
+            handshake = is_bootstrap_bufferable_event(&event_type, &data, &event);
             let mut rewritten = None;
-            match str_at(&event, "type").as_str() {
+            match event_type.as_str() {
                 "response.output_item.done" => self.items.collect(&event),
                 "response.completed" | "response.incomplete" | "response.done" => {
-                    terminal_success = true;
+                    terminal = true;
                     let mut changed = normalize_completion(&mut event);
                     if !self.setup.preserve_native {
                         changed |= self.items.patch(&mut event);
@@ -322,16 +512,21 @@ impl State {
                 patch.apply(&mut chunks, estimate);
             }
         }
+        Ok(Frame {
+            chunks,
+            handshake,
+            terminal,
+        })
+    }
+
+    /// Queues the non-empty chunks for the client.
+    fn send(&mut self, chunks: Vec<Vec<u8>>) {
         for chunk in chunks {
             if !chunk.is_empty() {
                 self.emitted += 1;
                 self.pending.push_back(Bytes::from(chunk));
             }
         }
-        if terminal_success {
-            self.finished = true;
-        }
-        Ok(())
     }
 
     /// The stream ended before a terminal event: silently when nothing was

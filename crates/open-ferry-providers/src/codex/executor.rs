@@ -17,8 +17,12 @@
 //! which [`refresh`](CodexExecutor::refresh) renews 24 hours before it
 //! expires.
 //!
-//! The config's `codex.model-level-cooling` keeps a usage limit to the
-//! model rather than the credential.
+//! Two settings of the config's `codex` section change how calls fail:
+//! `model-level-cooling` keeps a usage limit to the model rather than the
+//! credential, and `stream-bootstrap-buffering` (with
+//! `stream-bootstrap-timeout`) holds a stream's first lines back so that
+//! an overload can fail the call over to another credential (see
+//! [`super::stream`]).
 //!
 //! Deviations from upstream:
 //! - Requests go through `reqwest` with rustls, one shared client per proxy;
@@ -40,7 +44,7 @@
 //!   storage, which [`Auth`] doesn't have.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use futures_util::FutureExt as _;
@@ -65,7 +69,7 @@ use super::request::{
     Context, DEFAULT_BASE_URL, Kind, base_model, build_headers, credentials, endpoint,
     original_request, prepare_body, response_format,
 };
-use super::stream::{self, LineReader, MAX_LINE, StreamSetup, is_grok_client};
+use super::stream::{self, Bootstrap, Clock, LineReader, MAX_LINE, StreamSetup, is_grok_client};
 use super::terminal::{
     APPLY_PATCH_ERROR_MESSAGE, OutputItems, StatusError, empty_incomplete_stream_error,
     has_meaningful_output_delta, incomplete_stream_error, is_terminal_empty_incomplete,
@@ -93,6 +97,8 @@ pub struct CodexExecutor {
     models: Option<Arc<dyn ModelCatalog>>,
     base_url: String,
     oauth_endpoints: Endpoints,
+    /// The clock of stream bootstrap buffering's time limit.
+    bootstrap_clock: Clock,
 }
 
 impl CodexExecutor {
@@ -106,6 +112,7 @@ impl CodexExecutor {
             models: None,
             base_url: DEFAULT_BASE_URL.to_owned(),
             oauth_endpoints: Endpoints::default(),
+            bootstrap_clock: Arc::new(Instant::now),
         }
     }
 
@@ -134,12 +141,33 @@ impl CodexExecutor {
         self
     }
 
+    /// Measures stream bootstrap buffering's time limit on `now`, as
+    /// upstream's tests swap `codexBootstrapNow`.
+    #[cfg(test)]
+    pub(crate) fn with_bootstrap_clock(mut self, now: Clock) -> Self {
+        self.bootstrap_clock = now;
+        self
+    }
+
     /// Whether a usage limit cools only the model, not the whole credential
     /// (`codex.model-level-cooling`, upstream's `modelLevelCooling`).
     fn model_level_cooling(&self) -> bool {
         self.config
             .as_deref()
             .is_some_and(|config| config.codex.model_level_cooling)
+    }
+
+    /// How long a stream's first lines may be held back, when
+    /// `codex.stream-bootstrap-buffering` is on.
+    fn bootstrap(&self) -> Option<Bootstrap> {
+        let config = self
+            .config
+            .as_deref()
+            .filter(|config| config.codex.stream_bootstrap_buffering)?;
+        Some(Bootstrap {
+            timeout: config.codex.stream_bootstrap_timeout_duration(),
+            now: Arc::clone(&self.bootstrap_clock),
+        })
     }
 
     /// What a call with `auth` is prepared with.
@@ -357,9 +385,13 @@ impl CodexExecutor {
             model_level_cooling: self.model_level_cooling(),
             turn: prepared.turn,
         };
+        let chunks = match self.bootstrap() {
+            Some(bootstrap) => stream::translate_buffered(response, setup, bootstrap).await?,
+            None => stream::translate(response, setup),
+        };
         Ok(StreamResponse {
             headers: response_headers,
-            chunks: stream::translate(response, setup),
+            chunks,
         })
     }
 
@@ -486,6 +518,8 @@ impl ProviderExecutor for CodexExecutor {
     }
 }
 
+#[cfg(test)]
+mod bootstrap_tests;
 #[cfg(test)]
 mod manager_tests;
 #[cfg(test)]

@@ -8,7 +8,9 @@
 //! failure event (`error`, `response.failed`), an empty
 //! `response.incomplete`, and a stream that ends without a terminal event.
 //! Also the `response.output_item.done` items that fill in a completed
-//! response's `output`.
+//! response's `output`, and the checks stream bootstrap buffering makes:
+//! which events may be held back before generation starts, and which
+//! failures are overloads another credential may serve.
 //!
 //! A usage limit is scoped to the credential unless the config's
 //! `codex.model-level-cooling` is on, when it cools only the model.
@@ -16,8 +18,6 @@
 //! Deviations from upstream:
 //! - Bodies built from a stream event are written by `serde_json`, whose
 //!   escapes and spacing may differ from sjson's.
-//! - The stream-bootstrap helpers (overload probing while buffering) aren't
-//!   ported, as bootstrap buffering isn't.
 //! - Go can't hand on a negative wait here, so where its
 //!   `resets_in_seconds` arithmetic wraps below zero the wait is zero; the
 //!   auth manager treats both the same way. And a `resets_in_seconds` too big
@@ -28,6 +28,7 @@ use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use open_ferry_core::exec::ExecError;
+use open_ferry_translate::go::trim_space;
 use serde_json::{Value, json};
 
 use crate::json::{eq_fold, exists, get, int_at, int_of, set, str_at, str_of};
@@ -137,7 +138,6 @@ fn lower_trim(text: &str) -> String {
 
 /// The error for Codex's error status and body (`newCodexStatusErr`): a
 /// [`status_error_with_cooling`] without model-level cooling.
-#[cfg(test)]
 pub(crate) fn status_error(status: u16, body: &[u8]) -> StatusError {
     status_error_with_cooling(status, body, false)
 }
@@ -552,6 +552,136 @@ pub(crate) fn normalize_completion(event: &mut Value) -> bool {
         return set(event, "type", Value::from("response.completed"));
     }
     false
+}
+
+/// How many lines of Codex's stream bootstrap buffering holds back at most
+/// (`codexBootstrapMaxBufferedFrames`). Every line read counts, whatever
+/// its kind, so the upstream's framing can't stretch the bound: it covers
+/// 15 keepalives sent as `event:`, `data:` and a blank line, the overload's
+/// own `event:` line taking the 46th.
+pub(crate) const MAX_BOOTSTRAP_FRAMES: usize = 48;
+
+/// How many bytes bootstrap buffering holds back at most, counting each
+/// line and the chunks it translates into (`codexBootstrapMaxBufferedBytes`).
+/// A line is checked before it is held, so one that alone passes the limit
+/// starts the stream.
+pub(crate) const MAX_BOOTSTRAP_BYTES: usize = 1 << 20;
+
+/// Whether an event may be held back before the client's response starts,
+/// because nothing in it has happened yet for the client
+/// (`isCodexBootstrapBufferableEvent`). `data` is the event's trimmed text
+/// and `event` its JSON.
+///
+/// The list is closed: an event it doesn't know starts the stream, so that
+/// a later overload can't replay something already under way, such as a
+/// server-side tool call, on another credential. It holds the handshake
+/// (`response.created`, `response.in_progress`, rate limits and metadata),
+/// keepalives, an empty `data:` line, and the announcements of items and
+/// parts that have no content yet.
+pub(crate) fn is_bootstrap_bufferable_event(event_type: &str, data: &[u8], event: &Value) -> bool {
+    if trim_space(data).is_empty() {
+        return true;
+    }
+    match event_type {
+        "response.created"
+        | "response.in_progress"
+        | "codex.rate_limits"
+        | "codex.response.metadata"
+        | "keepalive" => true,
+        "response.output_item.added" => is_bufferable_output_item(get(event, "item")),
+        "response.content_part.added" | "response.reasoning_summary_part.added" => {
+            is_empty_part(get(event, "part"))
+        }
+        _ => false,
+    }
+}
+
+/// Whether gjson's `String()` of the value is empty: it is missing, null or
+/// an empty string.
+fn is_blank(value: Option<&Value>) -> bool {
+    match value {
+        None | Some(Value::Null) => true,
+        Some(Value::String(text)) => text.is_empty(),
+        Some(_) => false,
+    }
+}
+
+/// Whether an announced item is one the model makes itself and hasn't
+/// started on (`isCodexBufferableOutputItem`): a message or reasoning with
+/// no content yet, or a tool call with no arguments yet. Any other item,
+/// such as a web search, may already be running upstream.
+fn is_bufferable_output_item(item: Option<&Value>) -> bool {
+    let Some(item) = item else {
+        return false;
+    };
+    match str_at(item, "type").as_str() {
+        "message" => is_empty_content_list(get(item, "content")),
+        "reasoning" => {
+            is_blank(get(item, "encrypted_content"))
+                && is_empty_content_list(get(item, "summary"))
+                && is_empty_content_list(get(item, "content"))
+        }
+        "function_call" => is_blank(get(item, "arguments")),
+        "custom_tool_call" => is_blank(get(item, "input")),
+        _ => false,
+    }
+}
+
+/// Whether every entry of an item's `content` or `summary` is a textual one
+/// that is still empty (`isCodexEmptyContentList`). An entry of another
+/// type may hold content in a field this can't see, so it counts as made.
+/// As gjson's `Array()`, a value that isn't an array is a list of itself,
+/// and a missing or null one an empty list.
+fn is_empty_content_list(list: Option<&Value>) -> bool {
+    match list {
+        None | Some(Value::Null) => true,
+        Some(Value::Array(entries)) => entries.iter().all(|entry| is_empty_part(Some(entry))),
+        Some(entry) => is_empty_part(Some(entry)),
+    }
+}
+
+/// Whether an announced part, or a content entry, is a textual one that is
+/// still empty (`isCodexEmptyPart`).
+fn is_empty_part(part: Option<&Value>) -> bool {
+    let Some(part) = part else {
+        return false;
+    };
+    match str_at(part, "type").as_str() {
+        "output_text" | "summary_text" | "text" | "reasoning_text" => is_blank(get(part, "text")),
+        "refusal" => is_blank(get(part, "refusal")),
+        _ => false,
+    }
+}
+
+/// The error for an overload that bootstrap buffering caught, with the 503
+/// Codex didn't put on the wire (`newCodexBootstrapOverloadErr`). As
+/// upstream's, it takes no model-level cooling: a usage limit in it is the
+/// credential's.
+pub(crate) fn bootstrap_overload_error(body: &[u8]) -> StatusError {
+    status_error(503, body)
+}
+
+/// Whether a terminal failure's body is a passing lack of capacity that
+/// another credential may serve (`isCodexOverloadBootstrapFailure`): the
+/// model at capacity, an overload, a rate limit, or a server error that
+/// says to retry. Only these fail a held-back stream over.
+pub(crate) fn is_overload_bootstrap_failure(body: &[u8]) -> bool {
+    let parsed = parse(body);
+    if is_model_capacity(body, &parsed) {
+        return true;
+    }
+    let error_type = lower_trim(&str_at(&parsed, "error.type"));
+    let code = lower_trim(&str_at(&parsed, "error.code"));
+    let mut message = lower_trim(&str_at(&parsed, "error.message"));
+    if message.is_empty() {
+        message = lower_trim(&str_at(&parsed, "message"));
+    }
+    error_type == "service_unavailable_error"
+        || code == "server_is_overloaded"
+        || error_type == "rate_limit_error"
+        || code == "rate_limit_exceeded"
+        || ((error_type == "server_error" || code == "server_error")
+            && message.contains("you can retry your request"))
 }
 
 /// The items of `response.output_item.done` events, to fill in a completed

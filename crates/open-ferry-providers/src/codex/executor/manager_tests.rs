@@ -3,13 +3,18 @@
 
 //! The executor under the credential manager, against a mock Codex server
 //! on 127.0.0.1 that tells two API keys apart: how a usage limit cools a
-//! credential, with and without `codex.model-level-cooling`.
+//! credential, with and without `codex.model-level-cooling`, and how an
+//! overload that stream bootstrap buffering holds back reaches the manager.
 //!
 //! Deviations from upstream:
 //! - The `websocket-error` and `websocket-failed` rows of both tests are
 //!   dropped: the Responses WebSocket upstream isn't ported.
 //! - Upstream registers the models in its global registry; here each test
 //!   has its own.
+//! - `bootstrap_overload_fails_over_to_another_credential` isn't upstream's.
+//!   It checks what upstream's buffering tests leave to the manager: that
+//!   an overload held back before the stream starts makes the manager try
+//!   the next credential, and that without buffering it reaches the client.
 
 use std::sync::{Mutex, PoisonError};
 
@@ -23,6 +28,7 @@ use open_ferry_core::manager::{Manager, Settings};
 use open_ferry_core::models::ModelInfo;
 use open_ferry_core::registry::ModelRegistry;
 
+use super::bootstrap_tests::OVERLOAD_EVENT;
 use super::*;
 
 const CREATED: &str = r#"{"type":"response.created","response":{"id":"quota-test-response"}}"#;
@@ -227,4 +233,43 @@ async fn model_level_cooling_preserves_sibling_model() {
     assert!(error.is_none(), "the sibling model failed: {error:?}");
     assert!(payload.contains("response.completed"), "{payload}");
     assert_eq!(attempts(&recorded), ["quota-high", "quota-high"]);
+}
+
+// Not upstream's: an overload held back by bootstrap buffering fails the
+// first credential's call before its stream starts, and the manager tries
+// the next one; without buffering the stream has started, and the
+// overload reaches the client.
+#[tokio::test]
+async fn bootstrap_overload_fails_over_to_another_credential() {
+    const MODEL: &str = "gpt-5.6-terra";
+    let terminal: Terminal = |account, _| {
+        if account == "quota-high" {
+            OVERLOAD_EVENT.to_owned()
+        } else {
+            COMPLETED.to_owned()
+        }
+    };
+
+    let (url, recorded) = serve(terminal).await;
+    let codex = CodexConfig {
+        stream_bootstrap_buffering: true,
+        ..CodexConfig::default()
+    };
+    let manager = start_manager(codex, &url, &[MODEL]);
+    let (payload, error) = run(&manager, MODEL).await;
+    assert!(
+        error.is_none(),
+        "the overload must not reach the client: {error:?}"
+    );
+    assert_eq!(payload.matches("response.created").count(), 1, "{payload}");
+    assert!(payload.contains("quota-test-success"), "{payload}");
+    assert_eq!(attempts(&recorded), ["quota-high", "quota-low"]);
+
+    let (url, recorded) = serve(terminal).await;
+    let manager = start_manager(CodexConfig::default(), &url, &[MODEL]);
+    let (payload, error) = run(&manager, MODEL).await;
+    let error = error.unwrap_or_else(|| panic!("expected an in-stream overload after {payload}"));
+    assert_eq!(error.status, 502);
+    assert!(payload.contains("response.created"), "{payload}");
+    assert_eq!(attempts(&recorded), ["quota-high"]);
 }
