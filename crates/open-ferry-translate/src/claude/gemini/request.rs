@@ -23,12 +23,16 @@
 //!   string; and to a schema `type` that isn't a string, which is lowercased
 //!   as text.
 //! - Lowercasing a schema `type` follows sjson's rules for setting a path
-//!   where the value on the way was replaced by text, except two. sjson pads
+//!   where the value on the way was replaced by text, except three. sjson pads
 //!   an array with nulls up to a numeric key; we pad with at most 1,024, and
 //!   past that put the key in a new object, or set nothing in an existing
 //!   array, so a short key can't build a huge array. And sjson corrupts the
 //!   JSON when it sets a numeric key inside text holding a `[`, where we
-//!   build the array its rules describe.
+//!   build the array its rules describe. And a key is always just a key to
+//!   us, where upstream escapes only `.`, `*` and `?` in the paths it builds,
+//!   so it reads other path syntax in a key, such as `|`, `@`, `\` or a
+//!   leading `:`: it may leave that `type` as it was, or lowercase the `type`
+//!   of another key, adding it if it's missing (`:7` sets `7`).
 //! - Negative zero in a tool schema is written as `0`. Go writes `-0`.
 
 use std::collections::VecDeque;
@@ -521,7 +525,8 @@ fn collect_type_paths(value: &Value, prefix: &mut Vec<String>, paths: &mut Vec<V
     }
 }
 
-/// gjson `Get` for a path of keys: a key names an object's field, or an
+/// gjson `Get` for a path of keys, each key taken as it is (upstream would
+/// read path syntax in it): a key names an object's field, or an
 /// array's index if it is all digits.
 fn get<'v>(value: &'v Value, path: &[String]) -> Option<&'v Value> {
     path.iter().try_fold(value, |value, key| match value {

@@ -9,17 +9,25 @@
 /// nearest `f64`, or infinity or zero when out of range, or 0 if `s` isn't a
 /// Go floating-point literal.
 pub fn parse_float(s: &str) -> f64 {
-    if let Some(special) = special(s) {
-        return special;
-    }
-    let Some(float) = read_float(s) else {
-        return 0.0;
-    };
-    if float.end != s.len() {
-        return 0.0;
-    }
+    special(s).or_else(|| literal(s)).unwrap_or(0.0)
+}
+
+/// `strconv.ParseFloat(s, 64)` keeping its error: `None` if `s` isn't a Go
+/// floating-point literal, or is one too large for an `f64`.
+pub(crate) fn parse_float_checked(s: &str) -> Option<f64> {
+    special(s).or_else(|| literal(s).filter(|float| float.is_finite()))
+}
+
+/// The value of a decimal or hexadecimal literal, infinite when too large.
+fn literal(s: &str) -> Option<f64> {
+    let float = read_float(s).filter(|float| float.end == s.len())?;
     if float.hex {
-        return atof_hex(float.mantissa, float.exp, float.negative, float.truncated);
+        return Some(atof_hex(
+            float.mantissa,
+            float.exp,
+            float.negative,
+            float.truncated,
+        ));
     }
     // Rust reads the same literal without its underscores. Go stops adding to
     // the exponent once it passes 10000, so the exponent is written as Go
@@ -30,7 +38,7 @@ pub fn parse_float(s: &str) -> f64 {
         .collect();
     text.push('e');
     text.push_str(&float.decimal_exp.to_string());
-    text.parse().unwrap_or(0.0)
+    text.parse().ok()
 }
 
 /// `special`: infinity and NaN, ignoring case. Only infinity takes a sign.
@@ -312,6 +320,23 @@ fn atof_hex(mut mantissa: u64, exp: i64, negative: bool, truncated: bool) -> f64
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checked() {
+        assert_eq!(parse_float_checked("1_000"), Some(1000.0));
+        assert_eq!(parse_float_checked("1_0.5"), Some(10.5));
+        assert_eq!(parse_float_checked("0x1p3"), Some(8.0));
+        assert_eq!(parse_float_checked("0x_1p3"), Some(8.0));
+        assert_eq!(parse_float_checked("1e-400"), Some(0.0));
+        assert_eq!(parse_float_checked("-Inf"), Some(f64::NEG_INFINITY));
+        assert!(parse_float_checked("nan").is_some_and(f64::is_nan));
+        for bad in [
+            "", "_1", "1_", "1__0", "1_.5", "1._5", "1e_5", "0x10", "1e400", "-1e400", "0x1p2000",
+            "1x", ".", "+", "e5", "0b1",
+        ] {
+            assert_eq!(parse_float_checked(bad), None, "{bad:?}");
+        }
+    }
 
     #[test]
     fn decimal() {

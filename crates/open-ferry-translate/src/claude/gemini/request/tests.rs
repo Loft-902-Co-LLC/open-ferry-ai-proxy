@@ -336,6 +336,32 @@ fn lowercase_types_follows_sjson_through_replaced_values() {
 }
 
 #[test]
+fn lowercase_types_takes_path_syntax_in_keys_literally() {
+    // Upstream keeps `a|b` and `@this` as they are, sets `ab.type` to "" for
+    // `a\b`, and adds a `7` for `:7`.
+    let mut tool = json!({"p":{
+        "a|b":{"type":"INTEGER"},
+        "a\\b":{"type":"INTEGER"},
+        ":7":{"type":"INTEGER"},
+        "#":{"type":"INTEGER"},
+        "@this":{"type":"INTEGER"},
+        "x.y*?":{"type":"INTEGER"}
+    }});
+    lowercase_types(&mut tool);
+    assert_eq!(
+        tool,
+        json!({"p":{
+            "a|b":{"type":"integer"},
+            "a\\b":{"type":"integer"},
+            ":7":{"type":"integer"},
+            "#":{"type":"integer"},
+            "@this":{"type":"integer"},
+            "x.y*?":{"type":"integer"}
+        }})
+    );
+}
+
+#[test]
 fn builds_the_whole_request_in_upstream_order() {
     let out = convert(
         "claude-sonnet-4",

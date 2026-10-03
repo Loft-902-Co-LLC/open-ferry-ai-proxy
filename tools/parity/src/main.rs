@@ -7,6 +7,7 @@ mod cases;
 mod compare;
 mod generate;
 mod live;
+mod raw_json;
 mod signature;
 mod translator;
 mod upstream;

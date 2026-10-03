@@ -20,6 +20,7 @@ use std::fmt::Write as _;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
+use super::super::unique_names::{UniqueNames, truncate_bytes};
 use crate::common::claude::{
     align_tool_results, is_attribution_system_text, message_system_reminder_text,
 };
@@ -656,14 +657,13 @@ pub(super) fn build_tool_name_map(tools: Option<&Value>) -> ToolNameMap {
     let Some(Value::Array(tools)) = tools else {
         return map;
     };
-    let mut used = HashSet::new();
+    let mut names = UniqueNames::default();
     for tool in tools {
         let name = str_of(tool.get("name"));
         if name.is_empty() {
             continue;
         }
-        let unique = unique_name(&shorten_name(&name), &used);
-        used.insert(unique.clone());
+        let unique = names.claim(&shorten_name(&name), ID_LIMIT);
         map.insert(name.into_owned(), unique);
     }
     map
@@ -691,22 +691,6 @@ fn shorten_name(name: &str) -> Cow<'_, str> {
     Cow::Borrowed(truncate_bytes(name, ID_LIMIT))
 }
 
-fn unique_name(candidate: &str, used: &HashSet<String>) -> String {
-    if !used.contains(candidate) {
-        return candidate.to_owned();
-    }
-    let mut n = 1usize;
-    loop {
-        let suffix = format!("_{n}");
-        let prefix = truncate_bytes(candidate, ID_LIMIT.saturating_sub(suffix.len()));
-        let unique = format!("{prefix}{suffix}");
-        if !used.contains(&unique) {
-            return unique;
-        }
-        n += 1;
-    }
-}
-
 /// Keeps Claude tool IDs within the Responses `call_id` limit. A long ID becomes
 /// its first 47 bytes, `_`, and 16 hex digits of its SHA-256, so the mapping is
 /// stable across turns and a tool call still matches its result.
@@ -721,18 +705,6 @@ pub(super) fn shorten_call_id(id: &str) -> Cow<'_, str> {
         write!(short, "{byte:02x}").expect("writing to a String cannot fail");
     }
     Cow::Owned(short)
-}
-
-/// Cuts `s` to at most `max` bytes without splitting a character.
-fn truncate_bytes(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        return s;
-    }
-    let mut end = max;
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
 }
 
 #[cfg(test)]

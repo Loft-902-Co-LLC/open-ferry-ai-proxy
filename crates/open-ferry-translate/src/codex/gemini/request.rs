@@ -15,10 +15,11 @@
 //!   gjson path, so it misses one under a key holding path syntax other than
 //!   `.`, `*` and `?`, such as `#` or `|`.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 
 use serde_json::{Map, Value};
 
+use super::super::unique_names::{UniqueNames, truncate_bytes};
 use crate::go;
 use crate::json::{bool_of, int_of, object, path, str_of};
 use crate::thinking::budget_to_level;
@@ -483,12 +484,10 @@ pub(super) fn declared_names(request: &Value) -> Vec<String> {
 /// When two declarations share a name, it maps to the later one's suffixed
 /// name, as upstream's does.
 pub(super) fn build_short_name_map(names: &[String]) -> HashMap<String, String> {
-    let mut used = HashSet::new();
+    let mut unique = UniqueNames::default();
     let mut map = HashMap::new();
     for name in names {
-        let unique = unique_name(shorten_name(name), &used);
-        used.insert(unique.clone());
-        map.insert(name.clone(), unique);
+        map.insert(name.clone(), unique.claim(&shorten_name(name), NAME_LIMIT));
     }
     map
 }
@@ -513,34 +512,6 @@ fn shorten_name(name: &str) -> String {
         return truncate_bytes(&candidate, NAME_LIMIT).to_owned();
     }
     truncate_bytes(name, NAME_LIMIT).to_owned()
-}
-
-fn unique_name(candidate: String, used: &HashSet<String>) -> String {
-    if !used.contains(&candidate) {
-        return candidate;
-    }
-    let mut n = 1usize;
-    loop {
-        let suffix = format!("_{n}");
-        let prefix = truncate_bytes(&candidate, NAME_LIMIT.saturating_sub(suffix.len()));
-        let unique = format!("{prefix}{suffix}");
-        if !used.contains(&unique) {
-            return unique;
-        }
-        n += 1;
-    }
-}
-
-/// Cuts `s` to at most `max` bytes without splitting a character.
-fn truncate_bytes(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        return s;
-    }
-    let mut end = max;
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
 }
 
 #[cfg(test)]

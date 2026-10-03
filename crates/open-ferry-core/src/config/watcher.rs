@@ -1105,12 +1105,15 @@ mod tests {
         remember(&mut state, &path, r#"{"type":"demo","v":1}"#);
         let new = r#"{"type":"demo","v":2}"#;
 
-        // Written after the first check, within the retries.
+        // Written after the first check, within the retries, and renamed into
+        // place so the retries never see it empty.
         let writer = {
             let path = path.clone();
             thread::spawn(move || {
                 thread::sleep(Duration::from_millis(60));
-                fs::write(&path, new)
+                let temp = path.with_extension("tmp");
+                fs::write(&temp, new)?;
+                fs::rename(&temp, &path)
             })
         };
         let step = state.handle_event(&path, Op::Rename, Instant::now());

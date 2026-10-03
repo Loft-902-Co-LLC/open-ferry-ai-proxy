@@ -15,9 +15,7 @@
 //!   same JSON compactly: content that isn't a string, and reasoning given
 //!   as an object whose `text` isn't a string.
 //! - Reading arguments leniently, a number Go reads as infinite or NaN, such
-//!   as `inf`, stays text; Go writes `+Inf` or `NaN`, which isn't JSON. So
-//!   does a hexadecimal number such as `0x1p3`, which Go reads as a number.
-//!   A key is set as it is, as upstream escapes it for sjson, except where
+//!   as `inf`, stays text; Go writes `+Inf` or `NaN`, which isn't JSON. A key is set as it is, as upstream escapes it for sjson, except where
 //!   sjson rejects the path: the key is empty or holds `|`, `#`, `@`, `*`
 //!   or `?`. sjson drops a leading `:` from a path, and so do we.
 
@@ -579,10 +577,10 @@ fn scalar(token: &str) -> Value {
     {
         return uint.into();
     }
-    // Rust reads the decimal numbers Go's ParseFloat does, and both read a
-    // number too large for an f64 as infinite, where Go reports an error.
-    if let Ok(float) = token.parse::<f64>()
-        && float.is_finite()
+    // ParseFloat also takes underscores between digits and hexadecimal
+    // mantissas. It reads infinity and NaN, which Go writes as `+Inf` and
+    // `NaN`; those stay text.
+    if let Some(float) = go::parse_float_checked(token).filter(|float| float.is_finite())
         && let Ok(number) = serde_json::from_str(&go::format_float(float))
     {
         return number;

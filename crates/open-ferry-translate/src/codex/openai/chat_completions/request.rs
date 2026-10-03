@@ -25,6 +25,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::{Map, Value, json};
 
+use super::super::super::unique_names::UniqueNames;
 use crate::apply_patch;
 use crate::go;
 use crate::json::{go_value, object, path, str_of};
@@ -667,28 +668,15 @@ pub(super) fn collect_request_tool_names(request: &Value) -> Vec<String> {
 /// Gives each name a unique Codex name within the limit, adding `_1`, `_2`
 /// and so on when two shorten to the same one.
 pub(super) fn build_short_name_map(names: &[String]) -> ToolNameMap {
-    let mut used = HashSet::new();
+    let mut unique = UniqueNames::default();
     let mut map = ToolNameMap::new();
     for name in names {
-        let unique = unique_name(shorten_name_if_needed(name), &used);
-        used.insert(unique.clone());
-        map.insert(name.clone(), unique);
+        map.insert(
+            name.clone(),
+            unique.claim(&shorten_name_if_needed(name), NAME_LIMIT),
+        );
     }
     map
-}
-
-fn unique_name(candidate: String, used: &HashSet<String>) -> String {
-    if !used.contains(&candidate) {
-        return candidate;
-    }
-    (1..)
-        .map(|n| {
-            let suffix = format!("_{n}");
-            let prefix_len = candidate.len().min(NAME_LIMIT.saturating_sub(suffix.len()));
-            format!("{}{suffix}", &candidate[..prefix_len])
-        })
-        .find(|unique| !used.contains(unique))
-        .expect("some suffix is unused")
 }
 
 #[cfg(test)]

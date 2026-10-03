@@ -7,6 +7,7 @@ mod float;
 mod printable;
 
 pub use float::parse_float;
+pub(crate) use float::parse_float_checked;
 
 use std::cmp::Ordering;
 use std::fmt::Write as _;

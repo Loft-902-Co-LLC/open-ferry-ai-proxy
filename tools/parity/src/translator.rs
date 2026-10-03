@@ -62,9 +62,11 @@ use open_ferry_translate::openai::responses::{
 };
 use open_ferry_translate::registry::{Format, Registry, ResponseContext, ResponseTransform};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::cases::Case;
 use crate::compare::{self, Deviation, JsonAt, JsonForm};
+use crate::raw_json::{self, Raw};
 use crate::signature;
 
 /// How an empty non-streaming output reads, unlike any JSON a response holds.
@@ -669,7 +671,7 @@ impl Translator {
                 } else {
                     convert_gemini_request_to_openai(&case.model, &request, stream)
                 };
-                // Read back, so derived IDs are masked as upstream's are.
+                // Read back, so derived IDs become upstream's.
                 Ok(self
                     .read(case, output.to_string().as_bytes())
                     .expect("requests always read"))
@@ -1106,15 +1108,16 @@ impl Translator {
     ///
     /// Upstream makes up a Claude `metadata.user_id` when the client sent
     /// none; we don't. The Gemini to Chat Completions translator derives call
-    /// IDs from JSON text, which we write compactly: where the request's
-    /// text isn't compact, [`Self::read`] masks the derived IDs on both
-    /// sides, and that is accounted for here.
+    /// IDs from JSON text, which we write compactly: where that gives a
+    /// different ID, [`Self::read`] turns ours into upstream's, and that is
+    /// accounted for here.
     pub fn drop_deliberate_omissions(self, case: &Case, go: &mut Value) -> Option<Deviation> {
         if let Some(native) = self.native(case) {
             return native.drop_deliberate_omissions(case, go);
         }
         if self == Self::OpenAIGeminiRequest {
-            return contains_string(go, &|text| text.starts_with(DERIVED_CALL_ID))
+            let ids = derived_call_ids(&case.request);
+            return contains_string(go, &|text| ids.iter().any(|(_, upstream)| upstream == text))
                 .then_some(Deviation::CompactCallIdSource);
         }
         if !matches!(
@@ -1165,9 +1168,9 @@ impl Translator {
     /// Claude stream is masked when it is the current time (see
     /// [`mask_create_time_now`]), and the function calls in a chunk from a
     /// Chat Completions stream are sorted (see [`sort_function_calls`]). In
-    /// a Chat Completions request from a Gemini one whose text isn't compact,
-    /// call IDs derived from its JSON text are masked (see
-    /// [`mask_derived_call_ids`]).
+    /// a Chat Completions request from a Gemini one, each call ID we derive
+    /// from compact JSON where upstream derives another from the client's
+    /// text becomes upstream's (see [`derived_call_ids`]).
     pub fn read(self, case: &Case, output: &[u8]) -> Option<Value> {
         let text = String::from_utf8_lossy(output);
         let native = self.native(case);
@@ -1194,9 +1197,7 @@ impl Translator {
             | Self::CodexGeminiRequest => return serde_json::from_str(&text).ok(),
             Self::OpenAIGeminiRequest => {
                 let mut value: Value = serde_json::from_str(&text).ok()?;
-                if !is_compact(&case.request) {
-                    mask_derived_call_ids(&mut value, case);
-                }
+                replace_compact_call_ids(&mut value, case);
                 return Some(value);
             }
             Self::CodexGeminiStream | Self::ClaudeGeminiStream | Self::OpenAIGeminiStream => {
@@ -1552,49 +1553,128 @@ fn sort_function_calls(chunk: &mut Value) {
 type LineTranslator<'a> = Box<dyn FnMut(&[u8]) -> Vec<Value> + 'a>;
 
 /// Whether `text` is JSON written compactly, as we write it.
-fn is_compact(text: &str) -> bool {
-    serde_json::from_str::<Value>(text)
-        .and_then(|value| serde_json::to_string(&value))
-        .is_ok_and(|compact| compact == text)
+/// The call IDs the Gemini to Chat Completions translator derives from a
+/// function call's or response's JSON, where ours differ from upstream's, as
+/// (ours, upstream's). Upstream hashes the JSON as the client wrote it, and a
+/// name that's an object or array as its text; we hash them written
+/// compactly. Elsewhere the two match, so the IDs must too.
+fn derived_call_ids(request: &str) -> Vec<(String, String)> {
+    let mut ids = Vec::new();
+    let Some(root) = raw_json::parse(request) else {
+        return ids;
+    };
+    let Some(Raw::Array(contents, _)) = root.get("contents") else {
+        return ids;
+    };
+    for (message_index, content) in contents.iter().enumerate() {
+        let Some(Raw::Array(parts, _)) = content.get("parts") else {
+            continue;
+        };
+        for (part_index, part) in parts.iter().enumerate() {
+            let mut derive = |kind: &str, holder: &Raw<'_>, payload: Option<&Raw<'_>>| {
+                let name = holder.get("name");
+                let ours = derived_call_id(
+                    kind,
+                    message_index,
+                    part_index,
+                    &gjson_string(name, true),
+                    &payload
+                        .map(|payload| payload.value().to_string())
+                        .unwrap_or_default(),
+                );
+                let upstream = derived_call_id(
+                    kind,
+                    message_index,
+                    part_index,
+                    &gjson_string(name, false),
+                    payload.map_or("", Raw::text),
+                );
+                if ours != upstream {
+                    ids.push((ours, upstream));
+                }
+            };
+            if let Some(call) = part.get("functionCall") {
+                derive("call", call, call.get("args"));
+            }
+            if let Some(response) = part.get("functionResponse") {
+                let body = response.get("response");
+                derive(
+                    "response",
+                    response,
+                    body.map(|body| body.get("content").unwrap_or(body)),
+                );
+            }
+        }
+    }
+    ids
 }
 
-/// What the `n`th distinct derived call ID in an output starts with once
-/// masked.
-const DERIVED_CALL_ID: &str = "call_(derived-";
+/// `deterministicToolCallID`.
+fn derived_call_id(
+    kind: &str,
+    message_index: usize,
+    part_index: usize,
+    name: &str,
+    payload: &str,
+) -> String {
+    let digest = Sha256::digest(format!(
+        "{kind}|{message_index}|{part_index}|{name}|{payload}"
+    ));
+    let hex: String = digest[..12]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("call_{hex}")
+}
 
-/// Replaces `call_` and 24 hex digits, the IDs the Gemini to Chat Completions
-/// translator derives from a hash of a call's name and JSON text, where the
-/// request's text isn't compact: upstream hashes the text as the client wrote
-/// it, and we the same JSON written compactly. Each distinct ID gets the next
-/// number in the order it first appears, so a tool message still has to
-/// answer the right call. IDs found in `case`'s input are kept.
-fn mask_derived_call_ids(value: &mut Value, case: &Case) {
-    fn mask(value: &mut Value, input: &str, seen: &mut Vec<String>) {
-        match value {
-            Value::String(id) if is_derived_call_id(id) && !input.contains(id.as_str()) => {
-                let n = match seen.iter().position(|seen| seen == id) {
-                    Some(index) => index + 1,
-                    None => {
-                        seen.push(id.clone());
-                        seen.len()
-                    }
-                };
-                *id = format!("{DERIVED_CALL_ID}{n})");
+/// gjson `String()`: a string's value, an integer as written, another number
+/// as Go formats its float, `""` for null or nothing, and other values as
+/// their text, or with `compact` an object or array as we write it.
+fn gjson_string(value: Option<&Raw<'_>>, compact: bool) -> String {
+    let Some(value) = value else {
+        return String::new();
+    };
+    let text = value.text();
+    match value.value() {
+        Value::Object(_) | Value::Array(_) if compact => value.value().to_string(),
+        Value::String(string) => string,
+        Value::Null => String::new(),
+        Value::Number(_) => {
+            let digits = text.strip_prefix('-').unwrap_or(text);
+            if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+                return text.to_owned();
             }
-            Value::Array(items) => items.iter_mut().for_each(|item| mask(item, input, seen)),
-            Value::Object(fields) => fields
-                .values_mut()
-                .for_each(|field| mask(field, input, seen)),
+            match text.parse::<f64>() {
+                Ok(f64::INFINITY) => "+Inf".to_owned(),
+                Ok(f64::NEG_INFINITY) => "-Inf".to_owned(),
+                Ok(float) => float.to_string(),
+                Err(_) => text.to_owned(),
+            }
+        }
+        _ => text.to_owned(),
+    }
+}
+
+/// Replaces each call ID we derive from compact JSON with the one upstream
+/// derives from the client's text (see [`derived_call_ids`]). Every other ID
+/// is compared as it is.
+fn replace_compact_call_ids(value: &mut Value, case: &Case) {
+    fn replace(value: &mut Value, ids: &[(String, String)]) {
+        match value {
+            Value::String(text) => {
+                if let Some((_, upstream)) = ids.iter().find(|(ours, _)| ours == text) {
+                    *text = upstream.clone();
+                }
+            }
+            Value::Array(items) => items.iter_mut().for_each(|item| replace(item, ids)),
+            Value::Object(fields) => fields.values_mut().for_each(|field| replace(field, ids)),
             _ => {}
         }
     }
-    mask(value, &input_text(case), &mut Vec::new());
-}
-
-fn is_derived_call_id(text: &str) -> bool {
-    text.strip_prefix("call_").is_some_and(|hash| {
-        hash.len() == 24 && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-    })
+    let ids = derived_call_ids(&case.request);
+    if !ids.is_empty() {
+        replace(value, &ids);
+    }
 }
 
 /// Whether any string in `value` satisfies `matches`.
@@ -1980,6 +2060,58 @@ mod tests {
         assert_eq!(differences.len(), 1);
         assert_eq!(differences[0].path, "$.messages[1].content[0].tool_use_id");
         assert_eq!(differences[0].rust, r#""toolu_(generated-2)""#);
+    }
+
+    #[test]
+    fn only_ids_we_derive_from_compact_json_become_upstream_ids() {
+        let read = |request: &str, id: Option<&str>| {
+            let case = Case::new("derived", "gpt-5", request);
+            let mut rust = convert_gemini_request_to_openai(
+                "gpt-5",
+                &serde_json::from_str(request).unwrap(),
+                false,
+            );
+            let call = &mut rust["messages"][0]["tool_calls"][0]["id"];
+            let ours = call.as_str().unwrap().to_owned();
+            if let Some(id) = id {
+                *call = id.into();
+            }
+            let read = Translator::OpenAIGeminiRequest
+                .read(&case, rust.to_string().as_bytes())
+                .unwrap();
+            (ours, read["messages"][0]["tool_calls"][0]["id"].clone())
+        };
+        // Whitespace outside the hashed JSON changes nothing, so the ID is
+        // compared as it is, and a wrong one stays wrong.
+        let compact_args =
+            r#"{ "contents":[{"role":"model","parts":[{"functionCall":{"name":"f","args":{}}}]}]}"#;
+        let (ours, id) = read(compact_args, None);
+        assert_eq!(ours, "call_15109fbc38df8528f7e437db");
+        assert_eq!(id, ours);
+        let wrong = "call_0123456789abcdef01234567";
+        assert_eq!(read(compact_args, Some(wrong)).1, wrong);
+        // Arguments written with spaces: our ID becomes upstream's.
+        let spaced_args = r#"{"contents":[{"role":"model","parts":[{"functionCall":{"name":"f","args":{ "a" : 1 }}}]}]}"#;
+        let (ours, id) = read(spaced_args, None);
+        assert_eq!(ours, derived_call_id("call", 0, 0, "f", r#"{"a":1}"#));
+        assert_eq!(id, derived_call_id("call", 0, 0, "f", r#"{ "a" : 1 }"#));
+        assert_eq!(read(spaced_args, Some(wrong)).1, wrong);
+        // A name that's an object is hashed as its text too.
+        assert_eq!(
+            derived_call_ids(
+                r#"{"contents":[{"parts":[{"functionResponse":{"name":{ "n": 1.50 },"response":{"content":[ 1 ]}}}]}]}"#
+            ),
+            [(
+                derived_call_id("response", 0, 0, r#"{"n":1.50}"#, "[1]"),
+                derived_call_id("response", 0, 0, r#"{ "n": 1.50 }"#, "[ 1 ]"),
+            )]
+        );
+        assert_eq!(gjson_string(raw_json::parse("1.50").as_ref(), false), "1.5");
+        assert_eq!(gjson_string(raw_json::parse("-7").as_ref(), false), "-7");
+        assert_eq!(
+            gjson_string(raw_json::parse("1e400").as_ref(), false),
+            "+Inf"
+        );
     }
 
     #[test]

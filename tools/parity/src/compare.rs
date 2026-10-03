@@ -27,11 +27,13 @@ pub enum Deviation {
     /// Upstream made up a user ID for a client that sent none; we leave it out.
     SyntheticUserId,
     /// A Gemini response's `createTime` is the same instant, which upstream
-    /// writes in the local time zone and we in UTC.
+    /// writes in the local time zone and we in UTC. Only the response's own
+    /// field, not one in the data it carries.
     UtcCreateTime,
     /// A Chat Completions call ID derived from a Gemini call's JSON is
     /// derived from the JSON written compactly, where the client's text
-    /// isn't. Such IDs are masked on both sides (see `translator.rs`).
+    /// isn't. Ours is replaced by the ID upstream derives from the text,
+    /// where it is the one we should derive (see `translator.rs`).
     CompactCallIdSource,
 }
 
@@ -268,8 +270,10 @@ impl<'a> Walker<'a> {
             self.out.deviations.insert(Deviation::ProtoErrorPrefix);
             return;
         }
-        if matches!(self.path.last(), Some(Segment::Key("createTime")))
-            && rust.ends_with('Z')
+        if matches!(
+            self.path.as_slice(),
+            [Segment::Key("createTime")] | [Segment::Index(_), Segment::Key("createTime")]
+        ) && rust.ends_with('Z')
             && rfc3339_seconds(go).is_some_and(|go| rfc3339_seconds(rust) == Some(go))
         {
             self.out.deviations.insert(Deviation::UtcCreateTime);
@@ -337,8 +341,9 @@ impl<'a> Walker<'a> {
 
 /// The Unix time in seconds of an RFC 3339 time as Go's `time.RFC3339Nano`
 /// layout writes a whole second, `[-]YYYY-MM-DDTHH:MM:SS` then `Z` or a
-/// `+HH:MM` or `-HH:MM` offset, with a year of four digits or more.
-pub fn rfc3339_seconds(text: &str) -> Option<i64> {
+/// `+HH:MM` or `-HH:MM` offset, with a year of four digits or more. A year
+/// too large for the result gives `None`.
+pub fn rfc3339_seconds(text: &str) -> Option<i128> {
     let (negative, text) = match text.strip_prefix('-') {
         Some(rest) => (true, rest),
         None => (false, text),
@@ -375,11 +380,12 @@ pub fn rfc3339_seconds(text: &str) -> Option<i64> {
     } else {
         number(year)?
     };
-    let days = days_from_civil(year, number(month)?, number(day)?);
-    Some(days * 86_400 + number(hour)? * 3600 + number(minute)? * 60 + number(second)? - offset)
+    let days = days_from_civil(year, number(month)?, number(day)?)?;
+    let clock = number(hour)? * 3600 + number(minute)? * 60 + number(second)? - offset;
+    days.checked_mul(86_400)?.checked_add(clock)
 }
 
-fn number(digits: &str) -> Option<i64> {
+fn number(digits: &str) -> Option<i128> {
     if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
@@ -387,15 +393,19 @@ fn number(digits: &str) -> Option<i64> {
 }
 
 /// Days from 1970-01-01 to a proleptic Gregorian date, by Howard Hinnant's
-/// `days_from_civil`.
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
-    let year = if month <= 2 { year - 1 } else { year };
+/// `days_from_civil`. Month and day are two digits.
+fn days_from_civil(year: i128, month: i128, day: i128) -> Option<i128> {
+    let year = if month <= 2 {
+        year.checked_sub(1)?
+    } else {
+        year
+    };
     let era = year.div_euclid(400);
     let year_of_era = year.rem_euclid(400);
     let month_index = if month > 2 { month - 3 } else { month + 9 };
     let day_of_year = (153 * month_index + 2) / 5 + day - 1;
     let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    era * 146_097 + day_of_era - 719_468
+    era.checked_mul(146_097)?.checked_add(day_of_era - 719_468)
 }
 
 /// Splits `text` into the JSON objects and arrays embedded in it, each with
@@ -682,6 +692,63 @@ mod tests {
             compare(&go, &json!({ "n": 0 }), JSON_AT).differences.len(),
             1
         );
+    }
+
+    #[test]
+    fn only_a_response_create_time_may_be_in_utc() {
+        let local = "2023-11-14T16:13:20-06:00";
+        let utc = "2023-11-14T22:13:20Z";
+        let response = |time: &str| json!({ "createTime": time });
+        let cmp = compare(&response(local), &response(utc), JSON_AT);
+        assert!(cmp.differences.is_empty());
+        assert_eq!(cmp.deviations, BTreeSet::from([Deviation::UtcCreateTime]));
+        let chunks = |time: &str| json!([{}, { "createTime": time }]);
+        assert!(
+            compare(&chunks(local), &chunks(utc), JSON_AT)
+                .differences
+                .is_empty()
+        );
+
+        // The same time in a function call's arguments must be kept as it is.
+        let call = |time: &str| {
+            json!({ "candidates": [{ "content": { "parts": [
+                { "functionCall": { "name": "f", "args": { "createTime": time } } }
+            ] } }] })
+        };
+        assert_eq!(
+            compare(&call(local), &call(utc), JSON_AT).differences.len(),
+            1
+        );
+        // And another instant is a difference.
+        let later = "2023-11-14T22:13:21Z";
+        assert_eq!(
+            compare(&response(local), &response(later), JSON_AT)
+                .differences
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn extreme_times_are_read_without_overflow() {
+        assert_eq!(rfc3339_seconds("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(rfc3339_seconds("1969-12-31T18:00:00-06:00"), Some(0));
+        assert_eq!(
+            rfc3339_seconds("292277026596-12-04T15:30:07Z"),
+            Some(i128::from(i64::MAX))
+        );
+        assert_eq!(
+            rfc3339_seconds("-292277022657-01-27T08:29:52Z"),
+            Some(i128::from(i64::MIN))
+        );
+        assert_eq!(
+            rfc3339_seconds("292277026596-12-04T09:30:08-06:00"),
+            rfc3339_seconds("292277026596-12-04T15:30:08Z")
+        );
+        let huge = format!("{}-01-01T00:00:00Z", "9".repeat(38));
+        assert_eq!(rfc3339_seconds(&huge), None);
+        let huge = format!("-{}-01-01T00:00:00Z", "9".repeat(38));
+        assert_eq!(rfc3339_seconds(&huge), None);
     }
 
     #[test]

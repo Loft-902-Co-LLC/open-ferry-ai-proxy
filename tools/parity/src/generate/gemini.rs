@@ -279,8 +279,8 @@ const CREATED_AT: &[&str] = &[
 ];
 
 /// Arguments that only a lenient reader makes sense of: keys without
-/// quotes, text around the object, missing commas, single quotes. None
-/// holds a number Go reads as infinite or NaN, or a hexadecimal one.
+/// quotes, text around the object, missing commas, single quotes, numbers
+/// in Go's syntax. None holds a number Go reads as infinite or NaN.
 const LENIENT_ARGUMENTS: &[&str] = &[
     r#"{"city": "Paris", unit: celsius}"#,
     r#"Sure: {"a": 1, "b": [1, 2], "c": {"d": true}} done"#,
@@ -289,6 +289,7 @@ const LENIENT_ARGUMENTS: &[&str] = &[
     r#"{"a.b": 1, "a b": 2, ":lead": 3}"#,
     r#"{"a": "x" "b": "y"}"#,
     r#"{"big": 123456789012345678901234567890, "e": 1e3, "neg": -7}"#,
+    r#"{"h": 0x1p3, "u": 1_000, "f": 1_0.5, "bad": 1__0, "x": 0x10, "t": 1e-400}"#,
     r#"{"esc": "line\nnext \"quoted\" \\ back", "s": "/"}"#,
     r#"{"nested": {"inner": [1, {"x": null}]}, "after": false"#,
     r#"{"city":"Paris"}"#,
