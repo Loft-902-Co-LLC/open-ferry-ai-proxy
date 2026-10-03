@@ -20,6 +20,8 @@ use crate::codex::client::USER_AGENT;
 use crate::codex::reasoning::tests::valid_signature;
 use crate::json::{exists, get};
 
+mod replay;
+
 /// One request the mock received.
 #[derive(Clone, Debug)]
 struct Seen {
