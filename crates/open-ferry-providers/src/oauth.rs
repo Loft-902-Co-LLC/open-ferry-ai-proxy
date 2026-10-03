@@ -15,10 +15,20 @@
 //!   is turned away with 400 and doesn't end the wait. Upstream hands a code
 //!   on and checks its state later, and takes an error report as the
 //!   login's without checking it.
+//! - Upstream's 10-second read and write deadlines are one deadline here: a
+//!   connection is closed once it has gone 10 seconds since connecting, or
+//!   since its last response, without sending a whole request, or without
+//!   taking the response it is owed.
+//! - A stopped server gives its open connections 5 seconds (upstream's
+//!   shutdown timeout) to finish and then closes them; upstream's shutdown
+//!   gives up waiting and leaves them to their deadlines.
 
+use std::future::Future;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::Router;
@@ -30,8 +40,10 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use http::StatusCode;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use tokio::net::TcpListener;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{oneshot, watch};
+use tokio::time::{Instant, Sleep};
 
 /// A PKCE verifier and its S256 challenge (upstream's `PKCECodes`).
 #[derive(Clone)]
@@ -114,10 +126,36 @@ struct CallbackQuery {
     error: Option<String>,
 }
 
+/// How long a connection has to send a request, or take a response
+/// (upstream's `ReadTimeout` and `WriteTimeout`).
+const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long a stopped server lets open connections finish (upstream's
+/// shutdown timeout in `Stop`).
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+
+/// The callback server's time limits.
+#[derive(Clone, Copy, Debug)]
+struct Limits {
+    connection: Duration,
+    shutdown: Duration,
+}
+
+impl Limits {
+    const DEFAULT: Self = Self {
+        connection: CONNECTION_TIMEOUT,
+        shutdown: SHUTDOWN_GRACE,
+    };
+}
+
 impl CallbackServer {
     /// Listens on 127.0.0.1:`port` (0 for any free port) for a redirect to
     /// `path` that carries `state`.
     pub async fn start(port: u16, path: &str, state: &str) -> io::Result<Self> {
+        Self::start_with(port, path, state, Limits::DEFAULT).await
+    }
+
+    async fn start_with(port: u16, path: &str, state: &str, limits: Limits) -> io::Result<Self> {
         let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, port))).await?;
         let port = listener.local_addr()?.port();
         let (sender, result) = oneshot::channel();
@@ -128,13 +166,15 @@ impl CallbackServer {
                 state: state.into(),
                 result: Arc::new(Mutex::new(Some(sender))),
             });
-        let (shutdown, mut stopped) = watch::channel(false);
+        let (shutdown, stopped) = watch::channel(false);
+        let listener = CallbackListener {
+            inner: listener,
+            stopped: stopped.clone(),
+            limits,
+        };
         tokio::spawn(async move {
-            let stop = async move {
-                let _ = stopped.wait_for(|stop| *stop).await;
-            };
             if let Err(error) = axum::serve(listener, app)
-                .with_graceful_shutdown(stop)
+                .with_graceful_shutdown(stop_signal(stopped))
                 .await
             {
                 tracing::warn!("OAuth callback server failed: {error}");
@@ -163,8 +203,130 @@ impl CallbackServer {
 }
 
 impl Drop for CallbackServer {
+    /// Stops taking connections, and closes the open ones once they have
+    /// finished or five seconds have passed.
     fn drop(&mut self) {
         let _ = self.shutdown.send(true);
+    }
+}
+
+/// Resolves once the server is told to stop, or its owner is gone.
+async fn stop_signal(mut stopped: watch::Receiver<bool>) {
+    let _ = stopped.wait_for(|stop| *stop).await;
+}
+
+/// The callback server's listener: a TCP listener whose connections are held
+/// to the server's [`Limits`].
+struct CallbackListener {
+    inner: TcpListener,
+    stopped: watch::Receiver<bool>,
+    limits: Limits,
+}
+
+impl axum::serve::Listener for CallbackListener {
+    type Io = LimitedConnection;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        let (stream, address) = axum::serve::Listener::accept(&mut self.inner).await;
+        let connection = LimitedConnection::new(stream, self.stopped.clone(), self.limits);
+        (connection, address)
+    }
+
+    fn local_addr(&self) -> io::Result<Self::Addr> {
+        self.inner.local_addr()
+    }
+}
+
+/// A connection that fails, and so is closed, once it has gone the
+/// connection timeout without a whole request or without taking its
+/// response, or once the server has stopped and the shutdown grace has
+/// passed. A request still being read when the server stops is cut off then,
+/// as no graceful shutdown would end it.
+struct LimitedConnection {
+    stream: TcpStream,
+    timeout: Duration,
+    /// When the connection times out: [`Limits::connection`] after it was
+    /// accepted or last wrote.
+    deadline: Pin<Box<Sleep>>,
+    /// Resolves the shutdown grace after the server stops.
+    closing: Pin<Box<dyn Future<Output = ()> + Send>>,
+    /// Why the connection failed, once it has.
+    failed: Option<io::ErrorKind>,
+}
+
+impl LimitedConnection {
+    fn new(stream: TcpStream, stopped: watch::Receiver<bool>, limits: Limits) -> Self {
+        Self {
+            stream,
+            timeout: limits.connection,
+            deadline: Box::pin(tokio::time::sleep(limits.connection)),
+            closing: Box::pin(async move {
+                stop_signal(stopped).await;
+                tokio::time::sleep(limits.shutdown).await;
+            }),
+            failed: None,
+        }
+    }
+
+    /// Fails once the connection has timed out or must close. Polling the
+    /// deadline and the shutdown wakes the connection when either comes,
+    /// even while the client sends nothing.
+    fn check(&mut self, cx: &mut Context<'_>) -> io::Result<()> {
+        if self.failed.is_none() {
+            if self.closing.as_mut().poll(cx).is_ready() {
+                self.failed = Some(io::ErrorKind::ConnectionAborted);
+            } else if self.deadline.as_mut().poll(cx).is_ready() {
+                self.failed = Some(io::ErrorKind::TimedOut);
+            }
+        }
+        match self.failed {
+            Some(io::ErrorKind::TimedOut) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "OAuth callback connection timed out",
+            )),
+            Some(kind) => Err(io::Error::new(kind, "OAuth callback server stopped")),
+            None => Ok(()),
+        }
+    }
+}
+
+impl AsyncRead for LimitedConnection {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        self.check(cx)?;
+        Pin::new(&mut self.stream).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for LimitedConnection {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        self.check(cx)?;
+        let written = Pin::new(&mut self.stream).poll_write(cx, buf);
+        if let Poll::Ready(Ok(n)) = written
+            && n > 0
+        {
+            // A response went out; the next request gets a fresh deadline.
+            let next = Instant::now() + self.timeout;
+            self.deadline.as_mut().reset(next);
+        }
+        written
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.check(cx)?;
+        Pin::new(&mut self.stream).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_shutdown(cx)
     }
 }
 
@@ -284,6 +446,101 @@ mod tests {
         assert_eq!(get(port, "/callback?code=c1&state=s1").await.0, 302);
         let result = server.wait(Duration::from_secs(5)).await.unwrap();
         assert_eq!(result, CallbackResult::Code("c1".into()));
+    }
+
+    /// Short limits, so the tests don't wait 10 seconds.
+    const SHORT: Limits = Limits {
+        connection: Duration::from_millis(300),
+        shutdown: Duration::from_millis(200),
+    };
+
+    /// Opens a connection and sends a request that never finishes its
+    /// headers.
+    async fn half_open(port: u16) -> TcpStream {
+        use tokio::io::AsyncWriteExt;
+        let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+            .await
+            .unwrap();
+        stream
+            .write_all(b"GET /callback HTTP/1.1\r\nHost: localhost\r\n")
+            .await
+            .unwrap();
+        stream
+    }
+
+    /// Waits up to `limit` for the server to close `stream`, and says how long
+    /// it took, or `None` if it stayed open.
+    async fn closed_within(stream: &mut TcpStream, limit: Duration) -> Option<Duration> {
+        use tokio::io::AsyncReadExt;
+        let started = Instant::now();
+        let mut buf = [0; 256];
+        loop {
+            match tokio::time::timeout(limit, stream.read(&mut buf)).await {
+                Err(_) => return None,
+                Ok(Ok(0) | Err(_)) => return Some(started.elapsed()),
+                // A 408 or similar before closing is fine.
+                Ok(Ok(_)) => {}
+            }
+        }
+    }
+
+    #[test]
+    fn limits_are_upstreams() {
+        assert_eq!(Limits::DEFAULT.connection, Duration::from_secs(10));
+        assert_eq!(Limits::DEFAULT.shutdown, Duration::from_secs(5));
+    }
+
+    // A request whose headers never finish is cut off at the deadline, and
+    // the server still answers others.
+    #[tokio::test]
+    async fn unfinished_request_times_out() {
+        let mut server = CallbackServer::start_with(0, "/callback", "s1", SHORT)
+            .await
+            .unwrap();
+        let port = server.port();
+        let mut stream = half_open(port).await;
+        let took = closed_within(&mut stream, Duration::from_secs(5))
+            .await
+            .expect("the unfinished request outlived its deadline");
+        assert!(took >= Duration::from_millis(200), "{took:?}");
+        assert_eq!(get(port, "/callback?code=c1&state=s1").await.0, 302);
+        let result = server.wait(Duration::from_secs(5)).await.unwrap();
+        assert_eq!(result, CallbackResult::Code("c1".into()));
+    }
+
+    // Dropping the server closes a connection stuck in its headers after the
+    // shutdown grace, well before the connection's own deadline.
+    #[tokio::test]
+    async fn dropping_the_server_closes_unfinished_requests() {
+        let limits = Limits {
+            connection: Duration::from_secs(60),
+            shutdown: Duration::from_millis(100),
+        };
+        let server = CallbackServer::start_with(0, "/callback", "s1", limits)
+            .await
+            .unwrap();
+        let port = server.port();
+        let mut stream = half_open(port).await;
+        // Let the server take the connection and start reading it.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(server);
+        let took = closed_within(&mut stream, Duration::from_secs(5))
+            .await
+            .expect("the unfinished request outlived the server");
+        assert!(took < Duration::from_secs(2), "{took:?}");
+    }
+
+    // A response already on its way when the server is dropped still
+    // arrives, as a graceful shutdown lets it.
+    #[tokio::test]
+    async fn dropping_the_server_lets_a_redirect_finish() {
+        let mut server = CallbackServer::start(0, "/callback", "s1").await.unwrap();
+        let port = server.port();
+        let redirect = tokio::spawn(async move { get(port, "/callback?code=c1&state=s1").await });
+        let result = server.wait(Duration::from_secs(5)).await.unwrap();
+        drop(server);
+        assert_eq!(result, CallbackResult::Code("c1".into()));
+        assert_eq!(redirect.await.unwrap().0, 302);
     }
 
     #[tokio::test]
