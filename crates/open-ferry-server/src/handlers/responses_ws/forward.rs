@@ -30,10 +30,11 @@ use tokio::time::{Instant, Interval, MissedTickBehavior};
 
 use super::client_error::is_request_fault;
 use super::repair::{
-    ToolCacheTurn, caches, is_complete_tool_call, is_tool_call, is_tool_output,
+    ServerToolCaches, ToolCacheTurn, is_complete_tool_call, is_tool_call, is_tool_output,
     record_tool_calls_from_payload,
 };
 use super::writer::{Conn, Socket};
+use crate::auth::Principal;
 use crate::errors::{ErrorMessage, openai_body};
 use crate::exec::HandlerStream;
 use crate::json::{self, Val, str_at};
@@ -44,6 +45,10 @@ const EVENT_ERROR: &str = "error";
 
 /// How to forward a turn (`responsesWebsocketForwardOptions`).
 pub(super) struct ForwardOptions<'a> {
+    /// The server's tool caches.
+    pub(super) caches: &'a ServerToolCaches,
+    /// Who the client authenticated as.
+    pub(super) principal: Principal,
     /// The key the client's tool calls are kept under.
     pub(super) session_key: &'a str,
     /// Send the completed response as the upstream wrote it.
@@ -185,7 +190,7 @@ pub(super) async fn forward<S: Socket>(
             match options.turn.as_deref_mut() {
                 Some(turn) => turn.record_response(&payload),
                 None => record_tool_calls_from_payload(
-                    &mut caches().calls,
+                    &mut options.caches.lock(options.principal).calls,
                     options.session_key,
                     &payload,
                 ),

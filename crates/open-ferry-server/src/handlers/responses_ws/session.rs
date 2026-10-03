@@ -34,7 +34,7 @@ use super::forward::{
     should_replay_pinned_failure,
 };
 use super::prewarm::{normalize_followup, should_handle_locally, synthetic_payloads};
-use super::repair::{caches, prepare_fallback_turn, session_key};
+use super::repair::{PrincipalCaches, prepare_fallback_turn, session_key};
 use super::requests::{
     Normalized, TYPE_APPEND, TYPE_CREATE, input_contains_full_transcript, input_not_array,
     normalize, normalize_create, normalize_passthrough, request_type, transcript_replacement,
@@ -129,7 +129,8 @@ struct Session<S> {
     conn: Conn<S>,
     /// The session's ID, for executors that keep state per socket.
     id: String,
-    /// The key the client's tool calls are cached under.
+    /// The key the client's tool calls are cached under, among its
+    /// principal's.
     key: String,
     /// The last request sent over HTTP, whole.
     last_request: Vec<u8>,
@@ -177,7 +178,7 @@ pub(super) async fn run<S: Socket>(state: AppState, client: ClientRequest, socke
         upstream: Upstream::Unknown,
         upstream_ws_auth: String::new(),
     };
-    caches().retain(&session.key);
+    session.caches().retain(&session.key);
     tracing::info!(id = %session.id, "responses websocket: client connected");
 
     while let Some(payload) = session.conn.read().await {
@@ -186,7 +187,7 @@ pub(super) async fn run<S: Socket>(state: AppState, client: ClientRequest, socke
         }
     }
 
-    caches().release(&session.key);
+    session.caches().release(&session.key);
     tracing::info!(id = %session.id, "responses websocket: session closing");
     session.dispatcher.close_execution_session(&session.id);
     tracing::info!(id = %session.id, "responses websocket: upstream execution session closed");
@@ -194,6 +195,11 @@ pub(super) async fn run<S: Socket>(state: AppState, client: ClientRequest, socke
 }
 
 impl<S: Socket> Session<S> {
+    /// The tool caches of the client's principal, locked.
+    fn caches(&self) -> PrincipalCaches<'_> {
+        self.state.tool_caches().lock(self.client.principal)
+    }
+
     /// Handles one request. Breaks when the session is over.
     async fn turn(&mut self, payload: &[u8]) -> ControlFlow<()> {
         let explicit_model = str_at(payload, "model").trim().to_owned();
@@ -316,7 +322,8 @@ impl<S: Socket> Session<S> {
                 model.clone_into(&mut self.passthrough_model);
             }
         } else {
-            let (repaired, cache_turn) = prepare_fallback_turn(&self.key, &request);
+            let (repaired, cache_turn) =
+                prepare_fallback_turn(&mut self.caches(), &self.key, &request);
             request = repaired;
             turn = cache_turn;
             next_last_request = Some(request.clone());
@@ -400,6 +407,8 @@ impl<S: Socket> Session<S> {
             &mut self.conn,
             started.items,
             ForwardOptions {
+                caches: self.state.tool_caches(),
+                principal: self.client.principal,
                 session_key: &self.key,
                 preserve_completion_output: preserve_output,
                 turn: turn.as_mut(),
@@ -429,7 +438,7 @@ impl<S: Socket> Session<S> {
         };
 
         if let Some(turn) = turn {
-            turn.commit();
+            turn.commit(&mut self.caches());
         }
         self.pending_prewarm.clear();
         self.upstream = attempted;

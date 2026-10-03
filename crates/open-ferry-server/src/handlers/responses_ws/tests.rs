@@ -46,8 +46,8 @@ use super::forward::{
     restore_completion_output, should_expose, should_release_pinned, should_replay_pinned_failure,
 };
 use super::repair::{
-    ToolCache, ToolCacheTurn, ToolCaches, caches, is_complete_tool_call, prepare_fallback_turn,
-    record_tool_calls_from_payload, repair,
+    ServerToolCaches, ToolCache, ToolCacheTurn, ToolCaches, is_complete_tool_call,
+    prepare_fallback_turn, record_tool_calls_from_payload, repair,
 };
 use super::requests::{
     DecodeError, LOCAL_SUMMARY_PREFIX, Normalized, has_local_compaction_summary,
@@ -59,9 +59,11 @@ use super::session::{
 };
 use super::writer::{Closed, Conn, close_frame_for, truncate_close_reason};
 use super::{check_handshake, is_valid_challenge_key, token_list_contains};
+use crate::auth::{Principal, PrincipalTags};
 use crate::config::ServerConfig;
 use crate::errors::ErrorMessage;
 use crate::json::{self, Val};
+use crate::state::AppState;
 use crate::status::status_text;
 use crate::testing::{FakeCatalog, FakeDispatcher, Outcome};
 
@@ -1030,14 +1032,15 @@ const NEXT_CALL: &[u8] = br#"{"input":[{"type":"function_call","id":"fc-next","c
 #[test]
 fn tool_cache_turn_commits_only_on_success() {
     let key = "tool-cache-turn-commit-session";
+    let mut caches = ToolCaches::default();
     let (_, turn) = prepare_fallback_turn(
+        &mut caches,
         key,
         br#"{"input":[{"type":"function_call_output","id":"fco-1","call_id":"call-1","output":"cached result"}]}"#,
     );
-    let before = parse(&repair(&mut caches(), key, NEXT_CALL, false, None));
-    turn.expect("turn").commit();
-    let after = parse(&repair(&mut caches(), key, NEXT_CALL, false, None));
-    caches().release(key);
+    let before = parse(&repair(&mut caches, key, NEXT_CALL, false, None));
+    turn.expect("turn").commit(&mut caches);
+    let after = parse(&repair(&mut caches, key, NEXT_CALL, false, None));
     assert_eq!(before["input"], Value::Array(Vec::new()), "{before}");
     let input = after["input"].as_array().unwrap();
     assert_eq!(input.len(), 2, "{after}");
@@ -1047,17 +1050,67 @@ fn tool_cache_turn_commits_only_on_success() {
 #[test]
 fn tool_cache_retain_prevents_overlapping_release_deletion() {
     let key = "tool-cache-overlapping-retain-session";
-    caches().retain(key);
-    caches().retain(key);
+    let mut caches = ToolCaches::default();
+    caches.retain(key);
+    caches.retain(key);
     let (_, turn) = prepare_fallback_turn(
+        &mut caches,
         key,
         br#"{"input":[{"type":"function_call_output","id":"fco-1","call_id":"call-1","output":"kept"}]}"#,
     );
-    turn.expect("turn").commit();
-    caches().release(key);
-    assert!(caches().outputs.get(key, "call-1").is_some());
-    caches().release(key);
-    assert!(caches().outputs.get(key, "call-1").is_none());
+    turn.expect("turn").commit(&mut caches);
+    caches.release(key);
+    assert!(caches.outputs.get(key, "call-1").is_some());
+    caches.release(key);
+    assert!(caches.outputs.get(key, "call-1").is_none());
+}
+
+/// A request with `call-1` and its output, as Alice sends it in review3.
+const CALL_AND_OUTPUT: &[u8] = br#"{"input":[{"type":"function_call","id":"fc-1","call_id":"call-1","name":"secret","arguments":"{\"password\":\"alice-private\"}"},{"type":"function_call_output","id":"fco-1","call_id":"call-1","output":"alice private result"}]}"#;
+
+/// A request with only an output for `call-1`.
+const ORPHAN_OUTPUT: &[u8] = br#"{"input":[{"type":"function_call_output","id":"fco-2","call_id":"call-1","output":"attacker"}]}"#;
+
+#[test]
+fn tool_caches_are_kept_per_principal() {
+    let tags = PrincipalTags::default();
+    let (alice, bob) = (tags.of("sk-alice"), tags.of("sk-bob"));
+    let server = ServerToolCaches::default();
+    for principal in [alice, bob, Principal::ANONYMOUS] {
+        server.lock(principal).retain("shared");
+    }
+    let (_, turn) = prepare_fallback_turn(&mut server.lock(alice), "shared", CALL_AND_OUTPUT);
+    turn.expect("turn").commit(&mut server.lock(alice));
+
+    for principal in [bob, Principal::ANONYMOUS] {
+        let repaired = parse(&repair(
+            &mut server.lock(principal),
+            "shared",
+            ORPHAN_OUTPUT,
+            false,
+            None,
+        ));
+        assert_eq!(repaired["input"], Value::Array(Vec::new()), "{repaired}");
+    }
+    let repaired = parse(&repair(
+        &mut server.lock(alice),
+        "shared",
+        ORPHAN_OUTPUT,
+        false,
+        None,
+    ));
+    assert_eq!(item_ids(&repaired["input"]), ["fc-1", "fco-2"]);
+
+    // A principal's caches go once its last session is released.
+    server.lock(alice).release("shared");
+    let repaired = parse(&repair(
+        &mut server.lock(alice),
+        "shared",
+        ORPHAN_OUTPUT,
+        false,
+        None,
+    ));
+    assert_eq!(repaired["input"], Value::Array(Vec::new()), "{repaired}");
 }
 
 /// How many items Go's `encoding/json` decodes as the input: the last
@@ -1074,12 +1127,10 @@ fn effective_input_len(payload: &[u8]) -> usize {
 
 /// Commits `turn`, and says whether it kept anything for `call-1`.
 fn turn_recorded(session_key: &str, turn: Option<ToolCacheTurn>) -> bool {
-    turn.expect("turn").commit();
-    let mut caches = caches();
-    let recorded = caches.calls.get(session_key, "call-1").is_some()
-        || caches.outputs.get(session_key, "call-1").is_some();
-    caches.release(session_key);
-    recorded
+    let mut caches = ToolCaches::default();
+    turn.expect("turn").commit(&mut caches);
+    caches.calls.get(session_key, "call-1").is_some()
+        || caches.outputs.get(session_key, "call-1").is_some()
 }
 
 #[test]
@@ -1099,7 +1150,8 @@ fn tool_cache_scan_preserves_json_request_semantics() {
         ),
     ];
     for (key, payload) in left_alone {
-        let (repaired, turn) = prepare_fallback_turn(key, payload.as_bytes());
+        let (repaired, turn) =
+            prepare_fallback_turn(&mut ToolCaches::default(), key, payload.as_bytes());
         assert_eq!(repaired, payload.as_bytes(), "{key}");
         assert!(!turn_recorded(key, turn), "{key}");
     }
@@ -1119,7 +1171,8 @@ fn tool_cache_scan_preserves_json_request_semantics() {
         ),
     ];
     for (key, payload) in repaired {
-        let (repaired, _) = prepare_fallback_turn(key, payload.as_bytes());
+        let (repaired, _) =
+            prepare_fallback_turn(&mut ToolCaches::default(), key, payload.as_bytes());
         assert_eq!(
             effective_input_len(&repaired),
             0,
@@ -1191,10 +1244,13 @@ async fn forward_items(
         false
     };
     let mut conn = Conn::new(socket.clone());
+    let caches = ServerToolCaches::default();
     let forwarded = forward(
         &mut conn,
         stream::iter(items).boxed(),
         ForwardOptions {
+            caches: &caches,
+            principal: Principal::ANONYMOUS,
             session_key,
             preserve_completion_output,
             turn: None,
@@ -1203,7 +1259,6 @@ async fn forward_items(
         },
     )
     .await;
-    caches().release(session_key);
     let seen = seen.into_inner().unwrap_or_else(PoisonError::into_inner);
     (forwarded, seen)
 }
@@ -1320,10 +1375,13 @@ async fn forward_emits_periodic_pings() {
         ))
     })
     .boxed();
+    let caches = ServerToolCaches::default();
     let forwarded = forward(
         &mut conn,
         items,
         ForwardOptions {
+            caches: &caches,
+            principal: Principal::ANONYMOUS,
             session_key: "session-keepalive-test",
             preserve_completion_output: false,
             turn: None,
@@ -1332,7 +1390,6 @@ async fn forward_emits_periodic_pings() {
         },
     )
     .await;
-    caches().release("session-keepalive-test");
     assert_eq!(completed(forwarded).1, "resp-ping-1");
     let sent = socket.sent();
     assert_eq!(pings(&sent), 2);
@@ -1346,10 +1403,13 @@ async fn forward_ping_write_failure_aborts_session() {
         ..FakeSocket::default()
     };
     let mut conn = Conn::new(socket.clone());
+    let caches = ServerToolCaches::default();
     let forwarded = forward(
         &mut conn,
         stream::pending().boxed(),
         ForwardOptions {
+            caches: &caches,
+            principal: Principal::ANONYMOUS,
             session_key: "session-ping-fail",
             preserve_completion_output: false,
             turn: None,
@@ -2003,16 +2063,28 @@ fn test_catalog() -> FakeCatalog {
 /// Serves the router on a free port with `catalog`, `outcomes` and the key
 /// `sk-test`: the socket's URL, and the dispatcher.
 async fn serve(catalog: FakeCatalog, outcomes: Vec<Outcome>) -> (String, Arc<FakeDispatcher>) {
+    let (url, dispatcher, _) = serve_keys(catalog, outcomes, &["sk-test"]).await;
+    (url, dispatcher)
+}
+
+/// Serves the router on a free port with `catalog`, `outcomes` and `keys`:
+/// the socket's URL, the dispatcher, and the server's state.
+async fn serve_keys(
+    catalog: FakeCatalog,
+    outcomes: Vec<Outcome>,
+    keys: &[&str],
+) -> (String, Arc<FakeDispatcher>, AppState) {
     let dispatcher = FakeDispatcher::new(outcomes);
     let config = ServerConfig {
-        api_keys: vec!["sk-test".into()],
+        api_keys: keys.iter().map(|&key| key.to_owned()).collect(),
         ..ServerConfig::default()
     };
-    let app = crate::router(crate::testing::state(config, catalog, &dispatcher));
+    let state = crate::testing::state(config, catalog, &dispatcher);
+    let app = crate::router(state.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    (format!("ws://{addr}/v1/responses"), dispatcher)
+    (format!("ws://{addr}/v1/responses"), dispatcher, state)
 }
 
 /// Opens a socket to `url` with the test key and `headers`, and gives the
@@ -2021,9 +2093,22 @@ async fn connect_with(
     url: &str,
     headers: &[(&'static str, &str)],
 ) -> (Client, tungstenite::handshake::client::Response) {
+    connect_key(url, Some("sk-test"), headers).await
+}
+
+/// Opens a socket to `url` with `key`, if any, and `headers`, and gives the
+/// handshake's response too.
+async fn connect_key(
+    url: &str,
+    key: Option<&str>,
+    headers: &[(&'static str, &str)],
+) -> (Client, tungstenite::handshake::client::Response) {
     let mut request = url.into_client_request().unwrap();
     let request_headers = request.headers_mut();
-    request_headers.insert("authorization", HeaderValue::from_static("Bearer sk-test"));
+    if let Some(key) = key {
+        let bearer = HeaderValue::from_str(&format!("Bearer {key}")).unwrap();
+        request_headers.insert("authorization", bearer);
+    }
     for &(name, value) in headers {
         request_headers.insert(name, HeaderValue::from_str(value).unwrap());
     }
@@ -3152,4 +3237,87 @@ async fn retains_observed_compaction_across_subsequent_turns() {
     ])
     .await;
     assert_compacted(&payload_of(&dispatcher, 3)["input"], "turn-4-user");
+}
+
+/// Alice's request in review3: `call_1` and its output, with a secret in
+/// the call's arguments.
+const ALICE_TURN: &str = r#"{"type":"response.create","model":"test-model","input":[{"type":"function_call","id":"fc-1","call_id":"call_1","name":"secret","arguments":"{\"password\":\"alice-private\"}"},{"type":"function_call_output","id":"fco-1","call_id":"call_1","output":"alice private result"}]}"#;
+
+/// The follow-up in review3: only an output for `call_1`.
+const ORPHAN_TURN: &str = r#"{"type":"response.create","model":"test-model","input":[{"type":"function_call_output","id":"fco-2","call_id":"call_1","output":"attacker"}]}"#;
+
+/// Connects as `key`, if any, with `Session-Id: shared`, sends Alice's turn
+/// and waits until the server has cached its call. Gives the socket, which
+/// must stay open to keep the session's caches.
+async fn alice_turn(url: &str, state: &AppState, key: Option<&str>) -> Client {
+    let (mut ws, _) = connect_key(url, key, &[("session-id", "shared")]).await;
+    send(&mut ws, ALICE_TURN).await;
+    assert_eq!(recv(&mut ws).await["type"], "response.completed");
+    let principal = key.map_or(Principal::ANONYMOUS, |key| state.principal_tags().of(key));
+    eventually(|| {
+        state
+            .tool_caches()
+            .lock(principal)
+            .calls
+            .get("shared", "call_1")
+            .is_some()
+    })
+    .await;
+    ws
+}
+
+/// Sends the orphan output as `key`, if any, with `Session-Id: shared`, and
+/// gives the input the dispatcher's call `index` was sent.
+async fn orphan_turn(
+    url: &str,
+    dispatcher: &FakeDispatcher,
+    key: Option<&str>,
+    index: usize,
+) -> Value {
+    let (mut ws, _) = connect_key(url, key, &[("session-id", "shared")]).await;
+    send(&mut ws, ORPHAN_TURN).await;
+    assert_eq!(recv(&mut ws).await["type"], "response.completed");
+    payload_of(dispatcher, index)["input"].clone()
+}
+
+#[tokio::test]
+async fn tool_caches_do_not_cross_api_keys() {
+    let (url, dispatcher, state) = serve_keys(
+        test_catalog(),
+        vec![completes("resp-a", "[]"), completes("resp-b", "[]")],
+        &["sk-alice", "sk-bob"],
+    )
+    .await;
+    let _alice = alice_turn(&url, &state, Some("sk-alice")).await;
+    let input = orphan_turn(&url, &dispatcher, Some("sk-bob"), 1).await;
+    assert_eq!(input, Value::Array(Vec::new()));
+    let sent = String::from_utf8_lossy(&dispatcher.calls()[1].request.payload).into_owned();
+    assert!(!sent.contains("alice-private"), "{sent}");
+}
+
+#[tokio::test]
+async fn tool_caches_repair_within_one_api_key() {
+    let (url, dispatcher, state) = serve_keys(
+        test_catalog(),
+        vec![completes("resp-a", "[]"), completes("resp-b", "[]")],
+        &["sk-alice", "sk-bob"],
+    )
+    .await;
+    let _alice = alice_turn(&url, &state, Some("sk-alice")).await;
+    let input = orphan_turn(&url, &dispatcher, Some("sk-alice"), 1).await;
+    assert_eq!(item_ids(&input), ["fc-1", "fco-2"]);
+    assert_eq!(input[0]["arguments"], r#"{"password":"alice-private"}"#);
+}
+
+#[tokio::test]
+async fn tool_caches_are_shared_without_api_keys() {
+    let (url, dispatcher, state) = serve_keys(
+        test_catalog(),
+        vec![completes("resp-a", "[]"), completes("resp-b", "[]")],
+        &[],
+    )
+    .await;
+    let _first = alice_turn(&url, &state, None).await;
+    let input = orphan_turn(&url, &dispatcher, None, 1).await;
+    assert_eq!(item_ids(&input), ["fc-1", "fco-2"]);
 }

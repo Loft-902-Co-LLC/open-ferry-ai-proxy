@@ -47,6 +47,12 @@
 //! - The cause in a merge error reads `invalid JSON`, or approximates Go's
 //!   `cannot unmarshal` text, where upstream quotes `encoding/json`.
 //! - A request ID is a UUIDv7, where upstream's are v4.
+//! - The tool-call caches belong to the server and are kept by the
+//!   client's principal, then its session key. Upstream's are global and
+//!   kept by session key alone, which the client chooses, so a client that
+//!   sends another's session ID, under any API key, has that client's tool
+//!   calls put into its requests. With no API keys configured, every client
+//!   is one anonymous principal and shares the caches as upstream's do.
 //! - The tool-call caches share one lock, where upstream has one per cache
 //!   and one for the transactions between them. Like upstream's shared
 //!   caches, whose TTL is zero, they don't expire.
@@ -63,6 +69,8 @@ mod writer;
 
 #[cfg(test)]
 mod tests;
+
+pub(crate) use repair::ServerToolCaches;
 
 use axum::extract::State;
 use axum::extract::ws::WebSocketUpgrade;

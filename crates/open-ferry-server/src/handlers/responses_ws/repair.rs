@@ -16,13 +16,20 @@
 //! Tool-call repair: the tool calls and outputs a client's sessions have
 //! seen, kept so a request that lost one half of a pair can have it put back,
 //! or the orphan dropped, before it goes over HTTP.
+//!
+//! The caches belong to the server, and are kept by [`Principal`], then by
+//! session key. Upstream's are global to the process and kept by session key
+//! alone, which the client chooses, so a client sending another's session ID
+//! is given that client's tool calls.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
+use std::ops::{Deref, DerefMut};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use http::HeaderMap;
 use open_ferry_translate::go;
 
+use crate::auth::Principal;
 use crate::json::{self, Val};
 
 /// The most items a cache keeps per session
@@ -80,6 +87,10 @@ impl ToolCache {
     fn delete_session(&mut self, session_key: &str) {
         self.sessions.remove(session_key.trim());
     }
+
+    fn is_empty(&self) -> bool {
+        self.sessions.is_empty()
+    }
 }
 
 /// The tool outputs and calls sessions have seen, and how many sockets use
@@ -116,15 +127,65 @@ impl ToolCaches {
             }
         }
     }
+
+    fn is_empty(&self) -> bool {
+        self.refs.is_empty() && self.outputs.is_empty() && self.calls.is_empty()
+    }
 }
 
-/// The caches every socket shares (upstream's `defaultWebsocketToolOutputCache`,
-/// `defaultWebsocketToolCallCache` and `defaultWebsocketToolSessionRefs`).
-static CACHES: LazyLock<Mutex<ToolCaches>> = LazyLock::new(Mutex::default);
+/// A server's tool caches, one set per principal (upstream's
+/// `defaultWebsocketToolOutputCache`, `defaultWebsocketToolCallCache` and
+/// `defaultWebsocketToolSessionRefs`, which every client shares).
+#[derive(Debug, Default)]
+pub(crate) struct ServerToolCaches {
+    principals: Mutex<HashMap<Principal, ToolCaches>>,
+}
 
-/// The shared caches, locked.
-pub(super) fn caches() -> MutexGuard<'static, ToolCaches> {
-    CACHES.lock().unwrap_or_else(PoisonError::into_inner)
+impl ServerToolCaches {
+    /// The caches of `principal`, locked. One lock covers every principal.
+    pub(super) fn lock(&self, principal: Principal) -> PrincipalCaches<'_> {
+        let mut principals = self
+            .principals
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let caches = principals.remove(&principal).unwrap_or_default();
+        PrincipalCaches {
+            principals,
+            principal,
+            caches,
+        }
+    }
+}
+
+/// One principal's caches, locked. They are put back when this is dropped,
+/// unless they hold nothing.
+pub(super) struct PrincipalCaches<'a> {
+    principals: MutexGuard<'a, HashMap<Principal, ToolCaches>>,
+    principal: Principal,
+    caches: ToolCaches,
+}
+
+impl Deref for PrincipalCaches<'_> {
+    type Target = ToolCaches;
+
+    fn deref(&self) -> &ToolCaches {
+        &self.caches
+    }
+}
+
+impl DerefMut for PrincipalCaches<'_> {
+    fn deref_mut(&mut self) -> &mut ToolCaches {
+        &mut self.caches
+    }
+}
+
+impl Drop for PrincipalCaches<'_> {
+    fn drop(&mut self) {
+        if !self.caches.is_empty() {
+            let caches = std::mem::take(&mut self.caches);
+            self.principals.insert(self.principal, caches);
+        }
+    }
 }
 
 /// The key the client's tool items are kept under: its request ID, or the
@@ -308,9 +369,8 @@ impl ToolCacheTurn {
         }
     }
 
-    /// Keeps what the turn saw in the shared caches (`commit`).
-    pub(super) fn commit(self) {
-        let mut caches = caches();
+    /// Keeps what the turn saw in `caches` (`commit`).
+    pub(super) fn commit(self, caches: &mut ToolCaches) {
         for call_id in &self.output_order {
             caches
                 .outputs
@@ -366,15 +426,16 @@ pub(super) fn record_tool_calls_from_payload(
     }
 }
 
-/// Repairs a request bound for HTTP with the shared caches, noting its tool
-/// items in a turn that commits only if the request succeeds
+/// Repairs a request bound for HTTP with `caches`, noting its tool items in
+/// a turn that commits only if the request succeeds
 /// (`prepareResponsesWebsocketFallbackTurn`).
 pub(super) fn prepare_fallback_turn(
+    caches: &mut ToolCaches,
     session_key: &str,
     payload: &[u8],
 ) -> (Vec<u8>, Option<ToolCacheTurn>) {
     let mut turn = ToolCacheTurn::new(session_key);
-    let repaired = repair(&mut caches(), session_key, payload, false, turn.as_mut());
+    let repaired = repair(caches, session_key, payload, false, turn.as_mut());
     (repaired, turn)
 }
 

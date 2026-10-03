@@ -22,7 +22,7 @@ use open_ferry_core::exec::{
     ChunkStream, ExecError, Format, Metadata, Options, ProviderId, Request, StreamResponse,
 };
 
-use crate::auth::strip_credentials;
+use crate::auth::{Principal, strip_credentials};
 use crate::errors::ErrorMessage;
 use crate::headers::filter_upstream_headers;
 use crate::query;
@@ -46,6 +46,8 @@ pub(crate) struct ClientRequest {
     /// The `alt` query parameter, or `$alt`, with `sse` made empty
     /// (upstream's `GetAlt`).
     pub(crate) alt: String,
+    /// Who the client authenticated as. It is not sent upstream.
+    pub(crate) principal: Principal,
 }
 
 impl ClientRequest {
@@ -67,12 +69,18 @@ impl ClientRequest {
             .get("idempotency-key")
             .map(|value| String::from_utf8_lossy(value.as_bytes()).trim().to_owned())
             .filter(|key| !key.is_empty());
+        let principal = parts
+            .extensions
+            .get::<Principal>()
+            .copied()
+            .unwrap_or_default();
         Self {
             headers,
             query,
             path,
             idempotency_key,
             alt,
+            principal,
         }
     }
 }

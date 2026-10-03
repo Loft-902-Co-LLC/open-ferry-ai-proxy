@@ -5,14 +5,17 @@ use std::sync::{Arc, PoisonError, RwLock};
 use open_ferry_core::exec::Dispatcher;
 use open_ferry_core::models::ModelCatalog;
 
+use crate::auth::PrincipalTags;
 use crate::config::ServerConfig;
+use crate::handlers::responses_ws::ServerToolCaches;
 
 /// The template keys that put the server in safe mode
 /// (internal/safemode/example_api_keys.go).
 const EXAMPLE_API_KEYS: [&str; 3] = ["your-api-key-1", "your-api-key-2", "your-api-key-3"];
 
-/// The settings, the [`Dispatcher`] that makes provider calls, and the
-/// [`ModelCatalog`] that says which providers serve a model. Cloning is cheap.
+/// The settings, the [`Dispatcher`] that makes provider calls, the
+/// [`ModelCatalog`] that says which providers serve a model, and what the
+/// server keeps for its clients. Cloning is cheap.
 #[derive(Clone)]
 pub struct AppState {
     inner: Arc<Inner>,
@@ -22,6 +25,8 @@ struct Inner {
     settings: RwLock<Arc<Settings>>,
     dispatcher: Arc<dyn Dispatcher>,
     catalog: Arc<dyn ModelCatalog>,
+    principal_tags: PrincipalTags,
+    tool_caches: ServerToolCaches,
 }
 
 /// The config, with what is worked out from it.
@@ -65,6 +70,8 @@ impl AppState {
                 settings: RwLock::new(Arc::new(Settings::new(config))),
                 dispatcher,
                 catalog,
+                principal_tags: PrincipalTags::default(),
+                tool_caches: ServerToolCaches::default(),
             }),
         }
     }
@@ -96,5 +103,16 @@ impl AppState {
 
     pub(crate) fn catalog(&self) -> &dyn ModelCatalog {
         &*self.inner.catalog
+    }
+
+    /// What tags client keys as principals. It outlives config reloads.
+    pub(crate) fn principal_tags(&self) -> &PrincipalTags {
+        &self.inner.principal_tags
+    }
+
+    /// The tool calls and outputs the Responses WebSocket has seen, by
+    /// principal and session.
+    pub(crate) fn tool_caches(&self) -> &ServerToolCaches {
+        &self.inner.tool_caches
     }
 }
