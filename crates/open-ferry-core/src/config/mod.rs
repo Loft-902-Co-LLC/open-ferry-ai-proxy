@@ -73,6 +73,7 @@ mod yaml;
 
 use std::fmt;
 
+pub(crate) use duration::parse_go_duration;
 pub use safe_mode::example_api_key_warning_page;
 pub use types::{
     ClaudeConfig, ClaudeKey, ClaudeModel, ClientConfig, CodexClientConfig, CodexConfig,

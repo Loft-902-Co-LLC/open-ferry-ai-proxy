@@ -1,13 +1,12 @@
 // Ported from CLIProxyAPI internal/thinking/suffix.go (ParseSuffix), the
 // canonicalModelKey in sdk/cliproxy/auth/selector.go, and parseDurationString in
-// sdk/cliproxy/auth/conductor_refresh.go, with Go's time.ParseDuration
-// (v8.0.10, MIT).
+// sdk/cliproxy/auth/conductor_refresh.go (v8.0.10, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Go standard library behaviour the manager's decisions depend on: string
 //! case, number, bool and duration parsing, and gjson's string view of a
 //! JSON value. The case, bool and integer helpers are the credential
-//! module's.
+//! module's, and the Go duration parser is the config's.
 //!
 //! Deviations from upstream:
 //! - JSON numbers print as serde_json writes them, where gjson keeps the raw
@@ -20,6 +19,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 pub(crate) use crate::auth::{atoi, equal_fold, parse_bool, parse_bool_any, parse_int_any};
+pub(crate) use crate::config::parse_go_duration;
 
 /// Go's `strings.ToLower`.
 pub(crate) fn go_lower(s: &str) -> String {
@@ -35,114 +35,6 @@ pub(crate) fn str_of(value: Option<&Value>) -> String {
         Some(Value::Bool(flag)) => flag.to_string(),
         Some(other) => other.to_string(),
     }
-}
-
-/// Go's `time.ParseDuration`, in nanoseconds: `1h30m`, `1.5s`, `-2ms`,
-/// `0`.
-pub(crate) fn parse_go_duration(s: &str) -> Option<i64> {
-    const LIMIT: u64 = 1 << 63;
-    let (neg, mut rest) = match s.as_bytes().first() {
-        Some(b'-') => (true, s.get(1..)?),
-        Some(b'+') => (false, s.get(1..)?),
-        _ => (false, s),
-    };
-    if rest == "0" {
-        return Some(0);
-    }
-    if rest.is_empty() {
-        return None;
-    }
-    let mut total: u64 = 0;
-    while !rest.is_empty() {
-        let bytes = rest.as_bytes();
-        let unit_char_at = |i: usize| {
-            bytes
-                .get(i)
-                .is_some_and(|b| *b != b'.' && !b.is_ascii_digit())
-        };
-        if unit_char_at(0) {
-            return None;
-        }
-        // Whole part.
-        let mut i = 0;
-        let mut whole: u64 = 0;
-        while let Some(b) = bytes.get(i).filter(|b| b.is_ascii_digit()) {
-            if whole > LIMIT / 10 {
-                return None;
-            }
-            whole = whole * 10 + u64::from(b - b'0');
-            if whole > LIMIT {
-                return None;
-            }
-            i += 1;
-        }
-        let pre = i > 0;
-        // Fraction.
-        let mut frac: u64 = 0;
-        let mut scale = 1.0_f64;
-        let mut post = false;
-        if bytes.get(i) == Some(&b'.') {
-            i += 1;
-            let start = i;
-            let mut overflow = false;
-            while let Some(b) = bytes.get(i).filter(|b| b.is_ascii_digit()) {
-                if !overflow {
-                    if frac > (LIMIT - 1) / 10 {
-                        overflow = true;
-                    } else {
-                        let next = frac * 10 + u64::from(b - b'0');
-                        if next > LIMIT {
-                            overflow = true;
-                        } else {
-                            frac = next;
-                            scale *= 10.0;
-                        }
-                    }
-                }
-                i += 1;
-            }
-            post = i > start;
-        }
-        if !pre && !post {
-            return None;
-        }
-        // Unit.
-        let unit_start = i;
-        while unit_char_at(i) {
-            i += 1;
-        }
-        if i == unit_start {
-            return None;
-        }
-        let unit: u64 = match rest.get(unit_start..i)? {
-            "ns" => 1,
-            "us" | "\u{b5}s" | "\u{3bc}s" => 1_000,
-            "ms" => 1_000_000,
-            "s" => 1_000_000_000,
-            "m" => 60_000_000_000,
-            "h" => 3_600_000_000_000,
-            _ => return None,
-        };
-        rest = rest.get(i..)?;
-        if whole > LIMIT / unit {
-            return None;
-        }
-        let mut value = whole * unit;
-        if frac > 0 {
-            value += (frac as f64 * (unit as f64 / scale)) as u64;
-            if value > LIMIT {
-                return None;
-            }
-        }
-        total += value;
-        if total > LIMIT {
-            return None;
-        }
-    }
-    if neg {
-        return Some((-i128::from(total)) as i64);
-    }
-    i64::try_from(total).ok()
 }
 
 /// A positive duration from a Go duration such as `90s`, else a number of
@@ -256,6 +148,11 @@ mod tests {
         assert_eq!(parse_go_duration("."), None);
         assert_eq!(parse_go_duration("1d"), None);
         assert_eq!(parse_go_duration("9999999999h"), None);
+        // Go's sum wraps instead of overflowing.
+        assert_eq!(
+            parse_duration_string("9223372036854775808ns9223372036854775808ns1ns"),
+            Some(Duration::from_nanos(1))
+        );
         assert_eq!(parse_duration_string(" 90 "), Some(Duration::from_secs(90)));
         assert_eq!(
             parse_duration_string("2.5"),
