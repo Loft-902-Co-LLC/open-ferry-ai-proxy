@@ -13,16 +13,20 @@
 //! call's answer, before anything reads it; and [`on_completed`] and
 //! [`on_failure`] see how the call ended.
 //!
-//! The reasoning replay cache is ported, in [`super::replay`]: [`prepare`]
-//! replays a Claude client's earlier turns, [`on_completed`] saves its turn
-//! and [`on_failure`] clears them. Multi-agent v2 isn't ported yet, so
-//! [`restore`] leaves things as they are.
+//! Multi-agent v2 and orphan delegation are ported (see the `compat`
+//! module): [`prepare`] readies a Codex client's request and [`restore`]
+//! names the collaboration namespace back. The reasoning replay cache is
+//! ported, in [`super::replay`]: [`prepare`] then replays a Claude client's
+//! earlier turns, [`on_completed`] saves its turn and [`on_failure`] clears
+//! them.
 
 use std::borrow::Cow;
 
 use open_ferry_core::exec::{Options, Request};
+use open_ferry_translate::codex_client::multi_agent_v2;
 use serde_json::Value;
 
+use super::compat;
 use super::replay;
 use super::request::{Context, Kind};
 
@@ -30,6 +34,9 @@ use super::request::{Context, Kind};
 /// response.
 #[derive(Debug, Default)]
 pub(crate) struct Turn {
+    /// Whether the collaboration namespace was renamed for multi-agent v2,
+    /// so that responses must name it back.
+    multi_agent_v2_optimized: bool,
     /// Where the reasoning replay reads and saves the turn.
     replay: replay::Scope,
 }
@@ -39,19 +46,23 @@ pub(crate) struct Turn {
 /// schemas, before the response translators' copy of it is taken.
 pub(crate) fn prepare(
     kind: Kind,
-    _context: Context<'_>,
+    context: Context<'_>,
     request: &Request,
     options: &Options,
     body: &mut Value,
 ) -> Turn {
+    let multi_agent_v2_optimized = compat::prepare(context, request, options, body);
     let replay = replay::prepare(kind, request, options, body);
-    Turn { replay }
+    Turn {
+        multi_agent_v2_optimized,
+        replay,
+    }
 }
 
 /// The data of one of Codex's events, or a compact call's answer, as the
 /// rest of the executor should read it.
-pub(crate) fn restore<'d>(_turn: &Turn, data: &'d [u8]) -> Cow<'d, [u8]> {
-    Cow::Borrowed(data)
+pub(crate) fn restore<'d>(turn: &Turn, data: &'d [u8]) -> Cow<'d, [u8]> {
+    multi_agent_v2::restore_response(data, turn.multi_agent_v2_optimized)
 }
 
 /// Sees the terminal event of a call that succeeded (`response.completed`,

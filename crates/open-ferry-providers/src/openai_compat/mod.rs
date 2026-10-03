@@ -21,7 +21,8 @@
 //!   keys (from a Claude Code prompt or a session) aren't.
 //! - Not ported: the OpenAI Images endpoints (`openai-image` requests),
 //!   which have no routes here yet; payload rules; and the `is-compat` flag
-//!   of a model, which translators don't get.
+//!   of a model, which translators don't get. Codex clients' requests are
+//!   readied for translation as the Codex `compat` module says.
 //! - The management API's `api-call` requests through a credential
 //!   (`PrepareRequest`, `HttpRequest`) aren't ported.
 

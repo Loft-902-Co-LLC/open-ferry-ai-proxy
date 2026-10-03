@@ -25,9 +25,9 @@
 //!   and a `prompt_cache_key` the client itself sent pass through where
 //!   upstream passes them. If Codex then rejects a request, its error is
 //!   passed back as it is.
-//! - Config-driven behaviour isn't ported: payload rules, compat models (so
-//!   reasoning items are always cleaned for GPT), and the image generation
-//!   switch.
+//! - Config-driven behaviour isn't ported: payload rules and the image
+//!   generation switch. Compatibility models and Codex clients' multi-agent
+//!   v2 and orphan delegation requests are handled in the `compat` module.
 //!
 //! Deferred:
 //! - The Responses WebSocket upstream (`codex_websockets_executor.go`),
@@ -37,6 +37,7 @@
 
 pub(crate) mod claude_tokens;
 pub(crate) mod client;
+pub(crate) mod compat;
 mod executor;
 mod ext;
 mod input_ids;

@@ -28,9 +28,10 @@
 //! - The Home service (its credential options and refresh).
 //! - The config's `payload` rules.
 //! - The model that the credential manager resolved for an API key
-//!   (`APIKeyModelIsCompat`, `ResolvedModelInfo`) and the Codex
-//!   multi-agent translation: requests are translated as the client sent
-//!   them.
+//!   (`APIKeyModelIsCompat`, `ResolvedModelInfo`): requests are translated
+//!   as for a model that isn't a compatibility model. Codex clients'
+//!   requests are readied for translation as the Codex `compat` module
+//!   says.
 //! - A `countTokens` action in the request metadata, which upstream lets
 //!   `Execute` count tokens with.
 //! - `PrepareRequest` and `HttpRequest`, which sign arbitrary requests for
@@ -66,6 +67,7 @@ pub use vertex::VertexExecutor;
 use bytes::Bytes;
 use http::{HeaderMap, HeaderName, HeaderValue, header};
 use open_ferry_core::auth::Auth;
+use open_ferry_core::config::Config;
 use open_ferry_core::exec::{
     ErrorKind, ExecError, Format, Options, Request, Response, StreamResponse,
 };
@@ -77,6 +79,7 @@ use serde_json::Value;
 
 use self::stream::{Lines, StreamSetup};
 use crate::codex::client::{USER_AGENT, error_chain, read_body, read_body_prefix};
+use crate::codex::compat;
 use crate::codex::request::{
     base_model, original_request, parse_object, response_format, set_string_if_different,
 };
@@ -108,8 +111,9 @@ fn reject_compact(options: &Options) -> Result<(), ExecError> {
 /// The client's request in Gemini's format for the model without its
 /// suffix, as a stream or not, with its thinking setting applied and the
 /// image aspect ratio fixed. Models are looked up as `provider` registered
-/// them in `models`.
+/// them in `models`; a Codex client's request is readied as `config` says.
 fn translate_request(
+    config: Option<&Config>,
     request: &Request,
     options: &Options,
     stream: bool,
@@ -118,13 +122,10 @@ fn translate_request(
 ) -> Result<Value, ExecError> {
     let base = base_model(&request.model);
     let from = &options.source_format;
-    let mut body = Registry::global().translate_request(
-        from,
-        &Format::GEMINI,
-        base,
-        parse_object(&request.payload),
-        stream,
-    );
+    let mut payload = parse_object(&request.payload);
+    compat::before_translation(config, options, &Format::GEMINI, &mut payload);
+    let mut body =
+        Registry::global().translate_request(from, &Format::GEMINI, base, payload, stream);
     thinking::apply_request(
         &mut body,
         &request.model,

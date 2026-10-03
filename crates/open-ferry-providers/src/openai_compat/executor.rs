@@ -64,6 +64,7 @@ use super::thinking;
 use super::tokens::{count_chat_tokens, tokenizer_for, usage_json};
 use super::tool_results::{normalize_tool_results_text_only, should_normalize_tool_results};
 use crate::codex::client::{Clients, USER_AGENT, error_chain, read_body, read_body_prefix};
+use crate::codex::compat;
 use crate::codex::reasoning::sanitize_reasoning;
 use crate::codex::request::{
     base_model, original_request, parse_object, response_format, set_bool_if_different,
@@ -201,11 +202,13 @@ impl OpenAiCompatExecutor {
         };
         let base = base_model(&request.model);
         let payload = parse_object(&request.payload);
+        let mut prepared = payload.clone();
+        compat::before_translation(Some(&self.config), options, &to, &mut prepared);
         let mut body = Registry::global().translate_request(
             &options.source_format,
             &to,
             base,
-            payload.clone(),
+            prepared,
             translate_stream,
         );
         self.apply_thinking(&mut body, request, options, &to)?;
@@ -369,11 +372,13 @@ impl OpenAiCompatExecutor {
         options: &Options,
     ) -> Result<Response, ExecError> {
         let model = base_model(&request.model).to_owned();
+        let mut payload = parse_object(&request.payload);
+        compat::before_translation(Some(&self.config), options, &Format::OPENAI, &mut payload);
         let mut body = Registry::global().translate_request(
             &options.source_format,
             &Format::OPENAI,
             &model,
-            parse_object(&request.payload),
+            payload,
             false,
         );
         self.apply_thinking(&mut body, request, options, &Format::OPENAI)?;

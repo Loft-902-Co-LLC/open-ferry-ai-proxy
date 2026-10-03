@@ -36,7 +36,8 @@
 //!   redacted (see the crate's `redact` module).
 //! - Usage reporting, request logging, payload config rules, the Home-service
 //!   refresh, OAuth cancellation errors, API-key model compatibility and
-//!   upstream model renaming aren't ported.
+//!   upstream model renaming aren't ported. Codex clients' requests are
+//!   readied for translation as the Codex `compat` module says.
 //! - Refresh returns a copy of the credential with new metadata; the
 //!   credential manager saves it.
 
@@ -48,6 +49,7 @@ use futures_util::FutureExt as _;
 use futures_util::future::BoxFuture;
 use http::HeaderMap;
 use open_ferry_core::auth::Auth;
+use open_ferry_core::config::Config;
 use open_ferry_core::exec::{ExecError, Format, Options, Request, Response, StreamResponse};
 use open_ferry_core::executor::ProviderExecutor;
 use open_ferry_core::models::ModelCatalog;
@@ -69,6 +71,7 @@ use super::stream::{self, MAX_LINE, StreamSetup, apply_patch_error};
 use super::thinking;
 use super::token::{CREDENTIAL_TYPE, now_rfc3339};
 use super::usage::ensure_responses_usage_details;
+use crate::codex::compat;
 use crate::json::{self, Body};
 use crate::redact;
 
@@ -82,6 +85,7 @@ const REFRESH_ATTEMPTS: u32 = 3;
 /// Calls Claude (upstream's `ClaudeExecutor`).
 pub struct ClaudeExecutor {
     clients: Clients,
+    config: Option<Arc<Config>>,
     models: Option<Arc<dyn ModelCatalog>>,
     base_url: String,
     oauth_endpoints: Endpoints,
@@ -95,11 +99,19 @@ impl ClaudeExecutor {
     pub fn new(global_proxy_url: impl Into<String>) -> Self {
         Self {
             clients: Clients::new(global_proxy_url),
+            config: None,
             models: None,
             base_url: DEFAULT_BASE_URL.to_owned(),
             oauth_endpoints: Endpoints::default(),
             model_level_cooling: false,
         }
+    }
+
+    /// Readies Codex clients' requests as `config` says before translating
+    /// them.
+    pub fn with_config(mut self, config: Arc<Config>) -> Self {
+        self.config = Some(config);
+        self
     }
 
     /// Looks up models in `models`, to give a request without `max_tokens`
@@ -159,7 +171,8 @@ impl ClaudeExecutor {
         upstream_stream: bool,
         set_stream: bool,
     ) -> Result<Prepared, ExecError> {
-        let mut body = translate_request(request, options, base_model, upstream_stream)?;
+        let config = self.config.as_deref();
+        let mut body = translate_request(config, request, options, base_model, upstream_stream)?;
         ensure_model_max_tokens(&mut body, base_model, self.models.as_deref());
         disable_thinking_if_tool_choice_forced(&mut body);
         normalize_sampling(&mut body);
@@ -357,7 +370,8 @@ impl ClaudeExecutor {
         let format = response_format(options);
         // A streaming translation keeps tool calls, except from Claude.
         let translate_stream = options.source_format != Format::CLAUDE;
-        let mut body = translate_request(request, options, base_model, translate_stream)?;
+        let config = self.config.as_deref();
+        let mut body = translate_request(config, request, options, base_model, translate_stream)?;
         enforce_cache_control_limit(&mut body, MAX_CACHE_BREAKPOINTS);
         normalize_cache_control_ttl(&mut body);
         let mut extra_betas = extract_and_remove_betas(&mut body);
@@ -457,19 +471,17 @@ struct Prepared {
 /// The client's request in Claude's format, for `base_model`, with its
 /// thinking setting applied.
 fn translate_request(
+    config: Option<&Config>,
     request: &Request,
     options: &Options,
     base_model: &str,
     stream: bool,
 ) -> Result<Value, ExecError> {
     let from = &options.source_format;
-    let mut body = Registry::global().translate_request(
-        from,
-        &Format::CLAUDE,
-        base_model,
-        parse_object(&request.payload),
-        stream,
-    );
+    let mut payload = parse_object(&request.payload);
+    compat::before_translation(config, options, &Format::CLAUDE, &mut payload);
+    let mut body =
+        Registry::global().translate_request(from, &Format::CLAUDE, base_model, payload, stream);
     if json::str_at(&body, "model") != base_model {
         json::set(&mut body, "model", Value::String(base_model.to_owned()));
     }

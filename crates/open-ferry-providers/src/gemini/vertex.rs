@@ -39,6 +39,7 @@ use futures_util::FutureExt as _;
 use futures_util::future::BoxFuture;
 use http::HeaderMap;
 use open_ferry_core::auth::Auth;
+use open_ferry_core::config::Config;
 use open_ferry_core::exec::{ErrorKind, ExecError, Options, Request, Response, StreamResponse};
 use open_ferry_core::executor::ProviderExecutor;
 use open_ferry_core::models::ModelCatalog;
@@ -71,6 +72,7 @@ const DEFAULT_LOCATION: &str = "us-central1";
 /// (upstream's `GeminiVertexExecutor`).
 pub struct VertexExecutor {
     clients: Clients,
+    config: Option<Arc<Config>>,
     models: Option<Arc<dyn ModelCatalog>>,
     tokens: TokenCache,
     /// Where service-account calls go instead of their location's endpoint,
@@ -98,6 +100,7 @@ impl VertexExecutor {
     pub fn new(global_proxy_url: impl Into<String>) -> Self {
         Self {
             clients: Clients::new(global_proxy_url).for_provider(NAME),
+            config: None,
             models: None,
             tokens: TokenCache::default(),
             service_account_base_url: None,
@@ -108,6 +111,13 @@ impl VertexExecutor {
     /// built-in catalog.
     pub fn with_models(mut self, models: Arc<dyn ModelCatalog>) -> Self {
         self.models = Some(models);
+        self
+    }
+
+    /// Readies Codex clients' requests as `config` says before translating
+    /// them.
+    pub fn with_config(mut self, config: Arc<Config>) -> Self {
+        self.config = Some(config);
         self
     }
 
@@ -130,7 +140,14 @@ impl VertexExecutor {
         stream: bool,
     ) -> Result<Value, ExecError> {
         let base = base_model(&request.model);
-        let mut body = translate_request(request, options, stream, self.models(), PROVIDER)?;
+        let mut body = translate_request(
+            self.config.as_deref(),
+            request,
+            options,
+            stream,
+            self.models(),
+            PROVIDER,
+        )?;
         set_string_if_different(&mut body, "model", base);
         turns::strip_vertex_tool_call_ids(&mut body, options.source_format.as_str());
         sanitize_gemini_request_thought_signatures(&mut body, "contents");
@@ -265,7 +282,14 @@ impl VertexExecutor {
     ) -> Result<Response, ExecError> {
         let target = target(auth)?;
         let base = base_model(&request.model);
-        let mut body = translate_request(request, options, false, self.models(), PROVIDER)?;
+        let mut body = translate_request(
+            self.config.as_deref(),
+            request,
+            options,
+            false,
+            self.models(),
+            PROVIDER,
+        )?;
         turns::strip_vertex_tool_call_ids(&mut body, options.source_format.as_str());
         prepare_count_body(&mut body, base);
         let url = self.url(&target, base, "countTokens");

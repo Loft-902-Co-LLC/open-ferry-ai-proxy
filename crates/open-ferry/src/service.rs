@@ -318,14 +318,19 @@ impl Service {
         self.register_codex_executor();
         self.manager.register_executor(Arc::new(
             ClaudeExecutor::new(proxy_url.clone())
+                .with_config(Arc::clone(&self.config))
                 .with_models(Arc::clone(&self.registry) as _)
                 .with_model_level_cooling(self.config.claude.model_level_cooling),
         ));
         self.manager.register_executor(Arc::new(
-            GeminiExecutor::new(proxy_url.clone()).with_models(Arc::clone(&self.registry) as _),
+            GeminiExecutor::new(proxy_url.clone())
+                .with_config(Arc::clone(&self.config))
+                .with_models(Arc::clone(&self.registry) as _),
         ));
         self.manager.register_executor(Arc::new(
-            VertexExecutor::new(proxy_url).with_models(Arc::clone(&self.registry) as _),
+            VertexExecutor::new(proxy_url)
+                .with_config(Arc::clone(&self.config))
+                .with_models(Arc::clone(&self.registry) as _),
         ));
     }
 
@@ -560,8 +565,15 @@ impl Service {
         self.manager.set_settings(Settings::from(&*config));
         self.state.set_config(ServerConfig::from(&*config));
         self.management.set_config(Arc::clone(&config));
+        // What the executors do to Codex clients' requests before
+        // translating them.
+        let codex_clients_changed = previous.client.codex.optimize_multi_agent_v2
+            != config.client.codex.optimize_multi_agent_v2
+            || previous.codex.orphan_delegation_compatibility
+                != config.codex.orphan_delegation_compatibility;
         if previous.proxy_url != config.proxy_url
             || previous.claude.model_level_cooling != config.claude.model_level_cooling
+            || codex_clients_changed
         {
             self.register_native_executors();
         } else if previous != config {
@@ -572,6 +584,7 @@ impl Service {
         // credential of the new config is served by an executor of the old.
         if previous.proxy_url != config.proxy_url
             || previous.openai_compatibility != config.openai_compatibility
+            || codex_clients_changed
         {
             self.register_compat_executors();
         }

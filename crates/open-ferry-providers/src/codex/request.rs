@@ -16,7 +16,8 @@
 //! without its thinking suffix, `stream` forced, fields Codex refuses
 //! dropped, `instructions` filled in, reasoning items and tool schemas
 //! cleaned, `parallel_tool_calls` matched to the tools, and input item IDs
-//! made acceptable.
+//! made acceptable. A credential's compatibility models and Codex clients'
+//! multi-agent requests are handled as the `compat` module says.
 //!
 //! Deviations from upstream:
 //! - No `User-Agent`, `Originator`, `Session-Id` or `X-Codex-Routing-Hint`
@@ -36,8 +37,7 @@
 //! - Payload config rules aren't applied, and the original request isn't
 //!   translated alongside the payload, as the payload-config module isn't
 //!   ported.
-//! - The image generation tool isn't added, and multi-agent v2 isn't
-//!   ported.
+//! - The image generation tool isn't added.
 
 use http::header::{self, HeaderMap, HeaderName, HeaderValue};
 use open_ferry_core::auth::Auth;
@@ -45,10 +45,10 @@ use open_ferry_core::config::Config;
 use open_ferry_core::exec::{ErrorKind, ExecError, Format, Options, Request};
 use open_ferry_core::models::ModelCatalog;
 use open_ferry_translate::go::trim_space;
-use open_ferry_translate::registry::Registry;
 use serde_json::{Map, Value};
 
 use super::client::USER_AGENT;
+use super::compat;
 use super::ext::{self, Turn};
 use super::input_ids::sanitize_input_item_ids;
 use super::reasoning::sanitize_reasoning;
@@ -100,7 +100,6 @@ pub(crate) enum Kind {
 /// What a call is prepared with besides the client's request: the
 /// credential it goes out with, and the executor's config and models.
 #[derive(Clone, Copy, Default)]
-#[expect(dead_code, reason = "for the Codex rewrites that aren't ported yet")]
 pub(crate) struct Context<'a> {
     /// The credential.
     pub(crate) auth: Option<&'a Auth>,
@@ -305,12 +304,14 @@ pub(crate) fn prepare_body(
         Kind::Stream => (Format::CODEX, true),
         Kind::Execute | Kind::CountTokens => (Format::CODEX, false),
     };
-    let mut body = Registry::global().translate_request(
-        &options.source_format,
+    let mut body = compat::translate(
+        kind,
+        context,
+        request,
+        options,
         &to,
-        base,
-        payload.clone(),
         stream,
+        payload.clone(),
     );
     let route = Route {
         model: &request.model,
@@ -367,7 +368,7 @@ pub(crate) fn prepare_body(
             turn: Turn::default(),
         });
     }
-    sanitize_reasoning(&mut body, false);
+    sanitize_reasoning(&mut body, compat::is_compat(context, request));
     normalize_parallel_tool_calls(&mut body, &options.headers);
     normalize_tool_schemas(&mut body);
     let turn = ext::prepare(kind, context, request, options, &mut body);

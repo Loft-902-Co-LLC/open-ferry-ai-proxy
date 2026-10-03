@@ -29,8 +29,7 @@
 //! - A rewritten terminal event is written by `serde_json`.
 //! - Dropping the stream, or the call while lines are held back, stops
 //!   reading, where upstream watches its context.
-//! - Usage reporting, request logging, multi-agent v2 and image tool usage
-//!   aren't ported.
+//! - Usage reporting, request logging and image tool usage aren't ported.
 
 use std::collections::VecDeque;
 use std::fmt;

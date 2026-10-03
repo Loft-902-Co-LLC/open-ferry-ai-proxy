@@ -23,6 +23,7 @@ use std::sync::Arc;
 use futures_util::FutureExt as _;
 use futures_util::future::BoxFuture;
 use open_ferry_core::auth::Auth;
+use open_ferry_core::config::Config;
 use open_ferry_core::exec::{ExecError, Options, Request, Response, StreamResponse};
 use open_ferry_core::executor::ProviderExecutor;
 use open_ferry_core::models::ModelCatalog;
@@ -50,6 +51,7 @@ const API_VERSION: &str = "v1beta";
 /// Calls the Gemini API with API keys (upstream's `GeminiExecutor`).
 pub struct GeminiExecutor {
     clients: Clients,
+    config: Option<Arc<Config>>,
     models: Option<Arc<dyn ModelCatalog>>,
 }
 
@@ -60,6 +62,7 @@ impl GeminiExecutor {
     pub fn new(global_proxy_url: impl Into<String>) -> Self {
         Self {
             clients: Clients::new(global_proxy_url).for_provider(NAME),
+            config: None,
             models: None,
         }
     }
@@ -68,6 +71,13 @@ impl GeminiExecutor {
     /// limit, before the built-in catalog.
     pub fn with_models(mut self, models: Arc<dyn ModelCatalog>) -> Self {
         self.models = Some(models);
+        self
+    }
+
+    /// Readies Codex clients' requests as `config` says before translating
+    /// them.
+    pub fn with_config(mut self, config: Arc<Config>) -> Self {
+        self.config = Some(config);
         self
     }
 
@@ -83,7 +93,14 @@ impl GeminiExecutor {
         stream: bool,
     ) -> Result<Value, ExecError> {
         let base = base_model(&request.model);
-        let mut body = translate_request(request, options, stream, self.models(), PROVIDER)?;
+        let mut body = translate_request(
+            self.config.as_deref(),
+            request,
+            options,
+            stream,
+            self.models(),
+            PROVIDER,
+        )?;
         set_string_if_different(&mut body, "model", base);
         cap_max_output_tokens(&mut body, base, self.models());
         sanitize_gemini_request_thought_signatures(&mut body, "contents");
@@ -149,7 +166,14 @@ impl GeminiExecutor {
         options: &Options,
     ) -> Result<Response, ExecError> {
         let base = base_model(&request.model);
-        let mut body = translate_request(request, options, false, self.models(), PROVIDER)?;
+        let mut body = translate_request(
+            self.config.as_deref(),
+            request,
+            options,
+            false,
+            self.models(),
+            PROVIDER,
+        )?;
         prepare_count_body(&mut body, base);
         let url = model_url(auth, base, "countTokens");
         let headers = build_headers(auth, options, &Credential::ApiKey(api_key(auth)), NAME)?;
