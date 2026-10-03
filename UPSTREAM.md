@@ -40,7 +40,12 @@ Upstream translators live at `internal/translator/<upstream>/<client-format>/`. 
 | `open-ferry-translate`: Responses → Chat Completions | `internal/translator/openai/openai/responses` | Request ported (`openai::responses`), for a Chat Completions upstream that is sent a Responses body. Not in `registry` yet: upstream registers it together with the response half, which is not ported |
 | `open-ferry-translate`: registry | `sdk/translator` | Ported (`registry`): the built-in translators above, the fallback for pairs with none, and reasoning summary settings carried between formats. Plugin hooks and middleware are not ported |
 | `open-ferry-translate`: legacy Completions | `sdk/api/handlers/openai/openai_handlers.go` | Ported (`completions`): the request, response and stream chunk conversions the `/v1/completions` handler uses. The handler itself comes with the server |
-| `open-ferry-server`: Responses WebSocket | `sdk/api/handlers/openai/openai_responses_websocket*.go` | Planned |
+| `open-ferry-server`: routes and middleware | `internal/api/server_routes.go`, `server_middleware.go`, `internal/access`, `sdk/access` | Ported (`app`, `auth`): `/healthz`, `/v1/models`, Chat Completions, legacy Completions, Claude Messages and token counts, and Responses with compact, also under `/backend-api/codex`; client keys, safe mode and CORS. The management API and other providers' routes are not ported yet |
+| `open-ferry-server`: handler plumbing | `sdk/api/handlers/handlers*.go`, `request_body.go`, `model_execution.go`, `internal/util/provider.go`, `internal/thinking/suffix.go` | Ported: reading and decoding bodies, model routing (`auto` and thinking suffixes), error bodies, bootstrap retries, stream forwarding and keep-alives. Calls go to a `Dispatcher` (`open-ferry-core::exec`) |
+| `open-ferry-server`: OpenAI and Claude handlers | `sdk/api/handlers/openai/openai_handlers.go`, `sdk/api/handlers/claude/code_handlers.go` | Ported (`handlers::openai`, `handlers::claude`). Chat Completions takes Responses bodies too, through the Responses to Chat Completions translator |
+| `open-ferry-server`: Responses over HTTP | `sdk/api/handlers/openai/openai_responses_handlers.go` | Ported (`handlers::responses`), except Codex multi-agent v2 tools and orphan delegation |
+| `open-ferry-server`: Responses WebSocket | `sdk/api/handlers/openai/openai_responses_websocket*.go` | Ported (`handlers::responses_ws`): incremental input, transcript and tool-call repair, warm-ups answered locally, and hand-off to a credential's upstream WebSocket. Response steering and the request log's timeline are not ported |
+| `open-ferry-core`: call seam | `sdk/cliproxy/executor/types.go`, `sdk/cliproxy/auth` errors | Ported (`exec`, `models`): the call the HTTP layer hands the credential manager, and the manager's errors as the handlers report them |
 | `open-ferry-core`: Codex and Claude OAuth | `internal/auth/codex`, `internal/auth/claude` | Planned |
 | `open-ferry-management`: `auth-files` | `internal/api/handlers/management/auth_files*.go` | Planned |
 | `open-ferry-management`: `api-call` | `internal/api/handlers/management/api_tools.go` | Planned |
@@ -95,6 +100,8 @@ The Claude translators use more of upstream's shared code:
 - `thinking` from `internal/thinking`: thinking budgets and levels, model-name suffixes, and whether a client asked to see reasoning summaries.
 - `common::cache_control` and `common::claude` from `internal/translator/common` and `internal/util`: `cache_control` markers, grouping messages into turns, structured output instructions, and tool name and ID sanitizing.
 - `schema` from `internal/util/claude_schema.go`: making a tool's JSON Schema fit for Claude.
+
+The server edits some client JSON in place, as upstream does with gjson and sjson, so that the bytes a client sent go on as they came. `handlers::responses::json` and `handlers::responses_ws::json` port the parts of gjson v1.18.0 and sjson v1.2.5 they need (MIT, [licenses/gjson-LICENSE](licenses/gjson-LICENSE) and [licenses/sjson-LICENSE](licenses/sjson-LICENSE)). The WebSocket handshake is checked as gorilla/websocket v1.5.3's `Upgrader` checks it (BSD-2-Clause, [licenses/gorilla-websocket-LICENSE](licenses/gorilla-websocket-LICENSE)).
 
 ## Checking parity
 
