@@ -24,6 +24,7 @@ use super::credential::{KIND_API_KEY, SOURCE_CONFIG, attribute, auth_kind, auth_
 use super::settings::{ApiKeyEntry, ModelAlias, OpenAiCompat, Settings};
 use super::text::{atoi, canonical_model_key, equal_fold, go_lower, parse_suffix};
 use crate::auth::Auth;
+pub(crate) use crate::auth::compat::openai_compatible_provider_key;
 use crate::auth::json::{decode_field, fold_values};
 
 /// The upstream model an alias resolves to, and how responses should name
@@ -127,19 +128,6 @@ pub(crate) fn is_configured_openai_compat_auth(auth: &Auth) -> bool {
     }
     equal_fold(auth.provider.trim(), "openai-compatibility")
         || !attribute(auth, "compat_name").is_empty()
-}
-
-/// An OpenAI-compatible provider's routing key (upstream's
-/// `util.OpenAICompatibleProviderKey`).
-pub(crate) fn openai_compatible_provider_key(name: &str) -> String {
-    let name = go_lower(name.trim());
-    if name.is_empty() {
-        return "openai-compatibility".into();
-    }
-    if name == "openai-compatibility" || name.starts_with("openai-compatible-") {
-        return name;
-    }
-    format!("openai-compatible-{name}")
 }
 
 fn openai_compat_provider_key(auth: &Auth) -> String {

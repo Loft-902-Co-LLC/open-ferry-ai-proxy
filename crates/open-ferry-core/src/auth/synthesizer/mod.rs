@@ -5,12 +5,13 @@
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Synthesizers: build [`Auth`] records from credential files
-//! ([`file`](mod@file)) and from API keys in the config ([`api_key`]).
+//! ([`file`](mod@file)), from API keys in the config ([`api_key`]) and from
+//! the config's OpenAI-compatible providers ([`openai_compat`]).
 //!
-//! Records from both get the same settings as attributes: excluded models
-//! (`excluded_models`, comma-joined and lowercased, and a hash of them in
-//! `excluded_models_hash`), the credential's kind in `auth_kind`, and extra
-//! request headers as `header:<name>`.
+//! Records from files and API keys get the same settings as attributes:
+//! excluded models (`excluded_models`, comma-joined and lowercased, and a
+//! hash of them in `excluded_models_hash`), the credential's kind in
+//! `auth_kind`, and extra request headers as `header:<name>`.
 //!
 //! Deviations from upstream:
 //! - The context carries the one config setting the synthesizers here read,
@@ -22,6 +23,7 @@
 
 pub mod api_key;
 pub mod file;
+pub mod openai_compat;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;

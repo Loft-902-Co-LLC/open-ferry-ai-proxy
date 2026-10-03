@@ -12,8 +12,6 @@
 //!   provider.
 //! - Values are taken as given: trimming and dropping invalid rules
 //!   (upstream's config sanitizing) is the config layer's job.
-//! - The config has no OpenAI-compatible providers yet, so a config gives
-//!   none.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -245,7 +243,25 @@ impl From<&Config> for Settings {
                 .map(|(provider, list)| (provider.clone(), rules(list)))
                 .collect(),
             api_keys,
-            openai_compatibility: Vec::new(),
+            openai_compatibility: config
+                .openai_compatibility
+                .iter()
+                .map(|compat| OpenAiCompat {
+                    name: compat.name.clone(),
+                    disabled: compat.disabled,
+                    disable_cooling: compat.disable_cooling,
+                    models: compat
+                        .models
+                        .iter()
+                        .map(|model| ModelAlias {
+                            name: model.name.clone(),
+                            alias: model.alias.clone(),
+                            force_mapping: model.force_mapping,
+                        })
+                        .collect(),
+                    request_scoped_errors: rules(&compat.request_scoped_errors),
+                })
+                .collect(),
         }
     }
 }
@@ -315,6 +331,21 @@ claude-api-key:
     models:
       - name: claude-x
         alias: cx
+openai-compatibility:
+  - name: Kimi
+    disabled: true
+    disable-cooling: false
+    base-url: https://compat.example.test/v1
+    api-key-entries:
+      - api-key: compat-key
+    models:
+      - name: kimi-k2
+        alias: k2
+        force-mapping: true
+    request-scoped-errors:
+      - status: 400
+        match: ["too long"]
+        action: stop
 "#,
         )
         .unwrap();
@@ -348,6 +379,25 @@ claude-api-key:
         assert_eq!(claude[0].base_url, "https://example.test");
         assert_eq!(claude[0].models[0].alias, "cx");
         assert!(settings.api_key_entries("codex").is_empty());
+        assert_eq!(
+            settings.openai_compatibility,
+            [OpenAiCompat {
+                name: "Kimi".into(),
+                disabled: true,
+                disable_cooling: Some(false),
+                models: vec![ModelAlias {
+                    name: "kimi-k2".into(),
+                    alias: "k2".into(),
+                    force_mapping: true,
+                }],
+                request_scoped_errors: vec![RequestScopedErrorRule {
+                    status: 400,
+                    matches: vec!["too long".into()],
+                    match_regex: Vec::new(),
+                    action: "stop".into(),
+                }],
+            }]
+        );
     }
 
     #[test]

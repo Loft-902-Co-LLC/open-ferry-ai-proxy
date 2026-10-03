@@ -108,6 +108,8 @@ pub struct Config {
     pub claude: ClaudeConfig,
     /// Claude API keys.
     pub claude_api_key: Vec<ClaudeKey>,
+    /// OpenAI-compatible upstreams.
+    pub openai_compatibility: Vec<OpenAiCompatibility>,
     /// Models excluded per OAuth channel; keys and models are lower case.
     pub oauth_excluded_models: BTreeMap<String, Vec<String>>,
     /// Model aliases per OAuth channel.
@@ -156,6 +158,7 @@ impl Default for Config {
             codex_header_defaults: CodexHeaderDefaults::default(),
             claude: ClaudeConfig::default(),
             claude_api_key: Vec::new(),
+            openai_compatibility: Vec::new(),
             oauth_excluded_models: BTreeMap::new(),
             oauth_model_alias: BTreeMap::new(),
             oauth_request_scoped_errors: BTreeMap::new(),
@@ -223,6 +226,7 @@ impl fmt::Debug for Config {
             .field("codex_header_defaults", &self.codex_header_defaults)
             .field("claude", &self.claude)
             .field("claude_api_key", &self.claude_api_key)
+            .field("openai_compatibility", &self.openai_compatibility)
             .field("oauth_excluded_models", &self.oauth_excluded_models)
             .field("oauth_model_alias", &self.oauth_model_alias)
             .field(
@@ -585,6 +589,122 @@ pub struct ClaudeModel {
     pub thinking: Option<ThinkingSupport>,
 }
 
+/// An OpenAI-compatible upstream: a Chat Completions endpoint, its keys and
+/// the models it serves.
+#[derive(Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(
+    default,
+    rename = "config.OpenAICompatibility",
+    rename_all = "kebab-case"
+)]
+pub struct OpenAiCompatibility {
+    /// The provider's name, which identifies it in routing and logs.
+    pub name: String,
+    /// Selection preference; higher wins.
+    pub priority: i64,
+    /// Takes the provider out of routing.
+    pub disabled: bool,
+    /// Namespaces this provider's models (`teamA/kimi-k2`).
+    pub prefix: String,
+    /// The endpoint, up to `/chat/completions`. Providers without one are
+    /// dropped when loading.
+    pub base_url: String,
+    /// The API keys, each with an optional proxy.
+    pub api_key_entries: Vec<OpenAiCompatibilityApiKey>,
+    /// Upstream model names and their aliases.
+    pub models: Vec<OpenAiCompatibilityModel>,
+    /// Extra headers sent with every request.
+    pub headers: BTreeMap<String, String>,
+    /// Passes the client's `prompt_cache_key` on to the provider.
+    pub support_prompt_cache_key: bool,
+    /// Overrides `disable-cooling` for this provider.
+    pub disable_cooling: Option<bool>,
+    /// Overrides `request-retry`; negative means the global value.
+    pub request_retry: Option<i64>,
+    /// How upstream errors are classified for this provider.
+    pub request_scoped_errors: Vec<RequestScopedErrorRule>,
+}
+
+impl fmt::Debug for OpenAiCompatibility {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OpenAiCompatibility")
+            .field("name", &self.name)
+            .field("priority", &self.priority)
+            .field("disabled", &self.disabled)
+            .field("prefix", &self.prefix)
+            .field("base_url", &self.base_url)
+            .field("api_key_entries", &self.api_key_entries)
+            .field("models", &self.models)
+            .field("headers", &RedactedMap(&self.headers))
+            .field("support_prompt_cache_key", &self.support_prompt_cache_key)
+            .field("disable_cooling", &self.disable_cooling)
+            .field("request_retry", &self.request_retry)
+            .field("request_scoped_errors", &self.request_scoped_errors)
+            .finish()
+    }
+}
+
+/// An API key of an OpenAI-compatible provider.
+#[derive(Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(
+    default,
+    rename = "config.OpenAICompatibilityAPIKey",
+    rename_all = "kebab-case"
+)]
+pub struct OpenAiCompatibilityApiKey {
+    /// The key.
+    pub api_key: String,
+    /// Share under weighted round robin, as for [`CodexKey::weight`].
+    pub weight: Option<i64>,
+    /// A proxy for this key, overriding the global one.
+    pub proxy_url: String,
+}
+
+impl fmt::Debug for OpenAiCompatibilityApiKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OpenAiCompatibilityApiKey")
+            .field("api_key", &Redacted(&self.api_key))
+            .field("weight", &self.weight)
+            .field("proxy_url", &Redacted(&self.proxy_url))
+            .finish()
+    }
+}
+
+/// A model served by an OpenAI-compatible provider.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(
+    default,
+    rename = "config.OpenAICompatibilityModel",
+    rename_all = "kebab-case"
+)]
+pub struct OpenAiCompatibilityModel {
+    /// The upstream model name.
+    pub name: String,
+    /// The name clients use.
+    pub alias: String,
+    /// A name shown in model lists.
+    pub display_name: String,
+    /// The context window advertised to Codex clients.
+    pub max_context_length: i64,
+    /// Rewrites model names in responses back to the alias.
+    pub force_mapping: bool,
+    /// Marks the model for the `/v1/images/*` endpoints, which aren't
+    /// ported; it is listed with the type `openai-image` and no thinking
+    /// levels.
+    pub image: bool,
+    /// What the model takes as chat input, such as `text` and `image`. A
+    /// model with `text` and no `image` gets tool results as text.
+    pub input_modalities: Vec<String>,
+    /// What the model can produce, when known.
+    pub output_modalities: Vec<String>,
+    /// Keeps thinking blocks with empty signatures for compatible upstreams.
+    pub is_compat: bool,
+    /// Sends `max_completion_tokens` instead of `max_tokens`.
+    pub use_max_completion_tokens: bool,
+    /// Reasoning support; unset means the levels `low`, `medium` and `high`.
+    pub thinking: Option<ThinkingSupport>,
+}
+
 /// A model's reasoning support.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(
@@ -748,6 +868,16 @@ mod tests {
             proxy_url: "socks5://u:p@h".to_owned(),
             ..ClaudeKey::default()
         });
+        config.openai_compatibility.push(OpenAiCompatibility {
+            name: "compat".to_owned(),
+            headers: BTreeMap::from([("X-Compat".to_owned(), "compat-hdr-secret".to_owned())]),
+            api_key_entries: vec![OpenAiCompatibilityApiKey {
+                api_key: "sk-compat-secret".to_owned(),
+                proxy_url: "http://cu:cp@proxy".to_owned(),
+                weight: Some(2),
+            }],
+            ..OpenAiCompatibility::default()
+        });
         let text = format!("{config:?}");
         for secret in [
             "client-secret",
@@ -757,10 +887,14 @@ mod tests {
             "hdr-secret",
             "claude-secret",
             "u:p@h",
+            "compat-secret",
+            "compat-hdr-secret",
+            "cu:cp",
         ] {
             assert!(!text.contains(secret), "{secret} leaked");
         }
         assert!(text.contains("Authorization"));
+        assert!(text.contains("X-Compat"));
     }
 
     #[test]

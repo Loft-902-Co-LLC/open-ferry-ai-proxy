@@ -33,8 +33,8 @@
 //! - Request-scoped error rules are stored in the metadata as JSON objects,
 //!   the form a credential file holds them in, where upstream stores Go
 //!   structs.
-//! - Gemini, interactions, xAI, Meta, OpenAI-compatible and Vertex keys
-//!   aren't ported.
+//! - Gemini, interactions, xAI, Meta and Vertex keys aren't ported. The
+//!   OpenAI-compatible providers are in [`super::openai_compat`].
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -313,23 +313,11 @@ pub fn api_key_auth(
     if !key.is_empty() {
         attrs.insert(ATTRIBUTE_API_KEY.to_owned(), key.to_owned());
     }
-    let mut metadata = Map::new();
-    if let Some(disable_cooling) = entry.disable_cooling {
-        metadata.insert("disable_cooling".to_owned(), Value::Bool(disable_cooling));
-    }
-    if let Some(retry) = entry.request_retry
-        && retry >= 0
-    {
-        metadata.insert("request_retry".to_owned(), Value::from(retry));
-    }
-    if !entry.request_scoped_errors.is_empty() {
-        let rules = entry
-            .request_scoped_errors
-            .iter()
-            .map(RequestScopedErrorRule::to_json)
-            .collect();
-        metadata.insert("request_scoped_errors".to_owned(), Value::Array(rules));
-    }
+    let metadata = retry_metadata(
+        entry.disable_cooling,
+        entry.request_retry,
+        &entry.request_scoped_errors,
+    );
     if entry.priority != 0 {
         attrs.insert("priority".to_owned(), entry.priority.to_string());
     }
@@ -382,6 +370,34 @@ pub fn api_key_auth(
     Some(auth)
 }
 
+/// The metadata that carries an entry's cooling and retry settings:
+/// `disable_cooling` if set, `request_retry` if set and not negative, and
+/// `request_scoped_errors` if there are rules (upstream's
+/// `addRequestRetryToMetadata` and `addRequestScopedErrorsToMetadata`).
+pub(super) fn retry_metadata(
+    disable_cooling: Option<bool>,
+    request_retry: Option<i64>,
+    request_scoped_errors: &[RequestScopedErrorRule],
+) -> Map<String, Value> {
+    let mut metadata = Map::new();
+    if let Some(disable_cooling) = disable_cooling {
+        metadata.insert("disable_cooling".to_owned(), Value::Bool(disable_cooling));
+    }
+    if let Some(retry) = request_retry
+        && retry >= 0
+    {
+        metadata.insert("request_retry".to_owned(), Value::from(retry));
+    }
+    if !request_scoped_errors.is_empty() {
+        let rules = request_scoped_errors
+            .iter()
+            .map(RequestScopedErrorRule::to_json)
+            .collect();
+        metadata.insert("request_scoped_errors".to_owned(), Value::Array(rules));
+    }
+    metadata
+}
+
 /// A hash of a key's model list, to notice when it changes: the SHA-256, in
 /// hex, of one line per model with a name or alias. Empty for no models.
 pub fn compute_models_hash(models: &[ApiKeyModel]) -> String {
@@ -411,7 +427,7 @@ pub fn compute_models_hash(models: &[ApiKeyModel]) -> String {
 }
 
 /// Go's `json.Marshal` of a `*ThinkingSupport`.
-fn thinking_json(support: Option<&ThinkingSupport>) -> String {
+pub(super) fn thinking_json(support: Option<&ThinkingSupport>) -> String {
     let Some(support) = support else {
         return "null".to_owned();
     };

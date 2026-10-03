@@ -605,9 +605,12 @@ mod tests {
              gemini-api-key:\n  - api-key: gemini-key\n    disable-cooling: false\n\
              claude-api-key:\n  - api-key: claude-key\n    disable-cooling: false\n  - api-key: unset\n\
              codex-api-key:\n  - api-key: codex-key\n    base-url: https://codex.example.com\n    \
+             disable-cooling: false\n\
+             openai-compatibility:\n  - name: compat\n    base-url: https://compat.example.com/v1\n    \
              disable-cooling: false\n",
         );
         assert!(config.disable_cooling);
+        assert_eq!(config.openai_compatibility[0].disable_cooling, Some(false));
         let claude: Vec<Option<bool>> = config
             .claude_api_key
             .iter()
@@ -659,8 +662,11 @@ mod tests {
         let config = parse(
             "codex-api-key:\n  - api-key: codex-neg\n    base-url: https://codex.example.com\n    \
              request-retry: -1\n  - api-key: codex-unset\n    base-url: https://codex.example.com\n\
-             claude-api-key:\n  - api-key: claude-three\n    request-retry: 3\n",
+             claude-api-key:\n  - api-key: claude-three\n    request-retry: 3\n\
+             openai-compatibility:\n  - name: compat\n    base-url: https://compat.example.com/v1\n    \
+             request-retry: 0\n    api-key-entries:\n      - api-key: compat-key\n",
         );
+        assert_eq!(config.openai_compatibility[0].request_retry, Some(0));
         let codex: Vec<Option<i64>> = config
             .codex_api_key
             .iter()
@@ -687,8 +693,22 @@ mod tests {
              codex-api-key:\n  - models:\n      - name: codex-upstream\n        alias: codex-alias\n        \
              is-compat: true\n        display-name: Codex Name\n        max-context-length: 1048576\n        \
              support-configuration-update: true\n      - name: codex-native\n        \
-             alias: codex-native\n",
+             alias: codex-native\n\
+             openai-compatibility:\n  - name: compat\n    models:\n      - name: compat-upstream\n        \
+             alias: compat-alias\n        is-compat: true\n        display-name: Compatibility Name\n        \
+             max-context-length: 1048576\n      - name: compat-native\n        alias: compat-native\n",
         );
+        let compat = &config
+            .openai_compatibility
+            .first()
+            .expect("a compat provider")
+            .models;
+        assert_eq!(compat.len(), 2);
+        let compat_first = compat.first().expect("a model");
+        assert!(compat_first.is_compat);
+        assert!(!compat.get(1).expect("a model").is_compat);
+        assert_eq!(compat_first.display_name, "Compatibility Name");
+        assert_eq!(compat_first.max_context_length, 1_048_576);
         let claude = &config.claude_api_key.first().expect("a claude key").models;
         let codex = &config.codex_api_key.first().expect("a codex key").models;
         assert_eq!((claude.len(), codex.len()), (2, 2));
@@ -716,6 +736,82 @@ mod tests {
                 alias: "codex-native".to_owned(),
                 ..CodexModel::default()
             })
+        );
+    }
+
+    // use_max_completion_tokens_test.go:
+    // TestOpenAICompatibilityUseMaxCompletionTokensYAMLDecoding. The JSON
+    // variant is dropped: configs are only read from YAML here.
+
+    #[test]
+    fn openai_compatibility_use_max_completion_tokens() {
+        let config = unmarshal(
+            "\nopenai-compatibility:\n  - name: test-provider\n    models:\n      \
+             - name: new-reasoning-model\n        alias: new-alias\n        \
+             use-max-completion-tokens: true\n      - name: legacy-model\n        \
+             alias: legacy-alias\n",
+        );
+        assert_eq!(config.openai_compatibility.len(), 1);
+        let models = &config.openai_compatibility[0].models;
+        assert_eq!(models.len(), 2);
+        assert!(models[0].use_max_completion_tokens);
+        assert!(!models[1].use_max_completion_tokens);
+    }
+
+    #[test]
+    fn openai_compatibility_decodes_every_field() {
+        let config = parse(
+            "openai-compatibility:\n  - name: \" kimi \"\n    priority: 3\n    disabled: true\n    \
+             prefix: /teamA/\n    base-url: \" https://compat.example.com/v1 \"\n    \
+             api-key-entries:\n      - api-key: k1\n        weight: 2\n        \
+             proxy-url: http://proxy.local\n      - api-key: k2\n    \
+             models:\n      - name: kimi-k2\n        alias: k2\n        image: true\n        \
+             input-modalities: [text]\n        output-modalities: [text]\n        \
+             force-mapping: true\n        thinking: {levels: [low, high]}\n    \
+             headers: {X-Team: \" a \"}\n    support-prompt-cache-key: true\n  \
+             - name: no-base-url\n",
+        );
+        assert_eq!(config.openai_compatibility.len(), 1);
+        let compat = &config.openai_compatibility[0];
+        assert_eq!(compat.name, "kimi");
+        assert_eq!(compat.priority, 3);
+        assert!(compat.disabled && compat.support_prompt_cache_key);
+        assert_eq!(compat.prefix, "teamA");
+        assert_eq!(compat.base_url, "https://compat.example.com/v1");
+        assert_eq!(
+            compat.headers,
+            BTreeMap::from([("X-Team".to_owned(), "a".to_owned())])
+        );
+        let keys: Vec<(&str, Option<i64>, &str)> = compat
+            .api_key_entries
+            .iter()
+            .map(|key| (key.api_key.as_str(), key.weight, key.proxy_url.as_str()))
+            .collect();
+        assert_eq!(
+            keys,
+            [("k1", Some(2), "http://proxy.local"), ("k2", None, "")]
+        );
+        let model = &compat.models[0];
+        assert_eq!(
+            (model.name.as_str(), model.alias.as_str()),
+            ("kimi-k2", "k2")
+        );
+        assert!(model.image && model.force_mapping);
+        assert_eq!(model.input_modalities, ["text"]);
+        assert_eq!(model.output_modalities, ["text"]);
+        assert_eq!(
+            model
+                .thinking
+                .as_ref()
+                .map(|thinking| thinking.levels.clone()),
+            Some(strings(&["low", "high"]))
+        );
+        assert!(
+            Config::parse(
+                "openai-compatibility:\n  - name: p\n    base-url: u\n    \
+                 api-key-entries: [{api-key: k, weight: 1000001}]\n"
+            )
+            .is_err()
         );
     }
 
@@ -958,8 +1054,21 @@ mod tests {
              - \"context_window_exceeded\"\n        action: stop-and-cooldown\n\
              claude-api-key:\n  - api-key: claude-key-1\n    request-scoped-errors:\n      \
              - status: 400\n        match:\n          - \"prompt is too long\"\n        \
-             match-regexr:\n          - \"too long$\"\n        action: stop\n",
+             match-regexr:\n          - \"too long$\"\n        action: stop\n\
+             openai-compatibility:\n  - name: compat\n    base-url: https://compat.example.com/v1\n    \
+             request-scoped-errors:\n      - status: 400\n        match:\n          - \"too many tokens\"\n          \
+             - \"context length\"\n        match-regexr:\n          - \"tokens? exceeded\"\n          \
+             - \"^context\"\n        action: stop\n",
         );
+        let compat = &config
+            .openai_compatibility
+            .first()
+            .expect("a compat provider")
+            .request_scoped_errors;
+        assert_eq!(compat.len(), 1);
+        let rule = compat.first().expect("a rule");
+        assert_eq!((rule.status, rule.action.as_str()), (400, "stop"));
+        assert_eq!((rule.matches.len(), rule.match_regexr.len()), (2, 2));
         let codex = &config
             .codex_api_key
             .first()

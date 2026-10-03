@@ -14,7 +14,8 @@
 //! [`FileStore`] keeps credentials as files in the auth directory, and the
 //! [`synthesizer`] module builds records from those files and from the API
 //! keys in the config. The other modules hold the settings records carry:
-//! [`classification`] (kinds, sources and attribute names), [`metadata`]
+//! [`classification`] (kinds, sources and attribute names), [`compat`]
+//! (OpenAI-compatible provider keys), [`metadata`]
 //! (settings in a credential's file) and [`weight`] (routing weights).
 //!
 //! Deviations from upstream:
@@ -28,6 +29,7 @@
 //!   [`AuthStore::save_new`].
 
 pub mod classification;
+pub mod compat;
 mod expiry;
 pub mod file_store;
 mod go;

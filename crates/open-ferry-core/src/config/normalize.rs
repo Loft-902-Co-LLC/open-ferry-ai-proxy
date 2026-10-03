@@ -29,7 +29,7 @@ use std::path::PathBuf;
 use super::paths::{self, Os};
 use super::types::{
     ClaudeKey, CodexKey, Config, DEFAULT_PANEL_GITHUB_REPOSITORY, OAuthModelAlias,
-    OAuthModelSetting, RequestScopedErrorRule,
+    OAuthModelSetting, OpenAiCompatibility, RequestScopedErrorRule,
 };
 use super::v8::check_weight;
 use super::yaml::go_quote;
@@ -88,6 +88,7 @@ pub(crate) fn post_process(config: &mut Config) -> Result<(), ConfigError> {
     config.codex_header_defaults.beta_features =
         config.codex_header_defaults.beta_features.trim().to_owned();
     sanitize_claude_keys(&mut config.claude_api_key);
+    sanitize_openai_compatibility(&mut config.openai_compatibility);
     config.oauth_excluded_models = normalize_oauth_excluded_models(&config.oauth_excluded_models);
     config.oauth_model_alias = sanitize_oauth_model_alias(&config.oauth_model_alias);
     config.oauth_settings = sanitize_oauth_settings(&config.oauth_settings);
@@ -145,7 +146,22 @@ fn validate_weights(config: &Config) -> Result<(), ConfigError> {
     check_family_weights(
         "codex-api-key",
         config.codex_api_key.iter().map(|key| key.weight),
-    )
+    )?;
+    for (provider_index, compat) in config.openai_compatibility.iter().enumerate() {
+        for (key_index, entry) in compat.api_key_entries.iter().enumerate() {
+            if let Some(weight) = entry.weight
+                && let Err(message) = check_weight(weight)
+            {
+                return Err(ConfigError::new(
+                    ConfigErrorKind::Invalid,
+                    format!(
+                        "openai-compatibility[{provider_index}].api-key-entries[{key_index}].weight: {message}"
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn check_family_weights(
@@ -231,6 +247,18 @@ fn sanitize_claude_keys(keys: &mut [ClaudeKey]) {
         key.headers = normalize_headers(&key.headers);
         key.excluded_models = normalize_excluded_models(&key.excluded_models);
     }
+}
+
+/// Upstream's `SanitizeOpenAICompatibility`: names, prefixes, base URLs and
+/// headers cleaned up, and providers without a base URL dropped.
+fn sanitize_openai_compatibility(providers: &mut Vec<OpenAiCompatibility>) {
+    for provider in providers.iter_mut() {
+        provider.name = provider.name.trim().to_owned();
+        provider.prefix = normalize_model_prefix(&provider.prefix);
+        provider.base_url = provider.base_url.trim().to_owned();
+        provider.headers = normalize_headers(&provider.headers);
+    }
+    providers.retain(|provider| !provider.base_url.is_empty());
 }
 
 /// Upstream's `SanitizeOAuthModelAlias`: trimmed, channels in lower case,
@@ -351,6 +379,7 @@ fn sanitize_oauth_request_scoped_errors(
 mod tests {
     use std::collections::BTreeSet;
 
+    use super::super::types::OpenAiCompatibilityApiKey;
     use super::*;
 
     /// The OAuth-scoped settings [`Config::for_api_key`] resets.
@@ -494,6 +523,65 @@ mod tests {
         assert_eq!(
             validate_weights(&config).map_err(|error| error.to_string()),
             Err("codex-api-key[0].weight: weight must not exceed 1000000".to_owned())
+        );
+        config.codex_api_key.clear();
+        config.openai_compatibility = vec![
+            OpenAiCompatibility {
+                api_key_entries: vec![OpenAiCompatibilityApiKey {
+                    weight: Some(0),
+                    ..OpenAiCompatibilityApiKey::default()
+                }],
+                ..OpenAiCompatibility::default()
+            },
+            OpenAiCompatibility {
+                api_key_entries: vec![
+                    OpenAiCompatibilityApiKey::default(),
+                    OpenAiCompatibilityApiKey {
+                        weight: Some(2_000_000),
+                        ..OpenAiCompatibilityApiKey::default()
+                    },
+                ],
+                ..OpenAiCompatibility::default()
+            },
+        ];
+        assert_eq!(
+            validate_weights(&config).map_err(|error| error.to_string()),
+            Err(
+                "openai-compatibility[1].api-key-entries[1].weight: weight must not exceed 1000000"
+                    .to_owned()
+            )
+        );
+    }
+
+    // config_normalization.go: SanitizeOpenAICompatibility (no upstream test).
+    #[test]
+    fn openai_compatibility_without_base_url_is_dropped() {
+        let mut providers = vec![
+            OpenAiCompatibility {
+                name: " gone ".to_owned(),
+                base_url: " ".to_owned(),
+                ..OpenAiCompatibility::default()
+            },
+            OpenAiCompatibility {
+                name: " kept ".to_owned(),
+                base_url: " https://example.invalid/v1 ".to_owned(),
+                prefix: " /team/ ".to_owned(),
+                headers: BTreeMap::from([
+                    (" X-A ".to_owned(), " 1 ".to_owned()),
+                    ("X-B".to_owned(), " ".to_owned()),
+                ]),
+                ..OpenAiCompatibility::default()
+            },
+        ];
+        sanitize_openai_compatibility(&mut providers);
+        assert_eq!(providers.len(), 1);
+        let kept = &providers[0];
+        assert_eq!(kept.name, "kept");
+        assert_eq!(kept.base_url, "https://example.invalid/v1");
+        assert_eq!(kept.prefix, "team");
+        assert_eq!(
+            kept.headers,
+            BTreeMap::from([("X-A".to_owned(), "1".to_owned())])
         );
     }
 
