@@ -4,6 +4,7 @@
 //! upstream reads fields from a body that isn't JSON with gjson, which finds
 //! what it can, these read nothing.
 
+pub(crate) mod alpha_search;
 pub(crate) mod claude;
 pub(crate) mod codex_client;
 pub(crate) mod gemini;

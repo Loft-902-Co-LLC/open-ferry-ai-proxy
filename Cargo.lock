@@ -1446,6 +1446,7 @@ dependencies = [
  "http",
  "http-body-util",
  "open-ferry-core",
+ "open-ferry-providers",
  "open-ferry-translate",
  "regex",
  "ruzstd",

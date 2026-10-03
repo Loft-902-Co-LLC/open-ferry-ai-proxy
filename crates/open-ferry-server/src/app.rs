@@ -21,7 +21,9 @@ use tracing::Instrument;
 
 use crate::auth::require_key;
 use crate::errors::{JSON_UTF8, error_response};
-use crate::handlers::{claude, gemini, health, models, openai, responses, responses_ws};
+use crate::handlers::{
+    alpha_search, claude, gemini, health, models, openai, responses, responses_ws,
+};
 use crate::state::AppState;
 
 /// The response headers browsers may read (`corsExposedResponseHeaders`).
@@ -51,6 +53,7 @@ pub fn router_with(state: AppState, extra: Router) -> Router {
             .post(responses::responses.layer(auth.clone()))
     };
     let compact_route = || post(responses::compact.layer(auth.clone()));
+    let alpha_search_route = || post(alpha_search::search.layer(auth.clone()));
     let gemini_action_routes = || {
         get(gemini::model.layer(auth.clone()))
             .head(not_found)
@@ -80,6 +83,8 @@ pub fn router_with(state: AppState, extra: Router) -> Router {
         .route("/v1/responses/compact", compact_route())
         .route("/backend-api/codex/responses", responses_routes())
         .route("/backend-api/codex/responses/compact", compact_route())
+        .route("/v1/alpha/search", alpha_search_route())
+        .route("/backend-api/codex/alpha/search", alpha_search_route())
         .route(
             "/v1beta/models",
             get(gemini::models.layer(auth.clone())).head(not_found),

@@ -26,6 +26,7 @@ uuid = { version = "1.27.0", features = ["v7"] }
 
 [dev-dependencies]
 http-body-util = "0.1.5"
+open-ferry-providers.workspace = true
 tokio = { version = "1.53.1", features = ["full", "test-util"] }
 tokio-tungstenite = "0.30.0"
 tower = { version = "0.5.3", features = ["util"] }
