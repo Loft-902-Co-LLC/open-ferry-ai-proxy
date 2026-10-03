@@ -1433,16 +1433,28 @@ mod tests {
                 callback_timeout: Duration::from_secs(10),
             };
             login(&auth, options, |prompt| {
-                let _ = sender.send(prompt.callback_port);
+                let _ = sender.send(prompt.clone());
             })
             .await
         });
-        let port = receiver.await.unwrap();
-        reqwest::get(format!(
-            "http://127.0.0.1:{port}/auth/callback?error=access_denied"
-        ))
-        .await
-        .unwrap();
+        let prompt = receiver.await.unwrap();
+        let query: HashMap<String, String> = url::Url::parse(&prompt.url)
+            .unwrap()
+            .query_pairs()
+            .into_owned()
+            .collect();
+        let callback = format!(
+            "http://127.0.0.1:{}/auth/callback?error=access_denied",
+            prompt.callback_port
+        );
+        // Without the login's state, the error is turned away and the login
+        // keeps waiting.
+        let response = reqwest::get(&callback).await.unwrap();
+        assert_eq!(response.status(), 400);
+        assert!(!login.is_finished());
+        reqwest::get(format!("{callback}&state={}", query["state"]))
+            .await
+            .unwrap();
         let error = login.await.unwrap().unwrap_err();
         assert_eq!(error.to_string(), "OAuth error: access_denied");
     }

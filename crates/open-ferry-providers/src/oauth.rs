@@ -11,8 +11,10 @@
 //! - The success page is this project's own and takes nothing from the
 //!   query; upstream's copies a `platform_url` parameter into its HTML
 //!   unescaped.
-//! - A callback whose `state` isn't the login's is turned away with 400
-//!   and doesn't end the wait; upstream hands it on and checks it later.
+//! - A callback whose `state` isn't the login's, an error report included,
+//!   is turned away with 400 and doesn't end the wait. Upstream hands a code
+//!   on and checks its state later, and takes an error report as the
+//!   login's without checking it.
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -171,11 +173,14 @@ async fn callback(
     Query(query): Query<CallbackQuery>,
 ) -> Response {
     let nonempty = |value: Option<String>| value.filter(|value| !value.is_empty());
+    // Nothing without the login's state counts, not even an error report:
+    // anyone who can reach the port could otherwise end the login.
+    if nonempty(query.state).as_deref() != Some(&*server.state) {
+        return (StatusCode::BAD_REQUEST, "State parameter doesn't match").into_response();
+    }
     let (result, response) = if let Some(error) = nonempty(query.error) {
         let response = (StatusCode::BAD_REQUEST, format!("OAuth error: {error}")).into_response();
         (CallbackResult::Error(error), response)
-    } else if nonempty(query.state).as_deref() != Some(&*server.state) {
-        return (StatusCode::BAD_REQUEST, "State parameter doesn't match").into_response();
     } else if let Some(code) = nonempty(query.code) {
         let response = (StatusCode::FOUND, [(http::header::LOCATION, "/success")]).into_response();
         (CallbackResult::Code(code), response)
@@ -249,11 +254,36 @@ mod tests {
     async fn callback_gives_the_providers_error() {
         let mut server = CallbackServer::start(0, "/callback", "s1").await.unwrap();
         assert_eq!(
-            get(server.port(), "/callback?error=access_denied").await.0,
+            get(server.port(), "/callback?error=access_denied&state=s1")
+                .await
+                .0,
             400
         );
         let result = server.wait(Duration::from_secs(5)).await.unwrap();
         assert_eq!(result, CallbackResult::Error("access_denied".into()));
+    }
+
+    // An error report without the login's state is turned away like any other
+    // callback, and the login goes on waiting for the real one.
+    #[tokio::test]
+    async fn error_needs_the_state_too() {
+        let mut server = CallbackServer::start(0, "/callback", "s1").await.unwrap();
+        let port = server.port();
+        for query in [
+            "error=access_denied&state=wrong",
+            "error=access_denied",
+            "error=access_denied&state=",
+            "state=wrong",
+        ] {
+            let (status, body) = get(port, &format!("/callback?{query}")).await;
+            assert_eq!(status, 400, "{query}");
+            assert_eq!(body, "State parameter doesn't match", "{query}");
+        }
+        let error = server.wait(Duration::from_millis(50)).await.unwrap_err();
+        assert!(matches!(error, CallbackError::Timeout), "{error}");
+        assert_eq!(get(port, "/callback?code=c1&state=s1").await.0, 302);
+        let result = server.wait(Duration::from_secs(5)).await.unwrap();
+        assert_eq!(result, CallbackResult::Code("c1".into()));
     }
 
     #[tokio::test]
