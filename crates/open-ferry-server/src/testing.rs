@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::future::BoxFuture;
@@ -67,6 +68,8 @@ impl ModelCatalog for FakeCatalog {
 pub(crate) enum Outcome {
     /// A non-streaming result.
     Reply(Response),
+    /// A non-streaming result, after a wait.
+    Slow(Duration, Response),
     /// A stream of these chunks, with these headers.
     Stream(HeaderMap, Vec<Result<Bytes, ExecError>>),
     /// A stream that gives these chunks, then never ends.
@@ -223,10 +226,11 @@ impl FakeDispatcher {
         providers: &[ProviderId],
         request: Request,
         options: Options,
-    ) -> Result<Response, ExecError> {
+    ) -> (Option<Duration>, Result<Response, ExecError>) {
         match self.take(method, providers, request, options) {
-            Outcome::Reply(response) => Ok(response),
-            Outcome::Fail(error) => Err(error),
+            Outcome::Reply(response) => (None, Ok(response)),
+            Outcome::Slow(delay, response) => (Some(delay), Ok(response)),
+            Outcome::Fail(error) => (None, Err(error)),
             Outcome::Stream(..) | Outcome::Hang(..) => panic!("{method} was given a stream"),
             Outcome::Via(..) => unreachable!("take unwraps credentials"),
         }
@@ -240,8 +244,8 @@ impl Dispatcher for FakeDispatcher {
         request: Request,
         options: Options,
     ) -> BoxFuture<'a, Result<Response, ExecError>> {
-        let result = self.once("execute", providers, request, options);
-        async move { result }.boxed()
+        let (delay, result) = self.once("execute", providers, request, options);
+        slow(delay, result).boxed()
     }
 
     fn count_tokens<'a>(
@@ -250,8 +254,8 @@ impl Dispatcher for FakeDispatcher {
         request: Request,
         options: Options,
     ) -> BoxFuture<'a, Result<Response, ExecError>> {
-        let result = self.once("count_tokens", providers, request, options);
-        async move { result }.boxed()
+        let (delay, result) = self.once("count_tokens", providers, request, options);
+        slow(delay, result).boxed()
     }
 
     fn execute_stream<'a>(
@@ -270,7 +274,7 @@ impl Dispatcher for FakeDispatcher {
                 chunks: self.held(stream::iter(chunks).chain(stream::pending())),
             }),
             Outcome::Fail(error) => Err(error),
-            Outcome::Reply(_) => panic!("execute_stream was given a reply"),
+            Outcome::Reply(_) | Outcome::Slow(..) => panic!("execute_stream was given a reply"),
             Outcome::Via(..) => unreachable!("take unwraps credentials"),
         };
         async move { result }.boxed()
@@ -298,6 +302,14 @@ impl Dispatcher for FakeDispatcher {
             support(providers, model, auth_id)
         })
     }
+}
+
+/// `result`, after `delay` if there is one.
+async fn slow<T>(delay: Option<Duration>, result: T) -> T {
+    if let Some(delay) = delay {
+        tokio::time::sleep(delay).await;
+    }
+    result
 }
 
 /// State with `config`, `catalog` and `dispatcher`.

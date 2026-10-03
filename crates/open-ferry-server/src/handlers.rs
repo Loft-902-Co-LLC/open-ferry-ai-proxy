@@ -5,6 +5,7 @@
 //! what it can, these read nothing.
 
 pub(crate) mod claude;
+pub(crate) mod gemini;
 pub(crate) mod health;
 pub(crate) mod models;
 pub(crate) mod openai;

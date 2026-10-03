@@ -1,4 +1,4 @@
-//! HTTP and WebSocket handlers for `/v1/*`.
+//! HTTP and WebSocket handlers for `/v1/*` and the Gemini API's `/v1beta/*`.
 //!
 //! [`router`] serves the proxy's routes for an [`AppState`], which holds the
 //! [`ServerConfig`], the dispatcher that makes provider calls and the catalog
@@ -15,10 +15,10 @@
 //!   decoding, gets 413. Upstream reads any size.
 //! - `Content-Encoding: gzip` takes concatenated members, and zstd errors
 //!   read differently.
-//! - JSON written here doesn't escape `<`, `>` and `&` as Go's encoder does.
-//!   Where a body has a key twice, the last one counts; gjson takes the
-//!   first. A body that isn't JSON has no fields here, where gjson may read
-//!   some out of it.
+//! - JSON written here, except on the Gemini routes, doesn't escape `<`,
+//!   `>` and `&` as Go's encoder does. Where a body has a key twice, the
+//!   last one counts; gjson takes the first. A body that isn't JSON has no
+//!   fields here, where gjson may read some out of it.
 //! - Client keys are compared in constant time.
 //! - The client's proxy credentials are taken out of the headers and query
 //!   handed to executors.

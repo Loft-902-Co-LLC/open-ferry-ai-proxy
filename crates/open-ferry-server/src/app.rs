@@ -21,7 +21,7 @@ use tracing::Instrument;
 
 use crate::auth::require_key;
 use crate::errors::{JSON_UTF8, error_response};
-use crate::handlers::{claude, health, models, openai, responses, responses_ws};
+use crate::handlers::{claude, gemini, health, models, openai, responses, responses_ws};
 use crate::state::AppState;
 
 /// The response headers browsers may read (`corsExposedResponseHeaders`).
@@ -51,6 +51,11 @@ pub fn router_with(state: AppState, extra: Router) -> Router {
             .post(responses::responses.layer(auth.clone()))
     };
     let compact_route = || post(responses::compact.layer(auth.clone()));
+    let gemini_action_routes = || {
+        get(gemini::model.layer(auth.clone()))
+            .head(not_found)
+            .post(gemini::action.layer(auth.clone()))
+    };
     Router::new()
         .route("/", get(health::root).head(not_found))
         .route("/healthz", get(health::healthz).head(health::healthz_head))
@@ -75,6 +80,13 @@ pub fn router_with(state: AppState, extra: Router) -> Router {
         .route("/v1/responses/compact", compact_route())
         .route("/backend-api/codex/responses", responses_routes())
         .route("/backend-api/codex/responses/compact", compact_route())
+        .route(
+            "/v1beta/models",
+            get(gemini::models.layer(auth.clone())).head(not_found),
+        )
+        // A catch-all doesn't match an empty action, which gin's does.
+        .route("/v1beta/models/", gemini_action_routes())
+        .route("/v1beta/models/{*action}", gemini_action_routes())
         .method_not_allowed_fallback(not_found)
         .with_state(state.clone())
         .merge(extra)
