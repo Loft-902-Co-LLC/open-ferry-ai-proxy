@@ -25,10 +25,12 @@
 //! `quota-exceeded`, `routing.strategy`, `ws-auth`, `force-model-prefix`,
 //! `client.codex`, `codex` (minus cloaking and the live media relay),
 //! `codex-header-defaults.beta-features`, `claude.model-level-cooling`,
-//! `codex-api-key`, `claude-api-key` (minus `cloak` and
-//! `fingerprint-profile`), `openai-compatibility`, `oauth-excluded-models`,
-//! `oauth-model-alias`, `oauth-request-scoped-errors` and `oauth-settings`,
-//! with their v8 spellings.
+//! `gemini-api-key`, `codex-api-key`, `claude-api-key` (minus `cloak` and
+//! `fingerprint-profile`), `openai-compatibility`, `vertex-api-key`,
+//! `oauth-excluded-models`, `oauth-model-alias`,
+//! `oauth-request-scoped-errors` and `oauth-settings`, with their v8
+//! spellings (the key lists as `api-keys.gemini`, `api-keys.vertex` and so
+//! on).
 //!
 //! Read and ignored, so they never fail a load except where upstream checks
 //! their layout or weights before decoding:
@@ -38,9 +40,9 @@
 //!   and per-key `cloak`, `fingerprint-profile` and `disable-codex-cloaking`.
 //! - Session affinity: `routing.session-affinity`,
 //!   `routing.session-affinity-ttl` and `routing.session-affinity-subagents`.
-//! - Other providers: `gemini-api-key`, `interactions-api-key`,
-//!   `vertex-api-key`, `xai-api-key`, `meta-api-key`, `xai`, `antigravity`,
-//!   `antigravity-signature-*`, `devin`.
+//! - Other providers: `interactions-api-key`, `xai-api-key`,
+//!   `meta-api-key`, `xai`, `antigravity`, `antigravity-signature-*`,
+//!   `devin`.
 //! - Features not ported here: `plugins`, `pprof`, `discovery`,
 //!   `commercial-mode`, `payload`, `disable-image-generation`,
 //!   `gpt-image-2-base-model`, `video-result-auth-cache-ttl`,
@@ -78,10 +80,10 @@ pub use safe_mode::example_api_key_warning_page;
 pub use types::{
     ClaudeConfig, ClaudeKey, ClaudeModel, ClientConfig, CodexClientConfig, CodexConfig,
     CodexHeaderDefaults, CodexKey, CodexModel, Config, DEFAULT_AUTH_DIR,
-    DEFAULT_PANEL_GITHUB_REPOSITORY, OAuthModelAlias, OAuthModelSetting, OpenAiCompatibility,
-    OpenAiCompatibilityApiKey, OpenAiCompatibilityModel, QuotaExceeded, RemoteManagement,
-    RequestScopedErrorRule, RoutingConfig, RoutingStrategy, StreamingConfig, ThinkingSupport,
-    TlsConfig,
+    DEFAULT_PANEL_GITHUB_REPOSITORY, GeminiKey, GeminiModel, OAuthModelAlias, OAuthModelSetting,
+    OpenAiCompatibility, OpenAiCompatibilityApiKey, OpenAiCompatibilityModel, QuotaExceeded,
+    RemoteManagement, RequestScopedErrorRule, RoutingConfig, RoutingStrategy, StreamingConfig,
+    ThinkingSupport, TlsConfig, VertexCompatKey, VertexCompatModel,
 };
 pub use watcher::{AuthFile, ConfigWatcher, WatchError, WatchEvent};
 

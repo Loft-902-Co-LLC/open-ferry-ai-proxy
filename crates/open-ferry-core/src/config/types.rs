@@ -99,6 +99,8 @@ pub struct Config {
     pub routing: RoutingConfig,
     /// Requires authentication on the WebSocket API. Defaults to true.
     pub ws_auth: bool,
+    /// Gemini API keys.
+    pub gemini_api_key: Vec<GeminiKey>,
     /// Codex API keys.
     pub codex_api_key: Vec<CodexKey>,
     /// Provider-wide Codex behavior.
@@ -111,6 +113,9 @@ pub struct Config {
     pub claude_api_key: Vec<ClaudeKey>,
     /// OpenAI-compatible upstreams.
     pub openai_compatibility: Vec<OpenAiCompatibility>,
+    /// Vertex AI API keys, for Vertex AI's express mode or a service that
+    /// takes Vertex AI's paths with an API key.
+    pub vertex_api_key: Vec<VertexCompatKey>,
     /// Models excluded per OAuth channel; keys and models are lower case.
     pub oauth_excluded_models: BTreeMap<String, Vec<String>>,
     /// Model aliases per OAuth channel.
@@ -154,12 +159,14 @@ impl Default for Config {
             quota_exceeded: QuotaExceeded::default(),
             routing: RoutingConfig::default(),
             ws_auth: true,
+            gemini_api_key: Vec::new(),
             codex_api_key: Vec::new(),
             codex: CodexConfig::default(),
             codex_header_defaults: CodexHeaderDefaults::default(),
             claude: ClaudeConfig::default(),
             claude_api_key: Vec::new(),
             openai_compatibility: Vec::new(),
+            vertex_api_key: Vec::new(),
             oauth_excluded_models: BTreeMap::new(),
             oauth_model_alias: BTreeMap::new(),
             oauth_request_scoped_errors: BTreeMap::new(),
@@ -222,12 +229,14 @@ impl fmt::Debug for Config {
             .field("quota_exceeded", &self.quota_exceeded)
             .field("routing", &self.routing)
             .field("ws_auth", &self.ws_auth)
+            .field("gemini_api_key", &self.gemini_api_key)
             .field("codex_api_key", &self.codex_api_key)
             .field("codex", &self.codex)
             .field("codex_header_defaults", &self.codex_header_defaults)
             .field("claude", &self.claude)
             .field("claude_api_key", &self.claude_api_key)
             .field("openai_compatibility", &self.openai_compatibility)
+            .field("vertex_api_key", &self.vertex_api_key)
             .field("oauth_excluded_models", &self.oauth_excluded_models)
             .field("oauth_model_alias", &self.oauth_model_alias)
             .field(
@@ -590,6 +599,146 @@ pub struct ClaudeModel {
     pub thinking: Option<ThinkingSupport>,
 }
 
+/// A Gemini API key and its routing settings.
+#[derive(Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, rename = "config.GeminiKey", rename_all = "kebab-case")]
+pub struct GeminiKey {
+    /// The key, sent as `x-goog-api-key`.
+    pub api_key: String,
+    /// Selection preference; higher wins.
+    pub priority: i64,
+    /// Share under weighted round robin, as for [`CodexKey::weight`].
+    pub weight: Option<i64>,
+    /// Namespaces this key's models (`teamA/gemini-3-pro-preview`).
+    pub prefix: String,
+    /// The endpoint; empty means the Gemini API. An entry needs a key or a
+    /// base URL, or it is dropped when loading.
+    pub base_url: String,
+    /// A proxy for this key, overriding the global one.
+    pub proxy_url: String,
+    /// Upstream model names and their aliases.
+    pub models: Vec<GeminiModel>,
+    /// Extra headers sent with this key.
+    pub headers: BTreeMap<String, String>,
+    /// Models this key doesn't serve; lower case.
+    pub excluded_models: Vec<String>,
+    /// Overrides `disable-cooling` for this key.
+    pub disable_cooling: Option<bool>,
+    /// Overrides `request-retry`; negative means the global value.
+    pub request_retry: Option<i64>,
+    /// How upstream errors are classified for this key.
+    pub request_scoped_errors: Vec<RequestScopedErrorRule>,
+}
+
+impl fmt::Debug for GeminiKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GeminiKey")
+            .field("api_key", &Redacted(&self.api_key))
+            .field("priority", &self.priority)
+            .field("weight", &self.weight)
+            .field("prefix", &self.prefix)
+            .field("base_url", &self.base_url)
+            .field("proxy_url", &Redacted(&self.proxy_url))
+            .field("models", &self.models)
+            .field("headers", &RedactedMap(&self.headers))
+            .field("excluded_models", &self.excluded_models)
+            .field("disable_cooling", &self.disable_cooling)
+            .field("request_retry", &self.request_retry)
+            .field("request_scoped_errors", &self.request_scoped_errors)
+            .finish()
+    }
+}
+
+/// A Gemini model served by an API key.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, rename = "config.GeminiModel", rename_all = "kebab-case")]
+pub struct GeminiModel {
+    /// The upstream model name.
+    pub name: String,
+    /// The name clients use.
+    pub alias: String,
+    /// A name shown in model lists.
+    pub display_name: String,
+    /// The context window advertised to Codex clients.
+    pub max_context_length: i64,
+    /// Rewrites model names in responses back to the alias.
+    pub force_mapping: bool,
+    /// Keeps thinking blocks with empty signatures for compatible upstreams.
+    pub is_compat: bool,
+    /// Reasoning support.
+    pub thinking: Option<ThinkingSupport>,
+}
+
+/// A Vertex AI API key: for Vertex AI's express mode, or for a service that
+/// takes Vertex AI's paths (`/v1/publishers/google/models/...`) with an API
+/// key.
+#[derive(Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, rename = "config.VertexCompatKey", rename_all = "kebab-case")]
+pub struct VertexCompatKey {
+    /// The key, sent as `x-goog-api-key`. Entries without one are dropped
+    /// when loading.
+    pub api_key: String,
+    /// Selection preference; higher wins.
+    pub priority: i64,
+    /// Share under weighted round robin, as for [`CodexKey::weight`].
+    pub weight: Option<i64>,
+    /// Namespaces this key's models.
+    pub prefix: String,
+    /// The endpoint, before `/v1/publishers/...`; empty means Vertex AI.
+    pub base_url: String,
+    /// A proxy for this key, overriding the global one.
+    pub proxy_url: String,
+    /// Extra headers sent with this key.
+    pub headers: BTreeMap<String, String>,
+    /// Upstream model names and their aliases. Only models with both are
+    /// kept.
+    pub models: Vec<VertexCompatModel>,
+    /// Models this key doesn't serve; lower case.
+    pub excluded_models: Vec<String>,
+    /// Overrides `disable-cooling` for this key.
+    pub disable_cooling: Option<bool>,
+    /// Overrides `request-retry`; negative means the global value.
+    pub request_retry: Option<i64>,
+}
+
+impl fmt::Debug for VertexCompatKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VertexCompatKey")
+            .field("api_key", &Redacted(&self.api_key))
+            .field("priority", &self.priority)
+            .field("weight", &self.weight)
+            .field("prefix", &self.prefix)
+            .field("base_url", &self.base_url)
+            .field("proxy_url", &Redacted(&self.proxy_url))
+            .field("headers", &RedactedMap(&self.headers))
+            .field("models", &self.models)
+            .field("excluded_models", &self.excluded_models)
+            .field("disable_cooling", &self.disable_cooling)
+            .field("request_retry", &self.request_retry)
+            .finish()
+    }
+}
+
+/// A model served by a Vertex AI API key.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(
+    default,
+    rename = "config.VertexCompatModel",
+    rename_all = "kebab-case"
+)]
+pub struct VertexCompatModel {
+    /// The upstream model name.
+    pub name: String,
+    /// The name clients use.
+    pub alias: String,
+    /// A name shown in model lists.
+    pub display_name: String,
+    /// Rewrites model names in responses back to the alias.
+    pub force_mapping: bool,
+    /// Reasoning support.
+    pub thinking: Option<ThinkingSupport>,
+}
+
 /// An OpenAI-compatible upstream: a Chat Completions endpoint, its keys and
 /// the models it serves.
 #[derive(Clone, Default, PartialEq, Eq, Deserialize)]
@@ -930,6 +1079,18 @@ mod tests {
             proxy_url: "socks5://u:p@h".to_owned(),
             ..ClaudeKey::default()
         });
+        config.gemini_api_key.push(GeminiKey {
+            api_key: "gemini-secret".to_owned(),
+            proxy_url: "http://gu:gp@proxy".to_owned(),
+            headers: BTreeMap::from([("X-Gemini".to_owned(), "gemini-hdr-secret".to_owned())]),
+            ..GeminiKey::default()
+        });
+        config.vertex_api_key.push(VertexCompatKey {
+            api_key: "vertex-secret".to_owned(),
+            proxy_url: "http://vu:vp@proxy".to_owned(),
+            headers: BTreeMap::from([("X-Vertex".to_owned(), "vertex-hdr-secret".to_owned())]),
+            ..VertexCompatKey::default()
+        });
         config.openai_compatibility.push(OpenAiCompatibility {
             name: "compat".to_owned(),
             headers: BTreeMap::from([("X-Compat".to_owned(), "compat-hdr-secret".to_owned())]),
@@ -952,11 +1113,19 @@ mod tests {
             "compat-secret",
             "compat-hdr-secret",
             "cu:cp",
+            "gemini-secret",
+            "gu:gp",
+            "gemini-hdr-secret",
+            "vertex-secret",
+            "vu:vp",
+            "vertex-hdr-secret",
         ] {
             assert!(!text.contains(secret), "{secret} leaked");
         }
         assert!(text.contains("Authorization"));
         assert!(text.contains("X-Compat"));
+        assert!(text.contains("X-Gemini"));
+        assert!(text.contains("X-Vertex"));
     }
 
     #[test]

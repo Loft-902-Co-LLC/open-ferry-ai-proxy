@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/config/config_normalization.go,
-// trusted_proxies.go, weight.go (ValidateCredentialWeights), the post-decode
+// vertex_compat.go (SanitizeVertexCompatKeys), trusted_proxies.go, weight.go (ValidateCredentialWeights), the post-decode
 // steps of config_load.go and parse.go, and internal/util/util.go
 // (ResolveAuthDir) (v8.0.10, MIT), and internal/config/oauth_scope.go
 // (ForAPIKey) (v8.0.11, MIT).
@@ -30,13 +30,14 @@ use open_ferry_translate::go::to_lower;
 
 use super::paths::{self, Os};
 use super::types::{
-    ClaudeKey, CodexKey, Config, DEFAULT_PANEL_GITHUB_REPOSITORY, OAuthModelAlias,
-    OAuthModelSetting, OpenAiCompatibility, RequestScopedErrorRule,
+    ClaudeKey, CodexKey, Config, DEFAULT_PANEL_GITHUB_REPOSITORY, GeminiKey, OAuthModelAlias,
+    OAuthModelSetting, OpenAiCompatibility, RequestScopedErrorRule, VertexCompatKey,
 };
 use super::v8::check_weight;
 use super::yaml::go_quote;
 use super::{ConfigError, ConfigErrorKind};
 use crate::auth::equal_fold;
+use crate::auth::synthesizer::format_sorted_headers;
 
 impl Config {
     /// The config to use for a request made with an API key rather than an
@@ -86,6 +87,8 @@ pub(crate) fn post_process(config: &mut Config) -> Result<(), ConfigError> {
     if config.max_retry_credentials < 0 {
         config.max_retry_credentials = 0;
     }
+    sanitize_gemini_keys(&mut config.gemini_api_key);
+    sanitize_vertex_keys(&mut config.vertex_api_key);
     sanitize_codex_keys(&mut config.codex_api_key);
     config.codex_header_defaults.beta_features =
         config.codex_header_defaults.beta_features.trim().to_owned();
@@ -138,12 +141,20 @@ fn is_cidr(text: &str) -> bool {
     trimmed.len() <= 3 && trimmed.parse::<u32>().unwrap_or(0) <= size
 }
 
-/// Upstream's `ValidateCredentialWeights` for the key lists this port reads.
+/// Upstream's `ValidateCredentialWeights` for the key lists this port reads,
+/// in upstream's order.
 fn validate_weights(config: &Config) -> Result<(), ConfigError> {
-    // Upstream checks Claude keys before Codex keys.
+    check_family_weights(
+        "gemini-api-key",
+        config.gemini_api_key.iter().map(|key| key.weight),
+    )?;
     check_family_weights(
         "claude-api-key",
         config.claude_api_key.iter().map(|key| key.weight),
+    )?;
+    check_family_weights(
+        "vertex-api-key",
+        config.vertex_api_key.iter().map(|key| key.weight),
     )?;
     check_family_weights(
         "codex-api-key",
@@ -229,6 +240,61 @@ fn normalize_oauth_excluded_models(
         }
     }
     out
+}
+
+/// Upstream's `SanitizeGeminiKeys` (`sanitizeGeminiKeyEntries`): drops
+/// entries with neither a key nor a base URL, cleans up the rest, and keeps
+/// the first of entries alike in key, base URL, proxy, prefix and headers.
+fn sanitize_gemini_keys(keys: &mut Vec<GeminiKey>) {
+    let mut seen = HashSet::new();
+    keys.retain_mut(|key| {
+        key.api_key = key.api_key.trim().to_owned();
+        key.base_url = key.base_url.trim().to_owned();
+        if key.api_key.is_empty() && key.base_url.is_empty() {
+            return false;
+        }
+        key.prefix = normalize_model_prefix(&key.prefix);
+        key.proxy_url = key.proxy_url.trim().to_owned();
+        key.headers = normalize_headers(&key.headers);
+        key.excluded_models = normalize_excluded_models(&key.excluded_models);
+        seen.insert(gemini_key_dedup_id(key))
+    });
+}
+
+/// Upstream's `formatGeminiKeyDedupID`.
+fn gemini_key_dedup_id(key: &GeminiKey) -> String {
+    [
+        key.api_key.as_str(),
+        &key.base_url,
+        &key.proxy_url,
+        &key.prefix,
+        &format_sorted_headers(&key.headers),
+    ]
+    .join("\0")
+}
+
+/// Upstream's `SanitizeVertexCompatKeys`: drops entries without a key and
+/// models without both a name and an alias, cleans up the rest, and keeps
+/// the first of entries alike in key and base URL.
+fn sanitize_vertex_keys(keys: &mut Vec<VertexCompatKey>) {
+    let mut seen = HashSet::new();
+    keys.retain_mut(|key| {
+        key.api_key = key.api_key.trim().to_owned();
+        if key.api_key.is_empty() {
+            return false;
+        }
+        key.prefix = normalize_model_prefix(&key.prefix);
+        key.base_url = key.base_url.trim().to_owned();
+        key.proxy_url = key.proxy_url.trim().to_owned();
+        key.headers = normalize_headers(&key.headers);
+        key.excluded_models = normalize_excluded_models(&key.excluded_models);
+        key.models.retain_mut(|model| {
+            model.alias = model.alias.trim().to_owned();
+            model.name = model.name.trim().to_owned();
+            !model.alias.is_empty() && !model.name.is_empty()
+        });
+        seen.insert(format!("{}|{}", key.api_key, key.base_url))
+    });
 }
 
 /// Upstream's `SanitizeCodexKeys`: drops keys without a base URL.
@@ -381,7 +447,7 @@ fn sanitize_oauth_request_scoped_errors(
 mod tests {
     use std::collections::BTreeSet;
 
-    use super::super::types::OpenAiCompatibilityApiKey;
+    use super::super::types::{OpenAiCompatibilityApiKey, VertexCompatModel};
     use super::*;
 
     /// The OAuth-scoped settings [`Config::for_api_key`] resets.
@@ -553,6 +619,133 @@ mod tests {
                     .to_owned()
             )
         );
+    }
+
+    // gemini_keys_normalization_test.go:
+    // TestSanitizeGeminiKeys_AllowsEmptyAPIKeyWithBaseURL, minus the
+    // interactions keys, which aren't ported.
+    #[test]
+    fn sanitize_gemini_keys_allows_empty_api_key_with_base_url() {
+        let base = "https://custom-gemini.example.com";
+        let header =
+            |name: &str, value: &str| BTreeMap::from([(name.to_owned(), value.to_owned())]);
+        let mut keys = vec![
+            GeminiKey::default(),
+            GeminiKey {
+                api_key: "  ".to_owned(),
+                ..GeminiKey::default()
+            },
+            GeminiKey {
+                base_url: base.to_owned(),
+                headers: header("Header-A", "1"),
+                ..GeminiKey::default()
+            },
+            GeminiKey {
+                base_url: base.to_owned(),
+                headers: header("Header-B", "2"),
+                ..GeminiKey::default()
+            },
+            GeminiKey {
+                api_key: "key-1".to_owned(),
+                base_url: base.to_owned(),
+                ..GeminiKey::default()
+            },
+        ];
+        sanitize_gemini_keys(&mut keys);
+        assert_eq!(keys.len(), 3);
+        assert_eq!(keys[0].base_url, base);
+    }
+
+    // config_normalization.go: the rest of SanitizeGeminiKeys (no upstream
+    // test).
+    #[test]
+    fn gemini_keys_are_cleaned_and_deduplicated() {
+        let key = |api_key: &str, headers: &[(&str, &str)]| GeminiKey {
+            api_key: api_key.to_owned(),
+            prefix: " /team/ ".to_owned(),
+            proxy_url: " socks5://proxy ".to_owned(),
+            headers: headers
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect(),
+            excluded_models: strings(&[" Gemini-2.5-PRO ", "", "gemini-2.5-pro"]),
+            ..GeminiKey::default()
+        };
+        let mut keys = vec![
+            key(" k ", &[(" X-A ", " 1 "), ("X-B", " ")]),
+            key("k", &[("X-A", "1")]),
+            key("k", &[("X-A", "2")]),
+        ];
+        sanitize_gemini_keys(&mut keys);
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[0].api_key, "k");
+        assert_eq!(keys[0].prefix, "team");
+        assert_eq!(keys[0].proxy_url, "socks5://proxy");
+        assert_eq!(
+            keys[0].headers,
+            BTreeMap::from([("X-A".to_owned(), "1".to_owned())])
+        );
+        assert_eq!(keys[0].excluded_models, strings(&["gemini-2.5-pro"]));
+        assert_eq!(
+            keys[1].headers,
+            BTreeMap::from([("X-A".to_owned(), "2".to_owned())])
+        );
+    }
+
+    // vertex_compat.go: SanitizeVertexCompatKeys (no upstream test).
+    #[test]
+    fn vertex_keys_need_a_key_and_models_need_both_names() {
+        let model = |name: &str, alias: &str| VertexCompatModel {
+            name: name.to_owned(),
+            alias: alias.to_owned(),
+            ..VertexCompatModel::default()
+        };
+        let mut keys = vec![
+            VertexCompatKey {
+                api_key: " ".to_owned(),
+                base_url: "https://vertex.example.com".to_owned(),
+                ..VertexCompatKey::default()
+            },
+            VertexCompatKey {
+                api_key: " v ".to_owned(),
+                base_url: " https://vertex.example.com ".to_owned(),
+                prefix: "/p/".to_owned(),
+                proxy_url: " direct ".to_owned(),
+                headers: BTreeMap::from([(" X-A ".to_owned(), " 1 ".to_owned())]),
+                models: vec![
+                    model(" gemini-2.5-pro ", " vertex-pro "),
+                    model("gemini-2.5-flash", " "),
+                    model(" ", "alias"),
+                ],
+                excluded_models: strings(&[" A "]),
+                ..VertexCompatKey::default()
+            },
+            // Same key and base URL: a duplicate, whatever the headers.
+            VertexCompatKey {
+                api_key: "v".to_owned(),
+                base_url: "https://vertex.example.com".to_owned(),
+                headers: BTreeMap::from([("X-B".to_owned(), "2".to_owned())]),
+                ..VertexCompatKey::default()
+            },
+            VertexCompatKey {
+                api_key: "v".to_owned(),
+                ..VertexCompatKey::default()
+            },
+        ];
+        sanitize_vertex_keys(&mut keys);
+        assert_eq!(keys.len(), 2);
+        let kept = &keys[0];
+        assert_eq!(kept.api_key, "v");
+        assert_eq!(kept.base_url, "https://vertex.example.com");
+        assert_eq!(kept.prefix, "p");
+        assert_eq!(kept.proxy_url, "direct");
+        assert_eq!(
+            kept.headers,
+            BTreeMap::from([("X-A".to_owned(), "1".to_owned())])
+        );
+        assert_eq!(kept.models, [model("gemini-2.5-pro", "vertex-pro")]);
+        assert_eq!(kept.excluded_models, strings(&["a"]));
+        assert_eq!(keys[1].base_url, "");
     }
 
     // config_normalization.go: SanitizeOpenAICompatibility (no upstream test).

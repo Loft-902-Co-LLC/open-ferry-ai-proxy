@@ -112,7 +112,7 @@ mod tests {
     use super::*;
     use crate::config::RoutingStrategy;
     use crate::config::testing::TempDir;
-    use crate::config::types::{CodexModel, RoutingConfig};
+    use crate::config::types::{CodexModel, GeminiModel, RoutingConfig};
     use ConfigErrorKind::{Decode, Invalid, Syntax};
 
     const LOAD: &str = "failed to parse config file: ";
@@ -607,10 +607,14 @@ mod tests {
              codex-api-key:\n  - api-key: codex-key\n    base-url: https://codex.example.com\n    \
              disable-cooling: false\n\
              openai-compatibility:\n  - name: compat\n    base-url: https://compat.example.com/v1\n    \
+             disable-cooling: false\n\
+             vertex-api-key:\n  - api-key: vertex-key\n    base-url: https://vertex.example.com\n    \
              disable-cooling: false\n",
         );
         assert!(config.disable_cooling);
         assert_eq!(config.openai_compatibility[0].disable_cooling, Some(false));
+        assert_eq!(config.gemini_api_key[0].disable_cooling, Some(false));
+        assert_eq!(config.vertex_api_key[0].disable_cooling, Some(false));
         let claude: Vec<Option<bool>> = config
             .claude_api_key
             .iter()
@@ -636,9 +640,12 @@ mod tests {
             ("1000001", false),
             ("9223372036854775808", false),
         ] {
-            // Upstream checks gemini keys, which are checked here too before
-            // the section is ignored.
-            for family in ["gemini-api-key", "codex-api-key", "claude-api-key"] {
+            for family in [
+                "gemini-api-key",
+                "codex-api-key",
+                "claude-api-key",
+                "vertex-api-key",
+            ] {
                 let text = format!("{family}:\n  - api-key: key\n    weight: {weight}\n");
                 assert_eq!(Config::parse(&text).is_ok(), valid, "{text:?}");
             }
@@ -660,7 +667,10 @@ mod tests {
     #[test]
     fn request_retry_overrides() {
         let config = parse(
-            "codex-api-key:\n  - api-key: codex-neg\n    base-url: https://codex.example.com\n    \
+            "gemini-api-key:\n  - api-key: gemini-zero\n    request-retry: 0\n  \
+             - api-key: gemini-unset\n\
+             vertex-api-key:\n  - api-key: vertex-four\n    request-retry: 4\n\
+             codex-api-key:\n  - api-key: codex-neg\n    base-url: https://codex.example.com\n    \
              request-retry: -1\n  - api-key: codex-unset\n    base-url: https://codex.example.com\n\
              claude-api-key:\n  - api-key: claude-three\n    request-retry: 3\n\
              openai-compatibility:\n  - name: compat\n    base-url: https://compat.example.com/v1\n    \
@@ -679,6 +689,18 @@ mod tests {
             .map(|k| k.request_retry)
             .collect();
         assert_eq!(claude, [Some(3)]);
+        let gemini: Vec<Option<i64>> = config
+            .gemini_api_key
+            .iter()
+            .map(|k| k.request_retry)
+            .collect();
+        assert_eq!(gemini, [Some(0), None]);
+        let vertex: Vec<Option<i64>> = config
+            .vertex_api_key
+            .iter()
+            .map(|k| k.request_retry)
+            .collect();
+        assert_eq!(vertex, [Some(4)]);
     }
 
     // api_key_is_compat_test.go, is_compat_test.go, max_context_length_test.go
@@ -696,7 +718,35 @@ mod tests {
              alias: codex-native\n\
              openai-compatibility:\n  - name: compat\n    models:\n      - name: compat-upstream\n        \
              alias: compat-alias\n        is-compat: true\n        display-name: Compatibility Name\n        \
-             max-context-length: 1048576\n      - name: compat-native\n        alias: compat-native\n",
+             max-context-length: 1048576\n      - name: compat-native\n        alias: compat-native\n\
+             gemini-api-key:\n  - models:\n      - name: gemini-upstream\n        \
+             alias: gemini-alias\n        is-compat: true\n        display-name: Gemini Name\n        \
+             max-context-length: 1048576\n      - name: gemini-native\n        alias: gemini-native\n\
+             vertex-api-key:\n  - models:\n      - name: vertex-upstream\n        \
+             alias: vertex-alias\n        display-name: Vertex Name\n",
+        );
+        assert_eq!(
+            config.gemini_api_key.first().map(|key| key.models.clone()),
+            Some(vec![
+                GeminiModel {
+                    name: "gemini-upstream".to_owned(),
+                    alias: "gemini-alias".to_owned(),
+                    display_name: "Gemini Name".to_owned(),
+                    max_context_length: 1_048_576,
+                    is_compat: true,
+                    ..GeminiModel::default()
+                },
+                GeminiModel {
+                    name: "gemini-native".to_owned(),
+                    alias: "gemini-native".to_owned(),
+                    ..GeminiModel::default()
+                },
+            ])
+        );
+        let vertex = config.vertex_api_key.first().map(|key| &key.models[0]);
+        assert_eq!(
+            vertex.map(|model| model.display_name.as_str()),
+            Some("Vertex Name")
         );
         let compat = &config
             .openai_compatibility
@@ -1049,7 +1099,12 @@ mod tests {
     #[test]
     fn request_scoped_errors() {
         let config = parse(
-            "\ncodex-api-key:\n  - api-key: codex-key-1\n    base-url: https://codex.example.com/v1\n    \
+            "\ngemini-api-key:\n  - api-key: gemini-key-1\n    request-scoped-errors:\n      \
+             - status: 400\n        match:\n          - \"maximum_context_length\"\n          \
+             - \"context_length_exceeded\"\n        match-regexr:\n          \
+             - \"maximum_context_length$\"\n          - \"^context_length_exceeded\"\n        \
+             action: stop\n\
+             codex-api-key:\n  - api-key: codex-key-1\n    base-url: https://codex.example.com/v1\n    \
              request-scoped-errors:\n      - status: 400\n        match:\n          \
              - \"context_window_exceeded\"\n        action: stop-and-cooldown\n\
              claude-api-key:\n  - api-key: claude-key-1\n    request-scoped-errors:\n      \
@@ -1089,6 +1144,15 @@ mod tests {
         let rule = claude.first().expect("a rule");
         assert_eq!((rule.status, rule.action.as_str()), (400, "stop"));
         assert_eq!((rule.matches.len(), rule.match_regexr.len()), (1, 1));
+        let gemini = &config
+            .gemini_api_key
+            .first()
+            .expect("a gemini key")
+            .request_scoped_errors;
+        assert_eq!(gemini.len(), 1);
+        let rule = gemini.first().expect("a rule");
+        assert_eq!((rule.status, rule.action.as_str()), (400, "stop"));
+        assert_eq!((rule.matches.len(), rule.match_regexr.len()), (2, 2));
     }
 
     // oauth_settings_test.go
@@ -1285,6 +1349,7 @@ mod tests {
         assert_eq!(active.request_retry, 3);
         assert!(active.quota_exceeded.antigravity_credits);
         assert!(active.codex_api_key.is_empty() && active.claude_api_key.is_empty());
+        assert!(active.gemini_api_key.is_empty() && active.vertex_api_key.is_empty());
         assert!(active.has_example_api_keys());
 
         // The provider examples, uncommented as an operator would.
@@ -1308,8 +1373,10 @@ mod tests {
         let config = parse(&format!("{text}\n{uncommented}"));
         assert_eq!(config.port, 8317);
         assert_eq!(config.api_keys.len(), 3);
+        assert_eq!(config.gemini_api_key.len(), 3);
         assert_eq!(config.codex_api_key.len(), 1);
         assert_eq!(config.claude_api_key.len(), 2);
+        assert_eq!(config.vertex_api_key.len(), 1);
         assert!(config.quota_exceeded.antigravity_credits);
         assert!(!config.quota_exceeded.switch_project);
         assert!(!config.quota_exceeded.switch_preview_model);
@@ -1378,7 +1445,39 @@ mod tests {
     );
 
     fn key_summaries(config: &Config, provider: &str) -> Vec<KeySummary> {
-        if provider == "codex" {
+        if provider == "gemini" {
+            let summary = |k: &crate::config::GeminiKey| {
+                (
+                    k.api_key.clone(),
+                    k.priority,
+                    k.weight,
+                    k.prefix.clone(),
+                    k.proxy_url.clone(),
+                    k.headers.len(),
+                    k.models.len(),
+                    k.excluded_models.len(),
+                    k.disable_cooling,
+                    k.request_retry,
+                )
+            };
+            config.gemini_api_key.iter().map(summary).collect()
+        } else if provider == "vertex" {
+            let summary = |k: &crate::config::VertexCompatKey| {
+                (
+                    k.api_key.clone(),
+                    k.priority,
+                    k.weight,
+                    k.prefix.clone(),
+                    k.proxy_url.clone(),
+                    k.headers.len(),
+                    k.models.len(),
+                    k.excluded_models.len(),
+                    k.disable_cooling,
+                    k.request_retry,
+                )
+            };
+            config.vertex_api_key.iter().map(summary).collect()
+        } else if provider == "codex" {
             let summary = |k: &crate::config::CodexKey| {
                 (
                     k.api_key.clone(),
@@ -1415,8 +1514,8 @@ mod tests {
 
     #[test]
     fn v8_key_inheritance() {
-        // Upstream runs this for every provider; codex and claude are typed here.
-        for provider in ["codex", "claude"] {
+        // Upstream runs this for every provider; these are the typed ones.
+        for provider in ["gemini", "vertex", "codex", "claude"] {
             let text = format!(
                 "request-retry: 9\napi-keys:\n  {provider}:\n    - name: shared\n      \
                  base-url: https://example.invalid\n      priority: 7\n      prefix: group\n      \
@@ -1782,8 +1881,13 @@ mod tests {
             .map(|k| (k.api_key.as_str(), k.request_retry))
             .collect();
         assert_eq!(keys, [("first", Some(0)), ("second", Some(0))]);
-        // Upstream checks merge precedence on gemini groups, which this port
-        // ignores; the same groups under codex:
+        let keys: Vec<(&str, Option<i64>)> = after
+            .gemini_api_key
+            .iter()
+            .map(|k| (k.api_key.as_str(), k.request_retry))
+            .collect();
+        assert_eq!(keys, [("one", Some(2)), ("two", Some(0))]);
+        // The same groups under codex:
         let config = parse(
             "api-keys:\n  codex:\n    - &upstream\n      name: first\n      \
              base-url: https://example.invalid\n      request-retry: 2\n      \
