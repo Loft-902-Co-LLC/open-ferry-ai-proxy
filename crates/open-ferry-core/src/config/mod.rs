@@ -82,7 +82,7 @@ pub use types::{
     RemoteManagement, RequestScopedErrorRule, RoutingConfig, RoutingStrategy, StreamingConfig,
     ThinkingSupport, TlsConfig,
 };
-pub use watcher::{ConfigWatcher, WatchError, WatchEvent};
+pub use watcher::{AuthFile, ConfigWatcher, WatchError, WatchEvent};
 
 /// What kind of problem stopped a config from loading.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

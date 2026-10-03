@@ -17,8 +17,8 @@
 //!   executors; the API-key credentials are made again from it, and every
 //!   credential's models registered again, as aliases and exclusions may
 //!   have changed.
-//! - An auth file that is added or changes is read and registered; one that
-//!   is removed is unregistered.
+//! - An auth file that is added or changes is registered from the contents
+//!   the watcher read; one that is removed is unregistered.
 //!
 //! Credentials read from files or the config aren't saved back; the manager
 //! saves those it changes itself, as after a refresh.
@@ -33,6 +33,10 @@
 //!   address fails to parse.
 //! - Changing `host`, `port` or `tls` takes a restart, as upstream; a reload
 //!   logs that it was ignored.
+//! - The auth directory is made absolute, as the watcher's paths are, so a
+//!   credential file has the same `path` and ID whether it was found at
+//!   start or reported by the watcher. Upstream keeps a relative directory
+//!   relative, and so do its watcher's paths.
 //! - The cooldown state store, usage statistics, pprof, the discovery
 //!   advertiser, the WebSocket gateway, plugins and Home aren't ported.
 
@@ -45,12 +49,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use open_ferry_core::auth::file_store::read_capped;
 use open_ferry_core::auth::synthesizer::api_key::{ApiKeyEntry, synthesize_api_key_auths};
 use open_ferry_core::auth::synthesizer::file::{synthesize_auth_file, synthesize_file_auths};
 use open_ferry_core::auth::synthesizer::{StableIdGenerator, SynthesisContext};
 use open_ferry_core::auth::{Auth, FileStore, Status};
-use open_ferry_core::config::{Config, ConfigWatcher, WatchEvent};
+use open_ferry_core::config::{AuthFile, Config, ConfigWatcher, WatchEvent};
 use open_ferry_core::manager::{Manager, Settings};
 use open_ferry_core::registry::{ModelRegistry, RegistrationRules};
 use open_ferry_providers::claude::ClaudeExecutor;
@@ -234,6 +237,7 @@ struct Service {
 
 impl Service {
     fn new(config: Arc<Config>, auth_dir: PathBuf, log_level: LogLevel) -> Self {
+        let auth_dir = absolute_dir(auth_dir);
         let registry = Arc::new(ModelRegistry::new());
         let store = Arc::new(FileStore::new(&auth_dir));
         let manager = Manager::new(
@@ -377,8 +381,8 @@ impl Service {
             WatchEvent::ConfigInvalid(error) => {
                 tracing::error!("failed to reload config: {error}; keeping the current one");
             }
-            WatchEvent::AuthAdded(path) | WatchEvent::AuthChanged(path) => {
-                self.load_auth_file(&path)
+            WatchEvent::AuthAdded(file) | WatchEvent::AuthChanged(file) => {
+                self.load_auth_file(&file)
             }
             WatchEvent::AuthRemoved(path) => {
                 if let Some(id) = self.file_auths.remove(&path) {
@@ -390,16 +394,11 @@ impl Service {
         Watching::Same
     }
 
-    /// Registers the credential in auth file `path`.
-    fn load_auth_file(&mut self, path: &Path) {
-        let data = match read_capped(path) {
-            Ok(data) => data,
-            Err(error) => {
-                tracing::debug!("skipping auth file {}: {error}", path.display());
-                return;
-            }
-        };
-        let auth = match synthesize_auth_file(&self.synthesis_context(), path, &data) {
+    /// Registers the credential in an auth file, from the contents the
+    /// watcher read.
+    fn load_auth_file(&mut self, file: &AuthFile) {
+        let path = file.path.as_path();
+        let auth = match synthesize_auth_file(&self.synthesis_context(), path, &file.data) {
             Ok(auth) => auth,
             Err(error) => {
                 tracing::warn!("skipping auth file {}: {error}", path.display());
@@ -444,7 +443,7 @@ impl Service {
         }
 
         let mut watching = Watching::Same;
-        match config.resolve_auth_dir() {
+        match config.resolve_auth_dir().map(absolute_dir) {
             Ok(auth_dir) if auth_dir != self.auth_dir => {
                 tracing::info!("auth directory changed to {}", auth_dir.display());
                 if let Err(error) = ensure_auth_dir(&auth_dir) {
@@ -489,6 +488,12 @@ impl Service {
 
 fn is_disabled(auth: &Auth) -> bool {
     auth.disabled || auth.status == Status::Disabled
+}
+
+/// `dir` made absolute against the current directory, as the watcher makes
+/// it; unchanged when that fails, as for an empty path.
+fn absolute_dir(dir: PathBuf) -> PathBuf {
+    std::path::absolute(&dir).unwrap_or(dir)
 }
 
 /// Creates the auth directory if needed, readable by its owner only
@@ -611,6 +616,14 @@ mod tests {
         service
     }
 
+    /// What the watcher reports for `path` with its current contents.
+    fn auth_file(path: &Path) -> AuthFile {
+        AuthFile {
+            path: path.to_owned(),
+            data: std::fs::read(path).unwrap().into(),
+        }
+    }
+
     fn codex_file(dir: &Path, name: &str, extra: &str) -> PathBuf {
         let path = dir.join(name);
         let body =
@@ -653,10 +666,10 @@ mod tests {
         assert_eq!(service.file_auths.get(&path), Some(&id));
 
         // The watcher reports the same file again, then a change to it.
-        service.handle(WatchEvent::AuthAdded(path.clone()), Path::new(""));
+        service.handle(WatchEvent::AuthAdded(auth_file(&path)), Path::new(""));
         codex_file(dir.path(), "codex-a.json", r#","prefix":"team""#);
         let changed = std::fs::read(&path).unwrap();
-        service.handle(WatchEvent::AuthChanged(path.clone()), Path::new(""));
+        service.handle(WatchEvent::AuthChanged(auth_file(&path)), Path::new(""));
         assert_eq!(service.manager.list().len(), 1);
         assert_eq!(service.manager.get(&id).unwrap().prefix, "team");
         assert_ne!(written, changed);
@@ -677,14 +690,104 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = codex_file(dir.path(), "codex-a.json", "");
         let mut service = service(dir.path(), "");
-        service.handle(WatchEvent::AuthAdded(path.clone()), Path::new(""));
+        service.handle(WatchEvent::AuthAdded(auth_file(&path)), Path::new(""));
         let id = service.manager.list()[0].id.clone();
 
-        std::fs::write(&path, "{not json").unwrap();
-        service.handle(WatchEvent::AuthChanged(path.clone()), Path::new(""));
+        let broken = AuthFile {
+            path: path.clone(),
+            data: Arc::from(&b"{not json"[..]),
+        };
+        service.handle(WatchEvent::AuthChanged(broken), Path::new(""));
         assert!(service.manager.get(&id).is_none());
         assert!(service.registry.models_for_client(&id).is_empty());
         assert!(service.file_auths.is_empty());
+    }
+
+    #[tokio::test]
+    async fn auth_events_load_the_contents_the_watcher_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = codex_file(dir.path(), "codex-a.json", r#","prefix":"team""#);
+        let checked = auth_file(&path);
+        // A write that doesn't parse lands while the event waits.
+        std::fs::write(&path, "{not json").unwrap();
+        let mut service = service(dir.path(), "");
+        service.handle(WatchEvent::AuthAdded(checked), Path::new(""));
+        let auths = service.manager.list();
+        assert_eq!(auths.len(), 1);
+        assert_eq!(auths[0].prefix, "team");
+        assert_eq!(service.file_auths.get(&path), Some(&auths[0].id));
+    }
+
+    /// `path` relative to the current directory, when they share a root.
+    fn relative_to_cwd(path: &Path) -> Option<PathBuf> {
+        let cwd = std::env::current_dir().ok()?;
+        let mut base = cwd.components().peekable();
+        let mut target = path.components().peekable();
+        let mut shared = 0;
+        while let (Some(a), Some(b)) = (base.peek(), target.peek()) {
+            if a != b {
+                break;
+            }
+            base.next();
+            target.next();
+            shared += 1;
+        }
+        if shared == 0 {
+            return None;
+        }
+        let mut out: PathBuf = base.map(|_| std::path::Component::ParentDir).collect();
+        out.extend(target);
+        Some(out)
+    }
+
+    #[tokio::test]
+    async fn a_relative_auth_dir_gives_one_id_per_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(relative) = relative_to_cwd(dir.path()) else {
+            return;
+        };
+        assert!(relative.is_relative());
+        codex_file(dir.path(), "codex-a.json", "");
+        let config_dir = tempfile::tempdir().unwrap();
+        let config_path = config_dir.path().join("config.yaml");
+        let yaml = format!("auth-dir: '{}'\n", relative.display());
+        std::fs::write(&config_path, &yaml).unwrap();
+        let config = Arc::new(Config::parse(yaml).unwrap());
+
+        let mut service = Service::new(Arc::clone(&config), relative, LogLevel::detached());
+        service.register_executors();
+        service.load_file_auths();
+        let auths = service.manager.list();
+        assert_eq!(auths.len(), 1);
+        let id = auths[0].id.clone();
+
+        // The watcher reports the file under its absolute directory.
+        let (watcher, mut events) = ConfigWatcher::start(&config_path, &config).unwrap();
+        assert_eq!(watcher.auth_dir(), service.auth_dir);
+        let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let WatchEvent::AuthAdded(file) = event else {
+            panic!("expected an added auth file, got {event:?}");
+        };
+        let path = file.path.clone();
+        service.handle(WatchEvent::AuthAdded(file), &config_path);
+        assert_eq!(service.manager.list().len(), 1);
+        assert!(service.manager.get(&id).is_some());
+        assert_eq!(service.file_auths.get(&path), Some(&id));
+
+        service.handle(WatchEvent::AuthRemoved(path), &config_path);
+        assert!(service.manager.list().is_empty());
+        assert!(service.file_auths.is_empty());
+
+        // A reload naming the same directory keeps the watcher.
+        let same = Arc::new(Config::parse(std::fs::read_to_string(&config_path).unwrap()).unwrap());
+        service.watcher = Some(watcher);
+        assert!(matches!(
+            service.handle(WatchEvent::ConfigChanged(same), &config_path),
+            Watching::Same
+        ));
     }
 
     #[tokio::test]

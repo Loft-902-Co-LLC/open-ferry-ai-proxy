@@ -26,12 +26,17 @@
 //! skipped.
 //!
 //! The watcher stops when the [`ConfigWatcher`] is dropped or the receiver
-//! is closed. When the channel is full it waits for the consumer.
+//! is closed. When the channel is full it waits for the consumer, and still
+//! stops if the [`ConfigWatcher`] is dropped meanwhile.
 //!
 //! Deviations from upstream:
 //! - Events go out on a channel; upstream calls a reload callback and builds
-//!   and dispatches auth records itself. The consumer reads the file named in
-//!   an auth event.
+//!   and dispatches auth records itself. An auth event carries the contents
+//!   the watcher read, hashed and checked, as upstream builds its records
+//!   from those bytes, so a write that doesn't parse, made before the
+//!   consumer gets to the event, doesn't change what is loaded.
+//! - Auth files are read with the credential store's size cap
+//!   ([`read_capped`]); a larger file is skipped as one that can't be read.
 //! - The directory holding the config file is watched rather than the file,
 //!   so an editor that saves by replacing the file is still followed. Events
 //!   for other files there are ignored, as upstream ignores them.
@@ -52,6 +57,7 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self as std_mpsc, RecvTimeoutError};
 use std::time::{Duration, Instant};
 use std::{fmt, fs, thread};
@@ -66,6 +72,7 @@ use super::ConfigError;
 use super::load::load_bytes;
 use super::paths::{self, Os};
 use super::types::Config;
+use crate::auth::file_store::read_capped;
 
 /// How long a removed or renamed auth file gets to reappear before it
 /// counts as removed.
@@ -82,6 +89,8 @@ const AUTH_REMOVE_DEBOUNCE_WINDOW: Duration = Duration::from_secs(1);
 const REMOVE_TIMES_LIMIT: usize = 128;
 /// Events waiting for the consumer.
 const EVENT_CAPACITY: usize = 64;
+/// How often a send to a full channel checks whether the watcher stopped.
+const FULL_CHANNEL_POLL: Duration = Duration::from_millis(10);
 
 /// A change to the config file or the auth directory.
 #[derive(Clone, Debug, PartialEq)]
@@ -93,13 +102,22 @@ pub enum WatchEvent {
     /// The config file changed but didn't load. Keep the current config.
     ConfigInvalid(ConfigError),
     /// An auth file appeared, or was there at start. Load it.
-    AuthAdded(PathBuf),
+    AuthAdded(AuthFile),
     /// A known auth file has new contents. Load it again.
-    AuthChanged(PathBuf),
+    AuthChanged(AuthFile),
     /// A known auth file was removed. Drop what was loaded from it. Files
     /// that never parsed are known too, so this may name a file that was
     /// never added.
     AuthRemoved(PathBuf),
+}
+
+/// An auth file and the contents the watcher read and checked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthFile {
+    /// The file, in the auth directory.
+    pub path: PathBuf,
+    /// Its contents when the watcher read them: a JSON object or `null`.
+    pub data: Arc<[u8]>,
 }
 
 /// Why a watcher couldn't start.
@@ -129,6 +147,7 @@ pub struct ConfigWatcher {
     config_path: PathBuf,
     auth_dir: PathBuf,
     stop: std_mpsc::Sender<Message>,
+    stopped: Arc<AtomicBool>,
     _watcher: RecommendedWatcher,
 }
 
@@ -188,9 +207,11 @@ impl ConfigWatcher {
         let aliases = Aliases::new(&dirs);
         let state = WatchState::new(config_path.clone(), auth_dir.clone());
         let (events, receiver) = mpsc::channel(EVENT_CAPACITY);
+        let stopped = Arc::new(AtomicBool::new(false));
+        let thread_stopped = Arc::clone(&stopped);
         thread::Builder::new()
             .name("open-ferry-config-watcher".to_owned())
-            .spawn(move || run(state, &aliases, &messages, &events))
+            .spawn(move || run(state, &aliases, &messages, &events, &thread_stopped))
             .map_err(|error| WatchError::new(format!("start watcher thread: {error}")))?;
         debug!(
             config = %config_path.display(),
@@ -201,6 +222,7 @@ impl ConfigWatcher {
             config_path,
             auth_dir,
             stop: sender,
+            stopped,
             _watcher: watcher,
         };
         Ok((watcher, receiver))
@@ -228,6 +250,7 @@ impl fmt::Debug for ConfigWatcher {
 
 impl Drop for ConfigWatcher {
     fn drop(&mut self) {
+        self.stopped.store(true, Ordering::Release);
         let _ = self.stop.send(Message::Stop);
     }
 }
@@ -358,7 +381,7 @@ impl WatchState {
     /// Upstream's `addOrUpdateClient`, with its `authFileUnchanged` check
     /// folded in so the file is read once.
     fn add_or_update(&mut self, path: &Path, key: String) -> Step {
-        let data = match fs::read(path) {
+        let data = match read_capped(path) {
             Ok(data) => data,
             Err(error) => {
                 error!(file = %file_name(path), %error, "failed to read auth file");
@@ -380,11 +403,14 @@ impl WatchState {
         }
         let known = self.auth_hashes.insert(key, hash).is_some();
         info!(file = %file_name(path), "auth file changed");
-        let path = path.to_path_buf();
+        let file = AuthFile {
+            path: path.to_path_buf(),
+            data: data.into(),
+        };
         Step::Send(if known {
-            WatchEvent::AuthChanged(path)
+            WatchEvent::AuthChanged(file)
         } else {
-            WatchEvent::AuthAdded(path)
+            WatchEvent::AuthAdded(file)
         })
     }
 
@@ -464,13 +490,16 @@ impl WatchState {
         let mut events = Vec::new();
         for name in names {
             let path = self.auth_dir.join(&name);
-            let data = match fs::read(&path) {
+            let data = match read_capped(&path) {
                 Ok(data) if !data.is_empty() => data,
                 _ => continue,
             };
             self.auth_hashes.insert(path_key(&path), sha256(&data));
             match check_auth_json(&data) {
-                Ok(()) => events.push(WatchEvent::AuthAdded(path)),
+                Ok(()) => events.push(WatchEvent::AuthAdded(AuthFile {
+                    path,
+                    data: data.into(),
+                })),
                 Err(reason) => {
                     warn!(file = %name.to_string_lossy(), %reason, "skipping auth file");
                 }
@@ -567,9 +596,10 @@ fn run(
     aliases: &Aliases,
     messages: &std_mpsc::Receiver<Message>,
     events: &mpsc::Sender<WatchEvent>,
+    stopped: &AtomicBool,
 ) {
     for event in state.initial_scan() {
-        if events.blocking_send(event).is_err() {
+        if !send(events, stopped, event) {
             return;
         }
     }
@@ -580,7 +610,7 @@ fn run(
         {
             reload_at = None;
             if let Some(event) = state.reload_config_if_changed()
-                && events.blocking_send(event).is_err()
+                && !send(events, stopped, event)
             {
                 return;
             }
@@ -615,7 +645,7 @@ fn run(
                     reload_at = Some(Instant::now() + CONFIG_RELOAD_DEBOUNCE);
                 }
                 Step::Send(event) => {
-                    if events.blocking_send(event).is_err() {
+                    if !send(events, stopped, event) {
                         return;
                     }
                 }
@@ -623,6 +653,24 @@ fn run(
         }
         if events.is_closed() {
             return;
+        }
+    }
+}
+
+/// Sends `event`, waiting while the channel is full. Returns `false` when
+/// the receiver is gone or the watcher was stopped meanwhile.
+fn send(events: &mpsc::Sender<WatchEvent>, stopped: &AtomicBool, mut event: WatchEvent) -> bool {
+    loop {
+        if stopped.load(Ordering::Acquire) {
+            return false;
+        }
+        match events.try_send(event) {
+            Ok(()) => return true,
+            Err(mpsc::error::TrySendError::Closed(_)) => return false,
+            Err(mpsc::error::TrySendError::Full(back)) => {
+                event = back;
+                thread::sleep(FULL_CHANNEL_POLL);
+            }
         }
     }
 }
@@ -685,6 +733,23 @@ mod tests {
         state
             .auth_hashes
             .insert(path_key(path), sha256(contents.as_bytes()));
+    }
+
+    fn auth_file(path: &Path) -> AuthFile {
+        AuthFile {
+            path: path.to_path_buf(),
+            data: fs::read(path).expect("read auth file").into(),
+        }
+    }
+
+    /// The added event for `path` with its current contents.
+    fn added(path: &Path) -> WatchEvent {
+        WatchEvent::AuthAdded(auth_file(path))
+    }
+
+    /// The changed event for `path` with its current contents.
+    fn changed(path: &Path) -> WatchEvent {
+        WatchEvent::AuthChanged(auth_file(path))
     }
 
     fn config_of(event: Option<WatchEvent>) -> Arc<Config> {
@@ -775,7 +840,7 @@ mod tests {
         let path = fixture.write_auth("sample.json", contents);
         assert_eq!(
             state.add_or_update(&path, path_key(&path)),
-            Step::Send(WatchEvent::AuthAdded(path.clone()))
+            Step::Send(added(&path))
         );
         assert_eq!(known(&state, &path), Some(sha256(contents.as_bytes())));
 
@@ -784,7 +849,7 @@ mod tests {
         fs::write(&path, r#"{"type":"demo","api_key":"k2"}"#).expect("rewrite");
         assert_eq!(
             state.add_or_update(&path, path_key(&path)),
-            Step::Send(WatchEvent::AuthChanged(path.clone()))
+            Step::Send(changed(&path))
         );
     }
 
@@ -809,7 +874,7 @@ mod tests {
         let null = fixture.write_auth("null.json", "null");
         assert_eq!(
             state.add_or_update(&null, path_key(&null)),
-            Step::Send(WatchEvent::AuthAdded(null.clone()))
+            Step::Send(added(&null))
         );
     }
 
@@ -876,13 +941,7 @@ mod tests {
         fs::create_dir(fixture.auth("sub.json")).expect("create dir");
 
         let mut state = fixture.state();
-        assert_eq!(
-            state.initial_scan(),
-            [
-                WatchEvent::AuthAdded(one.clone()),
-                WatchEvent::AuthAdded(upper.clone())
-            ]
-        );
+        assert_eq!(state.initial_scan(), [added(&one), added(&upper)]);
         assert_eq!(state.auth_hashes.len(), 3);
         assert!(known(&state, &broken).is_some());
 
@@ -894,7 +953,7 @@ mod tests {
         fs::write(&broken, DEMO).expect("fix auth file");
         assert_eq!(
             state.handle_event(&broken, Op::Write, Instant::now()),
-            Step::Send(WatchEvent::AuthChanged(broken.clone()))
+            Step::Send(changed(&broken))
         );
     }
 
@@ -956,7 +1015,7 @@ mod tests {
         let path = fixture.write_auth("a.json", DEMO);
         assert_eq!(
             state.handle_event(&path, Op::Write, Instant::now()),
-            Step::Send(WatchEvent::AuthAdded(path.clone()))
+            Step::Send(added(&path))
         );
         assert!(known(&state, &path).is_some());
     }
@@ -969,7 +1028,7 @@ mod tests {
         let step = state.handle_event(&path, Op::Write, Instant::now());
         // Upstream lower-cases paths only on Windows before the suffix check.
         if cfg!(windows) {
-            assert_eq!(step, Step::Send(WatchEvent::AuthAdded(path)));
+            assert_eq!(step, Step::Send(added(&path)));
         } else {
             assert_eq!(step, Step::Nothing);
         }
@@ -1022,7 +1081,7 @@ mod tests {
         remember(&mut state, &path, r#"{"type":"demo","v":1}"#);
         assert_eq!(
             state.handle_event(&path, Op::Rename, Instant::now()),
-            Step::Send(WatchEvent::AuthChanged(path.clone()))
+            Step::Send(changed(&path))
         );
         assert_eq!(known(&state, &path), Some(sha256(new.as_bytes())));
     }
@@ -1060,7 +1119,7 @@ mod tests {
             .join()
             .expect("writer thread")
             .expect("write replacement");
-        assert_eq!(step, Step::Send(WatchEvent::AuthChanged(path.clone())));
+        assert_eq!(step, Step::Send(changed(&path)));
         assert_eq!(known(&state, &path), Some(sha256(new.as_bytes())));
     }
 
@@ -1130,8 +1189,16 @@ mod tests {
         let (sender, messages) = std_mpsc::channel();
         let (events, mut receiver) = mpsc::channel(8);
         let state = fixture.state();
-        let thread = thread::spawn(move || run(state, &Aliases::default(), &messages, &events));
-        assert_eq!(receiver.blocking_recv(), Some(WatchEvent::AuthAdded(auth)));
+        let thread = thread::spawn(move || {
+            run(
+                state,
+                &Aliases::default(),
+                &messages,
+                &events,
+                &AtomicBool::new(false),
+            )
+        });
+        assert_eq!(receiver.blocking_recv(), Some(added(&auth)));
 
         fixture.write_config("port: 7\n");
         let write = EventKind::Modify(ModifyKind::Any);
@@ -1158,13 +1225,76 @@ mod tests {
         let (sender, messages) = std_mpsc::channel();
         let (events, receiver) = mpsc::channel(8);
         let state = fixture.state();
-        let thread = thread::spawn(move || run(state, &Aliases::default(), &messages, &events));
+        let thread = thread::spawn(move || {
+            run(
+                state,
+                &Aliases::default(),
+                &messages,
+                &events,
+                &AtomicBool::new(false),
+            )
+        });
         drop(receiver);
         let path = fixture.write_auth("a.json", DEMO);
         sender
             .send(fs_event(EventKind::Create(CreateKind::File), &path))
             .expect("send");
         thread.join().expect("watcher thread");
+    }
+
+    #[test]
+    fn auth_events_carry_the_contents_that_were_checked() {
+        let fixture = Fixture::new();
+        let mut state = fixture.state();
+        let valid = r#"{"type":"demo","v":1}"#;
+        let path = fixture.write_auth("a.json", valid);
+        let step = state.add_or_update(&path, path_key(&path));
+        // A write that doesn't parse lands before the consumer reads.
+        fs::write(&path, "{not json").expect("rewrite");
+        let Step::Send(WatchEvent::AuthAdded(file)) = step else {
+            panic!("expected an added event, got {step:?}");
+        };
+        assert_eq!(&*file.data, valid.as_bytes());
+        assert_eq!(state.add_or_update(&path, path_key(&path)), Step::Nothing);
+    }
+
+    #[test]
+    fn oversized_auth_files_are_skipped() {
+        let fixture = Fixture::new();
+        let mut state = fixture.state();
+        let size = usize::try_from(crate::auth::file_store::MAX_AUTH_FILE_SIZE).unwrap();
+        let big = format!(r#"{{"type":"demo","pad":"{}"}}"#, "x".repeat(size));
+        let path = fixture.write_auth("big.json", &big);
+        assert_eq!(state.add_or_update(&path, path_key(&path)), Step::Nothing);
+        assert!(state.initial_scan().is_empty());
+        assert!(state.auth_hashes.is_empty());
+    }
+
+    #[test]
+    fn run_stops_while_the_channel_is_full() {
+        let fixture = Fixture::new();
+        for name in ["a.json", "b.json", "c.json"] {
+            fixture.write_auth(name, DEMO);
+        }
+        let (_sender, messages) = std_mpsc::channel();
+        let (events, receiver) = mpsc::channel(1);
+        let stopped = Arc::new(AtomicBool::new(false));
+        let thread = {
+            let state = fixture.state();
+            let stopped = Arc::clone(&stopped);
+            thread::spawn(move || run(state, &Aliases::default(), &messages, &events, &stopped))
+        };
+        // The scan fills the channel and waits on the second file.
+        thread::sleep(Duration::from_millis(50));
+        assert!(!thread.is_finished());
+        stopped.store(true, Ordering::Release);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !thread.is_finished() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(thread.is_finished(), "the watcher thread didn't stop");
+        thread.join().expect("watcher thread");
+        drop(receiver);
     }
 
     #[test]
@@ -1207,8 +1337,8 @@ mod tests {
 
     fn key_of(event: &WatchEvent) -> (&'static str, String) {
         match event {
-            WatchEvent::AuthAdded(path) => ("added", path_key(path)),
-            WatchEvent::AuthChanged(path) => ("changed", path_key(path)),
+            WatchEvent::AuthAdded(file) => ("added", path_key(&file.path)),
+            WatchEvent::AuthChanged(file) => ("changed", path_key(&file.path)),
             WatchEvent::AuthRemoved(path) => ("removed", path_key(path)),
             WatchEvent::ConfigChanged(_) => ("config", String::new()),
             WatchEvent::ConfigInvalid(_) => ("invalid", String::new()),
