@@ -1,19 +1,886 @@
-// To be ported from CLIProxyAPI internal/api/handlers/management/
-// auth_files_crud.go (DownloadAuthFile, UploadAuthFile, writeAuthFile,
-// DeleteAuthFile), auth_files.go (isUnsafeAuthFileName) and
-// auth_files_fields.go (removeAuth, deleteTokenRecord) (v8.0.10, MIT).
+// Ported from CLIProxyAPI internal/api/handlers/management/
+// auth_files_crud.go (DownloadAuthFile, UploadAuthFile,
+// multipartAuthFileHeaders, storeUploadedAuthFile, writeAuthFile,
+// buildAuthFromFileData, upsertAuthRecord, DeleteAuthFile,
+// requestedAuthFileNamesForDelete, uniqueAuthFileNames,
+// deleteAuthFileByName, findAuthForDelete, authIDForPath), auth_files.go
+// (isUnsafeAuthFileName) and auth_files_fields.go (removeAuth,
+// removeAuthsForPath, deleteTokenRecord) (v8.0.10, MIT), with gin-gonic/gin
+// v1.10.1 context.go (ContentType, QueryArray, MultipartForm) (MIT) and
+// Go's mime/multipart formdata.go (ReadForm) and path/filepath (Base)
+// (go1.26, BSD-3-Clause).
 // https://github.com/router-for-me/CLIProxyAPI
+// https://github.com/gin-gonic/gin
+// https://github.com/golang/go
 
-//! Credential files: downloading, uploading and deleting them.
+//! Credential files, each route needing the management key:
+//! `GET /v0/management/auth-files/download` (also
+//! `/v8/management/credentials/download`) sends one; `POST
+//! /v0/management/auth-files` (also `/v8/management/credentials`) uploads
+//! one or more; `DELETE` on the same paths deletes some or all.
 //!
-//! Not ported yet: `GET /v0/management/auth-files/download` (also
-//! `/v8/management/credentials/download`), and `POST` and `DELETE
-//! /v0/management/auth-files` (also `/v8/management/credentials`). They
-//! will change the auth directory only, never the config.
+//! An upload is a `multipart/form-data` form, whose files are taken in the
+//! order of their field names, or a body sent with `?name=`. One file
+//! answers `{"status":"ok"}` or its error; several answer the names
+//! uploaded, with a 207 and the failures when some failed. A file must be
+//! named `*.json` and hold a credential the service serves, else it isn't
+//! written, so a file that doesn't parse never replaces the one there. The
+//! service is sent each file written and serves its credential once the
+//! upload answers.
+//!
+//! A delete names its files with `?name=` (repeated for several), else in
+//! a JSON body (a list of names, or `{"name":..., "names":[...]}`), and
+//! answers as an upload does; `?all=true` (or `1` or `*`) deletes every
+//! `*.json` file at the top of the auth directory. A name may be a
+//! credential's ID or its file's name: the file removed is the
+//! credential's, else the one of that name in the auth directory. The
+//! service is told of each file removed and stops serving its credential.
+//!
+//! Names are checked as Windows needs them, on every system (see
+//! [`is_unsafe_name`]), and files are only ever read, written or removed
+//! at the top of the auth directory. A failure answers
+//! `{"error":"<reason>"}`.
+//!
+//! Deviations from upstream:
+//! - A name is refused with 400 `invalid name` if it holds `/`, `\` or
+//!   `:` (so no path, drive, UNC share or NTFS stream), a control
+//!   character or one of `<>"|?*`, ends in `.` or a space, or is a Windows
+//!   device name such as `CON` or `nul.json`. Upstream refuses only a blank
+//!   name, a separator and, on Windows, a volume name, and checks an
+//!   uploaded file's name for `.json` only. An uploaded file's name is what
+//!   follows the last `/` or `\` of its `filename` on every system; Go
+//!   splits only at `/` outside Windows.
+//! - An upload is written only if the core's file synthesizer reads a
+//!   credential from it: a JSON object with a type the service serves.
+//!   Upstream also writes `null`, a file without a type (registering it as
+//!   provider `unknown`) and a Gemini CLI file. The reason after `invalid
+//!   auth file: ` may read differently from Go's.
+//! - An upload is written atomically, as every auth file is; upstream's
+//!   `os.WriteFile` writes it in place. An upload over a symlink is refused
+//!   with `failed to write file: ... is a symlink` (checked just before the
+//!   write); upstream writes through it.
+//! - Uploads are bounded: a form or body over 32 MiB answers 413 `request
+//!   body too large`, a file over 8 MiB (the most the service reads) fails
+//!   with 413 `auth file too large`, and a form of more than 1000 parts
+//!   answers 400 `invalid multipart form: multipart: message too large`, as
+//!   Go's does. Upstream takes any size. The reason after `invalid
+//!   multipart form: ` is the form parser's.
+//! - A delete removes only a `*.json` file at the top of the auth
+//!   directory. When the credential named has its file elsewhere, the
+//!   delete is refused with 409 `auth file is outside the auth directory`
+//!   and nothing changes; upstream removes the file wherever it is. A
+//!   credential whose file isn't `*.json` is refused with 400 `name must
+//!   end with .json`, where upstream removes its file.
+//! - On Windows a delete matches a credential's ID or file name regardless
+//!   of case when nothing matches exactly, as the file system does.
+//! - When the service can't be told of a file written or removed (it has
+//!   stopped), the route answers 503 with the reason; the file stays
+//!   written or removed. Upstream registers the credential itself.
+//! - `?all=true` deletes in name order, skips names that aren't valid
+//!   UTF-8, and stops at the first file the service can't be told of.
+//! - A download of a file over 8 MiB fails with a 500.
+//! - The plugin host isn't ported, so there are no plugin credentials to
+//!   refuse deleting.
+
+use std::fs;
+use std::io;
+use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+
+use axum::body::Body;
+use axum::extract::multipart::MultipartError;
+use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, RawQuery, Request, State};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use bytes::Bytes;
+use chrono::Utc;
+use http::{HeaderMap, HeaderValue, StatusCode, header};
+use open_ferry_core::auth::Auth;
+use open_ferry_core::auth::file_store::{MAX_AUTH_FILE_SIZE, read_capped};
+use open_ferry_core::auth::synthesizer::SynthesisContext;
+use open_ferry_core::auth::synthesizer::file::synthesize_auth_file;
+use open_ferry_core::config::AuthFile;
+use open_ferry_core::manager::Manager;
+use open_ferry_translate::go::{to_lower, trim_space};
+use serde::de::{IgnoredAny, MapAccess};
+use serde_json::Value;
 
 use crate::Route;
+use crate::auth_files::run_blocking;
+use crate::bind::{self, GoStruct, Nullable, set_string};
+use crate::go::{equal_fold, lossy};
+use crate::json::{self, Json};
+use crate::query::Query;
+use crate::state::{CredentialStore, ManagementState, StoreUnavailable};
 
-/// The routes this module serves: none yet.
+/// The most a form or body on the upload routes may hold.
+pub(crate) const MAX_FORM: usize = 32 << 20;
+
+/// The most parts a form may have (Go's `multipartmaxparts`).
+const MAX_PARTS: usize = 1000;
+
+/// The routes this module serves.
 pub(crate) fn routes() -> Vec<Route> {
-    Vec::new()
+    vec![
+        Route::key("/v0/management/auth-files/download", get(download)),
+        Route::key("/v8/management/credentials/download", get(download)),
+        Route::key(
+            "/v0/management/auth-files",
+            post(upload)
+                .delete(delete)
+                .layer(DefaultBodyLimit::max(MAX_FORM)),
+        ),
+        Route::key(
+            "/v8/management/credentials",
+            post(upload)
+                .delete(delete)
+                .layer(DefaultBodyLimit::max(MAX_FORM)),
+        ),
+    ]
+}
+
+/// Why a file couldn't be uploaded or deleted.
+#[derive(Debug)]
+struct Failure {
+    status: StatusCode,
+    message: String,
+}
+
+impl Failure {
+    fn new(status: StatusCode, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            message: message.into(),
+        }
+    }
+
+    fn bad_request(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_REQUEST, message)
+    }
+
+    fn internal(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::INTERNAL_SERVER_ERROR, message)
+    }
+
+    fn response(&self) -> Response {
+        json::error(self.status, &self.message)
+    }
+}
+
+/// `GET /v0/management/auth-files/download` (upstream's
+/// `DownloadAuthFile`): file `name` of the auth directory, as an
+/// attachment.
+async fn download(State(state): State<ManagementState>, RawQuery(raw): RawQuery) -> Response {
+    let name = match query_name(raw.as_deref()) {
+        Ok(name) => name,
+        Err(failure) => return failure.response(),
+    };
+    let Some(files) = state.store().map(Arc::clone) else {
+        return StoreUnavailable.into_response();
+    };
+    let file = name.clone();
+    let read = run_blocking(move || read_capped(&files.file_path(&file)?)).await;
+    let data = match read {
+        Ok(data) => data,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return json::error(StatusCode::NOT_FOUND, "file not found");
+        }
+        Err(error) => {
+            return json::error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("failed to read file: {error}"),
+            );
+        }
+    };
+    let mut response = Response::new(Body::from(data));
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    // A safe name holds no control character or quote.
+    if let Ok(value) = HeaderValue::from_str(&format!("attachment; filename=\"{name}\"")) {
+        headers.insert(header::CONTENT_DISPOSITION, value);
+    }
+    response
+}
+
+/// The file `?name=` names, trimmed: a safe name ending in `.json`.
+fn query_name(raw: Option<&str>) -> Result<String, Failure> {
+    let query = Query::parse(raw);
+    let name = match std::str::from_utf8(trim_space(query.value("name"))) {
+        Ok(name) if !is_unsafe_name(name) => name,
+        _ => return Err(Failure::bad_request("invalid name")),
+    };
+    if !has_json_suffix(name) {
+        return Err(Failure::bad_request("name must end with .json"));
+    }
+    Ok(name.to_owned())
+}
+
+/// `POST /v0/management/auth-files` (upstream's `UploadAuthFile`).
+async fn upload(
+    State(state): State<ManagementState>,
+    RawQuery(raw): RawQuery,
+    request: Request,
+) -> Response {
+    let store = match state.credential_store() {
+        Ok(store) => store,
+        Err(unavailable) => return unavailable.into_response(),
+    };
+    if !is_multipart(request.headers()) {
+        return upload_body(&state, &store, raw.as_deref(), request).await;
+    }
+    let files = match read_form(request).await {
+        Ok(form) => form.files,
+        Err(FormError::TooLarge) => {
+            return json::error(StatusCode::PAYLOAD_TOO_LARGE, "request body too large");
+        }
+        Err(FormError::Invalid(reason)) => {
+            return json::error(
+                StatusCode::BAD_REQUEST,
+                &format!("invalid multipart form: {reason}"),
+            );
+        }
+    };
+    match files.as_slice() {
+        [] => json::error(StatusCode::BAD_REQUEST, "no files uploaded"),
+        [file] => match store_uploaded(&state, &store, file).await {
+            Ok(_) => ok(),
+            Err(failure) => failure.response(),
+        },
+        files => {
+            let mut uploaded = Vec::new();
+            let mut failed = Vec::new();
+            for file in files {
+                match store_uploaded(&state, &store, file).await {
+                    Ok(name) => uploaded.push(Json::Str(name)),
+                    Err(failure) => failed.push(Json::map([
+                        ("error", Json::Str(failure.message)),
+                        ("name", Json::Str(base_name(&file.file_name).to_owned())),
+                    ])),
+                }
+            }
+            batch_answer("uploaded", uploaded, failed)
+        }
+    }
+}
+
+/// An upload sent as the body, named by `?name=`.
+async fn upload_body(
+    state: &ManagementState,
+    store: &CredentialStore,
+    raw: Option<&str>,
+    request: Request,
+) -> Response {
+    let name = match query_name(raw) {
+        Ok(name) => name,
+        Err(failure) => return failure.response(),
+    };
+    // Read with the route's body limit.
+    let data = match Bytes::from_request(request, &()).await {
+        Ok(data) => data,
+        Err(rejection) if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE => {
+            return json::error(StatusCode::PAYLOAD_TOO_LARGE, "request body too large");
+        }
+        Err(_) => return json::error(StatusCode::BAD_REQUEST, "failed to read body"),
+    };
+    match write_auth_file(state, store, &name, data).await {
+        Ok(()) => ok(),
+        Err(failure) => failure.response(),
+    }
+}
+
+/// `storeUploadedAuthFile`: writes an uploaded file, and returns its name.
+async fn store_uploaded(
+    state: &ManagementState,
+    store: &CredentialStore,
+    file: &FormFile,
+) -> Result<String, Failure> {
+    // Go's form parser takes the base name, then upstream trims it.
+    let name = base_name(trim_str(base_name(&file.file_name)));
+    if !has_json_suffix(name) {
+        return Err(Failure::bad_request("file must be .json"));
+    }
+    write_auth_file(state, store, name, file.data.clone()).await?;
+    Ok(name.to_owned())
+}
+
+/// `writeAuthFile`: writes `data` as file `name` of the auth directory if
+/// it holds a credential the service serves, then sends it to the service.
+async fn write_auth_file(
+    state: &ManagementState,
+    store: &CredentialStore,
+    name: &str,
+    data: Bytes,
+) -> Result<(), Failure> {
+    if is_unsafe_name(name) {
+        return Err(Failure::bad_request("invalid name"));
+    }
+    if data.len() as u64 > MAX_AUTH_FILE_SIZE {
+        return Err(Failure::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "auth file too large",
+        ));
+    }
+    let files = Arc::clone(&store.files);
+    let file = name.to_owned();
+    let contents = data.clone();
+    let written = {
+        let _guard = state.credential_lock().lock().await;
+        run_blocking(move || {
+            let path = files
+                .file_path(&file)
+                .map_err(|error| Failure::internal(format!("failed to write file: {error}")))?;
+            check_credential(&files.base_dir(), &path, &contents)?;
+            if fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+                return Err(Failure::internal(format!(
+                    "failed to write file: {} is a symlink",
+                    path.display()
+                )));
+            }
+            files
+                .write_file(&file, &contents)
+                .map_err(|error| Failure::internal(format!("failed to write file: {error}")))
+        })
+        .await?
+    };
+    store
+        .sync
+        .file_written(AuthFile {
+            path: written,
+            data: Arc::from(data.as_ref()),
+        })
+        .await
+        .map_err(|error| Failure::new(error.status(), error.to_string()))
+}
+
+/// `buildAuthFromFileData`: checks that the service would read a credential
+/// from `data` saved at `path` in the auth directory `dir`.
+fn check_credential(dir: &Path, path: &Path, data: &[u8]) -> Result<(), Failure> {
+    let ctx = SynthesisContext::new(dir, Utc::now());
+    let reason = match synthesize_auth_file(&ctx, path, data) {
+        Ok(Some(_)) => return Ok(()),
+        Err(error) => error.to_string(),
+        Ok(None) if path.to_str().is_none() => "the auth directory isn't valid UTF-8".to_owned(),
+        Ok(None) => skipped_reason(data),
+    };
+    Err(Failure::internal(format!("invalid auth file: {reason}")))
+}
+
+/// Why the synthesizer reads no credential from `data`.
+fn skipped_reason(data: &[u8]) -> String {
+    let kind = match serde_json::from_str::<Value>(&lossy(data)) {
+        Err(error) => return error.to_string(),
+        Ok(Value::Object(fields)) => {
+            return match fields.get("type").and_then(Value::as_str).map(str::trim) {
+                None | Some("") => "missing type".to_owned(),
+                Some(kind) => format!("type {kind} isn't served"),
+            };
+        }
+        Ok(Value::Null) => return "not a JSON object".to_owned(),
+        Ok(Value::Bool(_)) => "bool",
+        Ok(Value::Number(_)) => "number",
+        Ok(Value::String(_)) => "string",
+        Ok(Value::Array(_)) => "array",
+    };
+    format!("json: cannot unmarshal {kind} into Go value of type map[string]interface {{}}")
+}
+
+/// `DELETE /v0/management/auth-files` (upstream's `DeleteAuthFile`).
+async fn delete(
+    State(state): State<ManagementState>,
+    RawQuery(raw): RawQuery,
+    body: Body,
+) -> Response {
+    let store = match state.credential_store() {
+        Ok(store) => store,
+        Err(unavailable) => return unavailable.into_response(),
+    };
+    let query = Query::parse(raw.as_deref());
+    if matches!(query.value("all"), b"true" | b"1" | b"*") {
+        return delete_all(&state, &store).await;
+    }
+    let mut names = unique_names(query_values(raw.as_deref(), "name"));
+    if names.is_empty() {
+        let body = match bind::read_body(body).await {
+            Ok(body) => body,
+            Err(response) => return response,
+        };
+        match body_names(&body) {
+            Some(listed) => names = unique_names(listed),
+            None => return json::error(StatusCode::BAD_REQUEST, "invalid request body"),
+        }
+    }
+    match names.as_slice() {
+        [] => json::error(StatusCode::BAD_REQUEST, "invalid name"),
+        [name] => match delete_one(&state, &store, name).await {
+            Ok(()) => ok(),
+            Err(failure) => failure.response(),
+        },
+        names => {
+            let mut deleted = Vec::new();
+            let mut failed = Vec::new();
+            for name in names {
+                match delete_one(&state, &store, name).await {
+                    Ok(()) => deleted.push(name_json(name)),
+                    Err(failure) => failed.push(Json::map([
+                        ("error", Json::Str(failure.message)),
+                        ("name", name_json(name)),
+                    ])),
+                }
+            }
+            batch_answer("deleted", deleted, failed)
+        }
+    }
+}
+
+/// `?all=true`: deletes every `*.json` file at the top of the auth
+/// directory.
+async fn delete_all(state: &ManagementState, store: &CredentialStore) -> Response {
+    let files = Arc::clone(&store.files);
+    let listed = run_blocking(move || -> io::Result<Vec<String>> {
+        let mut names: Vec<String> = fs::read_dir(files.base_dir())?
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_ok_and(|kind| !kind.is_dir()))
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter(|name| has_json_suffix(name))
+            .collect();
+        names.sort();
+        Ok(names)
+    })
+    .await;
+    let names = match listed {
+        Ok(names) => names,
+        Err(error) => {
+            return json::error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("failed to read auth dir: {error}"),
+            );
+        }
+    };
+    let mut deleted: i64 = 0;
+    for name in names {
+        let files = Arc::clone(&store.files);
+        let removed = {
+            let _guard = state.credential_lock().lock().await;
+            run_blocking(move || files.remove_file(&name)).await
+        };
+        // As upstream, a file that can't be removed is passed over.
+        let Ok(path) = removed else {
+            continue;
+        };
+        if let Err(error) = store.sync.file_removed(path).await {
+            return error.into_response();
+        }
+        deleted += 1;
+    }
+    json::response(
+        StatusCode::OK,
+        &Json::map([
+            ("deleted", Json::Int(deleted)),
+            ("status", Json::Str("ok".to_owned())),
+        ]),
+    )
+}
+
+/// `deleteAuthFileByName`: removes the file of the credential `name`
+/// names, else file `name` of the auth directory, and tells the service.
+async fn delete_one(
+    state: &ManagementState,
+    store: &CredentialStore,
+    name: &[u8],
+) -> Result<(), Failure> {
+    let name = match std::str::from_utf8(trim_space(name)) {
+        Ok(name) if !is_unsafe_name(name) => name,
+        _ => return Err(Failure::bad_request("invalid name")),
+    };
+    let credential_path = find_auth_for_delete(state.manager(), name)
+        .and_then(|auth| auth.attribute("path").map(|path| path.trim().to_owned()))
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from);
+    let file_name = match &credential_path {
+        Some(path) => top_level_name(&store.files.base_dir(), path)
+            .ok_or_else(|| {
+                Failure::new(
+                    StatusCode::CONFLICT,
+                    "auth file is outside the auth directory",
+                )
+            })?
+            .to_owned(),
+        None => name.to_owned(),
+    };
+    if !has_json_suffix(&file_name) {
+        return Err(Failure::bad_request("name must end with .json"));
+    }
+    let files = Arc::clone(&store.files);
+    let removed = {
+        let _guard = state.credential_lock().lock().await;
+        run_blocking(move || files.remove_file(&file_name)).await
+    };
+    let removed = match removed {
+        Ok(path) => path,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(Failure::new(StatusCode::NOT_FOUND, "auth file not found"));
+        }
+        Err(error) => return Err(Failure::internal(format!("failed to remove file: {error}"))),
+    };
+    // The service knows a credential by the path it was read from.
+    store
+        .sync
+        .file_removed(credential_path.unwrap_or(removed))
+        .await
+        .map_err(|error| Failure::new(error.status(), error.to_string()))
+}
+
+/// `findAuthForDelete`: the credential with ID `name`, else the first
+/// whose file name, or the last element of whose `path`, is `name`. On
+/// Windows, failing that, the same regardless of case.
+fn find_auth_for_delete(manager: &Manager, name: &str) -> Option<Arc<Auth>> {
+    if let Some(auth) = manager.get(name) {
+        return Some(auth);
+    }
+    let auths = manager.list();
+    let named = |auth: &Auth, same: fn(&str, &str) -> bool| {
+        same(auth.file_name.trim(), name)
+            || auth
+                .attribute("path")
+                .is_some_and(|path| same(base_name(path.trim()), name))
+    };
+    if let Some(auth) = auths.iter().find(|auth| named(auth, |a, b| a == b)) {
+        return Some(Arc::clone(auth));
+    }
+    if cfg!(windows) {
+        // The IDs of auth files are lower-cased on Windows.
+        if let Some(auth) = manager.get(&to_lower(name)) {
+            return Some(auth);
+        }
+        return auths.into_iter().find(|auth| named(auth, equal_fold));
+    }
+    None
+}
+
+/// The name of the file at `path` if it is directly in `dir`.
+fn top_level_name<'a>(dir: &Path, path: &'a Path) -> Option<&'a str> {
+    let mut components = path.components();
+    let Some(Component::Normal(name)) = components.next_back() else {
+        return None;
+    };
+    if dir.as_os_str().is_empty() || !same_path(components.as_path(), dir) {
+        return None;
+    }
+    name.to_str()
+}
+
+/// Whether `left` and `right` name the same path, component by component;
+/// on Windows regardless of case.
+fn same_path(left: &Path, right: &Path) -> bool {
+    let mut left = left.components();
+    let mut right = right.components();
+    loop {
+        match (left.next(), right.next()) {
+            (None, None) => return true,
+            (Some(a), Some(b)) if a == b => {}
+            (Some(a), Some(b)) if cfg!(windows) => {
+                match (a.as_os_str().to_str(), b.as_os_str().to_str()) {
+                    (Some(a), Some(b)) if equal_fold(a, b) => {}
+                    _ => return false,
+                }
+            }
+            _ => return false,
+        }
+    }
+}
+
+/// The values of query parameter `name`, in order (gin's `QueryArray`).
+fn query_values(raw: Option<&str>, name: &str) -> Vec<Vec<u8>> {
+    // Parsed whole first, for Go's limit on the number of parameters.
+    if Query::parse(raw).get(name).is_none() {
+        return Vec::new();
+    }
+    raw.unwrap_or_default()
+        .split('&')
+        .filter_map(|pair| Query::parse(Some(pair)).get(name).map(<[u8]>::to_vec))
+        .collect()
+}
+
+/// `uniqueAuthFileNames`: the names trimmed, without blanks or repeats.
+fn unique_names(names: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+    let mut out: Vec<Vec<u8>> = Vec::with_capacity(names.len());
+    for name in names {
+        let name = trim_space(&name);
+        if !name.is_empty() && !out.iter().any(|seen| seen == name) {
+            out.push(name.to_vec());
+        }
+    }
+    out
+}
+
+/// The names a delete's body lists, as Go's `json.Unmarshal` reads them;
+/// `None` when it fails.
+fn body_names(body: &[u8]) -> Option<Vec<Vec<u8>>> {
+    let body = trim_space(body);
+    if body.is_empty() {
+        return Some(Vec::new());
+    }
+    let text = lossy(body);
+    if body.first() == Some(&b'[') {
+        let names: Vec<Nullable> = serde_json::from_str(&text).ok()?;
+        return Some(
+            names
+                .into_iter()
+                .map(|Nullable(name)| name.unwrap_or_default().into_bytes())
+                .collect(),
+        );
+    }
+    let parsed = bind::decode::<DeleteBody>(body)?;
+    // Unlike a decoder, `json.Unmarshal` takes one value and nothing more.
+    serde_json::from_str::<IgnoredAny>(&text).ok()?;
+    let mut names = Vec::new();
+    if !parsed.name.trim().is_empty() {
+        names.push(parsed.name.into_bytes());
+    }
+    names.extend(
+        parsed
+            .names
+            .unwrap_or_default()
+            .into_iter()
+            .map(String::into_bytes),
+    );
+    Some(names)
+}
+
+/// A delete's body as an object.
+#[derive(Default)]
+struct DeleteBody {
+    name: String,
+    names: Option<Vec<String>>,
+}
+
+impl GoStruct for DeleteBody {
+    const FIELDS: &'static [&'static str] = &["name", "names"];
+
+    fn set<'de, A: MapAccess<'de>>(&mut self, index: usize, map: &mut A) -> Result<(), A::Error> {
+        if index == 0 {
+            return set_string(&mut self.name, map);
+        }
+        self.names = map.next_value::<Option<Vec<Nullable>>>()?.map(|names| {
+            names
+                .into_iter()
+                .map(|Nullable(name)| name.unwrap_or_default())
+                .collect()
+        });
+        Ok(())
+    }
+}
+
+/// A name as JSON, as Go writes a string that may not be UTF-8.
+fn name_json(name: &[u8]) -> Json {
+    match std::str::from_utf8(name) {
+        Ok(name) => Json::Str(name.to_owned()),
+        Err(_) => Json::Bytes(name.to_vec()),
+    }
+}
+
+/// `{"status":"ok"}`.
+fn ok() -> Response {
+    json::response(
+        StatusCode::OK,
+        &Json::map([("status", Json::Str("ok".to_owned()))]),
+    )
+}
+
+/// The answer to an upload or delete of several files: those done, counted
+/// under `count` and named under `files`, and with a 207 those that failed.
+fn batch_answer(count: &str, done: Vec<Json>, failed: Vec<Json>) -> Response {
+    let done_count = Json::Int(i64::try_from(done.len()).unwrap_or(i64::MAX));
+    if failed.is_empty() {
+        return json::response(
+            StatusCode::OK,
+            &Json::map([
+                (count, done_count),
+                ("files", Json::Array(done)),
+                ("status", Json::Str("ok".to_owned())),
+            ]),
+        );
+    }
+    json::response(
+        StatusCode::MULTI_STATUS,
+        &Json::map([
+            (count, done_count),
+            ("failed", Json::Array(failed)),
+            ("files", Json::Array(done)),
+            ("status", Json::Str("partial".to_owned())),
+        ]),
+    )
+}
+
+/// Whether `name` can't name a file at the top of the auth directory on
+/// every system (upstream's `isUnsafeAuthFileName`, made stricter): it is
+/// blank; holds `/`, `\` or `:` (a path, drive, UNC share or NTFS stream),
+/// a control character or one of `<>"|?*`; ends in `.` or a space, which
+/// Windows drops (so `.` and `..` too); or is a device name Windows
+/// reserves.
+pub(crate) fn is_unsafe_name(name: &str) -> bool {
+    name.trim().is_empty()
+        || name.chars().any(|c| {
+            c.is_control() || matches!(c, '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*')
+        })
+        || name.ends_with(['.', ' '])
+        || is_device_name(name)
+}
+
+/// Whether Windows takes `name` for a device: `CON`, `PRN`, `AUX`, `NUL`,
+/// `COM0` to `COM9` and `LPT0` to `LPT9` (with a superscript digit too),
+/// `CONIN$` or `CONOUT$`, in any case, before any extension and trailing
+/// spaces.
+fn is_device_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name).trim_end_matches(' ');
+    let stem = stem.to_ascii_uppercase();
+    match stem.as_str() {
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$" => true,
+        stem => ["COM", "LPT"].iter().any(|prefix| {
+            stem.strip_prefix(prefix).is_some_and(|rest| {
+                let mut chars = rest.chars();
+                matches!(
+                    (chars.next(), chars.next()),
+                    (Some('0'..='9' | '\u{b9}' | '\u{b2}' | '\u{b3}'), None)
+                )
+            })
+        }),
+    }
+}
+
+/// Whether `name` ends in `.json`, case aside.
+pub(crate) fn has_json_suffix(name: &str) -> bool {
+    to_lower(name).ends_with(".json")
+}
+
+/// Go's `filepath.Base` on Windows, less volume names: what follows the
+/// last `/` or `\`, past any at the end; `.` for an empty path.
+fn base_name(path: &str) -> &str {
+    if path.is_empty() {
+        return ".";
+    }
+    let trimmed = path.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        return "\\";
+    }
+    trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed)
+}
+
+/// Go's `strings.TrimSpace`.
+fn trim_str(text: &str) -> &str {
+    std::str::from_utf8(trim_space(text.as_bytes())).unwrap_or(text)
+}
+
+/// Gin's `c.ContentType() == "multipart/form-data"`: the first
+/// `Content-Type`, up to a space or `;`, compared exactly.
+pub(crate) fn is_multipart(headers: &HeaderMap) -> bool {
+    let value = headers
+        .get(header::CONTENT_TYPE)
+        .map(HeaderValue::as_bytes)
+        .unwrap_or_default();
+    let end = value
+        .iter()
+        .position(|&b| b == b' ' || b == b';')
+        .unwrap_or(value.len());
+    value.get(..end) == Some(b"multipart/form-data".as_slice())
+}
+
+/// A `multipart/form-data` form, as Go's `ReadForm` reads it.
+#[derive(Debug, Default)]
+pub(crate) struct Form {
+    /// The parts sent with a file name, in the order of their field names.
+    pub(crate) files: Vec<FormFile>,
+    /// The other parts, as field name and value, in order.
+    pub(crate) values: Vec<(String, Bytes)>,
+}
+
+impl Form {
+    /// The first value of field `name`.
+    pub(crate) fn value(&self, name: &str) -> Option<&[u8]> {
+        self.values
+            .iter()
+            .find(|(field, _)| field == name)
+            .map(|(_, value)| value.as_ref())
+    }
+
+    /// The first file of field `name` (Go's `FormFile`).
+    pub(crate) fn file(&self, name: &str) -> Option<&FormFile> {
+        self.files.iter().find(|file| file.field == name)
+    }
+}
+
+/// A file of a form.
+#[derive(Debug)]
+pub(crate) struct FormFile {
+    /// Its field's name.
+    pub(crate) field: String,
+    /// The `filename` it was sent with.
+    pub(crate) file_name: String,
+    /// Its contents.
+    pub(crate) data: Bytes,
+}
+
+/// Why a form couldn't be read.
+#[derive(Debug)]
+pub(crate) enum FormError {
+    /// It is over the route's body limit.
+    TooLarge,
+    /// It isn't a valid form, for this reason.
+    Invalid(String),
+}
+
+/// Reads the `multipart/form-data` form of `request`, of at most the
+/// route's body limit and [`MAX_PARTS`] parts. Parts without a field name
+/// are skipped, as Go skips them.
+pub(crate) async fn read_form(request: Request) -> Result<Form, FormError> {
+    let Ok(mut multipart) = Multipart::from_request(request, &()).await else {
+        return Err(FormError::Invalid(
+            "no multipart boundary param in Content-Type".to_owned(),
+        ));
+    };
+    let mut form = Form::default();
+    let mut parts = 0;
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(field)) => field,
+            Ok(None) => break,
+            Err(error) => return Err(form_error(&error)),
+        };
+        parts += 1;
+        if parts > MAX_PARTS {
+            return Err(FormError::Invalid(
+                "multipart: message too large".to_owned(),
+            ));
+        }
+        let field_name = field.name().unwrap_or_default().to_owned();
+        let file_name = field.file_name().unwrap_or_default().to_owned();
+        let data = field.bytes().await.map_err(|error| form_error(&error))?;
+        if field_name.is_empty() {
+            continue;
+        }
+        if file_name.is_empty() {
+            form.values.push((field_name, data));
+        } else {
+            form.files.push(FormFile {
+                field: field_name,
+                file_name,
+                data,
+            });
+        }
+    }
+    // Go keeps files by field name, and upstream takes the names sorted.
+    form.files.sort_by(|a, b| a.field.cmp(&b.field));
+    Ok(form)
+}
+
+/// What a form parser's error means for the request.
+fn form_error(error: &MultipartError) -> FormError {
+    if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        FormError::TooLarge
+    } else {
+        FormError::Invalid(error.body_text())
+    }
 }
