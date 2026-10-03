@@ -36,6 +36,10 @@
 //! disabled credential whose file is gone does nothing, so a deleted file
 //! stays deleted; a login uses [`FileStore::save_new_auth`] to create one.
 //!
+//! [`FileStore::write_file`] and [`FileStore::remove_file`] write the bytes
+//! of one file in the auth directory as they are, and remove one, by name,
+//! for the management API's uploads and deletes.
+//!
 //! Deviations from upstream:
 //! - Writes are atomic: a temporary file in the same directory, flushed and
 //!   renamed over the target, keeping an existing file's permissions on
@@ -65,7 +69,7 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError, RwLock};
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use super::classification::{
     ATTRIBUTE_PATH, ATTRIBUTE_SOURCE, ATTRIBUTE_SOURCE_BACKEND, AUTH_SOURCE_FILE,
@@ -134,9 +138,22 @@ impl FileStore {
     /// file's settings into it: every key `auth` lacks except tokens, and
     /// the file's `disabled` flag unless `auth` sets its own.
     pub fn merge_existing(&self, auth: &mut Auth) {
+        if let Some(existing) = self.existing_metadata(auth)
+            && !existing.is_empty()
+        {
+            merge_existing_auth_metadata(auth, &existing);
+        }
+    }
+
+    /// The JSON object in the file a login would save `auth` over: the one
+    /// named by its file name, else its ID, under the auth directory. `None`
+    /// when the store is unconfigured, or the file is missing, empty,
+    /// unreadable or not a JSON object, where upstream's `json.Unmarshal`
+    /// leaves its map nil.
+    pub fn existing_metadata(&self, auth: &Auth) -> Option<Map<String, Value>> {
         let dir = self.base_dir();
         if dir.as_os_str().is_empty() {
-            return;
+            return None;
         }
         let target = if auth.file_name.is_empty() {
             &auth.id
@@ -144,20 +161,74 @@ impl FileStore {
             &auth.file_name
         };
         if target.is_empty() {
-            return;
+            return None;
         }
-        let full = join(&dir, Path::new(target));
-        let Ok(raw) = read_capped(&full) else {
-            return;
-        };
+        let raw = read_capped(&join(&dir, Path::new(target))).ok()?;
         if raw.is_empty() {
-            return;
+            return None;
         }
-        if let Ok(Some(existing)) = unmarshal_object(&raw)
-            && !existing.is_empty()
-        {
-            merge_existing_auth_metadata(auth, &existing);
+        unmarshal_object(&raw).ok().flatten()
+    }
+
+    /// The path of the file `name` in the auth directory. `name` must be
+    /// one plain path component: no separator, no `.` or `..`, and no drive
+    /// or root. Callers check anything stricter, such as the `.json`
+    /// suffix or the names Windows reserves.
+    pub fn file_path(&self, name: &str) -> io::Result<PathBuf> {
+        let mut components = Path::new(name).components();
+        let plain = matches!(
+            (components.next(), components.next()),
+            (Some(std::path::Component::Normal(_)), None)
+        );
+        if !plain || name.contains(['/', '\\']) {
+            return Err(invalid("auth filestore: invalid file name"));
         }
+        let dir = self.base_dir();
+        if dir.as_os_str().is_empty() {
+            return Err(not_configured());
+        }
+        Ok(dir.join(name))
+    }
+
+    /// Writes `data` as the file `name` in the auth directory, as it is,
+    /// creating the directory if needed (mode 0700 on Unix), and returns
+    /// the file's path. `name` is checked as [`file_path`](Self::file_path)
+    /// checks it.
+    ///
+    /// The write is atomic, as a save's: a temporary file in the directory,
+    /// renamed over the target, so the watcher and readers see the old file
+    /// or the new one. A new file gets mode 0600 and an existing one keeps
+    /// its mode (on Unix). A symlink at `name` is written through to its
+    /// target, and a dangling one is replaced by the file; callers that must
+    /// not follow links check with [`fs::symlink_metadata`] first. Writes
+    /// and saves of this store take turns.
+    pub fn write_file(&self, name: &str, data: &[u8]) -> io::Result<PathBuf> {
+        let path = self.file_path(name)?;
+        let _guard = self
+            .save_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(parent) = path.parent() {
+            create_dir_all(parent)
+                .map_err(|err| wrap(&err, "auth filestore: create dir failed"))?;
+        }
+        write_atomic(&path, data).map_err(|err| wrap(&err, "auth filestore: write file failed"))?;
+        Ok(path)
+    }
+
+    /// Removes the file `name` from the auth directory, and returns its
+    /// path. `name` is checked as [`file_path`](Self::file_path) checks it.
+    /// A missing file is an error of kind [`io::ErrorKind::NotFound`],
+    /// unlike [`AuthStore::delete`]'s. A symlink is removed itself, not its
+    /// target.
+    pub fn remove_file(&self, name: &str) -> io::Result<PathBuf> {
+        let path = self.file_path(name)?;
+        let _guard = self
+            .save_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        fs::remove_file(&path).map_err(|err| wrap(&err, "auth filestore: delete failed"))?;
+        Ok(path)
     }
 
     fn save_with(&self, auth: &mut Auth, creation_intent: bool) -> io::Result<String> {
@@ -1066,6 +1137,109 @@ mod tests {
         };
         store.merge_existing(&mut absent);
         assert!(absent.metadata.is_empty());
+    }
+
+    // Not upstream's: the existing file's settings, told apart from no file.
+    #[test]
+    fn existing_metadata_is_none_without_an_object() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileStore::new(dir.path());
+        let named = |name: &str| Auth {
+            id: name.into(),
+            ..Auth::default()
+        };
+        for (name, content) in [
+            ("empty.json", ""),
+            ("null.json", "null"),
+            ("broken.json", "{"),
+            ("list.json", "[]"),
+        ] {
+            write(&dir.path().join(name), content);
+            assert_eq!(store.existing_metadata(&named(name)), None, "{name}");
+        }
+        assert_eq!(store.existing_metadata(&named("missing.json")), None);
+        write(&dir.path().join("bare.json"), "{}");
+        assert_eq!(
+            store.existing_metadata(&named("bare.json")),
+            Some(Map::new())
+        );
+        let mut by_file_name = named("other-id");
+        by_file_name.file_name = "list.json".into();
+        write(&dir.path().join("list.json"), r#"{"prefix":"team"}"#);
+        assert_eq!(
+            store.existing_metadata(&by_file_name),
+            Some(meta(json!({"prefix": "team"})))
+        );
+        assert_eq!(
+            FileStore::new("").existing_metadata(&named("bare.json")),
+            None
+        );
+    }
+
+    // Not upstream's: raw writes and removes of one file in the directory.
+    #[test]
+    fn files_are_written_and_removed_by_plain_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth_dir = dir.path().join("auths");
+        let store = FileStore::new(&auth_dir);
+        let path = store
+            .write_file("codex-a.json", b"{\"type\":\"codex\"}")
+            .unwrap();
+        assert_eq!(path, auth_dir.join("codex-a.json"));
+        assert_eq!(fs::read(&path).unwrap(), b"{\"type\":\"codex\"}");
+        store.write_file("codex-a.json", b"not json").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"not json");
+        assert_eq!(fs::read_dir(&auth_dir).unwrap().count(), 1);
+
+        assert_eq!(store.remove_file("codex-a.json").unwrap(), path);
+        assert!(!path.exists());
+        let missing = store.remove_file("codex-a.json").unwrap_err();
+        assert_eq!(missing.kind(), io::ErrorKind::NotFound);
+
+        for name in [
+            "",
+            ".",
+            "..",
+            "a/b.json",
+            "a\\b.json",
+            "../a.json",
+            "/a.json",
+        ] {
+            let err = store.write_file(name, b"{}").unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{name:?}");
+            let err = store.remove_file(name).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{name:?}");
+        }
+        #[cfg(windows)]
+        for name in ["C:a.json", "C:\\a.json", "\\\\server\\share\\a.json"] {
+            assert!(store.file_path(name).is_err(), "{name:?}");
+        }
+        assert!(FileStore::new("").write_file("a.json", b"{}").is_err());
+    }
+
+    // Not upstream's: how raw writes and removes treat symlinks.
+    #[cfg(unix)]
+    #[test]
+    fn raw_writes_follow_symlinks_and_removes_do_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.json");
+        write(&target, "{}");
+        let auth_dir = dir.path().join("auths");
+        fs::create_dir(&auth_dir).unwrap();
+        std::os::unix::fs::symlink(&target, auth_dir.join("link.json")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("gone"), auth_dir.join("dangling.json"))
+            .unwrap();
+
+        let store = FileStore::new(&auth_dir);
+        store.write_file("link.json", b"{\"a\":1}").unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"{\"a\":1}");
+        store.write_file("dangling.json", b"{}").unwrap();
+        let dangling = fs::symlink_metadata(auth_dir.join("dangling.json")).unwrap();
+        assert!(dangling.file_type().is_file());
+
+        store.remove_file("link.json").unwrap();
+        assert!(!auth_dir.join("link.json").exists());
+        assert!(target.exists());
     }
 
     #[cfg(windows)]

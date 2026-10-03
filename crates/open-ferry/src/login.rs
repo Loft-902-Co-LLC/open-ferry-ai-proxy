@@ -27,12 +27,11 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::process::ExitCode;
 
-use open_ferry_core::auth::metadata::merge_existing_auth_metadata;
-use open_ferry_core::auth::{Auth, AuthStore, FileStore};
+use open_ferry_core::auth::FileStore;
 use open_ferry_core::config::Config;
 use open_ferry_providers::claude::oauth::{self as claude_oauth, ClaudeAuth};
-use open_ferry_providers::claude::token::find_matching_legacy_credential;
 use open_ferry_providers::codex::oauth::{self as codex_oauth, CodexAuth};
+use open_ferry_providers::credentials;
 
 use crate::browser;
 
@@ -155,7 +154,7 @@ pub async fn run(login: Login, config: &Config, auth_dir: &Path, options: Option
             "Codex"
         }
     );
-    match save(&mut auth, auth_dir) {
+    match credentials::save(&FileStore::new(auth_dir), &mut auth) {
         Ok(path) => {
             if !path.is_empty() {
                 println!("Authentication saved to {path}");
@@ -163,7 +162,7 @@ pub async fn run(login: Login, config: &Config, auth_dir: &Path, options: Option
             println!("{} authentication successful!", login.name());
             ExitCode::SUCCESS
         }
-        Err(message) => report(login, Failure::Other(message), options),
+        Err(error) => report(login, Failure::Other(error.to_string()), options),
     }
 }
 
@@ -277,42 +276,8 @@ fn ssh_tunnel_instructions(port: u16) -> String {
     out
 }
 
-/// Saves a login's credential as upstream's `Manager.Login` does, and
-/// returns its path.
-fn save(auth: &mut Auth, auth_dir: &Path) -> Result<String, String> {
-    let store = FileStore::new(auth_dir);
-    store.merge_existing(auth);
-    let legacy =
-        find_matching_legacy_credential(&store, auth).map_err(|error| error.to_string())?;
-    if let Some(legacy) = &legacy {
-        merge_existing_auth_metadata(auth, &legacy.metadata);
-    }
-    let path = store
-        .save_new_auth(auth)
-        .map_err(|error| error.to_string())?;
-    if let Some(legacy) = legacy {
-        if path.trim().is_empty() {
-            return Err(
-                "canonical Claude credential was not persisted; legacy credential retained".into(),
-            );
-        }
-        let id = match legacy.id.trim() {
-            "" => legacy.file_name.trim(),
-            id => id,
-        };
-        store.delete(id).map_err(|error| {
-            format!(
-                "canonical Claude credential saved but legacy credential cleanup failed: {error}"
-            )
-        })?;
-    }
-    Ok(path)
-}
-
 #[cfg(test)]
 mod tests {
-    use serde_json::{Value, json};
-
     use super::*;
 
     #[test]
@@ -364,74 +329,5 @@ mod tests {
         assert_eq!(code, ExitCode::from(13));
         let code = report(Login::Codex, Failure::Other("x".into()), options);
         assert_eq!(code, ExitCode::FAILURE);
-    }
-
-    fn claude_auth(file_name: &str, metadata: Value) -> Auth {
-        let Value::Object(metadata) = metadata else {
-            unreachable!()
-        };
-        Auth {
-            id: file_name.into(),
-            file_name: file_name.into(),
-            provider: "claude".into(),
-            metadata,
-            ..Auth::default()
-        }
-    }
-
-    #[test]
-    fn saving_replaces_a_legacy_claude_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = FileStore::new(dir.path());
-        let mut legacy = claude_auth(
-            "claude-a@b.c.json",
-            json!({"type": "claude", "email": "a@b.c", "account_uuid": "acct",
-                   "access_token": "old", "prefix": "team"}),
-        );
-        store.save_new_auth(&mut legacy).unwrap();
-
-        let name = open_ferry_providers::claude::token::credential_file_name("a@b.c", "", "acct");
-        let mut auth = claude_auth(
-            &name,
-            json!({"type": "claude", "email": "a@b.c", "account_uuid": "acct",
-                   "access_token": "new"}),
-        );
-        let path = save(&mut auth, dir.path()).unwrap();
-        assert_eq!(Path::new(&path), dir.path().join(&name));
-        assert!(!dir.path().join("claude-a@b.c.json").exists());
-        let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(saved["access_token"], "new");
-        assert_eq!(saved["prefix"], "team");
-    }
-
-    #[test]
-    fn saving_keeps_the_settings_of_the_file_it_replaces() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = FileStore::new(dir.path());
-        let mut old = Auth {
-            id: "codex-a@b.c-plus.json".into(),
-            file_name: "codex-a@b.c-plus.json".into(),
-            provider: "codex".into(),
-            ..Auth::default()
-        };
-        old.metadata.insert("type".into(), json!("codex"));
-        old.metadata.insert("access_token".into(), json!("old"));
-        old.metadata.insert("disabled".into(), json!(true));
-        old.disabled = true;
-        store.save_new_auth(&mut old).unwrap();
-
-        let mut auth = Auth {
-            id: "codex-a@b.c-plus.json".into(),
-            file_name: "codex-a@b.c-plus.json".into(),
-            provider: "codex".into(),
-            ..Auth::default()
-        };
-        auth.metadata.insert("type".into(), json!("codex"));
-        auth.metadata.insert("access_token".into(), json!("new"));
-        let path = save(&mut auth, dir.path()).unwrap();
-        let saved: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        assert_eq!(saved["access_token"], "new");
-        assert_eq!(saved["disabled"], true);
-        assert!(auth.disabled);
     }
 }
