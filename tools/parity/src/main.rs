@@ -136,6 +136,12 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
         generate::claude_chat::event_cases(seed, random);
     let (claude_responses_streams, claude_responses_finals) =
         generate::claude_responses::event_cases(seed, random);
+    let (openai_responses_streams, openai_responses_finals) =
+        generate::openai_responses::event_cases(seed, random);
+    let (openai_claude_streams, openai_claude_finals) =
+        generate::openai_claude::event_cases(seed, random);
+    let (openai_chat_streams, openai_chat_finals) =
+        generate::openai_chat::event_cases(seed, random);
     let (registry_streams, registry_finals) = generate::registry::response_cases(seed, random);
     let suites = [
         (
@@ -220,6 +226,51 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
             Translator::OpenAIResponsesRequest,
             cases::openai_responses::requests(),
             generate::openai_responses::request_cases(seed, random),
+        ),
+        (
+            Translator::OpenAIResponsesStream,
+            cases::openai_responses::streams(),
+            openai_responses_streams,
+        ),
+        (
+            Translator::OpenAIResponsesNonStream,
+            cases::openai_responses::finals(),
+            openai_responses_finals,
+        ),
+        (
+            Translator::OpenAIClaudeRequest,
+            cases::openai_claude::requests(),
+            generate::openai_claude::request_cases(seed, random),
+        ),
+        (
+            Translator::OpenAIClaudeRequestCompat,
+            cases::openai_claude::requests(),
+            generate::openai_claude::request_cases(seed, random),
+        ),
+        (
+            Translator::OpenAIClaudeStream,
+            cases::openai_claude::streams(),
+            openai_claude_streams,
+        ),
+        (
+            Translator::OpenAIClaudeNonStream,
+            cases::openai_claude::finals(),
+            openai_claude_finals,
+        ),
+        (
+            Translator::OpenAIChatRequest,
+            cases::openai_chat::requests(),
+            generate::openai_chat::request_cases(seed, random),
+        ),
+        (
+            Translator::OpenAIChatStream,
+            cases::openai_chat::streams(),
+            openai_chat_streams,
+        ),
+        (
+            Translator::OpenAIChatNonStream,
+            cases::openai_chat::finals(),
+            openai_chat_finals,
         ),
         (
             Translator::SignatureInspect,

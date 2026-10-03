@@ -25,11 +25,17 @@
 // the stream; claude/openai-responses/response-non-stream takes the whole
 // Claude SSE body as its one event.
 //
+// The openai/* entries take Chat Completions stream lines, or a whole Chat
+// Completions response as the one event. openai/claude/request and
+// request-compat read {"stream": bool} from "options". openai/claude/response
+// and openai/openai-chat/response write a JSON array with one string per
+// output chunk, empty ones included. openai/openai-responses/response
+// concatenates its output for every line, then what FinalizeToolInput returns
+// at the end of the stream.
+//
 // The registry/* entries run sdk/translator's default registry, which holds
 // the translators of the packages imported here, for the pair of formats in
-// "options" (see registryOptions). The openai/openai/responses package is
-// imported only for its request translator: init takes its pair out of the
-// default registry, as open-ferry's registry doesn't have it yet. registry/response writes a JSON report of
+// "options" (see registryOptions). registry/response writes a JSON report of
 // the chunks TranslateStream returned for each event, and
 // registry/response-non-stream one of what TranslateNonStream returned;
 // registry/request writes the translated request.
@@ -58,6 +64,8 @@ import (
 	codexclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/claude"
 	codexchat "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/openai/chat-completions"
 	codexresponses "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/openai/responses"
+	openaiclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/openai/claude"
+	openaichat "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/openai/openai/chat-completions"
 	openairesponses "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/openai/openai/responses"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
@@ -191,6 +199,59 @@ var translators = map[string]func(in input) []byte{
 	"openai/openai-responses/request": func(in input) []byte {
 		return openairesponses.ConvertOpenAIResponsesRequestToOpenAIChatCompletions(in.Model, []byte(in.Request), true)
 	},
+	"openai/openai-responses/response": func(in input) []byte {
+		var param any
+		var out []byte
+		for _, event := range in.Events {
+			for _, chunk := range openairesponses.ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), []byte(event), &param) {
+				out = append(out, chunk...)
+			}
+		}
+		if state, ok := param.(interface{ FinalizeToolInput() [][]byte }); ok {
+			for _, chunk := range state.FinalizeToolInput() {
+				out = append(out, chunk...)
+			}
+		}
+		return out
+	},
+	"openai/openai-responses/response-non-stream": func(in input) []byte {
+		return openairesponses.ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), nil)
+	},
+	"openai/claude/request": func(in input) []byte {
+		return openaiclaude.ConvertClaudeRequestToOpenAI(in.Model, []byte(in.Request), streamOption(in))
+	},
+	"openai/claude/request-compat": func(in input) []byte {
+		return openaiclaude.ConvertClaudeRequestToOpenAIWithCompat(in.Model, []byte(in.Request), streamOption(in))
+	},
+	"openai/claude/response": func(in input) []byte {
+		var param any
+		chunks := []string{}
+		for _, event := range in.Events {
+			for _, chunk := range openaiclaude.ConvertOpenAIResponseToClaude(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), []byte(event), &param) {
+				chunks = append(chunks, string(chunk))
+			}
+		}
+		return marshal(chunks)
+	},
+	"openai/claude/response-non-stream": func(in input) []byte {
+		return openaiclaude.ConvertOpenAIResponseToClaudeNonStream(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), nil)
+	},
+	"openai/openai-chat/request": func(in input) []byte {
+		return openaichat.ConvertOpenAIRequestToOpenAI(in.Model, []byte(in.Request), true)
+	},
+	"openai/openai-chat/response": func(in input) []byte {
+		var param any
+		chunks := []string{}
+		for _, event := range in.Events {
+			for _, chunk := range openaichat.ConvertOpenAIResponseToOpenAI(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), []byte(event), &param) {
+				chunks = append(chunks, string(chunk))
+			}
+		}
+		return marshal(chunks)
+	},
+	"openai/openai-chat/response-non-stream": func(in input) []byte {
+		return openaichat.ConvertOpenAIResponseToOpenAINonStream(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), nil)
+	},
 	"registry/request":             registryRequest,
 	"registry/response":            registryResponse,
 	"registry/response-non-stream": registryResponseNonStream,
@@ -198,11 +259,6 @@ var translators = map[string]func(in input) []byte{
 	"signature/inspect":            inspectSignature,
 	"signature/claude-messages":    sanitizeClaudeMessages,
 	"signature/gemini":             sanitizeGemini,
-}
-
-// init runs after the imported packages register their translators.
-func init() {
-	sdktranslator.Unregister(sdktranslator.FormatOpenAIResponse, sdktranslator.FormatOpenAI)
 }
 
 func finalEvent(in input) []byte {
@@ -217,6 +273,15 @@ func translatedRequest(in input) []byte {
 		return nil
 	}
 	return []byte(in.Translated)
+}
+
+// streamOption is the "stream" option, false if not given.
+func streamOption(in input) bool {
+	var options struct {
+		Stream bool `json:"stream"`
+	}
+	decodeOptions(in, &options)
+	return options.Stream
 }
 
 // registryOptions are the registry/* entries' options. For a request, From is

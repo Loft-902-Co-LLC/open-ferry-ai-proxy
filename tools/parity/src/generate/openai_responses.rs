@@ -1,5 +1,4 @@
-//! Seeded random input for the Responses → Chat Completions request
-//! translator.
+//! Seeded random input for the Responses → Chat Completions translators.
 //!
 //! Requests aim at what that translator reads: `instructions`, messages of
 //! every role with text, image and video parts, `reasoning_content` on
@@ -14,12 +13,24 @@
 //! Custom tool call input is never an object or array here: upstream copies
 //! its JSON text into the call's arguments, and we write it compactly, which
 //! the comparison can't see through (see the hand-written cases).
+//!
+//! Responses are the Chat Completions generator's ([`super::openai_chat`])
+//! answering such a request, with calls to its tools by the names the
+//! translated request gives them, by the names the client wrote and by names
+//! neither declares. Calls to custom tools carry `{"input": ...}` arguments,
+//! and calls to `apply_patch` a patch, whole, cut short or not a patch at
+//! all. The client's request is sometimes missing or not JSON, and the
+//! translated one missing, translated from it, or a few fields that the
+//! response repeats. Neither holds a negative zero or a number too large for
+//! `int64`, which upstream writes as no JSON encoder would.
 
 use std::ops::{Deref, DerefMut};
 
+use open_ferry_translate::openai::responses::convert_openai_responses_request_to_openai_chat_completions;
 use serde_json::{Value, json};
 
 use super::claude_responses::qualify;
+use super::openai_chat::Call;
 use super::{EFFORTS, Rng, escape_text, num};
 use crate::cases::Case;
 
@@ -34,6 +45,37 @@ pub fn request_cases(seed: u64, count: usize) -> Vec<Case> {
             Case::new(format!("random-{seed}-{index}"), model, text)
         })
         .collect()
+}
+
+/// Builds `count` random Chat Completions streams answering random Responses
+/// requests, and a non-streaming case from a whole response for each.
+pub fn event_cases(seed: u64, count: usize) -> (Vec<Case>, Vec<Case>) {
+    (0..count as u64)
+        .map(|index| {
+            let mut generator = Generator::new(seed.rotate_left(13), index);
+            generator.whole_cuts = true;
+            let model = generator.rng.pick(MODELS);
+            let mut original = generator.request();
+            if generator.rng.chance(15) {
+                // Declares apply_patch more often than the request generator
+                // does, so its calls stream often enough.
+                declare_apply_patch(&mut original);
+                generator.tool_names.push(json!("apply_patch"));
+            }
+            tame_numbers(&mut original);
+            let calls = calls(&original, &generator.tool_names);
+            let (original_text, translated) = generator.requests(&original, model);
+            let mut chat = super::openai_chat::Generator::new(seed.rotate_left(43), index);
+            let lines = chat.stream(&calls);
+            let body = chat.body(&calls);
+            let case = |events| Case {
+                model: model.to_owned(),
+                translated_request: translated.clone(),
+                ..Case::response(format!("random-{seed}-{index}"), &original_text, events)
+            };
+            (case(lines), case(vec![body]))
+        })
+        .unzip()
 }
 
 /// Model names, which the translator only copies.
@@ -78,6 +120,49 @@ const CUSTOM_INPUTS: &[&str] = &[
     "",
 ];
 
+/// The arguments of a call to a custom tool: its input wrapped in an object,
+/// of other types, missing, or not wrapped.
+const CUSTOM_ARGUMENTS: &[&str] = &[
+    r#"{"input":"ls -la"}"#,
+    r#"{"input":"echo '<b>' && cat a > b"}"#,
+    r#"{"input":"café 🚀"}"#,
+    r#"{"input":"line\nbreak\ttab \"quoted\" \\"}"#,
+    r#"{"input":""}"#,
+    r#"{"input":5}"#,
+    r#"{"input":null}"#,
+    r#"{"input":{"b":1,"a":[2]}}"#,
+    r#"{"cmd":"ls"}"#,
+    "ls -la",
+    "",
+];
+
+/// The arguments of a call to `apply_patch`: patches whole, with escapes the
+/// stream's decoder has to put back together, cut short, not patches, and not
+/// wrapped as input.
+const PATCH_ARGUMENTS: &[&str] = &[
+    r#"{"input":"*** Begin Patch\n*** Add File: hello.txt\n+Hello, world!\n*** End Patch"}"#,
+    r#"{"input":"*** Begin Patch\n*** Update File: a.rs\n@@\n-old\n+new\n*** End Patch\n"}"#,
+    r#"{ "input" : "*** Begin Patch\n*** Delete File: gone.txt\n*** End Patch" }"#,
+    concat!(
+        r#"{"input":"*** Begin Patch\n*** Add File: caf"#,
+        '\\',
+        r#"u00e9.txt\n+"#,
+        '\\',
+        "ud83d",
+        '\\',
+        r#"ude80 \"quoted\" \\ back\/slash\n*** End Patch"}"#
+    ),
+    r#"{"input":"*** Begin Patch\n*** Add File: cut.txt\n+no end"}"#,
+    r#"{"input":"*** Begin Patch"#,
+    r#"{"input":"not a patch"}"#,
+    r#"{"input":"*** Begin Patch\n*** Add File: a\n+x\n*** End Patch","extra":1}"#,
+    r#"{"input":5}"#,
+    r#"{"input":""}"#,
+    r#"{"other":"x"}"#,
+    "not json",
+    "",
+];
+
 /// Reasoning text, from a small pool so repeats are common, with the
 /// placeholder upstream writes for reasoning it can't show.
 const REASONING: &[&str] = &[
@@ -109,6 +194,12 @@ struct Generator {
     base: super::Generator,
     /// Namespaces declared in `tools`, for calls and `tool_choice` to use.
     namespaces: Vec<String>,
+    /// Whether to lengthen a namespace child's name where cutting its full
+    /// name to 64 bytes would split a character. Upstream cuts the bytes and
+    /// we cut at the character (see UPSTREAM.md), and the responses name
+    /// their calls by the request's translation, so in a response suite the
+    /// two would read every call to such a tool differently.
+    whole_cuts: bool,
 }
 
 impl Deref for Generator {
@@ -126,6 +217,80 @@ impl DerefMut for Generator {
 }
 
 impl Generator {
+    /// The client's request as JSON text, and the request as translated for a
+    /// Chat Completions upstream, for `original`. Upstream reads the client's,
+    /// unless it is missing or not JSON.
+    fn requests(&mut self, original: &Value, model: &str) -> (String, String) {
+        let original_text = match self.rng.below(100) {
+            // Absent. Not "null": upstream would take that as a request.
+            0..=14 => String::new(),
+            15 | 16 => "{not json".to_owned(),
+            17 => "[]".to_owned(),
+            _ => self.render(original),
+        };
+        let translated = match self.rng.below(10) {
+            0..=2 => return (original_text, String::new()),
+            3..=6 => {
+                convert_openai_responses_request_to_openai_chat_completions(model, original, true)
+            }
+            _ => self.echoed_fields(),
+        };
+        let mut translated = translated;
+        tame_numbers(&mut translated);
+        (original_text, translated.to_string())
+    }
+
+    /// A translated request with the fields a response repeats, loosely
+    /// typed, and the `max_tokens` that stands in for `max_output_tokens`.
+    fn echoed_fields(&mut self) -> Value {
+        let mut fields = Vec::new();
+        if self.rng.chance(80) {
+            let model = self.loose_choice(&["gpt-4o", "", " "]);
+            fields.push(("model", model));
+        }
+        if self.rng.chance(40) {
+            fields.push(("max_tokens", self.token_limit()));
+        }
+        for key in [
+            "instructions",
+            "max_output_tokens",
+            "max_tool_calls",
+            "parallel_tool_calls",
+            "previous_response_id",
+            "prompt_cache_key",
+            "reasoning",
+            "safety_identifier",
+            "service_tier",
+            "store",
+            "temperature",
+            "text",
+            "tool_choice",
+            "top_logprobs",
+            "top_p",
+            "truncation",
+            "user",
+            "metadata",
+        ] {
+            if !self.rng.chance(20) {
+                continue;
+            }
+            let value = match key {
+                "max_output_tokens" | "max_tool_calls" | "top_logprobs" => self.token_limit(),
+                "parallel_tool_calls" | "store" => self.bool_like(),
+                "reasoning" => self.reasoning(),
+                "temperature" | "top_p" => self.number(),
+                "text" => self.text_config(),
+                "tool_choice" => self.tool_choice(),
+                "metadata" => self.one_of(&[json!({ "k": "v" }), json!({}), json!("m")]),
+                "service_tier" => self.loose_choice(&["auto", "flex", "priority", ""]),
+                "truncation" => self.loose_choice(&["auto", "disabled"]),
+                _ => self.loose_text(),
+            };
+            fields.push((key, value));
+        }
+        self.object(fields)
+    }
+
     fn new(seed: u64, index: u64) -> Self {
         Self {
             base: super::Generator {
@@ -136,6 +301,7 @@ impl Generator {
                 tool_use_ids: Vec::new(),
             },
             namespaces: Vec::new(),
+            whole_cuts: false,
         }
     }
 
@@ -401,7 +567,7 @@ impl Generator {
     }
 
     fn namespace_child(&mut self, namespace: &str) -> Value {
-        let child = match self.rng.below(12) {
+        let mut child = match self.rng.below(12) {
             0 => format!("mcp__{}", self.alphanumeric(4)),
             // Already qualified, or the namespace itself.
             1 if !namespace.is_empty() => format!("{namespace}__read"),
@@ -414,6 +580,12 @@ impl Generator {
                 _ => "read".to_owned(),
             },
         };
+        while self.whole_cuts && {
+            let full = qualify(namespace, &child);
+            full.len() > 64 && !full.is_char_boundary(full.len() - 64)
+        } {
+            child.push('x');
+        }
         // Calls name a child by its full name, or by its own.
         self.tool_names.push(qualify(namespace, &child).into());
         self.tool_names.push(child.trim().into());
@@ -1130,6 +1302,70 @@ impl Generator {
     }
 }
 
+/// Adds the `apply_patch` custom tool to a request's tools.
+fn declare_apply_patch(request: &mut Value) {
+    let Value::Object(fields) = request else {
+        return;
+    };
+    let tool = json!({ "type": "custom", "name": "apply_patch", "description": "Edit files." });
+    match fields.get_mut("tools") {
+        Some(Value::Array(tools)) => tools.push(tool),
+        _ => {
+            fields.insert("tools".into(), json!([tool]));
+        }
+    }
+}
+
+/// Replaces negative zeros, and numbers too large for `int64`, with numbers
+/// of their own: upstream repeats some request fields as Go writes them, a
+/// negative zero as `-0`, and reads a count beyond `int64` by the CPU's
+/// rules (see UPSTREAM.md).
+fn tame_numbers(value: &mut Value) {
+    match value {
+        Value::Number(number) => {
+            let float = number.as_f64().unwrap_or(0.0);
+            if float == 0.0 && number.to_string().starts_with('-') {
+                *value = json!(0);
+            } else if float.abs() >= 9.2e18 {
+                *value = json!(7);
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(tame_numbers),
+        Value::Object(fields) => fields.values_mut().for_each(tame_numbers),
+        _ => {}
+    }
+}
+
+/// The calls a model might make to a request's tools: by the names the
+/// translated request gives them, by the names the client wrote (`declared`)
+/// and by a name neither declares, each with arguments of the kind its tool
+/// takes.
+fn calls(request: &Value, declared: &[Value]) -> Vec<Call> {
+    let translated =
+        convert_openai_responses_request_to_openai_chat_completions("gpt-4o", request, true);
+    let mut calls: Vec<Call> = Vec::new();
+    if let Some(Value::Array(tools)) = translated.get("tools") {
+        for tool in tools {
+            let Some(name) = tool.pointer("/function/name").and_then(Value::as_str) else {
+                continue;
+            };
+            let arguments = if name == "apply_patch" {
+                PATCH_ARGUMENTS
+            } else if tool.pointer("/function/parameters/required") == Some(&json!(["input"])) {
+                CUSTOM_ARGUMENTS
+            } else {
+                super::openai_chat::ARGUMENTS
+            };
+            calls.push((name.to_owned(), arguments));
+        }
+    }
+    for name in declared.iter().filter_map(Value::as_str) {
+        calls.push((name.to_owned(), super::openai_chat::ARGUMENTS));
+    }
+    calls.push(("undeclared_tool".to_owned(), CUSTOM_ARGUMENTS));
+    calls
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1224,6 +1460,58 @@ mod tests {
             let found = count(matches);
             assert!(found >= 20, "{kind} in {found} outputs");
         }
+    }
+
+    /// Guards against a generator that never reaches the translators' branches.
+    #[test]
+    fn event_cases_cover_the_translators_branches() {
+        let (streams, finals) = event_cases(1, 2000);
+        let (again, _) = event_cases(1, 2000);
+        for (a, b) in streams.iter().zip(&again) {
+            assert_eq!(a.request, b.request);
+            assert_eq!(a.translated_request, b.translated_request);
+            assert_eq!(a.events, b.events);
+        }
+        let outputs = |translator: Translator, cases: &[Case]| -> Vec<String> {
+            cases
+                .iter()
+                .map(|case| {
+                    translator
+                        .run_rust(case)
+                        .expect("cases translate")
+                        .to_string()
+                })
+                .collect()
+        };
+        let streams = outputs(Translator::OpenAIResponsesStream, &streams);
+        check(
+            &streams,
+            &[
+                r#""event":"response.completed""#,
+                r#""event":"response.incomplete""#,
+                r#""event":"response.failed""#,
+                r#""event":"response.custom_tool_call_input.delta""#,
+                r#""event":"response.function_call_arguments.done""#,
+                r#""event":"response.reasoning_summary_text.delta""#,
+                r#""event":"response.output_text.delta""#,
+                r#""type":"custom_tool_call""#,
+                r#""namespace":"#,
+                r#""instructions":"#,
+                r#""cached_tokens":12"#,
+            ],
+        );
+        let finals = outputs(Translator::OpenAIResponsesNonStream, &finals);
+        check(
+            &finals,
+            &[
+                r#""status":"incomplete""#,
+                r#""type":"custom_tool_call""#,
+                r#""type":"function_call""#,
+                r#""type":"reasoning""#,
+                r#""max_output_tokens":"#,
+                r#""id":"resp_(generated)""#,
+            ],
+        );
     }
 
     fn check(outputs: &[String], needles: &[&str]) {

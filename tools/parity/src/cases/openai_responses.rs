@@ -1,8 +1,13 @@
-//! Hand-written cases for the Responses → Chat Completions request translator.
+//! Hand-written cases for the Responses → Chat Completions translators.
 
+use open_ferry_translate::openai::responses::convert_openai_responses_request_to_openai_chat_completions;
 use serde_json::{Value, json};
 
 use super::Case;
+use super::openai_chat::{
+    DONE, bodies, call as tool_call, data, event_streams, finish, lines, response, text, usage,
+    usage_only, whole_call, with_usage,
+};
 
 const MODEL: &str = "gpt-4o";
 
@@ -685,6 +690,358 @@ pub fn requests() -> Vec<Case> {
             r#"{"input":"Go.","text":{"format":{"type":"json_schema","name":"x","strict":1e400}}}"#,
         )
         .known_difference("Go can't write a number beyond float64 in text.format"),
+    ]);
+    cases
+}
+
+// --- Responses ---
+
+/// A client's request with tools of every kind but `apply_patch`, and every
+/// field a response repeats.
+fn plain_request() -> Value {
+    let mut tools = client_tools();
+    if let Value::Array(tools) = &mut tools {
+        tools.retain(|tool| tool["name"] != "apply_patch");
+    }
+    json!({
+        "model": MODEL,
+        "instructions": "Be brief.",
+        "input": [user("Hi")],
+        "tools": tools,
+        "tool_choice": "auto",
+        "parallel_tool_calls": true,
+        "reasoning": { "effort": "low", "summary": "auto" },
+        "temperature": 0.5,
+        "top_p": 1,
+        "max_output_tokens": 1024,
+        "max_tool_calls": 5,
+        "store": false,
+        "text": { "format": { "type": "text" } },
+        "metadata": { "k": "v" },
+        "user": "user_1",
+        "previous_response_id": "resp_0",
+        "prompt_cache_key": "key",
+        "safety_identifier": "sid",
+        "service_tier": "auto",
+        "truncation": "disabled",
+        "top_logprobs": 0
+    })
+}
+
+/// A client's request that declares `apply_patch`.
+fn patch_request() -> Value {
+    json!({ "model": MODEL, "input": [user("Edit hello.txt.")], "tools": client_tools() })
+}
+
+/// `request` as translated for the Chat Completions upstream.
+fn translated(request: &Value) -> String {
+    convert_openai_responses_request_to_openai_chat_completions(MODEL, request, true).to_string()
+}
+
+/// A case answering `request`, given both as the client sent it and as
+/// translated.
+fn answer(name: impl Into<String>, request: &Value, events: Vec<String>) -> Case {
+    Case {
+        model: MODEL.to_owned(),
+        translated_request: translated(request),
+        ..Case::response(name, request.to_string(), events)
+    }
+}
+
+/// A chunk from [`tool_call`] with its tool call at `index`.
+fn at_index(mut chunk: Value, index: u64) -> Value {
+    chunk["choices"][0]["delta"]["tool_calls"][0]["index"] = index.into();
+    chunk
+}
+
+/// Streams that only this translator reads differently: calls to tools in
+/// namespaces, custom tools and `apply_patch`, with the patch text's escapes
+/// cut across chunks.
+fn responses_streams() -> Vec<(&'static str, Value, Vec<String>)> {
+    let patch = r#"{"input":"*** Begin Patch\n*** Add File: a.txt\n+h\u00e9llo \ud83d\ude80\n*** End Patch\n"}"#;
+    // The arguments cut between a backslash and its letter, inside a `\u`
+    // escape, and between and inside a surrogate pair's halves.
+    let at = |needle: &str, offset: usize| patch.find(needle).map_or(0, |at| at + offset);
+    let cuts = [
+        0,
+        at("\\n***", 1),
+        at("\\u00e9", 3),
+        at("\\ude80", 0),
+        at("\\ude80", 2),
+        patch.len(),
+    ];
+    let patch_call = |arguments: &str| tool_call(0, Some("call_p"), Some("apply_patch"), arguments);
+    let mut streamed = vec![patch_call("")];
+    streamed.extend(
+        cuts.windows(2)
+            .map(|cut| tool_call(0, None, None, &patch[cut[0]..cut[1]])),
+    );
+    let mut finished = streamed.clone();
+    finished.push(finish("tool_calls"));
+    let plain = plain_request();
+    let patching = patch_request();
+    vec![
+        (
+            "namespaced-call",
+            plain.clone(),
+            lines(&[
+                tool_call(
+                    0,
+                    Some("call_1"),
+                    Some("mcp__github__read_file"),
+                    r#"{"path":"a"}"#,
+                ),
+                tool_call(1, Some("call_2"), Some("mcp__github__list"), "{}"),
+                finish("tool_calls"),
+            ]),
+        ),
+        (
+            "custom-call",
+            plain.clone(),
+            lines(&[
+                tool_call(0, Some("call_1"), Some("shell"), r#"{"inp"#),
+                tool_call(0, None, None, r#"ut":"ls -la \u003cb\u003e"}"#),
+                finish("tool_calls"),
+            ]),
+        ),
+        (
+            "custom-call-not-wrapped",
+            plain.clone(),
+            lines(&[
+                tool_call(0, Some("call_1"), Some("shell"), "ls -la"),
+                tool_call(1, Some("call_2"), Some("shell"), r#"{"input":5}"#),
+                finish("tool_calls"),
+            ]),
+        ),
+        (
+            "undeclared-call",
+            plain.clone(),
+            lines(&[
+                tool_call(0, Some("call_1"), Some(" undeclared "), "{}"),
+                finish("tool_calls"),
+            ]),
+        ),
+        ("apply-patch", patching.clone(), lines(&finished)),
+        (
+            "apply-patch-whole",
+            patching.clone(),
+            lines(&[patch_call(patch), finish("tool_calls")]),
+        ),
+        (
+            "apply-patch-not-input",
+            patching.clone(),
+            lines(&[patch_call(r#"{"input":5}"#), finish("tool_calls")]),
+        ),
+        (
+            "apply-patch-not-json",
+            patching.clone(),
+            lines(&[patch_call("not json"), finish("tool_calls")]),
+        ),
+        (
+            "apply-patch-cut-short",
+            patching.clone(),
+            lines(&[
+                patch_call(r#"{"input":"*** Begin Patch\n*** Add"#),
+                finish("tool_calls"),
+            ]),
+        ),
+        (
+            "apply-patch-no-done",
+            patching.clone(),
+            finished.iter().map(data).collect(),
+        ),
+        ("apply-patch-no-finish", patching.clone(), lines(&streamed)),
+        (
+            "apply-patch-id-changes",
+            patching.clone(),
+            lines(&[
+                patch_call(r#"{"input":"*** Begin"#),
+                tool_call(0, Some("call_q"), Some("apply_patch"), " Patch"),
+                finish("tool_calls"),
+            ]),
+        ),
+        (
+            "apply-patch-name-changes",
+            patching.clone(),
+            lines(&[
+                patch_call(r#"{"input":"*** Begin"#),
+                tool_call(0, None, Some("shell"), " Patch"),
+                finish("tool_calls"),
+            ]),
+        ),
+        (
+            "apply-patch-and-text",
+            patching.clone(),
+            lines(&[text("Editing."), finish("stop")]),
+        ),
+        (
+            "apply-patch-and-function",
+            patching.clone(),
+            lines(&[
+                tool_call(0, Some("call_1"), Some("get_weather"), "{}"),
+                at_index(patch_call(patch), 1),
+                finish("tool_calls"),
+            ]),
+        ),
+        (
+            "apply-patch-done-only",
+            patching.clone(),
+            vec![DONE.to_owned()],
+        ),
+        (
+            "apply-patch-malformed-line",
+            patching,
+            vec![
+                "data: {not json".to_owned(),
+                data(&text("Hi")),
+                data(&finish("stop")),
+                DONE.to_owned(),
+            ],
+        ),
+        (
+            "reasoning-requested",
+            plain.clone(),
+            lines(&[text("No reasoning."), finish("stop")]),
+        ),
+        (
+            "usage-after-finish",
+            plain.clone(),
+            lines(&[
+                text("Hi"),
+                finish("length"),
+                usage_only(
+                    json!({ "prompt_tokens": 9, "completion_tokens": 3, "prompt_tokens_details": { "cached_tokens": 2 }, "completion_tokens_details": { "reasoning_tokens": 1 } }),
+                ),
+            ]),
+        ),
+        (
+            "usage-on-first-chunk",
+            plain,
+            lines(&[with_usage(text("Hi"), usage(5, 5)), finish("stop")]),
+        ),
+    ]
+}
+
+/// Chat Completions streams answering a Responses client, with its request
+/// as sent and as translated, only one of them, or neither.
+pub fn streams() -> Vec<Case> {
+    let plain = plain_request();
+    let mut cases: Vec<Case> = event_streams()
+        .into_iter()
+        .map(|(name, lines)| answer(name, &plain, lines))
+        .collect();
+    cases.extend(
+        responses_streams()
+            .into_iter()
+            .map(|(name, request, lines)| answer(name, &request, lines)),
+    );
+    let finished = lines(&[text("Hi"), finish("stop")]);
+    cases.extend([
+        Case {
+            model: MODEL.to_owned(),
+            ..Case::response("original-only", plain.to_string(), finished.clone())
+        },
+        Case {
+            model: MODEL.to_owned(),
+            translated_request: translated(&plain),
+            ..Case::response("translated-only", "", finished.clone())
+        },
+        Case {
+            model: MODEL.to_owned(),
+            translated_request: translated(&plain),
+            ..Case::response("original-not-json", "{not json", finished.clone())
+        },
+        Case {
+            model: "fallback-model".to_owned(),
+            ..Case::response("no-requests", "", finished.clone())
+        },
+        Case {
+            model: MODEL.to_owned(),
+            ..Case::response("original-array", "[]", finished)
+        },
+        answer("apply-patch-no-lines", &patch_request(), Vec::new()),
+        answer(
+            "apply-patch-empty-line",
+            &patch_request(),
+            vec![String::new()],
+        ),
+    ]);
+    cases
+}
+
+/// Whole Chat Completions responses answering a Responses client.
+pub fn finals() -> Vec<Case> {
+    let plain = plain_request();
+    let patching = patch_request();
+    let mut cases: Vec<Case> = bodies()
+        .into_iter()
+        .map(|(name, body)| answer(name, &plain, vec![body]))
+        .collect();
+    let patch = r#"{"input":"*** Begin Patch\n*** Add File: a.txt\n+h\u00e9llo\n*** End Patch\n"}"#;
+    let body = |calls: Value| {
+        let message = json!({ "role": "assistant", "content": null, "tool_calls": calls });
+        vec![response(message, "tool_calls").to_string()]
+    };
+    let text_body = || vec![response(json!({ "content": "x" }), "stop").to_string()];
+    cases.extend([
+        answer(
+            "namespaced-and-custom-calls",
+            &plain,
+            body(json!([
+                whole_call("call_1", "mcp__github__read_file", r#"{"path":"a"}"#),
+                whole_call("call_2", "shell", r#"{"input":"ls"}"#),
+                whole_call("call_3", "shell", "ls"),
+                whole_call("call_4", " undeclared ", "{}")
+            ])),
+        ),
+        answer(
+            "apply-patch",
+            &patching,
+            body(json!([whole_call("call_p", "apply_patch", patch)])),
+        ),
+        answer(
+            "apply-patch-not-input",
+            &patching,
+            body(json!([whole_call(
+                "call_p",
+                "apply_patch",
+                r#"{"input":5}"#
+            )])),
+        ),
+        answer(
+            "apply-patch-not-json",
+            &patching,
+            body(json!([whole_call("call_p", "apply_patch", "not json")])),
+        ),
+        answer(
+            "apply-patch-not-a-patch",
+            &patching,
+            body(json!([whole_call(
+                "call_p",
+                "apply_patch",
+                r#"{"input":"hello"}"#
+            )])),
+        ),
+        answer(
+            "apply-patch-body-not-json",
+            &patching,
+            vec!["{not json".to_owned()],
+        ),
+        Case {
+            model: MODEL.to_owned(),
+            ..Case::response("original-only", plain.to_string(), text_body())
+        },
+        Case {
+            model: MODEL.to_owned(),
+            translated_request: json!({ "max_tokens": 77, "model": "", "temperature": "0.25" })
+                .to_string(),
+            ..Case::response("translated-fallbacks", "", text_body())
+        },
+        Case {
+            model: MODEL.to_owned(),
+            ..Case::response("no-requests", "", text_body())
+        },
+        answer("no-body", &plain, Vec::new()),
     ]);
     cases
 }

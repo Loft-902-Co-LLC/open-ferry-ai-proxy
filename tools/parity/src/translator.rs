@@ -35,7 +35,19 @@ use open_ferry_translate::completions::{
     convert_completions_request_to_chat_completions,
 };
 use open_ferry_translate::models::ModelCatalog;
-use open_ferry_translate::openai::responses::convert_openai_responses_request_to_openai_chat_completions;
+use open_ferry_translate::openai::chat_completions::{
+    OpenAIToOpenAIStream, convert_openai_request_to_openai,
+    convert_openai_response_to_openai_non_stream,
+};
+use open_ferry_translate::openai::claude::{
+    OpenAIToClaudeStream, convert_claude_request_to_openai,
+    convert_claude_request_to_openai_with_compat, convert_openai_response_to_claude_non_stream,
+};
+use open_ferry_translate::openai::responses::{
+    OpenAIToOpenAIResponsesStream,
+    convert_openai_chat_completions_response_to_openai_responses_non_stream,
+    convert_openai_responses_request_to_openai_chat_completions,
+};
 use open_ferry_translate::registry::{Format, Registry, ResponseContext, ResponseTransform};
 use serde_json::{Value, json};
 
@@ -56,6 +68,10 @@ const UNCHANGED: &str = "=";
 /// What a response's `created` or `created_at` is replaced with when it is
 /// the current time, which upstream and we each read from the clock.
 const CREATED_NOW: &str = "(now)";
+
+/// What the clock time and count in a response ID made up for a response
+/// without one are replaced with (see [`mask_generated_response_id`]).
+const GENERATED_RESPONSE_ID: &str = "(generated)";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Translator {
@@ -97,6 +113,25 @@ pub enum Translator {
     ClaudeResponsesNonStream,
     /// OpenAI Responses request → OpenAI Chat Completions request.
     OpenAIResponsesRequest,
+    /// Chat Completions stream → Responses events.
+    OpenAIResponsesStream,
+    /// A whole Chat Completions response → one Responses response.
+    OpenAIResponsesNonStream,
+    /// Claude Messages request → OpenAI Chat Completions request.
+    OpenAIClaudeRequest,
+    /// The same in compatibility mode, which passes on all thinking.
+    OpenAIClaudeRequestCompat,
+    /// Chat Completions stream → Claude SSE events, or a Claude message per
+    /// chunk for a client that didn't ask for a stream.
+    OpenAIClaudeStream,
+    /// A whole Chat Completions response → one Claude message.
+    OpenAIClaudeNonStream,
+    /// Chat Completions request → Chat Completions request, its model replaced.
+    OpenAIChatRequest,
+    /// Chat Completions stream → the same chunks, passed through.
+    OpenAIChatStream,
+    /// A whole Chat Completions response, passed through.
+    OpenAIChatNonStream,
     /// One reasoning signature → every check and replay decision on it.
     SignatureInspect,
     /// A Claude Messages request → its signed history stripped and sanitized.
@@ -145,6 +180,15 @@ impl Translator {
             Self::ClaudeResponsesStream => "claude/openai-responses/response",
             Self::ClaudeResponsesNonStream => "claude/openai-responses/response-non-stream",
             Self::OpenAIResponsesRequest => "openai/openai-responses/request",
+            Self::OpenAIResponsesStream => "openai/openai-responses/response",
+            Self::OpenAIResponsesNonStream => "openai/openai-responses/response-non-stream",
+            Self::OpenAIClaudeRequest => "openai/claude/request",
+            Self::OpenAIClaudeRequestCompat => "openai/claude/request-compat",
+            Self::OpenAIClaudeStream => "openai/claude/response",
+            Self::OpenAIClaudeNonStream => "openai/claude/response-non-stream",
+            Self::OpenAIChatRequest => "openai/openai-chat/request",
+            Self::OpenAIChatStream => "openai/openai-chat/response",
+            Self::OpenAIChatNonStream => "openai/openai-chat/response-non-stream",
             Self::SignatureInspect => "signature/inspect",
             Self::ClaudeMessagesSignatures => "signature/claude-messages",
             Self::GeminiSignatures => "signature/gemini",
@@ -180,6 +224,15 @@ impl Translator {
             Self::ClaudeResponsesStream => "claude-to-responses-stream",
             Self::ClaudeResponsesNonStream => "claude-to-responses-non-stream",
             Self::OpenAIResponsesRequest => "responses-to-chat-request",
+            Self::OpenAIResponsesStream => "chat-to-responses-stream",
+            Self::OpenAIResponsesNonStream => "chat-to-responses-non-stream",
+            Self::OpenAIClaudeRequest => "claude-to-chat-request",
+            Self::OpenAIClaudeRequestCompat => "claude-to-chat-request-compat",
+            Self::OpenAIClaudeStream => "chat-to-claude-stream",
+            Self::OpenAIClaudeNonStream => "chat-to-claude-non-stream",
+            Self::OpenAIChatRequest => "chat-to-chat-request",
+            Self::OpenAIChatStream => "chat-to-chat-stream",
+            Self::OpenAIChatNonStream => "chat-to-chat-non-stream",
             Self::SignatureInspect => "signature-inspect",
             Self::ClaudeMessagesSignatures => "signature-claude-messages",
             Self::GeminiSignatures => "signature-gemini",
@@ -216,6 +269,19 @@ impl Translator {
             Self::ClaudeResponsesStream => "Claude -> Responses response, streaming",
             Self::ClaudeResponsesNonStream => "Claude -> Responses response, non-streaming",
             Self::OpenAIResponsesRequest => "Responses -> Chat Completions request",
+            Self::OpenAIResponsesStream => "Chat Completions -> Responses response, streaming",
+            Self::OpenAIResponsesNonStream => {
+                "Chat Completions -> Responses response, non-streaming"
+            }
+            Self::OpenAIClaudeRequest => "Claude -> Chat Completions request",
+            Self::OpenAIClaudeRequestCompat => {
+                "Claude -> Chat Completions request, compatibility mode"
+            }
+            Self::OpenAIClaudeStream => "Chat Completions -> Claude response, streaming",
+            Self::OpenAIClaudeNonStream => "Chat Completions -> Claude response, non-streaming",
+            Self::OpenAIChatRequest => "Chat Completions passthrough request",
+            Self::OpenAIChatStream => "Chat Completions passthrough response, streaming",
+            Self::OpenAIChatNonStream => "Chat Completions passthrough response, non-streaming",
             Self::SignatureInspect => "Signature checks and replay decisions",
             Self::ClaudeMessagesSignatures => "Claude Messages signature sanitizers",
             Self::GeminiSignatures => "Gemini thought signature sanitizer and validators",
@@ -441,6 +507,92 @@ impl Translator {
                     .read(case, output.to_string().as_bytes())
                     .expect("requests always read"))
             }
+            Self::OpenAIResponsesStream => {
+                // An original request that isn't JSON counts as absent, as
+                // upstream's pickRequestJSON skips it.
+                let translated = serde_json::from_str(&case.translated_request).unwrap_or_default();
+                let mut stream = OpenAIToOpenAIResponsesStream::new(
+                    &case.model,
+                    &request.unwrap_or_default(),
+                    &translated,
+                );
+                // The SSE frames for every line, then those for the stream's end,
+                // as the harness collects upstream's.
+                let mut output: String = case
+                    .events
+                    .iter()
+                    .map(|line| stream.translate_line(line.as_bytes()))
+                    .collect();
+                output.push_str(&stream.finalize_tool_input());
+                Ok(self
+                    .read(case, output.as_bytes())
+                    .expect("streams always read"))
+            }
+            Self::OpenAIResponsesNonStream => {
+                let translated = serde_json::from_str(&case.translated_request).unwrap_or_default();
+                let body = case.events.first().map_or(&b""[..], |body| body.as_bytes());
+                let output =
+                    convert_openai_chat_completions_response_to_openai_responses_non_stream(
+                        &request.unwrap_or_default(),
+                        &translated,
+                        body,
+                    );
+                self.read(case, output.to_string().as_bytes())
+                    .ok_or_else(|| "output is not JSON".to_owned())
+            }
+            Self::OpenAIClaudeRequest | Self::OpenAIClaudeRequestCompat => {
+                let request = request
+                    .map_err(|err| format!("case {} is not valid JSON: {err}", case.name))?;
+                let convert = if self == Self::OpenAIClaudeRequest {
+                    convert_claude_request_to_openai
+                } else {
+                    convert_claude_request_to_openai_with_compat
+                };
+                let stream = case.options["stream"].as_bool().unwrap_or(false);
+                Ok(convert(&case.model, &request, stream))
+            }
+            Self::OpenAIClaudeStream => {
+                let mut stream = OpenAIToClaudeStream::new(&request.unwrap_or_default());
+                // Written as the harness writes upstream's output.
+                let chunks: Vec<String> = case
+                    .events
+                    .iter()
+                    .flat_map(|line| stream.translate_line(line.as_bytes()))
+                    .collect();
+                let output = serde_json::to_vec(&chunks).expect("strings serialize");
+                Ok(self.read(case, &output).expect("streams always read"))
+            }
+            Self::OpenAIClaudeNonStream => {
+                let output = convert_openai_response_to_claude_non_stream(
+                    &request.unwrap_or_default(),
+                    &final_event(),
+                );
+                self.read(case, output.to_string().as_bytes())
+                    .ok_or_else(|| "output is not JSON".to_owned())
+            }
+            Self::OpenAIChatRequest => {
+                let request = request
+                    .map_err(|err| format!("case {} is not valid JSON: {err}", case.name))?;
+                Ok(convert_openai_request_to_openai(&case.model, request))
+            }
+            Self::OpenAIChatStream => {
+                let mut stream = OpenAIToOpenAIStream::new();
+                // Written as the harness writes upstream's output, empty
+                // chunks included.
+                let chunks: Vec<String> = case
+                    .events
+                    .iter()
+                    .filter_map(|line| stream.translate_line(line.as_bytes()))
+                    .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
+                    .collect();
+                let output = serde_json::to_vec(&chunks).expect("strings serialize");
+                Ok(self.read(case, &output).expect("streams always read"))
+            }
+            Self::OpenAIChatNonStream => {
+                let body = case.events.first().map_or(&b""[..], |body| body.as_bytes());
+                let output = convert_openai_response_to_openai_non_stream(body);
+                Ok(self.read(case, output).expect("bodies always read"))
+            }
             Self::RegistryRequest => {
                 let request = request
                     .map_err(|err| format!("case {} is not valid JSON: {err}", case.name))?;
@@ -623,9 +775,11 @@ impl Translator {
             // The schema in a structured output instruction, a tool output
             // that has no part Claude can carry, and values read as text that
             // aren't strings: text, reasoning summaries (joined into one
-            // thinking text), image URLs and custom tool input.
+            // thinking text), image URLs, custom tool input and tool
+            // descriptions.
             Self::ClaudeResponsesRequest | Self::ClaudeResponsesRequestCompat => &[
                 ("$.system[*].text", InText),
+                ("$.tools[*].description", Whole),
                 ("$.messages[*].content", Whole),
                 ("$.messages[*].content[*].text", Whole),
                 ("$.messages[*].content[*].thinking", InText),
@@ -678,6 +832,37 @@ impl Translator {
                 ("$.tools[*].function.description", Whole),
                 ("$.tool_choice.function.name", Whole),
             ],
+            // Values read as text that aren't strings: call arguments, text
+            // (also when a system reminder wraps it), a tool result's content,
+            // stop sequences and the user.
+            Self::OpenAIClaudeRequest | Self::OpenAIClaudeRequestCompat => &[
+                ("$.messages[*].content", InText),
+                ("$.messages[*].content[*].text", InText),
+                ("$.messages[*].tool_calls[*].function.arguments", Whole),
+                ("$.stop[*]", Whole),
+                ("$.user", Whole),
+            ],
+            // Values read as text that aren't strings: the instructions a
+            // response repeats, and content and reasoning, each delta on its
+            // own and joined into one text.
+            Self::OpenAIResponsesStream => &[
+                ("$[*].data.response.instructions", Whole),
+                ("$[*].data.delta", Whole),
+                ("$[*].data.text", InText),
+                ("$[*].data.part.text", InText),
+                ("$[*].data.item.content[*].text", InText),
+                ("$[*].data.item.summary[*].text", InText),
+                ("$[*].data.response.output[*].content[*].text", InText),
+                ("$[*].data.response.output[*].summary[*].text", InText),
+            ],
+            // Content and call arguments that aren't strings, and so the
+            // input of a custom tool call whose arguments are an object
+            // without one.
+            Self::OpenAIResponsesNonStream => &[
+                ("$.output[*].content[*].text", Whole),
+                ("$.output[*].arguments", Whole),
+                ("$.output[*].input", Whole),
+            ],
             Self::ResponsesRequest
             | Self::ResponsesStream
             | Self::ResponsesNonStream
@@ -688,7 +873,12 @@ impl Translator {
             | Self::SignatureInspect
             | Self::ClaudeMessagesSignatures
             | Self::GeminiSignatures
-            | Self::RegistryLookup => &[],
+            | Self::RegistryLookup
+            | Self::OpenAIClaudeStream
+            | Self::OpenAIClaudeNonStream
+            | Self::OpenAIChatRequest
+            | Self::OpenAIChatStream
+            | Self::OpenAIChatNonStream => &[],
         }
     }
 
@@ -708,6 +898,9 @@ impl Translator {
                 ("openai", "codex") => Some(Self::ChatRequest),
                 ("openai", "claude") => Some(Self::ClaudeChatRequest),
                 ("openai-response", "claude") => Some(Self::ClaudeResponsesRequest),
+                ("claude", "openai") => Some(Self::OpenAIClaudeRequest),
+                ("openai", "openai") => Some(Self::OpenAIChatRequest),
+                ("openai-response", "openai") => Some(Self::OpenAIResponsesRequest),
                 _ => None,
             },
             Self::RegistryStream => match pair {
@@ -716,6 +909,9 @@ impl Translator {
                 ("codex", "openai") => Some(Self::ChatStream),
                 ("claude", "openai") => Some(Self::ClaudeChatStream),
                 ("claude", "openai-response") => Some(Self::ClaudeResponsesStream),
+                ("openai", "claude") => Some(Self::OpenAIClaudeStream),
+                ("openai", "openai") => Some(Self::OpenAIChatStream),
+                ("openai", "openai-response") => Some(Self::OpenAIResponsesStream),
                 _ => None,
             },
             Self::RegistryNonStream => match pair {
@@ -724,6 +920,9 @@ impl Translator {
                 ("codex", "openai") => Some(Self::ChatNonStream),
                 ("claude", "openai") => Some(Self::ClaudeChatNonStream),
                 ("claude", "openai-response") => Some(Self::ClaudeResponsesNonStream),
+                ("openai", "claude") => Some(Self::OpenAIClaudeNonStream),
+                ("openai", "openai") => Some(Self::OpenAIChatNonStream),
+                ("openai", "openai-response") => Some(Self::OpenAIResponsesNonStream),
                 _ => None,
             },
             _ => None,
@@ -768,13 +967,18 @@ impl Translator {
     ///
     /// A Claude stream becomes an array of `{"event", "data"}` frames, and a
     /// Responses or Chat Completions stream an array with an entry per line
-    /// (see [`read_lines`]). An empty non-streaming output (no response) reads
-    /// as [`NO_OUTPUT`]. In Claude responses and requests, tool IDs generated
-    /// for calls without one are masked, since they hold a timestamp or random
-    /// letters; IDs found in `case`'s input are not (see
+    /// (see [`read_lines`]). The Chat Completions to Claude stream is an array
+    /// with an entry per chunk: `{"json": …}` for a whole message, or
+    /// `{"sse": [frame, …]}`. A passed-through Chat Completions stream or
+    /// response is kept as text. An empty non-streaming output (no response)
+    /// reads as [`NO_OUTPUT`]. In Claude responses and requests, tool IDs
+    /// generated for calls without one are masked, since they hold a timestamp
+    /// or random letters; IDs found in `case`'s input are not (see
     /// [`mask_generated_tool_ids`]). So is a Chat Completions response's
-    /// `created`, or a Responses response's `created_at` from a Claude stream,
-    /// when it is the current time.
+    /// `created`, or a Responses response's `created_at` from a Claude stream
+    /// or a Chat Completions response, when it is the current time, and a
+    /// response ID made up for a Chat Completions response without one (see
+    /// [`mask_generated_response_id`]).
     pub fn read(self, case: &Case, output: &[u8]) -> Option<Value> {
         let text = String::from_utf8_lossy(output);
         let native = self.native(case);
@@ -789,6 +993,9 @@ impl Translator {
             | Self::RequestCompat
             | Self::ResponsesRequest
             | Self::OpenAIResponsesRequest
+            | Self::OpenAIClaudeRequest
+            | Self::OpenAIClaudeRequestCompat
+            | Self::OpenAIChatRequest
             | Self::SignatureInspect
             | Self::ClaudeMessagesSignatures
             | Self::GeminiSignatures
@@ -796,6 +1003,12 @@ impl Translator {
             | Self::CompletionsRequest
             | Self::CompletionsResponse => return serde_json::from_str(&text).ok(),
             Self::ResponsesStream | Self::ChatStream => return read_lines(&text),
+            Self::OpenAIChatStream => {
+                let chunks: Vec<String> = serde_json::from_str(&text).ok()?;
+                return Some(chunks.into_iter().map(Value::String).collect());
+            }
+            Self::OpenAIChatNonStream => return Some(Value::String(text.into_owned())),
+            Self::OpenAIResponsesStream => return Some(sse_frames(&text)),
             Self::CompletionsStreamChunk => return read_chunks(&text),
             Self::ClaudeChatStream => {
                 let mut lines = read_lines(&text)?;
@@ -820,6 +1033,8 @@ impl Translator {
             | Self::ChatNonStream
             | Self::ClaudeChatNonStream
             | Self::ClaudeResponsesNonStream
+            | Self::OpenAIResponsesNonStream
+            | Self::OpenAIClaudeNonStream
                 if text.is_empty() =>
             {
                 return Some(NO_OUTPUT.into());
@@ -835,6 +1050,23 @@ impl Translator {
                 mask_time_now(&mut value, "created_at");
                 return Some(value);
             }
+            Self::OpenAIResponsesNonStream => {
+                let mut value: Value = serde_json::from_str(&text).ok()?;
+                mask_time_now(&mut value, "created_at");
+                mask_generated_response_id(&mut value, case);
+                return Some(value);
+            }
+            Self::OpenAIClaudeStream => {
+                let chunks: Vec<String> = serde_json::from_str(&text).ok()?;
+                chunks
+                    .iter()
+                    .map(|chunk| match serde_json::from_str::<Value>(chunk) {
+                        Ok(message) => json!({ "json": message }),
+                        Err(_) => json!({ "sse": sse_frames(chunk) }),
+                    })
+                    .collect()
+            }
+            Self::OpenAIClaudeNonStream => serde_json::from_str(&text).ok()?,
             Self::ClaudeChatRequest
             | Self::ClaudeChatRequestCompat
             | Self::ClaudeResponsesRequest
@@ -946,9 +1178,11 @@ fn read_registry_stream(case: &Case, native: Option<Translator>, text: &str) -> 
     let failed = report["failed"].as_bool()?;
     let all = || events.iter().flatten().chain(&finish);
     let output = match native {
-        Some(Translator::Stream | Translator::ClaudeResponsesStream) => {
-            all().map(String::as_str).collect::<String>()
-        }
+        Some(
+            Translator::Stream
+            | Translator::ClaudeResponsesStream
+            | Translator::OpenAIResponsesStream,
+        ) => all().map(String::as_str).collect::<String>(),
         Some(Translator::ResponsesStream) | None => {
             let mut lines: Vec<&str> = Vec::new();
             for (event, chunks) in case.events.iter().zip(&events) {
@@ -969,7 +1203,11 @@ fn read_registry_stream(case: &Case, native: Option<Translator>, text: &str) -> 
     };
     let sse = matches!(
         native,
-        Some(Translator::Stream | Translator::ClaudeResponsesStream)
+        Some(
+            Translator::Stream
+                | Translator::ClaudeResponsesStream
+                | Translator::OpenAIResponsesStream
+        )
     );
     let shape = |chunks: &[String]| -> Value {
         if sse {
@@ -1039,6 +1277,45 @@ fn mask_time_now(value: &mut Value, key: &str) {
     {
         *created = CREATED_NOW.into();
     }
+}
+
+/// Replaces the made-up part of a response ID, `resp_<unix nanos in hex>_<count>`,
+/// which upstream and we each take from the clock and a counter, wherever the
+/// response repeats it: in its `id` and in the IDs of its items, such as
+/// `rs_<hex>_<count>` and `msg_resp_<hex>_<count>_0`. An `id` found in
+/// `case`'s input is kept as it is.
+fn mask_generated_response_id(value: &mut Value, case: &Case) {
+    fn replace(value: &mut Value, generated: &str) {
+        match value {
+            Value::String(text) if text.contains(generated) => {
+                *text = text.replace(generated, GENERATED_RESPONSE_ID);
+            }
+            Value::Array(items) => items.iter_mut().for_each(|item| replace(item, generated)),
+            Value::Object(fields) => fields
+                .values_mut()
+                .for_each(|field| replace(field, generated)),
+            _ => {}
+        }
+    }
+    let Some(id) = value.get("id").and_then(Value::as_str) else {
+        return;
+    };
+    let Some(generated) = id.strip_prefix("resp_") else {
+        return;
+    };
+    let made_up = generated.split_once('_').is_some_and(|(nanos, count)| {
+        !nanos.is_empty()
+            && nanos
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+            && !count.is_empty()
+            && count.bytes().all(|b| b.is_ascii_digit())
+    });
+    if !made_up || input_text(case).contains(id) {
+        return;
+    }
+    let generated = generated.to_owned();
+    replace(value, &generated);
 }
 
 /// What the `n`th distinct tool ID generated in an output is replaced with
@@ -1205,6 +1482,71 @@ mod tests {
             .read(&case, body.as_bytes())
             .unwrap();
         assert_eq!(response["created_at"], CREATED_NOW);
+    }
+
+    #[test]
+    fn made_up_response_ids_are_masked() {
+        let case = Case::response("generated", "{}", vec!["{}".into()]);
+        let read = |output: Value| {
+            Translator::OpenAIResponsesNonStream
+                .read(&case, output.to_string().as_bytes())
+                .unwrap()
+        };
+        let id = "resp_18a2b3c4d5e6f708_12";
+        let response = read(json!({
+            "id": id,
+            "output": [
+                { "id": "rs_18a2b3c4d5e6f708_12", "type": "reasoning" },
+                { "id": "msg_resp_18a2b3c4d5e6f708_12_0", "type": "message" },
+                { "call_id": "call_resp_18a2b3c4d5e6f708_12_0_1", "name": "18a2b3c4d5e6f708_12" }
+            ]
+        }));
+        assert_eq!(
+            response,
+            json!({
+                "id": "resp_(generated)",
+                "output": [
+                    { "id": "rs_(generated)", "type": "reasoning" },
+                    { "id": "msg_resp_(generated)_0", "type": "message" },
+                    { "call_id": "call_resp_(generated)_0_1", "name": "(generated)" }
+                ]
+            })
+        );
+
+        // Not made up: other forms, and an ID the provider sent.
+        for id in ["resp_1", "resp_18A2_1", "resp_18a2_", "chatcmpl-1"] {
+            assert_eq!(read(json!({ "id": id }))["id"], id);
+        }
+        let sent = Case::response(
+            "sent",
+            "{}",
+            vec![json!({ "id": "resp_ab_1", "choices": [] }).to_string()],
+        );
+        let response = Translator::OpenAIResponsesNonStream
+            .read(&sent, br#"{"id":"resp_ab_1"}"#)
+            .unwrap();
+        assert_eq!(response["id"], "resp_ab_1");
+    }
+
+    #[test]
+    fn chat_to_claude_chunks_read_by_kind() {
+        let case = Case::response("chunks", "{}", Vec::new());
+        let chunks = json!([
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+            "{\"id\":\"x\"}",
+            "event: a\ndata: {"
+        ]);
+        let read = Translator::OpenAIClaudeStream
+            .read(&case, chunks.to_string().as_bytes())
+            .unwrap();
+        assert_eq!(
+            read,
+            json!([
+                { "sse": [{ "event": "message_stop", "data": { "type": "message_stop" } }] },
+                { "json": { "id": "x" } },
+                { "sse": [{ "unparsed": "event: a\ndata: {" }] }
+            ])
+        );
     }
 
     #[test]

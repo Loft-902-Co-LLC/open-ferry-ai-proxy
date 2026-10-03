@@ -215,6 +215,18 @@ pub fn response_cases(seed: u64, count: usize) -> (Vec<Case>, Vec<Case>) {
             ("claude", "openai-response"),
             super::claude_responses::event_cases(source_seed, counts[4]),
         ),
+        (
+            ("openai", "claude"),
+            super::openai_claude::event_cases(source_seed, counts[5]),
+        ),
+        (
+            ("openai", "openai"),
+            super::openai_chat::event_cases(source_seed, counts[6]),
+        ),
+        (
+            ("openai", "openai-response"),
+            super::openai_responses::event_cases(source_seed, counts[7]),
+        ),
     ];
     let (mut streams, mut finals) = (Vec::new(), Vec::new());
     let mut index = 0;
@@ -267,10 +279,10 @@ fn rng(seed: u64, index: u64) -> Rng {
     Rng(derived(seed) ^ index.wrapping_mul(0x9E37_79B9_7F4A_7C15))
 }
 
-/// `count` split across five sources.
-fn split(count: usize) -> [usize; 5] {
-    let mut counts = [count / 5; 5];
-    counts[0] += count % 5;
+/// `count` split across the eight sources.
+fn split(count: usize) -> [usize; 8] {
+    let mut counts = [count / 8; 8];
+    counts[0] += count % 8;
     counts
 }
 
@@ -295,6 +307,18 @@ fn builtin_requests(seed: u64, count: usize) -> Vec<Case> {
         (
             ("openai-response", "claude"),
             super::claude_responses::request_cases(source_seed, counts[4]),
+        ),
+        (
+            ("claude", "openai"),
+            super::openai_claude::request_cases(source_seed, counts[5]),
+        ),
+        (
+            ("openai", "openai"),
+            super::openai_chat::request_cases(source_seed, counts[6]),
+        ),
+        (
+            ("openai-response", "openai"),
+            super::openai_responses::request_cases(source_seed, counts[7]),
         ),
     ];
     let mut cases = Vec::with_capacity(count);
