@@ -1256,3 +1256,130 @@ async fn errors_hide_every_secret_sent() {
         }
     }
 }
+
+/// The key, quoted where a model could echo it back.
+fn quoting_the_key(text: &str) -> String {
+    text.replace("Hello", &format!("key {API_KEY}"))
+}
+
+// Not upstream's: a successful answer that quotes the key, as a model can
+// echo it back, reaches the client with it redacted: whole for a call that
+// isn't streamed, a 200 JSON body with an `error` object among them, for a
+// Claude client and for one that gets Claude's stream translated.
+#[tokio::test]
+async fn a_successful_answer_that_echoes_the_key_hides_it() {
+    let error = format!(
+        r#"{{"type":"error","error":{{"type":"authentication_error","message":"bad key {API_KEY}"}}}}"#
+    );
+    // What a call that isn't streamed gets: its payload.
+    for (name, reply, format, payload) in [
+        (
+            "a message",
+            Reply::json(&quoting_the_key(MESSAGE)),
+            Format::CLAUDE,
+            claude_payload(),
+        ),
+        (
+            "an error object",
+            Reply::json(&error),
+            Format::CLAUDE,
+            claude_payload(),
+        ),
+        (
+            "a stream read for a translation",
+            Reply::sse(&quoting_the_key(SSE)),
+            Format::OPENAI,
+            openai_payload(false),
+        ),
+    ] {
+        let mock = Mock::start(reply).await;
+        let response = mock
+            .executor()
+            .execute(api_key_auth(), request(payload), options(format))
+            .await
+            .unwrap();
+        let shown = String::from_utf8_lossy(&response.payload);
+        assert!(!shown.contains(API_KEY), "{name}: {shown}");
+        assert!(shown.contains("[redacted]"), "{name}: {shown}");
+    }
+}
+
+// Not upstream's: the same for a stream, whose lines are redacted one at a
+// time, for a Claude client and for one that gets Claude's stream
+// translated.
+#[tokio::test]
+async fn a_stream_that_echoes_the_key_hides_it() {
+    for (name, format, payload) in [
+        ("a Claude client", Format::CLAUDE, claude_payload()),
+        ("a translated client", Format::OPENAI, openai_payload(true)),
+    ] {
+        let mock = Mock::start(Reply::sse(&quoting_the_key(SSE))).await;
+        let response = mock
+            .executor()
+            .execute_stream(api_key_auth(), request(payload), stream_options(format))
+            .await
+            .unwrap();
+        let joined: String = collect(response).await.iter().map(text).collect();
+        assert!(!joined.contains(API_KEY), "{name}: {joined}");
+        assert!(joined.contains("[redacted]"), "{name}: {joined}");
+    }
+}
+
+// Not upstream's: a token count's answer that quotes the key has it
+// redacted, as any other body.
+#[tokio::test]
+async fn a_token_count_that_echoes_the_key_hides_it() {
+    let mock = Mock::start(Reply::json(&format!(
+        r#"{{"input_tokens":42,"echo":"{API_KEY}"}}"#
+    )))
+    .await;
+    let response = mock
+        .executor()
+        .count_tokens(
+            api_key_auth(),
+            request(claude_payload()),
+            options(Format::CLAUDE),
+        )
+        .await
+        .unwrap();
+    let shown = String::from_utf8_lossy(&response.payload);
+    assert_eq!(shown, r#"{"input_tokens":42,"echo":"[redacted]"}"#);
+}
+
+// Not upstream's: the redaction is of what the client gets; the taps, which
+// write to disk with their own redaction, read Claude's answer as it came,
+// for a call that isn't streamed and for a stream.
+#[tokio::test]
+async fn the_taps_see_the_answer_as_it_came() {
+    for stream in [false, true] {
+        let reply = if stream {
+            Reply::sse(&quoting_the_key(SSE))
+        } else {
+            Reply::json(&quoting_the_key(MESSAGE))
+        };
+        let mock = Mock::start(reply).await;
+        let (observation, raw) = crate::secret_echo::Raw::observe();
+        let options = Options {
+            observation: Some(observation),
+            stream,
+            ..options(Format::CLAUDE)
+        };
+        let shown = if stream {
+            let response = mock
+                .executor()
+                .execute_stream(api_key_auth(), request(claude_payload()), options)
+                .await
+                .unwrap();
+            collect(response).await.iter().map(text).collect()
+        } else {
+            let response = mock
+                .executor()
+                .execute(api_key_auth(), request(claude_payload()), options)
+                .await
+                .unwrap();
+            String::from_utf8_lossy(&response.payload).into_owned()
+        };
+        assert!(!shown.contains(API_KEY), "{shown}");
+        assert!(raw.seen().contains(API_KEY), "{}", raw.seen());
+    }
+}

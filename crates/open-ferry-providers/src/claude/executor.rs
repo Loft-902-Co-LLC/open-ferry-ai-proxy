@@ -38,7 +38,11 @@
 //!   every client error is (see `Policy::Client` in the crate's `redact`
 //!   module): the credential headers after the custom ones, each cookie,
 //!   the URL's credentials, the proxy's password and the credential's key
-//!   or tokens.
+//!   or tokens. So has a successful answer that isn't a stream, whole,
+//!   before it is checked and translated (as a token count's is), and each
+//!   line of a stream; a model can echo a secret back in its output, which
+//!   upstream passes on as it is. The call's taps see the answer as Claude
+//!   sent it.
 //! - Usage reporting and request logging are left to the call's taps,
 //!   which each send tells of its attempt (see the crate's `observe_send`
 //!   module), and payload rules to [`crate::payload`].
@@ -49,6 +53,7 @@
 //! - Refresh returns a copy of the credential with new metadata; the
 //!   credential manager saves it.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -336,6 +341,7 @@ impl ClaudeExecutor {
         let data = read_body(response, MAX_LINE)
             .await
             .map_err(|error| wrap_fast(fast, status, plain_error(error.to_string())))?;
+        let data = redact_answer(&secrets, data);
         if upstream_stream {
             stream::validate(&data).map_err(|mut error| {
                 error.message = secrets.text(std::mem::take(&mut error.message), Policy::Client);
@@ -489,6 +495,7 @@ impl ClaudeExecutor {
         let data = read_body(response, MAX_LINE)
             .await
             .map_err(|error| plain_error(error.to_string()))?;
+        let data = redact_answer(&secrets, data);
         let count = serde_json::from_slice::<Value>(&data)
             .map_or(0, |value| json::int_at(&value, "input_tokens"));
         let out = Registry::global().translate_token_count(&Format::CLAUDE, &format, count, data);
@@ -633,6 +640,16 @@ fn compressed(headers: &HeaderMap) -> Option<String> {
         .collect::<Vec<_>>()
         .join(", ");
     (!encoding.is_empty() && !encoding.eq_ignore_ascii_case("identity")).then_some(encoding)
+}
+
+/// `data`, a successful answer's body, with the secrets the request sent
+/// (`secrets`, from the send) redacted as for a client, so a model that
+/// echoes one back doesn't hand it on.
+fn redact_answer(secrets: &Secrets, data: Vec<u8>) -> Vec<u8> {
+    match secrets.bytes(&data, Policy::Client) {
+        Cow::Owned(redacted) => redacted,
+        Cow::Borrowed(_) => data,
+    }
 }
 
 fn compact_error() -> ExecError {

@@ -10,9 +10,11 @@ use axum::Router;
 use axum::http::Uri;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
+use bytes::Bytes;
 use http::{HeaderMap, HeaderValue, Method};
 use open_ferry_core::auth::Auth;
 use open_ferry_core::exec::ExecError;
+use open_ferry_core::observe::{Observation, RequestContext, Tap};
 
 use crate::redact::REDACTED;
 
@@ -117,6 +119,38 @@ impl Case {
             assert!(!text.contains(&secret), "{secret} in {text}");
         }
         assert!(text.contains(REDACTED), "{text}");
+    }
+}
+
+/// A tap that keeps the body of each answer as it was read, for a test that
+/// what the client gets is redacted while the taps, which redact for the
+/// disk themselves, read what the upstream sent.
+#[derive(Default)]
+pub(crate) struct Raw(Mutex<Vec<u8>>);
+
+impl Tap for Raw {
+    fn chunk(&self, chunk: &Bytes) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .extend_from_slice(chunk);
+    }
+}
+
+impl Raw {
+    /// The observation of a call that the new recorder sees, and the
+    /// recorder.
+    pub(crate) fn observe() -> (Arc<Observation>, Arc<Self>) {
+        let raw = Arc::new(Self::default());
+        let context = Arc::new(RequestContext::new(Method::POST, "/v1/test".into()));
+        let observation = Arc::new(Observation::new(context, vec![raw.clone()]));
+        (observation, raw)
+    }
+
+    /// What the taps have read of the answers so far.
+    pub(crate) fn seen(&self) -> String {
+        let body = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        String::from_utf8_lossy(&body).into_owned()
     }
 }
 
