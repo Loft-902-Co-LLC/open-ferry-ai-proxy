@@ -20,7 +20,8 @@
 //! reach outside the auth directory, case on Windows, symlinks and
 //! junctions, which directory a credential's file is in, sizes, partial
 //! batches, `?all=true`, delete bodies, a store or service that isn't
-//! there, and a form's `Debug`.
+//! there, a form's `Debug`, and how a part's names are read from its
+//! `Content-Disposition`, checked against Go's answers.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -31,7 +32,7 @@ use serde_json::json;
 use super::{
     Answer, Api, AuthDir, LOCAL, Multipart, SyncCall, auth, file_auth, keyed, request_from,
 };
-use crate::credential_files::{is_unsafe_name, read_form};
+use crate::credential_files::{is_unsafe_name, part_names, read_form};
 
 const CODEX: &str = r#"{"type":"codex","email":"user@example.com"}"#;
 
@@ -574,6 +575,158 @@ async fn uploaded_file_names_are_checked() {
             .assert(StatusCode::BAD_REQUEST, r#"{"error":"file must be .json"}"#);
     }
     assert_eq!(listing(&auth_dir), ["secret.json"]);
+}
+
+// Not upstream's: an uploaded file is named as Go names it, from an RFC 2231
+// `filename*` (taken over a plain `filename`) and with parameter names in
+// any case. A header Go can't parse leaves the part without names, so it
+// isn't a file.
+#[tokio::test]
+async fn uploaded_file_names_are_read_as_go_reads_them() {
+    for (disposition, saved) in [
+        (
+            "form-data; name=\"file\"; filename*=UTF-8''extended.json",
+            "extended.json",
+        ),
+        (
+            "form-data; name=\"file\"; filename=\"plain.json\"; filename*=UTF-8''extended.json",
+            "extended.json",
+        ),
+        (
+            "form-data; Name=\"file\"; Filename=\"upper.json\"",
+            "upper.json",
+        ),
+    ] {
+        let auth_dir = AuthDir::new();
+        let api = Api::over(&auth_dir);
+        let request = Multipart::new()
+            .part(disposition, Some("application/json"), CODEX.as_bytes())
+            .request(Method::POST, "/v0/management/auth-files");
+
+        api.send(request).await.assert(StatusCode::OK, OK);
+        assert_eq!(listing(&auth_dir), [saved], "{disposition}");
+        assert_eq!(read(&auth_dir.path().join(saved)), CODEX);
+    }
+
+    let auth_dir = AuthDir::new();
+    let api = Api::over(&auth_dir);
+    let request = Multipart::new()
+        .part(
+            "form-data; name=\"file\"; filename=\"a.json\"; filename=\"b.json\"",
+            Some("application/json"),
+            CODEX.as_bytes(),
+        )
+        .request(Method::POST, "/v0/management/auth-files");
+    api.send(request)
+        .await
+        .assert(StatusCode::BAD_REQUEST, r#"{"error":"no files uploaded"}"#);
+    assert!(listing(&auth_dir).is_empty());
+}
+
+/// Each row is a `Content-Disposition` and the field and file names Go
+/// 1.26.4's `multipart.Part` (`FormName` and `FileName`) gave for it,
+/// recorded by a probe on Windows, whose `filepath.Base` splits at `\` as
+/// well as `/`. Bytes other than printable ASCII, and `\`, are written
+/// `\xNN`.
+#[rustfmt::skip]
+const GO_PART_NAMES: &[(&[u8], &[u8], &[u8])] = &[
+    (b"form-data; name=\"file\"; filename=\"plain.json\"", b"file", b"plain.json"),
+    (b"form-data; name=\"file\"; filename*=UTF-8''extended.json", b"file", b"extended.json"),
+    (b"form-data; name=\"file\"; filename=\"plain.json\"; filename*=UTF-8''extended.json", b"file", b"extended.json"),
+    (b"form-data; name=\"file\"; filename*=UTF-8''extended.json; filename=\"plain.json\"", b"file", b"extended.json"),
+    (b"form-data; Name=\"file\"; Filename=\"upper.json\"", b"file", b"upper.json"),
+    (b"Form-Data; NAME=file; FILENAME=upper.json", b"file", b"upper.json"),
+    (b"form-data; name=\"file\"; filename*=utf-8'en'%E2%82%AC%20rates.json", b"file", b"\xe2\x82\xac rates.json"),
+    (b"form-data; name=\"file\"; filename*=us-ascii''a%41.json", b"file", b"aA.json"),
+    (b"form-data; name=\"file\"; filename*=Utf-8''mixed.json", b"file", b"mixed.json"),
+    (b"form-data; name=\"file\"; filename*=ISO-8859-1''latin.json", b"file", b""),
+    (b"form-data; name=\"file\"; filename=\"plain.json\"; filename*=ISO-8859-1''latin.json", b"file", b"plain.json"),
+    (b"form-data; name=\"file\"; filename*=''nocharset.json", b"file", b""),
+    (b"form-data; name=\"file\"; filename*=UTF-8'onequote.json", b"file", b""),
+    (b"form-data; name=\"file\"; filename*=\"UTF-8''quoted.json\"", b"file", b"quoted.json"),
+    (b"form-data; name=\"file\"; filename*=UTF-8''bad%zz.json", b"file", b""),
+    (b"form-data; name=\"file\"; filename*=UTF-8''short%4", b"file", b""),
+    (b"form-data; name=\"file\"; filename=\"plain.json\"; filename*=UTF-8''", b"file", b""),
+    (b"form-data; name=\"file\"; filename*0=\"cont\"; filename*1=\"inued.json\"", b"file", b"continued.json"),
+    (b"form-data; name=\"file\"; filename*0*=UTF-8''%63ont; filename*1*=%69nued.json", b"file", b"continued.json"),
+    (b"form-data; name=\"file\"; filename*0*=UTF-8''a; filename*2=c.json", b"file", b"a"),
+    (b"form-data; name=\"file\"; filename*1=b.json", b"file", b""),
+    (b"form-data; name=\"file\"; filename*0*=UTF-8''a; filename*1*=%zz.json", b"file", b"a"),
+    (b"form-data; name=\"file\"; filename*0*=latin1''a; filename*1=b.json", b"file", b"b.json"),
+    (b"form-data; name=\"file\"; filename=\"plain.json\"; filename*0=zero.json", b"file", b"zero.json"),
+    (b"form-data; name=\"file\"; filename*=UTF-8''star.json; filename*0=zero.json", b"file", b"star.json"),
+    (b"form-data; name=\"file\"; filename*=UTF-8''a.json; filename*=UTF-8''b.json", b"", b""),
+    (b"form-data; name=\"file\"; filename=\"a.json\"; filename=\"b.json\"", b"", b""),
+    (b"form-data; name=\"file\"; filename=\"a.json\"; filename=\"a.json\"", b"file", b"a.json"),
+    (b"form-data; name=\"file\"; filename=\"a.json\"; FILENAME=\"b.json\"", b"", b""),
+    (b"form-data; name=\"file\"; name=\"other\"; filename=\"a.json\"", b"", b""),
+    (b"form-data; name=\"file\"; filename=\"a.json", b"", b""),
+    (b"form-data; name=\"file\"; filename=a b.json", b"", b""),
+    (b"form-data; name=\"file\"; filename=a@b.json", b"", b""),
+    (b"form-data; name=\"file\"; filename=\"a.json\";", b"file", b"a.json"),
+    (b"form-data; name=\"file\"; filename=\"a.json\" ; ", b"file", b"a.json"),
+    (b"form-data; name=\"file\"; filename=\"a.json\";;", b"", b""),
+    (b"form-data; name=\"file\"; ; filename=\"a.json\"", b"", b""),
+    (b"form-data; name=\"file\"; filename=", b"", b""),
+    (b"form-data; name=\"file\"; =a.json", b"", b""),
+    (b"attachment; name=\"file\"; filename=\"a.json\"", b"", b"a.json"),
+    (b"form-data", b"", b""),
+    (b"form-data;", b"", b""),
+    (b"", b"", b""),
+    (b"form data; name=\"file\"", b"", b""),
+    (b"form-data/x; name=\"file\"; filename=\"a.json\"", b"", b"a.json"),
+    (b"form-data/; name=\"file\"", b"", b""),
+    (b" form-data ; name=\"file\"; filename=\"spaced.json\"", b"file", b"spaced.json"),
+    (b"form-data; name=\"\"; filename=\"a.json\"", b"", b"a.json"),
+    (b"form-data; name=\"file\"; filename=\"\"", b"file", b""),
+    (b"form-data; name=\"file\"; filename=\"dir/sub/a.json\"", b"file", b"a.json"),
+    (b"form-data; name=\"file\"; filename=\"dir\x5c\x5ca.json\"", b"file", b"a.json"),
+    (b"form-data; name=\"file\"; filename=\"dir\x5ca.json\"", b"file", b"a.json"),
+    (b"form-data; name=\"file\"; filename=\"dir/\"", b"file", b"dir"),
+    (b"form-data; name=\"file\"; filename=\"/\"", b"file", b"\x5c"),
+    (b"form-data; name=\"file\"; filename=\"a\x5c\"b.json\"", b"file", b"a\"b.json"),
+    (b"form-data; name=\"file\"; filename=\"a\x5c", b"", b""),
+    (b"form-data;name=file;filename=nospace.json", b"file", b"nospace.json"),
+    (b"form-data;\x09name=\"file\";\x09filename=\"tab.json\"", b"file", b"tab.json"),
+    (b"form-data;\xc2\xa0name=\"file\";\xe3\x80\x80filename=\"unicode-space.json\"", b"file", b"unicode-space.json"),
+    (b"form-data; name=\"file\"; filename=\"a.json\"; size=12", b"file", b"a.json"),
+    (b"form-data; name*=UTF-8''file; filename=\"star-name.json\"", b"file", b"star-name.json"),
+    (b"form-data; name*=UTF-8''%C3%A9; filename=\"e.json\"", b"\xc3\xa9", b"e.json"),
+    (b"form-data; name=\"file\"; file*name=x; filename=\"cut.json\"", b"file", b"cut.json"),
+    (b"form-data; name=\"file\"; filename*=UTF-8''%FF.json", b"file", b"\xff.json"),
+    (b"form-data; name=\"caf\xc3\xa9\"; filename=\"caf\xc3\xa9.json\"", b"caf\xc3\xa9", b"caf\xc3\xa9.json"),
+    (b"FORM-DATA; NAME=\"file\"; FILENAME*=UTF-8''shout.json", b"file", b"shout.json"),
+    (b"form-data; name=\"file\"; filename*0=a; filename*0=a; filename*1=b.json", b"file", b"ab.json"),
+    (b"form-data; name=\"file\"; filename*0=a; filename*0=z; filename*1=b.json", b"", b""),
+    (b"form-data; name=\"file\"; filename=x.json; name=\"file\"", b"file", b"x.json"),
+    (b"form-data; name=\"file\"; filename=\"..\";", b"file", b".."),
+    (b"form-data; name=\"file\"; filename=\".\";", b"file", b"."),
+    (b"form-data; name=\"file\"; filename*=\"us-asc\xc4\xb0\xc4\xb0''dotted.json\"", b"file", b"dotted.json"),
+    (b"form-data; name=\"file\"; filename*=UTF-8''dir%2Fslash.json", b"file", b"slash.json"),
+    (b"form-data; name=\"file\"; filename*=UTF-8''dir%5Cback.json", b"file", b"back.json"),
+    (b"form-data; name=\"file\"; filename*=utf-8''b.json; FILENAME*=UTF-8''b.json", b"", b""),
+    (b" ; name=\"file\"; filename=\"a.json\"", b"", b""),
+    (b"form-data ; name = \"file\" ; filename = \"spaces.json\"", b"file", b"spaces.json"),
+    (b"form-data; name=\"file\"; filename=\"tab\x09in.json\"", b"file", b"tab\x09in.json"),
+    (b"\xc4\xb0nline; name=\"file\"; filename=\"a.json\"", b"", b"a.json"),
+    (b"form-data; name=\"file\"; filename=\"bad\xff.json\"", b"file", b"bad\xff.json"),
+    (b"form-data; name=\"f\xc3\"; filename=\"x.json\"", b"f\xc3", b"x.json"),
+];
+
+// Not upstream's: a part's names are read from its `Content-Disposition` as
+// Go reads them (see `GO_PART_NAMES`): parameter names in any case, RFC 2231
+// extended values in UTF-8 or US-ASCII and continuations, and Go's rules for
+// duplicates, malformed headers and spaces.
+#[test]
+fn part_names_are_read_as_go_reads_them() {
+    for (header, name, file) in GO_PART_NAMES {
+        assert_eq!(
+            part_names(header),
+            (name.to_vec(), file.to_vec()),
+            "{}",
+            String::from_utf8_lossy(header)
+        );
+    }
 }
 
 // Not upstream's: on Windows a delete matches a credential's ID and file

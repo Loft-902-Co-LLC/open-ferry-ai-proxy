@@ -7,8 +7,11 @@
 // (isUnsafeAuthFileName) and auth_files_fields.go (removeAuth,
 // removeAuthsForPath, deleteTokenRecord) (v8.0.10, MIT), with gin-gonic/gin
 // v1.10.1 context.go (ContentType, QueryArray, MultipartForm) (MIT) and
-// Go's mime/multipart formdata.go (ReadForm) and path/filepath (Base)
-// (go1.26, BSD-3-Clause).
+// Go's mime/multipart formdata.go (ReadForm) and multipart.go (FormName,
+// FileName, parseContentDisposition), mime/mediatype.go (ParseMediaType,
+// checkMediaTypeDisposition, consumeToken, consumeValue, consumeMediaParam,
+// decode2231Enc, percentHexUnescape, isTSpecial, isTokenChar) and
+// path/filepath (Base) (go1.26, BSD-3-Clause).
 // https://github.com/router-for-me/CLIProxyAPI
 // https://github.com/gin-gonic/gin
 // https://github.com/golang/go
@@ -20,8 +23,12 @@
 //! one or more; `DELETE` on the same paths deletes some or all.
 //!
 //! An upload is a `multipart/form-data` form, whose files are taken in the
-//! order of their field names, or a body sent with `?name=`. One file
-//! answers `{"status":"ok"}` or its error; several answer the names
+//! order of their field names, or a body sent with `?name=`. A part's field
+//! and file names are read from its `Content-Disposition` as Go reads them,
+//! with parameter names in any case, RFC 2231 continuations, and extended
+//! values (`filename*=UTF-8''...`) taken over plain ones; a part whose
+//! header Go can't parse, as one giving a parameter twice, is skipped. One
+//! file answers `{"status":"ok"}` or its error; several answer the names
 //! uploaded, with a 207 and the failures when some failed. A file must be
 //! named `*.json` and hold a credential the service serves, else it isn't
 //! written, so a file that doesn't parse never replaces the one there. The
@@ -48,8 +55,13 @@
 //!   device name such as `CON` or `nul.json`. Upstream refuses only a blank
 //!   name, a separator and, on Windows, a volume name, and checks an
 //!   uploaded file's name for `.json` only. An uploaded file's name is what
-//!   follows the last `/` or `\` of its `filename` on every system; Go
-//!   splits only at `/` outside Windows.
+//!   follows the last `/` or `\` of its `filename` on every system, a drive
+//!   such as `C:` kept (so refused); Go splits only at `/` outside Windows,
+//!   and drops the drive on Windows.
+//! - A field or file name's bytes that aren't UTF-8 are read as U+FFFD each,
+//!   so such a file is saved with U+FFFD in its name. Go keeps the bytes
+//!   outside Windows, and on Windows reads them as U+FFFD too, but for an
+//!   encoded surrogate.
 //! - An upload is written only if the core's file synthesizer reads a
 //!   credential from it: a JSON object with a type the service serves.
 //!   Upstream also writes `null`, a file without a type (registering it as
@@ -92,6 +104,7 @@
 //! - The plugin host isn't ported, so there are no plugin credentials to
 //!   refuse deleting.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::io::{self, Read};
@@ -119,7 +132,7 @@ use serde_json::Value;
 use crate::Route;
 use crate::auth_files::run_blocking;
 use crate::bind::{self, GoStruct, Nullable, set_string};
-use crate::go::{equal_fold, lossy};
+use crate::go::{decode_rune, equal_fold, lossy};
 use crate::json::{self, Json};
 use crate::query::Query;
 use crate::state::{CredentialStore, ManagementState, StoreUnavailable};
@@ -308,8 +321,9 @@ async fn store_uploaded(
     store: &CredentialStore,
     file: &FormFile,
 ) -> Result<String, Failure> {
-    // Go's form parser takes the base name, then upstream trims it.
-    let name = base_name(trim_str(base_name(&file.file_name)));
+    // The form's file name is already a base name, as Go's; upstream trims
+    // it and takes the base name again.
+    let name = base_name(trim_str(&file.file_name));
     if !has_json_suffix(name) {
         return Err(Failure::bad_request("file must be .json"));
     }
@@ -759,16 +773,28 @@ pub(crate) fn has_json_suffix(name: &str) -> bool {
 }
 
 /// Go's `filepath.Base` on Windows, less volume names: what follows the
-/// last `/` or `\`, past any at the end; `.` for an empty path.
+/// last `/` or `\`, past any at the end; `.` for an empty path, `\` for
+/// a path of separators only.
 fn base_name(path: &str) -> &str {
+    // Splitting at ASCII bytes leaves the parts UTF-8.
+    std::str::from_utf8(base_bytes(path.as_bytes())).unwrap_or(path)
+}
+
+/// [`base_name`] of bytes that needn't be UTF-8.
+fn base_bytes(path: &[u8]) -> &[u8] {
+    let is_separator = |b: &u8| matches!(b, b'/' | b'\x5c');
     if path.is_empty() {
-        return ".";
+        return b".";
     }
-    let trimmed = path.trim_end_matches(['/', '\\']);
+    let end = path
+        .iter()
+        .rposition(|b| !is_separator(b))
+        .map_or(0, |last| last + 1);
+    let trimmed = path.get(..end).unwrap_or_default();
     if trimmed.is_empty() {
-        return "\\";
+        return b"\x5c";
     }
-    trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed)
+    trimmed.rsplit(is_separator).next().unwrap_or(trimmed)
 }
 
 /// Go's `strings.TrimSpace`.
@@ -941,7 +967,7 @@ impl fmt::Debug for Form {
 pub(crate) struct FormFile {
     /// Its field's name.
     pub(crate) field: String,
-    /// The `filename` it was sent with.
+    /// The base name of the `filename` it was sent with (Go's `FileName`).
     pub(crate) file_name: String,
     /// Its contents.
     pub(crate) data: Bytes,
@@ -985,6 +1011,8 @@ pub(crate) async fn read_form(request: Request) -> Result<Form, FormError> {
         ));
     };
     let mut form = Form::default();
+    // Each file with its field name's bytes, which Go sorts by.
+    let mut files = Vec::new();
     let mut parts = 0;
     loop {
         let field = match multipart.next_field().await {
@@ -998,25 +1026,252 @@ pub(crate) async fn read_form(request: Request) -> Result<Form, FormError> {
                 "multipart: message too large".to_owned(),
             ));
         }
-        let field_name = field.name().unwrap_or_default().to_owned();
-        let file_name = field.file_name().unwrap_or_default().to_owned();
+        let disposition = field
+            .headers()
+            .get(header::CONTENT_DISPOSITION)
+            .map(HeaderValue::as_bytes)
+            .unwrap_or_default();
+        let (field_name, file_name) = part_names(disposition);
         let data = field.bytes().await.map_err(|error| form_error(&error))?;
         if field_name.is_empty() {
             continue;
         }
+        let field = lossy(&field_name);
         if file_name.is_empty() {
-            form.values.push((field_name, data));
+            form.values.push((field, data));
         } else {
-            form.files.push(FormFile {
-                field: field_name,
-                file_name,
-                data,
-            });
+            let file_name = lossy(&file_name);
+            files.push((
+                field_name,
+                FormFile {
+                    field,
+                    file_name,
+                    data,
+                },
+            ));
         }
     }
     // Go keeps files by field name, and upstream takes the names sorted.
-    form.files.sort_by(|a, b| a.field.cmp(&b.field));
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    form.files = files.into_iter().map(|(_, file)| file).collect();
     Ok(form)
+}
+
+/// A part's field and file names, as Go's `multipart.Part` reads them from
+/// its `Content-Disposition` (`FormName` and `FileName`): the `name`
+/// parameter, only when the disposition is `form-data`, and the
+/// [`base_bytes`] of the `filename` parameter. Each is empty when absent or
+/// empty, and both when the header doesn't parse.
+pub(crate) fn part_names(disposition: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let Some((kind, params)) = parse_media_type(disposition) else {
+        return (Vec::new(), Vec::new());
+    };
+    let field = match params.get("name") {
+        Some(name) if kind == "form-data" => name.clone(),
+        _ => Vec::new(),
+    };
+    let file = match params.get("filename") {
+        Some(name) if !name.is_empty() => base_bytes(name).to_vec(),
+        _ => Vec::new(),
+    };
+    (field, file)
+}
+
+/// Go's `mime.ParseMediaType`: the media type or disposition `value`
+/// names, lower case, and its parameters by lower-case name, RFC 2231
+/// continuations joined and extended values (`name*=charset'lang'value`)
+/// decoded and put first. `None` when it doesn't parse: the type isn't a
+/// token (or two joined by `/`), a parameter is malformed, or one is given
+/// twice with different values.
+fn parse_media_type(value: &[u8]) -> Option<(String, HashMap<String, Vec<u8>>)> {
+    let base_len = value.iter().position(|&b| b == b';').unwrap_or(value.len());
+    let (base, mut rest) = value.split_at_checked(base_len)?;
+    let kind = to_lower(&lossy(base)).trim().to_owned();
+    if !is_media_type(kind.as_bytes()) {
+        return None;
+    }
+    let mut params = HashMap::new();
+    // The parameters whose names hold a `*`, by the name before it.
+    let mut continued: HashMap<String, HashMap<String, Vec<u8>>> = HashMap::new();
+    while !rest.is_empty() {
+        rest = trim_left_space(rest);
+        if rest.is_empty() {
+            break;
+        }
+        let Some((key, value, after)) = consume_param(rest) else {
+            // One `;` at the end is let be.
+            if trim_space(rest) == b";" {
+                break;
+            }
+            return None;
+        };
+        let map = match key.split_once('*') {
+            Some((name, _)) => continued.entry(name.to_owned()).or_default(),
+            None => &mut params,
+        };
+        if map.get(&key).is_some_and(|old| *old != value) {
+            return None;
+        }
+        map.insert(key, value);
+        rest = after;
+    }
+    for (name, pieces) in continued {
+        if let Some(value) = pieces.get(&format!("{name}*")) {
+            if let Some(decoded) = decode_2231(value) {
+                params.insert(name, decoded);
+            }
+            continue;
+        }
+        let mut joined = Vec::new();
+        let mut found = false;
+        for n in 0_usize.. {
+            let simple = format!("{name}*{n}");
+            if let Some(value) = pieces.get(&simple) {
+                found = true;
+                joined.extend_from_slice(value);
+                continue;
+            }
+            let Some(value) = pieces.get(&format!("{simple}*")) else {
+                break;
+            };
+            found = true;
+            let decoded = if n == 0 {
+                decode_2231(value)
+            } else {
+                percent_unescape(value)
+            };
+            joined.extend(decoded.unwrap_or_default());
+        }
+        if found {
+            params.insert(name, joined);
+        }
+    }
+    Some((kind, params))
+}
+
+/// Go's `checkMediaTypeDisposition`: whether `kind` is a token, or two
+/// joined by `/`.
+fn is_media_type(kind: &[u8]) -> bool {
+    let (main, rest) = consume_token(kind);
+    if main.is_empty() {
+        return false;
+    }
+    if rest.is_empty() {
+        return true;
+    }
+    let Some(rest) = rest.strip_prefix(b"/") else {
+        return false;
+    };
+    let (sub, rest) = consume_token(rest);
+    !sub.is_empty() && rest.is_empty()
+}
+
+/// Go's `consumeMediaParam`: the `;` and parameter at the start of `rest`,
+/// as its lower-case name, its value and what follows.
+fn consume_param(rest: &[u8]) -> Option<(String, Vec<u8>, &[u8])> {
+    let rest = trim_left_space(rest).strip_prefix(b";")?;
+    let (name, rest) = consume_token(trim_left_space(rest));
+    if name.is_empty() {
+        return None;
+    }
+    let rest = trim_left_space(trim_left_space(rest).strip_prefix(b"=")?);
+    let (value, after) = consume_value(rest);
+    if value.is_empty() && after.len() == rest.len() {
+        return None;
+    }
+    Some((lossy(name).to_ascii_lowercase(), value, after))
+}
+
+/// Go's `consumeValue`: the token or quoted string at the start of `rest`,
+/// and what follows; empty, with all of `rest`, when there is none. In a
+/// quoted string `\` escapes a special character only, and before any
+/// other is kept, as Go keeps the `\` of a Windows path a browser sends.
+fn consume_value(rest: &[u8]) -> (Vec<u8>, &[u8]) {
+    let Some(mut quoted) = rest.strip_prefix(b"\"") else {
+        let (token, after) = consume_token(rest);
+        return (token.to_vec(), after);
+    };
+    let mut value = Vec::new();
+    loop {
+        match quoted {
+            [b'"', after @ ..] => return (value, after),
+            [b'\x5c', c, after @ ..] if is_special(*c) => {
+                value.push(*c);
+                quoted = after;
+            }
+            [] | [b'\r' | b'\n', ..] => return (Vec::new(), rest),
+            [c, after @ ..] => {
+                value.push(*c);
+                quoted = after;
+            }
+        }
+    }
+}
+
+/// Go's `consumeToken`: the token at the start of `rest`, and what
+/// follows.
+fn consume_token(rest: &[u8]) -> (&[u8], &[u8]) {
+    let end = rest
+        .iter()
+        .position(|&b| !is_token_byte(b))
+        .unwrap_or(rest.len());
+    rest.split_at_checked(end).unwrap_or((rest, b""))
+}
+
+/// Whether `b` may be in a token: printable ASCII, not a space nor
+/// special.
+fn is_token_byte(b: u8) -> bool {
+    b > 0x20 && b < 0x7f && !is_special(b)
+}
+
+/// Go's `isTSpecial`: whether `b` is one of `()<>@,;:\"/[]?=`.
+fn is_special(b: u8) -> bool {
+    b"()<>@,;:\x5c\"/[]?=".contains(&b)
+}
+
+/// Go's `decode2231Enc`: an RFC 2231 extended value,
+/// `charset'language'value`, its charset US-ASCII or UTF-8 in any case, and
+/// its value percent-decoded; the language is ignored.
+fn decode_2231(value: &[u8]) -> Option<Vec<u8>> {
+    let (charset, rest) = split_at_byte(value, b'\'')?;
+    let (_language, encoded) = split_at_byte(rest, b'\'')?;
+    match to_lower(&lossy(charset)).as_str() {
+        "us-ascii" | "utf-8" => percent_unescape(encoded),
+        _ => None,
+    }
+}
+
+/// Go's `percentHexUnescape`: `value` with each `%` and the two hex digits
+/// after it read as that byte; `None` when a `%` isn't followed by two.
+fn percent_unescape(value: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(value.len());
+    let mut bytes = value.iter();
+    while let Some(&b) = bytes.next() {
+        if b != b'%' {
+            out.push(b);
+            continue;
+        }
+        let mut digit = || bytes.next().and_then(|&d| char::from(d).to_digit(16));
+        let (high, low) = (digit()?, digit()?);
+        out.push(u8::try_from((high << 4) | low).ok()?);
+    }
+    Some(out)
+}
+
+/// `bytes` before and after the first `at`, if it holds one.
+fn split_at_byte(bytes: &[u8], at: u8) -> Option<(&[u8], &[u8])> {
+    let index = bytes.iter().position(|&b| b == at)?;
+    Some((bytes.get(..index)?, bytes.get(index + 1..)?))
+}
+
+/// Go's `strings.TrimLeftFunc(s, unicode.IsSpace)`.
+fn trim_left_space(mut bytes: &[u8]) -> &[u8] {
+    while let Some((c, width)) = decode_rune(bytes)
+        && c.is_whitespace()
+    {
+        bytes = bytes.get(width..).unwrap_or_default();
+    }
+    bytes
 }
 
 /// What a form parser's error means for the request.
