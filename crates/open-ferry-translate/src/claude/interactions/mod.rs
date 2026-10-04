@@ -5,8 +5,15 @@
 
 //! Gemini Interactions clients talking to a Claude upstream.
 //!
-//! Not ported yet: WP4-A puts the request translator in `request.rs` and the
-//! stream and non-streaming response translators in `response.rs`,
-//! re-exported from here.
+//! The request translator is in `request.rs`, and the stream and
+//! non-streaming response translators in `response.rs`.
 //!
-//! Deviations from upstream: none yet.
+//! Deviations from upstream: see each module.
+
+mod request;
+mod response;
+
+pub use request::convert_interactions_request_to_claude;
+pub use response::{
+    ClaudeToInteractionsStream, convert_claude_response_to_interactions_non_stream,
+};
