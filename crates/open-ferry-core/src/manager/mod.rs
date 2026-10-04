@@ -46,8 +46,8 @@
 //!   in.
 //! - Failed calls go to one [`ErrorEvents`] hook, which the usage
 //!   statistics set, where upstream's manager queues the event itself.
-//! - The cooldown state store is a stub until P3 WP-E (see
-//!   [`cooldown_store`]).
+//! - The cooldown state store saves on a background thread, debounced
+//!   (see [`cooldown_store`]).
 //! - Not ported: hooks, result policies, quota observation from headers,
 //!   request preparation and interceptors, the round tripper, the
 //!   Antigravity credits fallback and API-key capability metadata.

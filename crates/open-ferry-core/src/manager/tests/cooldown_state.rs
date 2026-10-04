@@ -5,12 +5,13 @@
 //! update that keeps the tokens leaves it.
 //!
 //! Deviations from upstream:
-//! - The cooldown state store isn't ported. In
-//!   `manager_update_clears_persisted_cooldown_when_credentials_change`,
+//! - In `manager_update_clears_persisted_cooldown_when_credentials_change`,
 //!   upstream's saved cooldown records become the cooldowns the credential
 //!   carries, picked as upstream's `cooldownStateRecordsForAuthLocked`
-//!   picks records to save.
-//! - Dropped, as they test only the cooldown state store:
+//!   picks records to save; `cooldown_state_store` ports it against a store
+//!   as well.
+//! - Ported, or dropped, in `cooldown_state_store`, as they test the
+//!   cooldown state store:
 //!   `FileCooldownStateStore_StateRelativePath`,
 //!   `FileCooldownStateStore_SaveLoadAndCleanStale`,
 //!   `FileCooldownStateStore_ConcurrentSave`,

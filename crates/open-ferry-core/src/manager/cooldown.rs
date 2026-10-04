@@ -785,7 +785,7 @@ pub(crate) fn apply_auth_failure_state(
 
 /// Why a cooldown holds: the quota reason, the status message, or the
 /// error (upstream's `cooldownReason`).
-fn cooldown_reason(
+pub(crate) fn cooldown_reason(
     status_message: &str,
     quota: &QuotaState,
     last_error: Option<&AuthError>,

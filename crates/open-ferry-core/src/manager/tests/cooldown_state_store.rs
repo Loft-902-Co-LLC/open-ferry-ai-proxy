@@ -1,2 +1,992 @@
-//! Not ported yet (P3 WP-E): upstream's
-//! sdk/cliproxy/auth/cooldown_state_test.go, the file store cases.
+// Ported from CLIProxyAPI sdk/cliproxy/auth/cooldown_state_test.go (v8.0.10, MIT).
+// https://github.com/router-for-me/CLIProxyAPI
+
+//! The cooldown state store: the `.cds` files, and what the manager saves
+//! and restores.
+//!
+//! Deviations from upstream:
+//! - Saves are debounced on the store's worker, so the tests that count
+//!   saves make the debounce long and call [`flush`] where upstream's
+//!   manager would have saved; [`flush`] saves only after a change, and
+//!   only what differs from what was last written.
+//! - Upstream's `SetCooldownStateStore` is [`install_store`] then
+//!   [`restore_now`]: nothing is saved to a store until it has been
+//!   restored from.
+//! - `ManagerSetConfigSnapshotDefersCooldownPersistence` and
+//!   `ManagerSwapCooldownStateStorePersistsOldStoreBeforeSwap` use
+//!   [`Manager::set_settings`], which never saves, and installing another
+//!   store, which saves to the old one first.
+//! - Dropped: `ManagerApplyConfigWithCooldownStoreSerializesTransitions`,
+//!   `ManagerSwapCooldownStateStoreKeepsOldStoreWhenCanceled` and
+//!   `ManagerResultSaveWaitsForCooldownStoreTransition`. There are no
+//!   contexts to cancel, a result never saves on the caller's task, and the
+//!   store's lock serializes its moves with its saves.
+//!
+//! [`flush`]: crate::manager::cooldown_store::flush
+
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, Instant};
+
+use chrono::{TimeDelta, TimeZone, Utc};
+use serde_json::json;
+
+use super::support::*;
+use crate::auth::{AuthError, QuotaState, Status, Timestamp};
+use crate::manager::cooldown_store::{
+    FileStore, Record, StateStore, StoreError, flush, install_store, restore_now, sanitize,
+    set_debounce,
+};
+use crate::manager::{CallResult, Manager, Settings, lock};
+
+/// A store that keeps what it was given (upstream's
+/// `recordingCooldownStateStore`).
+#[derive(Default)]
+struct RecordingStore {
+    saves: AtomicUsize,
+    records: Mutex<Vec<Record>>,
+    load: Mutex<Vec<Record>>,
+}
+
+impl RecordingStore {
+    fn with_load(load: Vec<Record>) -> Arc<Self> {
+        let store = Self::default();
+        *lock(&store.load) = load;
+        Arc::new(store)
+    }
+
+    fn saves(&self) -> usize {
+        self.saves.load(Ordering::SeqCst)
+    }
+
+    fn reset(&self) {
+        self.saves.store(0, Ordering::SeqCst);
+    }
+
+    fn saved(&self) -> Vec<Record> {
+        lock(&self.records).clone()
+    }
+}
+
+impl StateStore for RecordingStore {
+    fn load(&self) -> Result<Vec<Record>, StoreError> {
+        Ok(lock(&self.load).clone())
+    }
+
+    fn save(&self, records: &[Record], _now: Timestamp) -> Result<(), StoreError> {
+        self.saves.fetch_add(1, Ordering::SeqCst);
+        *lock(&self.records) = records.to_vec();
+        Ok(())
+    }
+}
+
+/// A manager with `store` installed and restored from, which saves only
+/// when flushed.
+fn manager_with(store: &Arc<RecordingStore>) -> Harness {
+    let h = Harness::new(Settings::default());
+    set_debounce(&h.manager, Duration::from_secs(3600));
+    install_store(&h.manager, store.clone());
+    restore_now(&h.manager);
+    h
+}
+
+fn register(manager: &Manager, id: &str, provider: &str) {
+    let mut auth = auth(id, provider);
+    auth.status = Status::Active;
+    manager.register_unsaved(auth).expect("register");
+}
+
+pub(super) fn failure(
+    id: &str,
+    provider: &str,
+    model: &str,
+    status: u16,
+    message: &str,
+) -> CallResult {
+    CallResult {
+        auth_id: id.into(),
+        provider: provider.into(),
+        model: model.into(),
+        success: false,
+        error: Some(AuthError {
+            message: message.into(),
+            http_status: status,
+            ..AuthError::default()
+        }),
+        ..CallResult::default()
+    }
+}
+
+pub(super) fn success(id: &str, provider: &str, model: &str) -> CallResult {
+    CallResult {
+        auth_id: id.into(),
+        provider: provider.into(),
+        model: model.into(),
+        success: true,
+        ..CallResult::default()
+    }
+}
+
+fn at(h: u32, m: u32, s: u32) -> Timestamp {
+    Utc.with_ymd_and_hms(2026, 6, 1, h, m, s)
+        .single()
+        .expect("time")
+}
+
+pub(super) fn temp_dir() -> tempfile::TempDir {
+    tempfile::tempdir().expect("temp dir")
+}
+
+/// The file names under `dir`, relative, with `/` between parts, sorted.
+pub(super) fn files(dir: &Path) -> Vec<String> {
+    fn visit(root: &Path, dir: &Path, out: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).expect("read dir") {
+            let entry = entry.expect("entry");
+            let path = entry.path();
+            if path.is_dir() {
+                visit(root, &path, out);
+            } else {
+                let rel = path.strip_prefix(root).expect("under root");
+                let parts: Vec<String> = rel
+                    .components()
+                    .map(|part| part.as_os_str().to_string_lossy().into_owned())
+                    .collect();
+                out.push(parts.join("/"));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    visit(dir, dir, &mut out);
+    out.sort();
+    out
+}
+
+#[test]
+fn file_cooldown_state_store_state_relative_path() {
+    let root = temp_dir();
+    let auth_dir = root.path().join("auths");
+    let outside = temp_dir();
+    let store = FileStore::new(auth_dir.clone());
+    let cases: [(&str, Record, PathBuf); 5] = [
+        (
+            "absolute auth file under auth dir",
+            Record {
+                auth_id: "auth-1".into(),
+                auth_file: auth_dir
+                    .join("nested")
+                    .join("xai.json")
+                    .to_string_lossy()
+                    .into_owned(),
+                ..Record::default()
+            },
+            Path::new("nested").join("xai.cds"),
+        ),
+        (
+            "relative auth file",
+            Record {
+                auth_id: "auth-2".into(),
+                auth_file: Path::new("team")
+                    .join("xai.json")
+                    .to_string_lossy()
+                    .into_owned(),
+                ..Record::default()
+            },
+            Path::new("team").join("xai.cds"),
+        ),
+        (
+            "absolute auth file outside auth dir",
+            Record {
+                auth_id: "auth-3".into(),
+                auth_file: outside
+                    .path()
+                    .join("outside.json")
+                    .to_string_lossy()
+                    .into_owned(),
+                ..Record::default()
+            },
+            PathBuf::from("outside.cds"),
+        ),
+        (
+            "relative parent escape is rejected",
+            Record {
+                auth_id: "auth-4".into(),
+                auth_file: Path::new("..")
+                    .join("escape.json")
+                    .to_string_lossy()
+                    .into_owned(),
+                ..Record::default()
+            },
+            PathBuf::new(),
+        ),
+        (
+            "auth id fallback",
+            Record {
+                auth_id: "auth/id 5".into(),
+                ..Record::default()
+            },
+            PathBuf::from("auth_id_5.cds"),
+        ),
+    ];
+    for (name, record, want) in cases {
+        assert_eq!(store.state_relative_path(&record), want, "{name}");
+    }
+}
+
+/// Not upstream's: the names upstream's `sanitizeCooldownFileName` gives.
+#[test]
+fn file_names_are_sanitized_as_upstream_sanitizes_them() {
+    for (name, want) in [
+        ("xai.json", "xai.cds"),
+        ("a.b.json", "a.b.cds"),
+        (" spaced name.json ", "spaced_name.cds"),
+        (".hidden", ""),
+        ("--x--", "x.cds"),
+        ("gemini:apikey:abc", "gemini_apikey_abc.cds"),
+        ("ünïcode", "n_code.cds"),
+        ("", ""),
+    ] {
+        assert_eq!(sanitize(name), want, "{name:?}");
+    }
+}
+
+#[test]
+fn file_cooldown_state_store_save_load_and_clean_stale() {
+    let dir = temp_dir();
+    let auth_dir = dir.path().to_path_buf();
+    let store = FileStore::new(auth_dir.clone());
+    let stale = auth_dir.join("stale.cds");
+    std::fs::write(&stale, "{}\n").expect("write stale");
+
+    let next_retry = at(1, 0, 0);
+    let record = Record {
+        provider: "xai".into(),
+        auth_id: "auth-1".into(),
+        auth_file: auth_dir.join("xai.json").to_string_lossy().into_owned(),
+        model: "grok-4".into(),
+        status: "cooling".into(),
+        next_retry_after: Some(next_retry),
+        reason: "quota".into(),
+        quota: QuotaState {
+            exceeded: true,
+            reason: "quota".into(),
+            next_recover_at: Some(next_retry),
+            backoff_level: 1,
+        },
+        last_error: Some(AuthError {
+            message: "rate limited".into(),
+            http_status: 429,
+            ..AuthError::default()
+        }),
+        updated_at: Some(at(0, 0, 0)),
+    };
+
+    store
+        .save(std::slice::from_ref(&record), at(0, 0, 0))
+        .expect("save");
+    assert!(auth_dir.join("xai.cds").is_file(), "expected xai.cds");
+    assert!(!stale.exists(), "expected stale.cds to be removed");
+
+    let loaded = store.load().expect("load");
+    assert_eq!(loaded.len(), 1);
+    let first = &loaded[0];
+    assert_eq!(first.auth_id, record.auth_id);
+    assert_eq!(first.model, record.model);
+    assert_eq!(first.next_retry_after, Some(next_retry));
+    assert_eq!(
+        first.last_error.as_ref().map(|err| err.http_status),
+        Some(429)
+    );
+    // Everything but the auth file, which isn't written, reads back.
+    assert_eq!(
+        *first,
+        Record {
+            auth_file: String::new(),
+            ..record
+        }
+    );
+
+    store.save(&[], at(0, 0, 0)).expect("save nothing");
+    assert!(
+        !auth_dir.join("xai.cds").exists(),
+        "expected xai.cds to be removed"
+    );
+}
+
+#[test]
+fn file_cooldown_state_store_concurrent_save() {
+    let dir = temp_dir();
+    let auth_dir = dir.path().to_path_buf();
+    let store = Arc::new(FileStore::new(auth_dir.clone()));
+    let next_retry = at(1, 0, 0);
+    let threads: Vec<_> = (0..16)
+        .map(|i| {
+            let store = store.clone();
+            let auth_file = auth_dir.join("xai.json").to_string_lossy().into_owned();
+            std::thread::spawn(move || {
+                store.save(
+                    &[Record {
+                        provider: "xai".into(),
+                        auth_id: "auth-1".into(),
+                        auth_file,
+                        model: "grok-4".into(),
+                        status: "cooling".into(),
+                        next_retry_after: Some(next_retry + TimeDelta::seconds(i)),
+                        updated_at: Some(next_retry),
+                        ..Record::default()
+                    }],
+                    next_retry,
+                )
+            })
+        })
+        .collect();
+    for thread in threads {
+        thread.join().expect("join").expect("save");
+    }
+    let loaded = store.load().expect("load");
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(files(&auth_dir), ["xai.cds"], "leftover temporary files");
+}
+
+/// Not upstream's: a file is written as upstream's `MarshalIndent` writes
+/// it (checked against Go 1.26.4), and reads back.
+#[test]
+fn a_file_is_written_as_upstream_writes_it() {
+    let dir = temp_dir();
+    let store = FileStore::new(dir.path().to_path_buf());
+    let next = at(1, 0, 0);
+    let records = [
+        Record {
+            provider: "xai".into(),
+            auth_id: "auth-1".into(),
+            model: "grok-4".into(),
+            status: "cooling".into(),
+            next_retry_after: Some(next),
+            reason: "quota".into(),
+            quota: QuotaState {
+                exceeded: true,
+                reason: "quota".into(),
+                next_recover_at: Some(next),
+                backoff_level: 1,
+            },
+            last_error: Some(AuthError {
+                message: "rate limited <x>".into(),
+                http_status: 429,
+                ..AuthError::default()
+            }),
+            updated_at: Some(at(0, 0, 0) + TimeDelta::milliseconds(500)),
+            ..Record::default()
+        },
+        Record {
+            provider: "xai".into(),
+            auth_id: "auth-1".into(),
+            status: "cooling".into(),
+            next_retry_after: Some(next),
+            updated_at: Some(at(0, 0, 0)),
+            ..Record::default()
+        },
+    ];
+    store.save(&records, at(0, 0, 0)).expect("save");
+    let written = std::fs::read_to_string(dir.path().join("auth-1.cds")).expect("read");
+    let want = r#"{
+  "version": 1,
+  "auth_id": "auth-1",
+  "provider": "xai",
+  "updated_at": "2026-06-01T00:00:00Z",
+  "records": [
+    {
+      "provider": "xai",
+      "auth_id": "auth-1",
+      "status": "cooling",
+      "next_retry_after": "2026-06-01T01:00:00Z",
+      "quota": {
+        "exceeded": false,
+        "next_recover_at": "0001-01-01T00:00:00Z",
+        "observed_at": "0001-01-01T00:00:00Z"
+      },
+      "updated_at": "2026-06-01T00:00:00Z"
+    },
+    {
+      "provider": "xai",
+      "auth_id": "auth-1",
+      "model": "grok-4",
+      "status": "cooling",
+      "next_retry_after": "2026-06-01T01:00:00Z",
+      "reason": "quota",
+      "quota": {
+        "exceeded": true,
+        "reason": "quota",
+        "next_recover_at": "2026-06-01T01:00:00Z",
+        "backoff_level": 1,
+        "observed_at": "0001-01-01T00:00:00Z"
+      },
+      "last_error": {
+        "message": "rate limited BSu003cxBSu003e",
+        "retryable": false,
+        "http_status": 429
+      },
+      "updated_at": "2026-06-01T00:00:00.5Z"
+    }
+  ]
+}
+"#
+    .replace("BS", "\\");
+    assert_eq!(written, want);
+    let mut loaded = store.load().expect("load");
+    loaded.sort_by(|a, b| a.model.cmp(&b.model));
+    assert_eq!(loaded, [records[1].clone(), records[0].clone()]);
+}
+
+/// Not upstream's: files are read as Go's decoder reads them: any case of
+/// a key, `null` as nothing, an empty file as no records, and a value of
+/// the wrong type failing the load.
+#[test]
+fn files_are_read_as_go_reads_them() {
+    let dir = temp_dir();
+    let store = FileStore::new(dir.path().to_path_buf());
+    std::fs::write(
+        dir.path().join("a.cds"),
+        r#"{"Records":[{"AUTH_ID":"a","next_retry_after":null,"Quota":{"Exceeded":true}},null]}"#,
+    )
+    .expect("write");
+    std::fs::write(dir.path().join("b.CDS"), " \n").expect("write");
+    std::fs::write(dir.path().join("c.cds"), "null").expect("write");
+    let loaded = store.load().expect("load");
+    assert_eq!(loaded.len(), 2);
+    assert_eq!(loaded[0].auth_id, "a");
+    assert!(loaded[0].quota.exceeded);
+    assert_eq!(loaded[1], Record::default());
+
+    for bad in [
+        r#"{"version":1.0}"#,
+        "[]",
+        r#"{"records":[{"next_retry_after":"soon"}]}"#,
+        "{",
+    ] {
+        std::fs::write(dir.path().join("d.cds"), bad).expect("write");
+        let err = store.load().expect_err(bad).to_string();
+        assert!(
+            err.starts_with("read cooldown state directory: parse cooldown state "),
+            "{bad}: {err}"
+        );
+    }
+}
+
+/// Not upstream's: a save removes `.cds` files and nothing else, under
+/// the directory at any depth.
+#[test]
+fn a_save_removes_only_cds_files() {
+    let dir = temp_dir();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("nested")).expect("mkdir");
+    for name in [
+        "a.json",
+        "notes.txt",
+        "cds",
+        "x.cds.json",
+        "nested/b.json",
+        "old.cds",
+        "UPPER.CDS",
+        "nested/c.cds",
+        ".a.cds.12345678.tmp.cds",
+    ] {
+        std::fs::write(root.join(name), "{}").expect("write");
+    }
+    let store = FileStore::new(root.to_path_buf());
+    store.save(&[], at(0, 0, 0)).expect("save");
+    assert_eq!(
+        files(root),
+        ["a.json", "cds", "nested/b.json", "notes.txt", "x.cds.json"]
+    );
+}
+
+/// Not upstream's: a linked file or directory is neither read nor
+/// removed.
+#[test]
+fn symbolic_links_are_skipped() {
+    let dir = temp_dir();
+    let target = temp_dir();
+    std::fs::write(target.path().join("t.cds"), "not json").expect("write");
+    std::fs::create_dir_all(target.path().join("sub")).expect("mkdir");
+    std::fs::write(target.path().join("sub").join("u.cds"), "{}").expect("write");
+    #[cfg(unix)]
+    let linked = std::os::unix::fs::symlink(target.path().join("t.cds"), dir.path().join("l.cds"))
+        .and_then(|()| std::os::unix::fs::symlink(target.path().join("sub"), dir.path().join("d")));
+    #[cfg(windows)]
+    let linked =
+        std::os::windows::fs::symlink_file(target.path().join("t.cds"), dir.path().join("l.cds"))
+            .and_then(|()| {
+                std::os::windows::fs::symlink_dir(target.path().join("sub"), dir.path().join("d"))
+            });
+    match linked {
+        Ok(()) => {}
+        Err(err) if err.raw_os_error() == Some(1314) => {
+            eprintln!("skipping: creating symbolic links needs a privilege: {err}");
+            return;
+        }
+        Err(err) => panic!("symlink: {err}"),
+    }
+    let store = FileStore::new(dir.path().to_path_buf());
+    assert!(store.load().expect("load").is_empty());
+    store.save(&[], at(0, 0, 0)).expect("save");
+    assert!(target.path().join("t.cds").exists());
+    assert!(target.path().join("sub").join("u.cds").exists());
+    assert!(dir.path().join("l.cds").symlink_metadata().is_ok());
+}
+
+/// Not upstream's: on Windows, file names that differ only in case are one
+/// file, and the save doesn't remove the file it just wrote.
+#[cfg(windows)]
+#[test]
+fn names_differing_in_case_are_one_file_on_windows() {
+    let dir = temp_dir();
+    let store = FileStore::new(dir.path().to_path_buf());
+    let next = at(1, 0, 0);
+    let records = [
+        Record {
+            auth_id: "Auth-A".into(),
+            model: "m1".into(),
+            next_retry_after: Some(next),
+            ..Record::default()
+        },
+        Record {
+            auth_id: "auth-a".into(),
+            model: "m2".into(),
+            next_retry_after: Some(next),
+            ..Record::default()
+        },
+    ];
+    store.save(&records, at(0, 0, 0)).expect("save");
+    assert_eq!(files(dir.path()).len(), 1);
+    assert_eq!(store.load().expect("load").len(), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn manager_mark_result_persists_cooldown_only_when_state_changes() {
+    let store = Arc::new(RecordingStore::default());
+    let h = manager_with(&store);
+    register(&h.manager, "auth-1", "xai");
+
+    h.manager.mark_result(&success("auth-1", "xai", "grok-4"));
+    flush(&h.manager);
+    assert_eq!(store.saves(), 0, "healthy success saved cooldown state");
+
+    h.manager.mark_result(&failure(
+        "auth-1",
+        "xai",
+        "grok-4",
+        500,
+        "upstream unavailable",
+    ));
+    flush(&h.manager);
+    assert_eq!(store.saves(), 1, "cooldown failure");
+
+    h.manager.mark_result(&success("auth-1", "xai", "grok-4"));
+    flush(&h.manager);
+    assert_eq!(store.saves(), 2, "cooldown clear");
+
+    h.manager.mark_result(&success("auth-1", "xai", "grok-4"));
+    flush(&h.manager);
+    assert_eq!(store.saves(), 2, "clean success");
+}
+
+#[tokio::test(start_paused = true)]
+async fn manager_update_clears_persisted_cooldown_when_credentials_change() {
+    let store = Arc::new(RecordingStore::default());
+    let h = manager_with(&store);
+    let mut first = auth_with_metadata("auth-codex-1", "codex", json!({"access_token": "token-1"}));
+    first.status = Status::Active;
+    h.manager.register_unsaved(first).expect("register");
+
+    // 1. Fail with 401.
+    h.manager.mark_result(&failure(
+        "auth-codex-1",
+        "codex",
+        "gpt-6-astra",
+        401,
+        "invalidated token",
+    ));
+    flush(&h.manager);
+    assert!(
+        !store.saved().is_empty(),
+        "expected a cooldown record to be saved after the unauthorized failure"
+    );
+
+    // 2. An update that keeps the credentials (a metadata note).
+    let mut same_cred = auth_with_metadata(
+        "auth-codex-1",
+        "codex",
+        json!({"access_token": "token-1", "note": "updated note"}),
+    );
+    same_cred.status = Status::Active;
+    h.manager.update_unsaved(same_cred).expect("update");
+    flush(&h.manager);
+    assert!(
+        !store.saved().is_empty(),
+        "expected the cooldown record to remain when credentials did not change"
+    );
+
+    // 3. An update with a new access token.
+    let mut new_cred =
+        auth_with_metadata("auth-codex-1", "codex", json!({"access_token": "token-2"}));
+    new_cred.status = Status::Active;
+    h.manager.update_unsaved(new_cred).expect("update");
+    flush(&h.manager);
+    let saved = store.saved();
+    assert!(
+        saved.is_empty(),
+        "expected cooldown records to be cleared after credential change, got {saved:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn manager_set_config_snapshot_defers_cooldown_persistence() {
+    let store = Arc::new(RecordingStore::default());
+    let h = manager_with(&store);
+    register(&h.manager, "auth-1", "xai");
+    h.manager
+        .mark_result(&failure("auth-1", "xai", "grok-4", 429, "rate limited"));
+    flush(&h.manager);
+    store.reset();
+
+    h.manager.set_settings(Settings {
+        disable_cooling: true,
+        ..Settings::default()
+    });
+    assert_eq!(store.saves(), 0, "set_settings saved cooldown state");
+    flush(&h.manager);
+    assert_eq!(store.saves(), 1, "flush");
+    assert!(store.saved().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn manager_swap_cooldown_state_store_persists_old_store_before_swap() {
+    let old_store = Arc::new(RecordingStore::default());
+    let new_store = Arc::new(RecordingStore::default());
+    let h = manager_with(&old_store);
+    register(&h.manager, "auth-1", "xai");
+    h.manager
+        .mark_result(&failure("auth-1", "xai", "grok-4", 429, "rate limited"));
+    flush(&h.manager);
+    old_store.reset();
+    h.manager.set_settings(Settings {
+        disable_cooling: true,
+        ..Settings::default()
+    });
+
+    install_store(&h.manager, new_store.clone());
+    assert_eq!(old_store.saves(), 1, "old store save count");
+    assert!(old_store.saved().is_empty(), "old store records");
+    assert_eq!(
+        new_store.saves(),
+        0,
+        "nothing goes to the new store before a restore"
+    );
+    restore_now(&h.manager);
+    h.manager.mark_result(&success("auth-1", "xai", "other"));
+    flush(&h.manager);
+    assert_eq!(old_store.saves(), 1, "the old store is left alone");
+}
+
+#[tokio::test(start_paused = true)]
+async fn manager_restore_cooldown_states() {
+    let h = Harness::new(Settings::default());
+    let now = h.now();
+    let next_retry = now + TimeDelta::hours(1);
+    let store = RecordingStore::with_load(vec![Record {
+        provider: "xai".into(),
+        auth_id: "auth-1".into(),
+        model: "grok-4".into(),
+        status: "cooling".into(),
+        next_retry_after: Some(next_retry),
+        reason: "quota".into(),
+        quota: QuotaState {
+            exceeded: true,
+            reason: "quota".into(),
+            next_recover_at: Some(next_retry),
+            ..QuotaState::default()
+        },
+        last_error: Some(AuthError {
+            message: "rate limited".into(),
+            http_status: 429,
+            ..AuthError::default()
+        }),
+        updated_at: Some(next_retry - TimeDelta::minutes(1)),
+        ..Record::default()
+    }]);
+    set_debounce(&h.manager, Duration::from_secs(3600));
+    install_store(&h.manager, store.clone());
+    h.manager
+        .register_unsaved(auth("auth-1", "xai"))
+        .expect("register");
+
+    restore_now(&h.manager);
+
+    let auth = h.get("auth-1");
+    let state = auth
+        .model_states
+        .get("grok-4")
+        .expect("model state restored");
+    assert!(state.unavailable);
+    assert_eq!(state.status, Status::Error);
+    assert_eq!(state.next_retry_after, Some(next_retry));
+    assert_eq!(
+        state.last_error.as_ref().map(|err| err.http_status),
+        Some(429)
+    );
+    assert_eq!(store.saves(), 1, "restore cleanup saves");
+}
+
+#[tokio::test(start_paused = true)]
+async fn manager_restore_cooldown_states_canonicalizes_thinking_suffixes() {
+    let h = Harness::new(Settings::default());
+    let now = h.now();
+    let later_retry = now + TimeDelta::hours(2);
+    let quota = |until: Timestamp| QuotaState {
+        exceeded: true,
+        reason: "quota".into(),
+        next_recover_at: Some(until),
+        ..QuotaState::default()
+    };
+    let store = RecordingStore::with_load(vec![
+        Record {
+            provider: "gemini".into(),
+            auth_id: "auth-thinking".into(),
+            model: "gemini-3.1-pro-preview(high)".into(),
+            next_retry_after: Some(now + TimeDelta::hours(1)),
+            quota: quota(now + TimeDelta::hours(1)),
+            updated_at: Some(now),
+            ..Record::default()
+        },
+        Record {
+            provider: "gemini".into(),
+            auth_id: "auth-thinking".into(),
+            model: "gemini-3.1-pro-preview(low)".into(),
+            next_retry_after: Some(later_retry),
+            quota: quota(later_retry),
+            updated_at: Some(now + TimeDelta::minutes(1)),
+            ..Record::default()
+        },
+    ]);
+    set_debounce(&h.manager, Duration::from_secs(3600));
+    install_store(&h.manager, store.clone());
+    h.manager
+        .register_unsaved(auth("auth-thinking", "gemini"))
+        .expect("register");
+
+    restore_now(&h.manager);
+
+    let auth = h.get("auth-thinking");
+    assert_eq!(auth.model_states.len(), 1, "{:?}", auth.model_states);
+    let state = auth
+        .model_states
+        .get("gemini-3.1-pro-preview")
+        .expect("canonical model state");
+    assert!(state.unavailable);
+    assert_eq!(state.next_retry_after, Some(later_retry));
+
+    let models: Vec<Record> = store
+        .saved()
+        .into_iter()
+        .filter(|record| !record.model.is_empty())
+        .collect();
+    assert_eq!(models.len(), 1, "{models:?}");
+    assert_eq!(models[0].model, "gemini-3.1-pro-preview");
+    assert_eq!(models[0].next_retry_after, Some(later_retry));
+}
+
+/// Not upstream's: a restore skips records that ran out, and those of
+/// credentials that are unknown, disabled or don't cool down; a
+/// credential-wide record comes back with its quota, reason and error.
+#[tokio::test(start_paused = true)]
+async fn restore_skips_what_upstream_skips() {
+    let h = Harness::new(Settings::default());
+    let now = h.now();
+    let until = now + TimeDelta::hours(1);
+    let record = |id: &str, next: Timestamp| Record {
+        provider: "xai".into(),
+        auth_id: id.into(),
+        status: "cooling".into(),
+        next_retry_after: Some(next),
+        reason: "quota".into(),
+        quota: QuotaState {
+            exceeded: true,
+            reason: "quota".into(),
+            backoff_level: 2,
+            ..QuotaState::default()
+        },
+        last_error: Some(AuthError {
+            message: "limit".into(),
+            http_status: 429,
+            ..AuthError::default()
+        }),
+        ..Record::default()
+    };
+    let store = RecordingStore::with_load(vec![
+        record("live", until),
+        record("expired", now - TimeDelta::seconds(1)),
+        record("unknown", until),
+        record("disabled", until),
+        record("no-cooling", until),
+        Record {
+            auth_id: " ".into(),
+            ..record("", until)
+        },
+    ]);
+    set_debounce(&h.manager, Duration::from_secs(3600));
+    install_store(&h.manager, store.clone());
+    for id in ["live", "expired"] {
+        register(&h.manager, id, "xai");
+    }
+    let mut disabled = auth("disabled", "xai");
+    disabled.disabled = true;
+    disabled.status = Status::Disabled;
+    h.manager.register_unsaved(disabled).expect("register");
+    let mut no_cooling = auth("no-cooling", "xai");
+    no_cooling
+        .metadata
+        .insert("disable_cooling".into(), json!(true));
+    h.manager.register_unsaved(no_cooling).expect("register");
+
+    restore_now(&h.manager);
+
+    let live = h.get("live");
+    assert!(live.unavailable);
+    assert_eq!(live.status, Status::Error);
+    assert_eq!(live.next_retry_after, Some(until));
+    assert_eq!(live.status_message, "quota");
+    assert!(live.quota.exceeded);
+    assert_eq!(
+        live.quota.next_recover_at,
+        Some(until),
+        "defaults to the retry"
+    );
+    assert_eq!(live.quota.backoff_level, 2);
+    assert_eq!(
+        live.last_error.as_ref().map(|err| err.http_status),
+        Some(429)
+    );
+    for id in ["expired", "disabled", "no-cooling"] {
+        let auth = h.get(id);
+        assert!(!auth.unavailable, "{id}");
+        assert!(auth.next_retry_after.is_none(), "{id}");
+    }
+    let saved: Vec<String> = store.saved().into_iter().map(|r| r.auth_id).collect();
+    assert_eq!(saved, ["live"]);
+}
+
+/// Not upstream's: an empty load saves nothing, and nothing is saved to a
+/// store before it has been restored from.
+#[tokio::test(start_paused = true)]
+async fn nothing_is_saved_before_the_restore() {
+    let store = Arc::new(RecordingStore::default());
+    let h = Harness::new(Settings::default());
+    set_debounce(&h.manager, Duration::from_secs(3600));
+    register(&h.manager, "auth-1", "xai");
+    install_store(&h.manager, store.clone());
+    h.manager
+        .mark_result(&failure("auth-1", "xai", "grok-4", 429, "rate limited"));
+    flush(&h.manager);
+    assert_eq!(store.saves(), 0, "saved before the restore");
+
+    restore_now(&h.manager);
+    assert_eq!(store.saves(), 0, "an empty load saves nothing");
+    h.manager.mark_result(&success("auth-1", "xai", "other"));
+    flush(&h.manager);
+    assert_eq!(store.saves(), 1, "the next change saves the cooldown");
+    assert_eq!(store.saved().len(), 1);
+}
+
+/// Not upstream's: the worker saves on its own once the debounce has
+/// passed, all the changes in it at once.
+#[test]
+fn the_worker_saves_after_the_debounce() {
+    let store = Arc::new(RecordingStore::default());
+    let h = Harness::new(Settings::default());
+    set_debounce(&h.manager, Duration::from_millis(200));
+    install_store(&h.manager, store.clone());
+    restore_now(&h.manager);
+    register(&h.manager, "auth-1", "xai");
+    h.manager
+        .mark_result(&failure("auth-1", "xai", "m1", 429, "rate limited"));
+    h.manager
+        .mark_result(&failure("auth-1", "xai", "m2", 429, "rate limited"));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while store.saves() == 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(store.saves(), 1);
+    let models: Vec<String> = store
+        .saved()
+        .into_iter()
+        .map(|record| record.model)
+        .filter(|model| !model.is_empty())
+        .collect();
+    assert_eq!(models, ["m1", "m2"]);
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(store.saves(), 1, "no change, no save");
+}
+
+/// A store whose saves wait to be let go.
+struct BlockingStore {
+    started: Mutex<Option<mpsc::Sender<()>>>,
+    release: Mutex<mpsc::Receiver<()>>,
+    saves: AtomicUsize,
+}
+
+impl StateStore for BlockingStore {
+    fn load(&self) -> Result<Vec<Record>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    fn save(&self, _records: &[Record], _now: Timestamp) -> Result<(), StoreError> {
+        if let Some(started) = lock(&self.started).take() {
+            let _ = started.send(());
+        }
+        let _ = lock(&self.release).recv_timeout(Duration::from_secs(10));
+        self.saves.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// Not upstream's: while a save is writing, the manager's lock is free:
+/// picking a credential and recording a result don't wait for it.
+#[test]
+fn a_save_never_holds_the_managers_lock() {
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let store = Arc::new(BlockingStore {
+        started: Mutex::new(Some(started_tx)),
+        release: Mutex::new(release_rx),
+        saves: AtomicUsize::new(0),
+    });
+    let h = Harness::new(Settings::default());
+    set_debounce(&h.manager, Duration::from_secs(3600));
+    install_store(&h.manager, store.clone());
+    restore_now(&h.manager);
+    register(&h.manager, "auth-1", "xai");
+    h.manager
+        .mark_result(&failure("auth-1", "xai", "m1", 429, "rate limited"));
+
+    let manager = h.manager.clone();
+    let saver = std::thread::spawn(move || flush(&manager));
+    started_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the save started");
+
+    let begun = Instant::now();
+    assert_eq!(h.manager.list().len(), 1);
+    drop(h.manager.lock());
+    h.manager
+        .mark_result(&failure("auth-1", "xai", "m2", 429, "rate limited"));
+    h.manager.mark_result(&success("auth-1", "xai", "m3"));
+    assert!(
+        begun.elapsed() < Duration::from_secs(5),
+        "the manager waited for the save"
+    );
+    assert_eq!(store.saves.load(Ordering::SeqCst), 0, "still writing");
+
+    release_tx.send(()).expect("release");
+    saver.join().expect("join");
+    assert_eq!(store.saves.load(Ordering::SeqCst), 1);
+}

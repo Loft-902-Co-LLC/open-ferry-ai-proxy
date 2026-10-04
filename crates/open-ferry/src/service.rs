@@ -222,6 +222,7 @@ pub async fn run(
             result = &mut server => {
                 service.manager.stop_auto_refresh();
                 service.management.shutdown().await;
+                open_ferry_core::manager::cooldown_store::flush(&service.manager);
                 return exit_code(result);
             }
             event = next_event(&mut events) => match event {
@@ -245,19 +246,21 @@ pub async fn run(
 type Server = tokio::task::JoinHandle<io::Result<()>>;
 
 /// Stops refresh, the management API's OAuth logins and the server, giving
-/// open requests up to [`SHUTDOWN_TIMEOUT`].
+/// open requests up to [`SHUTDOWN_TIMEOUT`], then saves the cooldowns.
 async fn shut_down(service: &Service, stop: &watch::Sender<bool>, mut server: Server) -> ExitCode {
     service.manager.stop_auto_refresh();
     service.management.shutdown().await;
     let _ = stop.send(true);
-    match tokio::time::timeout(SHUTDOWN_TIMEOUT, &mut server).await {
+    let code = match tokio::time::timeout(SHUTDOWN_TIMEOUT, &mut server).await {
         Ok(result) => exit_code(result),
         Err(_) => {
             tracing::warn!("open requests didn't finish within 30s; closing them");
             server.abort();
             ExitCode::SUCCESS
         }
-    }
+    };
+    open_ferry_core::manager::cooldown_store::flush(&service.manager);
+    code
 }
 
 fn exit_code(result: Result<io::Result<()>, tokio::task::JoinError>) -> ExitCode {
