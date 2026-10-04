@@ -1,6 +1,7 @@
 // Ported from CLIProxyAPI internal/config/config_normalization.go,
 // vertex_compat.go (SanitizeVertexCompatKeys), trusted_proxies.go, weight.go (ValidateCredentialWeights), the post-decode
-// steps of config_load.go and parse.go, and internal/util/util.go
+// steps of config_load.go and parse.go, config_validation.go
+// (SanitizePayloadRules), and internal/util/util.go
 // (ResolveAuthDir) (v8.0.10, MIT), and internal/config/oauth_scope.go
 // (ForAPIKey) (v8.0.11, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
@@ -18,8 +19,7 @@
 //! - The management key isn't hashed with bcrypt or written back; it stays
 //!   as written.
 //! - Steps for sections this port ignores (other providers, plugins, pprof,
-//!   logs, Redis, credential concurrency and in-flight, live media relay)
-//!   are left out.
+//!   credential concurrency and in-flight, live media relay) are left out.
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
@@ -29,6 +29,7 @@ use std::path::PathBuf;
 use open_ferry_translate::go::to_lower;
 
 use super::paths::{self, Os};
+use super::payload::sanitize_payload_rules;
 use super::types::{
     ClaudeKey, CodexKey, Config, DEFAULT_PANEL_GITHUB_REPOSITORY, GeminiKey, OAuthModelAlias,
     OAuthModelSetting, OpenAiCompatibility, RequestScopedErrorRule, VertexCompatKey,
@@ -84,6 +85,21 @@ pub(crate) fn post_process(config: &mut Config) -> Result<(), ConfigError> {
     if management.panel_github_repository.is_empty() {
         management.panel_github_repository = DEFAULT_PANEL_GITHUB_REPOSITORY.to_owned();
     }
+    if config.logs_max_total_size_mb < 0 {
+        config.logs_max_total_size_mb = 0;
+    }
+    if config.error_logs_max_files < 0 {
+        config.error_logs_max_files = 10;
+    }
+    if config.redis_usage_queue_retention_seconds <= 0 {
+        config.redis_usage_queue_retention_seconds = 60;
+    } else if config.redis_usage_queue_retention_seconds > 3600 {
+        tracing::warn!(
+            value = config.redis_usage_queue_retention_seconds,
+            "redis-usage-queue-retention-seconds too large; clamping to 3600"
+        );
+        config.redis_usage_queue_retention_seconds = 3600;
+    }
     if config.max_retry_credentials < 0 {
         config.max_retry_credentials = 0;
     }
@@ -99,6 +115,7 @@ pub(crate) fn post_process(config: &mut Config) -> Result<(), ConfigError> {
     config.oauth_settings = sanitize_oauth_settings(&config.oauth_settings);
     config.oauth_request_scoped_errors =
         sanitize_oauth_request_scoped_errors(&config.oauth_request_scoped_errors);
+    sanitize_payload_rules(&mut config.payload);
     Ok(())
 }
 

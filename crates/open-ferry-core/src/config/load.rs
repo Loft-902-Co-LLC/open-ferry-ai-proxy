@@ -2010,4 +2010,98 @@ mod tests {
             assert_eq!(config.port, 8317);
         }
     }
+
+    // Not upstream's: LoadConfig's defaults and clamps for the logging,
+    // usage and cooldown settings (config_load.go:67-73 and 143-155), with
+    // their v8 paths.
+    #[test]
+    fn observability_settings_load_with_upstream_defaults() {
+        let limits = |config: &Config| {
+            (
+                config.logs_max_total_size_mb,
+                config.error_logs_max_files,
+                config.redis_usage_queue_retention_seconds,
+            )
+        };
+        assert_eq!(limits(&defaults()), (0, 10, 60));
+        assert_eq!(limits(&parse("port: 1\n")), (0, 10, 60));
+        let config = parse(
+            "logs-max-total-size-mb: -5\nerror-logs-max-files: -1\n\
+             redis-usage-queue-retention-seconds: 0\n",
+        );
+        assert_eq!(limits(&config), (0, 10, 60));
+        let config = parse(
+            "logs-max-total-size-mb: 7\nerror-logs-max-files: 0\n\
+             redis-usage-queue-retention-seconds: 9000\n",
+        );
+        assert_eq!(limits(&config), (7, 0, 3600));
+        let config = parse(
+            "server: {commercial-mode: true}\n\
+             observability:\n  logs: {logs-max-total-size-mb: 2, error-logs-max-files: 3}\n  \
+             usage: {usage-statistics-enabled: true, redis-usage-queue-retention-seconds: 120}\n\
+             routing: {cooldown: {save-cooldown-status: true}}\n",
+        );
+        assert_eq!(limits(&config), (2, 3, 120));
+        assert!(config.commercial_mode);
+        assert!(config.usage_statistics_enabled);
+        assert!(config.save_cooldown_status);
+    }
+
+    // Not upstream's: the payload section decodes as yaml.v3 decodes it,
+    // keeping params in file order, and LoadConfig's SanitizePayloadRules
+    // drops raw rules that aren't JSON.
+    #[test]
+    fn payload_rules_load() {
+        use crate::config::{AnyValue, PayloadModelRule};
+
+        let config = parse(
+            "payload:\n  default:\n    - models: [{name: gpt-*, protocol: codex, \
+             headers: {X-Team: a*}, match: [{a: 1}], exist: [b]}]\n      \
+             params: {z: 1, a: [x, ~]}\n  default-raw:\n    - params: {x: '{'}\n    \
+             - params: {y: '{\"k\":1}'}\n  filter:\n    - models: [{name: m}]\n      \
+             params: [a.b]\n",
+        );
+        let payload = &config.payload;
+        let [rule] = payload.default.as_slice() else {
+            panic!("one default rule: {payload:?}");
+        };
+        assert_eq!(
+            rule.params,
+            [
+                ("z".to_owned(), AnyValue::Int(1)),
+                (
+                    "a".to_owned(),
+                    AnyValue::Seq(vec![AnyValue::Str("x".into()), AnyValue::Null])
+                ),
+            ]
+        );
+        assert_eq!(
+            rule.models,
+            [PayloadModelRule {
+                name: "gpt-*".into(),
+                protocol: "codex".into(),
+                headers: BTreeMap::from([("X-Team".into(), "a*".into())]),
+                r#match: vec![BTreeMap::from([("a".into(), AnyValue::Int(1))])],
+                exist: strings(&["b"]),
+                ..PayloadModelRule::default()
+            }]
+        );
+        assert_eq!(payload.default_raw.len(), 1);
+        assert_eq!(payload.filter.len(), 1);
+        assert_eq!(
+            payload.filter.first().map(|rule| rule.params.clone()),
+            Some(strings(&["a.b"]))
+        );
+        let v8 = parse("requests:\n  payload:\n    override:\n      - params: {c: true}\n");
+        assert_eq!(v8.payload.r#override.len(), 1);
+        assert_eq!(
+            Config::parse("payload: {default: 5, filter: [{params: {a: 1}}]}\n")
+                .map_err(|error| error.to_string()),
+            Err(format!(
+                "{PARSE}yaml: unmarshal errors:\n  \
+                 line 1: cannot unmarshal !!int into []config.PayloadRule\n  \
+                 line 1: cannot unmarshal !!map into []string"
+            ))
+        );
+    }
 }

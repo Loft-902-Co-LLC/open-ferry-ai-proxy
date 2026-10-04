@@ -32,6 +32,7 @@ use open_ferry_translate::go::{equal_fold, to_lower};
 use serde::Deserialize;
 
 use super::duration::parse_go_duration;
+use super::payload::PayloadConfig;
 
 /// The auth directory used when `auth-dir` is unset.
 pub const DEFAULT_AUTH_DIR: &str = "~/.cli-proxy-api";
@@ -77,10 +78,27 @@ pub struct Config {
     pub auth_dir: String,
     /// Enables debug logging.
     pub debug: bool,
+    /// Turns off request-log capture and the request-log routes' middleware
+    /// for lower memory use (upstream's commercial mode).
+    pub commercial_mode: bool,
     /// Writes logs to rotating files instead of stdout.
     pub logging_to_file: bool,
+    /// The most megabytes the log directory may hold before the oldest log
+    /// files are deleted; 0 disables the limit. Negative values load as 0.
+    pub logs_max_total_size_mb: i64,
+    /// The most error request log files kept; 0 keeps them all. Defaults to
+    /// 10, as do negative values.
+    pub error_logs_max_files: i64,
+    /// Queues a usage record for each request.
+    pub usage_statistics_enabled: bool,
+    /// Seconds a queued usage record is kept; loads as 60 when `<= 0` and
+    /// at most 3600.
+    pub redis_usage_queue_retention_seconds: i64,
     /// Disables credential and model cooldowns unless a credential overrides it.
     pub disable_cooling: bool,
+    /// Saves cooldowns next to the credential files, so they survive a
+    /// restart.
+    pub save_cooldown_status: bool,
     /// Cooldown for transient upstream errors: 0 keeps the default, negative
     /// disables it.
     pub transient_error_cooldown_seconds: i64,
@@ -124,6 +142,8 @@ pub struct Config {
     pub oauth_request_scoped_errors: BTreeMap<String, Vec<RequestScopedErrorRule>>,
     /// Model settings per OAuth channel.
     pub oauth_settings: BTreeMap<String, Vec<OAuthModelSetting>>,
+    /// Rules that edit the payloads sent upstream.
+    pub payload: PayloadConfig,
     /// Legacy names of settings a v8 document placed under
     /// `oauth.providers`, which don't apply to API-key credentials.
     #[serde(skip)]
@@ -149,8 +169,14 @@ impl Default for Config {
             remote_management: RemoteManagement::default(),
             auth_dir: String::new(),
             debug: false,
+            commercial_mode: false,
             logging_to_file: false,
+            logs_max_total_size_mb: 0,
+            error_logs_max_files: 10,
+            usage_statistics_enabled: false,
+            redis_usage_queue_retention_seconds: 60,
             disable_cooling: false,
+            save_cooldown_status: false,
             transient_error_cooldown_seconds: 0,
             auth_auto_refresh_workers: 0,
             request_retry: 0,
@@ -171,6 +197,7 @@ impl Default for Config {
             oauth_model_alias: BTreeMap::new(),
             oauth_request_scoped_errors: BTreeMap::new(),
             oauth_settings: BTreeMap::new(),
+            payload: PayloadConfig::default(),
             oauth_only_fields: BTreeSet::new(),
         }
     }
@@ -216,8 +243,17 @@ impl fmt::Debug for Config {
             .field("remote_management", &self.remote_management)
             .field("auth_dir", &self.auth_dir)
             .field("debug", &self.debug)
+            .field("commercial_mode", &self.commercial_mode)
             .field("logging_to_file", &self.logging_to_file)
+            .field("logs_max_total_size_mb", &self.logs_max_total_size_mb)
+            .field("error_logs_max_files", &self.error_logs_max_files)
+            .field("usage_statistics_enabled", &self.usage_statistics_enabled)
+            .field(
+                "redis_usage_queue_retention_seconds",
+                &self.redis_usage_queue_retention_seconds,
+            )
             .field("disable_cooling", &self.disable_cooling)
+            .field("save_cooldown_status", &self.save_cooldown_status)
             .field(
                 "transient_error_cooldown_seconds",
                 &self.transient_error_cooldown_seconds,
@@ -244,6 +280,7 @@ impl fmt::Debug for Config {
                 &self.oauth_request_scoped_errors,
             )
             .field("oauth_settings", &self.oauth_settings)
+            .field("payload", &self.payload)
             .field("oauth_only_fields", &self.oauth_only_fields)
             .finish()
     }
@@ -1016,7 +1053,7 @@ impl fmt::Debug for RedactedList<'_> {
 }
 
 /// Header names with their values hidden.
-struct RedactedMap<'a>(&'a BTreeMap<String, String>);
+pub(crate) struct RedactedMap<'a>(pub(crate) &'a BTreeMap<String, String>);
 
 impl fmt::Debug for RedactedMap<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

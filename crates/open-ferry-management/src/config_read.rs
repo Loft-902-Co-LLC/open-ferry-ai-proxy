@@ -45,12 +45,9 @@
 //! Deviations from upstream:
 //! - `GET /v0/management/config` writes only the sections open-ferry
 //!   types (see [`open_ferry_core::config`]). Left out: `plugins`, `pprof`,
-//!   `discovery`, `commercial-mode`, `credential-concurrency`,
-//!   `credential-in-flight`, `logs-max-total-size-mb`,
-//!   `error-logs-max-files`, `usage-statistics-enabled`,
-//!   `redis-usage-queue-retention-seconds`, `save-cooldown-status`,
+//!   `discovery`, `credential-concurrency`, `credential-in-flight`,
 //!   `disable-image-generation`, `gpt-image-2-base-model`,
-//!   `video-result-auth-cache-ttl`, `payload`, the other providers'
+//!   `video-result-auth-cache-ttl`, the other providers'
 //!   sections (`interactions-api-key`, `xai-api-key`, `meta-api-key`,
 //!   `xai`, `antigravity`, `antigravity-signature-*`, `devin`),
 //!   `codex.live-media-relay`, and the client impersonation settings

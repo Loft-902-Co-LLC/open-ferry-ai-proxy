@@ -643,7 +643,11 @@ async fn config_is_written_as_upstream_writes_it() {
             r#""streaming":{{"keepalive-seconds":15,"bootstrap-retries":2}},"#,
             r#""nonstream-keepalive-interval":5,"trusted-proxies":["10.0.0.0/8"],"#,
             r#""tls":{{"enable":true,"cert":"c.pem","key":"k.pem"}},"debug":true,"#,
-            r#""logging-to-file":true,"disable-cooling":true,"transient-error-cooldown-seconds":7,"#,
+            r#""commercial-mode":false,"logging-to-file":true,"logs-max-total-size-mb":0,"#,
+            r#""error-logs-max-files":10,"usage-statistics-enabled":false,"#,
+            r#""redis-usage-queue-retention-seconds":60,"#,
+            r#""disable-cooling":true,"save-cooldown-status":false,"#,
+            r#""transient-error-cooldown-seconds":7,"#,
             r#""auth-auto-refresh-workers":3,"request-retry":4,"max-retry-credentials":2,"#,
             r#""max-retry-interval":30,"quota-exceeded":{{"switch-project":true,"#,
             r#""switch-preview-model":true,"antigravity-credits":true}},"#,
@@ -661,12 +665,13 @@ async fn config_is_written_as_upstream_writes_it() {
             r#""vertex-api-key":{vertex},"oauth-excluded-models":{{"codex":["a","b"]}},"#,
             r#""oauth-model-alias":{{"codex":[{{"name":"gpt-5","alias":"g5","fork":true}}]}},"#,
             r#""oauth-request-scoped-errors":{{"codex":[{{"status":400,"match":["bad"],"#,
-            r#""action":"retry"}}]}}}}"#,
+            r#""action":"retry"}}]}},"payload":{payload}}}"#,
         ),
         gemini = RICH_GEMINI,
         codex = RICH_CODEX,
         claude = RICH_CLAUDE,
         vertex = RICH_VERTEX,
+        payload = NO_PAYLOAD,
     );
     answer.assert(StatusCode::OK, &want);
 
@@ -674,8 +679,11 @@ async fn config_is_written_as_upstream_writes_it() {
         r#"{"client":{"codex":{"optimize-multi-agent-v2":false,"enable-apply-patch":false}},"#,
         r#""proxy-url":"","force-model-prefix":false,"request-log":false,"api-keys":null,"#,
         r#""passthrough-headers":false,"streaming":{},"trusted-proxies":null,"#,
-        r#""tls":{"enable":false,"cert":"","key":""},"debug":false,"logging-to-file":false,"#,
-        r#""disable-cooling":false,"transient-error-cooldown-seconds":0,"#,
+        r#""tls":{"enable":false,"cert":"","key":""},"debug":false,"commercial-mode":false,"#,
+        r#""logging-to-file":false,"logs-max-total-size-mb":0,"error-logs-max-files":10,"#,
+        r#""usage-statistics-enabled":false,"redis-usage-queue-retention-seconds":60,"#,
+        r#""disable-cooling":false,"save-cooldown-status":false,"#,
+        r#""transient-error-cooldown-seconds":0,"#,
         r#""auth-auto-refresh-workers":0,"request-retry":0,"max-retry-credentials":0,"#,
         r#""max-retry-interval":0,"quota-exceeded":{"switch-project":false,"#,
         r#""switch-preview-model":false,"antigravity-credits":false},"routing":{},"#,
@@ -683,11 +691,49 @@ async fn config_is_written_as_upstream_writes_it() {
         r#""codex":{"stream-bootstrap-buffering":false,"orphan-delegation-compatibility":false,"#,
         r#""model-level-cooling":false,"response-steering":false},"#,
         r#""codex-header-defaults":{"beta-features":""},"claude":{"model-level-cooling":false},"#,
-        r#""claude-api-key":null,"openai-compatibility":null,"vertex-api-key":null}"#,
+        r#""claude-api-key":null,"openai-compatibility":null,"vertex-api-key":null,"#,
+        r#""payload":{"default":null,"default-raw":null,"override":null,"override-raw":null,"#,
+        r#""filter":null}}"#,
     );
     for text in ["port: 1\n", "port: 1\napi-keys: []\ntrusted-proxies: []\n"] {
         let answer = with_config(text).get("/v0/management/config").await;
         answer.assert(StatusCode::OK, empty);
+    }
+}
+
+/// The `payload` upstream writes when the file has none.
+const NO_PAYLOAD: &str =
+    r#"{"default":null,"default-raw":null,"override":null,"override-raw":null,"filter":null}"#;
+
+/// Not upstream's: the observability settings and payload rules are
+/// written at upstream's positions, as upstream writes them.
+#[tokio::test]
+async fn observability_settings_and_payload_are_written() {
+    let text = concat!(
+        "port: 1\ncommercial-mode: true\nlogs-max-total-size-mb: 5\n",
+        "error-logs-max-files: 2\nusage-statistics-enabled: true\n",
+        "redis-usage-queue-retention-seconds: 30\nsave-cooldown-status: true\n",
+        "payload:\n  override:\n    - models: [{name: gpt-*, headers: {X-A: a*}, ",
+        "match: [{a: 1.5}]}]\n      params: {z: [1, ~], a: {b: x}}\n",
+        "  filter:\n    - params: [a]\n",
+    );
+    let answer = with_config(text).get("/v0/management/config").await;
+    assert_eq!(answer.status, StatusCode::OK);
+    let body = answer.body;
+    for part in [
+        r#""debug":false,"commercial-mode":true,"logging-to-file":false,"#,
+        r#""logs-max-total-size-mb":5,"error-logs-max-files":2,"#,
+        r#""usage-statistics-enabled":true,"redis-usage-queue-retention-seconds":30,"#,
+        r#""disable-cooling":false,"save-cooldown-status":true,"#,
+        concat!(
+            r#""payload":{"default":null,"default-raw":null,"override":[{"models":[{"#,
+            r#""name":"gpt-*","protocol":"","headers":{"X-A":"a*"},"from-protocol":"","#,
+            r#""match":[{"a":1.5}],"not-match":null,"exist":null,"not-exist":null}],"#,
+            r#""params":{"a":{"b":"x"},"z":[1,null]}}],"override-raw":null,"#,
+            r#""filter":[{"models":null,"params":["a"]}]}}"#,
+        ),
+    ] {
+        assert!(body.contains(part), "{part} in {body}");
     }
 }
 

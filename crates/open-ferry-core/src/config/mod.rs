@@ -20,10 +20,13 @@
 //! management API shows it.
 //!
 //! Typed sections: `host`, `port`, `trusted-proxies`, `tls`,
-//! `remote-management`, `auth-dir`, `api-keys`, `debug`, `logging-to-file`,
+//! `remote-management`, `auth-dir`, `api-keys`, `debug`, `commercial-mode`,
+//! `logging-to-file`, `logs-max-total-size-mb`, `error-logs-max-files`,
+//! `usage-statistics-enabled`, `redis-usage-queue-retention-seconds`,
 //! `request-log`, `proxy-url`, `passthrough-headers`, `streaming`,
 //! `nonstream-keepalive-interval`, `disable-cooling`,
-//! `transient-error-cooldown-seconds`, `auth-auto-refresh-workers`,
+//! `save-cooldown-status`, `transient-error-cooldown-seconds`,
+//! `auth-auto-refresh-workers`,
 //! `request-retry`, `max-retry-credentials`, `max-retry-interval`,
 //! `quota-exceeded`, `routing.strategy`, `ws-auth`, `force-model-prefix`,
 //! `client.codex`, `codex` (minus cloaking and the live media relay),
@@ -31,9 +34,9 @@
 //! `gemini-api-key`, `codex-api-key`, `claude-api-key` (minus `cloak` and
 //! `fingerprint-profile`), `openai-compatibility`, `vertex-api-key`,
 //! `oauth-excluded-models`, `oauth-model-alias`,
-//! `oauth-request-scoped-errors` and `oauth-settings`, with their v8
-//! spellings (the key lists as `api-keys.gemini`, `api-keys.vertex` and so
-//! on).
+//! `oauth-request-scoped-errors`, `oauth-settings` and `payload`, with
+//! their v8 spellings (the key lists as `api-keys.gemini`,
+//! `api-keys.vertex` and so on).
 //!
 //! Read and ignored, so they never fail a load except where upstream checks
 //! their layout or weights before decoding:
@@ -47,11 +50,8 @@
 //!   `meta-api-key`, `xai`, `antigravity`, `antigravity-signature-*`,
 //!   `devin`.
 //! - Features not ported here: `plugins`, `pprof`, `discovery`,
-//!   `commercial-mode`, `payload`, `disable-image-generation`,
-//!   `gpt-image-2-base-model`, `video-result-auth-cache-ttl`,
-//!   `codex.live-media-relay`, `save-cooldown-status`,
-//!   `usage-statistics-enabled`, `redis-usage-queue-retention-seconds`,
-//!   `logs-max-total-size-mb`, `error-logs-max-files`.
+//!   `disable-image-generation`, `gpt-image-2-base-model`,
+//!   `video-result-auth-cache-ttl`, `codex.live-media-relay`.
 //! - Deferred: `credential-concurrency` and `credential-in-flight`.
 //!
 //! Upstream's `home` section has no YAML form and isn't read.
@@ -64,11 +64,13 @@
 //! - Each submodule lists its own deviations.
 
 mod decode;
+pub mod diff;
 mod duration;
 mod layout;
 mod load;
 mod normalize;
 mod paths;
+mod payload;
 mod safe_mode;
 #[cfg(test)]
 mod testing;
@@ -81,6 +83,7 @@ use std::fmt;
 
 pub(crate) use duration::parse_go_duration;
 pub use layout::{AnyValue, V8Document};
+pub use payload::{PayloadConfig, PayloadFilterRule, PayloadModelRule, PayloadRule};
 pub use safe_mode::example_api_key_warning_page;
 pub use types::{
     ClaudeConfig, ClaudeKey, ClaudeModel, ClientConfig, CodexClientConfig, CodexConfig,

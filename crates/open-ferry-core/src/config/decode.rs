@@ -24,26 +24,37 @@
 //! reports them: struct names come from each type's serde name and
 //! collection types from [`field_hint`].
 //!
+//! An [`AnyValue`] field decodes its node as yaml.v3 decodes into Go's
+//! `any`; it asks for that through serde's newtype-struct hook with a name
+//! of its own.
+//!
 //! Deviations from upstream:
 //! - Type errors leave out yaml.v3's excerpt of the offending value.
-//! - Only the types this crate decodes are supported; there is no general
-//!   `interface{}` decoding.
+//! - Only the types this crate decodes are supported.
 //! - A decode stops with `document contains excessive aliasing` once the
 //!   strings that aliases expanded to add up to more than 64 MiB; yaml.v3
 //!   decodes them.
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::de::value::StringDeserializer;
 use serde::de::{
-    self, DeserializeOwned, DeserializeSeed, IntoDeserializer, MapAccess, SeqAccess, Visitor,
+    self, DeserializeOwned, DeserializeSeed, Deserializer, EnumAccess, IntoDeserializer, MapAccess,
+    SeqAccess, VariantAccess, Visitor,
 };
+use serde::{Deserialize, forward_to_deserialize_any};
 
+use super::layout::AnyValue;
 use super::yaml::{
     AliasBudget, Kind, Node, Scalar, YamlError, duplicate_key_errors, is_merge, push_type_error,
-    resolve_node, scalar_string, type_error,
+    resolve_node, scalar_string, timestamp_json_text, type_error,
 };
+
+/// The newtype name [`AnyValue`] deserializes with, which [`NodeDe`]
+/// answers with the node decoded into `any`.
+const ANY_VALUE: &str = "config.anyValue";
 
 /// A decode that stopped; yaml.v3's `failf`, without the `yaml: ` prefix.
 #[derive(Debug)]
@@ -108,6 +119,17 @@ fn field_hint(owner: &str, key: &str) -> &'static str {
         (_, "request-scoped-errors") => "[]config.RequestScopedErrorRule",
         ("registry.ThinkingSupport", "levels") => "[]string",
         ("config.RequestScopedErrorRule", "match" | "match-regexr") => "[]string",
+        ("config.PayloadConfig", "default" | "default-raw" | "override" | "override-raw") => {
+            "[]config.PayloadRule"
+        }
+        ("config.PayloadConfig", "filter") => "[]config.PayloadFilterRule",
+        ("config.PayloadRule" | "config.PayloadFilterRule", "models") => {
+            "[]config.PayloadModelRule"
+        }
+        ("config.PayloadRule", "params") => "map[string]interface {}",
+        ("config.PayloadFilterRule", "params") => "[]string",
+        ("config.PayloadModelRule", "match" | "not-match") => "[]map[string]interface {}",
+        ("config.PayloadModelRule", "exist" | "not-exist") => "[]string",
         _ => "",
     }
 }
@@ -241,6 +263,57 @@ impl<'a> NodeDe<'a> {
         self.budget.charge(self.node).map_err(fatal)?;
         scalar_string(self.node).map_err(fatal)
     }
+
+    /// The node as yaml.v3 decodes it into `any` (`decoder.scalar`,
+    /// `decoder.sequence` and `decoder.mapping` with an `interface{}`
+    /// target): a mapping with a repeated key records the error and decodes
+    /// to nil, and sequences keep their null items.
+    fn any(&self) -> Result<AnyValue, Fatal> {
+        match self.node.kind {
+            Kind::Poison => Err(Fatal(self.node.value.to_string())),
+            Kind::Scalar => {
+                self.budget.charge(self.node).map_err(fatal)?;
+                Ok(match resolve_node(self.node).map_err(fatal)?.value {
+                    Scalar::Null => AnyValue::Null,
+                    Scalar::Bool(value) => AnyValue::Bool(value),
+                    Scalar::Int(value) => AnyValue::Int(value),
+                    Scalar::Uint(value) => AnyValue::Uint(value),
+                    Scalar::Float(value) => AnyValue::Float(value),
+                    Scalar::Timestamp => AnyValue::Time(timestamp_json_text(&self.node.value)),
+                    Scalar::Str(value) => AnyValue::Str(value.to_string()),
+                })
+            }
+            Kind::Sequence => self
+                .node
+                .content
+                .iter()
+                .map(|item| self.child(item, "").any())
+                .collect::<Result<_, _>>()
+                .map(AnyValue::Seq),
+            Kind::Mapping => {
+                if self.duplicates() {
+                    return Ok(AnyValue::Null);
+                }
+                let string_keys = self
+                    .node
+                    .pairs()
+                    .all(|(key, _)| key.tag == "!!str" || key.tag == "!!merge");
+                if string_keys {
+                    let mut map = BTreeMap::new();
+                    for (key, value) in self.node.pairs() {
+                        self.budget.charge(key).map_err(fatal)?;
+                        map.insert(key.value.to_string(), self.child(value, "").any()?);
+                    }
+                    return Ok(AnyValue::Map(map));
+                }
+                for (key, value) in self.node.pairs() {
+                    self.child(key, "").any()?;
+                    self.child(value, "").any()?;
+                }
+                Ok(AnyValue::AnyMap)
+            }
+        }
+    }
 }
 
 impl<'de> de::Deserializer<'de> for NodeDe<'_> {
@@ -358,14 +431,237 @@ impl<'de> de::Deserializer<'de> for NodeDe<'_> {
         })
     }
 
+    fn deserialize_newtype_struct<V: Visitor<'de>>(
+        self,
+        name: &'static str,
+        visitor: V,
+    ) -> Result<V::Value, Fatal> {
+        if name == ANY_VALUE {
+            return AnyDe(self.any()?).deserialize_any(visitor);
+        }
+        self.deserialize_any(visitor)
+    }
+
     fn deserialize_ignored_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Fatal> {
         // yaml.v3 never looks at the values of unknown fields.
         visitor.visit_unit()
     }
 
-    serde::forward_to_deserialize_any! {
+    forward_to_deserialize_any! {
         i8 i16 i32 i128 u8 u16 u32 u64 u128 f32 f64 char bytes byte_buf unit
-        unit_struct newtype_struct tuple tuple_struct enum identifier
+        unit_struct tuple tuple_struct enum identifier
+    }
+}
+
+impl<'de> Deserialize<'de> for AnyValue {
+    /// Only the config decoder gives every kind of value; another
+    /// deserializer gives what its data model holds.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_newtype_struct(ANY_VALUE, AnyVisitor)
+    }
+}
+
+/// Rebuilds an [`AnyValue`] from what [`AnyDe`] hands over.
+struct AnyVisitor;
+
+impl<'de> Visitor<'de> for AnyVisitor {
+    type Value = AnyValue;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("any value")
+    }
+
+    fn visit_unit<E>(self) -> Result<AnyValue, E> {
+        Ok(AnyValue::Null)
+    }
+
+    fn visit_none<E>(self) -> Result<AnyValue, E> {
+        Ok(AnyValue::Null)
+    }
+
+    fn visit_some<D: Deserializer<'de>>(self, deserializer: D) -> Result<AnyValue, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+
+    fn visit_newtype_struct<D: Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<AnyValue, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+
+    fn visit_bool<E>(self, value: bool) -> Result<AnyValue, E> {
+        Ok(AnyValue::Bool(value))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<AnyValue, E> {
+        Ok(AnyValue::Int(value))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<AnyValue, E> {
+        Ok(i64::try_from(value).map_or(AnyValue::Uint(value), AnyValue::Int))
+    }
+
+    fn visit_f64<E>(self, value: f64) -> Result<AnyValue, E> {
+        Ok(AnyValue::Float(value))
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<AnyValue, E> {
+        Ok(AnyValue::Str(value.to_owned()))
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<AnyValue, E> {
+        Ok(AnyValue::Str(value))
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<AnyValue, A::Error> {
+        let mut items = Vec::new();
+        while let Some(item) = seq.next_element()? {
+            items.push(item);
+        }
+        Ok(AnyValue::Seq(items))
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<AnyValue, A::Error> {
+        let mut entries = BTreeMap::new();
+        while let Some((key, value)) = map.next_entry()? {
+            entries.insert(key, value);
+        }
+        Ok(AnyValue::Map(entries))
+    }
+
+    fn visit_enum<A: EnumAccess<'de>>(self, data: A) -> Result<AnyValue, A::Error> {
+        let (variant, access): (String, _) = data.variant()?;
+        match variant.as_str() {
+            TIME => access
+                .newtype_variant()
+                .map(|text| AnyValue::Time(Some(text))),
+            BAD_TIME => access.unit_variant().map(|()| AnyValue::Time(None)),
+            _ => access.unit_variant().map(|()| AnyValue::AnyMap),
+        }
+    }
+}
+
+/// The enum variants [`AnyDe`] hands over the values serde has no kind
+/// for as: a time's JSON text, a time Go's encoder refuses, and a mapping
+/// with keys that aren't strings.
+const TIME: &str = "time";
+const BAD_TIME: &str = "bad-time";
+const ANY_MAP: &str = "any-map";
+
+/// Hands a decoded [`AnyValue`] to a visitor.
+struct AnyDe(AnyValue);
+
+impl<'de> Deserializer<'de> for AnyDe {
+    type Error = Fatal;
+
+    fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Fatal> {
+        match self.0 {
+            AnyValue::Null => visitor.visit_unit(),
+            AnyValue::Bool(value) => visitor.visit_bool(value),
+            AnyValue::Int(value) => visitor.visit_i64(value),
+            AnyValue::Uint(value) => visitor.visit_u64(value),
+            AnyValue::Float(value) => visitor.visit_f64(value),
+            AnyValue::Str(value) => visitor.visit_string(value),
+            AnyValue::Time(Some(text)) => visitor.visit_enum(AnyVariant(TIME, text)),
+            AnyValue::Time(None) => visitor.visit_enum(AnyVariant(BAD_TIME, String::new())),
+            AnyValue::AnyMap => visitor.visit_enum(AnyVariant(ANY_MAP, String::new())),
+            AnyValue::Seq(items) => visitor.visit_seq(AnyItems(items.into_iter())),
+            AnyValue::Map(entries) => visitor.visit_map(AnyEntries {
+                entries: entries.into_iter(),
+                value: None,
+            }),
+        }
+    }
+
+    forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+        bytes byte_buf option unit unit_struct newtype_struct seq tuple
+        tuple_struct map struct enum identifier ignored_any
+    }
+}
+
+/// A sequence's items, handed to a visitor.
+struct AnyItems(std::vec::IntoIter<AnyValue>);
+
+impl<'de> SeqAccess<'de> for AnyItems {
+    type Error = Fatal;
+
+    fn next_element_seed<T: DeserializeSeed<'de>>(
+        &mut self,
+        seed: T,
+    ) -> Result<Option<T::Value>, Fatal> {
+        self.0
+            .next()
+            .map(|item| seed.deserialize(AnyDe(item)))
+            .transpose()
+    }
+}
+
+/// A mapping's entries, handed to a visitor.
+struct AnyEntries {
+    entries: std::collections::btree_map::IntoIter<String, AnyValue>,
+    value: Option<AnyValue>,
+}
+
+impl<'de> MapAccess<'de> for AnyEntries {
+    type Error = Fatal;
+
+    fn next_key_seed<K: DeserializeSeed<'de>>(
+        &mut self,
+        seed: K,
+    ) -> Result<Option<K::Value>, Fatal> {
+        let Some((key, value)) = self.entries.next() else {
+            return Ok(None);
+        };
+        self.value = Some(value);
+        let key: StringDeserializer<Fatal> = key.into_deserializer();
+        seed.deserialize(key).map(Some)
+    }
+
+    fn next_value_seed<V: DeserializeSeed<'de>>(&mut self, seed: V) -> Result<V::Value, Fatal> {
+        let Some(value) = self.value.take() else {
+            return Err(Fatal("internal error: value before key".to_owned()));
+        };
+        seed.deserialize(AnyDe(value))
+    }
+}
+
+/// One of the variants above, with a time's text.
+struct AnyVariant(&'static str, String);
+
+impl<'de> EnumAccess<'de> for AnyVariant {
+    type Error = Fatal;
+    type Variant = Self;
+
+    fn variant_seed<V: DeserializeSeed<'de>>(self, seed: V) -> Result<(V::Value, Self), Fatal> {
+        let name: StringDeserializer<Fatal> = self.0.to_owned().into_deserializer();
+        Ok((seed.deserialize(name)?, self))
+    }
+}
+
+impl<'de> VariantAccess<'de> for AnyVariant {
+    type Error = Fatal;
+
+    fn unit_variant(self) -> Result<(), Fatal> {
+        Ok(())
+    }
+
+    fn newtype_variant_seed<T: DeserializeSeed<'de>>(self, seed: T) -> Result<T::Value, Fatal> {
+        let text: StringDeserializer<Fatal> = self.1.into_deserializer();
+        seed.deserialize(text)
+    }
+
+    fn tuple_variant<V: Visitor<'de>>(self, _len: usize, visitor: V) -> Result<V::Value, Fatal> {
+        visitor.visit_unit()
+    }
+
+    fn struct_variant<V: Visitor<'de>>(
+        self,
+        _fields: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, Fatal> {
+        visitor.visit_unit()
     }
 }
 
@@ -525,6 +821,123 @@ mod tests {
         );
         assert_eq!(
             run("count: !!int abc\n"),
+            Err("yaml: cannot decode !!str as a !!int".to_owned())
+        );
+    }
+
+    #[derive(Debug, Default, Deserialize, PartialEq)]
+    #[serde(default, rename = "config.AnySample")]
+    struct AnySample {
+        value: Option<AnyValue>,
+        list: Vec<AnyValue>,
+    }
+
+    fn any(text: &str) -> Result<AnySample, String> {
+        let root = parse_document(text)
+            .map_err(|e| e.message())?
+            .unwrap_or_default();
+        decode::<AnySample>(&root).map_err(|e| e.message())
+    }
+
+    // Not upstream's: yaml.v3 decoding into `any`, as upstream's payload
+    // params decode.
+    #[test]
+    fn any_values_decode_as_yaml_v3_decodes_into_any() {
+        let value = |text: &str| any(text).map(|sample| sample.value.unwrap_or(AnyValue::Null));
+        assert_eq!(
+            value(
+                "value: 0x10
+"
+            ),
+            Ok(AnyValue::Int(16))
+        );
+        assert_eq!(
+            value(
+                "value: 18446744073709551615
+"
+            ),
+            Ok(AnyValue::Uint(u64::MAX))
+        );
+        assert_eq!(
+            value(
+                "value: 1.5
+"
+            ),
+            Ok(AnyValue::Float(1.5))
+        );
+        assert_eq!(
+            value(
+                "value: on
+"
+            ),
+            Ok(AnyValue::Str("on".into()))
+        );
+        assert_eq!(
+            value(
+                "value: {a: ~}
+"
+            ),
+            Ok(AnyValue::Map(BTreeMap::from([(
+                "a".into(),
+                AnyValue::Null
+            )])))
+        );
+        assert_eq!(
+            value(
+                "value: !!binary aGVsbG8=
+"
+            ),
+            Ok(AnyValue::Str("hello".into()))
+        );
+        assert_eq!(
+            value(
+                "value: 2001-12-14
+"
+            ),
+            Ok(AnyValue::Time(Some("2001-12-14T00:00:00Z".into())))
+        );
+        assert_eq!(
+            value(
+                "value: [1, ~, {a: [x]}]
+"
+            ),
+            Ok(AnyValue::Seq(vec![
+                AnyValue::Int(1),
+                AnyValue::Null,
+                AnyValue::Map(BTreeMap::from([(
+                    "a".into(),
+                    AnyValue::Seq(vec![AnyValue::Str("x".into())])
+                )])),
+            ]))
+        );
+        assert_eq!(
+            value(
+                "value: {1: a}
+"
+            ),
+            Ok(AnyValue::AnyMap)
+        );
+        assert_eq!(
+            any("list: [a, ~, 1]
+")
+            .map(|sample| sample.list),
+            Ok(vec![AnyValue::Str("a".into()), AnyValue::Int(1)])
+        );
+        assert_eq!(
+            value(
+                "value: {a: {b: 1, b: 2}}
+"
+            ),
+            Err(
+                "yaml: unmarshal errors:\n  line 1: mapping key \"b\" already defined at line 1"
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            value(
+                "value: !!int abc
+"
+            ),
             Err("yaml: cannot decode !!str as a !!int".to_owned())
         );
     }

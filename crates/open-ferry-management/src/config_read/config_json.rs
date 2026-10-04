@@ -14,15 +14,22 @@
 //!   [`config`](super) for the ones left out.
 //! - A list the file gives as `[]` is written as `null`, as it is when the
 //!   file leaves it out: the typed config doesn't tell the two apart, where
-//!   upstream writes `[]` for the first.
+//!   upstream writes `[]` for the first. The same goes for a payload rule's
+//!   `params`.
+//! - A payload value Go's JSON encoder refuses (a mapping with a key that
+//!   isn't a string, a time in a zone a day or more from UTC, or an
+//!   infinite or NaN float) is written as `null`; upstream's whole answer
+//!   fails.
 
 use std::collections::BTreeMap;
 
 use open_ferry_core::config::{
-    ClaudeKey, ClaudeModel, CodexKey, CodexModel, Config, GeminiKey, GeminiModel, OAuthModelAlias,
-    OAuthModelSetting, OpenAiCompatibility, OpenAiCompatibilityApiKey, OpenAiCompatibilityModel,
+    AnyValue, ClaudeKey, ClaudeModel, CodexKey, CodexModel, Config, GeminiKey, GeminiModel,
+    OAuthModelAlias, OAuthModelSetting, OpenAiCompatibility, OpenAiCompatibilityApiKey,
+    OpenAiCompatibilityModel, PayloadConfig, PayloadFilterRule, PayloadModelRule, PayloadRule,
     RequestScopedErrorRule, ThinkingSupport, VertexCompatKey, VertexCompatModel,
 };
+use serde_json::Value;
 
 use crate::json::Json;
 
@@ -177,8 +184,29 @@ pub(super) fn config(config: &Config) -> Json {
                 .done(),
         )
         .with("debug", Json::Bool(config.debug))
+        .with("commercial-mode", Json::Bool(config.commercial_mode))
         .with("logging-to-file", Json::Bool(config.logging_to_file))
+        .with(
+            "logs-max-total-size-mb",
+            Json::Int(config.logs_max_total_size_mb),
+        )
+        .with(
+            "error-logs-max-files",
+            Json::Int(config.error_logs_max_files),
+        )
+        .with(
+            "usage-statistics-enabled",
+            Json::Bool(config.usage_statistics_enabled),
+        )
+        .with(
+            "redis-usage-queue-retention-seconds",
+            Json::Int(config.redis_usage_queue_retention_seconds),
+        )
         .with("disable-cooling", Json::Bool(config.disable_cooling))
+        .with(
+            "save-cooldown-status",
+            Json::Bool(config.save_cooldown_status),
+        )
         .with(
             "transient-error-cooldown-seconds",
             Json::Int(config.transient_error_cooldown_seconds),
@@ -284,7 +312,84 @@ pub(super) fn config(config: &Config) -> Json {
             "oauth-settings",
             list_map(&config.oauth_settings, model_setting),
         )
+        .with("payload", payload(&config.payload))
         .done()
+}
+
+/// `payload`.
+fn payload(payload: &PayloadConfig) -> Json {
+    Fields::new()
+        .with("default", slice(&payload.default, payload_rule))
+        .with("default-raw", slice(&payload.default_raw, payload_rule))
+        .with("override", slice(&payload.r#override, payload_rule))
+        .with("override-raw", slice(&payload.override_raw, payload_rule))
+        .with("filter", slice(&payload.filter, payload_filter_rule))
+        .done()
+}
+
+fn payload_rule(rule: &PayloadRule) -> Json {
+    let params = if rule.params.is_empty() {
+        Json::Null
+    } else {
+        Json::Map(
+            rule.params
+                .iter()
+                .map(|(path, value)| (path.clone(), any_value(value)))
+                .collect(),
+        )
+    };
+    Fields::new()
+        .with("models", slice(&rule.models, payload_model_rule))
+        .with("params", params)
+        .done()
+}
+
+fn payload_filter_rule(rule: &PayloadFilterRule) -> Json {
+    Fields::new()
+        .with("models", slice(&rule.models, payload_model_rule))
+        .with("params", strings(&rule.params))
+        .done()
+}
+
+fn payload_model_rule(rule: &PayloadModelRule) -> Json {
+    let conditions = |entries: &BTreeMap<String, AnyValue>| {
+        Json::Map(
+            entries
+                .iter()
+                .map(|(path, value)| (path.clone(), any_value(value)))
+                .collect(),
+        )
+    };
+    Fields::new()
+        .with("name", string(&rule.name))
+        .with("protocol", string(&rule.protocol))
+        .with("headers", string_map(&rule.headers))
+        .with("from-protocol", string(&rule.from_protocol))
+        .with("match", slice(&rule.r#match, conditions))
+        .with("not-match", slice(&rule.not_match, conditions))
+        .with("exist", strings(&rule.exist))
+        .with("not-exist", strings(&rule.not_exist))
+        .done()
+}
+
+/// A value decoded from YAML into `any`. What Go's encoder refuses is
+/// `null`.
+fn any_value(value: &AnyValue) -> Json {
+    match value {
+        AnyValue::Null | AnyValue::Time(None) | AnyValue::AnyMap => Json::Null,
+        AnyValue::Bool(b) => Json::Bool(*b),
+        AnyValue::Int(n) => Json::Int(*n),
+        AnyValue::Uint(n) => Json::Uint(*n),
+        AnyValue::Float(f) => Json::Any(Value::from(*f)),
+        AnyValue::Str(s) | AnyValue::Time(Some(s)) => string(s),
+        AnyValue::Seq(items) => Json::Array(items.iter().map(any_value).collect()),
+        AnyValue::Map(entries) => Json::Map(
+            entries
+                .iter()
+                .map(|(key, item)| (key.clone(), any_value(item)))
+                .collect(),
+        ),
+    }
 }
 
 /// `oauth-excluded-models`.
