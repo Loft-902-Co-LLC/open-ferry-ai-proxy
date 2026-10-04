@@ -47,7 +47,7 @@ use serde_json::{Value, json};
 use super::input::{CallState, InputDecoder, InputError, failure};
 use super::{description, is_custom_tool, parameters, wrap_input};
 use crate::json::lenient::{self, Found};
-use crate::json::{delete_path, int_of, path, raw, set_path, str_of};
+use crate::json::{delete_path, go_value, int_of, path, raw, set_path, str_of};
 use crate::responses_tools::{
     ToolDescriptor, collect_tool_descriptors, collect_tool_winners, qualify_namespace_tool_name,
 };
@@ -533,8 +533,10 @@ impl Bridge {
         self.error.as_ref()
     }
 
+    /// `next`. Upstream's `int` is 64 bits and wraps, and `sequence` can start
+    /// from a number upstream supplied, so this wraps too.
     fn next(&mut self) -> i64 {
-        self.sequence += 1;
+        self.sequence = self.sequence.wrapping_add(1);
         self.sequence
     }
 
@@ -879,12 +881,15 @@ impl Bridge {
     fn transform_item_event(&mut self, mut event: Event) -> Result<Vec<Event>, Error> {
         let has_item = event.value.get("item").is_some();
         // Arguments events can give a late name and identity at the top level.
+        // Upstream copies each with gjson `Value()`, so a number is read as a
+        // float64: one above 2^53 changes, and then contradicts the same
+        // number at the root.
         let identity = match event.value.get("name") {
             Some(_) if !has_item => {
                 let mut identity = json!({"type": "function_call"});
                 for key in ["name", "namespace", "call_id"] {
                     if let Some(value) = event.value.get(key) {
-                        set_path(&mut identity, key, value.clone());
+                        set_path(&mut identity, key, go_value(value));
                     }
                 }
                 Some(identity)
@@ -976,7 +981,8 @@ impl Bridge {
                     if taken {
                         for record in &self.records {
                             if record.state.output_index >= index {
-                                index = record.state.output_index + 1;
+                                // An output index is upstream's, and Go's wraps.
+                                index = record.state.output_index.wrapping_add(1);
                             }
                         }
                     }

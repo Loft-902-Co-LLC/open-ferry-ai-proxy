@@ -781,3 +781,200 @@ fn inactive_bridge_passes_everything() {
     assert_eq!(b.transform_non_stream(b"x").unwrap(), b"x");
     assert_eq!(b.finish(), Ok(()));
 }
+
+/// Events whose root supplies a late identity for a patch call: a delta that
+/// names the call, then the end of its arguments, then the terminal event.
+fn late_identity(call_id: &str) -> [String; 3] {
+    [
+        format!(
+            r#"{{"type":"response.function_call_arguments.delta","output_index":0,"item_id":"p","call_id":{call_id},"name":"apply_patch","delta":"{{\"input\":\"abc\"}}"}}"#
+        ),
+        r#"{"type":"response.function_call_arguments.done","output_index":0,"item_id":"p","arguments":"{\"input\":\"abc\"}"}"#.to_owned(),
+        r#"{"type":"response.completed","response":{"id":"r","output":[]}}"#.to_owned(),
+    ]
+}
+
+/// Not upstream's: a regression test. The late identity is built with gjson
+/// `Value()`, which reads a number as a float64, and sjson writes it back
+/// with `FormatFloat(v, 'f', -1, 64)`. A number the float64 can't hold exactly
+/// therefore no longer agrees with the same number at the root of the event,
+/// and the call fails. Go v8.0.10 was run on every case here.
+#[test]
+fn late_numeric_call_id_above_2_pow_53_conflicts_with_the_root() {
+    let mut b = bridge(REQUEST);
+    let [delta, done, completed] = late_identity("9007199254740993");
+    let (out, error) = b.transform(delta.as_bytes());
+    assert_failed(&out, error.as_ref(), "the first event");
+    assert_eq!(text(&out[0], "sequence_number"), "1");
+    assert_eq!(
+        text(&out[0], "response.error.code"),
+        "invalid_tool_arguments"
+    );
+    assert_eq!(
+        error.expect("a failure").to_string(),
+        "conflicting apply_patch call identity"
+    );
+    // After a failure nothing else comes out, and the error is kept.
+    assert!(send(&mut b, &done).is_empty());
+    assert!(send(&mut b, &completed).is_empty());
+    assert_eq!(
+        b.finish().unwrap_err().to_string(),
+        "conflicting apply_patch call identity"
+    );
+
+    // Repeating the number at the root of every event doesn't help: each
+    // event's identity is rebuilt from the root.
+    let mut b = bridge(REQUEST);
+    let (out, error) = b.transform(
+        br#"{"type":"response.function_call_arguments.delta","output_index":0,"item_id":"p","call_id":9007199254740993,"name":"apply_patch","delta":"{}"}"#,
+    );
+    assert_failed(&out, error.as_ref(), "the number repeated");
+}
+
+/// Not upstream's: a regression test. Numbers a float64 holds exactly still
+/// agree, and are written the way `FormatFloat(v, 'f', -1, 64)` writes them
+/// (1e2 is 100). Go v8.0.10 gave the same results.
+#[test]
+fn late_numeric_call_id_that_a_float64_holds_is_kept() {
+    for (written, id) in [
+        ("12", "12"),
+        ("1e2", "100"),
+        ("1.5", "1.5"),
+        (r#""c""#, "c"),
+    ] {
+        let mut b = bridge(REQUEST);
+        let [delta, done, completed] = late_identity(written);
+        let first = send(&mut b, &delta);
+        assert_eq!(first.len(), 2, "{written}: {}", shown(&first));
+        assert_eq!(
+            text(&first[0], "type"),
+            "response.output_item.added",
+            "{written}"
+        );
+        assert_eq!(text(&first[0], "item.call_id"), id, "{written}");
+        assert_eq!(text(&first[1], "call_id"), id, "{written}");
+        assert_eq!(text(&first[1], "delta"), "abc", "{written}");
+        let second = send(&mut b, &done);
+        assert_eq!(second.len(), 1, "{written}");
+        assert_eq!(text(&second[0], "input"), "abc", "{written}");
+        let last = send(&mut b, &completed);
+        assert_eq!(last.len(), 2, "{written}: {}", shown(&last));
+        assert_eq!(text(&last[0], "item.call_id"), id, "{written}");
+        assert_eq!(text(&last[1], "response.output.0.call_id"), id, "{written}");
+        assert_eq!(b.finish(), Ok(()), "{written}");
+    }
+}
+
+/// Not upstream's: a regression test. The same coercion applies to a numeric
+/// `name` and `namespace` at the root of an event. A number is not the name
+/// `apply_patch`, so the first leaves the event alone; the second, a
+/// namespace the request doesn't declare, doesn't name the patch tool either.
+/// Go v8.0.10 passed both through unchanged.
+#[test]
+fn late_numeric_name_and_namespace_pass_through() {
+    let mut b = bridge(REQUEST);
+    let name = r#"{"type":"response.function_call_arguments.delta","output_index":0,"item_id":"p","call_id":"c","name":9007199254740993,"delta":"{}"}"#;
+    assert_eq!(send(&mut b, name), [name.as_bytes()]);
+    assert_eq!(send(&mut b, COMPLETED), [COMPLETED.as_bytes()]);
+    assert_eq!(b.finish(), Ok(()));
+
+    let mut b = bridge(REQUEST);
+    let namespace = r#"{"type":"response.function_call_arguments.delta","output_index":0,"item_id":"p","call_id":"c","name":"apply_patch","namespace":9007199254740993,"delta":"{\"input\":\"abc\"}"}"#;
+    let done = r#"{"type":"response.function_call_arguments.done","output_index":0,"item_id":"p","arguments":"{\"input\":\"abc\"}"}"#;
+    assert_eq!(send(&mut b, namespace), [namespace.as_bytes()]);
+    assert_eq!(send(&mut b, done), [done.as_bytes()]);
+    assert_eq!(send(&mut b, COMPLETED), [COMPLETED.as_bytes()]);
+    assert_eq!(b.finish(), Ok(()));
+}
+
+/// Not upstream's: a regression test. A numeric `call_id` inside an output
+/// item is read as text, not through `Value()`, so a non-stream response keeps
+/// every digit. Go v8.0.10 gave the same.
+#[test]
+fn non_stream_numeric_call_id_keeps_every_digit() {
+    let mut b = bridge(REQUEST);
+    let response = br#"{"id":"r","output":[{"type":"function_call","id":"p","call_id":9007199254740993,"name":"apply_patch","arguments":"{\"input\":\"abc\"}","status":"completed"}]}"#;
+    let out = b.transform_non_stream(response).expect("a patch call");
+    assert_eq!(text(&out, "output.0.type"), "custom_tool_call");
+    assert_eq!(text(&out, "output.0.call_id"), "9007199254740993");
+    assert_eq!(text(&out, "output.0.input"), "abc");
+}
+
+/// Not upstream's: a regression test. Go's `int` is 64 bits and wraps, and
+/// upstream supplies `sequence_number`. An event at the largest value used to
+/// panic with "attempt to add with overflow" when the bridge numbered the
+/// event it converted. Go v8.0.10 wrapped.
+#[test]
+fn maximum_sequence_number_wraps_like_go() {
+    let mut b = bridge(REQUEST);
+    let added = r#"{"type":"response.output_item.added","output_index":0,"sequence_number":9223372036854775807,"item":{"type":"function_call","name":"apply_patch","id":"p","call_id":"c","arguments":""}}"#;
+    let out = send(&mut b, added);
+    assert_eq!(out.len(), 1, "{}", shown(&out));
+    assert_eq!(text(&out[0], "type"), "response.output_item.added");
+    assert_eq!(text(&out[0], "sequence_number"), "-9223372036854775807");
+    assert_eq!(text(&out[0], "item.type"), "custom_tool_call");
+
+    // The rest of the call, each event at the same largest number.
+    let mut b = bridge(REQUEST);
+    let events = [
+        added.to_owned(),
+        r#"{"type":"response.function_call_arguments.delta","output_index":0,"sequence_number":9223372036854775807,"item_id":"p","delta":"{\"input\":\"abc\"}"}"#.to_owned(),
+        r#"{"type":"response.function_call_arguments.done","output_index":0,"sequence_number":9223372036854775807,"item_id":"p","arguments":"{\"input\":\"abc\"}"}"#.to_owned(),
+        r#"{"type":"response.completed","sequence_number":9223372036854775807,"response":{"id":"r","output":[]}}"#.to_owned(),
+    ];
+    let mut numbers = Vec::new();
+    for event in &events {
+        for out in send(&mut b, event) {
+            numbers.push((text(&out, "type"), text(&out, "sequence_number")));
+        }
+    }
+    let numbers: Vec<_> = numbers
+        .iter()
+        .map(|(kind, number)| (kind.as_str(), number.as_str()))
+        .collect();
+    assert_eq!(
+        numbers,
+        [
+            ("response.output_item.added", "-9223372036854775807"),
+            (
+                "response.custom_tool_call_input.delta",
+                "-9223372036854775807"
+            ),
+            (
+                "response.custom_tool_call_input.done",
+                "-9223372036854775807"
+            ),
+            ("response.output_item.done", "-9223372036854775806"),
+            ("response.completed", "-9223372036854775805"),
+        ]
+    );
+    assert_eq!(b.finish(), Ok(()));
+}
+
+/// Not upstream's: a regression test. An output index of the largest value
+/// is upstream-supplied too. Finding a free index for an item the snapshot
+/// adds counts one past the highest taken index, which wraps in Go and used to
+/// panic here. Go v8.0.10 returned the response unchanged.
+#[test]
+fn maximum_output_index_wraps_when_a_free_index_is_found() {
+    let mut b = bridge(REQUEST);
+    for raw in [
+        event(
+            "response.output_item.added",
+            0,
+            &item("function_call", "a", "ca", "apply_patch", ""),
+        ),
+        event(
+            "response.output_item.added",
+            i64::MAX,
+            &item("function_call", "b", "cb", "apply_patch", ""),
+        ),
+    ] {
+        let out = send(&mut b, &raw);
+        assert_eq!(out.len(), 1, "{}", shown(&out));
+        assert_eq!(text(&out[0], "item.type"), "custom_tool_call");
+    }
+    let response = br#"{"id":"r","output":[{"type":"function_call","id":"c","call_id":"cc","name":"other","arguments":"{}","status":"completed"}]}"#;
+    let out = b.transform_non_stream(response).expect("an unknown item");
+    assert_eq!(out, response);
+}
