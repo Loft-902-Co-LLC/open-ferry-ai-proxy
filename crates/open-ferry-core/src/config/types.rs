@@ -119,8 +119,16 @@ pub struct Config {
     pub ws_auth: bool,
     /// Gemini API keys.
     pub gemini_api_key: Vec<GeminiKey>,
+    /// Google Interactions API keys, in the Gemini keys' shape.
+    pub interactions_api_key: Vec<GeminiKey>,
     /// Codex API keys.
     pub codex_api_key: Vec<CodexKey>,
+    /// xAI API keys, in the Codex keys' shape.
+    pub xai_api_key: Vec<CodexKey>,
+    /// Meta API keys, in the Codex keys' shape.
+    pub meta_api_key: Vec<CodexKey>,
+    /// Provider-wide xAI behavior.
+    pub xai: XaiConfig,
     /// Provider-wide Codex behavior.
     pub codex: CodexConfig,
     /// Fallback headers for Codex OAuth requests.
@@ -186,7 +194,11 @@ impl Default for Config {
             routing: RoutingConfig::default(),
             ws_auth: true,
             gemini_api_key: Vec::new(),
+            interactions_api_key: Vec::new(),
             codex_api_key: Vec::new(),
+            xai_api_key: Vec::new(),
+            meta_api_key: Vec::new(),
+            xai: XaiConfig::default(),
             codex: CodexConfig::default(),
             codex_header_defaults: CodexHeaderDefaults::default(),
             claude: ClaudeConfig::default(),
@@ -266,7 +278,11 @@ impl fmt::Debug for Config {
             .field("routing", &self.routing)
             .field("ws_auth", &self.ws_auth)
             .field("gemini_api_key", &self.gemini_api_key)
+            .field("interactions_api_key", &self.interactions_api_key)
             .field("codex_api_key", &self.codex_api_key)
+            .field("xai_api_key", &self.xai_api_key)
+            .field("meta_api_key", &self.meta_api_key)
+            .field("xai", &self.xai)
             .field("codex", &self.codex)
             .field("codex_header_defaults", &self.codex_header_defaults)
             .field("claude", &self.claude)
@@ -418,6 +434,14 @@ pub struct QuotaExceeded {
 pub struct RoutingConfig {
     /// The strategy as written; see [`Config::routing_strategy`].
     pub strategy: String,
+}
+
+/// Provider-wide xAI behavior.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, rename = "config.XAIConfig", rename_all = "kebab-case")]
+pub struct XaiConfig {
+    /// Adds xAI's native `x_search` tool to requests that don't declare it.
+    pub inject_x_search: bool,
 }
 
 /// Provider-wide Codex behavior.
@@ -1142,6 +1166,21 @@ mod tests {
             headers: BTreeMap::from([("X-Vertex".to_owned(), "vertex-hdr-secret".to_owned())]),
             ..VertexCompatKey::default()
         });
+        config.interactions_api_key.push(GeminiKey {
+            api_key: "interactions-secret".to_owned(),
+            proxy_url: "http://iu:ip@proxy".to_owned(),
+            ..GeminiKey::default()
+        });
+        config.xai_api_key.push(CodexKey {
+            api_key: "xai-secret".to_owned(),
+            headers: BTreeMap::from([("X-Xai".to_owned(), "xai-hdr-secret".to_owned())]),
+            ..CodexKey::default()
+        });
+        config.meta_api_key.push(CodexKey {
+            api_key: "meta-secret".to_owned(),
+            proxy_url: "http://mu:mp@proxy".to_owned(),
+            ..CodexKey::default()
+        });
         config.openai_compatibility.push(OpenAiCompatibility {
             name: "compat".to_owned(),
             headers: BTreeMap::from([("X-Compat".to_owned(), "compat-hdr-secret".to_owned())]),
@@ -1170,6 +1209,12 @@ mod tests {
             "vertex-secret",
             "vu:vp",
             "vertex-hdr-secret",
+            "interactions-secret",
+            "iu:ip",
+            "xai-secret",
+            "xai-hdr-secret",
+            "meta-secret",
+            "mu:mp",
         ] {
             assert!(!text.contains(secret), "{secret} leaked");
         }
@@ -1177,6 +1222,7 @@ mod tests {
         assert!(text.contains("X-Compat"));
         assert!(text.contains("X-Gemini"));
         assert!(text.contains("X-Vertex"));
+        assert!(text.contains("X-Xai"));
     }
 
     #[test]

@@ -18,8 +18,9 @@
 //!   sigma).
 //! - The management key isn't hashed with bcrypt or written back; it stays
 //!   as written.
-//! - Steps for sections this port ignores (other providers, plugins, pprof,
-//!   credential concurrency and in-flight, live media relay) are left out.
+//! - Steps for sections this port ignores (Antigravity, Devin, cloaking,
+//!   plugins, pprof, credential concurrency and in-flight, live media
+//!   relay) are left out.
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
@@ -104,8 +105,11 @@ pub(crate) fn post_process(config: &mut Config) -> Result<(), ConfigError> {
         config.max_retry_credentials = 0;
     }
     sanitize_gemini_keys(&mut config.gemini_api_key);
+    sanitize_gemini_keys(&mut config.interactions_api_key);
     sanitize_vertex_keys(&mut config.vertex_api_key);
     sanitize_codex_keys(&mut config.codex_api_key);
+    sanitize_xai_keys(&mut config.xai_api_key);
+    sanitize_meta_keys(&mut config.meta_api_key);
     config.codex_header_defaults.beta_features =
         config.codex_header_defaults.beta_features.trim().to_owned();
     sanitize_claude_keys(&mut config.claude_api_key);
@@ -166,6 +170,10 @@ fn validate_weights(config: &Config) -> Result<(), ConfigError> {
         config.gemini_api_key.iter().map(|key| key.weight),
     )?;
     check_family_weights(
+        "interactions-api-key",
+        config.interactions_api_key.iter().map(|key| key.weight),
+    )?;
+    check_family_weights(
         "claude-api-key",
         config.claude_api_key.iter().map(|key| key.weight),
     )?;
@@ -176,6 +184,14 @@ fn validate_weights(config: &Config) -> Result<(), ConfigError> {
     check_family_weights(
         "codex-api-key",
         config.codex_api_key.iter().map(|key| key.weight),
+    )?;
+    check_family_weights(
+        "xai-api-key",
+        config.xai_api_key.iter().map(|key| key.weight),
+    )?;
+    check_family_weights(
+        "meta-api-key",
+        config.meta_api_key.iter().map(|key| key.weight),
     )?;
     for (provider_index, compat) in config.openai_compatibility.iter().enumerate() {
         for (key_index, entry) in compat.api_key_entries.iter().enumerate() {
@@ -259,9 +275,10 @@ fn normalize_oauth_excluded_models(
     out
 }
 
-/// Upstream's `SanitizeGeminiKeys` (`sanitizeGeminiKeyEntries`): drops
-/// entries with neither a key nor a base URL, cleans up the rest, and keeps
-/// the first of entries alike in key, base URL, proxy, prefix and headers.
+/// Upstream's `SanitizeGeminiKeys` and `SanitizeInteractionsKeys`
+/// (`sanitizeGeminiKeyEntries`): drops entries with neither a key nor a base
+/// URL, cleans up the rest, and keeps the first of entries alike in key,
+/// base URL, proxy, prefix and headers.
 fn sanitize_gemini_keys(keys: &mut Vec<GeminiKey>) {
     let mut seen = HashSet::new();
     keys.retain_mut(|key| {
@@ -323,6 +340,36 @@ fn sanitize_codex_keys(keys: &mut Vec<CodexKey>) {
         key.excluded_models = normalize_excluded_models(&key.excluded_models);
     }
     keys.retain(|key| !key.base_url.is_empty());
+}
+
+/// Upstream's `SanitizeXAIKeys`: the Codex keys' clean-up, and no alpha
+/// search, which only Codex offers.
+fn sanitize_xai_keys(keys: &mut Vec<CodexKey>) {
+    sanitize_codex_keys(keys);
+    for key in keys.iter_mut() {
+        key.alpha_search = false;
+    }
+}
+
+/// Upstream's `SanitizeMetaKeys` (`sanitizeMetaKeyEntries`): drops entries
+/// without a key or with a `dca:` token, which needs an OAuth credential
+/// file, defaults the base URL and cleans up the rest.
+fn sanitize_meta_keys(keys: &mut Vec<CodexKey>) {
+    keys.retain_mut(|key| {
+        key.api_key = key.api_key.trim().to_owned();
+        if key.api_key.is_empty() || key.api_key.starts_with("dca:") {
+            return false;
+        }
+        key.prefix = normalize_model_prefix(&key.prefix);
+        key.base_url = key.base_url.trim().to_owned();
+        if key.base_url.is_empty() {
+            key.base_url = "https://api.meta.ai/v1".to_owned();
+        }
+        key.headers = normalize_headers(&key.headers);
+        key.excluded_models = normalize_excluded_models(&key.excluded_models);
+        key.alpha_search = false;
+        true
+    });
 }
 
 /// Upstream's `SanitizeClaudeKeys`.
@@ -610,6 +657,34 @@ mod tests {
             Err("codex-api-key[0].weight: weight must not exceed 1000000".to_owned())
         );
         config.codex_api_key.clear();
+        // Not upstream's: the other families, in upstream's order.
+        let bad = |weight| GeminiKey {
+            weight: Some(weight),
+            ..GeminiKey::default()
+        };
+        let bad_codex = |weight| CodexKey {
+            weight: Some(weight),
+            ..CodexKey::default()
+        };
+        config.meta_api_key = vec![bad_codex(-1), bad_codex(1_000_001)];
+        config.xai_api_key = vec![bad_codex(1_000_001)];
+        config.interactions_api_key = vec![bad(1_000_001)];
+        for want in [
+            "interactions-api-key[0].weight",
+            "xai-api-key[0].weight",
+            "meta-api-key[1].weight",
+        ] {
+            assert_eq!(
+                validate_weights(&config).map_err(|error| error.to_string()),
+                Err(format!("{want}: weight must not exceed 1000000"))
+            );
+            if want.starts_with("interactions") {
+                config.interactions_api_key.clear();
+            } else {
+                config.xai_api_key.clear();
+            }
+        }
+        config.meta_api_key.clear();
         config.openai_compatibility = vec![
             OpenAiCompatibility {
                 api_key_entries: vec![OpenAiCompatibilityApiKey {
@@ -639,8 +714,7 @@ mod tests {
     }
 
     // gemini_keys_normalization_test.go:
-    // TestSanitizeGeminiKeys_AllowsEmptyAPIKeyWithBaseURL, minus the
-    // interactions keys, which aren't ported.
+    // TestSanitizeGeminiKeys_AllowsEmptyAPIKeyWithBaseURL
     #[test]
     fn sanitize_gemini_keys_allows_empty_api_key_with_base_url() {
         let base = "https://custom-gemini.example.com";
@@ -668,9 +742,71 @@ mod tests {
                 ..GeminiKey::default()
             },
         ];
+        let interactions_base = "https://custom-interactions.example.com";
+        let mut interactions = vec![
+            GeminiKey::default(),
+            GeminiKey {
+                api_key: "  ".to_owned(),
+                ..GeminiKey::default()
+            },
+            GeminiKey {
+                base_url: interactions_base.to_owned(),
+                ..GeminiKey::default()
+            },
+        ];
         sanitize_gemini_keys(&mut keys);
+        sanitize_gemini_keys(&mut interactions);
         assert_eq!(keys.len(), 3);
         assert_eq!(keys[0].base_url, base);
+        assert_eq!(interactions.len(), 1);
+        assert_eq!(interactions[0].base_url, interactions_base);
+    }
+
+    // xai_alpha_search_test.go:
+    // TestSanitizeXAIKeysClearsCodexAlphaSearchCapability
+    #[test]
+    fn sanitize_xai_keys_clears_codex_alpha_search_capability() {
+        let mut keys = vec![CodexKey {
+            api_key: "xai-key".to_owned(),
+            base_url: "https://api.x.ai/v1".to_owned(),
+            alpha_search: true,
+            ..CodexKey::default()
+        }];
+        sanitize_xai_keys(&mut keys);
+        assert_eq!(keys.len(), 1);
+        assert!(!keys[0].alpha_search);
+    }
+
+    // Not upstream's: the rest of sanitizeMetaKeyEntries (config_meta_test.go
+    // is ported in `load`).
+    #[test]
+    fn meta_keys_are_cleaned_up() {
+        let mut keys = vec![CodexKey {
+            api_key: " LLM|key ".to_owned(),
+            prefix: " /team/ ".to_owned(),
+            base_url: " https://meta.example.com/v1 ".to_owned(),
+            headers: BTreeMap::from([(" X-A ".to_owned(), " 1 ".to_owned())]),
+            excluded_models: strings(&[" Muse-1 ", "muse-1"]),
+            alpha_search: true,
+            ..CodexKey::default()
+        }];
+        sanitize_meta_keys(&mut keys);
+        assert_eq!(keys.len(), 1);
+        let key = &keys[0];
+        assert_eq!(
+            (
+                key.api_key.as_str(),
+                key.prefix.as_str(),
+                key.base_url.as_str()
+            ),
+            ("LLM|key", "team", "https://meta.example.com/v1")
+        );
+        assert_eq!(
+            key.headers,
+            BTreeMap::from([("X-A".to_owned(), "1".to_owned())])
+        );
+        assert_eq!(key.excluded_models, strings(&["muse-1"]));
+        assert!(!key.alpha_search);
     }
 
     // config_normalization.go: the rest of SanitizeGeminiKeys (no upstream

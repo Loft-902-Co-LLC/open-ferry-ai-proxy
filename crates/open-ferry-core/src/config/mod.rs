@@ -31,7 +31,8 @@
 //! `quota-exceeded`, `routing.strategy`, `ws-auth`, `force-model-prefix`,
 //! `client.codex`, `codex` (minus cloaking and the live media relay),
 //! `codex-header-defaults.beta-features`, `claude.model-level-cooling`,
-//! `gemini-api-key`, `codex-api-key`, `claude-api-key` (minus `cloak` and
+//! `xai`, `gemini-api-key`, `interactions-api-key`, `codex-api-key`,
+//! `xai-api-key`, `meta-api-key`, `claude-api-key` (minus `cloak` and
 //! `fingerprint-profile`), `openai-compatibility`, `vertex-api-key`,
 //! `oauth-excluded-models`, `oauth-model-alias`,
 //! `oauth-request-scoped-errors`, `oauth-settings` and `payload`, with
@@ -46,9 +47,7 @@
 //!   and per-key `cloak`, `fingerprint-profile` and `disable-codex-cloaking`.
 //! - Session affinity: `routing.session-affinity`,
 //!   `routing.session-affinity-ttl` and `routing.session-affinity-subagents`.
-//! - Other providers: `interactions-api-key`, `xai-api-key`,
-//!   `meta-api-key`, `xai`, `antigravity`, `antigravity-signature-*`,
-//!   `devin`.
+//! - Other providers: `antigravity`, `antigravity-signature-*`, `devin`.
 //! - Features not ported here: `plugins`, `pprof`, `discovery`,
 //!   `disable-image-generation`, `gpt-image-2-base-model`,
 //!   `video-result-auth-cache-ttl`, `codex.live-media-relay`.
@@ -91,7 +90,7 @@ pub use types::{
     DEFAULT_PANEL_GITHUB_REPOSITORY, GeminiKey, GeminiModel, OAuthModelAlias, OAuthModelSetting,
     OpenAiCompatibility, OpenAiCompatibilityApiKey, OpenAiCompatibilityModel, QuotaExceeded,
     RemoteManagement, RequestScopedErrorRule, RoutingConfig, RoutingStrategy, StreamingConfig,
-    ThinkingSupport, TlsConfig, VertexCompatKey, VertexCompatModel,
+    ThinkingSupport, TlsConfig, VertexCompatKey, VertexCompatModel, XaiConfig,
 };
 pub(crate) use types::{Redacted, RedactedUrl};
 pub use watcher::{AuthFile, ConfigWatcher, WatchError, WatchEvent, next_revision};

@@ -596,15 +596,18 @@ mod tests {
         assert!(Config::parse("trusted-proxies: [not-an-ip]").is_err());
     }
 
-    // cooling_override_test.go, for the typed families.
+    // cooling_override_test.go
 
     #[test]
     fn cooling_override_presence_is_kept() {
         let config = parse(
             "disable-cooling: true\n\
              gemini-api-key:\n  - api-key: gemini-key\n    disable-cooling: false\n\
+             interactions-api-key:\n  - api-key: interactions-key\n    disable-cooling: false\n\
              claude-api-key:\n  - api-key: claude-key\n    disable-cooling: false\n  - api-key: unset\n\
              codex-api-key:\n  - api-key: codex-key\n    base-url: https://codex.example.com\n    \
+             disable-cooling: false\n\
+             xai-api-key:\n  - api-key: xai-key\n    base-url: https://api.x.ai/v1\n    \
              disable-cooling: false\n\
              openai-compatibility:\n  - name: compat\n    base-url: https://compat.example.com/v1\n    \
              disable-cooling: false\n\
@@ -614,6 +617,8 @@ mod tests {
         assert!(config.disable_cooling);
         assert_eq!(config.openai_compatibility[0].disable_cooling, Some(false));
         assert_eq!(config.gemini_api_key[0].disable_cooling, Some(false));
+        assert_eq!(config.interactions_api_key[0].disable_cooling, Some(false));
+        assert_eq!(config.xai_api_key[0].disable_cooling, Some(false));
         assert_eq!(config.vertex_api_key[0].disable_cooling, Some(false));
         let claude: Vec<Option<bool>> = config
             .claude_api_key
@@ -642,7 +647,10 @@ mod tests {
         ] {
             for family in [
                 "gemini-api-key",
+                "interactions-api-key",
                 "codex-api-key",
+                "xai-api-key",
+                "meta-api-key",
                 "claude-api-key",
                 "vertex-api-key",
             ] {
@@ -655,20 +663,89 @@ mod tests {
     #[test]
     fn api_key_weight_zero_is_explicit() {
         let config = parse(
-            "codex-api-key:\n  - api-key: key\n    base-url: https://codex.example.com\n    \
-             weight: 0\n  - api-key: other\n    base-url: https://codex.example.com\n",
+            "xai-api-key:\n  - api-key: key\n    base-url: https://api.x.ai/v1\n    \
+             weight: 0\n  - api-key: other\n    base-url: https://api.x.ai/v1\n",
         );
-        let weights: Vec<Option<i64>> = config.codex_api_key.iter().map(|k| k.weight).collect();
+        let weights: Vec<Option<i64>> = config.xai_api_key.iter().map(|k| k.weight).collect();
         assert_eq!(weights, [Some(0), None]);
     }
 
-    // request_retry_test.go, for the typed families.
+    // xai_api_key_test.go: TestParseConfigBytesXAIConfig
+
+    #[test]
+    fn xai_config() {
+        assert!(!parse("{}").xai.inject_x_search);
+        assert!(parse("xai:\n  inject-x-search: true\n").xai.inject_x_search);
+    }
+
+    // xai_api_key_test.go: TestParseConfigBytesXAIAPIKeyMatchesCodexShape
+
+    #[test]
+    fn xai_api_key_matches_codex_shape() {
+        let config = parse(
+            "xai-api-key:\n  - api-key: \" xai-key \"\n    priority: 3\n    weight: 5\n    \
+             prefix: \" team-xai \"\n    base-url: \" https://api.x.ai/v1 \"\n    websockets: true\n    \
+             proxy-url: \" http://proxy.local \"\n    headers:\n      X-Custom: value\n    \
+             models:\n      - name: grok-4.5\n        alias: grok-latest\n        \
+             display-name: Grok Latest\n        force-mapping: true\n    \
+             excluded-models:\n      - \" grok-3-* \"\n    disable-cooling: true\n    \
+             request-retry: 0\n  - api-key: dropped\n    base-url: \" \"\n",
+        );
+        assert_eq!(config.xai_api_key.len(), 1);
+        let entry = &config.xai_api_key[0];
+        // The key and proxy stay as written, as Codex keys' do.
+        assert_eq!(entry.api_key, " xai-key ");
+        assert_eq!((entry.priority, entry.weight), (3, Some(5)));
+        assert_eq!(entry.prefix, "team-xai");
+        assert_eq!(entry.base_url, "https://api.x.ai/v1");
+        assert!(entry.websockets);
+        assert_eq!(entry.proxy_url, " http://proxy.local ");
+        assert_eq!(entry.disable_cooling, Some(true));
+        assert_eq!(entry.request_retry, Some(0));
+        assert_eq!(
+            entry.headers,
+            BTreeMap::from([("X-Custom".to_owned(), "value".to_owned())])
+        );
+        assert_eq!(
+            entry.models,
+            [CodexModel {
+                name: "grok-4.5".to_owned(),
+                alias: "grok-latest".to_owned(),
+                display_name: "Grok Latest".to_owned(),
+                force_mapping: true,
+                ..CodexModel::default()
+            }]
+        );
+        assert_eq!(entry.excluded_models, ["grok-3-*"]);
+    }
+
+    // config_meta_test.go: TestMetaConfigDropsUnusableKeys
+
+    #[test]
+    fn meta_config_drops_unusable_keys() {
+        let config = parse(
+            "meta-api-key:\n  - {}\n  - api-key: \"   \"\n  - base-url: \"https://api.meta.ai/v1\"\n  \
+             - headers: {X-Trace: placeholder}\n  - api-key: \" LLM|valid \"\n  \
+             - api-key: \"dca:requires-oauth-storage\"\n",
+        );
+        let keys: Vec<(&str, &str)> = config
+            .meta_api_key
+            .iter()
+            .map(|key| (key.api_key.as_str(), key.base_url.as_str()))
+            .collect();
+        assert_eq!(keys, [("LLM|valid", "https://api.meta.ai/v1")]);
+    }
+
+    // request_retry_test.go, with one more Codex key.
 
     #[test]
     fn request_retry_overrides() {
         let config = parse(
             "gemini-api-key:\n  - api-key: gemini-zero\n    request-retry: 0\n  \
              - api-key: gemini-unset\n\
+             interactions-api-key:\n  - api-key: interactions-two\n    request-retry: 2\n\
+             xai-api-key:\n  - api-key: xai-zero\n    base-url: https://api.x.ai/v1\n    \
+             request-retry: 0\n\
              vertex-api-key:\n  - api-key: vertex-four\n    request-retry: 4\n\
              codex-api-key:\n  - api-key: codex-neg\n    base-url: https://codex.example.com\n    \
              request-retry: -1\n  - api-key: codex-unset\n    base-url: https://codex.example.com\n\
@@ -701,6 +778,14 @@ mod tests {
             .map(|k| k.request_retry)
             .collect();
         assert_eq!(vertex, [Some(4)]);
+        let interactions: Vec<Option<i64>> = config
+            .interactions_api_key
+            .iter()
+            .map(|k| k.request_retry)
+            .collect();
+        assert_eq!(interactions, [Some(2)]);
+        let xai: Vec<Option<i64>> = config.xai_api_key.iter().map(|k| k.request_retry).collect();
+        assert_eq!(xai, [Some(0)]);
     }
 
     // api_key_is_compat_test.go, is_compat_test.go, max_context_length_test.go
@@ -723,7 +808,12 @@ mod tests {
              alias: gemini-alias\n        is-compat: true\n        display-name: Gemini Name\n        \
              max-context-length: 1048576\n      - name: gemini-native\n        alias: gemini-native\n\
              vertex-api-key:\n  - models:\n      - name: vertex-upstream\n        \
-             alias: vertex-alias\n        display-name: Vertex Name\n",
+             alias: vertex-alias\n        display-name: Vertex Name\n\
+             interactions-api-key:\n  - models:\n      - name: interactions-upstream\n        \
+             alias: interactions-alias\n        is-compat: true\n        \
+             max-context-length: 1048576\n\
+             xai-api-key:\n  - models:\n      - name: xai-upstream\n        alias: xai-alias\n        \
+             is-compat: true\n        display-name: xAI Name\n        max-context-length: 1048576\n",
         );
         assert_eq!(
             config.gemini_api_key.first().map(|key| key.models.clone()),
@@ -786,6 +876,30 @@ mod tests {
                 alias: "codex-native".to_owned(),
                 ..CodexModel::default()
             })
+        );
+        assert_eq!(
+            config
+                .interactions_api_key
+                .first()
+                .map(|key| key.models.clone()),
+            Some(vec![GeminiModel {
+                name: "interactions-upstream".to_owned(),
+                alias: "interactions-alias".to_owned(),
+                max_context_length: 1_048_576,
+                is_compat: true,
+                ..GeminiModel::default()
+            }])
+        );
+        assert_eq!(
+            config.xai_api_key.first().map(|key| key.models.clone()),
+            Some(vec![CodexModel {
+                name: "xai-upstream".to_owned(),
+                alias: "xai-alias".to_owned(),
+                display_name: "xAI Name".to_owned(),
+                max_context_length: 1_048_576,
+                is_compat: true,
+                ..CodexModel::default()
+            }])
         );
     }
 
@@ -1104,9 +1218,15 @@ mod tests {
              - \"context_length_exceeded\"\n        match-regexr:\n          \
              - \"maximum_context_length$\"\n          - \"^context_length_exceeded\"\n        \
              action: stop\n\
+             interactions-api-key:\n  - api-key: interactions-key-1\n    request-scoped-errors:\n      \
+             - status: 400\n        match:\n          - \"invalid_argument\"\n        \
+             action: continue\n\
              codex-api-key:\n  - api-key: codex-key-1\n    base-url: https://codex.example.com/v1\n    \
              request-scoped-errors:\n      - status: 400\n        match:\n          \
              - \"context_window_exceeded\"\n        action: stop-and-cooldown\n\
+             xai-api-key:\n  - api-key: xai-key-1\n    base-url: https://api.x.ai/v1\n    \
+             request-scoped-errors:\n      - status: 500\n        match:\n          \
+             - \"rate_limit_exceeded\"\n        action: continue-and-cooldown\n\
              claude-api-key:\n  - api-key: claude-key-1\n    request-scoped-errors:\n      \
              - status: 400\n        match:\n          - \"prompt is too long\"\n        \
              match-regexr:\n          - \"too long$\"\n        action: stop\n\
@@ -1153,6 +1273,26 @@ mod tests {
         let rule = gemini.first().expect("a rule");
         assert_eq!((rule.status, rule.action.as_str()), (400, "stop"));
         assert_eq!((rule.matches.len(), rule.match_regexr.len()), (2, 2));
+        let interactions = &config
+            .interactions_api_key
+            .first()
+            .expect("an interactions key")
+            .request_scoped_errors;
+        assert_eq!(interactions.len(), 1);
+        let rule = interactions.first().expect("a rule");
+        assert_eq!((rule.status, rule.action.as_str()), (400, "continue"));
+        assert_eq!(rule.matches.len(), 1);
+        let xai = &config
+            .xai_api_key
+            .first()
+            .expect("an xai key")
+            .request_scoped_errors;
+        assert_eq!(xai.len(), 1);
+        let rule = xai.first().expect("a rule");
+        assert_eq!(
+            (rule.status, rule.action.as_str()),
+            (500, "continue-and-cooldown")
+        );
     }
 
     // oauth_settings_test.go
@@ -1223,8 +1363,13 @@ mod tests {
                 "the API-key view inherited an OAuth-only setting"
             );
             assert!(api.codex.model_level_cooling && api.codex.stream_bootstrap_buffering);
+            assert!(
+                api.xai.inject_x_search,
+                "the API-key view lost a shared setting"
+            );
             assert_eq!(api.codex_api_key.len(), 1);
             assert!(value.ws_auth, "the API-key view changed the shared config");
+            assert!(value.xai.inject_x_search);
         }
     }
 
@@ -1311,6 +1456,7 @@ mod tests {
                     );
                     let want = ("client-auth", 3, true, "10s", true, true, true, true);
                     assert_eq!(actual, want, "{name}");
+                    assert!(scoped.xai.inject_x_search, "{name}");
                 }
                 assert_eq!(
                     view.codex_header_defaults.beta_features, "oauth-beta",
@@ -1350,6 +1496,8 @@ mod tests {
         assert!(active.quota_exceeded.antigravity_credits);
         assert!(active.codex_api_key.is_empty() && active.claude_api_key.is_empty());
         assert!(active.gemini_api_key.is_empty() && active.vertex_api_key.is_empty());
+        assert!(active.xai_api_key.is_empty() && active.meta_api_key.is_empty());
+        assert!(active.interactions_api_key.is_empty());
         assert!(active.has_example_api_keys());
 
         // The provider examples, uncommented as an operator would.
@@ -1377,6 +1525,9 @@ mod tests {
         assert_eq!(config.codex_api_key.len(), 1);
         assert_eq!(config.claude_api_key.len(), 2);
         assert_eq!(config.vertex_api_key.len(), 1);
+        assert_eq!(config.xai_api_key.len(), 1);
+        assert_eq!(config.meta_api_key.len(), 1);
+        assert_eq!(config.interactions_api_key.len(), 1);
         assert!(config.quota_exceeded.antigravity_credits);
         assert!(!config.quota_exceeded.switch_project);
         assert!(!config.quota_exceeded.switch_preview_model);
@@ -1445,7 +1596,7 @@ mod tests {
     );
 
     fn key_summaries(config: &Config, provider: &str) -> Vec<KeySummary> {
-        if provider == "gemini" {
+        if provider == "gemini" || provider == "interactions" {
             let summary = |k: &crate::config::GeminiKey| {
                 (
                     k.api_key.clone(),
@@ -1460,7 +1611,12 @@ mod tests {
                     k.request_retry,
                 )
             };
-            config.gemini_api_key.iter().map(summary).collect()
+            let keys = if provider == "gemini" {
+                &config.gemini_api_key
+            } else {
+                &config.interactions_api_key
+            };
+            keys.iter().map(summary).collect()
         } else if provider == "vertex" {
             let summary = |k: &crate::config::VertexCompatKey| {
                 (
@@ -1477,7 +1633,7 @@ mod tests {
                 )
             };
             config.vertex_api_key.iter().map(summary).collect()
-        } else if provider == "codex" {
+        } else if ["codex", "xai", "meta"].contains(&provider) {
             let summary = |k: &crate::config::CodexKey| {
                 (
                     k.api_key.clone(),
@@ -1492,7 +1648,12 @@ mod tests {
                     k.request_retry,
                 )
             };
-            config.codex_api_key.iter().map(summary).collect()
+            let keys = match provider {
+                "xai" => &config.xai_api_key,
+                "meta" => &config.meta_api_key,
+                _ => &config.codex_api_key,
+            };
+            keys.iter().map(summary).collect()
         } else {
             let summary = |k: &crate::config::ClaudeKey| {
                 (
@@ -1514,8 +1675,15 @@ mod tests {
 
     #[test]
     fn v8_key_inheritance() {
-        // Upstream runs this for every provider; these are the typed ones.
-        for provider in ["gemini", "vertex", "codex", "claude"] {
+        for provider in [
+            "gemini",
+            "interactions",
+            "vertex",
+            "codex",
+            "claude",
+            "xai",
+            "meta",
+        ] {
             let text = format!(
                 "request-retry: 9\napi-keys:\n  {provider}:\n    - name: shared\n      \
                  base-url: https://example.invalid\n      priority: 7\n      prefix: group\n      \
