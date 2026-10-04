@@ -466,7 +466,8 @@ fn normalize_usage_detail_total_does_not_double_count_reasoning() {
 /// Ports TestParseInteractionsUsageNormalizesCacheWriteAlias.
 #[test]
 fn parse_interactions_usage_normalizes_cache_write_alias() {
-    let detail = parse_interactions_usage(br#"{"usage":{"input_tokens":3,"cache_write_tokens":2}}"#);
+    let detail =
+        parse_interactions_usage(br#"{"usage":{"input_tokens":3,"cache_write_tokens":2}}"#);
     assert_eq!(detail.cache_creation_tokens, 2);
 }
 

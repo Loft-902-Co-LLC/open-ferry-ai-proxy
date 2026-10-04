@@ -408,7 +408,11 @@ fn parse_interactions_usage_detail(node: Node<'_>) -> Detail {
     )
     .int();
     let input = non_negative_sum(&[
-        first_existing(node, &["input_tokens", "prompt_tokens", "total_input_tokens"]).int(),
+        first_existing(
+            node,
+            &["input_tokens", "prompt_tokens", "total_input_tokens"],
+        )
+        .int(),
         tool_use,
     ]);
     let mut detail = Detail {
