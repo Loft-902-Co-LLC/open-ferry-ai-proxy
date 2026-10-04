@@ -360,7 +360,24 @@ Not ported yet: the request log and the error logs (`request-log`, `error-logs-m
 
 ### Log files and config changes
 
-Not ported yet: `main.log` with `logging-to-file` and its rotation, the log directory's size limit (`logs-max-total-size-mb`), upstream's log line and access line formats, the routes `GET` and `DELETE logs` and the reads of `usage-statistics-enabled`, `logs-max-total-size-mb` and `error-logs-max-files`, and the config changes logged on reload.
+Ported:
+
+- **The log lines** (`open-ferry`'s `file_log`), in upstream's format: the local time, the request's short ID (`--------` outside a request), the level, where the line was logged, the message and upstream's fields. They go to standard output, or with `logging-to-file` to `main.log` in the log directory, rotated at 10 MB to `main-<time>.log`, every rotation kept. A reload that changes `logging-to-file` or the directory switches the output.
+- **The log directory's size limit**: with `logs-max-total-size-mb` positive, its `*.log` and `*.log.gz` files are checked at once and then every minute, and the oldest deleted until they are under the limit, never the `main.log` being written.
+- **The access line** (`open-ferry-server`'s `access_log`): the status, the time taken, the client's address, the method and the path, key-like query values masked, at info, warn from 400 and error from 500; a health probe answered with a 2xx isn't logged. A request on the AI routes is handled in a span with its ID, so every line logged for it shows the ID.
+- **`GET` and `DELETE logs`** (`open-ferry-management`'s `logs`), at `/v0/management/logs` and `/v8/management/observability/logs`, with the management key. `GET` reads `main.log` and its rotations oldest first: the last `limit` lines, the lines after `after`, or with `cursor` the complete lines written since an earlier answer, followed across rotations. `DELETE` empties `main.log` and removes its rotations.
+- **The reads of `usage-statistics-enabled`, `logs-max-total-size-mb` and `error-logs-max-files`** at `/v0/management/<name>`; v8 reads them through `config/*path`. Their `PUT` and `PATCH`, which write the config file, answer the empty 404.
+- **The config changes logged on reload** (`open_ferry_core::config::diff`): the lines upstream logs after `config changes detected:`, for every setting open-ferry types. Secrets never show: keys are only said to change, key lists are counted, header values are left out, and a URL shows only its scheme and host. The `config-diff` parity suite compares the lines with upstream's over fixed and seeded random config pairs.
+
+Deviations, each also noted in its module:
+
+- **`main.log` is written by a thread of its own**, through a bounded queue, so logging never waits on the disk. A line that finds the queue full is dropped and counted, and lines still queued at exit are lost.
+- **The rotated name's time is local**, where lumberjack's is UTC; the logs routes read it as local, as upstream's do. On Windows, renaming, deleting and truncating are retried while another process has the file open.
+- **A log directory that can't be made** is logged and the output stays as it was; upstream's start exits.
+- **A line's fields** come from the event and the spans it is in, and a field is quoted when its value was recorded as text.
+- **The access line is logged once the response's body is sent or dropped**, and a WebSocket's once its handshake is answered, where gin's comes when the connection closes. The path is written as the client sent it, percent-encoded.
+- **The logs routes' I/O errors** carry Rust's text, without Go's operation and path.
+- **Only the settings open-ferry types have change lines**, and a list or mapping that is missing isn't told from one that is empty. Where two OAuth channel names differ only in case or surrounding spaces, the one sorting last wins.
 
 ### Usage statistics
 

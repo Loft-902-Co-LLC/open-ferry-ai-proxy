@@ -2514,7 +2514,8 @@ mod tests {
 
             // Unported management routes answer an empty 404, other
             // unknown paths the server's 404; CORS answers OPTIONS.
-            let answer = fetch(addr, "GET", "/v0/management/logs", &[key]).await;
+            let unported = "/v0/management/usage-statistics-enabled";
+            let answer = fetch(addr, "PUT", unported, &[key]).await;
             assert_eq!((answer.status, answer.body.as_str()), (404, ""));
             assert_eq!(answer.header("access-control-allow-origin"), Some("*"));
             let answer = fetch(addr, "GET", "/v0/other", &[key]).await;
