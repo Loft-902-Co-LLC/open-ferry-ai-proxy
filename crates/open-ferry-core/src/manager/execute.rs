@@ -68,6 +68,7 @@ use super::rewrite::{StreamRewriter, rewrite_model_in_response};
 use super::scoped::{ScopedAction, match_request_scoped_error_action};
 use super::select::{PickArgs, Selection, is_auth_blocked_for_model, normalize_providers};
 use super::settings::Settings;
+use super::text::go_lower;
 use super::{Manager, lock};
 use crate::auth::Auth;
 use crate::exec::{ChunkStream, ErrorKind, ExecError, Options, Request, Response, StreamResponse};
@@ -168,6 +169,42 @@ fn preferred(fallback: Failure, upstream: Option<Failure>) -> Failure {
         }
         None => fallback,
     }
+}
+
+/// The providers a call runs over: only the forced provider when the call
+/// names one, else `providers`, lower-cased, trimmed and deduplicated
+/// (upstream's `providersForExecution` with a `ForcedProvider`, then
+/// `normalizeProviders`).
+///
+/// A forced provider that `providers` leave out is a conflict, which gets
+/// upstream's 400 for a model router that picked another provider: this
+/// port has no model router, so the providers the caller routed to stand in
+/// for its choice.
+fn execution_providers(providers: &[String], opts: &Options) -> Result<Vec<String>, ExecError> {
+    let normalized = normalize_providers(providers);
+    let forced = opts
+        .metadata
+        .forced_provider
+        .as_deref()
+        .map(|provider| go_lower(provider.trim()))
+        .filter(|provider| !provider.is_empty());
+    let Some(forced) = forced else {
+        if normalized.is_empty() {
+            return Err(ExecError::new(
+                ErrorKind::ProviderNotFound,
+                "no provider supplied",
+            ));
+        }
+        return Ok(normalized);
+    };
+    if !normalized.is_empty() && !normalized.contains(&forced) {
+        return Err(ExecError::new(
+            ErrorKind::Upstream,
+            "agent is only supported for native interactions execution",
+        )
+        .with_status(400));
+    }
+    Ok(vec![forced])
 }
 
 /// The model credentials are picked by: `auth_selection_model` when set,
@@ -550,13 +587,7 @@ impl Manager {
         req: Request,
         opts: Options,
     ) -> Result<Response, ExecError> {
-        let normalized = normalize_providers(providers);
-        if normalized.is_empty() {
-            return Err(ExecError::new(
-                ErrorKind::ProviderNotFound,
-                "no provider supplied",
-            ));
-        }
+        let normalized = execution_providers(providers, &opts)?;
         let retry = self.retry_settings();
         let retry_model = auth_selection_model(&opts, &req.model);
         let pinned = pinned_auth_id(&opts);
@@ -605,13 +636,7 @@ impl Manager {
         req: Request,
         opts: Options,
     ) -> Result<StreamResponse, ExecError> {
-        let normalized = normalize_providers(providers);
-        if normalized.is_empty() {
-            return Err(ExecError::new(
-                ErrorKind::ProviderNotFound,
-                "no provider supplied",
-            ));
-        }
+        let normalized = execution_providers(providers, &opts)?;
         let retry = self.retry_settings();
         let retry_model = auth_selection_model(&opts, &req.model);
         let pinned = pinned_auth_id(&opts);
@@ -1316,6 +1341,50 @@ mod tests {
 
     fn opts() -> Options {
         Options::new(Format::from("openai"))
+    }
+
+    fn names(names: &[&str]) -> Vec<String> {
+        names.iter().map(|&name| name.to_owned()).collect()
+    }
+
+    // Ports TestProvidersForExecutionForcedGeminiUsesGeminiProvider (the
+    // providers half: the model is the server's, which routes an agent to
+    // itself), plus the unforced normalization.
+    #[test]
+    fn forced_provider_is_the_only_provider() {
+        let mut o = opts();
+        assert_eq!(
+            execution_providers(&names(&[" Gemini ", "gemini", ""]), &o).unwrap(),
+            ["gemini"]
+        );
+        let none = execution_providers(&names(&[" "]), &o).unwrap_err();
+        assert!(matches!(none.kind, ErrorKind::ProviderNotFound));
+
+        o.metadata.forced_provider = Some(" Gemini ".into());
+        assert_eq!(execution_providers(&[], &o).unwrap(), ["gemini"]);
+        assert_eq!(
+            execution_providers(&names(&["gemini-interactions", "GEMINI"]), &o).unwrap(),
+            ["gemini"]
+        );
+        o.metadata.forced_provider = Some("  ".into());
+        assert_eq!(
+            execution_providers(&names(&["codex"]), &o).unwrap(),
+            ["codex"]
+        );
+    }
+
+    // Ports TestProvidersForExecutionForcedGeminiRejectsRouterProvider, with
+    // the providers the caller routed to standing in for the model router's.
+    #[test]
+    fn forced_provider_the_providers_leave_out_is_a_conflict() {
+        let mut o = opts();
+        o.metadata.forced_provider = Some("gemini".into());
+        let err = execution_providers(&names(&["claude"]), &o).unwrap_err();
+        assert_eq!(err.http_status(), 400);
+        assert_eq!(
+            err.to_string(),
+            "agent is only supported for native interactions execution"
+        );
     }
 
     #[test]

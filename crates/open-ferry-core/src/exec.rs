@@ -141,6 +141,10 @@ pub struct Metadata {
     pub execution_session_id: Option<String>,
     /// Called with the credential picked (`selected_auth_callback`).
     pub selected_auth: Option<SelectedAuthCallback>,
+    /// The only provider the call may use, whatever providers it is given
+    /// (upstream's `ForcedProvider`, which an Interactions `agent` request
+    /// sets).
+    pub forced_provider: Option<ProviderId>,
 }
 
 impl fmt::Debug for Metadata {
@@ -153,6 +157,7 @@ impl fmt::Debug for Metadata {
             .field("pinned_auth_id", &self.pinned_auth_id)
             .field("execution_session_id", &self.execution_session_id)
             .field("selected_auth", &self.selected_auth.is_some())
+            .field("forced_provider", &self.forced_provider)
             .finish()
     }
 }
