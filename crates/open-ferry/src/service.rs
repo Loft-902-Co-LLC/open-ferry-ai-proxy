@@ -2192,6 +2192,155 @@ mod tests {
         }
     }
 
+    /// A client's turn on the Responses WebSocket reaches Codex over Codex's
+    /// own WebSocket, for a Codex API key with websockets on; the session's
+    /// socket to Codex closes when the client's does.
+    mod codex_websocket {
+        use std::time::Duration;
+
+        use futures_util::{SinkExt as _, StreamExt as _};
+        use tokio::net::TcpListener;
+        use tokio::sync::{mpsc, watch};
+        use tokio_tungstenite::tungstenite::Message;
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+        use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+
+        use super::super::serve;
+        use super::service;
+
+        const CREATED: &str = r#"{"type":"response.created","response":{"id":"resp_up","status":"in_progress","output":[]}}"#;
+        const COMPLETED: &str = r#"{"type":"response.completed","response":{"id":"resp_up","status":"completed","output":[{"id":"msg_up","type":"message","role":"assistant","content":[{"type":"output_text","text":"hi from codex"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}"#;
+        const TURN: &str = r#"{"type":"response.create","model":"gpt-5.5","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}"#;
+
+        /// What Codex saw.
+        #[derive(Debug, PartialEq)]
+        enum Seen {
+            /// A handshake's path and `Authorization`.
+            Handshake(String, String),
+            /// A message.
+            Message(String),
+            /// The end of a connection.
+            Closed,
+        }
+
+        /// A Codex Responses WebSocket on a 127.0.0.1 ephemeral port that
+        /// answers each message with [`CREATED`] and [`COMPLETED`]. Returns
+        /// its URL and what it sees.
+        async fn codex() -> (String, mpsc::UnboundedReceiver<Seen>) {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let (seen, events) = mpsc::unbounded_channel();
+            tokio::spawn(async move {
+                while let Ok((tcp, _)) = listener.accept().await {
+                    let seen = seen.clone();
+                    tokio::spawn(async move {
+                        let handshake = seen.clone();
+                        let callback = move |request: &Request, response: Response| {
+                            let authorization = request
+                                .headers()
+                                .get("authorization")
+                                .and_then(|value| value.to_str().ok())
+                                .unwrap_or_default()
+                                .to_owned();
+                            let path = request.uri().path().to_owned();
+                            let _ = handshake.send(Seen::Handshake(path, authorization));
+                            Ok(response)
+                        };
+                        let Ok(mut ws) = tokio_tungstenite::accept_hdr_async(tcp, callback).await
+                        else {
+                            return;
+                        };
+                        while let Some(Ok(message)) = ws.next().await {
+                            match message {
+                                Message::Text(text) => {
+                                    let _ = seen.send(Seen::Message(text.as_str().to_owned()));
+                                    for event in [CREATED, COMPLETED] {
+                                        let _ = ws.send(Message::text(event)).await;
+                                    }
+                                }
+                                Message::Close(_) => break,
+                                _ => {}
+                            }
+                        }
+                        let _ = seen.send(Seen::Closed);
+                    });
+                }
+            });
+            (url, events)
+        }
+
+        /// The next thing Codex saw, or a failed test after a while.
+        async fn next(events: &mut mpsc::UnboundedReceiver<Seen>) -> Seen {
+            tokio::time::timeout(Duration::from_secs(10), events.recv())
+                .await
+                .expect("Codex saw nothing")
+                .expect("Codex stopped")
+        }
+
+        #[tokio::test]
+        async fn a_turn_reaches_codex_over_its_websocket() {
+            let dir = tempfile::tempdir().unwrap();
+            let (base_url, mut seen) = codex().await;
+            let config = format!(
+                "api-keys: ['client-key']\ncodex-api-key:\n  - api-key: sk-codex\n    base-url: {base_url}\n    websockets: true\n    models: [{{name: gpt-5.5, alias: gpt-5.5}}]\n"
+            );
+            let mut service = service(dir.path(), &config);
+            service.sync_config_auths();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (_stop, stopped) = watch::channel(false);
+            tokio::spawn(serve(listener, None, service.app(), stopped));
+
+            let mut request = format!("ws://{addr}/v1/responses")
+                .into_client_request()
+                .unwrap();
+            request
+                .headers_mut()
+                .insert("authorization", "Bearer client-key".parse().unwrap());
+            let (mut client, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+            client.send(Message::text(TURN)).await.unwrap();
+            let mut answer = Vec::new();
+            loop {
+                let message = tokio::time::timeout(Duration::from_secs(10), client.next())
+                    .await
+                    .expect("no answer")
+                    .expect("the client's socket ended")
+                    .unwrap();
+                if let Message::Text(text) = message {
+                    let done = text.contains(r#""type":"response.completed""#);
+                    answer.push(text.as_str().to_owned());
+                    if done {
+                        break;
+                    }
+                }
+            }
+            assert!(
+                answer.iter().any(|event| event.contains("hi from codex")),
+                "{answer:?}"
+            );
+
+            assert_eq!(
+                next(&mut seen).await,
+                Seen::Handshake("/responses".into(), "Bearer sk-codex".into())
+            );
+            let Seen::Message(sent) = next(&mut seen).await else {
+                panic!("Codex wasn't sent the turn");
+            };
+            assert!(sent.contains(r#""type":"response.create""#), "{sent}");
+            assert!(sent.contains("hello"), "{sent}");
+
+            // The session keeps its socket to Codex until the client goes.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert!(
+                seen.try_recv().is_err(),
+                "Codex saw more before the client went"
+            );
+            client.close(None).await.unwrap();
+            assert_eq!(next(&mut seen).await, Seen::Closed);
+            assert!(seen.try_recv().is_err(), "Codex saw more");
+        }
+    }
+
     /// The management API as the binary serves it, over TCP.
     ///
     /// Ports the management parts of CLIProxyAPI
