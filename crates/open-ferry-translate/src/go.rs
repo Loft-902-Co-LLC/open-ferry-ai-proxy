@@ -8,7 +8,7 @@ mod ftoa;
 mod printable;
 
 pub use float::parse_float;
-pub(crate) use float::parse_float_checked;
+pub use float::parse_float_checked;
 pub use ftoa::{format_float, format_float_g, json_float};
 
 use std::cmp::Ordering;

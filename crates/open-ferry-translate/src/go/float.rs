@@ -14,7 +14,7 @@ pub fn parse_float(s: &str) -> f64 {
 
 /// `strconv.ParseFloat(s, 64)` keeping its error: `None` if `s` isn't a Go
 /// floating-point literal, or is one too large for an `f64`.
-pub(crate) fn parse_float_checked(s: &str) -> Option<f64> {
+pub fn parse_float_checked(s: &str) -> Option<f64> {
     special(s).or_else(|| literal(s).filter(|float| float.is_finite()))
 }
 

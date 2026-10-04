@@ -59,8 +59,9 @@ const IDENTITY_HEADERS: [&str; 15] = [
     "x-claude-remote-container-id",
 ];
 
-/// Whether `name` says which client is calling, so no attribute may set it.
-fn is_identity_header(name: &HeaderName) -> bool {
+/// Whether `name` says which client is calling, so no attribute may set it
+/// (nor a credential's quota probe).
+pub fn is_identity_header(name: &HeaderName) -> bool {
     let name = name.as_str();
     IDENTITY_HEADERS.contains(&name) || name.starts_with("x-stainless-")
 }

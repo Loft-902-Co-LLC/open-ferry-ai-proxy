@@ -365,7 +365,7 @@ fn token_value_from_metadata(metadata: &Map<String, Value>) -> String {
 }
 
 /// The method, if it is an HTTP token (Go's `validMethod`).
-fn valid_method(method: &str) -> Option<Method> {
+pub(crate) fn valid_method(method: &str) -> Option<Method> {
     let valid = !method.is_empty()
         && method.bytes().all(|b| {
             b.is_ascii_alphanumeric()
@@ -395,22 +395,22 @@ fn valid_method(method: &str) -> Option<Method> {
 
 /// One request of a call: the first, or one following a redirect.
 #[derive(Clone)]
-struct Hop {
-    method: Method,
+pub(crate) struct Hop {
+    pub(crate) method: Method,
     /// The URL as given or resolved.
-    url: String,
+    pub(crate) url: String,
     /// Go's reading of the URL.
-    go: GoUrl,
+    pub(crate) go: GoUrl,
     /// The `Host` the request names instead of the URL's, or empty (Go's
     /// `Request.Host`).
-    host: String,
+    pub(crate) host: String,
     /// The headers, by Go's canonical names.
-    headers: BTreeMap<String, String>,
-    body: Option<Bytes>,
+    pub(crate) headers: BTreeMap<String, String>,
+    pub(crate) body: Option<Bytes>,
 }
 
 /// Why a call failed.
-enum CallError {
+pub(crate) enum CallError {
     /// No response: the reason, for the debug log. It never holds a URL or
     /// a header value.
     Request(String),
@@ -445,15 +445,42 @@ pub(crate) fn error_chain(error: &reqwest::Error) -> String {
 }
 
 /// A response, read.
-struct Received {
-    status: u16,
-    headers: BTreeMap<String, Vec<Vec<u8>>>,
-    body: Vec<u8>,
+pub(crate) struct Received {
+    pub(crate) status: u16,
+    /// The header values by Go's canonical names.
+    pub(crate) headers: BTreeMap<String, Vec<Vec<u8>>>,
+    pub(crate) body: Vec<u8>,
 }
 
-/// Sends the call, following redirects, and reads the final response (Go's
-/// `Client.Do` with a 60-second `Timeout`, then `io.ReadAll`).
+/// Sends the call and answers with the `api-call` body.
 async fn call(state: &ManagementState, route: &Route, first: Hop) -> Result<Json, CallError> {
+    let received = exchange(state, route, first).await?;
+    Ok(Json::Struct(vec![
+        ("status_code", Json::Int(i64::from(received.status))),
+        (
+            "header",
+            Json::Map(
+                received
+                    .headers
+                    .into_iter()
+                    .map(|(name, values)| {
+                        let values = values.into_iter().map(Json::Bytes).collect();
+                        (name, Json::Array(values))
+                    })
+                    .collect(),
+            ),
+        ),
+        ("body", Json::Bytes(received.body)),
+    ]))
+}
+
+/// Sends a request, following redirects, and reads the final response
+/// (Go's `Client.Do` with a 60-second `Timeout`, then `io.ReadAll`).
+pub(crate) async fn exchange(
+    state: &ManagementState,
+    route: &Route,
+    first: Hop,
+) -> Result<Received, CallError> {
     let deadline = Instant::now() + TIMEOUT;
     let initial = first.clone();
     let mut hop = first;
@@ -504,26 +531,9 @@ async fn call(state: &ManagementState, route: &Route, first: Hop) -> Result<Json
         drop(response);
         hop = next;
     };
-    let received = timeout_at(deadline, read(response, requested_gzip, &method))
+    timeout_at(deadline, read(response, requested_gzip, &method))
         .await
-        .map_err(|_| CallError::Read)??;
-    Ok(Json::Struct(vec![
-        ("status_code", Json::Int(i64::from(received.status))),
-        (
-            "header",
-            Json::Map(
-                received
-                    .headers
-                    .into_iter()
-                    .map(|(name, values)| {
-                        let values = values.into_iter().map(Json::Bytes).collect();
-                        (name, Json::Array(values))
-                    })
-                    .collect(),
-            ),
-        ),
-        ("body", Json::Bytes(received.body)),
-    ]))
+        .map_err(|_| CallError::Read)?
 }
 
 /// The request following a redirect to `location` (the loop of Go's
