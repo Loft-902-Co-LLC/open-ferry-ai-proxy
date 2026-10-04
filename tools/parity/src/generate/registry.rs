@@ -11,6 +11,10 @@
 //! Responses are the other generators' event streams and final events, sent
 //! through the registry for the pair they were made for or, sometimes, a pair
 //! with no translator.
+//!
+//! The Gemini Interactions families' requests and responses for their pairs
+//! (see `crate::interactions`) are treated the same way, after the others,
+//! each pair with as many as one of the others' sources.
 
 use serde_json::{Map, Value, json};
 
@@ -256,9 +260,10 @@ pub fn response_cases(seed: u64, count: usize) -> (Vec<Case>, Vec<Case>) {
             super::gemini_responses::event_cases(source_seed, counts[14]),
         ),
     ];
+    let interactions = crate::interactions::registry_response_cases(source_seed, count / 15);
     let (mut streams, mut finals) = (Vec::new(), Vec::new());
     let mut index = 0;
-    for ((from, to), (source_streams, source_finals)) in sources {
+    for ((from, to), (source_streams, source_finals)) in sources.into_iter().chain(interactions) {
         for (stream, last) in source_streams.into_iter().zip(source_finals) {
             let mut rng = rng(seed, index);
             index += 1;
@@ -401,8 +406,9 @@ fn builtin_requests(seed: u64, count: usize) -> Vec<Case> {
             super::gemini_responses::request_cases(source_seed, counts[14]),
         ),
     ];
+    let interactions = crate::interactions::registry_request_cases(source_seed, count / 15);
     let mut cases = Vec::with_capacity(count);
-    for ((from, to), source) in sources {
+    for ((from, to), source) in sources.into_iter().chain(interactions) {
         for mut case in source {
             let index = cases.len() as u64;
             let mut rng = rng(seed, index);
@@ -464,6 +470,7 @@ fn source_paths(format: &str) -> &'static [&'static str] {
         "openai" => OPENAI_PATHS,
         "claude" => CLAUDE_PATHS,
         "gemini" => GEMINI_PATHS,
+        "interactions" => INTERACTIONS_PATHS,
         _ => RESPONSES_PATHS,
     }
 }
@@ -609,7 +616,11 @@ mod tests {
     fn cases_are_reproducible_and_valid_json() {
         let first = request_cases(3, 40);
         let again = request_cases(3, 40);
-        assert_eq!(first.len(), 40);
+        let interactions: usize = crate::interactions::registry_request_cases(derived(3), 20 / 15)
+            .iter()
+            .map(|(_, cases)| cases.len())
+            .sum();
+        assert_eq!(first.len(), 40 + interactions);
         for (a, b) in first.iter().zip(&again) {
             assert_eq!(a.request, b.request);
             assert_eq!(a.options, b.options);
@@ -620,7 +631,14 @@ mod tests {
             );
         }
         let (streams, finals) = response_cases(3, 12);
-        assert_eq!((streams.len(), finals.len()), (12, 12));
+        let interactions: usize = crate::interactions::registry_response_cases(derived(3), 12 / 15)
+            .iter()
+            .map(|(_, (streams, _))| streams.len())
+            .sum();
+        assert_eq!(
+            (streams.len(), finals.len()),
+            (12 + interactions, 12 + interactions)
+        );
         assert_eq!(lookup_cases(3, 9).len(), 9);
     }
 

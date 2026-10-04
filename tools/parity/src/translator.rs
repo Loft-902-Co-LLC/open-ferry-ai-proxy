@@ -84,6 +84,7 @@ use crate::cases::Case;
 use crate::codex_models;
 use crate::compare::{self, Deviation, JsonAt, JsonForm};
 use crate::config_diff;
+use crate::interactions::{self, Stage};
 use crate::multi_agent;
 use crate::payload;
 use crate::raw_json::{self, Raw};
@@ -92,18 +93,18 @@ use crate::ttft;
 use crate::usage;
 
 /// How an empty non-streaming output reads, unlike any JSON a response holds.
-const NO_OUTPUT: &str = "(no output)";
+pub(crate) const NO_OUTPUT: &str = "(no output)";
 
 /// What a registry non-streaming case reads as when the translation failed:
 /// upstream's registry returned nil, and ours `None`.
 const FAILED: &str = "(failed)";
 
 /// How the Responses stream translator's harness writes a line it returned unchanged.
-const UNCHANGED: &str = "=";
+pub(crate) const UNCHANGED: &str = "=";
 
 /// What a response's `created` or `created_at` is replaced with when it is
 /// the current time, which upstream and we each read from the clock.
-const CREATED_NOW: &str = "(now)";
+pub(crate) const CREATED_NOW: &str = "(now)";
 
 /// What the clock time and count in a response ID made up for a response
 /// without one are replaced with (see [`mask_generated_response_id`]).
@@ -234,6 +235,9 @@ pub enum Translator {
     GeminiResponsesStream,
     /// A whole Gemini response → one Responses response.
     GeminiResponsesNonStream,
+    /// A Gemini Interactions translator, whose methods delegate to its
+    /// family's (see [`crate::interactions`]).
+    Interactions(interactions::Kind),
     /// A request translated for Codex or Responses → its thinking setting
     /// applied, for the model in the case's options (see
     /// [`crate::cases::thinking`]).
@@ -338,6 +342,7 @@ impl Translator {
             Self::GeminiResponsesRequest => "gemini/openai-responses/request",
             Self::GeminiResponsesStream => "gemini/openai-responses/response",
             Self::GeminiResponsesNonStream => "gemini/openai-responses/response-non-stream",
+            Self::Interactions(kind) => kind.key(),
             Self::ThinkingCodex => "thinking/codex",
             Self::ThinkingOpenAI => "thinking/openai",
             Self::CodexModels => "codex-models/list",
@@ -416,6 +421,7 @@ impl Translator {
             Self::GeminiResponsesRequest => "responses-to-gemini-request",
             Self::GeminiResponsesStream => "gemini-to-responses-stream",
             Self::GeminiResponsesNonStream => "gemini-to-responses-non-stream",
+            Self::Interactions(kind) => kind.slug(),
             Self::ThinkingCodex => "thinking-codex",
             Self::ThinkingOpenAI => "thinking-openai",
             Self::CodexModels => "codex-models",
@@ -499,6 +505,7 @@ impl Translator {
             Self::GeminiResponsesRequest => "Responses -> Gemini request",
             Self::GeminiResponsesStream => "Gemini -> Responses response, streaming",
             Self::GeminiResponsesNonStream => "Gemini -> Responses response, non-streaming",
+            Self::Interactions(kind) => kind.title(),
             Self::ThinkingCodex => "Thinking settings for Codex and Responses",
             Self::ThinkingOpenAI => "Thinking settings for Chat Completions",
             Self::CodexModels => "Codex client model list",
@@ -1144,6 +1151,7 @@ impl Translator {
                 self.read(case, output.as_bytes())
                     .ok_or_else(|| "output is not JSON".to_owned())
             }
+            Self::Interactions(kind) => kind.run(case),
             Self::ThinkingCodex | Self::ThinkingOpenAI => {
                 let mut body = request
                     .map_err(|err| format!("case {} is not valid JSON: {err}", case.name))?;
@@ -1451,6 +1459,7 @@ impl Translator {
             Self::GeminiResponsesRequest => GEMINI_RESPONSES_REQUEST_JSON,
             Self::GeminiResponsesStream => GEMINI_RESPONSES_STREAM_JSON,
             Self::GeminiResponsesNonStream => GEMINI_RESPONSES_NON_STREAM_JSON,
+            Self::Interactions(kind) => kind.embedded_json(case),
         }
     }
 
@@ -1480,7 +1489,9 @@ impl Translator {
                 ("claude", "gemini") => Some(Self::GeminiClaudeRequest),
                 ("openai", "gemini") => Some(Self::GeminiChatRequest),
                 ("openai-response", "gemini") => Some(Self::GeminiResponsesRequest),
-                _ => None,
+                (from, to) => {
+                    interactions::Kind::native(Stage::Request, from, to).map(Self::Interactions)
+                }
             },
             Self::RegistryStream => match pair {
                 ("codex", "claude") => Some(Self::Stream),
@@ -1498,7 +1509,9 @@ impl Translator {
                 ("gemini", "claude") => Some(Self::GeminiClaudeStream),
                 ("gemini", "openai") => Some(Self::GeminiChatStream),
                 ("gemini", "openai-response") => Some(Self::GeminiResponsesStream),
-                _ => None,
+                (from, to) => {
+                    interactions::Kind::native(Stage::Stream, from, to).map(Self::Interactions)
+                }
             },
             Self::RegistryNonStream => match pair {
                 ("codex", "claude") => Some(Self::NonStream),
@@ -1516,7 +1529,9 @@ impl Translator {
                 ("gemini", "claude") => Some(Self::GeminiClaudeNonStream),
                 ("gemini", "openai") => Some(Self::GeminiChatNonStream),
                 ("gemini", "openai-response") => Some(Self::GeminiResponsesNonStream),
-                _ => None,
+                (from, to) => {
+                    interactions::Kind::native(Stage::NonStream, from, to).map(Self::Interactions)
+                }
             },
             _ => None,
         }
@@ -1533,6 +1548,9 @@ impl Translator {
     pub fn drop_deliberate_omissions(self, case: &Case, go: &mut Value) -> Option<Deviation> {
         if let Some(native) = self.native(case) {
             return native.drop_deliberate_omissions(case, go);
+        }
+        if let Self::Interactions(kind) = self {
+            return kind.drop_deliberate_omissions(case, go);
         }
         if self == Self::OpenAIGeminiRequest {
             let ids = derived_call_ids(&case.request);
@@ -1596,6 +1614,7 @@ impl Translator {
         let mut value = match self {
             Self::RegistryStream => return read_registry_stream(case, native, &text),
             Self::RegistryNonStream => return read_registry_non_stream(case, native, &text),
+            Self::Interactions(kind) => return kind.read(case, output),
             Self::RegistryRequest if native.is_some() => return native?.read(case, output),
             Self::RegistryRequest | Self::RegistryLookup => {
                 return serde_json::from_str(&text).ok();
@@ -1781,7 +1800,7 @@ impl Translator {
 /// string per output line, or `=` for a line returned unchanged. A changed
 /// line becomes `{"data": …}` for an SSE data line, `{"json": …}` for a bare
 /// JSON line, and `{"line": text}` for anything else.
-fn read_lines(text: &str) -> Option<Value> {
+pub(crate) fn read_lines(text: &str) -> Option<Value> {
     let lines: Vec<String> = serde_json::from_str(text).ok()?;
     let json = |text: &str| serde_json::from_str::<Value>(text).ok();
     let lines = lines
@@ -1804,7 +1823,7 @@ fn read_lines(text: &str) -> Option<Value> {
 /// Reads the Completions chunk translator's output: a JSON array with a
 /// string per chunk, or `null` for a chunk that was skipped. Each chunk is
 /// read as JSON, or kept as text if it isn't JSON.
-fn read_chunks(text: &str) -> Option<Value> {
+pub(crate) fn read_chunks(text: &str) -> Option<Value> {
     let chunks: Vec<Option<String>> = serde_json::from_str(text).ok()?;
     let chunks = chunks
         .into_iter()
@@ -1880,6 +1899,9 @@ fn read_registry_stream(case: &Case, native: Option<Translator>, text: &str) -> 
             | Translator::GeminiClaudeStream
             | Translator::GeminiResponsesStream,
         ) => all().map(String::as_str).collect::<String>(),
+        Some(Translator::Interactions(kind)) if kind.joins_stream() => {
+            all().map(String::as_str).collect::<String>()
+        }
         Some(Translator::ResponsesStream) | None => {
             let mut lines: Vec<&str> = Vec::new();
             for (event, chunks) in case.events.iter().zip(&events) {
@@ -1907,7 +1929,7 @@ fn read_registry_stream(case: &Case, native: Option<Translator>, text: &str) -> 
                 | Translator::GeminiClaudeStream
                 | Translator::GeminiResponsesStream
         )
-    );
+    ) || matches!(native, Some(Translator::Interactions(kind)) if kind.joins_stream());
     let shape = |chunks: &[String]| -> Value {
         if sse {
             chunks.iter().map(|chunk| sse_chunk(chunk)).collect()
@@ -1945,7 +1967,7 @@ fn sse_chunk(chunk: &str) -> Value {
 /// an `event: …\ndata: <JSON>\n\n` frame is kept as `{"unparsed": text}`, and
 /// text after the last blank line as `{"unended": text}`, so they show up as
 /// differences.
-fn sse_frames(text: &str) -> Value {
+pub(crate) fn sse_frames(text: &str) -> Value {
     let mut frames = Vec::new();
     let mut rest = text;
     while let Some((frame, after)) = rest.split_once("\n\n") {
@@ -1968,7 +1990,7 @@ fn sse_frames(text: &str) -> Value {
 /// Splits SSE text whose frames each end with `end` into `{"event": …,
 /// "data": …}` frames, as [`sse_frames`] does for frames ending with a blank
 /// line. Anything else is kept as `{"unparsed": text}`.
-fn sse_frames_ended_by(text: &str, end: &str) -> Value {
+pub(crate) fn sse_frames_ended_by(text: &str, end: &str) -> Value {
     let frames = text
         .split_terminator(end)
         .map(|frame| {
@@ -2055,7 +2077,7 @@ fn mask_function_call_ids(value: &mut Value) {
 
 /// Replaces a response's creation time, held in `key`, if it is within an
 /// hour of now.
-fn mask_time_now(value: &mut Value, key: &str) {
+pub(crate) fn mask_time_now(value: &mut Value, key: &str) {
     let Some(created) = value.get_mut(key) else {
         return;
     };
@@ -2073,7 +2095,7 @@ fn mask_time_now(value: &mut Value, key: &str) {
 /// Replaces a Gemini response's `createTime`, an RFC 3339 time, if it is
 /// within an hour of now. Upstream writes it in the local time zone and we
 /// in UTC, so both are read as instants.
-fn mask_create_time_now(value: &mut Value) {
+pub(crate) fn mask_create_time_now(value: &mut Value) {
     let Some(created) = value.get_mut("createTime") else {
         return;
     };
@@ -2299,7 +2321,7 @@ fn generated_tool_id(n: usize) -> String {
 /// another call shows up as a difference. Keys are visited in the output's
 /// order. An ID for which `from_client` is true is kept as it is, so a
 /// changed client ID is a difference too.
-fn mask_generated_tool_ids(value: &mut Value, from_client: &dyn Fn(&str) -> bool) {
+pub(crate) fn mask_generated_tool_ids(value: &mut Value, from_client: &dyn Fn(&str) -> bool) {
     fn mask(value: &mut Value, from_client: &dyn Fn(&str) -> bool, seen: &mut Vec<String>) {
         match value {
             Value::String(id) if is_generated_tool_id(id) && !from_client(id) => {
@@ -2333,7 +2355,7 @@ fn mask_generated_tool_ids(value: &mut Value, from_client: &dyn Fn(&str) -> bool
 /// and every string in the JSON found in them, with escapes decoded. JSON
 /// held in those strings is read too, since a call's arguments can carry
 /// an ID that the output then holds as a string of its own.
-fn input_text(case: &Case) -> String {
+pub(crate) fn input_text(case: &Case) -> String {
     let options = case.options.to_string();
     let mut text = String::new();
     [&case.request, &case.translated_request, &options]

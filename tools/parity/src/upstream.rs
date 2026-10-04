@@ -1,5 +1,6 @@
-//! Builds and runs the Go harnesses (`go/main.go`, and `go/completions/main.go`
-//! for the legacy Completions conversions) inside a CLIProxyAPI checkout.
+//! Builds and runs the Go harnesses (`go/main.go`, `go/completions/main.go`
+//! for the legacy Completions conversions, and `go/interactions/main.go` for
+//! the Gemini Interactions translators) inside a CLIProxyAPI checkout.
 
 use std::env;
 use std::error::Error;
@@ -27,15 +28,21 @@ pub struct Upstream {
     harness: PathBuf,
     /// The harness for the `completions/` translators.
     completions_harness: PathBuf,
+    /// The harness for the Gemini Interactions translators (see
+    /// [`is_interactions`]).
+    interactions_harness: PathBuf,
 }
 
 impl Upstream {
     /// Compiles the harnesses into `work_dir`. They import internal packages,
     /// so they must be compiled as part of the CLIProxyAPI module. An overlay
-    /// adds them as `cmd/open-ferry-parity` and `cmd/open-ferry-parity-completions`
-    /// without touching the checkout, along with `go/openai/export.go`, which
-    /// exports the Completions conversions from their package. Each
-    /// `go/parity_*.go` joins `go/main.go` in `cmd/open-ferry-parity`.
+    /// adds them as `cmd/open-ferry-parity`, `cmd/open-ferry-parity-completions`
+    /// and `cmd/open-ferry-parity-interactions` without touching the checkout,
+    /// along with `go/openai/export.go`, which exports the Completions
+    /// conversions from their package. Each `go/parity_*.go` joins `go/main.go`
+    /// in `cmd/open-ferry-parity`, and each `go/interactions/parity_*.go` joins
+    /// `go/interactions/main.go`. The Interactions harness is then run once
+    /// with no input, as no suite may use it yet.
     pub fn build(dir: &Path, go: &Path, work_dir: &Path) -> Result<Self, Box<dyn Error>> {
         let dir = std::path::absolute(dir)?;
         if !dir.join("go.mod").is_file() {
@@ -48,16 +55,26 @@ impl Upstream {
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("go");
         let handlers = dir.join("sdk").join("api").join("handlers").join("openai");
         let main = dir.join("cmd").join("open-ferry-parity");
+        let interactions = dir.join("cmd").join("open-ferry-parity-interactions");
         let mut files = Vec::new();
-        for entry in fs::read_dir(&source)? {
-            let name = entry?.file_name().to_string_lossy().into_owned();
-            if name.starts_with("parity_") && name.ends_with(".go") {
-                files.push((main.join(&name), source.join(&name)));
+        for (target, source) in [
+            (&main, source.clone()),
+            (&interactions, source.join("interactions")),
+        ] {
+            for entry in fs::read_dir(&source)? {
+                let name = entry?.file_name().to_string_lossy().into_owned();
+                if name.starts_with("parity_") && name.ends_with(".go") {
+                    files.push((target.join(&name), source.join(&name)));
+                }
             }
         }
         let mut replace = Map::new();
         for (target, source) in files.into_iter().chain([
             (main.join("main.go"), source.join("main.go")),
+            (
+                interactions.join("main.go"),
+                source.join("interactions").join("main.go"),
+            ),
             (
                 dir.join("cmd")
                     .join("open-ferry-parity-completions")
@@ -82,9 +99,17 @@ impl Upstream {
             "upstream-completions-harness{}",
             env::consts::EXE_SUFFIX
         ));
+        let interactions_harness = work_dir.join(format!(
+            "upstream-interactions-harness{}",
+            env::consts::EXE_SUFFIX
+        ));
         for (binary, package) in [
             (&harness, "./cmd/open-ferry-parity"),
             (&completions_harness, "./cmd/open-ferry-parity-completions"),
+            (
+                &interactions_harness,
+                "./cmd/open-ferry-parity-interactions",
+            ),
         ] {
             let status = Command::new(go)
                 .current_dir(&dir)
@@ -105,6 +130,17 @@ impl Upstream {
                 return Err(format!("go build of {package} failed ({status})").into());
             }
         }
+        let output = Command::new(&interactions_harness)
+            .stdin(Stdio::null())
+            .stderr(Stdio::inherit())
+            .output()?;
+        if !output.status.success() || !output.stdout.is_empty() {
+            return Err(format!(
+                "the Interactions harness failed with no input ({})",
+                output.status
+            )
+            .into());
+        }
 
         Ok(Self {
             version: git(&dir, &["describe", "--tags", "--always", "--dirty"]),
@@ -112,6 +148,7 @@ impl Upstream {
             dir,
             harness,
             completions_harness,
+            interactions_harness,
         })
     }
 
@@ -144,10 +181,13 @@ impl Upstream {
             .map_err(|err| err.into_error())?
             .sync_all()?;
 
-        // The Completions conversions have a harness of their own (see
-        // go/completions/main.go).
+        // The Completions conversions and the Interactions translators have
+        // harnesses of their own (see go/completions/main.go and
+        // go/interactions/main.go).
         let harness = if translator.starts_with("completions/") {
             &self.completions_harness
+        } else if is_interactions(translator) {
+            &self.interactions_harness
         } else {
             &self.harness
         };
@@ -176,6 +216,18 @@ impl Upstream {
     }
 }
 
+/// Whether `translator` is an Interactions harness key: one whose package or
+/// format, its first or second `/`-separated part, is `interactions`, such as
+/// `interactions/claude/request` or `codex/interactions/response`. The
+/// `registry/` entries, which may translate to or from Interactions, run in
+/// the main harness.
+fn is_interactions(translator: &str) -> bool {
+    translator
+        .split('/')
+        .take(2)
+        .any(|part| part == "interactions")
+}
+
 fn parse_result(line: &[u8]) -> Result<GoResult, Box<dyn Error>> {
     let line: Value = serde_json::from_slice(line)?;
     if let Some(message) = line.get("panic").and_then(Value::as_str) {
@@ -197,4 +249,29 @@ fn git(dir: &Path, args: &[&str]) -> String {
         .filter(|output| output.status.success())
         .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
         .unwrap_or_else(|| "unknown".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interactions_keys_have_interactions_as_package_or_format() {
+        for key in [
+            "interactions/claude/request",
+            "claude/interactions/response-non-stream",
+            "openai-responses/interactions/request",
+            "interactions/interactions/response",
+        ] {
+            assert!(is_interactions(key), "{key}");
+        }
+        for key in [
+            "registry/request",
+            "gemini/openai-chat/request",
+            "completions/request",
+            "codex/claude/interactions",
+        ] {
+            assert!(!is_interactions(key), "{key}");
+        }
+    }
 }

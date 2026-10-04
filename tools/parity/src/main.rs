@@ -8,6 +8,7 @@ mod codex_models;
 mod compare;
 mod config_diff;
 mod generate;
+mod interactions;
 mod live;
 mod multi_agent;
 mod payload;
@@ -163,7 +164,7 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
         generate::to_gemini::chat_event_cases(seed, random);
     let (gemini_responses_streams, gemini_responses_finals) =
         generate::gemini_responses::event_cases(seed, random);
-    let suites = [
+    let mut suites = vec![
         (
             Translator::Request,
             cases::hand_written(),
@@ -513,6 +514,8 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
             generate::config_diff::detail_cases(seed, random),
         ),
     ];
+    // The Gemini Interactions families' suites (see interactions/mod.rs).
+    suites.extend(interactions::suites(seed, random));
 
     println!("open-ferry parity");
     println!(

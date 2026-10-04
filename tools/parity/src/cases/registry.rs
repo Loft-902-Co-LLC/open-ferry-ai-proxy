@@ -1,6 +1,8 @@
 //! Hand-written cases for the translator registry: every other suite's
 //! hand-written cases, sent through the registry for their own pair of
-//! formats, and cases for what the registry does itself.
+//! formats, and cases for what the registry does itself. The Gemini
+//! Interactions families' cases for their pairs come last (see
+//! `crate::interactions`).
 
 use serde_json::{Value, json};
 
@@ -401,6 +403,13 @@ pub fn requests() -> Vec<Case> {
         cases.push(identity(case.clone(), "openai-response", "claude"));
         cases.push(identity(case, "openai", "codex"));
     }
+    for ((from, to), source) in crate::interactions::registry_requests() {
+        cases.extend(
+            source
+                .into_iter()
+                .map(|case| through(case, from, to, stream())),
+        );
+    }
     cases
 }
 
@@ -469,6 +478,13 @@ pub fn streams() -> Vec<Case> {
         let case = Case::response("blank-lines", "{}", lines.clone());
         cases.push(through(case, from, to, json!({})));
     }
+    for ((from, to), source) in crate::interactions::registry_streams() {
+        cases.extend(
+            source
+                .into_iter()
+                .map(|case| through(case, from, to, json!({}))),
+        );
+    }
     cases
 }
 
@@ -515,6 +531,13 @@ pub fn finals() -> Vec<Case> {
     let request = r#"{"tools":[{"type":"custom","name":"apply_patch"}]}"#;
     let case = Case::response("apply-patch-failed", request, vec![body]);
     cases.push(through(case, "claude", "openai-response", json!({})));
+    for ((from, to), source) in crate::interactions::registry_finals() {
+        cases.extend(
+            source
+                .into_iter()
+                .map(|case| through(case, from, to, json!({}))),
+        );
+    }
     cases
 }
 

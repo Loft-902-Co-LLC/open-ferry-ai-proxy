@@ -17,6 +17,8 @@
 //! clients, [`signature`] reasoning signatures from every provider,
 //! [`registry`] input for the translator registry, and
 //! [`gemini_responses`] input for the translators between Responses and Gemini.
+//! [`interactions`] generates Gemini Interactions requests, event streams and
+//! responses, which the Interactions families' generators build on.
 //! [`thinking`] generates input for upstream's thinking settings on Codex
 //! and Chat Completions targets.
 //! [`codex_models`] generates registrations for the Codex client model list.
@@ -34,6 +36,7 @@ pub mod completions;
 pub mod config_diff;
 pub mod gemini;
 pub mod gemini_responses;
+pub mod interactions;
 pub mod multi_agent;
 pub mod openai_chat;
 pub mod openai_claude;
