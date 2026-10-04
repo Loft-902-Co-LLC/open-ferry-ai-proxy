@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 use super::*;
 use crate::codex::client::USER_AGENT;
 use crate::codex::reasoning::tests::valid_signature;
+use crate::codex::request::CONTROL_CHARACTER;
 use crate::json::{exists, get};
 
 mod replay;
@@ -706,6 +707,77 @@ async fn errors_hide_the_token() {
     let error = error.expect("a terminal error");
     assert!(!error.message.contains(key), "{error:?}");
     assert!(error.message.contains("bad key [redacted]"), "{error:?}");
+}
+
+// Not upstream's: Go's http.NewRequestWithContext refuses a URL with an
+// ASCII control character before anything is sent (Go 1.26.4: `parse
+// "<url>": net/url: invalid control character in URL`), where the WHATWG
+// parser would drop a tab or newline and encode the rest. The error here
+// leaves the URL out.
+#[tokio::test]
+async fn a_url_with_a_control_character_is_refused_unsent() {
+    let mock = Mock::start(Reply::sse(COMPLETED_EMPTY)).await;
+    let payload = r#"{"model":"gpt-5.5","input":"hello"}"#;
+    for base in [
+        format!("{}/codex\t", mock.url),
+        format!("{}/codex\n", mock.url),
+        format!("{}/co\x7fdex", mock.url),
+    ] {
+        let error = executor()
+            .execute(
+                api_key_auth(&base),
+                request("gpt-5.5", payload),
+                options("openai-response"),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.message, CONTROL_CHARACTER, "{base:?}");
+        assert_eq!(error.status, 0);
+        let error = refused(
+            executor()
+                .execute_stream(
+                    api_key_auth(&base),
+                    request("gpt-5.5", payload),
+                    stream_options("openai-response"),
+                )
+                .await,
+        );
+        assert_eq!(error.message, CONTROL_CHARACTER, "{base:?}");
+        let error = executor()
+            .execute(
+                api_key_auth(&base),
+                request("gpt-5.4", r#"{"input":"x"}"#),
+                compact_options("openai-response"),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.message, CONTROL_CHARACTER, "{base:?}");
+    }
+    assert!(mock.requests().is_empty(), "{:?}", mock.requests());
+}
+
+// Not upstream's: pins a deviation. Go sends `/a/%2e%2e/codex/responses`
+// and `/a/../codex/responses` as written, and a `\` as `%5C` (Go 1.26.4);
+// the WHATWG parser resolves the dot segments and reads `\` as `/`.
+#[tokio::test]
+async fn dot_segments_are_resolved() {
+    let payload = r#"{"model":"gpt-5.5","input":"hello"}"#;
+    for (base, path) in [
+        ("/a/%2e%2e/codex", "/codex/responses"),
+        ("/a/../codex", "/codex/responses"),
+        (r"/a\codex", "/a/codex/responses"),
+    ] {
+        let mock = Mock::start(Reply::sse(COMPLETED_EMPTY)).await;
+        executor()
+            .execute(
+                api_key_auth(&format!("{}{base}", mock.url)),
+                request("gpt-5.5", payload),
+                options("openai-response"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(mock.last().path, path, "{base}");
+    }
 }
 
 const CREATED_ONLY: &str = "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.5\"}}\n\n";
@@ -1723,11 +1795,16 @@ async fn usage_limit_events_are_scoped_to_the_credential() {
 
 /// `header:` attributes that would make a request pass for another client,
 /// in several cases.
-const IDENTITY_ATTRIBUTES: [(&str, &str); 9] = [
+const IDENTITY_ATTRIBUTES: [(&str, &str); 14] = [
     ("header:User-Agent", "codex_cli_rs/0.200.0"),
     ("header:ORIGINATOR", "codex-tui"),
     ("header:Session_id", "synthetic-session"),
     ("header:session-ID", "synthetic-session"),
+    ("header:Conversation_id", "invented-conversation"),
+    ("header:conversation-id", "invented-conversation"),
+    ("header:Thread-Id", "invented-thread"),
+    ("header:thread_id", "invented-thread"),
+    ("header:X-Codex-Window-Id", "invented-window"),
     ("header:X-App", "cli"),
     ("header:x-stainless-lang", "js"),
     ("header:X-Stainless-Runtime", "node"),
@@ -1763,6 +1840,11 @@ async fn custom_headers_cannot_set_the_clients_identity() {
         for name in [
             "session_id",
             "session-id",
+            "conversation_id",
+            "conversation-id",
+            "thread-id",
+            "thread_id",
+            "x-codex-window-id",
             "x-app",
             "x-stainless-lang",
             "x-stainless-runtime",

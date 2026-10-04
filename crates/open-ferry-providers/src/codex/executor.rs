@@ -48,6 +48,13 @@
 //! - Refresh returns a copy of the credential with new metadata; the
 //!   credential manager saves it. Upstream also updates the typed token
 //!   storage, which [`Auth`] doesn't have.
+//! - The URL is read as a WHATWG URL, so its `.` and `..` segments are
+//!   resolved, percent-encoded ones such as `%2e%2e` included, and a `\`
+//!   reads as `/`. Go sends `/a/%2e%2e/codex/responses` as written and a
+//!   `\` as `%5C`. A URL with an ASCII control character before any `#`,
+//!   which the WHATWG parser would drop or encode, fails before anything is
+//!   sent, as Go's does, with Go's message (`net/url: invalid control
+//!   character in URL`) but without the URL, which may hold a secret.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -73,7 +80,7 @@ use super::jwt::{DEFAULT_PLAN_TYPE, parse_jwt_token};
 use super::oauth::{CodexAuth, Endpoints};
 use super::request::{
     Context, DEFAULT_BASE_URL, Kind, base_model, build_headers, credentials, endpoint,
-    original_request, prepare_body, response_format,
+    original_request, prepare_body, refuse_control_characters, response_format,
 };
 use super::stream::{self, Bootstrap, Clock, LineReader, MAX_LINE, StreamSetup, is_grok_client};
 use super::terminal::{
@@ -220,6 +227,7 @@ impl CodexExecutor {
         headers: HeaderMap,
         body: &Value,
     ) -> Result<reqwest::Response, ExecError> {
+        refuse_control_characters(url)?;
         let response = self
             .clients
             .get(&auth.proxy_url)

@@ -24,10 +24,10 @@
 //! - The URL is read as a WHATWG URL, so its `.` and `..` segments are
 //!   resolved, percent-encoded ones such as `%2e%2e` included, and a `\`
 //!   reads as `/`. Go sends `/v1/%2e%2e/alpha/search` as written and a `\`
-//!   as `%5C`. A URL with an ASCII control character, which the WHATWG
-//!   parser would drop or encode, fails before anything is sent, as Go's
-//!   does, with Go's message (`net/url: invalid control character in URL`)
-//!   but without the URL, which may hold a secret.
+//!   as `%5C`. A URL with an ASCII control character before any `#`,
+//!   which the WHATWG parser would drop or encode, fails before anything is
+//!   sent, as Go's does, with Go's message (`net/url: invalid control
+//!   character in URL`) but without the URL, which may hold a secret.
 
 use bytes::Bytes;
 use http::header::{self, HeaderValue};
@@ -36,17 +36,8 @@ use open_ferry_core::exec::{ErrorKind, ExecError, HttpCall, HttpReply, HttpTarge
 
 use super::CodexExecutor;
 use crate::codex::client::{USER_AGENT, error_chain, read_body_prefix};
-use crate::codex::request::credentials;
+use crate::codex::request::{credentials, refuse_control_characters};
 use crate::custom_headers;
-
-/// Go's `url.Parse` error for a URL with an ASCII control character, without
-/// the URL it quotes.
-const CONTROL_CHARACTER: &str = "net/url: invalid control character in URL";
-
-/// Whether `url` has a byte Go's `url.Parse` refuses (`stringContainsCTLByte`).
-fn has_control_character(url: &str) -> bool {
-    url.bytes().any(|b| b < 0x20 || b == 0x7f)
-}
 
 impl CodexExecutor {
     /// Sends `call` with the credential's token and custom headers, and
@@ -65,9 +56,7 @@ impl CodexExecutor {
             response_limit,
         } = call;
         let url = self.target_url(target);
-        if has_control_character(&url) {
-            return Err(ExecError::new(ErrorKind::Upstream, CONTROL_CHARACTER));
-        }
+        refuse_control_characters(&url)?;
         let (token, _) = credentials(auth);
         if token.trim().is_empty() {
             headers.remove(header::AUTHORIZATION);
@@ -129,6 +118,7 @@ mod tests {
     use http::{HeaderMap, Method};
 
     use super::*;
+    use crate::codex::request::CONTROL_CHARACTER;
 
     /// One request the mock received.
     #[derive(Clone, Debug)]

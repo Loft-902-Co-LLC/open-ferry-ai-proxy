@@ -26,13 +26,29 @@
 //! [`Hold`]'s); a failure goes to that call too, then the connection is let
 //! go. Nothing for five minutes is a failure as well.
 //!
+//! Closing a session lets its connection go at once: the reader drops the
+//! socket before it hands the failure on, which may wait for the call to
+//! read, and the call stops being active, so its channel ends after what
+//! it holds. A handshake still under way when the session closes is
+//! abandoned, and a connection that comes up after is dropped unused.
+//!
 //! Deviations from upstream:
 //! - The store belongs to the executor; upstream's is global by default.
 //! - A call dropped before it ends (its client went away) closes the
 //!   connection, so that the rest of its response can't reach the next
 //!   call; upstream leaves the connection open.
-//! - The target includes a hash of the token, so a refreshed token connects
-//!   again; upstream keeps the connection.
+//! - The target includes the token, so a refreshed token connects again;
+//!   upstream keeps the connection.
+//! - The token is redacted (see [`crate::redact`]) from a connection's
+//!   failures, as Codex's close reason may quote it, before a call gets one
+//!   or it is logged; upstream passes it on.
+//! - A closed session stays closed: a handshake under way is abandoned, and
+//!   a connection that comes up after is dropped before `response.create`
+//!   is sent. Upstream gives the closed session the new connection, which
+//!   nothing closes then.
+//! - Closing a session ends its call at once, with the failure if its
+//!   channel has room, else once it has read what the channel holds;
+//!   upstream's reader waits for room to hand the failure on.
 //! - Pings are answered by the WebSocket library as the reader reads, and a
 //!   message is sent in one write; upstream writes in 32 KiB pieces.
 //! - Closing a connection drops it without a close frame, as gorilla's
@@ -51,14 +67,13 @@ use futures_util::{SinkExt as _, StreamExt as _};
 use http::HeaderMap;
 use open_ferry_core::executor::CLOSE_ALL_EXECUTION_SESSIONS;
 use serde::Deserialize;
-use sha2::{Digest as _, Sha256};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{OwnedMutexGuard, mpsc, watch};
 use tokio::time::{Instant, timeout, timeout_at};
 use tokio_tungstenite::tungstenite::Message;
 
 use super::dial::{DialError, Dialed, WsStream};
-use super::errors::Failure;
+use super::errors::{self, Failure};
 
 /// How long a connection may go without a message
 /// (`codexResponsesWebsocketIdleTimeout`).
@@ -152,8 +167,9 @@ pub(super) struct Target {
     pub(super) auth_id: String,
     pub(super) url: String,
     pub(super) proxy: String,
-    /// A hash of the token, so that a new token connects again.
-    token: [u8; 32],
+    /// The token: a new one connects again, and the connection's failures
+    /// have it redacted.
+    token: String,
 }
 
 impl Target {
@@ -162,7 +178,7 @@ impl Target {
             auth_id: auth_id.trim().to_owned(),
             url: url.trim().to_owned(),
             proxy: proxy.trim().to_owned(),
-            token: Sha256::digest(token.as_bytes()).into(),
+            token: token.to_owned(),
         }
     }
 }
@@ -232,7 +248,9 @@ impl Conn {
         tokio::select! {
             biased;
             _ = closing.wait_for(|closing| *closing) => Err(Failure::closed()),
-            sent = sink.send(Message::text(text)) => sent.map_err(|error| Failure::from_ws(&error)),
+            sent = sink.send(Message::text(text)) => {
+                sent.map_err(|error| Failure::from_ws(&error).redacted(&self.target.token))
+            }
         }
     }
 
@@ -299,6 +317,8 @@ struct State {
     multi_agent: Option<u64>,
     active: Option<Active>,
     next_token: u64,
+    /// Set once the session is closed; it connects no more.
+    closed: bool,
 }
 
 /// A session (`codexWebsocketSession`).
@@ -309,6 +329,9 @@ pub(super) struct Session {
     /// Held by the call in progress (`reqMu`).
     requests: Arc<tokio::sync::Mutex<()>>,
     state: Mutex<State>,
+    /// Set once the session is closed, after its state says so, for a
+    /// handshake under way.
+    closed: watch::Sender<bool>,
 }
 
 impl Session {
@@ -318,6 +341,7 @@ impl Session {
             idle,
             requests: Arc::new(tokio::sync::Mutex::new(())),
             state: Mutex::new(State::default()),
+            closed: watch::Sender::new(false),
         }
     }
 
@@ -450,17 +474,26 @@ impl Session {
         }
     }
 
-    /// Lets the session's connection go and closes it
-    /// (`closeCodexWebsocketSession`).
+    /// Closes the session (`closeCodexWebsocketSession`): it connects no
+    /// more, its connection is let go and closed, and its call stops being
+    /// active. The call gets the failure if its channel has room; either
+    /// way the channel ends after what it holds.
     pub(super) fn close(&self, reason: &str) {
-        let detached = {
+        let (detached, active) = {
             let mut state = self.state();
+            state.closed = true;
             state.multi_agent = None;
-            state.conn.take()
+            (state.conn.take(), state.active.take())
         };
+        self.closed.send_replace(true);
         if let Some(detached) = detached {
             self.log_disconnected(&detached, reason, None);
             detached.close();
+        }
+        if let Some(active) = active {
+            let _ = active
+                .tx
+                .try_send(Read::new(active.conn, Err(Failure::closed())));
         }
     }
 
@@ -494,6 +527,10 @@ impl Session {
     /// there is none (`ensureUpstreamConn`). A connection for another
     /// target is closed first, and one already closed is let go. The
     /// handshake's headers come back for a new connection.
+    ///
+    /// A closed session fails. One that closes during the handshake
+    /// abandons it, and one that closed as it finished drops the new
+    /// connection.
     pub(super) async fn ensure_conn<F, Fut>(
         self: &Arc<Self>,
         target: Target,
@@ -506,6 +543,9 @@ impl Session {
         // detachMismatchedWebsocketSessionConn
         let stale = {
             let mut state = self.state();
+            if state.closed {
+                return Err(closed_session());
+            }
             if state
                 .conn
                 .as_ref()
@@ -532,11 +572,24 @@ impl Session {
             return Ok((conn, None));
         }
 
-        let Dialed { stream, headers } = dial().await?;
+        let mut closed = self.closed.subscribe();
+        let Dialed { stream, headers } = tokio::select! {
+            biased;
+            _ = closed.wait_for(|closed| *closed) => return Err(closed_session()),
+            dialed = dial() => dialed?,
+        };
         let (sink, stream) = stream.split();
         let conn = Arc::new(Conn::new(target, Some(sink)));
         {
             let mut state = self.state();
+            if state.closed {
+                // Closed as the handshake finished: the connection is
+                // dropped unused, and its socket with it.
+                drop(state);
+                drop(conn);
+                drop(stream);
+                return Err(closed_session());
+            }
             if let Some(previous) = state.conn.clone() {
                 // Another call connected meanwhile: keep its connection.
                 drop(state);
@@ -557,6 +610,12 @@ impl Session {
     }
 }
 
+/// The failure of a call whose session is closed, as for a connection
+/// closed on our side.
+fn closed_session() -> DialError {
+    DialError::Failed(errors::error(&Failure::closed()))
+}
+
 impl Drop for Session {
     fn drop(&mut self) {
         let state = self.state.get_mut().unwrap_or_else(PoisonError::into_inner);
@@ -568,8 +627,8 @@ impl Drop for Session {
 
 /// Hands a failure to the active call (`sendTerminalWebsocketRead`). When
 /// its channel is full, the connection is let go first (`invalidate`), then
-/// the failure waits for room or for the call to stop being active.
-/// Returns whether it let the connection go.
+/// the failure waits for room or for the call to stop being active, as it
+/// does when its session closes. Returns whether it let the connection go.
 pub(super) async fn send_terminal(
     tx: &mpsc::Sender<Read>,
     mut done: watch::Receiver<()>,
@@ -599,8 +658,9 @@ struct Typed<'a> {
 }
 
 /// Reads `conn` until it fails or is closed (`readUpstreamLoop`). Either
-/// way, the call active on it gets the failure, as gorilla's read fails
-/// once the connection is closed.
+/// way, the socket is dropped, then the call active on it gets the failure
+/// with the token redacted, as gorilla's read fails once the connection is
+/// closed.
 async fn read_loop(
     session: Weak<Session>,
     conn: Arc<Conn>,
@@ -665,6 +725,16 @@ async fn read_loop(
     // active on the connection from here on fails to send, and one active
     // before is found below.
     conn.close();
+    let failure = failure.redacted(&conn.target.token);
+    if peer_closed {
+        // Sends the reply to Codex's close.
+        let _ = timeout(CLOSE_REPLY_TIMEOUT, stream.next()).await;
+    }
+    // The socket goes before the failure is handed on, which may wait for
+    // the call to read.
+    let sink = conn.sink.lock().await.take();
+    drop(sink);
+    drop(stream);
     if let Some(session) = session.upgrade() {
         let mut invalidated = false;
         if let Some((token, tx, done)) = session.active_for(conn.id) {
@@ -680,13 +750,6 @@ async fn read_loop(
             session.invalidate(&conn, reason, Some(&failure));
         }
     }
-    if peer_closed {
-        // Sends the reply to Codex's close.
-        let _ = timeout(CLOSE_REPLY_TIMEOUT, stream.next()).await;
-    }
-    let sink = conn.sink.lock().await.take();
-    drop(sink);
-    drop(stream);
 }
 
 /// A call's hold on its session and connection: the session's request lock,

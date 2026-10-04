@@ -28,9 +28,11 @@
 //! - `prompt_cache_key` is only the one the client sent. Upstream makes one
 //!   up from the Claude Code prompt cache, a provider session, or a hash of
 //!   the client's API key, and sends it as `Session-Id` too.
-//! - A `header:` attribute can't set `User-Agent`, `Originator`, a session
-//!   ID or another client identity header, and one that names
-//!   `$CPA-SESSION-ID` is skipped; see [`crate::custom_headers`].
+//! - A `header:` attribute can't set `User-Agent`, `Originator`, a session,
+//!   conversation, thread or window ID (`Session_id`, `Conversation_id`,
+//!   `Thread-Id`, `X-Codex-Window-Id` and their variants) or another client
+//!   identity header, and one that names `$CPA-SESSION-ID` is skipped; see
+//!   [`crate::custom_headers`].
 //! - The config's `codex-header-defaults` user agent, models.json
 //!   `override_header`, cloaking and `Connection: Keep-Alive` aren't ported.
 //! - A payload that isn't a JSON object is translated as an empty object.
@@ -214,6 +216,25 @@ pub(crate) fn endpoint(auth: &Auth, default_base: &str, compact: bool) -> String
     } else {
         format!("{base}/responses")
     }
+}
+
+/// Go's `url.Parse` error for a URL with an ASCII control character, without
+/// the URL it quotes.
+pub(crate) const CONTROL_CHARACTER: &str = "net/url: invalid control character in URL";
+
+/// Fails as Go's `url.Parse` does for `url` with an ASCII control character
+/// (`stringContainsCTLByte`) before any `#`; Go takes the fragment off first
+/// and escapes what it holds. The error has Go's message without the URL,
+/// which may hold a secret, and no status, as Go's plain error has none.
+pub(crate) fn refuse_control_characters(url: &str) -> Result<(), ExecError> {
+    if url
+        .bytes()
+        .take_while(|&byte| byte != b'#')
+        .any(|byte| byte < 0x20 || byte == 0x7f)
+    {
+        return Err(ExecError::new(ErrorKind::Upstream, CONTROL_CHARACTER));
+    }
+    Ok(())
 }
 
 /// Whether the request is a Codex Responses Lite one, by its header or the
@@ -616,6 +637,31 @@ mod tests {
             endpoint(&auth, DEFAULT_BASE_URL, true),
             "http://127.0.0.1:9/v1/responses/compact"
         );
+    }
+
+    // Not upstream's: Go 1.26.4's url.Parse refuses an ASCII control
+    // character before any `#` (`parse "<url>": net/url: invalid control
+    // character in URL`), and escapes one in the fragment; the error here
+    // leaves the URL out.
+    #[test]
+    fn refuses_control_characters_before_the_fragment() {
+        for url in [
+            "http://127.0.0.1:9/v1\t/responses",
+            "\thttp://127.0.0.1:9/v1/responses",
+            "http://127.0.0.1:9/v1/responses\n",
+            "http://127.0.0.1:9/v1\x7f/responses",
+            "http://127.0.0.1:9/v1\x01/responses?q#fragment",
+        ] {
+            let error = refuse_control_characters(url).unwrap_err();
+            assert_eq!(error.message, CONTROL_CHARACTER, "{url:?}");
+            assert_eq!(error.http_status(), 0);
+        }
+        for url in [
+            "http://127.0.0.1:9/v1/responses?q=a%09b",
+            "http://127.0.0.1:9/v1#a\tb\x7f/responses",
+        ] {
+            assert!(refuse_control_characters(url).is_ok(), "{url:?}");
+        }
     }
 
     #[test]

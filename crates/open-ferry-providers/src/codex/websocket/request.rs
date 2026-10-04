@@ -42,6 +42,14 @@
 //! - No `Content-Type` or `Accept` is sent, as upstream sends none.
 //! - Payload config rules and the image generation tool aren't applied, as
 //!   for HTTP.
+//! - The URL is read as a WHATWG URL when connecting, so its `.` and `..`
+//!   segments are resolved, percent-encoded ones such as `%2e%2e` included,
+//!   and a `\` reads as `/`. Gorilla sends `/a/%2e%2e/v1/responses` as
+//!   written and a `\` as `%5C`. A URL with an ASCII control character
+//!   before any `#` (once trimmed), which the WHATWG parser would drop or
+//!   encode, fails before anything is sent, as Go's `url.Parse` does, with
+//!   its message (`net/url: invalid control character in URL`) but without
+//!   the URL, which may hold a secret.
 
 use http::header::{self, HeaderMap, HeaderName, HeaderValue};
 use open_ferry_core::auth::Auth;
@@ -57,7 +65,8 @@ use crate::codex::reasoning::sanitize_reasoning;
 use crate::codex::request::{
     Context, Kind, RESPONSES_LITE_HEADER, base_model, client_prompt_cache_key, credentials,
     endpoint, ensure_header, format_is, is_native, is_responses_lite, normalize_instructions,
-    parse_object, set_bool_if_different, set_string_if_different, uses_api_key,
+    parse_object, refuse_control_characters, set_bool_if_different, set_string_if_different,
+    uses_api_key,
 };
 use crate::codex::thinking;
 use crate::codex::tool_schema::normalize_tool_schemas;
@@ -185,6 +194,7 @@ pub(super) fn message(body: &Value) -> String {
 /// `http` becomes `ws` and `https` becomes `wss`.
 pub(super) fn websocket_url(http_url: &str) -> Result<String, ExecError> {
     let trimmed = http_url.trim();
+    refuse_control_characters(trimmed)?;
     let (scheme, rest) = split_scheme(trimmed);
     let ws_scheme = match scheme.to_ascii_lowercase().as_str() {
         "http" => "ws",

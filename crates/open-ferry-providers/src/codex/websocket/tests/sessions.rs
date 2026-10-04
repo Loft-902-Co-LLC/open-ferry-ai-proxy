@@ -233,6 +233,35 @@ async fn dropped_or_ephemeral_call_closes_its_connection() {
     assert!(ephemeral.conn().is_none());
 }
 
+// Not upstream's: a closed session connects no more, and a connection that
+// comes up as it closes is dropped unused, so nothing is left open for it.
+// Upstream gives the closed session the connection.
+#[tokio::test]
+async fn a_closed_session_keeps_no_connection() {
+    let server = Server::start(|_| Answer::accept(|peer| peer.hold())).await;
+    let store = Store::new();
+    let session = store.get_or_create("closing").unwrap();
+    let url = request::websocket_url(&server.url).unwrap();
+    let result = session
+        .ensure_conn(target("auth", &url, "direct"), || async {
+            let dialed = dial::dial("direct", &url, &HeaderMap::new()).await;
+            store.close("closing");
+            dialed
+        })
+        .await;
+    assert!(result.is_err(), "the closed session got a connection");
+    assert!(session.conn().is_none());
+    let record = server.wait_closed(1).await;
+    assert_eq!(record.handshakes.len(), 1);
+
+    let dials = AtomicUsize::new(0);
+    let result = session
+        .ensure_conn(target("auth", &url, "direct"), counted_dial(&dials))
+        .await;
+    assert!(result.is_err(), "the closed session got a connection");
+    assert_eq!(dials.load(Ordering::SeqCst), 0, "the closed session dialed");
+}
+
 /// A server that sends the index of each connection the client ends.
 async fn target_server() -> (Server, mpsc::UnboundedReceiver<usize>) {
     let (tx, rx) = mpsc::unbounded_channel();

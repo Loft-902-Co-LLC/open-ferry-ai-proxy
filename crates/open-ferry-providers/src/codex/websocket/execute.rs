@@ -13,9 +13,11 @@
 //!
 //! A failed handshake is the call's error: its status and body (the
 //! credential's secret redacted), with a usage limit's cooling as for
-//! HTTP. A 426 for a client not on a WebSocket goes over HTTP instead, as
-//! upstream does; the WebSocket route only takes WebSocket clients, so this
-//! only happens when the route is called directly.
+//! HTTP. Another failure to connect, such as a refused `CONNECT`, is the
+//! call's error too, also with the secret redacted. A 426 for a client not
+//! on a WebSocket goes over HTTP instead, as upstream does; the WebSocket
+//! route only takes WebSocket clients, so this only happens when the route
+//! is called directly.
 //!
 //! [`execute`] reads Codex's events to the completed response and
 //! translates it, as the HTTP call does.
@@ -25,6 +27,8 @@
 //!   as the first handshake does; upstream gives gorilla's `websocket: bad
 //!   handshake`.
 //! - A dropped call closes its connection; see [`super::session`].
+//! - A failure to connect has the credential's secret redacted from its
+//!   text, as a refused handshake's body has; upstream passes it on.
 
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -151,7 +155,7 @@ fn restores(prepared: &Prepared, session: &Session, conn: u64) -> bool {
 }
 
 /// The call's error for a failed connection: a handshake's status and body,
-/// or the failure itself.
+/// or the failure itself, with the credential's secret redacted either way.
 fn dial_error(error: DialError, secret: &str, model_level_cooling: bool) -> ExecError {
     match error {
         DialError::Handshake { status: 426, body } => {
@@ -162,7 +166,10 @@ fn dial_error(error: DialError, secret: &str, model_level_cooling: bool) -> Exec
             status_error_with_cooling(status, &redact::bytes(&body, secret), model_level_cooling)
                 .into()
         }
-        DialError::Failed(error) => error,
+        DialError::Failed(mut error) => {
+            error.message = redact::text(std::mem::take(&mut error.message), secret);
+            error
+        }
     }
 }
 

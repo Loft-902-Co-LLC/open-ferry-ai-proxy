@@ -12,13 +12,18 @@
 //! itself. A `Host` attribute sets the request's host, as upstream's does.
 //!
 //! Deviations from upstream:
-//! - A header that says which client is calling can't be set this way:
-//!   `User-Agent`, `X-App`, any `X-Stainless-*`, `Originator`, `Session_id`,
-//!   `Session-Id` and `X-Claude-Code-Session-Id`, in any case. Such an
-//!   attribute is dropped with a warning that names the header but not the
-//!   value, so these headers carry only what the client sent, or this
-//!   project's own user agent. Upstream sets whatever is configured, which
-//!   lets a credential pass for another client.
+//! - A header that says which client is calling, or which of its
+//!   sessions, conversations, threads, windows, agents or containers, can't
+//!   be set this way: `User-Agent`, `X-App`, any `X-Stainless-*`,
+//!   `Originator`, `Session_id`, `Session-Id`, `Conversation_id`,
+//!   `Conversation-Id`, `Thread-Id`, `Thread_id`, `X-Codex-Window-Id`,
+//!   `X-Claude-Code-Session-Id`, `X-Claude-Code-Agent-Id`,
+//!   `X-Claude-Code-Parent-Agent-Id`, `X-Claude-Remote-Session-Id` and
+//!   `X-Claude-Remote-Container-Id`, in any case. Such an attribute is
+//!   dropped with a warning that names the header but not the value, so
+//!   these headers carry only what the client sent, or this project's own
+//!   user agent. Upstream sets whatever is configured, which lets a
+//!   credential pass for another client or one of its sessions.
 //! - A value that names `$CPA-SESSION-ID` is skipped, since session IDs
 //!   aren't derived.
 //! - An attribute whose name or value isn't a valid HTTP header is skipped
@@ -32,14 +37,26 @@ use open_ferry_translate::go::to_upper;
 use crate::json::eq_fold;
 
 /// The client identity headers no attribute may set, lowercased as
-/// [`HeaderName`] keeps them. Any `x-stainless-*` header counts too.
-const IDENTITY_HEADERS: [&str; 6] = [
+/// [`HeaderName`] keeps them: the client, and the session, conversation,
+/// thread, window, agent or container IDs that upstream's executors pass on
+/// from Codex and Claude Code clients or make up. Any `x-stainless-*`
+/// header counts too.
+const IDENTITY_HEADERS: [&str; 15] = [
     "user-agent",
     "x-app",
     "originator",
     "session_id",
     "session-id",
+    "conversation_id",
+    "conversation-id",
+    "thread-id",
+    "thread_id",
+    "x-codex-window-id",
     "x-claude-code-session-id",
+    "x-claude-code-agent-id",
+    "x-claude-code-parent-agent-id",
+    "x-claude-remote-session-id",
+    "x-claude-remote-container-id",
 ];
 
 /// Whether `name` says which client is calling, so no attribute may set it.
@@ -153,6 +170,18 @@ mod tests {
             "X-Claude-Code-Session-Id",
             "x-claude-code-session-id",
             "X-CLAUDE-CODE-SESSION-ID",
+            "Conversation_id",
+            "CONVERSATION_ID",
+            "Conversation-Id",
+            "Thread-Id",
+            "thread_id",
+            "THREAD-ID",
+            "X-Codex-Window-Id",
+            "x-codex-window-id",
+            "X-Claude-Code-Agent-Id",
+            "X-Claude-Code-Parent-Agent-Id",
+            "X-Claude-Remote-Session-Id",
+            "X-CLAUDE-REMOTE-CONTAINER-ID",
         ] {
             let header = HeaderName::from_bytes(name.as_bytes()).unwrap();
             assert!(is_identity_header(&header), "{name}");
@@ -162,6 +191,8 @@ mod tests {
             "X-Stainless",
             "Session",
             "X-Session-Id",
+            "Conversation",
+            "X-Thread",
             "X-App-Version",
             "Anthropic-Beta",
             "Authorization",
@@ -189,6 +220,13 @@ mod tests {
                 ("header:Session_id", "synthetic-session"),
                 ("header:session-ID", "$X-Source"),
                 ("header:X-Claude-Code-Session-Id", "s1"),
+                ("header:Conversation_id", "invented-conversation"),
+                ("header:conversation-ID", "$X-Source"),
+                ("header:Thread-Id", "invented-thread"),
+                ("header:thread_id", "invented-thread"),
+                ("header:X-Codex-Window-Id", "invented-window"),
+                ("header:X-Claude-Code-Agent-Id", "invented-agent"),
+                ("header:X-Claude-Remote-Container-Id", "invented-container"),
                 ("header:X-Team", "blue"),
                 ("header:X-Forward", "$X-Source"),
                 ("header:X-Agent-Copy", "$User-Agent"),
@@ -204,6 +242,13 @@ mod tests {
             "session_id",
             "session-id",
             "x-claude-code-session-id",
+            "conversation_id",
+            "conversation-id",
+            "thread-id",
+            "thread_id",
+            "x-codex-window-id",
+            "x-claude-code-agent-id",
+            "x-claude-remote-container-id",
         ] {
             assert!(target.get(absent).is_none(), "{absent}");
         }

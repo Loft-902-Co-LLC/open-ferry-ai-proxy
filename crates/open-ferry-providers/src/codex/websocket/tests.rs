@@ -7,7 +7,8 @@
 //! The Responses WebSocket upstream against a mock Codex on 127.0.0.1 (see
 //! [`super::mock`]), ported from upstream's WebSocket tests where they test
 //! what is ported. The calls are in this file, the sessions in
-//! [`sessions`], and connecting in [`proxy`].
+//! [`sessions`], connecting in [`proxy`], and keeping the credential's
+//! secret out of failures in [`secrets`].
 //!
 //! Upstream's tests call its WebSocket executor, which takes any client;
 //! here [`CodexExecutor`] only takes the WebSocket route for a client on the
@@ -94,9 +95,11 @@ use crate::codex::CodexExecutor;
 use crate::codex::client::USER_AGENT;
 use crate::codex::replay_cache::ReplayCache;
 use crate::codex::replay_cache::tests::valid_encrypted_content;
+use crate::codex::request::CONTROL_CHARACTER;
 use crate::json::{exists, get, str_at};
 
 mod proxy;
+mod secrets;
 mod sessions;
 
 /// How long a test waits for a call.
@@ -862,6 +865,49 @@ fn headers_of_an_empty_api_key_leave_out_authorization_and_account() {
     assert_eq!(headers["user-agent"], USER_AGENT);
 }
 
+// Not upstream's: the credential's `header:` attributes can't give the
+// handshake a conversation, thread or window ID; upstream sends whatever
+// is configured. Other custom headers still go through.
+#[tokio::test]
+async fn custom_headers_cannot_set_a_conversation() {
+    let server = Server::once(&[COMPLETED]).await;
+    let auth = auth_with(
+        &server.url,
+        &[
+            ("header:Conversation_id", "invented-conversation"),
+            ("header:conversation-id", "invented-conversation"),
+            ("header:Thread-Id", "invented-thread"),
+            ("header:thread_id", "invented-thread"),
+            ("header:X-Codex-Window-Id", "invented-window"),
+            ("header:Session_id", "invented-session"),
+            ("header:X-Team", "blue"),
+        ],
+    );
+    let response = executor()
+        .execute_stream(
+            Arc::new(auth),
+            request("gpt-5-codex", HELLO),
+            ws_options(""),
+        )
+        .await
+        .unwrap();
+    let (_, error) = collect(response).await;
+    assert!(error.is_none(), "{error:?}");
+    let record = server.record();
+    let handshake = &record.handshakes[0];
+    for name in [
+        "conversation_id",
+        "conversation-id",
+        "thread-id",
+        "thread_id",
+        "x-codex-window-id",
+        "session_id",
+    ] {
+        assert!(handshake.header(name).is_none(), "{name} was sent");
+    }
+    assert_eq!(handshake.header("x-team"), Some("blue"));
+}
+
 // TestBuildCodexResponsesWebsocketURLRequiresHTTPURL
 #[test]
 fn websocket_url_needs_an_http_url() {
@@ -875,6 +921,69 @@ fn websocket_url_needs_an_http_url() {
     );
     assert!(request::websocket_url("ftp://example.com/responses").is_err());
     assert!(request::websocket_url("https:///responses").is_err());
+}
+
+// Not upstream's: as Go's url.Parse in buildCodexResponsesWebsocketURL
+// (Go 1.26.4), a URL with an ASCII control character fails before anything
+// is sent, here without quoting the URL. The URL is trimmed first, and one
+// in the fragment is escaped.
+#[tokio::test]
+async fn a_url_with_a_control_character_is_refused_unsent() {
+    for url in [
+        "http://127.0.0.1:9/v1\t/responses",
+        "http://127.0.0.1:9/v1\n/responses",
+        "http://127.0.0.1:9/v1\x7f/responses",
+    ] {
+        let error = request::websocket_url(url).unwrap_err();
+        assert_eq!(error.message, CONTROL_CHARACTER, "{url:?}");
+        assert_eq!(error.status, 0);
+    }
+    assert_eq!(
+        request::websocket_url("\thttp://127.0.0.1:9/v1/responses\n").unwrap(),
+        "ws://127.0.0.1:9/v1/responses"
+    );
+    assert!(request::websocket_url("http://127.0.0.1:9/v1#a\tb").is_ok());
+
+    let server = Server::once(&[COMPLETED]).await;
+    let error = refused(
+        within(
+            "the call",
+            executor().execute_stream(
+                Arc::new(auth(&format!("{}/v1\t", server.url))),
+                request("gpt-5-codex", HELLO),
+                ws_options(""),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(error.message, CONTROL_CHARACTER);
+    assert_eq!(error.status, 0);
+    assert!(server.record().handshakes.is_empty());
+}
+
+// Not upstream's: pins a deviation. Gorilla sends `/a/%2e%2e/v1/responses`
+// and `/a/../v1/responses` as written, and a `\` as `%5C` (Go 1.26.4); the
+// WHATWG parser resolves the dot segments and reads `\` as `/`.
+#[tokio::test]
+async fn dot_segments_are_resolved() {
+    for (base, path) in [
+        ("/a/%2e%2e/v1", "/v1/responses"),
+        ("/a/../v1", "/v1/responses"),
+        (r"/a\v1", "/a/v1/responses"),
+    ] {
+        let server = Server::once(&[COMPLETED]).await;
+        let response = executor()
+            .execute_stream(
+                Arc::new(auth(&format!("{}{base}", server.url))),
+                request("gpt-5-codex", HELLO),
+                ws_options(""),
+            )
+            .await
+            .unwrap();
+        let (_, error) = collect(response).await;
+        assert!(error.is_none(), "{error:?}");
+        assert_eq!(server.record().handshakes[0].path, path, "{base}");
+    }
 }
 
 // TestParseCodexWebsocketErrorMarksConnectionLimitRetryable
@@ -1495,6 +1604,97 @@ async fn closing_the_session_ends_its_call() {
     let next = within("the call to end", chunks.next()).await;
     assert!(matches!(next, Some(Err(_))), "{next:?}");
     server.wait_closed(1).await;
+}
+
+// Not upstream's: closing the session closes its connection at once while
+// its call's channel is full and the call reads nothing; the call's stream
+// then ends after what the channel held. Upstream's reader closes the
+// socket and waits for room.
+#[tokio::test]
+async fn closing_the_session_closes_a_backed_up_connection() {
+    let frames = vec![DELTA.to_owned(); 4100];
+    let server = Server::start(move |_| {
+        let frames = frames.clone();
+        Answer::accept(move |mut peer| {
+            let frames = frames.clone();
+            async move {
+                if peer.recv().await.is_some() {
+                    peer.send_all(&frames).await;
+                    peer.hold().await;
+                }
+            }
+        })
+    })
+    .await;
+    let executor = executor();
+    let response = executor
+        .execute_stream(
+            Arc::new(auth(&server.url)),
+            request("gpt-5-codex", HELLO),
+            ws_options("backed-up"),
+        )
+        .await
+        .unwrap();
+    let session = executor.websockets().get_or_create("backed-up").unwrap();
+    within("the call's channel to fill", async {
+        while !session
+            .conn()
+            .and_then(|conn| session.active_for(conn.id()))
+            .is_some_and(|(_, tx, _)| tx.capacity() == 0)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+
+    executor.close_execution_session("backed-up");
+    server.wait_closed(1).await;
+    let (chunks, error) = collect(response).await;
+    assert!(error.is_some(), "the stream ended without an error");
+    assert!(chunks.len() < 4100, "{} chunks", chunks.len());
+}
+
+// Not upstream's: closing the session during its handshake abandons it, so
+// the closed session gets no connection, nothing is sent and nothing is
+// left open. Upstream gives the closed session the connection and sends
+// `response.create` on it.
+#[tokio::test]
+async fn closing_the_session_abandons_its_handshake() {
+    let (gate, held) = watch::channel(false);
+    let server = Server::start(move |_| {
+        Answer::Held(held.clone(), Box::new(Answer::accept(|peer| peer.hold())))
+    })
+    .await;
+    let executor = Arc::new(executor());
+    let call = tokio::spawn({
+        let executor = Arc::clone(&executor);
+        let auth = Arc::new(auth(&server.url));
+        async move {
+            executor
+                .execute_stream(
+                    auth,
+                    request("gpt-5-codex", HELLO),
+                    ws_options("handshaking"),
+                )
+                .await
+        }
+    });
+    server
+        .wait_for("the handshake", |record| !record.handshakes.is_empty())
+        .await;
+
+    executor.close_execution_session("handshaking");
+    gate.send_replace(true);
+    let error = refused(within("the call", call).await.unwrap());
+    assert_eq!(error.message, Failure::closed().text());
+    let record = server.wait_closed(1).await;
+    assert!(record.messages.is_empty(), "{record:?}");
+    executor.close_execution_session(CLOSE_ALL_EXECUTION_SESSIONS);
+    assert_eq!(executor.websockets().len(), 0);
+    let record = server.record();
+    assert_eq!(record.handshakes.len(), 1);
+    assert_eq!(record.client_closed, 1);
+    assert!(record.messages.is_empty(), "{record:?}");
 }
 
 // Not upstream's: an error event, or a close from Codex, lets the

@@ -3,9 +3,9 @@
 //!
 //! The server asks its handler how to answer each connection (an
 //! [`Answer`]): refuse the handshake, write raw bytes, or accept and run a
-//! script with the [`Peer`]. It records each handshake, each text message
-//! read, and each accepted connection that the client ended while a script
-//! held it.
+//! script with the [`Peer`], at once or once a gate opens. It records each
+//! handshake, each text message read, and each connection that the client
+//! ended while a script held it or its handshake waited for the gate.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -50,7 +50,7 @@ pub(in crate::codex) struct Record {
     /// The text messages read, on any connection.
     pub(in crate::codex) messages: Vec<String>,
     /// How many connections the client ended while [`Peer::hold`] held
-    /// them.
+    /// them, or an [`Answer::Held`] held their handshake.
     pub(in crate::codex) client_closed: usize,
 }
 
@@ -71,6 +71,10 @@ pub(in crate::codex) enum Answer {
     /// Accepts, then runs the script; the connection is dropped (without a
     /// close frame, as gorilla's `Close` drops it) when the script ends.
     Accept(Script),
+    /// Holds the handshake until the gate opens (or is dropped), then
+    /// answers it with the answer given. A client that ends the connection
+    /// first is recorded as having closed it.
+    Held(watch::Receiver<bool>, Box<Answer>),
 }
 
 impl Answer {
@@ -299,6 +303,20 @@ async fn serve(mut tcp: TcpStream, answer: Answer, record: Arc<watch::Sender<Rec
         .map(|key| key.as_bytes().to_vec())
         .unwrap_or_default();
     record.send_modify(|record| record.handshakes.push(handshake.clone()));
+    let answer = match answer {
+        Answer::Held(mut gate, answer) => {
+            let mut byte = [0_u8; 1];
+            tokio::select! {
+                biased;
+                _ = tcp.read(&mut byte) => {
+                    record.send_modify(|record| record.client_closed += 1);
+                    return;
+                }
+                _ = gate.wait_for(|open| *open) => *answer,
+            }
+        }
+        answer => answer,
+    };
     match answer {
         Answer::Refuse {
             status,
@@ -341,6 +359,7 @@ async fn serve(mut tcp: TcpStream, answer: Answer, record: Arc<watch::Sender<Rec
             })
             .await;
         }
+        Answer::Held(..) => unreachable!("a held answer is answered above"),
     }
 }
 

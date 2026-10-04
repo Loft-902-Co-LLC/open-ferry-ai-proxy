@@ -15,7 +15,8 @@
 //!
 //! Deviations from upstream:
 //! - An error event's status above 65535 becomes 500.
-//! - The credential's secret is redacted from an error event's body; see
+//! - The credential's secret is redacted from an error event's body, a
+//!   close reason and the text of another connection failure; see
 //!   [`crate::redact`].
 //! - A message past the size limit ends the connection with `websocket: read
 //!   limit exceeded`; upstream sets no limit.
@@ -118,6 +119,22 @@ impl Failure {
             other => Self::Other {
                 message: format!("codex websockets executor: {other}"),
                 transient: false,
+            },
+        }
+    }
+
+    /// The failure with every copy of `secret` in its text redacted (see
+    /// [`crate::redact`]): Codex's close reason, or a network error, may
+    /// quote the token.
+    pub(super) fn redacted(self, secret: &str) -> Self {
+        match self {
+            Self::Close { code, reason } => Self::Close {
+                code,
+                reason: crate::redact::text(reason, secret),
+            },
+            Self::Other { message, transient } => Self::Other {
+                message: crate::redact::text(message, secret),
+                transient,
             },
         }
     }
