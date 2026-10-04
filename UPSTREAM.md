@@ -305,7 +305,7 @@ Deviations, each also noted in its module:
 | | `GET /v8/management/config.yaml` |
 | | `GET /v8/management/config/*path` |
 | `GET /v0/management/<setting>`: `debug`, `logging-to-file`, `proxy-url`, `quota-exceeded/switch-project`, `quota-exceeded/switch-preview-model`, `request-log`, `ws-auth`, `request-retry`, `max-retry-credentials`, `max-retry-interval`, `force-model-prefix`, `routing/strategy` | |
-| `GET /v0/management/<list>`: `api-keys`, `gemini-api-key`, `claude-api-key`, `codex-api-key`, `openai-compatibility`, `vertex-api-key`, `oauth-excluded-models`, `oauth-model-alias`, `oauth-request-scoped-errors` | |
+| `GET /v0/management/<list>`: `api-keys`, `gemini-api-key`, `interactions-api-key`, `claude-api-key`, `codex-api-key`, `xai-api-key`, `meta-api-key`, `openai-compatibility`, `vertex-api-key`, `oauth-excluded-models`, `oauth-model-alias`, `oauth-request-scoped-errors` | |
 | `GET /v0/management/latest-version` | `GET /v8/management/server/latest-version` |
 | `GET /v0/management/model-definitions/:channel` | `GET /v8/management/routing/model-definitions/:channel` |
 
@@ -327,7 +327,7 @@ Deviations, each also noted in its module:
 
 - **A v8 value Go's JSON encoder can't write is a 500 `{"error":"encode_failed"}`**: a mapping with a key that isn't a string, an infinite or NaN float, or a time in a zone a day or more from UTC. Upstream answers 200 with no body.
 
-- **`model-definitions` knows only the channels open-ferry serves**: `claude`, `gemini`, `gemini-interactions`, `vertex` and `codex`. Upstream's others (`aistudio`, `kimi`, `antigravity`, `xai`, `devin`, `meta` and their other spellings) answer 400 `unknown channel`. A model's `config`, the client headers upstream sends for it, isn't written.
+- **`model-definitions` knows only the channels open-ferry serves**: `claude`, `gemini`, `gemini-interactions` (the Gemini models, as upstream lists them), `vertex`, `codex`, `xai` (also `x-ai` and `grok`) and `meta` (also `muse`). Upstream's others (`aistudio`, `kimi` and its spellings `kimi-ai`, `kimi.ai` and `kimi.com`, `antigravity` and `devin`) answer 400 `unknown channel`. The `xai` list lacks the six image and video models upstream adds to it. A model's `config`, the client headers upstream sends for it, isn't written.
 
 - **`latest-version` asks for open-ferry's releases as `open-ferry/<version>`**, where upstream asks for CLIProxyAPI's as `CLIProxyAPI`. Without a proxy in `proxy-url` it goes direct, where upstream follows `HTTP_PROXY` and `HTTPS_PROXY`. Redirects aren't followed. The token comes from `GITHUB_TOKEN` or `github_token`, not `GITSTORE_GIT_TOKEN`. Errors are worded as Rust's HTTP client words them, and a release that doesn't decode gives a fixed message (or `EOF` for an empty body) where upstream gives Go's decoder's error. A release is answered as soon as its JSON value is complete, as upstream answers it, but one that comes in so many pieces that checking after each would parse more than 16 MiB is checked after that only where its brackets close; so a body that isn't JSON may be read on until it ends, the 16 MiB limit or the deadline, where Go's decoder stops at the first byte that can't be JSON.
 
@@ -336,8 +336,6 @@ Deviations, each also noted in its module:
 Until the parts above port them, their routes answer the empty 404, and so does every other management route. This covers, under `/v0/management` and their v8 names under `/v8/management`:
 
 - writing the config: `PUT config.yaml`, v8's `PUT` and `PATCH config` and `config/*path`, and the `PUT`, `PATCH` and `DELETE` routes of each setting, key list and OAuth list;
-
-- the `xai-`, `meta-` and `interactions-api-key` lists;
 
 - the logins of other providers: `kimi-auth-url`, `kimi-ai-auth-url`, `xai-auth-url`, `meta-auth-url`, `antigravity-auth-url` and `devin-auth-url`. v8's `oauth/auth-url` answers 404 `{"error":"provider_not_found"}` for these providers and for plugins, as upstream answers a provider it doesn't know, and the main server's `/antigravity/callback`, `/devin/callback` and `/callback` answer the server's `404 page not found`;
 
