@@ -21,7 +21,13 @@
 //! - Usage, the served model and the response log are the call's taps' work
 //!   (see the crate's `observe_send` module), not the reporter's.
 //! - A dropped stream stops at once; upstream checks its context.
+//! - Each line has the secrets the request sent redacted before it is read,
+//!   if they are of eight bytes or more, as every client error is (see
+//!   `Policy::Client` in the crate's `redact` module); a model can echo one
+//!   back in its output, which upstream passes on as it is. The call's taps
+//!   see each line as Meta sent it.
 
+use std::borrow::Cow;
 use std::collections::VecDeque;
 
 use bytes::Bytes;
@@ -125,9 +131,21 @@ impl State {
     /// chunks already queued.
     async fn step(&mut self) -> Result<(), ExecError> {
         match self.reader.next_line().await {
-            Some(Ok(line)) => self.line(line).await,
+            Some(Ok(line)) => {
+                let line = self.redact(line);
+                self.line(line).await
+            }
             Some(Err(error)) => self.end(Some(error)).await,
             None => self.end(None).await,
+        }
+    }
+
+    /// `line` without the secrets the request was sent with, as the client
+    /// gets it: a model can echo one back in its output.
+    fn redact(&self, line: Vec<u8>) -> Vec<u8> {
+        match self.secrets.bytes(&line, Policy::Client) {
+            Cow::Owned(redacted) => redacted,
+            Cow::Borrowed(_) => line,
         }
     }
 

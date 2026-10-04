@@ -46,6 +46,11 @@
 //!   sent (the token, the other headers, the URL's user info, the proxy's
 //!   password) has it redacted if it is of eight bytes or more, as every
 //!   client error is (see `Policy::Client` in the crate's `redact` module).
+//!   So has the rest of an answer: a call that wants one answer has the
+//!   stream it reads redacted whole before it is read, and a stream has
+//!   each line redacted before it is read. A model can echo a secret back in
+//!   its output, which upstream passes on as it is. The call's taps still
+//!   see the answer as Meta sent it.
 //! - Usage reporting, the served model and request logging are left to the
 //!   call's taps (see the crate's `observe_send` module), and payload rules
 //!   to [`crate::payload`]. The usage tap reads a Meta answer as Codex's
@@ -59,6 +64,7 @@
 //!   [`crate::codex`]), and one with an ASCII control character before any
 //!   `#` fails before anything is sent.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -232,6 +238,12 @@ impl MetaExecutor {
         let data = read_body(response, MAX_LINE)
             .await
             .map_err(|error| ExecError::new(ErrorKind::Upstream, error.to_string()))?;
+        // A model can echo a secret back in its output: the answer is
+        // redacted whole, before it is read, as for a client.
+        let data = match secrets.bytes(&data, Policy::Client) {
+            Cow::Owned(redacted) => redacted,
+            Cow::Borrowed(_) => data,
+        };
         let out = translate_completed(request, &mut prepared, &secrets, &data)?;
         Ok(Response {
             payload: Bytes::from(finish_payload(&prepared.response_format, out)),

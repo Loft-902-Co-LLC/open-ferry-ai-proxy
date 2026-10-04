@@ -1384,3 +1384,152 @@ async fn errors_hide_every_secret_sent() {
         }
     }
 }
+
+/// A dummy token that a mock echoes back to the client.
+const ECHOED: &str = "meta-echoed-token-0123456789";
+
+/// Meta's answers that quote the token, as a model that echoes it back in
+/// its output would: each with whether the client can see the quote in what
+/// a call that reads one answer gets, and in what a stream gets. They are a
+/// stream whose completed event quotes it, a stream with an event that does
+/// (which one answer doesn't show), a plain JSON answer, an error event, and
+/// a 200 JSON body with an `error` object, which isn't an answer at all: one
+/// answer fails with a 408 that quotes nothing, and a stream passes its line
+/// on as it is.
+fn echoing_replies() -> Vec<(&'static str, Reply, bool, bool)> {
+    let echo = format!("the token is {ECHOED}");
+    let plain = json!({
+        "id": "resp_1",
+        "object": "response",
+        "status": "completed",
+        "output": [{
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": echo}],
+        }],
+    });
+    let delta = json!({"type": "response.output_text.delta", "delta": echo});
+    let error = json!({"type": "error", "error": {"code": "bad", "message": echo}});
+    let body = json!({"error": {"type": "invalid_request_error", "message": echo}});
+    vec![
+        (
+            "a completed event",
+            Reply::sse(&ok_stream(&echo)),
+            true,
+            true,
+        ),
+        (
+            "an event of a stream",
+            Reply::sse(&format!("data: {delta}\n\n{}", ok_stream("done"))),
+            false,
+            true,
+        ),
+        (
+            "a plain answer",
+            Reply::json(&plain.to_string()),
+            true,
+            true,
+        ),
+        (
+            "an error event",
+            Reply::sse(&format!("data: {error}\n\n{}", ok_stream("never read"))),
+            true,
+            true,
+        ),
+        (
+            "an error object",
+            Reply::json(&body.to_string()),
+            false,
+            true,
+        ),
+    ]
+}
+
+// Not upstream's: an answer that quotes the token, as a model can echo it
+// back, reaches the client with it redacted: whole for a call that reads
+// one answer, and a line at a time for a stream.
+#[tokio::test]
+async fn a_successful_answer_that_echoes_the_token_hides_it() {
+    let payload = r#"{"model":"muse-spark-1.3","input":"hello"}"#;
+    for (name, reply, call_quotes, stream_quotes) in echoing_replies() {
+        let mock = Mock::start(reply).await;
+        let auth = key_auth(&mock.url, ECHOED);
+
+        let shown = match executor()
+            .execute(
+                Arc::clone(&auth),
+                request("muse-spark-1.3", payload),
+                options("openai-response"),
+            )
+            .await
+        {
+            Ok(response) => String::from_utf8_lossy(&response.payload).into_owned(),
+            Err(error) => error.message,
+        };
+        assert!(!shown.contains(ECHOED), "{name}: {shown}");
+        assert_eq!(
+            shown.contains(crate::redact::REDACTED),
+            call_quotes,
+            "{name}: {shown}"
+        );
+
+        let response = executor()
+            .execute_stream(
+                auth,
+                request("muse-spark-1.3", payload),
+                stream_options("openai-response"),
+            )
+            .await
+            .unwrap();
+        let (text, error) = collect(response).await;
+        let streamed = format!(
+            "{text}{}",
+            error.map(|error| error.message).unwrap_or_default()
+        );
+        assert!(!streamed.contains(ECHOED), "{name}: {streamed}");
+        assert_eq!(
+            streamed.contains(crate::redact::REDACTED),
+            stream_quotes,
+            "{name}: {streamed}"
+        );
+    }
+}
+
+// Not upstream's: the redaction is of what the client gets; the taps, which
+// write to disk with their own redaction, read Meta's answer as it came, for
+// a call that reads one answer and for a stream.
+#[tokio::test]
+async fn the_taps_see_the_answer_as_it_came() {
+    let mock = Mock::start(Reply::sse(&ok_stream(&format!("token {ECHOED}")))).await;
+    let payload = r#"{"model":"muse-spark-1.3","input":"hi"}"#;
+    for stream in [false, true] {
+        let (observation, raw) = crate::secret_echo::Raw::observe();
+        let options = Options {
+            observation: Some(observation),
+            ..options("openai-response")
+        };
+        let shown = if stream {
+            let response = executor()
+                .execute_stream(
+                    key_auth(&mock.url, ECHOED),
+                    request("muse-spark-1.3", payload),
+                    Options { stream, ..options },
+                )
+                .await
+                .unwrap();
+            collect(response).await.0
+        } else {
+            let response = executor()
+                .execute(
+                    key_auth(&mock.url, ECHOED),
+                    request("muse-spark-1.3", payload),
+                    options,
+                )
+                .await
+                .unwrap();
+            String::from_utf8_lossy(&response.payload).into_owned()
+        };
+        assert!(!shown.contains(ECHOED), "{shown}");
+        assert!(raw.seen().contains(ECHOED), "{}", raw.seen());
+    }
+}
