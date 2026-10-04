@@ -70,8 +70,8 @@ Upstream translators live at `internal/translator/<upstream>/<client-format>/`. 
 | `open-ferry-providers`: Codex clients and compatibility models | `internal/runtime/executor/helps/codex_multi_agent_v2.go`, `codex_executor_auth.go` (`resolveCodexModelIsCompat`), `sdk/cliproxy/auth/api_key_model_capabilities.go` | Ported (`codex::compat`): the Codex executor optimizes a Codex client's multi-agent v2 request and undoes the rename in what comes back, rewrites orphan delegation outputs, and for a `codex-api-key` model marked `is-compat` translates Claude requests in compatibility mode and rewrites agent messages; the Claude, OpenAI-compatible, Gemini and Vertex AI executors give a Codex client's tools integer types and rewrite its agent messages and orphan outputs before translating, and give the tools integer types again after translating a call or a stream, as upstream's payload pass does. Home's credential options and the rest of the payload pass are not ported |
 | `open-ferry-providers`: Claude | `internal/auth/claude`, `internal/runtime/executor/claude_executor*.go` | Ported (`claude`): the OAuth login, token refresh, and the executor for Messages and token counts, with rate-limit cooldowns. The Claude Code profile is not ported (see [below](#deliberately-not-ported)) |
 | `open-ferry-providers`: OpenAI-compatible | `internal/runtime/executor/openai_compat_executor.go`, `helps/openai_compat_max_tokens.go`, `helps/openai_compat_tool_results.go`, `helps/token_helpers.go`, `internal/thinking/provider/openai` | Ported (`openai_compat`): the executor for the config's `openai-compatibility` upstreams, for Chat Completions (and OpenAI Responses for compact), streaming, local token counts, `max_tokens` and tool result adjustments by model, prompt cache keys a client sends, thinking settings and suffixes, and upstream's stream and error checks. Not ported: the Images endpoints, payload rules and the `is-compat` flag |
-| `open-ferry-providers`: Gemini and Vertex AI | `internal/runtime/executor/gemini_executor.go`, `gemini_vertex_executor.go`, `helps/gemini_content_turns.go`, `helps/vertex_payload_helpers.go`, `helps/usage_helpers.go` (the SSE usage filter), `internal/thinking/provider/gemini`, `internal/auth/vertex/keyutil.go`, `internal/util/image.go` | Ported (`gemini`): the Gemini executor for `gemini-api-key` credentials and the Vertex AI executor for `vertex-api-key` credentials and service-account files, for `generateContent`, streaming and token counts, with thinking settings and suffixes, the output token cap, the image aspect ratio fix, thought signature sanitizing, empty user turns, and Imagen through `predict`. Service-account tokens come from an RS256 JWT-bearer exchange and are cached until shortly before they expire. Not ported: the Interactions API, AI Studio, the Gemini CLI login, Home, payload rules, usage reporting and request logging |
-| `open-ferry`: the binary | `cmd/server/main.go`, `sdk/cliproxy/service*.go`, `internal/cmd` (logins), the TLS half of `internal/api/server.go` | Ported: the flags, the Codex and Claude logins, and serving with background refresh, config and auth file reloads, graceful shutdown and TLS, with the management API beside the proxy's routes. Each OpenAI-compatible provider of the config gets credentials and an executor, which follow config reloads, and so do the config's Gemini and Vertex AI keys; Vertex AI service-account files in the auth directory are served too. Logs go to standard output only, and nothing looks up the public IP |
+| `open-ferry-providers`: Gemini and Vertex AI | `internal/runtime/executor/gemini_executor.go`, `gemini_vertex_executor.go`, `helps/gemini_content_turns.go`, `helps/vertex_payload_helpers.go`, `helps/usage_helpers.go` (the SSE usage filter), `internal/thinking/provider/gemini`, `internal/auth/vertex/keyutil.go`, `internal/util/image.go` | Ported (`gemini`): the Gemini executor for `gemini-api-key` credentials and the Vertex AI executor for `vertex-api-key` credentials and service-account files, for `generateContent`, streaming and token counts, with thinking settings and suffixes, the output token cap, the image aspect ratio fix, thought signature sanitizing, empty user turns, and Imagen through `predict`. Service-account tokens come from an RS256 JWT-bearer exchange and are cached until shortly before they expire. Not ported: the Interactions API, AI Studio, the Gemini CLI login and Home; payload rules, usage reporting and request logging are under [Observability](#observability) |
+| `open-ferry`: the binary | `cmd/server/main.go`, `sdk/cliproxy/service*.go`, `internal/cmd` (logins), the TLS half of `internal/api/server.go` | Ported: the flags, the Codex and Claude logins, and serving with background refresh, config and auth file reloads, graceful shutdown and TLS, with the management API beside the proxy's routes. Each OpenAI-compatible provider of the config gets credentials and an executor, which follow config reloads, and so do the config's Gemini and Vertex AI keys; Vertex AI service-account files in the auth directory are served too. Logs go to standard output only (see [Observability](#observability)), and nothing looks up the public IP |
 | `open-ferry-management`: access | `internal/api/server_management.go`, `server_management_v8.go`, `internal/api/handlers/management/handler.go`, and gin's `ClientIP` as `internal/api/server.go` sets it up | Ported (`access`, `client_ip`, `state`): the API answers only while `remote-management.secret-key` or `MANAGEMENT_PASSWORD` is set, following config reloads; the key from `Authorization` (bearer or bare) or `X-Management-Key`, plain or bcrypt, compared in constant time; only 127.0.0.1 and ::1 count as local unless `allow-remote` is on, with `trusted-proxies` deciding whose forwarding headers count; five failures ban an address for thirty minutes; and the `X-CPA-*` headers. The local management password, Home mode and the plugin header are not ported |
 | `open-ferry-management`: `auth-files` | `internal/api/handlers/management/auth_files*.go` | Ported (`auth_files`, `credential_files`, `credential_state`): `GET auth-files` and `GET auth-files/models` (v8: `credentials`, `credentials/models`), with the `name` and `auth_index` filters, paging, states, cooldowns, call counts and recent requests (see [Listing, API calls and quota](#listing-api-calls-and-quota)); upload, download and delete (see [Credential files](#credential-files)); and status, fields and refresh (see [Credential state](#credential-state)). The listing from disk when there is no credential manager is not ported: this port always has one |
 | `open-ferry-management`: `api-call` | `internal/api/handlers/management/api_tools.go`, `sdk/proxyutil/proxy.go` | Ported (`api_call`, `proxy`, and the parts of Go's HTTP client the result depends on): `POST api-call` (v8: `requests/api-call`), with `$TOKEN$` substitution, the proxy choice and Go's redirect rules. Token refresh for Antigravity, Meta and xAI credentials is not ported |
@@ -299,7 +299,7 @@ All take the management key. The v8 config reads follow v8.0.11's, which show a 
 
 Deviations, each also noted in its module:
 
-- **`GET config` writes only the sections open-ferry types.** Plugins, pprof, the providers open-ferry doesn't serve, the request-log and usage settings, `payload` and the client impersonation settings are left out. An empty list is written as `null`, so `api-keys` gives `null` where the file has `[]`; upstream gives `[]`.
+- **`GET config` writes only the sections open-ferry types.** Plugins, pprof, the providers open-ferry doesn't serve and the client impersonation settings are left out. An empty list is written as `null`, so `api-keys` gives `null` where the file has `[]`; upstream gives `[]`.
 
 - **`config.yaml` sends the file as it is**, under both names; upstream's v8 route sends it migrated to the v8 layout. So it shows the management key as the file holds it.
 
@@ -323,17 +323,60 @@ Until the parts above port them, their routes answer the empty 404, and so does 
 
 - writing the config: `PUT config.yaml`, v8's `PUT` and `PATCH config` and `config/*path`, and the `PUT`, `PATCH` and `DELETE` routes of each setting, key list and OAuth list;
 
-- the settings that come with request logging and usage statistics (`usage-statistics-enabled`, `logs-max-total-size-mb`, `error-logs-max-files`), and the `xai-`, `meta-` and `interactions-api-key` lists;
+- the `xai-`, `meta-` and `interactions-api-key` lists;
 
 - the logins of other providers: `kimi-auth-url`, `kimi-ai-auth-url`, `xai-auth-url`, `meta-auth-url`, `antigravity-auth-url` and `devin-auth-url`. v8's `oauth/auth-url` answers 404 `{"error":"provider_not_found"}` for these providers and for plugins, as upstream answers a provider it doesn't know, and the main server's `/antigravity/callback`, `/devin/callback` and `/callback` answer the server's `404 page not found`;
 
-- logs and usage: `logs`, `request-error-logs`, `request-log-by-id`, `api-key-usage`, `usage-queue`;
-
-- quota: `quota/providers`, `quota/fetch`, `quota/reset`;
+- quota: `quota/providers` and `quota/reset`;
 
 - the plugins and plugin store.
 
-Nor are the management control panel (`/management.html`), the local management password, Home mode or the plugin host's management routes.
+Nor are the management control panel (`/management.html`), the local management password, Home mode or the plugin host's management routes. The routes for logs, request logs, usage, `quota/fetch` and the reads of the logging and usage settings come with [Observability](#observability).
+
+## Observability
+
+Upstream's request logs, log files, usage statistics, payload rules and saved cooldowns are ported in parts, each in a subsection below. Until a part is ported, its settings are read and kept, and its management routes answer the empty 404.
+
+### The foundation
+
+What the parts share is in place:
+
+- **A context for each request.** The server's outermost layer gives every request a `RequestContext` (`open_ferry_core::observe`): a version 7 UUID as its ID, when it started, its method and route, the connection's address and the client's address resolved through `trusted-proxies`, `X-Forwarded-For`, the client's `User-Agent`, the client key once it is checked, and the credential the manager picks. The access line is logged from it.
+- **Taps on the upstream traffic.** Each call carries an `Observation`: the context, and the taps the request log and the usage statistics give for it, none while both are off. The Claude, Codex (HTTP and WebSocket), Gemini, Vertex AI and OpenAI-compatible executors and the Codex Alpha Search pass-through tell the taps each attempt's request once its credential's headers are set, the answer's head, and each body chunk or message as it is read. The manager tells them how each executor call ended, and hands the credential errors it records to an error-event hook. Without taps each step costs a branch, and a tap never holds up a send or a stream.
+- **The payload hook.** Each executor calls `open_ferry_providers::payload::apply` where upstream applies the config's payload rules, beside the Codex clients' integer pass upstream runs first in it.
+- **The settings.** `commercial-mode`, `logs-max-total-size-mb`, `error-logs-max-files`, `usage-statistics-enabled`, `redis-usage-queue-retention-seconds`, `save-cooldown-status` and `payload` are read with upstream's defaults and limits, shown by `GET config`, and handed to each part at start and on every reload. The config file is never written.
+- **The log directory** is resolved as upstream resolves it: `WRITABLE_PATH` or `writable_path`, else beside the config.
+
+Deviations, each also noted in its module:
+
+- **One shared context.** The request's metadata is one `RequestContext` behind an `Arc`, made for every request, where upstream keeps context values and gin keys. It holds no session ID: the usage statistics read only a session header the client sent, and never derive one.
+- **Every executor names itself** to the payload rules and the taps, where upstream names only the Codex ones.
+- **A Codex WebSocket send is told once, before the connection is made**, as a `GET` of its URL with the `response.create` message as its body and no answer head, then each message read. A send tried again on a new connection isn't told again; upstream records each, as `WEBSOCKET`.
+- **The parts are first configured after the credentials load**, so lines logged before that go to standard output, and on a reload the config's changes are logged after the reload's own lines.
+
+### Request logs
+
+Not ported yet: the request log and the error logs (`request-log`, `error-logs-max-files`), with the attempts the taps see, the `X-CPA-TRACE-ID` header, the `commercial-mode` check, and the routes `request-error-logs`, `request-error-logs/:name` and `request-log-by-id/:id`.
+
+### Log files and config changes
+
+Not ported yet: `main.log` with `logging-to-file` and its rotation, the log directory's size limit (`logs-max-total-size-mb`), upstream's log line and access line formats, the routes `GET` and `DELETE logs` and the reads of `usage-statistics-enabled`, `logs-max-total-size-mb` and `error-logs-max-files`, and the config changes logged on reload.
+
+### Usage statistics
+
+Not ported yet: the usage records (`usage-statistics-enabled`) with time to first token, the usage queue (`redis-usage-queue-retention-seconds`) and the error events, and the routes `usage-queue` and `api-key-usage`. Upstream's own in-memory statistics were removed upstream ([#3200](https://github.com/router-for-me/CLIProxyAPI/issues/3200), below).
+
+### Payload rules
+
+Not ported yet: the config's `payload` rules (`default`, `default-raw`, `override`, `override-raw` and `filter`). The executors call the hook, which changes nothing.
+
+### Saved cooldowns and quota fetches
+
+Not ported yet: saving the credentials' cooldowns to `.cds` files in the auth directory and restoring them at start (`save-cooldown-status`), and `quota/fetch` with a credential's declarative quota probe.
+
+### The usage queue over RESP
+
+Not ported yet: upstream's Redis protocol on the server's port, for reading the usage queue.
 
 ## Other ported code
 
