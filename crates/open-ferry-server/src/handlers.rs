@@ -9,6 +9,7 @@ pub(crate) mod claude;
 pub(crate) mod codex_client;
 pub(crate) mod gemini;
 pub(crate) mod health;
+pub(crate) mod interactions;
 pub(crate) mod models;
 pub(crate) mod openai;
 pub(crate) mod responses;

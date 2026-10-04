@@ -23,7 +23,7 @@ use tower_http::catch_panic::CatchPanicLayer;
 use crate::auth::require_key;
 use crate::errors::{JSON_UTF8, error_response};
 use crate::handlers::{
-    alpha_search, claude, gemini, health, models, openai, responses, responses_ws,
+    alpha_search, claude, gemini, health, interactions, models, openai, responses, responses_ws,
 };
 use crate::state::AppState;
 use crate::{access_log, request_context, request_log};
@@ -94,6 +94,10 @@ pub fn router_with(state: AppState, extra: Router) -> Router {
         // A catch-all doesn't match an empty action, which gin's does.
         .route("/v1beta/models/", gemini_action_routes())
         .route("/v1beta/models/{*action}", gemini_action_routes())
+        .route(
+            "/v1beta/interactions",
+            post(interactions::interactions.layer(auth.clone())),
+        )
         .method_not_allowed_fallback(not_found)
         .with_state(state.clone())
         .merge(extra)

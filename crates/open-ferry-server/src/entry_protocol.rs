@@ -262,6 +262,7 @@ mod tests {
             ),
             ("/v1beta/models/m:generateContent", r#"{"contents":[]}"#),
             ("/v1beta/models/m:countTokens", r#"{"contents":[]}"#),
+            ("/v1beta/interactions", r#"{"model":"m","input":"hi"}"#),
         ];
         let dispatcher = FakeDispatcher::new(routes.iter().map(|_| Outcome::reply("{}")));
         let config = ServerConfig {
@@ -293,6 +294,10 @@ mod tests {
             ("claude".into(), kept()),
             ("gemini".into(), kept()),
             ("gemini".into(), kept()),
+            (
+                "interactions".into(),
+                vec!["gemini-interactions".to_owned(), "gemini".to_owned()],
+            ),
         ];
         assert_eq!(got, want);
     }

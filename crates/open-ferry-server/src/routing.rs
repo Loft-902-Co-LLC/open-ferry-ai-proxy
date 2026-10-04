@@ -93,7 +93,7 @@ pub(crate) fn parse_suffix(model: &str) -> (&str, Option<&str>) {
 }
 
 /// Turns away models only the image endpoints serve.
-fn check_image_only(model: &str) -> Result<(), ErrorMessage> {
+pub(crate) fn check_image_only(model: &str) -> Result<(), ErrorMessage> {
     let mut base = parse_suffix(model).0.trim();
     if base.is_empty() {
         base = model.trim();
