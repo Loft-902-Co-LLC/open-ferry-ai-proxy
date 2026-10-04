@@ -47,10 +47,10 @@ use crate::json::{get, str_at, str_of};
 pub(crate) const TURN_TYPE: &str = "cpa_codex_replay_turn";
 
 /// How long an entry lives after it was last written or read.
-const TTL: Duration = Duration::from_secs(60 * 60);
+pub(super) const TTL: Duration = Duration::from_secs(60 * 60);
 
 /// The most entries the cache keeps.
-const MAX_ENTRIES: usize = 10240;
+pub(super) const MAX_ENTRIES: usize = 10240;
 
 /// The most turns an entry keeps.
 const MAX_TURNS_PER_ENTRY: usize = 256;
@@ -60,10 +60,10 @@ const MAX_BYTES_PER_ENTRY: usize = 16 << 20;
 
 /// How many entries are evicted at once when the cache is full, so a busy
 /// cache doesn't rescan its entries on every write.
-const EVICT_BATCH: usize = 128;
+pub(super) const EVICT_BATCH: usize = 128;
 
 /// How often expired entries are purged (upstream's `CacheCleanupInterval`).
-const PURGE_INTERVAL: Duration = Duration::from_secs(10 * 60);
+pub(super) const PURGE_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
 /// A stored item: its compact JSON, as upstream keeps bytes, and the ID of
 /// the turn it starts if it is a marker.
@@ -79,7 +79,7 @@ struct Entry {
 }
 
 /// A hash of the model and session an entry is for.
-type Key = [u8; 32];
+pub(super) type Key = [u8; 32];
 
 #[derive(Default)]
 struct State {
@@ -235,7 +235,7 @@ impl State {
     }
 }
 
-fn expired(used: Instant, now: Instant) -> bool {
+pub(super) fn expired(used: Instant, now: Instant) -> bool {
     now.saturating_duration_since(used) > TTL
 }
 
@@ -252,7 +252,7 @@ fn cache_key(model: &str, session: &str) -> Option<Key> {
 
 /// A SHA-256 hash of `parts`, each led by its length, so that no two lists
 /// of parts hash alike whatever they hold.
-fn hash_parts(parts: &[&str]) -> Key {
+pub(super) fn hash_parts(parts: &[&str]) -> Key {
     let mut hash = Sha256::new();
     for part in parts {
         hash.update((part.len() as u64).to_be_bytes());

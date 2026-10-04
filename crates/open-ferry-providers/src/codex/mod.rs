@@ -46,7 +46,7 @@ mod input_ids;
 pub mod jwt;
 pub mod oauth;
 pub(crate) mod reasoning;
-mod replay;
+pub(crate) mod replay;
 mod replay_cache;
 pub(crate) mod request;
 pub(crate) mod stream;
@@ -57,6 +57,7 @@ pub(crate) mod tokens;
 pub(crate) mod tool_schema;
 pub(crate) mod usage;
 mod websocket;
+pub(crate) mod xai_replay_cache;
 
 pub use client::USER_AGENT;
 pub use executor::CodexExecutor;

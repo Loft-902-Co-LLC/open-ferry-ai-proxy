@@ -154,7 +154,7 @@ fn input_items(body: &Value) -> &[Value] {
 }
 
 /// `codexReasoningReplaySessionKey`, without the API key fallback.
-fn session_key(request: &Request, options: &Options, body: &Value) -> String {
+pub(crate) fn session_key(request: &Request, options: &Options, body: &Value) -> String {
     if format_is(&options.source_format, &Format::CLAUDE)
         && let Some(scope) =
             claude_code_session::execution_scope(&request.payload, &options.headers)
@@ -517,7 +517,11 @@ fn filter_items_for_input<'a>(input: &[Value], items: &[&'a Value]) -> Vec<&'a V
 
 /// Whether a saved tool call is new to the input and has its result there,
 /// noting it as there if so.
-fn keep_tool_call(item: &Value, calls: &mut HashSet<String>, outputs: &HashSet<String>) -> bool {
+pub(crate) fn keep_tool_call(
+    item: &Value,
+    calls: &mut HashSet<String>,
+    outputs: &HashSet<String>,
+) -> bool {
     let keys = tool_call_keys(item);
     if keys.is_empty() || keys.iter().any(|key| calls.contains(key)) {
         return false;
@@ -536,7 +540,7 @@ fn keep_tool_call(item: &Value, calls: &mut HashSet<String>, outputs: &HashSet<S
 /// first tool result that has no call ID or one of theirs, else before the
 /// last assistant message, else before the first item that isn't a system
 /// or developer message, else at the end.
-fn insert_index(input: &[Value], items: &[&Value]) -> usize {
+pub(crate) fn insert_index(input: &[Value], items: &[&Value]) -> usize {
     let call_ids: HashSet<String> = items
         .iter()
         .filter(|item| is_tool_call(item))
@@ -571,7 +575,7 @@ fn insert_index(input: &[Value], items: &[&Value]) -> usize {
 /// The items to insert, with each tool call's ID changed to the one its
 /// result has in the input, which may be the shortened ID a Claude client
 /// sees (`codexAlignReasoningReplayToolCallIDs`).
-fn align_call_ids(input: &[Value], items: &[&Value]) -> Vec<Value> {
+pub(crate) fn align_call_ids(input: &[Value], items: &[&Value]) -> Vec<Value> {
     let mut outputs: HashMap<String, String> = HashMap::new();
     for item in input {
         if !matches!(
@@ -611,7 +615,7 @@ fn align_call_ids(input: &[Value], items: &[&Value]) -> Vec<Value> {
         .collect()
 }
 
-fn is_tool_call(item: &Value) -> bool {
+pub(crate) fn is_tool_call(item: &Value) -> bool {
     matches!(
         str_at(item, "type").trim(),
         "function_call" | "custom_tool_call"
@@ -619,7 +623,7 @@ fn is_tool_call(item: &Value) -> bool {
 }
 
 /// The role of a message, in lowercase (`codexReplayMessageRole`).
-fn message_role(item: &Value) -> Option<String> {
+pub(crate) fn message_role(item: &Value) -> Option<String> {
     let kind = trimmed(item, "type");
     let role = to_lower(str_at(item, "role").trim());
     if role.is_empty() || (!kind.is_empty() && kind != "message") {
@@ -630,7 +634,7 @@ fn message_role(item: &Value) -> Option<String> {
 
 /// `type:call ID` for each form of a tool call's ID
 /// (`codexReplayToolCallKeys`).
-fn tool_call_keys(item: &Value) -> Vec<String> {
+pub(crate) fn tool_call_keys(item: &Value) -> Vec<String> {
     let kind = trimmed(item, "type");
     if kind != "function_call" && kind != "custom_tool_call" {
         return Vec::new();
@@ -644,7 +648,7 @@ fn tool_call_keys(item: &Value) -> Vec<String> {
 /// A call ID, and the ID a Claude client sees for it if that differs
 /// (`codexReplayComparableCallIDs`): the response translators make it a
 /// valid `tool_use` ID and shorten it to 64 bytes.
-fn comparable_call_ids(call_id: &str) -> Vec<String> {
+pub(crate) fn comparable_call_ids(call_id: &str) -> Vec<String> {
     let call_id = call_id.trim();
     if call_id.is_empty() {
         return Vec::new();
@@ -804,7 +808,7 @@ fn save(scope: &Scope, completed: &Value) {
 }
 
 /// gjson's `String()` at `path`, trimmed.
-fn trimmed(value: &Value, path: &str) -> String {
+pub(crate) fn trimmed(value: &Value, path: &str) -> String {
     str_at(value, path).trim().to_owned()
 }
 
