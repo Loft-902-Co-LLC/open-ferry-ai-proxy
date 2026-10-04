@@ -3,10 +3,16 @@
 //! ported in `crate::latest_version`; these ask a local server standing in
 //! for GitHub, never GitHub.
 
+use std::time::{Duration, Instant};
+
 use http::{Method, StatusCode};
 use open_ferry_core::config::Config;
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpListener;
 
-use super::{Answer, Api, LOCAL, Upstream, http_response, keyed_config, request_from};
+use super::{
+    Answer, Api, LOCAL, Upstream, http_response, keyed_config, read_request, request_from,
+};
 
 /// The API with `config`, asking `url` for the latest release.
 fn asking(config: Config, url: &str) -> Api {
@@ -60,6 +66,43 @@ async fn the_latest_version_is_the_release_tag() {
     answer.assert(StatusCode::OK, r#"{"latest-version":"Release 9"}"#);
     let (answer, _) = latest(release(r#"{"name":"only-name","extra":[1]}"#)).await;
     answer.assert(StatusCode::OK, r#"{"latest-version":"only-name"}"#);
+}
+
+/// Not upstream's: the release is read as Go's `json.Decoder.Decode`
+/// reads it, so the answer comes as soon as its JSON value is complete,
+/// however long the server holds the connection, and whatever follows the
+/// value is ignored.
+#[tokio::test]
+async fn the_release_is_read_up_to_its_value() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/latest", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_request(&mut stream).await;
+        let head = "HTTP/1.1 200 OK
+Content-Type: application/json
+Content-Length: 100000
+
+";
+        stream.write_all(head.as_bytes()).await.unwrap();
+        stream
+            .write_all(b" {\"tag_name\":\"v7\"} not json")
+            .await
+            .unwrap();
+        let _held = stream;
+        std::future::pending::<()>().await;
+    });
+    let started = Instant::now();
+    let answer = asking(keyed_config(), &url)
+        .get("/v0/management/latest-version")
+        .await;
+    let took = started.elapsed();
+    server.abort();
+    answer.assert(StatusCode::OK, r#"{"latest-version":"v7"}"#);
+    assert!(took < Duration::from_secs(3), "{took:?}");
+
+    let (answer, _) = latest(release(r#"{"tag_name":"v8"}{"tag_name":"v9"} x"#)).await;
+    answer.assert(StatusCode::OK, r#"{"latest-version":"v8"}"#);
 }
 
 /// Not upstream's: a release without a version, an answer that isn't a

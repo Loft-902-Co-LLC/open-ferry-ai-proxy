@@ -10,11 +10,13 @@
 //! GitHub's API is asked for the latest release, through the config's
 //! `proxy-url` when it names a proxy, with a 10 second limit on the whole
 //! exchange. The answer is `{"latest-version":<tag>}`, or the release's
-//! name when its tag is empty. A token from `GITHUB_TOKEN` or
-//! `github_token` is sent as a bearer token. Failures are answered with a
-//! 502 naming what went wrong: `request_failed`, `unexpected_status`
-//! (with the start of GitHub's answer), `decode_failed` or
-//! `invalid_response`.
+//! name when its tag is empty. The release is read as Go's
+//! `json.Decoder.Decode` reads it: the answer is given as soon as its JSON
+//! value is complete, and whatever follows is ignored. A token from
+//! `GITHUB_TOKEN` or `github_token` is sent as a bearer token. Failures are
+//! answered with a 502 naming what went wrong: `request_failed`,
+//! `unexpected_status` (with the start of GitHub's answer), `decode_failed`
+//! or `invalid_response`.
 //!
 //! Deviations from upstream:
 //! - It asks for open-ferry's releases, as `open-ferry/<version>`, where
@@ -28,6 +30,11 @@
 //!   a release that doesn't decode is `decode_failed` with `EOF` when the
 //!   body is empty and a fixed message otherwise, where upstream gives
 //!   Go's decoder's error. At most 16 MiB of a release is read.
+//! - A release that comes in so many pieces that checking after each
+//!   would parse more than 16 MiB is checked after that only where its
+//!   brackets close. So a body that isn't JSON may be read on until it
+//!   ends, the limit or the deadline, where Go's decoder stops at the first
+//!   byte that can't be JSON.
 
 use std::time::Duration;
 
@@ -37,7 +44,7 @@ use axum::routing::get;
 use http::header::{ACCEPT, AUTHORIZATION, USER_AGENT};
 use http::{HeaderMap, HeaderValue, Method, StatusCode};
 use open_ferry_translate::go::trim_space;
-use serde::de::MapAccess;
+use serde::de::{IgnoredAny, MapAccess};
 use tokio::time::{Instant, timeout_at};
 
 use crate::Route;
@@ -126,7 +133,7 @@ async fn latest_version(State(state): State<ManagementState>) -> Response {
         message.extend_from_slice(trim_space(&body));
         return failure(StatusCode::BAD_GATEWAY, "unexpected_status", message);
     }
-    let body = read_body(&mut response, MAX_RESPONSE_BODY, deadline).await;
+    let body = read_release(&mut response, deadline).await;
     let Some(info) = bind::decode::<ReleaseInfo>(&body) else {
         let message = if body
             .iter()
@@ -212,6 +219,105 @@ async fn read_body(response: &mut reqwest::Response, limit: usize, deadline: Ins
     body
 }
 
+/// The body until its first JSON value is complete or can't be one, as
+/// Go's `json.Decoder.Decode` reads it; else as much of it as arrives, up
+/// to [`MAX_RESPONSE_BODY`] bytes, before `deadline`, an error or its end.
+/// Anything read after the value is left for [`bind::decode`] to ignore.
+async fn read_release(response: &mut reqwest::Response, deadline: Instant) -> Vec<u8> {
+    let mut release = Release::default();
+    while release.body.len() < MAX_RESPONSE_BODY {
+        let Ok(Ok(Some(chunk))) = timeout_at(deadline, response.chunk()).await else {
+            break;
+        };
+        if release.push(&chunk) {
+            break;
+        }
+    }
+    release.body
+}
+
+/// How much parsing a [`Release`] may spend checking whether its body is
+/// complete after each chunk.
+const CHECK_BUDGET: usize = MAX_RESPONSE_BODY;
+
+/// A release's body as it arrives.
+#[derive(Default)]
+struct Release {
+    body: Vec<u8>,
+    /// Bytes parsed so far by checks after a chunk.
+    checked: usize,
+    /// Open objects and arrays outside strings.
+    depth: usize,
+    /// Whether the bytes so far end inside a string.
+    in_string: bool,
+    /// Whether they end after a `\` in a string.
+    escaped: bool,
+}
+
+impl Release {
+    /// Adds `chunk`, up to [`MAX_RESPONSE_BODY`] bytes in all; true once
+    /// the first JSON value is complete or can't be one. Each check parses
+    /// the body from its start, so once they have parsed
+    /// [`CHECK_BUDGET`] bytes, the body is checked only where its
+    /// brackets close, as a release's do once, at its end.
+    fn push(&mut self, chunk: &[u8]) -> bool {
+        let room = MAX_RESPONSE_BODY - self.body.len();
+        let chunk = chunk.get(..room).unwrap_or(chunk);
+        self.body.extend_from_slice(chunk);
+        let closed = self.brackets_close(chunk);
+        let affordable = self.checked + self.body.len() <= CHECK_BUDGET;
+        if affordable {
+            self.checked += self.body.len();
+        }
+        (closed || affordable) && first_value_read(&self.body)
+    }
+
+    /// Whether the brackets open outside strings all close in `chunk`.
+    fn brackets_close(&mut self, chunk: &[u8]) -> bool {
+        let mut closed = false;
+        for &byte in chunk {
+            if self.in_string {
+                if self.escaped {
+                    self.escaped = false;
+                } else if byte == b'\\' {
+                    self.escaped = true;
+                } else if byte == b'"' {
+                    self.in_string = false;
+                }
+                continue;
+            }
+            match byte {
+                b'"' => self.in_string = true,
+                b'{' | b'[' => self.depth += 1,
+                b'}' | b']' => {
+                    self.depth = self.depth.saturating_sub(1);
+                    closed |= self.depth == 0;
+                }
+                _ => {}
+            }
+        }
+        closed
+    }
+}
+
+/// Whether Go's decoder is done with the first JSON value in `body`: it has
+/// all of it, or has found that it isn't JSON. Go knows an object or an
+/// array is over at its last byte, any other value only at the byte after
+/// it, or at the end of the body. Bytes that aren't UTF-8 are read as
+/// U+FFFD, as Go's decoder reads them in a string.
+fn first_value_read(body: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(body);
+    let mut values = serde_json::Deserializer::from_str(&text).into_iter::<IgnoredAny>();
+    match values.next() {
+        None => false,
+        Some(Ok(_)) => {
+            let start = text.trim_start_matches([' ', '\t', '\n', '\r']);
+            start.starts_with(['{', '[']) || values.byte_offset() < text.len()
+        }
+        Some(Err(error)) => !error.is_eof(),
+    }
+}
+
 /// `{"error":"request_failed","message":message}` with a 502.
 fn request_failed(message: &str) -> Response {
     failure(
@@ -260,6 +366,64 @@ mod tests {
             assert_eq!(headers[USER_AGENT], RELEASE_USER_AGENT);
         }
         assert!(RELEASE_USER_AGENT.starts_with("open-ferry/"));
+    }
+
+    /// Not upstream's: reading stops where Go's decoder stops reading a
+    /// value: at the end of an object or array, a byte after any other
+    /// value, or a byte that can't go on.
+    #[test]
+    fn reading_stops_where_go_stops() {
+        for (body, done) in [
+            (&b""[..], false),
+            (b" \n", false),
+            (b"{\"tag_name\":\"v", false),
+            (b"{\"tag_name\":\"v\xff1\"", false),
+            (b"{\"tag_name\":\"v1\"}", true),
+            (b" [1, {}] x", true),
+            (b"[1,", false),
+            (b"null", false),
+            (b"null ", true),
+            (b"\"v1\"", false),
+            (b"\"v1\"\n", true),
+            (b"12", false),
+            (b"12x", true),
+            (b"{bad", true),
+            (b"\xff", true),
+        ] {
+            assert_eq!(
+                first_value_read(body),
+                done,
+                "{:?}",
+                body.escape_ascii().to_string()
+            );
+        }
+    }
+
+    /// Not upstream's: a release that arrives a byte at a time is checked
+    /// after each byte only until the checks have parsed 16 MiB, then where
+    /// its brackets close, so reading it takes time in proportion to its
+    /// length. Brackets in strings don't count.
+    #[test]
+    fn checking_a_release_is_bounded() {
+        let pad = "x".repeat(200_000);
+        let text = format!(r#"{{"tag_name":"v1","body":"}}]{pad}\"{{","more":[{{}}]}} "#);
+        let started = std::time::Instant::now();
+        let mut release = Release::default();
+        let bytes = text.as_bytes();
+        let last = bytes.len() - 2;
+        for (i, byte) in bytes.iter().enumerate() {
+            assert_eq!(release.push(&[*byte]), i == last, "byte {i}");
+            if i == last {
+                break;
+            }
+        }
+        assert!(release.checked <= CHECK_BUDGET);
+        assert!(started.elapsed() < Duration::from_secs(20));
+
+        // Within the budget, a byte that can't be JSON ends it at once.
+        let mut release = Release::default();
+        assert!(!release.push(b"{\"tag_name\":"));
+        assert!(release.push(b"x"));
     }
 
     /// Not upstream's: the token is `GITHUB_TOKEN`, else `github_token`,
