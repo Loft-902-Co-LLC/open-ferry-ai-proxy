@@ -25,8 +25,15 @@
 //! - Every credential header's value is masked, the answer's included (see
 //!   [`mask::mask_header_value`]); upstream masks only the client's
 //!   request headers and the upstream requests', and fewer names.
-//! - A decoded body is cut at a limit (see [`DECODE_LIMIT`]); the texts of
-//!   the decoding errors are Rust's.
+//! - A decoded answer is cut at a limit (see [`DECODE_LIMIT`]); the texts
+//!   of the decoding errors are Rust's.
+//! - A compressed request body is decoded for `gzip`, `deflate`, `br` and
+//!   `zstd`, to at most a limit, and one that can't be decoded, has an
+//!   encoding not known here, or decodes past the limit is shown as a
+//!   one-line placeholder ([`decode_request_body`]), never as it came,
+//!   since a secret compressed in it couldn't be scrubbed. Upstream decodes
+//!   only `zstd`, shows any other body as it came, and cuts one past its
+//!   limit with a marker.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -46,8 +53,11 @@ use crate::observe::mask;
 /// request body only).
 pub(crate) const DECODE_LIMIT: usize = 32 << 20;
 
-/// The marker after a decoded request body cut at the limit.
-const DECODED_REQUEST_TRUNCATED: &str = "[DECOMPRESSED REQUEST BODY TRUNCATED]";
+/// What a log shows for a compressed request body it can't show decoded,
+/// with the reason.
+fn omitted(reason: &str) -> Vec<u8> {
+    format!("[ENCODED REQUEST BODY OMITTED: {reason}]").into_bytes()
+}
 
 /// Go's `CanonicalMIMEHeaderKey`: each `-`-separated word of `name` with
 /// its first letter upper case and the rest lower case, or `name` as it is
@@ -396,9 +406,21 @@ pub(crate) fn decompress_response<'a>(
         .map(|value| String::from_utf8_lossy(value.as_bytes()).to_lowercase())
         .unwrap_or_default();
     let decoded = match encoding.as_str() {
-        "gzip" => read_limited(flate2::read::MultiGzDecoder::new(body), "gzip"),
-        "deflate" => read_limited(flate2::read::DeflateDecoder::new(body), "deflate"),
-        "br" => read_limited(brotli_decompressor::Decompressor::new(body, 4096), "brotli"),
+        "gzip" => read_limited(
+            flate2::read::MultiGzDecoder::new(body),
+            "gzip",
+            DECODE_LIMIT,
+        ),
+        "deflate" => read_limited(
+            flate2::read::DeflateDecoder::new(body),
+            "deflate",
+            DECODE_LIMIT,
+        ),
+        "br" => read_limited(
+            brotli_decompressor::Decompressor::new(body, 4096),
+            "brotli",
+            DECODE_LIMIT,
+        ),
         "zstd" => decode_zstd(body, DECODE_LIMIT)
             .map_err(|error| format!("failed to decompress zstd data: {error}")),
         _ => return (Cow::Borrowed(body), None),
@@ -415,17 +437,25 @@ pub(crate) fn decompress_response<'a>(
     }
 }
 
-/// Reads `reader` to its end or to [`DECODE_LIMIT`] bytes, saying whether
-/// there was more.
-fn read_limited(reader: impl Read, name: &str) -> Result<(Vec<u8>, bool), String> {
+/// Reads `reader` to its end or to `limit` bytes, saying whether there was
+/// more.
+fn read_limited(reader: impl Read, name: &str, limit: usize) -> Result<(Vec<u8>, bool), String> {
     let mut out = Vec::new();
     reader
-        .take(DECODE_LIMIT as u64 + 1)
+        .take(u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1))
         .read_to_end(&mut out)
         .map_err(|error| format!("failed to decompress {name} data: {error}"))?;
-    let truncated = out.len() > DECODE_LIMIT;
-    out.truncate(DECODE_LIMIT);
+    let truncated = out.len() > limit;
+    out.truncate(limit);
     Ok((out, truncated))
+}
+
+/// Decodes an HTTP `deflate` body, zlib-wrapped as the standard says or
+/// raw as some clients send it, to at most `limit` bytes, saying whether
+/// there was more.
+fn decode_deflate(body: &[u8], limit: usize) -> Result<(Vec<u8>, bool), String> {
+    read_limited(flate2::read::ZlibDecoder::new(body), "deflate", limit)
+        .or_else(|_| read_limited(flate2::read::DeflateDecoder::new(body), "deflate", limit))
 }
 
 /// Decodes a zstd stream of any number of frames, skipping skippable ones,
@@ -475,42 +505,42 @@ fn decode_zstd(mut input: &[u8], limit: usize) -> Result<(Vec<u8>, bool), String
 
 /// A request body as a log shows it, decoded as `encoding` says to at most
 /// `limit` bytes (upstream's `decodeCapturedRequestBodyForLogWithLimit`):
-/// only `zstd` is decoded; the body is kept as it came for any other
-/// encoding or an error, and a decoded body cut at the limit ends with a
-/// marker.
+/// `gzip`, `deflate`, `br` and `zstd` are decoded, in the reverse of the
+/// order they were applied. A body that can't be decoded, has another
+/// encoding, or decodes past `limit` is replaced by a one-line placeholder,
+/// never kept as it came.
 pub(crate) fn decode_request_body<'a>(
     raw: &'a [u8],
     encoding: &str,
     limit: usize,
 ) -> Cow<'a, [u8]> {
     let encoding = encoding.trim();
-    if raw.is_empty()
-        || limit == 0
-        || encoding.is_empty()
-        || encoding.eq_ignore_ascii_case("identity")
-    {
+    if raw.is_empty() || encoding.is_empty() || encoding.eq_ignore_ascii_case("identity") {
         return Cow::Borrowed(raw);
     }
     let mut body = Cow::Borrowed(raw);
     for part in encoding.rsplit(',') {
-        match part.trim().to_ascii_lowercase().as_str() {
+        let decoded = match part.trim().to_ascii_lowercase().as_str() {
             "" | "identity" => continue,
-            "zstd" => {
-                let Ok((decoded, truncated)) = decode_zstd(&body, limit) else {
-                    return Cow::Borrowed(raw);
-                };
-                body = Cow::Owned(decoded);
-                if truncated {
-                    let mut body = body.into_owned();
-                    if !body.is_empty() && !body.ends_with(b"\n") {
-                        body.push(b'\n');
-                    }
-                    body.extend_from_slice(DECODED_REQUEST_TRUNCATED.as_bytes());
-                    return Cow::Owned(body);
-                }
+            "gzip" | "x-gzip" => {
+                read_limited(flate2::read::MultiGzDecoder::new(&*body), "gzip", limit)
             }
-            _ => return Cow::Borrowed(raw),
-        }
+            "deflate" => decode_deflate(&body, limit),
+            "br" => read_limited(
+                brotli_decompressor::Decompressor::new(&*body, 4096),
+                "brotli",
+                limit,
+            ),
+            "zstd" => decode_zstd(&body, limit),
+            _ => return Cow::Owned(omitted("its Content-Encoding isn't supported")),
+        };
+        body = match decoded {
+            Ok((decoded, false)) => Cow::Owned(decoded),
+            Ok((_, true)) => {
+                return Cow::Owned(omitted(&format!("it decodes to over {limit} bytes")));
+            }
+            Err(_) => return Cow::Owned(omitted("it couldn't be decoded")),
+        };
     }
     body
 }
@@ -664,36 +694,83 @@ mod tests {
         assert_eq!((&*body, error), (&b"plain"[..], None));
     }
 
-    // Not upstream's: only zstd request bodies are decoded; anything else
-    // is shown as it came.
-    #[test]
-    fn decodes_request_bodies() {
-        let body = zstd(b"{\"a\":1}");
-        assert_eq!(
-            &*decode_request_body(&body, " zstd ", 1 << 20),
-            b"{\"a\":1}"
-        );
-        assert_eq!(
-            &*decode_request_body(&body, "identity, zstd", 1 << 20),
-            b"{\"a\":1}"
-        );
-        assert_eq!(&*decode_request_body(&body, "gzip", 1 << 20), &body[..]);
-        assert_eq!(&*decode_request_body(b"junk", "zstd", 1 << 20), b"junk");
-        assert_eq!(&*decode_request_body(&body, "", 1 << 20), &body[..]);
+    /// `input` as a brotli stream: one uncompressed meta-block, then an
+    /// empty last one.
+    fn brotli(input: &[u8]) -> Vec<u8> {
+        // Bits, lowest first: WBITS 16 (0), then the meta-block's header:
+        // ISLAST 0, MNIBBLES 4 (00), MLEN - 1 in 16 bits, ISUNCOMPRESSED 1;
+        // 21 bits, padded to three bytes. The last meta-block is ISLAST 1,
+        // ISLASTEMPTY 1.
+        let len = u32::try_from(input.len() - 1).unwrap();
+        let bits = (len << 4) | (1 << 20);
+        let mut out = bits.to_le_bytes()[..3].to_vec();
+        out.extend_from_slice(input);
+        out.push(0b11);
+        out
     }
 
-    // Ports TestDecodeCapturedRequestBodyForLogWithLimitTruncatesZstdExpansion.
+    // Not upstream's: gzip, deflate, br and zstd request bodies are
+    // decoded, stacked ones too; one that can't be, or with another
+    // encoding, is never shown as it came.
+    #[test]
+    fn decodes_request_bodies() {
+        let json = b"{\"a\":1}";
+        let body = zstd(json);
+        assert_eq!(&*decode_request_body(&body, " zstd ", 1 << 20), json);
+        assert_eq!(
+            &*decode_request_body(&body, "identity, zstd", 1 << 20),
+            json
+        );
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gzip.write_all(json).unwrap();
+        let gzip = gzip.finish().unwrap();
+        assert_eq!(&*decode_request_body(&gzip, "GZIP", 1 << 20), json);
+        let mut zlib = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+        zlib.write_all(json).unwrap();
+        let zlib = zlib.finish().unwrap();
+        assert_eq!(&*decode_request_body(&zlib, "deflate", 1 << 20), json);
+        let mut raw = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
+        raw.write_all(json).unwrap();
+        let raw = raw.finish().unwrap();
+        assert_eq!(&*decode_request_body(&raw, "deflate", 1 << 20), json);
+        assert_eq!(&*decode_request_body(&brotli(json), "br", 1 << 20), json);
+        assert_eq!(
+            &*decode_request_body(&zstd(&gzip), "gzip, zstd", 1 << 20),
+            json
+        );
+
+        let undecodable = b"[ENCODED REQUEST BODY OMITTED: it couldn't be decoded]";
+        assert_eq!(&*decode_request_body(&body, "gzip", 1 << 20), undecodable);
+        assert_eq!(&*decode_request_body(b"junk", "zstd", 1 << 20), undecodable);
+        assert_eq!(
+            &*decode_request_body(&gzip[..gzip.len() - 4], "gzip", 1 << 20),
+            undecodable
+        );
+        assert_eq!(
+            &*decode_request_body(&body, "compress", 1 << 20),
+            b"[ENCODED REQUEST BODY OMITTED: its Content-Encoding isn't supported]"
+        );
+        assert_eq!(&*decode_request_body(json, "", 1 << 20), json);
+        assert_eq!(&*decode_request_body(json, "identity", 1 << 20), json);
+    }
+
+    // Ports TestDecodeCapturedRequestBodyForLogWithLimitTruncatesZstdExpansion,
+    // except that a body decoding past the limit is replaced by a
+    // placeholder, where upstream keeps what fits and a marker.
     #[test]
     fn decode_captured_request_body_for_log_with_limit_truncates_zstd_expansion() {
         let compressed = zstd(&[b'x'; 1024]);
         let decoded = decode_request_body(&compressed, "zstd", 64);
         assert!(decoded.len() <= 128, "{}", decoded.len());
-        assert!(
-            decoded
-                .windows(DECODED_REQUEST_TRUNCATED.len())
-                .any(|window| window == DECODED_REQUEST_TRUNCATED.as_bytes()),
-            "{}",
-            String::from_utf8_lossy(&decoded)
+        assert_eq!(
+            &*decoded,
+            b"[ENCODED REQUEST BODY OMITTED: it decodes to over 64 bytes]"
+        );
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gzip.write_all(&[b'x'; 1024]).unwrap();
+        assert_eq!(
+            &*decode_request_body(&gzip.finish().unwrap(), "gzip", 64),
+            b"[ENCODED REQUEST BODY OMITTED: it decodes to over 64 bytes]"
         );
     }
 
