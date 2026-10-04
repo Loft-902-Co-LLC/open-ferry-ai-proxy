@@ -162,9 +162,8 @@ pub fn compute_vertex_models_hash(models: &[VertexCompatModel]) -> String {
 }
 
 // Ported from internal/watcher/synthesizer/config_test.go: the Vertex,
-// weight, retry and all-providers tests. The Gemini ones are in
-// `api_key`'s tests; the interactions, xAI and Meta parts are dropped, as
-// those providers aren't ported.
+// weight, retry and all-providers tests. The Gemini, interactions, xAI and
+// Meta ones are in `api_key`'s tests.
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
@@ -324,6 +323,17 @@ mod tests {
             ),
             (
                 Config {
+                    interactions_api_key: vec![GeminiKey {
+                        api_key: "key".to_owned(),
+                        weight: invalid,
+                        ..GeminiKey::default()
+                    }],
+                    ..Config::default()
+                },
+                "interactions-api-key[0].weight",
+            ),
+            (
+                Config {
                     claude_api_key: vec![ClaudeKey {
                         api_key: "key".to_owned(),
                         weight: invalid,
@@ -343,6 +353,17 @@ mod tests {
                     ..Config::default()
                 },
                 "codex-api-key[0].weight",
+            ),
+            (
+                Config {
+                    xai_api_key: vec![CodexKey {
+                        api_key: "key".to_owned(),
+                        weight: invalid,
+                        ..CodexKey::default()
+                    }],
+                    ..Config::default()
+                },
+                "xai-api-key[0].weight",
             ),
             (
                 Config {
@@ -395,14 +416,24 @@ mod tests {
                 weight: Some(1),
                 ..GeminiKey::default()
             }],
+            interactions_api_key: vec![GeminiKey {
+                api_key: "interactions".to_owned(),
+                weight: Some(2),
+                ..GeminiKey::default()
+            }],
             claude_api_key: vec![ClaudeKey {
                 api_key: "claude".to_owned(),
-                weight: Some(2),
+                weight: Some(3),
                 ..ClaudeKey::default()
             }],
             codex_api_key: vec![CodexKey {
                 api_key: "codex".to_owned(),
-                weight: Some(3),
+                weight: Some(4),
+                ..CodexKey::default()
+            }],
+            xai_api_key: vec![CodexKey {
+                api_key: "xai".to_owned(),
+                weight: Some(5),
                 ..CodexKey::default()
             }],
             openai_compatibility: vec![OpenAiCompatibility {
@@ -410,22 +441,25 @@ mod tests {
                 base_url: "https://compat.example.com".to_owned(),
                 api_key_entries: vec![OpenAiCompatibilityApiKey {
                     api_key: "compat".to_owned(),
-                    weight: Some(4),
+                    weight: Some(6),
                     ..OpenAiCompatibilityApiKey::default()
                 }],
                 ..OpenAiCompatibility::default()
             }],
             vertex_api_key: vec![VertexCompatKey {
-                weight: Some(5),
+                weight: Some(7),
                 ..key("vertex", "")
             }],
             ..Config::default()
         };
         let auths = synth(&config).unwrap();
         let weights: Vec<Option<&str>> = auths.iter().map(|a| a.attribute("weight")).collect();
+        let want: Vec<String> = (1..=7).map(|weight| weight.to_string()).collect();
         assert_eq!(
             weights,
-            [Some("1"), Some("2"), Some("3"), Some("4"), Some("5")]
+            want.iter()
+                .map(|weight| Some(weight.as_str()))
+                .collect::<Vec<_>>()
         );
         let negative = vertex(vec![VertexCompatKey {
             weight: Some(-5),
@@ -453,6 +487,15 @@ mod tests {
                 api_key: "codex-key".to_owned(),
                 ..CodexKey::default()
             }],
+            xai_api_key: vec![CodexKey {
+                api_key: "xai-key".to_owned(),
+                ..CodexKey::default()
+            }],
+            meta_api_key: vec![CodexKey {
+                api_key: "meta-key".to_owned(),
+                base_url: "https://api.meta.ai/v1".to_owned(),
+                ..CodexKey::default()
+            }],
             openai_compatibility: vec![OpenAiCompatibility {
                 name: "compat".to_owned(),
                 base_url: "https://compat.api".to_owned(),
@@ -472,6 +515,8 @@ mod tests {
                 "gemini",
                 "claude",
                 "codex",
+                "xai",
+                "meta",
                 "openai-compatible-compat",
                 "vertex"
             ]
@@ -492,6 +537,22 @@ mod tests {
                 gemini("gemini-negative", Some(-1)),
                 gemini("gemini-unset", None),
             ],
+            interactions_api_key: vec![gemini("interactions-zero", Some(0))],
+            claude_api_key: vec![ClaudeKey {
+                api_key: "claude-positive".to_owned(),
+                request_retry: Some(2),
+                ..ClaudeKey::default()
+            }],
+            codex_api_key: vec![CodexKey {
+                api_key: "codex-zero".to_owned(),
+                request_retry: Some(0),
+                ..CodexKey::default()
+            }],
+            xai_api_key: vec![CodexKey {
+                api_key: "xai-positive".to_owned(),
+                request_retry: Some(2),
+                ..CodexKey::default()
+            }],
             vertex_api_key: vec![VertexCompatKey {
                 request_retry: Some(2),
                 disable_cooling: Some(false),
@@ -516,10 +577,14 @@ mod tests {
                 (Some("gemini-positive"), Some(&Value::from(2))),
                 (Some("gemini-negative"), None),
                 (Some("gemini-unset"), None),
+                (Some("interactions-zero"), Some(&Value::from(0))),
+                (Some("claude-positive"), Some(&Value::from(2))),
+                (Some("codex-zero"), Some(&Value::from(0))),
+                (Some("xai-positive"), Some(&Value::from(2))),
                 (Some("vertex-positive"), Some(&Value::from(2))),
             ]
         );
-        assert_eq!(auths[4].disable_cooling_override(), Some(false));
+        assert_eq!(auths[8].disable_cooling_override(), Some(false));
     }
 
     #[test]

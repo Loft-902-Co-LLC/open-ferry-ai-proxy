@@ -1,6 +1,7 @@
 // Ported from CLIProxyAPI internal/watcher/synthesizer/config.go (the
-// gemini-api-key, claude-api-key and codex-api-key parts, including
-// synthesizeGeminiKeyEntries), addRequestRetryToMetadata and
+// gemini-api-key, interactions-api-key, claude-api-key, codex-api-key,
+// xai-api-key and meta-api-key parts, including synthesizeGeminiKeyEntries
+// and synthesizeCodexStyleKeys), addRequestRetryToMetadata and
 // addRequestScopedErrorsToMetadata in helpers.go, ComputeGeminiModelsHash,
 // ComputeClaudeModelsHash and ComputeCodexModelsHash in
 // internal/modelconfig/model_hash.go, and ValidateCredentialWeights in
@@ -8,20 +9,25 @@
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Records for the API keys in the config's `gemini-api-key`,
-//! `claude-api-key` and `codex-api-key` lists.
+//! `interactions-api-key`, `claude-api-key`, `codex-api-key`, `xai-api-key`
+//! and `meta-api-key` lists.
 //!
 //! The config module parses those lists into [`GeminiKey`], [`CodexKey`]
-//! and [`ClaudeKey`] entries; each converts into an [`ApiKeyEntry`], and
+//! and [`ClaudeKey`] entries (the interactions keys are Gemini keys, the xAI
+//! and Meta keys Codex keys); each converts into an [`ApiKeyEntry`], and
 //! [`api_key_auth`] builds its record:
 //!
 //! - The ID is `<provider>:apikey:<hash>`, from a hash of the key, base URL,
 //!   proxy URL, prefix and headers, so it survives reloads without showing
 //!   the key.
-//! - Attributes: `source` (`config:<provider>[<hash>]`), `config_index`,
+//! - The provider is `gemini`, `gemini-interactions`, `claude`, `codex`,
+//!   `xai` or `meta`, and the label `<source name>-apikey`, where the source
+//!   name is the provider's, apart from `interactions`.
+//! - Attributes: `source` (`config:<source name>[<hash>]`), `config_index`,
 //!   `api_key`, `base_url`, `priority`, `weight`, `models_hash`,
 //!   `header:<name>`, `excluded_models`, `excluded_models_hash` and
 //!   `auth_kind` (`apikey`); `rebuild_mid_system_message` for claude;
-//!   `websockets` and `codex_alpha_search` for codex.
+//!   `websockets` for codex, xai and meta; `codex_alpha_search` for codex.
 //! - Metadata: `disable_cooling`, `request_retry` and
 //!   `request_scoped_errors`, which the credential manager reads as it reads
 //!   them from a credential file.
@@ -35,9 +41,8 @@
 //! - Request-scoped error rules are stored in the metadata as JSON objects,
 //!   the form a credential file holds them in, where upstream stores Go
 //!   structs.
-//! - Interactions, xAI and Meta keys aren't ported. The OpenAI-compatible
-//!   providers are in [`super::openai_compat`] and the Vertex keys in
-//!   [`super::vertex`].
+//! - The OpenAI-compatible providers are in [`super::openai_compat`] and the
+//!   Vertex keys in [`super::vertex`].
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -62,19 +67,38 @@ pub use crate::config::{RequestScopedErrorRule, ThinkingSupport};
 pub enum ApiKeyProvider {
     /// `gemini-api-key`.
     Gemini,
+    /// `interactions-api-key`: Gemini keys for the Interactions API.
+    Interactions,
     /// `claude-api-key`.
     Claude,
     /// `codex-api-key`.
     Codex,
+    /// `xai-api-key`.
+    Xai,
+    /// `meta-api-key`.
+    Meta,
 }
 
 impl ApiKeyProvider {
-    /// The provider name: `gemini`, `claude` or `codex`.
+    /// The provider name: `gemini`, `gemini-interactions`, `claude`,
+    /// `codex`, `xai` or `meta`.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Gemini => "gemini",
+            Self::Interactions => "gemini-interactions",
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Xai => "xai",
+            Self::Meta => "meta",
+        }
+    }
+
+    /// The name in the record's `source` attribute and label: the provider
+    /// name, or `interactions` for the interactions keys.
+    pub fn source_name(self) -> &'static str {
+        match self {
+            Self::Interactions => "interactions",
+            _ => self.as_str(),
         }
     }
 
@@ -82,15 +106,17 @@ impl ApiKeyProvider {
     pub fn config_key(self) -> &'static str {
         match self {
             Self::Gemini => "gemini-api-key",
+            Self::Interactions => "interactions-api-key",
             Self::Claude => "claude-api-key",
             Self::Codex => "codex-api-key",
+            Self::Xai => "xai-api-key",
+            Self::Meta => "meta-api-key",
         }
     }
 }
 
-/// One entry of a `gemini-api-key`, `claude-api-key` or `codex-api-key`
-/// list, as parsed from the config (upstream's `GeminiKey`, `ClaudeKey` and
-/// `CodexKey`).
+/// One entry of an API-key list, as parsed from the config (upstream's
+/// `GeminiKey`, `ClaudeKey` and `CodexKey`).
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct ApiKeyEntry {
     /// The API key. Secret.
@@ -119,7 +145,7 @@ pub struct ApiKeyEntry {
     pub request_scoped_errors: Vec<RequestScopedErrorRule>,
     /// Claude only: rebuild system messages found mid-conversation.
     pub rebuild_mid_system_message: bool,
-    /// Codex only: use the Responses WebSocket transport.
+    /// Codex, xAI and Meta only: use the Responses WebSocket transport.
     pub websockets: bool,
     /// Codex only: allow alpha search.
     pub alpha_search: bool,
@@ -337,6 +363,7 @@ pub fn api_key_auth(
         return None;
     }
     let name = provider.as_str();
+    let source = provider.source_name();
     let prefix = entry.prefix.trim();
     let proxy_url = entry.proxy_url.trim();
     let headers = format_sorted_headers(&entry.headers);
@@ -348,7 +375,7 @@ pub fn api_key_auth(
     let mut attrs = BTreeMap::new();
     attrs.insert(
         ATTRIBUTE_SOURCE.to_owned(),
-        format!("config:{name}[{token}]"),
+        format!("config:{source}[{token}]"),
     );
     attrs.insert(ATTRIBUTE_CONFIG_INDEX.to_owned(), index.to_string());
     if !key.is_empty() {
@@ -369,7 +396,7 @@ pub fn api_key_auth(
         attrs.insert("base_url".to_owned(), base_url.to_owned());
     }
     match provider {
-        ApiKeyProvider::Gemini => {}
+        ApiKeyProvider::Gemini | ApiKeyProvider::Interactions => {}
         ApiKeyProvider::Claude => {
             if entry.rebuild_mid_system_message {
                 attrs.insert("rebuild_mid_system_message".to_owned(), "true".to_owned());
@@ -383,6 +410,11 @@ pub fn api_key_auth(
                 attrs.insert(ATTRIBUTE_CODEX_ALPHA_SEARCH.to_owned(), "true".to_owned());
             }
         }
+        ApiKeyProvider::Xai | ApiKeyProvider::Meta => {
+            if entry.websockets {
+                attrs.insert("websockets".to_owned(), "true".to_owned());
+            }
+        }
     }
     let models_hash = compute_models_hash(&entry.models);
     if !models_hash.is_empty() {
@@ -393,7 +425,7 @@ pub fn api_key_auth(
     let mut auth = Auth {
         id,
         provider: name.to_owned(),
-        label: format!("{name}-apikey"),
+        label: format!("{source}-apikey"),
         prefix: prefix.to_owned(),
         status: Status::Active,
         proxy_url: proxy_url.to_owned(),
@@ -645,10 +677,10 @@ mod tests {
                     ..ApiKeyEntry::default()
                 },
             ];
-            let auths = match provider {
-                ApiKeyProvider::Claude => synth(&entries, &[]),
-                ApiKeyProvider::Codex => synth(&[], &entries),
-                ApiKeyProvider::Gemini => unreachable!("gemini keys are tested below"),
+            let auths = if provider == ApiKeyProvider::Claude {
+                synth(&entries, &[])
+            } else {
+                synth(&[], &entries)
             }
             .unwrap();
             assert_eq!(auths.len(), 2);
@@ -881,19 +913,29 @@ mod tests {
     }
 
     // config_test.go: TestConfigSynthesizer_GeminiKeys,
-    // TestConfigSynthesizer_GeminiKeys_AllowsEmptyAPIKeyWithBaseURL (minus
-    // the interactions key), TestConfigSynthesizer_IDStability,
+    // TestConfigSynthesizer_InteractionsKeys, TestConfigSynthesizer_XAIKeys,
+    // TestConfigSynthesizer_MetaKeys,
+    // TestConfigSynthesizer_XAIKeys_AllowsEmptyAPIKeyWithBaseURL,
+    // TestConfigSynthesizer_GeminiKeys_AllowsEmptyAPIKeyWithBaseURL,
+    // TestConfigSynthesizer_IDStability,
     // TestConfigSynthesizer_OmittedWeightRemainsUnset,
-    // TestConfigSynthesizer_NormalizesNonPositiveWeightToZero and the Gemini
-    // part of TestConfigSynthesizer_RequestScopedErrors.
+    // TestConfigSynthesizer_NormalizesNonPositiveWeightToZero and the Gemini,
+    // interactions and xAI parts of TestConfigSynthesizer_RequestScopedErrors.
+
+    fn synth_config(config: &crate::config::Config) -> Vec<Auth> {
+        super::super::synthesize_config_auths(config, &ctx(), &mut StableIdGenerator::new())
+            .unwrap()
+    }
 
     fn gemini(keys: Vec<GeminiKey>) -> Vec<Auth> {
-        let config = crate::config::Config {
+        synth_config(&crate::config::Config {
             gemini_api_key: keys,
             ..crate::config::Config::default()
-        };
-        super::super::synthesize_config_auths(&config, &ctx(), &mut StableIdGenerator::new())
-            .unwrap()
+        })
+    }
+
+    fn header(name: &str, value: &str) -> BTreeMap<String, String> {
+        BTreeMap::from([(name.to_owned(), value.to_owned())])
     }
 
     fn gemini_key(api_key: &str) -> GeminiKey {
@@ -970,15 +1012,160 @@ mod tests {
 
     #[test]
     fn gemini_keys_allow_empty_api_key_with_base_url() {
-        let auths = gemini(vec![GeminiKey {
-            base_url: "https://custom-gemini.example.com".to_owned(),
-            headers: BTreeMap::from([("Custom-Auth".to_owned(), "secret".to_owned())]),
-            ..GeminiKey::default()
-        }]);
-        assert_eq!(auths.len(), 1);
+        let auths = synth_config(&crate::config::Config {
+            gemini_api_key: vec![GeminiKey {
+                base_url: "https://custom-gemini.example.com".to_owned(),
+                headers: header("Custom-Auth", "secret"),
+                ..GeminiKey::default()
+            }],
+            interactions_api_key: vec![GeminiKey {
+                base_url: "https://custom-interactions.example.com".to_owned(),
+                ..GeminiKey::default()
+            }],
+            ..crate::config::Config::default()
+        });
+        assert_eq!(auths.len(), 2);
         assert_eq!(
             auths[0].attribute("base_url"),
             Some("https://custom-gemini.example.com")
+        );
+        assert_eq!(auths[0].attribute("header:Custom-Auth"), Some("secret"));
+        assert_eq!(auths[0].attribute("auth_kind"), Some("apikey"));
+        assert_eq!(auths[0].attribute("api_key"), None);
+        assert_eq!(
+            auths[1].attribute("base_url"),
+            Some("https://custom-interactions.example.com")
+        );
+    }
+
+    #[test]
+    fn interactions_keys() {
+        let auths = synth_config(&crate::config::Config {
+            interactions_api_key: vec![GeminiKey {
+                base_url: "https://interactions.example.com".to_owned(),
+                proxy_url: "http://proxy.local:8080".to_owned(),
+                prefix: "native".to_owned(),
+                headers: header("X-Custom", "value"),
+                ..gemini_key("interactions-key")
+            }],
+            ..crate::config::Config::default()
+        });
+        assert_eq!(auths.len(), 1);
+        let auth = &auths[0];
+        assert_eq!(auth.provider, "gemini-interactions");
+        assert_eq!(auth.label, "interactions-apikey");
+        assert_eq!(auth.prefix, "native");
+        assert_eq!(auth.proxy_url, "http://proxy.local:8080");
+        assert_eq!(auth.attribute("api_key"), Some("interactions-key"));
+        assert_eq!(
+            auth.attribute("base_url"),
+            Some("https://interactions.example.com")
+        );
+        assert_eq!(auth.attribute("header:X-Custom"), Some("value"));
+        // Not upstream's: the ID and source names.
+        let token = auth
+            .id
+            .strip_prefix("gemini-interactions:apikey:")
+            .expect("interactions ID");
+        assert_eq!(
+            auth.attribute("source"),
+            Some(format!("config:interactions[{token}]").as_str())
+        );
+    }
+
+    #[test]
+    fn xai_keys() {
+        let auths = synth_config(&crate::config::Config {
+            xai_api_key: vec![CodexKey {
+                api_key: "xai-key-123".to_owned(),
+                prefix: "grok".to_owned(),
+                base_url: "https://api.x.ai/v1".to_owned(),
+                proxy_url: "http://proxy.local".to_owned(),
+                websockets: true,
+                alpha_search: true,
+                disable_cooling: Some(true),
+                headers: header("X-Custom", "value"),
+                models: vec![crate::config::CodexModel {
+                    name: "grok-4.5".to_owned(),
+                    alias: "grok-latest".to_owned(),
+                    ..crate::config::CodexModel::default()
+                }],
+                ..CodexKey::default()
+            }],
+            ..crate::config::Config::default()
+        });
+        assert_eq!(auths.len(), 1);
+        let auth = &auths[0];
+        assert_eq!(auth.provider, "xai");
+        assert_eq!(auth.label, "xai-apikey");
+        assert_eq!(auth.attribute("websockets"), Some("true"));
+        assert_eq!(auth.attribute(ATTRIBUTE_CODEX_ALPHA_SEARCH), None);
+        assert_eq!(auth.attribute("base_url"), Some("https://api.x.ai/v1"));
+        assert_eq!(auth.attribute("header:X-Custom"), Some("value"));
+        assert!(
+            auth.attribute("models_hash")
+                .is_some_and(|hash| !hash.is_empty())
+        );
+        assert_eq!(auth.proxy_url, "http://proxy.local");
+        assert_eq!(auth.metadata["disable_cooling"], Value::Bool(true));
+        // Not upstream's: the ID and source names.
+        let token = auth.id.strip_prefix("xai:apikey:").expect("xai ID");
+        assert_eq!(
+            auth.attribute("source"),
+            Some(format!("config:xai[{token}]").as_str())
+        );
+    }
+
+    #[test]
+    fn meta_keys() {
+        let auths = synth_config(&crate::config::Config {
+            meta_api_key: vec![CodexKey {
+                api_key: "meta-secret".to_owned(),
+                base_url: "https://api.meta.ai/v1".to_owned(),
+                proxy_url: "http://proxy.local".to_owned(),
+                disable_cooling: Some(true),
+                models: vec![crate::config::CodexModel {
+                    name: "muse-spark-1.3".to_owned(),
+                    alias: "muse-spark-1.3".to_owned(),
+                    ..crate::config::CodexModel::default()
+                }],
+                headers: header("X-Custom", "value"),
+                ..CodexKey::default()
+            }],
+            ..crate::config::Config::default()
+        });
+        assert_eq!(auths.len(), 1);
+        let auth = &auths[0];
+        assert_eq!(auth.provider, "meta");
+        assert_eq!(auth.label, "meta-apikey");
+        assert_eq!(auth.attribute("base_url"), Some("https://api.meta.ai/v1"));
+        assert_eq!(auth.attribute("header:X-Custom"), Some("value"));
+        assert_eq!(auth.proxy_url, "http://proxy.local");
+        // Not upstream's: the ID prefix.
+        assert!(auth.id.starts_with("meta:apikey:"));
+    }
+
+    #[test]
+    fn xai_keys_allow_empty_api_key_with_base_url() {
+        let auths = synth_config(&crate::config::Config {
+            xai_api_key: vec![
+                CodexKey {
+                    base_url: "https://custom-xai.example.com".to_owned(),
+                    headers: header("Custom-Auth", "secret"),
+                    ..CodexKey::default()
+                },
+                CodexKey {
+                    api_key: "   ".to_owned(),
+                    base_url: "https://custom-xai-2.example.com".to_owned(),
+                    ..CodexKey::default()
+                },
+            ],
+            ..crate::config::Config::default()
+        });
+        assert_eq!(auths.len(), 2);
+        assert_eq!(
+            auths[0].attribute("base_url"),
+            Some("https://custom-xai.example.com")
         );
         assert_eq!(auths[0].attribute("header:Custom-Auth"), Some("secret"));
         assert_eq!(auths[0].attribute("auth_kind"), Some("apikey"));
@@ -1022,14 +1209,30 @@ mod tests {
             action: "stop".into(),
             ..RequestScopedErrorRule::default()
         }];
-        let auths = gemini(vec![GeminiKey {
-            request_scoped_errors: rules,
-            ..gemini_key("gemini-key")
-        }]);
-        assert_eq!(
-            auths[0].metadata["request_scoped_errors"],
-            serde_json::json!([{"status": 400, "match": ["maximum_context_length"], "action": "stop"}])
-        );
+        let auths = synth_config(&crate::config::Config {
+            gemini_api_key: vec![GeminiKey {
+                request_scoped_errors: rules.clone(),
+                ..gemini_key("gemini-key")
+            }],
+            interactions_api_key: vec![GeminiKey {
+                request_scoped_errors: rules.clone(),
+                ..gemini_key("interactions-key")
+            }],
+            xai_api_key: vec![CodexKey {
+                api_key: "xai-key".to_owned(),
+                base_url: "https://xai.api".to_owned(),
+                request_scoped_errors: rules,
+                ..CodexKey::default()
+            }],
+            ..crate::config::Config::default()
+        });
+        assert_eq!(auths.len(), 3);
+        for auth in &auths {
+            assert_eq!(
+                auth.metadata["request_scoped_errors"],
+                serde_json::json!([{"status": 400, "match": ["maximum_context_length"], "action": "stop"}])
+            );
+        }
     }
 
     #[test]

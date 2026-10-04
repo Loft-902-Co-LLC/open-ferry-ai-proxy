@@ -84,27 +84,37 @@ impl std::error::Error for SynthesisError {}
 
 /// Records for every API key and OpenAI-compatible provider in `config`
 /// (upstream's `ConfigSynthesizer.Synthesize`): the Gemini keys, then the
-/// Claude, Codex, OpenAI-compatible and Vertex ones. Every weight is checked
-/// first, in upstream's order; an invalid one fails the whole lot, naming
-/// the entry.
+/// interactions, Claude, Codex, xAI, Meta, OpenAI-compatible and Vertex
+/// ones. Every weight is checked first, in upstream's order; an invalid one
+/// fails the whole lot, naming the entry.
 pub fn synthesize_config_auths(
     config: &Config,
     ctx: &SynthesisContext,
     ids: &mut StableIdGenerator,
 ) -> Result<Vec<Auth>, SynthesisError> {
     let gemini: Vec<ApiKeyEntry> = config.gemini_api_key.iter().map(Into::into).collect();
+    let interactions: Vec<ApiKeyEntry> =
+        config.interactions_api_key.iter().map(Into::into).collect();
     let claude: Vec<ApiKeyEntry> = config.claude_api_key.iter().map(Into::into).collect();
     let codex: Vec<ApiKeyEntry> = config.codex_api_key.iter().map(Into::into).collect();
+    let xai: Vec<ApiKeyEntry> = config.xai_api_key.iter().map(Into::into).collect();
+    let meta: Vec<ApiKeyEntry> = config.meta_api_key.iter().map(Into::into).collect();
     validate_api_key_weights(ApiKeyProvider::Gemini, &gemini)?;
+    validate_api_key_weights(ApiKeyProvider::Interactions, &interactions)?;
     validate_api_key_weights(ApiKeyProvider::Claude, &claude)?;
     vertex::validate_vertex_weights(&config.vertex_api_key)?;
     validate_api_key_weights(ApiKeyProvider::Codex, &codex)?;
+    validate_api_key_weights(ApiKeyProvider::Xai, &xai)?;
+    validate_api_key_weights(ApiKeyProvider::Meta, &meta)?;
     openai_compat::validate_openai_compat_weights(&config.openai_compatibility)?;
     let mut out = Vec::new();
     for (provider, entries) in [
         (ApiKeyProvider::Gemini, &gemini),
+        (ApiKeyProvider::Interactions, &interactions),
         (ApiKeyProvider::Claude, &claude),
         (ApiKeyProvider::Codex, &codex),
+        (ApiKeyProvider::Xai, &xai),
+        (ApiKeyProvider::Meta, &meta),
     ] {
         for (index, entry) in entries.iter().enumerate() {
             out.extend(api_key_auth(provider, index, entry, ctx, ids));
