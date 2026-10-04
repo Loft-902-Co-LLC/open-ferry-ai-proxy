@@ -1022,3 +1022,25 @@ fn media_parts() {
     );
     assert_eq!(part(json!({"type": "thought"})), None);
 }
+
+// Not upstream's: firstNonEmpty keeps the value as it was.
+#[test]
+fn first_non_empty_skips_white_space() {
+    assert_eq!(first_non_empty([" ", "	", " a ", "b"]), " a ");
+    assert_eq!(first_non_empty([" ", ""]), "");
+}
+
+// Not upstream's: data URLs split as parseDataURL splits them.
+#[test]
+fn data_urls_split() {
+    assert_eq!(
+        parse_data_url("data:image/png;base64,AAA"),
+        Some(("image/png", "AAA"))
+    );
+    assert_eq!(
+        parse_data_url("data:;base64,AAA"),
+        Some(("application/octet-stream", "AAA"))
+    );
+    assert_eq!(parse_data_url("data:image/png"), None);
+    assert_eq!(parse_data_url("https://x"), None);
+}

@@ -87,16 +87,18 @@ pub fn convert_openai_responses_request_to_interactions(
         );
     }
     let previous = first_non_empty([
-        str_of(root.get("previous_response_id")),
-        str_of(root.get("previous_interaction_id")),
-    ]);
+        &str_of(root.get("previous_response_id")),
+        &str_of(root.get("previous_interaction_id")),
+    ])
+    .to_owned();
     if !previous.is_empty() {
         set_path(&mut out, "previous_interaction_id", previous.into());
     }
     let environment = first_non_empty([
-        str_of(root.get("environment_id")),
-        str_of(path(root, "environment.id")),
-    ]);
+        &str_of(root.get("environment_id")),
+        &str_of(path(root, "environment.id")),
+    ])
+    .to_owned();
     if !environment.is_empty() {
         set_path(&mut out, "environment_id", environment.into());
     }
@@ -132,7 +134,7 @@ pub fn convert_openai_responses_request_to_interactions(
     {
         set_path(&mut out, "response_format", format.clone());
     }
-    if let Some(max_output_tokens) = first_existing(&[
+    if let Some(max_output_tokens) = first_existing([
         root.get("max_output_tokens"),
         root.get("max_tokens"),
         root.get("max_completion_tokens"),
@@ -179,16 +181,18 @@ pub fn convert_interactions_request_to_openai_responses(
         set_path(&mut out, "instructions", instructions.into());
     }
     let previous = first_non_empty([
-        str_of(root.get("previous_interaction_id")),
-        str_of(root.get("previous_response_id")),
-    ]);
+        &str_of(root.get("previous_interaction_id")),
+        &str_of(root.get("previous_response_id")),
+    ])
+    .to_owned();
     if !previous.is_empty() {
         set_path(&mut out, "previous_response_id", previous.into());
     }
     let environment = first_non_empty([
-        str_of(root.get("environment_id")),
-        str_of(path(root, "environment.id")),
-    ]);
+        &str_of(root.get("environment_id")),
+        &str_of(path(root, "environment.id")),
+    ])
+    .to_owned();
     if !environment.is_empty() {
         set_path(&mut out, "environment_id", environment.into());
     }
@@ -289,16 +293,17 @@ fn responses_tool_choice_to_interactions(tool_choice: &Value) -> Option<Value> {
         return Some(tool_choice.clone());
     }
     let mut name = first_non_empty([
-        str_of(path(tool_choice, "function.name")),
-        str_of(tool_choice.get("name")),
-        str_of(path(tool_choice, "custom.name")),
+        &str_of(path(tool_choice, "function.name")),
+        &str_of(tool_choice.get("name")),
+        &str_of(path(tool_choice, "custom.name")),
     ])
-    .into_owned();
+    .to_owned();
     let namespace = first_non_empty([
-        str_of(tool_choice.get("namespace")),
-        str_of(path(tool_choice, "function.namespace")),
-        str_of(path(tool_choice, "custom.namespace")),
-    ]);
+        &str_of(tool_choice.get("namespace")),
+        &str_of(path(tool_choice, "function.namespace")),
+        &str_of(path(tool_choice, "custom.namespace")),
+    ])
+    .to_owned();
     if !namespace.is_empty() && !name.is_empty() {
         name = qualify_namespace_tool_name(&namespace, &name);
     }
@@ -370,10 +375,10 @@ fn responses_input_item_to_interactions(
             Some(step)
         }
         "function_call" | "custom_tool_call" => {
-            let call_id = first_non_empty_at(item, &["call_id", "id"]);
+            let call_id = call_id(item);
             let name = qualified_name(item);
             if !call_id.is_empty() && !name.is_empty() {
-                names_by_call_id.insert(call_id.into_owned(), name);
+                names_by_call_id.insert(call_id, name);
             }
             Some(if item_type == "function_call" {
                 responses_function_call_to_interactions(item)
@@ -460,8 +465,9 @@ pub(super) fn responses_content_part_to_interactions(part: &Value) -> Option<Val
 /// URL is a data URL or it carries `data`, and else by URL.
 fn responses_image_part_to_interactions(part: &Value) -> Value {
     let mut out = object([("type", "image".into())]);
-    let image_url = first_non_empty([str_of(part.get("image_url")), str_of(part.get("url"))]);
-    if let Some((mime_type, data)) = parse_data_url(&image_url) {
+    let (image_url, url) = (str_of(part.get("image_url")), str_of(part.get("url")));
+    let image_url = first_non_empty([&image_url, &url]);
+    if let Some((mime_type, data)) = parse_data_url(image_url) {
         set_path(&mut out, "mime_type", mime_type.into());
         set_path(&mut out, "data", data.into());
         return out;
@@ -531,7 +537,7 @@ fn function_call_step(item: &Value) -> Value {
         ("name", qualified_name(item).into()),
         ("arguments", Value::Object(Map::new())),
     ]);
-    let call_id = first_non_empty_at(item, &["call_id", "id"]);
+    let call_id = call_id(item);
     if !call_id.is_empty() {
         set_path(&mut out, "call_id", call_id.into());
     }
@@ -549,13 +555,10 @@ fn responses_function_output_to_interactions(
         ("name", "".into()),
         ("result", Value::Object(Map::new())),
     ]);
-    let call_id = first_non_empty_at(item, &["call_id", "id"]);
+    let call_id = call_id(item);
     let mut name = qualified_name(item);
     if name.is_empty() && !call_id.is_empty() {
-        name = names_by_call_id
-            .get(call_id.as_ref())
-            .cloned()
-            .unwrap_or_default();
+        name = names_by_call_id.get(&call_id).cloned().unwrap_or_default();
     }
     if !name.is_empty() {
         set_path(&mut out, "name", name.into());
@@ -815,7 +818,7 @@ pub(super) fn interactions_function_call_to_responses_with_identity(
             ),
             None => (raw_name.into_owned(), String::new(), false),
         };
-    let call_id = first_non_empty_at(item, &["call_id", "id"]);
+    let call_id = call_id(item);
     let arguments = json_string_value(item.get("arguments"), "{}");
     let (mut out, value_key, value) = if custom {
         (
@@ -859,7 +862,7 @@ fn interactions_function_result_to_responses(item: &Value) -> Value {
         ("call_id", "".into()),
         ("output", "".into()),
     ]);
-    let call_id = first_non_empty_at(item, &["call_id", "id"]);
+    let call_id = call_id(item);
     if !call_id.is_empty() {
         set_path(&mut out, "call_id", call_id.into());
     }
@@ -898,19 +901,20 @@ fn append_interactions_tools_to_responses(out: &mut Value, tools: Option<&Value>
 /// tool, or `None` if it has no name.
 fn responses_tool_from_interactions_tool(tool: &Value) -> Option<Value> {
     let name = first_non_empty([
-        str_of(tool.get("name")),
-        str_of(path(tool, "function.name")),
-    ]);
+        &str_of(tool.get("name")),
+        &str_of(path(tool, "function.name")),
+    ])
+    .to_owned();
     if name.is_empty() {
         return None;
     }
     let mut out = object([("type", "function".into()), ("name", name.into())]);
     if let Some(description) =
-        first_existing(&[tool.get("description"), path(tool, "function.description")])
+        first_existing([tool.get("description"), path(tool, "function.description")])
     {
         set_path(&mut out, "description", str_of(Some(description)).into());
     }
-    if let Some(parameters) = first_existing(&[
+    if let Some(parameters) = first_existing([
         tool.get("parameters"),
         path(tool, "function.parameters"),
         tool.get("parametersJsonSchema"),
@@ -927,11 +931,11 @@ pub(super) fn interactions_content_texts(content: Option<&Value>) -> Vec<String>
         Some(Value::String(text)) => vec![text.clone()],
         Some(Value::Array(parts)) => parts
             .iter()
-            .map(|part| {
-                first_non_empty([str_of(part.get("text")), str_of(path(part, "content.text"))])
+            .filter_map(|part| {
+                let (own, nested) = (str_of(part.get("text")), str_of(path(part, "content.text")));
+                let text = first_non_empty([&own, &nested]);
+                (!text.is_empty()).then(|| text.to_owned())
             })
-            .filter(|text| !text.is_empty())
-            .map(Cow::into_owned)
             .collect(),
         _ => Vec::new(),
     }
@@ -940,13 +944,10 @@ pub(super) fn interactions_content_texts(content: Option<&Value>) -> Vec<String>
 /// `interactionsMediaDataURL`: a part's URL, or its inline data as a data
 /// URL.
 fn interactions_media_data_url(part: &Value) -> String {
-    let url = first_non_empty([
-        str_of(part.get("image_url")),
-        str_of(part.get("file_data")),
-        str_of(part.get("url")),
-    ]);
+    let urls = ["image_url", "file_data", "url"].map(|at| str_of(part.get(at)));
+    let url = first_non_empty([&urls[0], &urls[1], &urls[2]]);
     if !url.is_empty() {
-        return url.into_owned();
+        return url.to_owned();
     }
     let data = str_of(part.get("data"));
     if data.is_empty() {
@@ -1001,21 +1002,23 @@ pub(super) fn json_string_value(value: Option<&Value>, fallback: &str) -> String
 }
 
 /// `firstExisting`: the first value given.
-pub(super) fn first_existing<'v>(values: &[Option<&'v Value>]) -> Option<&'v Value> {
-    values.iter().find_map(|value| *value)
+pub(super) fn first_existing<const N: usize>(values: [Option<&Value>; N]) -> Option<&Value> {
+    values.into_iter().flatten().next()
 }
 
 /// `firstNonEmpty`: the first string that isn't blank, as it is, or `""`.
-pub(super) fn first_non_empty<'a>(values: impl IntoIterator<Item = Cow<'a, str>>) -> Cow<'a, str> {
+pub(super) fn first_non_empty<const N: usize>(values: [&str; N]) -> &str {
     values
         .into_iter()
         .find(|value| !value.trim().is_empty())
-        .unwrap_or(Cow::Borrowed(""))
+        .unwrap_or_default()
 }
 
-/// [`first_non_empty`] of the gjson `String()` of `item`'s `keys`.
-fn first_non_empty_at<'v>(item: &'v Value, keys: &[&str]) -> Cow<'v, str> {
-    first_non_empty(keys.iter().map(|key| str_of(item.get(*key))))
+/// [`first_non_empty`] of the gjson `String()` of `item`'s `call_id` and
+/// `id`.
+fn call_id(item: &Value) -> String {
+    let (own, id) = (str_of(item.get("call_id")), str_of(item.get("id")));
+    first_non_empty([&own, &id]).to_owned()
 }
 
 #[cfg(test)]

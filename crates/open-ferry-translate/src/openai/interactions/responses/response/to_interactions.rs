@@ -36,10 +36,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
-use super::items::{
-    content_part_to_interactions, first_non_empty, for_each, function_call_to_interactions, get,
-    json_string_value, key_int, response_model, set, text,
+use super::super::request::{
+    first_non_empty, json_string_value, responses_content_part_to_interactions,
+    responses_function_call_to_interactions,
 };
+use super::items::{for_each, get, key_int, response_model, set, text};
 use super::read::{read, sse_payload};
 use crate::common::sse::{push_event, push_frame};
 use crate::go;
@@ -587,11 +588,11 @@ fn output_item_to_step(item: &Value) -> Option<Value> {
         "message" => {
             let content: Vec<Value> = for_each(item.get("content"))
                 .into_iter()
-                .filter_map(|(_, part)| content_part_to_interactions(part))
+                .filter_map(|(_, part)| responses_content_part_to_interactions(part))
                 .collect();
             Some(json!({ "type": "model_output", "content": content }))
         }
-        "function_call" => Some(function_call_to_interactions(item)),
+        "function_call" => Some(responses_function_call_to_interactions(item)),
         "reasoning" => {
             let content: Vec<Value> = for_each(item.get("summary"))
                 .into_iter()

@@ -20,7 +20,8 @@ use std::collections::BTreeSet;
 
 use serde_json::{Value, json};
 
-use super::super::items::{first_non_empty, get, is_patch, json_string_value, set, text};
+use super::super::super::request::{first_non_empty, json_string_value};
+use super::super::items::{get, is_patch, set, text};
 use super::{
     Call, Events, InteractionsToOpenAIResponsesStream, ToolInputError, UNRESOLVED, emit,
     patch_delta,

@@ -33,10 +33,14 @@ use std::fmt;
 
 use serde_json::{Value, json};
 
+use super::super::request::{
+    first_existing, first_non_empty, interactions_content_part_to_responses,
+    interactions_content_texts, interactions_function_call_to_responses_with_identity,
+    json_string_value,
+};
 use super::items::{
-    content_part_to_responses, content_texts, encrypted_content, first_existing, first_non_empty,
-    first_usage_int, for_each, function_call_to_responses, get, identity_map, is_patch,
-    json_string_value, key_int, response_model, set, text, thought_signature,
+    encrypted_content, first_usage_int, for_each, get, identity_map, is_patch, key_int,
+    response_model, set, text, thought_signature,
 };
 use super::read::{read, sse_payload};
 use crate::apply_patch::input::{CallState, InputError, failure};
@@ -1310,7 +1314,9 @@ fn step_to_output(step: &Value, identities: &HashMap<String, ToolIdentity>) -> O
                 Some(Value::String(text)) => vec![json!({ "type": "output_text", "text": text })],
                 _ => for_each(content)
                     .into_iter()
-                    .filter_map(|(_, part)| content_part_to_responses(part, "assistant"))
+                    .filter_map(|(_, part)| {
+                        interactions_content_part_to_responses(part, "assistant")
+                    })
                     .collect(),
             };
             if !parts.is_empty() {
@@ -1324,7 +1330,7 @@ fn step_to_output(step: &Value, identities: &HashMap<String, ToolIdentity>) -> O
             if !signature.is_empty() {
                 set(&mut item, "encrypted_content", signature);
             }
-            let summaries: Vec<Value> = content_texts(step.get("content"))
+            let summaries: Vec<Value> = interactions_content_texts(step.get("content"))
                 .into_iter()
                 .map(|text| json!({ "type": "summary_text", "text": text }))
                 .collect();
@@ -1334,7 +1340,8 @@ fn step_to_output(step: &Value, identities: &HashMap<String, ToolIdentity>) -> O
             Some(item)
         }
         "function_call" => {
-            let mut item = function_call_to_responses(step, identities);
+            let mut item =
+                interactions_function_call_to_responses_with_identity(step, Some(identities));
             set(&mut item, "status", "completed");
             Some(item)
         }
