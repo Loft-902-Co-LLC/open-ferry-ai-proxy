@@ -51,7 +51,10 @@ pub(crate) type SanitizedToolNames = HashMap<String, String>;
 /// Reports whether a Gemini part holds the model's hidden thoughts.
 #[cfg_attr(
     not(test),
-    allow(dead_code, reason = "used by the translators from Gemini clients")
+    allow(
+        dead_code,
+        reason = "only the tests call it; the translators from Gemini clients keep their own `is_thought`"
+    )
 )]
 pub(crate) fn is_gemini_thought_part(part: &Value) -> bool {
     part.get("thought").is_some_and(bool_of)
@@ -71,13 +74,6 @@ pub(crate) fn merge_adjacent_gemini_contents(contents: Vec<Value>) -> Vec<Value>
 /// Merges consecutive user turns into one, like
 /// [`merge_adjacent_gemini_contents`], but leaves turns holding a function
 /// response apart, and keeps parts in their order.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "used by the OpenAI Responses to Gemini translator"
-    )
-)]
 pub(crate) fn merge_adjacent_gemini_user_contents(contents: Vec<Value>) -> Vec<Value> {
     merge_user_turns(contents, Merge::InOrder)
 }
@@ -317,13 +313,6 @@ pub(crate) fn set_gemini_function_response_result(
 
 /// [`set_gemini_function_response_result`] for a result given as JSON text.
 /// Blank text stores `""`.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "used by the OpenAI Responses to Gemini translator"
-    )
-)]
 pub(crate) fn set_gemini_function_response_raw(part: &mut Value, path: &str, raw: &str) {
     let trimmed = raw.trim();
     match serde_json::from_str::<Value>(trimmed) {

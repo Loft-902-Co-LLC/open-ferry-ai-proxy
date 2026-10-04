@@ -24,10 +24,6 @@ const USAGE_PATHS: &[&str] = &[
 
 /// `InteractionsUsage`: the first of [`USAGE_PATHS`] that `root` has, whatever
 /// its value, even `null`; `None` if it has none of them.
-#[allow(
-    dead_code,
-    reason = "the Interactions translators (WP4-A to WP4-E) call it as they land"
-)]
 pub(crate) fn interactions_usage(root: &Value) -> Option<&Value> {
     USAGE_PATHS.iter().find_map(|usage| path(root, usage))
 }

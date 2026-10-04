@@ -100,10 +100,6 @@ const TOOL_CHOICES: &[&str] = &["auto", "none", "any", "required", "validated", 
 
 /// Builds `count` request cases. Each case depends only on `seed` and its
 /// index.
-#[allow(
-    dead_code,
-    reason = "the Interactions families' generators call it as they land (WP4-A to WP4-E)"
-)]
 pub fn request_cases(seed: u64, count: usize) -> Vec<Case> {
     (0..count as u64)
         .map(|index| {
@@ -118,10 +114,6 @@ pub fn request_cases(seed: u64, count: usize) -> Vec<Case> {
 
 /// Builds `count` interactions, each as a stream case and a non-streaming
 /// case, with a request from [`request_cases`] as the client's.
-#[allow(
-    dead_code,
-    reason = "the Interactions families' generators call it as they land (WP4-A to WP4-E)"
-)]
 pub fn event_cases(seed: u64, count: usize) -> (Vec<Case>, Vec<Case>) {
     (0..count as u64)
         .map(|index| {

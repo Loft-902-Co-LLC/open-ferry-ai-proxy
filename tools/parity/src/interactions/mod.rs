@@ -232,10 +232,6 @@ const NOW_WINDOW: Duration = Duration::from_secs(3600);
 /// - a `created` or `updated` time within an hour of now, as RFC 3339 text
 ///   or unix seconds, becomes [`CREATED_NOW`]. Upstream writes RFC 3339
 ///   times in UTC, as we do, but they are read as instants anyway.
-#[allow(
-    dead_code,
-    reason = "the families' readers call it as they land (WP4-A to WP4-E)"
-)]
 pub fn mask_volatile(value: &mut Value) {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
