@@ -9,22 +9,28 @@
 //! Deviations from upstream:
 //! - All tests: the registry is a `FakeModels`, so suspension and quota read
 //!   the last projection the manager published. `ModelAlias` has no `fork`
-//!   field, and upstream's manager doesn't read it either. The cooldown
-//!   state store isn't ported (a deviation of the service), and `FileStore`
-//!   saves a credential's metadata, not its model states, so a cooldown
-//!   doesn't outlive the process. "The store has a record" here means the
-//!   credential the manager last handed the `FakeStore` is in active
-//!   cooldown: what it would hand a cooldown store. Those credentials carry
-//!   metadata so the manager saves them. Picks go through `execute` and
-//!   report the credential the executor got (upstream's
-//!   `scheduler.pickSingle`).
+//!   field, and upstream's manager doesn't read it either. Where upstream's
+//!   tests read what a recording cooldown store was given, these read the
+//!   credential the manager last handed the `FakeStore`, since the auth
+//!   store's `FileStore` saves a credential's metadata and its model states
+//!   don't outlive the process. "The store has a record" here means that
+//!   credential is in active cooldown: what it would hand a cooldown store.
+//!   Those credentials carry metadata so the manager saves them. The two
+//!   tests that restore into a new manager use the cooldown store itself.
+//!   Picks go through `execute` and report the credential the executor got
+//!   (upstream's `scheduler.pickSingle`).
 //! - `cooldown_persistence_consistency`, `cleanup_after_alias_removed`,
 //!   `store_persistence_cleaned_when_alias_removed`: check the saved
 //!   credential, not the cooldown store's records.
-//! - `real_persistence_restore_bypasses_cooling_auth` is dropped: there is
-//!   no cooldown store to restore from. In its place,
+//! - `real_persistence_restore_bypasses_cooling_auth` and
+//!   `real_disk_file_store_restore_bypasses_cooling_auth` install a
+//!   `RecordingStore` and a cooldown `FileStore` with `install_store` and
+//!   `restore_now`, and flush where upstream's manager would have saved. The
+//!   disk one keeps its `.cds` files in the auth directory, where upstream
+//!   passes a second directory. Besides them,
 //!   `credentials_reloaded_from_files_start_without_cooldowns` checks that a
-//!   credential a new manager loads through `FileStore` has none.
+//!   credential a new manager loads through the auth store's `FileStore` has
+//!   none.
 //! - `cancelled_context_reconcile_cooldown_store_cleaned`,
 //!   `strict_context_checking_store_reconcile_persists_under_cancelled_context`,
 //!   `reset_quota_cancelled_context_cleans_cooldown_store`: there is no
@@ -71,8 +77,6 @@
 //!   epoch, so stored credentials can't carry one. The epochs are 1 and 1,
 //!   then 2 and 2. Upstream's are 6 and 4, then 7 and 5: the same rule,
 //!   counted from stored epochs 5 and 3. The stale snapshot can't be sent.
-//! - Dropped `RealDiskFileStoreRestore_BypassesCoolingAuth`, for the same
-//!   reason.
 //! - Dropped `TestModelRegistry_Projection_GenerationProtection`,
 //!   `TestModelRegistry_UnregisterClient_TombstoneAndGhostProjectionProtection`,
 //!   `TestModelRegistry_UnregisterAndReRegister_ResetsTombstone` and
@@ -80,6 +84,7 @@
 //!   they test the model registry, which isn't part of the manager. Here the
 //!   registry is a fake.
 
+use super::cooldown_state_store::RecordingStore;
 use super::support::*;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -95,6 +100,7 @@ use crate::auth::{
 };
 use crate::exec::Dispatcher;
 use crate::manager::cooldown::{is_model_state_active_cooldown, model_state_is_clean};
+use crate::manager::cooldown_store::{self, StateStore};
 use crate::manager::{CallResult, ClientModels, Manager, ModelAlias, ModelProjection, Settings};
 
 const ANTIGRAVITY: &str = "antigravity";
@@ -515,7 +521,69 @@ async fn manager_no_fork_alias_per_auth_alias_retains_cooldown_after_reconcile()
     assert!(quota_exceeded(&h, ID, ROUTE));
 }
 
-// In place of test 10
+// Test 10
+#[tokio::test(start_paused = true)]
+async fn manager_no_fork_alias_real_persistence_restore_bypasses_cooling_auth() {
+    const ID1: &str = "restore-auth-1";
+    const ID2: &str = "restore-auth-2";
+    let initial = Arc::new(RecordingStore::default());
+    let first = Harness::new(route_settings());
+    cooldown_store::set_debounce(&first.manager, Duration::from_secs(3600));
+    cooldown_store::install_store(&first.manager, initial.clone());
+    cooldown_store::restore_now(&first.manager);
+    first.executor(&echo(ANTIGRAVITY));
+    first.add(active(ID1, ANTIGRAVITY), &[ROUTE]);
+    first.add(active(ID2, ANTIGRAVITY), &[ROUTE]);
+
+    // Put auth1 into cooldown on the target model.
+    first.manager.mark_result(&rate_limited(
+        ID1,
+        ANTIGRAVITY,
+        TARGET,
+        "",
+        "429 rate limit",
+        MIN30,
+    ));
+    cooldown_store::flush(&first.manager);
+    let saved = initial.saved();
+    assert!(
+        !saved.is_empty(),
+        "expected saved cooldown records in store, got 0"
+    );
+
+    // A new manager, as at a fresh start.
+    let h = Harness::new(route_settings());
+    cooldown_store::set_debounce(&h.manager, Duration::from_secs(3600));
+    cooldown_store::install_store(&h.manager, RecordingStore::with_load(saved));
+    let exec = echo(ANTIGRAVITY);
+    h.executor(&exec);
+    h.add(active(ID1, ANTIGRAVITY), &[ROUTE]);
+    h.add(active(ID2, ANTIGRAVITY), &[ROUTE]);
+
+    cooldown_store::restore_now(&h.manager);
+    h.manager.reconcile_registry_model_states(ID1);
+    h.manager.reconcile_registry_model_states(ID2);
+
+    assert!(
+        suspended(&h, ID1, ROUTE),
+        "routeModel should be suspended for restored auth1"
+    );
+    let resp = h
+        .manager
+        .execute(&providers(&[ANTIGRAVITY]), request(ROUTE), options())
+        .await
+        .expect("execute");
+    assert_eq!(&resp.payload[..], TARGET.as_bytes());
+    assert_eq!(
+        exec.ids(Kind::Execute).last().map(String::as_str),
+        Some(ID2),
+        "cooling auth1 should have been skipped"
+    );
+    assert_eq!(exec.models(Kind::Execute), [TARGET]);
+}
+
+// Not upstream's: what a new manager loads through the auth store's
+// `FileStore` has no cooldowns, since a credential's file doesn't hold them.
 #[tokio::test(start_paused = true)]
 async fn credentials_reloaded_from_files_start_without_cooldowns() {
     const ID: &str = "restore-auth-1.json";
@@ -864,6 +932,83 @@ fn assert_natural_consistency(h: &Harness, id: &str, route: &str, target: &str) 
     assert_eq!(
         stored_cooling, target_cooling,
         "saved cooldown doesn't match memory"
+    );
+}
+
+// Test 17
+#[tokio::test(start_paused = true)]
+async fn manager_no_fork_alias_real_disk_file_store_restore_bypasses_cooling_auth() {
+    const ID1: &str = "disk-auth-1";
+    const ID2: &str = "disk-auth-2";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let auth_dir = dir.path().join("auths");
+    std::fs::create_dir_all(&auth_dir).expect("mkdir");
+    let files = [("auth1.json", ID1), ("auth2.json", ID2)].map(|(name, id)| {
+        let path = auth_dir.join(name);
+        std::fs::write(
+            &path,
+            format!("{{\"id\":\"{id}\",\"provider\":\"antigravity\"}}"),
+        )
+        .expect("write auth file");
+        path.to_string_lossy().into_owned()
+    });
+    let credential = |id: &str, file: &str| Auth {
+        file_name: file.to_owned(),
+        ..active(id, ANTIGRAVITY)
+    };
+    let disk = || cooldown_store::FileStore::new(auth_dir.clone());
+
+    let first = Harness::new(route_settings());
+    cooldown_store::set_debounce(&first.manager, Duration::from_secs(3600));
+    cooldown_store::install_store(&first.manager, Arc::new(disk()));
+    cooldown_store::restore_now(&first.manager);
+    first.executor(&echo(ANTIGRAVITY));
+    first.add(credential(ID1, &files[0]), &[ROUTE]);
+    first.add(credential(ID2, &files[1]), &[ROUTE]);
+
+    // Put auth1 into cooldown on the target model, through the route model.
+    first.manager.mark_result(&rate_limited(
+        ID1,
+        ANTIGRAVITY,
+        TARGET,
+        ROUTE,
+        "429 rate limit",
+        MIN30,
+    ));
+    cooldown_store::flush(&first.manager);
+    let loaded = disk().load().expect("load the disk store");
+    assert!(
+        !loaded.is_empty(),
+        "expected persisted cooldown records on disk, got 0"
+    );
+
+    // A new manager over the same directory.
+    let h = Harness::new(route_settings());
+    cooldown_store::set_debounce(&h.manager, Duration::from_secs(3600));
+    cooldown_store::install_store(&h.manager, Arc::new(disk()));
+    let exec = echo(ANTIGRAVITY);
+    h.executor(&exec);
+    h.add(credential(ID1, &files[0]), &[ROUTE]);
+    h.add(credential(ID2, &files[1]), &[ROUTE]);
+
+    cooldown_store::restore_now(&h.manager);
+    h.manager.reconcile_registry_model_states(ID1);
+    h.manager.reconcile_registry_model_states(ID2);
+
+    assert!(
+        suspended(&h, ID1, ROUTE),
+        "routeModel should be suspended for restored disk-auth-1"
+    );
+    let resp = h
+        .manager
+        .execute(&providers(&[ANTIGRAVITY]), request(ROUTE), options())
+        .await
+        .expect("execute");
+    assert_eq!(&resp.payload[..], TARGET.as_bytes());
+    assert_eq!(
+        exec.ids(Kind::Execute).last().map(String::as_str),
+        Some(ID2),
+        "cooling disk-auth-1 should have been skipped"
     );
 }
 

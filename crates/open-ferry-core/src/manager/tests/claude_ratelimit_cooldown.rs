@@ -6,11 +6,15 @@
 //! model, and disabled cooling blocks nothing.
 //!
 //! Deviations from upstream:
-//! - `TestAuthManager_CooldownPersistenceAcrossRestore` is dropped: the
-//!   cooldown state store is not ported.
+//! - `TestAuthManager_CooldownPersistenceAcrossRestore` hands the new manager
+//!   the records of `cooldown_store::snapshot` through a `RecordingStore`,
+//!   installed with `install_store` and restored from with `restore_now`,
+//!   where upstream's mock store is set with `SetCooldownStateStore` and
+//!   `RestoreCooldownStates`.
 //! - Upstream's global `SetQuotaCooldownDisabled(true)` is
 //!   `Settings::disable_cooling`.
 
+use super::cooldown_state_store::RecordingStore;
 use super::support::*;
 
 use std::time::Duration;
@@ -18,6 +22,7 @@ use std::time::Duration;
 use chrono::TimeDelta;
 
 use crate::auth::{Auth, AuthError};
+use crate::manager::cooldown_store::{install_store, restore_now, snapshot};
 use crate::manager::select::{BlockReason, is_auth_blocked_for_model};
 use crate::manager::{CallResult, Settings};
 
@@ -176,5 +181,37 @@ async fn auth_manager_non_claude_provider_model429_does_not_block_sibling_models
     assert!(
         !blocked_mini,
         "gpt-4o-mini was incorrectly blocked by sibling model 429"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn auth_manager_cooldown_persistence_across_restore() {
+    let h = Harness::new(Settings::default());
+    let id = "claude-persistence-test";
+    h.add(api_key_auth(id, "claude", "k"), &[SONNET]);
+
+    h.manager.mark_result(&credential_429(id, SONNET));
+
+    let records = snapshot(&h.manager, h.now());
+    assert!(
+        !records.is_empty(),
+        "expected cooldown state records to be captured"
+    );
+
+    // A new manager restores them.
+    let restarted = Harness::new(Settings::default());
+    restarted.add(auth(id, "claude"), &[]);
+    install_store(&restarted.manager, RecordingStore::with_load(records));
+    restore_now(&restarted.manager);
+
+    let restored = restarted.get(id);
+    assert!(
+        restored.quota.exceeded
+            && restored
+                .quota
+                .next_recover_at
+                .is_some_and(|t| t >= restarted.now() + TimeDelta::days(6)),
+        "restored auth quota was not preserved: quota={:?}",
+        restored.quota
     );
 }

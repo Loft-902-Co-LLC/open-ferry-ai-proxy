@@ -43,14 +43,14 @@ use crate::manager::{CallResult, Manager, Settings, lock};
 /// A store that keeps what it was given (upstream's
 /// `recordingCooldownStateStore`).
 #[derive(Default)]
-struct RecordingStore {
+pub(super) struct RecordingStore {
     saves: AtomicUsize,
     records: Mutex<Vec<Record>>,
     load: Mutex<Vec<Record>>,
 }
 
 impl RecordingStore {
-    fn with_load(load: Vec<Record>) -> Arc<Self> {
+    pub(super) fn with_load(load: Vec<Record>) -> Arc<Self> {
         let store = Self::default();
         *lock(&store.load) = load;
         Arc::new(store)
@@ -64,7 +64,7 @@ impl RecordingStore {
         self.saves.store(0, Ordering::SeqCst);
     }
 
-    fn saved(&self) -> Vec<Record> {
+    pub(super) fn saved(&self) -> Vec<Record> {
         lock(&self.records).clone()
     }
 }
