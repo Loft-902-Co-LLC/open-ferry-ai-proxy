@@ -10,4 +10,5 @@ pub(crate) mod common;
     reason = "named after the client's format, as the other modules here are"
 )]
 pub mod gemini;
+pub mod interactions;
 pub mod openai;

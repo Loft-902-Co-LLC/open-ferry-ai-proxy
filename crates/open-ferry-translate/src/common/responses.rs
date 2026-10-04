@@ -20,6 +20,22 @@ use serde_json::Value;
 use crate::go;
 use crate::json::{bool_of, go_value, int_of, str_of};
 
+/// `SetResponsesToolCallIdentity`: sets a call item's `name`, and its
+/// `namespace` if there is one, or else removes it. Upstream's `itemPath`, for
+/// an item inside an event, is the caller passing the item itself. Anything
+/// but an object is left alone.
+pub(crate) fn set_tool_call_identity(item: &mut Value, name: &str, namespace: &str) {
+    let Some(fields) = item.as_object_mut() else {
+        return;
+    };
+    fields.insert("name".to_owned(), name.into());
+    if namespace.is_empty() {
+        fields.shift_remove("namespace");
+    } else {
+        fields.insert("namespace".to_owned(), namespace.into());
+    }
+}
+
 /// `ExtractResponsesCallID`: the tool call an input item belongs to, from
 /// `call_id`, `tool_call_id`, `callId` or else `id`. An `fco_` ID names the
 /// output item itself, not a call, so it gives `""`.

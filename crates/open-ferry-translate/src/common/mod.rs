@@ -8,9 +8,11 @@ pub(crate) mod claude;
 pub(crate) mod file_data;
 pub(crate) mod gemini;
 pub(crate) mod gemini_response;
+pub(crate) mod interactions_usage;
 pub(crate) mod mime_types;
 pub(crate) mod openai_tools;
 pub(crate) mod responses;
+pub(crate) mod sse;
 pub(crate) mod tool_names;
 
 use serde_json::Value;

@@ -21,6 +21,7 @@ pub mod completions;
 pub mod gemini;
 mod gemini_schema;
 pub mod go;
+pub mod interactions;
 mod json;
 pub mod models;
 pub mod openai;

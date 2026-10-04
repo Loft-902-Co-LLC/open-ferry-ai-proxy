@@ -4,8 +4,8 @@
 // geminiRecordFunctionEvidence, geminiPendingIdentityError, determineWebSearchStreamMode,
 // hasEffectiveGoogleSearchTool, isUpstreamGeminiRequest, pickRequestJSON, unwrapRequestRoot,
 // unwrapGeminiResponseRoot) (v8.0.11, MIT), and internal/util/translator.go
-// (SanitizedToolNameMap, RestoreSanitizedToolName), internal/translator/common/responses.go
-// (SetResponsesToolCallIdentity) and Go's time.Parse with the RFC 3339 layout (v8.0.10, MIT).
+// (SanitizedToolNameMap, RestoreSanitizedToolName) and Go's time.Parse with the
+// RFC 3339 layout (v8.0.10, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Gemini responses → OpenAI Responses events.
@@ -100,7 +100,8 @@ use crate::common::gemini::{
     SanitizedToolNames, restore_sanitized_tool_name, sanitized_tool_name_map,
 };
 use crate::common::request_model_name;
-use crate::common::responses::{echo_fields, pick_request};
+use crate::common::responses::{echo_fields, pick_request, set_tool_call_identity};
+use crate::common::sse::push_event;
 use crate::go;
 use crate::json::{bool_of, int_of, path, raw, str_of};
 use crate::responses_tools::{
@@ -1630,7 +1631,7 @@ impl GeminiToOpenAIResponsesStream {
                     "name": "",
                 },
             });
-            set_identity(&mut added["item"], &identity.name, &identity.namespace);
+            set_tool_call_identity(&mut added["item"], &identity.name, &identity.namespace);
             push_event(out, "response.output_item.added", &added);
             // Gemini sends complete arguments; this delta is not an early
             // preview.
@@ -1670,7 +1671,7 @@ impl GeminiToOpenAIResponsesStream {
                     "name": "",
                 },
             });
-            set_identity(&mut item_done["item"], &identity.name, &identity.namespace);
+            set_tool_call_identity(&mut item_done["item"], &identity.name, &identity.namespace);
             push_event(out, "response.output_item.done", &item_done);
             if let Some(state) = patch {
                 self.evidence.items[evidence_index].patch_call = Some(state);
@@ -1702,7 +1703,7 @@ impl GeminiToOpenAIResponsesStream {
                     "name": "",
                 },
             });
-            set_identity(&mut added["item"], &identity.name, &identity.namespace);
+            set_tool_call_identity(&mut added["item"], &identity.name, &identity.namespace);
             push_event(out, "response.output_item.added", &added);
             // Gemini sends the whole call at once.
             let seq = self.next_seq();
@@ -1737,7 +1738,7 @@ impl GeminiToOpenAIResponsesStream {
                     "name": "",
                 },
             });
-            set_identity(&mut item_done["item"], &identity.name, &identity.namespace);
+            set_tool_call_identity(&mut item_done["item"], &identity.name, &identity.namespace);
             push_event(out, "response.output_item.done", &item_done);
             self.calls.insert(
                 index,
@@ -1857,7 +1858,7 @@ impl GeminiToOpenAIResponsesStream {
                         "name": "",
                     })
                 };
-                set_identity(&mut item, &call.name, &call.namespace);
+                set_tool_call_identity(&mut item, &call.name, &call.namespace);
                 outputs.push(item);
             }
         }
@@ -2247,7 +2248,7 @@ fn non_stream(
                     "name": "",
                 })
             };
-            set_identity(&mut item, &identity.name, &identity.namespace);
+            set_tool_call_identity(&mut item, &identity.name, &identity.namespace);
             g.order.push(Output::Function(g.functions.len()));
             g.functions.push((item, signature));
             continue;
@@ -2456,29 +2457,6 @@ fn unwrap_response_root(root: &Value) -> (&Value, bool) {
         }
         _ => (root, false),
     }
-}
-
-/// `SetResponsesToolCallIdentity`: sets a call item's `name`, and its
-/// `namespace` if there is one.
-fn set_identity(item: &mut Value, name: &str, namespace: &str) {
-    let Some(fields) = item.as_object_mut() else {
-        return;
-    };
-    fields.insert("name".to_owned(), name.into());
-    if namespace.is_empty() {
-        fields.shift_remove("namespace");
-    } else {
-        fields.insert("namespace".to_owned(), namespace.into());
-    }
-}
-
-/// `SSEEventData`: one SSE frame.
-fn push_event(out: &mut String, event: &str, data: &Value) {
-    out.push_str("event: ");
-    out.push_str(event);
-    out.push_str("\ndata: ");
-    out.push_str(&data.to_string());
-    out.push_str("\n\n");
 }
 
 /// An `output_text` content part.

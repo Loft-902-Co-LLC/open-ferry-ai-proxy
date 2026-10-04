@@ -6,4 +6,5 @@
 pub mod chat_completions;
 pub mod claude;
 pub mod gemini;
+pub mod interactions;
 pub mod responses;
