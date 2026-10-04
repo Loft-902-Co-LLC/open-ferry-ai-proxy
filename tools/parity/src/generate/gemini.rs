@@ -217,7 +217,21 @@ const LEVELS: &[&str] = &[
 
 /// Sampling values that are finite however they're read.
 const FINITE: &[&str] = &[
-    "0", "1", "0.5", "1.50", "2.0", "0.95", "1e-1", "1E+0", "-0.5", "42", "-0", "1e30",
+    "0",
+    "1",
+    "0.5",
+    "1.50",
+    "2.0",
+    "0.95",
+    "1e-1",
+    "1E+0",
+    "-0.5",
+    "42",
+    "-0",
+    "1e30",
+    // Halfway between two shortest decimals, which Go rounds to even.
+    "2156163594508435.25",
+    "2.98023223876953125e-8",
 ];
 
 /// Token limits, none out of int64's range: Go converts those by the CPU's

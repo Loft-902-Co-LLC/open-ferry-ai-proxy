@@ -98,13 +98,13 @@ use axum::routing::{MethodRouter, get};
 use http::{HeaderValue, StatusCode, header};
 use open_ferry_core::auth::synthesizer::{StableIdGenerator, format_sorted_headers};
 use open_ferry_core::config::{AnyValue, Config, V8Document};
-use open_ferry_translate::go::to_lower;
+use open_ferry_translate::go::{json_float, to_lower};
 
 pub(crate) use config_json::{Fields, strings, thinking_fields};
 
 use crate::Route;
 use crate::auth_files::{auth_index, run_blocking};
-use crate::json::{self, Json, format_float, write_string};
+use crate::json::{self, Json, write_string};
 use crate::state::ManagementState;
 
 /// What `Content-Type` a config file is sent with.
@@ -597,7 +597,7 @@ fn write_any(out: &mut String, value: &AnyValue) -> Option<()> {
             if !f.is_finite() {
                 return None;
             }
-            out.push_str(&format_float(*f));
+            out.push_str(&json_float(*f));
         }
         AnyValue::Str(s) => write_string(out, s.as_bytes()),
         AnyValue::Time(Some(text)) => write_string(out, text.as_bytes()),

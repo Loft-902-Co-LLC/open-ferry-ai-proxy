@@ -78,9 +78,7 @@ pub(crate) fn str_of(value: Option<&Value>) -> String {
                 return raw;
             }
             match raw.parse::<f64>() {
-                Ok(f) if f == f64::INFINITY => "+Inf".to_owned(),
-                Ok(f) if f == f64::NEG_INFINITY => "-Inf".to_owned(),
-                Ok(f) => f.to_string(),
+                Ok(f) => open_ferry_translate::go::format_float(f),
                 Err(_) => raw,
             }
         }
@@ -291,6 +289,19 @@ mod tests {
         assert_eq!(str_at(&value, "z"), "");
         assert_eq!(str_at(&value, "a.b.0"), "1");
         assert_eq!(str_at(&value, "a.b.1"), r#"{"c":"x"}"#);
+        // As gjson's `String()` gives them in Go 1.26.4: a float64 halfway
+        // between two shortest decimals rounds to even.
+        for (text, want) in [
+            ("1e400", "+Inf"),
+            ("-1e400", "-Inf"),
+            ("1e21", "1000000000000000000000"),
+            ("2156163594508435.25", "2156163594508435.2"),
+            ("-191224687729131.625", "-191224687729131.62"),
+            ("2.98023223876953125e-8", "0.000000029802322387695312"),
+        ] {
+            let number: Value = serde_json::from_str(text).unwrap();
+            assert_eq!(str_of(Some(&number)), want, "{text}");
+        }
         assert!(exists(&value, "z"));
         assert!(!exists(&value, "a.b.2"));
         assert!(!exists(&value, "i.x"));

@@ -105,6 +105,9 @@ const TEXTS: &[&str] = &[
 ];
 
 /// Number literals, kept as text so `1.50` and `1e3` reach the translator as written.
+/// The last three are float64s halfway between two shortest decimals, which
+/// Go rounds to even: `2156163594508435.2`, `-628643006909686.2` and
+/// `2.9802322387695312e-8`.
 const NUMBERS: &[&str] = &[
     "0",
     "-0",
@@ -123,6 +126,9 @@ const NUMBERS: &[&str] = &[
     "123456789012345678901234567890",
     "1e30",
     "5e-324",
+    "2156163594508435.25",
+    "-628643006909686.25",
+    "2.98023223876953125e-8",
 ];
 
 const BUDGETS: &[&str] = &[

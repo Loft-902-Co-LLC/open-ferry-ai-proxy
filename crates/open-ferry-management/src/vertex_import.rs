@@ -2,8 +2,8 @@
 // vertex_import.go (ImportVertexCredential, valueAsString,
 // sanitizeVertexFilePart, labelForVertex) and auth_files_v8.go
 // (ImportOAuthV8) (v8.0.10, MIT), with Go's fmt print.go (Sprint of a
-// decoded JSON value) and strconv ftoa.go (%v of a float64) (go1.26,
-// BSD-3-Clause).
+// decoded JSON value) (go1.26, BSD-3-Clause); a float64's `%v` is
+// `open_ferry_translate::go::format_float_g`.
 // https://github.com/router-for-me/CLIProxyAPI
 // https://github.com/golang/go
 
@@ -67,7 +67,7 @@ use http::StatusCode;
 use open_ferry_core::auth::Auth;
 use open_ferry_core::auth::file_store::MAX_AUTH_FILE_SIZE;
 use open_ferry_providers::gemini::normalize_service_account;
-use open_ferry_translate::go::{to_lower, trim_space};
+use open_ferry_translate::go::{format_float_g, to_lower, trim_space};
 use serde_json::{Map, Value};
 
 use crate::Route;
@@ -273,7 +273,8 @@ fn sprint(value: &Value) -> String {
     match value {
         Value::Null => "<nil>".to_owned(),
         Value::Bool(flag) => flag.to_string(),
-        Value::Number(number) => number.as_f64().map(go_float).unwrap_or_default(),
+        // Go's `%v` of a float64.
+        Value::Number(number) => number.as_f64().map(format_float_g).unwrap_or_default(),
         Value::String(text) => text.clone(),
         Value::Array(items) => {
             let items: Vec<String> = items.iter().map(sprint).collect();
@@ -289,24 +290,6 @@ fn sprint(value: &Value) -> String {
             format!("map[{}]", entries.join(" "))
         }
     }
-}
-
-/// Go's `%v` of a float64: the shortest digits that read back as `value`,
-/// with an exponent of at least two digits when it is below -4 or 6 and
-/// over.
-fn go_float(value: f64) -> String {
-    let exponential = format!("{value:e}");
-    let Some((mantissa, exponent)) = exponential.split_once('e') else {
-        return exponential;
-    };
-    let Ok(exponent) = exponent.parse::<i32>() else {
-        return exponential;
-    };
-    if value == 0.0 || (-4..6).contains(&exponent) {
-        return format!("{value}");
-    }
-    let sign = if exponent < 0 { '-' } else { '+' };
-    format!("{mantissa}e{sign}{:02}", exponent.unsigned_abs())
 }
 
 /// `sanitizeVertexFilePart`: `s` trimmed, with `/`, `\` and `:` made `_`

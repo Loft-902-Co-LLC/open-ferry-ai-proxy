@@ -202,7 +202,8 @@ const INTEGERS: &[&str] = &[
     "-0",
 ];
 
-/// Floats, all finite as Go reads them.
+/// Floats, all finite as Go reads them. The last two are halfway between
+/// two shortest decimals, which Go rounds to even.
 const FLOATS: &[&str] = &[
     "0",
     "1",
@@ -218,6 +219,8 @@ const FLOATS: &[&str] = &[
     "9007199254740993",
     "1e30",
     "123456789012345678901234567890",
+    "-191224687729131.625",
+    "2.98023223876953125e-8",
 ];
 
 /// Namespace names: plain, already ending in the separator, padded, empty,

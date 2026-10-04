@@ -121,8 +121,7 @@ pub(crate) fn float_of(value: &Value) -> Option<Value> {
     if !float.is_finite() {
         return None;
     }
-    // Rust and Go both write the shortest decimal that reads back the same.
-    serde_json::from_str(&float.to_string()).ok()
+    serde_json::from_str(&go::format_float(float)).ok()
 }
 
 /// gjson `Bool()`.
@@ -189,21 +188,12 @@ fn go_float(number: &Number, marshaled: bool) -> Value {
         Ok(f) if f.is_finite() => f,
         _ => return Value::Number(number.clone()),
     };
-    let abs = f.abs();
-    let text = if marshaled && abs != 0.0 && !(1e-6..1e21).contains(&abs) {
-        // Rust writes `1e21` and `1.5e-7`; Go writes `1e+21` and `1.5e-07`,
-        // then drops the zero.
-        let text = format!("{f:e}");
-        match text.split_once('e') {
-            Some((mantissa, exponent)) if !exponent.starts_with('-') => {
-                format!("{mantissa}e+{exponent}")
-            }
-            _ => text,
-        }
+    let text = if marshaled {
+        go::json_float(f)
     } else {
-        f.to_string()
+        go::format_float(f)
     };
-    serde_json::from_str(&text).expect("a formatted float is valid JSON")
+    serde_json::from_str(&text).unwrap_or_else(|_| Value::Number(number.clone()))
 }
 
 /// gjson's strict integer parser: optional `-`, then ASCII digits only.
@@ -246,6 +236,40 @@ mod tests {
         let huge: Value = serde_json::from_str("-1e400").unwrap();
         assert_eq!(str_of(Some(&huge)), "-Inf");
         assert_eq!(str_of(Some(&json!([1, 2]))), "[1,2]");
+        // Halfway between two shortest decimals, which Go 1.26.4's gjson
+        // rounds to even.
+        for (text, want) in [
+            ("2156163594508435.25", "2156163594508435.2"),
+            ("-628643006909686.25", "-628643006909686.2"),
+            ("2.98023223876953125e-8", "0.000000029802322387695312"),
+            ("1e21", "1000000000000000000000"),
+        ] {
+            let number: Value = serde_json::from_str(text).unwrap();
+            assert_eq!(str_of(Some(&number)), want, "{text}");
+        }
+    }
+
+    // Not upstream's: sjson's `Set` of gjson's `Float()`, as Go 1.26.4
+    // writes it.
+    #[test]
+    fn float_of_writes_as_sjson_does() {
+        let parse = |text: &str| serde_json::from_str::<Value>(text).unwrap();
+        for (value, want) in [
+            (parse("1.50"), "1.5"),
+            (parse("1e21"), "1000000000000000000000"),
+            (parse("1e-7"), "0.0000001"),
+            (parse("2156163594508435.25"), "2156163594508435.2"),
+            (json!("-191224687729131.625"), "-191224687729131.62"),
+            (
+                json!("2.98023223876953125e-8"),
+                "0.000000029802322387695312",
+            ),
+            (json!(true), "1"),
+        ] {
+            let written = float_of(&value).map(|value| value.to_string());
+            assert_eq!(written.as_deref(), Some(want), "{value}");
+        }
+        assert_eq!(float_of(&parse("1e400")), None);
     }
 
     #[test]
@@ -334,6 +358,17 @@ mod tests {
         assert_eq!(
             written(r#"{"b":[1.50,1e21,1.5e-7,1e-6],"a":{"d":2,"c":0}}"#),
             r#"{"a":{"c":0,"d":2},"b":[1.5,1e+21,1.5e-7,0.000001]}"#
+        );
+        // Halfway between two shortest decimals, which Go 1.26.4 rounds to
+        // even, with `FormatFloat` and with `json.Marshal`.
+        assert_eq!(written("2156163594508435.25"), "2156163594508435.2");
+        assert_eq!(
+            written("2.98023223876953125e-8"),
+            "0.000000029802322387695312"
+        );
+        assert_eq!(
+            written("[-191224687729131.625,2.98023223876953125e-8]"),
+            "[-191224687729131.62,2.9802322387695312e-8]"
         );
     }
 

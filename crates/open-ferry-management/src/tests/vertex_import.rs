@@ -53,6 +53,11 @@ fn account() -> Value {
     })
 }
 
+/// A JSON number, as written.
+fn number(text: &str) -> Value {
+    serde_json::from_str(text).unwrap()
+}
+
 /// `account` with `key` set to `value`, or removed for `Value::Null`.
 fn account_with(key: &str, value: Value) -> Value {
     let mut account = account();
@@ -350,7 +355,9 @@ async fn project_id_is_required() {
 }
 
 // Not upstream's: a `project_id` that isn't a string reads as Go prints it,
-// and names the file with `/`, `\`, `:` and spaces replaced.
+// and names the file with `/`, `\`, `:` and spaces replaced. The numbers
+// halfway between two shortest decimals print as Go 1.26.4's `fmt.Sprint`
+// prints them.
 #[tokio::test]
 async fn project_ids_name_the_file() {
     let auth_dir = AuthDir::new();
@@ -360,6 +367,16 @@ async fn project_ids_name_the_file() {
         (json!(123), "123", "vertex-123.json"),
         (json!(1234567), "1.234567e+06", "vertex-1.234567e+06.json"),
         (json!(0.00001), "1e-05", "vertex-1e-05.json"),
+        (
+            number("2156163594508435.25"),
+            "2.1561635945084352e+15",
+            "vertex-2.1561635945084352e+15.json",
+        ),
+        (
+            number("-191224687729131.625"),
+            "-1.9122468772913162e+14",
+            "vertex--1.9122468772913162e+14.json",
+        ),
         (json!(true), "true", "vertex-true.json"),
         (json!([1, "a"]), "[1 a]", "vertex-[1-a].json"),
         (

@@ -146,9 +146,28 @@ const FLOATS: &[&str] = &[
 
 /// Floats written as strings, which gjson reads with Go's `ParseFloat`: the
 /// Go literal forms it takes, and text it doesn't. None reads as infinite.
+/// The last is halfway between two shortest decimals.
 const FLOAT_TEXTS: &[&str] = &[
-    "0.7", "1e3", ".5", "5.", "+1.5", "-0", "0x1p-2", "0X1.8P1", "1_000.5", "0x_1p0", "1__0", "1e",
-    "", " 1", "1.5 ", "abc", "1e-400", "1e308", "0x1p1023",
+    "0.7",
+    "1e3",
+    ".5",
+    "5.",
+    "+1.5",
+    "-0",
+    "0x1p-2",
+    "0X1.8P1",
+    "1_000.5",
+    "0x_1p0",
+    "1__0",
+    "1e",
+    "",
+    " 1",
+    "1.5 ",
+    "abc",
+    "1e-400",
+    "1e308",
+    "0x1p1023",
+    "1166311761237644.25",
 ];
 
 const FINISH_REASONS: &[&str] = &[

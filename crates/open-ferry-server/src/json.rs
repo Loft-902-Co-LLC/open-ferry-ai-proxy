@@ -99,7 +99,7 @@ impl<'a> Val<'a> {
                 if digits.iter().all(u8::is_ascii_digit) {
                     String::from_utf8_lossy(self.raw).into_owned()
                 } else {
-                    format_float(self.num())
+                    open_ferry_translate::go::format_float(self.num())
                 }
             }
         }
@@ -372,18 +372,6 @@ fn go_int64(f: f64) -> i64 {
         i64::MIN
     } else {
         f as i64
-    }
-}
-
-/// Go's `strconv.FormatFloat(f, 'f', -1, 64)` (a private copy of
-/// `open_ferry_translate::go::format_float`).
-fn format_float(f: f64) -> String {
-    if f == f64::INFINITY {
-        "+Inf".to_owned()
-    } else if f == f64::NEG_INFINITY {
-        "-Inf".to_owned()
-    } else {
-        f.to_string()
     }
 }
 
@@ -856,6 +844,11 @@ mod tests {
             ("1.50", "1.5"),
             ("-12", "-12"),
             ("1e2", "100"),
+            ("1e400", "+Inf"),
+            // Halfway between two shortest decimals: Go rounds to even.
+            ("2156163594508435.25", "2156163594508435.2"),
+            ("-628643006909686.25", "-628643006909686.2"),
+            ("2.98023223876953125e-8", "0.000000029802322387695312"),
             ("true", "true"),
             ("null", ""),
             (r#"{ "a":1 }"#, r#"{ "a":1 }"#),
