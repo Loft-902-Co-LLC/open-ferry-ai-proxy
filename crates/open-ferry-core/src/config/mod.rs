@@ -23,7 +23,8 @@
 //! `remote-management`, `auth-dir`, `api-keys`, `debug`, `commercial-mode`,
 //! `logging-to-file`, `logs-max-total-size-mb`, `error-logs-max-files`,
 //! `usage-statistics-enabled`, `redis-usage-queue-retention-seconds`,
-//! `request-log`, `proxy-url`, `passthrough-headers`, `streaming`,
+//! `request-log`, `proxy-url`, `disable-image-generation`,
+//! `passthrough-headers`, `streaming`,
 //! `nonstream-keepalive-interval`, `disable-cooling`,
 //! `save-cooldown-status`, `transient-error-cooldown-seconds`,
 //! `auth-auto-refresh-workers`,
@@ -49,8 +50,8 @@
 //!   `routing.session-affinity-ttl` and `routing.session-affinity-subagents`.
 //! - Other providers: `antigravity`, `antigravity-signature-*`, `devin`.
 //! - Features not ported here: `plugins`, `pprof`, `discovery`,
-//!   `disable-image-generation`, `gpt-image-2-base-model`,
-//!   `video-result-auth-cache-ttl`, `codex.live-media-relay`.
+//!   `gpt-image-2-base-model`, `video-result-auth-cache-ttl`,
+//!   `codex.live-media-relay`.
 //! - Deferred: `credential-concurrency` and `credential-in-flight`.
 //!
 //! Upstream's `home` section has no YAML form and isn't read.
@@ -65,6 +66,7 @@
 mod decode;
 pub mod diff;
 mod duration;
+mod image_generation;
 mod layout;
 mod load;
 mod normalize;
@@ -81,6 +83,7 @@ mod yaml;
 use std::fmt;
 
 pub(crate) use duration::parse_go_duration;
+pub use image_generation::DisableImageGeneration;
 pub use layout::{AnyValue, V8Document};
 pub use payload::{PayloadConfig, PayloadFilterRule, PayloadModelRule, PayloadRule};
 pub use safe_mode::example_api_key_warning_page;

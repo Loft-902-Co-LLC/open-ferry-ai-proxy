@@ -32,6 +32,7 @@ use open_ferry_translate::go::{equal_fold, to_lower};
 use serde::Deserialize;
 
 use super::duration::parse_go_duration;
+use super::image_generation::DisableImageGeneration;
 use super::payload::PayloadConfig;
 
 /// The auth directory used when `auth-dir` is unset.
@@ -49,6 +50,9 @@ pub struct Config {
     pub client: ClientConfig,
     /// An optional proxy for outbound requests.
     pub proxy_url: String,
+    /// Whether the built-in `image_generation` tool is taken out of the
+    /// requests sent upstream.
+    pub disable_image_generation: DisableImageGeneration,
     /// Requires explicit model prefixes to reach prefixed credentials.
     pub force_model_prefix: bool,
     /// Enables detailed request logging.
@@ -164,6 +168,7 @@ impl Default for Config {
         Self {
             client: ClientConfig::default(),
             proxy_url: String::new(),
+            disable_image_generation: DisableImageGeneration::Off,
             force_model_prefix: false,
             request_log: false,
             api_keys: Vec::new(),
@@ -239,6 +244,7 @@ impl fmt::Debug for Config {
         f.debug_struct("Config")
             .field("client", &self.client)
             .field("proxy_url", &Redacted(&self.proxy_url))
+            .field("disable_image_generation", &self.disable_image_generation)
             .field("force_model_prefix", &self.force_model_prefix)
             .field("request_log", &self.request_log)
             .field("api_keys", &RedactedList(&self.api_keys))
