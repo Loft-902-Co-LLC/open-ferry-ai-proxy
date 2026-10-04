@@ -385,7 +385,30 @@ Not ported yet: the usage records (`usage-statistics-enabled`) with time to firs
 
 ### Payload rules
 
-Not ported yet: the config's `payload` rules (`default`, `default-raw`, `override`, `override-raw` and `filter`). The executors call the hook, which changes nothing.
+The config's `payload` rules (`default`, `default-raw`, `override`, `override-raw` and `filter`) and `disable-image-generation` are ported from upstream's `internal/runtime/executor/helps/payload_helpers.go` into `open_ferry_providers::payload`. The Claude, Codex (HTTP and WebSocket), Gemini, Vertex AI and OpenAI-compatible executors call `payload::apply` once a body is translated, where upstream calls `ApplyPayloadConfigWithTrackedPathsForExecutor`. In order, it:
+
+1. declares a Codex client's whole-number tool parameters `integer` again, unless the body goes to a Codex executor. This is the Codex clients' integer pass, which each executor used to call on its own;
+2. with `disable-image-generation` (`true`, or `chat` outside the images endpoints), takes the built-in `image_generation` tool out of `tools`, and removes a `tool_choice` that picks it, so that a rule can put it back;
+3. writes the defaults, each only where the client's request lacks the path, the first rule to write a path winning;
+4. writes the overrides, the last rule to write a path winning;
+5. removes the filters' paths.
+
+A rule applies when one of its models matches either the model sent upstream or the one the client named, with or without its thinking suffix. That entry's `protocol`, `from-protocol`, `headers` and its `match`, `not-match`, `exist` and `not-exist` conditions must also hold. Paths are gjson and sjson paths under the executor's root, and a `#(query)` key stands for each array item the query matches. The rules are compiled once per config load and shared. The binary installs them with each config it loads, so a reload takes effect on the next request.
+
+**What a rule may write.** A rule writes only the literal value the operator configured, the same on every request. The operator may write identity-shaped fields that way, such as `metadata.user_id`, `user`, `safety_identifier` or `prompt_cache_key`. open-ferry never generates or derives a value for them, and it doesn't port the OpenAI-compatible executor's `prompt_cache_key` derivation (`applyPromptCacheKey`). A rule's `headers` are a read-only gate on whether it applies. No rule writes a header, and none will.
+
+The rule engine ports the parts of gjson v1.18.0 (`Get`, with wildcards, projections and `#(...)` queries), sjson v1.2.5 (`SetBytes`, `SetRawBytes`, `DeleteBytes`) and match v1.1.1 (`MatchLimit`) that upstream's payload rules use. All three are by Josh Baker and MIT licensed; see [licenses/gjson-LICENSE](licenses/gjson-LICENSE), [licenses/sjson-LICENSE](licenses/sjson-LICENSE) and [licenses/match-LICENSE](licenses/match-LICENSE).
+
+Deviations, each also noted in its module:
+
+- **Rules come from the config last installed**, where upstream reads each executor's own config. A reload that changes only the payload rules re-registers the Codex executors but not the others. The rules still reach every executor, since all of them read the installed rules.
+- **A rule's params apply in the order the file gives them.** Upstream iterates a Go map, in random order. The order only shows when two params of one rule add keys to the same object.
+- **A value that can't be written is dropped at load**, with a warning naming the section, the rule and the path but never the value. Upstream skips it on each request, except a NaN or infinite float, which it writes, leaving the body invalid JSON. A raw value that isn't JSON drops its whole rule, as upstream's config check does.
+- **Some gjson and sjson syntax isn't read**: modifiers, literals, multipaths, JSON lines, pipes, and a path into a string holding JSON. Some paths that upstream writes to the wrong place change nothing instead: a projection inside another, a count, or a list reached through a `#(query)` with a path after it.
+- **The client's request is translated for the defaults' check only when a default needs it**, where upstream translates it on every call.
+- **The tracked paths are reported but unused.** Upstream's Claude executor asks which of `context_management`, `fallbacks`, `thinking.display` and `diagnostics` a rule touched, for its cloaking and diagnostics, which aren't ported.
+
+Tests: upstream's `payload_helpers_codex_integer_test.go`, `payload_helpers_disable_image_generation_test.go` and `payload_mutations_test.go` are ported, along with the Gemini and OpenAI-compatible executors' payload tests. The tests that are dropped are listed, with reasons, in `crates/open-ferry-providers/src/payload/tests.rs`. The `payload` parity suite runs `ApplyPayloadConfigWithTrackedPathsForExecutor` on fixed cases, covering upstream's test scenarios and each feature's edges, and on generated ones.
 
 ### Saved cooldowns and quota fetches
 
