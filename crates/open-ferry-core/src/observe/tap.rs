@@ -8,15 +8,18 @@
 //! that carries them with the request's context.
 //!
 //! For each executor call a tap sees, in order: for each upstream attempt
-//! the executor makes, the request ([`Tap::attempt_request`]), then once an
-//! answer comes its head ([`Tap::response_head`]) and its body as it is read
-//! ([`Tap::chunk`]), and what failed if reading it did
-//! ([`Tap::attempt_error`]); then, when the call failed, its error
-//! ([`Tap::error`]);
+//! the executor makes, the request ([`Tap::attempt_request`]), then, for an
+//! attempt that has to connect first, that the request went out
+//! ([`Tap::request_sent`]), then once an answer comes its head
+//! ([`Tap::response_head`]) and its body as it is read ([`Tap::chunk`]), and
+//! what failed if reading it did ([`Tap::attempt_error`]); then, when the
+//! call failed, its error ([`Tap::error`]);
 //! and last how it ended ([`Tap::finish`]), once. The executor reports the
 //! attempts, and the manager the error and the end, so a call the manager
 //! retries on another credential or model gives the taps another such
-//! sequence.
+//! sequence. The manager makes its report before it awaits the executor, so
+//! a call dropped while the executor is still connecting ends with a
+//! [`Tap::finish`] of [`Outcome::Canceled`] all the same.
 //!
 //! Deviations from upstream:
 //! - Upstream's executors write each event into the gin context and the
@@ -43,6 +46,13 @@ pub trait Tap: Send + Sync {
     /// An upstream attempt is about to be sent, with its credential's
     /// headers set.
     fn attempt_request(&self, _request: &AttemptRequest<'_>) {}
+
+    /// The attempt's request is about to go out on a connection that is up.
+    /// Only an attempt that connects after it is announced tells this, as a
+    /// message on an upstream WebSocket does once its handshake is done; an
+    /// HTTP attempt is announced as it goes out and tells nothing more. A
+    /// WebSocket attempt that is retried on a new connection tells it again.
+    fn request_sent(&self) {}
 
     /// The attempt's answer came with `status` and `headers`.
     fn response_head(&self, _status: u16, _headers: &HeaderMap) {}
@@ -173,6 +183,14 @@ impl Observation {
     pub fn attempt_request(&self, request: &AttemptRequest<'_>) {
         for tap in &self.taps {
             tap.attempt_request(request);
+        }
+    }
+
+    /// Tells every tap the attempt's request is about to go out on a
+    /// connection that is up.
+    pub fn request_sent(&self) {
+        for tap in &self.taps {
+            tap.request_sent();
         }
     }
 

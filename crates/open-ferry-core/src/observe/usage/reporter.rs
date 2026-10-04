@@ -34,15 +34,24 @@
 //!   kept. A Codex stream, and each message on a Codex WebSocket, is read
 //!   event by event, and its counts are those of its first
 //!   `response.completed`, `response.incomplete` or `response.done`.
+//!   Reading stops at the protocol's terminal marker, as upstream's
+//!   executors stop reading there: an OpenAI-compatible stream's `[DONE]`,
+//!   Claude's `message_stop`, a Codex terminal event. Nothing after it
+//!   changes the counts or the model, whether it comes later in the same
+//!   chunk or in a later one.
 //!
 //! The record is published once per executor call, when it ends: with the
 //! counts read, or with none when the answer named none, or as a failure
 //! with the call's error. A call canceled before its answer came is a
-//! failure with status 499. Each record keeps the time to first token
-//! (see [`super::ttft`]), the latest answer's headers with credentials
-//! masked, and the model the answer named. When that model is not the one
-//! asked for, a warning is logged, once per credential and model pair in
-//! ten minutes.
+//! failure with status 499 and the body `context canceled`. So is a Claude
+//! stream canceled before its `message_stop`, with the counts it had read
+//! (upstream's `StreamUsageBuffer.PublishFailure`). Each record keeps the
+//! time to first token (see [`super::ttft`]), the latest answer's headers
+//! with credentials masked, and the model the answer named. When that model
+//! is not the one asked for, a warning is logged, once per credential and
+//! model pair in ten minutes. A Codex WebSocket's time to first token starts
+//! when its request is sent on the open connection ([`Tap::request_sent`]),
+//! not at the dial.
 //!
 //! A record's `session_id` is the first of the session headers the client
 //! sent (`X-Claude-Code-Session-Id`, `Session-Id`, `Session_id`,
@@ -71,6 +80,27 @@
 //! - The answer's headers are masked as the request log masks them.
 //! - The substitution warning is a `tracing` warning with the request's
 //!   ID as a field.
+//! - A stream's reading stops at its terminal line, not at the blank line
+//!   after it: an OpenAI-compatible stream at the `[DONE]` line, where
+//!   upstream's scanner leaves its loop at the next line, and Claude's at
+//!   the `message_stop` data line. Nothing else upstream reads between
+//!   those lines carries counts.
+//! - A call canceled before its executor answered, whether the executor was
+//!   still dialing or waiting for the headers, is a failure with status 499
+//!   and the body `context canceled` in every stream mode, as upstream's
+//!   `TrackFailure` records the error its canceled send returns; upstream's
+//!   text is the HTTP client's, which names the method and the URL.
+//! - A Claude stream dropped before its `message_stop` is a failure with the
+//!   counts it had read and status 499, for any credential. Upstream makes
+//!   its cancellation error (`newClaudeOAuthCancellationError`) only for an
+//!   OAuth credential, and records another credential's read cut off by the
+//!   canceled context as the scanner's error.
+//! - A Codex WebSocket's time to first token starts when its request goes
+//!   out on the open connection, as upstream's `StartResponseTTFT` does, and
+//!   again when a send is tried on a new connection; the first start wins.
+//!   The request is still announced before the dial, as upstream's request
+//!   log has it, so the tap is told the send as a step of its own
+//!   ([`Tap::request_sent`]).
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -461,6 +491,16 @@ fn is_terminal(payload: &[u8], types: &[&str]) -> bool {
     types.contains(&event.as_str())
 }
 
+/// Whether a stream line is the `data:` line of Claude's `message_stop`
+/// event, which ends the reply (upstream's `observeClaudeStreamLine`).
+fn is_message_stop(line: &[u8]) -> bool {
+    let Some(data) = json::trim_space(line).strip_prefix(b"data:") else {
+        return false;
+    };
+    let data = json::trim_space(data);
+    json::valid(data) && Doc::scan(data).get("type").string() == "message_stop"
+}
+
 /// Whether a stream line is `[DONE]`.
 fn is_done(line: &[u8]) -> bool {
     let line = json::trim_space(line);
@@ -527,6 +567,12 @@ struct Call {
     headers: Vec<(String, Vec<String>)>,
     seen_done: bool,
     held: Option<Held>,
+    /// Some of the attempt's answer was read: a body chunk, or a message.
+    answered: bool,
+    /// A stream's terminal marker was read (`[DONE]` or Claude's
+    /// `message_stop`): nothing after it counts. A Codex stream's first
+    /// terminal event is held, and the rest don't replace it.
+    ended: bool,
 }
 
 impl Call {
@@ -557,6 +603,8 @@ impl Call {
             headers: Vec::new(),
             seen_done: false,
             held: None,
+            answered: false,
+            ended: false,
         }
     }
 
@@ -596,6 +644,17 @@ impl Call {
         self.body = Vec::new();
         self.body_overflow = false;
         self.event_stream = false;
+        self.answered = false;
+        self.ended = false;
+        // A Codex WebSocket's clock starts when its request is sent, once
+        // connected (see `Self::request_sent`), not at the dial.
+        if self.mode != Mode::CodexWebsocket {
+            self.ttft.start(now);
+        }
+    }
+
+    /// The attempt's request is going out on a connection that is up.
+    fn request_sent(&mut self, now: Instant) {
         self.ttft.start(now);
     }
 
@@ -608,6 +667,9 @@ impl Call {
     }
 
     fn chunk(&mut self, chunk: &[u8], now: Instant) {
+        if self.mode != Mode::Ignored {
+            self.answered = true;
+        }
         match self.mode {
             Mode::Ignored => {}
             mode if mode.reads_whole() => {
@@ -623,6 +685,7 @@ impl Call {
                 }
             }
             Mode::CodexWebsocket => self.codex_stream_payload(json::trim_space(chunk), now),
+            _ if self.ended => {}
             mode => {
                 if mode == Mode::CodexStream {
                     self.ttft.observe_token_event(false, now);
@@ -638,10 +701,18 @@ impl Call {
 
     /// Reads a line of a stream, or of an answer read whole.
     fn line(&mut self, line: &[u8], now: Instant) {
+        if self.ended {
+            return;
+        }
         match self.mode {
-            Mode::ClaudeExecute | Mode::ClaudeStream => {
+            Mode::ClaudeExecute => {
                 self.response_model.observe(line, &self.provider);
                 self.buffer.observe_claude_stream(line);
+            }
+            Mode::ClaudeStream => {
+                self.response_model.observe(line, &self.provider);
+                self.buffer.observe_claude_stream(line);
+                self.ended = is_message_stop(line);
             }
             Mode::GeminiStream => {
                 self.response_model.observe(line, &self.provider);
@@ -652,6 +723,7 @@ impl Call {
                 self.buffer.observe_openai_stream(line);
                 if is_done(line) {
                     self.seen_done = true;
+                    self.ended = true;
                 }
             }
             Mode::CodexExecute => {
@@ -787,6 +859,13 @@ impl Call {
         }
         match (self.mode, outcome) {
             (Mode::Ignored, _) => None,
+            // Nothing of the answer came, as when the client went away
+            // while the executor was still connecting or waiting for the
+            // answer: upstream's `TrackFailure` records the error its
+            // canceled send returns, and a canceled read is a failure too.
+            (_, Outcome::Canceled) if !self.answered => {
+                Some(failure(Detail::default(), Failure::canceled()))
+            }
             (mode, Outcome::Failed) if mode.reads_whole() => {
                 Some(failure(Detail::default(), error))
             }
@@ -797,6 +876,16 @@ impl Call {
             (Mode::ClaudeStream, Outcome::Failed) => {
                 self.adopt_buffer_model();
                 Some(failure(self.buffer.raw_detail().clone(), error))
+            }
+            // A canceled stream is a failure that keeps what usage it read
+            // (`StreamUsageBuffer.PublishFailure`), unless it had read its
+            // `message_stop`, which completes it.
+            (Mode::ClaudeStream, Outcome::Canceled) if !self.ended => {
+                self.adopt_buffer_model();
+                Some(failure(
+                    self.buffer.raw_detail().clone(),
+                    Failure::canceled(),
+                ))
             }
             (Mode::ClaudeStream, _) => self.buffered().map(success),
             (Mode::GeminiStream | Mode::OpenAiStream, Outcome::Failed) => {
@@ -973,6 +1062,13 @@ impl Tap for UsageTap {
             )
         });
         call.attempt(request, client_key, now);
+    }
+
+    fn request_sent(&self) {
+        let now = (self.inner.clock)();
+        if let Some(call) = self.lock().call.as_mut() {
+            call.request_sent(now);
+        }
     }
 
     fn response_head(&self, _status: u16, headers: &HeaderMap) {

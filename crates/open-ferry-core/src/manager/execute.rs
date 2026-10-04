@@ -35,8 +35,11 @@
 //! - When the client drops a stream, its task stops reading at once and
 //!   records nothing, as upstream records nothing once its context ends.
 //! - Each executor call's end is reported to the request's taps here (see
-//!   [`CallReport`] and [`observe_stream`]), where upstream's executors
-//!   publish their usage and request-log records themselves.
+//!   [`CallReport`]), where upstream's executors publish their usage and
+//!   request-log records themselves. A stream's report is made before its
+//!   executor is awaited, at the first attempt and at the retry after a
+//!   refresh, so a client that leaves while the executor is still connecting
+//!   ends the call for the taps once, as canceled.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -69,7 +72,7 @@ use super::{Manager, lock};
 use crate::auth::Auth;
 use crate::exec::{ChunkStream, ErrorKind, ExecError, Options, Request, Response, StreamResponse};
 use crate::executor::ProviderExecutor;
-use crate::observe::{CallReport, SelectedAuth, observe_stream};
+use crate::observe::{CallReport, SelectedAuth};
 
 /// The pool offset at which the counter starts again (upstream's
 /// `nextModelPoolOffset` wrap).
@@ -668,6 +671,21 @@ impl Manager {
         result
     }
 
+    /// One executor call that opens a stream, reported to the taps from
+    /// before the executor is awaited: a call dropped while the executor
+    /// is still connecting reports itself canceled, and the report moves
+    /// into the stream the executor returns.
+    async fn call_stream(
+        executor: &dyn ProviderExecutor,
+        auth: Arc<Auth>,
+        req: Request,
+        opts: Options,
+    ) -> Result<StreamResponse, ExecError> {
+        let report = CallReport::start(&opts);
+        let result = executor.execute_stream(auth, req, opts).await;
+        report.stream(result)
+    }
+
     /// One round of a unary call (upstream's `executeMixedOnce` and
     /// `executeCountMixedOnce`).
     async fn unary_once(
@@ -997,12 +1015,13 @@ impl Manager {
                 execution_model.to_owned()
             };
             let exec_opts = opts.clone();
-            let mut outcome = observe_stream(
-                &exec_opts,
-                executor
-                    .execute_stream(auth.clone(), exec_req.clone(), exec_opts.clone())
-                    .await,
-            );
+            let mut outcome = Self::call_stream(
+                &**executor,
+                auth.clone(),
+                exec_req.clone(),
+                exec_opts.clone(),
+            )
+            .await;
             if let Err(err) = &outcome {
                 upstream = Some(Failure::upstream(err.clone()));
                 if let Some(refreshed) = self
@@ -1012,12 +1031,13 @@ impl Manager {
                     auth = refreshed;
                     publish_selected(&exec_opts, &auth);
                     did_refresh = true;
-                    outcome = observe_stream(
-                        &exec_opts,
-                        executor
-                            .execute_stream(auth.clone(), exec_req.clone(), exec_opts.clone())
-                            .await,
-                    );
+                    outcome = Self::call_stream(
+                        &**executor,
+                        auth.clone(),
+                        exec_req.clone(),
+                        exec_opts.clone(),
+                    )
+                    .await;
                     if let Err(err) = &outcome {
                         upstream = Some(Failure::upstream(err.clone()));
                     }
@@ -1058,12 +1078,14 @@ impl Manager {
                     auth = refreshed;
                     publish_selected(&exec_opts, &auth);
                     did_refresh = true;
-                    match observe_stream(
-                        &exec_opts,
-                        executor
-                            .execute_stream(auth.clone(), exec_req.clone(), exec_opts.clone())
-                            .await,
-                    ) {
+                    match Self::call_stream(
+                        &**executor,
+                        auth.clone(),
+                        exec_req.clone(),
+                        exec_opts.clone(),
+                    )
+                    .await
+                    {
                         Err(retry_err) => {
                             headers = HeaderMap::new();
                             bootstrap = Bootstrap::Failed(retry_err);

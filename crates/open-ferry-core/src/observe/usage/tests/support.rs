@@ -187,6 +187,11 @@ impl Driver {
         });
     }
 
+    /// The attempt's request is going out on a connection that is up.
+    pub(super) fn request_sent(&self) {
+        self.tap.request_sent();
+    }
+
     /// The answer's head.
     pub(super) fn head(&self, status: u16, headers: &[(&str, &str)]) {
         let mut map = HeaderMap::new();

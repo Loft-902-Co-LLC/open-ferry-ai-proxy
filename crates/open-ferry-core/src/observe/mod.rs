@@ -15,8 +15,7 @@
 //! it in [`Options::observation`]. Executors report each upstream attempt's
 //! request, response head and body chunks to the taps; the manager records
 //! the credential it picked in the context ([`SelectedAuth`]), and tells the
-//! taps how each executor call ended (see [`CallReport`] and
-//! [`observe_stream`]).
+//! taps how each executor call ended (see [`CallReport`]).
 //!
 //! With request logging and usage statistics off, a call has no taps and
 //! each report costs a branch. A tap runs on the request's task, so its
@@ -56,7 +55,7 @@ use std::time::Instant;
 use chrono::{DateTime, Utc};
 use http::Method;
 
-pub use report::{CallReport, observe_stream};
+pub use report::CallReport;
 pub use tap::{AttemptKind, AttemptRequest, Observation, Outcome, Tap};
 
 use crate::auth::Auth;

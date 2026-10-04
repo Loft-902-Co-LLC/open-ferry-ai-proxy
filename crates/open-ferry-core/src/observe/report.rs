@@ -1,11 +1,16 @@
 //! How the manager tells a call's taps that an executor call ended: a
-//! [`CallReport`] around a non-streaming call, and [`observe_stream`]
-//! around a stream.
+//! [`CallReport`] made before the executor is called, which reports the end
+//! of a non-streaming call ([`CallReport::finish`]) or of a stream
+//! ([`CallReport::stream`]).
 //!
 //! A call with no taps is left as it is: no report is kept and the stream
 //! isn't wrapped. A wrapped stream passes its chunks, its wake-ups and its
 //! size hint through unchanged, and dropping it drops the executor's
 //! stream, so backpressure and cancellation reach the executor as before.
+//!
+//! The report exists before the executor is awaited and moves into the
+//! stream it returns, so a call dropped at any point, even before the
+//! executor answers, tells its taps once that it was canceled.
 //!
 //! Deviations from upstream: the whole module. Upstream's executors publish
 //! their usage and request-log records themselves, and a context's end
@@ -21,9 +26,9 @@ use futures_core::Stream;
 use super::{Observation, Outcome};
 use crate::exec::{ChunkStream, ExecError, Options, StreamResponse};
 
-/// Reports a non-streaming executor call's end to its taps. Dropped before
-/// [`Self::finish`], as when the call's future is dropped, it reports the
-/// call canceled.
+/// Reports an executor call's end to its taps. Dropped before it is
+/// finished, as when the call's future is dropped, it reports the call
+/// canceled.
 #[derive(Debug)]
 #[must_use = "a report dropped at once says the call was canceled"]
 pub struct CallReport {
@@ -46,8 +51,8 @@ impl CallReport {
         }
     }
 
-    /// Reports the call's `result`: its error and a failure, or that it
-    /// completed.
+    /// Reports a non-streaming call's `result`: its error and a failure, or
+    /// that it completed.
     pub fn finish<T>(mut self, result: &Result<T, ExecError>) {
         if let Some(observation) = self.observation.take() {
             match result {
@@ -59,39 +64,40 @@ impl CallReport {
             }
         }
     }
+
+    /// Reports a streaming call's `result`, the start of its stream: an
+    /// error at once, and otherwise how the stream ends. The report moves
+    /// into the stream, which ends it at its first error or its end;
+    /// dropped before then, it reports the call canceled. Without taps,
+    /// `result` as it is.
+    pub fn stream(
+        mut self,
+        result: Result<StreamResponse, ExecError>,
+    ) -> Result<StreamResponse, ExecError> {
+        let Some(observation) = self.observation.take() else {
+            return result;
+        };
+        match result {
+            Ok(response) => Ok(StreamResponse {
+                headers: response.headers,
+                chunks: Box::pin(ObservedChunks {
+                    inner: response.chunks,
+                    observation: Some(observation),
+                }),
+            }),
+            Err(error) => {
+                observation.error(&error);
+                observation.finish(Outcome::Failed);
+                Err(error)
+            }
+        }
+    }
 }
 
 impl Drop for CallReport {
     fn drop(&mut self) {
         if let Some(observation) = self.observation.take() {
             observation.finish(Outcome::Canceled);
-        }
-    }
-}
-
-/// `result`, the start of a streaming executor call made with `options`,
-/// reported to the call's taps: an error at once, and otherwise how the
-/// stream ends. It ends at its first error or its end; dropped before
-/// then, it reports the call canceled. Without taps, `result` as it is.
-pub fn observe_stream(
-    options: &Options,
-    result: Result<StreamResponse, ExecError>,
-) -> Result<StreamResponse, ExecError> {
-    let Some(observation) = options.tapped() else {
-        return result;
-    };
-    match result {
-        Ok(response) => Ok(StreamResponse {
-            headers: response.headers,
-            chunks: Box::pin(ObservedChunks {
-                inner: response.chunks,
-                observation: Some(Arc::clone(observation)),
-            }),
-        }),
-        Err(error) => {
-            observation.error(&error);
-            observation.finish(Outcome::Failed);
-            Err(error)
         }
     }
 }
@@ -208,17 +214,46 @@ mod tests {
         assert_eq!(recorder.take(), ["Canceled"]);
     }
 
+    // Not upstream's: a call dropped before its executor answers, whether
+    // it makes a unary call or opens a stream, reports itself canceled once;
+    // one that answered leaves the report to the stream, which reports once.
+    #[tokio::test]
+    async fn reports_a_call_dropped_before_its_executor_answers() {
+        use futures_util::FutureExt as _;
+
+        let (options, recorder) = tapped();
+        let report = CallReport::start(&options);
+        let mut opening = Box::pin(async move {
+            std::future::pending::<()>().await;
+            report.stream(Err(failure()))
+        });
+        assert!(opening.as_mut().now_or_never().is_none());
+        assert!(recorder.take().is_empty());
+        drop(opening);
+        assert_eq!(recorder.take(), ["Canceled"]);
+
+        let report = CallReport::start(&options);
+        let response = report.stream(Ok(chunks(vec![]))).unwrap();
+        assert!(recorder.take().is_empty());
+        drop(response);
+        assert_eq!(recorder.take(), ["Canceled"]);
+    }
+
     // Not upstream's: a stream reports its first error, its end, or being
     // dropped, and passes its chunks through.
     #[tokio::test]
     async fn reports_how_a_stream_ended() {
         let (options, recorder) = tapped();
-        let error = observe_stream(&options, Err(failure())).unwrap_err();
+        let error = CallReport::start(&options)
+            .stream(Err(failure()))
+            .unwrap_err();
         assert_eq!(error.message, "boom");
         assert_eq!(recorder.take(), ["error boom", "Failed"]);
 
         let ok = || Ok(Bytes::from_static(b"a"));
-        let mut response = observe_stream(&options, Ok(chunks(vec![ok(), ok()]))).unwrap();
+        let mut response = CallReport::start(&options)
+            .stream(Ok(chunks(vec![ok(), ok()])))
+            .unwrap();
         assert_eq!(response.chunks.size_hint(), (2, Some(2)));
         assert!(response.chunks.next().await.unwrap().is_ok());
         assert!(recorder.take().is_empty());
@@ -227,13 +262,16 @@ mod tests {
         drop(response);
         assert_eq!(recorder.take(), ["Completed"]);
 
-        let mut response =
-            observe_stream(&options, Ok(chunks(vec![ok(), Err(failure())]))).unwrap();
+        let mut response = CallReport::start(&options)
+            .stream(Ok(chunks(vec![ok(), Err(failure())])))
+            .unwrap();
         while response.chunks.next().await.is_some() {}
         drop(response);
         assert_eq!(recorder.take(), ["error boom", "Failed"]);
 
-        let mut response = observe_stream(&options, Ok(chunks(vec![ok(), ok()]))).unwrap();
+        let mut response = CallReport::start(&options)
+            .stream(Ok(chunks(vec![ok(), ok()])))
+            .unwrap();
         assert!(response.chunks.next().await.is_some());
         drop(response);
         assert_eq!(recorder.take(), ["Canceled"]);
@@ -249,6 +287,6 @@ mod tests {
             Vec::new(),
         )));
         assert!(CallReport::start(&options).observation.is_none());
-        assert!(observe_stream(&options, Err(failure())).is_err());
+        assert!(CallReport::start(&options).stream(Err(failure())).is_err());
     }
 }

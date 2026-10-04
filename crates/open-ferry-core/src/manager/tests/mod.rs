@@ -73,6 +73,7 @@ mod scheduler;
 mod selector;
 mod service_cooldown_store;
 mod stream_request_span;
+mod stream_startup_cancel;
 mod support;
 mod types;
 mod types_cooling;
