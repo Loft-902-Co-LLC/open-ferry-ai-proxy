@@ -189,7 +189,7 @@ fn strip_incompatible_patterns(value: &mut Value) -> bool {
 }
 
 /// Sorts every object's keys, as Go writes a map.
-fn sort_keys(value: &mut Value) {
+pub(crate) fn sort_keys(value: &mut Value) {
     match value {
         Value::Object(object) => {
             let mut entries: Vec<(String, Value)> = std::mem::take(object).into_iter().collect();

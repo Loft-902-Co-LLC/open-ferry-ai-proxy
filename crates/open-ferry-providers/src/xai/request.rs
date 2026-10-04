@@ -15,7 +15,7 @@
 //! upstream does: the model without its thinking suffix, `stream` set as the
 //! call needs, fields xAI refuses dropped, a custom `apply_patch` tool
 //! declared as a function (see [`crate::apply_patch_responses`]), the tools
-//! reshaped for Grok, and `instructions` filled in.
+//! reshaped for Grok (see [`super::tools`]), and `instructions` filled in.
 //!
 //! Calls go to `<base>/responses` (or `/responses/compact`), where `<base>`
 //! is the credential's `base_url` attribute, else its `base_url` metadata,
@@ -48,6 +48,8 @@
 //!   compatibility translator; no credential resolves one here (as for the
 //!   other executors besides Codex; see [`crate::codex::compat`]).
 
+use std::collections::HashSet;
+
 use bytes::Bytes;
 use http::header::{self, HeaderMap, HeaderName, HeaderValue};
 use open_ferry_core::auth::Auth;
@@ -58,6 +60,7 @@ use open_ferry_translate::registry::Registry;
 use serde_json::Value;
 
 use super::thinking;
+use super::tools::{self, ClientToolKey, NamespaceRefs};
 use crate::apply_patch_responses::{self, State};
 use crate::codex::client::USER_AGENT;
 use crate::codex::compat;
@@ -122,8 +125,19 @@ pub(crate) struct Prepared {
     pub(crate) original: Value,
     /// What to send.
     pub(crate) body: Value,
+    /// The flattened and folded tool names, for restoring the response's
+    /// calls.
+    pub(crate) namespace_tools: NamespaceRefs,
+    /// The function and custom tools the client declared, which the X search
+    /// filter leaves alone.
+    pub(crate) client_declared_tools: HashSet<ClientToolKey>,
     /// The client's `prompt_cache_key`, trimmed, or empty.
     pub(crate) session_id: String,
+    /// Whether the body has Grok's X search tool, whose own calls are then
+    /// dropped from the response.
+    pub(crate) filter_internal_x_search: bool,
+    /// What the client's `web_search` function was renamed to, or empty.
+    pub(crate) web_search_alias: String,
 }
 
 /// Whether the call is for upstream's image or video handler, which isn't
@@ -278,9 +292,46 @@ pub(crate) fn prepare(
             false,
         );
     }
-    let apply_patch = State::new(from, &original, &original_translated);
+    let mut apply_patch = State::new(from, &original, &original_translated);
     apply_patch_responses::normalize_request(&mut body, Some(&original))
         .map_err(|error| ExecError::new(ErrorKind::Upstream, error.to_string()))?;
+
+    let inject_x_search = config.is_some_and(|config| config.xai.inject_x_search);
+    let fold = tools::should_fold(&body, inject_x_search);
+    let namespace_tools = tools::collect_namespace_refs(&body, fold);
+    for (name, reference) in &namespace_tools {
+        if reference.is_dispatcher {
+            apply_patch.add_dispatcher(name, &reference.namespace);
+        }
+    }
+    // Before namespaces are flattened, so the keys are as the client knows
+    // its tools.
+    let client_declared_tools = tools::collect_client_declared_tool_keys(&body);
+    tools::normalize_tools(&mut body, fold);
+    tools::promote_additional_tools(&mut body);
+    let mut web_search_alias = String::new();
+    if tools::has_client_web_search_function(&body, &namespace_tools) {
+        web_search_alias = tools::resolve_client_web_search_alias(&body);
+        tools::alias_client_web_search_function(&mut body, &web_search_alias, &namespace_tools);
+    }
+    tools::normalize_namespace_tool_choice(&mut body, fold);
+    // Before the hosted tool choices are rewritten, so a model that drops
+    // the tool keeps no "required" for it.
+    tools::prune_orphaned_tool_choice(&mut body);
+    tools::normalize_forced_hosted_tool_choice(&mut body, tools::WEB_SEARCH);
+    tools::normalize_forced_hosted_tool_choice(&mut body, tools::IMAGE_GENERATION);
+    tools::normalize_tool_choice_for_tools(&mut body);
+    // A choice forced to a hosted tool alone would let Grok call X search
+    // instead.
+    if inject_x_search && !tools::requires_hosted_tool_only_any(&body) {
+        tools::ensure_native_x_search(&mut body);
+    }
+    tools::clamp_tools(&mut body, tools::MAX_TOOLS, &namespace_tools);
+    tools::normalize_input_custom_tool_calls(&mut body);
+    tools::normalize_input_namespace_tool_calls(&mut body, fold);
+    if !web_search_alias.is_empty() {
+        tools::alias_client_web_search_input(&mut body, &web_search_alias, &namespace_tools);
+    }
 
     normalize_instructions(&mut body, false);
     // Chat Completions takes `stop`; xAI's Responses API doesn't.
@@ -298,8 +349,12 @@ pub(crate) fn prepare(
         to,
         original_payload,
         original,
+        filter_internal_x_search: tools::has_native_x_search(&body),
         body,
+        namespace_tools,
+        client_declared_tools,
         session_id,
+        web_search_alias,
     })
 }
 

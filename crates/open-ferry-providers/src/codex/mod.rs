@@ -54,7 +54,7 @@ pub(crate) mod terminal;
 pub mod thinking;
 pub mod token;
 pub(crate) mod tokens;
-mod tool_schema;
+pub(crate) mod tool_schema;
 pub(crate) mod usage;
 mod websocket;
 

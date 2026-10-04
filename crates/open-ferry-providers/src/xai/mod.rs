@@ -6,8 +6,9 @@
 //!
 //! The executor translates the client's request to Codex's Responses
 //! format, applies the thinking setting of a model suffix or of the request
-//! ([`thinking`]), reshapes it for Grok as upstream does, and translates
-//! xAI's server-sent events back.
+//! (the `thinking` module), reshapes it for Grok as upstream does (the
+//! `request` and `tools` modules), and translates xAI's server-sent events
+//! back.
 //!
 //! Deviations from upstream (each module lists its own):
 //! - Only API keys are served: no xAI sign-in, no Grok CLI chat proxy, and
@@ -20,4 +21,8 @@
 #[allow(dead_code)]
 mod request;
 #[allow(dead_code)]
+mod schema;
+#[allow(dead_code)]
 mod thinking;
+#[allow(dead_code)]
+mod tools;
