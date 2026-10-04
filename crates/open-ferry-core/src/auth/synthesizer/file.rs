@@ -24,6 +24,10 @@
 //! - A codex file's `plan_type`, or else the plan in its ID token, becomes
 //!   the `plan_type` attribute (`free` when the token has none).
 //!
+//! The only part the config plays is the provider's
+//! `oauth-excluded-models`; [`apply_config_attributes`] sets it again on a
+//! registered credential when the config is reloaded.
+//!
 //! Files of type `gemini` and files without a type are skipped. A Vertex AI
 //! service-account file (type `vertex`, as upstream's
 //! `VertexCredentialStorage` writes it) is read like any other: its
@@ -59,6 +63,11 @@ use super::super::path::join;
 use super::super::weight::{apply_auth_weight_metadata, validate_weights};
 use super::super::{Auth, Status};
 use super::{SynthesisContext, SynthesisError, apply_auth_excluded_models_meta};
+
+/// The attribute listing a credential's excluded models.
+const ATTRIBUTE_EXCLUDED_MODELS: &str = "excluded_models";
+/// The attribute holding the hash of a credential's excluded models.
+const ATTRIBUTE_EXCLUDED_MODELS_HASH: &str = "excluded_models_hash";
 
 /// The plan of a codex account whose token names none.
 pub const DEFAULT_CODEX_PLAN_TYPE: &str = "free";
@@ -215,6 +224,26 @@ pub fn synthesize_auth_file(
         auth.attributes.insert("plan_type".to_owned(), plan_type);
     }
     Ok(Some(auth))
+}
+
+/// Sets the attributes a file credential takes from the config again, as
+/// synthesizing its file with `ctx` would set them: `excluded_models` and
+/// `excluded_models_hash`, from the account's own list in its metadata and
+/// the provider's `oauth-excluded-models`, and `auth_kind`. Returns whether
+/// its attributes changed.
+pub fn apply_config_attributes(ctx: &SynthesisContext, auth: &mut Auth) -> bool {
+    let before = auth.attributes.clone();
+    for key in [ATTRIBUTE_EXCLUDED_MODELS, ATTRIBUTE_EXCLUDED_MODELS_HASH] {
+        auth.attributes.remove(key);
+    }
+    let per_account_excluded = extract_excluded_models(&auth.metadata);
+    apply_auth_excluded_models_meta(
+        auth,
+        &ctx.oauth_excluded_models,
+        &per_account_excluded,
+        AUTH_KIND_OAUTH,
+    );
+    auth.attributes != before
 }
 
 /// One per-account model alias (upstream's `OAuthModelAlias`): requests for
@@ -699,6 +728,37 @@ mod tests {
             auths[0].attribute("excluded_models"),
             Some("custom-model,model-b,shared")
         );
+    }
+
+    /// Not upstream's: the config's excluded models set again on a
+    /// registered record match what synthesizing its file with that config
+    /// gives, whatever the old config added.
+    #[test]
+    fn config_attributes_follow_the_config() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "auth.json",
+            &json!({"type": "claude", "excluded_models": ["custom-model"]}),
+        );
+        let mut old = ctx(dir.path());
+        old.oauth_excluded_models = BTreeMap::from([("claude".to_owned(), vec!["*".to_owned()])]);
+        let mut auth = synthesize_file_auths(&old).remove(0);
+        assert_eq!(auth.attribute("excluded_models"), Some("*,custom-model"));
+
+        let mut new = ctx(dir.path());
+        new.oauth_excluded_models = BTreeMap::from([("codex".to_owned(), vec!["*".to_owned()])]);
+        assert!(apply_config_attributes(&new, &mut auth));
+        let fresh = synthesize_file_auths(&new).remove(0);
+        assert_eq!(auth.attributes, fresh.attributes);
+        assert_eq!(auth.attribute("excluded_models"), Some("custom-model"));
+        assert!(!apply_config_attributes(&new, &mut auth));
+
+        auth.metadata.remove("excluded_models");
+        assert!(apply_config_attributes(&new, &mut auth));
+        assert_eq!(auth.attribute("excluded_models"), None);
+        assert_eq!(auth.attribute("excluded_models_hash"), None);
+        assert_eq!(auth.attribute("auth_kind"), Some("oauth"));
     }
 
     #[test]

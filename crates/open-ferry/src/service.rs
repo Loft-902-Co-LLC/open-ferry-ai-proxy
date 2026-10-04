@@ -24,8 +24,10 @@
 //! directory:
 //! - A config that changes is applied to the manager, the server, the
 //!   management API and the executors; the API-key and OpenAI-compatible
-//!   credentials are made again from it, and every credential's models
-//!   registered again, as aliases and exclusions may have changed.
+//!   credentials are made again from it, each file credential takes its
+//!   provider's `oauth-excluded-models` from it again, and every
+//!   credential's models are registered again, as aliases and exclusions
+//!   may have changed.
 //! - An auth file that is added or changes is registered from the contents
 //!   the watcher read; one that is removed is unregistered. An event for a
 //!   file that is gone by the time it is applied unregisters its
@@ -75,6 +77,12 @@
 //!   credential file has the same `path` and ID whether it was found at
 //!   start or reported by the watcher. Upstream keeps a relative directory
 //!   relative, and so do its watcher's paths.
+//! - On a reload, each file credential's excluded models are worked out
+//!   again from the credential as registered and the new config, keeping
+//!   its tokens and state. Upstream synthesizes every auth file again and
+//!   updates the credentials that differ, so a change to a file that the
+//!   watcher has yet to report is applied then, rather than with the
+//!   report.
 //! - The cooldown state store, usage statistics, pprof, the discovery
 //!   advertiser, the WebSocket gateway, plugins and Home aren't ported.
 
@@ -88,7 +96,9 @@ use std::time::Duration;
 
 use chrono::Utc;
 use open_ferry_core::auth::compat::OPENAI_COMPATIBILITY;
-use open_ferry_core::auth::synthesizer::file::{synthesize_auth_file, synthesize_file_auths};
+use open_ferry_core::auth::synthesizer::file::{
+    apply_config_attributes, synthesize_auth_file, synthesize_file_auths,
+};
 use open_ferry_core::auth::synthesizer::{
     StableIdGenerator, SynthesisContext, synthesize_config_auths,
 };
@@ -767,6 +777,27 @@ impl Service {
         }
     }
 
+    /// Sets the attributes each file credential takes from the config
+    /// again, keeping the rest, and updates those that changed (the file
+    /// part of upstream's `reloadClients` and `refreshAuthState`, which
+    /// rebuild the credentials of each provider whose
+    /// `oauth-excluded-models` changed).
+    fn apply_config_to_file_auths(&self) {
+        let ctx = self.synthesis_context();
+        let ids: BTreeSet<&String> = self.file_auths.values().collect();
+        for id in ids {
+            let Some(current) = self.manager.get(id) else {
+                continue;
+            };
+            let mut auth = Auth::clone(&current);
+            if apply_config_attributes(&ctx, &mut auth)
+                && let Err(error) = self.manager.update_unsaved(auth)
+            {
+                tracing::error!("failed to update auth {id}: {error}");
+            }
+        }
+    }
+
     /// Applies a reloaded config (upstream's `applyConfigRuntime`, with the
     /// watcher's credential diff).
     fn apply_config(&mut self, config: Arc<Config>, config_path: &Path) -> Watching {
@@ -841,6 +872,7 @@ impl Service {
         // New providers get executors as their credentials are registered.
         self.sync_config_auths();
         self.prune_compat_executors();
+        self.apply_config_to_file_auths();
         let rules = self.rules();
         for auth in self.manager.list() {
             self.registry.register_auth(&auth, &rules);
@@ -1594,6 +1626,106 @@ mod tests {
             dir.path().read_dir().unwrap().next().is_none(),
             "a file was saved"
         );
+    }
+
+    /// Reloads `service` with a config over `dir` holding `extra`.
+    fn reload(service: &mut Service, dir: &Path, extra: &str) {
+        let config = Config::parse(format!("auth-dir: '{}'\n{extra}", dir.display())).unwrap();
+        service.handle(WatchEvent::ConfigChanged(Arc::new(config)), Path::new(""));
+    }
+
+    /// The models a Codex file credential with no exclusions serves.
+    fn codex_models() -> Vec<String> {
+        let dir = tempfile::tempdir().unwrap();
+        codex_file(dir.path(), "codex-a.json", "");
+        let mut service = service(dir.path(), "");
+        service.load_file_auths();
+        let id = service.manager.list()[0].id.clone();
+        let models = model_ids(&service, &id);
+        assert!(models.len() > 1, "{models:?}");
+        models
+    }
+
+    /// Not upstream's test, for its reload (internal/watcher/config_reload.go,
+    /// reloadConfig, and clients.go, reloadClients): a file credential whose
+    /// provider's `oauth-excluded-models` a reload removes gets its models
+    /// back, keeping its own exclusions, its token and its state, and the
+    /// reverse.
+    #[tokio::test]
+    async fn file_credentials_follow_oauth_excluded_models_reloads() {
+        let all = codex_models();
+        let own = all[0].clone();
+        let excluded = "oauth-excluded-models:\n  codex:\n    - \"*\"\n";
+        let dir = tempfile::tempdir().unwrap();
+        let extra = format!(r#","excluded_models":["{own}"]"#);
+        let path = codex_file(dir.path(), "codex-a.json", &extra);
+        let mut service = service(dir.path(), excluded);
+        service.load_file_auths();
+        let id = service.manager.list()[0].id.clone();
+        let auth = service.manager.get(&id).unwrap();
+        let both = format!("*,{own}");
+        assert_eq!(auth.attribute("excluded_models"), Some(both.as_str()));
+        assert!(model_ids(&service, &id).is_empty());
+
+        // Runtime state the file doesn't hold.
+        let mut auth = Auth::clone(&auth);
+        auth.metadata
+            .insert("access_token".into(), "runtime".into());
+        auth.status_message = "cooling".into();
+        let retry = Utc::now() + chrono::Duration::hours(1);
+        auth.next_retry_after = Some(retry);
+        service.manager.update_unsaved(auth).unwrap();
+
+        reload(&mut service, dir.path(), "");
+        let auth = service.manager.get(&id).unwrap();
+        assert_eq!(auth.attribute("excluded_models"), Some(own.as_str()));
+        let models = model_ids(&service, &id);
+        assert_eq!(models.len(), all.len() - 1, "{models:?}");
+        assert!(!models.contains(&own), "{models:?}");
+        assert_eq!(access_token(&service, &id), "runtime");
+        assert_eq!(auth.status_message, "cooling");
+        assert_eq!(auth.next_retry_after, Some(retry));
+        assert_eq!(service.file_auths.get(&path), Some(&id));
+
+        reload(&mut service, dir.path(), excluded);
+        let auth = service.manager.get(&id).unwrap();
+        assert_eq!(auth.attribute("excluded_models"), Some(both.as_str()));
+        assert!(model_ids(&service, &id).is_empty());
+        assert_eq!(access_token(&service, &id), "runtime");
+        assert!(
+            !std::fs::read_to_string(&path).unwrap().contains("runtime"),
+            "the file was saved"
+        );
+    }
+
+    /// Not upstream's test, for the same reload: a credential with no
+    /// exclusions of its own loses its excluded-models attributes once the
+    /// config has none for its provider, and one whose exclusions a reload
+    /// doesn't change is left as it is.
+    #[tokio::test]
+    async fn a_reload_clears_excluded_models_from_the_config() {
+        let own = codex_models().swap_remove(0);
+        let dir = tempfile::tempdir().unwrap();
+        codex_file(dir.path(), "codex-a.json", "");
+        let config = format!("oauth-excluded-models:\n  codex:\n    - {own}\n");
+        let mut service = service(dir.path(), &config);
+        service.load_file_auths();
+        let id = service.manager.list()[0].id.clone();
+        let auth = service.manager.get(&id).unwrap();
+        assert_eq!(auth.attribute("excluded_models"), Some(own.as_str()));
+        assert!(!model_ids(&service, &id).contains(&own));
+
+        let other = "oauth-excluded-models:\n  claude:\n    - x\n";
+        reload(&mut service, dir.path(), other);
+        let auth = service.manager.get(&id).unwrap();
+        assert_eq!(auth.attribute("excluded_models"), None);
+        assert_eq!(auth.attribute("excluded_models_hash"), None);
+        assert!(model_ids(&service, &id).contains(&own));
+
+        let another = "oauth-excluded-models:\n  claude:\n    - y\n";
+        reload(&mut service, dir.path(), another);
+        let unchanged = service.manager.get(&id).unwrap();
+        assert_eq!(unchanged.generation, auth.generation);
     }
 
     /// A config with a Gemini key at `gemini_url` and a Vertex AI key at
