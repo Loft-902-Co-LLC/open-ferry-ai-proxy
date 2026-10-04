@@ -2165,9 +2165,7 @@ fn gjson_string(value: Option<&Raw<'_>>, compact: bool) -> String {
                 return text.to_owned();
             }
             match text.parse::<f64>() {
-                Ok(f64::INFINITY) => "+Inf".to_owned(),
-                Ok(f64::NEG_INFINITY) => "-Inf".to_owned(),
-                Ok(float) => float.to_string(),
+                Ok(float) => open_ferry_translate::go::format_float(float),
                 Err(_) => text.to_owned(),
             }
         }
@@ -2744,6 +2742,11 @@ mod tests {
         assert_eq!(
             gjson_string(raw_json::parse("1e400").as_ref(), false),
             "+Inf"
+        );
+        // Halfway between two shortest decimals: gjson rounds to even.
+        assert_eq!(
+            gjson_string(raw_json::parse("2156163594508435.25").as_ref(), false),
+            "2156163594508435.2"
         );
     }
 
