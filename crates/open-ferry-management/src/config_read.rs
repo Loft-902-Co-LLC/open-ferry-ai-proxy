@@ -4,8 +4,9 @@
 // GetMaxRetryInterval, GetForceModelPrefix, normalizeRoutingStrategy,
 // GetRoutingStrategy, GetProxyURL), quota.go (GetSwitchProject,
 // GetSwitchPreviewModel), config_lists.go (GetAPIKeys, GetGeminiKeys,
-// GetClaudeKeys, GetCodexKeys, GetOpenAICompat, GetVertexCompatKeys,
-// GetOAuthExcludedModels, GetOAuthModelAlias, GetOAuthRequestScopedErrors)
+// GetInteractionsKeys, GetClaudeKeys, GetCodexKeys, GetXAIKeys, GetMetaKeys,
+// GetOpenAICompat, GetVertexCompatKeys, GetOAuthExcludedModels,
+// GetOAuthModelAlias, GetOAuthRequestScopedErrors)
 // and config_auth_index.go (liveAuthIndexByID and the `*WithAuthIndex`
 // lists) (v8.0.10, MIT), and config_v8.go (ConfigV8's reads) (v8.0.11,
 // MIT).
@@ -22,11 +23,12 @@
 //!   `request-log`, `ws-auth`, `request-retry`, `max-retry-credentials`,
 //!   `max-retry-interval`, `force-model-prefix` and `routing/strategy`.
 //! - `GET /v0/management/<list>` gives one list: `api-keys`,
-//!   `gemini-api-key`, `claude-api-key`, `codex-api-key`,
-//!   `openai-compatibility`, `vertex-api-key`, `oauth-excluded-models`,
-//!   `oauth-model-alias` and `oauth-request-scoped-errors`. Each provider
-//!   key carries the `auth-index` of the credential it made, when the
-//!   manager holds that credential.
+//!   `gemini-api-key`, `interactions-api-key`, `claude-api-key`,
+//!   `codex-api-key`, `xai-api-key`, `meta-api-key`, `openai-compatibility`,
+//!   `vertex-api-key`, `oauth-excluded-models`, `oauth-model-alias` and
+//!   `oauth-request-scoped-errors`. Each provider key carries the
+//!   `auth-index` of the credential it made, when the manager holds that
+//!   credential.
 //! - `GET /v8/management/config`, `config/*path` and `config.yaml` read the
 //!   config file in the v8 layout: the whole of it or the value at a path
 //!   such as `config/server/tls`, as JSON, or the file.
@@ -156,8 +158,14 @@ pub(crate) fn routes() -> Vec<Route> {
         Route::key("/v0/management/config.yaml", get(get_config_yaml)),
         Route::key("/v0/management/api-keys", get(api_keys)),
         Route::key("/v0/management/gemini-api-key", get(gemini_keys)),
+        Route::key(
+            "/v0/management/interactions-api-key",
+            get(interactions_keys),
+        ),
         Route::key("/v0/management/claude-api-key", get(claude_keys)),
         Route::key("/v0/management/codex-api-key", get(codex_keys)),
+        Route::key("/v0/management/xai-api-key", get(xai_keys)),
+        Route::key("/v0/management/meta-api-key", get(meta_keys)),
         Route::key(
             "/v0/management/openai-compatibility",
             get(openai_compatibility),
@@ -302,9 +310,9 @@ impl Indexes {
         self.live.get(&id).cloned().unwrap_or_default()
     }
 
-    /// The index for a Gemini, Claude or Codex key, from its key, base URL,
-    /// proxy URL and prefix and its headers; empty, without taking an ID,
-    /// for an entry with neither a key nor a base URL.
+    /// The index for a Gemini, Interactions, Claude, Codex, xAI or Meta key,
+    /// from its key, base URL, proxy URL and prefix and its headers; empty,
+    /// without taking an ID, for an entry with neither a key nor a base URL.
     fn api_key(
         &mut self,
         provider: &str,
@@ -340,6 +348,24 @@ async fn gemini_keys(State(state): State<ManagementState>) -> Response {
     list("gemini-api-key", keys)
 }
 
+/// `GET /v0/management/interactions-api-key` (upstream's
+/// `GetInteractionsKeys`): Gemini keys, made into `gemini-interactions`
+/// credentials.
+async fn interactions_keys(State(state): State<ManagementState>) -> Response {
+    let mut indexes = Indexes::new(&state);
+    let config = state.config();
+    let keys = config
+        .interactions_api_key
+        .iter()
+        .map(|key| {
+            let parts = [&*key.api_key, &key.base_url, &key.proxy_url, &key.prefix];
+            let index = indexes.api_key("gemini-interactions", parts, &key.headers);
+            config_json::gemini_key(key, &index)
+        })
+        .collect();
+    list("interactions-api-key", keys)
+}
+
 /// `GET /v0/management/claude-api-key` (upstream's `GetClaudeKeys`).
 async fn claude_keys(State(state): State<ManagementState>) -> Response {
     let mut indexes = Indexes::new(&state);
@@ -370,6 +396,40 @@ async fn codex_keys(State(state): State<ManagementState>) -> Response {
         })
         .collect();
     list("codex-api-key", keys)
+}
+
+/// `GET /v0/management/xai-api-key` (upstream's `GetXAIKeys`): Codex-shaped
+/// keys, made into `xai` credentials.
+async fn xai_keys(State(state): State<ManagementState>) -> Response {
+    let mut indexes = Indexes::new(&state);
+    let config = state.config();
+    let keys = config
+        .xai_api_key
+        .iter()
+        .map(|key| {
+            let parts = [&*key.api_key, &key.base_url, &key.proxy_url, &key.prefix];
+            let index = indexes.api_key("xai", parts, &key.headers);
+            config_json::codex_key(key, &index)
+        })
+        .collect();
+    list("xai-api-key", keys)
+}
+
+/// `GET /v0/management/meta-api-key` (upstream's `GetMetaKeys`): Codex-shaped
+/// keys, made into `meta` credentials.
+async fn meta_keys(State(state): State<ManagementState>) -> Response {
+    let mut indexes = Indexes::new(&state);
+    let config = state.config();
+    let keys = config
+        .meta_api_key
+        .iter()
+        .map(|key| {
+            let parts = [&*key.api_key, &key.base_url, &key.proxy_url, &key.prefix];
+            let index = indexes.api_key("meta", parts, &key.headers);
+            config_json::codex_key(key, &index)
+        })
+        .collect();
+    list("meta-api-key", keys)
 }
 
 /// `GET /v0/management/vertex-api-key` (upstream's `GetVertexCompatKeys`).

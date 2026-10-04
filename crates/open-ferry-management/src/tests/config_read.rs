@@ -40,6 +40,12 @@
 //!   config_v8_compatibility_test.go, config_v8_upstream_test.go and the
 //!   other config_*_test.go files test writes, and are dropped.
 //!   (config_basic_weight_test.go is ported in `crate::config_read`.)
+//! - Upstream's tests of the `interactions-api-key`, `xai-api-key` and
+//!   `meta-api-key` lists (config_xai_key_test.go, config_meta_key_test.go,
+//!   and the Interactions, xAI and Meta cases of config_priority_test.go,
+//!   config_weight_test.go, config_lists_delete_keys_test.go and
+//!   config_apikey_disable_test.go) only `PATCH`, `PUT` or `DELETE` them,
+//!   and are dropped. The reads are checked by tests that aren't upstream's.
 
 use http::{Method, StatusCode};
 use open_ferry_core::auth::synthesizer::{
@@ -1125,4 +1131,122 @@ async fn provider_keys_show_their_credentials_auth_index() {
     assert_eq!(index(&compat[0]), None);
     assert_eq!(compat[1]["base-url"], "https://n.example");
     assert_eq!(index(&compat[1]), indexes[6]);
+}
+
+/// Not upstream's: the interactions, xAI and Meta lists read as
+/// `GetInteractionsKeys`, `GetXAIKeys` and `GetMetaKeys` write them (the
+/// entries the loader keeps, as the whole config writes them, without an
+/// `auth-index` while the manager holds no credentials), with `[]` for an
+/// empty list. A write is the empty 404 and leaves the file as it was.
+#[tokio::test]
+async fn interactions_xai_and_meta_lists_are_written() {
+    let api = with_config(NEW_KEYS);
+    let lists = [
+        (
+            "interactions-api-key",
+            concat!(
+                r#"[{"api-key":"i1","priority":1,"weight":2,"base-url":"https://i.example","#,
+                r#""models":[{"name":"gemini-2.5-flash","alias":"nf"}]}]"#,
+            ),
+        ),
+        (
+            "xai-api-key",
+            concat!(
+                r#"[{"api-key":"x1","base-url":"https://x.example","websockets":true,"#,
+                r#""proxy-url":"","models":null,"excluded-models":["grok-2*"]}]"#,
+            ),
+        ),
+        (
+            "meta-api-key",
+            concat!(
+                r#"[{"api-key":"m1","prefix":"team","base-url":"https://api.meta.ai/v1","#,
+                r#""proxy-url":"","models":null,"headers":{"X-A":"a"}}]"#,
+            ),
+        ),
+    ];
+    for (name, list) in lists {
+        let answer = api.get(&format!("/v0/management/{name}")).await;
+        answer.assert(StatusCode::OK, &format!(r#"{{"{name}":{list}}}"#));
+    }
+    let api = with_config(
+        "port: 1
+",
+    );
+    for (name, _) in lists {
+        let answer = api.get(&format!("/v0/management/{name}")).await;
+        answer.assert(StatusCode::OK, &format!(r#"{{"{name}":[]}}"#));
+    }
+    let (dir, api) = over_file(NEW_KEYS);
+    for (name, _) in lists {
+        for method in [Method::PUT, Method::PATCH, Method::DELETE] {
+            assert_unported(&api, method, &format!("/v0/management/{name}")).await;
+        }
+    }
+    assert_unchanged(&dir, NEW_KEYS);
+}
+
+/// Not upstream's: each interactions, xAI and Meta key shows the
+/// `auth-index` of the credential it made, when the manager holds that
+/// credential, and its key as stored. The credential's ID is made from the
+/// key, base URL, proxy URL, prefix and headers, with the parts trimmed and
+/// the headers sorted, so a proxy URL or prefix with spaces around it still
+/// finds its credential.
+#[tokio::test]
+async fn interactions_xai_and_meta_keys_show_their_credentials_auth_index() {
+    let text = "interactions-api-key:
+  - {api-key: i-secret-0001, base-url: https://i1.example, headers: {X-B: b, X-A: a}}
+  - {api-key: i-secret-0002, base-url: https://i2.example}
+xai-api-key:
+  - {api-key: xai-secret-0001, base-url: https://x.example, proxy-url: ' http://p.example ', prefix: ' team ', headers: {X-A: a}}
+meta-api-key:
+  - {api-key: meta-secret-0001, proxy-url: ' http://p.example '}
+  - {api-key: meta-secret-0002, base-url: https://m.example}
+";
+    let config = Config::parse(text).unwrap();
+    let ctx = SynthesisContext::new(AuthDir::new().path(), chrono::Utc::now());
+    let auths = synthesize_config_auths(&config, &ctx, &mut StableIdGenerator::new()).unwrap();
+    let api = with_config(text);
+    // The manager doesn't hold the second interactions key's credential.
+    let mut indexes = std::collections::HashMap::new();
+    for auth in auths {
+        let key = auth.attribute("api_key").unwrap().to_owned();
+        let index = (key != "i-secret-0002").then(|| api.register(auth));
+        indexes.insert(key, index);
+    }
+    assert_eq!(indexes.len(), 5);
+
+    for (name, keys) in [
+        (
+            "interactions-api-key",
+            &["i-secret-0001", "i-secret-0002"][..],
+        ),
+        ("xai-api-key", &["xai-secret-0001"]),
+        ("meta-api-key", &["meta-secret-0001", "meta-secret-0002"]),
+    ] {
+        let body = api
+            .get(&format!("/v0/management/{name}"))
+            .await
+            .expect(StatusCode::OK);
+        let shown: Vec<(&str, Option<&str>)> = body[name]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| {
+                (
+                    entry["api-key"].as_str().unwrap(),
+                    entry["auth-index"].as_str(),
+                )
+            })
+            .collect();
+        let want: Vec<(&str, Option<&str>)> = keys
+            .iter()
+            .map(|&key| (key, indexes[key].as_deref()))
+            .collect();
+        assert_eq!(shown, want, "{name}");
+        for (_, index) in &shown {
+            assert!(index.is_none_or(|index| !index.is_empty()), "{name}");
+        }
+    }
+    let held = indexes.values().filter(|index| index.is_some()).count();
+    assert_eq!(held, 4);
 }
