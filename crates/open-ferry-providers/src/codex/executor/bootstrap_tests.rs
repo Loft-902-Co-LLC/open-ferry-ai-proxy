@@ -5,8 +5,8 @@
 //! which writes its SSE body a piece at a time.
 //!
 //! Deviations from upstream:
-//! - The 21 `TestCodexWebsocketsExecutor_*` tests and their helpers are
-//!   dropped: the Responses WebSocket upstream isn't ported.
+//! - The `TestCodexWebsocketsExecutor_*` tests are in [`websocket`], which
+//!   lists its own deviations.
 //! - `TestCodexExecutor_BootstrapBuffering_CancelDuringBootstrapIsNotAnUpstreamFailure`
 //!   becomes `dropping_the_call_during_bootstrap_closes_the_upstream`. A
 //!   call is cancelled by dropping its future, so there is no context error
@@ -35,6 +35,8 @@ use crate::codex::terminal::{
     MAX_BOOTSTRAP_BYTES, MAX_BOOTSTRAP_FRAMES, is_bootstrap_bufferable_event,
     is_overload_bootstrap_failure,
 };
+
+mod websocket;
 
 pub(super) const OVERLOAD_EVENT: &str = r#"{"type":"error","error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later.","param":null},"sequence_number":2}"#;
 const CAPACITY_EVENT: &str = r#"{"type":"error","error":{"message":"Selected model is at capacity. Please try a different model."},"sequence_number":2}"#;

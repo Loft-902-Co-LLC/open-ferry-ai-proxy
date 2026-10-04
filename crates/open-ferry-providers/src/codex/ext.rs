@@ -41,6 +41,21 @@ pub(crate) struct Turn {
     replay: replay::Scope,
 }
 
+impl Turn {
+    /// Whether [`prepare`] renamed the collaboration namespace for
+    /// multi-agent v2.
+    pub(crate) fn multi_agent_v2_optimized(&self) -> bool {
+        self.multi_agent_v2_optimized
+    }
+
+    /// Sets whether [`restore`] names the collaboration namespace back. The
+    /// WebSocket upstream does so on a connection where an earlier request
+    /// renamed it, too.
+    pub(crate) fn set_multi_agent_v2_restore(&mut self, restore: bool) {
+        self.multi_agent_v2_optimized = restore;
+    }
+}
+
 /// Rewrites the body of a call of `kind` other than a token count once it
 /// is otherwise prepared, as upstream does after normalizing its tool
 /// schemas, before the response translators' copy of it is taken.

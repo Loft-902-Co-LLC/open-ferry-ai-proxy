@@ -115,7 +115,7 @@ pub(crate) fn empty_incomplete_stream_error() -> StatusError {
 }
 
 /// Go's `http.StatusText`, where it differs from the `http` crate's.
-fn status_text(status: u16) -> &'static str {
+pub(crate) fn status_text(status: u16) -> &'static str {
     match status {
         413 => "Request Entity Too Large",
         414 => "Request URI Too Long",
@@ -273,7 +273,7 @@ fn is_model_capacity(body: &[u8], parsed: &Value) -> bool {
 
 /// Whether the body says the credential's usage quota ran out
 /// (`isCodexUsageLimitError`). A per-minute rate limit doesn't count.
-fn is_usage_limit(parsed: &Value) -> bool {
+pub(crate) fn is_usage_limit(parsed: &Value) -> bool {
     ["error.type", "type"]
         .iter()
         .any(|path| eq_fold(str_at(parsed, path).trim(), "usage_limit_reached"))
@@ -292,7 +292,12 @@ const GO_MAX_UNIX_SECONDS: i64 = i64::MAX - 62_135_596_800;
 /// past Go's longest duration (about 292 years) is cut to it, as `Time.Sub`
 /// does; and `resets_in_seconds` wraps as `time.Duration` multiplication
 /// does.
-fn parse_retry_after(status: u16, body: &str, parsed: &Value, now: SystemTime) -> Option<Duration> {
+pub(crate) fn parse_retry_after(
+    status: u16,
+    body: &str,
+    parsed: &Value,
+    now: SystemTime,
+) -> Option<Duration> {
     if status != 429 || body.is_empty() {
         return None;
     }

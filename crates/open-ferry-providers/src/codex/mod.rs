@@ -9,7 +9,9 @@
 //! `gpt-5(high)` or of the request ([`thinking`]), adjusts it as upstream
 //! does, and translates Codex's server-sent events back, chunk by chunk
 //! when streaming and from the completed response otherwise.
-//! `responses/compact` calls go to Codex's compact endpoint. Token counts
+//! `responses/compact` calls go to Codex's compact endpoint. A client on the
+//! Responses WebSocket, with a credential that has `websockets` on, calls
+//! Codex over a WebSocket too (the `websocket` module). Token counts
 //! are made locally with `tiktoken-rs`. For Claude clients, which drop
 //! Codex's reasoning items, each turn's reasoning and tool calls are kept
 //! by the session the client named and put back in its next request (the
@@ -30,8 +32,6 @@
 //!   v2 and orphan delegation requests are handled in the `compat` module.
 //!
 //! Deferred:
-//! - The Responses WebSocket upstream (`codex_websockets_executor.go`),
-//!   which is a separate transport.
 //! - Image generation: the `image_generation` tool upstream adds, and the
 //!   OpenAI Images endpoints served through Codex.
 
@@ -54,6 +54,7 @@ pub mod token;
 mod tokens;
 mod tool_schema;
 pub(crate) mod usage;
+mod websocket;
 
 pub use client::USER_AGENT;
 pub use executor::CodexExecutor;

@@ -62,7 +62,7 @@ use crate::thinking::Route;
 pub(crate) const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 
 /// The header a native Codex client sends for a Responses Lite request.
-const RESPONSES_LITE_HEADER: &str = "x-openai-internal-codex-responses-lite";
+pub(crate) const RESPONSES_LITE_HEADER: &str = "x-openai-internal-codex-responses-lite";
 
 /// Fields Codex refuses, dropped from every request.
 const DROPPED_FIELDS: [&str; 4] = [
@@ -394,7 +394,7 @@ fn drop_fields(body: &mut Value) {
 
 /// The `prompt_cache_key` the client sent, for the formats upstream keeps it
 /// from (`cacheHelper`, without the keys it makes up).
-fn client_prompt_cache_key(source: &Format, payload: &Value) -> Option<String> {
+pub(crate) fn client_prompt_cache_key(source: &Format, payload: &Value) -> Option<String> {
     let key = get(payload, "prompt_cache_key")?;
     let key = if format_is(source, &Format::OPENAI_RESPONSE) {
         str_of(Some(key))
@@ -473,7 +473,7 @@ pub(crate) fn build_headers(
 
 /// Sets `name` to the client's value, trimmed, when it sent a non-empty one
 /// (`misc.EnsureHeader` with no default). Returns whether it did.
-fn ensure_header(target: &mut HeaderMap, client: &HeaderMap, name: HeaderName) -> bool {
+pub(crate) fn ensure_header(target: &mut HeaderMap, client: &HeaderMap, name: HeaderName) -> bool {
     let Some(value) = client.get(&name) else {
         return false;
     };

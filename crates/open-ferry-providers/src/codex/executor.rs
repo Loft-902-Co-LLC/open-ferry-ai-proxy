@@ -7,7 +7,9 @@
 //! key.
 //!
 //! A call goes to `<base>/responses`, where `<base>` is the credential's
-//! `base_url` attribute or ChatGPT's Codex API. Codex always streams: a
+//! `base_url` attribute or ChatGPT's Codex API. A client on the Responses
+//! WebSocket with a credential that has `websockets` on calls over a
+//! WebSocket instead (see [`super::websocket`]). Codex always streams: a
 //! non-streaming call reads the stream to its `response.completed` (or
 //! `response.incomplete`) event and translates that. `responses/compact`
 //! goes to `<base>/responses/compact`, as OpenAI Responses, and answers
@@ -39,6 +41,8 @@
 //!   ported.
 //! - Deferred: the image generation endpoints. See also the module docs of
 //!   [`super`].
+//! - One executor makes both HTTP and WebSocket calls; upstream wraps an
+//!   HTTP and a WebSocket executor in a `CodexAutoExecutor`.
 //! - Refresh returns a copy of the credential with new metadata; the
 //!   credential manager saves it. Upstream also updates the typed token
 //!   storage, which [`Auth`] doesn't have.
@@ -78,6 +82,7 @@ use super::terminal::{
 use super::token::{CREDENTIAL_TYPE, now_rfc3339};
 use super::tokens::{count_input_tokens, tokenizer_for};
 use super::usage::ensure_responses_usage_details;
+use super::websocket;
 use crate::json::str_at;
 use crate::redact;
 
@@ -99,6 +104,8 @@ pub struct CodexExecutor {
     oauth_endpoints: Endpoints,
     /// The clock of stream bootstrap buffering's time limit.
     bootstrap_clock: Clock,
+    /// The Responses WebSocket sessions.
+    websockets: websocket::Store,
 }
 
 impl CodexExecutor {
@@ -113,6 +120,7 @@ impl CodexExecutor {
             base_url: DEFAULT_BASE_URL.to_owned(),
             oauth_endpoints: Endpoints::default(),
             bootstrap_clock: Arc::new(Instant::now),
+            websockets: websocket::Store::new(),
         }
     }
 
@@ -149,9 +157,32 @@ impl CodexExecutor {
         self
     }
 
+    /// Closes Responses WebSocket connections after `idle` without a
+    /// message, instead of five minutes.
+    #[cfg(test)]
+    pub(crate) fn with_websocket_idle(mut self, idle: Duration) -> Self {
+        self.websockets = websocket::Store::with_idle(idle);
+        self
+    }
+
+    /// The base URL for credentials without a `base_url` attribute.
+    pub(super) fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    /// The proxy setting `auth`'s calls go through (see [`Self::new`]).
+    pub(super) fn proxy_for(&self, auth: &Auth) -> String {
+        self.clients.effective_proxy(&auth.proxy_url).to_owned()
+    }
+
+    /// The Responses WebSocket sessions.
+    pub(super) fn websockets(&self) -> &websocket::Store {
+        &self.websockets
+    }
+
     /// Whether a usage limit cools only the model, not the whole credential
     /// (`codex.model-level-cooling`, upstream's `modelLevelCooling`).
-    fn model_level_cooling(&self) -> bool {
+    pub(super) fn model_level_cooling(&self) -> bool {
         self.config
             .as_deref()
             .is_some_and(|config| config.codex.model_level_cooling)
@@ -159,7 +190,7 @@ impl CodexExecutor {
 
     /// How long a stream's first lines may be held back, when
     /// `codex.stream-bootstrap-buffering` is on.
-    fn bootstrap(&self) -> Option<Bootstrap> {
+    pub(super) fn bootstrap(&self) -> Option<Bootstrap> {
         let config = self
             .config
             .as_deref()
@@ -171,7 +202,7 @@ impl CodexExecutor {
     }
 
     /// What a call with `auth` is prepared with.
-    fn context<'a>(&'a self, auth: &'a Auth) -> Context<'a> {
+    pub(super) fn context<'a>(&'a self, auth: &'a Auth) -> Context<'a> {
         Context {
             auth: Some(auth),
             config: self.config.as_deref(),
@@ -244,7 +275,7 @@ impl CodexExecutor {
         })
     }
 
-    async fn execute_inner(
+    pub(super) async fn execute_inner(
         &self,
         auth: &Auth,
         request: &Request,
@@ -328,7 +359,7 @@ impl CodexExecutor {
         Err(incomplete_stream_error().into())
     }
 
-    async fn execute_stream_inner(
+    pub(super) async fn execute_stream_inner(
         &self,
         auth: &Auth,
         request: Request,
@@ -469,7 +500,7 @@ impl CodexExecutor {
 }
 
 /// Fills in usage details an OpenAI Responses client expects.
-fn finish_payload(format: &Format, out: Vec<u8>) -> Vec<u8> {
+pub(super) fn finish_payload(format: &Format, out: Vec<u8>) -> Vec<u8> {
     if *format == Format::OPENAI_RESPONSE {
         ensure_responses_usage_details(out)
     } else {
@@ -488,7 +519,13 @@ impl ProviderExecutor for CodexExecutor {
         request: Request,
         options: Options,
     ) -> BoxFuture<'_, Result<Response, ExecError>> {
-        async move { self.execute_inner(&auth, &request, &options).await }.boxed()
+        async move {
+            if websocket::routes(&auth, &options) {
+                return websocket::execute(self, &auth, &request, &options).await;
+            }
+            self.execute_inner(&auth, &request, &options).await
+        }
+        .boxed()
     }
 
     fn execute_stream(
@@ -497,7 +534,13 @@ impl ProviderExecutor for CodexExecutor {
         request: Request,
         options: Options,
     ) -> BoxFuture<'_, Result<StreamResponse, ExecError>> {
-        async move { self.execute_stream_inner(&auth, request, options).await }.boxed()
+        async move {
+            if websocket::routes(&auth, &options) {
+                return websocket::execute_stream(self, &auth, request, options).await;
+            }
+            self.execute_stream_inner(&auth, request, options).await
+        }
+        .boxed()
     }
 
     fn count_tokens(
@@ -515,6 +558,10 @@ impl ProviderExecutor for CodexExecutor {
 
     fn refresh_lead(&self) -> Option<Duration> {
         Some(REFRESH_LEAD)
+    }
+
+    fn close_execution_session(&self, session_id: &str) {
+        self.websockets.close(session_id);
     }
 }
 

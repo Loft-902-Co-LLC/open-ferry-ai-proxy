@@ -822,8 +822,9 @@ async fn stream_closed_before_any_payload_is_empty() {
     assert!(text.is_empty() && error.is_none(), "{text} {error:?}");
 }
 
-// TestCodexAutoExecutorHTTPFallbackForwardsSequentialCutoffReasoningSummaryDelivery,
-// over HTTP only: the WebSocket upstream is deferred.
+// TestCodexAutoExecutorHTTPFallbackForwardsSequentialCutoffReasoningSummaryDelivery:
+// a Responses WebSocket client's call goes over HTTP when the credential
+// has websockets off.
 #[tokio::test]
 async fn stream_forwards_reasoning_summary_delivery() {
     let mock = Mock::start(Reply::sse(concat!(
@@ -838,7 +839,10 @@ async fn stream_forwards_reasoning_summary_delivery() {
         .execute_stream(
             api_key_auth(&mock.url),
             request("gpt-5.6-sol", payload),
-            stream_options("openai-response"),
+            Options {
+                downstream_websocket: true,
+                ..stream_options("openai-response")
+            },
         )
         .await
         .unwrap();
