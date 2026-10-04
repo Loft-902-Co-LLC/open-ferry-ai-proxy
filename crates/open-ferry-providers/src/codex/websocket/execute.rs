@@ -11,6 +11,11 @@
 //! message. A send that fails on a session's connection is tried once more
 //! on a new one, unless the message was too big.
 //!
+//! The taps are told the handshake and the message once, before connecting,
+//! and told again just before each send that the request is going out
+//! ([`observe_send::request_sent`]), so the usage statistics' time to first
+//! token starts once the connection is up, not at the dial.
+//!
 //! A failed handshake is the call's error: its status and body (the
 //! credential's secret redacted), with a usage limit's cooling as for
 //! HTTP. Another failure to connect, such as a refused `CONNECT`, is the
@@ -29,6 +34,10 @@
 //! - A dropped call closes its connection; see [`super::session`].
 //! - A failure to connect has the credential's secret redacted from its
 //!   text, as a refused handshake's body has; upstream passes it on.
+//! - The taps are told the request is going out, just before the send,
+//!   once the connection is up. Upstream starts the time to first token
+//!   there (`StartResponseTTFT`) but logs the request before it dials; the
+//!   taps get both as separate steps.
 
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -133,10 +142,12 @@ pub(super) async fn open(
     };
 
     let mut hold = Hold::new(Arc::clone(&session), ephemeral, guard, conn);
+    let sender = tap.clone();
     hold.observe(tap);
     prepared
         .turn
         .set_multi_agent_v2_restore(restores(prepared, &session, hold.conn().id()));
+    observe_send::request_sent(sender.as_ref());
     if let Err(failure) = hold.conn().send(prepared.message.clone()).await {
         let error = errors::write_error(hold.conn().disconnect_code(), &failure);
         hold.invalidate("send_error");
@@ -157,6 +168,7 @@ pub(super) async fn open(
         prepared
             .turn
             .set_multi_agent_v2_restore(restores(prepared, &session, hold.conn().id()));
+        observe_send::request_sent(sender.as_ref());
         if let Err(failure) = hold.conn().send(prepared.message.clone()).await {
             let error = errors::write_error(hold.conn().disconnect_code(), &failure);
             hold.invalidate("send_error");

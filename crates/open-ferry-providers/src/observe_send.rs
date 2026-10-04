@@ -10,8 +10,10 @@
 //! answer comes, it hands it to [`response`], which tells the taps its head
 //! and marks it, so the body readers give each chunk they read to the
 //! [`BodyTap`] they find on it. Without taps, each step is one branch, and
-//! the answer isn't marked. OAuth and token calls aren't tapped, as
-//! upstream doesn't record them.
+//! the answer isn't marked. A send that connects first, as a Codex
+//! WebSocket's does, also tells the taps with [`request_sent`] that the
+//! request is going out on the open connection. OAuth and token calls
+//! aren't tapped, as upstream doesn't record them.
 //!
 //! Deviations from upstream: the whole module (see
 //! [`open_ferry_core::observe`]).
@@ -115,6 +117,12 @@ impl BodyTap {
         response.extensions().get::<Self>().cloned()
     }
 
+    /// Tells the taps the request is about to go out on a connection that
+    /// is up (see [`open_ferry_core::observe::Tap::request_sent`]).
+    pub(crate) fn request_sent(&self) {
+        self.0.request_sent();
+    }
+
     /// Gives the taps the next part of the body: a chunk off the wire, or
     /// a WebSocket message.
     pub(crate) fn chunk(&self, chunk: &Bytes) {
@@ -125,6 +133,14 @@ impl BodyTap {
     /// where upstream's executors record it (`RecordAPIResponseError`).
     pub(crate) fn error(&self, error: &dyn fmt::Display) {
         self.0.attempt_error(&error.to_string());
+    }
+}
+
+/// Tells `tap`, if any, its request is about to go out on a connection that
+/// is up (see [`BodyTap::request_sent`]).
+pub(crate) fn request_sent(tap: Option<&BodyTap>) {
+    if let Some(tap) = tap {
+        tap.request_sent();
     }
 }
 
