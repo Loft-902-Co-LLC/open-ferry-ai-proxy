@@ -143,7 +143,9 @@ fn incremental_input_for_model() {
     assert!(found.is_some_and(|auth| auth.websockets && auth.serves_model));
 }
 
-// TestWebsocketUpstreamSupportsIncrementalInputForXAI
+// TestWebsocketUpstreamSupportsIncrementalInputForXAI, inverted: xAI's
+// WebSocket executor isn't ported, so an xAI credential with websockets on,
+// by attribute or metadata, is served over HTTP.
 #[test]
 fn incremental_input_for_xai() {
     let h = Harness::new(Settings::default());
@@ -155,7 +157,7 @@ fn incremental_input_for_xai() {
         Some("auth-xai-ws"),
     )
     .auth;
-    assert!(found.is_some_and(|auth| auth.websockets));
+    assert!(found.is_some_and(|auth| !auth.websockets && auth.serves_model));
 
     let mut off = ws_auth("auth-xai-off", "xai");
     off.attributes.clear();
@@ -170,19 +172,22 @@ fn incremental_input_for_xai() {
     )
     .auth;
     assert!(
-        found.is_some_and(|auth| auth.websockets),
-        "metadata websockets string should count"
+        found.is_some_and(|auth| !auth.websockets),
+        "xAI is served over HTTP"
     );
 }
 
-// TestResponsesWebsocketUsesUpstreamWebsocketPassthroughForXAI
+// TestResponsesWebsocketUsesUpstreamWebsocketPassthroughForXAI, inverted:
+// xAI's WebSocket executor isn't ported, so there is no passthrough.
 #[test]
 fn upstream_passthrough_for_xai() {
     let h = Harness::new(Settings::default());
     h.executor(&FakeExecutor::new("xai"));
     let model = "xai-passthrough-model";
     h.add(ws_auth("auth-xai-ws", "xai"), &[model]);
-    assert!(support(&h, &providers(&["xai"]), model, None).upstream_passthrough);
+    let support = support(&h, &providers(&["xai"]), model, None);
+    assert!(!support.upstream_passthrough);
+    assert!(!support.compaction_replay);
 }
 
 // Not upstream's: passthrough needs a registered executor, websockets on for

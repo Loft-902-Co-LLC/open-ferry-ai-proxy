@@ -91,7 +91,7 @@ fn supports_apply_patch_for_providers(providers: &[String]) -> bool {
 fn provider_supports_apply_patch(provider: &str) -> bool {
     let provider = go::to_lower(provider.trim());
     match provider.as_str() {
-        "codex" | "claude" | GEMINI | GEMINI_INTERACTIONS | VERTEX | "meta"
+        "codex" | "claude" | "xai" | GEMINI | GEMINI_INTERACTIONS | VERTEX | "meta"
         | OPENAI_COMPATIBILITY => true,
         name => name
             .strip_prefix(OPENAI_COMPATIBLE_PREFIX)

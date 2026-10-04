@@ -17,6 +17,9 @@
 //!   upstream resolves them here.
 //! - The Home runtime's pinned-model check isn't ported: a credential serves
 //!   a model when the registry says so.
+//! - xAI's WebSocket executor isn't ported, so an xAI credential is served
+//!   over HTTP: it never reports websockets on, and never allows
+//!   passthrough. Upstream treats `xai` as `codex` here.
 //!
 //! [`Dispatcher::websocket_support`]: crate::exec::Dispatcher::websocket_support
 //! [`Dispatcher`]: crate::exec::Dispatcher
@@ -27,6 +30,10 @@ use super::text::{go_lower, parse_suffix};
 use super::{Manager, State};
 use crate::auth::{Auth, Status, Timestamp};
 use crate::exec::{ProviderId, WebsocketAuth, WebsocketSupport};
+
+/// Providers upstream may serve over a WebSocket whose WebSocket executors
+/// aren't ported: their credentials are served over HTTP.
+const HTTP_ONLY_PROVIDERS: [&str; 1] = ["xai"];
 
 impl Manager {
     /// What the Responses WebSocket may rely on for `model` among
@@ -47,10 +54,12 @@ impl Manager {
             let serves_model = in_providers(providers, &provider)
                 && available_for_model(auth, model, now)
                 && models.client_supports_model(&auth.id, model);
+            let websockets =
+                websockets_enabled(auth) && !HTTP_ONLY_PROVIDERS.contains(&provider.as_str());
             Some(WebsocketAuth {
                 provider,
                 serves_model,
-                websockets: websockets_enabled(auth),
+                websockets,
             })
         });
         WebsocketSupport {
@@ -93,8 +102,9 @@ fn available_auths<'a>(
         .collect()
 }
 
-/// Whether the credentials are all of one provider, `codex` or `xai`, whose
-/// executor is registered, and all have websockets on
+/// Whether the credentials are all of one provider, `codex` or `xai` (but
+/// not one in [`HTTP_ONLY_PROVIDERS`]), whose executor is registered, and
+/// all have websockets on
 /// (`responsesWebsocketUsesUpstreamWebsocketPassthrough`).
 fn uses_upstream_passthrough(state: &State, auths: &[&Auth], model: &str) -> bool {
     if model.trim().is_empty() || auths.is_empty() {
@@ -103,7 +113,9 @@ fn uses_upstream_passthrough(state: &State, auths: &[&Auth], model: &str) -> boo
     let mut provider = String::new();
     for auth in auths {
         let auth_provider = go_lower(auth.provider.trim());
-        if auth_provider != "codex" && auth_provider != "xai" {
+        if (auth_provider != "codex" && auth_provider != "xai")
+            || HTTP_ONLY_PROVIDERS.contains(&auth_provider.as_str())
+        {
             return false;
         }
         if provider.is_empty() {

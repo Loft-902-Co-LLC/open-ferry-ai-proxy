@@ -8,6 +8,7 @@
 // claude_executor_stream.go, codex_executor_execute.go,
 // codex_executor_stream.go, codex_executor_terminal.go
 // (observeCodexTokenEvent), codex_websockets_executor.go,
+// xai_executor_execute.go, xai_executor_stream.go,
 // gemini_executor.go (including executeInteractions and
 // executeInteractionsStream), gemini_vertex_executor.go and
 // openai_compat_executor.go, internal/redisqueue/plugin.go (HandleUsage's
@@ -54,6 +55,13 @@
 //! model pair in ten minutes. A Codex WebSocket's time to first token starts
 //! when its request is sent on the open connection ([`Tap::request_sent`]),
 //! not at the dial.
+//!
+//! An xAI answer is read as a Codex one, but as upstream's xAI executor
+//! reads it: the served model is named where an OpenAI-compatible provider
+//! names it; a stream's time to first token is its first byte, and its
+//! counts are those of its last `response.completed` or
+//! `response.incomplete`, published when it ends, with none when it named
+//! none; a compaction, streamed or not, is read whole as OpenAI JSON.
 //!
 //! A record's `session_id` is the first of the session headers the client
 //! sent (`X-Claude-Code-Session-Id`, `Session-Id`, `Session_id`,
@@ -280,6 +288,7 @@ enum Mode {
     CodexExecute,
     CodexStream,
     CodexWebsocket,
+    XaiStream,
 }
 
 impl Mode {
@@ -294,6 +303,17 @@ impl Mode {
             }
             ("codex", AttemptKind::Execute) => Self::CodexExecute,
             ("codex", AttemptKind::Stream) => Self::CodexStream,
+            ("xai", AttemptKind::Execute)
+                if format.as_str() == Format::OPENAI_RESPONSE.as_str() =>
+            {
+                Self::CodexCompact
+            }
+            // A compaction trigger reads its answer whole and names its model.
+            ("xai", AttemptKind::Stream) if format.as_str() == Format::OPENAI_RESPONSE.as_str() => {
+                Self::OpenAiExecute
+            }
+            ("xai", AttemptKind::Execute) => Self::CodexExecute,
+            ("xai", AttemptKind::Stream) => Self::XaiStream,
             (_, AttemptKind::Websocket) => Self::Ignored,
             ("meta", AttemptKind::Execute) => Self::CodexExecute,
             ("meta", AttemptKind::Stream) => Self::CodexStream,
@@ -332,6 +352,7 @@ fn executor_type(provider: &str, kind: Option<AttemptKind>) -> &'static str {
         "meta" => "MetaExecutor",
         "gemini" | "gemini-interactions" => "GeminiExecutor",
         "vertex" => "GeminiVertexExecutor",
+        "xai" => "XAIExecutor",
         _ => "OpenAICompatExecutor",
     }
 }
@@ -774,16 +795,21 @@ impl Call {
                     self.codex_stream_payload(json::trim_space(rest), now);
                 }
             }
+            Mode::XaiStream => {
+                if let Some(rest) = line.strip_prefix(b"data:") {
+                    self.xai_stream_payload(json::trim_space(rest));
+                }
+            }
             _ => {}
         }
     }
 
-    /// Reads an event of a Codex answer read whole.
+    /// Reads an event of a Codex or xAI answer read whole.
     fn codex_execute_payload(&mut self, payload: &[u8]) {
         if self.held.is_some() {
             return;
         }
-        self.response_model.observe(payload, "codex");
+        self.response_model.observe(payload, &self.provider);
         if is_terminal(payload, &["response.completed", "response.incomplete"]) {
             self.held = Some(Held {
                 detail: parse_codex_usage(payload),
@@ -813,6 +839,19 @@ impl Call {
                 detail: parse_codex_usage(payload),
                 latency: Some(now.saturating_duration_since(self.started)),
             });
+        }
+    }
+
+    /// Reads an event of an xAI stream: its model, and the counts of each
+    /// `response.completed` or `response.incomplete` (upstream's
+    /// `XAIExecutor.ExecuteStream`).
+    fn xai_stream_payload(&mut self, payload: &[u8]) {
+        if payload.is_empty() {
+            return;
+        }
+        self.response_model.observe(payload, &self.provider);
+        if is_terminal(payload, &["response.completed", "response.incomplete"]) {
+            self.buffer.observe(parse_codex_usage(payload));
         }
     }
 
@@ -943,6 +982,7 @@ impl Call {
                 None => self.seen_done.then(|| success(Detail::default())),
             },
             (_, Outcome::Failed) => Some(failure(Detail::default(), error)),
+            (Mode::XaiStream, _) => self.buffered().map(success),
             (_, outcome) => match self.held.take() {
                 Some(held) => Some(Publication {
                     detail: held.detail.unwrap_or_default(),

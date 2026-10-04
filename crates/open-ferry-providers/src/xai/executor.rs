@@ -81,6 +81,7 @@ use super::response::{
     NamespaceRestorer, XSearchFilter, patch_completed_output, restore_client_web_search_name,
 };
 use super::stream::{self, StreamSetup};
+use super::tokens;
 use crate::codex::client::{Clients, error_chain, read_body, read_body_prefix};
 use crate::codex::request::{Context, refuse_control_characters};
 use crate::codex::stream::{LineReader, MAX_LINE};
@@ -457,6 +458,41 @@ impl XaiExecutor {
             chunks,
         })
     }
+
+    /// Estimates the prepared request's input tokens, in the client's
+    /// format (`CountTokens`).
+    async fn count_tokens_inner(
+        &self,
+        auth: &Auth,
+        request: &Request,
+        options: &Options,
+    ) -> Result<Response, ExecError> {
+        let prepared = prepare(self.context(auth), request, options, false, Format::CODEX)?;
+        let Prepared {
+            body,
+            to,
+            response_format,
+            ..
+        } = prepared;
+        let count = tokio::task::spawn_blocking(move || tokens::count_input_tokens(&body))
+            .await
+            .map_err(|_| {
+                ExecError::new(ErrorKind::Upstream, "xai executor: token counting failed")
+            })?;
+        let usage = format!(
+            r#"{{"response":{{"usage":{{"input_tokens":{count},"output_tokens":0,"total_tokens":{count}}}}}}}"#
+        );
+        let payload = Registry::global().translate_token_count(
+            &to,
+            &response_format,
+            count,
+            usage.into_bytes(),
+        );
+        Ok(Response {
+            payload: Bytes::from(payload),
+            headers: HeaderMap::new(),
+        })
+    }
 }
 
 /// Translates xAI's terminal response to the client's format, filling in
@@ -508,17 +544,11 @@ impl ProviderExecutor for XaiExecutor {
 
     fn count_tokens(
         &self,
-        _auth: Arc<Auth>,
-        _request: Request,
-        _options: Options,
+        auth: Arc<Auth>,
+        request: Request,
+        options: Options,
     ) -> BoxFuture<'_, Result<Response, ExecError>> {
-        async move {
-            Err(ExecError::new(
-                ErrorKind::Upstream,
-                "xai executor: token counting isn't ported yet",
-            ))
-        }
-        .boxed()
+        async move { self.count_tokens_inner(&auth, &request, &options).await }.boxed()
     }
 
     /// An API key has nothing to refresh.

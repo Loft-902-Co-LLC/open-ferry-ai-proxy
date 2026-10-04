@@ -30,12 +30,10 @@
 //! The config settings involved come in a [`RegistrationRules`].
 //!
 //! Deviations from upstream:
-//! - Only Gemini, Gemini Interactions, Vertex, Claude, Codex, Meta and
+//! - Only Gemini, Gemini Interactions, Vertex, Claude, Codex, Meta, xAI and
 //!   OpenAI-compatible credentials get models; a credential of any other
-//!   provider is unregistered. xAI credentials get theirs only once its
-//!   executor is ported: until then `xai` stays in `UNPORTED_PROVIDERS`,
-//!   which comes first. Plugin models and Antigravity capability probing
-//!   aren't ported.
+//!   provider is unregistered. Plugin models and Antigravity capability
+//!   probing aren't ported.
 //! - xAI credentials don't get upstream's built-in image and video models
 //!   (`WithXAIBuiltins`): image and video generation aren't ported.
 //! - Upstream caches the OpenAI-compatible entries' models while it
@@ -100,7 +98,6 @@ const UNPORTED_PROVIDERS: &[&str] = &[
     "kimi-ai",
     "kimi.ai",
     "kimi.com",
-    "xai",
     "devin",
 ];
 

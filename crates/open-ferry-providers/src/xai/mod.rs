@@ -15,6 +15,8 @@
 //! `compaction_trigger` item goes to `/responses/compact` (the `compact`
 //! module). Error statuses keep upstream's remapping (the `errors` module).
 //! Reasoning replay is a hook that does nothing yet (the `replay` module).
+//! Token counts are estimated locally with `o200k_base` (the `tokens`
+//! module).
 //!
 //! Deviations from upstream (each module lists its own):
 //! - Only API keys are served: no xAI sign-in, no Grok CLI chat proxy, and
@@ -35,6 +37,7 @@ mod response;
 mod schema;
 mod stream;
 mod thinking;
+mod tokens;
 mod tools;
 
 pub use executor::XaiExecutor;

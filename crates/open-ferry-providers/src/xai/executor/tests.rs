@@ -1074,3 +1074,47 @@ async fn translates_for_a_chat_completions_client() {
     .await;
     assert!(text.contains("chat.completion.chunk"), "{text}");
 }
+
+// Not upstream's: a token count is estimated locally, without a call, and
+// answers in the client's format.
+#[tokio::test]
+async fn count_tokens_answers_in_the_clients_format_unsent() {
+    let mock = Mock::start(Reply::sse(COMPLETED)).await;
+    let payload = r#"{"model":"grok-4.3","instructions":"be brief","input":"hello there"}"#;
+    let response = executor()
+        .count_tokens(
+            api_key_auth(&mock.url),
+            request("grok-4.3", payload),
+            options("openai-response"),
+        )
+        .await
+        .unwrap();
+    let body = payload_json(&response);
+    let count = get(&body, "response.usage.input_tokens")
+        .and_then(Value::as_i64)
+        .unwrap();
+    assert!(count > 0, "{body}");
+    assert_eq!(get(&body, "response.usage.output_tokens"), Some(&json!(0)));
+    assert_eq!(
+        get(&body, "response.usage.total_tokens"),
+        Some(&json!(count))
+    );
+
+    let claude = r#"{"model":"grok-4.3","messages":[{"role":"user","content":"hello there"}]}"#;
+    let response = executor()
+        .count_tokens(
+            api_key_auth(&mock.url),
+            request("grok-4.3", claude),
+            options("claude"),
+        )
+        .await
+        .unwrap();
+    let body = payload_json(&response);
+    assert!(
+        get(&body, "input_tokens")
+            .and_then(Value::as_i64)
+            .is_some_and(|count| count > 0),
+        "{body}"
+    );
+    assert!(mock.requests().is_empty());
+}

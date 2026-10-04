@@ -21,3 +21,4 @@ mod stream_lifecycle;
 mod stream_response_model_observer;
 mod support;
 mod usage_helpers;
+mod xai;

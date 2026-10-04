@@ -738,3 +738,12 @@ fn apply_patch_needs_every_provider() {
         );
     }
 }
+
+// Not upstream's: xAI's executor takes the tool, as upstream's
+// XAIExecutor.SupportsApplyPatch says.
+#[test]
+fn apply_patch_xai() {
+    assert!(supports_apply_patch_for_providers(&strings(&[
+        " XAI ", "codex"
+    ])));
+}

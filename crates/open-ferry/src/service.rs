@@ -118,6 +118,7 @@ use open_ferry_providers::codex::CodexExecutor;
 use open_ferry_providers::gemini::{GeminiExecutor, InteractionsExecutor, VertexExecutor};
 use open_ferry_providers::meta::MetaExecutor;
 use open_ferry_providers::openai_compat::OpenAiCompatExecutor;
+use open_ferry_providers::xai::XaiExecutor;
 use open_ferry_server::{AppState, ServerConfig, router_with};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -471,8 +472,8 @@ impl Service {
         self.register_compat_executors();
     }
 
-    /// Registers the Codex, Meta, Claude, Gemini, Gemini Interactions and
-    /// Vertex AI executors for the current config.
+    /// Registers the Codex, Meta, Claude, Gemini, Gemini Interactions, Vertex
+    /// AI and xAI executors for the current config.
     fn register_native_executors(&self) {
         let proxy_url = self.config.proxy_url.clone();
         self.register_codex_executor();
@@ -490,6 +491,11 @@ impl Service {
         ));
         self.manager.register_executor(Arc::new(
             InteractionsExecutor::new(proxy_url.clone())
+                .with_config(Arc::clone(&self.config))
+                .with_models(Arc::clone(&self.registry) as _),
+        ));
+        self.manager.register_executor(Arc::new(
+            XaiExecutor::new(proxy_url.clone())
                 .with_config(Arc::clone(&self.config))
                 .with_models(Arc::clone(&self.registry) as _),
         ));
