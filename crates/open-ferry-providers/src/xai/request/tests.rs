@@ -1419,3 +1419,45 @@ fn normalizes_custom_tool_call_history() {
     );
     assert_eq!(body["tools"][0]["type"], "x_search");
 }
+
+// TestXAIExecutorReMergesReasoningAfterDroppingInvalidEncryptedContent,
+// checked on the prepared body rather than the one a mock server got:
+// another provider's encrypted_content goes, and the reasoning item left
+// with only its summary joins the one before.
+#[test]
+fn re_merges_reasoning_after_dropping_invalid_encrypted_content() {
+    let body = prepared(
+        &Config::default(),
+        "grok-4.3",
+        r#"{"model":"grok-4.3","input":[
+            {"type":"reasoning","summary":[{"type":"summary_text","text":"first"}]},
+            {"type":"reasoning","summary":[{"type":"summary_text","text":"second"}],"encrypted_content":"gAAAAABforeign-codex-replay"},
+            {"role":"user","content":"hi"}
+        ]}"#,
+    )
+    .body;
+    let input = body["input"].as_array().expect("input");
+    assert_eq!(input[0]["summary"][0]["text"], "first", "{body}");
+    assert_eq!(input[0]["summary"][1]["text"], "second", "{body}");
+    assert_eq!(input[1]["role"], "user", "{body}");
+    assert_eq!(input.len(), 2, "{body}");
+}
+
+// TestXAIExecutorDropsInvalidCompactionItem, checked on the prepared body
+// rather than the one a mock server got.
+#[test]
+fn drops_invalid_compaction_item() {
+    let body = prepared(
+        &Config::default(),
+        "grok-4.3",
+        r#"{"model":"grok-4.3","input":[{"type":"compaction","encrypted_content":"gAAAAABforeign-codex-replay"},{"role":"user","content":"hi"}]}"#,
+    )
+    .body;
+    let input = body["input"].as_array().expect("input");
+    assert!(
+        input.iter().all(|item| item["type"] != "compaction"),
+        "{body}"
+    );
+    assert_eq!(input[0]["role"], "user", "{body}");
+    assert_eq!(input.len(), 1, "{body}");
+}

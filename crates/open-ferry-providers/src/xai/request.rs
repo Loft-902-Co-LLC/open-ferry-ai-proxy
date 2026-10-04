@@ -15,7 +15,8 @@
 //! upstream does: the model without its thinking suffix, `stream` set as the
 //! call needs, fields xAI refuses dropped, a custom `apply_patch` tool
 //! declared as a function (see [`crate::apply_patch_responses`]), the tools
-//! reshaped for Grok (see [`super::tools`]), and `instructions` filled in.
+//! reshaped for Grok (see [`super::tools`]), reasoning xAI can't take
+//! dropped (see [`super::reasoning`]), and `instructions` filled in.
 //!
 //! Calls go to `<base>/responses` (or `/responses/compact`), where `<base>`
 //! is the credential's `base_url` attribute, else its `base_url` metadata,
@@ -59,6 +60,7 @@ use open_ferry_translate::codex_client::{header_value, multi_agent_v2};
 use open_ferry_translate::registry::Registry;
 use serde_json::Value;
 
+use super::reasoning;
 use super::thinking;
 use super::tools::{self, ClientToolKey, NamespaceRefs};
 use crate::apply_patch_responses::{self, State};
@@ -332,6 +334,8 @@ pub(crate) fn prepare(
     if !web_search_alias.is_empty() {
         tools::alias_client_web_search_input(&mut body, &web_search_alias, &namespace_tools);
     }
+    reasoning::normalize_input_reasoning_items(&mut body);
+    reasoning::sanitize_input_encrypted_content(&mut body);
 
     normalize_instructions(&mut body, false);
     // Chat Completions takes `stop`; xAI's Responses API doesn't.

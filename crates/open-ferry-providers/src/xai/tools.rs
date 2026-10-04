@@ -55,8 +55,12 @@ use crate::json::{self, str_of};
 /// The most tools xAI takes (`xaiMaxTools`).
 pub(crate) const MAX_TOOLS: usize = 200;
 
-const FUNCTION: &str = "function";
-const CUSTOM: &str = "custom";
+/// A function tool's type.
+pub(crate) const FUNCTION: &str = "function";
+
+/// A custom tool's type.
+pub(crate) const CUSTOM: &str = "custom";
+
 const NAMESPACE: &str = "namespace";
 const TOOL_SEARCH: &str = "tool_search";
 const ADDITIONAL_TOOLS: &str = "additional_tools";
