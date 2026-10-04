@@ -440,6 +440,18 @@ async fn config_v8_values_are_written_as_go_writes_them() {
         &api.get("/v8/management/config/plugins/configs/t/i").await,
         "42",
     );
+    // Floats halfway between two shortest decimals round to even.
+    let (_dir, api) = over_file(
+        "plugins:\n  configs:\n    value: 2156163594508435.25\n    w: [-29290947659102.0625, 2.98023223876953125e-8]\n",
+    );
+    assert_v8(
+        &api.get("/v8/management/config/plugins/configs/value").await,
+        "2156163594508435.2",
+    );
+    assert_v8(
+        &api.get("/v8/management/config/plugins/configs").await,
+        r#"{"value":2156163594508435.2,"w":[-29290947659102.062,2.9802322387695312e-8]}"#,
+    );
     let (_dir, api) = over_file(
         "plugins: {configs: {t: {v: 2024-01-02T03:04:05+24:00, w: 2002-12-14, e: , n: ~}}}\n",
     );
