@@ -1,7 +1,9 @@
 // Ported from CLIProxyAPI internal/config/config_v8.go (expandConfigAliases,
 // yamlPath, findMapKeyIndex, setYAMLPath, deleteYAMLPath) (v8.0.10, MIT),
 // with the decoding rules of gopkg.in/yaml.v3 v3.0.1 (resolve.go, decode.go,
-// yaml.go; Apache-2.0), which upstream decodes its config with.
+// yaml.go) and its scalar styles (encode.go encoder.node, emitterc.go
+// yaml_emitter_select_scalar_style, yaml_emitter_analyze_scalar;
+// Apache-2.0), which upstream decodes and writes its config with.
 // https://github.com/router-for-me/CLIProxyAPI
 // https://github.com/go-yaml/yaml
 
@@ -13,12 +15,24 @@
 //! errors. [`parse_document`] reads the first document into a [`Node`] tree
 //! with aliases expanded, [`check_shape`] repeats upstream's
 //! `node.Decode(&map[string]any)` pass, and [`expand_merges`] and the path
-//! helpers are upstream's own tree edits. `saphyr-parser` does the scanning.
+//! helpers are upstream's own tree edits. [`write_and_read_back`] gives a
+//! tree the tags yaml.v3 gives it when it writes the tree out and reads it
+//! back. `saphyr-parser` does the scanning.
+//!
+//! An alias expands to a copy of its anchor's node that shares the
+//! anchor's text, so the tree takes memory in proportion to the input
+//! however often an alias repeats a long scalar. Text that aliases produce
+//! when the tree is decoded into owned values is counted by an
+//! [`AliasBudget`].
+//!
+//! [`Node`]'s `Debug` shows a node's kind, line and size, never its text,
+//! which may be a secret.
 //!
 //! Deviations from upstream:
 //! - Syntax error wording is saphyr's, as `yaml: line N: <message>`; only the
 //!   line matches yaml.v3. saphyr also accepts a few inputs yaml.v3 rejects,
-//!   such as a tab before a top-level key.
+//!   such as a tab before a top-level key, and rejects a few it accepts,
+//!   such as a tab right after a key's `:`.
 //! - Nesting deeper than 256 levels, aliases included, is an error
 //!   (`exceeded max depth of 256`); yaml.v3 allows 10000.
 //! - Type errors (`cannot unmarshal`, `cannot decode`) leave out yaml.v3's
@@ -37,11 +51,24 @@
 //!   allowed`) is an error anywhere in the input. yaml.v3 reads ahead in
 //!   chunks and only refuses what it reads, so one deep in a second
 //!   document can go unnoticed there.
+//! - Decoding a tree into owned values (the config, or a v8 read's value)
+//!   stops with `document contains excessive aliasing` once the scalars
+//!   that aliases expanded to add up to more than 64 MiB. yaml.v3 shares a
+//!   Go string between its copies and has no such limit, beyond its ratio
+//!   of aliases to nodes, which applies here too.
+//! - An alias used as a mapping key with the `:` right after its name
+//!   (`*k: v`) is read as yaml.v3 reads it only when the `:` is followed by
+//!   a space, a line break or the end of the input. saphyr takes the `:` as
+//!   part of the name, so the others (`{*k:1}`, `[*k:]`) are an `unknown
+//!   anchor` error.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
-use std::fmt::Write as _;
+use std::fmt::{self, Write as _};
+use std::ops::Deref;
+use std::sync::Arc;
 
-use saphyr_parser::{Event, Parser, ScalarStyle, ScanError, Tag};
+use saphyr_parser::{Event, Parser, ScalarStyle, ScanError, Span, Tag};
 
 /// The deepest nesting accepted, counting expanded aliases.
 pub(crate) const MAX_DEPTH: usize = 256;
@@ -49,8 +76,77 @@ pub(crate) const MAX_DEPTH: usize = 256;
 /// The most type errors one decode reports.
 const MAX_TYPE_ERRORS: usize = 100;
 
+/// The most bytes of scalar text that aliases may produce in one decode
+/// into owned values.
+pub(crate) const MAX_ALIASED_BYTES: usize = 64 << 20;
+
 const EXCESSIVE_ALIASING: &str = "document contains excessive aliasing";
 const WANT_MAP: &str = "map merge requires map or sequence of maps as the value";
+
+/// A node's tag or value. Clones share the text, so the copies an alias
+/// expands to cost no more than the text once. Its `Debug` hides it.
+#[derive(Clone, Default, PartialEq, Eq, Hash)]
+pub(crate) struct Text(Arc<str>);
+
+impl Text {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Whether `self` and `other` share their text.
+    #[cfg(test)]
+    pub(crate) fn shares(&self, other: &Text) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Deref for Text {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for Text {
+    fn from(text: &str) -> Self {
+        Self(Arc::from(text))
+    }
+}
+
+impl From<String> for Text {
+    fn from(text: String) -> Self {
+        Self(Arc::from(text))
+    }
+}
+
+impl PartialEq<str> for Text {
+    fn eq(&self, other: &str) -> bool {
+        *self.0 == *other
+    }
+}
+
+impl PartialEq<&str> for Text {
+    fn eq(&self, other: &&str) -> bool {
+        *self.0 == **other
+    }
+}
+
+impl fmt::Display for Text {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl fmt::Debug for Text {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0.is_empty() {
+            f.write_str("\"\"")
+        } else {
+            f.write_str("<redacted>")
+        }
+    }
+}
 
 /// The kind of a [`Node`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -66,23 +162,39 @@ pub(crate) enum Kind {
 /// Where an alias stood, kept on the node it expanded to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AliasRef {
-    pub(crate) name: String,
+    pub(crate) name: Text,
     pub(crate) line: usize,
 }
 
 /// A YAML node, like yaml.v3's `Node` with aliases expanded.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Default, PartialEq)]
 pub(crate) struct Node {
     pub(crate) kind: Kind,
     /// The short tag, such as `!!str`, `!!int`, `!!map` or `!custom`.
-    pub(crate) tag: String,
-    pub(crate) value: String,
+    pub(crate) tag: Text,
+    pub(crate) value: Text,
     /// Children: sequence items, or mapping keys and values in turn.
     pub(crate) content: Vec<Node>,
     /// The 1-based source line; 0 for nodes built in code.
     pub(crate) line: usize,
     /// Set when this node is an alias's expansion.
     pub(crate) alias: Option<Box<AliasRef>>,
+    /// Set on a collection written in flow style (yaml.v3's `FlowStyle`).
+    pub(crate) flow: bool,
+    /// Set on a scalar whose tag was written out (yaml.v3's `TaggedStyle`).
+    pub(crate) tagged: bool,
+    /// Set on an alias's expansion and everything in it.
+    pub(crate) aliased: bool,
+}
+
+impl fmt::Debug for Node {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Node")
+            .field("kind", &self.kind)
+            .field("line", &self.line)
+            .field("content", &self.content.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Node {
@@ -90,8 +202,8 @@ impl Node {
     pub(crate) fn scalar(tag: &str, value: &str) -> Self {
         Self {
             kind: Kind::Scalar,
-            tag: tag.to_owned(),
-            value: value.to_owned(),
+            tag: tag.into(),
+            value: value.into(),
             ..Self::default()
         }
     }
@@ -100,7 +212,7 @@ impl Node {
     pub(crate) fn mapping() -> Self {
         Self {
             kind: Kind::Mapping,
-            tag: "!!map".to_owned(),
+            tag: "!!map".into(),
             ..Self::default()
         }
     }
@@ -109,7 +221,7 @@ impl Node {
     pub(crate) fn sequence() -> Self {
         Self {
             kind: Kind::Sequence,
-            tag: "!!seq".to_owned(),
+            tag: "!!seq".into(),
             ..Self::default()
         }
     }
@@ -129,16 +241,20 @@ impl Node {
 
     /// yaml.v3's `ShortTag`, where an alias has no tag.
     fn go_short_tag(&self) -> &str {
-        if self.alias.is_some() { "" } else { &self.tag }
+        if self.alias.is_some() {
+            ""
+        } else {
+            self.tag.as_str()
+        }
     }
 
     /// The node's kind and value as yaml.v3 compares keys for duplicates.
     fn go_identity(&self) -> (u8, &str) {
         if let Some(alias) = &self.alias {
-            return (4, &alias.name);
+            return (4, alias.name.as_str());
         }
         match self.kind {
-            Kind::Scalar => (1, &self.value),
+            Kind::Scalar => (1, self.value.as_str()),
             Kind::Sequence => (2, ""),
             Kind::Mapping => (3, ""),
             Kind::Poison => (5, ""),
@@ -188,30 +304,52 @@ pub(crate) fn type_error(node: &Node, type_name: &str) -> String {
     )
 }
 
+/// Counts the scalar text that aliases produce in one decode into owned
+/// values. The tree shares an anchor's text with its aliases; owned values
+/// can't, so without a limit a short document could decode to gigabytes.
+#[derive(Default)]
+pub(crate) struct AliasBudget(Cell<usize>);
+
+impl AliasBudget {
+    /// Counts `node`'s text when an alias produced it. An error once more
+    /// than [`MAX_ALIASED_BYTES`] has been counted.
+    pub(crate) fn charge(&self, node: &Node) -> Result<(), YamlError> {
+        if !node.aliased {
+            return Ok(());
+        }
+        let total = self.0.get().saturating_add(node.value.len());
+        self.0.set(total);
+        if total > MAX_ALIASED_BYTES {
+            return Err(YamlError::Fatal(EXCESSIVE_ALIASING.to_owned()));
+        }
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Reading
 
 enum Raw {
     Scalar {
-        tag: String,
-        value: String,
+        tag: Text,
+        tagged: bool,
+        value: Text,
         line: usize,
     },
     Collection {
         kind: Kind,
-        tag: String,
+        tag: Text,
+        flow: bool,
         items: Vec<usize>,
         line: usize,
     },
     Alias {
         target: usize,
-        name: String,
+        name: Text,
         line: usize,
     },
-    Cyclic {
-        name: String,
-        line: usize,
-    },
+    /// An alias inside its own anchor; the message says so.
+    Cyclic { message: Text, line: usize },
 }
 
 impl Raw {
@@ -277,21 +415,23 @@ fn short_tag(tag: &str) -> String {
     }
 }
 
-/// The tag yaml.v3's parser gives a node (`parser.node`).
-fn node_tag(explicit: Option<&Tag>, kind: Kind, style: ScalarStyle, value: &str) -> String {
+/// The tag yaml.v3's parser gives a node (`parser.node`), and whether it
+/// was written out (`TaggedStyle`).
+fn node_tag(explicit: Option<&Tag>, kind: Kind, style: ScalarStyle, value: &str) -> (Text, bool) {
     if let Some(tag) = explicit {
         let full = full_tag(tag);
         if !full.is_empty() && full != "!" {
-            return short_tag(&full);
+            return (short_tag(&full).into(), true);
         }
     }
-    match kind {
-        Kind::Mapping => "!!map".to_owned(),
-        Kind::Sequence => "!!seq".to_owned(),
-        _ if style != ScalarStyle::Plain => "!!str".to_owned(),
-        _ if value == "<<" => "!!merge".to_owned(),
-        _ => resolve_plain("", value).0.to_owned(),
-    }
+    let tag = match kind {
+        Kind::Mapping => "!!map",
+        Kind::Sequence => "!!seq",
+        _ if style != ScalarStyle::Plain => "!!str",
+        _ if value == "<<" => "!!merge",
+        _ => resolve_plain("", value).0,
+    };
+    (tag.into(), false)
 }
 
 fn depth_error(line: usize) -> YamlError {
@@ -353,21 +493,32 @@ impl<'s> Builder<'s> {
         Ok(())
     }
 
+    /// Opens a collection. It is in flow style when its start token takes
+    /// up text (`[` or `{`; saphyr gives block collections and a flow
+    /// sequence's single-pair mappings empty spans) or its parent is.
     fn open(
         &mut self,
         kind: Kind,
         anchor: usize,
         tag: Option<&Tag>,
-        line: usize,
+        span: Span,
     ) -> Result<(), YamlError> {
         let index = self.raws.len();
-        let tag = node_tag(tag, kind, ScalarStyle::Plain, "");
+        let (tag, _) = node_tag(tag, kind, ScalarStyle::Plain, "");
+        let in_flow = self.open.last().is_some_and(|&parent| {
+            matches!(
+                self.raws.get(parent),
+                Some(Raw::Collection { flow: true, .. })
+            )
+        });
+        let flow = in_flow || span.end.index() > span.start.index();
         self.add(
             Raw::Collection {
                 kind,
                 tag,
+                flow,
                 items: Vec::new(),
-                line,
+                line: span.start.line(),
             },
             anchor,
         )?;
@@ -376,40 +527,49 @@ impl<'s> Builder<'s> {
     }
 
     /// Feeds one event; returns true at the end of the first document.
-    fn event(&mut self, event: Event<'_>, start: (usize, usize)) -> Result<bool, YamlError> {
-        let (index, line) = start;
+    fn event(&mut self, event: Event<'_>, span: Span) -> Result<bool, YamlError> {
+        let line = span.start.line();
         match event {
             Event::DocumentEnd | Event::StreamEnd => return Ok(true),
             Event::Nothing | Event::StreamStart | Event::DocumentStart(_) => {}
             Event::Scalar(value, style, anchor, tag) => {
-                let tag = node_tag(tag.as_deref(), Kind::Scalar, style, &value);
+                let (tag, tagged) = node_tag(tag.as_deref(), Kind::Scalar, style, &value);
                 let raw = Raw::Scalar {
                     tag,
-                    value: value.into_owned(),
+                    tagged,
+                    value: Text::from(value.as_ref()),
                     line,
                 };
                 self.add(raw, anchor)?;
             }
             Event::SequenceStart(anchor, tag) => {
-                self.open(Kind::Sequence, anchor, tag.as_deref(), line)?
+                self.open(Kind::Sequence, anchor, tag.as_deref(), span)?
             }
             Event::MappingStart(anchor, tag) => {
-                self.open(Kind::Mapping, anchor, tag.as_deref(), line)?
+                self.open(Kind::Mapping, anchor, tag.as_deref(), span)?
             }
             Event::SequenceEnd | Event::MappingEnd => {
                 self.open.pop();
             }
             Event::Alias(anchor) => {
-                let name = self.names.alias_name(index);
+                let name = self.names.alias_name(span.start.index());
                 let Some(&target) = self.anchors.get(&anchor) else {
                     return Err(YamlError::Syntax(format!(
                         "yaml: unknown anchor '{name}' referenced"
                     )));
                 };
                 let raw = if self.open.contains(&target) {
-                    Raw::Cyclic { name, line }
+                    let message = format!("anchor '{name}' value contains itself");
+                    Raw::Cyclic {
+                        message: message.into(),
+                        line,
+                    }
                 } else {
-                    Raw::Alias { target, name, line }
+                    Raw::Alias {
+                        target,
+                        name: name.into(),
+                        line,
+                    }
                 };
                 self.add(raw, 0)?;
             }
@@ -440,7 +600,7 @@ fn allowed_alias_ratio(decodes: u64) -> f64 {
     }
 }
 
-fn poison(message: String, line: usize) -> Node {
+fn poison(message: Text, line: usize) -> Node {
     Node {
         kind: Kind::Poison,
         value: message,
@@ -458,10 +618,11 @@ impl Expander<'_> {
             return Err(depth_error(raw.line()));
         }
         if self.poisoned {
-            return Ok(poison(EXCESSIVE_ALIASING.to_owned(), raw.line()));
+            return Ok(poison(EXCESSIVE_ALIASING.into(), raw.line()));
         }
         self.decodes += 1;
-        if self.alias_depth > 0 {
+        let aliased = self.alias_depth > 0;
+        if aliased {
             self.aliases += 1;
         }
         if self.aliases > 100
@@ -469,19 +630,27 @@ impl Expander<'_> {
             && self.aliases as f64 / self.decodes as f64 > allowed_alias_ratio(self.decodes)
         {
             self.poisoned = true;
-            return Ok(poison(EXCESSIVE_ALIASING.to_owned(), raw.line()));
+            return Ok(poison(EXCESSIVE_ALIASING.into(), raw.line()));
         }
         match raw {
-            Raw::Scalar { tag, value, line } => Ok(Node {
+            Raw::Scalar {
+                tag,
+                tagged,
+                value,
+                line,
+            } => Ok(Node {
                 kind: Kind::Scalar,
                 tag: tag.clone(),
                 value: value.clone(),
                 line: *line,
+                tagged: *tagged,
+                aliased,
                 ..Node::default()
             }),
             Raw::Collection {
                 kind,
                 tag,
+                flow,
                 items,
                 line,
             } => {
@@ -494,6 +663,8 @@ impl Expander<'_> {
                     tag: tag.clone(),
                     content,
                     line: *line,
+                    flow: *flow,
+                    aliased,
                     ..Node::default()
                 })
             }
@@ -510,10 +681,7 @@ impl Expander<'_> {
                 }
                 Ok(node)
             }
-            Raw::Cyclic { name, line } => Ok(poison(
-                format!("anchor '{name}' value contains itself"),
-                *line,
-            )),
+            Raw::Cyclic { message, line } => Ok(poison(message.clone(), *line)),
         }
     }
 }
@@ -530,16 +698,121 @@ pub(crate) fn parse_document(text: &str) -> Result<Option<Node>, YamlError> {
             "yaml: control characters are not allowed".to_owned(),
         ));
     }
+    let mut aliases = HashSet::new();
+    let error = match read_document(text, &mut aliases) {
+        Ok(root) => return Ok(root),
+        Err(error) => error,
+    };
+    // An alias used as a key with the `:` right after its name: saphyr
+    // takes the `:` as part of the name, where yaml.v3 ends the name before
+    // it and reads it as the key's `:`, which may have space before it.
+    // Reading again with a space before each such `:` is reading what
+    // yaml.v3 reads, as long as each space follows an alias: a space after
+    // anything else would change a scalar or a comment, and in a tag would
+    // end it. Which of them do is learnt by splitting them all and seeing
+    // where saphyr then finds aliases, and confirmed by reading again with
+    // only those split.
+    let keys = alias_keys(text);
+    if keys.is_empty() {
+        return Err(error);
+    }
+    aliases.clear();
+    let _ = read_document(&split_alias_keys(text, &keys), &mut aliases);
+    let keys: Vec<AliasKey> = keys
+        .into_iter()
+        .enumerate()
+        .filter(|(before, key)| aliases.contains(&(key.star + before)))
+        .map(|(_, key)| key)
+        .collect();
+    if keys.is_empty() {
+        return Err(error);
+    }
+    aliases.clear();
+    let result = read_document(&split_alias_keys(text, &keys), &mut aliases);
+    let confirmed = keys
+        .iter()
+        .enumerate()
+        .all(|(before, key)| aliases.contains(&(key.star + before)));
+    if confirmed { result } else { Err(error) }
+}
+
+/// Reads the first document of `text`, noting the character index of each
+/// alias saphyr reads in `aliases`, known or not.
+fn read_document(text: &str, aliases: &mut HashSet<usize>) -> Result<Option<Node>, YamlError> {
     let mut builder = Builder::new(text);
     for item in Parser::new_from_str(text) {
         let (event, span) = match item {
             Ok(item) => item,
-            Err(error) => return Err(scan_error(&mut builder.names, &error)),
+            Err(error) => {
+                if error.info().contains("unknown anchor") {
+                    aliases.insert(error.marker().index());
+                }
+                return Err(scan_error(&mut builder.names, &error));
+            }
         };
-        if builder.event(event, (span.start.index(), span.start.line()))? {
+        if matches!(event, Event::Alias(_)) {
+            aliases.insert(span.start.index());
+        }
+        if builder.event(event, span)? {
             break;
         }
     }
+    expand(&builder)
+}
+
+/// What may be an alias used as a key with the `:` right after its name: a
+/// `*` at the start of the text or after white space, `[`, `{` or `,`, a
+/// name of letters, digits, `_` and `-` (yaml.v3's anchor names), and a `:`
+/// followed by a space, a line break or the end of the text.
+struct AliasKey {
+    /// The character index of the `*`.
+    star: usize,
+    /// The byte offset of the `:`.
+    colon: usize,
+}
+
+/// The [`AliasKey`]s in `text`, in order.
+fn alias_keys(text: &str) -> Vec<AliasKey> {
+    let bytes = text.as_bytes();
+    let mut keys = Vec::new();
+    let mut chars = 0;
+    let mut boundary = true;
+    for (at, &byte) in bytes.iter().enumerate() {
+        if byte == b'*' && boundary {
+            let rest = bytes.get(at + 1..).unwrap_or_default();
+            let name = rest
+                .iter()
+                .take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+                .count();
+            let colon = at + 1 + name;
+            let ends_key = matches!(bytes.get(colon + 1), None | Some(b' ' | b'\r' | b'\n'));
+            if name > 0 && bytes.get(colon) == Some(&b':') && ends_key {
+                keys.push(AliasKey { star: chars, colon });
+            }
+        }
+        boundary = matches!(byte, b' ' | b'\t' | b'\r' | b'\n' | b'[' | b'{' | b',');
+        if byte & 0xC0 != 0x80 {
+            chars += 1;
+        }
+    }
+    keys
+}
+
+/// `text` with a space before the `:` of each of `keys`.
+fn split_alias_keys(text: &str, keys: &[AliasKey]) -> String {
+    let mut split = String::with_capacity(text.len() + keys.len());
+    let mut from = 0;
+    for key in keys {
+        split.push_str(text.get(from..key.colon).unwrap_or_default());
+        split.push(' ');
+        from = key.colon;
+    }
+    split.push_str(text.get(from..).unwrap_or_default());
+    split
+}
+
+/// Expands the arena [`read_document`] built into a tree.
+fn expand(builder: &Builder<'_>) -> Result<Option<Node>, YamlError> {
     let Some(root) = builder.root else {
         return Ok(None);
     };
@@ -570,8 +843,8 @@ fn reader_accepts(c: char) -> bool {
 // ---------------------------------------------------------------------------
 // Scalars
 
-/// A resolved scalar value.
-#[derive(Clone, Debug, PartialEq)]
+/// A resolved scalar value. Its `Debug` shows only the variant.
+#[derive(Clone, PartialEq)]
 pub(crate) enum Scalar {
     Null,
     Bool(bool),
@@ -579,20 +852,35 @@ pub(crate) enum Scalar {
     Uint(u64),
     Float(f64),
     Timestamp,
-    Str(String),
+    Str(Text),
+}
+
+impl fmt::Debug for Scalar {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Null => "Null",
+            Self::Bool(_) => "Bool(..)",
+            Self::Int(_) => "Int(..)",
+            Self::Uint(_) => "Uint(..)",
+            Self::Float(_) => "Float(..)",
+            Self::Timestamp => "Timestamp",
+            Self::Str(_) => "Str(..)",
+        })
+    }
 }
 
 /// A scalar's tag and value after yaml.v3's resolution.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Resolved {
-    pub(crate) tag: String,
+    pub(crate) tag: Text,
     pub(crate) value: Scalar,
 }
 
 /// Resolves a scalar node as yaml.v3's `decoder.scalar` does, decoding
 /// `!!binary` values.
 pub(crate) fn resolve_node(node: &Node) -> Result<Resolved, YamlError> {
-    if node.tag == "!!str" {
+    // A string, or a tag yaml.v3 doesn't resolve: the value as it is.
+    if node.tag == "!!str" || (node.tag != "!!binary" && !resolvable(&node.tag)) {
         return Ok(Resolved {
             tag: node.tag.clone(),
             value: Scalar::Str(node.value.clone()),
@@ -607,11 +895,14 @@ pub(crate) fn resolve_node(node: &Node) -> Result<Resolved, YamlError> {
         };
         let text = String::from_utf8_lossy(&bytes).into_owned();
         return Ok(Resolved {
-            tag,
-            value: Scalar::Str(text),
+            tag: tag.into(),
+            value: Scalar::Str(text.into()),
         });
     }
-    Ok(Resolved { tag, value })
+    Ok(Resolved {
+        tag: tag.into(),
+        value,
+    })
 }
 
 /// The text a scalar node decodes to as a Go string: its value, or the
@@ -620,8 +911,8 @@ pub(crate) fn scalar_string(node: &Node) -> Result<Option<String>, YamlError> {
     let resolved = resolve_node(node)?;
     Ok(match resolved.value {
         Scalar::Null => None,
-        Scalar::Str(text) if resolved.tag == "!!binary" => Some(text),
-        _ => Some(node.value.clone()),
+        Scalar::Str(text) if resolved.tag == "!!binary" => Some(text.to_string()),
+        _ => Some(node.value.to_string()),
     })
 }
 
@@ -635,7 +926,7 @@ fn resolvable(tag: &str) -> bool {
 /// yaml.v3's `resolve`. The error is a `failf` message.
 pub(crate) fn resolve(tag: &str, input: &str) -> Result<(String, Scalar), String> {
     if !resolvable(tag) {
-        return Ok((tag.to_owned(), Scalar::Str(input.to_owned())));
+        return Ok((tag.to_owned(), Scalar::Str(input.into())));
     }
     let (rtag, out) = resolve_plain(tag, input);
     if tag.is_empty() || tag == rtag || tag == "!!str" {
@@ -690,7 +981,7 @@ fn resolve_plain(tag: &str, input: &str) -> (&'static str, Scalar) {
             _ => {}
         }
     }
-    ("!!str", Scalar::Str(input.to_owned()))
+    ("!!str", Scalar::Str(input.into()))
 }
 
 fn resolve_number(tag: &str, input: &str) -> Option<(&'static str, Scalar)> {
@@ -1255,7 +1546,7 @@ pub(crate) fn check_shape(root: &Node) -> Result<(), YamlError> {
 
 fn first_poison(node: &Node) -> Option<&str> {
     if node.kind == Kind::Poison {
-        return Some(&node.value);
+        return Some(node.value.as_str());
     }
     node.content.iter().find_map(first_poison)
 }
@@ -1270,7 +1561,7 @@ fn is_string_map(node: &Node) -> bool {
 impl Shape {
     fn value(&mut self, node: &Node) -> Result<(), YamlError> {
         match node.kind {
-            Kind::Poison => Err(YamlError::Fatal(node.value.clone())),
+            Kind::Poison => Err(YamlError::Fatal(node.value.to_string())),
             Kind::Scalar => resolve_node(node).map(|_| ()),
             Kind::Sequence => node.content.iter().try_for_each(|item| self.value(item)),
             Kind::Mapping => {
@@ -1287,7 +1578,7 @@ impl Shape {
     /// The key as decoded, for merge bookkeeping; `None` when yaml.v3 skips it.
     fn key(&mut self, key: &Node, target: KeyTarget) -> Result<Option<String>, YamlError> {
         match (key.kind, target) {
-            (Kind::Poison, _) => Err(YamlError::Fatal(key.value.clone())),
+            (Kind::Poison, _) => Err(YamlError::Fatal(key.value.to_string())),
             (Kind::Scalar, KeyTarget::Str) => {
                 Ok(scalar_string(key)?.map(|text| format!("s:{text}")))
             }
@@ -1375,7 +1666,7 @@ impl Shape {
 
     fn merge_value(&mut self, merge: &Node, target: KeyTarget) -> Result<(), YamlError> {
         if merge.kind == Kind::Poison {
-            return Err(YamlError::Fatal(merge.value.clone()));
+            return Err(YamlError::Fatal(merge.value.to_string()));
         }
         if merge.alias.is_some() || merge.kind == Kind::Mapping {
             if merge.kind != Kind::Mapping {
@@ -1388,7 +1679,7 @@ impl Shape {
         }
         for item in &merge.content {
             if item.kind == Kind::Poison {
-                return Err(YamlError::Fatal(item.value.clone()));
+                return Err(YamlError::Fatal(item.value.to_string()));
             }
             if item.kind != Kind::Mapping {
                 return Err(YamlError::Fatal(WANT_MAP.to_owned()));
@@ -1412,6 +1703,9 @@ pub(crate) fn expand_merges(node: &Node) -> Node {
         content: node.content.iter().map(expand_merges).collect(),
         line: node.line,
         alias: None,
+        flow: node.flow,
+        tagged: node.tagged,
+        aliased: node.aliased,
     };
     if copy.kind != Kind::Mapping {
         return copy;
@@ -1471,7 +1765,7 @@ pub(crate) fn yaml_path<'a>(node: &'a Node, path: &str) -> Option<&'a Node> {
 fn get_or_create_map_value<'a>(node: &'a mut Node, key: &str) -> &'a mut Node {
     if node.kind != Kind::Mapping {
         node.kind = Kind::Mapping;
-        node.tag = "!!map".to_owned();
+        node.tag = "!!map".into();
         node.content.clear();
     }
     let index = match find_map_key_index(node, key) {
@@ -1518,6 +1812,99 @@ pub(crate) fn delete_yaml_path(node: &mut Node, path: &str) -> bool {
     node.content
         .drain(index..(index + 2).min(node.content.len()));
     true
+}
+
+// ---------------------------------------------------------------------------
+// Writing out and reading back (encode.go, emitterc.go)
+
+/// Gives a tree the tags it has after yaml.v3 writes it out and reads it
+/// back, as upstream does with a migrated v8 config (`yaml.Marshal`, then
+/// `yaml.Unmarshal`). Values come back as they were. A scalar whose tag
+/// isn't written out, being the one its value resolves to, comes back a
+/// string when the emitter quotes it: an empty mapping key or flow value,
+/// and a timestamp with a `:` in flow style.
+pub(crate) fn write_and_read_back(node: &mut Node) {
+    write_node(node, false, false);
+}
+
+/// [`write_and_read_back`] for a node in flow style (`in_flow`) or as a
+/// mapping key (`key`).
+fn write_node(node: &mut Node, in_flow: bool, key: bool) {
+    match node.kind {
+        Kind::Scalar => {
+            // encoder.node drops the tag; the emitter quotes the value if
+            // it can't be plain, and a quoted value reads back as a string.
+            let implicit =
+                !node.tagged && node.tag != "!!str" && node.tag == resolve_plain("", &node.value).0;
+            if implicit && !written_plain(&node.value, in_flow, key) {
+                node.tag = "!!str".into();
+            }
+        }
+        Kind::Sequence | Kind::Mapping => {
+            let in_flow = in_flow || node.flow;
+            let mapping = node.kind == Kind::Mapping;
+            for (index, child) in node.content.iter_mut().enumerate() {
+                write_node(child, in_flow, mapping && index % 2 == 0);
+            }
+        }
+        Kind::Poison => {}
+    }
+}
+
+/// Whether yaml.v3's emitter writes `value` as a plain scalar where a
+/// plain scalar was asked for (`yaml_emitter_select_scalar_style`, with
+/// `yaml_emitter_analyze_scalar`'s analysis). A key is always a simple key
+/// here: one that isn't is never empty.
+fn written_plain(value: &str, in_flow: bool, key: bool) -> bool {
+    if value.is_empty() {
+        return !in_flow && !key;
+    }
+    let mut flow_indicators = value.starts_with("---") || value.starts_with("...");
+    let mut block_indicators = flow_indicators;
+    let mut not_plain = false;
+    let mut preceded_by_whitespace = true;
+    let mut chars = value.chars().peekable();
+    let mut first = true;
+    while let Some(c) = chars.next() {
+        let followed_by_whitespace = matches!(chars.peek(), None | Some(' ' | '\t'));
+        match (first, c) {
+            (true, '#' | ',' | '[' | ']' | '{' | '}' | '&' | '*' | '!' | '|' | '>')
+            | (true, '\'' | '"' | '%' | '@' | '`') => {
+                flow_indicators = true;
+                block_indicators = true;
+            }
+            (true, '?') | (_, ':') => {
+                flow_indicators = true;
+                block_indicators |= followed_by_whitespace;
+            }
+            (true, '-') => {
+                flow_indicators |= followed_by_whitespace;
+                block_indicators |= followed_by_whitespace;
+            }
+            (false, ',' | '?' | '[' | ']' | '{' | '}') => flow_indicators = true,
+            (false, '#') if preceded_by_whitespace => {
+                flow_indicators = true;
+                block_indicators = true;
+            }
+            _ => {}
+        }
+        // A tab, a character the emitter escapes, a line break, and space
+        // at either end all rule a plain scalar out.
+        let printable = matches!(
+            u32::from(c),
+            0x0A | 0x20..=0x7E | 0xA0..=0xD7FF | 0xE000..=0xFFFD
+        ) && c != '\u{FEFF}';
+        let line_break = matches!(c, '\r' | '\n' | '\u{85}' | '\u{2028}' | '\u{2029}');
+        let space_at_end = c == ' ' && (first || chars.peek().is_none());
+        not_plain |= c == '\t' || !printable || line_break || space_at_end;
+        preceded_by_whitespace = matches!(c, ' ' | '\t' | '\0') || line_break;
+        first = false;
+    }
+    if in_flow {
+        !not_plain && !flow_indicators
+    } else {
+        !not_plain && !block_indicators
+    }
 }
 
 #[cfg(test)]
@@ -1627,7 +2014,7 @@ mod tests {
         assert_eq!(value("-9223372036854775808"), Scalar::Int(i64::MIN));
         assert_eq!(value("9223372036854775808"), Scalar::Uint(1 << 63));
         assert_eq!(value("08"), Scalar::Float(8.0));
-        assert_eq!(value("._5"), Scalar::Str("._5".to_owned()));
+        assert_eq!(value("._5"), Scalar::Str("._5".into()));
         assert_eq!(value(".5_5"), Scalar::Float(0.55));
     }
 
@@ -1647,11 +2034,11 @@ mod tests {
         );
         assert_eq!(
             resolve("!!str", "42"),
-            Ok(("!!str".to_owned(), Scalar::Str("42".to_owned())))
+            Ok(("!!str".to_owned(), Scalar::Str("42".into())))
         );
         assert_eq!(
             resolve("!custom", "5"),
-            Ok(("!custom".to_owned(), Scalar::Str("5".to_owned())))
+            Ok(("!custom".to_owned(), Scalar::Str("5".into())))
         );
     }
 
@@ -1759,6 +2146,257 @@ mod tests {
                 "document contains excessive aliasing".to_owned()
             ))
         );
+    }
+
+    /// The tree written as a flow collection, keys in document order.
+    fn dump(node: &Node) -> String {
+        let items: Vec<String> = match node.kind {
+            Kind::Scalar => return node.value.to_string(),
+            Kind::Poison => return "!".to_owned(),
+            Kind::Sequence => node.content.iter().map(dump).collect(),
+            Kind::Mapping => node
+                .pairs()
+                .map(|(key, value)| format!("{}: {}", dump(key), dump(value)))
+                .collect(),
+        };
+        match node.kind {
+            Kind::Sequence => format!("[{}]", items.join(", ")),
+            _ => format!("{{{}}}", items.join(", ")),
+        }
+    }
+
+    /// Not upstream's: an alias expands to copies that share its anchor's
+    /// text, so a long scalar aliased many times (here 64 KiB, 800 times,
+    /// under a key nothing reads) takes its length in memory once, through
+    /// merges and clones too.
+    #[test]
+    fn aliases_share_their_anchor_text() {
+        let long = "x".repeat(64 << 10);
+        let aliases = vec!["*big"; 800].join(", ");
+        let text = format!("unused:\n  anchor: &big {long}\n  copies: [{aliases}]\n");
+        let Ok(Some(root)) = parse_document(&text) else {
+            panic!("expected a document");
+        };
+        assert_eq!(check_shape(&root), Ok(()));
+        let merged = expand_merges(&root.clone());
+        for tree in [&root, &merged] {
+            let Some(anchor) = yaml_path(tree, "unused.anchor") else {
+                panic!("the anchor is there");
+            };
+            let Some(copies) = yaml_path(tree, "unused.copies") else {
+                panic!("the copies are there");
+            };
+            assert_eq!(copies.content.len(), 800);
+            assert!(!anchor.aliased);
+            for copy in &copies.content {
+                assert!(copy.aliased);
+                assert!(copy.value.shares(&anchor.value));
+            }
+        }
+        // A copy decoded into an owned value is counted.
+        let budget = AliasBudget::default();
+        for copy in yaml_path(&root, "unused.copies").map_or(&[][..], |n| &n.content) {
+            assert_eq!(budget.charge(copy), Ok(()));
+        }
+        assert_eq!(budget.0.get(), 800 * long.len());
+        assert_eq!(budget.charge(&Node::scalar("!!str", &long)), Ok(()));
+        assert_eq!(budget.0.get(), 800 * long.len());
+        let mut copy = Node::scalar("!!str", &"y".repeat(MAX_ALIASED_BYTES));
+        copy.aliased = true;
+        assert_eq!(
+            budget.charge(&copy),
+            Err(YamlError::Fatal(EXCESSIVE_ALIASING.to_owned()))
+        );
+    }
+
+    /// Not upstream's: a node's `Debug` shows its kind, line and size,
+    /// never its text.
+    #[test]
+    fn debug_leaves_out_text() {
+        let Ok(Some(root)) = parse_document("secret-key: &s marker-secret-41\ncopy: *s\n") else {
+            panic!("expected a document");
+        };
+        let Ok(resolved) = resolve_node(&Node::scalar("!!str", "marker-secret-41")) else {
+            panic!("a string resolves");
+        };
+        for shown in [
+            format!("{root:?}"),
+            format!("{:?}", root.content),
+            format!("{resolved:?}"),
+            format!("{:?}", resolve_plain("", "marker-secret-41")),
+        ] {
+            assert!(!shown.contains("marker-secret-41"), "{shown}");
+        }
+        assert_eq!(
+            format!("{root:?}"),
+            "Node { kind: Mapping, line: 1, content: 4, .. }"
+        );
+    }
+
+    /// Not upstream's: an alias used as a key with the `:` right after its
+    /// name reads as yaml.v3 reads it. Recorded from yaml.v3 v3.0.1 under
+    /// Go 1.26.4.
+    #[test]
+    fn alias_keys_read_as_yaml_v3_reads_them() {
+        let read = |text: &str| parse_document(text).map(|root| root.as_ref().map(dump));
+        for (text, want) in [
+            (
+                "k: &k server\n*k: {port: 14}\n",
+                "{k: server, server: {port: 14}}",
+            ),
+            (
+                "k: &k server\n*k:\n  port: 14\n",
+                "{k: server, server: {port: 14}}",
+            ),
+            (
+                "k: &k server\nx:\n  - *k: 1\n",
+                "{k: server, x: [{server: 1}]}",
+            ),
+            ("k: &k server\nx:\n  *k: 1\n", "{k: server, x: {server: 1}}"),
+            (
+                "k: &k server\nx: {*k: 1, b: *k}\n",
+                "{k: server, x: {server: 1, b: server}}",
+            ),
+            (
+                "k: &k server\nx: [*k: 1]\n",
+                "{k: server, x: [{server: 1}]}",
+            ),
+        ] {
+            assert_eq!(read(text), Ok(Some(want.to_owned())), "{text:?}");
+        }
+        assert_eq!(
+            read("*nope: 1\n"),
+            Err(YamlError::Syntax(
+                "yaml: unknown anchor 'nope' referenced".to_owned()
+            ))
+        );
+        let Ok(Some(twice)) = parse_document("k: &k server\n*k: 1\n*k: 2\n") else {
+            panic!("expected a document");
+        };
+        assert_eq!(
+            check_shape(&twice),
+            Err(YamlError::Type(vec![
+                "line 3: mapping key \"k\" already defined at line 2".to_owned()
+            ]))
+        );
+        // yaml.v3 refuses these too.
+        for text in [
+            "k: &k server\nx: *k:\n",
+            "k: &k server\n*k:: 1\n",
+            "k: &k server\n*k::1\n",
+            "k: &k server\n*k:x: 1\n",
+        ] {
+            assert!(read(text).is_err(), "{text:?}");
+        }
+        // yaml.v3 reads these, with the `:` followed by something else;
+        // saphyr refuses a tab after any key's `:`.
+        for text in [
+            "k: &k server\nx: {*k:1}\n",
+            "k: &k server\nx: [*k:]\n",
+            "k: &k server\n*k:\t1\n",
+            "k:\t1\n",
+        ] {
+            assert!(read(text).is_err(), "{text:?}");
+        }
+        // A `*k: ` that isn't an alias is left as it is.
+        assert_eq!(
+            read("k: &k server\n*k: \"*k: x\" # *k: y\nz: |\n  *k: z\n"),
+            Ok(Some("{k: server, server: *k: x, z: *k: z\n}".to_owned()))
+        );
+        // However many there are.
+        let anchors: String = (0..200).map(|n| format!("a{n}: &a{n} v{n}\n")).collect();
+        let keys: String = (0..200).map(|n| format!("*a{n}: {n}\n")).collect();
+        let Ok(Some(root)) = parse_document(&format!("{anchors}{keys}")) else {
+            panic!("expected a document");
+        };
+        assert_eq!(root.content.len(), 800);
+        assert_eq!(
+            yaml_path(&root, "v199").map(|n| n.value.as_str()),
+            Some("199")
+        );
+    }
+
+    /// Not upstream's: the tags a tree has after yaml.v3 writes it out and
+    /// reads it back. Recorded from yaml.v3 v3.0.1 under Go 1.26.4.
+    #[test]
+    fn written_out_and_read_back_as_yaml_v3_does() {
+        let tags = |text: &str| {
+            let Ok(Some(mut root)) = parse_document(text) else {
+                panic!("expected a document: {text:?}");
+            };
+            write_and_read_back(&mut root);
+            let mut tags = Vec::new();
+            let mut stack = vec![&root];
+            while let Some(node) = stack.pop() {
+                if node.kind == Kind::Scalar {
+                    tags.push(node.tag.to_string());
+                }
+                stack.extend(node.content.iter().rev());
+            }
+            tags
+        };
+        for (text, want) in [
+            // A timestamp with a `:` can't be plain in flow style.
+            (
+                "v: 2001-12-14t21:59:43.10-05:00\n",
+                &["!!str", "!!timestamp"][..],
+            ),
+            ("{v: 2001-12-14t21:59:43.10-05:00}\n", &["!!str", "!!str"]),
+            ("a: [2001-12-14 21:59:43.10]\n", &["!!str", "!!str"]),
+            ("a: [2002-12-14]\n", &["!!str", "!!timestamp"]),
+            (
+                "a: &t {v: 2001-12-14T21:59:43Z}\nb: *t\n",
+                &["!!str", "!!str", "!!str", "!!str", "!!str", "!!str"],
+            ),
+            // An empty value is quoted in flow style or as a key.
+            ("{v: }\n", &["!!str", "!!str"]),
+            ("v:\n", &["!!str", "!!null"]),
+            ("- \n- ~\n", &["!!null", "!!null"]),
+            ("? \n: x\n", &["!!str", "!!str"]),
+            ("{~: x}\n", &["!!null", "!!str"]),
+            ("[a: ]\n", &["!!str", "!!str"]),
+            // Written tags and other values are kept.
+            ("{v: !!null }\n", &["!!str", "!!null"]),
+            (
+                "{v: !!timestamp 2002-12-14T01:02:03Z}\n",
+                &["!!str", "!!timestamp"],
+            ),
+            (
+                "{a: 1, b: -.inf, c: true, d: 0x1F}\n",
+                &[
+                    "!!str", "!!int", "!!str", "!!float", "!!str", "!!bool", "!!str", "!!int",
+                ],
+            ),
+        ] {
+            assert_eq!(tags(text), want, "{text:?}");
+        }
+        for (value, flow, block) in [
+            ("a", true, true),
+            ("a:b", false, true),
+            ("a: b", false, false),
+            ("a,b", false, true),
+            ("-a", true, true),
+            ("- a", false, false),
+            ("---a", false, false),
+            ("a #b", false, false),
+            ("a#b", true, true),
+            ("#a", false, false),
+            (" a", false, false),
+            ("a ", false, false),
+            ("a\tb", false, false),
+            ("a\nb", false, false),
+            ("caf\u{e9}", true, true),
+            ("\u{1F600}", false, false),
+            ("?a", false, true),
+            (":", false, false),
+        ] {
+            assert_eq!(written_plain(value, true, false), flow, "{value:?} in flow");
+            assert_eq!(
+                written_plain(value, false, false),
+                block,
+                "{value:?} in block"
+            );
+        }
     }
 
     #[test]

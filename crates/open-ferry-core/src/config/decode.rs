@@ -28,6 +28,9 @@
 //! - Type errors leave out yaml.v3's excerpt of the offending value.
 //! - Only the types this crate decodes are supported; there is no general
 //!   `interface{}` decoding.
+//! - A decode stops with `document contains excessive aliasing` once the
+//!   strings that aliases expanded to add up to more than 64 MiB; yaml.v3
+//!   decodes them.
 
 use std::cell::RefCell;
 use std::fmt;
@@ -38,8 +41,8 @@ use serde::de::{
 };
 
 use super::yaml::{
-    Kind, Node, Scalar, YamlError, duplicate_key_errors, is_merge, push_type_error, resolve_node,
-    scalar_string, type_error,
+    AliasBudget, Kind, Node, Scalar, YamlError, duplicate_key_errors, is_merge, push_type_error,
+    resolve_node, scalar_string, type_error,
 };
 
 /// A decode that stopped; yaml.v3's `failf`, without the `yaml: ` prefix.
@@ -70,10 +73,12 @@ fn fatal(error: YamlError) -> Fatal {
 /// Decodes `node` into `T` as yaml.v3's `Node.Decode` would.
 pub(crate) fn decode<T: DeserializeOwned>(node: &Node) -> Result<T, YamlError> {
     let errors = RefCell::new(Vec::new());
+    let budget = AliasBudget::default();
     let value = T::deserialize(NodeDe {
         node,
         hint: "",
         errors: &errors,
+        budget: &budget,
     })
     .map_err(|Fatal(message)| YamlError::Fatal(message))?;
     let errors = errors.into_inner();
@@ -113,6 +118,8 @@ struct NodeDe<'a> {
     node: &'a Node,
     hint: &'static str,
     errors: &'a RefCell<Vec<String>>,
+    /// The text aliases have produced so far.
+    budget: &'a AliasBudget,
 }
 
 impl<'a> NodeDe<'a> {
@@ -121,6 +128,7 @@ impl<'a> NodeDe<'a> {
             node,
             hint,
             errors: self.errors,
+            budget: self.budget,
         }
     }
 
@@ -155,7 +163,7 @@ impl<'a> NodeDe<'a> {
     /// The resolved scalar, or `None` for a collection.
     fn scalar(&self) -> Result<Option<Scalar>, Fatal> {
         match self.node.kind {
-            Kind::Poison => Err(Fatal(self.node.value.clone())),
+            Kind::Poison => Err(Fatal(self.node.value.to_string())),
             Kind::Scalar => resolve_node(self.node)
                 .map(|resolved| Some(resolved.value))
                 .map_err(fatal),
@@ -202,8 +210,11 @@ impl<'a> NodeDe<'a> {
 
     fn string(&self) -> Result<String, Fatal> {
         match self.node.kind {
-            Kind::Poison => Err(Fatal(self.node.value.clone())),
-            Kind::Scalar => Ok(scalar_string(self.node).map_err(fatal)?.unwrap_or_default()),
+            Kind::Poison => Err(Fatal(self.node.value.to_string())),
+            Kind::Scalar => {
+                self.budget.charge(self.node).map_err(fatal)?;
+                Ok(scalar_string(self.node).map_err(fatal)?.unwrap_or_default())
+            }
             Kind::Sequence | Kind::Mapping => {
                 self.mismatch("string");
                 Ok(String::new())
@@ -225,8 +236,9 @@ impl<'a> NodeDe<'a> {
 
     fn string_or_null(&self) -> Result<Option<String>, Fatal> {
         if self.node.kind == Kind::Poison {
-            return Err(Fatal(self.node.value.clone()));
+            return Err(Fatal(self.node.value.to_string()));
         }
+        self.budget.charge(self.node).map_err(fatal)?;
         scalar_string(self.node).map_err(fatal)
     }
 }

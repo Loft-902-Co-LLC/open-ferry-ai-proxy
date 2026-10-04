@@ -27,7 +27,7 @@
 use std::collections::BTreeSet;
 
 use super::yaml::{
-    Kind, Node, Resolved, Scalar, check_shape, delete_yaml_path, expand_merges, resolve_node,
+    Kind, Node, Resolved, Scalar, Text, check_shape, delete_yaml_path, expand_merges, resolve_node,
     set_yaml_path, yaml_path,
 };
 use super::{ConfigError, ConfigErrorKind, decode::decode};
@@ -593,8 +593,8 @@ pub(crate) fn flatten_v8(original: &Node) -> Result<Flattened, ConfigError> {
         if yaml_path(&root, current).is_none() {
             let mut copy = value.clone();
             copy.kind = Kind::Mapping;
-            copy.tag = "!!map".to_owned();
-            copy.value.clear();
+            copy.tag = "!!map".into();
+            copy.value = Text::default();
             set_yaml_path(&mut root, current, &copy);
         }
         delete_yaml_path(&mut root, old);
@@ -802,7 +802,7 @@ mod tests {
     }
 
     fn value_at(flattened: &Flattened, path: &str) -> Option<String> {
-        yaml_path(&flattened.root, path).map(|node| node.value.clone())
+        yaml_path(&flattened.root, path).map(|node| node.value.to_string())
     }
 
     #[test]
@@ -990,7 +990,7 @@ mod tests {
         let field = |index: usize, name: &str| {
             keys.get(index)
                 .and_then(|key| yaml_path(key, name))
-                .map(|node| node.value.clone())
+                .map(|node| node.value.to_string())
         };
         assert_eq!(field(0, "priority").as_deref(), Some("7"));
         assert_eq!(

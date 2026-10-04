@@ -77,6 +77,12 @@
 //!   find expected node content`, where upstream has `yaml: line 1: did
 //!   not find expected node content`), and a type error doesn't quote the
 //!   value (`cannot decode !!str as a !!int`).
+//! - A v8 value Go's JSON encoder can't write (a mapping with a key that
+//!   isn't a string, an infinite or NaN float, or a time in a zone a day or
+//!   more from UTC) is a 500 `{"error":"encode_failed"}`; upstream answers
+//!   200 with no body.
+//! - A v8 value whose aliases expand to more than 64 MiB of text is a 500
+//!   `decode_failed`; upstream answers with it.
 
 mod config_json;
 
@@ -561,13 +567,17 @@ fn management_key_hash(key: &str) -> Result<String, bcrypt::BcryptError> {
     Ok(hash)
 }
 
-/// A decoded YAML value as `c.JSON` writes it: when Go's encoder can't
-/// write it (a mapping with a key that isn't a string, or an infinite or
-/// NaN float), a 200 with no body.
+/// A decoded YAML value as `c.JSON` writes it, or a 500
+/// `{"error":"encode_failed"}` when Go's encoder can't write it (a mapping
+/// with a key that isn't a string, an infinite or NaN float, or a time in
+/// a zone a day or more from UTC), which upstream answers with a 200 and no
+/// body.
 fn any_response(value: &AnyValue) -> Response {
     let mut out = String::new();
-    let body = write_any(&mut out, value).map_or_else(String::new, |()| out);
-    let mut response = (StatusCode::OK, body).into_response();
+    if write_any(&mut out, value).is_none() {
+        return json::error(StatusCode::INTERNAL_SERVER_ERROR, "encode_failed");
+    }
+    let mut response = (StatusCode::OK, out).into_response();
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/json; charset=utf-8"),

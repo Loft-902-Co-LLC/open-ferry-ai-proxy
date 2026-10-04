@@ -304,7 +304,13 @@ Deviations, each also noted in its module:
 
 - **The v8 reads show a plain management key as a bcrypt hash**, as upstream does once it has hashed the key into the file. Since the file keeps the plain key here, the hash is made when it is read (once per key while the process runs) and differs from one run to the next.
 
-- **Config errors are worded as open-ferry's loader words them.** A file that doesn't load is `invalid_config`, but a syntax error is worded as the saphyr parser words it, and a type error doesn't quote the value. A read error's message is the operating system's.
+- **Config errors are worded as open-ferry's loader words them.** A file that doesn't load is `invalid_config`, but a syntax error is worded as the saphyr parser words it, and a type error doesn't quote the value. A read error's message is the operating system's. saphyr also reads a few files yaml.v3 refuses, such as one with a tab before a top-level key, and refuses a few it reads, such as one with a tab right after a key's `:`.
+
+- **An alias used as a mapping key needs a space, a line break or the end of the file after its `:`** when the `:` follows its name directly (`*k: v`). Otherwise saphyr takes the `:` as part of the name, so `{*k:1}` and `[*k:]` are an `unknown anchor` error where yaml.v3 reads them.
+
+- **Aliases may expand to at most 64 MiB of text.** A file whose settings take more than 64 MiB of text through aliases doesn't load (`yaml: document contains excessive aliasing`), and a v8 read of a value that does is a 500 `decode_failed`. yaml.v3 shares one Go string among an alias's copies, so upstream reads them; its limit on the ratio of aliases to nodes applies here too.
+
+- **A v8 value Go's JSON encoder can't write is a 500 `{"error":"encode_failed"}`**: a mapping with a key that isn't a string, an infinite or NaN float, or a time in a zone a day or more from UTC. Upstream answers 200 with no body.
 
 - **`model-definitions` knows only the channels open-ferry serves**: `claude`, `gemini`, `gemini-interactions`, `vertex` and `codex`. Upstream's others (`aistudio`, `kimi`, `antigravity`, `xai`, `devin`, `meta` and their other spellings) answer 400 `unknown channel`. A model's `config`, the client headers upstream sends for it, isn't written.
 
@@ -344,7 +350,7 @@ Some of upstream's behaviour comes from the details of Go libraries, so the part
 
 The config loader in `open-ferry-core` reads YAML as upstream's yaml.v3 does, since that decides which settings a file holds:
 
-- `config::yaml` and `config::decode` from yaml.v3 v3.0.1's `resolve.go`, `decode.go` and `yaml.go`: which plain scalars are numbers, booleans or timestamps, duplicate and merge keys, aliases, and its type errors (Apache-2.0, [licenses/go-yaml-LICENSE](licenses/go-yaml-LICENSE) and [licenses/go-yaml-NOTICE](licenses/go-yaml-NOTICE)).
+- `config::yaml` and `config::decode` from yaml.v3 v3.0.1's `resolve.go`, `decode.go` and `yaml.go`: which plain scalars are numbers, booleans or timestamps, duplicate and merge keys, aliases, and its type errors; and from its `encode.go` and `emitterc.go`, which scalars it writes plain, for upstream's v8 reads, which write the config out and read it back (Apache-2.0, [licenses/go-yaml-LICENSE](licenses/go-yaml-LICENSE) and [licenses/go-yaml-NOTICE](licenses/go-yaml-NOTICE)).
 - `config::duration` from Go's `time.ParseDuration` (BSD-3-Clause, [licenses/Go-LICENSE](licenses/Go-LICENSE)).
 
 The OpenAI translators share helpers with upstream's other translators, ported as far as they need them:

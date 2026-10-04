@@ -1902,6 +1902,24 @@ mod tests {
         assert_eq!(keys, [("one", Some(2)), ("two", Some(0))]);
     }
 
+    /// Not upstream's: settings whose aliases expand to more than 64 MiB of
+    /// text don't load, though the tree holds them in a little more than
+    /// one copy; yaml.v3 loads them.
+    #[test]
+    fn excessive_aliasing_fails() {
+        let long = "x".repeat(1 << 20);
+        let copies = vec!["*big"; 65].join(", ");
+        let text = format!("unused: &big {long}\napi-keys: [{copies}]\n");
+        let error = Config::parse(&text).expect_err("too much aliased text");
+        assert_eq!(
+            (error.kind(), error.to_string()),
+            (
+                Decode,
+                format!("{PARSE}yaml: document contains excessive aliasing")
+            )
+        );
+    }
+
     #[test]
     fn v8_legacy_null_routing() {
         for text in [

@@ -24,6 +24,15 @@
 //! [`V8Document::value`] decodes the node at a path as yaml.v3 decodes into
 //! Go's `any`.
 //!
+//! Upstream writes the migrated tree out as YAML and reads it back before
+//! using it, which can change what a value decodes to: a timestamp in a
+//! flow mapping comes back a string, as do an empty mapping key and an
+//! empty flow value. [`V8Document::migrate`] gives the tree the tags it
+//! would come back with.
+//!
+//! The `Debug` of a [`V8Document`] or an [`AnyValue`] shows its shape, never
+//! the config's text, which holds secrets.
+//!
 //! Deviations from upstream:
 //! - The tables of v8 sections and the fields they hold are fixed tables
 //!   generated from v8.0.11; upstream builds them by reflecting over its
@@ -31,19 +40,21 @@
 //! - Upstream comments out the sections it drops, and logs a warning for
 //!   each; they are dropped here without a trace, as the result is never
 //!   written.
-//! - Upstream writes the migrated tree back out as YAML and reads it in
-//!   again before using it; the tree is used as it is here, which holds the
-//!   same values.
+//! - A value whose scalars aliases expanded to more than 64 MiB of text
+//!   fails to decode with `yaml: document contains excessive aliasing`;
+//!   upstream decodes it.
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 use super::v8::{
     SHARED_KEY_FIELDS, V8_CLIENT_PATHS, V8_KEY_FAMILIES, V8_PATHS, V8_SHARED_PATHS,
     V8_SHARED_STRUCT_PATHS, flatten_v8, normalize_private_ip_alias,
 };
 use super::yaml::{
-    Kind, Node, Scalar, delete_yaml_path, expand_merges, find_map_key_index, parse_document,
-    resolve_node, scalar_string, set_yaml_path, timestamp_json_text, yaml_path,
+    AliasBudget, Kind, Node, Scalar, Text, delete_yaml_path, expand_merges, find_map_key_index,
+    parse_document, resolve_node, scalar_string, set_yaml_path, timestamp_json_text,
+    write_and_read_back, yaml_path,
 };
 use super::{ConfigError, ConfigErrorKind};
 
@@ -375,14 +386,25 @@ const ICE_SERVERS: &[&str] = &[
 /// Where the management key is in the v8 layout.
 const SECRET_KEY: &str = "management.secret-key";
 
-/// A config file in the v8 layout.
-#[derive(Clone, Debug)]
+/// A config file in the v8 layout. Its `Debug` shows the root's kind and
+/// size, not the config.
+#[derive(Clone)]
 pub struct V8Document {
     root: Node,
 }
 
-/// A YAML value decoded as yaml.v3 decodes into Go's `any`.
-#[derive(Clone, Debug, PartialEq)]
+impl fmt::Debug for V8Document {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("V8Document")
+            .field("root", &self.root)
+            .finish()
+    }
+}
+
+/// A YAML value decoded as yaml.v3 decodes into Go's `any`. Its `Debug`
+/// shows the kind of value and the size of a sequence or mapping, not what
+/// it holds.
+#[derive(Clone, PartialEq)]
 pub enum AnyValue {
     Null,
     Bool(bool),
@@ -402,6 +424,26 @@ pub enum AnyValue {
     /// A mapping with a key that isn't a string. yaml.v3 decodes it into a
     /// `map[any]any`, which Go's JSON encoder can't write.
     AnyMap,
+}
+
+impl fmt::Debug for AnyValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Null => f.write_str("Null"),
+            Self::Bool(_) => f.write_str("Bool(..)"),
+            Self::Int(_) => f.write_str("Int(..)"),
+            Self::Uint(_) => f.write_str("Uint(..)"),
+            Self::Float(_) => f.write_str("Float(..)"),
+            Self::Str(_) => f.write_str("Str(..)"),
+            Self::Time(_) => f.write_str("Time(..)"),
+            Self::Seq(items) => f.debug_struct("Seq").field("items", &items.len()).finish(),
+            Self::Map(entries) => f
+                .debug_struct("Map")
+                .field("entries", &entries.len())
+                .finish(),
+            Self::AnyMap => f.write_str("AnyMap"),
+        }
+    }
 }
 
 impl V8Document {
@@ -439,8 +481,8 @@ impl V8Document {
             };
             if node.tag == "!!null" {
                 node.kind = Kind::Mapping;
-                node.tag = "!!map".to_owned();
-                node.value.clear();
+                node.tag = "!!map".into();
+                node.value = Text::default();
             } else if !node.is_mapping() || !node.content.is_empty() {
                 continue;
             }
@@ -468,6 +510,7 @@ impl V8Document {
         }
         drop_unknown_sections(&mut root);
         set_yaml_path(&mut root, "config-version", &Node::scalar("!!int", "8"));
+        write_and_read_back(&mut root);
         Ok(Self { root })
     }
 
@@ -541,10 +584,15 @@ impl V8Document {
     /// The value at `parts`, one mapping key each, decoded as yaml.v3
     /// decodes into Go's `any`; `None` when there is no such key, or a
     /// value on the way isn't a mapping (upstream's `configV8Node`). The
-    /// error is yaml.v3's, as when a value doesn't resolve to its tag.
+    /// error is yaml.v3's, as when a value doesn't resolve to its tag, or
+    /// excessive aliasing.
     pub fn value(&self, parts: &[&str]) -> Option<Result<AnyValue, ConfigError>> {
         let node = node_at(&self.root, parts)?;
-        Some(decode_any(node).map_err(|message| ConfigError::new(ConfigErrorKind::Decode, message)))
+        let budget = AliasBudget::default();
+        Some(
+            decode_any(node, &budget)
+                .map_err(|message| ConfigError::new(ConfigErrorKind::Decode, message)),
+        )
     }
 }
 
@@ -683,25 +731,26 @@ fn keep_keys(node: &mut Node, allowed: &[&str]) {
     }
 }
 
-/// Decodes `node` as yaml.v3 decodes into Go's `any`. The error is
-/// yaml.v3's message.
-fn decode_any(node: &Node) -> Result<AnyValue, String> {
+/// Decodes `node` as yaml.v3 decodes into Go's `any`, counting the text
+/// aliases produce against `budget`. The error is yaml.v3's message.
+fn decode_any(node: &Node, budget: &AliasBudget) -> Result<AnyValue, String> {
     match node.kind {
-        Kind::Poison => Err(node.value.clone()),
-        Kind::Scalar => decode_scalar(node),
+        Kind::Poison => Err(node.value.to_string()),
+        Kind::Scalar => decode_scalar(node, budget),
         Kind::Sequence => node
             .content
             .iter()
-            .map(decode_any)
+            .map(|item| decode_any(item, budget))
             .collect::<Result<_, _>>()
             .map(AnyValue::Seq),
-        Kind::Mapping => decode_mapping(node),
+        Kind::Mapping => decode_mapping(node, budget),
     }
 }
 
 /// A scalar: `!!str` and unknown tags as strings, a timestamp as a time,
 /// `!!binary` decoded (yaml.v3's `decoder.scalar`).
-fn decode_scalar(node: &Node) -> Result<AnyValue, String> {
+fn decode_scalar(node: &Node, budget: &AliasBudget) -> Result<AnyValue, String> {
+    budget.charge(node).map_err(|error| error.message())?;
     let resolved = resolve_node(node).map_err(|error| error.message())?;
     Ok(match resolved.value {
         Scalar::Null => AnyValue::Null,
@@ -710,14 +759,14 @@ fn decode_scalar(node: &Node) -> Result<AnyValue, String> {
         Scalar::Uint(value) => AnyValue::Uint(value),
         Scalar::Float(value) => AnyValue::Float(value),
         Scalar::Timestamp => AnyValue::Time(timestamp_json_text(&node.value)),
-        Scalar::Str(value) => AnyValue::Str(value),
+        Scalar::Str(value) => AnyValue::Str(value.to_string()),
     })
 }
 
 /// A mapping: a `map[string]any` when every key is a string, else a
 /// `map[any]any` (yaml.v3's `decoder.mapping` and `isStringMap`). A key
 /// repeated, or one that is a sequence or mapping, fails.
-fn decode_mapping(node: &Node) -> Result<AnyValue, String> {
+fn decode_mapping(node: &Node, budget: &AliasBudget) -> Result<AnyValue, String> {
     let pairs: Vec<(&Node, &Node)> = node.pairs().collect();
     for (index, (key, _)) in pairs.iter().enumerate() {
         let repeated = pairs
@@ -737,7 +786,8 @@ fn decode_mapping(node: &Node) -> Result<AnyValue, String> {
     if string_keys {
         let mut map = BTreeMap::new();
         for (key, value) in pairs {
-            map.insert(key.value.clone(), decode_any(value)?);
+            budget.charge(key).map_err(|error| error.message())?;
+            map.insert(key.value.to_string(), decode_any(value, budget)?);
         }
         return Ok(AnyValue::Map(map));
     }
@@ -745,8 +795,8 @@ fn decode_mapping(node: &Node) -> Result<AnyValue, String> {
         if matches!(key.kind, Kind::Sequence | Kind::Mapping) {
             return Err("yaml: invalid map key".to_owned());
         }
-        decode_any(key)?;
-        decode_any(value)?;
+        decode_any(key, budget)?;
+        decode_any(value, budget)?;
     }
     Ok(AnyValue::AnyMap)
 }
@@ -1024,7 +1074,7 @@ mod tests {
         assert_eq!(get(&document, "plugins/configs/a/b"), None);
         // Loading checks the whole file first, so only a tree changed since
         // fails here.
-        assert!(decode_any(&Node::scalar("!!int", "x")).is_err());
+        assert!(decode_any(&Node::scalar("!!int", "x"), &AliasBudget::default()).is_err());
         let mut repeated = Node::mapping();
         repeated.content = vec![
             Node::scalar("!!str", "a"),
@@ -1032,7 +1082,94 @@ mod tests {
             Node::scalar("!!str", "a"),
             Node::scalar("!!null", ""),
         ];
-        assert!(decode_any(&repeated).is_err());
+        assert!(decode_any(&repeated, &AliasBudget::default()).is_err());
+    }
+
+    /// Not upstream's: values read as upstream reads them once it has
+    /// written the migrated document out and read it back: a timestamp in
+    /// a flow mapping and an empty flow value come back strings. Recorded
+    /// from upstream's `GetConfigV8` handler under Go 1.26.4.
+    #[test]
+    fn values_read_as_written_out_and_read_back() {
+        let document = migrate(
+            "plugins:\n  configs:\n    flow: {value: 2024-01-02T03:04:05+24:00, empty: }\n    block: 2024-01-02T03:04:05Z\n    seq: [2002-12-14, a:b]\n",
+        );
+        assert_eq!(
+            get(&document, "plugins/configs/flow"),
+            Some(map(&[
+                ("empty", text("")),
+                ("value", text("2024-01-02T03:04:05+24:00")),
+            ]))
+        );
+        assert_eq!(
+            get(&document, "plugins/configs/block"),
+            Some(AnyValue::Time(Some("2024-01-02T03:04:05Z".to_owned())))
+        );
+        assert_eq!(
+            get(&document, "plugins/configs/seq"),
+            Some(AnyValue::Seq(vec![
+                AnyValue::Time(Some("2002-12-14T00:00:00Z".to_owned())),
+                text("a:b"),
+            ]))
+        );
+    }
+
+    /// Not upstream's: a value whose aliases expand to more than 64 MiB of
+    /// text fails to decode, though the document holds it in a little more
+    /// than one copy.
+    #[test]
+    fn values_stop_at_excessive_aliasing() {
+        let long = "x".repeat(1 << 20);
+        let copies = vec!["*big"; 65].join(", ");
+        let document = migrate(&format!(
+            "plugins:\n  configs:\n    big: &big {long}\n    copies: [{copies}]\n"
+        ));
+        assert_eq!(
+            document
+                .value(&["plugins", "configs", "big"])
+                .map(|value| value.is_ok()),
+            Some(true)
+        );
+        let Some(Err(error)) = document.value(&["plugins", "configs", "copies"]) else {
+            panic!("the copies don't decode");
+        };
+        assert_eq!(
+            (error.kind(), error.to_string().as_str()),
+            (
+                ConfigErrorKind::Decode,
+                "yaml: document contains excessive aliasing"
+            )
+        );
+    }
+
+    /// Not upstream's: the `Debug` of a document and of its values shows
+    /// their shape, never the management key or a provider's key.
+    #[test]
+    fn debug_leaves_out_secrets() {
+        let document = migrate(
+            "remote-management:\n  secret-key: marker-secret-41\nclaude-api-key:\n  - api-key: marker-key-42\n",
+        );
+        let mut shown = vec![format!("{document:?}"), format!("{document:#?}")];
+        for path in ["", "management", "management/secret-key", "api-keys/claude"] {
+            let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+            let Some(Ok(value)) = document.value(&parts) else {
+                panic!("{path} decodes");
+            };
+            shown.push(format!("{value:?}"));
+        }
+        assert_eq!(
+            get(&document, "management/secret-key"),
+            Some(text("marker-secret-41"))
+        );
+        for shown in &shown {
+            assert!(!shown.contains("marker-"), "{shown}");
+        }
+        assert!(
+            shown[0].starts_with("V8Document { root: Node { kind: Mapping"),
+            "{}",
+            shown[0]
+        );
+        assert_eq!(shown[4], "Str(..)");
     }
 
     /// Not upstream's: files that don't make a v8 layout fail as upstream

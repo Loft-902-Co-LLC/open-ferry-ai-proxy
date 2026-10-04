@@ -418,8 +418,11 @@ async fn config_v8_historical_provider_subtrees() {
 }
 
 /// Not upstream's: values the typed config doesn't know are written as
-/// upstream writes what yaml.v3 decodes, and one Go's encoder can't write
-/// is a 200 with no body, as `c.JSON` leaves it.
+/// upstream writes what yaml.v3 decodes, after it writes the migrated file
+/// out and reads it back, so a timestamp in a flow mapping and an empty
+/// flow value come back strings. One Go's encoder can't write is a 500
+/// `encode_failed`, where `c.JSON` leaves upstream's 200 with no body.
+/// Recorded from upstream's `GetConfigV8` handler under Go 1.26.4.
 #[tokio::test]
 async fn config_v8_values_are_written_as_go_writes_them() {
     let raw = "plugins:\n  configs:\n    t:\n      i: 42\n      neg: -7\n      big: 18446744073709551615\n      f: 1.5\n      e: 1e21\n      small: 0.0000001\n      ts: 2001-12-14t21:59:43.10-05:00\n      date: 2002-12-14\n      bin: !!binary aGVsbG8=\n      n: ~\n      b: yes\n      t2: true\n      s: '<&>'\n      hex: 0x1F\n      oct: 0o17\n      seq: [1, two, 3.0]\n      inf: x\n";
@@ -437,15 +440,26 @@ async fn config_v8_values_are_written_as_go_writes_them() {
         &api.get("/v8/management/config/plugins/configs/t/i").await,
         "42",
     );
+    let (_dir, api) = over_file(
+        "plugins: {configs: {t: {v: 2024-01-02T03:04:05+24:00, w: 2002-12-14, e: , n: ~}}}\n",
+    );
+    assert_v8(
+        &api.get("/v8/management/config/plugins/configs/t").await,
+        r#"{"e":"","n":null,"v":"2024-01-02T03:04:05+24:00","w":"2002-12-14T00:00:00Z"}"#,
+    );
     for raw in [
         "plugins: {configs: {t: {v: .inf}}}\n",
         "plugins: {configs: {t: {1: a}}}\n",
-        "plugins: {configs: {t: {v: 2024-01-02T03:04:05+24:00}}}\n",
+        "plugins:\n  configs:\n    t:\n      v: 2024-01-02T03:04:05+24:00\n",
     ] {
         let (_dir, api) = over_file(raw);
         for path in ["plugins/configs/t", "plugins"] {
             let answer = api.get(&format!("/v8/management/config/{path}")).await;
-            assert_v8(&answer, "");
+            answer.assert(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                r#"{"error":"encode_failed"}"#,
+            );
+            assert_eq!(answer.header("cache-control"), Some("no-store"));
         }
     }
 }
