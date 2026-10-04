@@ -46,8 +46,9 @@
 //!   refresh returns the credential as it is. Image and video generation
 //!   aren't ported. One executor makes HTTP calls only; upstream wraps an
 //!   HTTP and a WebSocket executor in an `XAIAutoExecutor`.
-//! - Reasoning replay is a hook that does nothing yet (see the `replay`
-//!   module).
+//! - Reasoning replay keeps a session's last completed turn in memory, as
+//!   upstream does without Home mode, and only for a client-named session
+//!   (see the `replay` module).
 //! - The URL is read as a WHATWG URL, and one with an ASCII control
 //!   character fails before anything is sent, as Codex's does.
 

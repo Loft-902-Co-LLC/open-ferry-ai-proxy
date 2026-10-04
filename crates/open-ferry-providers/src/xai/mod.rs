@@ -14,7 +14,8 @@
 //! as it comes (the `stream` module), and `responses/compact` or a
 //! `compaction_trigger` item goes to `/responses/compact` (the `compact`
 //! module). Error statuses keep upstream's remapping (the `errors` module).
-//! Reasoning replay is a hook that does nothing yet (the `replay` module).
+//! Reasoning replay puts a session's last turn back into its next request
+//! (the `replay` module).
 //! Token counts are estimated locally with `o200k_base` (the `tokens`
 //! module).
 //!
