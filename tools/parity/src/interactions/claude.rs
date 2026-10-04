@@ -12,9 +12,9 @@
 //! non-streaming suite's is the body. Hand-written cases are in
 //! [`cases`], and random ones from `crate::generate::interactions::claude`.
 //!
-//! Not ported yet: the registry runs none of these translators, so
-//! [`Family::native`] maps no pair and the `registry_*` functions give no
-//! cases.
+//! The registry runs these translators for `claude` to `interactions` and
+//! `interactions` to `claude` (see [`Family::native`]); the `registry_*`
+//! functions send the same hand-written and random cases through it.
 
 mod cases;
 
@@ -244,8 +244,15 @@ impl Family for Kind {
     }
 
     fn native(stage: Stage, from: &str, to: &str) -> Option<Self> {
-        let _ = (stage, from, to);
-        None
+        match (stage, from, to) {
+            (Stage::Request, "claude", "interactions") => Some(Self::InteractionsRequest),
+            (Stage::Request, "interactions", "claude") => Some(Self::ClaudeRequest),
+            (Stage::Stream, "interactions", "claude") => Some(Self::InteractionsStream),
+            (Stage::Stream, "claude", "interactions") => Some(Self::ClaudeStream),
+            (Stage::NonStream, "interactions", "claude") => Some(Self::InteractionsNonStream),
+            (Stage::NonStream, "claude", "interactions") => Some(Self::ClaudeNonStream),
+            _ => None,
+        }
     }
 }
 
@@ -270,32 +277,57 @@ fn frame(chunk: &str, end: &str) -> Value {
 /// The hand-written registry request cases for the family's pairs, each list
 /// with its pair.
 pub fn registry_requests() -> Vec<(Pair, Vec<Case>)> {
-    Vec::new()
+    vec![
+        (("claude", "interactions"), cases::claude_requests()),
+        (("interactions", "claude"), cases::interactions_requests()),
+    ]
 }
 
 /// `count` random registry request cases for each of the family's pairs.
 pub fn registry_request_cases(seed: u64, count: usize) -> Vec<(Pair, Vec<Case>)> {
-    let _ = (seed, count);
-    Vec::new()
+    vec![
+        (
+            ("claude", "interactions"),
+            generate::claude_request_cases(seed, count),
+        ),
+        (
+            ("interactions", "claude"),
+            generate::interactions_request_cases(seed, count),
+        ),
+    ]
 }
 
 /// The hand-written registry stream cases for the family's pairs, each list
 /// with its pair.
 pub fn registry_streams() -> Vec<(Pair, Vec<Case>)> {
-    Vec::new()
+    vec![
+        (("interactions", "claude"), cases::interactions_streams()),
+        (("claude", "interactions"), cases::claude_streams()),
+    ]
 }
 
 /// The hand-written registry non-streaming cases for the family's pairs, each
 /// list with its pair.
 pub fn registry_finals() -> Vec<(Pair, Vec<Case>)> {
-    Vec::new()
+    vec![
+        (("interactions", "claude"), cases::interactions_finals()),
+        (("claude", "interactions"), cases::claude_finals()),
+    ]
 }
 
 /// `count` random registry stream cases, and as many non-streaming ones,
 /// for each of the family's pairs.
 pub fn registry_response_cases(seed: u64, count: usize) -> Vec<ResponseCases> {
-    let _ = (seed, count);
-    Vec::new()
+    vec![
+        (
+            ("interactions", "claude"),
+            generate::interactions_event_cases(seed, count),
+        ),
+        (
+            ("claude", "interactions"),
+            generate::claude_event_cases(seed, count),
+        ),
+    ]
 }
 
 #[cfg(test)]

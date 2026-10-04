@@ -1,9 +1,12 @@
-// WP4-A imports internal/translator/interactions/claude and
-// internal/translator/claude/interactions here, as blank imports, so that
-// sdk/translator's default registry, which the registry/* entries run, holds
-// their pairs. It does so in the same commit as the Rust registry gains
-// them, in
+// WP4-A's blank imports: internal/translator/interactions/claude and
+// internal/translator/claude/interactions register their pairs in
+// sdk/translator's default registry, which the registry/* entries run. The
+// Rust registry holds the same pairs, in
 // crates/open-ferry-translate/src/registry/builtin/interactions/claude.rs,
-// and maps them to its suites in tools/parity/src/interactions/claude.rs.
-// Not ported yet: nothing is imported.
+// and tools/parity/src/interactions/claude.rs maps them to its suites.
 package main
+
+import (
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/claude/interactions"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/interactions/claude"
+)
