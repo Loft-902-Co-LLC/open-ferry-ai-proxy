@@ -1,15 +1,23 @@
 //! Our side of the harness's `config-diff/details` entry: the change
 //! details `open_ferry_core::config::diff::build_change_details` gives
-//! for two configs (see `go/parity_config_diff.go`). Not ported yet (P3
-//! WP-B): every case gives null, and no case is generated.
+//! between the case's two configs (see `go/parity_config_diff.go`).
 
-use serde_json::Value;
+use open_ferry_core::config::Config;
+use open_ferry_core::config::diff::build_change_details;
+use serde_json::{Value, json};
 
 use crate::cases::Case;
 
-/// `config-diff/details`: the change details from the case's old
-/// config to its new one. For now, null.
+/// `config-diff/details`: `{"details": [...]}` from the case's old config
+/// to its new one, or `{"error": "old"}` or `{"error": "new"}` when that
+/// config doesn't parse.
 pub fn details(case: &Case) -> Result<Value, String> {
-    let _ = case;
-    Ok(Value::Null)
+    let parse = |side: &str| Config::parse(case.options[side].as_str().unwrap_or_default());
+    let Ok(old) = parse("old") else {
+        return Ok(json!({ "error": "old" }));
+    };
+    let Ok(new) = parse("new") else {
+        return Ok(json!({ "error": "new" }));
+    };
+    Ok(json!({ "details": build_change_details(&old, &new) }))
 }
