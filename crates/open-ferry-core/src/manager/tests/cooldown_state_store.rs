@@ -1107,6 +1107,143 @@ fn the_worker_saves_after_the_debounce() {
     assert_eq!(store.saves(), 1, "no change, no save");
 }
 
+/// A store whose first saves fail, and that remembers when each was tried.
+struct FlakyStore {
+    fail: Mutex<usize>,
+    attempts: Mutex<Vec<Instant>>,
+    saved: AtomicUsize,
+}
+
+impl FlakyStore {
+    fn failing(times: usize) -> Arc<Self> {
+        Arc::new(Self {
+            fail: Mutex::new(times),
+            attempts: Mutex::new(Vec::new()),
+            saved: AtomicUsize::new(0),
+        })
+    }
+
+    fn attempts(&self) -> Vec<Instant> {
+        lock(&self.attempts).clone()
+    }
+
+    fn saved(&self) -> usize {
+        self.saved.load(Ordering::SeqCst)
+    }
+}
+
+impl StateStore for FlakyStore {
+    fn load(&self) -> Result<Vec<Record>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    fn save(&self, _records: &[Record], _now: Timestamp) -> Result<(), StoreError> {
+        lock(&self.attempts).push(Instant::now());
+        let failing = {
+            let mut left = lock(&self.fail);
+            let failing = *left > 0;
+            *left = left.saturating_sub(1);
+            failing
+        };
+        if failing {
+            return Err(StoreError("the disk is full".to_owned()));
+        }
+        self.saved.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// Not upstream's: a save that failed is made again by the next flush, with
+/// nothing changed since, and a save that worked is not made again.
+#[test]
+fn a_failed_save_is_tried_again_by_the_next_flush() {
+    let store = FlakyStore::failing(1);
+    let h = Harness::new(Settings::default());
+    set_debounce(&h.manager, Duration::from_secs(3600));
+    install_store(&h.manager, store.clone());
+    restore_now(&h.manager);
+    register(&h.manager, "auth-1", "xai");
+    h.manager
+        .mark_result(&failure("auth-1", "xai", "m1", 429, "rate limited"));
+
+    flush(&h.manager);
+    assert_eq!((store.attempts().len(), store.saved()), (1, 0), "fails");
+    flush(&h.manager);
+    assert_eq!((store.attempts().len(), store.saved()), (2, 1), "retried");
+    flush(&h.manager);
+    assert_eq!(store.attempts().len(), 2, "saved, so left alone");
+}
+
+/// Not upstream's, and a case where upstream's explicit save would retry: a
+/// `.cds` file that can't be made is made once the obstruction is gone, by
+/// the flush at shutdown, with no other change.
+#[test]
+fn a_cooldown_that_could_not_be_written_is_written_at_shutdown() {
+    let dir = temp_dir();
+    let obstruction = dir.path().join("review-auth.cds");
+    std::fs::create_dir(&obstruction).expect("obstruction");
+    let h = Harness::new(Settings::default());
+    set_debounce(&h.manager, Duration::from_secs(3600));
+    install_store(
+        &h.manager,
+        Arc::new(FileStore::new(dir.path().to_path_buf())),
+    );
+    restore_now(&h.manager);
+    register(&h.manager, "review-auth", "xai");
+    h.manager
+        .mark_result(&failure("review-auth", "xai", "m1", 429, "rate limited"));
+
+    flush(&h.manager);
+    assert!(obstruction.is_dir(), "still in the way");
+
+    std::fs::remove_dir(&obstruction).expect("remove the obstruction");
+    flush(&h.manager);
+    assert!(obstruction.is_file(), "written by the flush at shutdown");
+    let records = FileStore::new(dir.path().to_path_buf())
+        .load()
+        .expect("load");
+    assert_eq!(
+        records.iter().filter(|record| record.model == "m1").count(),
+        1
+    );
+}
+
+/// Not upstream's: the worker tries a failed save again, waiting twice as
+/// long each time, and then stops once it has been saved.
+#[test]
+fn the_worker_retries_a_failed_save_after_longer_waits() {
+    let debounce = Duration::from_millis(20);
+    let store = FlakyStore::failing(3);
+    let h = Harness::new(Settings::default());
+    set_debounce(&h.manager, debounce);
+    install_store(&h.manager, store.clone());
+    restore_now(&h.manager);
+    register(&h.manager, "auth-1", "xai");
+    h.manager
+        .mark_result(&failure("auth-1", "xai", "m1", 429, "rate limited"));
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while store.saved() == 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(store.saved(), 1, "saved in the end");
+    let attempts = store.attempts();
+    assert_eq!(attempts.len(), 4);
+    // Each wait is at least what it is meant to be; a busy machine only
+    // makes it longer.
+    for (failures, pair) in (1u32..).zip(attempts.windows(2)) {
+        let [earlier, later] = pair else {
+            continue;
+        };
+        assert!(
+            later.duration_since(*earlier) >= debounce * (1 << failures),
+            "wait after failure {failures}"
+        );
+    }
+    std::thread::sleep(debounce * 20);
+    assert_eq!(store.attempts().len(), 4, "no more once saved");
+}
+
 /// A store whose saves wait to be let go.
 struct BlockingStore {
     started: Mutex<Option<mpsc::Sender<()>>>,

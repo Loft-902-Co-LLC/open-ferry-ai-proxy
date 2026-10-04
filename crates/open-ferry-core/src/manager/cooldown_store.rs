@@ -54,6 +54,11 @@
 //!   the store has restored from it, so the last save to the old directory
 //!   and the first to the new leave them out, and remove their files.
 //! - Load and save failures are logged; there is no context to cancel them.
+//! - A save that fails is not forgotten: the store stays dirty, the worker
+//!   tries again after the debounce doubled for each failure in a row (up to
+//!   a minute), and [`flush`] at shutdown tries once more. Upstream saves
+//!   only on a change, so a failed save is made again only when something
+//!   else changes.
 
 mod file;
 mod record;
@@ -150,7 +155,7 @@ struct Signal {
 struct Control {
     /// Whether changes are saved: a store is installed and restored.
     enabled: bool,
-    /// A change hasn't been saved yet.
+    /// A change, or a save that failed, hasn't been saved yet.
     dirty: bool,
     /// The manager is gone.
     shutdown: bool,
@@ -215,21 +220,29 @@ pub fn restore(manager: &Manager, config: &Config) {
 }
 
 /// Saves the cooldowns now if a change hasn't been saved yet, waiting for
-/// a save under way. For shutting down.
+/// a save under way. For shutting down. A save that failed is tried again
+/// here, though nothing has changed since.
 pub fn flush(manager: &Manager) {
+    flush_once(manager);
+}
+
+/// [`flush`], saying whether nothing is left unsaved.
+fn flush_once(manager: &Manager) -> bool {
     let signal = &manager.shared.cooldown_store.signal;
     let mut io = lock(&signal.io);
     if io.pending_restore || io.target.is_none() {
-        return;
+        return true;
     }
     {
         let mut control = lock(&signal.control);
         if !control.dirty {
-            return;
+            return true;
         }
+        // Cleared before the snapshot, so a change made while it is written
+        // marks the store again; a failed save marks it too.
         control.dirty = false;
     }
-    save_locked(manager, &mut io);
+    save_locked(manager, &mut io)
 }
 
 /// Notes that the cooldowns of `manager`'s credentials may have changed,
@@ -332,15 +345,30 @@ fn wait<'a>(signal: &Signal, guard: MutexGuard<'a, Control>) -> MutexGuard<'a, C
         .unwrap_or_else(PoisonError::into_inner)
 }
 
+/// The longest the worker waits to save again after a save failed.
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
+
+/// How long the worker waits before a save, after `failures` saves in a row
+/// have failed: the debounce, doubled for each, up to [`MAX_RETRY_DELAY`]
+/// (or the debounce itself, if that is longer).
+fn save_delay(debounce: Duration, failures: u32) -> Duration {
+    debounce
+        .saturating_mul(1u32 << failures.min(16))
+        .min(MAX_RETRY_DELAY.max(debounce))
+}
+
 /// The worker: waits for a change, then [`Control::debounce`] for more,
-/// then saves. It stops when the manager is gone.
+/// then saves. A save that fails is tried again after a longer wait each
+/// time, so a store that stays out of reach isn't written to in a loop. It
+/// stops when the manager is gone.
 fn run_worker(signal: &Signal, shared: &Weak<Shared>) {
+    let mut failures = 0u32;
     loop {
         let mut control = lock(&signal.control);
         while !control.dirty && !control.shutdown {
             control = wait(signal, control);
         }
-        let deadline = Instant::now() + control.debounce;
+        let deadline = Instant::now() + save_delay(control.debounce, failures);
         while !control.shutdown {
             let now = Instant::now();
             if now >= deadline {
@@ -363,25 +391,44 @@ fn run_worker(signal: &Signal, shared: &Weak<Shared>) {
             shared,
             _owner: None,
         };
-        flush(&manager);
+        failures = if flush_once(&manager) {
+            0
+        } else {
+            failures.saturating_add(1)
+        };
     }
 }
 
 /// Saves a snapshot to the target unless it is what was last written.
-fn save_locked(manager: &Manager, io: &mut Io) {
+/// Returns whether the target is up to date; if it isn't, the store is
+/// marked dirty again, so the worker and the next [`flush`] try once more.
+fn save_locked(manager: &Manager, io: &mut Io) -> bool {
     let Some(target) = &io.target else {
-        return;
+        return true;
     };
     let now = manager.now();
     let records = snapshot(manager, now);
     if io.last_written.as_ref() == Some(&records) {
-        return;
+        return true;
     }
     match target.store.save(&records, now) {
-        Ok(()) => io.last_written = Some(records),
+        Ok(()) => {
+            io.last_written = Some(records);
+            true
+        }
         Err(err) => {
             tracing::warn!("failed to persist cooldown state: {err}");
+            // What the target holds is unknown now, a save may have got part
+            // of the way.
             io.last_written = None;
+            let signal = &manager.shared.cooldown_store.signal;
+            let mut control = lock(&signal.control);
+            if control.enabled {
+                control.dirty = true;
+                drop(control);
+                signal.wake.notify_all();
+            }
+            false
         }
     }
 }
@@ -625,4 +672,38 @@ pub(crate) fn installed_dir(manager: &Manager) -> Option<PathBuf> {
 #[cfg(test)]
 pub(crate) fn is_pending(manager: &Manager) -> bool {
     lock(&manager.shared.cooldown_store.signal.io).pending_restore
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_wait_after_failed_saves_doubles_up_to_a_limit() {
+        let debounce = Duration::from_millis(500);
+        let waits: Vec<Duration> = (0..4)
+            .map(|failures| save_delay(debounce, failures))
+            .collect();
+        assert_eq!(
+            waits,
+            [
+                Duration::from_millis(500),
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+                Duration::from_secs(4),
+            ]
+        );
+        for failures in [8, 9, 64, u32::MAX] {
+            assert_eq!(
+                save_delay(debounce, failures),
+                MAX_RETRY_DELAY,
+                "{failures}"
+            );
+        }
+        // A debounce longer than the limit isn't cut short by it.
+        let long = Duration::from_secs(3600);
+        for failures in [0, 1, u32::MAX] {
+            assert_eq!(save_delay(long, failures), long, "{failures}");
+        }
+    }
 }

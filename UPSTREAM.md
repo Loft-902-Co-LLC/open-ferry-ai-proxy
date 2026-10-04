@@ -475,6 +475,7 @@ While `save-cooldown-status` is on, the credentials' cooldowns are saved to `.cd
 
 - **Only the file store is ported**: no token store backend's, Postgres or Home.
 - **Saves are debounced on a background thread**, which writes with the manager's lock released, so picking a credential never waits for the disk; a save that would write what was last written is skipped. Upstream saves on the caller's goroutine after each change to that credential's records. The binary saves once more as it shuts down.
+- **A save that fails is not forgotten**: the store stays marked as unsaved, the worker tries again after the debounce doubled for each failure in a row (up to a minute), and the save at shutdown tries once more even if nothing has changed since. Upstream saves only on a change, so a failed save is made again when something else changes.
 - **Cooldowns are restored when the store is turned on or moves** to another auth directory, not on every reload, as a reload here keeps the credentials' state. A credential-wide cooldown other than a quota, which a reload's update drops as upstream's does, stays dropped where upstream's next restore puts it back.
 - **Turning the setting off leaves the files as they are**; upstream saves to them once more.
 - **Moving the auth directory loses the saved cooldowns** of the files in both directories: the old directory's credentials are dropped before the store moves, and the new one's arrive after it has restored.
