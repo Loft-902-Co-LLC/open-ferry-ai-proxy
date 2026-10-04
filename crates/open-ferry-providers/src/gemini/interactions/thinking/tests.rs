@@ -9,10 +9,10 @@
 //! Changed:
 //! - The test models are registered in a model registry of their own,
 //!   rather than the global one.
-//! - The OpenAI and Gemini cases apply the setting through those targets'
-//!   executor entries, with no client request, since their targets are
-//!   private to their modules: as upstream's `ApplyThinking`, the body alone
-//!   then says whether summaries are shown.
+//! - The OpenAI, Codex and Gemini cases apply the setting through those
+//!   targets' executor entries, with no client request, since their targets
+//!   are private to their modules: as upstream's `ApplyThinking`, the body
+//!   alone then says whether summaries are shown.
 //!
 //! Dropped:
 //! - `OUT1` and `OUT8` (Claude): the Claude target looks models up in the
@@ -21,10 +21,6 @@
 //!   (xAI), and the Antigravity case of
 //!   `TestInvalidInteractionsSummaryDoesNotWriteTargetControl`: those
 //!   targets aren't ported.
-//!
-//! Waiting on the Interactions to Codex translator (WP4-D):
-//! - `OUT3`, and the Codex case of
-//!   `TestInvalidInteractionsSummaryDoesNotWriteTargetControl`.
 
 use std::sync::Arc;
 
@@ -288,6 +284,37 @@ fn interactions_matrix_to_openai() {
     );
 }
 
+/// Ports TestThinkingE2EInteractionsMatrix: the case with a Codex target.
+#[test]
+fn interactions_matrix_to_codex() {
+    run_matrix(
+        "codex",
+        &[(
+            "OUT3",
+            "interactions",
+            "level-model",
+            r#"{"model":"level-model","generation_config":{"thinking_level":"low"},"input":"hi"}"#,
+            &[("reasoning.effort", "low")],
+            &[],
+        )],
+        |body, model, from, catalog| {
+            let route = Route {
+                model,
+                from,
+                to: "codex",
+                provider: "codex",
+            };
+            crate::codex::thinking::apply_request(
+                body,
+                route,
+                &Body::Empty,
+                &Body::Empty,
+                Some(catalog),
+            )
+        },
+    );
+}
+
 /// Ports TestThinkingE2EInteractionsMatrix: the cases with a Gemini target.
 #[test]
 fn interactions_matrix_to_gemini() {
@@ -352,6 +379,21 @@ fn an_invalid_summary_setting_shows_nothing_on_gemini() {
         !json::exists(&out, "generationConfig.thinkingConfig.includeThoughts"),
         "{out}"
     );
+}
+
+/// Ports TestInvalidInteractionsSummaryDoesNotWriteTargetControl: the
+/// Codex case.
+#[test]
+fn an_invalid_summary_setting_shows_nothing_on_codex() {
+    let body = json!({"model": "model", "generation_config": {"thinking_summaries": "banana"}, "input": "hi"});
+    let out = Registry::global().translate_request(
+        &Format::INTERACTIONS,
+        &Format::CODEX,
+        "model",
+        body,
+        false,
+    );
+    assert!(!json::exists(&out, "reasoning.summary"), "{out}");
 }
 
 // Not upstream's: a budget becomes the level it stands for, matched to the
