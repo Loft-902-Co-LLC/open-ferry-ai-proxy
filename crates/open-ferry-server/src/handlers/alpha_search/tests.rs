@@ -436,6 +436,52 @@ async fn codex_alpha_search_opt_in_api_key_without_base_url_fails_closed() {
     assert!(mock.requests().is_empty());
 }
 
+// Not upstream's: the route model is the payload's `model` as Go's
+// `json.Unmarshal` reads it into upstream's routing struct. It reads the
+// members in order, repeated keys included, takes any case of `model`, and
+// keeps the last string; `null` or another value leaves the model as it
+// was, and no other letters fold to those of `model`. Go 1.26.4 reads these
+// payloads' models as "missing", "allowed", "allowed", "allowed",
+// "missing", "" and "".
+#[tokio::test]
+async fn codex_alpha_search_routes_on_the_model_go_reads() {
+    let mock = Mock::ok().await;
+    let credential = oauth("codex-auth", json!({"access_token": "codex-token"}));
+    let app = proxy(
+        Settings::default(),
+        &mock.url,
+        vec![credential],
+        &[("codex-auth", "allowed")],
+    );
+    let mut sent = 0;
+    for (payload, allowed) in [
+        (
+            r#"{"model":"missing","MODEL":"allowed","model":"missing"}"#,
+            false,
+        ),
+        (
+            r#"{"model":"missing","MODEL":"allowed","model":null}"#,
+            true,
+        ),
+        (r#"{"model":"missing","MODEL":"allowed","model":7}"#, true),
+        (r#"{"MoDeL":"allowed"}"#, true),
+        (r#"{"model":"allowed","Model":"missing"}"#, false),
+        ("{\"\u{ff4d}odel\":\"missing\"}", true),
+        ("{\"\u{1d0d}odel\":\"missing\"}", true),
+    ] {
+        let (status, _, body) = send(&app, search("/v1/alpha/search", payload, &[])).await;
+        if allowed {
+            sent += 1;
+            assert_eq!(status, StatusCode::OK, "{payload}: {body}");
+            assert_eq!(mock.requests().pop().unwrap().body, payload);
+        } else {
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{payload}: {body}");
+            assert_eq!(body, r#"{"error":"auth_not_found: no auth available"}"#);
+        }
+        assert_eq!(mock.requests().len(), sent, "{payload}");
+    }
+}
+
 // Not upstream's: both routes need a client key, and a refused one never
 // reaches Codex.
 #[tokio::test]

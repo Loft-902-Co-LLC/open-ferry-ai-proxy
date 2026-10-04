@@ -6,8 +6,9 @@
 //!
 //! The client's payload goes to Codex untranslated, without the Responses
 //! fields search refuses (`prompt_cache_key` and `prompt_cache_retention`).
-//! Its `model` is the route model for picking a credential the
-//! `codex_alpha_search_v1` policy allows (see [`super::policy`]). A ChatGPT
+//! Its `model`, read as Go's decoder reads it (see [`routing`]), is the
+//! route model for picking a credential the `codex_alpha_search_v1` policy
+//! allows (see [`super::policy`]). A ChatGPT
 //! sign-in sends the payload to the Codex executor's base URL plus
 //! `/alpha/search`, which is
 //! `https://chatgpt.com/backend-api/codex/alpha/search`. An API key that
@@ -35,6 +36,10 @@
 //!   written as serde_json writes them, where Go copies them as the client
 //!   wrote them, without spaces. A model that only differs in how it is
 //!   escaped isn't rewritten.
+//! - A payload `serde_json` can't read, though Go's decoder can (with
+//!   invalid UTF-8, a lone surrogate escape, or nested more than 128 deep),
+//!   goes out as it came, with its Responses fields and its model as the
+//!   client wrote them. Its `model` still picks the credential.
 //! - The `account_id` is sent trimmed, as Go writes header values, and
 //!   isn't sent when it can't be a header value.
 //!
@@ -48,12 +53,14 @@ use http::header::{self, HeaderMap, HeaderName, HeaderValue};
 use open_ferry_translate::go::trim_space;
 use serde_json::{Map, Value};
 
+use self::routing::payload_model;
 use super::Manager;
 use super::credential::attribute;
 use super::policy::CredentialPolicy;
-use super::text::equal_fold;
 use crate::auth::{Auth, AuthKind};
 use crate::exec::{AlphaSearch, ErrorKind, ExecError, HttpCall, HttpReply, HttpTarget};
+
+mod routing;
 
 /// The search endpoint, under a ChatGPT sign-in's base URL or an API key's
 /// `base_url`.
@@ -179,22 +186,6 @@ fn parse_object(raw: &[u8]) -> Option<Map<String, Value>> {
     }
 }
 
-/// The payload's `model`, trimmed, as Go decodes it into a struct: the last
-/// string under a key that is `model` in any case, or empty.
-fn payload_model(raw: &[u8]) -> String {
-    let Some(payload) = parse_object(raw) else {
-        return String::new();
-    };
-    payload
-        .iter()
-        .filter(|(key, _)| equal_fold(key, "model"))
-        .filter_map(|(_, value)| value.as_str())
-        .next_back()
-        .unwrap_or_default()
-        .trim()
-        .to_owned()
-}
-
 /// The payload without the Responses fields search refuses, or as it is
 /// when it has none or isn't a JSON object (`sanitizeCodexAlphaSearchBody`).
 fn sanitize_body(body: Bytes) -> Bytes {
@@ -306,17 +297,6 @@ mod tests {
         assert_eq!(sanitize_body(untouched.clone()), untouched);
         assert_eq!(sanitize_body(Bytes::from_static(b"null")), "null");
         assert_eq!(sanitize_body(Bytes::from_static(b"not json")), "not json");
-    }
-
-    // Not upstream's: the route model, as Go's struct decoding reads it.
-    #[test]
-    fn reads_the_payload_model() {
-        assert_eq!(payload_model(br#"{"model":" gpt-5 "}"#), "gpt-5");
-        assert_eq!(payload_model(br#"{"model":"a","MODEL":"b"}"#), "b");
-        assert_eq!(payload_model(br#"{"Model":"a","model":1}"#), "a");
-        assert_eq!(payload_model(br#"{"model":null}"#), "");
-        assert_eq!(payload_model(br#"["model"]"#), "");
-        assert_eq!(payload_model(br#"{"model":"a""#), "");
     }
 
     // Not upstream's: the headers every credential gets.
