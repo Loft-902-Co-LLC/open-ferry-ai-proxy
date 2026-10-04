@@ -27,8 +27,8 @@
 //! [`config_diff`] generates config pairs for the config change details.
 //! [`payload`] generates payload rules with the requests and calls they
 //! apply to.
-//! [`usage`] and [`ttft`] will generate input for usage parsing and
-//! first-token events (P3); none yet.
+//! [`usage`] generates upstream answers and stream lines for usage
+//! parsing, and [`ttft`] stream events for the first-token classifiers.
 
 pub mod chat;
 pub mod claude_chat;

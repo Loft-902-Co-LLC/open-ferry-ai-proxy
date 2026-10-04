@@ -5,12 +5,12 @@
 // "responses" (IsResponsesTokenEvent), "chat" (IsChatTokenEvent), "claude"
 // (IsClaudeTokenEvent) or "gemini" (IsGeminiTokenEvent).
 //
-// The entry imports helps, and keeps to this file so it can move with it.
-
+// It is in go/helps/main.go's harness, not go/main.go's, because importing
+// helps registers a translator the registry/* entries must not see (see
+// go/helps/main.go).
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
@@ -26,9 +26,7 @@ type ttftOptions struct {
 
 func ttftTokenEvent(in input) []byte {
 	var options ttftOptions
-	if err := json.Unmarshal(in.Options, &options); err != nil {
-		panic(fmt.Sprintf("ttft/token-event options: %v", err))
-	}
+	decodeOptions(in, &options)
 	payload := []byte(in.Request)
 	var token bool
 	switch options.Format {

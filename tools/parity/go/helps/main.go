@@ -22,7 +22,8 @@
 // Input and output are JSON lines in go/main.go's format. The
 // open-ferry-parity crate sends a key here when its package, the part before
 // the first "/", is one of the helpers' (see is_helps in src/upstream.rs):
-// payload, as in payload/apply. Each file documents its entries.
+// payload, usage or ttft, as in payload/apply, usage/parse and
+// ttft/token-event. Each file documents its entries.
 package main
 
 import (

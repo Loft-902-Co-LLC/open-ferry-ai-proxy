@@ -1,7 +1,7 @@
-//! Our side of the harness's `ttft/token-event` entry: whether an
-//! upstream's stream event carries the first token, as
+//! Our side of the executor helpers' harness's `ttft/token-event` entry:
+//! whether an upstream's stream event carries the first token, as
 //! `open_ferry_core::observe::usage` decides it for the time to first
-//! token (see `go/parity_ttft.go`).
+//! token (see `go/helps/parity_ttft.go`).
 
 use open_ferry_core::observe::usage::{
     is_chat_token_event, is_claude_token_event, is_gemini_token_event, is_responses_token_event,

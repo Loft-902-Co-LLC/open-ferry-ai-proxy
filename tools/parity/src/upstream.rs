@@ -243,11 +243,11 @@ fn is_interactions(translator: &str) -> bool {
 }
 
 /// The packages of the executor helpers' harness keys.
-const HELPS_PACKAGES: &[&str] = &["payload"];
+const HELPS_PACKAGES: &[&str] = &["payload", "usage", "ttft"];
 
 /// Whether `translator` is an executor helpers' harness key: one whose
 /// package, its first `/`-separated part, is in [`HELPS_PACKAGES`], such as
-/// `payload/apply`. Importing upstream's `helps` package registers
+/// `payload/apply`, `usage/parse` or `ttft/token-event`. Importing upstream's `helps` package registers
 /// translators the main harness's `registry/` entries must not see (see
 /// `go/helps/main.go`), so an entry that imports it is in that harness and
 /// its package is listed here.
@@ -307,7 +307,9 @@ mod tests {
 
     #[test]
     fn helps_keys_have_a_helpers_package() {
-        assert!(is_helps("payload/apply"));
+        for key in ["payload/apply", "usage/parse", "ttft/token-event"] {
+            assert!(is_helps(key), "{key}");
+        }
         for key in [
             "registry/request",
             "codex/payload/request",

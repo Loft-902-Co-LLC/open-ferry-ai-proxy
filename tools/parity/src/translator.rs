@@ -264,13 +264,13 @@ pub enum Translator {
     MultiAgentRestore,
     /// A translated body and payload rules → the body with the rules
     /// applied, and the tracked paths they touched (see
-    /// `go/parity_payload.go`).
+    /// `go/helps/parity_payload.go`).
     Payload,
     /// An upstream's response body or stream line → the usage parsed from
-    /// it (see `go/parity_usage.go`).
+    /// it (see `go/helps/parity_usage.go`).
     Usage,
     /// An upstream's stream event → whether it carries the first token
-    /// (see `go/parity_ttft.go`).
+    /// (see `go/helps/parity_ttft.go`).
     Ttft,
     /// Two configs → the change details logged on reload (see
     /// `go/parity_config_diff.go`).

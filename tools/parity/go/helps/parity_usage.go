@@ -9,12 +9,12 @@
 // The Antigravity, Interactions and Codex image tool parsers aren't ported,
 // so have no entry.
 //
-// The entry imports helps, and keeps to this file so it can move with it.
-
+// It is in go/helps/main.go's harness, not go/main.go's, because importing
+// helps registers a translator the registry/* entries must not see (see
+// go/helps/main.go).
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
@@ -44,9 +44,7 @@ type usageDetail struct {
 
 func usageParse(in input) []byte {
 	var options usageOptions
-	if err := json.Unmarshal(in.Options, &options); err != nil {
-		panic(fmt.Sprintf("usage/parse options: %v", err))
-	}
+	decodeOptions(in, &options)
 	body := []byte(in.Request)
 	var detail usage.Detail
 	found := true
@@ -71,7 +69,7 @@ func usageParse(in input) []byte {
 	if !found {
 		return []byte("null")
 	}
-	out, err := json.Marshal(usageDetail{
+	return marshal(usageDetail{
 		InputTokens:         detail.InputTokens,
 		OutputTokens:        detail.OutputTokens,
 		ReasoningTokens:     detail.ReasoningTokens,
@@ -82,8 +80,4 @@ func usageParse(in input) []byte {
 		TokenBreakdown:      detail.TokenBreakdown,
 		ResponseServiceTier: detail.ResponseServiceTier,
 	})
-	if err != nil {
-		panic(err)
-	}
-	return out
 }

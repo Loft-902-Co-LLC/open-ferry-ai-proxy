@@ -1,7 +1,7 @@
-//! Our side of the harness's `usage/parse` entry: the usage parsed from an
-//! upstream's response body or stream line by
+//! Our side of the executor helpers' harness's `usage/parse` entry: the
+//! usage parsed from an upstream's response body or stream line by
 //! `open_ferry_core::observe::usage`, written as the harness writes
-//! upstream's (see `go/parity_usage.go`).
+//! upstream's (see `go/helps/parity_usage.go`).
 
 use open_ferry_core::observe::usage::{
     Detail, TokenBreakdown, parse_claude_stream_usage, parse_claude_usage, parse_codex_usage,
