@@ -16,8 +16,8 @@
 //! - `openai_compat_home_options_test.go`: the Home service isn't ported.
 //! - `openai_compat_executor_reasoning_test.go`: the `is-compat` flag isn't
 //!   passed to translators.
-//! - `PayloadOverrideWinsOverThinkingSuffix`: payload rules aren't
-//!   applied.
+//! - `PayloadOverrideWinsOverThinkingSuffix`: it belongs to the payload
+//!   rules' tests (P3 WP-D).
 //! - `PromptCacheKeyIsModelAndProtocolScoped`: it checks derived keys.
 //!
 //! Changed:

@@ -32,10 +32,12 @@
 //! - An update with an empty index keeps the old one. Upstream doesn't for
 //!   a copy whose index was set and then cleared (its private
 //!   `indexAssigned` flag).
+//! - The cooldown state store is told after every change that may move a
+//!   cooldown, where upstream saves only when the records changed; the
+//!   store compares (see [`super::cooldown_store`]).
 //! - Not ported: hooks, the scheduler index, API-key model alias rebuilds,
-//!   the cooldown state store, plugin virtual credentials, the Meta key mint
-//!   save inside the lock, result policies and quota observation from
-//!   response headers.
+//!   plugin virtual credentials, the Meta key mint save inside the lock,
+//!   result policies and quota observation from response headers.
 
 use std::sync::Arc;
 
@@ -45,6 +47,7 @@ use super::cooldown::{
     has_model_error, is_credential_quota_active, normalize_model_states, projections_for,
     reconcile_model_states, reset_quota, update_aggregated_availability,
 };
+use super::cooldown_store;
 use super::credential::{
     KIND_API_KEY, SOURCE_CONFIG, auth_kind, auth_source_kind, credentials_changed, validate_weight,
 };
@@ -233,6 +236,7 @@ impl Manager {
             snapshot
         };
         self.queue_refresh_reschedule(&snapshot.id);
+        cooldown_store::changed(self);
         if let Err(err) = self.persist(&snapshot, snapshot.registration_epoch, 1, save) {
             tracing::warn!(
                 auth_id = %snapshot.id,
@@ -381,6 +385,7 @@ impl Manager {
             (snapshot, live_epoch, generation)
         };
         self.queue_refresh_reschedule(&snapshot.id);
+        cooldown_store::changed(self);
         if let Err(err) = self.persist(&snapshot, epoch, generation, save) {
             tracing::warn!(
                 auth_id = %snapshot.id,
@@ -414,6 +419,7 @@ impl Manager {
             existing.auth.provider.trim().to_owned()
         };
         self.queue_refresh_unschedule(id);
+        cooldown_store::changed(self);
         if !provider.is_empty()
             && let Some(executor) = self.executor(&provider)
         {
@@ -550,7 +556,9 @@ impl Manager {
             committed
         };
         let _ = self.persist(&snapshot, epoch, generation, Save::Yes);
+        cooldown_store::changed(self);
         self.publish_projections(&snapshot, generation, now, true);
+        self.publish_error_event(result, &snapshot);
     }
 
     /// Records an outcome that says nothing about the credential's health:
@@ -577,6 +585,7 @@ impl Manager {
             )
         };
         let _ = self.persist(&snapshot, epoch, generation, Save::Yes);
+        self.publish_error_event(result, &snapshot);
     }
 
     /// Clears a credential's quota and cooldowns and puts its models back in
@@ -615,6 +624,7 @@ impl Manager {
             committed
         };
         let persisted = self.persist(&snapshot, epoch, generation, Save::Yes);
+        cooldown_store::changed(self);
         self.publish_projections(&snapshot, generation, now, false);
         persisted.map(|()| {
             Some(QuotaReset {
@@ -687,6 +697,7 @@ impl Manager {
                 "failed to persist auth changes during model state reconciliation: {err}"
             );
         }
+        cooldown_store::changed(self);
         let (settings, oauth) = self.resolver_parts();
         let resolver = Resolver {
             settings: &settings,

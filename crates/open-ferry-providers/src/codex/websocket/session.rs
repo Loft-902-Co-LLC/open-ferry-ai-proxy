@@ -62,6 +62,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
+use bytes::Bytes;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt as _, StreamExt as _};
 use http::HeaderMap;
@@ -74,6 +75,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use super::dial::{DialError, Dialed, WsStream};
 use super::errors::{self, Failure};
+use crate::observe_send::BodyTap;
 
 /// How long a connection may go without a message
 /// (`codexResponsesWebsocketIdleTimeout`).
@@ -764,6 +766,8 @@ pub(super) struct Hold {
     token: u64,
     rx: mpsc::Receiver<Read>,
     finished: bool,
+    /// What sees the messages read, when the call's taps do.
+    tap: Option<BodyTap>,
 }
 
 impl Hold {
@@ -784,7 +788,13 @@ impl Hold {
             token,
             rx,
             finished: false,
+            tap: None,
         }
+    }
+
+    /// Has `tap` see the messages read from now on.
+    pub(super) fn observe(&mut self, tap: Option<BodyTap>) {
+        self.tap = tap;
     }
 
     pub(super) fn conn(&self) -> &Arc<Conn> {
@@ -797,7 +807,12 @@ impl Hold {
             match self.rx.recv().await {
                 None => return Err(Failure::channel_closed()),
                 Some(read) if read.conn != self.conn.id => {}
-                Some(read) => return read.result,
+                Some(read) => {
+                    if let (Some(tap), Ok(message)) = (&self.tap, &read.result) {
+                        tap.chunk(&Bytes::copy_from_slice(message.as_bytes()));
+                    }
+                    return read.result;
+                }
             }
         }
     }

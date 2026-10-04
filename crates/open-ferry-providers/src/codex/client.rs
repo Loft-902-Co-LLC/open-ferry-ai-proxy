@@ -28,6 +28,8 @@ use std::error::Error as StdError;
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
+use crate::observe_send::BodyTap;
+
 /// What our requests call themselves, unless the client sent its own.
 pub const USER_AGENT: &str = concat!("open-ferry/", env!("CARGO_PKG_VERSION"));
 
@@ -262,8 +264,12 @@ pub(crate) async fn read_body(
     mut response: reqwest::Response,
     limit: usize,
 ) -> Result<Vec<u8>, ReadError> {
+    let tap = BodyTap::of(&response);
     let mut body = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(ReadError::Http)? {
+        if let Some(tap) = &tap {
+            tap.chunk(&chunk);
+        }
         if body.len().saturating_add(chunk.len()) > limit {
             return Err(ReadError::TooLarge(limit));
         }
@@ -279,10 +285,14 @@ pub(crate) async fn read_body_prefix(
     mut response: reqwest::Response,
     limit: usize,
 ) -> (Vec<u8>, Option<reqwest::Error>) {
+    let tap = BodyTap::of(&response);
     let mut body = Vec::new();
     loop {
         match response.chunk().await {
             Ok(Some(chunk)) => {
+                if let Some(tap) = &tap {
+                    tap.chunk(&chunk);
+                }
                 let room = limit.saturating_sub(body.len());
                 body.extend_from_slice(chunk.get(..room.min(chunk.len())).unwrap_or_default());
                 if body.len() >= limit {

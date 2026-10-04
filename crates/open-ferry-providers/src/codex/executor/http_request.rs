@@ -32,12 +32,14 @@
 use bytes::Bytes;
 use http::header::{self, HeaderValue};
 use open_ferry_core::auth::Auth;
-use open_ferry_core::exec::{ErrorKind, ExecError, HttpCall, HttpReply, HttpTarget};
+use open_ferry_core::exec::{ErrorKind, ExecError, Format, HttpCall, HttpReply, HttpTarget};
+use open_ferry_core::observe::AttemptKind;
 
 use super::CodexExecutor;
 use crate::codex::client::{USER_AGENT, error_chain, read_body_prefix};
 use crate::codex::request::{credentials, refuse_control_characters};
 use crate::custom_headers;
+use crate::observe_send::{self, Attempt};
 
 impl CodexExecutor {
     /// Sends `call` with the credential's token and custom headers, and
@@ -54,6 +56,7 @@ impl CodexExecutor {
             body,
             client_headers,
             response_limit,
+            observation,
         } = call;
         let url = self.target_url(target);
         refuse_control_characters(&url)?;
@@ -74,7 +77,25 @@ impl CodexExecutor {
         if !headers.contains_key(header::USER_AGENT) {
             headers.insert(header::USER_AGENT, HeaderValue::from_static(USER_AGENT));
         }
-        let response = self
+        // Upstream's Alpha Search handler records the request as it is sent,
+        // with no model.
+        let attempt = Attempt {
+            observation: observation
+                .as_ref()
+                .filter(|observation| observation.is_tapped()),
+            kind: AttemptKind::Http,
+            provider: "codex",
+            model: "",
+            format: &Format::CODEX,
+            auth,
+        };
+        let tap = attempt.observation.map(|observation| {
+            observe_send::announce(
+                observation,
+                &attempt.request(&method, &url, &headers, &body, &[token]),
+            )
+        });
+        let mut response = self
             .clients
             .get(&auth.proxy_url)
             .request(method, url)
@@ -85,6 +106,7 @@ impl CodexExecutor {
             .map_err(|error| {
                 ExecError::new(ErrorKind::Upstream, error_chain(&error.without_url()))
             })?;
+        observe_send::response(tap, &mut response);
         let status = response.status().as_u16();
         let headers = response.headers().clone();
         let (body, read_error) = read_body_prefix(response, response_limit).await;
@@ -180,6 +202,7 @@ mod tests {
             body: Bytes::from_static(body.as_bytes()),
             client_headers: HeaderMap::new(),
             response_limit: 1 << 20,
+            observation: None,
         }
     }
 

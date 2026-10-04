@@ -34,9 +34,10 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use bytes::Bytes;
-use http::HeaderMap;
+use http::{HeaderMap, Method};
 use open_ferry_core::auth::Auth;
 use open_ferry_core::exec::{ExecError, Format, Options, Request, Response};
+use open_ferry_core::observe::AttemptKind;
 use open_ferry_translate::registry::{Registry, ResponseContext};
 use serde_json::Value;
 
@@ -53,6 +54,7 @@ use crate::codex::terminal::{
     status_error_with_cooling, terminal_failure,
 };
 use crate::json::str_at;
+use crate::observe_send::{self, Attempt};
 use crate::redact;
 
 /// A call whose message is sent.
@@ -94,6 +96,29 @@ pub(super) async fn open(
         None => (store.ephemeral(), true, None),
     };
     let secret = credentials(auth).0;
+    // The handshake and the message, told once, before connecting.
+    let tap = options.tapped().map(|observation| {
+        let model = str_at(&prepared.body, "model");
+        let message = Bytes::from(prepared.message.clone());
+        observe_send::announce(
+            observation,
+            &Attempt::new(
+                options,
+                AttemptKind::Websocket,
+                "codex",
+                &model,
+                &Format::CODEX,
+                auth,
+            )
+            .request(
+                &Method::GET,
+                &prepared.url,
+                &prepared.headers,
+                &message,
+                &[secret],
+            ),
+        )
+    });
     let model_level_cooling = executor.model_level_cooling();
     let proxy = executor.proxy_for(auth);
     let target = Target::new(&auth.id, &prepared.url, &proxy, secret);
@@ -108,6 +133,7 @@ pub(super) async fn open(
     };
 
     let mut hold = Hold::new(Arc::clone(&session), ephemeral, guard, conn);
+    hold.observe(tap);
     prepared
         .turn
         .set_multi_agent_v2_restore(restores(prepared, &session, hold.conn().id()));

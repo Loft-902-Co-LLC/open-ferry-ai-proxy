@@ -36,9 +36,9 @@
 //! - The config's `codex-header-defaults` user agent, models.json
 //!   `override_header`, cloaking and `Connection: Keep-Alive` aren't ported.
 //! - A payload that isn't a JSON object is translated as an empty object.
-//! - Payload config rules aren't applied, and the original request isn't
-//!   translated alongside the payload, as the payload-config module isn't
-//!   ported.
+//! - The config's payload rules are left to [`crate::payload`], given the
+//!   request and its options; upstream translates the original request
+//!   alongside the payload for them.
 //! - The image generation tool isn't added.
 
 use http::header::{self, HeaderMap, HeaderName, HeaderValue};
@@ -58,6 +58,7 @@ use super::thinking;
 use super::tool_schema::normalize_tool_schemas;
 use crate::custom_headers;
 use crate::json::{self, delete, eq_fold, exists, get, set, str_of};
+use crate::payload;
 use crate::thinking::Route;
 
 /// Codex's API, for credentials that name no `base_url`.
@@ -347,6 +348,20 @@ pub(crate) fn prepare_body(
         &json::Body::parse(&options.original_request),
         context.models,
     )?;
+    // Upstream counts tokens without the payload rules. A Codex target
+    // skips the Codex clients' integer pass, which P3 WP-D folds into
+    // `payload::apply`.
+    if kind != Kind::CountTokens {
+        let target = payload::Target {
+            executor: "codex",
+            protocol: &to,
+            model: base,
+            root: "",
+            stream,
+            tracked: &[],
+        };
+        payload::apply(context.config, &target, request, options, &mut body);
+    }
 
     match kind {
         Kind::Execute => {

@@ -27,8 +27,9 @@
 //!   handled as upstream handles one it doesn't recognise.
 //! - Device and account lookups before a request (`PrepareRequestAuth`),
 //!   raw HTTP passthrough (`PrepareRequest`, `HttpRequest`), the Kimi
-//!   thinking replay, mid-system message rebuilding and checks, payload
-//!   config rules, usage reporting and request logging aren't ported.
+//!   thinking replay and mid-system message rebuilding and checks aren't
+//!   ported. Usage reporting and request logging are left to the call's
+//!   taps, and payload rules to [`crate::payload`].
 //! - Deferred: local token counting for credentials that don't go to
 //!   Anthropic's API (a 501 for now).
 

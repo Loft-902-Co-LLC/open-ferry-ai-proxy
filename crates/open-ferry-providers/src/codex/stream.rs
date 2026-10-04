@@ -29,7 +29,9 @@
 //! - A rewritten terminal event is written by `serde_json`.
 //! - Dropping the stream, or the call while lines are held back, stops
 //!   reading, where upstream watches its context.
-//! - Usage reporting, request logging and image tool usage aren't ported.
+//! - Usage reporting and request logging are left to the call's taps,
+//!   which see each chunk as it is read (see the crate's `observe_send`
+//!   module). Image tool usage isn't ported.
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -55,6 +57,7 @@ use super::terminal::{
 };
 use super::usage::ensure_responses_usage_details;
 use crate::json::{get, str_at, str_of};
+use crate::observe_send::BodyTap;
 
 /// The longest line read, as upstream's scanner allows.
 pub(crate) const MAX_LINE: usize = 52_428_800;
@@ -93,6 +96,8 @@ enum ReaderState {
 /// comes first, then the error.
 pub(crate) struct LineReader {
     response: reqwest::Response,
+    /// What sees the body as it is read, when the call's taps do.
+    tap: Option<BodyTap>,
     buffer: Vec<u8>,
     /// Where the unread data starts.
     start: usize,
@@ -103,8 +108,10 @@ pub(crate) struct LineReader {
 
 impl LineReader {
     pub(crate) fn new(response: reqwest::Response) -> Self {
+        let tap = BodyTap::of(&response);
         Self {
             response,
+            tap,
             buffer: Vec::new(),
             start: 0,
             scanned: 0,
@@ -154,7 +161,12 @@ impl LineReader {
                 self.start = 0;
             }
             match self.response.chunk().await {
-                Ok(Some(chunk)) => self.buffer.extend_from_slice(&chunk),
+                Ok(Some(chunk)) => {
+                    if let Some(tap) = &self.tap {
+                        tap.chunk(&chunk);
+                    }
+                    self.buffer.extend_from_slice(&chunk);
+                }
                 Ok(None) => self.state = ReaderState::Done,
                 Err(error) => self.state = ReaderState::Failed(error.without_url()),
             }

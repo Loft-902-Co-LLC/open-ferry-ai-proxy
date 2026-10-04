@@ -27,8 +27,11 @@
 //! - `Originator: codex_cli_rs` isn't sent, by policy: nothing makes the
 //!   request pass for Codex CLI's. A client that sends no `User-Agent` gets
 //!   the executor's `open-ferry/<version>`.
-//! - The payload's `id` doesn't become a session ID, and the call isn't
-//!   logged or traced: session affinity and request logging aren't ported.
+//! - The payload's `id` doesn't become a session ID: session affinity
+//!   isn't ported.
+//! - The request log sees the call through the request's taps: the
+//!   executor reports the request, the answer's head and its body, and the
+//!   call's end is reported here, with a failed read as its error.
 //! - The Home dispatcher and the plugin model router aren't ported, so the
 //!   payload's `model` is the route model as it is.
 //! - A changed payload has its top-level keys sorted and `<`, `>`, `&`,
@@ -46,6 +49,7 @@
 //! [`Dispatcher::codex_alpha_search`]: crate::exec::Dispatcher::codex_alpha_search
 
 use std::fmt::Write as _;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use http::Method;
@@ -59,6 +63,7 @@ use super::credential::attribute;
 use super::policy::CredentialPolicy;
 use crate::auth::{Auth, AuthKind};
 use crate::exec::{AlphaSearch, ErrorKind, ExecError, HttpCall, HttpReply, HttpTarget};
+use crate::observe::{CallReport, SelectedAuth};
 
 mod routing;
 
@@ -89,6 +94,11 @@ impl Manager {
             )
             .map_err(|error| or_status(error, 503))?;
         let auth = picked.auth;
+        if let Some(observation) = &request.observation {
+            observation
+                .context()
+                .select(SelectedAuth::new(Arc::clone(&auth)));
+        }
         let mut headers = base_headers(&request.headers);
         if let Some(account) = account_id(&auth) {
             headers.insert(HeaderName::from_static("chatgpt-account-id"), account);
@@ -109,6 +119,7 @@ impl Manager {
         } else {
             (HttpTarget::Path(SEARCH_PATH.to_owned()), body)
         };
+        let report = CallReport::observing(request.observation.as_ref());
         let call = HttpCall {
             method: Method::POST,
             target,
@@ -116,12 +127,20 @@ impl Manager {
             body,
             client_headers: request.headers,
             response_limit: MAX_RESPONSE_BODY,
+            observation: request.observation,
         };
-        picked
-            .executor
-            .http_request(auth, call)
-            .await
-            .map_err(|error| or_status(error, 502))
+        let result = picked.executor.http_request(auth, call).await;
+        match &result {
+            Ok(HttpReply {
+                read_error: Some(read_error),
+                ..
+            }) => report.finish(&Err::<(), _>(ExecError::new(
+                ErrorKind::Upstream,
+                read_error.clone(),
+            ))),
+            _ => report.finish(&result),
+        }
+        result.map_err(|error| or_status(error, 502))
     }
 }
 

@@ -58,6 +58,7 @@ pub(crate) async fn search(
     let request = AlphaSearch {
         body: raw,
         headers: client.headers,
+        observation: None,
     };
     match state.dispatcher_arc().codex_alpha_search(request).await {
         Ok(reply) => answer(reply),

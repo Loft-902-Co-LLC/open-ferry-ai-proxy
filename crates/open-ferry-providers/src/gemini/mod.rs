@@ -24,9 +24,7 @@
 //! - Gemini's Interactions API and the `gemini-interactions` provider:
 //!   requests always go to `generateContent`.
 //! - AI Studio, which upstream serves through a websocket relay.
-//! - Usage reporting and request logging.
 //! - The Home service (its credential options and refresh).
-//! - The config's `payload` rules.
 //! - The model that the credential manager resolved for an API key
 //!   (`APIKeyModelIsCompat`, `ResolvedModelInfo`): requests are translated
 //!   as for a model that isn't a compatibility model. Codex clients'
@@ -49,6 +47,9 @@
 //! - A dropped call or stream stops at once; upstream checks its context.
 //! - An error body that quotes the API key or access token the request
 //!   carried has it redacted (see the crate's `redact` module).
+//! - Usage reporting and request logging are left to the call's taps (see
+//!   the crate's `observe_send` module), and payload rules to
+//!   [`crate::payload`].
 
 mod executor;
 mod image;
@@ -66,7 +67,7 @@ pub use token::normalize_service_account;
 pub use vertex::VertexExecutor;
 
 use bytes::Bytes;
-use http::{HeaderMap, HeaderName, HeaderValue, header};
+use http::{HeaderMap, HeaderName, HeaderValue, Method, header};
 use open_ferry_core::auth::Auth;
 use open_ferry_core::config::Config;
 use open_ferry_core::exec::{
@@ -89,6 +90,7 @@ use crate::codex::terminal::{APPLY_PATCH_ERROR_MESSAGE, StatusError};
 use crate::codex::usage::ensure_responses_usage_details;
 use crate::custom_headers;
 use crate::json::{self, Body};
+use crate::observe_send::{self, Attempt};
 use crate::redact;
 
 /// The `alt` of a `/responses/compact` call, which Gemini can't serve.
@@ -224,24 +226,34 @@ fn sent_secrets(headers: &HeaderMap) -> [String; 2] {
     [key, token]
 }
 
-/// Posts `body` and returns the answer if its status is a success, else
-/// the status and body as an error, without the credential it was sent
-/// with.
+/// Posts `body`, telling the call's taps, and returns the answer if its
+/// status is a success, else the status and body as an error, without the
+/// credential it was sent with.
 async fn post(
     client: &reqwest::Client,
     url: &str,
     headers: HeaderMap,
     body: &Value,
     name: &str,
+    attempt: Attempt<'_>,
 ) -> Result<reqwest::Response, ExecError> {
     let [key, token] = sent_secrets(&headers);
-    let response = client
+    let body = Bytes::from(body.to_string());
+    let tap = attempt.observation.map(|observation| {
+        let secrets = [key.as_str(), token.as_str()];
+        observe_send::announce(
+            observation,
+            &attempt.request(&Method::POST, url, &headers, &body, &secrets),
+        )
+    });
+    let mut response = client
         .post(url)
         .headers(headers)
-        .body(body.to_string())
+        .body(body)
         .send()
         .await
         .map_err(|error| ExecError::new(ErrorKind::Upstream, error_chain(&error.without_url())))?;
+    observe_send::response(tap, &mut response);
     let status = response.status().as_u16();
     if (200..300).contains(&status) {
         return Ok(response);

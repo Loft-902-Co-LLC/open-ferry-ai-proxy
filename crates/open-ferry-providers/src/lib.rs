@@ -6,7 +6,8 @@
 //! credentials they get. [`openai_compat`] calls the OpenAI-compatible
 //! providers of the config, with API keys and no login.
 //! [`gemini`] calls Gemini with API keys, and Vertex AI with API keys or
-//! service accounts.
+//! service accounts. [`payload`] applies the config's payload rules to the
+//! bodies the executors send.
 
 pub mod claude;
 mod claude_code_session;
@@ -17,7 +18,10 @@ pub mod gemini;
 mod go_json;
 mod json;
 pub mod oauth;
+mod observe_send;
 pub mod openai_compat;
-mod redact;
+pub mod payload;
 mod redirect;
 mod thinking;
+
+pub(crate) use open_ferry_core::observe::redact;

@@ -37,8 +37,9 @@
 //! - A dropped call or stream stops at once; upstream checks its context.
 //! - An error body or terminal failure event that quotes the credential's
 //!   token has it redacted (see the crate's `redact` module).
-//! - Usage reporting, request logging and the Home-service refresh aren't
-//!   ported.
+//! - Usage reporting and request logging are left to the call's taps (see
+//!   the crate's `observe_send` module), and payload rules to
+//!   [`crate::payload`]. The Home-service refresh isn't ported.
 //! - Deferred: the image generation endpoints. See also the module docs of
 //!   [`super`].
 //! - One executor makes both HTTP and WebSocket calls; upstream wraps an
@@ -62,7 +63,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use futures_util::FutureExt as _;
 use futures_util::future::BoxFuture;
-use http::HeaderMap;
+use http::{HeaderMap, Method};
 use open_ferry_core::auth::Auth;
 use open_ferry_core::config::Config;
 use open_ferry_core::exec::{
@@ -70,6 +71,7 @@ use open_ferry_core::exec::{
 };
 use open_ferry_core::executor::ProviderExecutor;
 use open_ferry_core::models::ModelCatalog;
+use open_ferry_core::observe::AttemptKind;
 use open_ferry_translate::go::trim_space;
 use open_ferry_translate::registry::{Registry, ResponseContext};
 use serde_json::Value;
@@ -93,6 +95,7 @@ use super::tokens::{count_input_tokens, tokenizer_for};
 use super::usage::ensure_responses_usage_details;
 use super::websocket;
 use crate::json::str_at;
+use crate::observe_send::{self, Attempt};
 use crate::redact;
 
 /// The `alt` of a `/responses/compact` call.
@@ -226,19 +229,29 @@ impl CodexExecutor {
         url: &str,
         headers: HeaderMap,
         body: &Value,
+        attempt: Attempt<'_>,
     ) -> Result<reqwest::Response, ExecError> {
         refuse_control_characters(url)?;
-        let response = self
+        let body = Bytes::from(body.to_string());
+        let tap = attempt.observation.map(|observation| {
+            let secret = credentials(auth).0;
+            observe_send::announce(
+                observation,
+                &attempt.request(&Method::POST, url, &headers, &body, &[secret]),
+            )
+        });
+        let mut response = self
             .clients
             .get(&auth.proxy_url)
             .post(url)
             .headers(headers)
-            .body(body.to_string())
+            .body(body)
             .send()
             .await
             .map_err(|error| {
                 ExecError::new(ErrorKind::Upstream, error_chain(&error.without_url()))
             })?;
+        observe_send::response(tap, &mut response);
         Ok(response)
     }
 
@@ -253,7 +266,22 @@ impl CodexExecutor {
         let format = response_format(options);
         let headers = build_headers(auth, &options.headers, false)?;
         let url = endpoint(auth, &self.base_url, true);
-        let response = self.send(auth, &url, headers, &prepared.body).await?;
+        let response = self
+            .send(
+                auth,
+                &url,
+                headers,
+                &prepared.body,
+                Attempt::new(
+                    options,
+                    AttemptKind::Execute,
+                    "codex",
+                    base_model(&request.model),
+                    &Format::OPENAI_RESPONSE,
+                    auth,
+                ),
+            )
+            .await?;
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {
             let (body, _) = read_body_prefix(response, MAX_ERROR_BODY).await;
@@ -298,7 +326,22 @@ impl CodexExecutor {
         let format = response_format(options);
         let headers = build_headers(auth, &options.headers, true)?;
         let url = endpoint(auth, &self.base_url, false);
-        let response = self.send(auth, &url, headers, &prepared.body).await?;
+        let response = self
+            .send(
+                auth,
+                &url,
+                headers,
+                &prepared.body,
+                Attempt::new(
+                    options,
+                    AttemptKind::Execute,
+                    "codex",
+                    base_model(&request.model),
+                    &Format::CODEX,
+                    auth,
+                ),
+            )
+            .await?;
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {
             let (body, _) = read_body_prefix(response, MAX_ERROR_BODY).await;
@@ -384,7 +427,22 @@ impl CodexExecutor {
         let format = response_format(&options);
         let headers = build_headers(auth, &options.headers, true)?;
         let url = endpoint(auth, &self.base_url, false);
-        let response = self.send(auth, &url, headers, &prepared.body).await?;
+        let response = self
+            .send(
+                auth,
+                &url,
+                headers,
+                &prepared.body,
+                Attempt::new(
+                    &options,
+                    AttemptKind::Stream,
+                    "codex",
+                    base_model(&request.model),
+                    &Format::CODEX,
+                    auth,
+                ),
+            )
+            .await?;
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {
             let (body, error) = read_body_prefix(response, MAX_ERROR_BODY).await;

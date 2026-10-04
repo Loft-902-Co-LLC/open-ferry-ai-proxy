@@ -41,19 +41,25 @@
 //!   released, still ordered per credential by epoch and generation.
 //! - The executor's [`ProviderExecutor::refresh_lead`] replaces upstream's
 //!   registry of refresh leads.
-//! - The selected credential goes to the `selected_auth` callback only;
-//!   there is no metadata map to publish it in.
-//! - Not ported: hooks, error events, result policies, quota observation
-//!   from headers, the cooldown state store, request preparation and
-//!   interceptors, the round tripper, the Antigravity credits fallback and
-//!   API-key capability metadata.
+//! - The selected credential goes to the `selected_auth` callback and the
+//!   request's observation context; there is no metadata map to publish it
+//!   in.
+//! - Failed calls go to one [`ErrorEvents`] hook, which the usage
+//!   statistics set, where upstream's manager queues the event itself.
+//! - The cooldown state store is a stub until P3 WP-E (see
+//!   [`cooldown_store`]).
+//! - Not ported: hooks, result policies, quota observation from headers,
+//!   request preparation and interceptors, the round tripper, the
+//!   Antigravity credits fallback and API-key capability metadata.
 
 mod alpha_search;
 mod classify;
 pub mod clienterror;
 mod cooldown;
+pub mod cooldown_store;
 mod cooldown_view;
 mod credential;
+mod error_events;
 mod execute;
 mod lifecycle;
 mod merge;
@@ -75,6 +81,7 @@ mod tests;
 pub use classify::has_unauthorized_auth_failure;
 pub use cooldown::CallResult;
 pub use cooldown_view::{CooldownView, cooldown_snapshot_for_auth};
+pub use error_events::ErrorEvents;
 pub use lifecycle::QuotaReset;
 pub use refresh::ForceRefreshResult;
 pub use select::{ClientModels, ModelProjection};
@@ -85,7 +92,7 @@ pub use settings::{
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::io;
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 
 use chrono::Utc;
 use futures_core::future::BoxFuture;
@@ -140,6 +147,10 @@ pub(crate) struct Shared {
     /// Serializes refreshes per credential (upstream's `refreshLocks`).
     refresh_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     refresh_loop: Mutex<Option<RefreshLoopHandle>>,
+    /// What failed calls are told to, once set.
+    error_events: OnceLock<Arc<dyn ErrorEvents>>,
+    /// The cooldown state store.
+    cooldown_store: cooldown_store::CooldownStore,
 }
 
 /// The credential manager. Cloning it gives another handle to the same
@@ -247,6 +258,8 @@ impl Manager {
             persist_locks: Mutex::new(HashMap::new()),
             refresh_locks: Mutex::new(HashMap::new()),
             refresh_loop: Mutex::new(None),
+            error_events: OnceLock::new(),
+            cooldown_store: cooldown_store::CooldownStore::default(),
         });
         let owner = Some(Arc::new(Owner(Arc::downgrade(&shared))));
         Self {
@@ -277,17 +290,20 @@ impl Manager {
     /// aliases, and resets the rotation when the routing strategy changed.
     pub fn set_settings(&self, settings: Settings) {
         let now = self.now();
-        let mut state = self.lock();
-        let strategy_changed = state.settings.routing_strategy != settings.routing_strategy;
-        state.oauth = Arc::new(OAuthAliasTable::compile(&settings.oauth_model_alias));
-        state.settings = Arc::new(settings);
-        let models = self.models();
-        for id in lifecycle::clear_disabled_cooldown_states(&mut state, now) {
-            state.sync_scheduler(models, &id, now);
+        {
+            let mut state = self.lock();
+            let strategy_changed = state.settings.routing_strategy != settings.routing_strategy;
+            state.oauth = Arc::new(OAuthAliasTable::compile(&settings.oauth_model_alias));
+            state.settings = Arc::new(settings);
+            let models = self.models();
+            for id in lifecycle::clear_disabled_cooldown_states(&mut state, now) {
+                state.sync_scheduler(models, &id, now);
+            }
+            if strategy_changed {
+                state.selector.reset_strategy();
+            }
         }
-        if strategy_changed {
-            state.selector.reset_strategy();
-        }
+        cooldown_store::changed(self);
     }
 
     /// The executor registered for `provider`.

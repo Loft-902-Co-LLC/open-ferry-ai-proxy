@@ -19,9 +19,11 @@
 //! - An event that grows past 50 MiB goes out in pieces rather than whole;
 //!   upstream buffers it however large it gets.
 //! - Dropping the stream stops reading, where upstream watches its context.
-//! - Usage reporting, request logging, response model restoring, OAuth tool
-//!   name restoring, continuity tracking and the thinking replay cache
-//!   aren't ported.
+//! - Usage reporting and request logging are left to the call's taps,
+//!   which see each chunk as it is read (see the crate's `observe_send`
+//!   module).
+//! - Response model restoring, OAuth tool name restoring, continuity
+//!   tracking and the thinking replay cache aren't ported.
 
 use std::collections::VecDeque;
 

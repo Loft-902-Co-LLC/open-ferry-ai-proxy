@@ -35,8 +35,10 @@
 //!   does, but the error doesn't quote the URL, which may hold a secret.
 //! - An error body that quotes the credential's API key has it redacted;
 //!   see [`crate::redact`].
-//! - Usage reporting, request logging and the Home service (its credential
-//!   options and refresh) aren't ported.
+//! - Usage reporting and request logging are left to the call's taps (see
+//!   the crate's `observe_send` module), and payload rules to
+//!   [`crate::payload`]. The Home service (its credential options and
+//!   refresh) isn't ported.
 //! - See also the module docs of [`super`].
 
 use std::sync::Arc;
@@ -44,7 +46,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use futures_util::FutureExt as _;
 use futures_util::future::BoxFuture;
-use http::{HeaderMap, HeaderValue, header};
+use http::{HeaderMap, HeaderValue, Method, header};
 use open_ferry_core::auth::compat::{ATTRIBUTE_COMPAT_NAME, ATTRIBUTE_PROVIDER_KEY};
 use open_ferry_core::auth::{Auth, AuthSource};
 use open_ferry_core::config::{Config, OpenAiCompatibility};
@@ -53,6 +55,7 @@ use open_ferry_core::exec::{
 };
 use open_ferry_core::executor::ProviderExecutor;
 use open_ferry_core::models::ModelCatalog;
+use open_ferry_core::observe::AttemptKind;
 use open_ferry_translate::go::trim_space;
 use open_ferry_translate::registry::{Registry, ResponseContext};
 use serde_json::Value;
@@ -76,6 +79,8 @@ use crate::codex::thinking as responses_thinking;
 use crate::codex::usage::ensure_responses_usage_details;
 use crate::custom_headers;
 use crate::json::{Body, delete, eq_fold, str_at};
+use crate::observe_send::{self, Attempt};
+use crate::payload;
 use crate::redact;
 use crate::thinking::Route;
 
@@ -212,7 +217,17 @@ impl OpenAiCompatExecutor {
             translate_stream,
         );
         self.apply_thinking(&mut body, request, options, &to)?;
+        // P3 WP-D folds this integer pass into `payload::apply`.
         compat::after_translation(options, &mut body);
+        let target = payload::Target {
+            executor: &self.provider,
+            protocol: &to,
+            model: base,
+            root: "",
+            stream: translate_stream,
+            tracked: &[],
+        };
+        payload::apply(Some(&*self.config), &target, request, options, &mut body);
 
         let compat = self.compat_config(auth);
         let requested = requested_model(request, options);
@@ -269,20 +284,39 @@ impl OpenAiCompatExecutor {
         }
     }
 
-    /// Posts the prepared request and returns the provider's answer if its
-    /// status is a success.
-    async fn send(&self, auth: &Auth, prepared: &Prepared) -> Result<reqwest::Response, ExecError> {
-        let response = self
+    /// Posts the prepared request, telling the call's taps, and returns the
+    /// provider's answer if its status is a success.
+    async fn send(
+        &self,
+        auth: &Auth,
+        prepared: &Prepared,
+        attempt: Attempt<'_>,
+    ) -> Result<reqwest::Response, ExecError> {
+        let body = Bytes::from(prepared.body.to_string());
+        let tap = attempt.observation.map(|observation| {
+            observe_send::announce(
+                observation,
+                &attempt.request(
+                    &Method::POST,
+                    &prepared.url,
+                    &prepared.headers,
+                    &body,
+                    &[api_key(auth)],
+                ),
+            )
+        });
+        let mut response = self
             .clients
             .get(&auth.proxy_url)
             .post(&prepared.url)
             .headers(prepared.headers.clone())
-            .body(prepared.body.to_string())
+            .body(body)
             .send()
             .await
             .map_err(|error| {
                 ExecError::new(ErrorKind::Upstream, error_chain(&error.without_url()))
             })?;
+        observe_send::response(tap, &mut response);
         let status = response.status().as_u16();
         if (200..300).contains(&status) {
             return Ok(response);
@@ -302,7 +336,20 @@ impl OpenAiCompatExecutor {
     ) -> Result<Response, ExecError> {
         let prepared = self.prepare(auth, request, options, false)?;
         let format = response_format(options);
-        let response = self.send(auth, &prepared).await?;
+        let response = self
+            .send(
+                auth,
+                &prepared,
+                Attempt::new(
+                    options,
+                    AttemptKind::Execute,
+                    &self.provider,
+                    base_model(&request.model),
+                    &prepared.to,
+                    auth,
+                ),
+            )
+            .await?;
         let response_headers = response.headers().clone();
         let data = read_body(response, MAX_LINE)
             .await
@@ -336,7 +383,20 @@ impl OpenAiCompatExecutor {
     ) -> Result<StreamResponse, ExecError> {
         let prepared = self.prepare(auth, &request, &options, true)?;
         let format = response_format(&options);
-        let response = self.send(auth, &prepared).await?;
+        let response = self
+            .send(
+                auth,
+                &prepared,
+                Attempt::new(
+                    &options,
+                    AttemptKind::Stream,
+                    &self.provider,
+                    base_model(&request.model),
+                    &prepared.to,
+                    auth,
+                ),
+            )
+            .await?;
         let response_headers = response.headers().clone();
 
         let original = original_request(&request, &options);

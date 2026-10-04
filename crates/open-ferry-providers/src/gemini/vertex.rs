@@ -40,9 +40,12 @@ use futures_util::future::BoxFuture;
 use http::HeaderMap;
 use open_ferry_core::auth::Auth;
 use open_ferry_core::config::Config;
-use open_ferry_core::exec::{ErrorKind, ExecError, Options, Request, Response, StreamResponse};
+use open_ferry_core::exec::{
+    ErrorKind, ExecError, Format, Options, Request, Response, StreamResponse,
+};
 use open_ferry_core::executor::ProviderExecutor;
 use open_ferry_core::models::ModelCatalog;
+use open_ferry_core::observe::AttemptKind;
 use open_ferry_translate::signature::sanitize_gemini_request_thought_signatures;
 use serde_json::{Map, Value, json};
 
@@ -57,6 +60,8 @@ use crate::codex::compat;
 use crate::codex::request::{base_model, set_string_if_different};
 use crate::codex::terminal::StatusError;
 use crate::json;
+use crate::observe_send::Attempt;
+use crate::payload;
 
 /// How log lines and errors name this executor.
 const NAME: &str = "vertex executor";
@@ -149,7 +154,17 @@ impl VertexExecutor {
             self.models(),
             PROVIDER,
         )?;
+        // P3 WP-D folds this integer pass into `payload::apply`.
         compat::after_translation(options, &mut body);
+        let target = payload::Target {
+            executor: PROVIDER,
+            protocol: &Format::GEMINI,
+            model: base,
+            root: "",
+            stream,
+            tracked: &[],
+        };
+        payload::apply(self.config.as_deref(), &target, request, options, &mut body);
         set_string_if_different(&mut body, "model", base);
         turns::strip_vertex_tool_call_ids(&mut body, options.source_format.as_str());
         sanitize_gemini_request_thought_signatures(&mut body, "contents");
@@ -233,7 +248,22 @@ impl VertexExecutor {
         }
         let headers = self.headers(auth, options, &target).await?;
         let client = self.clients.get(&auth.proxy_url);
-        let response = post(&client, &url, headers, &body, NAME).await?;
+        let response = post(
+            &client,
+            &url,
+            headers,
+            &body,
+            NAME,
+            Attempt::new(
+                options,
+                AttemptKind::Execute,
+                PROVIDER,
+                base,
+                &Format::GEMINI,
+                auth,
+            ),
+        )
+        .await?;
         let (headers, mut data) = read_answer(response).await?;
         if imagen {
             data = convert_imagen_to_gemini_response(data, base);
@@ -264,7 +294,22 @@ impl VertexExecutor {
         let headers = self.headers(auth, options, &target).await?;
         let secrets = sent_secrets(&headers);
         let client = self.clients.get(&auth.proxy_url);
-        let response = post(&client, &url, headers, &body, NAME).await?;
+        let response = post(
+            &client,
+            &url,
+            headers,
+            &body,
+            NAME,
+            Attempt::new(
+                options,
+                AttemptKind::Stream,
+                PROVIDER,
+                base,
+                &Format::GEMINI,
+                auth,
+            ),
+        )
+        .await?;
         Ok(translate_stream(
             response,
             request,
@@ -297,7 +342,22 @@ impl VertexExecutor {
         let url = self.url(&target, base, "countTokens");
         let headers = self.headers(auth, options, &target).await?;
         let client = self.clients.get(&auth.proxy_url);
-        let response = post(&client, &url, headers, &body, NAME).await?;
+        let response = post(
+            &client,
+            &url,
+            headers,
+            &body,
+            NAME,
+            Attempt::new(
+                options,
+                AttemptKind::CountTokens,
+                PROVIDER,
+                base,
+                &Format::GEMINI,
+                auth,
+            ),
+        )
+        .await?;
         let (headers, data) = read_answer(response).await?;
         Ok(translate_count(options, headers, data))
     }

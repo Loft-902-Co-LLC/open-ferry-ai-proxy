@@ -51,8 +51,8 @@
 //! - The other executors take the path upstream takes for models that
 //!   aren't compatibility models, as they don't resolve the flag.
 //! - Upstream normalizes the integer types of a Codex client's tools again
-//!   as it applies the payload config, which isn't ported;
-//!   [`after_translation`] is that pass alone.
+//!   as it applies the payload config; [`after_translation`] is that pass
+//!   alone, which the executors call next to [`crate::payload::apply`].
 //! - The translator plugin hooks aren't ported, so a compatibility
 //!   translation isn't passed to them.
 //! - Upstream v8.0.10 keeps a v8 document's

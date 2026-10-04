@@ -34,6 +34,9 @@
 //!   JSON (keeping key order and numbers), where sjson edits it in place.
 //! - When the client drops a stream, its task stops reading at once and
 //!   records nothing, as upstream records nothing once its context ends.
+//! - Each executor call's end is reported to the request's taps here (see
+//!   [`CallReport`] and [`observe_stream`]), where upstream's executors
+//!   publish their usage and request-log records themselves.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -65,6 +68,7 @@ use super::{Manager, lock};
 use crate::auth::Auth;
 use crate::exec::{ChunkStream, ErrorKind, ExecError, Options, Request, Response, StreamResponse};
 use crate::executor::ProviderExecutor;
+use crate::observe::{CallReport, SelectedAuth, observe_stream};
 
 /// The pool offset at which the counter starts again (upstream's
 /// `nextModelPoolOffset` wrap).
@@ -232,9 +236,16 @@ fn with_attempted_auth_tracker(opts: &Options) -> (Options, AttemptedSet) {
 }
 
 /// Tells the caller which credential the call was given (upstream's
-/// `publishSelectedAuthMetadata`, without the metadata keys).
-fn publish_selected(opts: &Options, auth_id: &str) {
-    let auth_id = auth_id.trim();
+/// `publishSelectedAuthMetadata`, without the metadata keys), and the
+/// request's observers, for its trace ID and logs (upstream's auth index
+/// callback).
+fn publish_selected(opts: &Options, auth: &Arc<Auth>) {
+    if let Some(observation) = &opts.observation {
+        observation
+            .context()
+            .select(SelectedAuth::new(Arc::clone(auth)));
+    }
+    let auth_id = auth.id.trim();
     if auth_id.is_empty() {
         return;
     }
@@ -647,10 +658,13 @@ impl Manager {
         req: Request,
         opts: Options,
     ) -> Result<Response, ExecError> {
-        match kind {
+        let report = CallReport::start(&opts);
+        let result = match kind {
             CallKind::Execute => executor.execute(auth, req, opts).await,
             CallKind::CountTokens => executor.count_tokens(auth, req, opts).await,
-        }
+        };
+        report.finish(&result);
+        result
     }
 
     /// One round of a unary call (upstream's `executeMixedOnce` and
@@ -696,7 +710,7 @@ impl Manager {
                     });
                 }
             };
-            publish_selected(&opts, &prepared.auth.id);
+            publish_selected(&opts, &prepared.auth);
             tried.insert(prepared.auth.id.clone());
             if prepared.models.is_empty() {
                 continue;
@@ -895,7 +909,7 @@ impl Manager {
                     });
                 }
             };
-            publish_selected(&opts, &prepared.auth.id);
+            publish_selected(&opts, &prepared.auth);
             tried.insert(prepared.auth.id.clone());
             if prepared.models.is_empty() {
                 continue;
@@ -982,9 +996,12 @@ impl Manager {
                 execution_model.to_owned()
             };
             let exec_opts = opts.clone();
-            let mut outcome = executor
-                .execute_stream(auth.clone(), exec_req.clone(), exec_opts.clone())
-                .await;
+            let mut outcome = observe_stream(
+                &exec_opts,
+                executor
+                    .execute_stream(auth.clone(), exec_req.clone(), exec_opts.clone())
+                    .await,
+            );
             if let Err(err) = &outcome {
                 upstream = Some(Failure::upstream(err.clone()));
                 if let Some(refreshed) = self
@@ -992,11 +1009,14 @@ impl Manager {
                     .await
                 {
                     auth = refreshed;
-                    publish_selected(&exec_opts, &auth.id);
+                    publish_selected(&exec_opts, &auth);
                     did_refresh = true;
-                    outcome = executor
-                        .execute_stream(auth.clone(), exec_req.clone(), exec_opts.clone())
-                        .await;
+                    outcome = observe_stream(
+                        &exec_opts,
+                        executor
+                            .execute_stream(auth.clone(), exec_req.clone(), exec_opts.clone())
+                            .await,
+                    );
                     if let Err(err) = &outcome {
                         upstream = Some(Failure::upstream(err.clone()));
                     }
@@ -1035,12 +1055,14 @@ impl Manager {
                     .await
                 {
                     auth = refreshed;
-                    publish_selected(&exec_opts, &auth.id);
+                    publish_selected(&exec_opts, &auth);
                     did_refresh = true;
-                    match executor
-                        .execute_stream(auth.clone(), exec_req.clone(), exec_opts.clone())
-                        .await
-                    {
+                    match observe_stream(
+                        &exec_opts,
+                        executor
+                            .execute_stream(auth.clone(), exec_req.clone(), exec_opts.clone())
+                            .await,
+                    ) {
                         Err(retry_err) => {
                             headers = HeaderMap::new();
                             bootstrap = Bootstrap::Failed(retry_err);
@@ -1322,8 +1344,14 @@ mod tests {
         let sink = seen.clone();
         o.metadata.selected_auth = Some(Arc::new(move |id: &str| lock(&sink).push(id.into())));
         let (tracked, attempted) = with_attempted_auth_tracker(&o);
-        publish_selected(&tracked, " a ");
-        publish_selected(&tracked, " ");
+        let auth = |id: &str| {
+            Arc::new(Auth {
+                id: id.into(),
+                ..Auth::default()
+            })
+        };
+        publish_selected(&tracked, &auth(" a "));
+        publish_selected(&tracked, &auth(" "));
         assert!(lock(&attempted).contains("a"));
         assert_eq!(*lock(&seen), vec!["a".to_owned()]);
     }

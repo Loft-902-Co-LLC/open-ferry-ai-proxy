@@ -4,8 +4,8 @@
 //! headers, errors and streams.
 //!
 //! Dropped:
-//! - `AppliesPayloadRulesBeforeLeadingUserNormalization`: payload rules
-//!   aren't ported.
+//! - `AppliesPayloadRulesBeforeLeadingUserNormalization`: it belongs to
+//!   the payload rules' tests (P3 WP-D).
 //! - `InteractionsWithGeminiAPIKeyUsesGeminiEndpoint`, every
 //!   `NativeInteractions` test and
 //!   `NativeInteractionsSourceFormatAllowsSupportedEntryProtocols`: the

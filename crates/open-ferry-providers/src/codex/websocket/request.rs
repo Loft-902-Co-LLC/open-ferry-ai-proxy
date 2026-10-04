@@ -40,8 +40,8 @@
 //!   native client's thread and window headers when it's off), the routing
 //!   hint and models.json `override_header` aren't ported.
 //! - No `Content-Type` or `Accept` is sent, as upstream sends none.
-//! - Payload config rules and the image generation tool aren't applied, as
-//!   for HTTP.
+//! - The image generation tool isn't added, and payload rules are left to
+//!   [`crate::payload`], as for HTTP.
 //! - The URL is read as a WHATWG URL when connecting, so its `.` and `..`
 //!   segments are resolved, percent-encoded ones such as `%2e%2e` included,
 //!   and a `\` reads as `/`. Gorilla sends `/a/%2e%2e/v1/responses` as
@@ -72,6 +72,7 @@ use crate::codex::thinking;
 use crate::codex::tool_schema::normalize_tool_schemas;
 use crate::custom_headers;
 use crate::json::{self, delete, set};
+use crate::payload;
 use crate::thinking::Route;
 
 /// The `OpenAI-Beta` value that opts into the Responses WebSocket.
@@ -145,6 +146,15 @@ pub(super) fn prepare(
         &json::Body::parse(&options.original_request),
         context.models,
     )?;
+    let target = payload::Target {
+        executor: "codex-websockets",
+        protocol: &to,
+        model: base,
+        root: "",
+        stream: kind == Kind::Stream,
+        tracked: &[],
+    };
+    payload::apply(context.config, &target, request, options, &mut body);
     set_string_if_different(&mut body, "model", base);
     if kind == Kind::Execute {
         set_bool_if_different(&mut body, "stream", true);

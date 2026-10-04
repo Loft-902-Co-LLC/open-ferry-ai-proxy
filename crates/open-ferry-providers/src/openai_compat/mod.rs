@@ -20,9 +20,10 @@
 //!   to a provider with `support-prompt-cache-key`, but upstream's derived
 //!   keys (from a Claude Code prompt or a session) aren't.
 //! - Not ported: the OpenAI Images endpoints (`openai-image` requests),
-//!   which have no routes here yet; payload rules; and the `is-compat` flag
-//!   of a model, which translators don't get. Codex clients' requests are
-//!   readied for translation as the Codex `compat` module says.
+//!   which have no routes here yet, and the `is-compat` flag of a model,
+//!   which translators don't get. Payload rules are left to
+//!   [`crate::payload`]. Codex clients' requests are readied for
+//!   translation as the Codex `compat` module says.
 //! - The management API's `api-call` requests through a credential
 //!   (`PrepareRequest`, `HttpRequest`) aren't ported.
 

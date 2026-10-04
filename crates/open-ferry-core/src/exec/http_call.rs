@@ -20,9 +20,12 @@
 //! [`ProviderExecutor::http_request`]: crate::executor::ProviderExecutor::http_request
 
 use std::fmt;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use http::{HeaderMap, Method};
+
+use crate::observe::Observation;
 
 /// Where an [`HttpCall`] goes.
 #[derive(Clone, PartialEq, Eq)]
@@ -52,6 +55,9 @@ pub struct HttpCall {
     pub client_headers: HeaderMap,
     /// The most bytes of the answer's body to read; the rest is dropped.
     pub response_limit: usize,
+    /// What the client request's observers see, for the request log
+    /// (upstream's `RecordAPIRequest` and the calls after it).
+    pub observation: Option<Arc<Observation>>,
 }
 
 impl fmt::Debug for HttpTarget {
@@ -74,6 +80,7 @@ impl fmt::Debug for HttpCall {
             .field("body_len", &self.body.len())
             .field("client_headers", &HeaderNames(&self.client_headers))
             .field("response_limit", &self.response_limit)
+            .field("observation", &self.observation)
             .finish()
     }
 }
@@ -112,6 +119,8 @@ pub struct AlphaSearch {
     pub body: Bytes,
     /// The client's headers, without its key.
     pub headers: HeaderMap,
+    /// What the client request's observers see.
+    pub observation: Option<Arc<Observation>>,
 }
 
 impl fmt::Debug for AlphaSearch {
@@ -120,6 +129,7 @@ impl fmt::Debug for AlphaSearch {
         f.debug_struct("AlphaSearch")
             .field("body_len", &self.body.len())
             .field("headers", &HeaderNames(&self.headers))
+            .field("observation", &self.observation)
             .finish()
     }
 }
@@ -199,6 +209,7 @@ mod tests {
             body: Bytes::from_static(br#"{"q":"BODY-SECRET"}"#),
             client_headers: client_headers.clone(),
             response_limit: 32,
+            observation: None,
         };
         let reply = HttpReply {
             status: 200,
@@ -209,6 +220,7 @@ mod tests {
         let search = AlphaSearch {
             body: Bytes::from_static(b"BODY-SECRET"),
             headers: client_headers,
+            observation: None,
         };
         let path = HttpTarget::Path("/alpha/search?token=QUERY-SECRET".into());
         let text = format!("{call:?} {reply:?} {search:?} {path:?}");

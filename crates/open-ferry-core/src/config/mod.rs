@@ -69,7 +69,7 @@ mod duration;
 mod layout;
 mod load;
 mod normalize;
-mod paths;
+pub(crate) mod paths;
 mod payload;
 mod safe_mode;
 #[cfg(test)]

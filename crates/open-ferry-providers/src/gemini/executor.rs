@@ -24,9 +24,10 @@ use futures_util::FutureExt as _;
 use futures_util::future::BoxFuture;
 use open_ferry_core::auth::Auth;
 use open_ferry_core::config::Config;
-use open_ferry_core::exec::{ExecError, Options, Request, Response, StreamResponse};
+use open_ferry_core::exec::{ExecError, Format, Options, Request, Response, StreamResponse};
 use open_ferry_core::executor::ProviderExecutor;
 use open_ferry_core::models::ModelCatalog;
+use open_ferry_core::observe::AttemptKind;
 use open_ferry_translate::signature::sanitize_gemini_request_thought_signatures;
 use serde_json::Value;
 
@@ -39,6 +40,8 @@ use crate::codex::client::Clients;
 use crate::codex::compat;
 use crate::codex::request::{base_model, set_string_if_different};
 use crate::json;
+use crate::observe_send::Attempt;
+use crate::payload;
 
 /// How log lines and errors name this executor.
 const NAME: &str = "gemini executor";
@@ -102,7 +105,17 @@ impl GeminiExecutor {
             self.models(),
             PROVIDER,
         )?;
+        // P3 WP-D folds this integer pass into `payload::apply`.
         compat::after_translation(options, &mut body);
+        let target = payload::Target {
+            executor: PROVIDER,
+            protocol: &Format::GEMINI,
+            model: base,
+            root: "",
+            stream,
+            tracked: &[],
+        };
+        payload::apply(self.config.as_deref(), &target, request, options, &mut body);
         set_string_if_different(&mut body, "model", base);
         cap_max_output_tokens(&mut body, base, self.models());
         sanitize_gemini_request_thought_signatures(&mut body, "contents");
@@ -126,7 +139,22 @@ impl GeminiExecutor {
         }
         let headers = build_headers(auth, options, &Credential::ApiKey(api_key(auth)), NAME)?;
         let client = self.clients.get(&auth.proxy_url);
-        let response = post(&client, &url, headers, &body, NAME).await?;
+        let response = post(
+            &client,
+            &url,
+            headers,
+            &body,
+            NAME,
+            Attempt::new(
+                options,
+                AttemptKind::Execute,
+                PROVIDER,
+                base_model(&request.model),
+                &Format::GEMINI,
+                auth,
+            ),
+        )
+        .await?;
         let (headers, data) = read_answer(response).await?;
         translate_answer(request, options, &body, headers, data)
     }
@@ -149,7 +177,22 @@ impl GeminiExecutor {
         let headers = build_headers(auth, options, &Credential::ApiKey(api_key(auth)), NAME)?;
         let secrets = sent_secrets(&headers);
         let client = self.clients.get(&auth.proxy_url);
-        let response = post(&client, &url, headers, &body, NAME).await?;
+        let response = post(
+            &client,
+            &url,
+            headers,
+            &body,
+            NAME,
+            Attempt::new(
+                options,
+                AttemptKind::Stream,
+                PROVIDER,
+                base_model(&request.model),
+                &Format::GEMINI,
+                auth,
+            ),
+        )
+        .await?;
         Ok(translate_stream(
             response,
             request,
@@ -180,7 +223,22 @@ impl GeminiExecutor {
         let url = model_url(auth, base, "countTokens");
         let headers = build_headers(auth, options, &Credential::ApiKey(api_key(auth)), NAME)?;
         let client = self.clients.get(&auth.proxy_url);
-        let response = post(&client, &url, headers, &body, NAME).await?;
+        let response = post(
+            &client,
+            &url,
+            headers,
+            &body,
+            NAME,
+            Attempt::new(
+                options,
+                AttemptKind::CountTokens,
+                PROVIDER,
+                base_model(&request.model),
+                &Format::GEMINI,
+                auth,
+            ),
+        )
+        .await?;
         let (headers, data) = read_answer(response).await?;
         Ok(translate_count(options, headers, data))
     }

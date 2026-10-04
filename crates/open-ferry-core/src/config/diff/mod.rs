@@ -15,6 +15,9 @@
 
 use super::Config;
 
+#[cfg(test)]
+mod tests;
+
 /// The changes from `old` to `new`, one readable line each, with secrets
 /// left out (upstream's `BuildConfigChangeDetails`).
 pub fn build_change_details(old: &Config, new: &Config) -> Vec<String> {

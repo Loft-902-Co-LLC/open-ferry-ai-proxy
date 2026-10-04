@@ -34,10 +34,13 @@
 //! - A dropped call or stream stops at once; upstream checks its context.
 //! - An error body that quotes the credential's key or token has it
 //!   redacted (see the crate's `redact` module).
-//! - Usage reporting, request logging, payload config rules, the Home-service
-//!   refresh, OAuth cancellation errors, API-key model compatibility and
-//!   upstream model renaming aren't ported. Codex clients' requests are
-//!   readied for translation as the Codex `compat` module says.
+//! - Usage reporting and request logging are left to the call's taps,
+//!   which each send tells of its attempt (see the crate's `observe_send`
+//!   module), and payload rules to [`crate::payload`].
+//! - The Home-service refresh, OAuth cancellation errors, API-key model
+//!   compatibility and upstream model renaming aren't ported. Codex
+//!   clients' requests are readied for translation as the Codex `compat`
+//!   module says.
 //! - Refresh returns a copy of the credential with new metadata; the
 //!   credential manager saves it.
 
@@ -47,12 +50,13 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures_util::FutureExt as _;
 use futures_util::future::BoxFuture;
-use http::HeaderMap;
+use http::{HeaderMap, Method};
 use open_ferry_core::auth::Auth;
 use open_ferry_core::config::Config;
 use open_ferry_core::exec::{ExecError, Format, Options, Request, Response, StreamResponse};
 use open_ferry_core::executor::ProviderExecutor;
 use open_ferry_core::models::ModelCatalog;
+use open_ferry_core::observe::AttemptKind;
 use open_ferry_translate::registry::{Registry, ResponseContext};
 use serde_json::{Map, Value};
 
@@ -73,6 +77,8 @@ use super::token::{CREDENTIAL_TYPE, now_rfc3339};
 use super::usage::ensure_responses_usage_details;
 use crate::codex::compat;
 use crate::json::{self, Body};
+use crate::observe_send::{self, Attempt};
+use crate::payload;
 use crate::redact;
 
 /// The `alt` of a `/responses/compact` call.
@@ -173,7 +179,18 @@ impl ClaudeExecutor {
     ) -> Result<Prepared, ExecError> {
         let config = self.config.as_deref();
         let mut body = translate_request(config, request, options, base_model, upstream_stream)?;
+        // P3 WP-D folds this integer pass into `payload::apply`.
         compat::after_translation(options, &mut body);
+        // Upstream tracks paths only for its cloaking, which isn't ported.
+        let target = payload::Target {
+            executor: "claude",
+            protocol: &Format::CLAUDE,
+            model: base_model,
+            root: "",
+            stream: upstream_stream,
+            tracked: &[],
+        };
+        payload::apply(config, &target, request, options, &mut body);
         ensure_model_max_tokens(&mut body, base_model, self.models.as_deref());
         disable_thinking_if_tool_choice_forced(&mut body);
         normalize_sampling(&mut body);
@@ -195,22 +212,34 @@ impl ClaudeExecutor {
         })
     }
 
-    /// Posts `body`.
+    /// Posts `body`, telling the call's taps.
     async fn send(
         &self,
         auth: &Auth,
         url: &str,
         headers: HeaderMap,
         body: &Value,
+        attempt: Attempt<'_>,
     ) -> Result<reqwest::Response, ExecError> {
-        self.clients
+        let body = Bytes::from(body.to_string());
+        let tap = attempt.observation.map(|observation| {
+            let secret = credentials(auth).0;
+            observe_send::announce(
+                observation,
+                &attempt.request(&Method::POST, url, &headers, &body, &[&secret]),
+            )
+        });
+        let mut response = self
+            .clients
             .get(&auth.proxy_url)
             .post(url)
             .headers(headers)
-            .body(body.to_string())
+            .body(body)
             .send()
             .await
-            .map_err(|error| plain_error(error_chain(&error.without_url())))
+            .map_err(|error| plain_error(error_chain(&error.without_url())))?;
+        observe_send::response(tap, &mut response);
+        Ok(response)
     }
 
     /// Claude's answer if its status is a success and its body is plain;
@@ -271,7 +300,20 @@ impl ClaudeExecutor {
         let fast = is_fast(&target, &headers, &prepared.upstream);
 
         let response = self
-            .send(auth, &url, headers, &prepared.upstream)
+            .send(
+                auth,
+                &url,
+                headers,
+                &prepared.upstream,
+                Attempt::new(
+                    options,
+                    AttemptKind::Execute,
+                    "claude",
+                    base_model,
+                    &Format::CLAUDE,
+                    auth,
+                ),
+            )
             .await
             .map_err(|error| wrap_fast(fast, 0, error))?;
         let response = self.check(response, fast, &target.key).await?;
@@ -321,7 +363,20 @@ impl ClaudeExecutor {
         let fast = is_fast(&target, &headers, &prepared.upstream);
 
         let response = self
-            .send(auth, &url, headers, &prepared.upstream)
+            .send(
+                auth,
+                &url,
+                headers,
+                &prepared.upstream,
+                Attempt::new(
+                    options,
+                    AttemptKind::Stream,
+                    "claude",
+                    base_model,
+                    &Format::CLAUDE,
+                    auth,
+                ),
+            )
             .await
             .map_err(|error| wrap_fast(fast, 0, error))?;
         let response = self.check(response, fast, &target.key).await?;
@@ -394,7 +449,22 @@ impl ClaudeExecutor {
             attributes: &auth.attributes,
         });
 
-        let response = self.send(auth, &url, headers, &body).await?;
+        let response = self
+            .send(
+                auth,
+                &url,
+                headers,
+                &body,
+                Attempt::new(
+                    options,
+                    AttemptKind::CountTokens,
+                    "claude",
+                    base_model,
+                    &Format::CLAUDE,
+                    auth,
+                ),
+            )
+            .await?;
         let response = self.check(response, false, &target.key).await?;
         let response_headers = response.headers().clone();
         let data = read_body(response, MAX_LINE)

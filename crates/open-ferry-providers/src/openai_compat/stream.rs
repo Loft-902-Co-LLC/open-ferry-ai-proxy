@@ -21,7 +21,9 @@
 //!
 //! Deviations from upstream:
 //! - Dropping the stream stops reading, where upstream watches its context.
-//! - Usage reporting and request logging aren't ported.
+//! - Usage reporting and request logging are left to the call's taps,
+//!   which see each chunk as it is read (see the crate's `observe_send`
+//!   module).
 //! - Data that Go's `json.Valid` accepts but `serde_json` can't read
 //!   (invalid UTF-8, very deep nesting) is checked for an error as if it had
 //!   no fields; see [`super::status`].

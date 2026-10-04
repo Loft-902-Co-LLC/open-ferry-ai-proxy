@@ -22,7 +22,9 @@
 //!
 //! Deviations from upstream:
 //! - The metadata upstream keeps in a map is a typed [`Metadata`], without the
-//!   session-affinity and usage-logging keys, which aren't ported.
+//!   session-affinity keys, which aren't ported. What the request log and
+//!   the usage statistics read of the request, upstream's context values
+//!   and usage keys, is the call's [`Options::observation`].
 //! - Errors are one type, [`ExecError`], where upstream checks an error for
 //!   optional methods (`StatusCode`, `Headers`, `IsTerminalAuth` and so on).
 //!   An executor's error carries no code of its own (upstream's `Error.Code`),
@@ -45,6 +47,8 @@ use bytes::Bytes;
 use futures_core::future::BoxFuture;
 use futures_core::stream::BoxStream;
 use http::HeaderMap;
+
+use crate::observe::Observation;
 
 pub use error::{ErrorKind, ExecError, TransportFault, WsClose};
 pub use http_call::{AlphaSearch, HttpCall, HttpReply, HttpTarget};
@@ -84,6 +88,10 @@ pub struct Options {
     pub downstream_websocket: bool,
     /// Hints for credential selection.
     pub metadata: Metadata,
+    /// What the call's observers see: the request's context, and the taps
+    /// that see its upstream traffic. `None` for a call no client request
+    /// made.
+    pub observation: Option<Arc<Observation>>,
 }
 
 impl Options {
@@ -100,7 +108,15 @@ impl Options {
             original_request: Bytes::new(),
             downstream_websocket: false,
             metadata: Metadata::default(),
+            observation: None,
         }
+    }
+
+    /// The call's observation when any tap sees it.
+    pub fn tapped(&self) -> Option<&Arc<Observation>> {
+        self.observation
+            .as_ref()
+            .filter(|observation| observation.is_tapped())
     }
 }
 

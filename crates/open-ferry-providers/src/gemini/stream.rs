@@ -21,7 +21,9 @@
 //!   before it is read, so neither reaches the client in an error the stream
 //!   carries, or anywhere else; see [`crate::redact`].
 //! - Dropping the stream stops reading, where upstream watches its context.
-//! - Usage reporting and request logging aren't ported.
+//! - Usage reporting and request logging are left to the call's taps,
+//!   which see each chunk as it is read (see the crate's `observe_send`
+//!   module).
 
 use std::borrow::Cow;
 use std::collections::VecDeque;

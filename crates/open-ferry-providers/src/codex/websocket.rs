@@ -38,8 +38,12 @@
 //!   `UpstreamDisconnectChan`, response steering (the duplex reader) and
 //!   `CloseCodexWebsocketSessionsForAuthID` aren't ported, as the server
 //!   uses none of them.
-//! - Usage reporting, request logging and the image generation tool aren't
-//!   ported.
+//! - Usage reporting and request logging are left to the call's taps: they
+//!   are told of the `response.create` message before the connection is
+//!   made, with no answer head, then of each message read (see the crate's
+//!   `observe_send` module). A send tried again on a new connection isn't
+//!   told again, and connection errors are only the call's; upstream
+//!   records each. The image generation tool isn't added.
 
 mod dial;
 mod errors;
