@@ -32,12 +32,12 @@
 //!   takes a Responses WebSocket's execution session, a session it derives
 //!   from the request's metadata, the Claude Code prompt cache, or a new
 //!   UUID for `grok-composer-` models.
-//! - Grok's CLI identity headers (`X-XAI-Token-Auth`, `x-grok-client-*`,
-//!   `x-authenticateresponse`) and its `xai-grok-workspace` user agent are
-//!   never sent, and a `header:` attribute can't set them, nor an
-//!   `x-grok-conv-id` other than the client's (see [`build_headers`]); nor,
-//!   as for every executor, a client identity header (see
-//!   [`crate::custom_headers`]).
+//! - Grok's CLI identity headers and its `xai-grok-workspace` user agent
+//!   are never sent. `X-XAI-Token-Auth` and `x-grok-client-*` are client
+//!   identity headers, which no `header:` attribute may set for any
+//!   executor (see [`crate::custom_headers`]); nor may one set the chat
+//!   proxy's `x-authenticateresponse` or an `x-grok-conv-id` other than the
+//!   client's (see [`build_headers`]).
 //! - The request says `User-Agent: open-ferry/<version>` where Go's says
 //!   `Go-http-client/1.1`, and sends no `Connection: Keep-Alive`.
 //! - Image and video requests (`openai-image`, `openai-video`) are refused
@@ -96,11 +96,10 @@ const MEDIA_SOURCES: [&str; 2] = ["openai-image", "openai-video"];
 /// The header that names the conversation for xAI's prompt cache.
 pub(crate) const CONV_ID_HEADER: &str = "x-grok-conv-id";
 
-/// Grok CLI identity headers that are never sent.
-const FORBIDDEN_HEADERS: [&str; 2] = ["x-xai-token-auth", "x-authenticateresponse"];
-
-/// The prefix of Grok CLI client headers, never sent.
-const FORBIDDEN_HEADER_PREFIX: &str = "x-grok-client-";
+/// The Grok CLI chat proxy's answer to its challenge, never sent. The CLI's
+/// other identity headers are dropped for every executor
+/// ([`custom_headers::is_identity_header`]).
+const AUTHENTICATE_RESPONSE_HEADER: &str = "x-authenticateresponse";
 
 /// Fields xAI's Responses API refuses, dropped from every request.
 const DROPPED_FIELDS: [&str; 4] = [
@@ -422,9 +421,10 @@ fn normalize_image_ref(value: &mut Value) {
 /// `event_stream` asks for SSE; `session_id` is the client's
 /// `prompt_cache_key`, or empty.
 ///
-/// After the credential's `header:` attributes, Grok's CLI identity headers
-/// are removed and `x-grok-conv-id` is set to the client's session alone,
-/// whatever an attribute said.
+/// The credential's `header:` attributes can't set a client identity header
+/// (as for every executor) or the chat proxy's `x-authenticateresponse`, and
+/// `x-grok-conv-id` is set to the client's session alone, whatever an
+/// attribute said.
 pub(crate) fn build_headers(
     auth: &Auth,
     client: &HeaderMap,
@@ -462,20 +462,13 @@ pub(crate) fn build_headers(
     Ok(headers)
 }
 
-/// Removes Grok's CLI identity headers, which a `header:` attribute may
-/// have set.
+/// Removes the chat proxy's `x-authenticateresponse`, which a `header:`
+/// attribute may have set.
 pub(crate) fn strip_forbidden_headers(headers: &mut HeaderMap) {
-    let forbidden: Vec<HeaderName> = headers
-        .keys()
-        .filter(|name| {
-            FORBIDDEN_HEADERS.contains(&name.as_str())
-                || name.as_str().starts_with(FORBIDDEN_HEADER_PREFIX)
-        })
-        .cloned()
-        .collect();
-    for name in forbidden {
-        tracing::warn!("xai: custom header {name:?} is a Grok CLI identity header; not sent");
-        headers.remove(&name);
+    if headers.remove(AUTHENTICATE_RESPONSE_HEADER).is_some() {
+        tracing::warn!(
+            "xai: custom header {AUTHENTICATE_RESPONSE_HEADER:?} is the Grok CLI chat proxy's; not sent"
+        );
     }
 }
 

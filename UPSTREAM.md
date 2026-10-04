@@ -161,8 +161,8 @@ Each ported file lists its deviations in its module docs. Most are byproducts of
 The xAI executor (`open-ferry-providers`' `xai` module) serves `xai-api-key` credentials over HTTP. It reuses the Codex executor's client, URL checks, secret redaction and `apply_patch` bridge, so like it:
 
 - Requests say `User-Agent: open-ferry/<version>`, follow redirects only within their origin, and fail before anything is sent when the URL holds an ASCII control character.
-- An error body or stream error that quotes a secret the request sent has it replaced with `[redacted]`.
-- A `header:` attribute can't set a client identity header (see `custom_headers`).
+- An error body or stream error that quotes a secret the request sent has it replaced with `[redacted]`, if the secret is of eight bytes or more, as every client error does (see `Policy::Client`).
+- A `header:` attribute can't set a client identity header, Grok's CLI `X-XAI-Token-Auth` and `x-grok-client-*` among them (see `custom_headers`), nor the chat proxy's `x-authenticateresponse`.
 
 Where it differs from upstream:
 

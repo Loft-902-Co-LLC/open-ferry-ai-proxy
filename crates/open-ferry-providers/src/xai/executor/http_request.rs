@@ -22,9 +22,9 @@
 //! - The URL is read as a WHATWG URL; one with an ASCII control character
 //!   fails before anything is sent.
 //! - An answer whose status isn't a success has every secret the request
-//!   sent redacted from its body, as a client's error is (see
-//!   [`observe_send::secrets`] and [`crate::redact`]). Upstream hands the
-//!   body on as it came.
+//!   sent, of eight bytes or more, redacted from its body, as every client
+//!   error is (see `Policy::Client`, [`observe_send::secrets`] and
+//!   [`crate::redact`]). Upstream hands the body on as it came.
 
 use bytes::Bytes;
 use http::HeaderName;
