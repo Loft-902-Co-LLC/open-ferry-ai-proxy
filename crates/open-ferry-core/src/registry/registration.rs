@@ -30,13 +30,12 @@
 //! The config settings involved come in a [`RegistrationRules`].
 //!
 //! Deviations from upstream:
-//! - Only Gemini, Vertex, Claude, Codex and OpenAI-compatible credentials
-//!   get models; a credential of any other provider is unregistered. Gemini
-//!   Interactions and xAI credentials get theirs only once their executors
-//!   are ported: until then those providers stay in `UNPORTED_PROVIDERS`,
-//!   which comes first. Meta's executor is ported, so its credentials get
-//!   models. Plugin models and Antigravity
-//!   capability probing aren't ported.
+//! - Only Gemini, Gemini Interactions, Vertex, Claude, Codex, Meta and
+//!   OpenAI-compatible credentials get models; a credential of any other
+//!   provider is unregistered. xAI credentials get theirs only once its
+//!   executor is ported: until then `xai` stays in `UNPORTED_PROVIDERS`,
+//!   which comes first. Plugin models and Antigravity capability probing
+//!   aren't ported.
 //! - xAI credentials don't get upstream's built-in image and video models
 //!   (`WithXAIBuiltins`): image and video generation aren't ported.
 //! - Upstream caches the OpenAI-compatible entries' models while it
