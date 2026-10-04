@@ -1831,7 +1831,7 @@ async fn manager_no_fork_alias_reconcile_exhausted_retry_on_epoch_mismatch_prese
     manager.register(active(ID, GEMINI)).expect("register auth");
 
     manager.mark_result(&rate_limited(ID, GEMINI, MODEL_B, MODEL_B, "429", MIN30));
-    let initial_gen = manager.lock().auths[ID].generation;
+    let initial_gen = manager.lock().auths[ID].auth.generation;
     let publishes = models.inner.published().len();
 
     models.shifting.store(true, Ordering::SeqCst);
@@ -1844,7 +1844,7 @@ async fn manager_no_fork_alias_reconcile_exhausted_retry_on_epoch_mismatch_prese
         state_b.is_some_and(|s| is_model_state_active_cooldown(s, clock.now())),
         "expected modelB to keep its cooldown after retry exhaustion, got {state_b:?}"
     );
-    let generation = manager.lock().auths[ID].generation;
+    let generation = manager.lock().auths[ID].auth.generation;
     assert!(
         generation >= initial_gen,
         "unexpected generation decrease: {generation} < {initial_gen}"

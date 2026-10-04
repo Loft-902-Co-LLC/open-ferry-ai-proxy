@@ -21,9 +21,8 @@
 //! Deviations from upstream:
 //! - Times are `Option`s, where upstream uses Go's zero time for "never".
 //! - `Debug` leaves out metadata and attribute values, which hold secrets.
-//! - Upstream's registration epoch, generation and plugin fields aren't
-//!   ported; nor is `Runtime`, nor `Storage`: a record's tokens live in its
-//!   metadata.
+//! - Upstream's plugin fields aren't ported; nor is `Runtime`, nor
+//!   `Storage`: a record's tokens live in its metadata.
 //! - Upstream's store takes a context and tells a login apart from a
 //!   runtime save by a flag on it; here a login calls
 //!   [`AuthStore::save_new`].
@@ -149,6 +148,15 @@ pub struct Auth {
     /// Unique across restarts. For a credential file, its path relative to
     /// the auth directory.
     pub id: String,
+    /// Which registration of the ID this is: the credential manager bumps
+    /// it each time the ID is registered again (upstream's
+    /// `RegistrationEpoch`). Zero on a record the manager didn't store,
+    /// such as one just read from a file.
+    pub registration_epoch: u64,
+    /// How many times this registration has changed: the credential manager
+    /// bumps it with each change it makes, token refreshes included
+    /// (upstream's `Generation`). Zero on a record the manager didn't store.
+    pub generation: u64,
     /// The provider, such as `codex` or `claude`.
     pub provider: String,
     /// Namespaces the credential's models, as in `team-a/gpt-5`, or empty.
@@ -214,6 +222,8 @@ impl fmt::Debug for Auth {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Auth")
             .field("id", &self.id)
+            .field("registration_epoch", &self.registration_epoch)
+            .field("generation", &self.generation)
             .field("provider", &self.provider)
             .field("prefix", &self.prefix)
             .field("file_name", &self.file_name)

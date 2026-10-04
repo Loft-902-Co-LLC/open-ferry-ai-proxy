@@ -91,7 +91,7 @@ pub use types::{
     ThinkingSupport, TlsConfig, VertexCompatKey, VertexCompatModel,
 };
 pub(crate) use types::{Redacted, RedactedUrl};
-pub use watcher::{AuthFile, ConfigWatcher, WatchError, WatchEvent};
+pub use watcher::{AuthFile, ConfigWatcher, WatchError, WatchEvent, next_revision};
 
 /// What kind of problem stopped a config from loading.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

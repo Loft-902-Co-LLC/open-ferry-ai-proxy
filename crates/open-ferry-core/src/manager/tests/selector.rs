@@ -154,9 +154,11 @@ impl Pool {
         self.auths.insert(
             auth.id.clone(),
             Entry {
-                auth: Arc::new(auth),
-                epoch: 1,
-                generation: 1,
+                auth: Arc::new(Auth {
+                    registration_epoch: 1,
+                    generation: 1,
+                    ..auth
+                }),
                 refresh_failures: 0,
             },
         );

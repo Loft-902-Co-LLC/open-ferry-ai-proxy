@@ -36,6 +36,8 @@ pub(crate) enum Json {
     Null,
     Bool(bool),
     Int(i64),
+    /// A `uint64`.
+    Uint(u64),
     /// A string.
     Str(String),
     /// A Go string, which may hold bytes that aren't UTF-8.
@@ -74,6 +76,9 @@ impl Json {
             Self::Null => out.push_str("null"),
             Self::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
             Self::Int(n) => {
+                let _ = write!(out, "{n}");
+            }
+            Self::Uint(n) => {
                 let _ = write!(out, "{n}");
             }
             Self::Str(s) => write_string(out, s.as_bytes()),

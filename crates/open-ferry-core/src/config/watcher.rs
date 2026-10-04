@@ -25,6 +25,12 @@
 //! non-empty one is remembered, so later events with the same contents are
 //! skipped.
 //!
+//! Each auth event carries a revision from [`next_revision`], taken before
+//! the file was read or found gone. The service takes its revisions for the
+//! management API's changes from the same counter once they are saved, and
+//! skips an event older than a change it has applied to the same
+//! credential, as upstream's service skips a stale revision.
+//!
 //! The watcher stops when the [`ConfigWatcher`] is dropped or the receiver
 //! is closed. When the channel is full it waits for the consumer, and still
 //! stops if the [`ConfigWatcher`] is dropped meanwhile.
@@ -52,12 +58,17 @@
 //! - Paths are made absolute before watching, as the file watcher reports
 //!   them that way, and events reported under a watched directory's canonical
 //!   path (macOS does this) are mapped back to the directory as given.
+//! - Revisions come from one counter for every credential, and an event's is
+//!   taken before the file is read or found gone. Upstream counts each
+//!   credential's revisions apart and stamps an update once it is built from
+//!   what was read, so a read made just before a management change was saved
+//!   could carry the newer revision, and undo the change.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self as std_mpsc, RecvTimeoutError};
 use std::time::{Duration, Instant};
 use std::{fmt, fs, thread};
@@ -93,7 +104,22 @@ const EVENT_CAPACITY: usize = 64;
 /// How often a send to a full channel checks whether the watcher stopped.
 const FULL_CHANNEL_POLL: Duration = Duration::from_millis(10);
 
-/// A change to the config file or the auth directory.
+/// The last revision handed out by [`next_revision`].
+static LAST_REVISION: AtomicU64 = AtomicU64::new(0);
+
+/// A revision for a credential change: above every one handed out before,
+/// and never zero (upstream's `authRevisions` counters, made one counter for
+/// every credential). The watcher takes one for each auth event before it
+/// reads the file or finds it gone; take one for any other change once it
+/// is saved, so that a change read before the save has the lower revision.
+pub fn next_revision() -> u64 {
+    LAST_REVISION
+        .fetch_add(1, Ordering::SeqCst)
+        .saturating_add(1)
+}
+
+/// A change to the config file or the auth directory. An auth event's
+/// number is its revision (see [`next_revision`]).
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum WatchEvent {
@@ -103,13 +129,13 @@ pub enum WatchEvent {
     /// The config file changed but didn't load. Keep the current config.
     ConfigInvalid(ConfigError),
     /// An auth file appeared, or was there at start. Load it.
-    AuthAdded(AuthFile),
+    AuthAdded(AuthFile, u64),
     /// A known auth file has new contents. Load it again.
-    AuthChanged(AuthFile),
+    AuthChanged(AuthFile, u64),
     /// A known auth file was removed. Drop what was loaded from it. Files
     /// that never parsed are known too, so this may name a file that was
     /// never added.
-    AuthRemoved(PathBuf),
+    AuthRemoved(PathBuf, u64),
 }
 
 /// An auth file and the contents the watcher read and checked.
@@ -358,6 +384,7 @@ impl WatchState {
             return Step::Nothing;
         }
         thread::sleep(REPLACE_CHECK_DELAY);
+        let revision = next_revision();
         let mut exists = fs::metadata(path).is_ok();
         if !exists && self.auth_hashes.contains_key(&key) {
             for _ in 0..REPLACE_RETRIES {
@@ -376,12 +403,13 @@ impl WatchState {
             return Step::Nothing;
         }
         info!(file = %file_name(path), "auth file removed");
-        Step::Send(WatchEvent::AuthRemoved(path.to_path_buf()))
+        Step::Send(WatchEvent::AuthRemoved(path.to_path_buf(), revision))
     }
 
     /// Upstream's `addOrUpdateClient`, with its `authFileUnchanged` check
     /// folded in so the file is read once.
     fn add_or_update(&mut self, path: &Path, key: String) -> Step {
+        let revision = next_revision();
         let data = match read_capped(path) {
             Ok(data) => data,
             Err(error) => {
@@ -409,9 +437,9 @@ impl WatchState {
             data: data.into(),
         };
         Step::Send(if known {
-            WatchEvent::AuthChanged(file)
+            WatchEvent::AuthChanged(file, revision)
         } else {
-            WatchEvent::AuthAdded(file)
+            WatchEvent::AuthAdded(file, revision)
         })
     }
 
@@ -491,16 +519,20 @@ impl WatchState {
         let mut events = Vec::new();
         for name in names {
             let path = self.auth_dir.join(&name);
+            let revision = next_revision();
             let data = match read_capped(&path) {
                 Ok(data) if !data.is_empty() => data,
                 _ => continue,
             };
             self.auth_hashes.insert(path_key(&path), sha256(&data));
             match check_auth_json(&data) {
-                Ok(()) => events.push(WatchEvent::AuthAdded(AuthFile {
-                    path,
-                    data: data.into(),
-                })),
+                Ok(()) => events.push(WatchEvent::AuthAdded(
+                    AuthFile {
+                        path,
+                        data: data.into(),
+                    },
+                    revision,
+                )),
                 Err(reason) => {
                     warn!(file = %name.to_string_lossy(), %reason, "skipping auth file");
                 }
@@ -741,14 +773,44 @@ mod tests {
         }
     }
 
-    /// The added event for `path` with its current contents.
+    /// The added event for `path` with its current contents, unstamped.
     fn added(path: &Path) -> WatchEvent {
-        WatchEvent::AuthAdded(auth_file(path))
+        WatchEvent::AuthAdded(auth_file(path), 0)
     }
 
-    /// The changed event for `path` with its current contents.
+    /// The changed event for `path` with its current contents, unstamped.
     fn changed(path: &Path) -> WatchEvent {
-        WatchEvent::AuthChanged(auth_file(path))
+        WatchEvent::AuthChanged(auth_file(path), 0)
+    }
+
+    /// `event` with its revision, if it has one, set to zero.
+    fn unstamped(event: WatchEvent) -> WatchEvent {
+        match event {
+            WatchEvent::AuthAdded(file, _) => WatchEvent::AuthAdded(file, 0),
+            WatchEvent::AuthChanged(file, _) => WatchEvent::AuthChanged(file, 0),
+            WatchEvent::AuthRemoved(path, _) => WatchEvent::AuthRemoved(path, 0),
+            other => other,
+        }
+    }
+
+    /// `step` with its event unstamped.
+    fn sent(step: Step) -> Step {
+        match step {
+            Step::Send(event) => Step::Send(unstamped(event)),
+            other => other,
+        }
+    }
+
+    /// The revision of an auth event.
+    fn revision_of(step: &Step) -> u64 {
+        match step {
+            Step::Send(
+                WatchEvent::AuthAdded(_, revision)
+                | WatchEvent::AuthChanged(_, revision)
+                | WatchEvent::AuthRemoved(_, revision),
+            ) => *revision,
+            other => panic!("expected an auth event, got {other:?}"),
+        }
     }
 
     fn config_of(event: Option<WatchEvent>) -> Arc<Config> {
@@ -838,7 +900,7 @@ mod tests {
         let contents = r#"{"type":"demo","api_key":"k"}"#;
         let path = fixture.write_auth("sample.json", contents);
         assert_eq!(
-            state.add_or_update(&path, path_key(&path)),
+            sent(state.add_or_update(&path, path_key(&path))),
             Step::Send(added(&path))
         );
         assert_eq!(known(&state, &path), Some(sha256(contents.as_bytes())));
@@ -847,9 +909,40 @@ mod tests {
         assert_eq!(state.add_or_update(&path, path_key(&path)), Step::Nothing);
         fs::write(&path, r#"{"type":"demo","api_key":"k2"}"#).expect("rewrite");
         assert_eq!(
-            state.add_or_update(&path, path_key(&path)),
+            sent(state.add_or_update(&path, path_key(&path))),
             Step::Send(changed(&path))
         );
+    }
+
+    /// Not upstream's: each auth event takes the next revision, in the
+    /// order the watcher handled them, from the counter the service's
+    /// credential sync shares.
+    #[test]
+    fn auth_events_take_rising_revisions() {
+        let fixture = Fixture::new();
+        let mut state = fixture.state();
+        let path = fixture.write_auth("a.json", DEMO);
+        let before = next_revision();
+        let add = state.handle_event(&path, Op::Write, Instant::now());
+        let between = next_revision();
+        fs::write(&path, r#"{"type":"demo","v":2}"#).expect("rewrite");
+        let change = state.handle_event(&path, Op::Write, Instant::now());
+        fs::remove_file(&path).expect("remove");
+        let remove = state.handle_event(&path, Op::Remove, Instant::now());
+        let after = next_revision();
+        let revisions = [&add, &change, &remove].map(revision_of);
+        assert!(before < revisions[0], "{before} {revisions:?}");
+        assert!(revisions[0] < between && between < revisions[1]);
+        assert!(revisions[1] < revisions[2] && revisions[2] < after);
+
+        let other = fixture.write_auth("b.json", DEMO);
+        let events = fixture.state().initial_scan();
+        assert_eq!(events.len(), 1);
+        let Some(WatchEvent::AuthAdded(file, revision)) = events.first() else {
+            panic!("expected an added event, got {events:?}");
+        };
+        assert_eq!(file.path, other);
+        assert!(after < *revision);
     }
 
     #[test]
@@ -872,7 +965,7 @@ mod tests {
         // `null` decodes into upstream's auth record, so it counts.
         let null = fixture.write_auth("null.json", "null");
         assert_eq!(
-            state.add_or_update(&null, path_key(&null)),
+            sent(state.add_or_update(&null, path_key(&null))),
             Step::Send(added(&null))
         );
     }
@@ -940,7 +1033,8 @@ mod tests {
         fs::create_dir(fixture.auth("sub.json")).expect("create dir");
 
         let mut state = fixture.state();
-        assert_eq!(state.initial_scan(), [added(&one), added(&upper)]);
+        let events: Vec<_> = state.initial_scan().into_iter().map(unstamped).collect();
+        assert_eq!(events, [added(&one), added(&upper)]);
         assert_eq!(state.auth_hashes.len(), 3);
         assert!(known(&state, &broken).is_some());
 
@@ -951,7 +1045,7 @@ mod tests {
         );
         fs::write(&broken, DEMO).expect("fix auth file");
         assert_eq!(
-            state.handle_event(&broken, Op::Write, Instant::now()),
+            sent(state.handle_event(&broken, Op::Write, Instant::now())),
             Step::Send(changed(&broken))
         );
     }
@@ -1013,7 +1107,7 @@ mod tests {
         let mut state = fixture.state();
         let path = fixture.write_auth("a.json", DEMO);
         assert_eq!(
-            state.handle_event(&path, Op::Write, Instant::now()),
+            sent(state.handle_event(&path, Op::Write, Instant::now())),
             Step::Send(added(&path))
         );
         assert!(known(&state, &path).is_some());
@@ -1027,7 +1121,7 @@ mod tests {
         let step = state.handle_event(&path, Op::Write, Instant::now());
         // Upstream lower-cases paths only on Windows before the suffix check.
         if cfg!(windows) {
-            assert_eq!(step, Step::Send(added(&path)));
+            assert_eq!(sent(step), Step::Send(added(&path)));
         } else {
             assert_eq!(step, Step::Nothing);
         }
@@ -1040,8 +1134,8 @@ mod tests {
         let path = fixture.auth("remove.json");
         remember(&mut state, &path, DEMO);
         assert_eq!(
-            state.handle_event(&path, Op::Remove, Instant::now()),
-            Step::Send(WatchEvent::AuthRemoved(path.clone()))
+            sent(state.handle_event(&path, Op::Remove, Instant::now())),
+            Step::Send(WatchEvent::AuthRemoved(path.clone(), 0))
         );
         assert_eq!(known(&state, &path), None);
     }
@@ -1079,7 +1173,7 @@ mod tests {
         let path = fixture.write_auth("change.json", new);
         remember(&mut state, &path, r#"{"type":"demo","v":1}"#);
         assert_eq!(
-            state.handle_event(&path, Op::Rename, Instant::now()),
+            sent(state.handle_event(&path, Op::Rename, Instant::now())),
             Step::Send(changed(&path))
         );
         assert_eq!(known(&state, &path), Some(sha256(new.as_bytes())));
@@ -1121,7 +1215,7 @@ mod tests {
             .join()
             .expect("writer thread")
             .expect("write replacement");
-        assert_eq!(step, Step::Send(changed(&path)));
+        assert_eq!(sent(step), Step::Send(changed(&path)));
         assert_eq!(known(&state, &path), Some(sha256(new.as_bytes())));
     }
 
@@ -1132,8 +1226,8 @@ mod tests {
         let path = fixture.auth("known.json");
         remember(&mut state, &path, DEMO);
         assert_eq!(
-            state.handle_event(&path, Op::Rename, Instant::now()),
-            Step::Send(WatchEvent::AuthRemoved(path.clone()))
+            sent(state.handle_event(&path, Op::Rename, Instant::now())),
+            Step::Send(WatchEvent::AuthRemoved(path.clone(), 0))
         );
         assert_eq!(known(&state, &path), None);
     }
@@ -1200,7 +1294,7 @@ mod tests {
                 &AtomicBool::new(false),
             )
         });
-        assert_eq!(receiver.blocking_recv(), Some(added(&auth)));
+        assert_eq!(receiver.blocking_recv().map(unstamped), Some(added(&auth)));
 
         fixture.write_config("port: 7\n");
         let write = EventKind::Modify(ModifyKind::Any);
@@ -1253,7 +1347,7 @@ mod tests {
         let step = state.add_or_update(&path, path_key(&path));
         // A write that doesn't parse lands before the consumer reads.
         fs::write(&path, "{not json").expect("rewrite");
-        let Step::Send(WatchEvent::AuthAdded(file)) = step else {
+        let Step::Send(WatchEvent::AuthAdded(file, _)) = step else {
             panic!("expected an added event, got {step:?}");
         };
         assert_eq!(&*file.data, valid.as_bytes());
@@ -1270,7 +1364,7 @@ mod tests {
         let path = fixture.auth("bad.json");
         fs::write(&path, &data).expect("write");
         let step = state.add_or_update(&path, path_key(&path));
-        let Step::Send(WatchEvent::AuthAdded(file)) = step else {
+        let Step::Send(WatchEvent::AuthAdded(file, _)) = step else {
             panic!("expected an added event, got {step:?}");
         };
         assert_eq!(&*file.data, &data[..]);
@@ -1357,9 +1451,9 @@ mod tests {
 
     fn key_of(event: &WatchEvent) -> (&'static str, String) {
         match event {
-            WatchEvent::AuthAdded(file) => ("added", path_key(&file.path)),
-            WatchEvent::AuthChanged(file) => ("changed", path_key(&file.path)),
-            WatchEvent::AuthRemoved(path) => ("removed", path_key(path)),
+            WatchEvent::AuthAdded(file, _) => ("added", path_key(&file.path)),
+            WatchEvent::AuthChanged(file, _) => ("changed", path_key(&file.path)),
+            WatchEvent::AuthRemoved(path, _) => ("removed", path_key(path)),
             WatchEvent::ConfigChanged(_) => ("config", String::new()),
             WatchEvent::ConfigInvalid(_) => ("invalid", String::new()),
         }

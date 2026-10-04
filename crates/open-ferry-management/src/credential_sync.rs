@@ -16,8 +16,14 @@
 //! [`CredentialSync::file_removed`] once the file is written or removed;
 //! one that changes a credential without writing its file itself, such as
 //! through [`Manager::update`](open_ferry_core::manager::Manager), calls
-//! [`CredentialSync::upsert`]. The watcher reports the same change again a
-//! moment later, which changes nothing more.
+//! [`CredentialSync::upsert`] with the credential the update returned.
+//!
+//! The service orders a change against the watcher's reports by a revision
+//! it takes when the call is made, as upstream's hook takes one once the
+//! change is saved. So call once the change is saved, while still holding
+//! the credential lock, and await the future once it is released: the
+//! watcher's report of the file as it was before is then skipped, and so is
+//! an older change to the same credential.
 //!
 //! When the service has stopped, every call fails with
 //! [`SyncError::Stopped`], which answers 503. Handlers don't hold the

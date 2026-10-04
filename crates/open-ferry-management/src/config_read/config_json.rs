@@ -69,6 +69,7 @@ fn is_empty(value: &Json) -> bool {
         Json::Null => true,
         Json::Bool(b) => !b,
         Json::Int(n) => *n == 0,
+        Json::Uint(n) => *n == 0,
         Json::Str(s) => s.is_empty(),
         Json::Bytes(bytes) => bytes.is_empty(),
         Json::Array(items) => items.is_empty(),

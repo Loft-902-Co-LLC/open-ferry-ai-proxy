@@ -626,7 +626,7 @@ impl Manager {
                 next_refresh_check_at(now, &entry.auth, lead),
                 should_refresh(&entry.auth, lead, now),
                 executor.is_some(),
-                entry.epoch,
+                entry.auth.registration_epoch,
             )
         };
         let Some(next) = next else {
@@ -671,7 +671,7 @@ impl Manager {
             let mut guard = self.lock();
             let state = &mut *guard;
             let entry = state.auths.get_mut(id)?;
-            if entry.epoch != epoch
+            if entry.auth.registration_epoch != epoch
                 || has_unauthorized_auth_failure(&entry.auth)
                 || has_disabled_invalid_grant_failure(&entry.auth)
             {
@@ -692,7 +692,7 @@ impl Manager {
             let auth = Arc::make_mut(&mut entry.auth);
             auth.next_refresh_after = Some(job.pending_until);
             auth.updated_at = Some(now);
-            entry.generation = entry.generation.saturating_add(1);
+            auth.generation = auth.generation.saturating_add(1);
             job
         };
         self.queue_refresh_reschedule(id);
@@ -711,7 +711,7 @@ impl Manager {
         let same_epoch = state
             .auths
             .get(&job.id)
-            .is_some_and(|entry| entry.epoch == job.epoch);
+            .is_some_and(|entry| entry.auth.registration_epoch == job.epoch);
         match state.refresh_jobs.get_mut(&job.id) {
             Some(stored) if stored.seq == job.seq && same_epoch => {
                 stored.running = true;
@@ -739,13 +739,13 @@ impl Manager {
             }
             state.refresh_jobs.remove(&job.id);
             if let Some(entry) = state.auths.get_mut(&job.id)
-                && entry.epoch == job.epoch
+                && entry.auth.registration_epoch == job.epoch
                 && entry.auth.next_refresh_after == Some(job.pending_until)
             {
                 let auth = Arc::make_mut(&mut entry.auth);
                 auth.next_refresh_after = retry_at;
                 auth.updated_at = Some(now);
-                entry.generation = entry.generation.saturating_add(1);
+                auth.generation = auth.generation.saturating_add(1);
             }
         }
         self.queue_refresh_reschedule(&job.id);
@@ -869,7 +869,7 @@ impl Manager {
             let Some(executor) = Self::executor_for(&state, &entry.auth) else {
                 return Err(ManagerError::Other("auth or executor not found".into()));
             };
-            (entry.auth.clone(), entry.epoch, executor)
+            (entry.auth.clone(), entry.auth.registration_epoch, executor)
         };
         if epoch != 0 && base_epoch != epoch {
             return Err(ManagerError::Other(
@@ -944,12 +944,12 @@ impl Manager {
             let Some(entry) = state.auths.get_mut(id) else {
                 return;
             };
-            if entry.epoch != base_epoch {
+            if entry.auth.registration_epoch != base_epoch {
                 return;
             }
-            entry.generation = entry.generation.saturating_add(1);
             let mut failures = entry.refresh_failures;
             let auth = Arc::make_mut(&mut entry.auth);
+            auth.generation = auth.generation.saturating_add(1);
             auth.updated_at = Some(now);
             auth.last_error = Some(refresh_error_from_error(ErrView::Exec(err)));
             let disabled = is_disabled(auth);

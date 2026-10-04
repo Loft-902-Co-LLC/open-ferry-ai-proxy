@@ -571,7 +571,7 @@ impl Harness {
         state
             .auths
             .get(id)
-            .map(|entry| (entry.epoch, entry.generation))
+            .map(|entry| (entry.auth.registration_epoch, entry.auth.generation))
             .unwrap_or_default()
     }
 

@@ -269,9 +269,11 @@ async fn status(State(state): State<ManagementState>, body: Body) -> Response {
         Ok(None) => return json::error(StatusCode::NOT_FOUND, "auth file not found"),
         Ok(Some(updated)) => updated,
     };
+    // Made under the lock, so the change takes its revision there.
+    let synced = store.sync.upsert(Auth::clone(&updated));
     drop(guard);
 
-    if let Err(error) = store.sync.upsert(Auth::clone(&updated)).await {
+    if let Err(error) = synced.await {
         tracing::error!(auth_id = %updated.id, "post-auth persist hook failed for status update: {error}");
         return json::error(
             error.status(),
@@ -756,9 +758,11 @@ async fn fields(State(state): State<ManagementState>, body: Body) -> Response {
         Ok(None) => return json::error(StatusCode::NOT_FOUND, "auth file not found"),
         Ok(Some(updated)) => updated,
     };
+    // Made under the lock, so the change takes its revision there.
+    let synced = store.sync.upsert(Auth::clone(&updated));
     drop(guard);
 
-    if let Err(error) = store.sync.upsert(Auth::clone(&updated)).await {
+    if let Err(error) = synced.await {
         return json::error(
             error.status(),
             &format!("post-auth persist hook failed: {error}"),

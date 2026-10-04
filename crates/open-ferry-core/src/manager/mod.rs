@@ -35,8 +35,7 @@
 //!   executor whether it reached the provider.
 //! - Empty metadata, attribute and state maps count as nil.
 //! - Maps are walked in key order, where Go's order is random.
-//! - The registration epoch, generation and refresh failure count live in
-//!   the manager, not on [`Auth`].
+//! - The refresh failure count lives in the manager, not on [`Auth`].
 //! - Saves go through the synchronous [`AuthStore`] after the state lock is
 //!   released, still ordered per credential by epoch and generation.
 //! - The executor's [`ProviderExecutor::refresh_lead`] replaces upstream's
@@ -102,14 +101,9 @@ pub(crate) type Clock = Arc<dyn Fn() -> Timestamp + Send + Sync>;
 
 /// A registered credential and its registration bookkeeping.
 pub(crate) struct Entry {
-    /// The current snapshot.
+    /// The current snapshot, carrying its registration epoch and
+    /// generation.
     pub(crate) auth: Arc<Auth>,
-    /// Which registration of the ID this is (upstream's
-    /// `RegistrationEpoch`).
-    pub(crate) epoch: u64,
-    /// How many times this registration has changed (upstream's
-    /// `Generation`).
-    pub(crate) generation: u64,
     /// Refreshes failed in a row with `invalid_grant` (upstream's
     /// `RefreshFailures`).
     pub(crate) refresh_failures: u32,

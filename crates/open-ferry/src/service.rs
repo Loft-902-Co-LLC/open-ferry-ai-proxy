@@ -34,9 +34,19 @@
 //!
 //! A credential the management API saves, changes or removes is applied
 //! by the same loop at once, as upstream's `runtimeAuthSyncHook` applies
-//! it, and the API waits until it is; the watcher's report of the same
-//! file a moment later changes nothing more. Once the loop has stopped,
-//! the API's changes fail, and it answers 503.
+//! it, and the API waits until it is. Once the loop has stopped, the API's
+//! changes fail, and it answers 503.
+//!
+//! Changes are ordered as upstream's service orders them. Each one carries
+//! a revision from one counter: the watcher takes its event's before it
+//! reads the file, and the API's change takes one once it is saved. A
+//! change at or below the last revision applied to its credential is
+//! skipped, so the watcher's report of a file read before the API saved it
+//! doesn't undo the API's change. A credential the API changed carries its
+//! generation (see [`Auth::generation`]), and is refused once the manager
+//! has changed the credential since, as by a token refresh, keeping the
+//! newer one. The API is told a skipped or refused change was applied, as
+//! upstream tells it.
 //!
 //! Credentials read from files or the config aren't saved back; the manager
 //! saves those it changes itself, as after a refresh.
@@ -83,7 +93,7 @@ use open_ferry_core::auth::synthesizer::{
     StableIdGenerator, SynthesisContext, synthesize_config_auths,
 };
 use open_ferry_core::auth::{Auth, FileStore, Status};
-use open_ferry_core::config::{AuthFile, Config, ConfigWatcher, WatchEvent};
+use open_ferry_core::config::{AuthFile, Config, ConfigWatcher, WatchEvent, next_revision};
 use open_ferry_core::manager::{Manager, Settings};
 use open_ferry_core::registry::{ModelRegistry, RegistrationRules};
 use open_ferry_management::{
@@ -268,6 +278,8 @@ enum Watching {
 /// applied.
 struct SyncRequest {
     change: SyncChange,
+    /// Taken once the change was saved (see [`next_revision`]).
+    revision: u64,
     applied: oneshot::Sender<()>,
 }
 
@@ -284,6 +296,10 @@ enum SyncChange {
 /// The service's [`CredentialSync`], which the management API holds: each
 /// change waits in a bounded queue for the service loop, which applies it
 /// and says so. The loop never waits for a change itself.
+///
+/// A change takes its revision when the call is made, before its future is
+/// polled: the API calls once the change is saved (upstream's
+/// `DispatchPersistedAuthUpdateWithRevision`).
 struct SyncSender {
     requests: mpsc::Sender<SyncRequest>,
 }
@@ -291,10 +307,15 @@ struct SyncSender {
 impl SyncSender {
     /// Queues `change` and waits until the loop has applied it; fails once
     /// the loop has stopped.
-    async fn send(&self, change: SyncChange) -> Result<(), SyncError> {
+    async fn send(&self, change: SyncChange, revision: u64) -> Result<(), SyncError> {
         let (applied, done) = oneshot::channel();
+        let request = SyncRequest {
+            change,
+            revision,
+            applied,
+        };
         self.requests
-            .send(SyncRequest { change, applied })
+            .send(request)
             .await
             .map_err(|_| SyncError::Stopped)?;
         done.await.map_err(|_| SyncError::Stopped)
@@ -303,15 +324,18 @@ impl SyncSender {
 
 impl CredentialSync for SyncSender {
     fn upsert(&self, auth: Auth) -> SyncFuture<'_> {
-        Box::pin(self.send(SyncChange::Upsert(Box::new(auth))))
+        let revision = next_revision();
+        Box::pin(self.send(SyncChange::Upsert(Box::new(auth)), revision))
     }
 
     fn file_written(&self, file: AuthFile) -> SyncFuture<'_> {
-        Box::pin(self.send(SyncChange::FileWritten(file)))
+        let revision = next_revision();
+        Box::pin(self.send(SyncChange::FileWritten(file), revision))
     }
 
     fn file_removed(&self, path: PathBuf) -> SyncFuture<'_> {
-        Box::pin(self.send(SyncChange::FileRemoved(path)))
+        let revision = next_revision();
+        Box::pin(self.send(SyncChange::FileRemoved(path), revision))
     }
 }
 
@@ -331,6 +355,10 @@ struct Service {
     config_auths: BTreeSet<String>,
     /// The credential ID registered for each auth file.
     file_auths: HashMap<PathBuf, String>,
+    /// The revision of the last change applied to each credential ID, kept
+    /// once it is unregistered so an older change can't bring it back
+    /// (upstream's `authRevisions`).
+    revisions: HashMap<String, u64>,
     /// The provider keys OpenAI-compatible executors are registered for.
     compat_executors: BTreeSet<String>,
     /// The management API's credential changes, waiting for the loop.
@@ -379,6 +407,7 @@ impl Service {
             watcher: None,
             config_auths: BTreeSet::new(),
             file_auths: HashMap::new(),
+            revisions: HashMap::new(),
             compat_executors: BTreeSet::new(),
             sync_requests,
         }
@@ -542,9 +571,26 @@ impl Service {
     /// its models (upstream's `prepareCoreAuthForModelRegistration` and
     /// `completeModelRegistrationForAuth`). Returns whether it is
     /// registered.
+    ///
+    /// A stale `auth` (see [`is_stale`]) leaves the registered credential as
+    /// it is, and registers its models again.
     fn upsert(&mut self, mut auth: Auth, rules: &RegistrationRules) -> bool {
         self.ensure_executor(&auth);
-        let (op, result) = match self.manager.get(&auth.id) {
+        let existing = self.manager.get(&auth.id);
+        if let Some(existing) = existing.as_deref()
+            && is_stale(existing, &auth)
+        {
+            tracing::debug!(
+                "skipping stale auth update for {}: incoming gen={}, existing gen={}",
+                auth.id,
+                auth.generation,
+                existing.generation
+            );
+            self.registry.register_auth(existing, rules);
+            self.manager.reconcile_registry_model_states(&existing.id);
+            return true;
+        }
+        let (op, result) = match existing {
             Some(existing) => {
                 auth.created_at = existing.created_at;
                 if !is_disabled(&existing) && !is_disabled(&auth) {
@@ -582,6 +628,31 @@ impl Service {
         true
     }
 
+    /// Whether a change to credential `id` at `revision` is newer than every
+    /// one applied to it, recording it if so (the revision check of
+    /// upstream's `handleAuthUpdates`). Revision zero is always applied.
+    fn claim_revision(&mut self, id: &str, revision: u64) -> bool {
+        if revision == 0 {
+            return true;
+        }
+        match self.revisions.get_mut(id) {
+            Some(last) if revision <= *last => {
+                tracing::debug!(
+                    "skipping stale auth update for {id}: rev {revision} <= processed {last}"
+                );
+                false
+            }
+            Some(last) => {
+                *last = revision;
+                true
+            }
+            None => {
+                self.revisions.insert(id.to_owned(), revision);
+                true
+            }
+        }
+    }
+
     /// Unregisters credential `id` (upstream's `applyCoreAuthRemoval`).
     fn remove(&self, id: &str) {
         self.registry.unregister_client(id);
@@ -595,23 +666,26 @@ impl Service {
             WatchEvent::ConfigInvalid(error) => {
                 tracing::error!("failed to reload config: {error}; keeping the current one");
             }
-            WatchEvent::AuthAdded(file) | WatchEvent::AuthChanged(file) => {
-                self.load_auth_file(&file)
+            WatchEvent::AuthAdded(file, revision) | WatchEvent::AuthChanged(file, revision) => {
+                self.load_auth_file(&file, revision);
             }
-            WatchEvent::AuthRemoved(path) => self.remove_auth_file(&path),
+            WatchEvent::AuthRemoved(path, revision) => self.remove_auth_file(&path, revision),
             _ => {}
         }
         Watching::Same
     }
 
-    /// Applies a credential change from the management API, then says so.
+    /// Applies a credential change from the management API, then says so,
+    /// even when it was skipped as stale.
     fn apply_sync(&mut self, request: SyncRequest) {
+        let revision = request.revision;
         match request.change {
             SyncChange::Upsert(auth) => {
                 let path = PathBuf::from(auth.attribute("path").unwrap_or_default());
                 let id = auth.id.clone();
                 let rules = self.rules();
-                if self.upsert(*auth, &rules)
+                if self.claim_revision(&id, revision)
+                    && self.upsert(*auth, &rules)
                     && !path.as_os_str().is_empty()
                     && let Some(previous) = self.file_auths.insert(path, id.clone())
                     && previous != id
@@ -619,8 +693,8 @@ impl Service {
                     self.remove(&previous);
                 }
             }
-            SyncChange::FileWritten(file) => self.load_auth_file(&file),
-            SyncChange::FileRemoved(path) => self.remove_auth_file(&path),
+            SyncChange::FileWritten(file) => self.load_auth_file(&file, revision),
+            SyncChange::FileRemoved(path) => self.remove_auth_file(&path, revision),
         }
         // The change stands even if its handler has gone.
         let _ = request.applied.send(());
@@ -635,20 +709,26 @@ impl Service {
         }
     }
 
-    /// Unregisters the credential registered for the auth file at `path`.
-    fn remove_auth_file(&mut self, path: &Path) {
-        if let Some(id) = self.file_auths.remove(path) {
+    /// Unregisters the credential registered for the auth file at `path`,
+    /// unless a change after `revision` was applied to it.
+    fn remove_auth_file(&mut self, path: &Path, revision: u64) {
+        let Some(id) = self.file_auths.get(path).cloned() else {
+            return;
+        };
+        if self.claim_revision(&id, revision) {
+            self.file_auths.remove(path);
             self.remove(&id);
         }
     }
 
     /// Registers the credential in an auth file, from the contents the
-    /// watcher read. A file that is gone unregisters its credential
-    /// instead: the event is older than the removal.
-    fn load_auth_file(&mut self, file: &AuthFile) {
+    /// watcher read, unless a change after `revision` was applied to it. A
+    /// file that is gone unregisters its credential instead: the event is
+    /// older than the removal.
+    fn load_auth_file(&mut self, file: &AuthFile, revision: u64) {
         let path = file.path.as_path();
         if matches!(path.try_exists(), Ok(false)) {
-            self.remove_auth_file(path);
+            self.remove_auth_file(path, revision);
             return;
         }
         let auth = match synthesize_auth_file(&self.synthesis_context(), path, &file.data) {
@@ -658,6 +738,16 @@ impl Service {
                 None
             }
         };
+        // The credential in the file, else the one it unregisters.
+        let id = match &auth {
+            Some(auth) => Some(auth.id.clone()),
+            None => self.file_auths.get(path).cloned(),
+        };
+        if let Some(id) = id
+            && !self.claim_revision(&id, revision)
+        {
+            return;
+        }
         let previous = self.file_auths.remove(path);
         let Some(auth) = auth else {
             if let Some(id) = previous {
@@ -763,6 +853,15 @@ impl Service {
 
 fn is_disabled(auth: &Auth) -> bool {
     auth.disabled || auth.status == Status::Disabled
+}
+
+/// Whether `incoming` is older than the registered `existing`: from an
+/// earlier registration of its ID, or an earlier generation of it
+/// (upstream's `isStaleCoreAuth`). Zero is no version, as for a credential
+/// read from its file.
+fn is_stale(existing: &Auth, incoming: &Auth) -> bool {
+    (incoming.registration_epoch > 0 && incoming.registration_epoch < existing.registration_epoch)
+        || (incoming.generation > 0 && incoming.generation < existing.generation)
 }
 
 /// The provider key of `auth`'s OpenAI-compatible executor, unless `auth`
@@ -896,7 +995,11 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
+    use std::pin::Pin;
+
     use open_ferry_core::auth::weight::MAX_WEIGHT;
+    use open_ferry_core::exec::{ErrorKind, ExecError, Options, Request, Response, StreamResponse};
+    use open_ferry_core::executor::ProviderExecutor;
 
     use super::*;
 
@@ -919,6 +1022,23 @@ mod tests {
             path: path.to_owned(),
             data: std::fs::read(path).unwrap().into(),
         }
+    }
+
+    /// The watcher's report that `path` was added, with its current
+    /// contents, taking the next revision.
+    fn added(path: &Path) -> WatchEvent {
+        WatchEvent::AuthAdded(auth_file(path), next_revision())
+    }
+
+    /// The watcher's report that `file` changed, taking the next revision.
+    fn changed(file: AuthFile) -> WatchEvent {
+        WatchEvent::AuthChanged(file, next_revision())
+    }
+
+    /// The watcher's report that `path` was removed, taking the next
+    /// revision.
+    fn removed(path: &Path) -> WatchEvent {
+        WatchEvent::AuthRemoved(path.to_owned(), next_revision())
     }
 
     fn codex_file(dir: &Path, name: &str, extra: &str) -> PathBuf {
@@ -963,20 +1083,20 @@ mod tests {
         assert_eq!(service.file_auths.get(&path), Some(&id));
 
         // The watcher reports the same file again, then a change to it.
-        service.handle(WatchEvent::AuthAdded(auth_file(&path)), Path::new(""));
+        service.handle(added(&path), Path::new(""));
         codex_file(dir.path(), "codex-a.json", r#","prefix":"team""#);
-        let changed = std::fs::read(&path).unwrap();
-        service.handle(WatchEvent::AuthChanged(auth_file(&path)), Path::new(""));
+        let rewritten = std::fs::read(&path).unwrap();
+        service.handle(changed(auth_file(&path)), Path::new(""));
         assert_eq!(service.manager.list().len(), 1);
         assert_eq!(service.manager.get(&id).unwrap().prefix, "team");
-        assert_ne!(written, changed);
+        assert_ne!(written, rewritten);
         assert_eq!(
             std::fs::read(&path).unwrap(),
-            changed,
+            rewritten,
             "the file was rewritten"
         );
 
-        service.handle(WatchEvent::AuthRemoved(path.clone()), Path::new(""));
+        service.handle(removed(&path), Path::new(""));
         assert!(service.manager.get(&id).is_none());
         assert!(service.registry.models_for_client(&id).is_empty());
         assert!(service.file_auths.is_empty());
@@ -987,14 +1107,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = codex_file(dir.path(), "codex-a.json", "");
         let mut service = service(dir.path(), "");
-        service.handle(WatchEvent::AuthAdded(auth_file(&path)), Path::new(""));
+        service.handle(added(&path), Path::new(""));
         let id = service.manager.list()[0].id.clone();
 
         let broken = AuthFile {
             path: path.clone(),
             data: Arc::from(&b"{not json"[..]),
         };
-        service.handle(WatchEvent::AuthChanged(broken), Path::new(""));
+        service.handle(changed(broken), Path::new(""));
         assert!(service.manager.get(&id).is_none());
         assert!(service.registry.models_for_client(&id).is_empty());
         assert!(service.file_auths.is_empty());
@@ -1008,7 +1128,10 @@ mod tests {
         // A write that doesn't parse lands while the event waits.
         std::fs::write(&path, "{not json").unwrap();
         let mut service = service(dir.path(), "");
-        service.handle(WatchEvent::AuthAdded(checked), Path::new(""));
+        service.handle(
+            WatchEvent::AuthAdded(checked, next_revision()),
+            Path::new(""),
+        );
         let auths = service.manager.list();
         assert_eq!(auths.len(), 1);
         assert_eq!(auths[0].prefix, "team");
@@ -1021,17 +1144,20 @@ mod tests {
         let path = codex_file(dir.path(), "codex-a.json", "");
         let mut service = service(dir.path(), "");
         let stale = auth_file(&path);
-        service.handle(WatchEvent::AuthAdded(stale.clone()), Path::new(""));
+        service.handle(
+            WatchEvent::AuthAdded(stale.clone(), next_revision()),
+            Path::new(""),
+        );
         let id = service.manager.list()[0].id.clone();
 
         // The file is deleted before the watcher's report of a change to it
         // is applied.
         std::fs::remove_file(&path).unwrap();
-        service.handle(WatchEvent::AuthChanged(stale.clone()), Path::new(""));
+        service.handle(changed(stale.clone()), Path::new(""));
         assert!(service.manager.get(&id).is_none());
         assert!(service.registry.models_for_client(&id).is_empty());
         assert!(service.file_auths.is_empty());
-        service.handle(WatchEvent::AuthAdded(stale), Path::new(""));
+        service.handle(WatchEvent::AuthAdded(stale, next_revision()), Path::new(""));
         assert!(service.manager.list().is_empty());
     }
 
@@ -1129,8 +1255,13 @@ mod tests {
         // fail.
         let (applied, done) = oneshot::channel();
         let change = SyncChange::FileWritten(auth_file(&path));
+        let revision = next_revision();
         sync.requests
-            .try_send(SyncRequest { change, applied })
+            .try_send(SyncRequest {
+                change,
+                revision,
+                applied,
+            })
             .unwrap_or_else(|_| panic!("the queue is full"));
         service.close_sync();
         assert_eq!(done.await, Ok(()));
@@ -1139,6 +1270,220 @@ mod tests {
         assert_eq!(error, SyncError::Stopped);
         assert_eq!(error.status().as_u16(), 503);
         assert_eq!(service.manager.list().len(), 1);
+    }
+
+    /// The access token in credential `id`'s metadata.
+    fn access_token(service: &Service, id: &str) -> String {
+        let auth = service.manager.get(id).unwrap();
+        let token = auth.metadata.get("access_token").and_then(|v| v.as_str());
+        token.unwrap_or_default().to_owned()
+    }
+
+    /// Not upstream's test, for its revisions (sdk/cliproxy/service_auth.go,
+    /// handleAuthUpdates): the watcher's report of a file it read before
+    /// the management API disabled the credential, applied after the
+    /// disable, is skipped, and the credential stays disabled with no
+    /// models.
+    #[tokio::test]
+    async fn a_watcher_report_from_before_a_disable_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = codex_file(dir.path(), "codex-a.json", "");
+        let mut service = service(dir.path(), "");
+        let sync = sync_sender(&mut service);
+        service.handle(added(&path), Path::new(""));
+        let id = service.manager.list()[0].id.clone();
+        assert!(!model_ids(&service, &id).is_empty());
+
+        // The watcher reads the enabled file; its report waits.
+        let queued = changed(auth_file(&path));
+
+        // The API disables the credential, saving its file, as the status
+        // route does.
+        let mut auth = Auth::clone(&service.manager.get(&id).unwrap());
+        auth.disabled = true;
+        auth.status = Status::Disabled;
+        let disabled = service.manager.update(auth).unwrap().unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["disabled"], true);
+        let sent = apply_next(&mut service, &sync, |sync| async move {
+            sync.upsert(Auth::clone(&disabled)).await
+        });
+        sent.await.unwrap();
+        assert!(model_ids(&service, &id).is_empty());
+
+        service.handle(queued, Path::new(""));
+        assert!(service.manager.get(&id).unwrap().disabled);
+        assert!(model_ids(&service, &id).is_empty());
+
+        // A report read after the save is applied.
+        service.handle(changed(auth_file(&path)), Path::new(""));
+        assert!(service.manager.get(&id).unwrap().disabled);
+        assert_eq!(service.revisions.len(), 1);
+    }
+
+    /// Not upstream's test, for its revisions: a removal the watcher saw
+    /// before the management API wrote the file again doesn't unregister
+    /// the credential written, and a management change older than one
+    /// applied is skipped too, its handler still told it was applied.
+    #[tokio::test]
+    async fn stale_removals_and_management_changes_are_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = codex_file(dir.path(), "codex-a.json", "");
+        let mut service = service(dir.path(), "");
+        let sync = sync_sender(&mut service);
+        service.handle(added(&path), Path::new(""));
+        let id = service.manager.list()[0].id.clone();
+
+        let queued = removed(&path);
+        codex_file(dir.path(), "codex-a.json", r#","prefix":"team""#);
+        let file = auth_file(&path);
+        let sent = apply_next(&mut service, &sync, |sync| async move {
+            sync.file_written(file).await
+        });
+        sent.await.unwrap();
+        service.handle(queued, Path::new(""));
+        assert_eq!(service.manager.get(&id).unwrap().prefix, "team");
+        assert_eq!(service.file_auths.get(&path), Some(&id));
+
+        // An upsert that took its revision before a newer report was
+        // applied.
+        let mut older = Auth::clone(&service.manager.get(&id).unwrap());
+        older.prefix = "older".into();
+        let (applied, done) = oneshot::channel();
+        let request = SyncRequest {
+            change: SyncChange::Upsert(Box::new(older)),
+            revision: next_revision(),
+            applied,
+        };
+        service.handle(changed(auth_file(&path)), Path::new(""));
+        service.apply_sync(request);
+        assert_eq!(done.await, Ok(()));
+        assert_eq!(service.manager.get(&id).unwrap().prefix, "team");
+    }
+
+    type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+    /// A Codex executor that serves nothing, and refreshes a credential to
+    /// the access token `refreshed`.
+    struct Refresher;
+
+    impl ProviderExecutor for Refresher {
+        fn id(&self) -> &str {
+            "codex"
+        }
+
+        fn execute(
+            &self,
+            _: Arc<Auth>,
+            _: Request,
+            _: Options,
+        ) -> BoxFuture<'_, Result<Response, ExecError>> {
+            Box::pin(async { Err(ExecError::new(ErrorKind::Upstream, "not served")) })
+        }
+
+        fn execute_stream(
+            &self,
+            _: Arc<Auth>,
+            _: Request,
+            _: Options,
+        ) -> BoxFuture<'_, Result<StreamResponse, ExecError>> {
+            Box::pin(async { Err(ExecError::new(ErrorKind::Upstream, "not served")) })
+        }
+
+        fn count_tokens(
+            &self,
+            _: Arc<Auth>,
+            _: Request,
+            _: Options,
+        ) -> BoxFuture<'_, Result<Response, ExecError>> {
+            Box::pin(async { Err(ExecError::new(ErrorKind::Upstream, "not served")) })
+        }
+
+        fn refresh(&self, auth: Arc<Auth>) -> BoxFuture<'_, Result<Auth, ExecError>> {
+            Box::pin(async move {
+                let mut auth = Auth::clone(&auth);
+                auth.metadata
+                    .insert("access_token".into(), "refreshed".into());
+                Ok(auth)
+            })
+        }
+    }
+
+    /// Not upstream's test, for its generations (sdk/cliproxy/service_auth.go,
+    /// prepareCoreAuthForModelRegistration and isStaleCoreAuth): a
+    /// management field change whose sync waits while the credential's
+    /// token is refreshed is refused when it comes, its handler still told
+    /// it was applied, and the refreshed token is kept.
+    #[tokio::test]
+    async fn a_management_change_older_than_a_refresh_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = codex_file(dir.path(), "codex-a.json", r#","refresh_token":"rt""#);
+        let mut service = service(dir.path(), "");
+        service.manager.register_executor(Arc::new(Refresher));
+        let sync = sync_sender(&mut service);
+        service.handle(added(&path), Path::new(""));
+        let id = service.manager.list()[0].id.clone();
+
+        // The API changes a field, saving the file; its sync waits.
+        let mut auth = Auth::clone(&service.manager.get(&id).unwrap());
+        auth.metadata.insert("note".into(), "changed".into());
+        let changed = service.manager.update(auth).unwrap().unwrap();
+        let held = tokio::spawn({
+            let sync = Arc::clone(&sync);
+            async move { sync.upsert(Auth::clone(&changed)).await }
+        });
+        let request = service.sync_requests.recv().await.unwrap();
+
+        let refreshed = service.manager.force_refresh(&id).await.unwrap();
+        assert_eq!(access_token(&service, &id), "refreshed");
+        assert!(refreshed.generation > request_generation(&request));
+
+        service.apply_sync(request);
+        assert_eq!(held.await.unwrap(), Ok(()));
+        let auth = service.manager.get(&id).unwrap();
+        assert_eq!(access_token(&service, &id), "refreshed");
+        assert_eq!(
+            auth.metadata.get("note").and_then(|v| v.as_str()),
+            Some("changed")
+        );
+        assert!(!model_ids(&service, &id).is_empty());
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["access_token"], "refreshed");
+    }
+
+    /// The generation of the credential an upsert request carries.
+    fn request_generation(request: &SyncRequest) -> u64 {
+        match &request.change {
+            SyncChange::Upsert(auth) => auth.generation,
+            _ => panic!("expected an upsert"),
+        }
+    }
+
+    /// Not upstream's: `is_stale` decides as upstream's `isStaleCoreAuth`
+    /// (sdk/cliproxy/service_auth.go), which v8.0.10 doesn't test.
+    #[test]
+    fn stale_credentials_are_older_by_epoch_or_generation() {
+        let existing = Auth {
+            registration_epoch: 2,
+            generation: 5,
+            ..Auth::default()
+        };
+        let at = |registration_epoch, generation| Auth {
+            registration_epoch,
+            generation,
+            ..Auth::default()
+        };
+        assert!(is_stale(&existing, &at(1, 9)));
+        assert!(is_stale(&existing, &at(2, 4)));
+        assert!(is_stale(&existing, &at(0, 4)));
+        assert!(!is_stale(&existing, &at(2, 5)));
+        // Generations are compared whatever the epoch, as upstream does.
+        assert!(is_stale(&existing, &at(3, 1)));
+        assert!(!is_stale(&existing, &at(3, 5)));
+        assert!(!is_stale(&existing, &at(0, 0)));
+        assert!(!is_stale(&existing, &at(2, 0)));
     }
 
     /// `path` relative to the current directory, when they share a root.
@@ -1196,16 +1541,16 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let WatchEvent::AuthAdded(file) = event else {
+        let WatchEvent::AuthAdded(file, revision) = event else {
             panic!("expected an added auth file, got {event:?}");
         };
         let path = file.path.clone();
-        service.handle(WatchEvent::AuthAdded(file), &config_path);
+        service.handle(WatchEvent::AuthAdded(file, revision), &config_path);
         assert_eq!(service.manager.list().len(), 1);
         assert!(service.manager.get(&id).is_some());
         assert_eq!(service.file_auths.get(&path), Some(&id));
 
-        service.handle(WatchEvent::AuthRemoved(path), &config_path);
+        service.handle(removed(&path), &config_path);
         assert!(service.manager.list().is_empty());
         assert!(service.file_auths.is_empty());
 

@@ -12,9 +12,6 @@
 //! upstream's does: the route is behind the management key.
 //!
 //! Deviations from upstream:
-//! - `registration_epoch` and `generation` are never written: the manager
-//!   keeps no such counters on a credential (upstream leaves both out when
-//!   zero).
 //! - The quota's `observed_at` is always Go's zero time, and its `signals`
 //!   never appear: the port doesn't track either.
 //! - A credential whose status isn't known writes `"unknown"`, where Go's
@@ -31,10 +28,14 @@ const ZERO_TIME: &str = "0001-01-01T00:00:00Z";
 
 /// `auth` as Go's `json.Marshal` writes a `*coreauth.Auth`.
 pub(crate) fn auth_json(auth: &Auth) -> Json {
-    let mut fields: Vec<(&'static str, Json)> = vec![
-        ("id", Json::Str(auth.id.clone())),
-        ("provider", Json::Str(auth.provider.clone())),
-    ];
+    let mut fields: Vec<(&'static str, Json)> = vec![("id", Json::Str(auth.id.clone()))];
+    if auth.registration_epoch != 0 {
+        fields.push(("registration_epoch", Json::Uint(auth.registration_epoch)));
+    }
+    if auth.generation != 0 {
+        fields.push(("generation", Json::Uint(auth.generation)));
+    }
+    fields.push(("provider", Json::Str(auth.provider.clone())));
     push_nonempty(&mut fields, "prefix", &auth.prefix);
     push_nonempty(&mut fields, "label", &auth.label);
     fields.push(("status", Json::Str(auth.status.as_str().to_owned())));

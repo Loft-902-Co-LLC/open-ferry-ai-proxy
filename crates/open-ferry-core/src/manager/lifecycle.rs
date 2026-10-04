@@ -18,8 +18,10 @@
 //! one just read from its file or the config (upstream's `WithSkipPersist`).
 //!
 //! Deviations from upstream:
-//! - The registration epoch and generation live on the manager's entry;
-//!   an update can't carry its own, so it always takes the live ones.
+//! - A registration or update takes the live registration epoch and
+//!   generation, whatever the credential carries: upstream refuses an
+//!   update carrying an older epoch, and moves on from a newer generation
+//!   than the live one.
 //! - A replaced credential starts with no `invalid_grant` failures counted;
 //!   upstream keeps whatever count the caller's copy held.
 //! - Saves happen after the state lock is released.
@@ -100,8 +102,9 @@ pub(crate) fn clear_disabled_cooldown_states(state: &mut State, now: Timestamp) 
         if !cooldown_disabled_for_auth(&settings, &entry.auth) && !is_disabled(&entry.auth) {
             continue;
         }
-        if clear_cooldown_state_for_auth(Arc::make_mut(&mut entry.auth), now) {
-            entry.generation += 1;
+        let auth = Arc::make_mut(&mut entry.auth);
+        if clear_cooldown_state_for_auth(auth, now) {
+            auth.generation += 1;
             cleared.push(id.clone());
         }
     }
@@ -207,28 +210,30 @@ impl Manager {
             clear_cooldown_state_for_auth(&mut auth, now);
         }
         auth.ensure_index();
-        let snapshot = Arc::new(auth);
-        let epoch = {
+        let snapshot = {
             let mut guard = self.lock();
             let state = &mut *guard;
-            let existing_epoch = state.auths.get(&snapshot.id).map_or(0, |entry| entry.epoch);
-            let slot = state.epochs.entry(snapshot.id.clone()).or_insert(0);
+            let existing_epoch = state
+                .auths
+                .get(&auth.id)
+                .map_or(0, |entry| entry.auth.registration_epoch);
+            let slot = state.epochs.entry(auth.id.clone()).or_insert(0);
             *slot = (*slot).max(existing_epoch).saturating_add(1);
-            let epoch = *slot;
+            auth.registration_epoch = *slot;
+            auth.generation = 1;
+            let snapshot = Arc::new(auth);
             state.auths.insert(
                 snapshot.id.clone(),
                 Entry {
                     auth: snapshot.clone(),
-                    epoch,
-                    generation: 1,
                     refresh_failures: 0,
                 },
             );
             state.sync_scheduler(self.models(), &snapshot.id, now);
-            epoch
+            snapshot
         };
         self.queue_refresh_reschedule(&snapshot.id);
-        if let Err(err) = self.persist(&snapshot, epoch, 1, save) {
+        if let Err(err) = self.persist(&snapshot, snapshot.registration_epoch, 1, save) {
             tracing::warn!(
                 auth_id = %snapshot.id,
                 provider = %snapshot.provider,
@@ -293,8 +298,8 @@ impl Manager {
                 return Ok(None);
             };
             let existing_auth = existing.auth.clone();
-            let existing_epoch = existing.epoch;
-            let existing_generation = existing.generation;
+            let existing_epoch = existing_auth.registration_epoch;
+            let existing_generation = existing_auth.generation;
             let existing_failures = existing.refresh_failures;
             let slot = state.epochs.entry(auth.id.clone()).or_insert(0);
             *slot = (*slot).max(existing_epoch);
@@ -362,13 +367,13 @@ impl Manager {
                 generation = generation.saturating_add(1);
             }
             auth.ensure_index();
+            auth.registration_epoch = live_epoch;
+            auth.generation = generation;
             let snapshot = Arc::new(auth);
             state.auths.insert(
                 snapshot.id.clone(),
                 Entry {
                     auth: snapshot.clone(),
-                    epoch: live_epoch,
-                    generation,
                     refresh_failures,
                 },
             );
@@ -403,7 +408,9 @@ impl Manager {
             state.pool_offsets.remove(id);
             state.sync_scheduler(self.models(), id, self.now());
             let slot = state.epochs.entry(id.to_owned()).or_insert(0);
-            *slot = (*slot).max(existing.epoch).saturating_add(1);
+            *slot = (*slot)
+                .max(existing.auth.registration_epoch)
+                .saturating_add(1);
             existing.auth.provider.trim().to_owned()
         };
         self.queue_refresh_unschedule(id);
@@ -436,13 +443,12 @@ impl Manager {
             auth.ensure_index();
             let slot = state.epochs.entry(auth.id.clone()).or_insert(0);
             *slot = slot.saturating_add(1);
-            let epoch = *slot;
+            auth.registration_epoch = *slot;
+            auth.generation = 1;
             state.auths.insert(
                 auth.id.clone(),
                 Entry {
                     auth: Arc::new(auth),
-                    epoch,
-                    generation: 1,
                     refresh_failures: 0,
                 },
             );
@@ -534,8 +540,12 @@ impl Manager {
             count_result(auth, result, now);
             apply_result(&state.settings, auth, result, &model_key, now);
             auth.updated_at = Some(now);
-            entry.generation = entry.generation.saturating_add(1);
-            let committed = (entry.auth.clone(), entry.epoch, entry.generation);
+            auth.generation = auth.generation.saturating_add(1);
+            let committed = (
+                entry.auth.clone(),
+                entry.auth.registration_epoch,
+                entry.auth.generation,
+            );
             state.sync_scheduler(self.models(), &result.auth_id, now);
             committed
         };
@@ -559,8 +569,12 @@ impl Manager {
             let auth = Arc::make_mut(&mut entry.auth);
             count_result(auth, result, now);
             auth.updated_at = Some(now);
-            entry.generation = entry.generation.saturating_add(1);
-            (entry.auth.clone(), entry.epoch, entry.generation)
+            auth.generation = auth.generation.saturating_add(1);
+            (
+                entry.auth.clone(),
+                entry.auth.registration_epoch,
+                entry.auth.generation,
+            )
         };
         let _ = self.persist(&snapshot, epoch, generation, Save::Yes);
     }
@@ -587,10 +601,16 @@ impl Manager {
             let Some(entry) = state.auths.get_mut(id) else {
                 return Ok(None);
             };
-            let (models, cleared) = reset_quota(Arc::make_mut(&mut entry.auth), &registered, now);
+            let auth = Arc::make_mut(&mut entry.auth);
+            let (models, cleared) = reset_quota(auth, &registered, now);
             let bumps = if cleared { 2 } else { 1 };
-            entry.generation = entry.generation.saturating_add(bumps);
-            let committed = (entry.auth.clone(), models, entry.epoch, entry.generation);
+            auth.generation = auth.generation.saturating_add(bumps);
+            let committed = (
+                entry.auth.clone(),
+                models,
+                entry.auth.registration_epoch,
+                entry.auth.generation,
+            );
             state.sync_scheduler(self.models(), id, now);
             committed
         };
@@ -642,12 +662,12 @@ impl Manager {
                         auth.status = Status::Active;
                     }
                     auth.updated_at = Some(now);
-                    entry.generation = entry.generation.saturating_add(1);
+                    auth.generation = auth.generation.saturating_add(1);
                 }
                 committed = Some((
                     entry.auth.clone(),
-                    entry.epoch,
-                    entry.generation,
+                    entry.auth.registration_epoch,
+                    entry.auth.generation,
                     changed,
                     supported,
                     reg_epoch,
