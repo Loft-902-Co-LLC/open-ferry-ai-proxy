@@ -9,7 +9,12 @@
 //! (the `thinking` module), reshapes it for Grok as upstream does (the
 //! `request`, `tools` and `reasoning` modules), and translates xAI's
 //! server-sent events back, undoing the reshaping and hiding X search's own
-//! tool calls (the `response` and `reasoning` modules).
+//! tool calls (the `response` and `reasoning` modules). A non-streaming call
+//! reads xAI's stream to its terminal event, a streaming one translates it
+//! as it comes (the `stream` module), and `responses/compact` or a
+//! `compaction_trigger` item goes to `/responses/compact` (the `compact`
+//! module). Error statuses keep upstream's remapping (the `errors` module).
+//! Reasoning replay is a hook that does nothing yet (the `replay` module).
 //!
 //! Deviations from upstream (each module lists its own):
 //! - Only API keys are served: no xAI sign-in, no Grok CLI chat proxy, and
@@ -17,17 +22,19 @@
 //! - No session is made up: `x-grok-conv-id` and `prompt_cache_key` are the
 //!   client's own `prompt_cache_key` or absent.
 //! - Image and video generation are refused with a 400.
+//! - HTTP only: upstream's WebSocket executor and reasoning replay aren't
+//!   ported yet.
 
-// The executor isn't wired yet.
-#[allow(dead_code)]
+mod compact;
+mod errors;
+mod executor;
 mod reasoning;
-#[allow(dead_code)]
+mod replay;
 mod request;
-#[allow(dead_code)]
 mod response;
-#[allow(dead_code)]
 mod schema;
-#[allow(dead_code)]
+mod stream;
 mod thinking;
-#[allow(dead_code)]
 mod tools;
+
+pub use executor::XaiExecutor;

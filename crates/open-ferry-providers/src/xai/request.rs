@@ -61,6 +61,7 @@ use open_ferry_translate::registry::Registry;
 use serde_json::Value;
 
 use super::reasoning;
+use super::replay;
 use super::thinking;
 use super::tools::{self, ClientToolKey, NamespaceRefs};
 use crate::apply_patch_responses::{self, State};
@@ -140,6 +141,8 @@ pub(crate) struct Prepared {
     pub(crate) filter_internal_x_search: bool,
     /// What the client's `web_search` function was renamed to, or empty.
     pub(crate) web_search_alias: String,
+    /// The session whose reasoning is replayed.
+    pub(crate) replay: replay::Scope,
 }
 
 /// Whether the call is for upstream's image or video handler, which isn't
@@ -329,6 +332,7 @@ pub(crate) fn prepare(
         tools::ensure_native_x_search(&mut body);
     }
     tools::clamp_tools(&mut body, tools::MAX_TOOLS, &namespace_tools);
+    let replay = replay::apply(&mut body, request, options)?;
     tools::normalize_input_custom_tool_calls(&mut body);
     tools::normalize_input_namespace_tool_calls(&mut body, fold);
     if !web_search_alias.is_empty() {
@@ -359,6 +363,7 @@ pub(crate) fn prepare(
         client_declared_tools,
         session_id,
         web_search_alias,
+        replay,
     })
 }
 
