@@ -11,8 +11,7 @@
 //!
 //! The request translators, both ways, are in `request.rs`, and the response
 //! translators, both ways, in `response.rs`, each re-exported by a `pub use`
-//! line right below its `mod` line. Not ported yet: the response
-//! translators, which WP4-C2 fills.
+//! line right below its `mod` line.
 //!
 //! Deviations from upstream: each file lists its own.
 
@@ -23,3 +22,8 @@ pub use request::{
 };
 
 mod response;
+pub use response::{
+    InteractionsToOpenAIResponsesStream, OpenAIResponsesToInteractionsStream,
+    convert_interactions_response_to_openai_responses_non_stream,
+    convert_openai_responses_response_to_interactions_non_stream,
+};
