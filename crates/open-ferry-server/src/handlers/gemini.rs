@@ -38,8 +38,8 @@
 //!   gets 400. Upstream reads any size and ignores read errors.
 //! - The 400 upstream gives when the route has no action isn't ported: the
 //!   router always has one.
-//! - Home mode's model list (`handleHomeGeminiModels`) and
-//!   `POST /v1beta/interactions` aren't ported.
+//! - Home mode's model list (`handleHomeGeminiModels`) isn't ported.
+//!   `POST /v1beta/interactions` is served by [`super::interactions`].
 
 mod sniff;
 
