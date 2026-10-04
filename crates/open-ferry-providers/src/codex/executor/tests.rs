@@ -1508,6 +1508,9 @@ async fn drops_invalid_reasoning_encrypted_content() {
     assert!(!exists(&mock.last().json(), "input.0.encrypted_content"));
 }
 
+// Not ported: TestCodexExecutorExecuteStream_GrokBuildDetectedFromGinContext
+// (and TestIsGrokClientContext in `stream`), as there is no Gin context to
+// read a user agent from; the call's own headers are all there is.
 const KEEPALIVE_STREAM: &str = concat!(
     "event: response.created\n",
     r#"data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.6-luna"}}"#,
@@ -1556,6 +1559,37 @@ async fn grok_clients_get_keepalive_comments() {
             "{agent}: {text}"
         );
     }
+}
+
+// TestCodexExecutorExecuteStream_GrokBuildWithBuffering: the keepalives are
+// comments with bootstrap buffering on as well.
+#[tokio::test]
+async fn grok_clients_get_keepalive_comments_while_buffering() {
+    let mock = Mock::start(Reply::sse(KEEPALIVE_STREAM)).await;
+    let mut config = Config::default();
+    config.codex.stream_bootstrap_buffering = true;
+    let response = CodexExecutor::new("direct")
+        .with_config(Arc::new(config))
+        .execute_stream(
+            api_key_auth(&mock.url),
+            request("gpt-5.6-luna", r#"{"model":"gpt-5.6-luna","input":"test"}"#),
+            with_header(
+                stream_options("openai-response"),
+                "user-agent",
+                "grok-shell/1.0.5",
+            ),
+        )
+        .await
+        .unwrap();
+    let (text, error) = tokio::time::timeout(Duration::from_secs(3), collect(response))
+        .await
+        .expect("the stream ends");
+    assert!(error.is_none(), "{error:?}");
+    assert!(
+        !text.contains(r#"{"type":"keepalive""#) && !text.contains("event: keepalive"),
+        "{text}"
+    );
+    assert!(text.contains(": keepalive"), "{text}");
 }
 
 // TestCodexExecutorExecuteStream_NonGrokClientKeepsVerbatim.

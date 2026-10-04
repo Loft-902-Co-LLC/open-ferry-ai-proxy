@@ -26,6 +26,10 @@
 //! comes after the held chunks, as it would have without the buffering.
 //!
 //! Deviations from upstream:
+//! - A Grok Build client is told by the call's own headers alone. Upstream
+//!   also reads the user agent from the request's Gin context
+//!   (`IsGrokClientContext`), which has the same headers: the Codex
+//!   executor is handed them as the call's options.
 //! - A rewritten terminal event is written by `serde_json`.
 //! - Dropping the stream, or the call while lines are held back, stops
 //!   reading, where upstream watches its context.
@@ -649,17 +653,25 @@ mod tests {
         assert!(is_grok_client(&headers));
     }
 
-    // TestIsKeepaliveSSELine.
+    // TestIsKeepaliveSSELine, and TestIsKeepalivePayload, whose payloads are
+    // the `data:` lines here: `IsKeepalivePayload` isn't a function of its
+    // own.
     #[test]
     fn detects_keepalive_lines() {
         for (line, want) in [
             ("event: keepalive", true),
+            ("event: keepalive\n", true),
+            ("  event: keepalive  ", true),
             ("  event:keepalive  ", true),
             (r#"data: {"type":"keepalive"}"#, true),
+            (r#"data: {"type":"keepalive","sequence_number":3}"#, true),
             (r#"data:{"type":"keepalive","sequence_number":3}"#, true),
             ("event: response.created", false),
+            ("event: keepalive-other", false),
             (r#"data: {"type":"response.created"}"#, false),
+            (r#"data: {"type":"response.reasoning.delta"}"#, false),
             ("data: [DONE]", false),
+            ("data: ", false),
             (": comment", false),
             ("", false),
         ] {
