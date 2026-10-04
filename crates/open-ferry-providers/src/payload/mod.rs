@@ -1,33 +1,96 @@
+// Ported from CLIProxyAPI internal/runtime/executor/helps/payload_helpers.go
+// (ApplyPayloadConfigWithTrackedPathsForExecutor, isCodexTargetExecutor,
+// PayloadRequestedModel, PayloadRequestPath) (v8.0.10, MIT).
+// https://github.com/router-for-me/CLIProxyAPI
+
 //! The config's payload rules applied to the bodies sent upstream:
 //! defaults, overrides and filters, by model, protocol, request headers and
 //! conditions on the body (upstream's internal/runtime/executor/helps/
-//! payload_helpers.go and payload_mutations.go). Not ported yet (P3 WP-D).
+//! payload_helpers.go).
 //!
-//! What is here is the hook the executors call, with the signature the
-//! port keeps: each executor calls [`apply`] once its body is translated,
-//! where upstream calls `ApplyPayloadConfigWithTrackedPathsForExecutor` or
-//! one of its wrappers. For now it leaves the body as it is and reports no
-//! path touched; the Codex clients' integer pass upstream runs first in it
-//! is still the executors' own call to the Codex `compat` module.
+//! Each executor calls [`apply`] once its body is translated, where
+//! upstream calls `ApplyPayloadConfigWithTrackedPathsForExecutor` or one of
+//! its wrappers. In order, it:
+//! 1. declares a Codex client's whole-number tool parameters `integer`
+//!    again (the translation can move them to where the pass before it
+//!    didn't look), unless the body goes to a Codex executor;
+//! 2. with `disable-image-generation`, takes the built-in
+//!    `image_generation` tool out of `tools` and `tool_choice`, so that a
+//!    rule can put it back;
+//! 3. applies the `default` and `default-raw` rules, each writing a path
+//!    the client's request doesn't have, the first rule to write a path
+//!    winning;
+//! 4. applies the `override` and `override-raw` rules, the last to write a
+//!    path winning;
+//! 5. applies the `filter` rules, removing paths.
 //!
-//! Deviations from upstream: no rule is applied yet. Every executor names
-//! itself in [`Target::executor`]; upstream names only the Codex ones, the
-//! only names it checks.
+//! A rule applies when one of its models matches the model sent upstream,
+//! or the model the client named with or without its thinking suffix, and
+//! the entry's protocol, client protocol, headers and conditions on the
+//! body hold. Paths are gjson and sjson paths (see the `gjson` and `sjson`
+//! modules), under the executor's root, and a `#(query)` key stands for the index of
+//! each array item the query matches.
+//!
+//! A rule writes exactly the value the operator configured, the same on
+//! every request. That includes identity-shaped fields such as
+//! `metadata.user_id`, `user`, `safety_identifier` or `prompt_cache_key`,
+//! when the operator writes them; open-ferry never generates or derives a
+//! value for them. A rule's `headers` are only read, to decide whether it
+//! applies; no rule writes a header.
+//!
+//! The rules are compiled once per config load: the binary calls
+//! [`reconfigure`] with each config it loads, and every call reads the
+//! rules installed then, so a reload takes effect on the next request.
+//!
+//! Deviations from upstream:
+//! - The rules come from the config last given to [`reconfigure`], where
+//!   upstream reads the executor's own config. A reload that changes only
+//!   the payload rules registers the Codex executors again but not the
+//!   others, which keep the config they were made with. An executor's own
+//!   config is read only when no config has been installed, as in tests.
+//! - A rule's params apply in the order the file gives them; Go iterates
+//!   its map in random order.
+//! - A value that can't be written as JSON is dropped when the config
+//!   loads, with a warning (see [`Rules`]).
+//! - Some gjson and sjson syntax isn't read, and some paths upstream
+//!   writes wrongly change nothing (see the `gjson` and `sjson` modules).
+//! - The client's request is translated for the default rules' check only
+//!   when one of them comes to a path; upstream translates it for every
+//!   call.
+//! - Every executor names itself in [`Target::executor`]; upstream names
+//!   only the Codex and xAI ones, and only the Codex names change anything.
 
+mod gjson;
+mod image;
 mod matchers;
 mod path;
 mod query;
+mod rules;
+mod sjson;
 #[cfg(test)]
 mod tests;
 
-use std::collections::BTreeSet;
+pub use rules::Rules;
 
+use std::collections::{BTreeSet, HashSet};
+use std::fmt;
+use std::sync::{Arc, PoisonError, RwLock};
+
+use http::HeaderMap;
+use http::header::{HeaderValue, USER_AGENT};
 use open_ferry_core::config::Config;
 use open_ferry_core::exec::{Format, Options, Request};
+use open_ferry_translate::codex_client::{header_value, tool_integers};
+use open_ferry_translate::go::to_lower;
+use open_ferry_translate::registry::Registry;
 use serde_json::Value;
 
+use crate::codex::compat;
+use crate::codex::request::parse_object;
+use matchers::Context;
+
 /// Where a body goes: what the rules match against besides the request.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct Target<'a> {
     /// The executor's identifier, such as `claude`, `codex` or
     /// `codex-websockets` (upstream's `targetExecutor`).
@@ -44,6 +107,24 @@ pub struct Target<'a> {
     /// The paths the caller wants to know an applied rule wrote or deleted
     /// (upstream's `trackedPaths`).
     pub tracked: &'a [&'a str],
+    /// How the executor translates a client body, for the defaults'
+    /// checks; `None` for the usual translation, which readies a Codex
+    /// client's request and translates it to [`Target::protocol`].
+    pub translate: Option<&'a dyn Fn(Value) -> Value>,
+}
+
+impl fmt::Debug for Target<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Target")
+            .field("executor", &self.executor)
+            .field("protocol", &self.protocol)
+            .field("model", &self.model)
+            .field("root", &self.root)
+            .field("stream", &self.stream)
+            .field("tracked", &self.tracked)
+            .field("translate", &self.translate.map(|_| ".."))
+            .finish()
+    }
 }
 
 /// The tracked paths an applied rule wrote or deleted, or wrote or deleted
@@ -61,12 +142,59 @@ impl Touched {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    /// The tracked paths touched, in order.
+    pub fn iter(&self) -> impl Iterator<Item = &str> {
+        self.0.iter().map(String::as_str)
+    }
 }
 
-/// Applies `config`'s payload rules to `body`, the translated `request`
-/// made with `options`, going to `target`, and says which tracked paths
-/// they touched (upstream's `ApplyPayloadConfigWithTrackedPathsForExecutor`).
-/// For now, changes nothing.
+/// A call the rules are applied for, as upstream's
+/// `ApplyPayloadConfigWithTrackedPathsForExecutor` takes it.
+#[derive(Clone, Copy, Debug)]
+pub struct Call<'a> {
+    /// The executor's identifier (`targetExecutor`).
+    pub executor: &'a str,
+    /// The format the body is in (`protocol`).
+    pub protocol: &'a str,
+    /// The client's format (`fromProtocol`).
+    pub from: &'a str,
+    /// The model sent upstream (`model`).
+    pub model: &'a str,
+    /// The model the client named (`requestedModel`).
+    pub requested_model: &'a str,
+    /// The client's route (`requestPath`).
+    pub request_path: &'a str,
+    /// The path the rules' paths are under (`root`).
+    pub root: &'a str,
+    /// The client's request headers (`headers`).
+    pub headers: &'a HeaderMap,
+    /// The paths to report on (`trackedPaths`).
+    pub tracked: &'a [&'a str],
+}
+
+/// The rules installed by the last [`reconfigure`].
+static CURRENT: RwLock<Option<Arc<Rules>>> = RwLock::new(None);
+
+/// Compiles `config`'s payload rules, warning about the values dropped,
+/// and installs them for every call from now on.
+pub fn reconfigure(config: &Config) {
+    let rules = Arc::new(Rules::compile(config));
+    *CURRENT.write().unwrap_or_else(PoisonError::into_inner) = Some(rules);
+}
+
+/// The rules [`reconfigure`] installed, if it has run.
+fn installed() -> Option<Arc<Rules>> {
+    CURRENT
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+}
+
+/// Applies the payload rules to `body`, the translated `request` made with
+/// `options`, going to `target`, and says which tracked paths they touched
+/// (upstream's `ApplyPayloadConfigWithTrackedPathsForExecutor`). With no
+/// `config`, only a Codex client's tool parameters are changed.
 pub fn apply(
     config: Option<&Config>,
     target: &Target<'_>,
@@ -74,6 +202,256 @@ pub fn apply(
     options: &Options,
     body: &mut Value,
 ) -> Touched {
-    let _ = (config, target, request, options, body);
-    Touched::default()
+    let rules = select(config, installed);
+    let requested = requested_model(request, options);
+    let call = Call {
+        executor: target.executor,
+        protocol: target.protocol.as_str(),
+        from: options.source_format.as_str(),
+        model: target.model,
+        requested_model: &requested,
+        request_path: options.metadata.request_path.trim(),
+        root: target.root,
+        headers: &options.headers,
+        tracked: target.tracked,
+    };
+    apply_call(
+        rules.get(),
+        &call,
+        || original(config, target, request, options),
+        body,
+    )
+}
+
+/// The rules a call reads.
+enum Selected {
+    /// No config: no rules.
+    None,
+    /// The rules [`reconfigure`] installed.
+    Installed(Arc<Rules>),
+    /// The executor's config's rules, compiled for the call.
+    Own(Rules),
+}
+
+impl Selected {
+    fn get(&self) -> Option<&Rules> {
+        match self {
+            Selected::None => None,
+            Selected::Installed(rules) => Some(rules),
+            Selected::Own(rules) => Some(rules),
+        }
+    }
+}
+
+/// The rules for a call with the executor's `config`: none without one,
+/// else those `installed` gives, else `config`'s own, compiled for the
+/// call without the warnings [`reconfigure`] gives once per load.
+fn select(config: Option<&Config>, installed: impl FnOnce() -> Option<Arc<Rules>>) -> Selected {
+    let Some(config) = config else {
+        return Selected::None;
+    };
+    match installed() {
+        Some(rules) => Selected::Installed(rules),
+        None => Selected::Own(Rules::build(config, false)),
+    }
+}
+
+/// The model the client named, else the request's, trimmed
+/// (`PayloadRequestedModel`).
+fn requested_model(request: &Request, options: &Options) -> String {
+    let named = options.metadata.requested_model.trim();
+    if named.is_empty() {
+        request.model.trim().to_owned()
+    } else {
+        named.to_owned()
+    }
+}
+
+/// The client's request, as it arrived, translated as the executor
+/// translates its body; `None` when there was none.
+fn original(
+    config: Option<&Config>,
+    target: &Target<'_>,
+    request: &Request,
+    options: &Options,
+) -> Option<Value> {
+    let raw = if options.original_request.is_empty() {
+        &request.payload
+    } else {
+        &options.original_request
+    };
+    if raw.is_empty() {
+        return None;
+    }
+    let mut payload = parse_object(raw);
+    Some(match target.translate {
+        Some(translate) => translate(payload),
+        None => {
+            compat::before_translation(config, options, target.protocol, &mut payload);
+            Registry::global().translate_request(
+                &options.source_format,
+                target.protocol,
+                target.model,
+                payload,
+                target.stream,
+            )
+        }
+    })
+}
+
+/// Whether `executor` is a Codex executor, whose clients' tools are left
+/// as they are (`isCodexTargetExecutor`).
+fn is_codex_target(executor: &str) -> bool {
+    matches!(
+        to_lower(executor.trim()).as_str(),
+        "codex" | "codex-websockets" | "codex_websockets"
+    )
+}
+
+/// What the default rules check a path against: the client's request,
+/// translated, or else the body as it was before the rules, made only
+/// when first needed.
+struct Source<F> {
+    original: Option<F>,
+    before_strip: Option<Value>,
+    value: Option<Value>,
+}
+
+impl<F: FnOnce() -> Option<Value>> Source<F> {
+    /// Whether the client's request has `path`.
+    fn has(&mut self, body: &Value, path: &str) -> bool {
+        let source = self.value.get_or_insert_with(|| {
+            self.original
+                .take()
+                .and_then(|original| original())
+                .or_else(|| self.before_strip.take())
+                .unwrap_or_else(|| body.clone())
+        });
+        gjson::get(source, path).is_some()
+    }
+}
+
+/// [`apply`] for a call described in full: `rules` (`None` for no
+/// config), the call, the client's request translated, made only if a
+/// default rule needs it, and the body.
+pub fn apply_call(
+    rules: Option<&Rules>,
+    call: &Call<'_>,
+    original: impl FnOnce() -> Option<Value>,
+    body: &mut Value,
+) -> Touched {
+    let mut touched = Touched::default();
+    if !is_codex_target(call.executor) {
+        let user_agent = header_value(
+            call.headers
+                .get_all(USER_AGENT)
+                .iter()
+                .map(HeaderValue::as_bytes),
+        );
+        if tool_integers::normalize(body, &user_agent) {
+            tracing::debug!("payload: normalized Codex client tool number types to integer");
+        }
+    }
+    let Some(rules) = rules else {
+        return touched;
+    };
+
+    let mut before_strip = None;
+    if image::should_strip(rules.image, call.request_path)
+        && let Some(strip) = image::plan(body, call.root)
+    {
+        if rules.has_defaults() {
+            before_strip = Some(body.clone());
+        }
+        strip.apply(body);
+    }
+
+    if !rules.has_rules() {
+        return touched;
+    }
+    let candidates = matchers::candidates(call.model, call.requested_model);
+    if candidates.is_empty() {
+        return touched;
+    }
+    let context = Context {
+        protocol: call.protocol,
+        from: call.from,
+        headers: call.headers,
+        root: call.root,
+        candidates: &candidates,
+    };
+    let mut mark = |resolved: &str| {
+        for tracked in call.tracked {
+            let tracked = tracked.trim();
+            if !tracked.is_empty() && path::targets_path(resolved, tracked) {
+                touched.0.insert(tracked.to_owned());
+            }
+        }
+    };
+    let mut source = Source {
+        original: Some(original),
+        before_strip,
+        value: None,
+    };
+
+    // Defaults: the first write of a path wins, across both kinds.
+    let mut applied = HashSet::new();
+    for rule in rules.default.iter().chain(&rules.default_raw) {
+        if !matchers::rules_match(&rule.models, &context, body) {
+            continue;
+        }
+        for (path, value) in &rule.params {
+            let full = path::build_path(call.root, path);
+            if full.is_empty() {
+                continue;
+            }
+            for resolved in path::resolve(body, &full) {
+                if source.has(body, &resolved) || applied.contains(&resolved) {
+                    continue;
+                }
+                if sjson::set(body, &resolved, value).is_err() {
+                    continue;
+                }
+                mark(&resolved);
+                applied.insert(resolved);
+            }
+        }
+    }
+
+    // Overrides: the last write of a path wins.
+    for rule in rules.overrides.iter().chain(&rules.override_raw) {
+        if !matchers::rules_match(&rule.models, &context, body) {
+            continue;
+        }
+        for (path, value) in &rule.params {
+            let full = path::build_path(call.root, path);
+            if full.is_empty() {
+                continue;
+            }
+            for resolved in path::resolve(body, &full) {
+                if sjson::set(body, &resolved, value).is_ok() {
+                    mark(&resolved);
+                }
+            }
+        }
+    }
+
+    // Filters, each path's matches removed from the last.
+    for rule in &rules.filter {
+        if !matchers::rules_match(&rule.models, &context, body) {
+            continue;
+        }
+        for path in &rule.params {
+            let full = path::build_path(call.root, path);
+            if full.is_empty() {
+                continue;
+            }
+            for resolved in path::resolve(body, &full).iter().rev() {
+                if sjson::delete(body, resolved).is_ok() {
+                    mark(resolved);
+                }
+            }
+        }
+    }
+    touched
 }

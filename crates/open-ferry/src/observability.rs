@@ -8,8 +8,8 @@
 //! (cmd/server/main.go) and reload (internal/api/server_reload.go and the
 //! service's config runtime) apply theirs: the main log's output, the
 //! request log, the usage statistics, the log of what a reload changed,
-//! and the cooldown state store. Each subsystem's hook lives in its owner's
-//! module; this one only calls them.
+//! the cooldown state store and the payload rules. Each subsystem's hook
+//! lives in its owner's module; this one only calls them.
 //!
 //! Deviations from upstream: the config is applied once the credentials are
 //! loaded and the rest of the config applied, at start as on a reload, so
@@ -39,9 +39,10 @@ pub fn build(config: &Config, config_path: &Path) -> Observability {
 
 /// Applies `config` to the main log's output `file_log`, to
 /// `observability`'s request logger and usage statistics, and to
-/// `manager`'s cooldown store, and logs what changed since `previous`, the
-/// config before (`None` at start). `management_available` says whether
-/// the management API serves requests, which the usage queue follows.
+/// `manager`'s cooldown store, installs its payload rules for the
+/// executors, and logs what changed since `previous`, the config before
+/// (`None` at start). `management_available` says whether the management
+/// API serves requests, which the usage queue follows.
 pub fn reconfigure(
     observability: &Observability,
     file_log: &FileLog,
@@ -58,4 +59,5 @@ pub fn reconfigure(
     }
     cooldown_store::reconfigure(manager, previous, config);
     cooldown_store::restore(manager, config);
+    open_ferry_providers::payload::reconfigure(config);
 }

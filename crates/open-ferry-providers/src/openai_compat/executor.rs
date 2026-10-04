@@ -217,8 +217,6 @@ impl OpenAiCompatExecutor {
             translate_stream,
         );
         self.apply_thinking(&mut body, request, options, &to)?;
-        // P3 WP-D folds this integer pass into `payload::apply`.
-        compat::after_translation(options, &mut body);
         let target = payload::Target {
             executor: &self.provider,
             protocol: &to,
@@ -226,6 +224,7 @@ impl OpenAiCompatExecutor {
             root: "",
             stream: translate_stream,
             tracked: &[],
+            translate: None,
         };
         payload::apply(Some(&*self.config), &target, request, options, &mut body);
 

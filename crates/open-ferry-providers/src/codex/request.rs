@@ -349,8 +349,8 @@ pub(crate) fn prepare_body(
         context.models,
     )?;
     // Upstream counts tokens without the payload rules. A Codex target
-    // skips the Codex clients' integer pass, which P3 WP-D folds into
-    // `payload::apply`.
+    // skips the Codex clients' integer pass, which `payload::apply` runs
+    // for the other executors.
     if kind != Kind::CountTokens {
         let target = payload::Target {
             executor: "codex",
@@ -359,6 +359,9 @@ pub(crate) fn prepare_body(
             root: "",
             stream,
             tracked: &[],
+            translate: Some(&|payload| {
+                compat::translate(kind, context, request, options, &to, stream, payload)
+            }),
         };
         payload::apply(context.config, &target, request, options, &mut body);
     }

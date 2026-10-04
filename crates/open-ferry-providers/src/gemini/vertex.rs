@@ -56,7 +56,6 @@ use super::{
     translate_answer, translate_count, translate_request, translate_stream, turns,
 };
 use crate::codex::client::Clients;
-use crate::codex::compat;
 use crate::codex::request::{base_model, set_string_if_different};
 use crate::codex::terminal::StatusError;
 use crate::json;
@@ -154,8 +153,6 @@ impl VertexExecutor {
             self.models(),
             PROVIDER,
         )?;
-        // P3 WP-D folds this integer pass into `payload::apply`.
-        compat::after_translation(options, &mut body);
         let target = payload::Target {
             executor: PROVIDER,
             protocol: &Format::GEMINI,
@@ -163,6 +160,7 @@ impl VertexExecutor {
             root: "",
             stream,
             tracked: &[],
+            translate: None,
         };
         payload::apply(self.config.as_deref(), &target, request, options, &mut body);
         set_string_if_different(&mut body, "model", base);

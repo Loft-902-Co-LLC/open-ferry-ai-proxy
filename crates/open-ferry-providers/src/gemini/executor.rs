@@ -37,7 +37,6 @@ use super::{
     thinking, translate_answer, translate_count, translate_request, translate_stream, turns,
 };
 use crate::codex::client::Clients;
-use crate::codex::compat;
 use crate::codex::request::{base_model, set_string_if_different};
 use crate::json;
 use crate::observe_send::Attempt;
@@ -105,8 +104,6 @@ impl GeminiExecutor {
             self.models(),
             PROVIDER,
         )?;
-        // P3 WP-D folds this integer pass into `payload::apply`.
-        compat::after_translation(options, &mut body);
         let target = payload::Target {
             executor: PROVIDER,
             protocol: &Format::GEMINI,
@@ -114,6 +111,7 @@ impl GeminiExecutor {
             root: "",
             stream,
             tracked: &[],
+            translate: None,
         };
         payload::apply(self.config.as_deref(), &target, request, options, &mut body);
         set_string_if_different(&mut body, "model", base);

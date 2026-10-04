@@ -179,8 +179,6 @@ impl ClaudeExecutor {
     ) -> Result<Prepared, ExecError> {
         let config = self.config.as_deref();
         let mut body = translate_request(config, request, options, base_model, upstream_stream)?;
-        // P3 WP-D folds this integer pass into `payload::apply`.
-        compat::after_translation(options, &mut body);
         // Upstream tracks paths only for its cloaking, which isn't ported.
         let target = payload::Target {
             executor: "claude",
@@ -189,6 +187,7 @@ impl ClaudeExecutor {
             root: "",
             stream: upstream_stream,
             tracked: &[],
+            translate: None,
         };
         payload::apply(config, &target, request, options, &mut body);
         ensure_model_max_tokens(&mut body, base_model, self.models.as_deref());

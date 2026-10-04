@@ -153,6 +153,17 @@ pub(super) fn prepare(
         root: "",
         stream: kind == Kind::Stream,
         tracked: &[],
+        translate: Some(&|payload| {
+            compat::translate(
+                kind,
+                context,
+                request,
+                options,
+                &to,
+                kind == Kind::Stream,
+                payload,
+            )
+        }),
     };
     payload::apply(context.config, &target, request, options, &mut body);
     set_string_if_different(&mut body, "model", base);

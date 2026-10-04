@@ -37,7 +37,7 @@
 //! Codex client's own tools get integer parameter types, and a Responses
 //! request has its orphan delegation outputs and, unless it stays in a
 //! Responses format, its `agent_message` items rewritten.
-//! [`after_translation`] gives the tools integer types again in the
+//! [`crate::payload::apply`] gives the tools integer types again in the
 //! translated body of a call or a stream, but not of a token count.
 //!
 //! Deviations from upstream:
@@ -50,9 +50,6 @@
 //!   aren't ported.
 //! - The other executors take the path upstream takes for models that
 //!   aren't compatibility models, as they don't resolve the flag.
-//! - Upstream normalizes the integer types of a Codex client's tools again
-//!   as it applies the payload config; [`after_translation`] is that pass
-//!   alone, which the executors call next to [`crate::payload::apply`].
 //! - The translator plugin hooks aren't ported, so a compatibility
 //!   translation isn't passed to them.
 //! - Upstream v8.0.10 keeps a v8 document's
@@ -522,19 +519,6 @@ pub(crate) fn before_translation(
     if *to != Format::CODEX && *to != Format::OPENAI_RESPONSE {
         let enabled = config.client.codex.optimize_multi_agent_v2;
         multi_agent_v2::rewrite_input(payload, &user_agent, enabled, false);
-    }
-}
-
-/// Declares a Codex client's whole-number tool parameters `integer` again in
-/// the body another executor translated for a call or a stream, as upstream
-/// does when it applies the payload config
-/// (`ApplyPayloadConfigWithTrackedPathsForExecutor` for a target that isn't
-/// Codex): translation can move a tool's parameters to where the pass before
-/// it didn't look, such as out of a root `anyOf`.
-pub(crate) fn after_translation(options: &Options, body: &mut Value) {
-    let user_agent = header(&options.headers, header::USER_AGENT.as_str());
-    if tool_integers::normalize(body, &user_agent) {
-        tracing::debug!("codex: normalized target tool number types to integer");
     }
 }
 
