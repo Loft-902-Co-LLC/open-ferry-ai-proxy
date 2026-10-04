@@ -94,7 +94,6 @@ pub const OPENAI_IMAGE_MODEL_TYPE: &str = "openai-image";
 /// their own cases in [`auth_models_with`], which apply once a provider's
 /// executor is ported and its name leaves this list.
 const UNPORTED_PROVIDERS: &[&str] = &[
-    "gemini-interactions",
     "aistudio",
     "antigravity",
     "kimi",

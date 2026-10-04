@@ -552,7 +552,7 @@ fn register_models_for_auth_meta_oauth_alias_and_excluded_models() {
 // while their providers are unported.
 #[test]
 fn interactions_xai_and_meta_wait_for_their_executors() {
-    for provider in ["gemini-interactions", "xai", "meta"] {
+    for provider in ["xai", "meta"] {
         assert!(UNPORTED_PROVIDERS.contains(&provider), "{provider}");
         let credential = auth(&format!("{provider}-key"), provider, &[("api_key", "k")]);
         assert_eq!(

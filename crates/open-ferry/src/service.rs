@@ -54,12 +54,12 @@
 //! saves those it changes itself, as after a refresh.
 //!
 //! Deviations from upstream:
-//! - Only the Codex, Claude, Gemini, Vertex AI and OpenAI-compatible
+//! - Only the Codex, Claude, Gemini, Gemini Interactions, Vertex AI and OpenAI-compatible
 //!   executors are registered, the native ones at start rather than as
 //!   their first credential comes. Upstream gives a credential of a provider
-//!   it has no executor for (such as `gemini-cli`, `aistudio` or
-//!   `gemini-interactions`) an OpenAI-compatible executor keyed by that
-//!   provider; here such a credential has no executor, and isn't served.
+//!   it has no executor for (such as `gemini-cli` or `aistudio`) an
+//!   OpenAI-compatible executor keyed by that provider; here such a
+//!   credential has no executor, and isn't served.
 //! - Executors are made again on a reload only when a setting they use
 //!   changed (for the native ones `proxy-url` or
 //!   `claude.model-level-cooling`, and for the OpenAI-compatible ones
@@ -115,7 +115,7 @@ use open_ferry_management::{
 };
 use open_ferry_providers::claude::ClaudeExecutor;
 use open_ferry_providers::codex::CodexExecutor;
-use open_ferry_providers::gemini::{GeminiExecutor, VertexExecutor};
+use open_ferry_providers::gemini::{GeminiExecutor, InteractionsExecutor, VertexExecutor};
 use open_ferry_providers::openai_compat::OpenAiCompatExecutor;
 use open_ferry_server::{AppState, ServerConfig, router_with};
 use tokio::net::TcpListener;
@@ -470,7 +470,7 @@ impl Service {
         self.register_compat_executors();
     }
 
-    /// Registers the Codex, Claude, Gemini and Vertex AI executors for the
+    /// Registers the Codex, Claude, Gemini, Gemini Interactions and Vertex AI executors for the
     /// current config.
     fn register_native_executors(&self) {
         let proxy_url = self.config.proxy_url.clone();
@@ -483,6 +483,11 @@ impl Service {
         ));
         self.manager.register_executor(Arc::new(
             GeminiExecutor::new(proxy_url.clone())
+                .with_config(Arc::clone(&self.config))
+                .with_models(Arc::clone(&self.registry) as _),
+        ));
+        self.manager.register_executor(Arc::new(
+            InteractionsExecutor::new(proxy_url.clone())
                 .with_config(Arc::clone(&self.config))
                 .with_models(Arc::clone(&self.registry) as _),
         ));
@@ -1843,7 +1848,7 @@ mod tests {
 
     /// Ports `TestRegisterAvailableExecutors` of CLIProxyAPI
     /// sdk/cliproxy/service_executor_registration_test.go (v8.0.10, MIT)
-    /// for the executors ported: Codex, Claude, Gemini, Vertex AI and the
+    /// for the executors ported: Codex, Claude, Gemini, Gemini Interactions, Vertex AI and the
     /// baseline OpenAI-compatible one. The plugin executor and the other
     /// providers' aren't ported.
     #[tokio::test]
@@ -1854,6 +1859,7 @@ mod tests {
             "codex",
             "claude",
             "gemini",
+            "gemini-interactions",
             "vertex",
             "openai-compatibility",
         ] {
