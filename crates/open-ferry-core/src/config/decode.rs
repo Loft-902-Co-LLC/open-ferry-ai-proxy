@@ -49,7 +49,7 @@ use serde::{Deserialize, forward_to_deserialize_any};
 use super::layout::AnyValue;
 use super::yaml::{
     AliasBudget, Kind, Node, Scalar, YamlError, duplicate_key_errors, is_merge, push_type_error,
-    resolve_node, scalar_string, timestamp_json_text, type_error,
+    resolve_node, scalar_string, type_error,
 };
 
 /// The newtype name [`AnyValue`] deserializes with, which [`NodeDe`]
@@ -279,7 +279,7 @@ impl<'a> NodeDe<'a> {
                     Scalar::Int(value) => AnyValue::Int(value),
                     Scalar::Uint(value) => AnyValue::Uint(value),
                     Scalar::Float(value) => AnyValue::Float(value),
-                    Scalar::Timestamp => AnyValue::Time(timestamp_json_text(&self.node.value)),
+                    Scalar::Timestamp(time) => AnyValue::from_timestamp(time),
                     Scalar::Str(value) => AnyValue::Str(value.to_string()),
                 })
             }
@@ -328,7 +328,7 @@ impl<'de> de::Deserializer<'de> for NodeDe<'_> {
             Some(Scalar::Int(value)) => visitor.visit_i64(value),
             Some(Scalar::Uint(value)) => visitor.visit_u64(value),
             Some(Scalar::Float(value)) => visitor.visit_f64(value),
-            Some(Scalar::Timestamp | Scalar::Str(_)) => visitor.visit_string(self.string()?),
+            Some(Scalar::Timestamp(_) | Scalar::Str(_)) => visitor.visit_string(self.string()?),
         }
     }
 
@@ -533,20 +533,19 @@ impl<'de> Visitor<'de> for AnyVisitor {
     fn visit_enum<A: EnumAccess<'de>>(self, data: A) -> Result<AnyValue, A::Error> {
         let (variant, access): (String, _) = data.variant()?;
         match variant.as_str() {
-            TIME => access
-                .newtype_variant()
-                .map(|text| AnyValue::Time(Some(text))),
-            BAD_TIME => access.unit_variant().map(|()| AnyValue::Time(None)),
+            TIME => access.newtype_variant().and_then(|text: String| {
+                AnyValue::time(&text)
+                    .ok_or_else(|| de::Error::custom("internal error: a time that doesn't decode"))
+            }),
             _ => access.unit_variant().map(|()| AnyValue::AnyMap),
         }
     }
 }
 
 /// The enum variants [`AnyDe`] hands over the values serde has no kind
-/// for as: a time's JSON text, a time Go's encoder refuses, and a mapping
-/// with keys that aren't strings.
+/// for as: a time, as a timestamp text that decodes to it again, and a
+/// mapping with keys that aren't strings.
 const TIME: &str = "time";
-const BAD_TIME: &str = "bad-time";
 const ANY_MAP: &str = "any-map";
 
 /// Hands a decoded [`AnyValue`] to a visitor.
@@ -563,8 +562,7 @@ impl<'de> Deserializer<'de> for AnyDe {
             AnyValue::Uint(value) => visitor.visit_u64(value),
             AnyValue::Float(value) => visitor.visit_f64(value),
             AnyValue::Str(value) => visitor.visit_string(value),
-            AnyValue::Time(Some(text)) => visitor.visit_enum(AnyVariant(TIME, text)),
-            AnyValue::Time(None) => visitor.visit_enum(AnyVariant(BAD_TIME, String::new())),
+            AnyValue::Time(_, time) => visitor.visit_enum(AnyVariant(TIME, time.text())),
             AnyValue::AnyMap => visitor.visit_enum(AnyVariant(ANY_MAP, String::new())),
             AnyValue::Seq(items) => visitor.visit_seq(AnyItems(items.into_iter())),
             AnyValue::Map(entries) => visitor.visit_map(AnyEntries {
@@ -894,7 +892,7 @@ mod tests {
                 "value: 2001-12-14
 "
             ),
-            Ok(AnyValue::Time(Some("2001-12-14T00:00:00Z".into())))
+            Ok(AnyValue::time("2001-12-14T00:00:00Z").expect("a timestamp"))
         );
         assert_eq!(
             value(

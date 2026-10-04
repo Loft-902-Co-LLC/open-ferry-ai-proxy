@@ -982,6 +982,45 @@ fn payload_sections() {
     );
 }
 
+// Not upstream's: an unquoted timestamp in a rule's params decodes to a
+// `time.Time`, which upstream's `reflect.DeepEqual` compares by instant and
+// zone. `Z` and `+00:00` write the same JSON but are different zones, as
+// are two offsets 24 hours or more from UTC, which have no JSON text;
+// `+00:00` and `-00:00`, or a date and its midnight in UTC, are the same.
+#[test]
+fn payload_timestamps_compare_by_zone() {
+    let parse = |time: &str| {
+        Config::parse(format!(
+            "payload:\n  default:\n    - models: [{{name: gpt-*}}]\n      params:\n        a: {time}\n"
+        ))
+        .unwrap()
+    };
+    let updated = ["payload.default: updated (1 -> 1 rules)"];
+    for (old, new) in [
+        ("2001-12-14T21:59:43Z", "2001-12-14T21:59:43+00:00"),
+        ("2001-12-14T21:59:43+24:00", "2001-12-14T21:59:43+24:30"),
+        ("2001-12-14T22:59:43+01:00", "2001-12-14T21:59:43Z"),
+        ("2001-12-14", "2001-12-14T00:00:00-00:00"),
+    ] {
+        assert_eq!(
+            build_change_details(&parse(old), &parse(new)),
+            updated,
+            "{old} {new}"
+        );
+    }
+    for (old, new) in [
+        ("2001-12-14T21:59:43+00:00", "2001-12-14T21:59:43-00:00"),
+        ("2001-12-14", "2001-12-14T00:00:00Z"),
+        ("2001-12-14 21:59:43.10", "2001-12-14t21:59:43.1Z"),
+        ("2001-12-14T21:59:43+24:00", "2001-12-14T21:59:43+24:00"),
+    ] {
+        assert!(
+            build_change_details(&parse(old), &parse(new)).is_empty(),
+            "{old} {new}"
+        );
+    }
+}
+
 // Not upstream's: no line shows an API key, the management key, header
 // values or a URL's user information, path or query.
 #[test]

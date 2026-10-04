@@ -851,7 +851,7 @@ pub(crate) enum Scalar {
     Int(i64),
     Uint(u64),
     Float(f64),
-    Timestamp,
+    Timestamp(Timestamp),
     Str(Text),
 }
 
@@ -863,7 +863,7 @@ impl fmt::Debug for Scalar {
             Self::Int(_) => "Int(..)",
             Self::Uint(_) => "Uint(..)",
             Self::Float(_) => "Float(..)",
-            Self::Timestamp => "Timestamp",
+            Self::Timestamp(_) => "Timestamp",
             Self::Str(_) => "Str(..)",
         })
     }
@@ -985,8 +985,10 @@ fn resolve_plain(tag: &str, input: &str) -> (&'static str, Scalar) {
 }
 
 fn resolve_number(tag: &str, input: &str) -> Option<(&'static str, Scalar)> {
-    if (tag.is_empty() || tag == "!!timestamp") && is_timestamp(input) {
-        return Some(("!!timestamp", Scalar::Timestamp));
+    if (tag.is_empty() || tag == "!!timestamp")
+        && let Some(time) = parse_timestamp(input)
+    {
+        return Some(("!!timestamp", Scalar::Timestamp(time)));
     }
     let plain = input.replace('_', "");
     if let Some(int) = parse_int(&plain, 0) {
@@ -1181,9 +1183,13 @@ enum TimestampLayout {
     Date,
 }
 
-/// A timestamp's fields, as Go's `time.Parse` reads them.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-struct Timestamp {
+/// A timestamp's fields, as Go's `time.Parse` reads them. Two are equal
+/// when `reflect.DeepEqual` finds the `time.Time`s equal: the same instant
+/// in the same zone. A `Z`, or no zone at all, gives UTC; a numeric offset,
+/// even `+00:00` or `-00:00`, gives the local zone or a fixed zone with
+/// that offset, which never equals UTC.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Timestamp {
     year: u32,
     month: u32,
     day: u32,
@@ -1191,13 +1197,74 @@ struct Timestamp {
     minute: u32,
     second: u32,
     nanosecond: u32,
-    /// The zone's offset, in seconds east of UTC.
-    offset: i64,
+    /// The numeric zone offset, in seconds east of UTC; `None` for UTC.
+    offset: Option<i64>,
+}
+
+impl Timestamp {
+    /// The time as Go's JSON encoder writes the `time.Time`: RFC 3339, with
+    /// as much of the fraction as isn't trailing zeros, and `Z` for a zero
+    /// offset. `None` when the encoder refuses it, its zone being 24 hours
+    /// or more from UTC.
+    pub(crate) fn json_text(&self) -> Option<String> {
+        let mut out = self.clock_text();
+        let offset = self.offset.unwrap_or(0);
+        if offset == 0 {
+            out.push('Z');
+            return Some(out);
+        }
+        let minutes = offset.unsigned_abs() / 60;
+        let (hours, minutes) = (minutes / 60, minutes % 60);
+        if hours >= 24 {
+            return None;
+        }
+        let sign = if offset < 0 { '-' } else { '+' };
+        let _ = write!(out, "{sign}{hours:02}:{minutes:02}");
+        Some(out)
+    }
+
+    /// A timestamp text [`parse_timestamp`] reads back as this one: `Z`
+    /// for UTC, and the numeric offset otherwise, which may be up to
+    /// `+24:60`.
+    pub(crate) fn text(&self) -> String {
+        let mut out = self.clock_text();
+        let Some(offset) = self.offset else {
+            out.push('Z');
+            return out;
+        };
+        let minutes = offset.unsigned_abs() / 60;
+        let (mut hours, mut minutes) = (minutes / 60, minutes % 60);
+        // 25 hours is the largest offset Go reads, written `24:60`.
+        if hours > 24 {
+            hours -= 1;
+            minutes += 60;
+        }
+        let sign = if offset < 0 { '-' } else { '+' };
+        let _ = write!(out, "{sign}{hours:02}:{minutes:02}");
+        out
+    }
+
+    /// The date and the clock, with as much of the fraction as isn't
+    /// trailing zeros.
+    fn clock_text(&self) -> String {
+        let mut out = String::new();
+        let _ = write!(
+            out,
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+            self.year, self.month, self.day, self.hour, self.minute, self.second
+        );
+        if self.nanosecond != 0 {
+            let fraction = format!("{:09}", self.nanosecond);
+            out.push('.');
+            out.push_str(fraction.trim_end_matches('0'));
+        }
+        out
+    }
 }
 
 /// yaml.v3's `parseTimestamp`, using Go's `time.Parse` rules for its four
 /// layouts.
-fn parse_timestamp(text: &str) -> Option<Timestamp> {
+pub(crate) fn parse_timestamp(text: &str) -> Option<Timestamp> {
     let bytes = text.as_bytes();
     let year_digits = bytes.iter().take_while(|b| b.is_ascii_digit()).count();
     if year_digits != 4 || bytes.get(4) != Some(&b'-') {
@@ -1211,41 +1278,6 @@ fn parse_timestamp(text: &str) -> Option<Timestamp> {
     ]
     .into_iter()
     .find_map(|layout| parse_layout(bytes, layout))
-}
-
-fn is_timestamp(text: &str) -> bool {
-    parse_timestamp(text).is_some()
-}
-
-/// A timestamp as Go's JSON encoder writes the `time.Time` yaml.v3 decodes
-/// it to: RFC 3339, with as much of the fraction as isn't trailing zeros,
-/// and `Z` for UTC. `None` when `text` isn't a timestamp, or when the
-/// encoder refuses it, its zone being 24 hours or more from UTC.
-pub(crate) fn timestamp_json_text(text: &str) -> Option<String> {
-    let time = parse_timestamp(text)?;
-    let mut out = String::new();
-    let _ = write!(
-        out,
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
-        time.year, time.month, time.day, time.hour, time.minute, time.second
-    );
-    if time.nanosecond != 0 {
-        let fraction = format!("{:09}", time.nanosecond);
-        out.push('.');
-        out.push_str(fraction.trim_end_matches('0'));
-    }
-    if time.offset == 0 {
-        out.push('Z');
-        return Some(out);
-    }
-    let minutes = time.offset.unsigned_abs() / 60;
-    let (hours, minutes) = (minutes / 60, minutes % 60);
-    if hours >= 24 {
-        return None;
-    }
-    let sign = if time.offset < 0 { '-' } else { '+' };
-    let _ = write!(out, "{sign}{hours:02}:{minutes:02}");
-    Some(out)
 }
 
 /// Go's `getnum` without the fixed flag: one or two digits.
@@ -1315,11 +1347,11 @@ fn parse_layout(bytes: &[u8], layout: TimestampLayout) -> Option<Timestamp> {
                     return None;
                 }
                 let offset = i64::from(hours * 3600 + minutes * 60);
-                time.offset = if zone.first() == Some(&b'-') {
+                time.offset = Some(if zone.first() == Some(&b'-') {
                     -offset
                 } else {
                     offset
-                };
+                });
                 rest = rest.get(6..)?;
             }
         }
@@ -1590,7 +1622,7 @@ impl Shape {
                     Scalar::Int(value) => format!("i:{value}"),
                     Scalar::Uint(value) => format!("u:{value}"),
                     Scalar::Float(value) => format!("f:{}", value.to_bits()),
-                    Scalar::Timestamp => format!("t:{}", key.value),
+                    Scalar::Timestamp(_) => format!("t:{}", key.value),
                     Scalar::Str(text) => format!("s:{text}"),
                 }))
             }
@@ -1998,7 +2030,8 @@ mod tests {
             ),
             ("2024-01-02T03:04:05", None),
         ] {
-            assert_eq!(timestamp_json_text(input).as_deref(), want, "{input:?}");
+            let text = parse_timestamp(input).and_then(|time| time.json_text());
+            assert_eq!(text.as_deref(), want, "{input:?}");
         }
     }
 

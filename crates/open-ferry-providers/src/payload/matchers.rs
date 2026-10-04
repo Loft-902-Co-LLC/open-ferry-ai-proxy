@@ -98,14 +98,14 @@ pub(super) fn norm_any(value: &AnyValue) -> Option<Norm> {
         AnyValue::Uint(n) => Norm::Num(*n as f64),
         AnyValue::Float(f) if f.is_finite() => Norm::Num(*f),
         AnyValue::Str(s) => Norm::Str(s.clone()),
-        AnyValue::Time(Some(text)) => Norm::Str(text.clone()),
+        AnyValue::Time(Some(text), _) => Norm::Str(text.clone()),
         AnyValue::Seq(items) => Norm::Arr(items.iter().map(norm_any).collect::<Option<_>>()?),
         AnyValue::Map(map) => Norm::Obj(
             map.iter()
                 .map(|(key, value)| Some((key.clone(), norm_any(value)?)))
                 .collect::<Option<_>>()?,
         ),
-        AnyValue::Float(_) | AnyValue::Time(None) | AnyValue::AnyMap => return None,
+        AnyValue::Float(_) | AnyValue::Time(None, _) | AnyValue::AnyMap => return None,
     })
 }
 

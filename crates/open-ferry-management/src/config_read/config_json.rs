@@ -409,12 +409,12 @@ fn payload_model_rule(rule: &PayloadModelRule) -> Json {
 /// `null`.
 fn any_value(value: &AnyValue) -> Json {
     match value {
-        AnyValue::Null | AnyValue::Time(None) | AnyValue::AnyMap => Json::Null,
+        AnyValue::Null | AnyValue::Time(None, _) | AnyValue::AnyMap => Json::Null,
         AnyValue::Bool(b) => Json::Bool(*b),
         AnyValue::Int(n) => Json::Int(*n),
         AnyValue::Uint(n) => Json::Uint(*n),
         AnyValue::Float(f) => Json::Any(Value::from(*f)),
-        AnyValue::Str(s) | AnyValue::Time(Some(s)) => string(s),
+        AnyValue::Str(s) | AnyValue::Time(Some(s), _) => string(s),
         AnyValue::Seq(items) => Json::Array(items.iter().map(any_value).collect()),
         AnyValue::Map(entries) => Json::Map(
             entries

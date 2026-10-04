@@ -655,7 +655,7 @@ fn write_any(out: &mut String, value: &AnyValue) -> Option<()> {
             out.push_str(&json_float(*f));
         }
         AnyValue::Str(s) => write_string(out, s.as_bytes()),
-        AnyValue::Time(Some(text)) => write_string(out, text.as_bytes()),
+        AnyValue::Time(Some(text), _) => write_string(out, text.as_bytes()),
         AnyValue::Seq(items) => {
             out.push('[');
             for (i, item) in items.iter().enumerate() {
@@ -678,7 +678,7 @@ fn write_any(out: &mut String, value: &AnyValue) -> Option<()> {
             }
             out.push('}');
         }
-        AnyValue::AnyMap | AnyValue::Time(None) => return None,
+        AnyValue::AnyMap | AnyValue::Time(None, _) => return None,
     }
     Some(())
 }
@@ -743,8 +743,9 @@ mod tests {
         assert_eq!(write(&AnyValue::Float(f64::INFINITY)), None);
         assert_eq!(write(&AnyValue::Float(f64::NAN)), None);
         assert_eq!(write(&AnyValue::Seq(vec![AnyValue::AnyMap])), None);
-        let time = AnyValue::Time(Some("2002-12-14T00:00:00Z".into()));
+        let time = AnyValue::time("2002-12-14").unwrap();
         assert_eq!(write(&time).as_deref(), Some(r#""2002-12-14T00:00:00Z""#));
-        assert_eq!(write(&AnyValue::Time(None)), None);
+        let refused = AnyValue::time("2002-12-14T00:00:00+24:00").unwrap();
+        assert_eq!(write(&refused), None);
     }
 }

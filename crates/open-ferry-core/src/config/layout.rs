@@ -52,9 +52,9 @@ use super::v8::{
     V8_SHARED_STRUCT_PATHS, flatten_v8, normalize_private_ip_alias,
 };
 use super::yaml::{
-    AliasBudget, Kind, Node, Scalar, Text, delete_yaml_path, expand_merges, find_map_key_index,
-    parse_document, resolve_node, scalar_string, set_yaml_path, timestamp_json_text,
-    write_and_read_back, yaml_path,
+    AliasBudget, Kind, Node, Scalar, Text, Timestamp, delete_yaml_path, expand_merges,
+    find_map_key_index, parse_document, parse_timestamp, resolve_node, scalar_string,
+    set_yaml_path, write_and_read_back, yaml_path,
 };
 use super::{ConfigError, ConfigErrorKind};
 
@@ -416,8 +416,10 @@ pub enum AnyValue {
     Str(String),
     /// A timestamp, which yaml.v3 decodes to a `time.Time`: the RFC 3339
     /// text Go's JSON encoder writes for it, or `None` when the encoder
-    /// refuses it (a zone 24 hours or more from UTC).
-    Time(Option<String>),
+    /// refuses it (a zone 24 hours or more from UTC), and the time itself,
+    /// which two values compare as Go's `reflect.DeepEqual` does. Make one
+    /// with [`AnyValue::time`].
+    Time(Option<String>, YamlTime),
     Seq(Vec<AnyValue>),
     /// A mapping whose keys are all strings, sorted.
     Map(BTreeMap<String, AnyValue>),
@@ -435,7 +437,7 @@ impl fmt::Debug for AnyValue {
             Self::Uint(_) => f.write_str("Uint(..)"),
             Self::Float(_) => f.write_str("Float(..)"),
             Self::Str(_) => f.write_str("Str(..)"),
-            Self::Time(_) => f.write_str("Time(..)"),
+            Self::Time(..) => f.write_str("Time(..)"),
             Self::Seq(items) => f.debug_struct("Seq").field("items", &items.len()).finish(),
             Self::Map(entries) => f
                 .debug_struct("Map")
@@ -443,6 +445,38 @@ impl fmt::Debug for AnyValue {
                 .finish(),
             Self::AnyMap => f.write_str("AnyMap"),
         }
+    }
+}
+
+impl AnyValue {
+    /// The value yaml.v3 decodes the timestamp `text` to, or `None` when
+    /// `text` isn't one.
+    pub fn time(text: &str) -> Option<Self> {
+        parse_timestamp(text).map(Self::from_timestamp)
+    }
+
+    pub(crate) fn from_timestamp(time: Timestamp) -> Self {
+        Self::Time(time.json_text(), YamlTime(time))
+    }
+}
+
+/// The `time.Time` yaml.v3 decodes a timestamp to, as `reflect.DeepEqual`
+/// compares it: two are equal when they are the same instant in the same
+/// zone, where `Z` and no zone are UTC, and a numeric offset, even
+/// `+00:00`, isn't. Its `Debug` doesn't show the time.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct YamlTime(Timestamp);
+
+impl YamlTime {
+    /// A timestamp text that decodes to this time again.
+    pub(crate) fn text(&self) -> String {
+        self.0.text()
+    }
+}
+
+impl fmt::Debug for YamlTime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("YamlTime(..)")
     }
 }
 
@@ -758,7 +792,7 @@ fn decode_scalar(node: &Node, budget: &AliasBudget) -> Result<AnyValue, String> 
         Scalar::Int(value) => AnyValue::Int(value),
         Scalar::Uint(value) => AnyValue::Uint(value),
         Scalar::Float(value) => AnyValue::Float(value),
-        Scalar::Timestamp => AnyValue::Time(timestamp_json_text(&node.value)),
+        Scalar::Timestamp(time) => AnyValue::from_timestamp(time),
         Scalar::Str(value) => AnyValue::Str(value.to_string()),
     })
 }
@@ -829,6 +863,61 @@ mod tests {
 
     fn text(value: &str) -> AnyValue {
         AnyValue::Str(value.to_owned())
+    }
+
+    fn time(value: &str) -> AnyValue {
+        AnyValue::time(value).expect("a timestamp")
+    }
+
+    /// Not upstream's: a time compares as Go's `reflect.DeepEqual`
+    /// compares the `time.Time` yaml.v3 decodes it to: the same instant in
+    /// the same zone, where `Z` and no zone are UTC and a numeric offset,
+    /// even a zero one, isn't. The JSON text alone doesn't tell them apart.
+    #[test]
+    fn times_compare_by_instant_and_zone() {
+        let same = [
+            ("2001-12-14", "2001-12-14T00:00:00Z"),
+            ("2001-12-14 21:59:43.10", "2001-12-14T21:59:43.1Z"),
+            ("2001-12-14T21:59:43+00:00", "2001-12-14T21:59:43-00:00"),
+            (
+                "2001-12-14t21:59:43.10-05:00",
+                "2001-12-14T21:59:43.1-05:00",
+            ),
+            ("2001-12-14T21:59:43+01:60", "2001-12-14T21:59:43+02:00"),
+        ];
+        for (a, b) in same {
+            assert_eq!(time(a), time(b), "{a} {b}");
+        }
+        // The text a time is handed on as decodes to it again.
+        for input in [
+            "2001-12-14",
+            "2001-12-14T21:59:43.000000001+00:00",
+            "2001-12-14T21:59:43-24:60",
+            "2001-12-14T21:59:43+24:59",
+        ] {
+            let AnyValue::Time(_, yaml_time) = time(input) else {
+                unreachable!()
+            };
+            assert_eq!(time(&yaml_time.text()), time(input), "{input}");
+        }
+        let different = [
+            ("2001-12-14T21:59:43Z", "2001-12-14T21:59:43+00:00"),
+            ("2001-12-14", "2001-12-14T00:00:00-00:00"),
+            ("2001-12-14T22:59:43+01:00", "2001-12-14T21:59:43Z"),
+            ("2001-12-14T21:59:43+24:00", "2001-12-14T21:59:43+24:30"),
+        ];
+        for (a, b) in different {
+            assert_ne!(time(a), time(b), "{a} {b}");
+        }
+        let AnyValue::Time(text, _) = time("2001-12-14T21:59:43+00:00") else {
+            unreachable!()
+        };
+        assert_eq!(text.as_deref(), Some("2001-12-14T21:59:43Z"));
+        let AnyValue::Time(text, _) = time("2001-12-14T21:59:43+24:00") else {
+            unreachable!()
+        };
+        assert_eq!(text, None);
+        assert_eq!(AnyValue::time("2001-12-14T21:59:43"), None);
     }
 
     /// Not upstream's: the struct table matches the paths it was generated
@@ -1059,7 +1148,7 @@ mod tests {
         assert_eq!(
             get(&document, "plugins/configs"),
             Some(map(&[
-                ("a", AnyValue::Time(Some("2024-01-02T00:00:00Z".to_owned()))),
+                ("a", time("2024-01-02T00:00:00Z")),
                 ("b", AnyValue::Uint(9_999_999_999_999_999_999)),
                 ("c", AnyValue::Float(1.5)),
                 ("d", AnyValue::Null),
@@ -1103,12 +1192,12 @@ mod tests {
         );
         assert_eq!(
             get(&document, "plugins/configs/block"),
-            Some(AnyValue::Time(Some("2024-01-02T03:04:05Z".to_owned())))
+            Some(time("2024-01-02T03:04:05Z"))
         );
         assert_eq!(
             get(&document, "plugins/configs/seq"),
             Some(AnyValue::Seq(vec![
-                AnyValue::Time(Some("2002-12-14T00:00:00Z".to_owned())),
+                time("2002-12-14T00:00:00Z"),
                 text("a:b"),
             ]))
         );

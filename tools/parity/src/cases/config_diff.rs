@@ -11,6 +11,17 @@ fn case(name: &str, old: &str, new: &str) -> Case {
     Case::new(name, "", "").with_options(json!({ "old": old, "new": new }))
 }
 
+/// A case whose configs differ only in a payload param's unquoted
+/// timestamp.
+fn timestamp_case(name: &str, old: &str, new: &str) -> Case {
+    let config = |time: &str| {
+        format!(
+            "payload:\n  default:\n    - models:\n        - name: \"gpt-*\"\n      params:\n        \"a\": {time}\n"
+        )
+    };
+    case(name, &config(old), &config(new))
+}
+
 /// A config with every typed section set, for the no-change case and as a
 /// base for others.
 const FULL: &str = r#"port: 8317
@@ -296,6 +307,51 @@ routing:
         "b": "two"
         "a": 1
 "#,
+        ),
+        // An unquoted timestamp is a time.Time, which Go compares by its
+        // instant and zone: `Z` and `+00:00` are different zones, though
+        // their JSON is the same, as are two offsets of 24 hours or more,
+        // which have no JSON; `+00:00` and `-00:00` are the same zone, and
+        // a date alone is its midnight in UTC.
+        timestamp_case(
+            "timestamp-utc-and-zero-offset",
+            "2001-12-14T21:59:43Z",
+            "2001-12-14T21:59:43+00:00",
+        ),
+        timestamp_case(
+            "timestamp-plus-and-minus-zero",
+            "2001-12-14T21:59:43+00:00",
+            "2001-12-14T21:59:43-00:00",
+        ),
+        timestamp_case(
+            "timestamp-date-and-midnight",
+            "2001-12-14",
+            "2001-12-14T00:00:00Z",
+        ),
+        timestamp_case(
+            "timestamp-spaced-and-utc",
+            "2001-12-14 21:59:43.10",
+            "2001-12-14t21:59:43.1Z",
+        ),
+        timestamp_case(
+            "timestamp-same-instant-other-zone",
+            "2001-12-14T22:59:43+01:00",
+            "2001-12-14T21:59:43Z",
+        ),
+        timestamp_case(
+            "timestamp-same-offset-other-text",
+            "2001-12-14t21:59:43.10-05:00",
+            "2001-12-14T21:59:43.1-05:00",
+        ),
+        timestamp_case(
+            "timestamp-offsets-past-a-day",
+            "2001-12-14T21:59:43+24:00",
+            "2001-12-14T21:59:43+24:30",
+        ),
+        timestamp_case(
+            "timestamp-offset-past-a-day-same",
+            "2001-12-14T21:59:43+24:00",
+            "2001-12-14T21:59:43+23:60",
         ),
         case(
             "payload-sections",

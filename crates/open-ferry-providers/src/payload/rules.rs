@@ -265,7 +265,7 @@ fn marshal(value: &AnyValue) -> Result<Value, ()> {
         AnyValue::Int(n) => Ok(Value::Number((*n).into())),
         AnyValue::Uint(n) => Ok(Value::Number((*n).into())),
         AnyValue::Float(f) if f.is_finite() => Ok(number(&json_float(*f))),
-        AnyValue::Str(s) | AnyValue::Time(Some(s)) => Ok(Value::String(s.clone())),
+        AnyValue::Str(s) | AnyValue::Time(Some(s), _) => Ok(Value::String(s.clone())),
         AnyValue::Seq(items) => items
             .iter()
             .map(marshal)
@@ -276,6 +276,6 @@ fn marshal(value: &AnyValue) -> Result<Value, ()> {
             .map(|(key, value)| Ok((key.clone(), marshal(value)?)))
             .collect::<Result<Map<_, _>, ()>>()
             .map(Value::Object),
-        AnyValue::Float(_) | AnyValue::Time(None) | AnyValue::AnyMap => Err(()),
+        AnyValue::Float(_) | AnyValue::Time(None, _) | AnyValue::AnyMap => Err(()),
     }
 }

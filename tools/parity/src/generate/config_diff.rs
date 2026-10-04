@@ -4,7 +4,10 @@
 //! of a key entry or OAuth channels changed or removed. Values aim at the
 //! diff's corners: padded and differently cased names that normalize to the
 //! same entry, URLs with user information, paths and odd hosts, values
-//! parsing clamps, raw payload JSON, and model lists in another order.
+//! parsing clamps, raw payload JSON, and model lists in another order. One
+//! case in ten or so has payloads alike but for an unquoted timestamp,
+//! which yaml.v3 decodes to a `time.Time` that Go compares by its instant
+//! and zone.
 //!
 //! What the generator avoids, as Go and open-ferry can't agree on it or Go
 //! doesn't agree with itself:
@@ -155,6 +158,27 @@ const IMAGE_GENERATION: &[&str] = &[
 
 const RAW_JSON: &[&str] = &["{}", "[1, 2]", "{\"a\": 1}", " true ", "\"text\"", "null"];
 
+/// Timestamps, written unquoted so yaml.v3 decodes them to a `time.Time`:
+/// the same instant in UTC (`Z`, no zone, a date alone) and with a zero or
+/// another numeric offset, and offsets 24 hours or more from UTC.
+const TIMESTAMPS: &[&str] = &[
+    "2001-12-14T21:59:43Z",
+    "2001-12-14T21:59:43+00:00",
+    "2001-12-14T21:59:43-00:00",
+    "2001-12-14t21:59:43.10-05:00",
+    "2001-12-14T16:59:43.1-05:00",
+    "2001-12-14 21:59:43.10",
+    "2001-12-14T21:59:43.1Z",
+    "2001-12-14",
+    "2001-12-14T00:00:00Z",
+    "2001-12-14T22:59:43+01:00",
+    "2001-12-14T21:59:43+24:00",
+    "2001-12-14T21:59:43+23:60",
+];
+
+/// Marks a string the YAML writer writes as it is, unquoted.
+const UNQUOTED: &str = "\x00unquoted:";
+
 /// The top-level keys the generator sets.
 const SECTIONS: &[&str] = &[
     "port",
@@ -210,8 +234,13 @@ pub fn detail_cases(seed: u64, count: usize) -> Vec<Case> {
             let mut generator = Configs {
                 rng: Generator::new(seed, index).rng,
             };
-            let old = generator.config();
-            let new = generator.changed(&old);
+            let mut old = generator.config();
+            let mut new = generator.changed(&old);
+            if generator.rng.below(10) == 0 {
+                let (old_payload, new_payload) = generator.timestamp_payloads();
+                old.insert("payload".to_owned(), old_payload);
+                new.insert("payload".to_owned(), new_payload);
+            }
             Case::new(format!("random-{seed}-{index}"), "", "").with_options(json!({
                 "old": yaml(&old),
                 "new": yaml(&new),
@@ -575,6 +604,33 @@ impl Configs {
         Value::Object(payload)
     }
 
+    /// Two payloads alike but for one param's unquoted timestamp, which may
+    /// be the same time or not, in the same zone or not.
+    fn timestamp_payloads(&mut self) -> (Value, Value) {
+        let section = self
+            .rng
+            .pick(&["default", "default-raw", "override", "override-raw"]);
+        let models = self.model_rules();
+        let path = self.rng.pick(PARAM_PATHS);
+        let old = self.rng.pick(TIMESTAMPS);
+        let new = if self.rng.chance(25) {
+            old
+        } else {
+            self.rng.pick(TIMESTAMPS)
+        };
+        let payload = |time: &str| {
+            let mut params = Map::new();
+            params.insert(path.to_owned(), json!(format!("{UNQUOTED}{time}")));
+            let mut payload = Map::new();
+            payload.insert(
+                section.to_owned(),
+                json!([{ "models": models.clone(), "params": params }]),
+            );
+            Value::Object(payload)
+        };
+        (payload(old), payload(new))
+    }
+
     fn model_rules(&mut self) -> Value {
         self.list(2, |generator| {
             let mut rule = json!({ "name": generator.rng.pick(MODEL_RULE_NAMES) });
@@ -661,7 +717,8 @@ impl Configs {
     }
 }
 
-/// `config` as block YAML, every string double-quoted.
+/// `config` as block YAML, every string double-quoted but the ones marked
+/// [`UNQUOTED`].
 fn yaml(config: &Map<String, Value>) -> String {
     let mut out = String::new();
     write_mapping(&mut out, config, 0, None);
@@ -724,11 +781,15 @@ fn write_value(out: &mut String, value: &Value, indent: usize) {
 }
 
 /// A scalar as YAML: strings double-quoted with control characters
-/// escaped, everything else as JSON writes it.
+/// escaped, unless marked [`UNQUOTED`], and everything else as JSON writes
+/// it.
 fn scalar(value: &Value) -> String {
     let Value::String(text) = value else {
         return value.to_string();
     };
+    if let Some(text) = text.strip_prefix(UNQUOTED) {
+        return text.to_owned();
+    }
     let mut out = String::from("\"");
     for ch in text.chars() {
         match ch {
@@ -761,13 +822,26 @@ mod tests {
             yaml(&config),
             "\"a\":\n  \"b\":\n    - \"c\": 1\n      \"d\":\n        - \"x\"\n        - \"y\\\"\\u000a\"\n    - \"plain\"\n\"e\": true\n"
         );
+        let mut config = Map::new();
+        config.insert("t".to_owned(), json!(format!("{UNQUOTED}2001-12-14")));
+        assert_eq!(yaml(&config), "\"t\": 2001-12-14\n");
     }
 
     /// The generated configs parse, and most pairs differ in something the
     /// diff reports, so the suite compares lines rather than empty lists.
+    /// Some have unquoted timestamps.
     #[test]
     fn cases_parse_and_mostly_change() {
         let cases = detail_cases(13, 300);
+        let timestamps = cases
+            .iter()
+            .filter(|case| {
+                case.options["old"]
+                    .as_str()
+                    .is_some_and(|old| old.contains(": 2001-12-14"))
+            })
+            .count();
+        assert!(timestamps >= 15, "{timestamps}");
         let mut changed = 0;
         for case in &cases {
             let details = crate::config_diff::details(case).unwrap();

@@ -84,7 +84,7 @@ use std::fmt;
 
 pub(crate) use duration::parse_go_duration;
 pub use image_generation::DisableImageGeneration;
-pub use layout::{AnyValue, V8Document};
+pub use layout::{AnyValue, V8Document, YamlTime};
 pub use payload::{PayloadConfig, PayloadFilterRule, PayloadModelRule, PayloadRule};
 pub use safe_mode::example_api_key_warning_page;
 pub use types::{
