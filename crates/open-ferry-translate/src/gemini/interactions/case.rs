@@ -20,6 +20,10 @@
 //! - A digit key that would pad an array with more than 65,535 nulls, or index
 //!   into an array it doesn't reach, is left out. Upstream runs out of memory or
 //!   panics.
+//! - A key with a character other than ASCII just after an `_` is written once,
+//!   with all its leaves. Upstream's camelCase cuts that character in two, so
+//!   sjson never finds the key it wrote and writes it again for each leaf: a
+//!   reader that keeps the last duplicate gets only the last leaf.
 
 use serde_json::{Map, Value};
 
