@@ -162,6 +162,9 @@ pub struct InteractionsToOpenAIResponsesStream {
     pub(super) pending_identity_errors: BTreeMap<i64, ToolInputError>,
     pub(super) item_identity_indexes: HashMap<String, i64>,
     pub(super) call_identity_indexes: HashMap<String, i64>,
+    /// Whether a chunk has been given. Upstream's state only exists from
+    /// the first, so before it there is nothing to finalize.
+    pub(super) given_chunk: bool,
 }
 
 impl InteractionsToOpenAIResponsesStream {
@@ -194,6 +197,7 @@ impl InteractionsToOpenAIResponsesStream {
             pending_identity_errors: BTreeMap::new(),
             item_identity_indexes: HashMap::new(),
             call_identity_indexes: HashMap::new(),
+            given_chunk: false,
         }
     }
 
@@ -201,14 +205,17 @@ impl InteractionsToOpenAIResponsesStream {
     /// `data:` line, into the Responses events it gives, as SSE text. The
     /// end of the stream gives `data: [DONE]`, with no line break after it.
     pub fn translate(&mut self, chunk: &[u8]) -> String {
+        self.given_chunk = true;
         self.event(chunk).concat()
     }
 
     /// `FinalizeToolInput`: call when the Interactions stream ends. If the
     /// client declared `apply_patch` and the response never completed or
     /// failed, returns `response.failed`, since a patch may be cut short.
+    /// Returns `""` if no chunk was given at all, as upstream has no state
+    /// to finalize then.
     pub fn finalize_tool_input(&mut self) -> String {
-        if self.error.is_some() || self.terminal || !self.patch_bridge {
+        if !self.given_chunk || self.error.is_some() || self.terminal || !self.patch_bridge {
             return String::new();
         }
         self.error = Some(UNTERMINATED);

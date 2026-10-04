@@ -1373,3 +1373,36 @@ fn whole_response_patch_failure_says_why() {
         .is_none()
     );
 }
+
+// Not upstream's: FinalizeToolInput fails a stream for an `apply_patch`
+// client that never completed, and only that one; with no chunk given there
+// is nothing to finalize, as upstream has no state then.
+#[test]
+fn finalize_tool_input_fails_only_an_unfinished_patch_stream() {
+    let created = r#"data: {"event_type":"interaction.created","interaction":{"id":"i1"}}"#;
+    let completed = r#"data: {"event_type":"interaction.completed","interaction":{"id":"i1","status":"completed"}}"#;
+
+    let mut stream = patch_stream();
+    assert_eq!(stream.finalize_tool_input(), "");
+    assert!(stream.tool_input_error().is_none());
+
+    let mut stream = patch_stream();
+    send(&mut stream, created);
+    let failed = events(&stream.finalize_tool_input());
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(kind(&failed[0]), "response.failed");
+    assert_eq!(s(&failed[0], "response.id"), "i1");
+    assert!(stream.tool_input_error().is_some());
+    assert_eq!(stream.finalize_tool_input(), "");
+
+    let mut stream = patch_stream();
+    send(&mut stream, created);
+    send(&mut stream, completed);
+    assert_eq!(stream.finalize_tool_input(), "");
+    assert!(stream.tool_input_error().is_none());
+
+    let mut stream = stream_for("{}");
+    send(&mut stream, created);
+    assert_eq!(stream.finalize_tool_input(), "");
+    assert!(stream.tool_input_error().is_none());
+}
