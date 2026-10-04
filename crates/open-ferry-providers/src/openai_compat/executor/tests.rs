@@ -1568,3 +1568,147 @@ async fn errors_hide_every_secret_sent() {
         }
     }
 }
+
+/// A key a model could echo back: longer than the eight bytes under which a
+/// secret isn't redacted from what a client gets.
+const ECHOED_KEY: &str = "compat-dummy-key-0123456789";
+
+/// A credential with [`ECHOED_KEY`] as its API key.
+fn echoed_key_auth(base_url: &str) -> Arc<Auth> {
+    let mut auth = (*plain_auth(base_url)).clone();
+    auth.attributes.insert("api_key".into(), ECHOED_KEY.into());
+    Arc::new(auth)
+}
+
+/// A chat stream that has the model say `text`, then ends.
+fn chat_stream_saying(text: &str) -> String {
+    format!(
+        "data: {{\"id\":\"chatcmpl_1\",\"object\":\"chat.completion.chunk\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{text}\"}},\"finish_reason\":null}}]}}\n\ndata: [DONE]\n\n"
+    )
+}
+
+// Not upstream's: a 2xx answer that quotes the key, as a model can echo it
+// back or a provider can put it in an `error` object it answers 200 with,
+// reaches the client with the key redacted: whole, before it is translated,
+// for a chat completion, for a stream read for a translation and for a
+// compact answer.
+#[tokio::test]
+async fn a_successful_answer_that_echoes_the_key_hides_it() {
+    let compact = format!(
+        r#"{{"id":"resp_1","object":"response.compaction","echo":"{ECHOED_KEY}","usage":{{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}}"#
+    );
+    let error = format!(r#"{{"error":{{"message":"bad key {ECHOED_KEY}","type":"auth"}}}}"#);
+    for (name, reply, options) in [
+        (
+            "a completion",
+            Reply::json(&CHAT_ANSWER.replace("\"ok\"", &format!("\"key {ECHOED_KEY}\""))),
+            options(&Format::OPENAI),
+        ),
+        (
+            "an error object",
+            Reply::json(&error),
+            options(&Format::OPENAI),
+        ),
+        (
+            "a stream read for a translation",
+            Reply::sse(&chat_stream_saying(&format!("key {ECHOED_KEY}"))),
+            options(&Format::OPENAI),
+        ),
+        (
+            "a compact answer",
+            Reply::json(&compact),
+            Options {
+                alt: COMPACT_ALT.into(),
+                ..options(&Format::OPENAI_RESPONSE)
+            },
+        ),
+    ] {
+        let mock = Mock::start(reply).await;
+        let response = executor(vec![entry("compat", true)])
+            .execute(
+                echoed_key_auth(&mock.base_url()),
+                request("m", "{}"),
+                options,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+        let shown = String::from_utf8_lossy(&response.payload);
+        assert!(!shown.contains(ECHOED_KEY), "{name}: {shown}");
+        assert!(shown.contains("[redacted]"), "{name}: {shown}");
+    }
+}
+
+// Not upstream's: the same for a stream, whose lines are redacted one at a
+// time, for a client of Chat Completions and for one of Responses.
+#[tokio::test]
+async fn a_stream_that_echoes_the_key_hides_it() {
+    for (name, options) in [
+        ("a chat client", stream_options(&Format::OPENAI)),
+        (
+            "a responses client",
+            responses_stream_options(RESPONSES_REQUEST),
+        ),
+    ] {
+        let mock = Mock::start(Reply::sse(&chat_stream_saying(&format!(
+            "key {ECHOED_KEY}"
+        ))))
+        .await;
+        let response = executor(Vec::new())
+            .execute_stream(
+                echoed_key_auth(&mock.base_url()),
+                request("deepseek-v4-flash", RESPONSES_REQUEST),
+                options,
+            )
+            .await
+            .unwrap();
+        let (chunks, error) = collect(response).await;
+        let joined = chunks.concat();
+        assert!(error.is_none(), "{name}: {error:?}");
+        assert!(!joined.contains(ECHOED_KEY), "{name}: {joined}");
+        assert!(joined.contains("[redacted]"), "{name}: {joined}");
+    }
+}
+
+// Not upstream's: the redaction is of what the client gets; the taps, which
+// write to disk with their own redaction, read the provider's answer as it
+// came, for a call that isn't streamed and for a stream.
+#[tokio::test]
+async fn the_taps_see_the_answer_as_it_came() {
+    for stream in [false, true] {
+        let reply = if stream {
+            Reply::sse(&chat_stream_saying(&format!("key {ECHOED_KEY}")))
+        } else {
+            Reply::json(&CHAT_ANSWER.replace("\"ok\"", &format!("\"key {ECHOED_KEY}\"")))
+        };
+        let mock = Mock::start(reply).await;
+        let (observation, raw) = crate::secret_echo::Raw::observe();
+        let options = Options {
+            observation: Some(observation),
+            stream,
+            ..options(&Format::OPENAI)
+        };
+        let shown = if stream {
+            let response = executor(Vec::new())
+                .execute_stream(
+                    echoed_key_auth(&mock.base_url()),
+                    request("m", "{}"),
+                    options,
+                )
+                .await
+                .unwrap();
+            collect(response).await.0.concat()
+        } else {
+            let response = executor(Vec::new())
+                .execute(
+                    echoed_key_auth(&mock.base_url()),
+                    request("m", "{}"),
+                    options,
+                )
+                .await
+                .unwrap();
+            String::from_utf8_lossy(&response.payload).into_owned()
+        };
+        assert!(!shown.contains(ECHOED_KEY), "{shown}");
+        assert!(raw.seen().contains(ECHOED_KEY), "{}", raw.seen());
+    }
+}

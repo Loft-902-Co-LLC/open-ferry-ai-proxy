@@ -29,10 +29,14 @@
 //!   no fields; see [`super::status`].
 //! - A frame's data, joined, may hold at most 50 MiB, as one line may; a
 //!   bigger frame ends the stream with a 502. Upstream holds any amount.
-//! - An error that quotes a secret the request sent has it redacted if it is
-//!   of eight bytes or more, as every client error is; see
-//!   [`crate::redact`] and its `Policy::Client`.
+//! - Each line has the secrets the request sent redacted before it is read,
+//!   if they are of eight bytes or more, as every client error is; see
+//!   [`crate::redact`] and its `Policy::Client`. So an error that quotes
+//!   one, and what a model echoes back in its output, which upstream passes
+//!   on as it is, reach the client without it. The call's taps see each line
+//!   as the provider sent it.
 
+use std::borrow::Cow;
 use std::collections::VecDeque;
 
 use bytes::Bytes;
@@ -46,6 +50,7 @@ use crate::codex::claude_tokens;
 use crate::codex::stream::{LineError, LineReader, MAX_LINE};
 use crate::codex::terminal::{APPLY_PATCH_ERROR_MESSAGE, StatusError};
 use crate::codex::usage::ensure_responses_usage_details;
+use crate::redact::Policy;
 
 /// The most data a frame may hold, joined: as much as one line may.
 const MAX_FRAME: usize = MAX_LINE;
@@ -64,8 +69,8 @@ pub(crate) struct StreamSetup {
     pub(crate) source_format: Format,
     /// The client's request as it came, for the Claude input estimate.
     pub(crate) original: Bytes,
-    /// The secrets the request sent, redacted from the errors made from the
-    /// provider's events.
+    /// The secrets the request sent, redacted from each line the provider
+    /// sends.
     pub(crate) secrets: crate::redact::Secrets,
 }
 
@@ -126,7 +131,7 @@ impl State {
     /// Reads one line and acts on it.
     async fn step(&mut self) {
         let line = match self.reader.next_line().await {
-            Some(Ok(line)) => line,
+            Some(Ok(line)) => self.redact(line),
             Some(Err(error)) => return self.end(Some(error)).await,
             None => return self.end(None).await,
         };
@@ -160,6 +165,15 @@ impl State {
         } else if trimmed.starts_with(b"{") || trimmed.starts_with(b"[") {
             self.fail_with_payload(StatusError::new(502, String::from_utf8_lossy(trimmed)));
             self.end(None).await;
+        }
+    }
+
+    /// `line` without the secrets the request was sent with, as the client
+    /// gets it: a model can echo one back in its output.
+    fn redact(&self, line: Vec<u8>) -> Vec<u8> {
+        match self.setup.secrets.bytes(&line, Policy::Client) {
+            Cow::Owned(redacted) => redacted,
+            Cow::Borrowed(_) => line,
         }
     }
 

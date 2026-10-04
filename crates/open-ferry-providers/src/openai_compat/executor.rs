@@ -37,13 +37,18 @@
 //!   it is of eight bytes or more, as every client error is (see
 //!   `Policy::Client` in [`crate::redact`]): the credential headers after
 //!   the custom ones, each cookie, the URL's credentials, the proxy's
-//!   password and the credential's key.
+//!   password and the credential's key. So has a successful answer that
+//!   isn't a stream, a compact call's among them, whole, before it is
+//!   translated, as has each line of a stream (see `stream`); a model can
+//!   echo a secret back in its output, which upstream passes on as it is.
+//!   The call's taps see the answer as the provider sent it.
 //! - Usage reporting and request logging are left to the call's taps (see
 //!   the crate's `observe_send` module), and payload rules to
 //!   [`crate::payload`]. The Home service (its credential options and
 //!   refresh) isn't ported.
 //! - See also the module docs of [`super`].
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -366,6 +371,12 @@ impl OpenAiCompatExecutor {
         let data = read_body(response, MAX_LINE)
             .await
             .map_err(|error| ExecError::new(ErrorKind::Upstream, error.to_string()))?;
+        // A model can echo a secret back in its output: the answer is
+        // redacted whole, before it is translated, as for a client.
+        let data = match prepared.secrets.bytes(&data, Policy::Client) {
+            Cow::Owned(redacted) => redacted,
+            Cow::Borrowed(_) => data,
+        };
         let original = original_request(request, options);
         let context = ResponseContext {
             model: &request.model,
