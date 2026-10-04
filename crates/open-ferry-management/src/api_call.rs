@@ -430,7 +430,7 @@ impl CallError {
 
 /// A `reqwest` error and its sources, without the URL, which may hold a
 /// secret.
-fn error_chain(error: &reqwest::Error) -> String {
+pub(crate) fn error_chain(error: &reqwest::Error) -> String {
     let mut text = error.to_string();
     let mut source = std::error::Error::source(error);
     while let Some(cause) = source {
