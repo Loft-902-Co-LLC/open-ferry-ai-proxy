@@ -440,6 +440,12 @@ The Gemini translators use more still:
 - `gemini::common` from `internal/translator/gemini/common/safety.go`: the default safety settings added to Gemini requests.
 - `responses_tools`, the rest of `internal/util/responses_tools.go`: Gemini function declarations for a Responses request's tools, under names Gemini accepts (from `common::gemini`), with maps from the client's names to Gemini's and back, and a Responses `tool_choice` as Gemini's tool config.
 
+The Gemini Interactions translators share these:
+
+- `common::interactions_usage` from `internal/translator/common/interactions_usage.go` (`InteractionsUsage`): where an Interactions response or event keeps its usage: `usage`, or `metadata`'s `total_usage` or `usage`, at the top or under `interaction`.
+- `common::sse` from `SSEEventData` in `internal/translator/common/bytes.go`: a server-sent event frame, for the translators whose stream names each event; the Responses translator for Gemini uses it too. The rest of `bytes.go` is not ported: `JoinRawArray`, `SetRawArrayItems`, `NewRawArrayItems` and the `AppendSSEEvent*` functions only save allocations when building JSON and frames as bytes, and `SetStringWithoutHTMLEscape` writes a string as serde_json always does, without escaping `<`, `>` and `&`.
+- `common::responses::set_tool_call_identity` from `SetResponsesToolCallIdentity` in `internal/translator/common/responses.go`, which the Responses translator for Gemini had kept to itself: a call item's `name` and `namespace`.
+
 The server edits some client JSON in place, as upstream does with gjson and sjson, so that the bytes a client sent go on as they came. Its `json` module (`crates/open-ferry-server/src/json.rs`) ports the parts of gjson v1.18.0 and sjson v1.2.5 that its Responses handlers need (MIT, [licenses/gjson-LICENSE](licenses/gjson-LICENSE) and [licenses/sjson-LICENSE](licenses/sjson-LICENSE)). The WebSocket handshake is checked as gorilla/websocket v1.5.3's `Upgrader` checks it (BSD-2-Clause, [licenses/gorilla-websocket-LICENSE](licenses/gorilla-websocket-LICENSE)).
 
 The management API reads requests and writes answers as gin v1.10.1 and Go's standard library do in upstream, so `open-ferry-management` ports the parts of them it relies on (gin: MIT, [licenses/gin-LICENSE](licenses/gin-LICENSE); Go: BSD-3-Clause, [licenses/Go-LICENSE](licenses/Go-LICENSE)):
