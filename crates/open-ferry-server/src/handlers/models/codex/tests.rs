@@ -31,7 +31,10 @@
 //!
 //! Added: `apply_patch_routing` and `apply_patch_needs_every_provider` also
 //! check that `gemini` and `vertex` take the tool, as upstream's Gemini and
-//! Vertex AI executors say they do.
+//! Vertex AI executors say they do, and `apply_patch_needs_every_provider`
+//! that `gemini-interactions` and `meta` do, as upstream's Gemini
+//! Interactions executor (a Gemini executor) and Meta executor say, while
+//! `xai` doesn't.
 //!
 //! Dropped: `TestCodexClientModelsResponse_DevinDisplayName` and
 //! `TestModelsWithClientVersion_DevinDisplayName`, as Devin isn't ported, and
@@ -713,10 +716,17 @@ fn apply_patch_needs_every_provider() {
         (&["vertex"][..], true),
         (&[custom, "gemini", "vertex"][..], true),
         (&["gemini", "denied"][..], false),
+        // So do Gemini Interactions and Meta, but not xAI.
+        (&["gemini-interactions"][..], true),
+        (&["meta"][..], true),
+        (&[custom, "gemini-interactions", "meta"][..], true),
+        (&["meta", "xai"][..], false),
+        (&["xai"][..], false),
         // How names match.
         (&["codex", "claude", "openai-compatibility"][..], true),
         (&[" Codex ", "CLAUDE", "OpenAI-Compatible-Custom"][..], true),
         (&[" Gemini ", "VERTEX"][..], true),
+        (&[" Gemini-Interactions ", "META"][..], true),
         (&[""][..], false),
         (&["openai-compatible-"][..], false),
         (&["openai"][..], false),

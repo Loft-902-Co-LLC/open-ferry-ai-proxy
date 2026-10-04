@@ -15,8 +15,9 @@
 //!
 //! Deviations from upstream:
 //! - Whether a provider takes the tool goes by its name: `codex`, `claude`,
-//!   `gemini`, `vertex` and the OpenAI-compatible providers
-//!   (`openai-compatibility` and `openai-compatible-<name>`) do, the
+//!   `gemini`, `gemini-interactions`, `vertex`, `meta` and the
+//!   OpenAI-compatible providers (`openai-compatibility` and
+//!   `openai-compatible-<name>`) do, the
 //!   providers whose executors say so upstream and are ported. Upstream asks
 //!   the provider's executor, which would take a new executor method, and
 //!   says no when none is registered; here those executors are registered at
@@ -36,6 +37,7 @@ use open_ferry_core::codex_models::{
 use open_ferry_core::models::ModelCatalog;
 use open_ferry_translate::go;
 
+use crate::entry_protocol::GEMINI_INTERACTIONS;
 use crate::routing;
 use crate::state::AppState;
 
@@ -89,7 +91,8 @@ fn supports_apply_patch_for_providers(providers: &[String]) -> bool {
 fn provider_supports_apply_patch(provider: &str) -> bool {
     let provider = go::to_lower(provider.trim());
     match provider.as_str() {
-        "codex" | "claude" | GEMINI | VERTEX | OPENAI_COMPATIBILITY => true,
+        "codex" | "claude" | GEMINI | GEMINI_INTERACTIONS | VERTEX | "meta"
+        | OPENAI_COMPATIBILITY => true,
         name => name
             .strip_prefix(OPENAI_COMPATIBLE_PREFIX)
             .is_some_and(|rest| !rest.is_empty()),

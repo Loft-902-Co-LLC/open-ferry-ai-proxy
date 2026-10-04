@@ -48,8 +48,9 @@
 //!   to [`crate::payload`].
 //! - Two of upstream's 401s can't happen here and are left out: the base URL
 //!   always has a default, and a call always has a credential.
-//! - Nothing in the server tells `provider_supports_apply_patch` about Meta
-//!   yet; there is no executor hook for upstream's `SupportsApplyPatch`.
+//! - There is no executor hook for upstream's `SupportsApplyPatch`: the
+//!   server's Codex client model list knows by its name that `meta` takes
+//!   the `apply_patch` tool.
 //! - The URL is read as a WHATWG URL, as for Codex (see
 //!   [`crate::codex`]), and one with an ASCII control character before any
 //!   `#` fails before anything is sent.
