@@ -451,7 +451,27 @@ Tests: upstream's `payload_helpers_codex_integer_test.go`, `payload_helpers_disa
 
 ### Saved cooldowns and quota fetches
 
-Not ported yet: saving the credentials' cooldowns to `.cds` files in the auth directory and restoring them at start (`save-cooldown-status`), and `quota/fetch` with a credential's declarative quota probe.
+Ported: the cooldown state store (`open-ferry-core::manager::cooldown_store`, upstream's `FileCooldownStateStore`, `RestoreCooldownStates` and `persistCooldownStates`), and `POST /v0/management/quota/fetch` with a credential's declarative quota probe (`open-ferry-management::quota_fetch`, upstream's `FetchCredentialQuota` and `executeQuotaProbe`).
+
+While `save-cooldown-status` is on, the credentials' cooldowns are saved to `.cds` files beside their auth files, and those that haven't run out are put back when the store is turned on. Where the store differs from upstream:
+
+- **Only the file store is ported**: no token store backend's, Postgres or Home.
+- **Saves are debounced on a background thread**, which writes with the manager's lock released, so picking a credential never waits for the disk; a save that would write what was last written is skipped. Upstream saves on the caller's goroutine after each change to that credential's records. The binary saves once more as it shuts down.
+- **Cooldowns are restored when the store is turned on or moves** to another auth directory, not on every reload, as a reload here keeps the credentials' state. A credential-wide cooldown other than a quota, which a reload's update drops as upstream's does, stays dropped where upstream's next restore puts it back.
+- **Turning the setting off leaves the files as they are**; upstream saves to them once more.
+- **Moving the auth directory loses the saved cooldowns** of the files in both directories: the old directory's credentials are dropped before the store moves, and the new one's arrive after it has restored.
+- **Only `.cds` files are ever made or removed**: temporary files end in `.tmp.cds` (upstream's in `.tmp`), and symbolic links are skipped. On Windows, a rename or removal refused for a moment is tried three more times.
+- **Times are written in UTC**; a record with a time Go can't write is left out, where upstream's save fails; a quota's `observed_at` is the zero time and it has no `signals`.
+
+A credential whose metadata holds a `quota_probe` with a `url` is probed as upstream probes it: its method, data and headers, with `$TOKEN$` replaced by the credential's token, and the answer read from the response by the probe's `mapping` or in the answer's own shape, with its `summary`. Where the fetch differs from upstream:
+
+- **There is no plugin host**, so only the declarative probe answers; `plugin_id` and `provider` are ignored, and without a probe the answer is 501.
+- **The probe never names the client**: a `User-Agent`, `X-App`, `Originator`, session or similar ID, or `X-Stainless-*` header it gives is skipped with a warning, and the user agent is `open-ferry/<version>`. `Accept: */*` is sent, as `api-call` sends it.
+- **The token is never logged or shown**: in a failure's reason, the upstream's body it quotes included, it is written `$TOKEN$`. Tokens are never refreshed or minted, as in `api-call`.
+- **A request and reading its response have a minute**, and a body over 16 MiB fails; upstream's client has no limit. A failed request's reason is this port's client's, without Go's `Get "<url>": ` before it.
+- **A header value outside ASCII fails the request.** Headers are applied in the credential file's order and invalid ones reported in the order of their names, where upstream's order is random.
+- **Paths are read as gjson reads them**, except that a wildcard, pipe, query, modifier, literal, sub-selector or `..` finds nothing.
+- **Of several `summary` members in other cases, the first by name is read**; an RFC 850 `Date`'s zone never moves the time; and the request body is read as the management API reads others (413 over 16 MiB).
 
 ### The usage queue over RESP
 
