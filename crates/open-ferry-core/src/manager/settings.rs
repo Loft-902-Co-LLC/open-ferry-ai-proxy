@@ -165,12 +165,8 @@ impl From<&Config> for Settings {
         let rules = |rules: &[config::RequestScopedErrorRule]| {
             rules.iter().map(RequestScopedErrorRule::from).collect()
         };
-        let mut api_keys = BTreeMap::new();
-        api_keys.insert(
-            "gemini".to_owned(),
-            config
-                .gemini_api_key
-                .iter()
+        let gemini = |keys: &[config::GeminiKey]| -> Vec<ApiKeyEntry> {
+            keys.iter()
                 .map(|key| ApiKeyEntry {
                     api_key: key.api_key.clone(),
                     base_url: key.base_url.clone(),
@@ -187,7 +183,33 @@ impl From<&Config> for Settings {
                         .collect(),
                     request_scoped_errors: rules(&key.request_scoped_errors),
                 })
-                .collect(),
+                .collect()
+        };
+        let codex = |keys: &[config::CodexKey]| -> Vec<ApiKeyEntry> {
+            keys.iter()
+                .map(|key| ApiKeyEntry {
+                    api_key: key.api_key.clone(),
+                    base_url: key.base_url.clone(),
+                    prefix: key.prefix.clone(),
+                    proxy_url: key.proxy_url.clone(),
+                    models: key
+                        .models
+                        .iter()
+                        .map(|model| ModelAlias {
+                            name: model.name.clone(),
+                            alias: model.alias.clone(),
+                            force_mapping: model.force_mapping,
+                        })
+                        .collect(),
+                    request_scoped_errors: rules(&key.request_scoped_errors),
+                })
+                .collect()
+        };
+        let mut api_keys = BTreeMap::new();
+        api_keys.insert("gemini".to_owned(), gemini(&config.gemini_api_key));
+        api_keys.insert(
+            "gemini-interactions".to_owned(),
+            gemini(&config.interactions_api_key),
         );
         api_keys.insert(
             "vertex".to_owned(),
@@ -235,29 +257,9 @@ impl From<&Config> for Settings {
                 })
                 .collect(),
         );
-        api_keys.insert(
-            "codex".to_owned(),
-            config
-                .codex_api_key
-                .iter()
-                .map(|key| ApiKeyEntry {
-                    api_key: key.api_key.clone(),
-                    base_url: key.base_url.clone(),
-                    prefix: key.prefix.clone(),
-                    proxy_url: key.proxy_url.clone(),
-                    models: key
-                        .models
-                        .iter()
-                        .map(|model| ModelAlias {
-                            name: model.name.clone(),
-                            alias: model.alias.clone(),
-                            force_mapping: model.force_mapping,
-                        })
-                        .collect(),
-                    request_scoped_errors: rules(&key.request_scoped_errors),
-                })
-                .collect(),
-        );
+        api_keys.insert("codex".to_owned(), codex(&config.codex_api_key));
+        api_keys.insert("xai".to_owned(), codex(&config.xai_api_key));
+        api_keys.insert("meta".to_owned(), codex(&config.meta_api_key));
         Self {
             request_retry: count(config.request_retry),
             max_retry_credentials: count(config.max_retry_credentials),
@@ -481,6 +483,46 @@ openai-compatibility:
             ("v", "https://vertex.example.test")
         );
         assert_eq!(vertex[0].models[0].alias, "flash");
+    }
+
+    // Not upstream's: the interactions, xAI and Meta keys, which upstream's
+    // manager reads from its config (resolveAPIKeyConfig and
+    // requestScopedErrorRulesForAuth).
+    #[test]
+    fn interactions_xai_and_meta_keys_come_from_the_config() {
+        let config = Config::parse(concat!(
+            "interactions-api-key:\n  - api-key: i\n",
+            "    models: [{name: gemini-2.5-flash, alias: native-flash}]\n",
+            "xai-api-key:\n  - api-key: x\n    base-url: https://xai.example.test\n",
+            "    request-scoped-errors: [{status: 400, match: [long], action: stop}]\n",
+            "meta-api-key:\n  - api-key: m\n    prefix: team\n",
+            "    models: [{name: muse-spark-1.3, alias: muse, force-mapping: true}]\n",
+        ))
+        .unwrap();
+        let settings = Settings::from(&config);
+        let interactions = settings.api_key_entries("gemini-interactions");
+        assert_eq!(interactions.len(), 1);
+        assert_eq!(interactions[0].api_key, "i");
+        assert_eq!(interactions[0].models[0].alias, "native-flash");
+        let xai = settings.api_key_entries("xai");
+        assert_eq!(
+            (xai[0].api_key.as_str(), xai[0].base_url.as_str()),
+            ("x", "https://xai.example.test")
+        );
+        assert_eq!(xai[0].request_scoped_errors[0].action, "stop");
+        let meta = settings.api_key_entries("meta");
+        assert_eq!(meta[0].prefix, "team");
+        // The loader defaults Meta's base URL.
+        assert_eq!(meta[0].base_url, "https://api.meta.ai/v1");
+        assert_eq!(
+            meta[0].models,
+            [ModelAlias {
+                name: "muse-spark-1.3".into(),
+                alias: "muse".into(),
+                force_mapping: true,
+            }]
+        );
+        assert!(settings.api_key_entries("gemini").is_empty());
     }
 
     #[test]

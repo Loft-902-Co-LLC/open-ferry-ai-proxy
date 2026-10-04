@@ -14,9 +14,10 @@
 //!
 //! A Claude credential serves the catalog's Claude models, or the models its
 //! config entry lists; so do Gemini and Vertex credentials, with the
-//! catalog's Gemini and Vertex models. A Codex account serves its ChatGPT
-//! plan's models; a Codex API key serves the models its config entry lists,
-//! or the Pro models.
+//! catalog's Gemini and Vertex models, Gemini Interactions credentials, with
+//! the Gemini models, and xAI and Meta credentials, with the catalog's xAI
+//! and Meta models. A Codex account serves its ChatGPT plan's models; a Codex
+//! API key serves the models its config entry lists, or the Pro models.
 //! Then exclusions take models out (`*` matches any text), aliases rename
 //! models or, with `fork`, add names for them, settings set context windows,
 //! and a prefix namespaces them, as in `team-a/gpt-5`.
@@ -30,8 +31,13 @@
 //!
 //! Deviations from upstream:
 //! - Only Gemini, Vertex, Claude, Codex and OpenAI-compatible credentials
-//!   get models; a credential of any other provider is unregistered. Plugin
-//!   models and Antigravity capability probing aren't ported.
+//!   get models; a credential of any other provider is unregistered. Gemini
+//!   Interactions, xAI and Meta credentials get theirs only once their
+//!   executors are ported: until then those providers stay in
+//!   `UNPORTED_PROVIDERS`, which comes first. Plugin models and Antigravity
+//!   capability probing aren't ported.
+//! - xAI credentials don't get upstream's built-in image and video models
+//!   (`WithXAIBuiltins`): image and video generation aren't ported.
 //! - Upstream caches the OpenAI-compatible entries' models while it
 //!   registers many credentials at once; they are built for each credential
 //!   here, which gives the same models.
@@ -73,7 +79,8 @@ use crate::auth::Auth;
 use crate::auth::classification::{AUTH_KIND_API_KEY, AuthKind, AuthSource};
 use crate::auth::compat::OPENAI_COMPATIBILITY;
 use crate::config::{
-    Config, OAuthModelAlias, OAuthModelSetting, OpenAiCompatibilityModel, RedactedUrl,
+    CodexKey, Config, GeminiKey, OAuthModelAlias, OAuthModelSetting, OpenAiCompatibilityModel,
+    RedactedUrl,
 };
 use crate::models::{ModelInfo, ThinkingSupport};
 
@@ -81,10 +88,12 @@ use crate::models::{ModelInfo, ThinkingSupport};
 /// serve (upstream's `registry.OpenAIImageModelType`).
 pub const OPENAI_IMAGE_MODEL_TYPE: &str = "openai-image";
 
-/// Providers upstream lists models of their own for, none of which are
+/// Providers upstream lists models of their own for whose executors aren't
 /// ported: their credentials get no models, rather than an OpenAI-compatible
-/// provider's of the same name.
-const UNPORTED_PROVIDERS: [&str; 10] = [
+/// provider's of the same name. `gemini-interactions`, `xai` and `meta` have
+/// their own cases in [`auth_models_with`], which apply once a provider's
+/// executor is ported and its name leaves this list.
+const UNPORTED_PROVIDERS: &[&str] = &[
     "gemini-interactions",
     "aistudio",
     "antigravity",
@@ -127,12 +136,18 @@ pub struct RegistrationRules {
     pub oauth_settings: BTreeMap<String, Vec<ModelSetting>>,
     /// The `gemini-api-key` entries.
     pub gemini_keys: Vec<ApiKeyEntry>,
+    /// The `interactions-api-key` entries.
+    pub interactions_keys: Vec<ApiKeyEntry>,
     /// The `vertex-api-key` entries.
     pub vertex_keys: Vec<ApiKeyEntry>,
     /// The `claude-api-key` entries.
     pub claude_keys: Vec<ApiKeyEntry>,
     /// The `codex-api-key` entries.
     pub codex_keys: Vec<ApiKeyEntry>,
+    /// The `xai-api-key` entries.
+    pub xai_keys: Vec<ApiKeyEntry>,
+    /// The `meta-api-key` entries.
+    pub meta_keys: Vec<ApiKeyEntry>,
     /// The `openai-compatibility` entries.
     pub openai_compatibility: Vec<OpenAiCompatEntry>,
 }
@@ -161,8 +176,9 @@ pub struct ModelSetting {
     pub max_context_length: u64,
 }
 
-/// A `gemini-api-key`, `vertex-api-key`, `claude-api-key` or
-/// `codex-api-key` entry, as far as models go.
+/// A `gemini-api-key`, `interactions-api-key`, `vertex-api-key`,
+/// `claude-api-key`, `codex-api-key`, `xai-api-key` or `meta-api-key` entry,
+/// as far as models go.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct ApiKeyEntry {
     /// The API key.
@@ -253,7 +269,8 @@ pub struct ConfiguredModel {
     pub is_compat: bool,
     /// Its thinking settings, or `None` for the catalog's.
     pub thinking: Option<ThinkingSupport>,
-    /// The model takes Codex's `configuration_update`. Codex only.
+    /// The model takes Codex's `configuration_update`. Only Codex keys use
+    /// it.
     pub support_configuration_update: bool,
 }
 
@@ -282,32 +299,56 @@ impl From<&Config> for RegistrationRules {
                 .map(|(channel, entries)| (channel.clone(), entries.iter().map(convert).collect()))
                 .collect()
         }
+        fn gemini_entry(key: &GeminiKey) -> ApiKeyEntry {
+            ApiKeyEntry {
+                api_key: key.api_key.clone(),
+                base_url: key.base_url.clone(),
+                models: key
+                    .models
+                    .iter()
+                    .map(|model| ConfiguredModel {
+                        name: model.name.clone(),
+                        alias: model.alias.clone(),
+                        display_name: model.display_name.clone(),
+                        max_context_length: context_length(model.max_context_length),
+                        is_compat: model.is_compat,
+                        thinking: model.thinking.as_ref().map(thinking),
+                        support_configuration_update: false,
+                    })
+                    .collect(),
+                excluded_models: key.excluded_models.clone(),
+            }
+        }
+        fn codex_entry(key: &CodexKey) -> ApiKeyEntry {
+            ApiKeyEntry {
+                api_key: key.api_key.clone(),
+                base_url: key.base_url.clone(),
+                models: key
+                    .models
+                    .iter()
+                    .map(|model| ConfiguredModel {
+                        name: model.name.clone(),
+                        alias: model.alias.clone(),
+                        display_name: model.display_name.clone(),
+                        max_context_length: context_length(model.max_context_length),
+                        is_compat: model.is_compat,
+                        thinking: model.thinking.as_ref().map(thinking),
+                        support_configuration_update: model.support_configuration_update,
+                    })
+                    .collect(),
+                excluded_models: key.excluded_models.clone(),
+            }
+        }
         Self {
             force_model_prefix: config.force_model_prefix,
             oauth_excluded_models: config.oauth_excluded_models.clone(),
             oauth_model_alias: by_channel(&config.oauth_model_alias, alias),
             oauth_settings: by_channel(&config.oauth_settings, setting),
-            gemini_keys: config
-                .gemini_api_key
+            gemini_keys: config.gemini_api_key.iter().map(gemini_entry).collect(),
+            interactions_keys: config
+                .interactions_api_key
                 .iter()
-                .map(|key| ApiKeyEntry {
-                    api_key: key.api_key.clone(),
-                    base_url: key.base_url.clone(),
-                    models: key
-                        .models
-                        .iter()
-                        .map(|model| ConfiguredModel {
-                            name: model.name.clone(),
-                            alias: model.alias.clone(),
-                            display_name: model.display_name.clone(),
-                            max_context_length: context_length(model.max_context_length),
-                            is_compat: model.is_compat,
-                            thinking: model.thinking.as_ref().map(thinking),
-                            support_configuration_update: false,
-                        })
-                        .collect(),
-                    excluded_models: key.excluded_models.clone(),
-                })
+                .map(gemini_entry)
                 .collect(),
             vertex_keys: config
                 .vertex_api_key
@@ -351,28 +392,9 @@ impl From<&Config> for RegistrationRules {
                     excluded_models: key.excluded_models.clone(),
                 })
                 .collect(),
-            codex_keys: config
-                .codex_api_key
-                .iter()
-                .map(|key| ApiKeyEntry {
-                    api_key: key.api_key.clone(),
-                    base_url: key.base_url.clone(),
-                    models: key
-                        .models
-                        .iter()
-                        .map(|model| ConfiguredModel {
-                            name: model.name.clone(),
-                            alias: model.alias.clone(),
-                            display_name: model.display_name.clone(),
-                            max_context_length: context_length(model.max_context_length),
-                            is_compat: model.is_compat,
-                            thinking: model.thinking.as_ref().map(thinking),
-                            support_configuration_update: model.support_configuration_update,
-                        })
-                        .collect(),
-                    excluded_models: key.excluded_models.clone(),
-                })
-                .collect(),
+            codex_keys: config.codex_api_key.iter().map(codex_entry).collect(),
+            xai_keys: config.xai_api_key.iter().map(codex_entry).collect(),
+            meta_keys: config.meta_api_key.iter().map(codex_entry).collect(),
             openai_compatibility: config
                 .openai_compatibility
                 .iter()
@@ -443,6 +465,17 @@ pub fn auth_models_with(
     rules: &RegistrationRules,
     catalog: &StaticCatalog,
 ) -> AuthModels {
+    auth_models_gated(auth, rules, catalog, UNPORTED_PROVIDERS)
+}
+
+/// [`auth_models_with`], where a credential of a provider in `unported`
+/// gets no models.
+fn auth_models_gated(
+    auth: &Auth,
+    rules: &RegistrationRules,
+    catalog: &StaticCatalog,
+    unported: &[&str],
+) -> AuthModels {
     if auth.id.is_empty() {
         return AuthModels::Ignore;
     }
@@ -501,7 +534,7 @@ pub fn auth_models_with(
         }
         "codex" if kind == AUTH_KIND_API_KEY => {
             let mut models = Vec::new();
-            if let Some(entry) = resolve_config_codex_key(auth, &rules.codex_keys) {
+            if let Some(entry) = resolve_config_codex_style_key(auth, &rules.codex_keys, true) {
                 models = build_codex_config_models(entry, catalog);
                 excluded.clone_from(&entry.excluded_models);
             }
@@ -511,7 +544,43 @@ pub fn auth_models_with(
             let plan = CodexPlan::from_plan_type(&codex_plan_type(auth));
             apply_excluded_models(catalog.codex_models(plan), &excluded)
         }
-        name if UNPORTED_PROVIDERS.contains(&name) => Vec::new(),
+        name if unported.contains(&name) => Vec::new(),
+        "gemini-interactions" => {
+            let mut models = catalog.gemini_models();
+            if let Some(entry) = resolve_config_gemini_key(auth, &rules.interactions_keys) {
+                if !entry.models.is_empty() {
+                    models = build_config_models(&entry.models, "google", "gemini");
+                }
+                if kind == AUTH_KIND_API_KEY {
+                    excluded.clone_from(&entry.excluded_models);
+                }
+            }
+            apply_excluded_models(models, &excluded)
+        }
+        "xai" => {
+            let mut models = catalog.xai_models();
+            if let Some(entry) = resolve_config_codex_style_key(auth, &rules.xai_keys, false) {
+                if !entry.models.is_empty() {
+                    models = build_config_models(&entry.models, "xai", "xai");
+                }
+                if kind == AUTH_KIND_API_KEY {
+                    excluded.clone_from(&entry.excluded_models);
+                }
+            }
+            apply_excluded_models(models, &excluded)
+        }
+        "meta" => {
+            let mut models = catalog.meta_models();
+            if let Some(entry) = resolve_config_codex_style_key(auth, &rules.meta_keys, false) {
+                if !entry.models.is_empty() {
+                    models = build_config_models(&entry.models, "meta", "meta");
+                }
+                if kind == AUTH_KIND_API_KEY {
+                    excluded.clone_from(&entry.excluded_models);
+                }
+            }
+            apply_excluded_models(models, &excluded)
+        }
         _ => {
             if let Some(registration) = openai_compat_registration(auth, rules, &provider, compat) {
                 return registration;
@@ -801,10 +870,10 @@ fn resolve_config_claude_key<'a>(
         .find(|entry| equal_fold(entry.api_key.trim(), key))
 }
 
-/// The `gemini-api-key` entry for `auth`: by config index, else the first
-/// whose key matches and whose base URL is empty or matches, or, for a
-/// keyless credential, whose base URL matches (upstream's
-/// `resolveConfigGeminiKey`).
+/// The `gemini-api-key` or `interactions-api-key` entry for `auth`: by
+/// config index, else the first whose key matches and whose base URL is
+/// empty or matches, or, for a keyless credential, whose base URL matches
+/// (upstream's `resolveConfigGeminiKey` and `resolveConfigInteractionsKey`).
 fn resolve_config_gemini_key<'a>(
     auth: &Auth,
     entries: &'a [ApiKeyEntry],
@@ -842,12 +911,16 @@ fn resolve_config_vertex_key<'a>(
         .find(|entry| equal_fold(entry.api_key.trim(), key))
 }
 
-/// The `codex-api-key` entry for `auth`: by config index if its key and base
-/// URL match, else the first that matches (upstream's
-/// `resolveConfigCodexStyleKey` as `resolveConfigCodexKey` calls it).
-fn resolve_config_codex_key<'a>(
+/// The `codex-api-key`, `xai-api-key` or `meta-api-key` entry for `auth`: by
+/// config index, if its key and base URL match or `validate_index_credentials`
+/// is off, else the first that matches (upstream's
+/// `resolveConfigCodexStyleKey`, which `resolveConfigCodexKey` calls with
+/// the check on, and `resolveConfigXAIKey` and `resolveConfigMetaKey` with
+/// it off).
+fn resolve_config_codex_style_key<'a>(
     auth: &Auth,
     entries: &'a [ApiKeyEntry],
+    validate_index_credentials: bool,
 ) -> Option<&'a ApiKeyEntry> {
     let key = attribute(auth, "api_key");
     let base = attribute(auth, "base_url");
@@ -861,7 +934,7 @@ fn resolve_config_codex_key<'a>(
         }
     };
     if let Some(entry) = config_entry_for_auth_index(auth, entries)
-        && matches(entry)
+        && (!validate_index_credentials || matches(entry))
     {
         return Some(entry);
     }

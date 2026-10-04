@@ -13,18 +13,17 @@
 //! Tests of registration.
 //!
 //! Upstream's tests that use the global registry use a fresh `ModelRegistry`
-//! here. Those for Gemini, Vertex, xAI, Meta, Devin and plugin providers
-//! run against Claude or Codex where the rule tested is provider-neutral
-//! (`MetaOAuthAliasAndExcludedModels`,
-//! `UsesPreMergedExcludedModelsAttribute`), and as written where it is (the
-//! alias and channel tests). `RegisterConfigAPIKeyAuthsCodexModelModes`
-//! builds the credential the config loader would.
+//! here. Those for Gemini, Vertex, Devin and plugin providers run against
+//! Claude or Codex where the rule tested is provider-neutral
+//! (`UsesPreMergedExcludedModelsAttribute`), and as written where it is (the
+//! alias and channel tests). `MetaOAuthAliasAndExcludedModels` runs as
+//! written with no provider held back as unported, as Meta's executor isn't
+//! ported yet. `RegisterConfigAPIKeyAuthsCodexModelModes` builds the
+//! credential the config loader would.
 //! `OpenAICompatibilityRegistrationCacheUsesConfigIndex` checks the
 //! registration the cache feeds, as the cache isn't ported.
 //!
 //! Dropped:
-//! - The xAI and interactions cases of the display name and context length
-//!   tests: those providers aren't ported.
 //! - `AntigravityFetchesWebSearchCapability` and `DevinSWE16SlowIncluded`:
 //!   Antigravity and Devin aren't ported.
 //! - `ApplyOAuthSettings_CodexCatalogPipeline`: it needs the Codex client
@@ -511,6 +510,189 @@ fn register_models_for_auth_oauth_alias_and_excluded_models() {
     );
 }
 
+/// The models `auth` serves under `rules` with no provider held back as
+/// unported, or none.
+fn ported(auth: &Auth, rules: &RegistrationRules) -> Vec<ModelInfo> {
+    match auth_models_gated(auth, rules, StaticCatalog::embedded(), &[]) {
+        AuthModels::Register { models, .. } => models,
+        AuthModels::Ignore | AuthModels::Unregister => Vec::new(),
+    }
+}
+
+// TestRegisterModelsForAuth_MetaOAuthAliasAndExcludedModels
+#[test]
+fn register_models_for_auth_meta_oauth_alias_and_excluded_models() {
+    let rules = RegistrationRules {
+        oauth_excluded_models: channel("meta", vec!["muse-spark-1.1".to_owned()]),
+        oauth_model_alias: channel("meta", vec![alias("muse-spark-1.3", "muse-latest")]),
+        ..RegistrationRules::default()
+    };
+    let auth = auth(
+        "auth-meta-oauth",
+        "meta",
+        &[("auth_kind", "oauth"), ("api_key", "LLM|minted")],
+    );
+    let got = id_set(&ported(&auth, &rules));
+    assert!(!got.is_empty(), "expected meta models to be registered");
+    assert!(
+        !got.contains("muse-spark-1.1"),
+        "oauth-excluded-models was ignored"
+    );
+    assert!(
+        !got.contains("muse-spark-1.3"),
+        "oauth-model-alias didn't rename"
+    );
+    assert!(
+        got.contains("muse-latest"),
+        "oauth-model-alias didn't add the alias"
+    );
+}
+
+// Not upstream's: the interactions, xAI and Meta credentials get no models
+// while their providers are unported.
+#[test]
+fn interactions_xai_and_meta_wait_for_their_executors() {
+    for provider in ["gemini-interactions", "xai", "meta"] {
+        assert!(UNPORTED_PROVIDERS.contains(&provider), "{provider}");
+        let credential = auth(&format!("{provider}-key"), provider, &[("api_key", "k")]);
+        assert_eq!(
+            auth_models(&credential, &RegistrationRules::default()),
+            AuthModels::Unregister,
+            "{provider}"
+        );
+        assert!(
+            !ported(&credential, &RegistrationRules::default()).is_empty(),
+            "{provider}"
+        );
+    }
+}
+
+// service_models.go: the gemini-interactions, xai and meta cases of
+// registerModelsForAuth, resolveConfigInteractionsKey and
+// resolveConfigCodexStyleKey without the index check (no upstream test).
+#[test]
+fn interactions_xai_and_meta_keys_use_their_entry() {
+    let catalog = StaticCatalog::embedded();
+    let rules = RegistrationRules {
+        oauth_excluded_models: channel("xai", vec!["grok-4.5".to_owned()]),
+        interactions_keys: vec![
+            ApiKeyEntry {
+                excluded_models: vec!["gemini-2.5-flash*".to_owned()],
+                ..api_key_entry("interactions-key", Vec::new())
+            },
+            api_key_entry(
+                "listed-key",
+                vec![configured("gemini-2.5-pro", "native-pro")],
+            ),
+        ],
+        xai_keys: vec![
+            ApiKeyEntry {
+                excluded_models: vec!["grok-3-*".to_owned()],
+                ..api_key_entry("xai-key", Vec::new())
+            },
+            api_key_entry("xai-listed", vec![configured("grok-4.5", "grok-latest")]),
+        ],
+        meta_keys: vec![api_key_entry(
+            "meta-key",
+            vec![configured("muse-spark-1.3", "muse")],
+        )],
+        ..RegistrationRules::default()
+    };
+
+    // The Gemini catalog without the entry's exclusions, or its own models.
+    let interactions = auth(
+        "interactions-catalog",
+        "gemini-interactions",
+        &[("api_key", "interactions-key"), ("auth_kind", "apikey")],
+    );
+    let got = id_set(&ported(&interactions, &rules));
+    assert!(got.contains("gemini-2.5-pro"));
+    assert!(!got.iter().any(|id| id.starts_with("gemini-2.5-flash")));
+    assert!(got.is_subset(&id_set(&catalog.gemini_models())));
+    let listed = auth(
+        "interactions-listed",
+        "gemini-interactions",
+        &[("api_key", "listed-key")],
+    );
+    let models = ported(&listed, &rules);
+    assert_eq!(ids(&models), ["native-pro"]);
+    assert_eq!(
+        (models[0].owned_by.as_str(), models[0].model_type.as_str()),
+        ("google", "gemini")
+    );
+    match auth_models_gated(&listed, &rules, catalog, &[]) {
+        AuthModels::Register { provider, .. } => assert_eq!(provider, "gemini-interactions"),
+        other => panic!("{other:?}"),
+    }
+
+    // The xAI catalog without the entry's exclusions; the global OAuth
+    // exclusions don't apply to API keys.
+    let xai = auth(
+        "xai-catalog",
+        "xai",
+        &[("api_key", "xai-key"), ("auth_kind", "apikey")],
+    );
+    let got = id_set(&ported(&xai, &rules));
+    assert!(got.contains("grok-4.5"));
+    assert!(!got.iter().any(|id| id.starts_with("grok-3-")));
+    assert!(got.is_subset(&id_set(&catalog.xai_models())));
+    // By config index, whatever the key, unlike a Codex key.
+    let indexed = auth(
+        "xai-indexed",
+        "xai",
+        &[
+            ("api_key", "stale-key"),
+            ("config_index", "1"),
+            ("source", "config:xai[token]"),
+        ],
+    );
+    let models = ported(&indexed, &rules);
+    assert_eq!(ids(&models), ["grok-latest"]);
+    assert_eq!(
+        (models[0].owned_by.as_str(), models[0].model_type.as_str()),
+        ("xai", "xai")
+    );
+    // An OAuth credential gets the catalog under the global exclusions.
+    let oauth = auth("xai-oauth", "xai", &[]);
+    let got = id_set(&ported(&oauth, &rules));
+    assert!(!got.is_empty() && !got.contains("grok-4.5"));
+
+    let meta = auth("meta-listed", "meta", &[("api_key", "meta-key")]);
+    let models = ported(&meta, &rules);
+    assert_eq!(ids(&models), ["muse"]);
+    assert_eq!(
+        (models[0].owned_by.as_str(), models[0].model_type.as_str()),
+        ("meta", "meta")
+    );
+    let unknown = auth("meta-other", "meta", &[("api_key", "other")]);
+    assert_eq!(
+        id_set(&ported(&unknown, &rules)),
+        id_set(&catalog.meta_models())
+    );
+}
+
+// Not upstream's: resolveConfigCodexStyleKey's index check.
+#[test]
+fn codex_style_keys_check_the_index_only_for_codex() {
+    let entries = [
+        api_key_entry("first", Vec::new()),
+        api_key_entry("second", Vec::new()),
+    ];
+    let credential = auth(
+        "",
+        "xai",
+        &[
+            ("api_key", "second"),
+            ("config_index", "0"),
+            ("source", "config:xai[token]"),
+        ],
+    );
+    let checked = resolve_config_codex_style_key(&credential, &entries, true);
+    assert_eq!(checked.map(|entry| entry.api_key.as_str()), Some("second"));
+    let unchecked = resolve_config_codex_style_key(&credential, &entries, false);
+    assert_eq!(unchecked.map(|entry| entry.api_key.as_str()), Some("first"));
+}
+
 #[test]
 fn apply_oauth_model_alias_rename() {
     let rules = alias_rules(
@@ -908,6 +1090,15 @@ fn build_config_models_display_name() {
         (vertex[0].owned_by.as_str(), vertex[0].model_type.as_str()),
         ("google", "vertex")
     );
+    let xai = build_config_models(
+        &[ConfiguredModel {
+            display_name: "xAI Catalog Name".to_owned(),
+            ..configured("grok-4.5", "grok-latest")
+        }],
+        "xai",
+        "xai",
+    );
+    assert_eq!(xai[0].display_name, "xAI Catalog Name");
 }
 
 #[test]
@@ -975,10 +1166,28 @@ fn build_config_models_propagates_max_context_length() {
         "google",
         "gemini",
     );
+    let interactions = build_config_models(
+        &[ConfiguredModel {
+            max_context_length: WANT,
+            ..configured("interactions-upstream", "interactions-alias")
+        }],
+        "google",
+        "gemini",
+    );
+    let xai = build_config_models(
+        &[ConfiguredModel {
+            max_context_length: WANT,
+            ..configured("xai-upstream", "xai-alias")
+        }],
+        "xai",
+        "xai",
+    );
     for (name, model) in [
         ("codex", &codex[0]),
         ("claude", &claude[0]),
         ("gemini", &gemini[0]),
+        ("interactions", &interactions[0]),
+        ("xai", &xai[0]),
         ("openai-compatibility", &compat[0]),
     ] {
         assert_eq!(model.context_length, WANT, "{name}");
@@ -1634,6 +1843,34 @@ fn rules_come_from_the_config() {
             ..configured("gemini-2.5-flash", "flash")
         }]
     );
+
+    let config = Config::parse(concat!(
+        "interactions-api-key:\n  - api-key: i\n    excluded-models: [z]\n",
+        "    models:\n      - name: gemini-2.5-pro\n        alias: pro\n",
+        "xai-api-key:\n  - api-key: x\n    base-url: https://api.x.ai/v1\n",
+        "    models:\n      - name: grok-4.5\n",
+        "        alias: grok\n        max-context-length: 9\n",
+        "meta-api-key:\n  - api-key: m\n    excluded-models: [muse-spark-1.1]\n",
+    ))
+    .unwrap();
+    let rules = RegistrationRules::from(&config);
+    assert_eq!(rules.interactions_keys[0].api_key, "i");
+    assert_eq!(rules.interactions_keys[0].excluded_models, ["z"]);
+    assert_eq!(
+        rules.interactions_keys[0].models,
+        [configured("gemini-2.5-pro", "pro")]
+    );
+    assert_eq!(
+        rules.xai_keys[0].models,
+        [ConfiguredModel {
+            max_context_length: 9,
+            ..configured("grok-4.5", "grok")
+        }]
+    );
+    let meta = &rules.meta_keys[0];
+    assert_eq!(meta.base_url, "https://api.meta.ai/v1");
+    assert_eq!(meta.excluded_models, ["muse-spark-1.1"]);
+    assert!(rules.gemini_keys.is_empty() && rules.codex_keys.is_empty());
 }
 
 // OpenAI-compatible providers: openai_compat_config_models_test.go,

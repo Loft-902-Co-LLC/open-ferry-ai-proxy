@@ -13,10 +13,13 @@
 //! - The catalog isn't refreshed from the network (upstream's model updater
 //!   fetches a new `models.json` every three hours); the built-in copy is
 //!   used.
-//! - Only the Claude, Gemini, Vertex and Codex sections are served. The
-//!   others are decoded and checked as upstream does, so a catalog upstream
-//!   rejects is rejected here, and are kept only for [`StaticCatalog::lookup`];
-//!   [`StaticCatalog::models_for_channel`] has nothing for their channels.
+//! - Only the Claude, Gemini, Vertex, Codex, xAI and Meta sections are
+//!   served, and [`StaticCatalog::models_for_channel`] has nothing for the
+//!   xAI and Meta channels yet. The others are decoded and checked as
+//!   upstream does, so a catalog upstream rejects is rejected here, and are
+//!   kept only for [`StaticCatalog::lookup`].
+//! - The xAI models don't include upstream's built-in image and video models
+//!   (`WithXAIBuiltins`): image and video generation aren't ported.
 //! - [`StaticCatalog::lookup`] doesn't search upstream's built-in Devin
 //!   models, which no ported provider serves.
 //! - A model's `config.override_header` is checked, then dropped: it forces a
@@ -146,6 +149,8 @@ pub struct StaticCatalog {
     codex_team: Vec<ModelInfo>,
     codex_plus: Vec<ModelInfo>,
     codex_pro: Vec<ModelInfo>,
+    xai: Vec<ModelInfo>,
+    meta: Vec<ModelInfo>,
     /// Every section but the Codex Free, Team and Plus ones, in the order
     /// upstream's `LookupStaticModelInfo` searches them.
     lookup: Vec<ModelInfo>,
@@ -213,6 +218,8 @@ impl StaticCatalog {
             codex_team,
             codex_plus,
             codex_pro,
+            xai,
+            meta,
             lookup,
         })
     }
@@ -240,6 +247,17 @@ impl StaticCatalog {
     /// `GetGeminiVertexModels`).
     pub fn vertex_models(&self) -> Vec<ModelInfo> {
         self.vertex.clone()
+    }
+
+    /// The xAI models (upstream's `GetXAIModels`, without the built-in image
+    /// and video models).
+    pub fn xai_models(&self) -> Vec<ModelInfo> {
+        self.xai.clone()
+    }
+
+    /// The Meta models (upstream's `GetMetaModels`).
+    pub fn meta_models(&self) -> Vec<ModelInfo> {
+        self.meta.clone()
     }
 
     /// The Codex models of `plan`, with the image models every plan serves

@@ -5,9 +5,14 @@
 //! Tests for the static catalog.
 //!
 //! `TestValidateModelsCatalog_Meta` runs through [`StaticCatalog::from_json`],
-//! as the checks aren't public. Dropped: the Gemini, Vertex, Kimi, xAI,
-//! Antigravity, Devin and Meta tests (those providers aren't ported) and
-//! `TestModelOverrideHeadersFromEmbeddedModels` (left out by policy). The
+//! as the checks aren't public, and
+//! `TestGetStaticModelDefinitionsByChannelSupportsGeminiInteractions` is
+//! part of `the_embedded_catalog_loads`. Dropped: the Gemini, Vertex, Kimi,
+//! Antigravity and Devin tests (those providers aren't ported), the xAI
+//! built-in tests (`TestWithXAIBuiltinsIncludesImage20` and
+//! `TestWithXAIBuiltinsIncludesVideo15GAAndPreviewAlias`: image and video
+//! generation aren't ported) and `TestModelOverrideHeadersFromEmbeddedModels`
+//! (left out by policy). The
 //! check that `support_configuration_update` stays out of a model's JSON has
 //! no counterpart: `ModelInfo` isn't serialized.
 
@@ -163,6 +168,30 @@ fn the_embedded_catalog_loads() {
         catalog.vertex_models()
     );
     assert!(catalog.models_for_channel("aistudio").is_empty());
+}
+
+// Not upstream's: the xAI and Meta sections, the xAI one without upstream's
+// image and video built-ins.
+#[test]
+fn xai_and_meta_models_come_from_their_sections() {
+    let catalog = StaticCatalog::embedded();
+    let xai = catalog.xai_models();
+    assert!(xai.iter().any(|model| model.id == "grok-4.5"));
+    assert!(
+        xai.iter()
+            .all(|model| model.owned_by == "xai" && !model.id.contains("imagine")),
+        "{xai:?}"
+    );
+    let meta = catalog.meta_models();
+    assert!(meta.iter().any(|model| model.id == "muse-spark-1.3"));
+    assert!(meta.iter().all(|model| model.owned_by == "meta"));
+    let only = StaticCatalog::from_json(
+        r#"{"xai":[{"id":"grok-x"}],"meta":[{"id":"muse-x"}]}"#,
+        "test",
+    )
+    .unwrap();
+    assert_eq!(only.xai_models().len(), 1);
+    assert_eq!(only.meta_models()[0].id, "muse-x");
 }
 
 #[test]
