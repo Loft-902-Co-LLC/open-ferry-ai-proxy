@@ -4,9 +4,7 @@
 
 //! The per-key `disable-cooling` overrides.
 //!
-//! Deviations from upstream:
-//! - The `interactions` and `xai` cases are left out, as those keys aren't
-//!   typed.
+//! Deviations from upstream: none.
 
 use super::config_with;
 use crate::config::diff::build_change_details;
@@ -16,6 +14,16 @@ fn gemini(disable_cooling: Option<bool>) -> Config {
     config_with(|config| {
         config.gemini_api_key = vec![GeminiKey {
             api_key: "gemini-key".to_owned(),
+            disable_cooling,
+            ..GeminiKey::default()
+        }];
+    })
+}
+
+fn interactions(disable_cooling: Option<bool>) -> Config {
+    config_with(|config| {
+        config.interactions_api_key = vec![GeminiKey {
+            api_key: "interactions-key".to_owned(),
             disable_cooling,
             ..GeminiKey::default()
         }];
@@ -36,6 +44,16 @@ fn codex(disable_cooling: Option<bool>) -> Config {
     config_with(|config| {
         config.codex_api_key = vec![CodexKey {
             api_key: "codex-key".to_owned(),
+            disable_cooling,
+            ..CodexKey::default()
+        }];
+    })
+}
+
+fn xai(disable_cooling: Option<bool>) -> Config {
+    config_with(|config| {
+        config.xai_api_key = vec![CodexKey {
+            api_key: "xai-key".to_owned(),
             disable_cooling,
             ..CodexKey::default()
         }];
@@ -74,6 +92,12 @@ fn includes_all_cooling_overrides() {
             "gemini[0].disable-cooling: inherit -> false",
         ),
         (
+            "interactions false to true",
+            interactions(Some(false)),
+            interactions(Some(true)),
+            "interactions[0].disable-cooling: false -> true",
+        ),
+        (
             "claude false to true",
             claude(Some(false)),
             claude(Some(true)),
@@ -84,6 +108,12 @@ fn includes_all_cooling_overrides() {
             codex(Some(true)),
             codex(None),
             "codex[0].disable-cooling: true -> inherit",
+        ),
+        (
+            "xai inherit to true",
+            xai(None),
+            xai(Some(true)),
+            "xai[0].disable-cooling: inherit -> true",
         ),
         (
             "openai compatibility false to inherit",

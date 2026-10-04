@@ -20,8 +20,7 @@
 //! - Only the settings open-ferry types have lines. The sections it reads
 //!   and ignores (pprof, cloaking and `claude-code`, fingerprints,
 //!   `disable-image-generation`, `gpt-image-2-base-model`, Antigravity,
-//!   Devin, xAI, Codex live media relay, `disable-codex-cloaking`, and the
-//!   Interactions, xAI and Meta keys) have none.
+//!   Devin, Codex live media relay and `disable-codex-cloaking`) have none.
 //! - Go tells a list or map that is missing from one that is empty, and
 //!   reports `payload.default: []` against no `payload.default` as an
 //!   update (0 -> 0 rules); the typed config can't tell them apart, so no
@@ -155,6 +154,11 @@ pub fn build_change_details(old: &Config, new: &Config) -> Vec<String> {
         old.codex.orphan_delegation_compatibility,
         new.codex.orphan_delegation_compatibility,
     );
+    changes.flag(
+        "xai.inject-x-search",
+        old.xai.inject_x_search,
+        new.xai.inject_x_search,
+    );
 
     changes.text(
         "routing.strategy",
@@ -212,6 +216,44 @@ pub fn build_change_details(old: &Config, new: &Config) -> Vec<String> {
             .enumerate()
         {
             let field = |name: &str| format!("gemini[{i}].{name}");
+            changes.url(&field("base-url"), &o.base_url, &n.base_url);
+            changes.url(&field("proxy-url"), &o.proxy_url, &n.proxy_url);
+            changes.trimmed(&field("prefix"), &o.prefix, &n.prefix);
+            changes.optional_bool(
+                &field("disable-cooling"),
+                o.disable_cooling,
+                n.disable_cooling,
+            );
+            changes.secret(&field("api-key"), &o.api_key, &n.api_key);
+            changes.headers(&field("headers"), &o.headers, &n.headers);
+            changes.summary(
+                &field("models"),
+                &summary::gemini_models(&o.models),
+                &summary::gemini_models(&n.models),
+            );
+            changes.excluded(
+                &field("excluded-models"),
+                &o.excluded_models,
+                &n.excluded_models,
+            );
+            changes.optional_int(&field("request-retry"), o.request_retry, n.request_retry);
+        }
+    }
+
+    if old.interactions_api_key.len() != new.interactions_api_key.len() {
+        changes.count(
+            "interactions-api-key",
+            old.interactions_api_key.len(),
+            new.interactions_api_key.len(),
+        );
+    } else {
+        for (i, (o, n)) in old
+            .interactions_api_key
+            .iter()
+            .zip(&new.interactions_api_key)
+            .enumerate()
+        {
+            let field = |name: &str| format!("interactions[{i}].{name}");
             changes.url(&field("base-url"), &o.base_url, &n.base_url);
             changes.url(&field("proxy-url"), &o.proxy_url, &n.proxy_url);
             changes.trimmed(&field("prefix"), &o.prefix, &n.prefix);
@@ -313,6 +355,76 @@ pub fn build_change_details(old: &Config, new: &Config) -> Vec<String> {
                 &n.excluded_models,
             );
             changes.optional_int(&field("request-retry"), o.request_retry, n.request_retry);
+        }
+    }
+
+    // xAI keys (no key material).
+    if old.xai_api_key.len() != new.xai_api_key.len() {
+        changes.count("xai-api-key", old.xai_api_key.len(), new.xai_api_key.len());
+    } else {
+        for (i, (o, n)) in old.xai_api_key.iter().zip(&new.xai_api_key).enumerate() {
+            let field = |name: &str| format!("xai[{i}].{name}");
+            changes.url(&field("base-url"), &o.base_url, &n.base_url);
+            changes.url(&field("proxy-url"), &o.proxy_url, &n.proxy_url);
+            changes.trimmed(&field("prefix"), &o.prefix, &n.prefix);
+            changes.int(&field("priority"), o.priority, n.priority);
+            changes.flag(&field("websockets"), o.websockets, n.websockets);
+            changes.optional_bool(
+                &field("disable-cooling"),
+                o.disable_cooling,
+                n.disable_cooling,
+            );
+            changes.optional_int(&field("request-retry"), o.request_retry, n.request_retry);
+            changes.secret(&field("api-key"), &o.api_key, &n.api_key);
+            changes.headers(&field("headers"), &o.headers, &n.headers);
+            changes.summary(
+                &field("models"),
+                &summary::codex_models(&o.models),
+                &summary::codex_models(&n.models),
+            );
+            changes.excluded(
+                &field("excluded-models"),
+                &o.excluded_models,
+                &n.excluded_models,
+            );
+        }
+    }
+
+    // Meta keys (no key material). The prefix is compared trimmed but shown
+    // as written, as upstream does.
+    if old.meta_api_key.len() != new.meta_api_key.len() {
+        changes.count(
+            "meta-api-key",
+            old.meta_api_key.len(),
+            new.meta_api_key.len(),
+        );
+    } else {
+        for (i, (o, n)) in old.meta_api_key.iter().zip(&new.meta_api_key).enumerate() {
+            let field = |name: &str| format!("meta[{i}].{name}");
+            changes.url(&field("base-url"), &o.base_url, &n.base_url);
+            changes.url(&field("proxy-url"), &o.proxy_url, &n.proxy_url);
+            if o.prefix.trim() != n.prefix.trim() {
+                changes.push(format!("{}: {} -> {}", field("prefix"), o.prefix, n.prefix));
+            }
+            changes.int(&field("priority"), o.priority, n.priority);
+            changes.optional_bool(
+                &field("disable-cooling"),
+                o.disable_cooling,
+                n.disable_cooling,
+            );
+            changes.optional_int(&field("request-retry"), o.request_retry, n.request_retry);
+            changes.secret(&field("api-key"), &o.api_key, &n.api_key);
+            changes.headers(&field("headers"), &o.headers, &n.headers);
+            changes.summary(
+                &field("models"),
+                &summary::codex_models(&o.models),
+                &summary::codex_models(&n.models),
+            );
+            changes.excluded(
+                &field("excluded-models"),
+                &o.excluded_models,
+                &n.excluded_models,
+            );
         }
     }
 

@@ -6,6 +6,8 @@
 // TestBuildConfigChangeDetails_ModelPrefixes,
 // TestBuildConfigChangeDetails_CodexAlphaSearch,
 // TestBuildConfigChangeDetails_CodexOrphanDelegationCompatibility,
+// TestBuildConfigChangeDetails_XAIKeys,
+// TestBuildConfigChangeDetails_XAIForceMappingOnly,
 // TestBuildConfigChangeDetails_SecretsAndCounts,
 // TestBuildConfigChangeDetails_RedactsEndpointURLs,
 // TestBuildConfigChangeDetails_FlagsAndKeys,
@@ -21,13 +23,10 @@
 //! Deviations from upstream:
 //! - The expectations for settings open-ferry doesn't type are left out:
 //!   `codex.disable-codex-cloaking`, `disable-image-generation`,
-//!   `claude-code.disable-cloaking-model-list`, `antigravity.*` and
-//!   `xai.inject-x-search`.
-//! - Dropped: TestBuildConfigChangeDetails_CodexLiveMediaRelay,
-//!   TestBuildConfigChangeDetails_CodexKey_DisableCodexCloaking,
-//!   TestBuildConfigChangeDetails_XAIKeys and
-//!   TestBuildConfigChangeDetails_XAIForceMappingOnly (live media relay,
-//!   per-key cloaking and xAI keys aren't typed), and
+//!   `claude-code.disable-cloaking-model-list` and `antigravity.*`.
+//! - Dropped: TestBuildConfigChangeDetails_CodexLiveMediaRelay and
+//!   TestBuildConfigChangeDetails_CodexKey_DisableCodexCloaking (live media
+//!   relay and per-key cloaking aren't typed), and
 //!   TestBuildConfigChangeDetails_NilSafe (the configs are references, never
 //!   nil).
 //! - TestTrimStrings checks the trimmed comparison of `api-keys` it serves,
@@ -38,7 +37,7 @@ use std::collections::BTreeMap;
 use super::{config_with, expect_contains, strings};
 use crate::config::diff::{build_change_details, format_url};
 use crate::config::{
-    AnyValue, ClaudeKey, CodexKey, Config, GeminiKey, OpenAiCompatibility,
+    AnyValue, ClaudeKey, CodexKey, CodexModel, Config, GeminiKey, OpenAiCompatibility,
     OpenAiCompatibilityApiKey, OpenAiCompatibilityModel, PayloadFilterRule, PayloadModelRule,
     PayloadRule, VertexCompatKey, VertexCompatModel,
 };
@@ -335,6 +334,161 @@ fn codex_orphan_delegation_compatibility() {
     );
 }
 
+// Ports TestBuildConfigChangeDetails_XAIKeys.
+#[test]
+fn xai_keys() {
+    let model = |name: &str| CodexModel {
+        name: name.to_owned(),
+        alias: "grok".to_owned(),
+        ..CodexModel::default()
+    };
+    let old = config_with(|old| {
+        old.xai_api_key = vec![CodexKey {
+            priority: 1,
+            prefix: "old".to_owned(),
+            base_url: "https://old.example.com/v1".to_owned(),
+            proxy_url: "http://old-proxy".to_owned(),
+            websockets: false,
+            disable_cooling: Some(false),
+            request_retry: Some(1),
+            headers: headers(&[("X-Test", "old")]),
+            models: vec![model("grok-old")],
+            excluded_models: strings(&["grok-hidden"]),
+            ..codex("old-key")
+        }];
+    });
+    let new = config_with(|new| {
+        new.xai_api_key = vec![CodexKey {
+            priority: 2,
+            prefix: "new".to_owned(),
+            base_url: "https://new.example.com/v1".to_owned(),
+            proxy_url: "http://new-proxy".to_owned(),
+            websockets: true,
+            disable_cooling: Some(true),
+            request_retry: Some(0),
+            headers: headers(&[("X-Test", "new")]),
+            models: vec![model("grok-new")],
+            excluded_models: strings(&["grok-other"]),
+            ..codex("new-key")
+        }];
+    });
+
+    let changes = build_change_details(&old, &new);
+    for want in [
+        "xai[0].base-url: https://old.example.com -> https://new.example.com",
+        "xai[0].proxy-url: http://old-proxy -> http://new-proxy",
+        "xai[0].prefix: old -> new",
+        "xai[0].priority: 1 -> 2",
+        "xai[0].websockets: false -> true",
+        "xai[0].disable-cooling: false -> true",
+        "xai[0].request-retry: 1 -> 0",
+        "xai[0].api-key: updated",
+        "xai[0].headers: updated",
+        "xai[0].models: updated (1 -> 1 entries)",
+        "xai[0].excluded-models: updated (1 -> 1 entries)",
+    ] {
+        expect_contains(&changes, want);
+    }
+}
+
+// Ports TestBuildConfigChangeDetails_XAIForceMappingOnly.
+#[test]
+fn xai_force_mapping_only() {
+    let key = |force_mapping: bool| CodexKey {
+        base_url: "https://api.x.ai/v1".to_owned(),
+        models: vec![CodexModel {
+            name: "grok-4.5".to_owned(),
+            alias: "grok-latest".to_owned(),
+            force_mapping,
+            ..CodexModel::default()
+        }],
+        ..codex("xai-key")
+    };
+    let old = config_with(|old| {
+        old.xai_api_key = vec![key(false)];
+    });
+    let new = config_with(|new| {
+        new.xai_api_key = vec![key(true)];
+    });
+
+    let changes = build_change_details(&old, &new);
+    expect_contains(&changes, "xai[0].models: updated (1 -> 1 entries)");
+}
+
+// Not upstream's: the Interactions and Meta keys get the lines upstream
+// gives them, in its order. Meta's prefix is compared trimmed but shown as
+// written, and Meta has no websockets line.
+#[test]
+fn interactions_and_meta_keys() {
+    let old = config_with(|old| {
+        old.interactions_api_key = vec![GeminiKey {
+            base_url: "https://old.example.com/v1beta".to_owned(),
+            prefix: " old ".to_owned(),
+            ..gemini("old-key")
+        }];
+        old.meta_api_key = vec![CodexKey {
+            prefix: " old ".to_owned(),
+            priority: 1,
+            ..codex("old-key")
+        }];
+    });
+    let new = config_with(|new| {
+        new.interactions_api_key = vec![GeminiKey {
+            base_url: "https://new.example.com/v1beta".to_owned(),
+            prefix: "new".to_owned(),
+            disable_cooling: Some(true),
+            request_retry: Some(2),
+            excluded_models: strings(&["gemini-hidden"]),
+            ..gemini("new-key")
+        }];
+        new.meta_api_key = vec![CodexKey {
+            prefix: " new ".to_owned(),
+            priority: 2,
+            websockets: true,
+            request_retry: Some(0),
+            headers: headers(&[("X-Test", "new")]),
+            models: vec![CodexModel {
+                name: "llama".to_owned(),
+                ..CodexModel::default()
+            }],
+            ..codex("new-key")
+        }];
+    });
+
+    assert_eq!(
+        build_change_details(&old, &new),
+        [
+            "interactions[0].base-url: https://old.example.com -> https://new.example.com",
+            "interactions[0].prefix: old -> new",
+            "interactions[0].disable-cooling: inherit -> true",
+            "interactions[0].api-key: updated",
+            "interactions[0].excluded-models: updated (0 -> 1 entries)",
+            "interactions[0].request-retry: <unset> -> 2",
+            "meta[0].prefix:  old  ->  new ",
+            "meta[0].priority: 1 -> 2",
+            "meta[0].request-retry: <unset> -> 0",
+            "meta[0].api-key: updated",
+            "meta[0].headers: updated",
+            "meta[0].models: updated (0 -> 1 entries)",
+        ]
+    );
+
+    let mut padded = old.clone();
+    padded.meta_api_key[0].prefix = "old".to_owned();
+    assert!(build_change_details(&old, &padded).is_empty());
+
+    let mut more = new.clone();
+    more.interactions_api_key.clear();
+    more.meta_api_key.push(codex("other"));
+    assert_eq!(
+        build_change_details(&new, &more),
+        [
+            "interactions-api-key count: 1 -> 0",
+            "meta-api-key count: 1 -> 2",
+        ]
+    );
+}
+
 // Ports TestBuildConfigChangeDetails_SecretsAndCounts.
 #[test]
 fn secrets_and_counts() {
@@ -463,6 +617,7 @@ fn flags_and_keys() {
         new.api_keys = strings(&[" key-1 ", "key-2"]);
         new.force_model_prefix = true;
         new.nonstream_keepalive_interval = 5;
+        new.xai.inject_x_search = true;
     });
 
     let details = build_change_details(&old, &new);
@@ -484,6 +639,7 @@ fn flags_and_keys() {
         "quota-exceeded.switch-project: false -> true",
         "quota-exceeded.switch-preview-model: false -> true",
         "quota-exceeded.antigravity-credits: false -> true",
+        "xai.inject-x-search: false -> true",
         "api-keys count: 1 -> 2",
         "claude-api-key count: 1 -> 2",
         "codex-api-key count: 1 -> 2",
@@ -718,7 +874,7 @@ fn remote_management_base_url() {
     );
 }
 
-// Ports TestBuildConfigChangeDetails_CountBranches, without its xAI key.
+// Ports TestBuildConfigChangeDetails_CountBranches.
 #[test]
 fn count_branches() {
     let old = Config::default();
@@ -726,6 +882,7 @@ fn count_branches() {
         new.gemini_api_key = vec![gemini("g")];
         new.claude_api_key = vec![claude("c")];
         new.codex_api_key = vec![codex("c")];
+        new.xai_api_key = vec![codex("x")];
         new.vertex_api_key = vec![VertexCompatKey {
             base_url: "http://v".to_owned(),
             ..vertex("v")
@@ -736,6 +893,7 @@ fn count_branches() {
     expect_contains(&changes, "gemini-api-key count: 0 -> 1");
     expect_contains(&changes, "claude-api-key count: 0 -> 1");
     expect_contains(&changes, "codex-api-key count: 0 -> 1");
+    expect_contains(&changes, "xai-api-key count: 0 -> 1");
     expect_contains(&changes, "vertex-api-key count: 0 -> 1");
 }
 
@@ -811,6 +969,17 @@ fn secrets_never_show() {
                 headers: headers(&[("Authorization", &format!("Bearer {age}-header"))]),
                 ..gemini(&format!("sk-{age}-gemini"))
             }];
+            config.interactions_api_key = vec![GeminiKey {
+                base_url: format!("https://{age}-user@ip.example/{age}-path?key={age}-query"),
+                ..gemini(&format!("sk-{age}-interactions"))
+            }];
+            let codex_shaped = |provider: &str| CodexKey {
+                proxy_url: format!("socks5://{age}-user:{age}-pass@{provider}.example"),
+                headers: headers(&[("X-Key", &format!("{age}-header"))]),
+                ..codex(&format!("sk-{age}-{provider}"))
+            };
+            config.xai_api_key = vec![codex_shaped("xai")];
+            config.meta_api_key = vec![codex_shaped("meta")];
             config.openai_compatibility = vec![OpenAiCompatibility {
                 headers: headers(&[("X-Key", &format!("{age}-header"))]),
                 ..compat("compat", &[&format!("sk-{age}-compat")], &[])
@@ -824,12 +993,16 @@ fn secrets_never_show() {
         for secret in [
             "-client",
             "-gemini",
+            "-interactions",
+            "-xai",
+            "-meta",
             "-compat",
             "-management",
             "-header",
             "-user",
             "-pass",
             "-path",
+            "-query",
         ] {
             let secret = format!("{age}{secret}");
             assert!(!joined.contains(&secret), "leaked {secret:?}: {joined}");

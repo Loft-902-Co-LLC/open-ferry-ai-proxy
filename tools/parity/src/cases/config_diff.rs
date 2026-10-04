@@ -40,6 +40,8 @@ codex:
   stream-bootstrap-buffering: true
   stream-bootstrap-timeout: "15s"
   orphan-delegation-compatibility: true
+xai:
+  inject-x-search: true
 client:
   codex:
     optimize-multi-agent-v2: true
@@ -95,6 +97,16 @@ gemini-api-key:
       - "gemini-1.5-*"
     disable-cooling: false
     request-retry: 1
+interactions-api-key:
+  - api-key: "interactions-key-1"
+    prefix: "team-i"
+    base-url: "https://interactions.example/v1beta"
+    headers:
+      X-Team: "i"
+    models:
+      - name: "gemini-2.5-pro"
+        alias: "i-pro"
+    disable-cooling: true
 claude-api-key:
   - api-key: "claude-key-1"
     base-url: "https://api.anthropic.example"
@@ -115,6 +127,30 @@ codex-api-key:
       - name: "gpt-6-sol"
         alias: "sol"
         force-mapping: true
+xai-api-key:
+  - api-key: "xai-key-1"
+    priority: 2
+    prefix: "team-x"
+    base-url: "https://api.x.example/v1"
+    proxy-url: "http://user:secret@xp.example:3128"
+    websockets: true
+    models:
+      - name: "grok-4.5"
+        alias: "grok"
+        force-mapping: true
+    excluded-models:
+      - "grok-2*"
+    request-retry: 1
+meta-api-key:
+  - api-key: "meta-key-1"
+    priority: 1
+    prefix: " team-m "
+    headers:
+      X-Team: "m"
+    models:
+      - name: "muse"
+        alias: "m"
+    disable-cooling: false
 vertex-api-key:
   - api-key: "vertex-key-1"
     base-url: "https://vertex.example"
@@ -538,12 +574,124 @@ vertex-api-key:
         display-name: "A"
 "#,
         ),
+        // Ports TestBuildConfigChangeDetails_XAIKeys.
+        case(
+            "xai-keys",
+            r#"xai-api-key:
+  - api-key: "old-key"
+    priority: 1
+    prefix: "old"
+    base-url: "https://old.example.com/v1"
+    proxy-url: "http://old-proxy"
+    websockets: false
+    disable-cooling: false
+    request-retry: 1
+    headers:
+      X-Test: "old"
+    models:
+      - name: "grok-old"
+        alias: "grok"
+    excluded-models:
+      - "grok-hidden"
+"#,
+            r#"xai-api-key:
+  - api-key: "new-key"
+    priority: 2
+    prefix: "new"
+    base-url: "https://new.example.com/v1"
+    proxy-url: "http://new-proxy"
+    websockets: true
+    disable-cooling: true
+    request-retry: 0
+    headers:
+      X-Test: "new"
+    models:
+      - name: "grok-new"
+        alias: "grok"
+    excluded-models:
+      - "grok-other"
+"#,
+        ),
+        // Ports TestBuildConfigChangeDetails_XAIForceMappingOnly.
+        case(
+            "xai-force-mapping-only",
+            r#"xai-api-key:
+  - api-key: "xai-key"
+    base-url: "https://api.x.ai/v1"
+    models:
+      - name: "grok-4.5"
+        alias: "grok-latest"
+"#,
+            r#"xai-api-key:
+  - api-key: "xai-key"
+    base-url: "https://api.x.ai/v1"
+    models:
+      - name: "grok-4.5"
+        alias: "grok-latest"
+        force-mapping: true
+"#,
+        ),
+        // Meta's prefix shows as written; it has no websockets line, and
+        // parsing gives it a default base URL and clears xAI's alpha search.
+        case(
+            "interactions-meta-key-fields",
+            r#"interactions-api-key:
+  - api-key: "i-old"
+    base-url: "https://user:pass@i-old.example/v1beta?key=secret"
+    prefix: " team "
+meta-api-key:
+  - api-key: "m-old"
+    prefix: " team "
+xai-api-key:
+  - api-key: "x"
+    base-url: "https://api.x.example/v1"
+"#,
+            r#"interactions-api-key:
+  - api-key: "i-new"
+    base-url: "https://i-new.example/v1beta"
+    prefix: "/team/"
+    disable-cooling: false
+    request-retry: 2
+meta-api-key:
+  - api-key: "m-old"
+    base-url: "https://api.meta.ai/v1"
+    prefix: "team"
+    websockets: true
+    alpha-search: true
+    priority: 3
+xai-api-key:
+  - api-key: "x"
+    base-url: "https://api.x.example/v1"
+    alpha-search: true
+"#,
+        ),
+        case(
+            "meta-prefix-padded",
+            r#"meta-api-key:
+  - api-key: "m"
+    prefix: "a"
+"#,
+            r#"meta-api-key:
+  - api-key: "m"
+    prefix: " b "
+"#,
+        ),
+        case(
+            "xai-inject-x-search",
+            r#"xai:
+  inject-x-search: true
+"#,
+            r#"port: 8317
+"#,
+        ),
         // Ports TestBuildConfigChangeDetails_CountBranches.
         case(
             "provider-key-counts",
             "port: 1\n",
             r#"gemini-api-key:
   - api-key: "g"
+interactions-api-key:
+  - api-key: "i"
 claude-api-key:
   - api-key: "c"
     base-url: ""
@@ -552,6 +700,11 @@ codex-api-key:
   - api-key: "x"
     base-url: "https://codex.example"
     proxy-url: ""
+xai-api-key:
+  - api-key: "x"
+    base-url: "https://api.x.example/v1"
+meta-api-key:
+  - api-key: "m"
 vertex-api-key:
   - api-key: "v"
     base-url: "http://v"

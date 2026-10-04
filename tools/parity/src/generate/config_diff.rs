@@ -157,13 +157,17 @@ const SECTIONS: &[&str] = &[
     "nonstream-keepalive-interval",
     "quota-exceeded",
     "codex",
+    "xai",
     "client",
     "routing",
     "api-keys",
     "payload",
     "gemini-api-key",
+    "interactions-api-key",
     "claude-api-key",
     "codex-api-key",
+    "xai-api-key",
+    "meta-api-key",
     "vertex-api-key",
     "oauth-excluded-models",
     "oauth-model-alias",
@@ -243,13 +247,20 @@ impl Configs {
     }
 
     /// Changes one part of `current` to `fresh`'s: one field of a mapping
-    /// (or of one entry of a list of mappings), or the whole value.
+    /// (or of one entry of a list of mappings), or the whole value. A key
+    /// of `fresh` that is another key of `current` once trimmed and in
+    /// lower case (an OAuth channel or a header name) isn't added.
     fn tweak(&mut self, current: &mut Value, fresh: Value) {
         match (current, fresh) {
             (Value::Object(current), Value::Object(mut fresh)) => {
                 let keys: Vec<String> = current.keys().chain(fresh.keys()).cloned().collect();
                 let key = self.rng.pick(&keys);
+                let normalized = key.trim().to_lowercase();
+                let collides = current
+                    .keys()
+                    .any(|other| *other != key && other.trim().to_lowercase() == normalized);
                 match fresh.remove(&key) {
+                    Some(_) if collides => {}
                     Some(value) => {
                         current.insert(key, value);
                     }
@@ -307,15 +318,20 @@ impl Configs {
                 codex["stream-bootstrap-timeout"] = json!(self.rng.pick(TIMEOUTS));
                 codex
             }
+            "xai" => self.flags(&["inject-x-search"]),
             "client" => json!({
                 "codex": self.flags(&["optimize-multi-agent-v2", "enable-apply-patch"]),
             }),
             "routing" => json!({ "strategy": self.rng.pick(STRATEGIES) }),
             "api-keys" => self.list(4, |generator| json!(generator.rng.pick(API_KEYS))),
             "payload" => self.payload(),
-            "gemini-api-key" | "claude-api-key" | "codex-api-key" | "vertex-api-key" => {
-                self.list(3, |generator| generator.provider_key(section))
-            }
+            "gemini-api-key"
+            | "interactions-api-key"
+            | "claude-api-key"
+            | "codex-api-key"
+            | "xai-api-key"
+            | "meta-api-key"
+            | "vertex-api-key" => self.list(3, |generator| generator.provider_key(section)),
             "oauth-excluded-models" => self.channels(|generator| {
                 generator.list(3, |generator| json!(generator.rng.pick(EXCLUDED)))
             }),
@@ -403,11 +419,17 @@ impl Configs {
                 let rebuild = json!(self.rng.chance(50));
                 field(self, "rebuild-mid-system-message", rebuild);
             }
-            "codex-api-key" => {
+            "codex-api-key" | "xai-api-key" | "meta-api-key" => {
+                // Only Codex shows `alpha-search` and only Meta leaves out
+                // `websockets`, and only xAI and Meta show the priority;
+                // each key gets them all, to check the lines left out stay
+                // out.
                 let websockets = json!(self.rng.chance(50));
                 field(self, "websockets", websockets);
                 let alpha_search = json!(self.rng.chance(50));
                 field(self, "alpha-search", alpha_search);
+                let priority = json!(self.rng.pick(&[-1, 0, 1, 5]));
+                field(self, "priority", priority);
             }
             _ => {}
         }
