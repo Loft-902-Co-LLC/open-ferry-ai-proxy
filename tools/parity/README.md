@@ -2,7 +2,7 @@
 
 Differential tests of open-ferry's translators against upstream [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI). The tool runs the same input through upstream's Go translators and through our Rust ports, then compares what they produce.
 
-Seventy-two suites are covered so far:
+One hundred and four suites are covered so far:
 
 | Module | Translator | Input | Output |
 |---|---|---|---|
@@ -78,6 +78,12 @@ Seventy-two suites are covered so far:
 | `observe::usage` (`open-ferry-core`) | Usage parsed from upstream responses | an upstream's response body or stream line and the parser for its protocol | the usage it reads, or none |
 | | First-token events | an upstream's stream event and its protocol | whether it carries the first token |
 | `config::diff` (`open-ferry-core`) | Config change details | two configs | the change details logged when the config is reloaded |
+| `interactions::claude` and `claude::interactions` | Claude ↔ Interactions, 7 suites: the request both ways, Claude's also in compatibility mode, and the response both ways, streaming and non-streaming | a Claude Messages or Interactions request; an Interactions or Claude event stream, or a whole response | the request, events or response in the other format |
+| `openai::interactions::chat_completions` | Chat Completions ↔ Interactions, 6 suites: the request and the response both ways, streaming and non-streaming | a Chat Completions or Interactions request; an Interactions or Chat Completions stream, or a whole response | the same, in the other format |
+| `openai::interactions::responses` | Responses ↔ Interactions, 7 suites: the request and the response both ways, streaming and non-streaming, and the tool input error after an Interactions stream (`FinalizeToolInput`) | a Responses or Interactions request; an Interactions or Responses stream, or a whole response, with the client's request | the same, in the other format, and why an `apply_patch` call's input failed |
+| `codex::interactions` | Interactions → Codex, 3 suites: the request and the response, streaming and non-streaming | an Interactions request; a Codex event stream, or Codex's final event | the Codex request; Interactions events or one interaction |
+| `gemini::interactions` | Gemini ↔ Interactions and the Interactions passthrough, 9 suites: the request and the response both ways and passed through, streaming and non-streaming | a Gemini or Interactions request; an Interactions or Gemini stream, or a whole response | the same, in the other format or passed through, with a failed interaction as a Gemini error |
+| `registry`, Interactions pairs | Requests and responses, within the registry suites above | each family's cases through its pairs, ten in all: `claude`, `openai` and `openai-response` to and from `interactions`, `interactions` to `codex`, `interactions` to and from `gemini`, and `interactions` to itself | as for the other registry rows |
 
 ## Running it
 
