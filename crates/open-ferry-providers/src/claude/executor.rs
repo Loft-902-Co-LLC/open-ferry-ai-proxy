@@ -32,8 +32,9 @@
 //! - Token counting for a credential that doesn't go to Anthropic's API,
 //!   which upstream estimates locally, fails with a 501.
 //! - A dropped call or stream stops at once; upstream checks its context.
-//! - An error body, or the error event of a stream answering a call that
-//!   isn't streamed, that quotes a secret the request sent has it redacted:
+//! - An error body, or an error event of a stream (a streamed call's or the
+//!   one answering a call that isn't streamed), that quotes a secret the
+//!   request sent has it redacted:
 //!   the credential headers after the custom ones, each cookie, the URL's
 //!   credentials, the proxy's password and the credential's key or tokens
 //!   (see the crate's `redact` module).
@@ -415,6 +416,7 @@ impl ClaudeExecutor {
                 responses: format == Format::OPENAI_RESPONSE,
                 fast,
                 status,
+                secrets,
             },
         );
         Ok(StreamResponse {

@@ -1151,6 +1151,48 @@ async fn error_event_in_a_stream_is_forwarded() {
     assert!(text(&chunks[1]).contains("overloaded_error"));
 }
 
+// Not upstream's: an error event in a stream that quotes the key has it
+// redacted, for a Claude client and for one that gets Claude's stream
+// translated; the events around it go out as Claude sent them.
+#[tokio::test]
+async fn an_error_event_in_a_stream_hides_the_key() {
+    let start = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_01\",\"model\":\"claude-sonnet-4-5\"}}\n\n",
+    );
+    let error = |key: &str| {
+        format!(
+            "event: error\ndata: {{\"type\":\"error\",\"error\":{{\"type\":\"authentication_error\",\"message\":\"bad key {key}\"}}}}\n\n"
+        )
+    };
+    let mock = Mock::start(Reply::sse(&format!("{start}{}", error(API_KEY)))).await;
+    let response = mock
+        .executor()
+        .execute_stream(
+            api_key_auth(),
+            request(claude_payload()),
+            stream_options(Format::CLAUDE),
+        )
+        .await
+        .unwrap();
+    let joined: String = collect(response).await.iter().map(text).collect();
+    assert_eq!(joined, format!("{start}{}", error("[redacted]")));
+
+    let mock = Mock::start(Reply::sse(&format!("{start}{}", error(API_KEY)))).await;
+    let response = mock
+        .executor()
+        .execute_stream(
+            api_key_auth(),
+            request(openai_payload(true)),
+            stream_options(Format::OPENAI),
+        )
+        .await
+        .unwrap();
+    let joined: String = collect(response).await.iter().map(text).collect();
+    assert!(joined.contains("bad key [redacted]"), "{joined}");
+    assert!(!joined.contains(API_KEY), "{joined}");
+}
+
 #[tokio::test]
 async fn openai_responses_stream_gets_usage_details() {
     let mock = Mock::start(Reply::sse(SSE)).await;

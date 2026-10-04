@@ -16,6 +16,10 @@
 //! `message_delta`, and no `error` event.
 //!
 //! Deviations from upstream:
+//! - An `error` event has the secrets the request sent (the API key or
+//!   token among them) redacted before it is passed on or translated, so
+//!   none reaches the client in an error the stream carries; see
+//!   [`crate::redact`]. The other events go out as Claude sent them.
 //! - An event that grows past 50 MiB goes out in pieces rather than whole;
 //!   upstream buffers it however large it gets.
 //! - Dropping the stream stops reading, where upstream watches its context.
@@ -25,6 +29,7 @@
 //! - Response model restoring, OAuth tool name restoring, continuity
 //!   tracking and the thinking replay cache aren't ported.
 
+use std::borrow::Cow;
 use std::collections::VecDeque;
 
 use bytes::Bytes;
@@ -39,6 +44,7 @@ use super::usage::ensure_responses_usage_details;
 pub(crate) use crate::codex::stream::MAX_LINE;
 use crate::codex::stream::{LineError, LineReader};
 use crate::json::str_at;
+use crate::redact::{Policy, Secrets};
 
 /// The error for a tool call whose input couldn't be translated
 /// (`ApplyPatchUpstreamErrorMessage`).
@@ -56,10 +62,10 @@ fn data_event(line: &[u8]) -> Option<Value> {
     serde_json::from_slice(trim_space(data)).ok()
 }
 
-/// Whether a line is the `message_stop` event that ends a reply
-/// (`observeClaudeStreamLine`).
-fn is_message_stop(line: &[u8]) -> bool {
-    data_event(line).is_some_and(|event| str_at(&event, "type") == "message_stop")
+/// The `type` of a `data:` line's event, if it has valid JSON; a
+/// `message_stop` ends a reply (`observeClaudeStreamLine`).
+fn event_type(line: &[u8]) -> Option<String> {
+    data_event(line).map(|event| str_at(&event, "type"))
 }
 
 /// A 502 for a stream that doesn't hold a complete reply.
@@ -143,6 +149,8 @@ pub(crate) struct StreamSetup {
     pub(crate) fast: bool,
     /// Claude's status, for errors.
     pub(crate) status: u16,
+    /// The secrets the request sent, redacted from each error event.
+    pub(crate) secrets: Secrets,
 }
 
 /// The state of one stream.
@@ -188,13 +196,26 @@ impl State {
             Some(Err(error)) => return self.end(Some(error)),
             None => return self.end(None),
         };
-        if is_message_stop(&line) {
-            self.completed = true;
-        }
+        let line = match event_type(&line).as_deref() {
+            Some("message_stop") => {
+                self.completed = true;
+                line
+            }
+            Some("error") => self.redact(line),
+            _ => line,
+        };
         if self.setup.translator.is_none() {
             self.forward_line(&line);
         } else {
             self.translate_line(&line);
+        }
+    }
+
+    /// `line` without the secrets the request was sent with.
+    fn redact(&self, line: Vec<u8>) -> Vec<u8> {
+        match self.setup.secrets.bytes(&line, Policy::Client) {
+            Cow::Owned(redacted) => redacted,
+            Cow::Borrowed(_) => line,
         }
     }
 
@@ -342,10 +363,23 @@ mod tests {
 
     #[test]
     fn spots_message_stop() {
+        let is_message_stop =
+            |line: &[u8]| event_type(line).is_some_and(|kind| kind == "message_stop");
         assert!(is_message_stop(b" data: {\"type\":\"message_stop\"} "));
         assert!(is_message_stop(b"data:{\"type\":\"message_stop\"}"));
         assert!(!is_message_stop(b"event: message_stop"));
         assert!(!is_message_stop(b"data: {\"type\":\"message_delta\"}"));
         assert!(!is_message_stop(b"data: message_stop"));
+    }
+
+    #[test]
+    fn spots_error_events() {
+        assert_eq!(
+            event_type(b"data: {\"type\":\"error\",\"error\":{}}").as_deref(),
+            Some("error")
+        );
+        assert_eq!(event_type(b"event: error"), None);
+        assert_eq!(event_type(b"data: {nope"), None);
+        assert_eq!(event_type(b"data: {}").as_deref(), Some(""));
     }
 }
