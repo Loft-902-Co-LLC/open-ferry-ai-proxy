@@ -15,9 +15,9 @@
 //! Deviations from upstream:
 //! - A Codex client's body is readied as [`codex_client`] says, and nothing
 //!   notes that it was.
-//! - Errors aren't kept for the request log or usage records
-//!   (`LoggingAPIResponseError`). A stream's errors are logged with
-//!   `tracing` at debug level, as upstream words them for its request log.
+//! - Errors aren't kept for usage records. A stream's errors are also
+//!   logged with `tracing` at debug level, as upstream words them for its
+//!   request log (`LoggingAPIResponseError`).
 //! - Plugins can't answer for the provider, so an error before the first
 //!   event is always sanitized (there is no `DirectResponse`).
 //! - The Responses model list (`OpenAIResponsesModels`) isn't routed.
@@ -44,6 +44,7 @@ mod stream_error;
 mod tests;
 
 use std::future::ready;
+use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::State;
@@ -52,6 +53,7 @@ use bytes::{Bytes, BytesMut};
 use futures_util::{StreamExt, stream};
 use http::HeaderMap;
 use open_ferry_core::exec::Format;
+use open_ferry_core::observe::RequestContext;
 use open_ferry_translate::go;
 use serde_json::Value;
 
@@ -62,6 +64,7 @@ use crate::body;
 use crate::errors::{ErrorMessage, local_error, openai_error_response};
 use crate::exec::{Call, ClientRequest, Started};
 use crate::json;
+use crate::request_log;
 use crate::sse_check::MAX_EVENT_BYTES;
 use crate::state::AppState;
 use crate::stream::{StreamWriter, forward, json_response, keep_alive, sse_response};
@@ -193,6 +196,8 @@ async fn respond_streaming(
         Err(error) => Started::failed(error),
     };
     let mut framer = Framer::new(is_codex_client(&client.headers));
+    let context = client.context.as_deref();
+    let writer = |framer| ResponsesWriter::new(framer).log_to(client.context.clone());
     let mut initial = BytesMut::new();
     let error = loop {
         match items.next().await {
@@ -208,15 +213,16 @@ async fn respond_streaming(
                                 "upstream stream sent more than {MAX_EVENT_BYTES} bytes before its first payload"
                             ),
                         ));
+                        request_log::record_api_error(context, &error);
                         return openai_error_response(&error, passthrough);
                     }
                     continue;
                 }
                 if let Some(error) = &framer.terminal_error {
-                    log_stream_error(&framer, error);
+                    log_stream_error(&framer, error, context);
                     return sse_response(&headers, Body::from(initial.freeze()));
                 }
-                let rest = forward(items, ResponsesWriter::new(framer), keepalive);
+                let rest = forward(items, writer(framer), keepalive);
                 return sse_response(&headers, prepend(initial.freeze(), rest));
             }
             Some(Err(error)) => break error,
@@ -227,16 +233,17 @@ async fn respond_streaming(
                         502,
                         "upstream stream closed before first payload",
                     ));
+                    request_log::record_api_error(context, &error);
                     return openai_error_response(&error, passthrough);
                 }
                 if let Some(error) = &framer.terminal_error {
-                    log_stream_error(&framer, error);
+                    log_stream_error(&framer, error, context);
                 } else if framer.terminal_event.is_empty() {
                     let error = sanitize_error(ErrorMessage::new(
                         502,
                         "upstream stream closed before a terminal event",
                     ));
-                    let mut writer = ResponsesWriter::new(framer);
+                    let mut writer = writer(framer);
                     let error = writer.normalize_terminal_error(error);
                     writer.write_terminal_error(&error, &mut initial);
                 }
@@ -249,9 +256,10 @@ async fn respond_streaming(
     framer.flush(&mut initial);
     let error = sanitize_error(error);
     if framer.data_frames == 0 {
+        request_log::record_api_error(context, &error);
         return openai_error_response(&error, passthrough);
     }
-    let mut writer = ResponsesWriter::new(framer);
+    let mut writer = writer(framer);
     let error = writer.normalize_terminal_error(error);
     writer.write_terminal_error(&error, &mut initial);
     sse_response(&headers, Body::from(initial.freeze()))
@@ -315,10 +323,12 @@ fn stream_error_diagnostic(framer: &Framer, error: &ErrorMessage) -> (u16, Strin
     )
 }
 
-/// Logs a stream error at debug level.
-fn log_stream_error(framer: &Framer, error: &ErrorMessage) {
+/// Logs a stream error at debug level, and records it for the request's
+/// log in `context`.
+fn log_stream_error(framer: &Framer, error: &ErrorMessage, context: Option<&RequestContext>) {
     let (status, text) = stream_error_diagnostic(framer, error);
     tracing::debug!(status, "{text}");
+    request_log::record_api_error(context, &ErrorMessage::new(status, text));
 }
 
 /// Writes a Responses stream once it has started (the options
@@ -329,6 +339,8 @@ struct ResponsesWriter {
     flushed: BytesMut,
     /// The error the framer stopped the stream with, already written.
     failed: Option<ErrorMessage>,
+    /// The request's context, whose log gets the stream's errors.
+    context: Option<Arc<RequestContext>>,
 }
 
 impl ResponsesWriter {
@@ -337,7 +349,14 @@ impl ResponsesWriter {
             framer,
             flushed: BytesMut::new(),
             failed: None,
+            context: None,
         }
+    }
+
+    /// Records the stream's errors for the request log in `context`.
+    fn log_to(mut self, context: Option<Arc<RequestContext>>) -> Self {
+        self.context = context;
+        self
     }
 
     /// Writes what was flushed, then flushes the framer.
@@ -361,7 +380,7 @@ impl StreamWriter for ResponsesWriter {
             return Some(error);
         }
         let error = self.framer.terminal_error.clone()?;
-        log_stream_error(&self.framer, &error);
+        log_stream_error(&self.framer, &error, self.context.as_deref());
         Some(error)
     }
 
@@ -373,7 +392,7 @@ impl StreamWriter for ResponsesWriter {
         self.flush(out);
         let status = error.http_status();
         let err_text = stream_error_text(error, status);
-        log_stream_error(&self.framer, error);
+        log_stream_error(&self.framer, error, self.context.as_deref());
         if !self.framer.terminal_event.is_empty() {
             return;
         }

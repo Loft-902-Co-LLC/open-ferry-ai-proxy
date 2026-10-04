@@ -63,12 +63,14 @@ use bytes::Bytes;
 use futures_util::{StreamExt, stream};
 use http::{HeaderMap, HeaderValue, Method, header};
 use http_body::{Frame, SizeHint};
+use open_ferry_core::exec::ErrorKind;
 use open_ferry_core::observe::RequestContext;
 use open_ferry_core::observe::request_log::{
     self, Answer, CPA_TRACE_ID_HEADER, DeferredCapture, Downstream, Mode, RequestBody,
     STATUS_CLIENT_CLOSED_REQUEST,
 };
 
+use crate::errors::ErrorMessage;
 use crate::request_context;
 use crate::state::AppState;
 
@@ -248,6 +250,24 @@ async fn read_ahead(body: Body, limit: usize) -> (Bytes, bool, Body) {
         None => Body::from_stream(read.chain(data)),
     };
     (raw, truncated, body)
+}
+
+/// Records `error`, as a handler gave it to the client, for the log's
+/// `=== API ERROR RESPONSE ===` sections (upstream's
+/// `LoggingAPIResponseError`), which are kept only with `request-log` on.
+/// Upstream's Responses handlers, over HTTP and WebSocket, are the ones
+/// that record their errors.
+pub(crate) fn record_api_error(context: Option<&RequestContext>, error: &ErrorMessage) {
+    let Some(context) = context else {
+        return;
+    };
+    let canceled = error
+        .source
+        .as_ref()
+        .is_some_and(|source| source.kind == ErrorKind::Canceled);
+    context
+        .request_log()
+        .record_api_error(error.status, &error.text, canceled);
 }
 
 /// Sets the trace header from the request's latest selection, unless the

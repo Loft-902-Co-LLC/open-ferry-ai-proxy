@@ -1256,6 +1256,7 @@ async fn forward_items(
             turn: None,
             suppress_error: &suppress,
             keepalive: None,
+            context: None,
         },
     )
     .await;
@@ -1387,6 +1388,7 @@ async fn forward_emits_periodic_pings() {
             turn: None,
             suppress_error: &|_: &ErrorMessage| false,
             keepalive: Some(Duration::from_secs(10)),
+            context: None,
         },
     )
     .await;
@@ -1415,6 +1417,7 @@ async fn forward_ping_write_failure_aborts_session() {
             turn: None,
             suppress_error: &|_: &ErrorMessage| false,
             keepalive: Some(Duration::from_millis(10)),
+            context: None,
         },
     )
     .await;

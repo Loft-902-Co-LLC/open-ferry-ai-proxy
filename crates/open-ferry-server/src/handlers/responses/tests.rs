@@ -6,6 +6,7 @@
 //! The Responses stream writer, from upstream's tests, and the routes end to
 //! end against a fake dispatcher.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,7 +16,10 @@ use bytes::{Bytes, BytesMut};
 use futures_util::{StreamExt, stream};
 use http::{HeaderMap, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
+use open_ferry_core::config::Config;
 use open_ferry_core::exec::{ErrorKind, ExecError, Format};
+use open_ferry_core::observe::RequestContext;
+use open_ferry_core::observe::request_log::{ApiError, RequestLogger};
 use serde_json::Value;
 use tower::ServiceExt;
 
@@ -53,6 +57,38 @@ async fn run(framer: Framer, items: Vec<Result<Bytes, ErrorMessage>>) -> String 
     );
     let bytes = body.collect().await.unwrap().to_bytes();
     String::from_utf8(bytes.to_vec()).unwrap()
+}
+
+/// What the stream writer sends for `items` once `framer` has started,
+/// recording its errors for the log of the request of `context`.
+async fn run_logged(
+    framer: Framer,
+    items: Vec<Result<Bytes, ErrorMessage>>,
+    context: &Arc<RequestContext>,
+) -> String {
+    let writer = ResponsesWriter::new(framer).log_to(Some(Arc::clone(context)));
+    let body = forward(stream::iter(items).boxed(), writer, None);
+    let bytes = body.collect().await.unwrap().to_bytes();
+    String::from_utf8(bytes.to_vec()).unwrap()
+}
+
+/// A request logged whole, as with upstream's `RequestLog: true`, whose
+/// recorded errors the tests read as upstream's read `API_RESPONSE_ERROR`.
+/// Its log is never written, as it never finishes.
+fn logged_request() -> Arc<RequestContext> {
+    let mut config = Config::default();
+    config.request_log = true;
+    let context = Arc::new(RequestContext::new(Method::POST, "/v1/responses".into()));
+    let logger = RequestLogger::new(&config, Path::new("unwritten"), Path::new(""));
+    assert!(logger.start(&context).is_some());
+    context
+}
+
+/// The one error recorded for the log of the request of `context`.
+fn only_api_error(context: &RequestContext) -> ApiError {
+    let mut errors = context.request_log().api_errors();
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    errors.remove(0)
 }
 
 /// A framer that has been given `chunk`, and what it wrote.
@@ -369,12 +405,22 @@ async fn exposes_transport_error_after_output_for_codex() {
                 .to_owned()
         )
     );
-    let body = run(framer, vec![failed(502, "unexpected EOF")]).await;
+    let context = logged_request();
+    let body = run_logged(framer, vec![failed(502, "unexpected EOF")], &context).await;
     assert_eq!(
         body,
         "\nevent: response.failed\ndata: {\"type\":\"response.failed\",\"sequence_number\":1,\
          \"response\":{\"status\":\"failed\",\"error\":{\"code\":\"internal_server_error\",\
          \"message\":\"unexpected EOF\",\"param\":null,\"type\":\"server_error\"}}}\n\n"
+    );
+    assert_eq!(
+        only_api_error(&context),
+        ApiError {
+            status: 502,
+            message: "responses stream terminated after response.output_text.delta: unexpected EOF"
+                .to_owned(),
+            canceled: false,
+        }
     );
 }
 
@@ -392,7 +438,9 @@ async fn sanitizes_diagnostic_error_details() {
         stream_error_diagnostic(&framer, &sanitize_error(ErrorMessage::new(502, &raw)));
     assert!(!diagnostic.contains(debug_secret) && !diagnostic.contains(message_secret));
     assert!(diagnostic.len() <= 4096 && diagnostic.contains("upstream failed"));
-    let body = run(framer, vec![failed(502, &raw)]).await;
+    let context = logged_request();
+    let body = run_logged(framer, vec![failed(502, &raw)], &context).await;
+    assert_eq!(only_api_error(&context).message, diagnostic);
     assert!(
         body.contains("upstream failed") && body.contains("upstream_failed"),
         "{body}"
@@ -441,6 +489,9 @@ async fn sanitizes_last_event_diagnostic() {
         diagnostic,
         "responses stream terminated after custom-event-Bearer [REDACTED]: unexpected EOF"
     );
+    let context = logged_request();
+    run_logged(framer, vec![failed(502, "unexpected EOF")], &context).await;
+    assert_eq!(only_api_error(&context).message, diagnostic);
 }
 
 // TestForwardResponsesStreamSanitizesPayloadErrorsAndStopsAtFailure
@@ -476,13 +527,16 @@ async fn sanitizes_payload_errors_and_stops_at_failure() {
 #[tokio::test]
 async fn reports_data_only_error_flushed_at_eof() {
     let chunk = r#"data: {"type":"error","error":{"message":"failed at EOF"}}"#;
-    let mut writer = ResponsesWriter::new(Framer::new(true));
+    let context = logged_request();
+    let mut writer = ResponsesWriter::new(Framer::new(true)).log_to(Some(Arc::clone(&context)));
     let mut out = BytesMut::new();
     writer.write_chunk(Bytes::from_static(chunk.as_bytes()), &mut out);
     assert!(writer.chunk_error().is_none());
     let error = writer.close_error().unwrap();
     assert!(error.text.contains("failed at EOF"), "{}", error.text);
     writer.write_terminal_error(&error, &mut out);
+    let logged = only_api_error(&context).message;
+    assert!(logged.contains("failed at EOF"), "{logged}");
     assert_eq!(
         &out[..],
         run(Framer::new(true), vec![ok(chunk)]).await.as_bytes()
@@ -504,8 +558,18 @@ async fn does_not_append_failure_after_terminal_event() {
         stream_error_diagnostic(&framer, &error).1,
         "responses stream terminated after response.completed: unexpected EOF after completion"
     );
-    let body = run(framer, vec![failed(502, "unexpected EOF after completion")]).await;
+    let context = logged_request();
+    let body = run_logged(
+        framer,
+        vec![failed(502, "unexpected EOF after completion")],
+        &context,
+    )
+    .await;
     assert_eq!(body, "");
+    assert_eq!(
+        only_api_error(&context).message,
+        "responses stream terminated after response.completed: unexpected EOF after completion"
+    );
 }
 
 // TestForwardResponsesStreamFailsWhenUpstreamClosesWithoutTerminalEvent

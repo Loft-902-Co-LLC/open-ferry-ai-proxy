@@ -25,6 +25,7 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use http::HeaderMap;
 use open_ferry_core::exec::ExecError;
+use open_ferry_core::observe::RequestContext;
 use open_ferry_translate::go;
 use tokio::time::{Instant, Interval, MissedTickBehavior};
 
@@ -38,6 +39,7 @@ use crate::auth::Principal;
 use crate::errors::{ErrorMessage, openai_body};
 use crate::exec::HandlerStream;
 use crate::json::{self, Val, str_at};
+use crate::request_log;
 use crate::status::status_text;
 
 /// The event that ends a turn with an error (`wsEventTypeError`).
@@ -60,6 +62,8 @@ pub(super) struct ForwardOptions<'a> {
     pub(super) suppress_error: &'a (dyn Fn(&ErrorMessage) -> bool + Sync),
     /// How often to ping the client while the turn runs.
     pub(super) keepalive: Option<Duration>,
+    /// The session's request context, whose log gets the turn's errors.
+    pub(super) context: Option<&'a RequestContext>,
 }
 
 /// How a turn ended.
@@ -157,11 +161,13 @@ pub(super) async fn forward<S: Socket>(
             None => {
                 let error = ErrorMessage::new(408, "stream closed before response.completed");
                 tracing::debug!(error = %error.text, "responses websocket: stream ended early");
+                request_log::record_api_error(options.context, &error);
                 conn.close_without_error();
                 return Forwarded::Closed;
             }
             Some(Err(error)) => {
                 tracing::debug!(status = error.status, error = %error.text, "responses websocket: upstream error");
+                request_log::record_api_error(options.context, &error);
                 if (options.suppress_error)(&error) {
                     return Forwarded::Suppressed(error);
                 }
@@ -200,6 +206,7 @@ pub(super) async fn forward<S: Socket>(
             if event_type == EVENT_ERROR {
                 let error = error_message_from_payload(&payload);
                 tracing::debug!(status = error.status, error = %error.text, "responses websocket: error event");
+                request_log::record_api_error(options.context, &error);
                 if (options.suppress_error)(&error) {
                     return Forwarded::Suppressed(error);
                 }

@@ -1,10 +1,11 @@
 //! Tests of the request log's capture layer: the ports of CLIProxyAPI
 //! internal/api/middleware/request_logging_test.go, response_writer_test.go
 //! and internal/logging/cpa_trace_test.go (v8.0.10, MIT), and the redaction
-//! tests of the port's own.
+//! and failed-attempt tests of the port's own.
 //!
 //! Each test serves its routes behind the request context and the capture
-//! layer alone, with a request logger writing to a directory of its own.
+//! layer alone, or the whole router, with a request logger writing to a
+//! directory of its own.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -32,6 +33,7 @@ use crate::request_context;
 use crate::state::AppState;
 use crate::testing::{FakeCatalog, FakeDispatcher, state};
 
+mod api_errors;
 mod cpa_trace;
 mod redaction;
 mod request_logging;
@@ -73,18 +75,24 @@ struct Harness {
 impl Harness {
     /// With `request-log` on or off, and the server's config.
     fn with(request_log: bool, server: ServerConfig) -> Self {
+        Self::over(
+            request_log,
+            state(server, FakeCatalog::new(), &FakeDispatcher::new([])),
+        )
+    }
+
+    /// With `request-log` on or off, over `state`.
+    fn over(request_log: bool, state: AppState) -> Self {
         let dir = TempDir::new();
         let mut config = Config::default();
         config.request_log = request_log;
         config.error_logs_max_files = 10;
         let logger = RequestLogger::new(&config, dir.path(), Path::new(""));
-        let state = state(server, FakeCatalog::new(), &FakeDispatcher::new([])).with_observability(
-            Observability {
-                log_dir: Some(dir.path().to_path_buf()),
-                request_log: logger.clone(),
-                ..Observability::default()
-            },
-        );
+        let state = state.with_observability(Observability {
+            log_dir: Some(dir.path().to_path_buf()),
+            request_log: logger.clone(),
+            ..Observability::default()
+        });
         Self { dir, logger, state }
     }
 

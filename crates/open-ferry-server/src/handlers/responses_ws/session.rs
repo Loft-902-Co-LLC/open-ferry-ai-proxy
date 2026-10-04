@@ -44,6 +44,7 @@ use crate::errors::ErrorMessage;
 use crate::exec::{Call, ClientRequest, Started};
 use crate::handlers::codex_client;
 use crate::json::{self, Val, str_at};
+use crate::request_log;
 use crate::routing::{parse_suffix, resolve_model, route};
 use crate::state::AppState;
 
@@ -282,6 +283,7 @@ impl<S: Socket> Session<S> {
         let (mut request, updated_last_request) = match normalized {
             Ok(normalized) => normalized,
             Err(error) => {
+                request_log::record_api_error(self.client.context.as_deref(), &error);
                 let payload = error_payload(&error);
                 tracing::info!(
                     id = %self.id,
@@ -424,6 +426,7 @@ impl<S: Socket> Session<S> {
                 turn: turn.as_mut(),
                 suppress_error: &suppress_error,
                 keepalive,
+                context: self.client.context.as_deref(),
             },
         )
         .await;
