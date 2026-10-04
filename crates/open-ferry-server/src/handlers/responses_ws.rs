@@ -61,6 +61,11 @@
 //!   caches, whose TTL is zero, they don't expire.
 //! - A `X-Codex-Turn-Metadata` header is read for its session ID only when
 //!   it is JSON.
+//! - A request with 128 or more arrays and objects inside one another is
+//!   answered with a 400 error event before anything else is done with it,
+//!   so the session is as it was (see [`crate::body::check_depth`]).
+//!   Upstream forwards a request of any depth, and warm-ups and transcripts
+//!   hold it as it came.
 
 mod client_error;
 mod forward;

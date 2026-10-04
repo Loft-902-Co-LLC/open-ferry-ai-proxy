@@ -3364,3 +3364,72 @@ async fn ends_the_turn_when_an_event_grows_past_the_limit() {
     assert!(matches!(end, None | Some(Err(_))), "{end:?}");
     eventually(|| dispatcher.live_streams() == 0).await;
 }
+
+/// A `response.create` for `test-model` with `extra` members and one more
+/// nested so the request is `depth` levels deep.
+fn nested_create(extra: &str, depth: usize) -> String {
+    format!(
+        r#"{{"type":"response.create","model":"test-model"{extra},"deep":{}0{}}}"#,
+        "[".repeat(depth - 1),
+        "]".repeat(depth - 1)
+    )
+}
+
+// Not upstream's: a request with 128 or more arrays and objects inside one
+// another is answered with a 400 error event, whatever it asks for, and the
+// session goes on as if it hadn't been sent: nothing is called, a warm-up
+// isn't answered, and the transcript is as it was. One of 127 is a turn.
+// Upstream forwards a request of any depth.
+#[tokio::test]
+async fn refuses_requests_nested_too_deeply() {
+    let (url, dispatcher) = serve(
+        test_catalog(),
+        vec![
+            completes_with("resp-1", "out-1"),
+            completes_with("resp-2", "out-2"),
+        ],
+    )
+    .await;
+    let mut ws = connect(&url, &[]).await;
+    let refused = |error: &Value| {
+        assert_eq!(error["type"], "error", "{error}");
+        assert_eq!(error["status"], 400, "{error}");
+        assert_eq!(error["error"]["type"], "invalid_request_error", "{error}");
+        let message = text_of(&error["error"]["message"]);
+        assert!(message.contains("nested more than 127"), "{error}");
+    };
+    let message = r#","input":[{"type":"message","id":"msg-1"}]"#;
+    // A turn, a warm-up, and a delta on a response there isn't.
+    for (extra, depth) in [
+        (message, 128),
+        (r#","generate":false"#, 128),
+        (r#","previous_response_id":"resp-1""#, 129),
+        (message, 100_000),
+    ] {
+        send(&mut ws, &nested_create(extra, depth)).await;
+        refused(&recv(&mut ws).await);
+        assert!(dispatcher.calls().is_empty(), "{extra}: {depth}");
+    }
+
+    send(&mut ws, &nested_create(message, 127)).await;
+    assert_eq!(recv(&mut ws).await["type"], "response.completed");
+    assert_eq!(dispatcher.calls().len(), 1);
+
+    send(
+        &mut ws,
+        &nested_create(r#","previous_response_id":"resp-1""#, 128),
+    )
+    .await;
+    refused(&recv(&mut ws).await);
+    assert_eq!(dispatcher.calls().len(), 1);
+
+    send(
+        &mut ws,
+        r#"{"type":"response.create","previous_response_id":"resp-1","input":[{"type":"message","id":"msg-2"}]}"#,
+    )
+    .await;
+    assert_eq!(recv(&mut ws).await["type"], "response.completed");
+    assert_eq!(dispatcher.calls().len(), 2);
+    let forwarded = payload_of(&dispatcher, 1);
+    assert_eq!(item_ids(&forwarded["input"]), ["msg-1", "out-1", "msg-2"]);
+}

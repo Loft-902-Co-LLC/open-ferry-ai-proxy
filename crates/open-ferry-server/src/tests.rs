@@ -17,6 +17,8 @@ use crate::config::{ServerConfig, StreamingConfig};
 use crate::router;
 use crate::testing::{FakeCatalog, FakeDispatcher, Outcome, state};
 
+mod depth;
+
 /// A server with `outcomes`, serving `gpt-5` through `codex` and
 /// `claude-sonnet` through `claude`, with the key `sk-test`.
 fn app(config: ServerConfig, outcomes: Vec<Outcome>) -> (Router, Arc<FakeDispatcher>) {

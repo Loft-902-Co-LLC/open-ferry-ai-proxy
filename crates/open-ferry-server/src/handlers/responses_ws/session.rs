@@ -40,6 +40,7 @@ use super::requests::{
     normalize, normalize_create, normalize_passthrough, request_type, transcript_replacement,
 };
 use super::writer::{Conn, Socket};
+use crate::body;
 use crate::errors::ErrorMessage;
 use crate::exec::{Call, ClientRequest, Started};
 use crate::handlers::codex_client;
@@ -202,8 +203,30 @@ impl<S: Socket> Session<S> {
         self.state.tool_caches().lock(self.client.principal)
     }
 
+    /// Answers the request being handled with `error`, as an error event,
+    /// and logs it. The session goes on, unless the event can't be written.
+    async fn reject(&mut self, error: &ErrorMessage) -> ControlFlow<()> {
+        request_log::record_api_error(self.client.context.as_deref(), error);
+        let payload = error_payload(error);
+        tracing::info!(
+            id = %self.id,
+            payload = %String::from_utf8_lossy(&payload),
+            "responses websocket: downstream_out"
+        );
+        if self.conn.write(&payload).await.is_err() {
+            tracing::warn!(id = %self.id, "responses websocket: downstream_out write failed");
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
+    }
+
     /// Handles one request. Breaks when the session is over.
     async fn turn(&mut self, payload: &[u8]) -> ControlFlow<()> {
+        // Nothing of the session changes for a request nested too deeply to
+        // be read: it isn't a turn.
+        if let Err(error) = body::check_depth(payload) {
+            return self.reject(&error).await;
+        }
         let explicit_model = str_at(payload, "model").trim().to_owned();
         let mut request_model = explicit_model.clone();
         if request_model.is_empty() {
@@ -282,20 +305,7 @@ impl<S: Socket> Session<S> {
         };
         let (mut request, updated_last_request) = match normalized {
             Ok(normalized) => normalized,
-            Err(error) => {
-                request_log::record_api_error(self.client.context.as_deref(), &error);
-                let payload = error_payload(&error);
-                tracing::info!(
-                    id = %self.id,
-                    payload = %String::from_utf8_lossy(&payload),
-                    "responses websocket: downstream_out"
-                );
-                if self.conn.write(&payload).await.is_err() {
-                    tracing::warn!(id = %self.id, "responses websocket: downstream_out write failed");
-                    return ControlFlow::Break(());
-                }
-                return ControlFlow::Continue(());
-            }
+            Err(error) => return self.reject(&error).await,
         };
         if let Some(prepared) = codex_client::prepare(
             &self.state.settings().config,

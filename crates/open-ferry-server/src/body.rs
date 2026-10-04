@@ -8,6 +8,12 @@
 //!   Upstream reads bodies of any size.
 //! - `gzip` is decoded as well as `zstd`.
 //! - The text of a zstd decoding error differs.
+//! - A JSON body with 128 or more arrays and objects inside one another is
+//!   refused with a 400 ([`check_depth`]), in the error format of the route
+//!   that read it, before a translator or an executor sees it. Upstream
+//!   forwards a body of any depth. Everything here that parses JSON reads at
+//!   most [`MAX_DEPTH`] levels, and takes a deeper body for an empty one, so
+//!   the model, the messages and the tools would be dropped without a word.
 
 use std::io::Read;
 
@@ -20,11 +26,34 @@ use open_ferry_translate::go;
 use ruzstd::decoding::errors::{FrameDecoderError, ReadFrameHeaderError};
 use ruzstd::decoding::{BlockDecodingStrategy, FrameDecoder};
 
-use crate::errors::invalid_request;
+use crate::errors::{ErrorMessage, invalid_request};
 
 /// The error text for a body over the limit, as Go's `http.MaxBytesReader`
 /// words it.
 const TOO_LARGE: &str = "http: request body too large";
+
+/// How many arrays and objects a JSON body may have inside one another. This
+/// is as many as serde_json reads: it fails on the 128th, and the handlers
+/// and translators read bodies with it.
+pub(crate) const MAX_DEPTH: usize = 127;
+
+/// Refuses a JSON `body` nested deeper than [`MAX_DEPTH`], with a 400 for
+/// the route to answer in its own format. Every array and object counts,
+/// empty or not. A body that isn't JSON passes, for the route to deal with as
+/// it does now, and so does one that is no deeper than the limit. The body's
+/// nesting is tracked on the heap, so a hostile one can't overflow the stack.
+pub(crate) fn check_depth(body: &[u8]) -> Result<(), ErrorMessage> {
+    if go::gjson_valid_within(body, MAX_DEPTH) || !go::gjson_valid(body) {
+        return Ok(());
+    }
+    Err(ErrorMessage::new(
+        400,
+        format!(
+            "Invalid request: the body is nested more than {MAX_DEPTH} levels deep \
+             (arrays and objects inside one another)"
+        ),
+    ))
+}
 
 /// Reads a body of at most `limit` bytes as it came (upstream's
 /// `GetRawData`), or answers 413 or 400.
@@ -173,6 +202,72 @@ mod tests {
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
         encoder.write_all(payload).unwrap();
         encoder.finish().unwrap()
+    }
+
+    fn arrays(depth: usize, inner: &str) -> String {
+        format!("{}{inner}{}", "[".repeat(depth), "]".repeat(depth))
+    }
+
+    fn objects(depth: usize, inner: &str) -> String {
+        format!("{}{inner}{}", r#"{"a":"#.repeat(depth), "}".repeat(depth))
+    }
+
+    // Not upstream's: the limit is the deepest body serde_json reads, so a
+    // body that gets by is never read as an empty one further on.
+    #[test]
+    fn the_depth_limit_is_what_serde_json_reads() {
+        let reads = |text: &str| serde_json::from_str::<serde_json::Value>(text).is_ok();
+        assert!(reads(&arrays(MAX_DEPTH, "0")));
+        assert!(!reads(&arrays(MAX_DEPTH + 1, "0")));
+        assert!(reads(&objects(MAX_DEPTH, "0")));
+        assert!(!reads(&objects(MAX_DEPTH + 1, "0")));
+        // That is what the handlers do to a body they can't read.
+        assert_eq!(
+            crate::handlers::parse_body(arrays(MAX_DEPTH + 1, "0").as_bytes()),
+            serde_json::Value::Null
+        );
+    }
+
+    // Not upstream's: upstream forwards a body of any depth.
+    #[test]
+    fn refuses_bodies_nested_deeper_than_the_limit() {
+        let refused = |text: &str| check_depth(text.as_bytes()).unwrap_err();
+        let passes = |text: &str| assert!(check_depth(text.as_bytes()).is_ok(), "{text}");
+        passes(&arrays(MAX_DEPTH, "0"));
+        passes(&objects(MAX_DEPTH, "0"));
+        for text in [
+            arrays(MAX_DEPTH + 1, "0"),
+            arrays(MAX_DEPTH + 2, "0"),
+            objects(MAX_DEPTH + 1, "0"),
+            objects(MAX_DEPTH + 1, r#"{"b":[1]}"#),
+        ] {
+            let error = refused(&text);
+            assert_eq!(error.status, 400, "{error:?}");
+            assert!(error.text.contains("127"), "{}", error.text);
+        }
+        // An empty array or object is a level, and a mixture counts alike.
+        passes(&arrays(MAX_DEPTH - 1, "[]"));
+        passes(&arrays(MAX_DEPTH - 1, "{}"));
+        refused(&arrays(MAX_DEPTH, "[]"));
+        refused(&arrays(MAX_DEPTH, "{}"));
+        refused(&format!(
+            "{}0{}",
+            r#"[{"a":"#.repeat(MAX_DEPTH / 2 + 1),
+            "}]".repeat(MAX_DEPTH / 2 + 1)
+        ));
+        // White space around the body doesn't change what it is.
+        refused(&format!(" \r\n{}\t", arrays(MAX_DEPTH + 1, "0")));
+        // A body with no depth to speak of, or not JSON at all, is left to
+        // the route.
+        for body in ["", "nope", "0", r#""[[[""#, r#"{"a":[1,{"b":null}]}"#] {
+            passes(body);
+        }
+        // So is one that isn't valid JSON, however deep it starts.
+        let broken = arrays(MAX_DEPTH + 10, "0");
+        passes(&broken[1..]);
+        passes(&format!("{broken} 1"));
+        // It reads a body nested a million deep without overflowing the stack.
+        refused(&arrays(1_000_000, "0"));
     }
 
     #[test]

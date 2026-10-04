@@ -72,6 +72,11 @@ pub(crate) async fn completions(
         Ok(raw) => raw,
         Err(response) => return response,
     };
+    // The call below carries the converted body, which has nothing of the
+    // depth the client's had.
+    if let Err(error) = body::check_depth(&raw) {
+        return openai_error_response(&error, false);
+    }
     let parsed = parse_body(&raw);
     let stream = parsed.get("stream") == Some(&Value::Bool(true));
     let chat = convert_completions_request_to_chat_completions(&parsed);

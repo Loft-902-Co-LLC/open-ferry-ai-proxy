@@ -35,6 +35,9 @@
 //!   interactions execution" comes from the manager, when the providers a
 //!   call is given leave out the forced one.
 //! - The 500 upstream gives when the response can't be flushed can't happen.
+//! - A body with 128 or more arrays and objects inside one another gets a
+//!   400, for a model and for an `agent` alike (see [`body::check_depth`]).
+//!   Upstream forwards a body of any depth.
 
 #[cfg(test)]
 mod tests;
@@ -203,6 +206,8 @@ fn new_call(
             target.stream,
         );
     }
+    // `Call::routed` doesn't look at the depth as `Call::new` does.
+    body::check_depth(&raw)?;
     let route = forced_route(model)?;
     let mut call = Call::routed(
         state,

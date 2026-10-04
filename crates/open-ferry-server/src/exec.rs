@@ -12,6 +12,11 @@
 //! `'static` and can outlive the handler that made them. Each call carries
 //! the request's observation: its context, and the taps the request log and
 //! the usage statistics give the call.
+//!
+//! Deviations from upstream:
+//! - [`Call::new`] refuses a payload with 128 or more arrays and objects
+//!   inside one another, with a 400 ([`body::check_depth`]); upstream calls
+//!   with a payload of any depth.
 
 use std::sync::Arc;
 
@@ -26,6 +31,7 @@ use open_ferry_core::exec::{
 use open_ferry_core::observe::{Observation, RequestContext};
 
 use crate::auth::{Principal, strip_credentials};
+use crate::body;
 use crate::entry_protocol;
 use crate::errors::ErrorMessage;
 use crate::headers::filter_upstream_headers;
@@ -148,6 +154,11 @@ pub(crate) struct Call {
 impl Call {
     /// Routes a call for `model` with `payload` in `format`. `alt` is the
     /// endpoint variant, and `stream` whether the client asked for a stream.
+    ///
+    /// A `payload` nested deeper than [`body::MAX_DEPTH`] is refused with a
+    /// 400 before anything else, even the routing: a handler that couldn't
+    /// read such a body has no model to route, and a translator or an
+    /// executor would read it as empty.
     pub(crate) fn new(
         state: &AppState,
         client: &ClientRequest,
@@ -157,6 +168,7 @@ impl Call {
         alt: &str,
         stream: bool,
     ) -> Result<Self, ErrorMessage> {
+        body::check_depth(&payload)?;
         let mut route = routing::route(state.catalog(), model)?;
         route.providers = entry_protocol::adjust_execution_providers(&format, route.providers);
         Ok(Self::routed(

@@ -276,6 +276,14 @@ pub fn gjson_valid(bytes: &[u8]) -> bool {
     crate::json::raw::valid_bytes(bytes)
 }
 
+/// [`gjson_valid`] for a value nested at most `max_depth` deep, every array
+/// and object, empty or not, counting as one level. Not upstream's: gjson
+/// has no limit. The input's nesting is tracked on the heap, so a hostile
+/// body can't overflow the stack.
+pub fn gjson_valid_within(bytes: &[u8], max_depth: usize) -> bool {
+    crate::json::raw::valid_within(bytes, max_depth)
+}
+
 /// Go's `json.Marshal` of a string: wrapped in double quotes, with the escapes
 /// JSON requires and, as Go adds for HTML, `<`, `>`, `&`, U+2028 and U+2029
 /// written as `\u` escapes too.
@@ -393,6 +401,27 @@ mod tests {
         // gjson has no limit.
         assert!(gjson_valid(nested(MAX_NESTING_DEPTH + 1, "[]").as_bytes()));
         assert!(gjson_valid(objects.as_bytes()));
+    }
+
+    // Not upstream's: a limit a caller picks, counted as `json_valid` counts.
+    #[test]
+    fn gjson_valid_within_limits_nesting_as_asked() {
+        let nested = |depth: usize, inner: &str| {
+            format!("{}{inner}{}", "[".repeat(depth), "]".repeat(depth))
+        };
+        assert!(gjson_valid_within(nested(3, "0").as_bytes(), 3));
+        assert!(!gjson_valid_within(nested(4, "0").as_bytes(), 3));
+        // An empty array or object is a level too.
+        assert!(gjson_valid_within(nested(2, "[]").as_bytes(), 3));
+        assert!(!gjson_valid_within(nested(3, "{}").as_bytes(), 3));
+        // Scalars nest nowhere, and what isn't JSON isn't valid at any depth.
+        assert!(gjson_valid_within(b"0", 0));
+        assert!(!gjson_valid_within(b"[]", 0));
+        assert!(!gjson_valid_within(b"[1,", usize::MAX));
+        // Deep input doesn't overflow the stack.
+        let deep = nested(1_000_000, "0");
+        assert!(!gjson_valid_within(deep.as_bytes(), 127));
+        assert!(gjson_valid_within(deep.as_bytes(), usize::MAX));
     }
 
     #[test]

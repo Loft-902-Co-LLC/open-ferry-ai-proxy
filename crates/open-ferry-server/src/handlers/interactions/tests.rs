@@ -537,3 +537,52 @@ async fn streams_keep_alive() {
     let frame = body.frame().await.unwrap().unwrap().into_data().unwrap();
     assert_eq!(&frame[..], b": keep-alive\n\n");
 }
+
+/// `fields` in a JSON object, with one more member nested so the object is
+/// `depth` levels deep.
+fn nested(fields: &str, depth: usize) -> String {
+    format!(
+        r#"{{{fields},"deep":{}0{}}}"#,
+        "[".repeat(depth - 1),
+        "]".repeat(depth - 1)
+    )
+}
+
+// Not upstream's: a body with 128 or more arrays and objects inside one
+// another gets a 400 before the call is made, for a model, for an agent, and
+// for a stream, which is told by the body; one of 127 goes through. Upstream
+// forwards a body of any depth.
+#[tokio::test]
+async fn bodies_nested_too_deeply_are_refused() {
+    let (app, dispatcher) = app(vec![
+        Outcome::reply(r#"{"id":"i1"}"#),
+        Outcome::reply(r#"{"id":"i2"}"#),
+        Outcome::chunks(&[r#"{"n":1}"#]),
+    ]);
+    let model = format!(r#""model":"{MODEL}","input":"hi""#);
+    let agent = format!(r#""agent":"{AGENT}","input":"hi""#);
+    let stream = format!(r#""model":"{MODEL}","input":"hi","stream":true"#);
+    for (fields, providers) in [
+        (&model, vec!["gemini-interactions", "gemini"]),
+        (&agent, vec!["gemini-interactions"]),
+        (&stream, vec!["gemini-interactions", "gemini"]),
+    ] {
+        let calls = dispatcher.calls().len();
+        let (status, _, body) = send(&app, post(PATH, &nested(fields, 127))).await;
+        assert_eq!(status, StatusCode::OK, "{fields}: {body}");
+        let calls_after = dispatcher.calls();
+        assert_eq!(calls_after.len(), calls + 1, "{fields}");
+        assert_eq!(calls_after[calls].providers, providers, "{fields}");
+
+        for depth in [128, 129, 100_000] {
+            let (status, headers, body) = send(&app, post(PATH, &nested(fields, depth))).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{fields}: {depth}");
+            assert_eq!(content_type(&headers), "application/json");
+            let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(error["error"]["type"], "invalid_request_error", "{body}");
+            let message = error["error"]["message"].as_str().unwrap();
+            assert!(message.contains("nested more than 127"), "{body}");
+        }
+        assert_eq!(dispatcher.calls().len(), calls + 1, "{fields}");
+    }
+}
