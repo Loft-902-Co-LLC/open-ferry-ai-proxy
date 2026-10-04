@@ -14,16 +14,19 @@
 //! and on a reload that changes `logging-to-file` or
 //! `logs-max-total-size-mb`, as upstream's reload does.
 //!
-//! Lines for `main.log` go through a bounded queue to a thread of their
-//! own, which does the file's I/O, so logging never waits on the disk. When
-//! the queue is full a line is dropped and counted, and the writer says how
-//! many it lost (upstream writes each line as it is logged). Lines for
-//! standard output are written as they are logged, as upstream's are.
+//! Lines go through a bounded queue to a thread of their own, for
+//! `main.log` or for standard output, which does the I/O, so logging never
+//! waits on the disk or on whatever reads standard output. When the queue
+//! is full a line is dropped and counted, and the writer says how many it
+//! lost (upstream writes each line as it is logged). A switch away from a
+//! file returns once the lines queued for it are written and it is closed.
 //!
 //! Deviations from upstream:
 //! - A log directory that can't be made, at start as on a reload, is
 //!   logged and the output stays as it was. Upstream's start exits.
-//! - Lines still queued for `main.log` when the process exits are lost.
+//! - Lines are queued, and dropped when the queue is full, for standard
+//!   output as for `main.log`. At exit, the process waits up to a second
+//!   for the queued lines to be written; any left then are lost.
 //! - When `logging-to-file` stays on and the directory is the same, the
 //!   file stays open, where upstream reopens it.
 
@@ -95,10 +98,16 @@ impl FileLog {
         self.output.file()
     }
 
+    /// Waits, until `timeout` has passed at most, for the lines logged so
+    /// far to be written.
+    pub fn flush(&self, timeout: std::time::Duration) {
+        self.output.flush(timeout);
+    }
+
     /// Waits until the lines logged so far are written.
     #[cfg(test)]
     pub(crate) fn sync(&self) {
-        self.output.sync();
+        self.output.flush(std::time::Duration::from_secs(60));
     }
 }
 

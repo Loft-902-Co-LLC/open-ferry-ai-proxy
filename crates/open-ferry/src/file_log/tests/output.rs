@@ -3,14 +3,18 @@
 //! upstream's own.
 
 use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use open_ferry_core::config::Config;
 use tracing_subscriber::layer::SubscriberExt;
 
 use crate::file_log::format::FormatLayer;
-use crate::file_log::writer::Rotating;
+use crate::file_log::writer::{Output, QUEUE, Rotating};
 use crate::file_log::{FileLog, MAIN_LOG, reconfigure};
 
 /// Runs `log` with `file_log`'s layer as the logger, and waits until its
@@ -168,4 +172,133 @@ fn refuses_a_line_over_the_limit() {
         error.to_string(),
         "write length 20 exceeds maximum file size 10"
     );
+}
+
+/// Holds the thread the lines go to now, and lets it go on after a moment
+/// from another thread, as a slow disk would.
+fn hold_briefly(file_log: &FileLog) -> JoinHandle<()> {
+    let (go, held) = mpsc::channel();
+    file_log.output.hold(held);
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(100));
+        let _ = go.send(());
+    })
+}
+
+/// Not upstream's: turning `logging-to-file` off returns once the lines
+/// queued for `main.log` are written and the file is closed, so the file
+/// doesn't go on growing after.
+#[test]
+fn turning_off_waits_for_the_queued_lines() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path().join("logs");
+    let file_log = FileLog::default();
+    file_log.configure(&dir, true, 0);
+    let release = hold_briefly(&file_log);
+    for n in 0..100 {
+        file_log.output.write(format!("line {n}\n").into_bytes());
+    }
+
+    file_log.configure(&dir, false, 0);
+    let text = fs::read_to_string(dir.join(MAIN_LOG)).unwrap();
+    assert_eq!(text.lines().count(), 100, "{text:?}");
+    assert_eq!(text.lines().last(), Some("line 99"));
+    release.join().unwrap();
+}
+
+/// Not upstream's: turning `logging-to-file` off and on again at once
+/// leaves one writer on `main.log`, which counts its size alone: the lines
+/// queued before come first, and the new writer's only after them.
+#[test]
+fn off_and_on_again_keeps_one_writer() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path().join("logs");
+    let file_log = FileLog::default();
+    file_log.configure(&dir, true, 0);
+    let release = hold_briefly(&file_log);
+    for n in 0..100 {
+        file_log.output.write(format!("before {n}\n").into_bytes());
+    }
+
+    file_log.configure(&dir, false, 0);
+    file_log.configure(&dir, true, 0);
+    file_log.output.write(b"after\n".to_vec());
+    file_log.sync();
+    let text = fs::read_to_string(dir.join(MAIN_LOG)).unwrap();
+    let want: Vec<String> = (0..100)
+        .map(|n| format!("before {n}"))
+        .chain(["after".to_owned()])
+        .collect();
+    assert_eq!(text.lines().collect::<Vec<_>>(), want);
+    release.join().unwrap();
+}
+
+/// A standard output nothing reads until `go` says, which then keeps what
+/// is written to it.
+struct Stalled {
+    go: Option<Receiver<()>>,
+    written: Arc<Mutex<Vec<u8>>>,
+}
+
+impl Write for Stalled {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if let Some(go) = self.go.take() {
+            let _ = go.recv();
+        }
+        let mut written = self.written.lock().unwrap_or_else(PoisonError::into_inner);
+        written.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Not upstream's: lines for standard output go through a bounded queue,
+/// so logging doesn't wait while nothing reads standard output. Past the
+/// queue's size lines are dropped, and the writer says how many once it
+/// can write again.
+#[test]
+fn standard_output_never_blocks() {
+    let (go, stalled): (Sender<()>, _) = mpsc::channel();
+    let written = Arc::new(Mutex::new(Vec::new()));
+    let file_log = FileLog {
+        output: Arc::new(Output::with_console(Box::new(Stalled {
+            go: Some(stalled),
+            written: Arc::clone(&written),
+        }))),
+        cleaner: Arc::default(),
+    };
+    let total = QUEUE + 100;
+    let (done, logged) = mpsc::channel();
+    let output = Arc::clone(&file_log.output);
+    thread::spawn(move || {
+        for n in 0..total {
+            output.write(format!("line {n}\n").into_bytes());
+        }
+        let _ = done.send(());
+    });
+    logged
+        .recv_timeout(Duration::from_secs(30))
+        .expect("logging waited on standard output");
+
+    go.send(()).unwrap();
+    file_log.sync();
+    let text = String::from_utf8(written.lock().unwrap().clone()).unwrap();
+    let (notes, lines): (Vec<&str>, Vec<&str>) = text
+        .lines()
+        .partition(|line| line.contains("logging: dropped "));
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    let dropped: usize = notes[0]
+        .split("logging: dropped ")
+        .nth(1)
+        .and_then(|rest| rest.split(' ').next())
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(notes[0].ends_with("log line(s): the main log writer fell behind"));
+    assert!(dropped >= 99, "{dropped}");
+    assert_eq!(lines.len() + dropped, total);
+    assert_eq!(lines.first(), Some(&"line 0"));
 }

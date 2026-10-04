@@ -404,7 +404,7 @@ Ported:
 
 Deviations, each also noted in its module:
 
-- **`main.log` is written by a thread of its own**, through a bounded queue, so logging never waits on the disk. A line that finds the queue full is dropped and counted, and lines still queued at exit are lost.
+- **The lines are written by threads of their own**, one for `main.log` and one for standard output, through bounded queues, so logging never waits on the disk or on a standard output nothing reads; upstream writes each line as it is logged. A line that finds its queue full is dropped and counted, and the count is logged. A switch away from a file returns once the lines queued for it are written and it is closed. At exit, the queued lines are waited for up to a second; any left then are lost.
 - **The rotated name's time is local**, where lumberjack's is UTC; the logs routes read it as local, as upstream's do. On Windows, renaming, deleting and truncating are retried while another process has the file open.
 - **The size limit's cleaner knows the `main.log` being written by the file it is**, not only by its path, so it keeps it under a name cased otherwise (`MAIN.LOG`, which Windows opens for `main.log`) or linked to it. Upstream keeps it on Windows only because its writer doesn't share deletion.
 - **A log directory that can't be made** is logged and the output stays as it was; upstream's start exits.

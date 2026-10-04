@@ -26,11 +26,15 @@ mod tls;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use open_ferry_core::config::Config;
 
 use crate::flags::{FlagError, Flags};
 use crate::login::Login;
+
+/// How long, at most, exiting waits for the log lines still queued.
+const EXIT_FLUSH: Duration = Duration::from_secs(1);
 
 fn main() -> ExitCode {
     let mut args = std::env::args_os().map(|arg| arg.to_string_lossy().into_owned());
@@ -48,17 +52,20 @@ fn main() -> ExitCode {
         }
     };
     let log_level = logging::init();
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
+    let file_log = log_level.file_log().clone();
+    let code = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
     {
-        Ok(runtime) => runtime,
+        Ok(runtime) => runtime.block_on(run(flags, log_level)),
         Err(error) => {
             tracing::error!("failed to start the async runtime: {error}");
-            return ExitCode::FAILURE;
+            ExitCode::FAILURE
         }
     };
-    runtime.block_on(run(flags, log_level))
+    // The lines are written by threads of their own, which exiting stops.
+    file_log.flush(EXIT_FLUSH);
+    code
 }
 
 async fn run(flags: Flags, log_level: logging::LogLevel) -> ExitCode {
