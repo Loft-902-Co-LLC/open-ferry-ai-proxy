@@ -4,7 +4,10 @@
 // The translators live in internal packages, so this file is compiled inside a
 // CLIProxyAPI checkout (via go build -overlay) by the open-ferry-parity crate.
 // See tools/parity/README.md. The legacy Completions conversions have a
-// harness of their own, go/completions/main.go. Each go/parity_*.go file is
+// harness of their own, go/completions/main.go, and so do the executor
+// helpers, go/helps/main.go: no file of this harness may import
+// internal/runtime/executor/helps, whose imports register translators the
+// registry/* entries must not see. Each go/parity_*.go file is
 // compiled with this one and may add entries to translators from init(),
 // which runs once the map is made.
 //

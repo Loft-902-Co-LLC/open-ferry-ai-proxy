@@ -1,7 +1,7 @@
-//! Our side of the harness's `payload/apply` entry: the config's payload
-//! rules applied to a translated body by
+//! Our side of the executor helpers' harness's `payload/apply` entry: the
+//! config's payload rules applied to a translated body by
 //! `open_ferry_providers::payload::apply_call`, and the tracked paths they
-//! touched (see `go/parity_payload.go` for the options).
+//! touched (see `go/helps/parity_payload.go` for the options).
 
 use http::{HeaderMap, HeaderName, HeaderValue};
 use open_ferry_core::config::Config;

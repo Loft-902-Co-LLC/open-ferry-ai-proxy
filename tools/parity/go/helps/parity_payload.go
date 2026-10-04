@@ -21,6 +21,10 @@
 // It writes {"body": the body, "touched": the tracked paths touched,
 // sorted}, {"config_error": true} when the config can't be read, or
 // {"invalid_body": the body as a string} when the body isn't valid JSON.
+//
+// It is in go/helps/main.go's harness, not go/main.go's, because importing
+// helps registers a translator the registry/* entries must not see (see
+// go/helps/main.go).
 package main
 
 import (
@@ -30,7 +34,6 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 type payloadOptions struct {
@@ -49,11 +52,6 @@ type payloadOptions struct {
 
 func init() {
 	translators["payload/apply"] = payloadApply
-	// helps imports the translator from Claude to the Gemini Interactions
-	// API, which registers itself. open-ferry has no Interactions format,
-	// so the registry/* entries must not see it; every package's init has
-	// run before this one.
-	sdktranslator.Unregister(sdktranslator.FromString("claude"), sdktranslator.FromString("interactions"))
 }
 
 func payloadApply(in input) []byte {

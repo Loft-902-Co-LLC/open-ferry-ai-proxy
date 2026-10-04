@@ -1,6 +1,7 @@
 //! Builds and runs the Go harnesses (`go/main.go`, `go/completions/main.go`
-//! for the legacy Completions conversions, and `go/interactions/main.go` for
-//! the Gemini Interactions translators) inside a CLIProxyAPI checkout.
+//! for the legacy Completions conversions, `go/interactions/main.go` for
+//! the Gemini Interactions translators, and `go/helps/main.go` for the
+//! executor helpers) inside a CLIProxyAPI checkout.
 
 use std::env;
 use std::error::Error;
@@ -31,17 +32,20 @@ pub struct Upstream {
     /// The harness for the Gemini Interactions translators (see
     /// [`is_interactions`]).
     interactions_harness: PathBuf,
+    /// The harness for the executor helpers (see [`is_helps`]).
+    helps_harness: PathBuf,
 }
 
 impl Upstream {
     /// Compiles the harnesses into `work_dir`. They import internal packages,
     /// so they must be compiled as part of the CLIProxyAPI module. An overlay
-    /// adds them as `cmd/open-ferry-parity`, `cmd/open-ferry-parity-completions`
-    /// and `cmd/open-ferry-parity-interactions` without touching the checkout,
-    /// along with `go/openai/export.go`, which exports the Completions
-    /// conversions from their package. Each `go/parity_*.go` joins `go/main.go`
-    /// in `cmd/open-ferry-parity`, and each `go/interactions/parity_*.go` joins
-    /// `go/interactions/main.go`. The Interactions harness is then run once
+    /// adds them as `cmd/open-ferry-parity`, `cmd/open-ferry-parity-completions`,
+    /// `cmd/open-ferry-parity-interactions` and `cmd/open-ferry-parity-helps`
+    /// without touching the checkout, along with `go/openai/export.go`, which
+    /// exports the Completions conversions from their package. Each
+    /// `go/parity_*.go` joins `go/main.go` in `cmd/open-ferry-parity`, and
+    /// each `go/interactions/parity_*.go` and `go/helps/parity_*.go` joins
+    /// the `main.go` beside it. The Interactions harness is then run once
     /// with no input, as no suite may use it yet.
     pub fn build(dir: &Path, go: &Path, work_dir: &Path) -> Result<Self, Box<dyn Error>> {
         let dir = std::path::absolute(dir)?;
@@ -56,10 +60,12 @@ impl Upstream {
         let handlers = dir.join("sdk").join("api").join("handlers").join("openai");
         let main = dir.join("cmd").join("open-ferry-parity");
         let interactions = dir.join("cmd").join("open-ferry-parity-interactions");
+        let helps = dir.join("cmd").join("open-ferry-parity-helps");
         let mut files = Vec::new();
         for (target, source) in [
             (&main, source.clone()),
             (&interactions, source.join("interactions")),
+            (&helps, source.join("helps")),
         ] {
             for entry in fs::read_dir(&source)? {
                 let name = entry?.file_name().to_string_lossy().into_owned();
@@ -75,6 +81,7 @@ impl Upstream {
                 interactions.join("main.go"),
                 source.join("interactions").join("main.go"),
             ),
+            (helps.join("main.go"), source.join("helps").join("main.go")),
             (
                 dir.join("cmd")
                     .join("open-ferry-parity-completions")
@@ -103,6 +110,8 @@ impl Upstream {
             "upstream-interactions-harness{}",
             env::consts::EXE_SUFFIX
         ));
+        let helps_harness =
+            work_dir.join(format!("upstream-helps-harness{}", env::consts::EXE_SUFFIX));
         for (binary, package) in [
             (&harness, "./cmd/open-ferry-parity"),
             (&completions_harness, "./cmd/open-ferry-parity-completions"),
@@ -110,6 +119,7 @@ impl Upstream {
                 &interactions_harness,
                 "./cmd/open-ferry-parity-interactions",
             ),
+            (&helps_harness, "./cmd/open-ferry-parity-helps"),
         ] {
             let status = Command::new(go)
                 .current_dir(&dir)
@@ -149,6 +159,7 @@ impl Upstream {
             harness,
             completions_harness,
             interactions_harness,
+            helps_harness,
         })
     }
 
@@ -181,13 +192,16 @@ impl Upstream {
             .map_err(|err| err.into_error())?
             .sync_all()?;
 
-        // The Completions conversions and the Interactions translators have
-        // harnesses of their own (see go/completions/main.go and
-        // go/interactions/main.go).
+        // The Completions conversions, the Interactions translators and the
+        // executor helpers have harnesses of their own (see
+        // go/completions/main.go, go/interactions/main.go and
+        // go/helps/main.go).
         let harness = if translator.starts_with("completions/") {
             &self.completions_harness
         } else if is_interactions(translator) {
             &self.interactions_harness
+        } else if is_helps(translator) {
+            &self.helps_harness
         } else {
             &self.harness
         };
@@ -226,6 +240,22 @@ fn is_interactions(translator: &str) -> bool {
         .split('/')
         .take(2)
         .any(|part| part == "interactions")
+}
+
+/// The packages of the executor helpers' harness keys.
+const HELPS_PACKAGES: &[&str] = &["payload"];
+
+/// Whether `translator` is an executor helpers' harness key: one whose
+/// package, its first `/`-separated part, is in [`HELPS_PACKAGES`], such as
+/// `payload/apply`. Importing upstream's `helps` package registers
+/// translators the main harness's `registry/` entries must not see (see
+/// `go/helps/main.go`), so an entry that imports it is in that harness and
+/// its package is listed here.
+fn is_helps(translator: &str) -> bool {
+    translator
+        .split('/')
+        .next()
+        .is_some_and(|package| HELPS_PACKAGES.contains(&package))
 }
 
 fn parse_result(line: &[u8]) -> Result<GoResult, Box<dyn Error>> {
@@ -272,6 +302,19 @@ mod tests {
             "codex/claude/interactions",
         ] {
             assert!(!is_interactions(key), "{key}");
+        }
+    }
+
+    #[test]
+    fn helps_keys_have_a_helpers_package() {
+        assert!(is_helps("payload/apply"));
+        for key in [
+            "registry/request",
+            "codex/payload/request",
+            "payloads/apply",
+            "interactions/claude/request",
+        ] {
+            assert!(!is_helps(key), "{key}");
         }
     }
 }
