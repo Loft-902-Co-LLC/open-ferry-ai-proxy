@@ -1351,6 +1351,7 @@ dependencies = [
  "open-ferry-management",
  "open-ferry-providers",
  "open-ferry-server",
+ "open-ferry-translate",
  "rcgen",
  "rustls",
  "serde_json",
