@@ -13,6 +13,9 @@
 //! the translator's `stream` argument. The Interactions to Chat Completions
 //! stream's entry writes its chunks as a JSON array of them, and the Chat
 //! Completions to Interactions one its SSE frames joined.
+//!
+//! The registry runs them for the pairs `openai` → `interactions` and
+//! `interactions` → `openai` (see [`Family::native`]), with the same cases.
 
 mod cases;
 
@@ -276,10 +279,21 @@ impl Family for Kind {
     }
 
     fn native(stage: Stage, from: &str, to: &str) -> Option<Self> {
-        let _ = (stage, from, to);
-        None
+        match (stage, from, to) {
+            (Stage::Request, OPENAI, INTERACTIONS) => Some(Self::ChatRequest),
+            (Stage::Request, INTERACTIONS, OPENAI) => Some(Self::InteractionsRequest),
+            (Stage::Stream, INTERACTIONS, OPENAI) => Some(Self::ChatStream),
+            (Stage::NonStream, INTERACTIONS, OPENAI) => Some(Self::ChatNonStream),
+            (Stage::Stream, OPENAI, INTERACTIONS) => Some(Self::InteractionsStream),
+            (Stage::NonStream, OPENAI, INTERACTIONS) => Some(Self::InteractionsNonStream),
+            _ => None,
+        }
     }
 }
+
+/// The registry's names of the two formats.
+const OPENAI: &str = "openai";
+const INTERACTIONS: &str = "interactions";
 
 /// A provider's body or event as JSON. One that isn't valid JSON reads as
 /// having no fields, as the ports read it.
@@ -304,30 +318,46 @@ fn unnumber_chat_ids(value: &mut Value) {
 /// The hand-written registry request cases for the family's pairs, each list
 /// with its pair.
 pub fn registry_requests() -> Vec<(Pair, Vec<Case>)> {
-    Vec::new()
+    vec![
+        ((OPENAI, INTERACTIONS), cases::chat_requests()),
+        ((INTERACTIONS, OPENAI), cases::interactions_requests()),
+    ]
 }
 
 /// `count` random registry request cases for each of the family's pairs.
 pub fn registry_request_cases(seed: u64, count: usize) -> Vec<(Pair, Vec<Case>)> {
-    let _ = (seed, count);
-    Vec::new()
+    vec![
+        (
+            (OPENAI, INTERACTIONS),
+            generate::chat_request_cases(seed, count),
+        ),
+        ((INTERACTIONS, OPENAI), generate::request_cases(seed, count)),
+    ]
 }
 
 /// The hand-written registry stream cases for the family's pairs, each list
 /// with its pair.
 pub fn registry_streams() -> Vec<(Pair, Vec<Case>)> {
-    Vec::new()
+    vec![
+        ((INTERACTIONS, OPENAI), cases::interactions_streams()),
+        ((OPENAI, INTERACTIONS), cases::chat_streams()),
+    ]
 }
 
 /// The hand-written registry non-streaming cases for the family's pairs, each
 /// list with its pair.
 pub fn registry_finals() -> Vec<(Pair, Vec<Case>)> {
-    Vec::new()
+    vec![
+        ((INTERACTIONS, OPENAI), cases::interactions_finals()),
+        ((OPENAI, INTERACTIONS), cases::chat_finals()),
+    ]
 }
 
 /// `count` random registry stream cases, and as many non-streaming ones,
 /// for each of the family's pairs.
 pub fn registry_response_cases(seed: u64, count: usize) -> Vec<ResponseCases> {
-    let _ = (seed, count);
-    Vec::new()
+    vec![
+        ((INTERACTIONS, OPENAI), generate::event_cases(seed, count)),
+        ((OPENAI, INTERACTIONS), generate::chunk_cases(seed, count)),
+    ]
 }
