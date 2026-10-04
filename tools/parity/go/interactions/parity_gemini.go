@@ -1,13 +1,53 @@
 // The gemini family's entries in the Interactions harness (see main.go),
-// added to translators from init(). Not ported yet: WP4-E adds them,
-// along with their Rust side in
-// tools/parity/src/interactions/gemini.rs. They will be these:
-// gemini/interactions/request, response and response-non-stream run
-// tr/gemini/interactions for Interactions clients to a Gemini
-// upstream, interactions/gemini/request, response and
-// response-non-stream the same package for Gemini clients to an
-// Interactions upstream, and interactions/interactions/request,
-// response and response-non-stream its passthrough.
+// added to translators from init(), with their Rust side in
+// tools/parity/src/interactions/gemini.rs. All run
+// internal/translator/gemini/interactions:
+//
+//   - gemini/interactions/request, response and response-non-stream:
+//     Interactions clients to a Gemini upstream. The request entry's
+//     "stream" option is the stream flag. The stream entry writes its SSE
+//     frames joined; the non-streaming entry reads the first event as the
+//     Gemini response.
+//   - interactions/gemini/request, response and response-non-stream: Gemini
+//     clients to an Interactions upstream. The stream entry writes a JSON
+//     array of its chunks.
+//   - interactions/interactions/request, response and response-non-stream:
+//     Interactions passed through. The stream entry writes a JSON array of
+//     its chunks.
 package main
 
-func init() {}
+import (
+	"context"
+
+	geminiinteractions "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/gemini/interactions"
+)
+
+func init() {
+	translators["gemini/interactions/request"] = func(in input) []byte {
+		return geminiinteractions.ConvertInteractionsRequestToGemini(in.Model, []byte(in.Request), streamOption(in))
+	}
+	translators["gemini/interactions/response"] = func(in input) []byte {
+		return joined(streamChunks(in, geminiinteractions.ConvertGeminiResponseToInteractions))
+	}
+	translators["gemini/interactions/response-non-stream"] = func(in input) []byte {
+		return geminiinteractions.ConvertGeminiResponseToInteractionsNonStream(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), nil)
+	}
+	translators["interactions/gemini/request"] = func(in input) []byte {
+		return geminiinteractions.ConvertGeminiRequestToInteractions(in.Model, []byte(in.Request), streamOption(in))
+	}
+	translators["interactions/gemini/response"] = func(in input) []byte {
+		return chunkList(streamChunks(in, geminiinteractions.ConvertInteractionsResponseToGemini))
+	}
+	translators["interactions/gemini/response-non-stream"] = func(in input) []byte {
+		return geminiinteractions.ConvertInteractionsResponseToGeminiNonStream(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), nil)
+	}
+	translators["interactions/interactions/request"] = func(in input) []byte {
+		return geminiinteractions.ConvertInteractionsRequestToInteractions(in.Model, []byte(in.Request), streamOption(in))
+	}
+	translators["interactions/interactions/response"] = func(in input) []byte {
+		return chunkList(streamChunks(in, geminiinteractions.ConvertInteractionsResponsePassthrough))
+	}
+	translators["interactions/interactions/response-non-stream"] = func(in input) []byte {
+		return geminiinteractions.ConvertInteractionsResponsePassthroughNonStream(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), nil)
+	}
+}
