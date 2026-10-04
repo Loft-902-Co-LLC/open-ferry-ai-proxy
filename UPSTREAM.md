@@ -401,7 +401,26 @@ Deviations, each also noted in its module:
 
 ### Usage statistics
 
-Not ported yet: the usage records (`usage-statistics-enabled`) with time to first token, the usage queue (`redis-usage-queue-retention-seconds`) and the error events, and the routes `usage-queue` and `api-key-usage`. Upstream's own in-memory statistics were removed upstream ([#3200](https://github.com/router-for-me/CLIProxyAPI/issues/3200), below).
+While `usage-statistics-enabled` is on, each executor call makes a usage record (`open_ferry_core::observe::usage`): its tokens, read from the upstream's answer as upstream reads them for Chat Completions, the Responses API and Codex, Claude Messages and Gemini, with upstream's token breakdown; its time to first token, else to its first packet, else to its first byte; its latency, outcome, credential and model, and a warning, at most once in ten minutes per credential and model, when the answer names another model than the one asked for. The records wait in the usage queue, kept while the management API serves requests, for `redis-usage-queue-retention-seconds` (60 unless set, at most an hour). The credential errors the manager records make error events, for the queue's error subscribers. Both settings take effect on reload.
+
+The routes, under `/v0/management` and their v8 names under `/v8/management`, need the management key:
+
+- `GET usage-queue` (`observability/usage/queue`) takes up to `count` records, 1 by default, oldest first. A `count` that isn't a positive integer is a 400 and takes nothing.
+- `GET api-key-usage` (`observability/usage/api-keys`) gives each API key credential's successes, failures and recent request buckets, by provider (an OpenAI-compatible provider by its name) and `base-url|key`.
+
+Upstream's own in-memory statistics were removed upstream ([#3200](https://github.com/router-for-me/CLIProxyAPI/issues/3200), below).
+
+Deviations, each also noted in its module:
+
+- **Records are made by a tap on the executor's traffic**, not by the executors. A call's `requested_at` and latency start at its first attempt, and a call that failed before it sent anything is recorded with the credential the manager gave it. A Codex stream's counts are published when the call ends. `reasoning_effort` is always empty: upstream reads it from the translated request, which the tap doesn't see. Gemini stream lines are read without `FilterSSEUsageMetadata`, which only drops usage from lines before the last.
+- **`session_id` is only ever a session header the client sent**, as sent, a UUID in lower case. Upstream also derives one from the request and projects one that isn't a UUID onto a version 8 UUID; open-ferry never derives an identity. `parent_session_id`, `node_kind`, `is_fork` and `is_compaction` are never written.
+- **`failed` is the call's own outcome.** Upstream also counts a call failed when the status sent to the client was 400 or more by then.
+- **A failure's body is the error's text, scrubbed of the attempt's secrets and the client's key**, and the answer's headers are masked as the request log masks them; upstream writes both as they are. An error event's body is scrubbed of the credential's key and tokens.
+- **Times are in UTC**, in records and error events; upstream writes the local time with its offset. An `execution_id` made here is a version 7 UUID; upstream's is version 4.
+- **The queue keeps at most 100,000 records**; past that the oldest are dropped, with a warning at most once a minute. Upstream's grows without bound within its retention.
+- **An answer is read as JSON only when it parses whole.** One cut short, nested more than 128 deep or holding a string that isn't UTF-8 gives no counts, no model and no first token, where gjson reads what it can. A key given twice reads as its last value, where gjson reads the first, and an object or array read as text, such as a service tier, is its compact JSON.
+- **Records keep the client's key and the credential's account in clear**, as upstream's do; only the management API serves them.
+- **Not ported:** Antigravity's, Interactions' and the Codex image tool's usage parsers, the session hierarchy, the credits markers, the SDK's usage plugins beyond the queue, Home mode's skipping of the error events, and the queue over RESP (below). Upstream's `503 core auth manager unavailable` can't happen here.
 
 ### Payload rules
 
