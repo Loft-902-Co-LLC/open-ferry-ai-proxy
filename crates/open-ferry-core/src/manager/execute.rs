@@ -47,6 +47,7 @@ use futures_util::StreamExt;
 use http::HeaderMap;
 use serde_json::Value;
 use tokio::sync::mpsc;
+use tracing::Instrument as _;
 
 use super::classify::{
     CODE_FORCE_COOLDOWN, ErrView, is_count_tokens_endpoint_not_found_error,
@@ -1182,7 +1183,9 @@ impl Manager {
             failed: false,
             tx,
         };
-        tokio::spawn(async move {
+        // The task keeps the request's span, so what the provider's stream
+        // logs shows the request's ID.
+        let forward = async move {
             if let Some(first) = first
                 && !forwarder.emit(Ok(first)).await
             {
@@ -1222,7 +1225,8 @@ impl Manager {
                     ..CallResult::default()
                 });
             }
-        });
+        };
+        tokio::spawn(forward.in_current_span());
         let chunks = futures_util::stream::unfold(rx, |mut rx| async move {
             rx.recv().await.map(|item| (item, rx))
         });

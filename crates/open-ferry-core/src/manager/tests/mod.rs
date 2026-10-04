@@ -72,6 +72,7 @@ mod retry_deadline;
 mod scheduler;
 mod selector;
 mod service_cooldown_store;
+mod stream_request_span;
 mod support;
 mod types;
 mod types_cooling;

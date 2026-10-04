@@ -17,9 +17,9 @@
 //! A request on the AI routes (`/v1`, `/v1beta`, `/openai/v1` and
 //! `/backend-api/codex`) is handled in a span with its ID as
 //! `request_id`, so its line and every line logged while it is handled show
-//! the ID; the others show `--------`. The layer runs inside the request
-//! context, so every request has its [`RequestContext`], and outside the
-//! request log.
+//! the ID, including those logged while the answer's body is sent; the
+//! others show `--------`. The layer runs inside the request context, so
+//! every request has its [`RequestContext`], and outside the request log.
 //!
 //! Deviations from upstream:
 //! - The line is logged once the response's body is sent or dropped, so
@@ -78,7 +78,7 @@ pub(crate) async fn layer(request: Request, next: Next) -> Response {
         Some(id) => tracing::info_span!("request", request_id = %id),
         None => tracing::Span::none(),
     };
-    let response = next.run(request).instrument(span).await;
+    let response = next.run(request).instrument(span.clone()).await;
 
     let method = context.method.clone();
     let status = response.status();
@@ -102,6 +102,7 @@ pub(crate) async fn layer(request: Request, next: Next) -> Response {
     let body = Logged {
         inner: body,
         line: Some(line),
+        span,
     };
     Response::from_parts(parts, Body::new(body))
 }
@@ -186,17 +187,18 @@ fn go_latency(elapsed: Duration) -> String {
 }
 
 /// A response body that logs its request's line once it ends or is
-/// dropped.
+/// dropped. The body is polled outside the handler, so each poll, and
+/// dropping the body, enter the request's span again.
 struct Logged {
     inner: Body,
     line: Option<AccessLine>,
+    span: tracing::Span,
 }
 
-impl Logged {
-    fn log(&mut self) {
-        if let Some(line) = self.line.take() {
-            line.log();
-        }
+/// Logs `line`, if it hasn't been yet.
+fn log_once(line: &mut Option<AccessLine>) {
+    if let Some(line) = line.take() {
+        line.log();
     }
 }
 
@@ -208,9 +210,11 @@ impl http_body::Body for Logged {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        let polled = Pin::new(&mut self.inner).poll_frame(cx);
+        let this = &mut *self;
+        let _entered = this.span.enter();
+        let polled = Pin::new(&mut this.inner).poll_frame(cx);
         if matches!(polled, Poll::Ready(None)) {
-            self.log();
+            log_once(&mut this.line);
         }
         polled
     }
@@ -226,6 +230,9 @@ impl http_body::Body for Logged {
 
 impl Drop for Logged {
     fn drop(&mut self) {
-        self.log();
+        let _entered = self.span.enter();
+        log_once(&mut self.line);
+        // The body's own drop may log too.
+        drop(std::mem::take(&mut self.inner));
     }
 }

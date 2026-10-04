@@ -25,6 +25,7 @@ use axum::extract::{Extension, Request};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
+use futures_util::StreamExt as _;
 use http::{Method, StatusCode};
 use http_body_util::BodyExt;
 use open_ferry_core::observe::RequestContext;
@@ -225,6 +226,50 @@ async fn adds_request_id_for_codex_backend() {
             .ends_with(r#" | POST    "/backend-api/codex/responses""#),
         "{logged:?}"
     );
+}
+
+/// Logs as it is dropped.
+struct Noisy;
+
+impl Drop for Noisy {
+    fn drop(&mut self) {
+        tracing::info!("body dropped");
+    }
+}
+
+// Not upstream's: what is logged while the answer's body is read, and as it
+// is dropped, carries the request's ID, though the body is read outside the
+// handler.
+#[tokio::test]
+async fn lines_logged_while_the_body_is_sent_carry_the_request_id() {
+    let app = logged(Router::new().route(
+        "/v1/stream",
+        any(|| async {
+            let noisy = Noisy;
+            let chunks = futures_util::stream::iter(0..2).map(move |n| {
+                let _kept = &noisy;
+                tracing::info!("sending {n}");
+                Ok::<_, std::io::Error>(format!("chunk {n}"))
+            });
+            Body::from_stream(chunks)
+        }),
+    ));
+
+    let (status, logged) = send(&app, request(Method::GET, "/v1/stream")).await;
+    assert_eq!(status, StatusCode::OK);
+    let messages: Vec<_> = logged.iter().map(|line| line.message.as_str()).collect();
+    assert_eq!(messages.len(), 4, "{logged:?}");
+    assert_eq!(&messages[..2], ["sending 0", "sending 1"]);
+    assert!(
+        messages[2].ends_with(r#" | GET     "/v1/stream""#),
+        "{logged:?}"
+    );
+    assert_eq!(messages[3], "body dropped");
+    let id = logged[2].request_id.as_deref();
+    assert!(id.is_some_and(|id| id.len() == 36), "{logged:?}");
+    for line in &logged {
+        assert_eq!(line.request_id.as_deref(), id, "{logged:?}");
+    }
 }
 
 /// A handler no request should reach.

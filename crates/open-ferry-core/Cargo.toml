@@ -32,3 +32,4 @@ uuid = { version = "1.27.0", features = ["v7"] }
 
 [dev-dependencies]
 tokio = { version = "1.53.1", features = ["full", "test-util"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "registry"] }
