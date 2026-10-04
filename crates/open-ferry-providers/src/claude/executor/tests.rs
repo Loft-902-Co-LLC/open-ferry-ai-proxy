@@ -402,6 +402,78 @@ async fn oauth_alone_gets_only_the_oauth_beta() {
     assert!(seen.json().get("system").is_none());
 }
 
+// Not upstream's: a `betas` that a payload rule writes reaches the
+// `anthropic-beta` header, and leaves the body, exactly as the same `betas`
+// in the client's body do. Upstream applies the rules first and then
+// `extractAndRemoveBetas` (claude_executor_execute.go), and nothing filters
+// either, so the rule's betas are the operator's choice.
+#[tokio::test]
+async fn betas_a_rule_writes_are_handled_as_the_clients_are() {
+    let rules = Arc::new(
+        Config::parse(
+            r"
+payload:
+  override:
+    - models:
+        - name: claude-sonnet-4-5
+          protocol: claude
+      params:
+        betas: [payload-rule-probe]
+",
+        )
+        .unwrap(),
+    );
+    let without_betas = || {
+        let mut payload = claude_payload();
+        payload.as_object_mut().unwrap().remove("betas");
+        payload
+    };
+    let client_header =
+        |options| with_header(options, "anthropic-beta", "interleaved-thinking-2025-05-14");
+    for (auth, expected) in [
+        (
+            api_key_auth(),
+            "interleaved-thinking-2025-05-14,payload-rule-probe",
+        ),
+        (
+            oauth_auth(),
+            "oauth-2025-04-20,interleaved-thinking-2025-05-14,payload-rule-probe",
+        ),
+    ] {
+        // The rule writes the betas of a body that has none.
+        let by_rule = Mock::start(Reply::json(MESSAGE)).await;
+        by_rule
+            .executor()
+            .with_config(Arc::clone(&rules))
+            .execute(
+                Arc::clone(&auth),
+                request(without_betas()),
+                client_header(options(Format::CLAUDE)),
+            )
+            .await
+            .unwrap();
+        // The client sends the same betas, and no rule is configured.
+        let by_client = Mock::start(Reply::json(MESSAGE)).await;
+        let mut payload = without_betas();
+        payload["betas"] = json!(["payload-rule-probe"]);
+        by_client
+            .executor()
+            .execute(
+                Arc::clone(&auth),
+                request(payload),
+                client_header(options(Format::CLAUDE)),
+            )
+            .await
+            .unwrap();
+
+        let (by_rule, by_client) = (by_rule.last(), by_client.last());
+        assert_eq!(by_rule.header("anthropic-beta"), Some(expected));
+        assert_eq!(by_client.header("anthropic-beta"), Some(expected));
+        assert!(by_rule.json().get("betas").is_none(), "{}", by_rule.body);
+        assert_eq!(by_rule.json(), by_client.json());
+    }
+}
+
 #[tokio::test]
 async fn native_stream_forwards_whole_events() {
     let mock = Mock::start(Reply::sse(SSE)).await;

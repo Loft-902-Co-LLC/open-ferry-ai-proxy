@@ -38,6 +38,13 @@
 //! value for them. A rule's `headers` are only read, to decide whether it
 //! applies; no rule writes a header.
 //!
+//! A rule can write any field of a body, `betas` of a Claude body among
+//! them. The Claude executor reads the body after the rules have run, so a
+//! `betas` a rule wrote is taken out of it and sent in the `anthropic-beta`
+//! header, merged with the client's, exactly as a `betas` the client sent is.
+//! Upstream does the same, and nothing filters either: the operator who
+//! configures the rule chooses the betas, as they choose any other value.
+//!
 //! The `Debug` of a [`Call`] and of [`Rules`] shows header names and the
 //! kind and size of a value, never what a header, param or condition holds,
 //! as any of them can be a credential.
