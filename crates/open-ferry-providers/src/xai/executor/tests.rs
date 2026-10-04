@@ -18,6 +18,7 @@ use crate::codex::request::CONTROL_CHARACTER;
 use crate::json::{exists, get};
 use crate::xai::request::MEDIA_REFUSED;
 
+mod replay;
 mod tools;
 
 /// One request the mock received.
