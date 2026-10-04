@@ -268,7 +268,33 @@ Deviations, each also noted in its module:
 
 #### Config and info reads
 
-Not ported yet: reading the config (`config`, `config.yaml` and v8's `config/*path`), the settings, key lists and OAuth lists it holds, `latest-version` and `model-definitions/:channel`.
+| Route | v8 route |
+|---|---|
+| `GET /v0/management/config` | |
+| `GET /v0/management/config.yaml` | |
+| | `GET /v8/management/config` |
+| | `GET /v8/management/config.yaml` |
+| | `GET /v8/management/config/*path` |
+| `GET /v0/management/<setting>`: `debug`, `logging-to-file`, `proxy-url`, `quota-exceeded/switch-project`, `quota-exceeded/switch-preview-model`, `request-log`, `ws-auth`, `request-retry`, `max-retry-credentials`, `max-retry-interval`, `force-model-prefix`, `routing/strategy` | |
+| `GET /v0/management/<list>`: `api-keys`, `gemini-api-key`, `claude-api-key`, `codex-api-key`, `openai-compatibility`, `vertex-api-key`, `oauth-excluded-models`, `oauth-model-alias`, `oauth-request-scoped-errors` | |
+| `GET /v0/management/latest-version` | `GET /v8/management/server/latest-version` |
+| `GET /v0/management/model-definitions/:channel` | `GET /v8/management/routing/model-definitions/:channel` |
+
+All take the management key. The v8 config reads follow v8.0.11's, which show a setting at its historical path too, as v8.0.10's don't. The reads show the secrets the config holds as upstream shows them, to whoever has the key: client and provider API keys, proxy URLs with their passwords, and the whole file from `config.yaml`. The v8 JSON reads leave out the ICE servers' usernames and credentials, as upstream's do. Every write to the config answers the empty 404 and leaves the file as it is (see "Not ported").
+
+Deviations, each also noted in its module:
+
+- **`GET config` writes only the sections open-ferry types.** Plugins, pprof, the providers open-ferry doesn't serve, the request-log and usage settings, `payload` and the client impersonation settings are left out. An empty list is written as `null`, so `api-keys` gives `null` where the file has `[]`; upstream gives `[]`.
+
+- **`config.yaml` sends the file as it is**, under both names; upstream's v8 route sends it migrated to the v8 layout. So it shows the management key as the file holds it.
+
+- **The v8 reads show a plain management key as a bcrypt hash**, as upstream does once it has hashed the key into the file. Since the file keeps the plain key here, the hash is made when it is read (once per key while the process runs) and differs from one run to the next.
+
+- **Config errors are worded as open-ferry's loader words them.** A file that doesn't load is `invalid_config`, but a syntax error is worded as the saphyr parser words it, and a type error doesn't quote the value. A read error's message is the operating system's.
+
+- **`model-definitions` knows only the channels open-ferry serves**: `claude`, `gemini`, `gemini-interactions`, `vertex` and `codex`. Upstream's others (`aistudio`, `kimi`, `antigravity`, `xai`, `devin`, `meta` and their other spellings) answer 400 `unknown channel`. A model's `config`, the client headers upstream sends for it, isn't written.
+
+- **`latest-version` asks for open-ferry's releases as `open-ferry/<version>`**, where upstream asks for CLIProxyAPI's as `CLIProxyAPI`. Without a proxy in `proxy-url` it goes direct, where upstream follows `HTTP_PROXY` and `HTTPS_PROXY`. Redirects aren't followed. The token comes from `GITHUB_TOKEN` or `github_token`, not `GITSTORE_GIT_TOKEN`. Errors are worded as Rust's HTTP client words them, and a release that doesn't decode gives a fixed message (or `EOF` for an empty body) where upstream gives Go's decoder's error.
 
 #### Not ported
 
