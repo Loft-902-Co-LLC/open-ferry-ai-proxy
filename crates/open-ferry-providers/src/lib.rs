@@ -6,8 +6,9 @@
 //! credentials they get. [`openai_compat`] calls the OpenAI-compatible
 //! providers of the config, with API keys and no login.
 //! [`gemini`] calls Gemini with API keys, and Vertex AI with API keys or
-//! service accounts. [`payload`] applies the config's payload rules to the
-//! bodies the executors send.
+//! service accounts. [`meta`] calls Meta's API with API keys.
+//! [`payload`] applies the config's payload rules to the bodies the
+//! executors send.
 
 pub mod apply_patch_responses;
 pub mod claude;
@@ -18,6 +19,7 @@ mod custom_headers;
 pub mod gemini;
 mod go_json;
 mod json;
+pub mod meta;
 pub mod oauth;
 mod observe_send;
 pub mod openai_compat;

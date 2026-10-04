@@ -321,7 +321,7 @@ pub(crate) fn parse_retry_after(
 
 /// The wait from `now` until the Unix time `resets_at`, if that's ahead, as
 /// Go's `time.Unix(resets_at, 0)` with `After` and `Sub` gives it.
-fn wait_until(resets_at: i64, now: SystemTime) -> Option<Duration> {
+pub(crate) fn wait_until(resets_at: i64, now: SystemTime) -> Option<Duration> {
     if !(1..=GO_MAX_UNIX_SECONDS).contains(&resets_at) {
         return None;
     }
