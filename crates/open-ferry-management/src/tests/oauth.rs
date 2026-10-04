@@ -39,6 +39,7 @@
 use std::cell::RefCell;
 use std::fmt::{self, Write as _};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Once};
 use std::time::{Duration, Instant};
 
@@ -48,12 +49,14 @@ use http::{Method, StatusCode};
 use open_ferry_core::config::Config;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
+use tokio::task::JoinSet;
 use tracing::subscriber::Interest;
 
 use super::{
-    Answer, Api, AuthDir, LOCAL, Upstream, http_response, keyed, keyed_config, request_from,
+    Answer, Api, AuthDir, LOCAL, Upstream, http_response, keyed, keyed_config, read_request,
+    request_from,
 };
 use crate::oauth::Provider;
 use crate::oauth::sessions::{Callback, MAX_SESSIONS, NotPending, Session, Store};
@@ -88,7 +91,7 @@ fn store() -> Store {
 /// Starts a pending session in `store`, and returns where its callback
 /// arrives.
 fn register(store: &Store, state: &str, provider: &str) -> oneshot::Receiver<Callback> {
-    store.register(state, provider).expect("a session")
+    store.register(state, provider).expect("a session").callback
 }
 
 /// `{"error":message,"status":"error"}`.
@@ -300,6 +303,74 @@ fn assert_page(answer: &Answer, what: &str) {
         Some("text/html; charset=utf-8"),
         "{what}"
     );
+}
+
+/// Waits up to 5 seconds for every login of `api` to end.
+async fn ended(api: &Api) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while api.state.oauth_sessions().running() > 0 {
+        assert!(Instant::now() < deadline, "a login runs on");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Waits up to 5 seconds for `count` to reach `want`.
+async fn reaches(count: &AtomicUsize, want: usize, what: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while count.load(Ordering::SeqCst) < want {
+        assert!(Instant::now() < deadline, "{what}: not {want}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(count.load(Ordering::SeqCst), want, "{what}");
+}
+
+/// A token endpoint on a 127.0.0.1 ephemeral port that never answers: it
+/// reads each request, then holds its connection until the client closes
+/// it.
+struct Stall {
+    /// `http://127.0.0.1:<port>`.
+    url: String,
+    /// How many requests it read.
+    requests: Arc<AtomicUsize>,
+    /// How many of their connections the client closed.
+    closed: Arc<AtomicUsize>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Stall {
+    async fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let closed = Arc::new(AtomicUsize::new(0));
+        let (read, ended) = (Arc::clone(&requests), Arc::clone(&closed));
+        let task = tokio::spawn(async move {
+            let mut connections = JoinSet::new();
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let (read, ended) = (Arc::clone(&read), Arc::clone(&ended));
+                connections.spawn(async move {
+                    if read_request(&mut stream).await.is_some() {
+                        read.fetch_add(1, Ordering::SeqCst);
+                    }
+                    let mut rest = [0; 1024];
+                    while matches!(stream.read(&mut rest).await, Ok(n) if n > 0) {}
+                    ended.fetch_add(1, Ordering::SeqCst);
+                });
+            }
+        });
+        Self {
+            url,
+            requests,
+            closed,
+            task,
+        }
+    }
+}
+
+impl Drop for Stall {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 thread_local! {
@@ -1427,4 +1498,118 @@ fn debug_hides_what_logins_hold() {
     let _callback = register(&store, "MARKER-state", "codex");
     store.deliver("MARKER-state", "codex", callback).unwrap();
     assert_eq!(format!("{store:?}"), "Store { .. }");
+}
+
+// Not upstream's: a login cancelled after its callback came, before its
+// exchange, sends no token request.
+#[tokio::test]
+async fn a_login_cancelled_before_its_exchange_sends_no_request() {
+    let upstream = Upstream::answering(claude_tokens()).await;
+    let auth_dir = AuthDir::new();
+    let api = login_api(&auth_dir, &upstream.url);
+    let store = api.state.oauth_sessions().store();
+
+    for (path, provider) in [(CLAUDE_AUTH_URL, "anthropic"), (CODEX_AUTH_URL, "codex")] {
+        let state = start_login(&api, path).await;
+        // The login runs on this thread: it can't run between these.
+        deliver(&api, &state, provider, code("the-code"));
+        assert!(store.cancel(&state));
+        ended(&api).await;
+        assert_eq!(store.get(&state), None);
+    }
+    assert_eq!(upstream.requests().len(), 0);
+    assert_eq!(files(&auth_dir), Vec::<String>::new());
+    assert!(api.sync.calls().is_empty());
+}
+
+// Not upstream's: a login cancelled while the token endpoint keeps it
+// waiting drops its request at once, stops its forwarder and saves
+// nothing.
+#[tokio::test]
+async fn a_login_cancelled_during_a_stalled_exchange_drops_it() {
+    let stall = Stall::start().await;
+    let auth_dir = AuthDir::new();
+    let mut config = auth_dir.config();
+    config.port = SERVER_PORT;
+    let api = Api::over_with(&auth_dir, config, None);
+    api.state.oauth_sessions().overrides().endpoints = Some(stall.url.clone());
+    let store = api.state.oauth_sessions().store();
+
+    let state = start_login(&api, &format!("{CODEX_AUTH_URL}?is_webui=1")).await;
+    let addr = forwarder(&api, Provider::Codex);
+    deliver(&api, &state, "codex", code("the-code"));
+    reaches(&stall.requests, 1, "requests").await;
+
+    let path = format!("{SESSION}?state={state}");
+    api.send(keyed(Method::DELETE, &path, ""))
+        .await
+        .assert(StatusCode::OK, r#"{"cancelled":true,"status":"ok"}"#);
+    ended(&api).await;
+    stopped(&api, Provider::Codex, addr).await;
+    reaches(&stall.closed, 1, "closed connections").await;
+    assert_eq!(store.get(&state), None);
+    assert_eq!(files(&auth_dir), Vec::<String>::new());
+    assert!(api.sync.calls().is_empty());
+}
+
+// Not upstream's: an exchange that takes too long fails the login.
+#[tokio::test]
+async fn exchanges_time_out() {
+    let stall = Stall::start().await;
+    let auth_dir = AuthDir::new();
+    let api = login_api(&auth_dir, &stall.url);
+    api.state.oauth_sessions().overrides().exchange = Some(Duration::from_millis(200));
+
+    for (path, provider) in [(CLAUDE_AUTH_URL, "anthropic"), (CODEX_AUTH_URL, "codex")] {
+        let state = start_login(&api, path).await;
+        deliver(&api, &state, provider, code("the-code"));
+        let timed_out = "Timeout exchanging authorization code for tokens";
+        assert_eq!(failure(&api, &state).await, timed_out, "{provider}");
+        api.get(&format!("{STATUS}?state={state}"))
+            .await
+            .assert(StatusCode::OK, &failed(timed_out));
+    }
+    ended(&api).await;
+    reaches(&stall.requests, 2, "requests").await;
+    reaches(&stall.closed, 2, "closed connections").await;
+    assert_eq!(files(&auth_dir), Vec::<String>::new());
+}
+
+// Not upstream's: shutting down stops every login, waiting for its callback
+// or exchanging its code, which stops their forwarders and drops their
+// sessions; no login starts after that.
+#[tokio::test]
+async fn shutting_down_stops_the_logins() {
+    let stall = Stall::start().await;
+    let auth_dir = AuthDir::new();
+    let mut config = auth_dir.config();
+    config.port = SERVER_PORT;
+    let api = Api::over_with(&auth_dir, config, None);
+    api.state.oauth_sessions().overrides().endpoints = Some(stall.url.clone());
+    let store = api.state.oauth_sessions().store();
+
+    let waiting = start_login(&api, &format!("{CODEX_AUTH_URL}?is_webui=1")).await;
+    let addr = forwarder(&api, Provider::Codex);
+    let exchanging = start_login(&api, CLAUDE_AUTH_URL).await;
+    deliver(&api, &exchanging, "anthropic", code("the-code"));
+    reaches(&stall.requests, 1, "requests").await;
+    assert_eq!(api.state.oauth_sessions().running(), 2);
+
+    tokio::time::timeout(Duration::from_secs(5), api.state.shutdown())
+        .await
+        .expect("the logins stop");
+    assert_eq!(api.state.oauth_sessions().running(), 0);
+    stopped(&api, Provider::Codex, addr).await;
+    reaches(&stall.closed, 1, "closed connections").await;
+    assert_eq!(store.get(&waiting), None);
+    assert_eq!(store.get(&exchanging), None);
+
+    api.get(CODEX_AUTH_URL).await.assert(
+        StatusCode::SERVICE_UNAVAILABLE,
+        r#"{"error":"server shutting down"}"#,
+    );
+    assert_eq!(store.count(), 0);
+    assert_eq!(api.state.oauth_sessions().running(), 0);
+    assert_eq!(files(&auth_dir), Vec::<String>::new());
+    assert!(api.sync.calls().is_empty());
 }

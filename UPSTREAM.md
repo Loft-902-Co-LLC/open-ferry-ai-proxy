@@ -247,7 +247,7 @@ Claude and Codex logins, with the providers' official OAuth flows only:
 | `GET`, `POST /v0/management/oauth-callback` | `GET`, `POST /v8/management/oauth/callback` | `Availability` |
 | `GET /anthropic/callback`, `GET /codex/callback` (the main server) | | `Open` |
 
-A login answers its authorization URL and `state` at once, then waits up to 5 minutes for its callback. It exchanges the code at the provider's token endpoint, through the config's `proxy-url` and with `User-Agent: open-ferry/<version>`, and saves the credential as other saved logins are saved (above). With `is_webui`, a callback forwarder on the redirect URI's port (54545 for Claude, 1455 for Codex) sends the browser on to the main server's callback page, over `https` when TLS is on; while that port is held elsewhere, the login answers 500 `{"error":"failed to start callback server"}`. The callback routes only look up a `state` of 1 to 128 letters, digits, `-`, `_` and `.`, without `..`.
+A login answers its authorization URL and `state` at once, then waits up to 5 minutes for its callback. It exchanges the code at the provider's token endpoint, through the config's `proxy-url` and with `User-Agent: open-ferry/<version>`, within 60 seconds, and saves the credential as other saved logins are saved (above). With `is_webui`, a callback forwarder on the redirect URI's port (54545 for Claude, 1455 for Codex) sends the browser on to the main server's callback page, over `https` when TLS is on; while that port is held elsewhere, the login answers 500 `{"error":"failed to start callback server"}`. The callback routes only look up a `state` of 1 to 128 letters, digits, `-`, `_` and `.`, without `..`.
 
 Deviations, each also noted in its module:
 
@@ -255,7 +255,11 @@ Deviations, each also noted in its module:
 
 - **Sessions are bounded.** At most 1024 are kept; past that, a login answers 429 `{"error":"too many oauth sessions"}` until some expire. Upstream keeps any number.
 
-- **A cancelled login stops at once.** Cancelling a session wakes its login, which stops its forwarder, and a login cancelled while it exchanges the code saves nothing. Upstream's login notices on its next poll.
+- **A cancelled login stops at once**, wherever it is but while it saves, and stops its forwarder. A login cancelled after its callback came and before its exchange sends no token request, and one cancelled during its exchange drops the request. Upstream's login notices a cancel on its next poll, and one cancelled during its exchange runs the exchange to its end, then saves nothing.
+
+- **The exchange has 60 seconds**, until the credential is made; past that, the session fails with `Timeout exchanging authorization code for tokens`. Upstream's has no deadline.
+
+- **Shutting down stops the logins.** When the service shuts down, every login stops, as a cancelled one does, and drops its session; a login started after that answers 503 `{"error":"server shutting down"}`. Upstream's logins run until the process exits.
 
 - **No log or unauthenticated answer quotes the token endpoint's answer**, which may quote the code and the PKCE verifier. A failed exchange is logged with a fixed message and the endpoint's status, where upstream logs the error with the answer in it. `oauth-callback`, which needs no key, answers a callback for a failed login 409 `{"error":"oauth flow failed","status":"error"}`, where upstream answers the session's status. That status, which `get-auth-status` answers with the key, keeps upstream's wording, a Codex one quoting the answer, but with the login's code and verifier replaced by `[redacted]`.
 

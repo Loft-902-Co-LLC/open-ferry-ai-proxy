@@ -35,13 +35,14 @@ mod forwarder;
 pub(crate) mod sessions;
 
 use std::fmt;
-#[cfg(test)]
+use std::future::Future;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use axum::routing::{delete, get};
 use open_ferry_providers::claude::oauth as claude;
 use open_ferry_providers::codex::oauth as codex;
+use tokio::task::JoinSet;
 
 use crate::Route;
 use forwarder::Forwarders;
@@ -99,13 +100,23 @@ impl fmt::Display for Provider {
 }
 
 /// The OAuth logins in progress: their sessions (upstream's
-/// `oauthSessionStore`) and callback forwarders.
+/// `oauthSessionStore`), callback forwarders and tasks.
 #[derive(Debug, Default)]
 pub(crate) struct Sessions {
     store: Store,
     forwarders: Forwarders,
+    logins: Mutex<Logins>,
     #[cfg(test)]
     overrides: Mutex<Overrides>,
+}
+
+/// The logins' tasks.
+#[derive(Debug, Default)]
+struct Logins {
+    /// The tasks, some perhaps ended.
+    tasks: JoinSet<()>,
+    /// Whether the logins were shut down: no login starts after that.
+    shut_down: bool,
 }
 
 /// What a test changes: where the providers' endpoints are, the ports the
@@ -122,6 +133,8 @@ pub(crate) struct Overrides {
     pub(crate) ports: Option<(u16, u16)>,
     /// How long a login waits for its callback.
     pub(crate) wait: Option<Duration>,
+    /// How long a login's code exchange may take.
+    pub(crate) exchange: Option<Duration>,
 }
 
 #[cfg(test)]
@@ -131,6 +144,7 @@ impl Default for Overrides {
             endpoints: Some("http://127.0.0.1:9".to_owned()),
             ports: Some((0, 0)),
             wait: None,
+            exchange: None,
         }
     }
 }
@@ -143,6 +157,43 @@ impl Sessions {
 
     fn forwarders(&self) -> &Forwarders {
         &self.forwarders
+    }
+
+    fn logins(&self) -> MutexGuard<'_, Logins> {
+        self.logins.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Runs `login` as a task of its own, until it ends or the logins are
+    /// shut down. Once they are, returns false and drops `login`.
+    fn spawn(&self, login: impl Future<Output = ()> + Send + 'static) -> bool {
+        let mut logins = self.logins();
+        if logins.shut_down {
+            return false;
+        }
+        // Forget the logins that have ended.
+        while logins.tasks.try_join_next().is_some() {}
+        logins.tasks.spawn(login);
+        true
+    }
+
+    /// Stops every login and waits for their tasks to end; no login starts
+    /// after this. A login stopped here stops its forwarder and frees its
+    /// session as when it ends otherwise.
+    pub(crate) async fn shutdown(&self) {
+        let mut tasks = {
+            let mut logins = self.logins();
+            logins.shut_down = true;
+            std::mem::take(&mut logins.tasks)
+        };
+        tasks.shutdown().await;
+    }
+
+    /// How many logins are still running.
+    #[cfg(test)]
+    pub(crate) fn running(&self) -> usize {
+        let mut logins = self.logins();
+        while logins.tasks.try_join_next().is_some() {}
+        logins.tasks.len()
     }
 
     /// What a test changes.
@@ -196,6 +247,15 @@ impl Sessions {
             return wait;
         }
         flows::WAIT_TIMEOUT
+    }
+
+    /// How long a login's code exchange may take.
+    fn exchange_timeout(&self) -> Duration {
+        #[cfg(test)]
+        if let Some(exchange) = self.overrides().exchange {
+            return exchange;
+        }
+        flows::EXCHANGE_TIMEOUT
     }
 }
 

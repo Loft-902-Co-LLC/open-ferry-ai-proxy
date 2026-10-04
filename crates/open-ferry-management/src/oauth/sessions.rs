@@ -17,6 +17,10 @@
 //! (the code, or the error the provider reported) can be handed to the
 //! login waiting for it.
 //!
+//! A login learns that its session was dropped (cancelled, replaced or
+//! expired) through the session's [`Lifeline`], whatever it is doing; the
+//! callback channel tells it only while it waits for the callback.
+//!
 //! Deviations from upstream:
 //! - A callback reaches the waiting login through a channel the session
 //!   holds, instead of a `.oauth-<provider>-<state>.oauth` file in the auth
@@ -35,7 +39,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use open_ferry_translate::go::to_lower;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 
 use super::Redacted;
 use crate::go::equal_fold;
@@ -67,6 +71,30 @@ impl fmt::Debug for Callback {
             .field("code", &Redacted(&self.code))
             .field("error", &Redacted(&self.error))
             .finish()
+    }
+}
+
+/// What a login gets for its session from [`Store::register`].
+pub(crate) struct Registration {
+    /// Where its callback arrives. It closes, without one, when the
+    /// session stops being pending before a callback came.
+    pub(crate) callback: oneshot::Receiver<Callback>,
+    /// What tells the login its session was dropped.
+    pub(crate) lifeline: Lifeline,
+    /// Which registration of the state this is, for [`Store::release`].
+    pub(crate) id: u64,
+}
+
+/// What tells a login its session was dropped: cancelled, replaced by a
+/// session with the same state, or expired. Unlike the callback channel,
+/// it lasts the session's whole life.
+pub(crate) struct Lifeline(watch::Receiver<()>);
+
+impl Lifeline {
+    /// Waits until the session is dropped; at once if it already was.
+    pub(crate) async fn cut(&mut self) {
+        // Nothing is ever sent: only the session's end wakes this.
+        while self.0.changed().await.is_ok() {}
     }
 }
 
@@ -106,6 +134,8 @@ struct Inner {
     ttl: Duration,
     completed_ttl: Duration,
     sessions: HashMap<String, Entry>,
+    /// The ID of the next registration.
+    next_id: u64,
 }
 
 struct Entry {
@@ -113,6 +143,10 @@ struct Entry {
     /// Where the session's callback goes, until one has gone or the session
     /// stops being pending. Dropping it wakes the waiting login.
     callback: Option<oneshot::Sender<Callback>>,
+    /// Cuts the login's [`Lifeline`] when the session is dropped.
+    _lifeline: watch::Sender<()>,
+    /// The registration's ID.
+    id: u64,
 }
 
 impl fmt::Debug for Store {
@@ -138,6 +172,7 @@ impl Store {
                 ttl,
                 completed_ttl: COMPLETED_TTL.min(ttl),
                 sessions: HashMap::new(),
+                next_id: 0,
             }),
         }
     }
@@ -161,14 +196,10 @@ impl Store {
     }
 
     /// Starts a pending session for `state` and `provider`, after trimming,
-    /// in place of any session with that state, and returns where its
-    /// callback will arrive (`Register`). `None`, registering nothing, when
-    /// either is empty, or [`MAX_SESSIONS`] are already kept.
-    pub(crate) fn register(
-        &self,
-        state: &str,
-        provider: &str,
-    ) -> Option<oneshot::Receiver<Callback>> {
+    /// in place of any session with that state, and returns what its login
+    /// needs (`Register`). `None`, registering nothing, when either is
+    /// empty, or [`MAX_SESSIONS`] are already kept.
+    pub(crate) fn register(&self, state: &str, provider: &str) -> Option<Registration> {
         let state = state.trim();
         let provider = to_lower(provider.trim());
         if state.is_empty() || provider.is_empty() {
@@ -180,7 +211,10 @@ impl Store {
         if inner.sessions.len() >= MAX_SESSIONS && !inner.sessions.contains_key(state) {
             return None;
         }
-        let (sender, receiver) = oneshot::channel();
+        let (sender, callback) = oneshot::channel();
+        let (lifeline, login_end) = watch::channel(());
+        let id = inner.next_id;
+        inner.next_id = id.wrapping_add(1);
         let session = Session {
             provider,
             status: String::new(),
@@ -192,9 +226,15 @@ impl Store {
             Entry {
                 session,
                 callback: Some(sender),
+                _lifeline: lifeline,
+                id,
             },
         );
-        Some(receiver)
+        Some(Registration {
+            callback,
+            lifeline: Lifeline(login_end),
+            id,
+        })
     }
 
     /// Marks the login failed with `message`, or `Authentication failed`
@@ -292,6 +332,20 @@ impl Store {
             inner.sessions.remove(state);
         }
         pending
+    }
+
+    /// Drops the session for `state` if it is the pending session of
+    /// registration `id`: its login ended without completing or failing,
+    /// so nothing will.
+    pub(crate) fn release(&self, state: &str, id: u64) {
+        let mut inner = self.lock();
+        let ours = inner
+            .sessions
+            .get(state)
+            .is_some_and(|entry| entry.id == id && entry.session.is_pending());
+        if ours {
+            inner.sessions.remove(state);
+        }
     }
 
     /// Hands `callback` to the login waiting on the pending session for

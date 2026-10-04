@@ -12,11 +12,16 @@
 //! at once, and then waits up to 5 minutes for its callback, which a
 //! callback route hands it. It then exchanges the code for tokens with the
 //! provider's official OAuth endpoints, through the config's `proxy-url`,
-//! and saves the credential in the auth directory, where the running
-//! service takes it up; the session then completes. A login that fails
-//! sets the session's status to say why. Cancelling the session stops the
-//! wait at once, and a login cancelled while it exchanges the code saves
-//! nothing.
+//! within 60 seconds, and saves the credential in the auth directory,
+//! where the running service takes it up; the session then completes. A
+//! login that fails sets the session's status to say why.
+//!
+//! Cancelling the session stops its login at once, wherever it is, except
+//! while it saves: a login cancelled before its exchange sends no token
+//! request, and one cancelled during it drops the request and saves
+//! nothing. When the service shuts down, every login stops. However a
+//! login ends, its forwarder stops, and its session is dropped unless the
+//! login completed or failed it.
 //!
 //! No log or answer holds a login's code, PKCE verifier or tokens. A
 //! failed exchange is logged with a fixed message and the token endpoint's
@@ -38,6 +43,15 @@
 //! - A login that can't start its forwarder, or can't tell where the main
 //!   server listens, drops its session; upstream leaves it pending, with
 //!   nothing waiting on it.
+//! - A login cancelled before its exchange sends no token request, and one
+//!   cancelled during it drops the request at once. Upstream's runs the
+//!   exchange to its end, then saves nothing.
+//! - The exchange, until the credential is made, has 60 seconds: past
+//!   that, the session fails with `Timeout exchanging authorization code
+//!   for tokens`. Upstream's has no deadline.
+//! - When the service shuts down, the logins stop and drop their sessions,
+//!   and a login can't start after that: it answers 503 `{"error":"server
+//!   shutting down"}`. Upstream's logins run until the process exits.
 //! - A failed exchange is logged with a fixed message and the token
 //!   endpoint's status, where upstream logs the error, which quotes the
 //!   endpoint's answer, and so may hold the code. A Codex session's status
@@ -67,11 +81,10 @@ use open_ferry_providers::claude::oauth::{self as claude, ClaudeAuth};
 use open_ferry_providers::codex::oauth::{self as codex, CodexAuth};
 use open_ferry_providers::oauth::{Pkce, generate_state};
 use open_ferry_translate::go::{to_lower, trim_space};
-use tokio::sync::oneshot;
 
 use super::Provider;
 use super::forwarder::Started;
-use super::sessions::{Callback, error_with_cause, is_valid_state};
+use super::sessions::{Registration, error_with_cause, is_valid_state};
 use crate::go::lossy;
 use crate::json::{self, Json};
 use crate::query::Query;
@@ -81,8 +94,14 @@ use crate::token_record::save_token_record;
 /// How long a login waits for its callback.
 pub(super) const WAIT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
+/// How long a login's code exchange may take, until its credential is made.
+pub(super) const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// The status of a login whose code couldn't be exchanged.
 const EXCHANGE_FAILED: &str = "Failed to exchange authorization code for tokens";
+
+/// The status of a login whose code exchange took too long.
+const EXCHANGE_TIMED_OUT: &str = "Timeout exchanging authorization code for tokens";
 
 /// The status of a login whose credential couldn't be saved.
 const SAVE_FAILED: &str = "Failed to save authentication tokens";
@@ -144,15 +163,25 @@ async fn start(state: &ManagementState, provider: Provider, query: &Query) -> Re
     let client = Client::new(state, provider, &config);
     let url = client.auth_url(&oauth_state, &pkce);
 
-    let Some(callback) = sessions.store().register(&oauth_state, provider.name()) else {
+    let Some(registration) = sessions.store().register(&oauth_state, provider.name()) else {
         return json::error(StatusCode::TOO_MANY_REQUESTS, "too many oauth sessions");
+    };
+    // From here, a login that doesn't start drops its session.
+    let login = Login {
+        client,
+        state: oauth_state.clone(),
+        pkce,
+        _lease: Lease {
+            management: state.clone(),
+            state: oauth_state.clone(),
+            id: registration.id,
+        },
     };
 
     let mut forwarder = None;
     if is_web_ui(query) {
         let Some(target) = callback_url(&config, provider.page()) else {
             tracing::error!("Can't forward the {provider} OAuth callback: no server port");
-            sessions.store().cancel(&oauth_state);
             return json::error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "callback server unavailable",
@@ -163,7 +192,6 @@ async fn start(state: &ManagementState, provider: Provider, query: &Query) -> Re
             Ok(started) => forwarder = Some(started),
             Err(error) => {
                 tracing::error!("Failed to start the {provider} OAuth callback forwarder: {error}");
-                sessions.store().cancel(&oauth_state);
                 return json::error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "failed to start callback server",
@@ -172,16 +200,9 @@ async fn start(state: &ManagementState, provider: Provider, query: &Query) -> Re
         }
     }
 
-    tokio::spawn(wait(
-        state.clone(),
-        Login {
-            client,
-            state: oauth_state.clone(),
-            pkce,
-        },
-        callback,
-        forwarder,
-    ));
+    if !sessions.spawn(run(state.clone(), login, registration, forwarder)) {
+        return json::error(StatusCode::SERVICE_UNAVAILABLE, "server shutting down");
+    }
     json::response(
         StatusCode::OK,
         &Json::map([
@@ -216,6 +237,26 @@ struct Login {
     /// The session's state.
     state: String,
     pkce: Pkce,
+    _lease: Lease,
+}
+
+/// A login's hold on its session: when the login ends, however it ends,
+/// the session is dropped if it is still pending.
+struct Lease {
+    management: ManagementState,
+    /// The session's state.
+    state: String,
+    /// The session's registration.
+    id: u64,
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        self.management
+            .oauth_sessions()
+            .store()
+            .release(&self.state, self.id);
+    }
 }
 
 /// What calls the provider's OAuth endpoints.
@@ -292,19 +333,25 @@ impl Client {
 /// Waits for `login`'s callback, then makes and saves its credential and
 /// completes its session, or sets the session's status saying why it
 /// failed. Returns at once when the session is cancelled or ends
-/// otherwise; `forwarder` stops when this returns.
-async fn wait(
+/// otherwise, except while it saves; `forwarder` stops when this returns.
+async fn run(
     state: ManagementState,
     login: Login,
-    receiver: oneshot::Receiver<Callback>,
+    registration: Registration,
     forwarder: Option<Started>,
 ) {
     let _forwarder = forwarder;
-    let store = state.oauth_sessions().store();
+    let Registration {
+        callback,
+        mut lifeline,
+        ..
+    } = registration;
+    let sessions = state.oauth_sessions();
+    let store = sessions.store();
     let provider = login.client.provider();
     let callback = tokio::select! {
-        callback = receiver => callback,
-        () = tokio::time::sleep(state.oauth_sessions().wait_timeout()) => {
+        callback = callback => callback,
+        () = tokio::time::sleep(sessions.wait_timeout()) => {
             tracing::error!("Timed out waiting for the {provider} OAuth callback");
             store.set_error(&login.state, "Timeout waiting for OAuth callback");
             return;
@@ -319,22 +366,36 @@ async fn wait(
         store.set_error(&login.state, provider.callback_error());
         return;
     }
-    let record = match login
-        .client
-        .credential(&callback.code, &login.state, &login.pkce)
-        .await
-    {
-        Ok(record) => record,
-        Err(status) => {
-            // Codex's status quotes the token endpoint's answer, which may
-            // quote the request: the code, as is or as sent.
-            let code = &callback.code;
-            let secrets = [code, &query_escape(code), &login.pkce.verifier];
-            store.set_error(&login.state, &redact(&status, &secrets));
-            return;
-        }
+    let exchange = tokio::time::timeout(
+        sessions.exchange_timeout(),
+        login
+            .client
+            .credential(&callback.code, &login.state, &login.pkce),
+    );
+    let record = tokio::select! {
+        // The lifeline first: a login whose session ended since its callback
+        // came sends no token request, and one whose session ends meanwhile
+        // drops it.
+        biased;
+        () = lifeline.cut() => return,
+        exchanged = exchange => match exchanged {
+            Ok(Ok(record)) => record,
+            Ok(Err(status)) => {
+                // Codex's status quotes the token endpoint's answer, which
+                // may quote the request: the code, as is or as sent.
+                let code = &callback.code;
+                let secrets = [code, &query_escape(code), &login.pkce.verifier];
+                store.set_error(&login.state, &redact(&status, &secrets));
+                return;
+            }
+            Err(_) => {
+                tracing::error!("Timed out exchanging the {provider} authorization code for tokens");
+                store.set_error(&login.state, EXCHANGE_TIMED_OUT);
+                return;
+            }
+        },
     };
-    // A login cancelled while it exchanged the code saves nothing.
+    // A login whose session ended as the exchange did saves nothing.
     if !store.is_pending(&login.state, provider.name()) {
         return;
     }

@@ -148,6 +148,12 @@ impl ManagementState {
             .unwrap_or_else(PoisonError::into_inner) = config;
     }
 
+    /// Stops the OAuth logins in progress and waits for them to end; no
+    /// login starts after this. The service calls it as it shuts down.
+    pub async fn shutdown(&self) {
+        self.inner.oauth_sessions.shutdown().await;
+    }
+
     /// The current config.
     pub(crate) fn config(&self) -> Arc<Config> {
         Arc::clone(

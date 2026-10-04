@@ -215,6 +215,7 @@ pub async fn run(
             }
             result = &mut server => {
                 service.manager.stop_auto_refresh();
+                service.management.shutdown().await;
                 return exit_code(result);
             }
             event = next_event(&mut events) => match event {
@@ -237,10 +238,11 @@ pub async fn run(
 
 type Server = tokio::task::JoinHandle<io::Result<()>>;
 
-/// Stops refresh and the server, giving open requests up to
-/// [`SHUTDOWN_TIMEOUT`].
+/// Stops refresh, the management API's OAuth logins and the server, giving
+/// open requests up to [`SHUTDOWN_TIMEOUT`].
 async fn shut_down(service: &Service, stop: &watch::Sender<bool>, mut server: Server) -> ExitCode {
     service.manager.stop_auto_refresh();
+    service.management.shutdown().await;
     let _ = stop.send(true);
     match tokio::time::timeout(SHUTDOWN_TIMEOUT, &mut server).await {
         Ok(result) => exit_code(result),
@@ -2220,7 +2222,7 @@ mod tests {
         use tokio::net::{TcpListener, TcpStream};
         use tokio::sync::watch;
 
-        use super::super::{Service, serve};
+        use super::super::{Service, serve, shut_down};
         use super::service;
 
         const KEYED: &str = "remote-management:\n  secret-key: test-secret\n";
@@ -2393,6 +2395,43 @@ mod tests {
             let path = "/v0/management/oauth-callback?state=s&code=c";
             let answer = fetch(addr, "GET", path, &[]).await;
             assert_eq!((answer.status, answer.body.as_str()), (404, ""));
+        }
+
+        /// Not upstream's: shutting the service down stops the OAuth logins
+        /// in progress, dropping their sessions, and no login starts after
+        /// that.
+        #[tokio::test]
+        async fn shutting_down_stops_oauth_logins() {
+            let dir = tempfile::tempdir().unwrap();
+            let service = service(dir.path(), KEYED);
+            let (addr, _stop) = start(&service).await;
+            let key = ("Authorization", "Bearer test-secret");
+            let start_login = "/v0/management/codex-auth-url";
+            let answer = fetch(addr, "GET", start_login, &[key]).await;
+            assert_eq!(answer.status, 200, "{}", answer.body);
+            let started: serde_json::Value = serde_json::from_str(&answer.body).unwrap();
+            let state = started["state"].as_str().unwrap();
+            let status = format!("/v0/management/get-auth-status?state={state}");
+            let answer = fetch(addr, "GET", &status, &[key]).await;
+            assert_eq!(answer.body, r#"{"status":"wait"}"#);
+
+            // Shut down as `run` does, another server standing for the one
+            // it stops; the first still answers.
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let (stop, stopped) = watch::channel(false);
+            let server = tokio::spawn(serve(listener, None, service.app(), stopped));
+            let _ = shut_down(&service, &stop, server).await;
+
+            let answer = fetch(addr, "GET", &status, &[key]).await;
+            assert_eq!(
+                answer.body,
+                r#"{"error":"unknown or expired state","status":"error"}"#
+            );
+            let answer = fetch(addr, "GET", start_login, &[key]).await;
+            assert_eq!(
+                (answer.status, answer.body.as_str()),
+                (503, r#"{"error":"server shutting down"}"#)
+            );
         }
 
         #[tokio::test]
