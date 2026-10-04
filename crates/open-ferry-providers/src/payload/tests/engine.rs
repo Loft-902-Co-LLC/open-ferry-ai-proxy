@@ -96,6 +96,163 @@ fn sjson_sets_and_builds_paths() {
     assert_eq!(set("{}", "", "1"), Err(SetError::EmptyPath));
 }
 
+/// `set` of `value` at `path` in `doc`, which is left to be checked: a
+/// refused write must leave it as it was.
+fn set_in(doc: &mut Value, path: &str, value: &str) -> Result<(), SetError> {
+    sjson::set(doc, path, &json(value))
+}
+
+/// Not upstream's: sjson returns the error and the document it was given, so
+/// a write that is refused changes nothing. A scalar on the path was
+/// replaced by an empty array or object before the write was refused.
+#[test]
+fn a_refused_write_leaves_the_document_as_it_was() {
+    for (doc, path, error) in [
+        (r#"{"a":1}"#, "a.1025", SetError::TooFar),
+        (r#"{"a":"text"}"#, "a.b.1025", SetError::TooFar),
+        (r#"{"a":null}"#, "a.5000.x", SetError::TooFar),
+        (r"7", "1025", SetError::TooFar),
+        (r#"{"a":[1]}"#, "a.1026", SetError::TooFar),
+        (r#"{"a":[1]}"#, "a.x", SetError::NonNumericKey),
+        (r#"{"a":[1]}"#, "a.0.1025", SetError::TooFar),
+    ] {
+        let mut value = json(doc);
+        assert_eq!(set_in(&mut value, path, "9"), Err(error), "{doc} {path}");
+        assert_eq!(value, json(doc), "{doc} {path}");
+    }
+    // A write within the limit still replaces the scalar.
+    let mut value = json(r#"{"a":1}"#);
+    assert_eq!(set_in(&mut value, "a.1", "9"), Ok(()));
+    assert_eq!(value, json(r#"{"a":[null,9]}"#));
+}
+
+/// Not upstream's: through the rules, a refused write leaves the scalar.
+#[test]
+fn a_rule_whose_write_is_refused_leaves_the_body() {
+    let config = r#"
+payload:
+  override:
+    - models:
+        - name: m
+      params:
+        a.1025: 9
+        b: 1
+"#;
+    let out = Args {
+        model: "m",
+        ..Args::default()
+    }
+    .run(config, r#"{"a":1}"#);
+    assert_eq!(out, json(r#"{"a":1,"b":1}"#));
+}
+
+/// A simple path of `keys` keys, each `a`.
+fn deep_path(keys: usize) -> String {
+    vec!["a"; keys].join(".")
+}
+
+/// Not upstream's: a path to set of more than 64 keys is refused, where
+/// sjson builds a value as deep as the path; deleting one is no error.
+#[test]
+fn sjson_refuses_to_build_too_deep_a_value() {
+    for keys in [65, 2048, 100_000] {
+        let path = deep_path(keys);
+        let mut doc = json("{}");
+        assert_eq!(set_in(&mut doc, &path, "1"), Err(SetError::TooDeep));
+        assert_eq!(doc, json("{}"));
+        assert_eq!(delete("{}", &path), Ok(json("{}")));
+    }
+    // 64 keys write a value 64 deep, which serializes and drops.
+    let mut doc = json("{}");
+    assert_eq!(set_in(&mut doc, &deep_path(64), "1"), Ok(()));
+    let text = serde_json::to_string(&doc).expect("serializes");
+    assert_eq!(text.matches('{').count(), 64);
+    // A path to an existing value that deep is deleted: the innermost key.
+    let deleted = delete(&text, &deep_path(64)).expect("deletes");
+    let text = serde_json::to_string(&deleted).expect("serializes");
+    assert_eq!(text.matches(r#""a""#).count(), 63);
+}
+
+/// Not upstream's: a rule's param with a path of more than 64 keys is
+/// dropped when the config loads, and the rest of its rule kept; a body that
+/// takes 2,048 keys doesn't overflow the stack. (The paths are explicit
+/// keys: YAML reads no implicit key of more than 1,024 characters.)
+#[test]
+fn rules_drop_params_with_too_deep_a_path() {
+    let deep = deep_path(2048);
+    let config = format!(
+        r#"
+payload:
+  default:
+    - models:
+        - name: m
+      params:
+        ? {deep}
+        : 1
+        kept-default: 1
+  default-raw:
+    - models:
+        - name: m
+      params:
+        ? {deep}
+        : '1'
+  override:
+    - models:
+        - name: m
+      params:
+        ? {deep}
+        : 2
+        kept-override: 2
+        {limit}: 2
+  override-raw:
+    - models:
+        - name: m
+      params:
+        ? {deep}
+        : '{{"k":1}}'
+        kept-raw: '3'
+  filter:
+    - models:
+        - name: m
+      params:
+        - {deep}
+"#,
+        limit = deep_path(65),
+    );
+    let rules = rules(&config);
+    assert_eq!(rules.default.len(), 1);
+    assert!(rules.default_raw.is_empty());
+    assert_eq!(rules.overrides.len(), 1);
+    assert_eq!(rules.overrides[0].params.len(), 1);
+    assert_eq!(rules.override_raw.len(), 1);
+    // A filter path removes only what a body has.
+    assert_eq!(rules.filter.len(), 1);
+    let out = Args {
+        model: "m",
+        ..Args::default()
+    }
+    .apply(Some(&rules), r#"{"x":1}"#)
+    .0;
+    assert_eq!(
+        out,
+        json(r#"{"x":1,"kept-default":1,"kept-override":2,"kept-raw":3}"#)
+    );
+
+    // A path of the limit is written, and the body serializes and drops.
+    let at_limit = format!(
+        "payload:\n  override:\n    - models:\n        - name: m\n      params:\n        {}: 1\n",
+        deep_path(64)
+    );
+    let out = Args {
+        model: "m",
+        ..Args::default()
+    }
+    .run(&at_limit, "{}");
+    let text = serde_json::to_string(&out).expect("serializes");
+    assert_eq!(text.matches('{').count(), 64);
+    assert_eq!(serde_json::from_str::<Value>(&text).ok(), Some(out));
+}
+
 #[test]
 fn sjson_deletes_paths() {
     assert_eq!(delete(r#"{"a":[1,2]}"#, "a.0"), Ok(json(r#"{"a":[2]}"#)));

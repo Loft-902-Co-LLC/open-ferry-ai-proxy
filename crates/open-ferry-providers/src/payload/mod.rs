@@ -52,6 +52,9 @@
 //!   its map in random order.
 //! - A value that can't be written as JSON is dropped when the config
 //!   loads, with a warning (see [`Rules`]).
+//! - A param to write whose path has more than 64 keys is dropped the same
+//!   way, where upstream builds a value of any depth. One 2,000 levels deep
+//!   overflows the stack of a thread that builds, writes or drops it.
 //! - Some gjson and sjson syntax isn't read, and some paths upstream
 //!   writes wrongly change nothing (see the `gjson` and `sjson` modules).
 //! - The client's request is translated for the default rules' check only

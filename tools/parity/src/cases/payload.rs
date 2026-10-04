@@ -734,6 +734,39 @@ fn path_cases() -> Vec<Case> {
         "{}",
         options("payload:\n  override:\n    - models:\n        - name: m\n      params:\n        v: first\n    - models:\n        - name: '*'\n      params:\n        v: second\n  override-raw:\n    - models:\n        - name: m\n      params:\n        w: '[1]'\n"),
     ));
+    // The deepest path a rule may write has 64 keys; a longer one is dropped
+    // at load, which upstream doesn't (the Rust tests cover it).
+    let deep_path = vec!["a"; 64].join(".");
+    let deep_body = format!("{}1{}", r#"{"a":"#.repeat(64), "}".repeat(64));
+    cases.push(case(
+        "path-deep-override",
+        "m",
+        "{}",
+        options(&rule("override", "m", "", &format!("{deep_path}: 1"))),
+    ));
+    cases.push(case(
+        "path-deep-default-raw",
+        "m",
+        r#"{"a":{"b":1}}"#,
+        options(&rule(
+            "default-raw",
+            "m",
+            "",
+            &format!("{deep_path}: '{{\"k\":[1]}}'"),
+        )),
+    ));
+    cases.push(case(
+        "path-deep-existing-override",
+        "m",
+        &deep_body,
+        options(&rule("override", "m", "", &format!("{deep_path}: 2"))),
+    ));
+    cases.push(case(
+        "path-deep-filter",
+        "m",
+        &deep_body,
+        options(&rule("filter", "m", "", &format!("- {deep_path}"))),
+    ));
     cases.push(case(
         "path-conditions-see-earlier-rules",
         "m",

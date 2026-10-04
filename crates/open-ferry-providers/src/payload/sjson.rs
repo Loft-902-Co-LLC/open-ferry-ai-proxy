@@ -20,7 +20,14 @@
 //! - `-1` removes an array's last item; an object's key `-1` is removed
 //!   like any other, where sjson first looks for a key `#`.
 //! - Filling an array up to an index more than 1024 past its end is
-//!   refused, where sjson writes as many `null`s as it takes.
+//!   refused, where sjson writes as many `null`s as it takes. A refused
+//!   write changes nothing, as in sjson, which returns the error and the
+//!   document it was given.
+//! - A set of a simple path of more than 64 keys is refused, where sjson
+//!   builds a path of any length. A path is built a key at a time, and
+//!   a value 2,000 levels deep takes more stack than a thread has to build,
+//!   write and drop. Deleting a path is not limited: the walk stops where
+//!   the document does.
 //! - A complex path whose results upstream can't place, or places wrongly
 //!   (a projection inside another, a count, or a list found through a
 //!   `#(query)` with a path after it), changes nothing, where sjson writes
@@ -33,6 +40,17 @@ use super::gjson::{self, Found, Loc, Step};
 /// The most `null`s a set writes to reach an index past an array's end.
 const MAX_PADDING: i64 = 1024;
 
+/// The most keys a simple path may have for a set.
+pub(super) const MAX_KEYS: usize = 64;
+
+/// Whether a set of `path` is over the [`MAX_KEYS`] limit, counting a key
+/// for each `.` and one more. That's a bound on the keys of the simple path
+/// the rules' `path::resolve` makes of `path` (a `#(query)` that may hold
+/// dots becomes one index), never an undercount.
+pub(super) fn too_deep(path: &str) -> bool {
+    path.bytes().filter(|&b| b == b'.').count() >= MAX_KEYS
+}
+
 /// Why a set or delete failed.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum SetError {
@@ -44,6 +62,8 @@ pub(super) enum SetError {
     NonNumericKey,
     /// An index too far past an array's end (not upstream's).
     TooFar,
+    /// A path of more than [`MAX_KEYS`] keys to set (not upstream's).
+    TooDeep,
 }
 
 /// What a walk found nothing to do for (sjson's `errNoChange`), which the
@@ -69,7 +89,12 @@ fn run(doc: &mut Value, path: &str, value: Option<&Value>) -> Result<Outcome, Se
         return Err(SetError::EmptyPath);
     }
     match parse_components(path) {
-        Some(components) => append_paths(doc, &components, value),
+        Some(components) => {
+            if value.is_some() && components.len() > MAX_KEYS {
+                return Err(SetError::TooDeep);
+            }
+            append_paths(doc, &components, value)
+        }
         None => match value {
             Some(value) => Ok(set_complex(doc, path, value)),
             None => Err(SetError::ComplexDelete),
@@ -309,13 +334,8 @@ fn append_paths(
         return Ok(Outcome::NoChange);
     };
     let (n, numeric) = atoui(component);
-    if !matches!(node, Value::Object(_) | Value::Array(_)) {
-        *node = if numeric {
-            Value::Array(Vec::new())
-        } else {
-            Value::Object(Map::new())
-        };
-    }
+    // Everything that can fail is done before `node` changes, so a refused
+    // write leaves the document as it was.
     let built = build(components, value)?;
     match node {
         Value::Object(map) => {
@@ -330,7 +350,18 @@ fn append_paths(
             }
             items.push(built);
         }
-        _ => {}
+        // A scalar is replaced by the container the key names.
+        scalar => {
+            *scalar = if numeric {
+                let mut items = padding(n)?;
+                items.push(built);
+                Value::Array(items)
+            } else {
+                let mut map = Map::new();
+                map.insert(component.part.clone(), built);
+                Value::Object(map)
+            };
+        }
     }
     Ok(Outcome::Done)
 }

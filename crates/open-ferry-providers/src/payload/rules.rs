@@ -22,6 +22,13 @@
 //!   (Go's `json.Valid`) that serde_json won't read, such as one with a
 //!   lone UTF-16 surrogate escape, or one nested more than 128 deep, is
 //!   dropped the same way.
+//! - A param to write whose path has more than 64 keys (counting a key for
+//!   each `.` and one more) is dropped at load with a warning naming the
+//!   section, the rule's index and the number of keys, and the rest of its
+//!   rule is kept. Upstream builds a value as deep as the path, and one
+//!   2,000 levels deep overflows the stack of a thread that builds, writes
+//!   or drops it. A `filter` path isn't limited: it removes only what a
+//!   body has, and a body is read no deeper than 128.
 
 use std::collections::BTreeMap;
 
@@ -32,6 +39,7 @@ use open_ferry_translate::go::{format_float, json_float};
 use serde_json::{Map, Number, Value};
 
 use super::matchers::{ModelRule, Norm, norm_any, normalize_from_protocol};
+use super::sjson;
 
 /// The config's payload rules, compiled (upstream's `cfg.Payload` and
 /// `cfg.DisableImageGeneration`).
@@ -80,6 +88,18 @@ impl Rules {
                         .params
                         .iter()
                         .filter_map(|(path, value)| {
+                            if sjson::too_deep(path) {
+                                if warn {
+                                    tracing::warn!(
+                                        section,
+                                        rule_index = index + 1,
+                                        keys = path.matches('.').count() + 1,
+                                        limit = sjson::MAX_KEYS,
+                                        "payload rule param dropped: its path has too many keys"
+                                    );
+                                }
+                                return None;
+                            }
                             let encoded = if raw {
                                 encode_raw(value)
                             } else {
