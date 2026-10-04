@@ -682,6 +682,21 @@ mod tests {
         assert_eq!(&*decode_request_body(&body, "", 1 << 20), &body[..]);
     }
 
+    // Ports TestDecodeCapturedRequestBodyForLogWithLimitTruncatesZstdExpansion.
+    #[test]
+    fn decode_captured_request_body_for_log_with_limit_truncates_zstd_expansion() {
+        let compressed = zstd(&[b'x'; 1024]);
+        let decoded = decode_request_body(&compressed, "zstd", 64);
+        assert!(decoded.len() <= 128, "{}", decoded.len());
+        assert!(
+            decoded
+                .windows(DECODED_REQUEST_TRUNCATED.len())
+                .any(|window| window == DECODED_REQUEST_TRUNCATED.as_bytes()),
+            "{}",
+            String::from_utf8_lossy(&decoded)
+        );
+    }
+
     // Not upstream's: whether an answer is a stream.
     #[test]
     fn detects_streams() {

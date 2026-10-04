@@ -118,6 +118,16 @@ where
     }
 }
 
+/// The trace ID of the request of `context`, from the credential its
+/// latest call was given (see [`format_cpa_trace_id`]), or `None` when it
+/// was given none, or one without an index.
+pub fn trace_id(context: &RequestContext) -> Option<String> {
+    let selected = context.selected()?;
+    let selected_at = selected.selected_at.with_timezone(&Local);
+    let trace = format_cpa_trace_id(Some(&selected_at), selected.index(), context.id.as_str());
+    (!trace.is_empty()).then_some(trace)
+}
+
 /// How much of a request is logged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -394,6 +404,20 @@ pub struct Answer {
     pub head_at: DateTime<Local>,
     /// Whether the client left before the answer ended.
     pub canceled: bool,
+}
+
+impl Answer {
+    /// An answer with `status` and `headers` whose head is sent now,
+    /// nothing of its body kept yet.
+    pub fn new(status: u16, headers: HeaderMap) -> Self {
+        Self {
+            status,
+            headers,
+            body: ResponseCapture::default(),
+            head_at: Local::now(),
+            canceled: false,
+        }
+    }
 }
 
 /// Finishes the log of the request of `context` with what was kept of its

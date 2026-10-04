@@ -5,8 +5,10 @@
 //! are in `tests/`; the middleware's tests are in open-ferry-server's
 //! `request_log/tests`.
 //!
-//! The tests here are not upstream's: upstream tests its logger through the
-//! middleware.
+//! The tests here are not upstream's, as upstream tests its logger through
+//! the middleware, but for `TestFormatCPATraceID` of
+//! internal/logging/cpa_trace_test.go; the rest of that file is ported in
+//! open-ferry-server.
 
 use std::fs;
 use std::path::Path;
@@ -512,4 +514,45 @@ fn records_api_errors_and_finishes_later() {
     );
     assert!(log.contains("Error: context canceled\n"), "{log}");
     assert!(log.contains("=== RESPONSE ===\nStatus: 101\n"), "{log}");
+}
+
+// Ports TestFormatCPATraceID.
+#[test]
+fn format_cpa_trace_id_works() {
+    let selected_at = chrono::Utc
+        .with_ymd_and_hms(2026, 7, 17, 21, 58, 49)
+        .unwrap();
+    assert_eq!(
+        format_cpa_trace_id(Some(&selected_at), "auth-index", "request1"),
+        "20260717215849-auth-index-request1"
+    );
+    assert_eq!(
+        format_cpa_trace_id::<chrono::Utc>(None, "auth-index", "request1"),
+        ""
+    );
+    assert_eq!(format_cpa_trace_id(Some(&selected_at), " ", "request1"), "");
+    assert_eq!(
+        format_cpa_trace_id(Some(&selected_at), "auth-index", ""),
+        ""
+    );
+}
+
+// Not upstream's: the trace ID comes from the latest selection, in local
+// time, with the request's whole ID.
+#[test]
+fn traces_the_latest_selection() {
+    let context = context("/v1/responses");
+    assert_eq!(trace_id(&context), None);
+    context.select(crate::observe::SelectedAuth::new(Arc::new(Auth {
+        index: " 7 ".to_owned(),
+        ..Auth::default()
+    })));
+    let trace = trace_id(&context).unwrap();
+    assert!(
+        trace.ends_with(&format!("-7-{}", context.id.as_str())),
+        "{trace}"
+    );
+    assert_eq!(trace.find('-'), Some(14), "{trace}");
+    context.select(crate::observe::SelectedAuth::new(Arc::new(Auth::default())));
+    assert_eq!(trace_id(&context), None);
 }
