@@ -36,7 +36,7 @@ use super::support::*;
 use crate::auth::{AuthError, QuotaState, Status, Timestamp};
 use crate::manager::cooldown_store::{
     FileStore, Limits, MAX_FILE_BYTES, Record, StateStore, StoreError, flush, install_store,
-    restore_now, sanitize, set_debounce,
+    restore_now, sanitize, set_debounce, snapshot,
 };
 use crate::manager::{CallResult, Manager, Settings, lock};
 
@@ -1404,6 +1404,136 @@ fn a_cooldown_that_could_not_be_written_is_written_at_shutdown() {
     assert_eq!(
         records.iter().filter(|record| record.model == "m1").count(),
         1
+    );
+}
+
+/// Not upstream's, which writes what an upstream answered as it came: an
+/// OpenAI-compatible credential with a `Cookie` header, whose upstream
+/// answers 401 and quotes the cookie, leaves no copy of it in the file.
+#[test]
+fn a_cooldown_file_keeps_no_cookie_the_upstream_echoed() {
+    let dir = temp_dir();
+    let h = Harness::new(Settings::default());
+    set_debounce(&h.manager, Duration::from_secs(3600));
+    install_store(
+        &h.manager,
+        Arc::new(FileStore::new(dir.path().to_path_buf())),
+    );
+    restore_now(&h.manager);
+    let mut review = auth("review-auth", "openai-compatibility");
+    review.status = Status::Active;
+    review.file_name = "review-auth.json".into();
+    review.attributes.insert(
+        "header:Cookie".into(),
+        "session=synthetic-cookie-secret; theme=dark".into(),
+    );
+    h.manager.register_unsaved(review).expect("register");
+    h.manager.mark_result(&failure(
+        "review-auth",
+        "openai-compatibility",
+        "m1",
+        401,
+        r#"{"error":{"message":"Bad cookie: session=synthetic-cookie-secret"}}"#,
+    ));
+
+    flush(&h.manager);
+    let text = files(dir.path())
+        .iter()
+        .map(|name| std::fs::read_to_string(dir.path().join(name)).expect("read"))
+        .collect::<String>();
+    assert!(text.contains("Bad cookie: session=[redacted]"), "{text}");
+    assert!(!text.contains("synthetic-cookie-secret"), "{text}");
+    assert!(!text.contains("dark"), "every cookie value goes: {text}");
+    let records = FileStore::new(dir.path().to_path_buf())
+        .load()
+        .expect("load");
+    assert!(records.iter().any(|record| record.model.is_empty()));
+    assert!(records.iter().any(|record| record.model == "m1"));
+}
+
+/// Not upstream's: every free-text field of the credential's record and of
+/// a model's, and every secret however short, is scrubbed, and another
+/// credential's secret is not.
+#[tokio::test(start_paused = true)]
+async fn every_free_text_field_of_a_saved_record_is_scrubbed() {
+    let h = Harness::new(Settings::default());
+    let until = h.now() + TimeDelta::minutes(30);
+    let echoing = |what: &str| AuthError {
+        code: format!("bad {what} k-1"),
+        message: format!("rejected k-1 and {what} tok-9"),
+        http_status: 401,
+        ..AuthError::default()
+    };
+    let quota = QuotaState {
+        exceeded: true,
+        reason: "quota for k-1".into(),
+        next_recover_at: Some(until),
+        backoff_level: 1,
+    };
+    let mut first = auth("auth-1", "xai");
+    first.status = Status::Active;
+    first.attributes.insert("api_key".into(), "k-1".into());
+    first.metadata = json!({"access_token": "tok-9"})
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    first.unavailable = true;
+    first.next_retry_after = Some(until);
+    first.status_message = "credential k-1".into();
+    first.quota = quota.clone();
+    first.last_error = Some(echoing("credential"));
+    first.model_states.insert(
+        "m1".into(),
+        crate::auth::ModelState {
+            status: Status::Error,
+            status_message: "model tok-9".into(),
+            unavailable: true,
+            next_retry_after: Some(until),
+            last_error: Some(echoing("model")),
+            quota,
+            updated_at: Some(h.now()),
+        },
+    );
+    h.manager.register_unsaved(first).expect("register");
+    let mut second = auth("auth-2", "xai");
+    second.status = Status::Active;
+    second.unavailable = true;
+    second.next_retry_after = Some(until);
+    second.status_message = "credential k-1".into();
+    h.manager.register_unsaved(second).expect("register");
+
+    let records = snapshot(&h.manager, h.now());
+    let of = |id: &str, model: &str| {
+        records
+            .iter()
+            .find(|record| record.auth_id == id && record.model == model)
+            .cloned()
+            .unwrap_or_default()
+    };
+    for model in ["", "m1"] {
+        let record = of("auth-1", model);
+        let what = if model.is_empty() {
+            "credential"
+        } else {
+            "model"
+        };
+        let error = record.last_error.clone().unwrap_or_default();
+        assert_eq!(record.quota.reason, "quota for [redacted]", "{model}");
+        assert_eq!(error.code, format!("bad {what} [redacted]"), "{model}");
+        assert_eq!(
+            error.message,
+            format!("rejected [redacted] and {what} [redacted]"),
+            "{model}"
+        );
+        assert_eq!(error.http_status, 401, "{model}");
+        assert!(record.reason.contains("[redacted]"), "{model}: {record:?}");
+        assert!(!record.reason.contains("k-1"), "{model}: {record:?}");
+        assert!(!record.reason.contains("tok-9"), "{model}: {record:?}");
+    }
+    assert_eq!(
+        of("auth-2", "").reason,
+        "credential k-1",
+        "the other credential's text is its own"
     );
 }
 

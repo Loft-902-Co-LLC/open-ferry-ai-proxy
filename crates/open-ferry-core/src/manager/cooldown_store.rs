@@ -66,6 +66,13 @@
 //!   records from it, skipping a file over either with a warning; upstream
 //!   reads a file whole and restores every record.
 //! - Load and save failures are logged; there is no context to cancel them.
+//! - What a file keeps of a credential's free text is scrubbed of that
+//!   credential's secrets: its own keys and tokens, its credential headers
+//!   and each cookie value among them, and its proxy's password, every one
+//!   however short, as `[redacted]`. Upstream writes the `reason`, the
+//!   quota's `reason` and the error's `code` and `message` as they came, and
+//!   an upstream that quotes a key or cookie it was sent ("Bad cookie:
+//!   session=...") would leave it in the file.
 //! - A save that fails is not forgotten: the store stays dirty, the worker
 //!   tries again after the debounce doubled for each failure in a row (up to
 //!   a minute), and [`flush`] at shutdown tries once more. Upstream saves
@@ -90,6 +97,7 @@ use super::text::canonical_model_key;
 use super::{Entry, Manager, Settings, Shared, lock};
 use crate::auth::{Auth, ModelState, QuotaState, Status, Timestamp};
 use crate::config::Config;
+use crate::observe::redact::{Policy, Secrets};
 
 pub(crate) use file::FileStore;
 #[cfg(test)]
@@ -483,8 +491,38 @@ fn after(time: Option<Timestamp>, now: Timestamp) -> bool {
 }
 
 /// `auth`'s records (upstream's `cooldownStateRecordsForAuthLocked`): its
-/// own cooldown and each model's, while they last.
+/// own cooldown and each model's, while they last. Their free text is
+/// scrubbed of the credential's secrets (see [`scrub_record`]).
 fn records_for_auth(settings: &Settings, auth: &Auth, now: Timestamp, out: &mut Vec<Record>) {
+    let first = out.len();
+    collect_records(settings, auth, now, out);
+    if out.len() > first {
+        let mut secrets = Secrets::new();
+        secrets.add_auth(auth);
+        for record in out.iter_mut().skip(first) {
+            scrub_record(&secrets, record);
+        }
+    }
+}
+
+/// Hides `secrets`, every one however short, in the free text of `record`:
+/// its `reason`, its quota's `reason`, and its error's `code` and
+/// `message`. An upstream's error often quotes what it was sent, and the
+/// file is kept on disk.
+fn scrub_record(secrets: &Secrets, record: &mut Record) {
+    let hide = |text: &mut String| {
+        *text = secrets.text(std::mem::take(text), Policy::Disk);
+    };
+    hide(&mut record.reason);
+    hide(&mut record.quota.reason);
+    if let Some(error) = &mut record.last_error {
+        hide(&mut error.code);
+        hide(&mut error.message);
+    }
+}
+
+/// `auth`'s records as the manager holds them, before they are scrubbed.
+fn collect_records(settings: &Settings, auth: &Auth, now: Timestamp, out: &mut Vec<Record>) {
     if auth.id.is_empty()
         || auth.disabled
         || auth.status == Status::Disabled
