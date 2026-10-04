@@ -43,10 +43,33 @@ fn shown(events: &[Vec<u8>]) -> String {
         .join("\n")
 }
 
+/// The bytes and events the state holds, counted from what it holds.
+fn recount(s: &State) -> (usize, usize) {
+    let mut bytes: usize = s.by_key.keys().map(|key| key.len() + ENTRY_COST).sum();
+    let mut events = 0;
+    for call in &s.records {
+        bytes += CALL_COST
+            + held_size(&call.events)
+            + held_size(&call.originals)
+            + held_size(&call.snapshots)
+            + call.source.len()
+            + call.name.len()
+            + call.arguments.len();
+        events += call.events.len() + call.snapshots.len();
+    }
+    (bytes, events)
+}
+
+/// The state's own count of what it holds is what it holds.
+fn assert_counted(s: &State) {
+    assert_eq!((s.held_bytes, s.held_events), recount(s));
+}
+
 /// Transforms an event that must not fail.
 fn send(s: &mut State, event: &str) -> Vec<Vec<u8>> {
     let (out, error) = s.transform(event.as_bytes());
     assert!(error.is_none(), "transform({event}): {error:?}");
+    assert_counted(s);
     out
 }
 
@@ -54,6 +77,7 @@ fn send(s: &mut State, event: &str) -> Vec<Vec<u8>> {
 /// executor passes each one.
 fn remember_and_send(s: &mut State, event: &str) -> Vec<Vec<u8>> {
     s.remember_dispatcher_event(event.as_bytes());
+    assert_counted(s);
     send(s, event)
 }
 
@@ -762,4 +786,246 @@ fn chat_preference_writes_tools_back() {
         declarations,
         json(r#"{"tools":[{"type":"function","name":"lookup"}]}"#)
     );
+}
+
+const EMPTY_DELTA: &str =
+    r#"{"type":"response.function_call_arguments.delta","item_id":"a","delta":""}"#;
+
+/// The state failed once, with the limit's error, and holds nothing.
+fn assert_limit_failure(s: &mut State, out: &[Vec<u8>], error: Option<&Error>, case: &str) {
+    assert_failed(out, error, case);
+    assert_eq!(
+        text(&out[0], "response.error.code"),
+        "invalid_tool_arguments",
+        "{case}"
+    );
+    assert_eq!(
+        error.map(ToString::to_string).as_deref(),
+        Some(LIMIT_MESSAGE),
+        "{case}"
+    );
+    assert!(s.records.is_empty() && s.by_key.is_empty(), "{case}");
+    assert_eq!((s.held_bytes, s.held_events), (0, 0), "{case}");
+    // Nothing else comes out, and the failure is what the stream ends with.
+    let (out, error) = s.transform(EMPTY_DELTA.as_bytes());
+    assert!(out.is_empty() && error.is_none(), "{case}: {}", shown(&out));
+    let (out, error) = s.finish_stream();
+    assert!(out.is_empty() && error.is_none(), "{case}: {}", shown(&out));
+    assert_eq!(s.finish().unwrap_err().to_string(), LIMIT_MESSAGE, "{case}");
+}
+
+/// Not upstream's: a regression test, from the review's case. A declared
+/// dispatcher gets empty argument deltas for one item and never a terminal
+/// event. The state holds each event twice, and with Go's version no number
+/// of them stops it. Here the event limit does, at its default.
+#[test]
+fn held_events_are_bounded() {
+    let mut s = dispatching(NAMESPACED);
+    for held in 0..Limits::DEFAULT.events {
+        let (out, error) = s.transform(EMPTY_DELTA.as_bytes());
+        assert!(
+            out.is_empty() && error.is_none(),
+            "event {held}: {} {error:?}",
+            shown(&out)
+        );
+    }
+    assert_eq!(s.held_events, Limits::DEFAULT.events);
+    assert_counted(&s);
+    assert!(
+        s.held_bytes < Limits::DEFAULT.bytes / 2,
+        "the byte limit stopped it first"
+    );
+    // The next event is one too many.
+    let (out, error) = s.transform(EMPTY_DELTA.as_bytes());
+    assert_limit_failure(&mut s, &out, error.as_ref(), "the event limit");
+}
+
+/// Not upstream's: the byte limit counts events however many there are of
+/// them, and what each one carries.
+#[test]
+fn held_bytes_are_bounded() {
+    let mut s = dispatching(NAMESPACED);
+    s.limits.bytes = 64 << 10;
+    let delta = format!(
+        r#"{{"type":"response.function_call_arguments.delta","item_id":"a","delta":"{}"}}"#,
+        "x".repeat(1000)
+    );
+    let mut held = 0;
+    let (out, error) = loop {
+        let (out, error) = s.transform(delta.as_bytes());
+        if error.is_some() {
+            break (out, error);
+        }
+        assert!(out.is_empty(), "{}", shown(&out));
+        assert_counted(&s);
+        assert!(s.held_bytes <= s.limits.bytes);
+        held += 1;
+        assert!(held < 1000, "nothing stopped {held} events");
+    };
+    // Each event is held twice and its delta once, about 3 KB in all.
+    assert!((15..=25).contains(&held), "{held} events held");
+    assert_limit_failure(&mut s, &out, error.as_ref(), "the byte limit");
+
+    // One event of more than the limit fails at once.
+    let mut s = dispatching(NAMESPACED);
+    s.limits.bytes = 64 << 10;
+    let big = format!(
+        r#"{{"type":"response.function_call_arguments.delta","item_id":"a","delta":"{}"}}"#,
+        "x".repeat(40 << 10)
+    );
+    let (out, error) = s.transform(big.as_bytes());
+    assert_limit_failure(&mut s, &out, error.as_ref(), "one large event");
+}
+
+/// Not upstream's: an event that names no call still records one. Without a
+/// bound on the calls, such events fill `records` however little each holds.
+#[test]
+fn recorded_calls_are_bounded() {
+    let mut s = dispatching(NAMESPACED);
+    s.limits.calls = 50;
+    let nameless = r#"{"type":"response.function_call_arguments.delta","delta":""}"#;
+    for held in 0..50 {
+        let (out, error) = s.transform(nameless.as_bytes());
+        assert!(
+            out.is_empty() && error.is_none(),
+            "call {held}: {} {error:?}",
+            shown(&out)
+        );
+    }
+    assert_eq!(s.records.len(), 50);
+    assert_counted(&s);
+    let (out, error) = s.transform(nameless.as_bytes());
+    assert_limit_failure(&mut s, &out, error.as_ref(), "the call limit");
+
+    // The same through the keys of the events: each names a new call.
+    let mut s = dispatching(NAMESPACED);
+    s.limits.calls = 50;
+    for item in 0..51 {
+        let delta = format!(
+            r#"{{"type":"response.function_call_arguments.delta","item_id":"i{item}","delta":""}}"#
+        );
+        let (out, error) = s.transform(delta.as_bytes());
+        if item < 50 {
+            assert!(out.is_empty() && error.is_none(), "item {item}");
+        } else {
+            assert_limit_failure(&mut s, &out, error.as_ref(), "the call limit by key");
+        }
+    }
+}
+
+/// Not upstream's: the snapshots the executor hands over are held too, and it
+/// can't be told when they pass a limit. The next event, or the end of the
+/// stream, fails.
+#[test]
+fn held_snapshots_are_bounded() {
+    let done = r#"{"type":"response.function_call_arguments.done","item_id":"a","arguments":"{}"}"#;
+    for next in ["event", "finish", "stream end"] {
+        let mut s = dispatching(NAMESPACED);
+        s.limits.events = 10;
+        for held in 0..10 {
+            s.remember_dispatcher_event(done.as_bytes());
+            assert_eq!(s.held_events, held + 1);
+            assert_counted(&s);
+        }
+        assert!(s.finish().is_err(), "{next}: the response hasn't ended");
+        s.remember_dispatcher_event(done.as_bytes());
+        // Nothing more is held, and nothing fails yet.
+        s.remember_dispatcher_arguments(done.as_bytes());
+        assert_eq!(s.held_events, 10, "{next}");
+        assert!(!s.failed, "{next}");
+        match next {
+            "event" => {
+                let (out, error) = s.transform(EMPTY_DELTA.as_bytes());
+                assert_limit_failure(&mut s, &out, error.as_ref(), next);
+            }
+            "finish" => {
+                assert_eq!(s.finish().unwrap_err().to_string(), LIMIT_MESSAGE);
+                let (out, error) = s.transform(b"[DONE]");
+                assert_limit_failure(&mut s, &out, error.as_ref(), next);
+            }
+            _ => {
+                let (events, error) = s.finish_stream();
+                assert_eq!(events.len(), 1, "{}", shown(&events));
+                assert_eq!(
+                    str_at(&parse(events[0].strip_prefix(b"data: ").unwrap()), "type"),
+                    "response.failed"
+                );
+                assert_eq!(error.map(|e| e.to_string()).as_deref(), Some(LIMIT_MESSAGE));
+            }
+        }
+    }
+}
+
+/// A long dispatcher call, far below the limits, completes as it does
+/// without them, and what it held is counted until the response ends.
+#[test]
+fn a_long_dispatcher_call_completes_within_the_limits() {
+    let patch = "*** Begin Patch\n*** End Patch\n".repeat(4000);
+    let wrapper = json!({"name": "apply_patch", "arguments": {"input": patch}}).to_string();
+    let mut s = dispatching(NAMESPACED);
+    send(
+        &mut s,
+        r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"a","call_id":"c","name":"n","arguments":""}}"#,
+    );
+    let chunks: Vec<&str> = wrapper
+        .as_bytes()
+        .chunks(16)
+        .map(|chunk| std::str::from_utf8(chunk).unwrap())
+        .collect();
+    assert!(chunks.len() > 7000, "{} chunks", chunks.len());
+    for chunk in &chunks {
+        let delta = json!({
+            "type": DELTA, "output_index": 0, "item_id": "a", "delta": chunk,
+        });
+        assert!(send(&mut s, &delta.to_string()).is_empty());
+    }
+    assert_eq!(s.held_events, chunks.len() + 1);
+    assert!(s.held_bytes < s.limits.bytes / 10, "{}", s.held_bytes);
+    let out = send(
+        &mut s,
+        r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"a","call_id":"c","name":"n","namespace":"n"}}"#,
+    );
+    assert!(
+        out.last()
+            .is_some_and(|last| text(last, "item.input") == patch),
+        "the long call was lost: {} events",
+        out.len()
+    );
+    // What the call keeps for the response's end is counted.
+    assert_eq!(s.held_events, chunks.len() + 2);
+    send(
+        &mut s,
+        r#"{"type":"response.completed","response":{"output":[]}}"#,
+    );
+    assert_eq!((s.held_bytes, s.held_events), (0, 0));
+}
+
+/// Events an ordinary function's call held back are released with it, and
+/// not counted again.
+#[test]
+fn released_events_are_not_counted() {
+    let mut s = dispatching(NAMESPACED);
+    for item in ["a", "b", "c"] {
+        let out = send(
+            &mut s,
+            &format!(
+                r#"{{"type":"response.function_call_arguments.delta","item_id":"{item}","delta":"{{}}"}}"#
+            ),
+        );
+        assert!(out.is_empty());
+    }
+    assert_eq!(s.held_events, 3);
+    // Their late names say they're ordinary.
+    for item in ["a", "b", "c"] {
+        let out = send(
+            &mut s,
+            &format!(
+                r#"{{"type":"response.output_item.done","item":{{"type":"function_call","id":"{item}","name":"lookup","arguments":"{{}}"}}}}"#
+            ),
+        );
+        assert_eq!(out.len(), 2, "{}", shown(&out));
+    }
+    assert_eq!(s.held_events, 0);
+    // What stays is the calls and their keys, and no events.
+    assert!(s.records.iter().all(|call| call.events.is_empty()));
 }

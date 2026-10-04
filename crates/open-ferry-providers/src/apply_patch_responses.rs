@@ -35,6 +35,14 @@
 //!   Dispatcher arguments are read as gjson reads them, malformed or not,
 //!   except that text that doesn't start with an object has no fields, where
 //!   gjson may still find some in it.
+//! - What the state holds for dispatcher calls is bounded: the bytes of their
+//!   events, snapshots, streamed arguments and keys, the events and snapshots
+//!   themselves, and the calls. Upstream keeps all of it until the response
+//!   ends, so a stream of events that never completes a call, even empty ones,
+//!   grows without end whatever the limit on each line. Past a limit the
+//!   response fails as any other conflict does, with one `response.failed`
+//!   event, at the next event or at the end of the stream. The limits are
+//!   200 MiB, 262,144 events and 16,384 calls.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -48,12 +56,62 @@ use open_ferry_translate::apply_patch::{is_custom_tool, unwrap_input};
 use open_ferry_translate::go;
 use serde_json::{Value, json};
 
+use crate::codex::stream::MAX_LINE;
 use crate::json::{get, int_of, str_at, str_of};
 
 const ADDED: &str = "response.output_item.added";
 const ITEM_DONE: &str = "response.output_item.done";
 const DELTA: &str = "response.function_call_arguments.delta";
 const ARGUMENTS_DONE: &str = "response.function_call_arguments.done";
+
+/// What the state may hold for the dispatcher calls of one response. Not
+/// upstream's: see the module's deviations.
+///
+/// The bytes count each buffer's contents and a fixed `ENTRY_COST` for the
+/// buffer itself, so that events with nothing in them still add up. A single
+/// line can be [`MAX_LINE`] long, and the state keeps up to three copies of
+/// an event (`events`, `originals` and `snapshots`), so the byte limit lets
+/// the largest line through in all of them, with room for the rest of the
+/// call. The event limit is twice the events of a call that streams 128K
+/// tokens, one delta event each. The call limit is far above the calls one
+/// response makes.
+#[derive(Clone, Copy, Debug)]
+struct Limits {
+    /// The bytes held.
+    bytes: usize,
+    /// The events and snapshots held. The provider's text of each event is
+    /// kept with it and not counted again.
+    events: usize,
+    /// The calls recorded, whether or not they turn out to be dispatchers'.
+    calls: usize,
+}
+
+impl Limits {
+    const DEFAULT: Self = Self {
+        bytes: 4 * MAX_LINE,
+        events: 1 << 18,
+        calls: 1 << 14,
+    };
+}
+
+/// What one buffer costs beyond its contents: its header, and the allocator's
+/// slack.
+const ENTRY_COST: usize = 64;
+
+/// What one recorded call costs beyond what it holds.
+const CALL_COST: usize = mem::size_of::<DispatcherCall>();
+
+/// The text of the error when a limit is passed.
+const LIMIT_MESSAGE: &str = "apply_patch dispatcher buffering limit exceeded";
+
+fn limit_error() -> Error {
+    Error::new(LIMIT_MESSAGE)
+}
+
+/// What a list of buffers costs.
+fn held_size(buffers: &[Vec<u8>]) -> usize {
+    buffers.iter().map(|buffer| buffer.len() + ENTRY_COST).sum()
+}
 
 /// `NormalizeApplyPatchResponsesRequest`: opts a request to a provider that
 /// only knows function tools into the patch contract.
@@ -122,6 +180,17 @@ pub struct State {
     closed: bool,
     /// Whether `[DONE]` has ended the stream.
     transport_done: bool,
+    /// What may be held.
+    limits: Limits,
+    /// The bytes held in `by_key` and `records`, as [`Limits`] counts them.
+    held_bytes: usize,
+    /// The events and snapshots held in `records`.
+    held_events: usize,
+    /// Whether the executor handed over more than may be held through
+    /// [`remember_dispatcher_event`](Self::remember_dispatcher_event) or
+    /// [`remember_dispatcher_arguments`](Self::remember_dispatcher_arguments),
+    /// which can't report it. The next event, or the end of the stream, fails.
+    overflowed: bool,
 }
 
 /// `patchDispatcherCall`: one call that may be to a dispatcher.
@@ -188,6 +257,10 @@ impl State {
             failed: false,
             closed: false,
             transport_done: false,
+            limits: Limits::DEFAULT,
+            held_bytes: 0,
+            held_events: 0,
+            overflowed: false,
         }
     }
 
@@ -231,15 +304,66 @@ impl State {
             .min()
     }
 
+    /// Counts `bytes` and `events` more held, or fails if that passes a limit.
+    fn hold(&mut self, bytes: usize, events: usize) -> Result<(), Error> {
+        let bytes = self.held_bytes.saturating_add(bytes);
+        let events = self.held_events.saturating_add(events);
+        if bytes > self.limits.bytes || events > self.limits.events {
+            return Err(limit_error());
+        }
+        self.held_bytes = bytes;
+        self.held_events = events;
+        Ok(())
+    }
+
+    /// Counts `bytes` and `events` fewer held.
+    fn release(&mut self, bytes: usize, events: usize) {
+        self.held_bytes = self.held_bytes.saturating_sub(bytes);
+        self.held_events = self.held_events.saturating_sub(events);
+    }
+
+    /// Counts a held buffer of `old` bytes as `new` bytes, failing if that
+    /// passes a limit.
+    fn resize(&mut self, old: usize, new: usize) -> Result<(), Error> {
+        if new > old {
+            self.hold(new - old, 0)
+        } else {
+            self.release(old - new, 0);
+            Ok(())
+        }
+    }
+
+    /// Fails if the state holds more than the executor was allowed to hand it.
+    fn check_overflow(&self) -> Result<(), Error> {
+        if self.overflowed {
+            Err(limit_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Names `call` by the event's keys that no call holds yet.
+    fn index_keys(&mut self, root: &Value, call: usize) -> Result<(), Error> {
+        for key in dispatcher_keys(root) {
+            if !self.by_key.contains_key(&key) {
+                self.hold(key.len() + ENTRY_COST, 0)?;
+                self.by_key.insert(key, call);
+            }
+        }
+        Ok(())
+    }
+
     /// `newDispatcherCandidate`: records a new call, under the event's keys
     /// that no call holds yet.
-    fn new_candidate(&mut self, root: &Value) -> usize {
+    fn new_candidate(&mut self, root: &Value) -> Result<usize, Error> {
         let call = self.records.len();
-        self.records.push(DispatcherCall::default());
-        for key in dispatcher_keys(root) {
-            self.by_key.entry(key).or_insert(call);
+        if call >= self.limits.calls {
+            return Err(limit_error());
         }
-        call
+        self.hold(CALL_COST, 0)?;
+        self.records.push(DispatcherCall::default());
+        self.index_keys(root, call)?;
+        Ok(call)
     }
 
     /// `RememberDispatcherEvent`: keeps the provider's text of the event the
@@ -257,8 +381,15 @@ impl State {
     /// `function_call_arguments.done` event on every call its keys name,
     /// recording a new call if none. A wrapper in the arguments proves
     /// nothing by itself; only a dispatcher's name does.
+    ///
+    /// Past a limit, the next event or the end of the stream fails.
     pub fn remember_dispatcher_arguments(&mut self, event: &[u8]) {
-        if self.failed || self.closed || self.transport_done || self.dispatchers.is_empty() {
+        if self.failed
+            || self.closed
+            || self.transport_done
+            || self.overflowed
+            || self.dispatchers.is_empty()
+        {
             return;
         }
         let root = parse(event);
@@ -266,17 +397,27 @@ impl State {
             return;
         }
         self.upstream = Some(event.to_vec());
-        if self.dispatcher(&root).is_none() {
-            self.new_candidate(&root);
+        if self.remember_snapshot(&root, event).is_err() {
+            self.overflowed = true;
+        }
+    }
+
+    /// Keeps `event`, the `function_call_arguments.done` event `root`, on
+    /// every call its keys name.
+    fn remember_snapshot(&mut self, root: &Value, event: &[u8]) -> Result<(), Error> {
+        if self.dispatcher(root).is_none() {
+            self.new_candidate(root)?;
         }
         let mut seen = HashSet::new();
-        for key in dispatcher_keys(&root) {
+        for key in dispatcher_keys(root) {
             if let Some(&call) = self.by_key.get(&key)
                 && seen.insert(call)
             {
+                self.hold(event.len() + ENTRY_COST, 1)?;
                 self.records[call].snapshots.push(event.to_vec());
             }
         }
+        Ok(())
     }
 
     /// `expandDispatcher`: holds a dispatcher call's events until its child
@@ -300,16 +441,14 @@ impl State {
                 || kind == DELTA
                 || kind == ARGUMENTS_DONE
             {
-                call = Some(self.new_candidate(&root));
+                call = Some(self.new_candidate(&root)?);
             }
         }
         let Some(call) = call else {
             return Ok(vec![event]);
         };
         self.bridge.check_identity(&event)?;
-        for key in dispatcher_keys(&root) {
-            self.by_key.entry(key).or_insert(call);
-        }
+        self.index_keys(&root, call)?;
         let record = &mut self.records[call];
         if record.index < 0
             && let Some(index) = get(&root, "output_index")
@@ -319,6 +458,8 @@ impl State {
         if record.ordinary && declared.is_none() {
             return Ok(vec![event]);
         }
+        self.hold(event.len() + original.len() + 2 * ENTRY_COST, 1)?;
+        let record = &mut self.records[call];
         record.events.push(event.clone());
         record.originals.push(original.to_vec());
         if let Some(namespace) = &declared {
@@ -339,15 +480,19 @@ impl State {
                 }
                 return Ok(vec![event]);
             }
-            record.source.push_str(&delta);
+            self.hold(delta.len(), 0)?;
+            self.records[call].source.push_str(&delta);
         }
+        let record = &mut self.records[call];
         if record.namespace.is_empty() {
             if !dispatcher_event_name(&raw).is_empty() {
                 // A late ordinary name releases untouched arguments, even if
                 // they look like a wrapper.
                 record.ordinary = true;
-                record.originals.clear();
-                return Ok(mem::take(&mut record.events));
+                let events = mem::take(&mut record.events);
+                let originals = mem::take(&mut record.originals);
+                self.release(held_size(&events) + held_size(&originals), events.len());
+                return Ok(events);
             }
             return Ok(Vec::new());
         }
@@ -485,6 +630,8 @@ impl State {
         // Completed aliases and source evidence stay until the response
         // closes. A repeated snapshot checks only the new event, and replays
         // nothing already sent.
+        let replaced = self.records[call].events.last().map_or(0, Vec::len);
+        self.resize(replaced, event.len())?;
         let record = &mut self.records[call];
         if let Some(last) = record.events.last_mut() {
             *last = event;
@@ -590,6 +737,9 @@ impl State {
                 pending.clone()
             });
         }
+        let record = &self.records[call];
+        let replaced = record.name.len() + record.arguments.len();
+        self.resize(replaced, name.len() + final_arguments.len())?;
         let record = &mut self.records[call];
         record.completed = true;
         record.name = name;
@@ -610,6 +760,8 @@ impl State {
         self.by_key.clear();
         self.records.clear();
         self.upstream = None;
+        self.held_bytes = 0;
+        self.held_events = 0;
     }
 
     /// `fail`: ends the response with the bridge's one `response.failed`
@@ -630,6 +782,9 @@ impl State {
     pub fn transform(&mut self, event: &[u8]) -> (Vec<Vec<u8>>, Option<Error>) {
         if self.failed || self.transport_done {
             return (Vec::new(), None);
+        }
+        if let Err(error) = self.check_overflow() {
+            return self.fail(error);
         }
         if self.active && go::trim_space(event) == b"[DONE]" {
             if let Err(error) = self.finish() {
@@ -705,11 +860,15 @@ impl State {
             }
             // Unproven calls stay ordinary; the bridge resolves their events
             // or passes them on.
+            let (mut bytes, mut count) = (0, 0);
             for call in &mut self.records {
                 if call.namespace.is_empty() && !call.ordinary {
+                    bytes += held_size(&call.events);
+                    count += call.events.len();
                     preceding.append(&mut call.events);
                 }
             }
+            self.release(bytes, count);
             if changed {
                 event = to_bytes(&updated);
             }
@@ -741,6 +900,7 @@ impl State {
     /// non-streaming response.
     pub fn finish(&self) -> Result<(), Error> {
         self.bridge.finish()?;
+        self.check_overflow()?;
         if self.closed || !self.active {
             return Ok(());
         }
