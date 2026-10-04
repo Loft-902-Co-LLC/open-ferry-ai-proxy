@@ -39,6 +39,7 @@ mod app;
 mod auth;
 mod body;
 pub mod config;
+mod entry_protocol;
 mod errors;
 mod exec;
 mod handlers;

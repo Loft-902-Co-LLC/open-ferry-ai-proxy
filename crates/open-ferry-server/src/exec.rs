@@ -26,6 +26,7 @@ use open_ferry_core::exec::{
 use open_ferry_core::observe::{Observation, RequestContext};
 
 use crate::auth::{Principal, strip_credentials};
+use crate::entry_protocol;
 use crate::errors::ErrorMessage;
 use crate::headers::filter_upstream_headers;
 use crate::query;
@@ -156,7 +157,26 @@ impl Call {
         alt: &str,
         stream: bool,
     ) -> Result<Self, ErrorMessage> {
-        let route = routing::route(state.catalog(), model)?;
+        let mut route = routing::route(state.catalog(), model)?;
+        route.providers = entry_protocol::adjust_execution_providers(&format, route.providers);
+        Ok(Self::routed(
+            state, client, format, model, route, payload, alt, stream,
+        ))
+    }
+
+    /// A call for `model` that goes where `route` says, as [`Call::new`]
+    /// makes once it has routed the model.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn routed(
+        state: &AppState,
+        client: &ClientRequest,
+        format: Format,
+        model: &str,
+        route: routing::Route,
+        payload: Bytes,
+        alt: &str,
+        stream: bool,
+    ) -> Self {
         let mut options = Options::new(format);
         options.stream = stream;
         options.alt = alt.to_owned();
@@ -177,12 +197,12 @@ impl Call {
             .context
             .as_ref()
             .map(|context| observe(state, context, &request, &options));
-        Ok(Self {
+        Self {
             state: state.clone(),
             providers: route.providers,
             request,
             options,
-        })
+        }
     }
 
     /// Makes a non-streaming call.
