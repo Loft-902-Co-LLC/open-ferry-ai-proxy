@@ -28,6 +28,12 @@
 //!   which the WHATWG parser would drop or encode, fails before anything is
 //!   sent, as Go's does, with Go's message (`net/url: invalid control
 //!   character in URL`) but without the URL, which may hold a secret.
+//! - An answer whose status isn't a success has every secret the request
+//!   sent redacted from its body, as a client's error is (see
+//!   [`observe_send::secrets`] and [`crate::redact`]): the token, the
+//!   credential headers after the custom ones, each cookie, the URL's
+//!   credentials and the proxy's password. Upstream hands the body to the
+//!   handler as it came.
 
 use bytes::Bytes;
 use http::header::{self, HeaderValue};
@@ -40,10 +46,12 @@ use crate::codex::client::{USER_AGENT, error_chain, read_body_prefix};
 use crate::codex::request::{credentials, refuse_control_characters};
 use crate::custom_headers;
 use crate::observe_send::{self, Attempt, BodyTap};
+use crate::redact::Policy;
 
 impl CodexExecutor {
     /// Sends `call` with the credential's token and custom headers, and
-    /// reads the answer, whatever its status (`HttpRequest`).
+    /// reads the answer, whatever its status (`HttpRequest`); a failure's
+    /// body without the secrets the request sent.
     pub(super) async fn http_request_inner(
         &self,
         auth: &Auth,
@@ -89,10 +97,11 @@ impl CodexExecutor {
             format: &Format::CODEX,
             auth,
         };
+        let secrets = observe_send::secrets(&url, &headers, &self.proxy_for(auth), auth);
         let tap = attempt.observation.map(|observation| {
             observe_send::announce(
                 observation,
-                &attempt.request(&method, &url, &headers, &body, &[token]),
+                &attempt.request(&method, &url, &headers, &body, &secrets),
             )
         });
         let mut response = self
@@ -104,16 +113,24 @@ impl CodexExecutor {
             .send()
             .await
             .map_err(|error| {
-                ExecError::new(ErrorKind::Upstream, error_chain(&error.without_url()))
+                ExecError::new(
+                    ErrorKind::Upstream,
+                    secrets.text(error_chain(&error.without_url()), Policy::Client),
+                )
             })?;
         observe_send::response(tap, &mut response);
         let status = response.status().as_u16();
         let headers = response.headers().clone();
         let tap = BodyTap::of(&response);
-        let (body, read_error) = read_body_prefix(response, response_limit).await;
+        let (mut body, read_error) = read_body_prefix(response, response_limit).await;
         let read_error = read_error.map(|error| error_chain(&error));
         if let Some(error) = &read_error {
             observe_send::attempt_error(tap.as_ref(), error);
+        }
+        if !(200..300).contains(&status)
+            && let std::borrow::Cow::Owned(scrubbed) = secrets.bytes(&body, Policy::Client)
+        {
+            body = scrubbed;
         }
         Ok(HttpReply {
             status,
@@ -358,5 +375,33 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.http_status(), 0);
         assert!(!err.message.contains("secret"), "{}", err.message);
+    }
+
+    // Not upstream's: a failure's body, which the handler hands on, quotes
+    // none of the secrets the request sent (the token, the credential
+    // headers after the custom ones, each cookie, the URL's credentials),
+    // nor the password of a proxy that answers 407.
+    #[tokio::test]
+    async fn a_failures_body_hides_every_secret_sent() {
+        const TOKEN: &str = "alpha-token-0123456789";
+        let api_key = |base_url: &str| {
+            let mut auth = Auth::default();
+            auth.attributes.insert("base_url".into(), base_url.into());
+            auth.attributes.insert("api_key".into(), TOKEN.into());
+            auth
+        };
+        for case in crate::secret_echo::cases(api_key).await {
+            let base_url = case.auth.attribute("base_url").unwrap_or_default();
+            let mut call = call(HttpTarget::Url(format!("{base_url}/alpha/search")), "{}");
+            call.client_headers = case.headers.clone();
+            let reply = CodexExecutor::new("direct")
+                .http_request_inner(&case.auth, call)
+                .await
+                .unwrap();
+            assert!(reply.status == 401 || reply.status == 407, "{reply:?}");
+            let body = String::from_utf8_lossy(&reply.body);
+            assert!(!body.contains(TOKEN), "{body}");
+            case.check_text(&body);
+        }
     }
 }

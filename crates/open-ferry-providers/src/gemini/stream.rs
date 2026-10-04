@@ -17,9 +17,9 @@
 //! final `[DONE]` is translated, then the read error, if any, follows.
 //!
 //! Deviations from upstream:
-//! - Every line has the API key or token the request was sent with redacted
-//!   before it is read, so neither reaches the client in an error the stream
-//!   carries, or anywhere else; see [`crate::redact`].
+//! - Every line has the secrets the request sent (the API key or token
+//!   among them) redacted before it is read, so none reaches the client in
+//!   an error the stream carries, or anywhere else; see [`crate::redact`].
 //! - Dropping the stream stops reading, where upstream watches its context.
 //! - Usage reporting and request logging are left to the call's taps,
 //!   which see each chunk as it is read (see the crate's `observe_send`
@@ -38,7 +38,7 @@ use crate::codex::claude_tokens;
 use crate::codex::stream::{LineError, LineReader};
 use crate::codex::terminal::{APPLY_PATCH_ERROR_MESSAGE, StatusError};
 use crate::codex::usage::ensure_responses_usage_details;
-use crate::redact;
+use crate::redact::{Policy, Secrets};
 
 /// How the lines of a stream reach the translator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,9 +60,8 @@ pub(crate) struct StreamSetup {
     /// The client's request as it came, for the Claude input estimate.
     pub(crate) original: Bytes,
     pub(crate) lines: Lines,
-    /// The API key and bearer token the request was sent with, redacted
-    /// from each line.
-    pub(crate) secrets: [String; 2],
+    /// The secrets the request sent, redacted from each line.
+    pub(crate) secrets: Secrets,
     /// How log lines name the executor.
     pub(crate) name: &'static str,
 }
@@ -129,13 +128,11 @@ impl State {
     }
 
     /// `line` without the secrets the request was sent with.
-    fn redact(&self, mut line: Vec<u8>) -> Vec<u8> {
-        for secret in &self.setup.secrets {
-            if let Cow::Owned(redacted) = redact::bytes(&line, secret) {
-                line = redacted;
-            }
+    fn redact(&self, line: Vec<u8>) -> Vec<u8> {
+        match self.setup.secrets.bytes(&line, Policy::Client) {
+            Cow::Owned(redacted) => redacted,
+            Cow::Borrowed(_) => line,
         }
-        line
     }
 
     /// Translates one line and queues what comes out

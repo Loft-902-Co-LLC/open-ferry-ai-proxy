@@ -3,7 +3,8 @@
 // shouldMaskQueryParam) and internal/logging/diagnostic.go
 // (SafeDiagnosticForLog, SafeErrorDiagnostic, diagnosticRunePrefix,
 // truncateDiagnosticLogExcerpt) (v8.0.10, MIT), and Go's net/url/url.go
-// (QueryUnescape, QueryEscape, shouldEscape) (go1.26, BSD-3-Clause).
+// (QueryUnescape, PathUnescape, QueryEscape, shouldEscape) (go1.26,
+// BSD-3-Clause).
 // https://github.com/router-for-me/CLIProxyAPI
 // https://github.com/golang/go
 
@@ -19,6 +20,9 @@
 //! - [`is_credential_header`] and [`mask_header_value`] also mask `Cookie`,
 //!   `Set-Cookie`, `X-Management-Key` and `X-Local-Password`, which
 //!   upstream's request log writes in clear.
+//! - [`mask_header_value`] and [`mask_sensitive_query`] hide a credential
+//!   of one or two bytes whole, as `...`, where upstream keeps it as it is
+//!   ([`hide_log_bytes`]).
 //! - The patterns are upstream's with Go's ASCII-only `\s` and `\b` written
 //!   out, since Rust's are Unicode-aware.
 //! - [`safe_error_diagnostic`] looks for its signals in the text of the
@@ -113,6 +117,21 @@ pub fn hide_api_key(key: &str) -> String {
     String::from_utf8_lossy(&hide_bytes(key.as_bytes())).into_owned()
 }
 
+/// [`hide_bytes`] for what a log keeps: a key of one or two bytes, which
+/// [`hide_bytes`] keeps as it is, is hidden whole as `...`.
+pub fn hide_log_bytes(key: &[u8]) -> Vec<u8> {
+    match key.len() {
+        0 => Vec::new(),
+        1 | 2 => b"...".to_vec(),
+        _ => hide_bytes(key),
+    }
+}
+
+/// [`hide_log_bytes`] as text.
+pub fn hide_log_key(key: &str) -> String {
+    String::from_utf8_lossy(&hide_log_bytes(key.as_bytes())).into_owned()
+}
+
 /// Upstream's `MaskAuthorizationHeader`: an `Authorization` value with its
 /// scheme kept and its credential hidden, or all of it hidden when it has
 /// no scheme.
@@ -152,24 +171,27 @@ pub fn is_credential_header(name: &str) -> bool {
 }
 
 /// The value of header `name` as a log may keep it: masked as upstream
-/// masks it ([`mask_sensitive_header_value`]), or hidden whole for the
-/// other credential headers ([`is_credential_header`]).
+/// masks it ([`mask_sensitive_header_value`]), and for the other credential
+/// headers ([`is_credential_header`]) as upstream masks an API key; but a
+/// credential of one or two bytes is hidden whole ([`hide_log_bytes`]).
 pub fn mask_header_value(name: &str, value: &str) -> String {
     let lower = to_lower(name.trim());
-    if CREDENTIAL_NAME_PARTS
-        .iter()
-        .any(|part| lower.contains(part))
-    {
-        mask_sensitive_header_value(name, value)
-    } else if OTHER_CREDENTIAL_HEADERS.contains(&lower.as_str()) {
-        hide_api_key(value)
+    if lower.contains("authorization") {
+        match value.trim().split_once(' ') {
+            Some((scheme, credential)) => format!("{scheme} {}", hide_log_key(credential)),
+            None => hide_log_key(value),
+        }
+    } else if is_credential_header(name) {
+        hide_log_key(value)
     } else {
         value.to_owned()
     }
 }
 
 /// Upstream's `MaskSensitiveQuery`: a raw query with the value of every
-/// key-like parameter hidden, or the query as it is when it has none.
+/// key-like parameter hidden, or the query as it is when it has none. A
+/// value of one or two bytes, which upstream keeps, is hidden whole
+/// ([`hide_log_bytes`]).
 pub fn mask_sensitive_query(raw: &str) -> String {
     if raw.is_empty() {
         return String::new();
@@ -192,7 +214,7 @@ pub fn mask_sensitive_query(raw: &str) -> String {
             changed = true;
             format!(
                 "{key}={}",
-                query_escape(&hide_bytes(trim_space(&decoded_value)))
+                query_escape(&hide_log_bytes(trim_space(&decoded_value)))
             )
         })
         .collect();
@@ -205,7 +227,7 @@ pub fn mask_sensitive_query(raw: &str) -> String {
 
 /// Upstream's `shouldMaskQueryParam`: whether a query parameter named
 /// `key` holds a key, a token or a secret.
-fn should_mask_query_param(key: &str) -> bool {
+pub(crate) fn should_mask_query_param(key: &str) -> bool {
     let key = to_lower(key.trim());
     if key.is_empty() {
         return false;
@@ -218,7 +240,19 @@ fn should_mask_query_param(key: &str) -> bool {
 }
 
 /// Go's `url.QueryUnescape`, or `None` where it fails.
-fn query_unescape(text: &str) -> Option<Vec<u8>> {
+pub(crate) fn query_unescape(text: &str) -> Option<Vec<u8>> {
+    unescape(text, true)
+}
+
+/// Go's `url.PathUnescape`, or `None` where it fails: as
+/// [`query_unescape`], but `+` is kept.
+pub(crate) fn percent_unescape(text: &str) -> Option<Vec<u8>> {
+    unescape(text, false)
+}
+
+/// `text` with its `%XX` escapes decoded, and `+` read as a space when
+/// `plus_is_space`, or `None` for a broken escape.
+fn unescape(text: &str, plus_is_space: bool) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(text.len());
     let mut bytes = text.bytes();
     while let Some(byte) = bytes.next() {
@@ -228,7 +262,7 @@ fn query_unescape(text: &str) -> Option<Vec<u8>> {
                 let low = hex(bytes.next()?)?;
                 out.push(high << 4 | low);
             }
-            b'+' => out.push(b' '),
+            b'+' if plus_is_space => out.push(b' '),
             _ => out.push(byte),
         }
     }
@@ -455,6 +489,22 @@ mod tests {
         let broken = hide_api_key("aaaé999999");
         assert!(broken.starts_with('a'));
         assert!(broken.contains(char::REPLACEMENT_CHARACTER));
+    }
+
+    // Not upstream's: a credential of one or two bytes, which upstream's
+    // masks keep, is hidden whole in a header or a query.
+    #[test]
+    fn hides_tiny_credentials_whole() {
+        assert_eq!(mask_header_value("X-Api-Key", "ab"), "...");
+        assert_eq!(mask_header_value("Authorization", "Bearer x"), "Bearer ...");
+        assert_eq!(mask_header_value("Cookie", "a"), "...");
+        assert_eq!(mask_header_value("X-Api-Key", ""), "");
+        assert_eq!(mask_header_value("X-Api-Key", "abc"), "a...c");
+        assert_eq!(mask_sensitive_query("key=xy&alt=sse"), "key=...&alt=sse");
+        assert_eq!(mask_sensitive_query("token=%41"), "token=...");
+        assert_eq!(mask_sensitive_query("token="), "token=");
+        assert_eq!(percent_unescape("a+b%40"), Some(b"a+b@".to_vec()));
+        assert_eq!(query_unescape("a+b%40"), Some(b"a b@".to_vec()));
     }
 
     // Not upstream's: credential headers are masked, others kept.

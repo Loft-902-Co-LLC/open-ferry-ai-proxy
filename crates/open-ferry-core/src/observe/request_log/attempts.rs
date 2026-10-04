@@ -34,8 +34,9 @@
 //!   call's error that follows isn't written again.
 //! - The upstream URL's user info and key-like query parameters are masked,
 //!   the headers' values masked as [`mask::mask_header_value`] masks them,
-//!   and the bodies scrubbed of the attempt's secrets when written; upstream
-//!   writes the URL, the bodies and fewer masked headers as they are.
+//!   and the bodies scrubbed of the attempt's secrets and those of the
+//!   answer's headers when written; upstream writes the URL, the bodies and
+//!   fewer masked headers as they are.
 //! - The bodies of the upstream requests are kept up to [`CAPTURE_LIMIT`]
 //!   bytes in all, the request log on or off, each one cut with upstream's
 //!   deferred-request marker; the answers and the WebSocket timeline up to
@@ -114,7 +115,7 @@ fn auth_info(request: &AttemptRequest<'_>) -> String {
     match request.auth.account_info() {
         Some(("api_key", value)) if !value.trim().is_empty() => parts.push(format!(
             "type=api_key value={}",
-            mask::hide_api_key(value.trim())
+            mask::hide_log_key(value.trim())
         )),
         Some(("api_key", _)) => parts.push("type=api_key".to_owned()),
         Some(("oauth", _)) => parts.push("type=oauth".to_owned()),
@@ -597,6 +598,7 @@ impl Tap for RequestLogTap {
         self.flush(&mut call);
         call.status = Some(status);
         self.with(|capture| {
+            capture.add_header_secrets(headers);
             if capture.mode == Mode::Full {
                 capture.attempts.record_metadata(status, headers);
             }
@@ -706,6 +708,8 @@ mod tests {
     use crate::auth::Auth;
     use crate::exec::Format;
 
+    static NO_SECRETS: redact::Secrets = redact::Secrets::new();
+
     fn request<'a>(
         url: &'a str,
         method: &'a Method,
@@ -724,7 +728,7 @@ mod tests {
             model: "gpt-5",
             format,
             auth,
-            secrets: &[],
+            secrets: &NO_SECRETS,
         }
     }
 

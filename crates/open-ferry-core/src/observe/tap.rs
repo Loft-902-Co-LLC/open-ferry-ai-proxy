@@ -37,6 +37,7 @@ use bytes::Bytes;
 use http::{HeaderMap, Method};
 
 use super::RequestContext;
+use super::redact::Secrets;
 use crate::auth::Auth;
 use crate::exec::{ExecError, Format};
 
@@ -131,9 +132,10 @@ pub struct AttemptRequest<'a> {
     pub format: &'a Format,
     /// The credential.
     pub auth: &'a Auth,
-    /// The secrets the attempt sends, such as the credential's key or
-    /// token, to scrub from anything kept.
-    pub secrets: &'a [&'a str],
+    /// The secrets the attempt sends, gathered from its headers, its URL,
+    /// its proxy and its credential (see [`Secrets`]), to scrub from
+    /// anything kept.
+    pub secrets: &'a Secrets,
 }
 
 impl fmt::Debug for AttemptRequest<'_> {

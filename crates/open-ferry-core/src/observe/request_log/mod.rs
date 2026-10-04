@@ -36,10 +36,14 @@
 //!   `X-Api-Key`, `X-Goog-Api-Key`, `Cookie`, `Set-Cookie`,
 //!   `X-Management-Key`, `Proxy-Authorization` and any other name
 //!   [`mask::is_credential_header`] knows), the answer's included; an
-//!   upstream URL's user info and key-like query parameters are masked;
-//!   and every copy of the attempts' secrets and the client's key is
-//!   scrubbed from the whole file (see [`redact`]). Upstream writes bodies
-//!   and upstream URLs as they are.
+//!   upstream URL's user info and key-like query parameters are masked,
+//!   and a credential of one or two bytes is hidden whole; and every copy
+//!   of every secret known, however short, is scrubbed from the whole file
+//!   and from the path its name is made from (see [`redact`]): those the
+//!   attempts sent (their credential headers, cookies, URLs, proxies and
+//!   credentials), those of the client's credential headers, cookies and
+//!   URL and of the answers' headers, and the client's key. Upstream writes
+//!   bodies, upstream URLs and names as they are.
 //! - The mode is fixed when the request arrives, where upstream reads
 //!   `request-log` again when it finishes; commercial mode is read live,
 //!   where upstream reads it only at start.
@@ -79,6 +83,7 @@ pub use names::{
     sanitize_for_filename,
 };
 
+use super::redact::Secrets;
 use super::{RequestContext, Tap, mask};
 use crate::config::Config;
 use attempts::{Attempts, RequestLogTap};
@@ -272,7 +277,7 @@ impl RequestLogger {
                     arrived_at: context.started_at.with_timezone(&Local),
                     attempts: Attempts::default(),
                     api_errors: Vec::new(),
-                    secrets: Vec::new(),
+                    secrets: Secrets::new(),
                     pending: None,
                 })
                 .mode,
@@ -342,6 +347,9 @@ pub fn reconfigure(logger: &RequestLogger, previous: Option<&Config>, config: &C
 pub struct Downstream {
     /// The path, and the query masked (see [`Downstream::url`]).
     pub url: String,
+    /// The secrets of its URL (see [`Downstream::url_secrets`]), to scrub
+    /// from the log; those of its headers are gathered when it is written.
+    pub secrets: Secrets,
     /// The method.
     pub method: String,
     /// The headers, as they came; they are masked when written.
@@ -360,6 +368,16 @@ impl Downstream {
         } else {
             format!("{path}?{masked}")
         }
+    }
+
+    /// The secrets of the URL of `path` and `query`: the values of its
+    /// key-like query parameters (see [`Secrets::add_url`]).
+    pub fn url_secrets(path: &str, query: Option<&str>) -> Secrets {
+        let mut secrets = Secrets::new();
+        if let Some(query) = query {
+            secrets.add_url(&format!("{path}?{query}"));
+        }
+        secrets
     }
 }
 
@@ -529,24 +547,24 @@ pub(crate) struct Capture {
     arrived_at: DateTime<Local>,
     pub(crate) attempts: Attempts,
     api_errors: Vec<ApiError>,
-    secrets: Vec<String>,
+    secrets: Secrets,
     pending: Option<(Downstream, Answer)>,
 }
 
 impl Capture {
     /// Keeps `secrets` to scrub from the log.
-    pub(crate) fn add_secrets(&mut self, secrets: &[&str]) {
-        for secret in secrets {
-            self.add_secret(Some(secret));
-        }
+    pub(crate) fn add_secrets(&mut self, secrets: &Secrets) {
+        self.secrets.extend(secrets);
+    }
+
+    /// Keeps the secrets of `headers` to scrub from the log.
+    pub(crate) fn add_header_secrets(&mut self, headers: &HeaderMap) {
+        self.secrets.add_headers(headers);
     }
 
     fn add_secret(&mut self, secret: Option<&str>) {
-        if let Some(secret) = secret
-            && !secret.is_empty()
-            && !self.secrets.iter().any(|kept| kept == secret)
-        {
-            self.secrets.push(secret.to_owned());
+        if let Some(secret) = secret {
+            self.secrets.add(secret);
         }
     }
 

@@ -172,10 +172,7 @@ impl Upstream<'_> {
             provider: "codex".to_owned(),
             ..Auth::default()
         };
-        let secrets: Vec<&str> = [self.secret]
-            .into_iter()
-            .filter(|s| !s.is_empty())
-            .collect();
+        let secrets = open_ferry_core::observe::redact::Secrets::from_iter([self.secret]);
         tap.attempt_request(&AttemptRequest {
             kind: self.kind,
             method: if self.kind == AttemptKind::Websocket {

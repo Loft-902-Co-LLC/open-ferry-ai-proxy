@@ -966,3 +966,40 @@ async fn refreshes_to_the_same_credential() {
     let refreshed = executor().refresh(Arc::clone(&auth)).await.unwrap();
     assert_eq!(refreshed.metadata, auth.metadata);
 }
+
+// Not upstream's: an error quotes none of the secrets the request sent (the
+// credential headers after the custom ones, each cookie, the URL's
+// credentials), nor the password of a proxy that answers 407.
+#[tokio::test]
+async fn errors_hide_every_secret_sent() {
+    let payload = r#"{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}"#;
+    for case in crate::secret_echo::cases(|base_url| {
+        (*key_auth("vertex", "test-vertex-key", base_url)).clone()
+    })
+    .await
+    {
+        for stream in [false, true] {
+            let options = Options {
+                headers: case.headers.clone(),
+                ..if stream {
+                    stream_options(&Format::GEMINI)
+                } else {
+                    options(&Format::GEMINI)
+                }
+            };
+            let auth = Arc::clone(&case.auth);
+            let error = if stream {
+                executor()
+                    .execute_stream(auth, request("gemini-2.5-flash", payload), options)
+                    .await
+                    .err()
+            } else {
+                executor()
+                    .execute(auth, request("gemini-2.5-flash", payload), options)
+                    .await
+                    .err()
+            };
+            case.check(&error.expect("the call went through"));
+        }
+    }
+}

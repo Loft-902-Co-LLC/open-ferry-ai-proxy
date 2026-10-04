@@ -244,9 +244,9 @@ pub(crate) struct StreamSetup {
     pub(crate) preserve_native: bool,
     /// Whether the client is a Grok Build one.
     pub(crate) grok: bool,
-    /// The credential's token, redacted from the errors made from Codex's
-    /// events.
-    pub(crate) secret: String,
+    /// The secrets the request sent, redacted from the errors made from
+    /// Codex's events.
+    pub(crate) secrets: crate::redact::Secrets,
     /// Whether a usage limit cools only the model
     /// (`codex.model-level-cooling`).
     pub(crate) model_level_cooling: bool,
@@ -280,7 +280,7 @@ struct Frame {
 
 /// A line that ends the stream with an error.
 struct Failure {
-    /// The error, with the credential's token redacted.
+    /// The error, with the request's secrets redacted.
     error: ExecError,
     /// A terminal failure event's error body, which says whether it was an
     /// overload; `None` for an empty `response.incomplete`.
@@ -423,7 +423,7 @@ impl State {
                                 "codex executor: bootstrap overload rejection after {frames} buffered lines, failing over"
                             );
                             let error = bootstrap_overload_error(body.as_bytes());
-                            return Err(error.redacted(&self.setup.secret).into());
+                            return Err(error.redacted(&self.setup.secrets).into());
                         }
                         tracing::debug!(
                             "codex executor: bootstrap overload rejection after {frames} lines, time budget exhausted; delivering in-stream"
@@ -504,7 +504,7 @@ impl State {
             let mut event: Value = serde_json::from_slice(&data).unwrap_or(Value::Null);
             if let Some((error, body)) = terminal_failure(&event, self.setup.model_level_cooling) {
                 ext::on_failure(&self.setup.turn, error.status, body.as_bytes());
-                let error: ExecError = error.redacted(&self.setup.secret).into();
+                let error: ExecError = error.redacted(&self.setup.secrets).into();
                 self.reader.report(&error);
                 return Err(Failure {
                     error,

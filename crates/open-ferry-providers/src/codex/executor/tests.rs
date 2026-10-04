@@ -2091,3 +2091,37 @@ async fn refresh_failure_is_reported_without_the_token() {
     // A reused token isn't retried.
     assert_eq!(server.requests().len(), 1);
 }
+
+// Not upstream's: an error quotes none of the secrets the request sent (the
+// credential headers after the custom ones, each cookie, the URL's
+// credentials), nor the password of a proxy that answers 407; for a call,
+// a stream and a compaction.
+#[tokio::test]
+async fn errors_hide_every_secret_sent() {
+    let payload = r#"{"model":"gpt-5.5","input":"hello"}"#;
+    for case in crate::secret_echo::cases(|base_url| (*api_key_auth(base_url)).clone()).await {
+        for options in [
+            options("openai-response"),
+            stream_options("openai-response"),
+            compact_options("openai-response"),
+        ] {
+            let options = Options {
+                headers: case.headers.clone(),
+                ..options
+            };
+            let auth = Arc::clone(&case.auth);
+            let error = if options.stream {
+                executor()
+                    .execute_stream(auth, request("gpt-5.5", payload), options)
+                    .await
+                    .err()
+            } else {
+                executor()
+                    .execute(auth, request("gpt-5.5", payload), options)
+                    .await
+                    .err()
+            };
+            case.check(&error.expect("the call went through"));
+        }
+    }
+}

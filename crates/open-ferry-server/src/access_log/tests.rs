@@ -376,6 +376,20 @@ async fn writes_upstreams_line() {
     assert_eq!(logged[0].request_id.as_deref(), Some(NO_REQUEST_ID));
 }
 
+/// Not upstream's: a key of one or two bytes, which upstream writes as it
+/// is, is hidden whole.
+#[tokio::test]
+async fn hides_short_keys_whole() {
+    let app = logged(Router::new().route("/v1/models", any(|| async { StatusCode::OK })));
+    let (_, logged) = send(&app, request(Method::GET, "/v1/models?key=xy&alt=sse")).await;
+    assert_eq!(logged.len(), 1, "{logged:?}");
+    let message = logged[0].message.as_str();
+    assert!(
+        message.ends_with(r#" | GET     "/v1/models?key=...&alt=sse""#),
+        "{message}"
+    );
+}
+
 /// Not upstream's: the time taken, as gin writes it.
 #[test]
 fn latency_prints_as_go_does() {

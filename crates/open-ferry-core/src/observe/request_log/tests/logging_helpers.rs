@@ -35,7 +35,7 @@ fn send(tap: &Arc<dyn Tap>, url: &str, body: &Bytes) {
         model: "gpt-5",
         format: &Format::from("codex"),
         auth: &Auth::default(),
-        secrets: &[],
+        secrets: &crate::observe::redact::Secrets::new(),
     });
 }
 

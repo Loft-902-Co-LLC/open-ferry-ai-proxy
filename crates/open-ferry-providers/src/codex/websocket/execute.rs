@@ -16,10 +16,11 @@
 //! ([`observe_send::request_sent`]), so the usage statistics' time to first
 //! token starts once the connection is up, not at the dial.
 //!
-//! A failed handshake is the call's error: its status and body (the
-//! credential's secret redacted), with a usage limit's cooling as for
-//! HTTP. Another failure to connect, such as a refused `CONNECT`, is the
-//! call's error too, also with the secret redacted. A 426 for a client not
+//! A failed handshake is the call's error: its status and body (the secrets
+//! the handshake sent redacted; see [`observe_send::secrets`]), with a usage
+//! limit's cooling as for HTTP. Another failure to connect, such as a
+//! refused `CONNECT`, is the call's error too, also with the secrets
+//! redacted. A 426 for a client not
 //! on a WebSocket goes over HTTP instead, as upstream does; the WebSocket
 //! route only takes WebSocket clients, so this only happens when the route
 //! is called directly.
@@ -32,8 +33,8 @@
 //!   as the first handshake does; upstream gives gorilla's `websocket: bad
 //!   handshake`.
 //! - A dropped call closes its connection; see [`super::session`].
-//! - A failure to connect has the credential's secret redacted from its
-//!   text, as a refused handshake's body has; upstream passes it on.
+//! - A failure to connect has the secrets the handshake sent redacted from
+//!   its text, as a refused handshake's body has; upstream passes them on.
 //! - The taps are told the request is going out, just before the send,
 //!   once the connection is up. Upstream starts the time to first token
 //!   there (`StartResponseTTFT`) but logs the request before it dials; the
@@ -56,7 +57,7 @@ use super::request::{Prepared, prepare};
 use super::session::{Hold, Session, Target};
 use crate::codex::executor::{CodexExecutor, finish_payload};
 use crate::codex::ext;
-use crate::codex::request::{Kind, credentials, original_request, response_format};
+use crate::codex::request::{Kind, original_request, response_format};
 use crate::codex::terminal::{
     APPLY_PATCH_ERROR_MESSAGE, OutputItems, StatusError, empty_incomplete_stream_error,
     has_meaningful_output_delta, is_terminal_empty_incomplete, normalize_completion,
@@ -64,7 +65,7 @@ use crate::codex::terminal::{
 };
 use crate::json::str_at;
 use crate::observe_send::{self, Attempt};
-use crate::redact;
+use crate::redact::{Policy, Secrets};
 
 /// A call whose message is sent.
 pub(super) struct Call {
@@ -72,6 +73,9 @@ pub(super) struct Call {
     pub(super) hold: Hold,
     /// The handshake's response headers, when the call connected.
     pub(super) headers: Option<HeaderMap>,
+    /// The secrets the call sends, redacted from its errors (see
+    /// [`observe_send::secrets`]).
+    pub(super) secrets: Secrets,
 }
 
 /// How [`open`] went.
@@ -104,7 +108,8 @@ pub(super) async fn open(
         }
         None => (store.ephemeral(), true, None),
     };
-    let secret = credentials(auth).0;
+    let proxy = executor.proxy_for(auth);
+    let secrets = observe_send::secrets(&prepared.url, &prepared.headers, &proxy, auth);
     // The handshake and the message, told once, before connecting.
     let tap = options.tapped().map(|observation| {
         let model = str_at(&prepared.body, "model");
@@ -124,13 +129,13 @@ pub(super) async fn open(
                 &prepared.url,
                 &prepared.headers,
                 &message,
-                &[secret],
+                &secrets,
             ),
         )
     });
     let model_level_cooling = executor.model_level_cooling();
-    let proxy = executor.proxy_for(auth);
-    let target = Target::new(&auth.id, &prepared.url, &proxy, secret);
+    let token = crate::codex::request::credentials(auth).0;
+    let target = Target::new(&auth.id, &prepared.url, &proxy, token).with_secrets(&secrets);
 
     let connect = || dial::dial(&proxy, &prepared.url, &prepared.headers);
     let (conn, mut headers) = match session.ensure_conn(target.clone(), connect).await {
@@ -138,7 +143,7 @@ pub(super) async fn open(
         Err(DialError::Handshake { status: 426, .. }) if !options.downstream_websocket => {
             return Ok(Opened::Fallback);
         }
-        Err(error) => return Err(dial_error(error, secret, model_level_cooling)),
+        Err(error) => return Err(dial_error(error, &secrets, model_level_cooling)),
     };
 
     let mut hold = Hold::new(Arc::clone(&session), ephemeral, guard, conn);
@@ -161,7 +166,7 @@ pub(super) async fn open(
             Ok(found) => found,
             Err(error) => {
                 hold.release();
-                return Err(dial_error(error, secret, model_level_cooling));
+                return Err(dial_error(error, &secrets, model_level_cooling));
             }
         };
         hold.switch(conn);
@@ -182,7 +187,11 @@ pub(super) async fn open(
         session
             .set_multi_agent_optimized(hold.conn().id(), prepared.optimize && !prepared.conflict);
     }
-    Ok(Opened::Ws(Call { hold, headers }))
+    Ok(Opened::Ws(Call {
+        hold,
+        headers,
+        secrets,
+    }))
 }
 
 /// Whether Codex's events on `conn` name the collaboration namespace back:
@@ -193,19 +202,22 @@ fn restores(prepared: &Prepared, session: &Session, conn: u64) -> bool {
 }
 
 /// The call's error for a failed connection: a handshake's status and body,
-/// or the failure itself, with the credential's secret redacted either way.
-fn dial_error(error: DialError, secret: &str, model_level_cooling: bool) -> ExecError {
+/// or the failure itself, with the `secrets` the handshake sent redacted
+/// either way.
+fn dial_error(error: DialError, secrets: &Secrets, model_level_cooling: bool) -> ExecError {
     match error {
         DialError::Handshake { status: 426, body } => {
-            let body = redact::bytes(&body, secret);
+            let body = secrets.bytes(&body, Policy::Client);
             StatusError::new(426, String::from_utf8_lossy(&body)).into()
         }
-        DialError::Handshake { status, body } => {
-            status_error_with_cooling(status, &redact::bytes(&body, secret), model_level_cooling)
-                .into()
-        }
+        DialError::Handshake { status, body } => status_error_with_cooling(
+            status,
+            &secrets.bytes(&body, Policy::Client),
+            model_level_cooling,
+        )
+        .into(),
         DialError::Failed(mut error) => {
-            error.message = redact::text(std::mem::take(&mut error.message), secret);
+            error.message = secrets.text(std::mem::take(&mut error.message), Policy::Client);
             error
         }
     }
@@ -227,11 +239,12 @@ pub(in crate::codex) async fn execute(
         request,
         options,
     )?;
-    let Opened::Ws(Call { mut hold, .. }) = open(executor, auth, &mut prepared, options).await?
+    let Opened::Ws(Call {
+        mut hold, secrets, ..
+    }) = open(executor, auth, &mut prepared, options).await?
     else {
         return executor.execute_inner(auth, request, options).await;
     };
-    let secret = credentials(auth).0;
     let model_level_cooling = executor.model_level_cooling();
     let mut items = OutputItems::default();
     let mut saw_output_delta = false;
@@ -249,7 +262,7 @@ pub(in crate::codex) async fn execute(
         let data = ext::restore(&prepared.turn, payload.as_bytes());
         let mut event: Value = serde_json::from_slice(&data).unwrap_or(Value::Null);
         if let Some((error, status, raw)) =
-            errors::parse_ws_error(&event, model_level_cooling, secret, SystemTime::now())
+            errors::parse_ws_error(&event, model_level_cooling, &secrets, SystemTime::now())
         {
             hold.invalidate("upstream_error");
             ext::on_failure(&prepared.turn, status, raw.as_bytes());
@@ -261,7 +274,7 @@ pub(in crate::codex) async fn execute(
             hold.invalidate("terminal_failure");
             ext::on_failure(&prepared.turn, error.status, body.as_bytes());
             hold.release();
-            return Err(error.redacted(secret).into());
+            return Err(error.redacted(&secrets).into());
         }
 
         let normalized = normalize_completion(&mut event);

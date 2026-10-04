@@ -32,8 +32,11 @@
 //! - Token counting for a credential that doesn't go to Anthropic's API,
 //!   which upstream estimates locally, fails with a 501.
 //! - A dropped call or stream stops at once; upstream checks its context.
-//! - An error body that quotes the credential's key or token has it
-//!   redacted (see the crate's `redact` module).
+//! - An error body, or the error event of a stream answering a call that
+//!   isn't streamed, that quotes a secret the request sent has it redacted:
+//!   the credential headers after the custom ones, each cookie, the URL's
+//!   credentials, the proxy's password and the credential's key or tokens
+//!   (see the crate's `redact` module).
 //! - Usage reporting and request logging are left to the call's taps,
 //!   which each send tells of its attempt (see the crate's `observe_send`
 //!   module), and payload rules to [`crate::payload`].
@@ -79,7 +82,7 @@ use crate::codex::compat;
 use crate::json::{self, Body};
 use crate::observe_send::{self, Attempt, BodyTap};
 use crate::payload;
-use crate::redact;
+use crate::redact::{Policy, Secrets};
 
 /// The `alt` of a `/responses/compact` call.
 const COMPACT_ALT: &str = "responses/compact";
@@ -211,7 +214,8 @@ impl ClaudeExecutor {
         })
     }
 
-    /// Posts `body`, telling the call's taps.
+    /// Posts `body`, telling the call's taps; with the answer come the
+    /// secrets the request sent (see [`observe_send::secrets`]).
     async fn send(
         &self,
         auth: &Auth,
@@ -219,13 +223,18 @@ impl ClaudeExecutor {
         headers: HeaderMap,
         body: &Value,
         attempt: Attempt<'_>,
-    ) -> Result<reqwest::Response, ExecError> {
+    ) -> Result<(reqwest::Response, Secrets), ExecError> {
         let body = Bytes::from(body.to_string());
+        let secrets = observe_send::secrets(
+            url,
+            &headers,
+            self.clients.effective_proxy(&auth.proxy_url),
+            auth,
+        );
         let tap = attempt.observation.map(|observation| {
-            let secret = credentials(auth).0;
             observe_send::announce(
                 observation,
-                &attempt.request(&Method::POST, url, &headers, &body, &[&secret]),
+                &attempt.request(&Method::POST, url, &headers, &body, &secrets),
             )
         });
         let mut response = self
@@ -236,19 +245,21 @@ impl ClaudeExecutor {
             .body(body)
             .send()
             .await
-            .map_err(|error| plain_error(error_chain(&error.without_url())))?;
+            .map_err(|error| {
+                plain_error(secrets.text(error_chain(&error.without_url()), Policy::Client))
+            })?;
         observe_send::response(tap, &mut response);
-        Ok(response)
+        Ok((response, secrets))
     }
 
     /// Claude's answer if its status is a success and its body is plain;
-    /// else the error, classified as upstream does, with the credential's
-    /// `secret` redacted from it.
+    /// else the error, classified as upstream does, with the `secrets` the
+    /// request sent redacted from it.
     async fn check(
         &self,
         response: reqwest::Response,
         fast: bool,
-        secret: &str,
+        secrets: &Secrets,
     ) -> Result<reqwest::Response, ExecError> {
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {
@@ -262,7 +273,7 @@ impl ClaudeExecutor {
                 }
             };
             tracing::debug!(status, "claude: request error");
-            let body = redact::bytes(&body, secret);
+            let body = secrets.bytes(&body, Policy::Client);
             return Err(if fast {
                 fast_direct_error(status, &headers, &body)
             } else {
@@ -299,7 +310,7 @@ impl ClaudeExecutor {
         let headers = build_headers(&target, &prepared, auth, options, upstream_stream, false);
         let fast = is_fast(&target, &headers, &prepared.upstream);
 
-        let response = self
+        let (response, secrets) = self
             .send(
                 auth,
                 &url,
@@ -316,7 +327,7 @@ impl ClaudeExecutor {
             )
             .await
             .map_err(|error| wrap_fast(fast, 0, error))?;
-        let response = self.check(response, fast, &target.key).await?;
+        let response = self.check(response, fast, &secrets).await?;
         let status = response.status().as_u16();
         let response_headers = response.headers().clone();
         let tap = BodyTap::of(&response);
@@ -324,7 +335,8 @@ impl ClaudeExecutor {
             .await
             .map_err(|error| wrap_fast(fast, status, plain_error(error.to_string())))?;
         if upstream_stream {
-            stream::validate(&data).map_err(|error| {
+            stream::validate(&data).map_err(|mut error| {
+                error.message = secrets.text(std::mem::take(&mut error.message), Policy::Client);
                 observe_send::attempt_error(tap.as_ref(), &error);
                 wrap_fast(fast, status, error)
             })?;
@@ -366,7 +378,7 @@ impl ClaudeExecutor {
         let headers = build_headers(&target, &prepared, auth, options, true, false);
         let fast = is_fast(&target, &headers, &prepared.upstream);
 
-        let response = self
+        let (response, secrets) = self
             .send(
                 auth,
                 &url,
@@ -383,7 +395,7 @@ impl ClaudeExecutor {
             )
             .await
             .map_err(|error| wrap_fast(fast, 0, error))?;
-        let response = self.check(response, fast, &target.key).await?;
+        let response = self.check(response, fast, &secrets).await?;
         let status = response.status().as_u16();
         let response_headers = response.headers().clone();
 
@@ -453,7 +465,7 @@ impl ClaudeExecutor {
             attributes: &auth.attributes,
         });
 
-        let response = self
+        let (response, secrets) = self
             .send(
                 auth,
                 &url,
@@ -469,7 +481,7 @@ impl ClaudeExecutor {
                 ),
             )
             .await?;
-        let response = self.check(response, false, &target.key).await?;
+        let response = self.check(response, false, &secrets).await?;
         let response_headers = response.headers().clone();
         let data = read_body(response, MAX_LINE)
             .await

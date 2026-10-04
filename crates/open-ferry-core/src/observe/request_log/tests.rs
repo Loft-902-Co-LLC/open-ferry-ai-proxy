@@ -27,6 +27,7 @@ use crate::observe::{AttemptKind, AttemptRequest, Outcome};
 
 mod logging_helpers;
 mod request_logger_collision;
+mod secrets;
 
 const SECRET: &str = "sk-upstream-secret-123456";
 const CLIENT_KEY: &str = "client-key-abcdefgh";
@@ -58,6 +59,7 @@ fn downstream(path: &str, body: &'static [u8]) -> Downstream {
     );
     Downstream {
         url: Downstream::url(path, Some("key=AIzaSyA-1234567890&alt=sse")),
+        secrets: Downstream::url_secrets(path, Some("key=AIzaSyA-1234567890&alt=sse")),
         method: "POST".to_owned(),
         headers,
         body: RequestBody::Captured {
@@ -106,7 +108,7 @@ fn attempt(tap: &Arc<dyn Tap>, kind: AttemptKind, status: u16, body: &'static [u
         model: "gpt-5",
         format: &format,
         auth: &auth,
-        secrets: &[SECRET],
+        secrets: &Secrets::from_iter([SECRET]),
     });
     let mut response_headers = HeaderMap::new();
     response_headers.insert("content-type", HeaderValue::from_static("application/json"));
@@ -378,7 +380,7 @@ fn renders_streaming_logs() {
             message: "left out of streams".to_owned(),
             canceled: false,
         }],
-        secrets: vec![SECRET.to_owned()],
+        secrets: Secrets::from_iter([SECRET]),
     };
     let (name, content) = writer::render(&entry, Local::now());
     let log = String::from_utf8(content).unwrap();
@@ -418,7 +420,7 @@ fn notes_what_was_left_out() {
         },
         attempts: attempts::Attempts::default(),
         api_errors: Vec::new(),
-        secrets: Vec::new(),
+        secrets: Secrets::new(),
     };
     let (_, content) = writer::render(&entry, Local::now());
     let tail = content.get(content.len() - 120..).unwrap();
@@ -457,7 +459,7 @@ fn shows_deferred_bodies_with_their_markers() {
         answer: answer(500, "application/json", b"{}"),
         attempts: attempts::Attempts::default(),
         api_errors: Vec::new(),
-        secrets: Vec::new(),
+        secrets: Secrets::new(),
     };
     let (name, content) = writer::render(&entry, Local::now());
     assert!(name.starts_with("error-v1-x-"), "{name}");
@@ -525,7 +527,7 @@ fn records_api_errors_and_finishes_later() {
         model: "gpt-5",
         format: &Format::from("codex"),
         auth: &Auth::default(),
-        secrets: &[],
+        secrets: &Secrets::new(),
     });
     tap.error(&ExecError::canceled());
     drop(tap);
@@ -572,7 +574,7 @@ fn records_each_attempt_error_once() {
             model: "gpt-5",
             format: &Format::from("codex"),
             auth: &Auth::default(),
-            secrets: &[],
+            secrets: &Secrets::new(),
         };
         tap.attempt_request(&request);
         tap.response_head(200, &HeaderMap::new());
@@ -637,7 +639,7 @@ fn records_a_websocket_attempt_error_as_upstream_does() {
         model: "gpt-5",
         format: &Format::from("codex"),
         auth: &Auth::default(),
-        secrets: &[],
+        secrets: &Secrets::new(),
     };
     let incomplete = "upstream returned response.incomplete without output";
     tap.attempt_request(&request);

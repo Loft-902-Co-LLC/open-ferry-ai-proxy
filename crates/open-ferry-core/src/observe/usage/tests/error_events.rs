@@ -174,3 +174,44 @@ fn error_event_body_is_scrubbed_and_defaults() {
     assert_eq!(str_field(&event, "body"), "request failed");
     assert_eq!(int_at(&event, "/status_code"), 500);
 }
+
+/// Not upstream's: the credential's and the model's status messages, which
+/// repeat the error's message, are scrubbed of the credential's tokens as
+/// the body is.
+#[test]
+fn error_event_status_messages_are_scrubbed() {
+    let (usage, manager) = manager_with_events();
+    let (mut subscriber, _subscription) = usage.subscribe_errors();
+    let mut credential = codex_auth("auth-status");
+    credential
+        .metadata
+        .insert("access_token".to_owned(), json!("access-secret-123456789"));
+    let auth = manager.register_unsaved(credential).expect("register");
+    manager.mark_result(&CallResult {
+        auth_id: auth.id.clone(),
+        provider: "codex".to_owned(),
+        model: "gpt-5".to_owned(),
+        success: false,
+        error: Some(AuthError {
+            message: "invalid access-secret-123456789".to_owned(),
+            http_status: 401,
+            ..AuthError::default()
+        }),
+        ..CallResult::default()
+    });
+    let event: Value =
+        serde_json::from_slice(&subscriber.try_recv().expect("an error event")).expect("JSON");
+    let text = event.to_string();
+    assert!(!text.contains("access-secret-123456789"), "{text}");
+    assert_eq!(str_field(&event, "body"), "invalid [redacted]");
+    for pointer in [
+        "/auth_status/status_message",
+        "/auth_status/model/status_message",
+    ] {
+        assert_eq!(
+            event.pointer(pointer).and_then(Value::as_str),
+            Some("invalid [redacted]"),
+            "{pointer} in {text}"
+        );
+    }
+}

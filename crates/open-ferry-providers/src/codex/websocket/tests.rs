@@ -998,7 +998,7 @@ fn connection_limit_error_event_may_be_retried_at_once() {
             r#"{"type":"error","status":429,"error":{"code":"websocket_connection_limit_reached","message":"too many websockets"},"headers":{"retry-after":"1"}}"#,
         ),
         false,
-        "",
+        &crate::redact::Secrets::new(),
         SystemTime::now(),
     )
     .expect("not an error event");
@@ -1015,7 +1015,7 @@ fn usage_limit_error_event_waits_for_the_reset() {
             r#"{"type":"error","status":429,"body":{"error":{"type":"usage_limit_reached","message":"usage limit reached","resets_in_seconds":7}}}"#,
         ),
         false,
-        "",
+        &crate::redact::Secrets::new(),
         SystemTime::now(),
     )
     .expect("not an error event");
@@ -1031,7 +1031,7 @@ fn error_event_keeps_wrapped_body_and_headers() {
             r#"{"type":"error","status":429,"body":{"error":{"code":"websocket_connection_limit_reached","type":"server_error","message":"too many websocket connections"}},"headers":{"x-request-id":"req-1"}}"#,
         ),
         false,
-        "",
+        &crate::redact::Secrets::new(),
         SystemTime::now(),
     )
     .expect("not an error event");
@@ -1057,7 +1057,15 @@ fn error_event_without_status_is_left_alone() {
         r#"{"type":"error","error":{"message":"overloaded"}}"#,
         r#"{"type":"response.failed","status":500}"#,
     ] {
-        assert!(errors::parse_ws_error(&json(event), false, "", SystemTime::now()).is_none());
+        assert!(
+            errors::parse_ws_error(
+                &json(event),
+                false,
+                &crate::redact::Secrets::new(),
+                SystemTime::now()
+            )
+            .is_none()
+        );
     }
 }
 

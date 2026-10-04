@@ -440,3 +440,53 @@ fn record_keeps_keys_in_clear_but_scrubs_failures_and_headers() {
         Some(&serde_json::json!("upstream-1"))
     );
 }
+
+/// Not upstream's: a failure body is scrubbed of the credential's own
+/// tokens, for a call that failed before it sent anything and for one
+/// whose attempt sent only some of them.
+#[test]
+fn failure_bodies_are_scrubbed_of_the_credentials_tokens() {
+    let mut credential = auth("claude-1", "0", "claude");
+    for (key, token) in [
+        ("access_token", "access-secret-123456789"),
+        ("refresh_token", "refresh-secret-123456789"),
+    ] {
+        credential
+            .metadata
+            .insert(key.to_owned(), Value::String(token.to_owned()));
+    }
+    let message = "invalid access-secret-123456789 and refresh-secret-123456789";
+
+    let harness = Harness::new();
+    let call = ClientCall::new("claude-sonnet-4-6");
+    call.context
+        .select(crate::observe::SelectedAuth::new(std::sync::Arc::new(
+            credential.clone(),
+        )));
+    let driver = call.tap(&harness);
+    driver.fail(&ExecError::upstream(401, message));
+    let record = harness.record();
+    assert_eq!(
+        str_field(&record["fail"], "body"),
+        "invalid [redacted] and [redacted]"
+    );
+
+    let harness = Harness::new();
+    let driver = ClientCall::new("claude-sonnet-4-6").tap(&harness);
+    driver.attempt_with(
+        AttemptKind::Execute,
+        "claude",
+        "claude-sonnet-4-6",
+        &Format::CLAUDE,
+        &credential,
+        &["access-secret-123456789"],
+        "{}",
+    );
+    driver.head(401, &[]);
+    driver.fail(&ExecError::upstream(401, message));
+    let record = harness.record();
+    assert_eq!(
+        str_field(&record["fail"], "body"),
+        "invalid [redacted] and [redacted]"
+    );
+}

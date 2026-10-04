@@ -33,8 +33,8 @@ use serde_json::Value;
 
 use super::stream::Lines;
 use super::{
-    Credential, build_headers, post, prepare_count_body, read_answer, reject_compact, sent_secrets,
-    thinking, translate_answer, translate_count, translate_request, translate_stream, turns,
+    Credential, build_headers, post, prepare_count_body, read_answer, reject_compact, thinking,
+    translate_answer, translate_count, translate_request, translate_stream, turns,
 };
 use crate::codex::client::Clients;
 use crate::codex::request::{base_model, set_string_if_different};
@@ -136,9 +136,8 @@ impl GeminiExecutor {
             url.push_str(&options.alt);
         }
         let headers = build_headers(auth, options, &Credential::ApiKey(api_key(auth)), NAME)?;
-        let client = self.clients.get(&auth.proxy_url);
-        let response = post(
-            &client,
+        let (response, _) = post(
+            &self.clients,
             &url,
             headers,
             &body,
@@ -173,10 +172,8 @@ impl GeminiExecutor {
             url.push_str(&options.alt);
         }
         let headers = build_headers(auth, options, &Credential::ApiKey(api_key(auth)), NAME)?;
-        let secrets = sent_secrets(&headers);
-        let client = self.clients.get(&auth.proxy_url);
-        let response = post(
-            &client,
+        let (response, secrets) = post(
+            &self.clients,
             &url,
             headers,
             &body,
@@ -220,9 +217,8 @@ impl GeminiExecutor {
         prepare_count_body(&mut body, base);
         let url = model_url(auth, base, "countTokens");
         let headers = build_headers(auth, options, &Credential::ApiKey(api_key(auth)), NAME)?;
-        let client = self.clients.get(&auth.proxy_url);
-        let response = post(
-            &client,
+        let (response, _) = post(
+            &self.clients,
             &url,
             headers,
             &body,

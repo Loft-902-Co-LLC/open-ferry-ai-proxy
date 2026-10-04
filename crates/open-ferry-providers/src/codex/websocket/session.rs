@@ -39,9 +39,10 @@
 //!   call; upstream leaves the connection open.
 //! - The target includes the token, so a refreshed token connects again;
 //!   upstream keeps the connection.
-//! - The token is redacted (see [`crate::redact`]) from a connection's
-//!   failures, as Codex's close reason may quote it, before a call gets one
-//!   or it is logged; upstream passes it on.
+//! - The secrets the connection's handshake sent, the token among them,
+//!   are redacted (see [`crate::redact`]) from its failures, as Codex's
+//!   close reason may quote them, before a call gets one or it is logged;
+//!   upstream passes them on.
 //! - A closed session stays closed: a handshake under way is abandoned, and
 //!   a connection that comes up after is dropped before `response.create`
 //!   is sent. Upstream gives the closed session the new connection, which
@@ -77,6 +78,7 @@ use tokio_tungstenite::tungstenite::Message;
 use super::dial::{DialError, Dialed, WsStream};
 use super::errors::{self, Failure};
 use crate::observe_send::{self, BodyTap};
+use crate::redact::Secrets;
 
 /// How long a connection may go without a message
 /// (`codexResponsesWebsocketIdleTimeout`).
@@ -165,15 +167,28 @@ impl Store {
 
 /// What a connection was opened for; another target needs another
 /// connection (`websocketSessionTargetMatches`, with the token).
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub(super) struct Target {
     pub(super) auth_id: String,
     pub(super) url: String,
     pub(super) proxy: String,
-    /// The token: a new one connects again, and the connection's failures
-    /// have it redacted.
+    /// The token: a new one connects again.
     token: String,
+    /// What the handshake sends, the token among them, redacted from the
+    /// connection's failures; not part of what the target is.
+    secrets: Secrets,
 }
+
+impl PartialEq for Target {
+    fn eq(&self, other: &Self) -> bool {
+        self.auth_id == other.auth_id
+            && self.url == other.url
+            && self.proxy == other.proxy
+            && self.token == other.token
+    }
+}
+
+impl Eq for Target {}
 
 impl Target {
     pub(super) fn new(auth_id: &str, url: &str, proxy: &str, token: &str) -> Self {
@@ -182,7 +197,14 @@ impl Target {
             url: url.trim().to_owned(),
             proxy: proxy.trim().to_owned(),
             token: token.to_owned(),
+            secrets: Secrets::from_iter([token]),
         }
+    }
+
+    /// The target, its connection's failures also redacting `secrets`.
+    pub(super) fn with_secrets(mut self, secrets: &Secrets) -> Self {
+        self.secrets.extend(secrets);
+        self
     }
 }
 
@@ -252,7 +274,7 @@ impl Conn {
             biased;
             _ = closing.wait_for(|closing| *closing) => Err(Failure::closed()),
             sent = sink.send(Message::text(text)) => {
-                sent.map_err(|error| Failure::from_ws(&error).redacted(&self.target.token))
+                sent.map_err(|error| Failure::from_ws(&error).redacted(&self.target.secrets))
             }
         }
     }
@@ -728,7 +750,7 @@ async fn read_loop(
     // active on the connection from here on fails to send, and one active
     // before is found below.
     conn.close();
-    let failure = failure.redacted(&conn.target.token);
+    let failure = failure.redacted(&conn.target.secrets);
     if peer_closed {
         // Sends the reply to Codex's close.
         let _ = timeout(CLOSE_REPLY_TIMEOUT, stream.next()).await;

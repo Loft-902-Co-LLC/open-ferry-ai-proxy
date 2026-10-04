@@ -29,7 +29,7 @@
 //!   no fields; see [`super::status`].
 //! - A frame's data, joined, may hold at most 50 MiB, as one line may; a
 //!   bigger frame ends the stream with a 502. Upstream holds any amount.
-//! - An error that quotes the credential's API key has it redacted; see
+//! - An error that quotes a secret the request sent has it redacted; see
 //!   [`crate::redact`].
 
 use std::collections::VecDeque;
@@ -63,9 +63,9 @@ pub(crate) struct StreamSetup {
     pub(crate) source_format: Format,
     /// The client's request as it came, for the Claude input estimate.
     pub(crate) original: Bytes,
-    /// The credential's API key, redacted from the errors made from the
+    /// The secrets the request sent, redacted from the errors made from the
     /// provider's events.
-    pub(crate) secret: String,
+    pub(crate) secrets: crate::redact::Secrets,
 }
 
 /// The state of one translated stream.
@@ -256,7 +256,7 @@ impl State {
     /// Queues an error, after which nothing more is sent, and tells the
     /// call's taps of it (`publishStreamError`).
     fn fail(&mut self, error: StatusError) {
-        let error: ExecError = error.redacted(&self.setup.secret).into();
+        let error: ExecError = error.redacted(&self.setup.secrets).into();
         self.reader.report(&error);
         self.stop(error);
     }
@@ -265,7 +265,7 @@ impl State {
     /// the taps are told only as [`ERROR_PAYLOAD`], as upstream records it.
     fn fail_with_payload(&mut self, error: StatusError) {
         self.reader.report(&ERROR_PAYLOAD);
-        self.stop(error.redacted(&self.setup.secret).into());
+        self.stop(error.redacted(&self.setup.secrets).into());
     }
 
     /// Queues `error`, after which nothing more is sent, without telling

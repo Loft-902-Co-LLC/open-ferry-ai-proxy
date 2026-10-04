@@ -74,9 +74,10 @@
 //!   the last.
 //! - `reasoning_effort` is always empty: upstream reads it from the
 //!   translated request, which the tap doesn't see.
-//! - A failure's body is the error's text, scrubbed of the attempt's
-//!   secrets and the client's key. Upstream writes the error's response
-//!   body as it is.
+//! - A failure's body is the error's text, scrubbed of every secret the
+//!   attempts sent, the credential's own keys and tokens (also for a call
+//!   that failed before it sent anything) and the client's key. Upstream
+//!   writes the error's response body as it is.
 //! - The answer's headers are masked as the request log masks them.
 //! - The substitution warning is a `tracing` warning with the request's
 //!   ID as a field.
@@ -126,8 +127,9 @@ use super::response_model::{
 use super::ttft::{Ttft, is_responses_token_event};
 use crate::auth::Auth;
 use crate::exec::{ExecError, Format, Options, Request};
+use crate::observe::redact::{Policy, Secrets};
 use crate::observe::{
-    AttemptKind, AttemptRequest, Outcome, RequestContext, SelectedAuth, Tap, mask, redact,
+    AttemptKind, AttemptRequest, Outcome, RequestContext, SelectedAuth, Tap, mask,
 };
 
 /// The most of an answer read whole that is kept to read its tokens; past
@@ -555,7 +557,7 @@ struct Call {
     credential: Credential,
     requested_at: DateTime<Utc>,
     started: Instant,
-    secrets: Vec<String>,
+    secrets: Secrets,
     ttft: Ttft,
     response_model: ResponseModel,
     buffer: StreamUsageBuffer,
@@ -592,7 +594,7 @@ impl Call {
             credential,
             requested_at: Utc::now(),
             started,
-            secrets: Vec::new(),
+            secrets: Secrets::new(),
             ttft: Ttft::default(),
             response_model: ResponseModel::default(),
             buffer: StreamUsageBuffer::default(),
@@ -625,6 +627,7 @@ impl Call {
             now.checked_sub(elapsed).unwrap_or(now),
         );
         call.requested_at = selected.selected_at;
+        call.secrets.add_auth(&selected.auth);
         call
     }
 
@@ -635,11 +638,8 @@ impl Call {
         self.model = request.model.to_owned();
         self.executor_type = executor_type(request.provider, Some(request.kind));
         self.credential = Credential::of(request.auth, client_key);
-        for secret in request.secrets {
-            if !self.secrets.iter().any(|kept| kept == secret) {
-                self.secrets.push((*secret).to_owned());
-            }
-        }
+        self.secrets.extend(request.secrets);
+        self.secrets.add_auth(request.auth);
         self.lines = Lines::default();
         self.body = Vec::new();
         self.body_overflow = false;
@@ -949,13 +949,11 @@ impl UsageTap {
         self.context.client_key().unwrap_or_default()
     }
 
-    /// `body` without the call's secrets.
-    fn scrub(&self, body: String, secrets: &[String]) -> String {
-        secrets
-            .iter()
-            .map(String::as_str)
-            .chain([self.client_key()])
-            .fold(body, redact::text)
+    /// `body` without the call's secrets and the client's key.
+    fn scrub(&self, body: String, secrets: &Secrets) -> String {
+        let mut secrets = secrets.clone();
+        secrets.add(self.client_key());
+        secrets.text(body, Policy::Client)
     }
 
     fn record(&self, call: &Call, publication: Publication) -> Record {

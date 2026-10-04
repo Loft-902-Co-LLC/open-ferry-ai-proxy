@@ -42,7 +42,7 @@ use super::request::prepare;
 use super::session::{Hold, is_terminal_event};
 use crate::codex::executor::CodexExecutor;
 use crate::codex::ext::{self, Turn};
-use crate::codex::request::{Kind, credentials};
+use crate::codex::request::Kind;
 use crate::codex::stream::Bootstrap;
 use crate::codex::terminal::{
     MAX_BOOTSTRAP_BYTES, MAX_BOOTSTRAP_FRAMES, OutputItems, bootstrap_overload_error,
@@ -68,7 +68,11 @@ pub(in crate::codex) async fn execute_stream(
         &request,
         &options,
     )?;
-    let Call { hold, headers } = match open(executor, auth, &mut prepared, &options).await? {
+    let Call {
+        hold,
+        headers,
+        secrets,
+    } = match open(executor, auth, &mut prepared, &options).await? {
         Opened::Ws(call) => call,
         Opened::Fallback => return executor.execute_stream_inner(auth, request, options).await,
     };
@@ -76,7 +80,7 @@ pub(in crate::codex) async fn execute_stream(
         hold,
         turn: prepared.turn,
         native: prepared.native,
-        secret: credentials(auth).0.to_owned(),
+        secrets,
         model_level_cooling: executor.model_level_cooling(),
         items: OutputItems::default(),
         saw_output_delta: false,
@@ -135,7 +139,8 @@ struct State {
     /// Whether a native client sent the request, so the completed response
     /// is kept as Codex sent it.
     native: bool,
-    secret: String,
+    /// The secrets the call sent, redacted from its errors.
+    secrets: crate::redact::Secrets,
     model_level_cooling: bool,
     items: OutputItems,
     saw_output_delta: bool,
@@ -161,7 +166,7 @@ impl State {
         if let Some((error, status, raw)) = errors::parse_ws_error(
             &event,
             self.model_level_cooling,
-            &self.secret,
+            &self.secrets,
             SystemTime::now(),
         ) {
             self.hold.invalidate("upstream_error");
@@ -172,7 +177,7 @@ impl State {
             self.hold.unlock();
             self.hold.invalidate("terminal_failure");
             ext::on_failure(&self.turn, error.status, body.as_bytes());
-            return Err(Fault::Terminal(error.redacted(&self.secret).into(), body));
+            return Err(Fault::Terminal(error.redacted(&self.secrets).into(), body));
         }
 
         let event_type = str_at(&event, "type");
@@ -306,7 +311,7 @@ impl State {
                                 "codex websockets executor: bootstrap overload rejection after {frames} messages read, failing over"
                             );
                             let error = bootstrap_overload_error(body.as_bytes());
-                            return Err(error.redacted(&self.secret).into());
+                            return Err(error.redacted(&self.secrets).into());
                         }
                         tracing::debug!(
                             "codex websockets executor: bootstrap overload rejection after {frames} messages read / {elapsed:?}, time budget exhausted; delivering in-stream"

@@ -23,6 +23,8 @@ mod observe_send;
 pub mod openai_compat;
 pub mod payload;
 mod redirect;
+#[cfg(test)]
+mod secret_echo;
 mod thinking;
 
 pub use custom_headers::is_identity_header;

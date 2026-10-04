@@ -32,6 +32,8 @@
 //!   ported, nor is `SkipGinRequestLogging`, which upstream never calls.
 //! - The ID is the request context's, which every request has; only the
 //!   AI routes' lines show it, as upstream makes one for those only.
+//! - A key-like query value of one or two bytes is hidden whole, as `...`
+//!   (see [`mask_sensitive_query`]); upstream writes it as it is.
 //!
 //! [`RequestContext`]: open_ferry_core::observe::RequestContext
 

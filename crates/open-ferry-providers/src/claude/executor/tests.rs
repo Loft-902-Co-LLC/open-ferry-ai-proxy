@@ -675,6 +675,32 @@ async fn error_event_in_a_success_is_a_bad_gateway() {
     );
 }
 
+// Not upstream's: such an error event that quotes the key has it
+// redacted.
+#[tokio::test]
+async fn an_error_event_in_a_success_hides_the_key() {
+    let body = format!(
+        "event: error
+data: {{\"type\":\"error\",\"error\":{{\"type\":\"authentication_error\",\"message\":\"bad key {API_KEY}\"}}}}
+
+"
+    );
+    let mock = Mock::start(Reply::sse(&body)).await;
+    let error = mock
+        .executor()
+        .execute(
+            api_key_auth(),
+            request(openai_payload(false)),
+            options(Format::OPENAI),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.message,
+        "claude executor: upstream returned error event: bad key [redacted]"
+    );
+}
+
 #[tokio::test]
 async fn account_wide_rate_limit_is_the_credentials() {
     let reset = chrono::Utc::now().timestamp() + 3600;
@@ -1157,4 +1183,34 @@ async fn openai_responses_stream_gets_usage_details() {
         event["response"]["usage"]["input_tokens_details"]["cached_tokens"],
         0
     );
+}
+
+// Not upstream's: an error quotes none of the secrets the request sent (the
+// credential headers after the custom ones, each cookie, the URL's
+// credentials), nor the password of a proxy that answers 407.
+#[tokio::test]
+async fn errors_hide_every_secret_sent() {
+    for case in crate::secret_echo::cases(|base_url| (*gateway_auth(base_url)).clone()).await {
+        for stream in [false, true] {
+            let options = Options {
+                headers: case.headers.clone(),
+                stream,
+                ..options(Format::CLAUDE)
+            };
+            let executor = ClaudeExecutor::new("direct");
+            let auth = Arc::clone(&case.auth);
+            let error = if stream {
+                executor
+                    .execute_stream(auth, request(claude_payload()), options)
+                    .await
+                    .err()
+            } else {
+                executor
+                    .execute(auth, request(claude_payload()), options)
+                    .await
+                    .err()
+            };
+            case.check(&error.expect("the call went through"));
+        }
+    }
 }

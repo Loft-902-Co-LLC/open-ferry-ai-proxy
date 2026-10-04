@@ -173,6 +173,7 @@ impl Driver {
     ) {
         let body = Bytes::copy_from_slice(body.as_bytes());
         let headers = HeaderMap::new();
+        let secrets = crate::observe::redact::Secrets::from_iter(secrets);
         self.tap.attempt_request(&AttemptRequest {
             kind,
             method: &Method::POST,
@@ -183,7 +184,7 @@ impl Driver {
             model,
             format,
             auth,
-            secrets,
+            secrets: &secrets,
         });
     }
 

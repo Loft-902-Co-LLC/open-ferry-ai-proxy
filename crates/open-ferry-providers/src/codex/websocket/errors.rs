@@ -15,8 +15,10 @@
 //!
 //! Deviations from upstream:
 //! - An error event's status above 65535 becomes 500.
-//! - The credential's secret is redacted from an error event's body, a
-//!   close reason and the text of another connection failure; see
+//! - The secrets the connection sent (its credential headers after the
+//!   custom ones, each cookie, the URL's credentials, the proxy's password
+//!   and the credential's key or tokens) are redacted from an error event's
+//!   body, a close reason and the text of another connection failure; see
 //!   [`crate::redact`].
 //! - A message past the size limit ends the connection with `websocket: read
 //!   limit exceeded`; upstream sets no limit.
@@ -30,6 +32,7 @@ use tokio_tungstenite::tungstenite;
 
 use crate::codex::terminal::{is_usage_limit, parse_retry_after, status_text};
 use crate::json::{get, int_at, str_at};
+use crate::redact::{Policy, Secrets};
 
 /// The body of the error for a message too big for Codex.
 pub(super) const MESSAGE_TOO_BIG_BODY: &str = r#"{"error":{"message":"upstream websocket message too big","type":"invalid_request_error","code":"message_too_big"}}"#;
@@ -123,17 +126,17 @@ impl Failure {
         }
     }
 
-    /// The failure with every copy of `secret` in its text redacted (see
-    /// [`crate::redact`]): Codex's close reason, or a network error, may
-    /// quote the token.
-    pub(super) fn redacted(self, secret: &str) -> Self {
+    /// The failure with every copy of the `secrets` the connection sent in
+    /// its text redacted, as a client's error is (see [`crate::redact`]):
+    /// Codex's close reason, or a network error, may quote the token.
+    pub(super) fn redacted(self, secrets: &Secrets) -> Self {
         match self {
             Self::Close { code, reason } => Self::Close {
                 code,
-                reason: crate::redact::text(reason, secret),
+                reason: secrets.text(reason, Policy::Client),
             },
             Self::Other { message, transient } => Self::Other {
-                message: crate::redact::text(message, secret),
+                message: secrets.text(message, Policy::Client),
                 transient,
             },
         }
@@ -224,7 +227,7 @@ pub(super) fn should_retry(error: &ExecError) -> bool {
 pub(super) fn parse_ws_error(
     event: &Value,
     model_level_cooling: bool,
-    secret: &str,
+    secrets: &Secrets,
     now: SystemTime,
 ) -> Option<(ExecError, u16, String)> {
     if str_at(event, "type").trim() != "error" {
@@ -240,7 +243,7 @@ pub(super) fn parse_ws_error(
     let status = u16::try_from(status).unwrap_or(500);
     let out = error_body(event, status);
     let raw = out.to_string();
-    let mut error = ExecError::upstream(status, crate::redact::text(raw.clone(), secret));
+    let mut error = ExecError::upstream(status, secrets.text(raw.clone(), Policy::Client));
     error.headers = error_headers(event);
     error.credential_scoped = is_usage_limit(&out) && !model_level_cooling;
     error.retry_after = parse_retry_after(status, &raw, &out, now)

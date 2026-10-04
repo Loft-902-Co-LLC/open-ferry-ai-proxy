@@ -16,7 +16,9 @@
 //!
 //! Deviations from upstream:
 //! - Times are in UTC; upstream writes the local time with its offset.
-//! - The body is scrubbed of the credential's key and tokens.
+//! - The body and the credential's and model's status messages are
+//!   scrubbed of the credential's keys and tokens (see
+//!   [`Secrets::add_auth`]).
 //! - Upstream skips the events in its Home mode, which open-ferry doesn't
 //!   have.
 
@@ -29,7 +31,7 @@ use super::queue::Queue;
 use super::record_json::go_time;
 use crate::auth::{Auth, AuthError, QuotaState, Timestamp};
 use crate::manager::{CallResult, ErrorEvents};
-use crate::observe::redact;
+use crate::observe::redact::{Policy, Secrets};
 
 /// Publishes the manager's failed calls to the usage queue.
 pub(super) struct UsageErrorEvents {
@@ -120,14 +122,15 @@ pub(crate) fn error_event_payload(result: &CallResult, auth: &Auth) -> String {
     event.str_omitempty("auth_id", result.auth_id.trim());
     event.str("auth_index", auth.index.trim());
     event.raw("status_code", &status_code(error).to_string());
-    event.str("body", &scrub(body(error), auth));
+    let secrets = credential_secrets(auth);
+    event.str("body", &secrets.text(body(error), Policy::Client));
     if let Some(error) = error {
         event.str_omitempty("code", error.code.trim());
         if error.retryable {
             event.bool("retryable", true);
         }
     }
-    event.raw("auth_status", &auth_status(&result.model, auth));
+    event.raw("auth_status", &auth_status(&result.model, auth, &secrets));
     event.finish()
 }
 
@@ -160,44 +163,22 @@ fn body(error: Option<&AuthError>) -> String {
     }
 }
 
-/// `body` without the credential's key and tokens.
-fn scrub(body: String, auth: &Auth) -> String {
-    let token = |object: &serde_json::Map<String, serde_json::Value>, key: &str| {
-        object
-            .get(key)
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .unwrap_or_default()
-            .to_owned()
-    };
-    let mut secrets = vec![
-        auth.attribute("api_key")
-            .unwrap_or_default()
-            .trim()
-            .to_owned(),
-    ];
-    for key in [
-        "api_key",
-        "access_token",
-        "accessToken",
-        "refresh_token",
-        "id_token",
-    ] {
-        secrets.push(token(&auth.metadata, key));
-        for nested in ["token", "Token"] {
-            if let Some(serde_json::Value::Object(object)) = auth.metadata.get(nested) {
-                secrets.push(token(object, key));
-            }
-        }
-    }
-    secrets.iter().map(String::as_str).fold(body, redact::text)
+/// The secrets to scrub from `auth`'s error events: its keys and tokens.
+fn credential_secrets(auth: &Auth) -> Secrets {
+    let mut secrets = Secrets::new();
+    secrets.add_auth(auth);
+    secrets
 }
 
-/// The credential's state (upstream's `buildErrorEventAuthStatus`).
-fn auth_status(model: &str, auth: &Auth) -> String {
+/// The credential's state (upstream's `buildErrorEventAuthStatus`), its
+/// status messages scrubbed of `secrets`.
+fn auth_status(model: &str, auth: &Auth, secrets: &Secrets) -> String {
     let mut status = Object::new();
     status.str("status", auth.status.as_str());
-    status.str_omitempty("status_message", auth.status_message.trim());
+    status.str_omitempty(
+        "status_message",
+        &secrets.str(auth.status_message.trim(), Policy::Client),
+    );
     status.bool("disabled", auth.disabled);
     status.bool("unavailable", auth.unavailable);
     status.time_omitempty("next_retry_after", auth.next_retry_after);
@@ -211,7 +192,10 @@ fn auth_status(model: &str, auth: &Auth) -> String {
         let mut object = Object::new();
         object.str("name", model);
         object.str("status", state.status.as_str());
-        object.str_omitempty("status_message", state.status_message.trim());
+        object.str_omitempty(
+            "status_message",
+            &secrets.str(state.status_message.trim(), Policy::Client),
+        );
         object.bool("unavailable", state.unavailable);
         object.time_omitempty("next_retry_after", state.next_retry_after);
         if let Some(quota) = quota_status(&state.quota) {

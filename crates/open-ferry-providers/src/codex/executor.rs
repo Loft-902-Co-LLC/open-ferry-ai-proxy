@@ -35,8 +35,10 @@
 //!   same. Error bodies are read up to 4 MiB and compact bodies up to
 //!   50 MiB.
 //! - A dropped call or stream stops at once; upstream checks its context.
-//! - An error body or terminal failure event that quotes the credential's
-//!   token has it redacted (see the crate's `redact` module).
+//! - An error body or terminal failure event that quotes a secret the
+//!   request sent has it redacted: the credential headers after the custom
+//!   ones, each cookie, the URL's credentials, the proxy's password and the
+//!   credential's key or tokens (see the crate's `redact` module).
 //! - Usage reporting and request logging are left to the call's taps (see
 //!   the crate's `observe_send` module), and payload rules to
 //!   [`crate::payload`]. The Home-service refresh isn't ported.
@@ -81,8 +83,8 @@ use super::ext;
 use super::jwt::{DEFAULT_PLAN_TYPE, parse_jwt_token};
 use super::oauth::{CodexAuth, Endpoints};
 use super::request::{
-    Context, DEFAULT_BASE_URL, Kind, base_model, build_headers, credentials, endpoint,
-    original_request, prepare_body, refuse_control_characters, response_format,
+    Context, DEFAULT_BASE_URL, Kind, base_model, build_headers, endpoint, original_request,
+    prepare_body, refuse_control_characters, response_format,
 };
 use super::stream::{self, Bootstrap, Clock, LineReader, MAX_LINE, StreamSetup, is_grok_client};
 use super::terminal::{
@@ -96,7 +98,7 @@ use super::usage::ensure_responses_usage_details;
 use super::websocket;
 use crate::json::str_at;
 use crate::observe_send::{self, Attempt, BodyTap};
-use crate::redact;
+use crate::redact::{Policy, Secrets};
 
 /// The `alt` of a `/responses/compact` call.
 const COMPACT_ALT: &str = "responses/compact";
@@ -222,7 +224,8 @@ impl CodexExecutor {
         }
     }
 
-    /// Posts `body` and returns Codex's answer if its status is a success.
+    /// Posts `body` and returns Codex's answer, whatever its status, with the
+    /// secrets the request sent (see [`observe_send::secrets`]).
     async fn send(
         &self,
         auth: &Auth,
@@ -230,14 +233,14 @@ impl CodexExecutor {
         headers: HeaderMap,
         body: &Value,
         attempt: Attempt<'_>,
-    ) -> Result<reqwest::Response, ExecError> {
+    ) -> Result<(reqwest::Response, Secrets), ExecError> {
         refuse_control_characters(url)?;
         let body = Bytes::from(body.to_string());
+        let secrets = observe_send::secrets(url, &headers, &self.proxy_for(auth), auth);
         let tap = attempt.observation.map(|observation| {
-            let secret = credentials(auth).0;
             observe_send::announce(
                 observation,
-                &attempt.request(&Method::POST, url, &headers, &body, &[secret]),
+                &attempt.request(&Method::POST, url, &headers, &body, &secrets),
             )
         });
         let mut response = self
@@ -249,10 +252,13 @@ impl CodexExecutor {
             .send()
             .await
             .map_err(|error| {
-                ExecError::new(ErrorKind::Upstream, error_chain(&error.without_url()))
+                ExecError::new(
+                    ErrorKind::Upstream,
+                    secrets.text(error_chain(&error.without_url()), Policy::Client),
+                )
             })?;
         observe_send::response(tap, &mut response);
-        Ok(response)
+        Ok((response, secrets))
     }
 
     /// `Execute` for `responses/compact` (`executeCompact`).
@@ -266,7 +272,7 @@ impl CodexExecutor {
         let format = response_format(options);
         let headers = build_headers(auth, &options.headers, false)?;
         let url = endpoint(auth, &self.base_url, true);
-        let response = self
+        let (response, secrets) = self
             .send(
                 auth,
                 &url,
@@ -287,7 +293,7 @@ impl CodexExecutor {
             let (body, _) = read_body_prefix(response, MAX_ERROR_BODY).await;
             tracing::debug!(status, "codex: compact request error");
             ext::on_failure(&prepared.turn, status, &body);
-            let body = redact::bytes(&body, credentials(auth).0);
+            let body = secrets.bytes(&body, Policy::Client);
             return Err(
                 status_error_with_cooling(status, &body, self.model_level_cooling()).into(),
             );
@@ -326,7 +332,7 @@ impl CodexExecutor {
         let format = response_format(options);
         let headers = build_headers(auth, &options.headers, true)?;
         let url = endpoint(auth, &self.base_url, false);
-        let response = self
+        let (response, secrets) = self
             .send(
                 auth,
                 &url,
@@ -347,7 +353,7 @@ impl CodexExecutor {
             let (body, _) = read_body_prefix(response, MAX_ERROR_BODY).await;
             tracing::debug!(status, "codex: request error");
             ext::on_failure(&prepared.turn, status, &body);
-            let body = redact::bytes(&body, credentials(auth).0);
+            let body = secrets.bytes(&body, Policy::Client);
             return Err(
                 status_error_with_cooling(status, &body, self.model_level_cooling()).into(),
             );
@@ -376,7 +382,7 @@ impl CodexExecutor {
             }
             if let Some((error, body)) = terminal_failure(&event, self.model_level_cooling()) {
                 ext::on_failure(&prepared.turn, error.status, body.as_bytes());
-                return Err(error.redacted(credentials(auth).0).into());
+                return Err(error.redacted(&secrets).into());
             }
             let event_type = str_at(&event, "type");
             if event_type == "response.output_item.done" {
@@ -428,7 +434,7 @@ impl CodexExecutor {
         let format = response_format(&options);
         let headers = build_headers(auth, &options.headers, true)?;
         let url = endpoint(auth, &self.base_url, false);
-        let response = self
+        let (response, secrets) = self
             .send(
                 auth,
                 &url,
@@ -455,7 +461,7 @@ impl CodexExecutor {
             }
             tracing::debug!(status, "codex: request error");
             ext::on_failure(&prepared.turn, status, &body);
-            let body = redact::bytes(&body, credentials(auth).0);
+            let body = secrets.bytes(&body, Policy::Client);
             return Err(
                 status_error_with_cooling(status, &body, self.model_level_cooling()).into(),
             );
@@ -484,7 +490,7 @@ impl CodexExecutor {
             original: original_bytes,
             preserve_native: prepared.native,
             grok: is_grok_client(&options.headers),
-            secret: credentials(auth).0.to_owned(),
+            secrets,
             model_level_cooling: self.model_level_cooling(),
             turn: prepared.turn,
         };

@@ -33,8 +33,10 @@
 //!   base URL are resolved, where Go sends them as written. A base URL with
 //!   an ASCII control character fails before anything is sent, as Go's
 //!   does, but the error doesn't quote the URL, which may hold a secret.
-//! - An error body that quotes the credential's API key has it redacted;
-//!   see [`crate::redact`].
+//! - An error body that quotes a secret the request sent has it redacted:
+//!   the credential headers after the custom ones, each cookie, the URL's
+//!   credentials, the proxy's password and the credential's key; see
+//!   [`crate::redact`].
 //! - Usage reporting and request logging are left to the call's taps (see
 //!   the crate's `observe_send` module), and payload rules to
 //!   [`crate::payload`]. The Home service (its credential options and
@@ -81,7 +83,7 @@ use crate::custom_headers;
 use crate::json::{Body, delete, eq_fold, str_at};
 use crate::observe_send::{self, Attempt};
 use crate::payload;
-use crate::redact;
+use crate::redact::{Policy, Secrets};
 use crate::thinking::Route;
 
 /// The `alt` of a `/responses/compact` call.
@@ -113,6 +115,9 @@ struct Prepared {
     /// The body as sent, which response translators see as the request.
     body: Value,
     headers: HeaderMap,
+    /// What the request sends that is scrubbed from what is kept of it and
+    /// from its errors (see [`observe_send::secrets`]).
+    secrets: Secrets,
 }
 
 impl OpenAiCompatExecutor {
@@ -249,11 +254,18 @@ impl OpenAiCompatExecutor {
 
         let headers = build_headers(auth, api_key, &options.headers, stream)?;
         let url = format!("{}{path}", base_url.strip_suffix('/').unwrap_or(base_url));
+        let secrets = observe_send::secrets(
+            &url,
+            &headers,
+            self.clients.effective_proxy(&auth.proxy_url),
+            auth,
+        );
         Ok(Prepared {
             url,
             to,
             body,
             headers,
+            secrets,
         })
     }
 
@@ -300,7 +312,7 @@ impl OpenAiCompatExecutor {
                     &prepared.url,
                     &prepared.headers,
                     &body,
-                    &[api_key(auth)],
+                    &prepared.secrets,
                 ),
             )
         });
@@ -323,7 +335,7 @@ impl OpenAiCompatExecutor {
         let headers = response.headers().clone();
         let (body, _) = read_body_prefix(response, MAX_ERROR_BODY).await;
         tracing::debug!(status, "{NAME}: request error");
-        let body = redact::bytes(&body, api_key(auth));
+        let body = prepared.secrets.bytes(&body, Policy::Client);
         Err(status_error(status, &headers, &body).into())
     }
 
@@ -418,7 +430,7 @@ impl OpenAiCompatExecutor {
             response_format: format,
             source_format: options.source_format.clone(),
             original: original_bytes,
-            secret: api_key(auth).to_owned(),
+            secrets: prepared.secrets.clone(),
         };
         Ok(StreamResponse {
             headers: response_headers,

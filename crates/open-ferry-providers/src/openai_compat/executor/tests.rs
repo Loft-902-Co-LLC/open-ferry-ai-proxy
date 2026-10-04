@@ -1536,3 +1536,35 @@ fn compat_config_lookup() {
     }
     assert_eq!(name(&Auth::default()), None);
 }
+
+// Not upstream's: an error quotes none of the secrets the request sent (the
+// credential headers after the custom ones, each cookie, the URL's
+// credentials), nor the password of a proxy that answers 407.
+#[tokio::test]
+async fn errors_hide_every_secret_sent() {
+    for case in crate::secret_echo::cases(|base_url| (*plain_auth(base_url)).clone()).await {
+        for stream in [false, true] {
+            let options = Options {
+                headers: case.headers.clone(),
+                ..if stream {
+                    stream_options(&Format::OPENAI)
+                } else {
+                    options(&Format::OPENAI)
+                }
+            };
+            let auth = Arc::clone(&case.auth);
+            let error = if stream {
+                executor(Vec::new())
+                    .execute_stream(auth, request("m", "{}"), options)
+                    .await
+                    .err()
+            } else {
+                executor(Vec::new())
+                    .execute(auth, request("m", "{}"), options)
+                    .await
+                    .err()
+            };
+            case.check(&error.expect("the call went through"));
+        }
+    }
+}

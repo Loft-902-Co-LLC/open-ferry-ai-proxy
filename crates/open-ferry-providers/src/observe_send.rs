@@ -15,6 +15,10 @@
 //! request is going out on the open connection. OAuth and token calls
 //! aren't tapped, as upstream doesn't record them.
 //!
+//! Each send site gathers the attempt's [`secrets`] from the request as it
+//! is finally sent, tells the taps them with the request, and scrubs them
+//! from the errors it makes of the upstream's answer.
+//!
 //! Deviations from upstream: the whole module (see
 //! [`open_ferry_core::observe`]).
 
@@ -26,6 +30,22 @@ use http::{HeaderMap, Method};
 use open_ferry_core::auth::Auth;
 use open_ferry_core::exec::{Format, Options};
 use open_ferry_core::observe::{AttemptKind, AttemptRequest, Observation};
+
+use crate::redact::Secrets;
+
+/// The secrets an attempt sends to `url` with `headers`: those of its
+/// credential headers and cookies, of its URL's user info and key-like
+/// query parameters, of the proxy setting `proxy` it goes through (the
+/// credential's or the global one, as the executor's clients pick it), and
+/// `auth`'s own keys and tokens (see [`Secrets`]).
+pub(crate) fn secrets(url: &str, headers: &HeaderMap, proxy: &str, auth: &Auth) -> Secrets {
+    let mut secrets = Secrets::new();
+    secrets.add_headers(headers);
+    secrets.add_url(url);
+    secrets.add_proxy(proxy);
+    secrets.add_auth(auth);
+    secrets
+}
 
 /// What a send site is told about the attempts of its executor call,
 /// besides the request it sends.
@@ -66,14 +86,14 @@ impl<'a> Attempt<'a> {
     }
 
     /// The attempt that sends `body` with `method` to `url` with `headers`,
-    /// sending `secrets` somewhere in them.
+    /// sending `secrets` somewhere in them (see [`secrets`]).
     pub(crate) fn request<'b>(
         &'b self,
         method: &'b Method,
         url: &'b str,
         headers: &'b HeaderMap,
         body: &'b Bytes,
-        secrets: &'b [&'b str],
+        secrets: &'b Secrets,
     ) -> AttemptRequest<'b> {
         AttemptRequest {
             kind: self.kind,
@@ -168,7 +188,9 @@ mod tests {
         fn attempt_request(&self, request: &AttemptRequest<'_>) {
             self.push(format!(
                 "request {} {} {}",
-                request.url, request.model, request.secrets[0]
+                request.url,
+                request.model,
+                request.secrets.iter().collect::<Vec<_>>().join(",")
             ));
         }
 
@@ -220,7 +242,7 @@ mod tests {
                     "https://example.test/v1/messages",
                     &HeaderMap::new(),
                     &body,
-                    &["sk-secret"],
+                    &Secrets::from_iter(["sk-secret"]),
                 ),
             )
         });
@@ -250,6 +272,42 @@ mod tests {
         let mut answer = reqwest::Response::from(http::Response::new("hello"));
         response(None, &mut answer);
         assert!(BodyTap::of(&answer).is_none());
+    }
+
+    /// Not upstream's: an attempt's secrets are those of its credential
+    /// headers after the custom ones, its cookies, its URL, its proxy and its
+    /// credential.
+    #[test]
+    fn gathers_what_an_attempt_sends() {
+        let mut auth = Auth::default();
+        auth.attributes
+            .insert("api_key".to_owned(), "attribute-secret-1234".to_owned());
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            http::HeaderValue::from_static("Bearer override-secret-5678"),
+        );
+        headers.insert(
+            "cookie",
+            http::HeaderValue::from_static("sid=cookie-secret-9012"),
+        );
+        let found = secrets(
+            "https://example.test/v1?api_key=query-secret-5678",
+            &headers,
+            "http://user:proxy-secret-5678@127.0.0.1:1",
+            &auth,
+        );
+        assert_eq!(
+            found.iter().collect::<Vec<_>>(),
+            [
+                "override-secret-5678",
+                "cookie-secret-9012",
+                "query-secret-5678",
+                "proxy-secret-5678",
+                "dXNlcjpwcm94eS1zZWNyZXQtNTY3OA==",
+                "attribute-secret-1234",
+            ]
+        );
     }
 
     /// Not upstream's: a body that fails to read is told to the taps as the

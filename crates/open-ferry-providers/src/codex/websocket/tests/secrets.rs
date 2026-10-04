@@ -11,7 +11,9 @@ use open_ferry_core::executor::ProviderExecutor;
 use tracing::subscriber::Interest;
 
 use super::super::mock::{Answer, Server};
-use super::{HELLO, auth_with, collect, executor, refused, request, within, ws_options};
+use super::{
+    HELLO, auth_with, collect, executor, refused, request, with_header, within, ws_options,
+};
 use crate::redact::REDACTED;
 
 /// The credential's secret, as Codex or a proxy might quote it.
@@ -107,6 +109,115 @@ async fn a_refused_connect_has_the_token_redacted() {
     );
     assert_eq!(proxy.record().handshakes.len(), 1);
     assert!(!logs.text().contains(TOKEN), "{}", logs.text());
+}
+
+/// The client's key, which the credential forwards upstream.
+const FORWARDED_KEY: &str = "forwarded-key-0123456789";
+/// The client's cookie, which the credential forwards upstream.
+const COOKIE: &str = "cookie-secret-0123456789";
+/// The proxy's password.
+const PROXY_SECRET: &str = "proxy-secret-0123456789";
+
+/// A credential for `base_url` forwarding the client's key and cookie.
+fn forwarding(base_url: &str) -> Auth {
+    auth_with(
+        base_url,
+        &[
+            ("api_key", TOKEN),
+            ("header:X-Upstream-Key", "$X-Client-Key"),
+            ("header:Cookie", "$Cookie"),
+        ],
+    )
+}
+
+/// Options of a client on the WebSocket that sends its key and cookie.
+fn client_options() -> open_ferry_core::exec::Options {
+    with_header(
+        with_header(ws_options(""), "x-client-key", FORWARDED_KEY),
+        "cookie",
+        &format!("sid={COOKIE}"),
+    )
+}
+
+// Not upstream's: a refused handshake whose body quotes the headers the
+// custom ones set, the forwarded cookie among them, fails the call with
+// them redacted.
+#[tokio::test]
+async fn a_refused_handshake_has_every_secret_sent_redacted() {
+    let server = Server::refusing(
+        401,
+        &format!(r#"{{"error":"invalid {FORWARDED_KEY} for {COOKIE} with {TOKEN}"}}"#),
+    )
+    .await;
+    let error = refused(
+        within(
+            "the call",
+            executor().execute_stream(
+                Arc::new(forwarding(&server.url)),
+                request("gpt-5-codex", HELLO),
+                client_options(),
+            ),
+        )
+        .await,
+    );
+    let handshake = server.record().handshakes[0].clone();
+    assert_eq!(handshake.header("x-upstream-key"), Some(FORWARDED_KEY));
+    assert_eq!(
+        handshake.header("cookie"),
+        Some(format!("sid={COOKIE}").as_str())
+    );
+    for secret in [FORWARDED_KEY, COOKIE, TOKEN] {
+        assert!(!error.message.contains(secret), "{error:?}");
+    }
+    assert!(
+        error.message.contains(&format!(
+            "invalid {REDACTED} for {REDACTED} with {REDACTED}"
+        )),
+        "{error:?}"
+    );
+}
+
+// Not upstream's: a proxy that refuses the `CONNECT` with a reason quoting
+// its password and the `Proxy-Authorization` it was sent fails the call
+// with both redacted.
+#[tokio::test]
+async fn a_refused_connect_has_the_proxys_password_redacted() {
+    let credential = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        format!("user:{PROXY_SECRET}"),
+    );
+    let reason = format!(
+        "HTTP/1.1 407 bad {PROXY_SECRET} {credential}
+
+"
+    );
+    let proxy = Server::start(move |_| Answer::Raw(reason.clone().into_bytes())).await;
+    let auth = Auth {
+        proxy_url: proxy
+            .url
+            .replacen("http://", &format!("http://user:{PROXY_SECRET}@"), 1),
+        ..forwarding("http://127.0.0.1:9")
+    };
+    let error = refused(
+        within(
+            "the call",
+            executor().execute_stream(
+                Arc::new(auth),
+                request("gpt-5-codex", HELLO),
+                client_options(),
+            ),
+        )
+        .await,
+    );
+    let handshake = proxy.record().handshakes[0].clone();
+    assert_eq!(
+        handshake.header("proxy-authorization"),
+        Some(format!("Basic {credential}").as_str())
+    );
+    assert_eq!(
+        error.message,
+        format!("codex websockets executor: proxy CONNECT failed: 407 bad {REDACTED} {REDACTED}")
+    );
 }
 
 thread_local! {

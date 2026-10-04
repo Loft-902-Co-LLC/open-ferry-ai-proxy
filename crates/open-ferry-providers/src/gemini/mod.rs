@@ -45,8 +45,10 @@
 //!   can't pass for one of Google's client libraries; upstream sets it.
 //! - The body is written as `serde_json` writes it, compact.
 //! - A dropped call or stream stops at once; upstream checks its context.
-//! - An error body that quotes the API key or access token the request
-//!   carried has it redacted (see the crate's `redact` module).
+//! - An error body that quotes a secret the request sent has it redacted:
+//!   the credential headers after the custom ones (the API key or access
+//!   token among them), each cookie, the URL's credentials, the proxy's
+//!   password and the credential's key (see the crate's `redact` module).
 //! - Usage reporting and request logging are left to the call's taps (see
 //!   the crate's `observe_send` module), and payload rules to
 //!   [`crate::payload`].
@@ -80,7 +82,7 @@ use open_ferry_translate::signature::sanitize_gemini_request_thought_signatures;
 use serde_json::Value;
 
 use self::stream::{Lines, StreamSetup};
-use crate::codex::client::{USER_AGENT, error_chain, read_body, read_body_prefix};
+use crate::codex::client::{Clients, USER_AGENT, error_chain, read_body, read_body_prefix};
 use crate::codex::compat;
 use crate::codex::request::{
     base_model, original_request, parse_object, response_format, set_string_if_different,
@@ -91,7 +93,7 @@ use crate::codex::usage::ensure_responses_usage_details;
 use crate::custom_headers;
 use crate::json::{self, Body};
 use crate::observe_send::{self, Attempt};
-use crate::redact;
+use crate::redact::{Policy, Secrets};
 
 /// The `alt` of a `/responses/compact` call, which Gemini can't serve.
 const COMPACT_ALT: &str = "responses/compact";
@@ -211,57 +213,53 @@ fn build_headers(
     Ok(headers)
 }
 
-/// The API key and bearer token `headers` carry, to keep out of errors.
-fn sent_secrets(headers: &HeaderMap) -> [String; 2] {
-    let key = headers
-        .get(API_KEY_HEADER)
-        .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned())
-        .unwrap_or_default();
-    let token = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .unwrap_or_default()
-        .to_owned();
-    [key, token]
-}
-
-/// Posts `body`, telling the call's taps, and returns the answer if its
-/// status is a success, else the status and body as an error, without the
-/// credential it was sent with.
+/// Posts `body` with one of `clients`, telling the call's taps, and returns
+/// the answer if its status is a success, with the secrets the request sent
+/// (see [`observe_send::secrets`]); else the status and body as an error,
+/// without those secrets.
 async fn post(
-    client: &reqwest::Client,
+    clients: &Clients,
     url: &str,
     headers: HeaderMap,
     body: &Value,
     name: &str,
     attempt: Attempt<'_>,
-) -> Result<reqwest::Response, ExecError> {
-    let [key, token] = sent_secrets(&headers);
+) -> Result<(reqwest::Response, Secrets), ExecError> {
+    let auth = attempt.auth;
+    let secrets = observe_send::secrets(
+        url,
+        &headers,
+        clients.effective_proxy(&auth.proxy_url),
+        auth,
+    );
     let body = Bytes::from(body.to_string());
     let tap = attempt.observation.map(|observation| {
-        let secrets = [key.as_str(), token.as_str()];
         observe_send::announce(
             observation,
             &attempt.request(&Method::POST, url, &headers, &body, &secrets),
         )
     });
-    let mut response = client
+    let mut response = clients
+        .get(&auth.proxy_url)
         .post(url)
         .headers(headers)
         .body(body)
         .send()
         .await
-        .map_err(|error| ExecError::new(ErrorKind::Upstream, error_chain(&error.without_url())))?;
+        .map_err(|error| {
+            ExecError::new(
+                ErrorKind::Upstream,
+                secrets.text(error_chain(&error.without_url()), Policy::Client),
+            )
+        })?;
     observe_send::response(tap, &mut response);
     let status = response.status().as_u16();
     if (200..300).contains(&status) {
-        return Ok(response);
+        return Ok((response, secrets));
     }
     let (body, _) = read_body_prefix(response, MAX_ERROR_BODY).await;
     tracing::debug!(status, "{name}: request error");
-    let body = redact::bytes(&body, &key);
-    let body = redact::bytes(&body, &token);
+    let body = secrets.bytes(&body, Policy::Client);
     Err(StatusError::new(status, String::from_utf8_lossy(&body)).into())
 }
 
@@ -306,13 +304,13 @@ fn translate_answer(
 }
 
 /// Translates Gemini's stream in `response`, to the request `sent` with
-/// `secrets` (see [`sent_secrets`]), into the client's format.
+/// `secrets` (see [`observe_send::secrets`]), into the client's format.
 fn translate_stream(
     response: reqwest::Response,
     request: &Request,
     options: &Options,
     sent: &Value,
-    secrets: [String; 2],
+    secrets: Secrets,
     lines: Lines,
     name: &'static str,
 ) -> StreamResponse {

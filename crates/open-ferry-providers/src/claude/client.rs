@@ -127,15 +127,21 @@ impl Clients {
         }
     }
 
-    /// The client for a credential with `proxy_url`, or for the global proxy
-    /// when it is empty.
-    pub(crate) fn get(&self, proxy_url: &str) -> reqwest::Client {
+    /// The proxy setting a credential with `proxy_url` goes through: its
+    /// own, trimmed, or else the global one.
+    pub(crate) fn effective_proxy<'a>(&'a self, proxy_url: &'a str) -> &'a str {
         let proxy_url = proxy_url.trim();
-        let effective = if proxy_url.is_empty() {
+        if proxy_url.is_empty() {
             self.global_proxy_url.as_str()
         } else {
             proxy_url
-        };
+        }
+    }
+
+    /// The client for a credential with `proxy_url`, or for the global proxy
+    /// when it is empty.
+    pub(crate) fn get(&self, proxy_url: &str) -> reqwest::Client {
+        let effective = self.effective_proxy(proxy_url);
         if let Some(client) = self.cached(effective) {
             return client;
         }

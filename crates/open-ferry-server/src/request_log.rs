@@ -118,6 +118,7 @@ pub(crate) async fn layer(State(state): State<AppState>, request: Request, next:
     };
     let downstream = Downstream {
         url: Downstream::url(parts.uri.path(), parts.uri.query()),
+        secrets: Downstream::url_secrets(parts.uri.path(), parts.uri.query()),
         method: parts.method.as_str().to_owned(),
         headers: parts.headers.clone(),
         body: kept,

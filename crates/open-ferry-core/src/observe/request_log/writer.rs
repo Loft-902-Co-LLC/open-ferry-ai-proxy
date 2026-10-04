@@ -16,8 +16,10 @@
 //! - Logs are written on a thread of their own, after the answer is sent;
 //!   upstream writes a log on the request's goroutine, and a stream's as it
 //!   goes.
-//! - Every secret of the request's attempts, and the client's key, is
-//!   scrubbed from the whole log (see [`redact::bytes`]).
+//! - Every secret the request's attempts sent, the secrets of the client's
+//!   credential headers, cookies and URL and of the answers' headers, and
+//!   the client's key, are scrubbed from the whole log however short they
+//!   are, and from the path its name is made from (see [`Policy::Disk`]).
 //! - What the bodies had past the capture limits is counted in one line at
 //!   the end of the log.
 //! - Removing an old error log is tried three times, for Windows.
@@ -39,7 +41,7 @@ use super::body_source::CAPTURE_LIMIT;
 use super::format::{self, DECODE_LIMIT, Sections};
 use super::names::{create_unique_log_file, error_filename, filename};
 use super::{Answer, ApiError, Downstream, RequestBody};
-use crate::observe::redact;
+use crate::observe::redact::{Policy, Secrets};
 
 /// How many finished logs may wait for the writer.
 const QUEUE: usize = 1024;
@@ -72,8 +74,9 @@ pub(crate) struct Entry {
     pub attempts: Attempts,
     /// The handlers' errors.
     pub api_errors: Vec<ApiError>,
-    /// What to scrub from the log.
-    pub secrets: Vec<String>,
+    /// What to scrub from the log, besides the secrets of the client's
+    /// request and the answer, which are gathered when it is written.
+    pub secrets: Secrets,
 }
 
 enum Job {
@@ -244,18 +247,29 @@ pub(crate) fn render(entry: &Entry, now: DateTime<Local>) -> (String, Vec<u8>) {
         );
     }
 
-    for secret in &entry.secrets {
-        if let std::borrow::Cow::Owned(scrubbed) = redact::bytes(&content, secret) {
-            content = scrubbed;
-        }
+    let secrets = log_secrets(entry);
+    if let std::borrow::Cow::Owned(scrubbed) = secrets.bytes(&content, Policy::Disk) {
+        content = scrubbed;
     }
 
+    let url = secrets.str(&downstream.url, Policy::Disk);
     let name = if entry.forced {
-        error_filename(&downstream.url, &entry.request_id, name_time)
+        error_filename(&url, &entry.request_id, name_time)
     } else {
-        filename(&downstream.url, &entry.request_id, name_time)
+        filename(&url, &entry.request_id, name_time)
     };
     (name, content)
+}
+
+/// Every secret to scrub from `entry`'s log: those its attempts sent, the
+/// client's key and what else it kept, and those of the client's request
+/// and of the answer, in their headers and the request's URL.
+fn log_secrets(entry: &Entry) -> Secrets {
+    let mut secrets = entry.secrets.clone();
+    secrets.add_headers(&entry.downstream.headers);
+    secrets.extend(&entry.downstream.secrets);
+    secrets.add_headers(&entry.answer.headers);
+    secrets
 }
 
 /// The client's body as the log shows it: decoded as its first
