@@ -640,6 +640,167 @@ async fn reasons_never_show_the_token() {
     assert_eq!(echo.requests().len(), 1);
 }
 
+/// A token with a quote and a backslash, which JSON writes with escapes and
+/// a URL with an escape for the quote.
+const AWKWARD_TOKEN: &str = "synthetic-secret\"back\\slash";
+
+/// Fails if any run of letters in `AWKWARD_TOKEN` is in `text`.
+fn assert_no_token(text: &str) {
+    for part in ["synthetic-secret", "back", "slash"] {
+        assert!(!text.contains(part), "{part} in {text}");
+    }
+}
+
+// Not upstream's: a reason doesn't show the token as the upstream writes it
+// in JSON, with escapes, or the URL a request was made to writes it.
+#[tokio::test]
+async fn reasons_never_show_the_token_as_escaped() {
+    let echo = Upstream::start(|_, request| {
+        let line = request.lines().next().unwrap_or_default();
+        let bearer = header_values(request, "Authorization").join(",");
+        let body = json!({ "error": { "message": format!("bad {bearer} at {line}") } });
+        http_response(
+            "401 Unauthorized",
+            &[("Content-Type", "application/json")],
+            body.to_string().as_bytes(),
+        )
+    })
+    .await;
+
+    let answer = fetch(json!({
+        "token": AWKWARD_TOKEN,
+        "quota_probe": {
+            "url": echo.url,
+            "header": { "Authorization": "Bearer $TOKEN$" },
+        },
+    }))
+    .await;
+    answer.assert(
+        StatusCode::BAD_GATEWAY,
+        &probe_failed(
+            r#"probe returned status 401: {"error":{"message":"bad Bearer $TOKEN$ at GET / HTTP/1.1"}}"#,
+        ),
+    );
+
+    // In the URL: made as the client writes it, and shown as the upstream
+    // does.
+    let answer = fetch(json!({
+        "token": AWKWARD_TOKEN,
+        "quota_probe": { "url": format!("{}/q?key=$TOKEN$", echo.url) },
+    }))
+    .await;
+    assert_eq!(answer.status, StatusCode::BAD_GATEWAY, "{}", answer.body);
+    assert_no_token(&answer.body);
+    assert!(answer.body.contains("$TOKEN$"), "{}", answer.body);
+}
+
+// Not upstream's: nor does an answer show the token, where the response
+// holds it, whether the body is read as it is or by a mapping.
+#[tokio::test]
+async fn answers_never_show_the_token() {
+    let upstream = json_upstream(
+        &json!({
+            "subscription": {
+                "plan": AWKWARD_TOKEN,
+                "tierName": format!("tier {AWKWARD_TOKEN}!"),
+                "tierId": AWKWARD_TOKEN.to_ascii_uppercase(),
+            },
+            "summary": [{
+                "key": AWKWARD_TOKEN,
+                "label": format!("<{AWKWARD_TOKEN}>"),
+                "value": 1,
+                "unit": AWKWARD_TOKEN,
+            }],
+            "groups": [{
+                "displayName": AWKWARD_TOKEN,
+                "buckets": [{
+                    "window": AWKWARD_TOKEN,
+                    "remainingFraction": 0.5,
+                    "resetTime": AWKWARD_TOKEN,
+                    "description": format!("a {AWKWARD_TOKEN} b"),
+                }],
+            }],
+        })
+        .to_string(),
+    )
+    .await;
+    let answer = fetch(json!({
+        "token": AWKWARD_TOKEN,
+        "quota_probe": {
+            "url": upstream.url,
+            "header": { "Authorization": "Bearer $TOKEN$" },
+        },
+    }))
+    .await;
+    let mut body = answer.expect(StatusCode::OK);
+    body.as_object_mut().unwrap().remove("serverTimeOffsetMs");
+    assert_eq!(
+        body,
+        json!({
+            "subscription": {
+                "plan": "$TOKEN$",
+                "tierName": "tier $TOKEN$!",
+                "tierId": "$TOKEN$",
+            },
+            "summary": [{
+                "key": "$TOKEN$",
+                "label": "<$TOKEN$>",
+                "value": 1,
+                "unit": "$TOKEN$",
+            }],
+            "groups": [{
+                "displayName": "$TOKEN$",
+                "buckets": [{
+                    "window": "$TOKEN$",
+                    "remainingFraction": 0.5,
+                    "resetTime": "$TOKEN$",
+                    "description": "a $TOKEN$ b",
+                }],
+            }],
+        })
+    );
+
+    let upstream = json_upstream(
+        &json!({
+            "user": { "tier": AWKWARD_TOKEN, "id": "t-1" },
+            "packages": [{ "period": AWKWARD_TOKEN, "left": 1, "all": 4 }],
+        })
+        .to_string(),
+    )
+    .await;
+    let answer = fetch(json!({
+        "token": AWKWARD_TOKEN,
+        "quota_probe": {
+            "url": upstream.url,
+            "header": { "Authorization": "Bearer $TOKEN$" },
+            "mapping": {
+                "plan": "user.tier",
+                "tier_id": "user.id",
+                "groups": [{
+                    "display_name": "Packages",
+                    "buckets_path": "packages",
+                    "window_key": "period",
+                    "remaining_amount_key": "left",
+                    "total_amount_key": "all",
+                }],
+            },
+        },
+    }))
+    .await;
+    let mut body = answer.expect(StatusCode::OK);
+    body.as_object_mut().unwrap().remove("serverTimeOffsetMs");
+    assert_eq!(
+        body,
+        json!({
+            "subscription": { "plan": "$TOKEN$", "tierId": "t-1" },
+            "groups": [{
+                "displayName": "Packages",
+                "buckets": [{ "window": "$TOKEN$", "remainingFraction": 0.25 }],
+            }],
+        })
+    );
+}
+
 // Not upstream's: a mapping path as deep as the response is read, as Go
 // reads it, where a recursive read would overflow the stack.
 #[tokio::test]

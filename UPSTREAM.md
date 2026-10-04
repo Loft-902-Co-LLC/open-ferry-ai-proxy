@@ -486,7 +486,7 @@ A credential whose metadata holds a `quota_probe` with a `url` is probed as upst
 
 - **There is no plugin host**, so only the declarative probe answers; `plugin_id` and `provider` are ignored, and without a probe the answer is 501.
 - **The probe never names the client**: a `User-Agent`, `X-App`, `Originator`, session or similar ID, or `X-Stainless-*` header it gives is skipped with a warning, and the user agent is `open-ferry/<version>`. `Accept: */*` is sent, as `api-call` sends it.
-- **The token is never logged or shown**: in a failure's reason, the upstream's body it quotes included, it is written `$TOKEN$`. Tokens are never refreshed or minted, as in `api-call`.
+- **The token is never logged or shown**: in a failure's reason, the upstream's body it quotes included, and in the text of a successful answer (a plan, a tier, a window and so on), it is written `$TOKEN$`; upstream shows it in both. It is found in any case of letter, and as a URL or JSON writes it, each character as itself, percent-encoded, or with a JSON escape (`\"`, `\uXXXX`), so a token with a quote or a backslash is found in a JSON error body. Tokens are never refreshed or minted, as in `api-call`.
 - **A request and reading its response have a minute**, and a body over 16 MiB fails; upstream's client has no limit. A failed request's reason is this port's client's, without Go's `Get "<url>": ` before it.
 - **A header value outside ASCII fails the request.** Headers are applied in the credential file's order and invalid ones reported in the order of their names, where upstream's order is random.
 - **Paths are read as gjson reads them**, except that a wildcard, pipe, query, modifier, literal, sub-selector or `..` finds nothing.

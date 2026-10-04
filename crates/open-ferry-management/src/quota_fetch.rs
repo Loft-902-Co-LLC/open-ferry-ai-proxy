@@ -47,8 +47,8 @@
 //! Without a probe the answer is 501 `no quota provider available for
 //! credential`.
 //!
-//! The token is never logged, and a reason never shows it: where it
-//! appears, it is written `$TOKEN$`.
+//! The token is never logged, and neither a reason nor an answer shows it:
+//! where it appears, however it is written, it is written `$TOKEN$`.
 //!
 //! Deviations from upstream:
 //! - There is no plugin host: `plugin_id` and `provider` are read and
@@ -75,7 +75,11 @@
 //!   response`. The URL is read by the `url` crate, as in
 //!   [`crate::api_call`].
 //! - The token is written `$TOKEN$` in a reason, a response body it
-//!   quotes included; upstream shows it.
+//!   quotes included, and in the text of a successful answer (a plan, a
+//!   name, a window and so on); upstream shows it. It is found in any case
+//!   of letter, and as a URL or JSON writes it: each character as itself,
+//!   percent-encoded, or with a JSON escape (a quote after a backslash, or
+//!   a backslash, `u` and four hex digits).
 //! - Paths are read as gjson reads them, but a path with a wildcard, pipe,
 //!   query, modifier, literal (`!`), sub-selector or `..` finds nothing.
 //! - With several members named `summary` in different cases and none in
@@ -323,9 +327,19 @@ async fn execute_quota_probe(
         body: (!data.is_empty()).then(|| Bytes::from(data)),
     };
     let outcome = send_probe(state, auth, probe, hop).await;
-    match (outcome, &token) {
-        (Probe::Failed(reason), Some(token)) => Probe::Failed(scrub(&reason, token)),
-        (outcome, _) => outcome,
+    let Some(token) = &token else {
+        return outcome;
+    };
+    // What a failure quotes of the response, and what an answer reads from
+    // it, may both hold the token.
+    let forms = TokenForms::new(token);
+    match outcome {
+        Probe::Failed(reason) => Probe::Failed(forms.scrub(&reason)),
+        Probe::Fetched(mut answer) => {
+            forms.answer(&mut answer);
+            Probe::Fetched(answer)
+        }
+        Probe::NotHandled => Probe::NotHandled,
     }
 }
 
@@ -432,34 +446,159 @@ fn server_offset(received: &Received) -> i64 {
     (date - now).num_nanoseconds().unwrap_or(saturated) / 1_000_000
 }
 
-/// `reason` with the token, and the token in lower case (as a URL's scheme
-/// is written), written `$TOKEN$`.
-fn scrub(reason: &[u8], token: &str) -> Vec<u8> {
-    let mut out = replace_bytes(reason, token.as_bytes(), TOKEN.as_bytes());
-    let lower = token.to_ascii_lowercase();
-    if lower != token {
-        out = replace_bytes(&out, lower.as_bytes(), TOKEN.as_bytes());
-    }
-    out
+/// The credential's token, found in what the upstream sends back however it
+/// writes it.
+///
+/// Each character of the token may be written as itself, in either case of
+/// an ASCII letter (a URL's scheme and host are written in lower case);
+/// percent-encoded, as `%22` in either case of hex digit, or `+` for a
+/// space; or as JSON escapes it, as `\"`, `\\`, `\/`, `\n` and the like, or
+/// with a backslash, `u` and four hex digits (a surrogate pair beyond the
+/// Basic Plane). Each character is taken as it comes, so a URL that encodes
+/// a quote and leaves a backslash, or a JSON string that quotes such a URL,
+/// is found as a token written one way throughout is.
+struct TokenForms {
+    /// For each character of the token, the ways it may be written, in lower
+    /// case.
+    chars: Vec<Vec<Vec<u8>>>,
+    /// The bytes a way to write the token's first character may start with,
+    /// in either case.
+    first: [bool; 256],
 }
 
-/// `haystack` with each `needle` replaced by `with`.
-fn replace_bytes(haystack: &[u8], needle: &[u8], with: &[u8]) -> Vec<u8> {
-    if needle.is_empty() {
-        return haystack.to_vec();
+impl TokenForms {
+    fn new(token: &str) -> Self {
+        let chars: Vec<Vec<Vec<u8>>> = token.chars().map(spellings).collect();
+        let mut first = [false; 256];
+        for byte in chars
+            .first()
+            .into_iter()
+            .flatten()
+            .filter_map(|way| way.first())
+        {
+            for byte in [byte.to_ascii_lowercase(), byte.to_ascii_uppercase()] {
+                if let Some(slot) = first.get_mut(usize::from(byte)) {
+                    *slot = true;
+                }
+            }
+        }
+        Self { chars, first }
     }
-    let mut out = Vec::with_capacity(haystack.len());
-    let mut rest = haystack;
-    while let Some((&first, tail)) = rest.split_first() {
-        if rest.starts_with(needle) {
-            out.extend_from_slice(with);
-            rest = rest.get(needle.len()..).unwrap_or_default();
-        } else {
-            out.push(first);
-            rest = tail;
+
+    /// `text` with each time the token is written, written `$TOKEN$`.
+    fn scrub(&self, text: &[u8]) -> Vec<u8> {
+        if self.chars.is_empty() {
+            return text.to_vec();
+        }
+        let mut out = Vec::with_capacity(text.len());
+        let mut at = 0;
+        while let Some(&byte) = text.get(at) {
+            let starts = self.first.get(usize::from(byte)).is_some_and(|&hit| hit);
+            match starts.then(|| self.written_at(text, at)).flatten() {
+                Some(end) => {
+                    out.extend_from_slice(TOKEN.as_bytes());
+                    at = end;
+                }
+                None => {
+                    out.push(byte);
+                    at += 1;
+                }
+            }
+        }
+        out
+    }
+
+    /// Where the longest writing of the token that starts at `start` ends.
+    fn written_at(&self, text: &[u8], start: usize) -> Option<usize> {
+        // Where the characters so far may end: more than one place where
+        // one way to write a character begins another's.
+        let mut ends = vec![start];
+        for ways in &self.chars {
+            let mut next = Vec::new();
+            for &at in &ends {
+                let rest = text.get(at..).unwrap_or_default();
+                for way in ways {
+                    let found = rest
+                        .get(..way.len())
+                        .is_some_and(|head| head.eq_ignore_ascii_case(way));
+                    if found && !next.contains(&(at + way.len())) {
+                        next.push(at + way.len());
+                    }
+                }
+            }
+            if next.is_empty() {
+                return None;
+            }
+            ends = next;
+        }
+        ends.into_iter().max()
+    }
+
+    fn field(&self, field: &mut Vec<u8>) {
+        *field = self.scrub(field);
+    }
+
+    /// The text of a successful answer, scrubbed.
+    fn answer(&self, answer: &mut QuotaFetchResponse) {
+        if let Some(subscription) = &mut answer.subscription {
+            self.field(&mut subscription.plan);
+            self.field(&mut subscription.tier_name);
+            self.field(&mut subscription.tier_id);
+        }
+        for metric in &mut answer.summary {
+            self.field(&mut metric.key);
+            self.field(&mut metric.label);
+            self.field(&mut metric.unit);
+            self.field(&mut metric.format);
+            self.field(&mut metric.currency);
+        }
+        for group in &mut answer.groups {
+            self.field(&mut group.display_name);
+            for bucket in &mut group.buckets {
+                self.field(&mut bucket.window);
+                self.field(&mut bucket.reset_time);
+                self.field(&mut bucket.description);
+            }
         }
     }
-    out
+}
+
+/// The ways `c` may be written in a token's quotation, in lower case (see
+/// [`TokenForms`]).
+fn spellings(c: char) -> Vec<Vec<u8>> {
+    let mut ways: Vec<Vec<u8>> = Vec::new();
+    let mut add = |way: Vec<u8>| {
+        let way = way.to_ascii_lowercase();
+        if !ways.contains(&way) {
+            ways.push(way);
+        }
+    };
+    let mut buffer = [0; 4];
+    let utf8 = c.encode_utf8(&mut buffer).as_bytes();
+    add(utf8.to_vec());
+    add(utf8
+        .iter()
+        .flat_map(|byte| format!("%{byte:02x}").into_bytes())
+        .collect());
+    if c == ' ' {
+        add(b"+".to_vec());
+    }
+    match c {
+        '"' | '\\' | '/' => add(format!("\\{c}").into_bytes()),
+        '\u{8}' => add(b"\\b".to_vec()),
+        '\u{c}' => add(b"\\f".to_vec()),
+        '\n' => add(b"\\n".to_vec()),
+        '\r' => add(b"\\r".to_vec()),
+        '\t' => add(b"\\t".to_vec()),
+        _ => {}
+    }
+    let mut units = [0; 2];
+    add(c
+        .encode_utf16(&mut units)
+        .iter()
+        .flat_map(|unit| format!("\\u{unit:04x}").into_bytes())
+        .collect());
+    ways
 }
 
 /// Whether `name` is an HTTP token (`httpguts.ValidHeaderFieldName`).
@@ -823,14 +962,73 @@ mod tests {
         }
     }
 
+    fn scrubbed(text: &str, token: &str) -> String {
+        String::from_utf8(TokenForms::new(token).scrub(text.as_bytes())).expect("utf-8")
+    }
+
     // Not upstream's: a reason never shows the token, in any case the
     // scheme gives it.
     #[test]
     fn scrub_hides_the_token() {
         assert_eq!(
-            scrub(b"x Sec-Ret y sec-ret Sec-Ret", "Sec-Ret"),
-            b"x $TOKEN$ y $TOKEN$ $TOKEN$".to_vec()
+            scrubbed("x Sec-Ret y sec-ret Sec-Ret SEC-RET", "Sec-Ret"),
+            "x $TOKEN$ y $TOKEN$ $TOKEN$ $TOKEN$"
         );
-        assert_eq!(scrub(b"aaa", "aa"), b"$TOKEN$a".to_vec());
+        assert_eq!(scrubbed("aaa", "aa"), "$TOKEN$a");
+        assert_eq!(scrubbed("aaa", ""), "aaa");
+        assert_eq!(scrubbed("ab", "abc"), "ab");
+    }
+
+    // Not upstream's: nor does it show the token as a JSON string or a URL
+    // writes it, character by character.
+    #[test]
+    fn scrub_hides_the_token_as_escaped() {
+        let token = "s-\"b\\k /é😀\n";
+        // JSON's escape of a UTF-16 unit: a backslash, `u` and four hex
+        // digits.
+        let u = |hex: &str| format!("\\u{hex}");
+        let ascii = format!(
+            "s-{}b{}k {}{}{}{}{}",
+            u("0022"),
+            u("005C"),
+            u("002f"),
+            u("00e9"),
+            u("d83d"),
+            u("DE00"),
+            u("000a")
+        );
+        for written in [
+            // As is, and as JSON writes it.
+            token.to_owned(),
+            r#"s-\"b\\k \/é😀\n"#.to_owned(),
+            // ASCII only, with surrogates, in either case of hex digit.
+            ascii,
+            // As a URL writes it, with a space as a plus and as `%20`, in
+            // either case.
+            "s-%22b%5Ck+%2F%C3%A9%F0%9F%98%80%0A".to_owned(),
+            "s-%22b%5ck%20%2f%c3%a9%f0%9f%98%80%0a".to_owned(),
+            // Mixed: a quote encoded and a backslash not, in JSON.
+            r#"s-%22b\\k+/é%F0%9F%98%80\n"#.to_owned(),
+        ] {
+            assert_eq!(
+                scrubbed(&format!("<{written}> and {written}"), token),
+                "<$TOKEN$> and $TOKEN$",
+                "{written}"
+            );
+        }
+        // Neither half of it alone.
+        assert_eq!(scrubbed(r#"s-\"b"#, token), r#"s-\"b"#);
+    }
+
+    // Not upstream's: where a way to write one character starts another's,
+    // the token is still found.
+    #[test]
+    fn scrub_finds_the_token_where_writings_overlap() {
+        assert_eq!(scrubbed("a%25b", "a%b"), "$TOKEN$");
+        assert_eq!(scrubbed("a%b", "a%b"), "$TOKEN$");
+        assert_eq!(
+            scrubbed("a%2525b and a%25b", "a%25b"),
+            "$TOKEN$ and $TOKEN$"
+        );
     }
 }
