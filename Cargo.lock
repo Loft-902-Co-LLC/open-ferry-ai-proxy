@@ -1424,6 +1424,7 @@ name = "open-ferry-parity"
 version = "0.0.0"
 dependencies = [
  "base64 0.23.1",
+ "http",
  "open-ferry-core",
  "open-ferry-providers",
  "open-ferry-translate",

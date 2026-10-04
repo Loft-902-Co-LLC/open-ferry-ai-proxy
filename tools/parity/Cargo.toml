@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 base64 = "0.23.1"
+http = "1.5.0"
 open-ferry-core.workspace = true
 open-ferry-providers.workspace = true
 open-ferry-translate.workspace = true
