@@ -1,6 +1,7 @@
 //! Tests of the routes of `crate::model_definitions`. Upstream has no tests
 //! of `GetStaticModelDefinitions`; the expected models are upstream's
-//! answers for the same channels.
+//! answers for the same channels, less the six image and video models its
+//! `xai` channel adds (see `StaticCatalog::xai_models`).
 
 use http::{Method, StatusCode};
 use open_ferry_core::registry::StaticCatalog;
@@ -86,6 +87,85 @@ async fn channels_list_their_models() {
     }
 }
 
+/// Not upstream's: `xai` and `meta` list the catalog's xAI and Meta models,
+/// under each of upstream's spellings of their names, written as upstream
+/// writes them. The channel is named as sent, in lower case.
+#[tokio::test]
+async fn xai_and_meta_channels_list_their_models() {
+    let api = Api::new();
+    let catalog = StaticCatalog::embedded();
+    let xai_first = concat!(
+        r#"{"id":"grok-4.7","object":"model","created":1789948800,"owned_by":"xai","#,
+        r#""type":"xai","display_name":"Grok 4.7","name":"grok-4.7","#,
+        r#""description":"SpaceXAI's frontier model for coding, agentic tasks, and knowledge work.","#,
+        r#""context_length":500000,"max_completion_tokens":500000,"#,
+        r#""supportedInputModalities":["text","image"],"supportedOutputModalities":["text"],"#,
+        r#""thinking":{"levels":["low","medium","high","xhigh"]}}"#,
+    );
+    let meta_first = concat!(
+        r#"{"id":"muse-spark-1.3","object":"model","created":1788307200,"owned_by":"meta","#,
+        r#""type":"meta","display_name":"Muse Spark 1.3","name":"muse-spark-1.3","#,
+        r#""description":"Meta Muse Spark 1.3 flagship reasoning and agentic coding model","#,
+        r#""context_length":1048576,"max_completion_tokens":65536,"#,
+        r#""supportedInputModalities":["text","image"],"supportedOutputModalities":["text"],"#,
+        r#""thinking":{"levels":["minimal","low","medium","high","xhigh","max"]}}"#,
+    );
+    for (names, models, first) in [
+        (
+            &["xai", "x-ai", "grok"][..],
+            catalog.xai_models(),
+            xai_first,
+        ),
+        (&["meta", "muse"][..], catalog.meta_models(), meta_first),
+    ] {
+        assert!(!models.is_empty());
+        let want: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
+        for name in names {
+            for path in [
+                format!("/v0/management/model-definitions/{name}"),
+                format!("/v8/management/routing/model-definitions/{name}"),
+                format!(
+                    "/v0/management/model-definitions/%20{}%20",
+                    name.to_uppercase()
+                ),
+            ] {
+                let answer = api.get(&path).await;
+                assert_eq!(answer.status, StatusCode::OK, "{path}");
+                let start = format!(r#"{{"channel":"{name}","models":[{first}"#);
+                assert!(answer.body.starts_with(&start), "{path}: {}", answer.body);
+                let body = answer.expect(StatusCode::OK);
+                assert_eq!(ids(&body), want, "{path}");
+            }
+        }
+    }
+    // The built-in image and video models upstream adds to xAI's list.
+    let body = api
+        .get("/v0/management/model-definitions/xai")
+        .await
+        .expect(StatusCode::OK);
+    assert!(ids(&body).iter().all(|id| !id.contains("imagine")));
+}
+
+/// Not upstream's: `gemini-interactions` lists the Gemini models, as
+/// upstream's does, on both routes.
+#[tokio::test]
+async fn gemini_interactions_lists_the_gemini_models() {
+    let api = Api::new();
+    let gemini = api
+        .get("/v0/management/model-definitions/gemini")
+        .await
+        .expect(StatusCode::OK);
+    assert!(!ids(&gemini).is_empty());
+    for path in [
+        "/v0/management/model-definitions/gemini-interactions",
+        "/v8/management/routing/model-definitions/Gemini-Interactions",
+    ] {
+        let body = api.get(path).await.expect(StatusCode::OK);
+        assert_eq!(body["channel"], "gemini-interactions", "{path}");
+        assert_eq!(body["models"], gemini["models"], "{path}");
+    }
+}
+
 /// Not upstream's: the channel is trimmed and taken in any case, and named
 /// in lower case; a blank one is taken from the query.
 #[tokio::test]
@@ -127,10 +207,14 @@ async fn unknown_channels_are_refused() {
     for (path, channel) in [
         ("Codex-Pro", "Codex-Pro"),
         ("gemini-cli", "gemini-cli"),
-        ("%20xai%20", "xai"),
-        ("kimi", "kimi"),
+        ("xai-grok", "xai-grok"),
+        ("%20Kimi%20", "Kimi"),
+        ("kimi-ai", "kimi-ai"),
+        ("kimi.ai", "kimi.ai"),
+        ("kimi.com", "kimi.com"),
         ("aistudio", "aistudio"),
         ("antigravity", "antigravity"),
+        ("devin", "devin"),
     ] {
         let answer = api
             .get(&format!("/v0/management/model-definitions/{path}"))

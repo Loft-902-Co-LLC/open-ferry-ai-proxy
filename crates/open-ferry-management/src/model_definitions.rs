@@ -1,6 +1,8 @@
 // Ported from CLIProxyAPI internal/api/handlers/management/
-// model_definitions.go (GetStaticModelDefinitions) and the JSON layout of
-// internal/registry/model_registry.go (ModelInfo) (v8.0.10, MIT).
+// model_definitions.go (GetStaticModelDefinitions), the channel names of
+// internal/registry/model_definitions.go (GetStaticModelDefinitionsByChannel)
+// and the JSON layout of internal/registry/model_registry.go (ModelInfo)
+// (v8.0.10, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! `GET /v0/management/model-definitions/:channel` (also
@@ -14,9 +16,12 @@
 //!
 //! Deviations from upstream:
 //! - Only the channels open-ferry serves are known: `claude`, `gemini`,
-//!   `gemini-interactions`, `vertex` and `codex` (with the Pro plan's
-//!   models). Upstream also knows `aistudio`, `kimi`, `antigravity`,
-//!   `xai`, `devin` and `meta`, and their other spellings.
+//!   `gemini-interactions`, `vertex`, `codex` (with the Pro plan's models),
+//!   `xai` (also `x-ai` and `grok`) and `meta` (also `muse`). Upstream also
+//!   knows `aistudio`, `kimi` (also `kimi-ai`, `kimi.ai` and `kimi.com`),
+//!   `antigravity` and `devin`, which are a 400 here.
+//! - `xai` lacks the six image and video models upstream adds to its list
+//!   (see [`StaticCatalog::xai_models`]).
 //! - A model's `supports_web_search` and `config` aren't written. No model
 //!   of these channels has the first; the second holds the client
 //!   headers upstream sends for a model, which open-ferry doesn't send.
@@ -73,7 +78,7 @@ async fn definitions(
     if channel.is_empty() {
         return json::error(StatusCode::BAD_REQUEST, "channel is required");
     }
-    let models = StaticCatalog::embedded().models_for_channel(&channel);
+    let models = channel_models(StaticCatalog::embedded(), &channel);
     if models.is_empty() {
         return json::response(
             StatusCode::BAD_REQUEST,
@@ -90,6 +95,17 @@ async fn definitions(
             ("models", Json::Array(models.iter().map(model).collect())),
         ]),
     )
+}
+
+/// The models of a channel, in upstream's spellings of its name (its
+/// `GetStaticModelDefinitionsByChannel`). The catalog's own
+/// `models_for_channel` has no xAI or Meta channel.
+fn channel_models(catalog: &StaticCatalog, channel: &str) -> Vec<ModelInfo> {
+    match to_lower(channel).as_str() {
+        "xai" | "x-ai" | "grok" => catalog.xai_models(),
+        "meta" | "muse" => catalog.meta_models(),
+        _ => catalog.models_for_channel(channel),
+    }
 }
 
 /// A model as Go's encoder writes upstream's `ModelInfo`.
