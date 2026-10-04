@@ -15,6 +15,11 @@
 //!   (Windows can keep a deleted file that is still open listed for a
 //!   while).
 //! - A limit too large to count in bytes is no limit.
+//! - The main log is recognized by the file it is, not only by its path,
+//!   so it is kept under a name that differs in case (`MAIN.LOG`, which
+//!   Windows opens for `main.log`) or under another name linked to it.
+//!   Upstream keeps it on Windows only because its writer has it open
+//!   without sharing deletion.
 
 use std::fs;
 use std::io;
@@ -22,6 +27,8 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, SystemTime};
+
+use same_file::Handle;
 
 use super::{file_name, retry_shared};
 
@@ -140,12 +147,19 @@ pub(super) fn enforce_log_dir_size_limit(
     }
 
     files.sort_by_key(|file| file.modified);
+    // The protected file itself, which may be listed under a name cased
+    // otherwise, or linked to it.
+    let protected_file = protected.and_then(|protected| Handle::from_path(protected).ok());
     let mut deleted = 0;
     for file in files {
         if total <= max_bytes {
             break;
         }
-        if protected.is_some_and(|protected| protected == file.path) {
+        if protected.is_some_and(|protected| protected == file.path)
+            || protected_file.as_ref().is_some_and(|protected| {
+                Handle::from_path(&file.path).is_ok_and(|handle| handle == *protected)
+            })
+        {
             continue;
         }
         match retry_shared(|| fs::remove_file(&file.path)) {

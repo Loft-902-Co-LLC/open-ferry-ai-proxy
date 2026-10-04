@@ -20,6 +20,7 @@ open-ferry-providers.workspace = true
 open-ferry-server.workspace = true
 open-ferry-translate.workspace = true
 rustls = { version = "0.23.45", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+same-file = "1.0.6"
 serde_json.workspace = true
 socket2 = "0.6.5"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }

@@ -406,6 +406,7 @@ Deviations, each also noted in its module:
 
 - **`main.log` is written by a thread of its own**, through a bounded queue, so logging never waits on the disk. A line that finds the queue full is dropped and counted, and lines still queued at exit are lost.
 - **The rotated name's time is local**, where lumberjack's is UTC; the logs routes read it as local, as upstream's do. On Windows, renaming, deleting and truncating are retried while another process has the file open.
+- **The size limit's cleaner knows the `main.log` being written by the file it is**, not only by its path, so it keeps it under a name cased otherwise (`MAIN.LOG`, which Windows opens for `main.log`) or linked to it. Upstream keeps it on Windows only because its writer doesn't share deletion.
 - **A log directory that can't be made** is logged and the output stays as it was; upstream's start exits.
 - **A line's fields** come from the event and the spans it is in, and a field is quoted when its value was recorded as text.
 - **The access line is logged once the response's body is sent or dropped**, and a WebSocket's once its handshake is answered, where gin's comes when the connection closes. The path is written as the client sent it, percent-encoded, except that a key-like query value of one or two bytes is hidden whole, as `...`, where upstream writes it as it is.

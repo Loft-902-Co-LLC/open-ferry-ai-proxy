@@ -1354,6 +1354,7 @@ dependencies = [
  "open-ferry-translate",
  "rcgen",
  "rustls",
+ "same-file",
  "serde_json",
  "socket2",
  "tempfile",

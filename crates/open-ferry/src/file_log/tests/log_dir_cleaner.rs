@@ -95,3 +95,37 @@ fn deletes_files_open_elsewhere() {
     assert!(!dir.join("open.log").exists());
     assert!(dir.join("newer.log").exists());
 }
+
+/// Not upstream's: the main log is kept when the directory lists it under
+/// a name cased otherwise, as Windows opens `MAIN.LOG` for `main.log`. On a
+/// file system that tells the names apart, `MAIN.LOG` is another file and
+/// is deleted.
+#[test]
+fn skips_protected_cased_otherwise() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path();
+    write_log_file(&dir.join("MAIN.LOG"), 2 * 1024 * 1024, 1);
+    let protected = dir.join("main.log");
+    let same_file = protected.exists();
+
+    let deleted = enforce_log_dir_size_limit(dir, 1024 * 1024, Some(&protected)).unwrap();
+    assert_eq!(deleted, usize::from(!same_file));
+    assert_eq!(dir.join("MAIN.LOG").exists(), same_file);
+}
+
+/// Not upstream's: the main log is kept under another name linked to it.
+#[test]
+fn skips_protected_linked_elsewhere() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path();
+    let protected = dir.join("main.log");
+    write_log_file(&protected, 2 * 1024 * 1024, 1);
+    fs::hard_link(&protected, dir.join("linked.log")).unwrap();
+    write_log_file(&dir.join("other.log"), 10, 2);
+
+    let deleted = enforce_log_dir_size_limit(dir, 1024 * 1024, Some(&protected)).unwrap();
+    assert_eq!(deleted, 1);
+    assert!(protected.exists());
+    assert!(dir.join("linked.log").exists());
+    assert!(!dir.join("other.log").exists());
+}
