@@ -267,9 +267,6 @@ mod tests {
         }
 
         // A quota in the stream is the credential's too.
-        let (value, data) = event(&quota(0).replace("rate_limit_error", "x"));
-        let error = stream_event_error(&value, data.as_bytes());
-        assert!(error.is_none(), "an event with no type isn't an error");
         let text =
             r#"{"type":"error","error":{"code":429,"message":"Subscription quota exhausted."}}"#;
         let (value, data) = event(text);

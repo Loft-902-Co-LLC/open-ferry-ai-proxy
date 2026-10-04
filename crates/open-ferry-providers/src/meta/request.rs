@@ -554,7 +554,6 @@ mod tests {
         let request = Request {
             model: "muse-spark-1.3(high)".to_owned(),
             payload: Bytes::from(payload.to_string()),
-            ..Request::default()
         };
         let mut options = Options::new(Format::OPENAI_RESPONSE);
         options.original_request = request.payload.clone();
@@ -579,7 +578,6 @@ mod tests {
         let request = Request {
             model: "muse-spark-1.3".to_owned(),
             payload: Bytes::from(r#"{"model":"muse-spark-1.3","input":"hi","stream":true}"#),
-            ..Request::default()
         };
         let options = Options::new(Format::OPENAI_RESPONSE);
         let off = prepare(None, None, &request, &options, false).unwrap();
