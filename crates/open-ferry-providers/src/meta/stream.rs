@@ -38,6 +38,7 @@ use crate::codex::stream::{LineError, LineReader};
 use crate::codex::terminal::{APPLY_PATCH_ERROR_MESSAGE, OutputItems, StatusError};
 use crate::codex::usage::ensure_responses_usage_details;
 use crate::json::str_at;
+use crate::redact::{Policy, Secrets};
 
 /// What a stream is translated with.
 pub(super) struct Setup {
@@ -51,8 +52,8 @@ pub(super) struct Setup {
     pub(super) response_format: Format,
     /// The client's request as it came, for the Claude input estimate.
     pub(super) original: Bytes,
-    /// The credential's token, redacted from the errors.
-    pub(super) secret: String,
+    /// The secrets the request sent, redacted from the errors.
+    pub(super) secrets: Secrets,
 }
 
 struct State {
@@ -63,7 +64,7 @@ struct State {
     items: OutputItems,
     response_format: Format,
     original: Bytes,
-    secret: String,
+    secrets: Secrets,
     pending: VecDeque<Bytes>,
     /// An error to end the stream with once `pending` is sent.
     failure: Option<ExecError>,
@@ -92,7 +93,7 @@ impl State {
             items: OutputItems::default(),
             response_format: setup.response_format,
             original: setup.original,
-            secret: setup.secret,
+            secrets: setup.secrets,
             pending: VecDeque::new(),
             failure: None,
             finished: false,
@@ -138,17 +139,16 @@ impl State {
         let mut data = trim_space(rest).to_vec();
         let mut event: Value = serde_json::from_slice(&data).unwrap_or(Value::Null);
         if let Some(error) = stream_event_error(&event, &data) {
-            let error: ExecError = error.redacted(&self.secret).into();
+            let error: ExecError = error.redacted(&self.secrets).into();
             tracing::debug!(status = error.status, "meta: stream error event");
             self.reader.report(&error);
             return Err(error);
         }
         match str_at(&event, "type").as_str() {
             "response.output_item.done" => self.items.collect(&event),
-            "response.completed" | "response.incomplete" => {
-                if self.items.patch(&mut event) {
-                    data = event.to_string().into_bytes();
-                }
+            // The kept items fill in the completed event's output.
+            "response.completed" | "response.incomplete" if self.items.patch(&mut event) => {
+                data = event.to_string().into_bytes();
             }
             _ => {}
         }
@@ -224,7 +224,8 @@ impl State {
         if let Some(error) = read_error {
             tracing::debug!("meta: stream read failed: {error}");
             self.reader.report(&error);
-            return Err(ExecError::new(ErrorKind::Upstream, error.to_string()));
+            let text = self.secrets.text(error.to_string(), Policy::Client);
+            return Err(ExecError::new(ErrorKind::Upstream, text));
         }
         Ok(())
     }

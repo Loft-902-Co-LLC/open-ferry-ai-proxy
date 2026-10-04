@@ -25,6 +25,7 @@ use super::error::stream_event_error;
 use super::request::Prepared;
 use crate::codex::terminal::{APPLY_PATCH_ERROR_MESSAGE, OutputItems, StatusError};
 use crate::json::{exists, str_at};
+use crate::redact::Secrets;
 
 /// What the error for a stream that ended with no completed event says.
 const DISCONNECTED_MESSAGE: &str =
@@ -85,8 +86,8 @@ fn translate(
         .ok_or_else(apply_patch_failure)
 }
 
-/// Translates Meta's whole reply `data` to the client's format, with `secret`
-/// (the credential's token) redacted from the errors it makes
+/// Translates Meta's whole reply `data` to the client's format, with the
+/// `secrets` the request sent redacted from the errors it makes
 /// (`translateMetaCompleted`).
 ///
 /// The reply is read a line at a time for `data:` lines. An `error` or
@@ -97,7 +98,7 @@ fn translate(
 pub(super) fn translate_completed(
     request: &Request,
     prepared: &mut Prepared,
-    secret: &str,
+    secrets: &Secrets,
     data: &[u8],
 ) -> Result<Vec<u8>, StatusError> {
     let mut items = OutputItems::default();
@@ -107,7 +108,7 @@ pub(super) fn translate_completed(
         };
         let event_data = trim_space(rest);
         if let Some(error) = stream_event_error(&parse(event_data), event_data) {
-            return Err(error.redacted(secret));
+            return Err(error.redacted(secrets));
         }
         let (events, error) = prepared.apply_patch.transform(event_data);
         if error.is_some() {
@@ -164,7 +165,8 @@ mod tests {
 
     fn completed(secret: &str, data: &str) -> Result<Value, StatusError> {
         let (request, mut prepared) = prepared(&json!({"model": "muse-spark-1.3", "input": []}));
-        translate_completed(&request, &mut prepared, secret, data.as_bytes())
+        let secrets: Secrets = [secret].into_iter().collect();
+        translate_completed(&request, &mut prepared, &secrets, data.as_bytes())
             .map(|out| serde_json::from_slice(&out).unwrap())
     }
 

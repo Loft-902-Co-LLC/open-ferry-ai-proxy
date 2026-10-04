@@ -14,20 +14,19 @@
 //! in its metadata; a call without one fails with a 401 before anything is
 //! sent. Meta always streams: a call that wants one answer reads the stream
 //! to its `response.completed` (or `response.incomplete`) event and
-//! translates that (see [`completed`]). `responses/compact` isn't
-//! supported, and answers 501.
+//! translates that. `responses/compact` isn't supported, and answers 501.
 //!
-//! What the request is made of is in [`request`], what a failure means for
-//! the credential in [`error`], the stream in [`stream`], and what Meta's
-//! `web_search` tool takes in [`tools`]. A custom `apply_patch` tool goes to
-//! Meta as a function, and back (see [`crate::apply_patch_responses`], which
-//! this is the first executor to use).
+//! What the request is made of is in the `request` module, what a failure
+//! means for the credential in `error`, the stream in `stream`, and what
+//! Meta's `web_search` tool takes in `tools`. A custom `apply_patch` tool
+//! goes to Meta as a function, and back (see
+//! [`crate::apply_patch_responses`]).
 //!
 //! The request carries only what the call needs: an `Authorization` bearer,
 //! `Content-Type`, `Accept`, `Cache-Control`, the credential's custom
 //! headers, and a user agent that is the client's own or
 //! `open-ferry/<version>`. It carries nothing that names a client of Meta's
-//! (see [`request`]).
+//! (see the `request` module).
 //!
 //! Deviations from upstream:
 //! - Meta's sign-in isn't ported, nor what it brings: the executor doesn't
@@ -36,18 +35,19 @@
 //!   `enrichAuth`), add the token to a plain HTTP request
 //!   (`PrepareRequest`, `HttpRequest`, `PrepareRequestAuth`), or read the
 //!   typed token storage. A credential holds an API key or an access token
-//!   itself, and [`refresh`](MetaExecutor::refresh) returns it as it is.
+//!   itself, and `refresh` returns it as it is.
 //! - The request names no Meta client: upstream sends `X-Client-Id:
-//!   tbh:tui` and a `muse-build/…` user agent. See [`request`].
+//!   tbh:tui` and a `muse-build/…` user agent. See the `request` module.
 //! - Requests go through `reqwest` with rustls, one shared client per proxy;
 //!   upstream builds a client per request. Error bodies are read up to
-//!   4 MiB, and an error body or event that quotes the credential's token
-//!   has it redacted (see the crate's `redact` module).
+//!   4 MiB, and an error body or event that quotes anything the request
+//!   sent (the token, the other headers, the URL's user info, the proxy's
+//!   password) has it redacted (see the crate's `redact` module).
 //! - Usage reporting, the served model and request logging are left to the
 //!   call's taps (see the crate's `observe_send` module), and payload rules
 //!   to [`crate::payload`].
-//! - Upstream's `unreachable` errors are left out: Meta's base URL always
-//!   has a default, and a credential can't be missing.
+//! - Two of upstream's 401s can't happen here and are left out: the base URL
+//!   always has a default, and a call always has a credential.
 //! - Nothing in the server tells `provider_supports_apply_patch` about Meta
 //!   yet; there is no executor hook for upstream's `SupportsApplyPatch`.
 //! - The URL is read as a WHATWG URL, as for Codex (see
@@ -81,6 +81,7 @@ use crate::codex::terminal::StatusError;
 use crate::codex::tokens::count_input_tokens;
 use crate::codex::usage::ensure_responses_usage_details;
 use crate::observe_send::{self, Attempt, BodyTap};
+use crate::redact::{Policy, Secrets};
 
 mod completed;
 mod error;
@@ -134,22 +135,24 @@ impl MetaExecutor {
         Ok(creds)
     }
 
-    /// Posts `body` and returns Meta's answer, whatever its status.
+    /// Posts `body` and returns Meta's answer, whatever its status, with the
+    /// secrets the request sent (see [`observe_send::secrets`]).
     async fn send(
         &self,
         auth: &Auth,
         url: &str,
         headers: HeaderMap,
         body: &Value,
-        secret: &str,
         attempt: Attempt<'_>,
-    ) -> Result<reqwest::Response, ExecError> {
+    ) -> Result<(reqwest::Response, Secrets), ExecError> {
         refuse_control_characters(url)?;
         let body = Bytes::from(body.to_string());
+        let proxy = self.clients.effective_proxy(&auth.proxy_url).to_owned();
+        let secrets = observe_send::secrets(url, &headers, &proxy, auth);
         let tap = attempt.observation.map(|observation| {
             observe_send::announce(
                 observation,
-                &attempt.request(&Method::POST, url, &headers, &body, &[secret]),
+                &attempt.request(&Method::POST, url, &headers, &body, &secrets),
             )
         });
         let mut response = self
@@ -161,15 +164,18 @@ impl MetaExecutor {
             .send()
             .await
             .map_err(|error| {
-                ExecError::new(ErrorKind::Upstream, error_chain(&error.without_url()))
+                ExecError::new(
+                    ErrorKind::Upstream,
+                    secrets.text(error_chain(&error.without_url()), Policy::Client),
+                )
             })?;
         observe_send::response(tap, &mut response);
-        Ok(response)
+        Ok((response, secrets))
     }
 
-    /// The error for Meta's failure `response`, with the credential's
-    /// `token` redacted.
-    async fn failure(response: reqwest::Response, token: &str) -> ExecError {
+    /// The error for Meta's failure `response`, with the `secrets` the
+    /// request sent redacted.
+    async fn failure(response: reqwest::Response, secrets: &Secrets) -> ExecError {
         let status = response.status().as_u16();
         let tap = BodyTap::of(&response);
         let (body, error) = read_body_prefix(response, MAX_ERROR_BODY).await;
@@ -179,7 +185,7 @@ impl MetaExecutor {
             return error;
         }
         tracing::debug!(status, "meta: request error");
-        wrap_upstream_error(status, &body).redacted(token).into()
+        wrap_upstream_error(status, &body).redacted(secrets).into()
     }
 
     async fn execute_inner(
@@ -198,13 +204,12 @@ impl MetaExecutor {
             true,
         )?;
         let headers = build_headers(auth, &creds.token, &options.headers)?;
-        let response = self
+        let (response, secrets) = self
             .send(
                 auth,
                 &endpoint(&creds.base_url),
                 headers,
                 &prepared.body,
-                &creds.token,
                 Attempt::new(
                     options,
                     AttemptKind::Execute,
@@ -216,13 +221,13 @@ impl MetaExecutor {
             )
             .await?;
         if !response.status().is_success() {
-            return Err(Self::failure(response, &creds.token).await);
+            return Err(Self::failure(response, &secrets).await);
         }
         let response_headers = response.headers().clone();
         let data = read_body(response, MAX_LINE)
             .await
             .map_err(|error| ExecError::new(ErrorKind::Upstream, error.to_string()))?;
-        let out = translate_completed(request, &mut prepared, &creds.token, &data)?;
+        let out = translate_completed(request, &mut prepared, &secrets, &data)?;
         Ok(Response {
             payload: Bytes::from(finish_payload(&prepared.response_format, out)),
             headers: response_headers,
@@ -245,13 +250,12 @@ impl MetaExecutor {
             true,
         )?;
         let headers = build_headers(auth, &creds.token, &options.headers)?;
-        let response = self
+        let (response, secrets) = self
             .send(
                 auth,
                 &endpoint(&creds.base_url),
                 headers,
                 &prepared.body,
-                &creds.token,
                 Attempt::new(
                     &options,
                     AttemptKind::Stream,
@@ -263,7 +267,7 @@ impl MetaExecutor {
             )
             .await?;
         if !response.status().is_success() {
-            return Err(Self::failure(response, &creds.token).await);
+            return Err(Self::failure(response, &secrets).await);
         }
         let response_headers = response.headers().clone();
         let translator = Registry::global().response_stream(
@@ -283,7 +287,7 @@ impl MetaExecutor {
                 source_format: options.source_format.clone(),
                 response_format: prepared.response_format,
                 original: prepared.original_bytes,
-                secret: creds.token,
+                secrets,
             },
         );
         Ok(StreamResponse {
