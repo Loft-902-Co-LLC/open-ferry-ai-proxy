@@ -15,6 +15,10 @@
 //! Like gjson, it expects JSON and doesn't validate it: it scans for what
 //! the path names, and on other input finds what gjson finds. A key in a
 //! path may escape `.` and the other special characters with a backslash.
+//! Where gjson calls itself for each part of a path, the search keeps its
+//! place on a stack of its own, so a path as deep as the response (the
+//! response may be 16 MiB) is read as gjson reads it, not overflowing the
+//! thread's stack.
 //!
 //! Deviations from upstream:
 //! - Where gjson would apply a wildcard, pipe, query, modifier, literal
@@ -275,12 +279,8 @@ pub(crate) fn get<'a>(json: &'a [u8], path: &str) -> Value<'a> {
         unsupported: false,
     };
     for (i, &b) in json.iter().enumerate() {
-        if b == b'{' {
-            parse_object(&mut c, i + 1, path);
-            break;
-        }
-        if b == b'[' {
-            parse_array(&mut c, i + 1, path);
+        if b == b'{' || b == b'[' {
+            search(&mut c, b == b'{', i + 1, path);
             break;
         }
     }
@@ -530,105 +530,209 @@ fn parse_uint(s: &[u8]) -> Option<u64> {
     }))
 }
 
-/// Searches the object whose members start at `i` for `path`
-/// (`parseObject`).
-fn parse_object<'a>(c: &mut Context<'a>, mut i: usize, path: &[u8]) -> (usize, bool) {
-    let rp = parse_object_path(path);
-    if rp.wild || rp.piped {
-        c.unsupported = true;
-        return (i, false);
+/// What one step of a container's scan came to.
+enum Step<'p> {
+    /// The scan ended at `next`, with the value found or not.
+    Done { next: usize, found: bool },
+    /// The scan met an object or array along the path, whose members start
+    /// at `next`: that is searched for `path` and then the scan goes on.
+    Descend {
+        next: usize,
+        object: bool,
+        path: &'p [u8],
+    },
+}
+
+fn done<'p>(next: usize, found: bool) -> Step<'p> {
+    Step::Done { next, found }
+}
+
+/// A container being searched: one level of what gjson does by recursion,
+/// kept on a stack of its own, so that a path as deep as the body can't
+/// overflow the thread's.
+enum Scan<'a, 'p> {
+    Object(ObjectScan<'a, 'p>),
+    Array(ArrayScan<'p>),
+}
+
+impl<'a, 'p> Scan<'a, 'p> {
+    /// The scan of the object or array whose members follow, or `None`
+    /// where the path asks for what this port leaves out (`c.unsupported` is
+    /// set then).
+    fn open(c: &mut Context<'a>, object: bool, path: &'p [u8]) -> Option<Self> {
+        if object {
+            let rp = parse_object_path(path);
+            if rp.wild || rp.piped {
+                c.unsupported = true;
+                return None;
+            }
+            Some(Self::Object(ObjectScan {
+                rp,
+                ok: false,
+                key: b"",
+                key_escaped: false,
+            }))
+        } else {
+            let rp = parse_array_path(path);
+            if rp.unsupported || rp.piped {
+                c.unsupported = true;
+                return None;
+            }
+            // Go converts the index to an int, wrapping.
+            let partidx = if rp.arrch {
+                0
+            } else {
+                parse_uint(rp.part).map_or(-1, |n| n as i64)
+            };
+            Some(Self::Array(ArrayScan {
+                rp,
+                partidx,
+                h: 0,
+                pmatch: false,
+                hit: false,
+            }))
+        }
     }
-    let json = c.json;
-    let mut ok = false;
-    let mut key: &[u8] = b"";
-    let mut key_escaped = false;
-    while i < json.len() {
-        while i < json.len() {
-            match at(json, i) {
-                b'"' => {
-                    let (next, raw, escaped, found) = parse_string(json, i + 1);
-                    i = next;
-                    ok = found;
-                    key_escaped = escaped;
-                    key = span(raw, 1, raw.len().saturating_sub(1));
-                    break;
-                }
-                b'}' => return (i + 1, false),
-                _ => i += 1,
+
+    /// Scans on from `i`: where the container's members start, or where the
+    /// search of one it descended into ended.
+    fn run(&mut self, c: &mut Context<'a>, i: usize) -> Step<'p> {
+        match self {
+            Self::Object(scan) => scan.run(c, i),
+            Self::Array(scan) => scan.run(c, i),
+        }
+    }
+}
+
+/// Searches the object or array whose members start at `start` for `path`
+/// (`parseObject` and `parseArray`, which in gjson call each other).
+fn search<'a, 'p>(c: &mut Context<'a>, object: bool, start: usize, path: &'p [u8]) {
+    let mut stack: Vec<Scan<'a, 'p>> = Vec::new();
+    let mut opening = Some((object, path));
+    let mut next = start;
+    loop {
+        if let Some((object, path)) = opening.take()
+            && let Some(scan) = Scan::open(c, object, path)
+        {
+            stack.push(scan);
+        }
+        // Where a container wasn't opened, its parent goes on from `next`,
+        // as it does where gjson's call returns.
+        let Some(scan) = stack.last_mut() else {
+            return;
+        };
+        match scan.run(c, next) {
+            Step::Done { found: true, .. } => return,
+            Step::Done { next: end, .. } => {
+                stack.pop();
+                next = end;
+            }
+            Step::Descend {
+                next: inner,
+                object,
+                path,
+            } => {
+                opening = Some((object, path));
+                next = inner;
             }
         }
-        if !ok {
-            return (i, false);
-        }
-        let pmatch = if key_escaped {
-            unescape(key) == *rp.part
-        } else {
-            key == &*rp.part
-        };
-        let hit = pmatch && !rp.more;
+    }
+}
+
+/// An object being searched (`parseObject`).
+struct ObjectScan<'a, 'p> {
+    rp: ObjectPath<'p>,
+    ok: bool,
+    key: &'a [u8],
+    key_escaped: bool,
+}
+
+impl<'a, 'p> ObjectScan<'a, 'p> {
+    fn run(&mut self, c: &mut Context<'a>, mut i: usize) -> Step<'p> {
+        let json = c.json;
         while i < json.len() {
-            let ch = at(json, i);
-            let mut num = false;
-            match ch {
-                b'"' => {
-                    let (next, raw, escaped, found) = parse_string(json, i + 1);
-                    i = next;
-                    ok = found;
-                    if !ok {
-                        return (i, false);
-                    }
-                    if hit {
-                        c.value = string_value(raw, escaped);
-                        return (i, true);
-                    }
-                }
-                b'{' | b'[' => {
-                    if pmatch && !hit {
-                        let (next, found) = if ch == b'{' {
-                            parse_object(c, i + 1, rp.path)
-                        } else {
-                            parse_array(c, i + 1, rp.path)
-                        };
+            while i < json.len() {
+                match at(json, i) {
+                    b'"' => {
+                        let (next, raw, escaped, found) = parse_string(json, i + 1);
                         i = next;
-                        if found {
-                            return (i, true);
+                        self.ok = found;
+                        self.key_escaped = escaped;
+                        self.key = span(raw, 1, raw.len().saturating_sub(1));
+                        break;
+                    }
+                    b'}' => return done(i + 1, false),
+                    _ => i += 1,
+                }
+            }
+            if !self.ok {
+                return done(i, false);
+            }
+            let pmatch = if self.key_escaped {
+                unescape(self.key) == *self.rp.part
+            } else {
+                self.key == &*self.rp.part
+            };
+            let hit = pmatch && !self.rp.more;
+            while i < json.len() {
+                let ch = at(json, i);
+                let mut num = false;
+                match ch {
+                    b'"' => {
+                        let (next, raw, escaped, found) = parse_string(json, i + 1);
+                        i = next;
+                        self.ok = found;
+                        if !self.ok {
+                            return done(i, false);
                         }
-                    } else {
+                        if hit {
+                            c.value = string_value(raw, escaped);
+                            return done(i, true);
+                        }
+                    }
+                    b'{' | b'[' => {
+                        if pmatch && !hit {
+                            return Step::Descend {
+                                next: i + 1,
+                                object: ch == b'{',
+                                path: self.rp.path,
+                            };
+                        }
                         let (next, raw) = parse_squash(json, i);
                         i = next;
                         if hit {
                             c.value = json_value(raw);
-                            return (i, true);
+                            return done(i, true);
                         }
                     }
-                }
-                b'n' if i + 1 < json.len() && at(json, i + 1) != b'u' => num = true,
-                b'n' | b't' | b'f' => {
-                    let (next, raw) = parse_literal(json, i);
-                    i = next;
-                    if hit {
-                        c.value = literal(literal_kind(ch), raw);
-                        return (i, true);
+                    b'n' if i + 1 < json.len() && at(json, i + 1) != b'u' => num = true,
+                    b'n' | b't' | b'f' => {
+                        let (next, raw) = parse_literal(json, i);
+                        i = next;
+                        if hit {
+                            c.value = literal(literal_kind(ch), raw);
+                            return done(i, true);
+                        }
+                    }
+                    b'+' | b'-' | b'0'..=b'9' | b'i' | b'I' | b'N' => num = true,
+                    _ => {
+                        i += 1;
+                        continue;
                     }
                 }
-                b'+' | b'-' | b'0'..=b'9' | b'i' | b'I' | b'N' => num = true,
-                _ => {
-                    i += 1;
-                    continue;
+                if num {
+                    let (next, raw) = parse_number(json, i);
+                    i = next;
+                    if hit {
+                        c.value = number(raw, to_number(raw));
+                        return done(i, true);
+                    }
                 }
+                break;
             }
-            if num {
-                let (next, raw) = parse_number(json, i);
-                i = next;
-                if hit {
-                    c.value = number(raw, to_number(raw));
-                    return (i, true);
-                }
-            }
-            break;
         }
+        done(i, false)
     }
-    (i, false)
 }
 
 /// The kind of the literal starting with `first`.
@@ -640,110 +744,100 @@ fn literal_kind(first: u8) -> Kind {
     }
 }
 
-/// Searches the array whose elements start at `i` for `path`
-/// (`parseArray`).
-fn parse_array<'a>(c: &mut Context<'a>, mut i: usize, path: &[u8]) -> (usize, bool) {
-    let rp = parse_array_path(path);
-    if rp.unsupported || rp.piped {
-        c.unsupported = true;
-        return (i, false);
-    }
-    // Go converts the index to an int, wrapping.
-    let partidx = if rp.arrch {
-        0
-    } else {
-        parse_uint(rp.part).map_or(-1, |n| n as i64)
-    };
-    let json = c.json;
-    let len = json.len();
-    let mut pmatch = false;
-    let mut hit = false;
-    let mut h: i64 = 0;
-    while i < len + 1 {
-        if !rp.arrch {
-            pmatch = partidx == h;
-            hit = pmatch && !rp.more;
-        }
-        h += 1;
-        loop {
-            let ch = match i.cmp(&len) {
-                std::cmp::Ordering::Greater => break,
-                std::cmp::Ordering::Equal => b']',
-                std::cmp::Ordering::Less => at(json, i),
-            };
-            let mut num = false;
-            match ch {
-                b'"' => {
-                    let (next, raw, escaped, found) = parse_string(json, i + 1);
-                    i = next;
-                    if !found {
-                        return (i, false);
-                    }
-                    if hit {
-                        c.value = string_value(raw, escaped);
-                        return (i, true);
-                    }
-                }
-                b'{' | b'[' => {
-                    if pmatch && !hit {
-                        let (next, found) = if ch == b'{' {
-                            parse_object(c, i + 1, rp.path)
-                        } else {
-                            parse_array(c, i + 1, rp.path)
-                        };
+/// An array being searched (`parseArray`).
+struct ArrayScan<'p> {
+    rp: ArrayPath<'p>,
+    partidx: i64,
+    /// The index of the element after the one being read.
+    h: i64,
+    pmatch: bool,
+    hit: bool,
+}
+
+impl<'p> ArrayScan<'p> {
+    fn run(&mut self, c: &mut Context<'_>, mut i: usize) -> Step<'p> {
+        let json = c.json;
+        let len = json.len();
+        while i < len + 1 {
+            if !self.rp.arrch {
+                self.pmatch = self.partidx == self.h;
+                self.hit = self.pmatch && !self.rp.more;
+            }
+            self.h += 1;
+            loop {
+                let ch = match i.cmp(&len) {
+                    std::cmp::Ordering::Greater => break,
+                    std::cmp::Ordering::Equal => b']',
+                    std::cmp::Ordering::Less => at(json, i),
+                };
+                let mut num = false;
+                match ch {
+                    b'"' => {
+                        let (next, raw, escaped, found) = parse_string(json, i + 1);
                         i = next;
-                        hit = found;
-                        if hit {
-                            return (i, true);
+                        if !found {
+                            return done(i, false);
                         }
-                    } else {
+                        if self.hit {
+                            c.value = string_value(raw, escaped);
+                            return done(i, true);
+                        }
+                    }
+                    b'{' | b'[' => {
+                        if self.pmatch && !self.hit {
+                            return Step::Descend {
+                                next: i + 1,
+                                object: ch == b'{',
+                                path: self.rp.path,
+                            };
+                        }
                         let (next, raw) = parse_squash(json, i);
                         i = next;
-                        if hit {
+                        if self.hit {
                             c.value = json_value(raw);
-                            return (i, true);
+                            return done(i, true);
                         }
                     }
+                    b'n' if i + 1 < len && at(json, i + 1) != b'u' => num = true,
+                    b'n' | b't' | b'f' => {
+                        let (next, raw) = parse_literal(json, i);
+                        i = next;
+                        if self.hit {
+                            c.value = literal(literal_kind(ch), raw);
+                            return done(i, true);
+                        }
+                    }
+                    b'+' | b'-' | b'0'..=b'9' | b'i' | b'I' | b'N' => num = true,
+                    b']' => {
+                        if self.rp.arrch && self.rp.part == b"#" {
+                            c.value = Value {
+                                kind: Kind::Number,
+                                raw: Cow::Owned((self.h - 1).to_string().into_bytes()),
+                                str: Cow::Borrowed(b""),
+                                num: (self.h - 1) as f64,
+                            };
+                            return done(i + 1, true);
+                        }
+                        return done(i + 1, false);
+                    }
+                    _ => {
+                        i += 1;
+                        continue;
+                    }
                 }
-                b'n' if i + 1 < len && at(json, i + 1) != b'u' => num = true,
-                b'n' | b't' | b'f' => {
-                    let (next, raw) = parse_literal(json, i);
+                if num {
+                    let (next, raw) = parse_number(json, i);
                     i = next;
-                    if hit {
-                        c.value = literal(literal_kind(ch), raw);
-                        return (i, true);
+                    if self.hit {
+                        c.value = number(raw, to_number(raw));
+                        return done(i, true);
                     }
                 }
-                b'+' | b'-' | b'0'..=b'9' | b'i' | b'I' | b'N' => num = true,
-                b']' => {
-                    if rp.arrch && rp.part == b"#" {
-                        c.value = Value {
-                            kind: Kind::Number,
-                            raw: Cow::Owned((h - 1).to_string().into_bytes()),
-                            str: Cow::Borrowed(b""),
-                            num: (h - 1) as f64,
-                        };
-                        return (i + 1, true);
-                    }
-                    return (i + 1, false);
-                }
-                _ => {
-                    i += 1;
-                    continue;
-                }
+                break;
             }
-            if num {
-                let (next, raw) = parse_number(json, i);
-                i = next;
-                if hit {
-                    c.value = number(raw, to_number(raw));
-                    return (i, true);
-                }
-            }
-            break;
         }
+        done(i, false)
     }
-    (i, false)
 }
 
 /// Whether the quote at `i` is escaped: preceded by an odd number of
@@ -1027,6 +1121,74 @@ mod tests {
         assert_eq!(text(r#"{"":5}"#, "").as_deref(), Some("5"));
         assert_eq!(text("[5]", "0").as_deref(), Some("5"));
         assert_eq!(text("5", "a"), None);
+    }
+
+    // Not upstream's: a path as deep as the body is searched without
+    // recursing, as gjson's recursion runs on Go's growing stack. The thread
+    // here has a stack that couldn't hold a call for each of the levels; the
+    // answers are gjson v1.18.0's own for these inputs.
+    #[test]
+    fn deep_paths_are_searched_without_recursing() {
+        const DEPTH: usize = 3_000;
+        let joined = |part: &str, count: usize| vec![part; count].join(".");
+        let probe = move || {
+            // `{"a":{"a":...{"a":"Pro"}...}}`
+            let nested = format!("{}\"Pro\"{}", "{\"a\":".repeat(DEPTH), "}".repeat(DEPTH));
+            assert_eq!(
+                found(&nested, &joined("a", DEPTH)),
+                (true, Kind::String, "Pro".into(), "\"Pro\"".into())
+            );
+            let (exists, kind, _, raw) = found(&nested, &joined("a", DEPTH - 1));
+            assert_eq!((exists, kind), (true, Kind::Json));
+            assert_eq!(raw, "{\"a\":\"Pro\"}");
+            assert_eq!(
+                text(&nested, &format!("{}.b", joined("a", DEPTH - 1))),
+                None
+            );
+            assert_eq!(text(&nested, &format!("{}.a", joined("a", DEPTH))), None);
+            assert_eq!(
+                text(&nested, &format!("{}.#", joined("a", DEPTH - 1))),
+                None
+            );
+
+            // `[{"a":[{"a":...[{"a":"Pro"}]...}]}]`, reached by `0.a.0.a...`
+            let nested = format!(
+                "{}\"Pro\"{}",
+                "[{\"a\":".repeat(DEPTH / 2),
+                "}]".repeat(DEPTH / 2)
+            );
+            let path = vec!["0.a"; DEPTH / 2].join(".");
+            assert_eq!(text(&nested, &path).as_deref(), Some("Pro"));
+            assert_eq!(
+                text(&nested, path.strip_suffix(".a").unwrap_or_default()).as_deref(),
+                Some("{\"a\":\"Pro\"}")
+            );
+            let shorter = vec!["0.a"; DEPTH / 2 - 1].join(".");
+            assert_eq!(text(&nested, &format!("{shorter}.1.a")), None);
+            assert_eq!(text(&nested, &format!("{shorter}.0.#")), None);
+
+            // Each level holds an earlier `a` that doesn't hold the rest of
+            // the path, so every level is resumed after a failed descent.
+            let nested = format!(
+                "{}\"Pro\"{}",
+                "{\"a\":{\"x\":1},\"a\":".repeat(1_000),
+                "}".repeat(1_000)
+            );
+            assert_eq!(
+                text(&nested, &joined("a", 1_000)).as_deref(),
+                Some("{\"x\":1}")
+            );
+            assert_eq!(
+                found(&nested, &format!("{}.x", joined("a", 1_000))),
+                (true, Kind::Number, "1".into(), "1".into())
+            );
+        };
+        std::thread::Builder::new()
+            .stack_size(128 * 1024)
+            .spawn(probe)
+            .expect("spawn the probe thread")
+            .join()
+            .expect("the probe finished");
     }
 
     // Not upstream's: the paths this port leaves out find nothing.

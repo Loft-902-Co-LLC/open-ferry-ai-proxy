@@ -640,6 +640,19 @@ async fn reasons_never_show_the_token() {
     assert_eq!(echo.requests().len(), 1);
 }
 
+// Not upstream's: a mapping path as deep as the response is read, as Go
+// reads it, where a recursive read would overflow the stack.
+#[tokio::test]
+async fn a_deep_mapping_path_is_read() {
+    const DEPTH: usize = 3_000;
+    let body = format!("{}\"Pro\"{}", "{\"a\":".repeat(DEPTH), "}".repeat(DEPTH));
+    let upstream = json_upstream(&body).await;
+    let mapping = json!({ "plan": vec!["a"; DEPTH].join(".") });
+    fetch(json!({ "quota_probe": { "url": upstream.url, "mapping": mapping } }))
+        .await
+        .assert(StatusCode::OK, r#"{"subscription":{"plan":"Pro"}}"#);
+}
+
 // Not upstream's: the headers are checked as Go's transport checks them,
 // before anything is sent.
 #[tokio::test]
