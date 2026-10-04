@@ -10,6 +10,7 @@
 
 use std::borrow::Cow;
 use std::collections::hash_map::RandomState;
+use std::collections::{HashMap, VecDeque};
 use std::hash::BuildHasher;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -74,6 +75,11 @@ pub(crate) fn message_system_reminder_text(content: Option<&Value>) -> Option<St
 /// Reorders the `tool_result` parts of a user message to match the order of the
 /// preceding `tool_use` IDs, keeping every other part in its slot. The input is
 /// returned unchanged unless every ID matches exactly one result.
+///
+/// An ID takes the first result with that `tool_use_id` that no earlier ID
+/// took. Upstream finds it by scanning every result for each ID, which takes
+/// quadratic time; the results wait here in a queue per ID, so each match is
+/// one lookup. The output is the same.
 pub(crate) fn align_tool_results<'a>(
     parts: &'a [Value],
     tool_use_ids: &[String],
@@ -91,17 +97,24 @@ pub(crate) fn align_tool_results<'a>(
         return Cow::Borrowed(parts);
     }
 
-    let mut used = vec![false; slots.len()];
+    // Each ID takes the first unused result carrying it. A queue of slots per
+    // ID, in message order, finds that in one step.
+    let mut waiting: HashMap<Cow<'_, str>, VecDeque<usize>> = HashMap::new();
+    for &slot in &slots {
+        let id = str_of(parts.get(slot).and_then(|part| part.get("tool_use_id")));
+        waiting.entry(id).or_default().push_back(slot);
+    }
     let mut reordered = Vec::with_capacity(slots.len());
     for id in tool_use_ids {
-        let matched = slots.iter().enumerate().position(|(i, &slot)| {
-            !used[i] && !id.is_empty() && str_of(parts[slot].get("tool_use_id")) == id.as_str()
-        });
-        let Some(i) = matched else {
+        let matched = if id.is_empty() {
+            None
+        } else {
+            waiting.get_mut(id.as_str()).and_then(VecDeque::pop_front)
+        };
+        let Some(source) = matched else {
             return Cow::Borrowed(parts);
         };
-        used[i] = true;
-        reordered.push(slots[i]);
+        reordered.push(source);
     }
 
     let mut aligned = parts.to_vec();
@@ -383,6 +396,91 @@ mod tests {
         let parts = vec![json!({"type": "tool_result", "tool_use_id": "x"})];
         let aligned = align_tool_results(&parts, &["a".to_owned()]);
         assert!(matches!(aligned, Cow::Borrowed(_)));
+    }
+
+    // Not upstream's: a duplicate ID goes to the first unused result in message
+    // order, as upstream's scan finds it, and each later duplicate to the next.
+    #[test]
+    fn align_tool_results_gives_duplicate_ids_their_results_in_message_order() {
+        let parts = vec![
+            json!({"type": "tool_result", "tool_use_id": "b", "content": "b1"}),
+            json!({"type": "tool_result", "tool_use_id": "a", "content": "a1"}),
+            json!({"type": "text", "text": "keep"}),
+            json!({"type": "tool_result", "tool_use_id": "b", "content": "b2"}),
+            json!({"type": "tool_result", "tool_use_id": "a", "content": "a2"}),
+        ];
+        let ids = ["a", "b", "a", "b"].map(str::to_owned);
+        let aligned = align_tool_results(&parts, &ids);
+        let contents: Vec<&str> = aligned
+            .iter()
+            .map(|part| part["content"].as_str().unwrap_or("-"))
+            .collect();
+        assert_eq!(contents, ["a1", "b1", "-", "a2", "b2"]);
+        assert_eq!(aligned[2]["text"], "keep");
+    }
+
+    // Not upstream's: every way the one-to-one match can fail leaves the parts
+    // as they came, as upstream's does: a result no ID asks for (the counts
+    // agree, the sets differ), an ID with no result, an ID whose only result an
+    // earlier duplicate took, an empty ID, which matches nothing, even a result
+    // without a `tool_use_id`, and a count that differs.
+    #[test]
+    fn align_tool_results_falls_back_unless_every_id_has_its_own_result() {
+        let result = |id: Value| json!({"type": "tool_result", "tool_use_id": id});
+        let cases: [(Vec<Value>, Vec<&str>); 5] = [
+            (vec![result(json!("a")), result(json!("c"))], vec!["a", "b"]),
+            (vec![result(json!("a")), result(json!("a"))], vec!["a", "b"]),
+            (vec![result(json!("a")), result(json!("b"))], vec!["a", "a"]),
+            (vec![result(json!(null)), result(json!("a"))], vec!["", "a"]),
+            (vec![result(json!("a"))], vec!["a", "b"]),
+        ];
+        for (parts, ids) in cases {
+            let ids: Vec<String> = ids.into_iter().map(str::to_owned).collect();
+            let aligned = align_tool_results(&parts, &ids);
+            assert!(matches!(aligned, Cow::Borrowed(_)), "{parts:?} {ids:?}");
+        }
+    }
+
+    // Not upstream's: a result's `tool_use_id` is read as text as gjson reads it,
+    // so a number matches the ID spelled the same.
+    #[test]
+    fn align_tool_results_reads_a_numeric_id_as_text() {
+        let parts = vec![
+            json!({"type": "tool_result", "tool_use_id": 2}),
+            json!({"type": "tool_result", "tool_use_id": 1}),
+        ];
+        let aligned = align_tool_results(&parts, &["1".to_owned(), "2".to_owned()]);
+        assert_eq!(aligned[0]["tool_use_id"], 1);
+        assert_eq!(aligned[1]["tool_use_id"], 2);
+    }
+
+    // Not upstream's: 20,000 results in reverse order. Upstream scans the results
+    // again for each ID, which took 80 seconds here in a debug build; this must
+    // take milliseconds, so the bound is loose enough for a slow machine yet
+    // far under what the scan costs.
+    #[test]
+    fn align_tool_results_is_linear_for_many_results_in_reverse_order() {
+        const COUNT: usize = 20_000;
+        let ids: Vec<String> = (0..COUNT).map(|n| n.to_string()).collect();
+        let parts: Vec<Value> = ids
+            .iter()
+            .rev()
+            .map(|id| json!({"type": "tool_result", "tool_use_id": id, "content": "x"}))
+            .collect();
+
+        let started = std::time::Instant::now();
+        let aligned = align_tool_results(&parts, &ids);
+        let elapsed = started.elapsed();
+
+        assert!(matches!(aligned, Cow::Owned(_)));
+        assert_eq!(aligned.len(), COUNT);
+        for (part, id) in aligned.iter().zip(&ids) {
+            assert_eq!(part["tool_use_id"], id.as_str());
+        }
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "aligning {COUNT} results took {elapsed:?}"
+        );
     }
 
     #[test]
