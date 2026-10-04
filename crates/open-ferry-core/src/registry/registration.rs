@@ -32,9 +32,10 @@
 //! Deviations from upstream:
 //! - Only Gemini, Vertex, Claude, Codex and OpenAI-compatible credentials
 //!   get models; a credential of any other provider is unregistered. Gemini
-//!   Interactions, xAI and Meta credentials get theirs only once their
-//!   executors are ported: until then those providers stay in
-//!   `UNPORTED_PROVIDERS`, which comes first. Plugin models and Antigravity
+//!   Interactions and xAI credentials get theirs only once their executors
+//!   are ported: until then those providers stay in `UNPORTED_PROVIDERS`,
+//!   which comes first. Meta's executor is ported, so its credentials get
+//!   models. Plugin models and Antigravity
 //!   capability probing aren't ported.
 //! - xAI credentials don't get upstream's built-in image and video models
 //!   (`WithXAIBuiltins`): image and video generation aren't ported.
@@ -90,9 +91,9 @@ pub const OPENAI_IMAGE_MODEL_TYPE: &str = "openai-image";
 
 /// Providers upstream lists models of their own for whose executors aren't
 /// ported: their credentials get no models, rather than an OpenAI-compatible
-/// provider's of the same name. `gemini-interactions`, `xai` and `meta` have
-/// their own cases in [`auth_models_with`], which apply once a provider's
-/// executor is ported and its name leaves this list.
+/// provider's of the same name. `gemini-interactions` and `xai` have their own
+/// cases in [`auth_models_with`], which apply once a provider's executor is
+/// ported and its name leaves this list.
 const UNPORTED_PROVIDERS: &[&str] = &[
     "aistudio",
     "antigravity",
@@ -102,7 +103,6 @@ const UNPORTED_PROVIDERS: &[&str] = &[
     "kimi.com",
     "xai",
     "devin",
-    "meta",
 ];
 
 /// The plan a Codex account has when its token doesn't say.

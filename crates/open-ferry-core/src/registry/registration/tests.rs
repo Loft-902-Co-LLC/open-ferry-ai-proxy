@@ -548,23 +548,18 @@ fn register_models_for_auth_meta_oauth_alias_and_excluded_models() {
     );
 }
 
-// Not upstream's: the interactions, xAI and Meta credentials get no models
-// while their providers are unported.
+// Not upstream's: the xAI credentials get no models while their provider is
+// unported; the interactions and Meta ones get them, as their executors are
+// ported.
 #[test]
-fn interactions_xai_and_meta_wait_for_their_executors() {
-    for provider in ["xai", "meta"] {
-        assert!(UNPORTED_PROVIDERS.contains(&provider), "{provider}");
-        let credential = auth(&format!("{provider}-key"), provider, &[("api_key", "k")]);
-        assert_eq!(
-            auth_models(&credential, &RegistrationRules::default()),
-            AuthModels::Unregister,
-            "{provider}"
-        );
-        assert!(
-            !ported(&credential, &RegistrationRules::default()).is_empty(),
-            "{provider}"
-        );
-    }
+fn xai_waits_for_its_executor() {
+    assert!(UNPORTED_PROVIDERS.contains(&"xai"));
+    let credential = auth("xai-key", "xai", &[("api_key", "k")]);
+    assert_eq!(
+        auth_models(&credential, &RegistrationRules::default()),
+        AuthModels::Unregister
+    );
+    assert!(!ported(&credential, &RegistrationRules::default()).is_empty());
 }
 
 // service_models.go: the gemini-interactions, xai and meta cases of

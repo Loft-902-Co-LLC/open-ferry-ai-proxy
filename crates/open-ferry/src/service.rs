@@ -116,6 +116,7 @@ use open_ferry_management::{
 use open_ferry_providers::claude::ClaudeExecutor;
 use open_ferry_providers::codex::CodexExecutor;
 use open_ferry_providers::gemini::{GeminiExecutor, InteractionsExecutor, VertexExecutor};
+use open_ferry_providers::meta::MetaExecutor;
 use open_ferry_providers::openai_compat::OpenAiCompatExecutor;
 use open_ferry_server::{AppState, ServerConfig, router_with};
 use tokio::net::TcpListener;
@@ -462,7 +463,7 @@ impl Service {
         router_with(self.state.clone(), management)
     }
 
-    /// Registers the executors for the current config: Codex, Claude,
+    /// Registers the executors for the current config: Codex, Meta, Claude,
     /// Gemini, Vertex AI, and the OpenAI-compatible ones (see
     /// [`Self::register_compat_executors`]).
     fn register_executors(&mut self) {
@@ -470,11 +471,12 @@ impl Service {
         self.register_compat_executors();
     }
 
-    /// Registers the Codex, Claude, Gemini, Gemini Interactions and Vertex AI executors for the
-    /// current config.
+    /// Registers the Codex, Meta, Claude, Gemini, Gemini Interactions and
+    /// Vertex AI executors for the current config.
     fn register_native_executors(&self) {
         let proxy_url = self.config.proxy_url.clone();
         self.register_codex_executor();
+        self.register_meta_executor();
         self.manager.register_executor(Arc::new(
             ClaudeExecutor::new(proxy_url.clone())
                 .with_config(Arc::clone(&self.config))
@@ -502,6 +504,15 @@ impl Service {
     fn register_codex_executor(&self) {
         self.manager.register_executor(Arc::new(
             CodexExecutor::new(self.config.proxy_url.clone())
+                .with_config(Arc::clone(&self.config))
+                .with_models(Arc::clone(&self.registry) as _),
+        ));
+    }
+
+    /// Registers the Meta executor for the current config.
+    fn register_meta_executor(&self) {
+        self.manager.register_executor(Arc::new(
+            MetaExecutor::new(self.config.proxy_url.clone())
                 .with_config(Arc::clone(&self.config))
                 .with_models(Arc::clone(&self.registry) as _),
         ));
@@ -862,8 +873,9 @@ impl Service {
         {
             self.register_native_executors();
         } else if previous != config {
-            // The Codex executor follows the whole config.
+            // The Codex and Meta executors follow the whole config.
             self.register_codex_executor();
+            self.register_meta_executor();
         }
         // Made again before the credentials change, as upstream does, so no
         // credential of the new config is served by an executor of the old.
@@ -1848,8 +1860,9 @@ mod tests {
 
     /// Ports `TestRegisterAvailableExecutors` of CLIProxyAPI
     /// sdk/cliproxy/service_executor_registration_test.go (v8.0.10, MIT)
-    /// for the executors ported: Codex, Claude, Gemini, Gemini Interactions, Vertex AI and the
-    /// baseline OpenAI-compatible one. The plugin executor and the other
+    /// for the executors ported: Codex, Meta, Claude, Gemini, Gemini
+    /// Interactions, Vertex AI and the baseline OpenAI-compatible one. The
+    /// plugin executor and the other
     /// providers' aren't ported.
     #[tokio::test]
     async fn registers_the_available_executors() {
@@ -1857,6 +1870,7 @@ mod tests {
         let service = service(dir.path(), "");
         for provider in [
             "codex",
+            "meta",
             "claude",
             "gemini",
             "gemini-interactions",
