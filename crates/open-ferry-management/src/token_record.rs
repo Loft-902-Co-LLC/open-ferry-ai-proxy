@@ -18,11 +18,12 @@
 //!   file name to a record without one. Of several with the file name,
 //!   the first by ID is taken, where upstream takes whichever its map
 //!   yields first.
-//! - The merge, the save and the readback hold the credential lock that
-//!   the management API's other changes of credential files and records
-//!   hold, released before the service is told; upstream takes none, so a
-//!   status change made meanwhile could save its stale copy over the new
-//!   credential.
+//! - The merge, the save, the readback and the call telling the service
+//!   hold the credential lock that the management API's other changes of
+//!   credential files and records hold, so the change takes its revision
+//!   under it, and the call is awaited once the lock is released (see
+//!   [`crate::credential_sync`]); upstream takes none, so a status change
+//!   made meanwhile could save its stale copy over the new credential.
 //! - The file replaced and the one saved are never read through a symlink
 //!   or, on Windows, any reparse point, and a symlink where the file would
 //!   be saved is refused (checked just before the save): the save fails
@@ -112,8 +113,10 @@ impl std::error::Error for SaveError {}
 /// 3. The service is sent the saved file, or `record` when the file can't
 ///    be read back, and serves the credential once this returns.
 ///
-/// The credential lock is held from the merge until the file is read back,
-/// and released before the service is told. The file replaced and the one
+/// The credential lock is held from the merge until the service is sent
+/// the change, which takes its revision under it, and released before the
+/// change is awaited (see [`crate::credential_sync`]). The file replaced
+/// and the one
 /// saved are never read through a link (see
 /// [`read_unlinked`](crate::credential_files::read_unlinked)), and a
 /// symlink where the file would be saved is refused; either fails with
@@ -129,8 +132,9 @@ pub(crate) async fn save_token_record(
     let store = state
         .credential_store()
         .map_err(|_| SaveError::Unavailable)?;
-    // Held from the merge to the readback, as every change of a credential
-    // file or record is, so none is lost to another made meanwhile.
+    // Held from the merge until the service is sent the change, as every
+    // change of a credential file or record is, so none is lost to another
+    // made meanwhile and the service applies them in order.
     let guard = state.credential_lock().lock().await;
     let files = Arc::clone(&store.files);
     let (returned, existing) = run_blocking(move || {
@@ -157,20 +161,18 @@ pub(crate) async fn save_token_record(
         (record, saved)
     })
     .await;
-    drop(guard);
     let (path, data) = saved.map_err(SaveError::Save)?;
     let sync: &dyn CredentialSync = store.sync.as_ref();
+    // Made under the lock, so the change takes its revision there.
     let synced = match data {
-        Some(data) => {
-            sync.file_written(AuthFile {
-                path: PathBuf::from(&path),
-                data: data.into(),
-            })
-            .await
-        }
-        None => sync.upsert(record).await,
+        Some(data) => sync.file_written(AuthFile {
+            path: PathBuf::from(&path),
+            data: data.into(),
+        }),
+        None => sync.upsert(record),
     };
-    match synced {
+    drop(guard);
+    match synced.await {
         Ok(()) => Ok(path),
         Err(error) => Err(SaveError::Sync { path, error }),
     }

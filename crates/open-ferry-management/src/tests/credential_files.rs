@@ -1190,6 +1190,32 @@ async fn batch_upload_order_and_failures() {
     assert_eq!(listing(&auth_dir), ["mu.json", "zeta.json"]);
 }
 
+// Not upstream's: an upload or delete tells the service while it holds the
+// credential lock, so the change takes its revision under the lock, and
+// awaits the service once the lock is released.
+#[tokio::test]
+async fn changes_are_sent_under_the_lock_and_awaited_after() {
+    let auth_dir = AuthDir::new();
+    let api = Api::over(&auth_dir);
+    api.sync.watch_lock(api.state.clone());
+
+    upload(&api, &[("a.json", CODEX)])
+        .await
+        .assert(StatusCode::OK, OK);
+    upload_raw(&api, "b.json", OTHER)
+        .await
+        .assert(StatusCode::OK, OK);
+    upload(&api, &[("c.json", CODEX), ("d.json", OTHER)])
+        .await
+        .expect(StatusCode::OK);
+    delete_name(&api, "a.json").await.assert(StatusCode::OK, OK);
+    delete(&api, "?all=true", "").await.expect(StatusCode::OK);
+
+    assert!(listing(&auth_dir).is_empty());
+    assert_eq!(api.sync.calls().len(), 8);
+    assert_eq!(api.sync.lock_held(), [(true, false); 8]);
+}
+
 // Not upstream's: a form's `Debug` shows its names and sizes, never what a
 // file or value holds.
 #[tokio::test]

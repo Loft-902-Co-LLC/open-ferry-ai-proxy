@@ -351,31 +351,30 @@ async fn write_auth_file(
     let files = Arc::clone(&store.files);
     let file = name.to_owned();
     let contents = data.clone();
-    let written = {
-        let _guard = state.credential_lock().lock().await;
-        run_blocking(move || {
-            let path = files
-                .file_path(&file)
-                .map_err(|error| Failure::internal(format!("failed to write file: {error}")))?;
-            check_credential(&files.base_dir(), &path, &contents)?;
-            if fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_symlink()) {
-                return Err(Failure::internal(format!(
-                    "failed to write file: {} is a symlink",
-                    path.display()
-                )));
-            }
-            files
-                .write_file(&file, &contents)
-                .map_err(|error| Failure::internal(format!("failed to write file: {error}")))
-        })
-        .await?
-    };
-    store
-        .sync
-        .file_written(AuthFile {
-            path: written,
-            data: Arc::from(data.as_ref()),
-        })
+    let guard = state.credential_lock().lock().await;
+    let written = run_blocking(move || {
+        let path = files
+            .file_path(&file)
+            .map_err(|error| Failure::internal(format!("failed to write file: {error}")))?;
+        check_credential(&files.base_dir(), &path, &contents)?;
+        if fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            return Err(Failure::internal(format!(
+                "failed to write file: {} is a symlink",
+                path.display()
+            )));
+        }
+        files
+            .write_file(&file, &contents)
+            .map_err(|error| Failure::internal(format!("failed to write file: {error}")))
+    })
+    .await?;
+    // Made under the lock, so the change takes its revision there.
+    let synced = store.sync.file_written(AuthFile {
+        path: written,
+        data: Arc::from(data.as_ref()),
+    });
+    drop(guard);
+    synced
         .await
         .map_err(|error| Failure::new(error.status(), error.to_string()))
 }
@@ -487,15 +486,15 @@ async fn delete_all(state: &ManagementState, store: &CredentialStore) -> Respons
     let mut deleted: i64 = 0;
     for name in names {
         let files = Arc::clone(&store.files);
-        let removed = {
-            let _guard = state.credential_lock().lock().await;
-            run_blocking(move || files.remove_file(&name)).await
-        };
+        let guard = state.credential_lock().lock().await;
         // As upstream, a file that can't be removed is passed over.
-        let Ok(path) = removed else {
+        let Ok(path) = run_blocking(move || files.remove_file(&name)).await else {
             continue;
         };
-        if let Err(error) = store.sync.file_removed(path).await {
+        // Made under the lock, so the change takes its revision there.
+        let synced = store.sync.file_removed(path);
+        drop(guard);
+        if let Err(error) = synced.await {
             return error.into_response();
         }
         deleted += 1;
@@ -543,21 +542,19 @@ async fn delete_one(
         return Err(Failure::bad_request("name must end with .json"));
     }
     let files = Arc::clone(&store.files);
-    let removed = {
-        let _guard = state.credential_lock().lock().await;
-        run_blocking(move || files.remove_file(&file_name)).await
-    };
-    let removed = match removed {
+    let guard = state.credential_lock().lock().await;
+    let removed = match run_blocking(move || files.remove_file(&file_name)).await {
         Ok(path) => path,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Err(Failure::new(StatusCode::NOT_FOUND, "auth file not found"));
         }
         Err(error) => return Err(Failure::internal(format!("failed to remove file: {error}"))),
     };
-    // The service knows a credential by the path it was read from.
-    store
-        .sync
-        .file_removed(credential_path.unwrap_or(removed))
+    // The service knows a credential by the path it was read from. The call
+    // is made under the lock, so the change takes its revision there.
+    let synced = store.sync.file_removed(credential_path.unwrap_or(removed));
+    drop(guard);
+    synced
         .await
         .map_err(|error| Failure::new(error.status(), error.to_string()))
 }

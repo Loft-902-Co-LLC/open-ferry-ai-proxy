@@ -40,7 +40,7 @@ use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use axum::Router;
 use axum::body::Body;
@@ -306,13 +306,19 @@ enum SyncCall {
 }
 
 /// A [`CredentialSync`] that stands in for the service: it records each
-/// call and applies it to its manager, much as the service would, without
-/// the model registry; once stopped, it fails every call as a stopped
-/// service does, and records nothing.
+/// call and applies it to its manager when the call is made, as the
+/// service takes its revision then, without the model registry; once
+/// stopped, it fails every call as a stopped service does, and records
+/// nothing.
 struct FakeSync {
     manager: Manager,
     calls: Mutex<Vec<SyncCall>>,
     stopped: AtomicBool,
+    /// The state whose credential lock each call checks, once watched.
+    watched: OnceLock<ManagementState>,
+    /// For each call made while watched: whether the credential lock was
+    /// held when the call was made, and when its future was awaited.
+    lock_held: Mutex<Vec<(bool, bool)>>,
 }
 
 impl FakeSync {
@@ -321,7 +327,30 @@ impl FakeSync {
             manager,
             calls: Mutex::new(Vec::new()),
             stopped: AtomicBool::new(false),
+            watched: OnceLock::new(),
+            lock_held: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Records, for each later call, whether the credential lock of
+    /// `state` was held when the call was made and when it was awaited
+    /// (see [`FakeSync::lock_held`]). The state holds this sync, so the two
+    /// are never freed: watch only a test's own API.
+    fn watch_lock(&self, state: ManagementState) {
+        assert!(self.watched.set(state).is_ok(), "already watched");
+    }
+
+    /// For each call made while watched, whether the credential lock was
+    /// held when it was made, and when it was awaited.
+    fn lock_held(&self) -> Vec<(bool, bool)> {
+        self.lock_held.lock().unwrap().clone()
+    }
+
+    /// Whether the watched credential lock is held now, if one is watched.
+    fn lock_held_now(&self) -> Option<bool> {
+        self.watched
+            .get()
+            .map(|state| state.credential_lock().try_lock().is_err())
     }
 
     /// The calls taken so far.
@@ -335,6 +364,7 @@ impl FakeSync {
     }
 
     fn call(&self, call: SyncCall) -> SyncFuture<'_> {
+        let held_at_call = self.lock_held_now();
         let result = if self.stopped.load(Ordering::SeqCst) {
             Err(SyncError::Stopped)
         } else {
@@ -342,7 +372,13 @@ impl FakeSync {
             self.calls.lock().unwrap().push(call);
             Ok(())
         };
-        Box::pin(std::future::ready(result))
+        Box::pin(async move {
+            if let Some(at_call) = held_at_call {
+                let at_await = self.lock_held_now().unwrap_or_default();
+                self.lock_held.lock().unwrap().push((at_call, at_await));
+            }
+            result
+        })
     }
 
     fn apply(&self, call: &SyncCall) {

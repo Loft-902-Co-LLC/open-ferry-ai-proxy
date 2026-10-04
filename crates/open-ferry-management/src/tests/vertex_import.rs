@@ -534,3 +534,18 @@ async fn imports_wait_for_the_credential_lock() {
     );
     assert_eq!(api.sync.calls().len(), 1);
 }
+
+// Not upstream's: an import tells the service while it holds the
+// credential lock, so the change takes its revision under the lock, and
+// awaits the service once the lock is released.
+#[tokio::test]
+async fn imports_are_sent_under_the_lock_and_awaited_after() {
+    let auth_dir = AuthDir::new();
+    let api = Api::over(&auth_dir);
+    api.sync.watch_lock(api.state.clone());
+
+    import(&api, &account()).await.expect(StatusCode::OK);
+
+    assert_eq!(api.sync.calls().len(), 1);
+    assert_eq!(api.sync.lock_held(), [(true, false)]);
+}
