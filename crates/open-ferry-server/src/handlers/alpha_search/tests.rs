@@ -482,6 +482,54 @@ async fn codex_alpha_search_routes_on_the_model_go_reads() {
     }
 }
 
+// Not upstream's: a base URL with an ASCII control character fails before
+// anything is sent, as Go's `url.Parse` fails it, with a 502 and Go's
+// message, but without the URL Go quotes (Go 1.26.4 answers `parse
+// "<url>": net/url: invalid control character in URL`), which may hold a
+// secret.
+#[tokio::test]
+async fn codex_alpha_search_refuses_a_base_url_with_a_control_character() {
+    let chatgpt = Mock::ok().await;
+    let endpoint = Mock::ok().await;
+    for base_url in [
+        format!("{}/v1\n/x?key=secret", endpoint.url),
+        format!("{}/v1\u{7f}", endpoint.url),
+    ] {
+        let credential = opted_in("codex-alpha-api-key", &base_url);
+        let app = proxy(Settings::default(), &chatgpt.url, vec![credential], &[]);
+        let request = search("/v1/alpha/search", r#"{"query":"golang"}"#, &[]);
+        let (status, headers, body) = send(&app, request).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+        assert_eq!(
+            body,
+            r#"{"error":"net/url: invalid control character in URL"}"#
+        );
+        assert_eq!(content_type(&headers), "application/json; charset=utf-8");
+        assert!(headers.get(header::RETRY_AFTER).is_none());
+    }
+    assert!(endpoint.requests().is_empty());
+    assert!(chatgpt.requests().is_empty());
+}
+
+// Not upstream's: pins a deviation. A base URL is read as a WHATWG URL, so
+// its percent-encoded dot segments are resolved, where Go 1.26.4 sends
+// `/v1/%2e%2e/alpha/search` as written.
+#[tokio::test]
+async fn codex_alpha_search_resolves_a_base_urls_dot_segments() {
+    let chatgpt = Mock::ok().await;
+    let endpoint = Mock::ok().await;
+    let credential = opted_in(
+        "codex-alpha-api-key",
+        &format!("{}/v1/%2e%2e", endpoint.url),
+    );
+    let app = proxy(Settings::default(), &chatgpt.url, vec![credential], &[]);
+    let request = search("/v1/alpha/search", r#"{"query":"golang"}"#, &[]);
+    let (status, _, body) = send(&app, request).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(endpoint.only().path, "/alpha/search");
+    assert!(chatgpt.requests().is_empty());
+}
+
 // Not upstream's: both routes need a client key, and a refused one never
 // reaches Codex.
 #[tokio::test]

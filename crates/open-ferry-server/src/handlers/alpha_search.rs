@@ -12,9 +12,9 @@
 //! manager's `alpha_search` module). The answer comes back with Codex's
 //! status, `Content-Type` and body, up to 32 MiB. A failure answers
 //! `{"error":"<message>"}`: 503 when no credential could be picked, or when
-//! the picked API key has no base URL; 502 when Codex couldn't be reached or
-//! its answer couldn't be read; and a `Retry-After` when every credential
-//! is cooling down.
+//! the picked API key has no base URL; 502 when Codex couldn't be reached,
+//! its answer couldn't be read, or the URL holds an ASCII control
+//! character; and a `Retry-After` when every credential is cooling down.
 //!
 //! Deviations from upstream:
 //! - A payload over 16 MiB (or the configured body limit, when lower) gets

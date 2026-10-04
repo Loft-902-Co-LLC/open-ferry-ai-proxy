@@ -21,6 +21,13 @@
 //!   dropped; a connection error reads as no answer, without the URL.
 //! - A custom header can't set a client identity header (see
 //!   [`crate::custom_headers`]).
+//! - The URL is read as a WHATWG URL, so its `.` and `..` segments are
+//!   resolved, percent-encoded ones such as `%2e%2e` included, and a `\`
+//!   reads as `/`. Go sends `/v1/%2e%2e/alpha/search` as written and a `\`
+//!   as `%5C`. A URL with an ASCII control character, which the WHATWG
+//!   parser would drop or encode, fails before anything is sent, as Go's
+//!   does, with Go's message (`net/url: invalid control character in URL`)
+//!   but without the URL, which may hold a secret.
 
 use bytes::Bytes;
 use http::header::{self, HeaderValue};
@@ -31,6 +38,15 @@ use super::CodexExecutor;
 use crate::codex::client::{USER_AGENT, error_chain, read_body_prefix};
 use crate::codex::request::credentials;
 use crate::custom_headers;
+
+/// Go's `url.Parse` error for a URL with an ASCII control character, without
+/// the URL it quotes.
+const CONTROL_CHARACTER: &str = "net/url: invalid control character in URL";
+
+/// Whether `url` has a byte Go's `url.Parse` refuses (`stringContainsCTLByte`).
+fn has_control_character(url: &str) -> bool {
+    url.bytes().any(|b| b < 0x20 || b == 0x7f)
+}
 
 impl CodexExecutor {
     /// Sends `call` with the credential's token and custom headers, and
@@ -49,6 +65,9 @@ impl CodexExecutor {
             response_limit,
         } = call;
         let url = self.target_url(target);
+        if has_control_character(&url) {
+            return Err(ExecError::new(ErrorKind::Upstream, CONTROL_CHARACTER));
+        }
         let (token, _) = credentials(auth);
         if token.trim().is_empty() {
             headers.remove(header::AUTHORIZATION);
@@ -261,6 +280,50 @@ mod tests {
         assert_eq!(reply.body, "0123");
         assert!(reply.read_error.is_none());
         assert!(last(&seen).headers.get("authorization").is_none());
+    }
+
+    // Not upstream's: Go's url.Parse refuses a control character before
+    // anything is sent (Go 1.26.4 answers `parse "<url>": net/url: invalid
+    // control character in URL`), where the WHATWG parser would drop a
+    // newline or tab and encode the rest.
+    #[tokio::test]
+    async fn a_url_with_a_control_character_is_refused_unsent() {
+        let (url, seen) = serve(200, "{}").await;
+        let executor = CodexExecutor::new("direct").with_base_url(format!("{url}/v1\t"));
+        for target in [
+            HttpTarget::Url(format!("{url}/v1\n/x/alpha/search?key=secret")),
+            HttpTarget::Url(format!("{url}/v1\u{7f}/alpha/search")),
+            HttpTarget::Url(format!("{url}/v1\u{1}/alpha/search")),
+            HttpTarget::Path("/alpha/search".into()),
+        ] {
+            let err = executor
+                .http_request_inner(&Auth::default(), call(target, "{}"))
+                .await
+                .unwrap_err();
+            assert_eq!(err.message, CONTROL_CHARACTER);
+            assert_eq!(err.http_status(), 0);
+        }
+        assert!(seen.lock().unwrap().is_empty());
+    }
+
+    // Not upstream's: pins a deviation. Go sends `/v1/%2e%2e/alpha/search`
+    // and `/v1%5Cx/alpha/search` as written (Go 1.26.4); the WHATWG parser
+    // resolves the encoded dot segment and reads `\` as `/`.
+    #[tokio::test]
+    async fn a_url_is_read_as_a_whatwg_url() {
+        let (url, seen) = serve(200, "{}").await;
+        let executor = CodexExecutor::new("direct");
+        for (sent, path) in [
+            (format!("{url}/v1/%2e%2e/alpha/search"), "/alpha/search"),
+            (format!("{url}/v1/%2E%2e/alpha/search"), "/alpha/search"),
+            (format!("{url}/v1\\x/alpha/search"), "/v1/x/alpha/search"),
+        ] {
+            executor
+                .http_request_inner(&Auth::default(), call(HttpTarget::Url(sent), "{}"))
+                .await
+                .unwrap();
+            assert_eq!(last(&seen).path, path);
+        }
     }
 
     #[tokio::test]
