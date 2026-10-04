@@ -151,9 +151,22 @@ impl FileStore {
     /// unreadable or not a JSON object, where upstream's `json.Unmarshal`
     /// leaves its map nil.
     pub fn existing_metadata(&self, auth: &Auth) -> Option<Map<String, Value>> {
+        self.read_existing_metadata(auth, read_capped)
+            .ok()
+            .flatten()
+    }
+
+    /// As [`existing_metadata`](Self::existing_metadata), with the file
+    /// read by `read`, whose error is returned: for a caller that reads it
+    /// more strictly, as without following a link.
+    pub fn read_existing_metadata(
+        &self,
+        auth: &Auth,
+        read: impl FnOnce(&Path) -> io::Result<Vec<u8>>,
+    ) -> io::Result<Option<Map<String, Value>>> {
         let dir = self.base_dir();
         if dir.as_os_str().is_empty() {
-            return None;
+            return Ok(None);
         }
         let target = if auth.file_name.is_empty() {
             &auth.id
@@ -161,13 +174,13 @@ impl FileStore {
             &auth.file_name
         };
         if target.is_empty() {
-            return None;
+            return Ok(None);
         }
-        let raw = read_capped(&join(&dir, Path::new(target))).ok()?;
+        let raw = read(&join(&dir, Path::new(target)))?;
         if raw.is_empty() {
-            return None;
+            return Ok(None);
         }
-        unmarshal_object(&raw).ok().flatten()
+        Ok(unmarshal_object(&raw).ok().flatten())
     }
 
     /// The path of the file `name` in the auth directory. `name` must be
@@ -306,7 +319,9 @@ impl FileStore {
         Ok(path_str)
     }
 
-    fn resolve_auth_path(&self, auth: &Auth) -> io::Result<PathBuf> {
+    /// The path a save writes `auth` to: its `path` attribute, else its
+    /// file name, else its ID, under the auth directory unless absolute.
+    pub fn resolve_auth_path(&self, auth: &Auth) -> io::Result<PathBuf> {
         let attr = auth.trimmed_attribute(ATTRIBUTE_PATH);
         if !attr.is_empty() {
             return Ok(PathBuf::from(attr));

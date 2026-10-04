@@ -39,8 +39,9 @@
 //! - A `project_id` that gives a file name Windows can't hold (with a
 //!   control character or one of `<>"|?*`) is refused with 400 `invalid
 //!   service account`, on every system. A symlink where the file would go
-//!   is refused with 500 `save_failed` (checked just before the save);
-//!   upstream writes through it.
+//!   is refused with 500 `save_failed`, checked just before the save while
+//!   the credential lock is held, as [`save_token_record`] describes;
+//!   upstream writes through it and takes no lock.
 //! - Without a credential store or sync the route answers 503 `credential
 //!   store unavailable` before reading the form; a credential saved that
 //!   the service can't be told of (it has stopped) answers 503
@@ -50,9 +51,6 @@
 //!   atomically, rather than indented by upstream's Vertex storage; the
 //!   service account's numbers are written as they came, where Go writes
 //!   them as float64. The key's PEM headers are dropped.
-
-use std::fs;
-use std::sync::Arc;
 
 use axum::extract::{DefaultBodyLimit, RawQuery, Request, State};
 use axum::response::{IntoResponse, Response};
@@ -65,7 +63,6 @@ use open_ferry_translate::go::{to_lower, trim_space};
 use serde_json::{Map, Value};
 
 use crate::Route;
-use crate::auth_files::run_blocking;
 use crate::credential_files::{FormError, MAX_FORM, is_unsafe_name, read_form};
 use crate::go::lossy;
 use crate::json::{self, Json};
@@ -173,28 +170,6 @@ async fn import(state: &ManagementState, raw: Option<&str>, request: Request) ->
             "project_id holds characters a file name can't",
         );
     }
-    let files = Arc::clone(&store.files);
-    let name = file_name.clone();
-    let symlink = run_blocking(move || {
-        files
-            .file_path(&name)
-            .ok()
-            .filter(|path| fs::symlink_metadata(path).is_ok_and(|meta| meta.is_symlink()))
-    })
-    .await;
-    if let Some(path) = symlink {
-        return json::response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &Json::map([
-                ("error", Json::Str("save_failed".to_owned())),
-                (
-                    "message",
-                    Json::Str(format!("{} is a symlink", path.display())),
-                ),
-            ]),
-        );
-    }
-
     let label = label_for_vertex(&project_id, &email);
     let metadata = Map::from_iter([
         ("service_account".to_owned(), Value::Object(account)),

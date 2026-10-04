@@ -3,6 +3,7 @@
 //! key made for the test run, and a token URI that is never reached.
 
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use aws_lc_rs::encoding::AsDer as _;
 use aws_lc_rs::rsa::{KeyPair, KeySize};
@@ -458,9 +459,37 @@ async fn imports_never_write_through_a_link() {
         .await
         .expect(StatusCode::INTERNAL_SERVER_ERROR);
 
-    assert_eq!(body["error"], "save_failed");
-    let message = body["message"].as_str().unwrap();
-    assert!(message.ends_with("is a symlink"), "{message}");
+    assert_eq!(
+        body,
+        json!({
+            "error": "save_failed",
+            "message": format!("{} is a symlink", link.display()),
+        })
+    );
     assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
     assert!(api.sync.calls().is_empty());
+}
+
+// Not upstream's: an import waits while the credential lock is held, as a
+// status change holds it, and saves nothing until it is free.
+#[tokio::test]
+async fn imports_wait_for_the_credential_lock() {
+    let auth_dir = AuthDir::new();
+    let api = Api::over(&auth_dir);
+    let account = account();
+    let guard = api.state.credential_lock().lock().await;
+
+    let mut pending = std::pin::pin!(import(&api, &account));
+    let waited = tokio::time::timeout(Duration::from_millis(500), &mut pending).await;
+    assert!(waited.is_err(), "the import didn't wait for the lock");
+    assert!(std::fs::read_dir(auth_dir.path()).unwrap().next().is_none());
+    assert!(api.sync.calls().is_empty());
+
+    drop(guard);
+    pending.await.expect(StatusCode::OK);
+    assert_eq!(
+        auth_dir.read_json("vertex-proxy-test.json")["project_id"],
+        "proxy-test"
+    );
+    assert_eq!(api.sync.calls().len(), 1);
 }

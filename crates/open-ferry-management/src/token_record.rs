@@ -18,6 +18,15 @@
 //!   file name to a record without one. Of several with the file name,
 //!   the first by ID is taken, where upstream takes whichever its map
 //!   yields first.
+//! - The merge, the save and the readback hold the credential lock that
+//!   the management API's other changes of credential files and records
+//!   hold, released before the service is told; upstream takes none, so a
+//!   status change made meanwhile could save its stale copy over the new
+//!   credential.
+//! - The file replaced and the one saved are never read through a symlink
+//!   or, on Windows, any reparse point, and a symlink where the file would
+//!   be saved is refused (checked just before the save): the save fails
+//!   with `<path> is a symlink`. Upstream reads and writes through it.
 //! - Upstream's post-auth hook, which only plugins and embedders set,
 //!   isn't ported.
 //! - The service is sent the saved file and makes the credential from it,
@@ -26,18 +35,20 @@
 //!   fails with `synthesize persisted auth failed` when it can't.
 
 use std::fmt;
+use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use http::StatusCode;
 use open_ferry_core::auth::Auth;
-use open_ferry_core::auth::file_store::read_capped;
+use open_ferry_core::auth::file_store::FileStore;
 use open_ferry_core::auth::metadata::merge_existing_auth_metadata;
 use open_ferry_core::config::AuthFile;
 use open_ferry_providers::credentials;
 
 use crate::auth_files::run_blocking;
+use crate::credential_files::{is_linked, linked, read_unlinked};
 use crate::credential_sync::{CredentialSync, SyncError};
 use crate::state::ManagementState;
 
@@ -100,6 +111,13 @@ impl std::error::Error for SaveError {}
 ///    the same account, as [`credentials::save_merged`] does.
 /// 3. The service is sent the saved file, or `record` when the file can't
 ///    be read back, and serves the credential once this returns.
+///
+/// The credential lock is held from the merge until the file is read back,
+/// and released before the service is told. The file replaced and the one
+/// saved are never read through a link (see
+/// [`read_unlinked`](crate::credential_files::read_unlinked)), and a
+/// symlink where the file would be saved is refused; either fails with
+/// `<path> is a symlink`.
 #[cfg_attr(
     not(test),
     allow(dead_code, reason = "for the import and OAuth login routes")
@@ -111,14 +129,23 @@ pub(crate) async fn save_token_record(
     let store = state
         .credential_store()
         .map_err(|_| SaveError::Unavailable)?;
+    // Held from the merge to the readback, as every change of a credential
+    // file or record is, so none is lost to another made meanwhile.
+    let guard = state.credential_lock().lock().await;
     let files = Arc::clone(&store.files);
-    let existing = run_blocking(move || {
-        let existing = files.existing_metadata(&record);
+    let (returned, existing) = run_blocking(move || {
+        let existing = match files.read_existing_metadata(&record, read_unlinked) {
+            Ok(existing) => Ok(existing),
+            Err(error) if is_linked(&error) => Err(error),
+            Err(_) => Ok(None),
+        };
         (record, existing)
     })
     .await;
-    record = existing.0;
-    if let Some(existing) = existing.1.or_else(|| registered_metadata(state, &record))
+    record = returned;
+    if let Some(existing) = existing
+        .map_err(SaveError::Save)?
+        .or_else(|| registered_metadata(state, &record))
         && !existing.is_empty()
     {
         merge_existing_auth_metadata(&mut record, &existing);
@@ -126,16 +153,11 @@ pub(crate) async fn save_token_record(
 
     let files = Arc::clone(&store.files);
     let (record, saved) = run_blocking(move || {
-        let saved = credentials::save_merged(&files, &mut record).map(|path| {
-            let data = match read_capped(path.as_ref()) {
-                Ok(data) if !data.is_empty() => Some(data),
-                _ => None,
-            };
-            (path, data)
-        });
+        let saved = save_unlinked(&files, &mut record);
         (record, saved)
     })
     .await;
+    drop(guard);
     let (path, data) = saved.map_err(SaveError::Save)?;
     let sync: &dyn CredentialSync = store.sync.as_ref();
     let synced = match data {
@@ -152,6 +174,24 @@ pub(crate) async fn save_token_record(
         Ok(()) => Ok(path),
         Err(error) => Err(SaveError::Sync { path, error }),
     }
+}
+
+/// Saves `record` as [`credentials::save_merged`] does, unless a symlink is
+/// where it would go, and reads the file back, never through a link.
+/// Returns the file's path and contents, `None` when it can't be read back
+/// or is empty.
+fn save_unlinked(files: &FileStore, record: &mut Auth) -> io::Result<(String, Option<Vec<u8>>)> {
+    if let Ok(path) = files.resolve_auth_path(record)
+        && fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_symlink())
+    {
+        return Err(linked(&path));
+    }
+    let path = credentials::save_merged(files, record)?;
+    let data = match read_unlinked(path.as_ref()) {
+        Ok(data) if !data.is_empty() => Some(data),
+        _ => None,
+    };
+    Ok((path, data))
 }
 
 /// The metadata of the credential registered with `record`'s ID, else of

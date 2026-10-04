@@ -59,6 +59,13 @@
 //!   `os.WriteFile` writes it in place. An upload over a symlink is refused
 //!   with `failed to write file: ... is a symlink` (checked just before the
 //!   write); upstream writes through it.
+//! - A download never reads through a symlink at the file's name, nor on
+//!   Windows through any reparse point, a junction included: it fails with
+//!   500 `failed to read file: <path> is a symlink`. The check is made on
+//!   the file opened, so no link can be put there between the check and
+//!   the read: Windows opens a link itself rather than its target, and on
+//!   Unix the file opened must be the one found at the name. Upstream reads
+//!   through it.
 //! - Uploads are bounded: a form or body over 32 MiB answers 413 `request
 //!   body too large`, a file over 8 MiB (the most the service reads) fails
 //!   with 413 `auth file too large`, and a form of more than 1000 parts
@@ -68,9 +75,12 @@
 //! - A delete removes only a `*.json` file at the top of the auth
 //!   directory. When the credential named has its file elsewhere, the
 //!   delete is refused with 409 `auth file is outside the auth directory`
-//!   and nothing changes; upstream removes the file wherever it is. A
-//!   credential whose file isn't `*.json` is refused with 400 `name must
-//!   end with .json`, where upstream removes its file.
+//!   and nothing changes; upstream removes the file wherever it is. The
+//!   file is there when the directory its path names is the auth directory
+//!   itself, as the file system resolves both, so case, `.`, `..` and links
+//!   count as it counts them; a directory it can't resolve, as one that is
+//!   gone, is elsewhere. A credential whose file isn't `*.json` is refused
+//!   with 400 `name must end with .json`, where upstream removes its file.
 //! - On Windows a delete matches a credential's ID or file name regardless
 //!   of case when nothing matches exactly, as the file system does.
 //! - When the service can't be told of a file written or removed (it has
@@ -82,8 +92,9 @@
 //! - The plugin host isn't ported, so there are no plugin credentials to
 //!   refuse deleting.
 
+use std::fmt;
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -96,7 +107,7 @@ use bytes::Bytes;
 use chrono::Utc;
 use http::{HeaderMap, HeaderValue, StatusCode, header};
 use open_ferry_core::auth::Auth;
-use open_ferry_core::auth::file_store::{MAX_AUTH_FILE_SIZE, read_capped};
+use open_ferry_core::auth::file_store::MAX_AUTH_FILE_SIZE;
 use open_ferry_core::auth::synthesizer::SynthesisContext;
 use open_ferry_core::auth::synthesizer::file::synthesize_auth_file;
 use open_ferry_core::config::AuthFile;
@@ -179,7 +190,7 @@ async fn download(State(state): State<ManagementState>, RawQuery(raw): RawQuery)
         return StoreUnavailable.into_response();
     };
     let file = name.clone();
-    let read = run_blocking(move || read_capped(&files.file_path(&file)?)).await;
+    let read = run_blocking(move || read_unlinked(&files.file_path(&file)?)).await;
     let data = match read {
         Ok(data) => data,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -500,14 +511,18 @@ async fn delete_one(
         .filter(|path| !path.is_empty())
         .map(PathBuf::from);
     let file_name = match &credential_path {
-        Some(path) => top_level_name(&store.files.base_dir(), path)
-            .ok_or_else(|| {
-                Failure::new(
-                    StatusCode::CONFLICT,
-                    "auth file is outside the auth directory",
-                )
-            })?
-            .to_owned(),
+        Some(path) => {
+            let dir = store.files.base_dir();
+            let path = path.clone();
+            run_blocking(move || top_level_name(&dir, &path))
+                .await
+                .ok_or_else(|| {
+                    Failure::new(
+                        StatusCode::CONFLICT,
+                        "auth file is outside the auth directory",
+                    )
+                })?
+        }
         None => name.to_owned(),
     };
     if !has_json_suffix(&file_name) {
@@ -560,36 +575,23 @@ fn find_auth_for_delete(manager: &Manager, name: &str) -> Option<Arc<Auth>> {
     None
 }
 
-/// The name of the file at `path` if it is directly in `dir`.
-fn top_level_name<'a>(dir: &Path, path: &'a Path) -> Option<&'a str> {
+/// The name of the file at `path` if it is directly in `dir`: when the
+/// directory `path` names is `dir` itself, as the file system resolves
+/// both, so case and links are matched as it matches them. A directory
+/// that can't be resolved, as one that is gone, isn't `dir`.
+fn top_level_name(dir: &Path, path: &Path) -> Option<String> {
     let mut components = path.components();
     let Some(Component::Normal(name)) = components.next_back() else {
         return None;
     };
-    if dir.as_os_str().is_empty() || !same_path(components.as_path(), dir) {
+    let parent = components.as_path();
+    if dir.as_os_str().is_empty() || parent.as_os_str().is_empty() {
         return None;
     }
-    name.to_str()
-}
-
-/// Whether `left` and `right` name the same path, component by component;
-/// on Windows regardless of case.
-fn same_path(left: &Path, right: &Path) -> bool {
-    let mut left = left.components();
-    let mut right = right.components();
-    loop {
-        match (left.next(), right.next()) {
-            (None, None) => return true,
-            (Some(a), Some(b)) if a == b => {}
-            (Some(a), Some(b)) if cfg!(windows) => {
-                match (a.as_os_str().to_str(), b.as_os_str().to_str()) {
-                    (Some(a), Some(b)) if equal_fold(a, b) => {}
-                    _ => return false,
-                }
-            }
-            _ => return false,
-        }
+    if fs::canonicalize(dir).ok()? != fs::canonicalize(parent).ok()? {
+        return None;
     }
+    name.to_str().map(str::to_owned)
 }
 
 /// The values of query parameter `name`, in order (gin's `QueryArray`).
@@ -774,6 +776,113 @@ fn trim_str(text: &str) -> &str {
     std::str::from_utf8(trim_space(text.as_bytes())).unwrap_or(text)
 }
 
+/// Why a file wasn't read: its name is a link, at this path.
+#[derive(Debug)]
+pub(crate) struct Linked(PathBuf);
+
+impl fmt::Display for Linked {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} is a symlink", self.0.display())
+    }
+}
+
+impl std::error::Error for Linked {}
+
+/// The error of a read refused because `path` is a link.
+pub(crate) fn linked(path: &Path) -> io::Error {
+    io::Error::other(Linked(path.to_path_buf()))
+}
+
+/// Whether `error` is a read refused because the file's name is a link.
+pub(crate) fn is_linked(error: &io::Error) -> bool {
+    error.get_ref().is_some_and(|inner| inner.is::<Linked>())
+}
+
+/// Whether `meta` is a link's: a symlink, or on Windows any reparse point,
+/// a junction included.
+fn is_link(meta: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return true;
+        }
+    }
+    meta.file_type().is_symlink()
+}
+
+/// Reads the file at `path` as
+/// [`read_capped`](open_ferry_core::auth::file_store::read_capped) does, at most
+/// [`MAX_AUTH_FILE_SIZE`] bytes, but never through a link: a symlink or
+/// reparse point at `path` is refused with [`Linked`], checked on the file
+/// opened so that one can't be put there between the check and the read.
+pub(crate) fn read_unlinked(path: &Path) -> io::Result<Vec<u8>> {
+    let mut data = Vec::new();
+    open_unlinked(path)?
+        .take(MAX_AUTH_FILE_SIZE + 1)
+        .read_to_end(&mut data)?;
+    if data.len() as u64 > MAX_AUTH_FILE_SIZE {
+        return Err(io::Error::new(
+            io::ErrorKind::FileTooLarge,
+            format!("file exceeds {MAX_AUTH_FILE_SIZE} bytes"),
+        ));
+    }
+    Ok(data)
+}
+
+/// Opens `path` to read, refusing a link: Windows opens a link itself
+/// rather than its target (`FILE_FLAG_OPEN_REPARSE_POINT`), then refuses
+/// what it opened if that is a link.
+#[cfg(windows)]
+fn open_unlinked(path: &Path) -> io::Result<fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    let opened = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path);
+    let file = match opened {
+        Ok(file) => file,
+        // A link to a directory, as a junction, doesn't open as a file.
+        Err(_) if fs::symlink_metadata(path).is_ok_and(|meta| is_link(&meta)) => {
+            return Err(linked(path));
+        }
+        Err(error) => return Err(error),
+    };
+    if is_link(&file.metadata()?) {
+        return Err(linked(path));
+    }
+    Ok(file)
+}
+
+/// Opens `path` to read, refusing a link: Unix refuses a symlink at
+/// `path`, then a file opened that isn't the one found there, as one a
+/// symlink put there since leads to.
+#[cfg(unix)]
+fn open_unlinked(path: &Path) -> io::Result<fs::File> {
+    use std::os::unix::fs::MetadataExt;
+    let found = fs::symlink_metadata(path)?;
+    if found.file_type().is_symlink() {
+        return Err(linked(path));
+    }
+    let file = fs::File::open(path)?;
+    let opened = file.metadata()?;
+    if (opened.dev(), opened.ino()) != (found.dev(), found.ino()) {
+        return Err(linked(path));
+    }
+    Ok(file)
+}
+
+/// Opens `path` to read, refusing a symlink found there first.
+#[cfg(not(any(unix, windows)))]
+fn open_unlinked(path: &Path) -> io::Result<fs::File> {
+    if fs::symlink_metadata(path)?.file_type().is_symlink() {
+        return Err(linked(path));
+    }
+    fs::File::open(path)
+}
+
 /// Gin's `c.ContentType() == "multipart/form-data"`: the first
 /// `Content-Type`, up to a space or `;`, compared exactly.
 pub(crate) fn is_multipart(headers: &HeaderMap) -> bool {
@@ -788,8 +897,10 @@ pub(crate) fn is_multipart(headers: &HeaderMap) -> bool {
     value.get(..end) == Some(b"multipart/form-data".as_slice())
 }
 
-/// A `multipart/form-data` form, as Go's `ReadForm` reads it.
-#[derive(Debug, Default)]
+/// A `multipart/form-data` form, as Go's `ReadForm` reads it. Its `Debug`
+/// shows names and sizes only, for its files and values may hold tokens
+/// and private keys.
+#[derive(Default)]
 pub(crate) struct Form {
     /// The parts sent with a file name, in the order of their field names.
     pub(crate) files: Vec<FormFile>,
@@ -812,8 +923,21 @@ impl Form {
     }
 }
 
-/// A file of a form.
-#[derive(Debug)]
+impl fmt::Debug for Form {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let values: Vec<(&String, ByteCount)> = self
+            .values
+            .iter()
+            .map(|(name, value)| (name, ByteCount(value.len())))
+            .collect();
+        f.debug_struct("Form")
+            .field("files", &self.files)
+            .field("values", &values)
+            .finish()
+    }
+}
+
+/// A file of a form. Its `Debug` shows names and size only.
 pub(crate) struct FormFile {
     /// Its field's name.
     pub(crate) field: String,
@@ -821,6 +945,25 @@ pub(crate) struct FormFile {
     pub(crate) file_name: String,
     /// Its contents.
     pub(crate) data: Bytes,
+}
+
+impl fmt::Debug for FormFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FormFile")
+            .field("field", &self.field)
+            .field("file_name", &self.file_name)
+            .field("data", &ByteCount(self.data.len()))
+            .finish()
+    }
+}
+
+/// A size in bytes, shown in place of the bytes.
+struct ByteCount(usize);
+
+impl fmt::Debug for ByteCount {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} bytes", self.0)
+    }
 }
 
 /// Why a form couldn't be read.

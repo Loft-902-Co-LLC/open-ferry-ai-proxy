@@ -17,9 +17,10 @@
 //!   whose file is outside the auth directory isn't deleted here.
 //!
 //! The tests marked "Not upstream's" cover the rest: names that could
-//! reach outside the auth directory, case on Windows, symlinks, sizes,
-//! partial batches, `?all=true`, delete bodies, and a store or service
-//! that isn't there.
+//! reach outside the auth directory, case on Windows, symlinks and
+//! junctions, which directory a credential's file is in, sizes, partial
+//! batches, `?all=true`, delete bodies, a store or service that isn't
+//! there, and a form's `Debug`.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -30,7 +31,7 @@ use serde_json::json;
 use super::{
     Answer, Api, AuthDir, LOCAL, Multipart, SyncCall, auth, file_auth, keyed, request_from,
 };
-use crate::credential_files::is_unsafe_name;
+use crate::credential_files::{is_unsafe_name, read_form};
 
 const CODEX: &str = r#"{"type":"codex","email":"user@example.com"}"#;
 
@@ -275,6 +276,80 @@ async fn delete_refuses_a_credential_file_outside_the_auth_directory() {
     assert!(shadow.exists());
     assert_eq!(api.files("").await.len(), 1);
     assert!(api.sync.calls().is_empty());
+}
+
+// Not upstream's: whether a credential's file is in the auth directory is
+// for the file system to say, so a directory whose name Go's case folding
+// equates with the auth directory's (a Kelvin sign for `K`) isn't it, and
+// the delete is refused, changing nothing.
+#[tokio::test]
+async fn delete_tells_apart_directories_case_folding_equates() {
+    let auth_dir = AuthDir::new();
+    let root = auth_dir.path().parent().unwrap().to_path_buf();
+    let kelvin = char::from_u32(0x212A).unwrap().to_string();
+    let inside = root.join("K");
+    let outside = root.join(&kelvin);
+    std::fs::create_dir(&inside).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    let file_name = "same.json";
+    let inside_file = inside.join(file_name);
+    let outside_file = outside.join(file_name);
+    std::fs::write(&inside_file, CODEX).unwrap();
+    std::fs::write(&outside_file, OTHER).unwrap();
+    auth_dir.store.set_base_dir(&inside);
+    let api = Api::over(&auth_dir);
+    let mut record = auth(
+        &format!("legacy/{file_name}"),
+        &[("path", outside_file.to_str().unwrap())],
+    );
+    record.file_name = file_name.into();
+    api.manager.register_unsaved(record).unwrap();
+
+    delete_name(&api, file_name).await.assert(
+        StatusCode::CONFLICT,
+        r#"{"error":"auth file is outside the auth directory"}"#,
+    );
+
+    assert_eq!(read(&inside_file), CODEX);
+    assert_eq!(read(&outside_file), OTHER);
+    assert!(api.sync.calls().is_empty());
+}
+
+// Not upstream's: a credential whose file is in the auth directory under
+// another spelling of its path has that file deleted, and the service is
+// told of the path the credential names; one whose directory is gone is
+// refused.
+#[tokio::test]
+async fn delete_resolves_the_credential_file_directory() {
+    let auth_dir = AuthDir::new();
+    let path = auth_dir.write("spelled.json", CODEX);
+    let dir_name = auth_dir.path().file_name().unwrap().to_owned();
+    let spelled = auth_dir
+        .path()
+        .join("..")
+        .join(dir_name)
+        .join("spelled.json");
+    let gone = auth_dir.path().join("gone").join("gone.json");
+    let api = Api::over(&auth_dir);
+    for (id, file) in [("spelled", &spelled), ("gone", &gone)] {
+        api.manager
+            .register_unsaved(auth(id, &[("path", file.to_str().unwrap())]))
+            .unwrap();
+    }
+
+    delete_name(&api, "gone").await.assert(
+        StatusCode::CONFLICT,
+        r#"{"error":"auth file is outside the auth directory"}"#,
+    );
+    delete_name(&api, "spelled")
+        .await
+        .assert(StatusCode::OK, OK);
+    assert!(!path.exists());
+    let calls = api.sync.calls();
+    assert!(
+        matches!(calls.as_slice(), [SyncCall::FileRemoved(removed)] if *removed == spelled),
+        "{calls:?}"
+    );
 }
 
 // TestDeleteAuthFile_FallbackToAuthDirPath
@@ -527,18 +602,25 @@ async fn deletes_match_case_as_the_file_system_does() {
     }
 }
 
-// Not upstream's: an upload never writes through a symlink, and a delete
-// removes the link, not its target.
+// Not upstream's: a download never reads through a symlink, an upload never
+// writes through one, and a delete removes the link, not its target.
 #[tokio::test]
 async fn symlinks_are_never_followed() {
     let auth_dir = AuthDir::new();
     let target = auth_dir.path().parent().unwrap().join("target.json");
     std::fs::write(&target, CODEX).unwrap();
-    if let Err(error) = symlink(&target, &auth_dir.path().join("link.json")) {
+    let link = auth_dir.path().join("link.json");
+    if let Err(error) = symlink(&target, &link) {
         eprintln!("skipped: can't make a symlink here: {error}");
         return;
     }
     let api = Api::over(&auth_dir);
+
+    let body = download(&api, "link.json")
+        .await
+        .expect(StatusCode::INTERNAL_SERVER_ERROR);
+    let expected = format!("failed to read file: {} is a symlink", link.display());
+    assert_eq!(body, json!({ "error": expected }));
 
     for answer in [
         upload_raw(&api, "link.json", OTHER).await,
@@ -562,15 +644,16 @@ async fn symlinks_are_never_followed() {
 // junction, which Windows lets anyone make, standing in for the symlink.
 #[cfg(windows)]
 #[tokio::test]
-async fn uploads_never_write_through_a_junction() {
+async fn junctions_are_never_followed() {
     let auth_dir = AuthDir::new();
     let target = auth_dir.path().parent().unwrap().join("target");
     std::fs::create_dir(&target).unwrap();
+    let link = auth_dir.path().join("link.json");
     let made = std::process::Command::new("cmd")
         .arg("/C")
         .arg("mklink")
         .arg("/J")
-        .arg(auth_dir.path().join("link.json"))
+        .arg(&link)
         .arg(&target)
         .output();
     if !made.as_ref().is_ok_and(|output| output.status.success()) {
@@ -578,6 +661,12 @@ async fn uploads_never_write_through_a_junction() {
         return;
     }
     let api = Api::over(&auth_dir);
+
+    let body = download(&api, "link.json")
+        .await
+        .expect(StatusCode::INTERNAL_SERVER_ERROR);
+    let expected = format!("failed to read file: {} is a symlink", link.display());
+    assert_eq!(body, json!({ "error": expected }));
 
     for answer in [
         upload_raw(&api, "link.json", OTHER).await,
@@ -946,4 +1035,37 @@ async fn batch_upload_order_and_failures() {
         })
     );
     assert_eq!(listing(&auth_dir), ["mu.json", "zeta.json"]);
+}
+
+// Not upstream's: a form's `Debug` shows its names and sizes, never what a
+// file or value holds.
+#[tokio::test]
+async fn form_debug_leaves_out_contents() {
+    const MARKER: &str = "SYNTHETIC-PRIVATE-KEY-MARKER";
+    let contents = format!(r#"{{"private_key":"{MARKER}"}}"#);
+    let request = Multipart::new()
+        .text("location", MARKER)
+        .file("file", "account.json", contents.as_bytes())
+        .request(Method::POST, "/v0/management/vertex/import");
+    let form = read_form(request).await.unwrap();
+
+    let file = form.file("file").unwrap();
+    for shown in [
+        format!("{form:?}"),
+        format!("{form:#?}"),
+        format!("{file:?}"),
+    ] {
+        assert!(!shown.contains(MARKER), "{shown}");
+        assert!(shown.contains("account.json"), "{shown}");
+        assert!(
+            shown.contains(&format!("{} bytes", contents.len())),
+            "{shown}"
+        );
+    }
+    let shown = format!("{form:?}");
+    assert!(shown.contains("location"), "{shown}");
+    assert!(
+        shown.contains(&format!("{} bytes", MARKER.len())),
+        "{shown}"
+    );
 }
