@@ -227,6 +227,50 @@ async fn chat_completions_call_the_dispatcher() {
     assert_eq!(call.options.metadata.idempotency_key.as_deref(), Some("k1"));
 }
 
+// Not upstream's: each call carries the request's context, with its route,
+// the client's addresses and agent, and the key it presented. With nothing
+// observing, the call has no tap.
+#[tokio::test]
+async fn calls_carry_the_request_context() {
+    use std::net::SocketAddr;
+
+    use axum::extract::ConnectInfo;
+
+    let config = ServerConfig {
+        trusted_proxies: vec!["10.0.0.0/8".into()],
+        ..ServerConfig::default()
+    };
+    let (app, dispatcher) = app(config, vec![Outcome::reply("{}")]);
+    let mut request = authed(
+        Method::POST,
+        "/v1/chat/completions?x=1",
+        r#"{"model":"gpt-5","messages":[]}"#,
+    );
+    let headers = request.headers_mut();
+    headers.insert(header::USER_AGENT, " client/1.0 ".parse().unwrap());
+    headers.append("x-forwarded-for", "203.0.113.7".parse().unwrap());
+    headers.append("x-forwarded-for", "10.0.0.2".parse().unwrap());
+    request
+        .extensions_mut()
+        .insert(ConnectInfo(SocketAddr::from(([10, 0, 0, 1], 4321))));
+    let (status, _, _) = send(&app, request).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let calls = dispatcher.calls();
+    let observation = calls[0].options.observation.as_ref().unwrap();
+    assert!(!observation.is_tapped());
+    assert!(calls[0].options.tapped().is_none());
+    let context = observation.context();
+    assert_eq!(context.method, Method::POST);
+    assert_eq!(context.path, "/v1/chat/completions");
+    assert_eq!(context.endpoint, "POST /v1/chat/completions");
+    assert_eq!(context.client_ip, "10.0.0.1");
+    assert_eq!(context.resolved_client_ip, "203.0.113.7");
+    assert_eq!(context.forwarded_for, "203.0.113.7, 10.0.0.2");
+    assert_eq!(context.user_agent, "client/1.0");
+    assert_eq!(context.client_key(), Some("sk-test"));
+}
+
 #[tokio::test]
 async fn unknown_models_and_failed_calls_answer_with_errors() {
     let (app, dispatcher) = app(

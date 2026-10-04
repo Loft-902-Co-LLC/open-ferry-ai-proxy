@@ -28,12 +28,15 @@
 //!
 //! [`Dispatcher::codex_alpha_search`]: open_ferry_core::exec::Dispatcher::codex_alpha_search
 
+use std::sync::Arc;
+
 use axum::body::Body;
 use axum::extract::State;
 use axum::response::Response;
 use bytes::Bytes;
 use http::{HeaderMap, StatusCode, header};
 use open_ferry_core::exec::{AlphaSearch, ExecError, HttpReply};
+use open_ferry_core::observe::Observation;
 
 use crate::body;
 use crate::errors::{JSON_UTF8, error_response};
@@ -55,10 +58,18 @@ pub(crate) async fn search(
         Ok(raw) => raw,
         Err(response) => return response,
     };
+    // Upstream records the search in the request log, and no usage.
+    let observation = client.context.as_ref().map(|context| {
+        let taps = state.observability().request_log.tap(context);
+        Arc::new(Observation::new(
+            Arc::clone(context),
+            taps.into_iter().collect(),
+        ))
+    });
     let request = AlphaSearch {
         body: raw,
         headers: client.headers,
-        observation: None,
+        observation,
     };
     match state.dispatcher_arc().codex_alpha_search(request).await {
         Ok(reply) => answer(reply),

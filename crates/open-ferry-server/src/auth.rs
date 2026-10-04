@@ -13,7 +13,8 @@
 //! A request that gets through carries its [`Principal`] in its extensions:
 //! an opaque tag for the key it presented, which upstream keeps as the key
 //! itself (`userApiKey`). With no keys configured, every client is the same
-//! anonymous principal.
+//! anonymous principal. The key itself goes in the request's context, for
+//! the request log and the usage statistics.
 
 use std::hash::{BuildHasher, RandomState};
 
@@ -26,8 +27,8 @@ use open_ferry_translate::go;
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 
 use crate::errors::{JSON_UTF8, error_response};
-use crate::query;
 use crate::state::AppState;
+use crate::{query, request_context};
 
 /// The headers a client key can come in.
 const KEY_HEADERS: [HeaderName; 3] = [
@@ -82,8 +83,8 @@ impl Rejection {
 }
 
 /// Lets a request through if it presents a configured key, or if no keys
-/// are configured, noting its [`Principal`] in its extensions. Otherwise
-/// answers 401.
+/// are configured, noting its [`Principal`] in its extensions and the key in
+/// its context. Otherwise answers 401.
 pub(crate) async fn require_key(
     State(state): State<AppState>,
     mut request: Request,
@@ -95,7 +96,12 @@ pub(crate) async fn require_key(
     } else {
         let params = query::parse(request.uri().query().unwrap_or(""));
         match check(&settings.keys, request.headers(), &params) {
-            Ok(key) => state.principal_tags().of(key),
+            Ok(key) => {
+                if let Some(context) = request_context::of(request.extensions()) {
+                    context.set_client_key(key);
+                }
+                state.principal_tags().of(key)
+            }
             Err(rejection) => return rejected(rejection),
         }
     };

@@ -2,53 +2,62 @@
 // internal/util's SetLogLevel (v8.0.10, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
-//! Logging to standard output, at debug level when the config's `debug` is
-//! on and at info level otherwise. A reload can change the level. Lines are
-//! coloured only on a terminal.
+//! Logging, at debug level when the config's `debug` is on and at info
+//! level otherwise. A reload can change the level. Where the lines go, and
+//! how they are written, is the main log's output (see
+//! [`crate::file_log`]).
 //!
 //! Deviations from upstream:
-//! - `logging-to-file` isn't ported: logs always go to standard output.
 //! - Debug level applies to this project's crates only; libraries such as
 //!   the HTTP client stay at info, as their debug output would bury ours.
-
-use std::io::IsTerminal;
 
 use tracing_subscriber::filter::{LevelFilter, Targets};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::{Registry, fmt, reload};
+use tracing_subscriber::{Registry, reload};
 
-/// Changes the level of the installed logger.
+use crate::file_log::{self, FileLog};
+
+/// Changes the installed logger: its level, and through
+/// [`LogLevel::file_log`] where its lines go.
 #[derive(Clone)]
-pub struct LogLevel(reload::Handle<Targets, Registry>);
+pub struct LogLevel {
+    level: reload::Handle<Targets, Registry>,
+    file_log: FileLog,
+}
 
 impl LogLevel {
     /// Logs at debug level when `debug`, and at info level otherwise.
     pub fn set_debug(&self, debug: bool) {
-        if let Err(error) = self.0.reload(targets(debug)) {
+        if let Err(error) = self.level.reload(targets(debug)) {
             tracing::warn!("failed to change the log level: {error}");
         }
+    }
+
+    /// Where the lines go.
+    pub fn file_log(&self) -> &FileLog {
+        &self.file_log
     }
 
     /// A level for a logger that was never installed, for tests.
     #[cfg(test)]
     pub fn detached() -> Self {
-        Self(reload::Layer::new(targets(false)).1)
+        Self {
+            level: reload::Layer::new(targets(false)).1,
+            file_log: FileLog::default(),
+        }
     }
 }
 
-/// Installs the logger at info level.
+/// Installs the logger at info level, writing to the main log's output.
 pub fn init() -> LogLevel {
-    let (filter, handle) = reload::Layer::new(targets(false));
+    let (filter, level) = reload::Layer::new(targets(false));
+    let (output, file_log) = file_log::init();
     tracing_subscriber::registry()
         .with(filter)
-        .with(
-            fmt::layer()
-                .with_writer(std::io::stdout)
-                .with_ansi(std::io::stdout().is_terminal()),
-        )
+        .with(output)
         .init();
-    LogLevel(handle)
+    LogLevel { level, file_log }
 }
 
 fn targets(debug: bool) -> Targets {

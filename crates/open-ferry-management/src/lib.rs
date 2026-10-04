@@ -43,7 +43,6 @@ mod access;
 mod api_call;
 mod auth_files;
 mod bind;
-mod client_ip;
 mod config_read;
 mod credential_files;
 mod credential_state;
@@ -52,16 +51,25 @@ mod go;
 mod go_url;
 mod json;
 mod latest_version;
+mod log_dir;
+mod logs;
 mod model_definitions;
 mod oauth;
+mod observability_settings;
 mod proxy;
 mod query;
 mod quota;
+mod quota_fetch;
+mod quota_types;
+mod request_logs;
 mod state;
 #[cfg(test)]
 mod tests;
 mod token_record;
+mod usage;
 mod vertex_import;
+
+use open_ferry_core::observe::client_ip;
 
 pub use client_ip::TrustedProxies;
 pub use credential_sync::{CredentialSync, SyncError, SyncFuture};
@@ -97,6 +105,11 @@ fn routes() -> Vec<Route> {
         config_read::routes(),
         model_definitions::routes(),
         latest_version::routes(),
+        observability_settings::routes(),
+        logs::routes(),
+        request_logs::routes(),
+        usage::routes(),
+        quota_fetch::routes(),
     ]
     .into_iter()
     .flatten()

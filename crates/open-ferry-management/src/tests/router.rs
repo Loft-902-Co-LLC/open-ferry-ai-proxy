@@ -35,7 +35,8 @@ fn error(message: &str) -> String {
 async fn unported_paths_answer_an_empty_404() {
     let api = Api::new();
     for (method, path) in [
-        (Method::GET, "/v0/management/logs"),
+        (Method::PUT, "/v0/management/usage-statistics-enabled"),
+        (Method::GET, "/v0/management/quota/providers"),
         (Method::GET, "/v0/management"),
         (Method::GET, "/v0/management/"),
         (Method::GET, "/v8/management"),

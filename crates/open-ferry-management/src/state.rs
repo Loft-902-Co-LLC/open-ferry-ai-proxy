@@ -9,7 +9,8 @@
 //! trusted proxies, the failed-attempt record and the HTTP clients for
 //! `api-call`; and, as the service sets them, the credential store, the
 //! [`CredentialSync`] that reaches the service, the config file's path,
-//! the OAuth login sessions and the credential lock.
+//! the OAuth login sessions, the credential lock and the [`Observability`]
+//! handles the log and usage routes read.
 //!
 //! A handler that writes credentials takes the store and the sync together
 //! with `credential_store`; without them, as in a state made only with
@@ -29,6 +30,7 @@ use http::StatusCode;
 use open_ferry_core::auth::FileStore;
 use open_ferry_core::config::Config;
 use open_ferry_core::manager::Manager;
+use open_ferry_core::observe::Observability;
 use open_ferry_core::registry::ModelRegistry;
 use open_ferry_translate::go::trim_space;
 
@@ -68,6 +70,7 @@ struct Parts {
     store: Option<Arc<FileStore>>,
     sync: Option<Arc<dyn CredentialSync>>,
     config_path: Option<PathBuf>,
+    observability: Observability,
     #[cfg(test)]
     latest_release_url: Option<String>,
 }
@@ -126,6 +129,15 @@ impl ManagementState {
     #[must_use]
     pub fn with_config_path(mut self, path: PathBuf) -> Self {
         Arc::make_mut(&mut self.parts).config_path = Some(path);
+        self
+    }
+
+    /// Serves the logs, request logs and usage statistics of
+    /// `observability` (upstream's `SetLogDirectory`, and the request logger
+    /// and usage queue upstream reaches through globals).
+    #[must_use]
+    pub fn with_observability(mut self, observability: Observability) -> Self {
+        Arc::make_mut(&mut self.parts).observability = observability;
         self
     }
 
@@ -196,7 +208,7 @@ impl ManagementState {
     /// Whether the management API serves requests: when the config has a
     /// management key or `MANAGEMENT_PASSWORD` is set (upstream's
     /// `managementRoutesEnabled`).
-    pub(crate) fn available(&self) -> bool {
+    pub fn available(&self) -> bool {
         !self.env_secret().is_empty() || !self.config().remote_management.secret_key.is_empty()
     }
 }
@@ -247,6 +259,10 @@ impl ManagementState {
     /// its post-auth persist hook.
     pub(crate) fn credential_lock(&self) -> &tokio::sync::Mutex<()> {
         &self.inner.credential_lock
+    }
+
+    pub(crate) fn observability(&self) -> &Observability {
+        &self.parts.observability
     }
 
     /// Where to ask for the latest release: open-ferry's releases on

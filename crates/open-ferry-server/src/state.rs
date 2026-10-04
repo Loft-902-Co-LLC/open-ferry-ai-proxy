@@ -4,6 +4,8 @@ use std::sync::{Arc, PoisonError, RwLock};
 
 use open_ferry_core::exec::Dispatcher;
 use open_ferry_core::models::ModelCatalog;
+use open_ferry_core::observe::Observability;
+use open_ferry_core::observe::client_ip::TrustedProxies;
 
 use crate::auth::PrincipalTags;
 use crate::config::ServerConfig;
@@ -14,11 +16,13 @@ use crate::handlers::responses_ws::ServerToolCaches;
 const EXAMPLE_API_KEYS: [&str; 3] = ["your-api-key-1", "your-api-key-2", "your-api-key-3"];
 
 /// The settings, the [`Dispatcher`] that makes provider calls, the
-/// [`ModelCatalog`] that says which providers serve a model, and what the
-/// server keeps for its clients. Cloning is cheap.
+/// [`ModelCatalog`] that says which providers serve a model, the
+/// [`Observability`] handles, and what the server keeps for its clients.
+/// Cloning is cheap.
 #[derive(Clone)]
 pub struct AppState {
     inner: Arc<Inner>,
+    observability: Arc<Observability>,
 }
 
 struct Inner {
@@ -27,6 +31,9 @@ struct Inner {
     catalog: Arc<dyn ModelCatalog>,
     principal_tags: PrincipalTags,
     tool_caches: ServerToolCaches,
+    /// The proxies whose forwarded-address headers are believed, read once
+    /// at start.
+    trusted_proxies: TrustedProxies,
 }
 
 /// The config, with what is worked out from it.
@@ -65,6 +72,7 @@ impl AppState {
         dispatcher: Arc<dyn Dispatcher>,
         catalog: Arc<dyn ModelCatalog>,
     ) -> Self {
+        let trusted_proxies = TrustedProxies::new(&config.trusted_proxies);
         Self {
             inner: Arc::new(Inner {
                 settings: RwLock::new(Arc::new(Settings::new(config))),
@@ -72,8 +80,18 @@ impl AppState {
                 catalog,
                 principal_tags: PrincipalTags::default(),
                 tool_caches: ServerToolCaches::default(),
+                trusted_proxies,
             }),
+            observability: Arc::default(),
         }
+    }
+
+    /// Gives each call the server makes the taps of `observability`'s
+    /// request logger and usage statistics. Without it, no call is tapped.
+    #[must_use]
+    pub fn with_observability(mut self, observability: Observability) -> Self {
+        self.observability = Arc::new(observability);
+        self
     }
 
     /// Replaces the config. Requests that have started keep the old one.
@@ -114,5 +132,15 @@ impl AppState {
     /// principal and session.
     pub(crate) fn tool_caches(&self) -> &ServerToolCaches {
         &self.inner.tool_caches
+    }
+
+    /// The request logger and the usage statistics.
+    pub(crate) fn observability(&self) -> &Observability {
+        &self.observability
+    }
+
+    /// The proxies whose forwarded-address headers are believed.
+    pub(crate) fn trusted_proxies(&self) -> &TrustedProxies {
+        &self.inner.trusted_proxies
     }
 }

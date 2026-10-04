@@ -8,6 +8,12 @@
 //! [`router_with`] serves other routes beside them, such as the management
 //! API's, which this crate doesn't depend on.
 //!
+//! Each request gets a context as it arrives (see
+//! [`open_ferry_core::observe`]), which the access log, the request log and
+//! every call the request makes share. [`AppState::with_observability`]
+//! gives the server the request logger and the usage statistics that tap
+//! the calls.
+//!
 //! Deviations from upstream, besides those noted on each module:
 //! - Routes match paths exactly. Gin redirects a path with a trailing slash,
 //!   and matches percent-encoded paths decoded; both get 404 here.
@@ -28,6 +34,7 @@
 //!   or made-up session and user IDs. Only official OAuth and documented
 //!   headers are ported.
 
+mod access_log;
 mod app;
 mod auth;
 mod body;
@@ -38,6 +45,8 @@ mod handlers;
 mod headers;
 mod json;
 mod query;
+mod request_context;
+mod request_log;
 mod routing;
 mod sse_check;
 mod state;

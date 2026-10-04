@@ -15,6 +15,7 @@
 //! [`FakeSync`] standing in for the service. [`Multipart`] builds the
 //! bodies of uploads.
 
+mod api_key_usage;
 mod api_tools;
 mod auth_files_cooldown;
 mod auth_files_filter;
@@ -28,11 +29,16 @@ mod credential_files;
 mod credential_state;
 mod handler;
 mod latest_version;
+mod logs;
 mod model_definitions;
 mod oauth;
+mod observability_settings;
+mod plugin_quota;
 mod quota;
+mod request_logs;
 mod router;
 mod server_management_v8;
+mod usage;
 mod vertex_import;
 
 use std::ffi::OsString;

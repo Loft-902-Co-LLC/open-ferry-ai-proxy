@@ -21,6 +21,7 @@ open-ferry-translate.workspace = true
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "stream", "http2", "charset"] }
 serde = "1.0.229"
 serde_json.workspace = true
+sha2 = "0.11.0"
 subtle = "2.6.1"
 tokio = { version = "1.53.1", features = ["rt", "time", "sync", "macros", "io-util", "net"] }
 tracing = "0.1.44"

@@ -2,10 +2,12 @@
 // middleware in internal/api/server_middleware.go (v8.0.10, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
-//! The router, and the middleware every request passes through.
+//! The router, and the middleware every request passes through: from the
+//! outside in, the request context, which makes the request's
+//! `RequestContext`, the access log, the request log, CORS, panic handling
+//! and safe mode.
 
 use std::any::Any;
-use std::time::Instant;
 
 use axum::Router;
 use axum::extract::{Request, State};
@@ -17,7 +19,6 @@ use bytes::Bytes;
 use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
 use serde_json::json;
 use tower_http::catch_panic::CatchPanicLayer;
-use tracing::Instrument;
 
 use crate::auth::require_key;
 use crate::errors::{JSON_UTF8, error_response};
@@ -25,6 +26,7 @@ use crate::handlers::{
     alpha_search, claude, gemini, health, models, openai, responses, responses_ws,
 };
 use crate::state::AppState;
+use crate::{access_log, request_context, request_log};
 
 /// The response headers browsers may read (`corsExposedResponseHeaders`).
 const CORS_EXPOSED_HEADERS: &str = "X-CPA-TRACE-ID, X-CPA-VERSION, X-CPA-COMMIT, \
@@ -43,8 +45,8 @@ pub fn router(state: AppState) -> Router {
 
 /// The proxy's routes, as [`router`] serves them, with `extra` routes
 /// beside them, such as the management API's. The extra routes pass
-/// through the same logging, CORS, panic handling and safe mode, but not the
-/// client-key check, and must not set a fallback.
+/// through the same request context, logging, CORS, panic handling and
+/// safe mode, but not the client-key check, and must not set a fallback.
 pub fn router_with(state: AppState, extra: Router) -> Router {
     let auth = middleware::from_fn_with_state(state.clone(), require_key);
     let responses_routes = || {
@@ -96,10 +98,18 @@ pub fn router_with(state: AppState, extra: Router) -> Router {
         .with_state(state.clone())
         .merge(extra)
         .fallback(not_found)
-        .layer(middleware::from_fn_with_state(state, safe_mode))
+        .layer(middleware::from_fn_with_state(state.clone(), safe_mode))
         .layer(CatchPanicLayer::custom(panicked))
         .layer(middleware::from_fn(cors))
-        .layer(middleware::from_fn(log_request))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            request_log::layer,
+        ))
+        .layer(middleware::from_fn(access_log::layer))
+        .layer(middleware::from_fn_with_state(
+            state,
+            request_context::layer,
+        ))
 }
 
 /// Gin's 404.
@@ -108,24 +118,6 @@ async fn not_found() -> Response {
     response
         .headers_mut()
         .insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain"));
-    response
-}
-
-/// Logs each request, without its query string, which may hold a key.
-async fn log_request(request: Request, next: Next) -> Response {
-    let id = uuid::Uuid::now_v7();
-    let method = request.method().clone();
-    let path = request.uri().path().to_owned();
-    let span = tracing::info_span!("request", %id, %method, %path);
-    let started = Instant::now();
-    let response = next.run(request).instrument(span.clone()).await;
-    span.in_scope(|| {
-        tracing::info!(
-            status = response.status().as_u16(),
-            elapsed_ms = started.elapsed().as_millis() as u64,
-            "handled"
-        );
-    });
     response
 }
 

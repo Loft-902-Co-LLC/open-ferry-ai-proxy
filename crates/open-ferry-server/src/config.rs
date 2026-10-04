@@ -35,6 +35,10 @@ pub struct ServerConfig {
     /// Whether a Codex sub-agent's orphan delegation outputs become user
     /// messages (`codex.orphan-delegation-compatibility`).
     pub codex_orphan_delegation: bool,
+    /// The proxies whose forwarded-address headers are believed when a
+    /// request's client address is worked out (`trusted-proxies`). They
+    /// are read once, when the server starts, as upstream reads them.
+    pub trusted_proxies: Vec<String>,
 }
 
 impl Default for ServerConfig {
@@ -47,6 +51,7 @@ impl Default for ServerConfig {
             body_limit: DEFAULT_BODY_LIMIT,
             codex_client: CodexClientConfig::default(),
             codex_orphan_delegation: false,
+            trusted_proxies: Vec::new(),
         }
     }
 }
@@ -85,6 +90,7 @@ impl From<&Config> for ServerConfig {
             body_limit: DEFAULT_BODY_LIMIT,
             codex_client: config.client.codex.clone(),
             codex_orphan_delegation: config.codex.orphan_delegation_compatibility,
+            trusted_proxies: config.trusted_proxies.clone(),
         }
     }
 }
@@ -99,6 +105,7 @@ mod tests {
             "api-keys: [k1, k2]\npassthrough-headers: true\n",
             "nonstream-keepalive-interval: 0\n",
             "streaming:\n  keepalive-seconds: 15\n  bootstrap-retries: -1\n",
+            "trusted-proxies: [10.0.0.0/8]\n",
         ))
         .unwrap();
         let server = ServerConfig::from(&config);
@@ -108,6 +115,7 @@ mod tests {
         assert_eq!(server.streaming.keepalive, Some(Duration::from_secs(15)));
         assert_eq!(server.streaming.bootstrap_retries, 0);
         assert_eq!(server.body_limit, DEFAULT_BODY_LIMIT);
+        assert_eq!(server.trusted_proxies, ["10.0.0.0/8"]);
 
         let config =
             Config::parse("nonstream-keepalive-interval: 5\nstreaming:\n  bootstrap-retries: 2\n")

@@ -9,7 +9,9 @@
 //! Calls to providers, as the handlers make them.
 //!
 //! A [`Call`] owns everything it needs, so its futures and streams are
-//! `'static` and can outlive the handler that made them.
+//! `'static` and can outlive the handler that made them. Each call carries
+//! the request's observation: its context, and the taps the request log and
+//! the usage statistics give the call.
 
 use std::sync::Arc;
 
@@ -21,11 +23,13 @@ use http::request::Parts;
 use open_ferry_core::exec::{
     ChunkStream, ExecError, Format, Metadata, Options, ProviderId, Request, StreamResponse,
 };
+use open_ferry_core::observe::{Observation, RequestContext};
 
 use crate::auth::{Principal, strip_credentials};
 use crate::errors::ErrorMessage;
 use crate::headers::filter_upstream_headers;
 use crate::query;
+use crate::request_context;
 use crate::routing;
 use crate::sse_check::SseCheck;
 use crate::state::AppState;
@@ -48,6 +52,10 @@ pub(crate) struct ClientRequest {
     pub(crate) alt: String,
     /// Who the client authenticated as. It is not sent upstream.
     pub(crate) principal: Principal,
+    /// The request's context, which each call's observation carries.
+    /// `None` only for a request that didn't pass through the router, as
+    /// in tests.
+    pub(crate) context: Option<Arc<RequestContext>>,
 }
 
 impl ClientRequest {
@@ -81,6 +89,7 @@ impl ClientRequest {
             idempotency_key,
             alt,
             principal,
+            context: request_context::of(&parts.extensions).cloned(),
         }
     }
 }
@@ -160,13 +169,18 @@ impl Call {
             idempotency_key: client.idempotency_key.clone(),
             ..Metadata::default()
         };
+        let request = Request {
+            model: route.model,
+            payload,
+        };
+        options.observation = client
+            .context
+            .as_ref()
+            .map(|context| observe(state, context, &request, &options));
         Ok(Self {
             state: state.clone(),
             providers: route.providers,
-            request: Request {
-                model: route.model,
-                payload,
-            },
+            request,
             options,
         })
     }
@@ -297,6 +311,26 @@ impl Call {
         };
         Started { headers, items }
     }
+}
+
+/// The observation of a call made with `request` and `options` for the
+/// request of `context`: the context, and the taps the request log and the
+/// usage statistics give the call. With both off, it has none.
+fn observe(
+    state: &AppState,
+    context: &Arc<RequestContext>,
+    request: &Request,
+    options: &Options,
+) -> Arc<Observation> {
+    let observability = state.observability();
+    let taps = [
+        observability.request_log.tap(context),
+        observability.usage.tap(context, request, options),
+    ];
+    Arc::new(Observation::new(
+        Arc::clone(context),
+        taps.into_iter().flatten().collect(),
+    ))
 }
 
 /// What a stream gave first.

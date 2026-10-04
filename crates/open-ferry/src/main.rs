@@ -16,9 +16,11 @@
 //!   exits with 1; upstream logs it and exits with 0.
 
 mod browser;
+mod file_log;
 mod flags;
 mod logging;
 mod login;
+mod observability;
 mod service;
 mod tls;
 

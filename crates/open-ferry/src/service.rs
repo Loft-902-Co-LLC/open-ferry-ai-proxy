@@ -83,8 +83,11 @@
 //!   updates the credentials that differ, so a change to a file that the
 //!   watcher has yet to report is applied then, rather than with the
 //!   report.
-//! - The cooldown state store, usage statistics, pprof, the discovery
-//!   advertiser, the WebSocket gateway, plugins and Home aren't ported.
+//! - The logs, the usage statistics and the cooldown state store take the
+//!   config through the `observability` hooks once the credentials are
+//!   loaded, at start as on a reload; P3 ports what is behind them. pprof,
+//!   the discovery advertiser, the WebSocket gateway, plugins and Home
+//!   aren't ported.
 
 use std::collections::{BTreeSet, HashMap};
 use std::io;
@@ -105,6 +108,7 @@ use open_ferry_core::auth::synthesizer::{
 use open_ferry_core::auth::{Auth, FileStore, Status};
 use open_ferry_core::config::{AuthFile, Config, ConfigWatcher, WatchEvent, next_revision};
 use open_ferry_core::manager::{Manager, Settings};
+use open_ferry_core::observe::Observability;
 use open_ferry_core::registry::{ModelRegistry, RegistrationRules};
 use open_ferry_management::{
     CredentialSync, ManagementState, SyncError, SyncFuture, management_password_from_env,
@@ -118,6 +122,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::logging::LogLevel;
+use crate::observability;
 use crate::tls::{self, TlsListener, TlsPeer};
 
 /// How often background refresh looks for tokens to renew.
@@ -160,6 +165,7 @@ pub async fn run(
     service.register_executors();
     service.load_file_auths();
     service.sync_config_auths();
+    service.reconfigure_observability(None);
     if let Err(error) = service.manager.start_auto_refresh(AUTO_REFRESH_INTERVAL) {
         tracing::warn!("failed to start core auth auto-refresh: {error}");
     } else {
@@ -362,6 +368,9 @@ struct Service {
     registry: Arc<ModelRegistry>,
     state: AppState,
     management: ManagementState,
+    /// The log directory, the request logger and the usage statistics the
+    /// server and the management API share.
+    observability: Observability,
     watcher: Option<ConfigWatcher>,
     /// The IDs of the credentials made from config API keys.
     config_auths: BTreeSet<String>,
@@ -392,11 +401,14 @@ impl Service {
             Arc::clone(&registry) as _,
             Some(Arc::clone(&store) as _),
         );
+        let observability = observability::build(&config, &config_path);
+        manager.set_error_events(observability.usage.error_events());
         let state = AppState::new(
             ServerConfig::from(&*config),
             Arc::new(manager.clone()),
             Arc::clone(&registry) as _,
-        );
+        )
+        .with_observability(observability.clone());
         let (requests, sync_requests) = mpsc::channel(SYNC_QUEUE);
         let management = ManagementState::new(
             Arc::clone(&config),
@@ -406,7 +418,8 @@ impl Service {
         )
         .with_store(Arc::clone(&store))
         .with_sync(Arc::new(SyncSender { requests }))
-        .with_config_path(config_path);
+        .with_config_path(config_path)
+        .with_observability(observability.clone());
         Self {
             config,
             auth_dir,
@@ -416,6 +429,7 @@ impl Service {
             registry,
             state,
             management,
+            observability,
             watcher: None,
             config_auths: BTreeSet::new(),
             file_auths: HashMap::new(),
@@ -423,6 +437,20 @@ impl Service {
             compat_executors: BTreeSet::new(),
             sync_requests,
         }
+    }
+
+    /// Applies the config to the logs, the usage statistics and the
+    /// cooldown store (see [`observability::reconfigure`]). `previous` is
+    /// the config before, `None` at start.
+    fn reconfigure_observability(&self, previous: Option<&Config>) {
+        observability::reconfigure(
+            &self.observability,
+            self.log_level.file_log(),
+            &self.manager,
+            self.management.available(),
+            previous,
+            &self.config,
+        );
     }
 
     /// The proxy's routes, with the management API's beside them.
@@ -880,6 +908,7 @@ impl Service {
             self.registry.register_auth(&auth, &rules);
             self.manager.reconcile_registry_model_states(&auth.id);
         }
+        self.reconfigure_observability(Some(&previous));
         tracing::info!("config reloaded");
         watching
     }
