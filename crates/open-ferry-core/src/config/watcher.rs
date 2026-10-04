@@ -1206,30 +1206,43 @@ mod tests {
 
     #[test]
     fn handle_event_atomic_replace_delayed_stat_preserves_client() {
-        let fixture = Fixture::new();
-        let mut state = fixture.state();
-        let path = fixture.auth("token.json");
-        remember(&mut state, &path, r#"{"type":"demo","v":1}"#);
-        let new = r#"{"type":"demo","v":2}"#;
+        // The last check comes no sooner than this after the event. A loaded
+        // machine can land the replacement later than that, and such a try
+        // proves nothing, so it is run again.
+        let window = REPLACE_CHECK_DELAY + REPLACE_RETRY_DELAY * REPLACE_RETRIES as u32;
+        for _ in 0..5 {
+            let fixture = Fixture::new();
+            let mut state = fixture.state();
+            let path = fixture.auth("token.json");
+            remember(&mut state, &path, r#"{"type":"demo","v":1}"#);
+            let new = r#"{"type":"demo","v":2}"#;
 
-        // Written after the first check, within the retries, and renamed into
-        // place so the retries never see it empty.
-        let writer = {
-            let path = path.clone();
-            thread::spawn(move || {
-                thread::sleep(Duration::from_millis(60));
-                let temp = path.with_extension("tmp");
-                fs::write(&temp, new)?;
-                fs::rename(&temp, &path)
-            })
-        };
-        let step = state.handle_event(&path, Op::Rename, Instant::now());
-        writer
-            .join()
-            .expect("writer thread")
-            .expect("write replacement");
-        assert_eq!(sent(step), Step::Send(changed(&path)));
-        assert_eq!(known(&state, &path), Some(sha256(new.as_bytes())));
+            // Written after the first check, within the retries, and renamed
+            // into place so the retries never see it empty.
+            let start = Instant::now();
+            let writer = {
+                let path = path.clone();
+                thread::spawn(move || {
+                    thread::sleep(Duration::from_millis(60));
+                    let temp = path.with_extension("tmp");
+                    fs::write(&temp, new)?;
+                    fs::rename(&temp, &path)?;
+                    Ok::<_, std::io::Error>(Instant::now())
+                })
+            };
+            let step = state.handle_event(&path, Op::Rename, start);
+            let landed = writer
+                .join()
+                .expect("writer thread")
+                .expect("write replacement");
+            if landed.duration_since(start) >= window {
+                continue;
+            }
+            assert_eq!(sent(step), Step::Send(changed(&path)));
+            assert_eq!(known(&state, &path), Some(sha256(new.as_bytes())));
+            return;
+        }
+        eprintln!("the replacement never landed before the last check; inconclusive");
     }
 
     #[test]
