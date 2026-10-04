@@ -685,3 +685,66 @@ async fn errors_hide_every_secret_sent() {
         }
     }
 }
+
+// Not upstream's: a model that says the key the request carried doesn't hand
+// it on, in the answer to a call translated for any client or in a count
+// that is handed on as it came (a Gemini count is made again from its
+// total, so it couldn't say anything).
+#[tokio::test]
+async fn answers_hide_the_key() {
+    let mock = Mock::answering(|seen| {
+        let key = seen.header("x-goog-api-key").unwrap_or_default();
+        let answer = if seen.path.ends_with(":countTokens") {
+            json!({"totalTokens": 7, "note": format!("counted with {key}")})
+        } else {
+            json!({
+                "candidates": [{
+                    "content": {"role": "model", "parts": [{"text": format!("your key is {key}")}]},
+                    "finishReason": "STOP",
+                }],
+                "usageMetadata": {"promptTokenCount": 1, "candidatesTokenCount": 1, "totalTokenCount": 2},
+            })
+        };
+        Reply::json(&answer.to_string())
+    })
+    .await;
+    let auth = key_auth("gemini", "test-key-secret", &mock.url);
+    let gemini = r#"{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}"#;
+    let chat = r#"{"model":"gemini-2.5-flash","messages":[{"role":"user","content":"hi"}]}"#;
+    let claude = r#"{"model":"gemini-2.5-flash","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}"#;
+    for (format, payload) in [
+        (Format::GEMINI, gemini),
+        (Format::OPENAI, chat),
+        (Format::CLAUDE, claude),
+    ] {
+        let response = executor()
+            .execute(
+                Arc::clone(&auth),
+                request("gemini-2.5-flash", payload),
+                options(&format),
+            )
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&response.payload);
+        assert!(!text.contains("test-key-secret"), "{format:?}: {text}");
+        assert!(
+            text.contains("your key is [redacted]"),
+            "{format:?}: {text}"
+        );
+    }
+    let response = executor()
+        .count_tokens(
+            auth,
+            request(
+                "gemini-2.5-flash",
+                r#"{"model":"gemini-2.5-flash","input":"hi"}"#,
+            ),
+            options(&Format::OPENAI_RESPONSE),
+        )
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&response.payload);
+    assert!(!text.contains("test-key-secret"), "{text}");
+    assert!(text.contains("counted with [redacted]"), "{text}");
+    assert_eq!(mock.hits(), 4);
+}

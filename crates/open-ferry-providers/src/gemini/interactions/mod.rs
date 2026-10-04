@@ -37,7 +37,10 @@
 //!   executor trait has no such method, so nothing outside asks it.
 //! - An error answer is read up to 4 MiB, with the secrets of eight bytes or
 //!   more the request sent redacted, as in every client error (see
-//!   `Policy::Client`); upstream reads it whole, as it is.
+//!   `Policy::Client`); upstream reads it whole, as it is. A successful
+//!   answer that isn't a stream has them redacted too, whole, before it is
+//!   translated, as each line of a stream has; upstream passes it on as it
+//!   is.
 //! - Refresh returns the credential as it is; the Home service isn't
 //!   ported.
 
@@ -220,10 +223,10 @@ impl InteractionsExecutor {
     ) -> Result<Response, ExecError> {
         reject_compact(options)?;
         let body = self.prepare(request, options, false)?;
-        let (response, _) = self
+        let (response, secrets) = self
             .send(auth, request, options, &body, AttemptKind::Execute)
             .await?;
-        let (headers, data) = read_answer(response).await?;
+        let (headers, data) = read_answer(response, &secrets).await?;
         translate_answer(request, options, &body, headers, data)
     }
 

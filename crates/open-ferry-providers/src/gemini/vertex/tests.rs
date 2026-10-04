@@ -1003,3 +1003,67 @@ async fn errors_hide_every_secret_sent() {
         }
     }
 }
+
+// Not upstream's: a model that says the key or token the request carried
+// doesn't hand it on, in a call's answer or in a count that is handed on as
+// it came (a Gemini count is made again from its total).
+#[tokio::test]
+async fn answers_hide_the_key_and_token() {
+    let payload = r#"{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}"#;
+    // What the model was sent as a credential: an express API key in
+    // `x-goog-api-key`, or a service account's token as a bearer.
+    let model = Mock::answering(|seen| {
+        let credential = seen
+            .header("x-goog-api-key")
+            .or_else(|| seen.header("authorization"))
+            .unwrap_or_default();
+        let answer = if seen.path.ends_with(":countTokens") {
+            json!({"totalTokens": 7, "note": format!("counted with {credential}")})
+        } else {
+            json!({
+                "candidates": [{
+                    "content": {"role": "model", "parts": [{"text": format!("your credential is {credential}")}]},
+                    "finishReason": "STOP",
+                }],
+            })
+        };
+        Reply::json(&answer.to_string())
+    })
+    .await;
+    let tokens = Mock::start(Reply::json(
+        r#"{"access_token":"sa-token-secret","expires_in":3600,"token_type":"Bearer"}"#,
+    ))
+    .await;
+    let account = Arc::new(service_account_auth(&format!("{}/token", tokens.url), ""));
+    let account_executor = executor().with_service_account_base_url(model.url.clone());
+    for (executor, auth, secret) in [
+        (executor(), auth(&model), "test-vertex-key"),
+        (account_executor, account, "sa-token-secret"),
+    ] {
+        let response = executor
+            .execute(
+                Arc::clone(&auth),
+                request("gemini-2.5-flash", payload),
+                options(&Format::GEMINI),
+            )
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&response.payload);
+        assert!(!text.contains(secret), "{secret} in {text}");
+        assert!(text.contains("[redacted]"), "{text}");
+        let response = executor
+            .count_tokens(
+                auth,
+                request(
+                    "gemini-2.5-flash",
+                    r#"{"model":"gemini-2.5-flash","input":"hi"}"#,
+                ),
+                options(&Format::OPENAI_RESPONSE),
+            )
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&response.payload);
+        assert!(!text.contains(secret), "{secret} in {text}");
+        assert!(text.contains("[redacted]"), "{text}");
+    }
+}

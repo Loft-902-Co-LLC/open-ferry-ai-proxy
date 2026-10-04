@@ -245,7 +245,7 @@ impl VertexExecutor {
             url.push_str(&options.alt);
         }
         let headers = self.headers(auth, options, &target).await?;
-        let (response, _) = post(
+        let (response, secrets) = post(
             &self.clients,
             &url,
             headers,
@@ -261,7 +261,7 @@ impl VertexExecutor {
             ),
         )
         .await?;
-        let (headers, mut data) = read_answer(response).await?;
+        let (headers, mut data) = read_answer(response, &secrets).await?;
         if imagen {
             data = convert_imagen_to_gemini_response(data, base);
         }
@@ -336,7 +336,7 @@ impl VertexExecutor {
         prepare_count_body(&mut body, base);
         let url = self.url(&target, base, "countTokens");
         let headers = self.headers(auth, options, &target).await?;
-        let (response, _) = post(
+        let (response, secrets) = post(
             &self.clients,
             &url,
             headers,
@@ -352,7 +352,7 @@ impl VertexExecutor {
             ),
         )
         .await?;
-        let (headers, data) = read_answer(response).await?;
+        let (headers, data) = read_answer(response, &secrets).await?;
         Ok(translate_count(options, headers, data))
     }
 }

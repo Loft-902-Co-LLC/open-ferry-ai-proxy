@@ -1035,3 +1035,89 @@ async fn refreshes_to_the_same_credential() {
     assert_eq!(refreshed.attributes, auth.attributes);
     assert_eq!(executor().id(), "gemini-interactions");
 }
+
+/// A mock whose answer, an Interactions one, says the API key the request
+/// carried as the model's output.
+async fn saying_the_key() -> Mock {
+    Mock::answering(|seen| {
+        let key = seen.header("x-goog-api-key").unwrap_or_default();
+        Reply::json(
+            &json!({
+                "id": "interaction_1",
+                "object": "interaction",
+                "status": "completed",
+                "model": "gemini-3.1-flash-lite",
+                "steps": [{
+                    "type": "model_output",
+                    "content": [{"type": "text", "text": format!("your key is {key}")}],
+                }],
+                "usage": {"total_input_tokens": 1, "total_output_tokens": 1},
+            })
+            .to_string(),
+        )
+    })
+    .await
+}
+
+// Not upstream's: a model that says the key the request carried doesn't hand
+// it on, in the answer to a call that isn't streamed, whether it is returned
+// as it is or translated for another client.
+#[tokio::test]
+async fn answers_hide_the_key() {
+    let mock = saying_the_key().await;
+    let auth = key_auth("gemini-interactions", "test-key-secret", &mock.url);
+    let native = r#"{"model":"gemini-3.1-flash-lite","input":"hi"}"#;
+    let chat = r#"{"model":"gemini-3.1-flash-lite","messages":[{"role":"user","content":"hi"}]}"#;
+    let claude = r#"{"model":"gemini-3.1-flash-lite","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}"#;
+    for (format, payload) in [
+        (Format::INTERACTIONS, native),
+        (Format::OPENAI, chat),
+        (Format::CLAUDE, claude),
+    ] {
+        let response = execute(
+            &executor(),
+            Arc::clone(&auth),
+            "gemini-3.1-flash-lite",
+            payload,
+            options(&format),
+        )
+        .await;
+        let text = String::from_utf8_lossy(&response.payload);
+        assert!(!text.contains("test-key-secret"), "{format:?}: {text}");
+        assert!(
+            text.contains("your key is [redacted]"),
+            "{format:?}: {text}"
+        );
+    }
+    assert_eq!(mock.hits(), 3);
+}
+
+// Not upstream's: an interaction that failed with a 200, quoting the key in
+// its error, doesn't hand it on either.
+#[tokio::test]
+async fn a_failed_interaction_hides_the_key() {
+    let mock = Mock::answering(|seen| {
+        let key = seen.header("x-goog-api-key").unwrap_or_default();
+        Reply::json(
+            &json!({
+                "id": "interaction_1",
+                "object": "interaction",
+                "status": "failed",
+                "error": {"code": "invalid_key", "message": format!("API key {key} is not valid")},
+            })
+            .to_string(),
+        )
+    })
+    .await;
+    let response = execute(
+        &executor(),
+        key_auth("gemini-interactions", "test-key-secret", &mock.url),
+        "gemini-3.1-flash-lite",
+        r#"{"model":"gemini-3.1-flash-lite","input":"hi"}"#,
+        options(&Format::INTERACTIONS),
+    )
+    .await;
+    let text = String::from_utf8_lossy(&response.payload);
+    assert!(!text.contains("test-key-secret"), "{text}");
+    assert!(text.contains("API key [redacted] is not valid"), "{text}");
+}

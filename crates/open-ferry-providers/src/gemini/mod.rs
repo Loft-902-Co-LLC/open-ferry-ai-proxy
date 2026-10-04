@@ -54,7 +54,10 @@
 //!   `Policy::Client` in the crate's `redact` module): the credential
 //!   headers after the custom ones (the API key or access token among
 //!   them), each cookie, the URL's credentials, the proxy's password and the
-//!   credential's key.
+//!   credential's key. So has a successful answer that isn't a stream
+//!   (`read_answer`), whole, before it is translated, as each line of a
+//!   stream has (`stream`); a model can echo a secret back in its output,
+//!   which upstream passes on as it is.
 //! - Usage reporting and request logging are left to the call's taps (see
 //!   the crate's `observe_send` module), and payload rules to
 //!   [`crate::payload`].
@@ -75,6 +78,8 @@ pub use executor::GeminiExecutor;
 pub use interactions::InteractionsExecutor;
 pub use token::normalize_service_account;
 pub use vertex::VertexExecutor;
+
+use std::borrow::Cow;
 
 use bytes::Bytes;
 use http::{HeaderMap, HeaderName, HeaderValue, Method, header};
@@ -271,13 +276,29 @@ async fn post(
     Err(StatusError::new(status, String::from_utf8_lossy(&body)).into())
 }
 
-/// The headers and body of a successful answer.
-async fn read_answer(response: reqwest::Response) -> Result<(HeaderMap, Vec<u8>), ExecError> {
+/// The headers and body of a successful answer, with the secrets the
+/// request sent (`secrets`, from [`post`]) redacted from the body as for a
+/// client, so a model that echoes one back doesn't hand it on.
+async fn read_answer(
+    response: reqwest::Response,
+    secrets: &Secrets,
+) -> Result<(HeaderMap, Vec<u8>), ExecError> {
     let headers = response.headers().clone();
-    let data = read_body(response, MAX_LINE)
-        .await
-        .map_err(|error| ExecError::new(ErrorKind::Upstream, error.to_string()))?;
-    Ok((headers, data))
+    let data = read_body(response, MAX_LINE).await.map_err(|error| {
+        ExecError::new(
+            ErrorKind::Upstream,
+            secrets.text(error.to_string(), Policy::Client),
+        )
+    })?;
+    Ok((headers, redact_answer(secrets, data)))
+}
+
+/// `data` with the secrets the request sent redacted as for a client.
+fn redact_answer(secrets: &Secrets, data: Vec<u8>) -> Vec<u8> {
+    match secrets.bytes(&data, Policy::Client) {
+        Cow::Owned(redacted) => redacted,
+        Cow::Borrowed(_) => data,
+    }
 }
 
 /// Translates Gemini's answer `data` to the request `sent` into the

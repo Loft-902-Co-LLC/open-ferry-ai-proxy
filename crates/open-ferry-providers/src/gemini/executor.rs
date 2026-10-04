@@ -136,7 +136,7 @@ impl GeminiExecutor {
             url.push_str(&options.alt);
         }
         let headers = build_headers(auth, options, &Credential::ApiKey(api_key(auth)), NAME)?;
-        let (response, _) = post(
+        let (response, secrets) = post(
             &self.clients,
             &url,
             headers,
@@ -152,7 +152,7 @@ impl GeminiExecutor {
             ),
         )
         .await?;
-        let (headers, data) = read_answer(response).await?;
+        let (headers, data) = read_answer(response, &secrets).await?;
         translate_answer(request, options, &body, headers, data)
     }
 
@@ -217,7 +217,7 @@ impl GeminiExecutor {
         prepare_count_body(&mut body, base);
         let url = model_url(auth, base, "countTokens");
         let headers = build_headers(auth, options, &Credential::ApiKey(api_key(auth)), NAME)?;
-        let (response, _) = post(
+        let (response, secrets) = post(
             &self.clients,
             &url,
             headers,
@@ -233,7 +233,7 @@ impl GeminiExecutor {
             ),
         )
         .await?;
-        let (headers, data) = read_answer(response).await?;
+        let (headers, data) = read_answer(response, &secrets).await?;
         Ok(translate_count(options, headers, data))
     }
 }
