@@ -11,11 +11,6 @@
 //! the tap and read the record it queues, on a clock the tests move.
 //!
 //! Dropped:
-//! - TestParseInteractionsUsage, TestParseInteractionsUsageNormalizesCacheWriteAlias,
-//!   TestParseInteractionsUsageIncludesToolUseTokens,
-//!   TestParseInteractionsStreamUsage and
-//!   TestParseInteractionsStreamUsageOfficialMetadata: the Interactions
-//!   parsers aren't ported (see the module's docs).
 //! - TestUsageReporterBuildRecordIncludesReasoningEffort,
 //!   TestUsageReporterSetTranslatedReasoningEffortCodexConfigurationUpdate
 //!   and TestUsageReporterSetTranslatedReasoningEffortConfigurationUpdateAfterCleanup:
@@ -44,7 +39,8 @@ use std::time::{Duration, Instant};
 use super::super::accounting::{Detail, Quality, ensure_token_breakdown_for_provider};
 use super::super::parse::{
     StreamUsageBuffer, parse_claude_stream_usage, parse_claude_usage, parse_codex_usage,
-    parse_gemini_stream_usage, parse_gemini_usage, parse_openai_stream_usage, parse_openai_usage,
+    parse_gemini_stream_usage, parse_gemini_usage, parse_interactions_stream_usage,
+    parse_interactions_usage, parse_openai_stream_usage, parse_openai_usage,
 };
 use super::super::record_json::Record;
 use super::super::ttft::Ttft;
@@ -431,6 +427,22 @@ fn parse_gemini_usage_rejects_invalid_tool_use_sums() {
     }
 }
 
+/// Ports TestParseInteractionsUsage.
+#[test]
+fn parse_interactions_usage_reads_usage() {
+    let detail = parse_interactions_usage(
+        br#"{"usage":{"input_tokens":3,"output_tokens":4,"reasoning_tokens":5,"cached_tokens":2}}"#,
+    );
+    assert_eq!(detail.input_tokens, 3);
+    assert_eq!(detail.output_tokens, 4);
+    assert_eq!(detail.reasoning_tokens, 5);
+    assert_eq!(detail.total_tokens, 12);
+    assert_eq!(detail.cached_tokens, 2);
+    assert_eq!(detail.cache_read_tokens, 2);
+    assert_eq!(detail.token_breakdown.input.uncached_tokens, 1);
+    assert_eq!(detail.token_breakdown.output.total_tokens, 9);
+}
+
 /// Ports TestNormalizeUsageDetailTotalDoesNotDoubleCountReasoning
 /// (upstream's `normalizeUsageDetailTotal` is
 /// `EnsureTokenBreakdownForProvider`).
@@ -449,6 +461,83 @@ fn normalize_usage_detail_total_does_not_double_count_reasoning() {
     assert_eq!(detail.total_tokens, 130);
     assert_eq!(detail.token_breakdown.quality, Quality::Complete);
     assert_eq!(detail.token_breakdown.output.reasoning_tokens, 12);
+}
+
+/// Ports TestParseInteractionsUsageNormalizesCacheWriteAlias.
+#[test]
+fn parse_interactions_usage_normalizes_cache_write_alias() {
+    let detail = parse_interactions_usage(br#"{"usage":{"input_tokens":3,"cache_write_tokens":2}}"#);
+    assert_eq!(detail.cache_creation_tokens, 2);
+}
+
+/// Ports TestParseInteractionsUsageIncludesToolUseTokens.
+#[test]
+fn parse_interactions_usage_includes_tool_use_tokens() {
+    let detail = parse_interactions_usage(
+        br#"{"usage":{"total_input_tokens":2,"total_output_tokens":6,"total_thought_tokens":3,"total_tool_use_tokens":4,"total_tokens":15}}"#,
+    );
+    assert_eq!(detail.input_tokens, 6);
+    assert_eq!(detail.output_tokens, 6);
+    assert_eq!(detail.reasoning_tokens, 3);
+    assert_eq!(detail.total_tokens, 15);
+    let breakdown = detail.token_breakdown;
+    assert!(breakdown.is_valid());
+    assert_eq!(breakdown.quality, Quality::Complete);
+    assert_eq!(breakdown.input.uncached_tokens, 6);
+    assert_eq!(breakdown.output.total_tokens, 9);
+}
+
+/// Ports TestParseInteractionsStreamUsage.
+#[test]
+fn parse_interactions_stream_usage_reads_the_interaction() {
+    let detail = parse_interactions_stream_usage(
+        br#"{"type":"interaction.completed","interaction":{"usage":{"input_tokens":2,"output_tokens":6,"total_tokens":8}}}"#,
+    )
+    .expect("counts");
+    assert_eq!(detail.total_tokens, 8);
+}
+
+/// Ports TestParseInteractionsStreamUsageOfficialMetadata.
+#[test]
+fn parse_interactions_stream_usage_official_metadata() {
+    let detail = parse_interactions_stream_usage(
+        br#"data: {"event_type":"finish","metadata":{"total_usage":{"total_input_tokens":2,"total_output_tokens":6,"total_thought_tokens":3,"total_cached_tokens":1,"total_tokens":11}}}"#,
+    )
+    .expect("counts");
+    assert_eq!(detail.input_tokens, 2);
+    assert_eq!(detail.output_tokens, 6);
+    assert_eq!(detail.reasoning_tokens, 3);
+    assert_eq!(detail.cached_tokens, 1);
+    assert_eq!(detail.cache_read_tokens, 1);
+    assert_eq!(detail.total_tokens, 11);
+}
+
+/// Not upstream's: an Interactions stream's other lines, an `event:` line,
+/// `[DONE]`, Gemini-style counts of zero and JSON that isn't whole, give no
+/// counts; Gemini's counts under `usage` are read as Gemini's.
+#[test]
+fn parse_interactions_stream_usage_skips_lines_without_counts() {
+    let lines: [&[u8]; 5] = [
+        b"event: interaction.completed",
+        b"data: [DONE]",
+        br#"data: {"usage":{"promptTokenCount":0,"candidatesTokenCount":0}}"#,
+        br#"data: {"usage":{"input_tokens":2"#,
+        b"",
+    ];
+    for line in lines {
+        assert!(
+            parse_interactions_stream_usage(line).is_none(),
+            "{}",
+            String::from_utf8_lossy(line)
+        );
+    }
+    let detail = parse_interactions_usage(
+        br#"{"usage_metadata":{"promptTokenCount":4,"candidatesTokenCount":2,"thoughtsTokenCount":1},"service_tier":"flex"}"#,
+    );
+    assert_eq!(detail.input_tokens, 4);
+    assert_eq!(detail.output_tokens, 2);
+    assert_eq!(detail.total_tokens, 7);
+    assert_eq!(detail.response_service_tier, "flex");
 }
 
 /// The record of `call` making an OpenAI-compatible call that answers
@@ -612,6 +701,49 @@ fn executor_type_follows_the_provider() {
             "{provider}"
         );
     }
+}
+
+/// Not upstream's: a Gemini Interactions call's answer is read as
+/// Interactions', whole or as a stream whose latest counts win, and is
+/// recorded as the Gemini executor's.
+#[test]
+fn interactions_answers_are_read_as_interactions() {
+    let auth = auth("interactions-1", "0", "gemini-interactions");
+    let harness = Harness::new();
+    let driver = ClientCall::new("gemini-3.5-flash").tap(&harness);
+    driver.attempt(
+        AttemptKind::Execute,
+        "gemini-interactions",
+        "gemini-3.5-flash",
+        &auth,
+    );
+    driver.chunk(r#"{"id":"interaction_1","usage":{"input_tokens":1,"output_tokens":2}}"#);
+    driver.finish(Outcome::Completed);
+    let record = harness.record();
+    assert_eq!(str_field(&record, "provider"), "gemini-interactions");
+    assert_eq!(str_field(&record, "executor_type"), "GeminiExecutor");
+    assert_eq!(int_at(&record, "/tokens/total_tokens"), 3);
+
+    let harness = Harness::new();
+    let driver = ClientCall::new("gemini-3.5-flash").stream().tap(&harness);
+    driver.attempt(
+        AttemptKind::Stream,
+        "gemini-interactions",
+        "gemini-3.5-flash",
+        &auth,
+    );
+    driver.chunk(
+        "event: interaction.created\ndata: {\"interaction\":{\"id\":\"i\",\"usage\":{\"total_input_tokens\":1,\"total_tokens\":1}}}\n\n",
+    );
+    driver.chunk(
+        "event: interaction.completed\ndata: {\"interaction\":{\"usage\":{\"total_input_tokens\":2,\"total_output_tokens\":3,\"total_tokens\":5}}}\n\n",
+    );
+    driver.finish(Outcome::Completed);
+    let record = harness.record();
+    assert_eq!(str_field(&record, "executor_type"), "GeminiExecutor");
+    assert_eq!(int_at(&record, "/tokens/input_tokens"), 2);
+    assert_eq!(int_at(&record, "/tokens/output_tokens"), 3);
+    assert_eq!(int_at(&record, "/tokens/total_tokens"), 5);
 }
 
 /// Ports TestUsageReporterBuildRecordIncludesServiceTier.

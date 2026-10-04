@@ -42,7 +42,7 @@
 //! - The Redis protocol listener is not ported yet (P3 WP-F): until it is,
 //!   the usage queue is served by the management API only.
 //! - Not ported: session derivation and hierarchy, the
-//!   Antigravity, Interactions and Codex image tool parsers, the credits
+//!   Antigravity and Codex image tool parsers, the credits
 //!   markers, and the usage plugins of the SDK's `usage.Manager` beyond
 //!   the queue.
 
@@ -69,7 +69,8 @@ pub use accounting::{
 };
 pub use parse::{
     StreamUsageBuffer, merge_stream_usage_detail, parse_claude_stream_usage, parse_claude_usage,
-    parse_codex_usage, parse_gemini_stream_usage, parse_gemini_usage, parse_openai_stream_usage,
+    parse_codex_usage, parse_gemini_stream_usage, parse_gemini_usage,
+    parse_interactions_stream_usage, parse_interactions_usage, parse_openai_stream_usage,
     parse_openai_usage,
 };
 pub use queue::{

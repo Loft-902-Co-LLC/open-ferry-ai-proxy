@@ -8,7 +8,8 @@
 // claude_executor_stream.go, codex_executor_execute.go,
 // codex_executor_stream.go, codex_executor_terminal.go
 // (observeCodexTokenEvent), codex_websockets_executor.go,
-// gemini_executor.go, gemini_vertex_executor.go and
+// gemini_executor.go (including executeInteractions and
+// executeInteractionsStream), gemini_vertex_executor.go and
 // openai_compat_executor.go, internal/redisqueue/plugin.go (HandleUsage's
 // gate), sdk/cliproxy/auth/token_fingerprint.go (AccessTokenSHA256,
 // accessTokenForFingerprint), sdk/cliproxy/auth/conductor_execution.go
@@ -25,8 +26,9 @@
 //! call ended, and reads the answer as the executor would have:
 //! - An answer read whole (a non-streaming call) is kept, up to
 //!   [`BODY_BOUND`], and read when the call completes: Claude's as JSON, or
-//!   line by line when it came as an event stream; Gemini's and an
-//!   OpenAI-compatible provider's as JSON; Codex's lines up to its
+//!   line by line when it came as an event stream; Gemini's, Gemini
+//!   Interactions' and an OpenAI-compatible provider's as JSON; Codex's
+//!   lines up to its
 //!   `response.completed` or `response.incomplete`; a Codex compaction's
 //!   as OpenAI JSON.
 //! - A stream is read line by line as it comes, each line up to
@@ -72,6 +74,12 @@
 //! - Gemini stream lines are read without upstream's
 //!   `FilterSSEUsageMetadata`, which only drops usage from lines before
 //!   the last.
+//! - A Gemini Interactions stream is read line by line, where upstream
+//!   reads each SSE frame's `data:` lines joined: an event whose JSON is
+//!   split over several `data:` lines gives no counts. Its calls that the
+//!   executor hands to the Gemini executor, for a client format it doesn't
+//!   send natively or a credential that isn't `gemini-interactions`, are
+//!   recorded as `gemini`'s.
 //! - `reasoning_effort` is always empty: upstream reads it from the
 //!   translated request, which the tap doesn't see.
 //! - A failure's body is the error's text, scrubbed of every secret the
@@ -120,7 +128,8 @@ use super::accounting::Detail;
 use super::json::{self, Doc};
 use super::parse::{
     StreamUsageBuffer, parse_claude_usage, parse_codex_usage, parse_gemini_stream_usage,
-    parse_gemini_usage, parse_openai_usage,
+    parse_gemini_usage, parse_interactions_stream_usage, parse_interactions_usage,
+    parse_openai_usage,
 };
 use super::record_json::Record;
 use super::response_model::{
@@ -248,6 +257,8 @@ enum Mode {
     ClaudeStream,
     GeminiExecute,
     GeminiStream,
+    InteractionsExecute,
+    InteractionsStream,
     OpenAiExecute,
     OpenAiStream,
     CodexCompact,
@@ -273,6 +284,8 @@ impl Mode {
             ("claude", AttemptKind::Stream) => Self::ClaudeStream,
             ("gemini" | "vertex", AttemptKind::Execute) => Self::GeminiExecute,
             ("gemini" | "vertex", AttemptKind::Stream) => Self::GeminiStream,
+            ("gemini-interactions", AttemptKind::Execute) => Self::InteractionsExecute,
+            ("gemini-interactions", AttemptKind::Stream) => Self::InteractionsStream,
             (_, AttemptKind::Execute) => Self::OpenAiExecute,
             (_, AttemptKind::Stream) => Self::OpenAiStream,
         }
@@ -284,6 +297,7 @@ impl Mode {
             self,
             Self::ClaudeExecute
                 | Self::GeminiExecute
+                | Self::InteractionsExecute
                 | Self::OpenAiExecute
                 | Self::CodexCompact
                 | Self::CodexExecute
@@ -298,7 +312,7 @@ fn executor_type(provider: &str, kind: Option<AttemptKind>) -> &'static str {
         "codex" if kind == Some(AttemptKind::Websocket) => "CodexWebsocketsExecutor",
         "codex" => "CodexExecutor",
         "claude" => "ClaudeExecutor",
-        "gemini" => "GeminiExecutor",
+        "gemini" | "gemini-interactions" => "GeminiExecutor",
         "vertex" => "GeminiVertexExecutor",
         _ => "OpenAICompatExecutor",
     }
@@ -720,6 +734,10 @@ impl Call {
                 self.response_model.observe(line, &self.provider);
                 self.buffer.observe(parse_gemini_stream_usage(line));
             }
+            Mode::InteractionsStream => {
+                self.response_model.observe(line, &self.provider);
+                self.buffer.observe(parse_interactions_stream_usage(line));
+            }
             Mode::OpenAiStream => {
                 self.response_model.observe(line, &self.provider);
                 self.buffer.observe_openai_stream(line);
@@ -820,6 +838,10 @@ impl Call {
                 self.response_model.observe(&body, &self.provider);
                 Some(parse_gemini_usage(&body))
             }
+            Mode::InteractionsExecute => {
+                self.response_model.observe(&body, &self.provider);
+                Some(parse_interactions_usage(&body))
+            }
             Mode::OpenAiExecute => {
                 self.response_model.observe(&body, &self.provider);
                 Some(parse_openai_usage(&body))
@@ -890,10 +912,12 @@ impl Call {
                 ))
             }
             (Mode::ClaudeStream, _) => self.buffered().map(success),
-            (Mode::GeminiStream | Mode::OpenAiStream, Outcome::Failed) => {
-                Some(failure(Detail::default(), error))
-            }
-            (Mode::GeminiStream, _) | (Mode::OpenAiStream, Outcome::Completed) => {
+            (
+                Mode::GeminiStream | Mode::InteractionsStream | Mode::OpenAiStream,
+                Outcome::Failed,
+            ) => Some(failure(Detail::default(), error)),
+            (Mode::GeminiStream | Mode::InteractionsStream, _)
+            | (Mode::OpenAiStream, Outcome::Completed) => {
                 Some(success(self.buffered().unwrap_or_default()))
             }
             (Mode::OpenAiStream, _) => match self.buffered() {

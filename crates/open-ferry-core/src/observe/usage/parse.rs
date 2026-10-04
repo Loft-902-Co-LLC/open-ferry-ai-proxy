@@ -4,7 +4,8 @@
 // parseOpenAIStyleUsageNode, ParseOpenAIStreamUsage, ParseClaudeUsage,
 // ParseClaudeStreamUsage, parseClaudeUsageNode,
 // parseGeminiFamilyUsageDetail, ParseGeminiUsage, ParseGeminiStreamUsage,
-// hasNonZeroTokenUsage, extractResponseServiceTier,
+// parseInteractionsUsageDetail, ParseInteractionsUsage,
+// ParseInteractionsStreamUsage, hasNonZeroTokenUsage, extractResponseServiceTier,
 // extractResponseServiceTierFromValidJSON, firstExistingUsageNode,
 // safeUsageTokenSum, jsonPayload) and plugin_executor_usage.go
 // (ObserveMergedStreamUsage, MergeStreamUsageDetail) (v8.0.10, MIT).
@@ -17,13 +18,15 @@
 //! `usage` with `prompt_tokens` or `input_tokens` and their details;
 //! Claude's write `usage` with its cache buckets apart, in
 //! `message_start` and again in `message_delta`; Gemini's write
-//! `usageMetadata`. A stream's counts are kept in a [`StreamUsageBuffer`],
-//! the latest winning, Claude's merged.
+//! `usageMetadata`; Gemini Interactions' write `usage` with `input_tokens`
+//! or `total_input_tokens`, beside the interaction or inside it. A
+//! stream's counts are kept in a [`StreamUsageBuffer`], the latest winning,
+//! Claude's merged.
 //!
 //! Deviations from upstream:
 //! - JSON that doesn't parse whole has no counts (see [`super::json`]).
-//! - Antigravity's, Interactions' and the Codex image tool's counts, and
-//!   the plugin executors', aren't parsed: those aren't ported yet.
+//! - Antigravity's and the Codex image tool's counts, and the plugin
+//!   executors', aren't parsed: those aren't ported yet.
 
 use super::accounting::{Detail, TokenBreakdown, non_negative_sum};
 use super::json::{self, Doc, Node};
@@ -372,6 +375,140 @@ pub fn parse_gemini_stream_usage(line: &[u8]) -> Option<Detail> {
         return None;
     }
     let detail = parse_gemini_usage_node(node);
+    detail.has_tokens().then_some(detail)
+}
+
+/// Where an Interactions answer or event keeps its counts, in the order
+/// they are looked for.
+const INTERACTIONS_USAGE_PATHS: [&str; 9] = [
+    "usage",
+    "total_usage",
+    "metadata.total_usage",
+    "metadata.usage",
+    "usageMetadata",
+    "usage_metadata",
+    "interaction.usage",
+    "interaction.total_usage",
+    "interaction.metadata.total_usage",
+];
+
+/// The counts of an Interactions `usage`, tool use counted in the input,
+/// cache inside it and reasoning beside the output (upstream's
+/// `parseInteractionsUsageDetail`).
+fn parse_interactions_usage_detail(node: Node<'_>) -> Detail {
+    let cache_read = first_existing(node, &["cache_read_tokens", "cacheReadTokens"]);
+    let tool_use = first_existing(
+        node,
+        &[
+            "tool_use_tokens",
+            "total_tool_use_tokens",
+            "toolUseTokens",
+            "totalToolUseTokens",
+        ],
+    )
+    .int();
+    let input = non_negative_sum(&[
+        first_existing(node, &["input_tokens", "prompt_tokens", "total_input_tokens"]).int(),
+        tool_use,
+    ]);
+    let mut detail = Detail {
+        input_tokens: input.unwrap_or(0),
+        output_tokens: first_existing(
+            node,
+            &["output_tokens", "completion_tokens", "total_output_tokens"],
+        )
+        .int(),
+        reasoning_tokens: first_existing(
+            node,
+            &[
+                "reasoning_tokens",
+                "thoughtsTokenCount",
+                "total_thought_tokens",
+            ],
+        )
+        .int(),
+        total_tokens: first_existing(node, &["total_tokens", "totalTokenCount"]).int(),
+        cached_tokens: first_existing(
+            node,
+            &[
+                "cached_tokens",
+                "cachedContentTokenCount",
+                "total_cached_tokens",
+            ],
+        )
+        .int(),
+        cache_read_tokens: cache_read.int(),
+        cache_creation_tokens: first_existing(
+            node,
+            &[
+                "cache_creation_tokens",
+                "cacheCreationTokens",
+                "cache_write_tokens",
+                "cacheWriteTokens",
+            ],
+        )
+        .int(),
+        ..Detail::default()
+    };
+    if input.is_none() {
+        detail.token_breakdown = TokenBreakdown::invalid(detail.total_tokens);
+        return detail;
+    }
+    if !cache_read.exists() && detail.cached_tokens > 0 {
+        detail.cache_read_tokens = detail.cached_tokens;
+    }
+    if detail.total_tokens == 0 {
+        match non_negative_sum(&[
+            detail.input_tokens,
+            detail.output_tokens,
+            detail.reasoning_tokens,
+        ]) {
+            Some(total) => detail.total_tokens = total,
+            None => {
+                detail.total_tokens = 0;
+                detail.token_breakdown = TokenBreakdown::invalid(0);
+                return detail;
+            }
+        }
+    }
+    detail.token_breakdown = TokenBreakdown::separate_reasoning(
+        detail.input_tokens,
+        detail.cache_read_tokens,
+        detail.cache_creation_tokens,
+        detail.output_tokens,
+        detail.reasoning_tokens,
+        detail.total_tokens,
+    );
+    detail
+}
+
+/// The counts in a Gemini Interactions answer or event: its `usage`, its
+/// `total_usage` or its interaction's, read as Gemini's `usageMetadata`
+/// when it has Gemini's counts (upstream's `ParseInteractionsUsage`).
+pub fn parse_interactions_usage(data: &[u8]) -> Detail {
+    let doc = Doc::parse(data);
+    let node = first_existing(doc.root(), &INTERACTIONS_USAGE_PATHS);
+    if !node.exists() {
+        return Detail::default();
+    }
+    let mut detail =
+        if node.get("promptTokenCount").exists() || node.get("candidatesTokenCount").exists() {
+            parse_gemini_usage_node(node)
+        } else {
+            parse_interactions_usage_detail(node)
+        };
+    detail.response_service_tier = extract_response_service_tier(data);
+    detail
+}
+
+/// The counts in a Gemini Interactions stream line, a `data:` line or bare
+/// JSON, when it has any (upstream's `ParseInteractionsStreamUsage`).
+pub fn parse_interactions_stream_usage(line: &[u8]) -> Option<Detail> {
+    let payload = json_payload(line).unwrap_or(line);
+    if payload.is_empty() || !json::valid(payload) {
+        return None;
+    }
+    let detail = parse_interactions_usage(payload);
     detail.has_tokens().then_some(detail)
 }
 
