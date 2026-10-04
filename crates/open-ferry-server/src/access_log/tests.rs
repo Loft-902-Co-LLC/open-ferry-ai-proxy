@@ -2,14 +2,19 @@
 // (TestIsAIAPIPathIncludesPublicAPIGroups, TestIsAIAPIPathIncludesImages,
 // TestIsAIAPIPathIncludesCodexBackend,
 // TestGinLogrusLoggerAddsRequestIDForCodexBackend,
-// TestGinLogrusLoggerHealthProbeStatus) (v8.0.10, MIT).
+// TestGinLogrusLoggerHealthProbeStatus) and the healthy case of
+// TestHealthzAccessLogging in internal/api/server_test.go (v8.0.10, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The access log.
 //!
-//! Dropped: TestGinLogrusRecoveryRepanicsErrAbortHandler and
-//! TestGinLogrusRecoveryHandlesRegularPanic, which test gin's panic
-//! recovery; the router's `CatchPanicLayer` does that here.
+//! Dropped:
+//! - TestGinLogrusRecoveryRepanicsErrAbortHandler and
+//!   TestGinLogrusRecoveryHandlesRegularPanic, which test gin's panic
+//!   recovery; the router's `CatchPanicLayer` does that here.
+//! - The `home_unavailable` case of TestHealthzAccessLogging: Home isn't
+//!   ported, and no probe of ours answers 503. A failed probe's line is
+//!   checked by `health_probe_status`.
 
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -31,6 +36,8 @@ use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
 
 use super::*;
+use crate::config::ServerConfig;
+use crate::testing::{FakeCatalog, FakeDispatcher, state};
 
 /// A logged event: its level, message and request ID, the event's own or
 /// that of a span it is in.
@@ -252,6 +259,33 @@ async fn health_probe_status() {
         let (got, logged) = send(&app, request(method, path)).await;
         assert_eq!(got, status, "{name}");
         assert_eq!(!logged.is_empty(), want_log, "{name}: {logged:?}");
+    }
+}
+
+// Ports the healthy case of TestHealthzAccessLogging, through the router:
+// a `GET` or `HEAD` of the real `/healthz` route isn't logged, and an
+// ordinary request after it is, with its ID.
+#[tokio::test]
+async fn healthz_probe_leaves_no_line_and_the_next_request_does() {
+    let dispatcher = FakeDispatcher::new([]);
+    let app = crate::router(state(
+        ServerConfig::default(),
+        FakeCatalog::new(),
+        &dispatcher,
+    ));
+    for method in [Method::GET, Method::HEAD] {
+        let (status, logged) = send(&app, request(method.clone(), "/healthz")).await;
+        assert_eq!(status, StatusCode::OK, "{method}");
+        assert!(logged.is_empty(), "{method}: {logged:?}");
+
+        let control = "/healthz-access-log-control";
+        let (_, logged) = send(&app, request(Method::GET, control)).await;
+        assert!(
+            logged.iter().any(|line| {
+                line.request_id.is_some() && line.message.contains(&format!("\"{control}\""))
+            }),
+            "{method}: no access line after the probe: {logged:?}"
+        );
     }
 }
 

@@ -28,8 +28,8 @@
 //!   and a `prompt_cache_key` the client itself sent pass through where
 //!   upstream passes them. If Codex then rejects a request, its error is
 //!   passed back as it is.
-//! - The config's image generation switch isn't ported, and its payload
-//!   rules are left to [`crate::payload`]. Compatibility models and Codex
+//! - The config's `disable-image-generation` switch and its payload rules
+//!   are left to [`crate::payload`]. Compatibility models and Codex
 //!   clients' multi-agent v2 and orphan delegation requests are handled in
 //!   the `compat` module.
 //!

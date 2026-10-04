@@ -34,8 +34,11 @@
 //! - `prepareCodexMultiAgentV2Tools` and `prepareCodexOrphanDelegation` are
 //!   left out, and `WithRequiredUpstreamWebsocket` isn't passed to calls.
 //! - Response steering (the duplex reader), subscriptions to upstream
-//!   disconnects, and the request log's WebSocket timeline aren't ported;
-//!   the timeline's events go to `tracing`.
+//!   disconnects, and the client's own WebSocket timeline in the request
+//!   log aren't ported; those events go to `tracing`. The log of a session
+//!   has the upgrade request, a `101` answer, the upstream attempts of
+//!   every turn with their WebSocket timelines, and each turn's
+//!   `API ERROR RESPONSE`.
 //! - A client that goes away is noticed when a read, write or ping fails,
 //!   as with gorilla after the hijack; upstream also cancels the call with
 //!   the request's context.

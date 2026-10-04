@@ -53,7 +53,10 @@
 //!   HTTP route's own headers are tested in `codex/executor/tests.rs`.
 //! - `TestCodexWebsocketsExecuteObservesWebSocketResponseEvents` and
 //!   `TestCodexWebsocketsExecuteStreamObservesWebSocketResponseEvents`:
-//!   usage reporting isn't ported.
+//!   they test `Options.WebSocketResponseObserver`, which upstream wires
+//!   only for the plugin host; plugins aren't ported. Usage records of a
+//!   WebSocket call are made from the call's own traffic, and are tested
+//!   in `open-ferry-core`'s `observe::usage`.
 //! - `TestCodexWebsocketsExecuteResponsesLiteDoesNotInjectImageGenerationTool`
 //!   keeps its Responses Lite checks; the image generation tool isn't
 //!   ported.

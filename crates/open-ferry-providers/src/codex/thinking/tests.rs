@@ -11,9 +11,10 @@
 //! - The test models are registered in a model registry of their own,
 //!   rather than the global one.
 //! - Upstream reads a body's effective effort with
-//!   `ExtractTranslatedReasoningEffort`, which usage reporting calls and
-//!   isn't ported; the tests here read the setting it is made from
-//!   (`codex_usage_config`).
+//!   `ExtractTranslatedReasoningEffort`, which fills a usage record's
+//!   `reasoning_effort`; usage records here carry none (see the reporter's
+//!   module in `open-ferry-core`), so the tests read the setting it is made
+//!   from (`codex_usage_config`).
 //! - Where upstream checks that a body is unchanged byte for byte, the
 //!   tests here compare JSON values, as a body here is one.
 //! - `TestApplyThinkingLogsNativeResponsesEffectiveEffort` checks that the
@@ -26,8 +27,9 @@
 //!   `gemini::thinking`'s), and the Interactions matrix.
 //! - `ExtractReasoningEffort`'s checks in
 //!   `TestExtractCodexReasoningEffortWithConfigurationUpdate` and
-//!   `...TargetRouting`: usage reporting isn't ported. The former's invalid
-//!   JSON case goes with them.
+//!   `...TargetRouting`: a usage record's `reasoning_effort` is always
+//!   empty, so there is no `ExtractReasoningEffort` to check. The former's
+//!   invalid JSON case goes with them.
 //! - `TestApplyConfigurationUpdateRouting`'s "invalid JSON is untouched":
 //!   the body here is always JSON, as the translators give it.
 

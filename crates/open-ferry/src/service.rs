@@ -2386,19 +2386,25 @@ mod tests {
     ///   route.
     /// - `TestNewServerAppliesTrustedProxyConfiguration`, through what the
     ///   management API makes of a client's address.
+    /// - `TestManagementUsageRequiresManagementAuthAndPopsArray`, with the
+    ///   service's own usage queue, which it turns on as `run` does while
+    ///   the management API is available.
     ///
     /// `TestHomeEnabledHidesManagementEndpointsAndControlPanel`,
-    /// `TestManagementPluginsRouteRegistered`,
-    /// `TestManagementUsageRequiresManagementAuthAndPopsArray` and
+    /// `TestManagementPluginsRouteRegistered` and
     /// `TestOAuthCallbackRouteSkipsManagementKeyMiddleware` are dropped:
-    /// Home mode, plugins, usage and the OAuth callbacks aren't ported.
+    /// Home mode and plugins aren't ported, and the OAuth test completes a
+    /// plugin's login session. The main server's callback pages are tested
+    /// by `oauth_callback_pages_are_served_beside_the_proxy`.
     mod management {
         use std::fmt::Write as _;
         use std::net::SocketAddr;
         use std::path::Path;
         use std::sync::Arc;
 
+        use axum::body::Bytes;
         use open_ferry_core::config::{Config, WatchEvent};
+        use open_ferry_core::observe::usage;
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
         use tokio::net::{TcpListener, TcpStream};
         use tokio::sync::watch;
@@ -2528,6 +2534,32 @@ mod tests {
             );
             let answer = fetch(addr, "OPTIONS", LIST, &[origin]).await;
             assert_eq!((answer.status, answer.body.as_str()), (204, ""));
+        }
+
+        /// Ports TestManagementUsageRequiresManagementAuthAndPopsArray: the
+        /// usage queue is behind the management key, takes records oldest
+        /// first as a JSON array, and the old `usage` route is gone.
+        #[tokio::test]
+        async fn usage_queue_needs_the_management_key_and_pops_an_array() {
+            let dir = tempfile::tempdir().unwrap();
+            let service = service(dir.path(), KEYED);
+            let queue = &service.observability.usage;
+            usage::reconfigure(queue, None, &service.config, service.management.available());
+            queue.enqueue(Bytes::from_static(br#"{"id":1}"#));
+            queue.enqueue(Bytes::from_static(br#"{"id":2}"#));
+            let (addr, _stop) = start(&service).await;
+            let key = ("Authorization", "Bearer test-secret");
+            let path = "/v0/management/usage-queue?count=2";
+
+            let answer = fetch(addr, "GET", path, &[]).await;
+            assert_eq!(answer.status, 401, "{}", answer.body);
+            let answer = fetch(addr, "GET", "/v0/management/usage?count=2", &[key]).await;
+            assert_eq!(answer.status, 404, "{}", answer.body);
+
+            let answer = fetch(addr, "GET", path, &[key]).await;
+            assert_eq!(answer.status, 200, "{}", answer.body);
+            assert_eq!(answer.body, r#"[{"id":1},{"id":2}]"#);
+            assert!(queue.pop_oldest(1).is_empty());
         }
 
         /// The main server serves the OAuth callback pages to anyone, for

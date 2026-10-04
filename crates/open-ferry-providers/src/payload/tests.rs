@@ -20,8 +20,8 @@
 //!   upstream's config.example.yaml, which this repository doesn't ship;
 //!   `codex_additional_tools_filter` tests the path it documents.
 //! - The executors' payload tests for features not ported: cloaking,
-//!   billing headers, usage reporting, sensitive words, Fable, the Gemini
-//!   Interactions API, AI Studio, Antigravity and xAI.
+//!   billing headers, sensitive words, Fable, the Gemini Interactions API,
+//!   AI Studio, Antigravity and xAI.
 
 mod codex_integer;
 mod disable_image_generation;

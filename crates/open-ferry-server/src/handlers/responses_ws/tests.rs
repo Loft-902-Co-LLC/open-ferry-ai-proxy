@@ -8,10 +8,10 @@
 //! sessions over a real socket against a scripted dispatcher.
 //!
 //! Deviations from upstream:
-//! - Tests of allocations and retained memory, the request log's timeline,
-//!   home runtimes, plugins, provider routes, model routers, disconnect
-//!   subscriptions and the writer's lock aren't ported, as what they test
-//!   isn't.
+//! - Tests of allocations and retained memory, the client's own WebSocket
+//!   timeline in the request log, home runtimes, plugins, provider routes,
+//!   model routers, disconnect subscriptions and the writer's lock aren't
+//!   ported, as what they test isn't.
 //! - Upstream's tests of errors that arrive through a disconnect
 //!   subscription run here as errors in the call's stream.
 //! - A `str` can't hold bytes that aren't UTF-8, so the close reason cases

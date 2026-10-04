@@ -15,9 +15,9 @@
 //! Deviations from upstream:
 //! - A Codex client's body is readied as [`codex_client`] says, and nothing
 //!   notes that it was.
-//! - Errors aren't kept for usage records. A stream's errors are also
-//!   logged with `tracing` at debug level, as upstream words them for its
-//!   request log (`LoggingAPIResponseError`).
+//! - A stream's errors are put in the request log as an `API ERROR
+//!   RESPONSE` (`LoggingAPIResponseError`), and also logged with `tracing`
+//!   at debug level, worded as upstream words them for its request log.
 //! - Plugins can't answer for the provider, so an error before the first
 //!   event is always sanitized (there is no `DirectResponse`).
 //! - The Responses model list (`OpenAIResponsesModels`) isn't routed.
