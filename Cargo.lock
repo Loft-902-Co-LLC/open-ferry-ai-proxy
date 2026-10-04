@@ -1405,6 +1405,7 @@ dependencies = [
  "bytes",
  "chrono",
  "flate2",
+ "futures-util",
  "http",
  "http-body-util",
  "libc",

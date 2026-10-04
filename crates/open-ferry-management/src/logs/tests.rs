@@ -8,12 +8,16 @@ use std::path::Path;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{Local, TimeZone};
+use http::StatusCode;
+use http_body_util::BodyExt as _;
+use serde_json::{Value, json};
 
+use super::body::respond;
 use super::read::{MAX_LINE, scan_lines};
 use super::timestamp::parse_timestamp;
 use super::{
-    collect_log_files, decode_log_cursor, is_allowed_log_cursor_file, parse_cutoff, parse_limit,
-    rotation_order,
+    Page, collect_log_files, decode_log_cursor, is_allowed_log_cursor_file, parse_cutoff,
+    parse_limit, read_logs, rotation_order,
 };
 
 /// The Unix time of a local time on 2026-06-15.
@@ -264,8 +268,12 @@ fn scan(dir: &Path, content: &[u8]) -> Result<Vec<Vec<u8>>, String> {
     let path = dir.join("scan.log");
     File::create(&path).unwrap().write_all(content).unwrap();
     let mut lines = Vec::new();
-    scan_lines(File::open(&path).unwrap(), |line| lines.push(line.to_vec()))
-        .map_err(|error| error.to_string())?;
+    let read = scan_lines(File::open(&path).unwrap(), |line| {
+        lines.push(line.to_vec());
+        Ok(())
+    })
+    .map_err(|error| error.to_string())?;
+    assert_eq!(read, content.len() as i64);
     Ok(lines)
 }
 
@@ -299,4 +307,94 @@ fn lines_are_scanned_as_go_scans_them() {
         scan(dir.path(), &content),
         Err("bufio.Scanner: token too long".to_owned())
     );
+}
+
+/// The body sent with `page`, which must be a 200.
+async fn answer(page: Page) -> Value {
+    let response = respond(page).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    serde_json::from_slice(&body).unwrap()
+}
+
+/// Not upstream's: a scan of every file keeps open only the files whose
+/// lines the answer may have, and reads them again from the filter as it
+/// was when the first of them began: a line without a time goes with the
+/// line before it, in an older file too.
+#[tokio::test]
+async fn only_the_files_answered_are_read_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let write = |name: &str, content: &str| fs::write(dir.path().join(name), content).unwrap();
+    write("main.log.2", "[2026-06-15 10:00:00] a\n");
+    write("main.log.1", "[2026-06-15 10:00:01] b\nmore of b\n");
+    write("main.log", "still more of b\n[2026-06-15 10:00:02] c\n");
+    let after = june_15(10, 0, 0).to_string();
+
+    for (limit, files, lines) in [
+        (
+            "",
+            2,
+            json!([
+                "[2026-06-15 10:00:01] b",
+                "more of b",
+                "still more of b",
+                "[2026-06-15 10:00:02] c"
+            ]),
+        ),
+        (
+            "3",
+            2,
+            json!(["more of b", "still more of b", "[2026-06-15 10:00:02] c"]),
+        ),
+        (
+            "2",
+            1,
+            json!(["still more of b", "[2026-06-15 10:00:02] c"]),
+        ),
+        ("1", 1, json!(["[2026-06-15 10:00:02] c"])),
+    ] {
+        let page = read_logs(dir.path(), b"", after.as_bytes(), limit.as_bytes()).unwrap();
+        assert_eq!(page.segments.len(), files, "limit {limit}");
+        let body = answer(page).await;
+        assert_eq!(body["lines"], lines, "limit {limit}");
+        assert_eq!(body["line-count"], 5, "limit {limit}");
+        assert_eq!(body["latest-timestamp"], june_15(10, 0, 2));
+    }
+
+    let page = read_logs(
+        dir.path(),
+        b"",
+        june_15(11, 0, 0).to_string().as_bytes(),
+        b"",
+    )
+    .unwrap();
+    assert_eq!(page.segments.len(), 0);
+    assert_eq!(answer(page).await["lines"], json!([]));
+}
+
+/// Not upstream's: the lines of a `GET` are read again as its body is
+/// sent; a file changed in between gives the lines it then has where the
+/// first read found its lines, never more than that read counted, and the
+/// rest of the answer is the first read's.
+#[tokio::test]
+async fn lines_are_read_again_as_the_body_is_sent() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("main.log");
+    let original = "[2026-06-15 10:00:00] one\n[2026-06-15 10:00:01] two\n";
+
+    fs::write(&path, original).unwrap();
+    let page = read_logs(dir.path(), b"", b"", b"").unwrap();
+    fs::write(&path, "a\nb\nc\nd\ne\nf\ng\nh\n").unwrap();
+    let body = answer(page).await;
+    assert_eq!(body["lines"], json!(["a", "b"]));
+    assert_eq!(body["line-count"], 2);
+    assert_eq!(body["latest-timestamp"], june_15(10, 0, 1));
+
+    fs::write(&path, original).unwrap();
+    let page = read_logs(dir.path(), b"", b"", b"1").unwrap();
+    fs::write(&path, "").unwrap();
+    let body = answer(page).await;
+    assert_eq!(body["lines"], json!([]));
+    assert_eq!(body["line-count"], 1);
+    assert!(body["next-cursor"].as_str().is_some_and(|c| !c.is_empty()));
 }

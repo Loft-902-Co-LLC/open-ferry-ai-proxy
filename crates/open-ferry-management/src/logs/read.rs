@@ -8,13 +8,17 @@
 
 //! Reading `main.log` and its rotations: every line of a file, the
 //! complete lines after an offset, where the last complete line ends, and
-//! the last lines of the files.
+//! the last lines of the files. A read counts the lines and keeps where
+//! they are, a [`Segment`] of the file, from which they are read again as
+//! the answer is sent.
 //!
-//! Deviations from upstream: a file is opened as the routes open one,
-//! which refuses links (see
-//! [`open_log_file`](crate::log_dir::open_log_file)), and the last lines of
-//! a file are found and read through one handle of it, where upstream
-//! opens it for each step.
+//! Deviations from upstream:
+//! - A file is opened as the routes open one, which refuses links (see
+//!   [`open_log_file`](crate::log_dir::open_log_file)), and the last lines
+//!   of a file are found and read through one handle of it, where upstream
+//!   opens it for each step.
+//! - The lines read aren't kept, only counted, with where they are;
+//!   upstream gathers them.
 
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
@@ -37,8 +41,8 @@ const SCAN_BUFFER: usize = 64 * 1024;
 /// What a read of complete lines found (upstream's `completeLogRead`).
 #[derive(Debug, Default)]
 pub(crate) struct CompleteRead {
-    /// The lines, without their `\n` and trailing `\r`s.
-    pub(crate) lines: Vec<Vec<u8>>,
+    /// How many lines were read.
+    pub(crate) count: usize,
     /// The offset after the last line read.
     pub(crate) end_offset: i64,
     /// The latest time a line starts with, or 0.
@@ -51,19 +55,57 @@ pub(crate) struct CompleteRead {
 /// after them (upstream's `logReadResult`).
 #[derive(Debug, Default)]
 pub(super) struct ReadResult {
-    pub(super) lines: Vec<Vec<u8>>,
+    /// Where the lines are, oldest first.
+    pub(super) segments: Vec<Segment>,
+    /// How many lines they hold.
+    pub(super) count: usize,
     pub(super) latest: i64,
     /// A Go string: a cursor given back as it came may not be UTF-8.
     pub(super) next_cursor: Vec<u8>,
 }
 
+/// The lines of a file an answer has: the bytes from `start` to `end` of a
+/// handle opened when the answer was planned.
+#[derive(Debug)]
+pub(super) struct Segment {
+    pub(super) file: File,
+    pub(super) start: i64,
+    pub(super) end: i64,
+}
+
+impl Segment {
+    /// Calls `each` with each line of the segment, as [`scan_lines`] gives
+    /// them. A line over [`MAX_LINE`] bytes, which a file changed since it
+    /// was planned may hold, fails the read.
+    pub(super) fn lines(mut self, each: impl FnMut(&[u8]) -> io::Result<()>) -> io::Result<()> {
+        self.file.seek(SeekFrom::Start(
+            u64::try_from(self.start).unwrap_or_default(),
+        ))?;
+        let len = u64::try_from(self.end - self.start).unwrap_or_default();
+        scan(self.file.take(len), MAX_LINE + 1, each).map(drop)
+    }
+}
+
 /// Calls `each` with each line of `file`, as Go's `bufio.Scanner` splits
 /// lines with a buffer of at most [`MAX_LINE`] bytes: the last line needn't
 /// end with `\n`, trailing `\r`s are trimmed, and a line of [`MAX_LINE`]
-/// bytes or more fails the read.
-pub(super) fn scan_lines(file: File, mut each: impl FnMut(&[u8])) -> io::Result<()> {
+/// bytes or more fails the read. Gives how many bytes were read.
+pub(super) fn scan_lines(
+    file: impl Read,
+    each: impl FnMut(&[u8]) -> io::Result<()>,
+) -> io::Result<i64> {
+    scan(file, MAX_LINE, each)
+}
+
+/// [`scan_lines`], a line of `max` bytes or more failing the read.
+fn scan(
+    file: impl Read,
+    max: usize,
+    mut each: impl FnMut(&[u8]) -> io::Result<()>,
+) -> io::Result<i64> {
     let mut reader = BufReader::with_capacity(SCAN_BUFFER, file);
     let mut line = Vec::new();
+    let mut read = 0;
     loop {
         let data = match reader.fill_buf() {
             Ok(data) => data,
@@ -72,21 +114,22 @@ pub(super) fn scan_lines(file: File, mut each: impl FnMut(&[u8])) -> io::Result<
         };
         if data.is_empty() {
             if !line.is_empty() {
-                each(trim_right_cr(&line));
+                each(trim_right_cr(&line))?;
             }
-            return Ok(());
+            return Ok(len_i64(read));
         }
         let (segment, used, complete) = match data.iter().position(|&b| b == b'\n') {
             Some(index) => (data.get(..index).unwrap_or_default(), index + 1, true),
             None => (data, data.len(), false),
         };
-        if line.len() + segment.len() >= MAX_LINE {
+        if line.len() + segment.len() >= max {
             return Err(io::Error::other("bufio.Scanner: token too long"));
         }
         line.extend_from_slice(segment);
         reader.consume(used);
+        read += used;
         if complete {
-            each(trim_right_cr(&line));
+            each(trim_right_cr(&line))?;
             line.clear();
         }
     }
@@ -94,16 +137,41 @@ pub(super) fn scan_lines(file: File, mut each: impl FnMut(&[u8])) -> io::Result<
 
 /// The complete lines of the file at `path` from `offset` up to
 /// `max_offset` (the end of the file when `None` or past it), at most
-/// `limit` of them when it isn't 0 (upstream's `readCompleteLogLines`). A
-/// line over [`MAX_LINE`] bytes fails the read.
+/// `limit` of them when it isn't 0 (upstream's `readCompleteLogLines`),
+/// and the segment they are. A line over [`MAX_LINE`] bytes fails the
+/// read.
 pub(crate) fn read_complete_log_lines(
     path: &Path,
     offset: i64,
     max_offset: Option<i64>,
     limit: usize,
-) -> io::Result<CompleteRead> {
+) -> io::Result<(CompleteRead, Segment)> {
     let (mut file, info) = open_log_file(path)?;
-    read_complete_lines(&mut file, file_size(&info), offset, max_offset, limit)
+    let read = read_complete_lines(&mut file, file_size(&info), offset, max_offset, limit)?;
+    let segment = Segment {
+        file,
+        start: offset,
+        end: read.end_offset,
+    };
+    Ok((read, segment))
+}
+
+/// [`read_complete_log_lines`], with the lines, read again from the
+/// segment.
+#[cfg(test)]
+pub(crate) fn complete_log_lines(
+    path: &Path,
+    offset: i64,
+    max_offset: Option<i64>,
+    limit: usize,
+) -> io::Result<(Vec<Vec<u8>>, CompleteRead)> {
+    let (read, segment) = read_complete_log_lines(path, offset, max_offset, limit)?;
+    let mut lines = Vec::new();
+    segment.lines(|line| {
+        lines.push(line.to_vec());
+        Ok(())
+    })?;
+    Ok((lines, read))
 }
 
 /// [`read_complete_log_lines`] of `file`, `size` bytes long.
@@ -152,12 +220,11 @@ fn read_complete_lines(
             }
             line.extend_from_slice(segment);
             current += len_i64(index) + 1;
-            let text = trim_right_cr(&line).to_vec();
-            result.latest = result.latest.max(parse_timestamp(&text));
-            result.lines.push(text);
+            result.latest = result.latest.max(parse_timestamp(trim_right_cr(&line)));
+            result.count += 1;
             result.end_offset = current;
             line.clear();
-            if limit > 0 && result.lines.len() >= limit {
+            if limit > 0 && result.count >= limit {
                 result.hit_limit = true;
                 return Ok(result);
             }
@@ -240,17 +307,24 @@ fn read_at<'a>(file: &mut File, buf: &'a mut [u8], len: i64, pos: i64) -> io::Re
 }
 
 /// The last `limit` complete lines of the file at `path`, all of them when
-/// `limit` is 0 (upstream's `readTailLogLines`), read from one handle of
-/// it, where upstream opens it for each step.
-fn read_tail_log_lines(path: &Path, limit: usize) -> io::Result<CompleteRead> {
+/// `limit` is 0 (upstream's `readTailLogLines`), and the segment they are;
+/// `None` when it has none. They are found and read through one handle of
+/// the file, where upstream opens it for each step.
+fn read_tail_log_lines(path: &Path, limit: usize) -> io::Result<Option<(CompleteRead, Segment)>> {
     let (mut file, info) = open_log_file(path)?;
     let size = file_size(&info);
     let boundary = log_boundary(&mut file, size)?;
     if boundary == 0 {
-        return Ok(CompleteRead::default());
+        return Ok(None);
     }
     let start = tail_start_offset(&mut file, boundary, limit)?;
-    read_complete_lines(&mut file, size, start, Some(boundary), limit)
+    let read = read_complete_lines(&mut file, size, start, Some(boundary), limit)?;
+    let segment = Segment {
+        file,
+        start,
+        end: read.end_offset,
+    };
+    Ok(Some((read, segment)))
 }
 
 /// The last `limit` complete lines of `files`, oldest first, all of them
@@ -268,26 +342,28 @@ pub(super) fn tail_log_files(
     };
     for path in files.iter().rev() {
         let remaining = if limit > 0 {
-            match limit.saturating_sub(result.lines.len()) {
+            match limit.saturating_sub(result.count) {
                 0 => break,
                 remaining => remaining,
             }
         } else {
             0
         };
-        let read = match read_tail_log_lines(path, remaining) {
-            Ok(read) => read,
+        let (read, segment) = match read_tail_log_lines(path, remaining) {
+            Ok(Some(found)) => found,
+            Ok(None) => continue,
             Err(error) if is_not_found(&error) => continue,
             Err(error) => return Err(error),
         };
-        if read.lines.is_empty() {
+        if read.count == 0 {
             continue;
         }
-        let mut lines = read.lines;
-        lines.append(&mut result.lines);
-        result.lines = lines;
+        // Newest first until reversed below.
+        result.segments.push(segment);
+        result.count += read.count;
         result.latest = result.latest.max(read.latest);
     }
+    result.segments.reverse();
     result.next_cursor = cursor_for_latest_log_file(files, result.latest)?.into_bytes();
     Ok(result)
 }

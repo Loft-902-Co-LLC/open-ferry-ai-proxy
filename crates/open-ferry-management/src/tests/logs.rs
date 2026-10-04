@@ -38,13 +38,16 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::{Local, TimeZone};
-use http::{Method, StatusCode};
+use http::{Method, StatusCode, header};
+use http_body_util::BodyExt as _;
 use open_ferry_core::observe::Observability;
+use tower::ServiceExt as _;
 
 use super::{Api, KEY, LOCAL, keyed, keyed_config, request_from};
+use crate::json::Json;
 use crate::logs::{
-    LogCursor, complete_log_boundary, cursor_mod_time_unix_nano, decode_cursor, encode_log_cursor,
-    new_log_cursor, read_complete_log_lines,
+    LogCursor, complete_log_boundary, complete_log_lines, cursor_mod_time_unix_nano, decode_cursor,
+    encode_log_cursor, new_log_cursor,
 };
 
 const MAIN_LOG: &str = "main.log";
@@ -210,14 +213,90 @@ fn read_complete_log_lines_skips_trailing_partial() {
     let initial = "first\nsecond\r\npartial";
     fs::write(&path, initial).unwrap();
 
-    let read = read_complete_log_lines(&path, 0, None, 0).unwrap();
-    assert_eq!(read.lines, [b"first".to_vec(), b"second".to_vec()]);
+    let (lines, read) = complete_log_lines(&path, 0, None, 0).unwrap();
+    assert_eq!(lines, [b"first".to_vec(), b"second".to_vec()]);
+    assert_eq!(read.count, 2);
     assert_eq!(read.end_offset, "first\nsecond\r\n".len() as i64);
 
     append_main_log(dir.path(), "\n");
-    let next = read_complete_log_lines(&path, read.end_offset, None, 0).unwrap();
-    assert_eq!(next.lines, [b"partial".to_vec()]);
+    let (lines, next) = complete_log_lines(&path, read.end_offset, None, 0).unwrap();
+    assert_eq!(lines, [b"partial".to_vec()]);
     assert_eq!(next.end_offset, initial.len() as i64 + 1);
+}
+
+/// Not upstream's: an answer longer than a chunk is sent as its lines are
+/// read, in chunks and without a length, where upstream gathers every line
+/// first; its bytes are those upstream's `c.JSON` writes.
+#[tokio::test]
+async fn long_answers_are_sent_as_they_are_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let api = api(dir.path(), true);
+    let (mut rotated, mut current, mut lines) = (Vec::new(), Vec::new(), Vec::new());
+    for i in 0..20_000 {
+        let (file, hour) = if i < 10_000 {
+            (&mut rotated, 9)
+        } else {
+            (&mut current, 10)
+        };
+        let mut line = format!("[2026-06-15 {hour:02}:00:00] line <{i}> & more").into_bytes();
+        if i % 1000 == 7 {
+            line.push(0xff);
+        }
+        file.extend_from_slice(&line);
+        if i % 3 == 0 {
+            file.push(b'\r');
+        }
+        file.push(b'\n');
+        lines.push(line);
+    }
+    fs::write(dir.path().join("main.log.1"), &rotated).unwrap();
+    fs::write(dir.path().join(MAIN_LOG), &current).unwrap();
+
+    let after = june_15(9, 0, 0);
+    for (query, from, line_count) in [
+        (String::new(), 0, 20_000),
+        (format!("?after={after}"), 10_000, 20_000),
+        ("?limit=15000".to_owned(), 5_000, 15_000),
+    ] {
+        let target = format!("/v0/management/logs{query}");
+        let request = keyed(Method::GET, &target, "");
+        let response = api.router.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{target}");
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "application/json; charset=utf-8"
+        );
+        let length = response.headers().get(header::CONTENT_LENGTH);
+        assert!(length.is_none(), "{target}: {length:?}");
+        let mut body = response.into_body();
+        let mut frames = Vec::new();
+        while let Some(frame) = body.frame().await {
+            if let Ok(data) = frame.unwrap().into_data() {
+                frames.push(data);
+            }
+        }
+        assert!(frames.len() > 1, "{target}: {} frames", frames.len());
+        assert!(
+            frames.iter().all(|frame| frame.len() < 65 * 1024),
+            "{target}"
+        );
+
+        let body = frames.concat();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let next_cursor = parsed["next-cursor"].as_str().unwrap().to_owned();
+        assert_eq!(decode(&next_cursor).file, MAIN_LOG);
+        let expected = Json::map([
+            (
+                "lines",
+                Json::Array(lines[from..].iter().cloned().map(Json::Bytes).collect()),
+            ),
+            ("line-count", Json::Int(line_count)),
+            ("latest-timestamp", Json::Int(june_15(10, 0, 0))),
+            ("next-cursor", Json::Str(next_cursor)),
+        ]);
+        // Not assert_eq!, which would print both bodies.
+        assert!(body == expected.encode().as_bytes(), "{target}");
+    }
 }
 
 // Ports TestGetLogsTailLimitReturnsRecentLinesWithCursor.

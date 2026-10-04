@@ -152,9 +152,9 @@ pub(super) fn read_log_files_from_cursor(
         return Ok((ReadResult::default(), true));
     };
     let mut result = ReadResult {
-        lines: Vec::new(),
         latest: cursor.latest_timestamp,
         next_cursor: raw.to_vec(),
+        ..ReadResult::default()
     };
     if safe_log_file_path(dir, &cursor.file, is_allowed_log_cursor_file).is_err() {
         return Ok((result, true));
@@ -168,7 +168,7 @@ pub(super) fn read_log_files_from_cursor(
     let mut advanced = false;
     for (index, path) in files.iter().enumerate().skip(start) {
         let remaining = if limit > 0 {
-            match limit.saturating_sub(result.lines.len()) {
+            match limit.saturating_sub(result.count) {
                 0 => break,
                 remaining => remaining,
             }
@@ -176,13 +176,14 @@ pub(super) fn read_log_files_from_cursor(
             0
         };
         let offset = if index == start { cursor.offset } else { 0 };
-        let read = match read_complete_log_lines(path, offset, None, remaining) {
-            Ok(read) => read,
+        let (read, segment) = match read_complete_log_lines(path, offset, None, remaining) {
+            Ok(found) => found,
             Err(error) if is_not_found(&error) => return Ok((result, true)),
             Err(error) => return Err(error),
         };
-        if !read.lines.is_empty() {
-            result.lines.extend(read.lines);
+        if read.count > 0 {
+            result.segments.push(segment);
+            result.count += read.count;
             result.latest = result.latest.max(read.latest);
             current_path = Some(path);
             current_offset = read.end_offset;

@@ -23,10 +23,16 @@
 //!   removed.
 //!
 //! Both answer 400 while `logging-to-file` is off. The files are read and
-//! removed on the blocking pool. On Windows a file another process holds
-//! without sharing it is retried a few times before the removal fails.
+//! removed on the blocking pool. `GET` reads the files twice: once to
+//! count the lines and find where the answer's are, then again from the
+//! same handles as the body is sent (see `body`). On Windows a file
+//! another process holds without sharing it is retried a few times before
+//! the removal fails.
 //!
 //! Deviations from upstream:
+//! - `GET` sends its lines as it reads them, holding only a few chunks of
+//!   the body at a time, where upstream gathers them all; the body's
+//!   bytes are upstream's (see `body`).
 //! - A file that is a symbolic link or other reparse point, isn't a plain
 //!   file, or has more than one hard link is refused, not followed: `GET`
 //!   and `DELETE` fail with `invalid log file` (see
@@ -38,13 +44,14 @@
 //!   insertion sort gives at any count, where Go's sort of twelve or more
 //!   leaves them in no set order.
 
+mod body;
 mod cursor;
 mod read;
 #[cfg(test)]
 mod tests;
 mod timestamp;
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -58,7 +65,8 @@ use open_ferry_translate::go::trim_space;
 
 use self::cursor::{decode_log_cursor, read_log_files_from_cursor};
 use self::read::{
-    ReadResult, cursor_for_latest_log_file, len_i64, scan_lines, tail_log_files, trim_right_cr,
+    ReadResult, Segment, cursor_for_latest_log_file, len_i64, scan_lines, tail_log_files,
+    trim_right_cr,
 };
 use self::timestamp::{ROTATION_LAYOUT, parse_local, parse_timestamp};
 use crate::Route;
@@ -75,7 +83,7 @@ pub(crate) use self::cursor::{
     new_log_cursor,
 };
 #[cfg(test)]
-pub(crate) use self::read::{complete_log_boundary, read_complete_log_lines};
+pub(crate) use self::read::{complete_log_boundary, complete_log_lines};
 
 /// The active log's name (upstream's `defaultLogFileName`).
 const MAIN_LOG: &str = "main.log";
@@ -114,7 +122,7 @@ async fn get_logs(State(state): State<ManagementState>, RawQuery(raw): RawQuery)
     let after = query.value("after").to_vec();
     let limit = query.value("limit").to_vec();
     match run_blocking(move || read_logs(&dir, &cursor, &after, &limit)).await {
-        Ok(page) => page.response(),
+        Ok(page) => body::respond(page).await,
         Err((status, message)) => json::error(status, &message),
     }
 }
@@ -154,10 +162,18 @@ fn log_files_directory(state: &ManagementState) -> Result<PathBuf, Failure> {
     Ok(dir)
 }
 
-/// What `GET /v0/management/logs` answers.
+/// What `GET /v0/management/logs` answers, before its lines are read
+/// again to send them.
 #[derive(Debug, Default)]
 struct Page {
-    lines: Vec<Vec<u8>>,
+    /// Where the lines are, oldest first.
+    segments: Vec<Segment>,
+    /// Which of the segments' lines the answer has.
+    filter: Filter,
+    /// How many of those are left out first: all but the last `limit`.
+    skip: usize,
+    /// How many lines the answer has, at most, after those.
+    wanted: usize,
     line_count: usize,
     latest: i64,
     next_cursor: Vec<u8>,
@@ -168,29 +184,14 @@ impl Page {
     /// The page of `result`, counting the lines it holds.
     fn of(result: ReadResult, cursor_reset: bool) -> Self {
         Self {
-            line_count: result.lines.len(),
-            lines: result.lines,
+            segments: result.segments,
+            wanted: result.count,
+            line_count: result.count,
             latest: result.latest,
             next_cursor: result.next_cursor,
             cursor_reset,
+            ..Self::default()
         }
-    }
-
-    /// The answer (upstream's `writeLogsResponse`).
-    fn response(self) -> Response {
-        let mut body = BTreeMap::from([
-            (
-                "lines".to_owned(),
-                Json::Array(self.lines.into_iter().map(Json::Bytes).collect()),
-            ),
-            ("line-count".to_owned(), Json::Int(len_i64(self.line_count))),
-            ("latest-timestamp".to_owned(), Json::Int(self.latest)),
-            ("next-cursor".to_owned(), Json::Bytes(self.next_cursor)),
-        ]);
-        if self.cursor_reset {
-            body.insert("cursor-reset".to_owned(), Json::Bool(true));
-        }
-        json::response(StatusCode::OK, &Json::Map(body))
     }
 }
 
@@ -240,73 +241,147 @@ fn read_logs(dir: &Path, cursor: &[u8], after: &[u8], limit: &[u8]) -> Result<Pa
             .consume_file(path)
             .map_err(|error| internal(format!("failed to read log file: {error}")))?;
     }
-    let Accumulator {
-        lines,
-        total,
-        mut latest,
-        ..
-    } = accumulator;
+    let mut latest = accumulator.latest;
     if latest == 0 || latest < cutoff {
         latest = cutoff;
     }
     let next_cursor = cursor_for_latest_log_file(&files, latest)
         .map_err(|error| internal(format!("failed to prepare log cursor: {error}")))?;
-    Ok(Page {
-        lines: lines.into(),
-        line_count: total,
-        latest,
-        next_cursor: next_cursor.into_bytes(),
-        cursor_reset: false,
-    })
+    Ok(accumulator.into_page(latest, next_cursor.into_bytes()))
 }
 
-/// The lines of a scan of every file (upstream's `logAccumulator`): those
-/// after `cutoff`, a line without a time going with the line before it;
-/// the last `limit` of them when it isn't 0.
+/// Which lines a scan of every file keeps (upstream's `logAccumulator`'s
+/// `cutoff` and `include`): those after `cutoff`, a line without a time
+/// going with the line before it; every line when `cutoff` is 0.
+#[derive(Clone, Copy, Debug, Default)]
+struct Filter {
+    cutoff: i64,
+    /// Whether the last line with a time was after the cutoff.
+    include: bool,
+}
+
+impl Filter {
+    fn new(cutoff: i64) -> Self {
+        Self {
+            cutoff,
+            include: false,
+        }
+    }
+
+    /// Whether the next line, starting with the time `timestamp` (0 for
+    /// none), is kept (upstream's `logAccumulator.addLine`).
+    fn admits(&mut self, timestamp: i64) -> bool {
+        if timestamp > 0 {
+            self.include = self.cutoff == 0 || timestamp > self.cutoff;
+        }
+        self.cutoff == 0 || self.include
+    }
+}
+
+/// A scan of every file (upstream's `logAccumulator`): the lines it
+/// keeps are counted, and the files that may hold the answer's lines are
+/// kept open to read them again; the answer has the last `limit` of them
+/// when it isn't 0.
 #[derive(Debug, Default)]
 struct Accumulator {
-    cutoff: i64,
+    filter: Filter,
     limit: usize,
-    lines: VecDeque<Vec<u8>>,
+    /// The files that may hold the answer's lines, oldest first.
+    files: VecDeque<Scanned>,
+    /// The lines kept in those files.
+    held: usize,
     /// Every line scanned.
     total: usize,
     latest: i64,
-    /// Whether the last line with a time was after the cutoff.
-    include: bool,
+}
+
+/// A file scanned and kept open: its lines, the filter as it was when it
+/// began, and how many lines it kept.
+#[derive(Debug)]
+struct Scanned {
+    segment: Segment,
+    filter: Filter,
+    kept: usize,
 }
 
 impl Accumulator {
     fn new(cutoff: i64, limit: usize) -> Self {
         Self {
-            cutoff,
+            filter: Filter::new(cutoff),
             limit,
             ..Self::default()
         }
     }
 
-    /// Adds the lines of the file at `path`, if there is one.
+    /// Adds the lines of the file at `path`, if there is one, then closes
+    /// the oldest files none of whose lines the answer can have: those
+    /// that kept none, and with a limit those before the last `limit` lines
+    /// kept.
     fn consume_file(&mut self, path: &Path) -> io::Result<()> {
-        match open_log_file(path) {
-            Ok((file, _)) => scan_lines(file, |line| self.add_line(line)),
-            Err(error) if is_not_found(&error) => Ok(()),
-            Err(error) => Err(error),
+        let mut file = match open_log_file(path) {
+            Ok((file, _)) => file,
+            Err(error) if is_not_found(&error) => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        let filter = self.filter;
+        let mut kept = 0;
+        let end = scan_lines(&mut file, |line| {
+            if self.add_line(line) {
+                kept += 1;
+            }
+            Ok(())
+        })?;
+        let segment = Segment {
+            file,
+            start: 0,
+            end,
+        };
+        self.files.push_back(Scanned {
+            segment,
+            filter,
+            kept,
+        });
+        self.held += kept;
+        while let Some(oldest) = self.files.front() {
+            let rest = self.held - oldest.kept;
+            if oldest.kept > 0 && (self.limit == 0 || rest < self.limit) {
+                break;
+            }
+            self.held = rest;
+            self.files.pop_front();
+        }
+        Ok(())
+    }
+
+    /// The answer, with `latest` and `next_cursor`: the last `limit` lines
+    /// kept, every one when it is 0, read again from the files held, the
+    /// first read from the filter as it began.
+    fn into_page(self, latest: i64, next_cursor: Vec<u8>) -> Page {
+        let skip = if self.limit > 0 {
+            self.held.saturating_sub(self.limit)
+        } else {
+            0
+        };
+        let filter = self.files.front().map_or(self.filter, |file| file.filter);
+        Page {
+            segments: self.files.into_iter().map(|file| file.segment).collect(),
+            filter,
+            skip,
+            wanted: self.held - skip,
+            line_count: self.total,
+            latest,
+            next_cursor,
+            cursor_reset: false,
         }
     }
 
-    fn add_line(&mut self, raw: &[u8]) {
+    /// Counts a line, and whether it is kept.
+    fn add_line(&mut self, raw: &[u8]) -> bool {
         let line = trim_right_cr(raw);
         self.total += 1;
         let timestamp = parse_timestamp(line);
         self.latest = self.latest.max(timestamp);
-        if timestamp > 0 {
-            self.include = self.cutoff == 0 || timestamp > self.cutoff;
-        }
-        if self.cutoff == 0 || self.include {
-            self.lines.push_back(line.to_vec());
-            if self.limit > 0 && self.lines.len() > self.limit {
-                self.lines.pop_front();
-            }
-        }
+        self.filter.admits(timestamp)
     }
 }
 
