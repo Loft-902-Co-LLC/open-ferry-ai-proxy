@@ -38,6 +38,10 @@
 //! value for them. A rule's `headers` are only read, to decide whether it
 //! applies; no rule writes a header.
 //!
+//! The `Debug` of a [`Call`] and of [`Rules`] shows header names and the
+//! kind and size of a value, never what a header, param or condition holds,
+//! as any of them can be a credential.
+//!
 //! The rules are compiled once per config load: the binary calls
 //! [`reconfigure`] with each config it loads, and every call reads the
 //! rules installed then, so a reload takes effect on the next request.
@@ -154,7 +158,10 @@ impl Touched {
 
 /// A call the rules are applied for, as upstream's
 /// `ApplyPayloadConfigWithTrackedPathsForExecutor` takes it.
-#[derive(Clone, Copy, Debug)]
+///
+/// Its `Debug` shows the names of the headers and the size of their values,
+/// not the values, which can hold a credential.
+#[derive(Clone, Copy)]
 pub struct Call<'a> {
     /// The executor's identifier (`targetExecutor`).
     pub executor: &'a str,
@@ -174,6 +181,64 @@ pub struct Call<'a> {
     pub headers: &'a HeaderMap,
     /// The paths to report on (`trackedPaths`).
     pub tracked: &'a [&'a str],
+}
+
+impl fmt::Debug for Call<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Call")
+            .field("executor", &self.executor)
+            .field("protocol", &self.protocol)
+            .field("from", &self.from)
+            .field("model", &self.model)
+            .field("requested_model", &self.requested_model)
+            .field("request_path", &self.request_path)
+            .field("root", &self.root)
+            .field("headers", &HeaderSizes(self.headers))
+            .field("tracked", &self.tracked)
+            .finish()
+    }
+}
+
+/// The size of a byte string, which is all its `Debug` says of it.
+struct Size(usize);
+
+impl fmt::Debug for Size {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<{} bytes>", self.0)
+    }
+}
+
+/// Header names with the size of each value, for a `Debug` that must not
+/// show a credential.
+struct HeaderSizes<'a>(&'a HeaderMap);
+
+impl fmt::Debug for HeaderSizes<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_map()
+            .entries(
+                self.0
+                    .iter()
+                    .map(|(name, value)| (name.as_str(), Size(value.len()))),
+            )
+            .finish()
+    }
+}
+
+/// What a JSON value is, not what it holds, for a `Debug` that must not
+/// show a value a rule writes or compares.
+struct Shape<'a>(&'a Value);
+
+impl fmt::Debug for Shape<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Value::Null => f.write_str("null"),
+            Value::Bool(_) => f.write_str("bool"),
+            Value::Number(_) => f.write_str("number"),
+            Value::String(text) => write!(f, "string({} bytes)", text.len()),
+            Value::Array(items) => write!(f, "array({} items)", items.len()),
+            Value::Object(map) => write!(f, "object({} keys)", map.len()),
+        }
+    }
 }
 
 /// The rules installed by the last [`reconfigure`].

@@ -446,6 +446,8 @@ A rule applies when one of its models matches either the model sent upstream or 
 
 **What a rule may write.** A rule writes only the literal value the operator configured, the same on every request. The operator may write identity-shaped fields that way, such as `metadata.user_id`, `user`, `safety_identifier` or `prompt_cache_key`. open-ferry never generates or derives a value for them, and it doesn't port the OpenAI-compatible executor's `prompt_cache_key` derivation (`applyPromptCacheKey`). A rule's `headers` are a read-only gate on whether it applies. No rule writes a header, and none will.
 
+The `Debug` output of a call and of the compiled rules shows header names and paths, and only the kind and size of a value, never what a header, param or condition holds, since any of them can be a credential.
+
 The rule engine ports the parts of gjson v1.18.0 (`Get`, with wildcards, projections and `#(...)` queries), sjson v1.2.5 (`SetBytes`, `SetRawBytes`, `DeleteBytes`) and match v1.1.1 (`MatchLimit`) that upstream's payload rules use. All three are by Josh Baker and MIT licensed; see [licenses/gjson-LICENSE](licenses/gjson-LICENSE), [licenses/sjson-LICENSE](licenses/sjson-LICENSE) and [licenses/match-LICENSE](licenses/match-LICENSE).
 
 Deviations, each also noted in its module:

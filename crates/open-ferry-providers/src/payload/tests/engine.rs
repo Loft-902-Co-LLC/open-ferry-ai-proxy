@@ -6,7 +6,7 @@ use std::sync::Arc;
 use open_ferry_core::config::Config;
 use serde_json::Value;
 
-use super::{Args, json, rules};
+use super::{Args, Call, headers, json, rules};
 use crate::payload::gjson::{self, match_limit};
 use crate::payload::sjson::{self, SetError};
 use crate::payload::{Rules, Selected, matchers, path, select};
@@ -369,6 +369,104 @@ payload:
             r#"{"float":1,"big":1000000000000000000000,"list":[1,"a",true],"map":{"a":2,"z":1},"raw":{"k":[1,2]}}"#
         )
     );
+}
+
+/// Not upstream's, which has no `Debug` of a compiled rule or a call: what a
+/// call and the rules print shows header names and the kind and size of a
+/// value, never a header's value, a pattern, a param or a condition.
+#[test]
+fn debug_output_hides_credentials() {
+    let config = r#"
+payload:
+  default:
+    - models:
+        - name: m
+          protocol: openai
+          headers:
+            Authorization: Bearer sk-FAKE-GATE
+            Cookie: sid=FAKE-GATE-COOKIE
+          match:
+            - metadata.token: sk-FAKE-MATCH
+            - metadata.list: [sk-FAKE-MATCH-LIST]
+          not-match:
+            - metadata.other: {key: sk-FAKE-NOT-MATCH}
+          exist:
+            - metadata.present
+      params:
+        metadata.user_id: sk-FAKE-DEFAULT
+  override:
+    - models:
+        - name: m
+      params:
+        api_key: sk-FAKE-OVERRIDE
+        nested: {secret: sk-FAKE-NESTED, list: [sk-FAKE-ITEM]}
+  override-raw:
+    - models:
+        - name: m
+      params:
+        raw: '{"key":"sk-FAKE-RAW"}'
+  filter:
+    - models:
+        - name: m
+          headers:
+            X-Api-Key: sk-FAKE-FILTER-GATE
+      params:
+        - secret.path
+"#;
+    let compiled = rules(config);
+    let headers = headers(&[
+        ("Authorization", "Bearer sk-FAKE-CLIENT"),
+        ("Cookie", "sid=FAKE-COOKIE"),
+    ]);
+    let call = Call {
+        executor: "claude",
+        protocol: "claude",
+        from: "openai",
+        model: "m",
+        requested_model: "m(high)",
+        request_path: "/v1/messages",
+        root: "",
+        headers: &headers,
+        tracked: &["tools"],
+    };
+    let norm = matchers::norm_any(&open_ferry_core::config::AnyValue::Str(
+        "sk-FAKE-NORM".into(),
+    ));
+    for text in [
+        format!("{compiled:?}"),
+        format!("{compiled:#?}"),
+        format!("{call:?}"),
+        format!("{call:#?}"),
+        format!("{norm:?}"),
+    ] {
+        assert!(!text.contains("FAKE"), "{text}");
+    }
+    let shown = format!("{compiled:?}");
+    for want in [
+        "Authorization",
+        "Cookie",
+        "X-Api-Key",
+        "metadata.user_id",
+        "metadata.token",
+        "api_key",
+        "nested",
+        "secret.path",
+        "string(15 bytes)",
+        "object(2 keys)",
+        "<19 bytes>",
+    ] {
+        assert!(shown.contains(want), "{want} in {shown}");
+    }
+    let shown = format!("{call:?}");
+    for want in [
+        "authorization",
+        "cookie",
+        "/v1/messages",
+        "<21 bytes>",
+        "<15 bytes>",
+    ] {
+        assert!(shown.contains(want), "{want} in {shown}");
+    }
 }
 
 /// The rules installed for every call win over the executor's config, and

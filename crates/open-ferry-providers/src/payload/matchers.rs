@@ -23,19 +23,24 @@
 //! Deviations from upstream: none.
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 use http::HeaderMap;
 use open_ferry_core::config::AnyValue;
 use open_ferry_translate::go::{equal_fold, parse_float, to_lower, trim_space};
 use serde_json::Value;
 
+use super::Size;
 use super::gjson::{self, Found};
 use super::path::{build_path, resolve};
 use crate::thinking::parse_suffix;
 
 /// A JSON value as Go's `encoding/json` decodes it into `any`, which
 /// `reflect.DeepEqual` compares.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// Its `Debug` says what kind of value it is and how big, not what it
+/// holds: a condition can compare a credential.
+#[derive(Clone, PartialEq)]
 pub(super) enum Norm {
     Null,
     Bool(bool),
@@ -43,6 +48,19 @@ pub(super) enum Norm {
     Str(String),
     Arr(Vec<Norm>),
     Obj(BTreeMap<String, Norm>),
+}
+
+impl fmt::Debug for Norm {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Null => f.write_str("null"),
+            Self::Bool(_) => f.write_str("bool"),
+            Self::Num(_) => f.write_str("number"),
+            Self::Str(text) => write!(f, "string({} bytes)", text.len()),
+            Self::Arr(items) => write!(f, "array({} items)", items.len()),
+            Self::Obj(map) => write!(f, "object({} keys)", map.len()),
+        }
+    }
 }
 
 /// `value` decoded, or `None` where Go's decode fails: a number too large
@@ -101,7 +119,10 @@ fn norm_found(found: &Found<'_>) -> Option<Norm> {
 
 /// When a rule applies: a model name or pattern and what the call and its
 /// body must have (upstream's `PayloadModelRule`, its strings trimmed).
-#[derive(Debug)]
+///
+/// Its `Debug` shows the header names and paths as configured and only the
+/// size of a header pattern and the kind of a value, as these can hold a
+/// credential.
 pub(super) struct ModelRule {
     /// The model name or `*` pattern; never empty.
     pub(super) name: String,
@@ -120,6 +141,36 @@ pub(super) struct ModelRule {
     pub(super) exist: Vec<String>,
     /// Paths that must be missing or null.
     pub(super) not_exist: Vec<String>,
+}
+
+impl fmt::Debug for ModelRule {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ModelRule")
+            .field("name", &self.name)
+            .field("protocol", &self.protocol)
+            .field("from_protocol", &self.from_protocol)
+            .field("headers", &Gates(&self.headers))
+            .field("matches", &self.matches)
+            .field("not_matches", &self.not_matches)
+            .field("exist", &self.exist)
+            .field("not_exist", &self.not_exist)
+            .finish()
+    }
+}
+
+/// Header names with the size of the pattern each value must match.
+struct Gates<'a>(&'a [(String, String)]);
+
+impl fmt::Debug for Gates<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_map()
+            .entries(
+                self.0
+                    .iter()
+                    .map(|(name, pattern)| (name, Size(pattern.len()))),
+            )
+            .finish()
+    }
 }
 
 /// What a call brings to the rules' checks.

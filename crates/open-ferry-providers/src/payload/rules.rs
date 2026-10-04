@@ -31,6 +31,7 @@
 //!   body has, and a body is read no deeper than 128.
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 use open_ferry_core::config::{
     AnyValue, Config, DisableImageGeneration, PayloadModelRule, PayloadRule,
@@ -39,10 +40,15 @@ use open_ferry_translate::go::{format_float, json_float};
 use serde_json::{Map, Number, Value};
 
 use super::matchers::{ModelRule, Norm, norm_any, normalize_from_protocol};
-use super::sjson;
+use super::{Shape, sjson};
 
 /// The config's payload rules, compiled (upstream's `cfg.Payload` and
 /// `cfg.DisableImageGeneration`).
+///
+/// Its `Debug` shows what each rule matches and the paths it writes, and
+/// the kind and size of a value, never what a value, header pattern or
+/// condition holds: any of them can be a credential. It's derived because
+/// each rule's `Debug` is written that way.
 #[derive(Debug, Default)]
 pub struct Rules {
     pub(super) image: DisableImageGeneration,
@@ -53,12 +59,32 @@ pub struct Rules {
     pub(super) filter: Vec<FilterRule>,
 }
 
-/// A rule that writes values.
-#[derive(Debug)]
+/// A rule that writes values. Its `Debug` shows the paths and the kind of
+/// each value, not the value.
 pub(super) struct Rule {
     pub(super) models: Vec<ModelRule>,
     /// Each path, as configured, and the JSON written there.
     pub(super) params: Vec<(String, Value)>,
+}
+
+impl fmt::Debug for Rule {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Rule")
+            .field("models", &self.models)
+            .field("params", &Params(&self.params))
+            .finish()
+    }
+}
+
+/// A rule's paths with the kind of the value written to each.
+struct Params<'a>(&'a [(String, Value)]);
+
+impl fmt::Debug for Params<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_map()
+            .entries(self.0.iter().map(|(path, value)| (path, Shape(value))))
+            .finish()
+    }
 }
 
 /// A rule that removes paths.
