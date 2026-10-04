@@ -6,13 +6,17 @@
 mod cases;
 mod codex_models;
 mod compare;
+mod config_diff;
 mod generate;
 mod live;
 mod multi_agent;
+mod payload;
 mod raw_json;
 mod signature;
 mod translator;
+mod ttft;
 mod upstream;
+mod usage;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -488,6 +492,26 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
             cases::multi_agent::restores(),
             generate::multi_agent::restore_cases(seed, random),
         ),
+        (
+            Translator::Payload,
+            cases::payload::applies(),
+            generate::payload::apply_cases(seed, random),
+        ),
+        (
+            Translator::Usage,
+            cases::usage::parses(),
+            generate::usage::parse_cases(seed, random),
+        ),
+        (
+            Translator::Ttft,
+            cases::ttft::token_events(),
+            generate::ttft::token_event_cases(seed, random),
+        ),
+        (
+            Translator::ConfigDiff,
+            cases::config_diff::details(),
+            generate::config_diff::detail_cases(seed, random),
+        ),
     ];
 
     println!("open-ferry parity");
@@ -500,6 +524,7 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
     let mut all_match = true;
     for (translator, mut cases, random) in suites {
         let hand_written = cases.len();
+        let generated = random.len();
         cases.extend(random);
         let started = Instant::now();
         let dir = failures_dir.join(translator.slug());
@@ -507,8 +532,7 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
         println!();
         println!("{}", translator.title());
         println!(
-            "cases       {hand_written} hand-written + {} random (seed {}), {:.1?}",
-            args.random,
+            "cases       {hand_written} hand-written + {generated} random (seed {}), {:.1?}",
             args.seed,
             started.elapsed()
         );

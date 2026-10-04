@@ -22,24 +22,31 @@
 //! [`codex_models`] generates registrations for the Codex client model list.
 //! [`multi_agent`] generates Codex clients' multi-agent v2 requests, Codex
 //! sub-agents' delegation outputs, and upstream events to restore.
+//! [`payload`], [`usage`], [`ttft`] and [`config_diff`] will generate input
+//! for the payload rules, usage parsing, first-token events and config
+//! change details (P3); none yet.
 
 pub mod chat;
 pub mod claude_chat;
 pub mod claude_responses;
 pub mod codex_models;
 pub mod completions;
+pub mod config_diff;
 pub mod gemini;
 pub mod gemini_responses;
 pub mod multi_agent;
 pub mod openai_chat;
 pub mod openai_claude;
 pub mod openai_responses;
+pub mod payload;
 pub mod registry;
 pub mod response;
 pub mod responses;
 pub mod signature;
 pub mod thinking;
 pub mod to_gemini;
+pub mod ttft;
+pub mod usage;
 
 use serde_json::{Value, json};
 

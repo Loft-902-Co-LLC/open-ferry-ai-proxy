@@ -83,9 +83,13 @@ use sha2::{Digest, Sha256};
 use crate::cases::Case;
 use crate::codex_models;
 use crate::compare::{self, Deviation, JsonAt, JsonForm};
+use crate::config_diff;
 use crate::multi_agent;
+use crate::payload;
 use crate::raw_json::{self, Raw};
 use crate::signature;
+use crate::ttft;
+use crate::usage;
 
 /// How an empty non-streaming output reads, unlike any JSON a response holds.
 const NO_OUTPUT: &str = "(no output)";
@@ -254,6 +258,19 @@ pub enum Translator {
     MultiAgentOrphan,
     /// An upstream's event → the optimized namespace renamed back, as text.
     MultiAgentRestore,
+    /// A translated body and payload rules → the body with the rules
+    /// applied, and the tracked paths they touched (see
+    /// `go/parity_payload.go`).
+    Payload,
+    /// An upstream's response body or stream line → the usage parsed from
+    /// it (see `go/parity_usage.go`).
+    Usage,
+    /// An upstream's stream event → whether it carries the first token
+    /// (see `go/parity_ttft.go`).
+    Ttft,
+    /// Two configs → the change details logged on reload (see
+    /// `go/parity_config_diff.go`).
+    ConfigDiff,
 }
 
 impl Translator {
@@ -329,6 +346,10 @@ impl Translator {
             Self::MultiAgentInput => "multi-agent/input",
             Self::MultiAgentOrphan => "multi-agent/orphan",
             Self::MultiAgentRestore => "multi-agent/restore",
+            Self::Payload => "payload/apply",
+            Self::Usage => "usage/parse",
+            Self::Ttft => "ttft/token-event",
+            Self::ConfigDiff => "config-diff/details",
         }
     }
 
@@ -403,6 +424,10 @@ impl Translator {
             Self::MultiAgentInput => "multi-agent-input",
             Self::MultiAgentOrphan => "multi-agent-orphan",
             Self::MultiAgentRestore => "multi-agent-restore",
+            Self::Payload => "payload",
+            Self::Usage => "usage",
+            Self::Ttft => "ttft",
+            Self::ConfigDiff => "config-diff",
         }
     }
 
@@ -482,6 +507,10 @@ impl Translator {
             Self::MultiAgentInput => "Codex agent messages for other formats",
             Self::MultiAgentOrphan => "Codex orphan delegation outputs",
             Self::MultiAgentRestore => "Codex multi-agent v2 namespace restored",
+            Self::Payload => "Payload rules applied",
+            Self::Usage => "Usage parsed from upstream responses",
+            Self::Ttft => "First-token events",
+            Self::ConfigDiff => "Config change details",
         }
     }
 
@@ -1152,6 +1181,10 @@ impl Translator {
                 Ok(run(body, &case.options))
             }
             Self::MultiAgentRestore => Ok(multi_agent::restore(&case.request, &case.options)),
+            Self::Payload => payload::apply(case),
+            Self::Usage => usage::parse(case),
+            Self::Ttft => ttft::token_event(case),
+            Self::ConfigDiff => config_diff::details(case),
         }
     }
 
@@ -1410,7 +1443,11 @@ impl Translator {
             | Self::MultiAgentOptimize
             | Self::MultiAgentInput
             | Self::MultiAgentOrphan
-            | Self::MultiAgentRestore => &[],
+            | Self::MultiAgentRestore
+            | Self::Payload
+            | Self::Usage
+            | Self::Ttft
+            | Self::ConfigDiff => &[],
             Self::GeminiResponsesRequest => GEMINI_RESPONSES_REQUEST_JSON,
             Self::GeminiResponsesStream => GEMINI_RESPONSES_STREAM_JSON,
             Self::GeminiResponsesNonStream => GEMINI_RESPONSES_NON_STREAM_JSON,
@@ -1589,7 +1626,11 @@ impl Translator {
             | Self::MultiAgentOptimize
             | Self::MultiAgentInput
             | Self::MultiAgentOrphan
-            | Self::MultiAgentRestore => return serde_json::from_str(&text).ok(),
+            | Self::MultiAgentRestore
+            | Self::Payload
+            | Self::Usage
+            | Self::Ttft
+            | Self::ConfigDiff => return serde_json::from_str(&text).ok(),
             Self::OpenAIGeminiRequest => {
                 let mut value: Value = serde_json::from_str(&text).ok()?;
                 replace_compact_call_ids(&mut value, case);

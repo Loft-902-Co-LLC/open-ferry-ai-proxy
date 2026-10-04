@@ -10,17 +10,21 @@ pub mod claude_chat;
 pub mod claude_responses;
 pub mod codex_models;
 pub mod completions;
+pub mod config_diff;
 pub mod gemini;
 pub mod gemini_responses;
 pub mod multi_agent;
 pub mod openai_chat;
 pub mod openai_claude;
 pub mod openai_responses;
+pub mod payload;
 pub mod registry;
 pub mod responses;
 pub mod signature;
 pub mod thinking;
 pub mod to_gemini;
+pub mod ttft;
+pub mod usage;
 
 #[derive(Clone)]
 pub struct Case {
