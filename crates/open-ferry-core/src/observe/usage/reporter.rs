@@ -76,8 +76,10 @@
 //!   translated request, which the tap doesn't see.
 //! - A failure's body is the error's text, scrubbed of every secret the
 //!   attempts sent, the credential's own keys and tokens (also for a call
-//!   that failed before it sent anything) and the client's key. Upstream
-//!   writes the error's response body as it is.
+//!   that failed before it sent anything) and the client's key, each
+//!   however short: the queue is served to the management API and can be
+//!   written to disk, so it is scrubbed as a file is, not as what a client
+//!   is given. Upstream writes the error's response body as it is.
 //! - The answer's headers are masked as the request log masks them.
 //! - The substitution warning is a `tracing` warning with the request's
 //!   ID as a field.
@@ -949,11 +951,12 @@ impl UsageTap {
         self.context.client_key().unwrap_or_default()
     }
 
-    /// `body` without the call's secrets and the client's key.
+    /// `body` without the call's secrets and the client's key, every one
+    /// however short.
     fn scrub(&self, body: String, secrets: &Secrets) -> String {
         let mut secrets = secrets.clone();
         secrets.add(self.client_key());
-        secrets.text(body, Policy::Client)
+        secrets.text(body, Policy::Disk)
     }
 
     fn record(&self, call: &Call, publication: Publication) -> Record {

@@ -490,3 +490,33 @@ fn failure_bodies_are_scrubbed_of_the_credentials_tokens() {
         "invalid [redacted] and [redacted]"
     );
 }
+
+/// Not upstream's: a queued failure's body is scrubbed as a file is, so a
+/// secret shorter than eight bytes goes too, the client's key as well.
+#[test]
+fn failure_bodies_are_scrubbed_of_short_secrets() {
+    let harness = Harness::new();
+    let call = ClientCall::new("gpt-5.4");
+    call.context.set_client_key("ck-12");
+    let driver = call.tap(&harness);
+    let mut credential = auth("openai-1", "0", "openai");
+    credential
+        .attributes
+        .insert("api_key".to_owned(), "k-123".to_owned());
+    driver.attempt_with(
+        AttemptKind::Execute,
+        "openai",
+        "gpt-5.4",
+        &Format::OPENAI,
+        &credential,
+        &["k-123"],
+        "{}",
+    );
+    driver.head(401, &[]);
+    driver.fail(&ExecError::upstream(401, "bad k-123 and ck-12"));
+    let record = harness.record();
+    assert_eq!(
+        str_field(&record["fail"], "body"),
+        "bad [redacted] and [redacted]"
+    );
+}
