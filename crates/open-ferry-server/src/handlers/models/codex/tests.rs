@@ -716,12 +716,12 @@ fn apply_patch_needs_every_provider() {
         (&["vertex"][..], true),
         (&[custom, "gemini", "vertex"][..], true),
         (&["gemini", "denied"][..], false),
-        // So do Gemini Interactions and Meta, but not xAI.
+        // So do Gemini Interactions, Meta and xAI.
         (&["gemini-interactions"][..], true),
         (&["meta"][..], true),
         (&[custom, "gemini-interactions", "meta"][..], true),
-        (&["meta", "xai"][..], false),
-        (&["xai"][..], false),
+        (&["meta", "xai"][..], true),
+        (&["xai", "denied"][..], false),
         // How names match.
         (&["codex", "claude", "openai-compatibility"][..], true),
         (&[" Codex ", "CLAUDE", "OpenAI-Compatible-Custom"][..], true),
