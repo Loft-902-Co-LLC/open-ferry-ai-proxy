@@ -8,8 +8,7 @@
 //! - `TestMiddlewareSetsSupportPluginHeader` checks `X-CPA-VERSION`,
 //!   `X-CPA-COMMIT` and `X-CPA-BUILD-DATE` instead of
 //!   `X-CPA-SUPPORT-PLUGIN`, which comes from the plugin host this port
-//!   doesn't have, and requests `/v0/management/auth-files` instead of the
-//!   unported `/v0/management/config`.
+//!   doesn't have.
 
 use http::{Method, StatusCode};
 
@@ -45,7 +44,7 @@ async fn middleware_sets_build_headers() {
         ("wrong-secret", StatusCode::UNAUTHORIZED),
         (KEY, StatusCode::OK),
     ] {
-        let mut request = request_from(LOCAL, Method::GET, "/v0/management/auth-files", "");
+        let mut request = request_from(LOCAL, Method::GET, "/v0/management/config", "");
         request
             .headers_mut()
             .insert("x-management-key", key.parse().unwrap());

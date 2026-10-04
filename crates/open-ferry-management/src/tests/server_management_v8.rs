@@ -6,19 +6,27 @@
 //!
 //! Deviations from upstream:
 //! - `TestManagementV8RoutesShareAccessControl` requests the credential
-//!   list under both names instead of the unported config and plugin
-//!   routes, and drops its Home mode case: Home mode isn't ported.
-//! - `TestManagementV8IndependentContract` keeps what concerns the routes
-//!   ported here: the legacy names and the removed quota routes answer 404
-//!   under `/v8/management`, and each ported route answers under both
-//!   names. Its route table, OAuth, config and migration checks concern
-//!   unported routes and are dropped.
+//!   list under both names here; its config routes are requested in
+//!   `config_read` (`management_v8_config_routes_share_access_control`),
+//!   and its plugin routes aren't ported. Its Home mode case is dropped:
+//!   Home mode isn't ported.
+//! - `TestManagementV8IndependentContract` keeps here its legacy names and
+//!   removed quota routes, which answer 404 under `/v8/management`, and its
+//!   import checks, and checks that each ported route answers under both
+//!   names. Its OAuth checks are in `oauth`
+//!   (`management_v8_oauth_contract`), and its config reads and writes in
+//!   `config_read` (`management_v8_independent_contract_config`), the
+//!   writes answering 404 as this port never writes the config. Its route
+//!   table check is dropped, the router having no list of routes to read,
+//!   as are its plugin routes (not ported). The Vertex import answers `file
+//!   required` only with a credential store, which upstream doesn't need,
+//!   so the import checks run with one.
 //! - `TestManagementV8PluginOperationMigratesConfiguration` is dropped: the
 //!   plugin routes aren't ported, and this port never writes the config.
 
 use http::{Method, StatusCode};
 
-use super::{Api, KEY, LOCAL, keyed, keyed_config, request_from};
+use super::{Api, AuthDir, KEY, LOCAL, keyed, keyed_config, request_from};
 
 #[tokio::test]
 async fn management_v8_routes_share_access_control() {
@@ -125,6 +133,44 @@ async fn management_v8_independent_contract() {
         "{}",
         v8.body
     );
+
+    // The import routes, sent no form. Imports need a credential store.
+    let auth_dir = AuthDir::new();
+    let api_with_store = Api::over(&auth_dir);
+    for (path, status, want) in [
+        (
+            "/v8/management/oauth/import",
+            StatusCode::BAD_REQUEST,
+            r#"{"error":"provider is required"}"#,
+        ),
+        (
+            "/v8/management/oauth/import?provider=codex",
+            StatusCode::NOT_FOUND,
+            r#"{"error":"provider_not_found"}"#,
+        ),
+        (
+            "/v8/management/oauth/import?provider=vertex",
+            StatusCode::BAD_REQUEST,
+            r#"{"error":"file required"}"#,
+        ),
+        (
+            "/v0/management/vertex/import",
+            StatusCode::BAD_REQUEST,
+            r#"{"error":"file required"}"#,
+        ),
+        (
+            "/v8/management/oauth/providers/vertex/import",
+            StatusCode::NOT_FOUND,
+            "",
+        ),
+    ] {
+        let answer = api_with_store.send(keyed(Method::POST, path, "")).await;
+        assert_eq!(
+            (answer.status, answer.body.as_str()),
+            (status, want),
+            "{path}"
+        );
+    }
 
     // The key works under both names, through either header.
     let mut request = request_from(LOCAL, Method::GET, "/v8/management/credentials", "");

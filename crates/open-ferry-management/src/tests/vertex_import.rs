@@ -261,6 +261,47 @@ async fn invalid_json_is_refused() {
     assert!(api.sync.calls().is_empty());
 }
 
+// Not upstream's: the key file is read with a JSON parser that takes at
+// most 127 levels of nesting, the account's own object the first, where Go
+// takes 10000. A deeper file answers 400 `invalid json`. The saved file
+// holds the account a level deeper, under `service_account`, and the service
+// reads it with the same limit, so an account 127 deep is saved but not
+// served.
+#[tokio::test]
+async fn deeply_nested_accounts() {
+    /// `arrays` arrays nested around `0`.
+    fn nested(arrays: usize) -> Value {
+        (0..arrays).fold(json!(0), |value, _| json!([value]))
+    }
+
+    let auth_dir = AuthDir::new();
+    let api = Api::over(&auth_dir);
+    let body = import(&api, &account_with("extra", nested(127)))
+        .await
+        .expect(StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "invalid json");
+    let message = body["message"].as_str().unwrap();
+    assert!(message.starts_with("recursion limit exceeded"), "{message}");
+    assert!(std::fs::read_dir(auth_dir.path()).unwrap().next().is_none());
+    assert!(api.sync.calls().is_empty());
+
+    for (arrays, served) in [(125, true), (126, false)] {
+        let auth_dir = AuthDir::new();
+        let api = Api::over(&auth_dir);
+        import(&api, &account_with("extra", nested(arrays)))
+            .await
+            .expect(StatusCode::OK);
+        let saved = auth_dir.path().join("vertex-proxy-test.json");
+        assert!(saved.is_file(), "{arrays}");
+        assert_eq!(api.sync.calls().len(), 1, "{arrays}");
+        assert_eq!(
+            api.manager.get("vertex-proxy-test.json").is_some(),
+            served,
+            "{arrays}"
+        );
+    }
+}
+
 // Not upstream's: an account without a usable RSA key is refused, and the
 // answer never quotes the key.
 #[tokio::test]

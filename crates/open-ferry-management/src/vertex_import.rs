@@ -36,6 +36,14 @@
 //!   upstream takes any size.
 //! - The `message` of `invalid json` is the JSON parser's, which reads
 //!   differently from Go's.
+//! - The key file is read with a JSON parser that takes at most 127 levels
+//!   of nesting, the account's own object the first: a file nested 128 or
+//!   more deep, as one with a field holding 127 nested arrays, answers 400
+//!   `invalid json` (`recursion limit exceeded at line ... column ...`),
+//!   where Go reads up to 10000 levels. The saved file holds the account a
+//!   level deeper, under `service_account`, and the service reads it with
+//!   the same limit, so an account exactly 127 deep is saved and answers
+//!   200 but isn't served (the service logs the file); Go serves it.
 //! - A `project_id` that gives a file name Windows can't hold (with a
 //!   control character or one of `<>"|?*`) is refused with 400 `invalid
 //!   service account`, on every system. A symlink where the file would go
