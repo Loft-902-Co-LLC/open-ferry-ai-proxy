@@ -22,7 +22,7 @@
 //!
 //! Deviations from upstream:
 //! - The expectations for settings open-ferry doesn't type are left out:
-//!   `codex.disable-codex-cloaking`, `disable-image-generation`,
+//!   `codex.disable-codex-cloaking`,
 //!   `claude-code.disable-cloaking-model-list` and `antigravity.*`.
 //! - Dropped: TestBuildConfigChangeDetails_CodexLiveMediaRelay and
 //!   TestBuildConfigChangeDetails_CodexKey_DisableCodexCloaking (live media
@@ -37,9 +37,9 @@ use std::collections::BTreeMap;
 use super::{config_with, expect_contains, strings};
 use crate::config::diff::{build_change_details, format_url};
 use crate::config::{
-    AnyValue, ClaudeKey, CodexKey, CodexModel, Config, GeminiKey, OpenAiCompatibility,
-    OpenAiCompatibilityApiKey, OpenAiCompatibilityModel, PayloadFilterRule, PayloadModelRule,
-    PayloadRule, VertexCompatKey, VertexCompatModel,
+    AnyValue, ClaudeKey, CodexKey, CodexModel, Config, DisableImageGeneration, GeminiKey,
+    OpenAiCompatibility, OpenAiCompatibilityApiKey, OpenAiCompatibilityModel, PayloadFilterRule,
+    PayloadModelRule, PayloadRule, VertexCompatKey, VertexCompatModel,
 };
 
 fn gemini(api_key: &str) -> GeminiKey {
@@ -617,6 +617,7 @@ fn flags_and_keys() {
         new.api_keys = strings(&[" key-1 ", "key-2"]);
         new.force_model_prefix = true;
         new.nonstream_keepalive_interval = 5;
+        new.disable_image_generation = DisableImageGeneration::All;
         new.xai.inject_x_search = true;
     });
 
@@ -628,6 +629,7 @@ fn flags_and_keys() {
         "disable-cooling: false -> true",
         "save-cooldown-status: false -> true",
         "transient-error-cooldown-seconds: 0 -> -1",
+        "disable-image-generation: false -> true",
         "request-log: false -> true",
         "request-retry: 1 -> 2",
         "max-retry-credentials: 1 -> 3",
@@ -748,6 +750,7 @@ fn all_branches() {
         new.request_log = true;
         new.proxy_url = "http://new-proxy".to_owned();
         new.api_keys = strings(&["keyB"]);
+        new.disable_image_generation = DisableImageGeneration::All;
         new.oauth_excluded_models = BTreeMap::from([
             ("p1".to_owned(), strings(&["b", "c"])),
             ("p2".to_owned(), strings(&["d"])),
@@ -768,6 +771,7 @@ fn all_branches() {
         "disable-cooling: false -> true",
         "save-cooldown-status: false -> true",
         "transient-error-cooldown-seconds: 0 -> -1",
+        "disable-image-generation: false -> true",
         "request-retry: 1 -> 2",
         "max-retry-credentials: 1 -> 3",
         "max-retry-interval: 1 -> 3",
@@ -912,6 +916,29 @@ fn trim_strings() {
         build_change_details(&old, &new),
         ["api-keys: values updated (count unchanged, redacted)"]
     );
+}
+
+// Not upstream's: `disable-image-generation` shows each mode as upstream's
+// `String` prints it, and the same mode written another way is no change.
+#[test]
+fn disable_image_generation_modes() {
+    use DisableImageGeneration::{All, Chat, Off, Passthrough};
+    let mode = |mode| config_with(|config| config.disable_image_generation = mode);
+    for (old, new, want) in [
+        (Off, Chat, "false -> chat"),
+        (Chat, Passthrough, "chat -> passthrough"),
+        (Passthrough, All, "passthrough -> true"),
+        (All, Off, "true -> false"),
+    ] {
+        assert_eq!(
+            build_change_details(&mode(old), &mode(new)),
+            [format!("disable-image-generation: {want}")]
+        );
+    }
+    let parse = |text: &str| Config::parse(format!("disable-image-generation: {text}\n")).unwrap();
+    assert!(build_change_details(&parse("' Chat '"), &parse("chat")).is_empty());
+    assert!(build_change_details(&parse("yes"), &parse("true")).is_empty());
+    assert!(build_change_details(&Config::default(), &parse("off")).is_empty());
 }
 
 // Not upstream's: the payload sections count their rules, and a rule's

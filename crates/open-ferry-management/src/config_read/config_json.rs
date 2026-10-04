@@ -24,10 +24,11 @@
 use std::collections::BTreeMap;
 
 use open_ferry_core::config::{
-    AnyValue, ClaudeKey, ClaudeModel, CodexKey, CodexModel, Config, GeminiKey, GeminiModel,
-    OAuthModelAlias, OAuthModelSetting, OpenAiCompatibility, OpenAiCompatibilityApiKey,
-    OpenAiCompatibilityModel, PayloadConfig, PayloadFilterRule, PayloadModelRule, PayloadRule,
-    RequestScopedErrorRule, ThinkingSupport, VertexCompatKey, VertexCompatModel,
+    AnyValue, ClaudeKey, ClaudeModel, CodexKey, CodexModel, Config, DisableImageGeneration,
+    GeminiKey, GeminiModel, OAuthModelAlias, OAuthModelSetting, OpenAiCompatibility,
+    OpenAiCompatibilityApiKey, OpenAiCompatibilityModel, PayloadConfig, PayloadFilterRule,
+    PayloadModelRule, PayloadRule, RequestScopedErrorRule, ThinkingSupport, VertexCompatKey,
+    VertexCompatModel,
 };
 use serde_json::Value;
 
@@ -156,6 +157,10 @@ pub(super) fn config(config: &Config) -> Json {
                 .done(),
         )
         .with("proxy-url", string(&config.proxy_url))
+        .with(
+            "disable-image-generation",
+            image_generation(config.disable_image_generation),
+        )
         .with("force-model-prefix", Json::Bool(config.force_model_prefix))
         .with("request-log", Json::Bool(config.request_log))
         .with("api-keys", strings(&config.api_keys))
@@ -332,6 +337,16 @@ pub(super) fn config(config: &Config) -> Json {
         )
         .with("payload", payload(&config.payload))
         .done()
+}
+
+/// `disable-image-generation`, as upstream's `MarshalJSON` writes it: a
+/// switch for `false` and `true`, a text for `chat` and `passthrough`.
+fn image_generation(mode: DisableImageGeneration) -> Json {
+    match mode {
+        DisableImageGeneration::Off => Json::Bool(false),
+        DisableImageGeneration::All => Json::Bool(true),
+        DisableImageGeneration::Chat | DisableImageGeneration::Passthrough => string(mode.as_str()),
+    }
 }
 
 /// `payload`.

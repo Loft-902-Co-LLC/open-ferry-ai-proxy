@@ -132,6 +132,27 @@ const PARAM_PATHS: &[&str] = &[
     "tools.0.name",
 ];
 
+/// `disable-image-generation` values, as JSON: each mode as a switch, a
+/// number, or a text in any case, with spaces around it, or empty.
+const IMAGE_GENERATION: &[&str] = &[
+    "false",
+    "true",
+    "0",
+    "1",
+    "\"\"",
+    "\"true\"",
+    "\"False\"",
+    "\"chat\"",
+    "\" Chat \"",
+    "\"CHAT\"",
+    "\"passthrough\"",
+    "\" Passthrough \"",
+    "\"yes\"",
+    "\"off\"",
+    "\"on\"",
+    "\"no\"",
+];
+
 const RAW_JSON: &[&str] = &["{}", "[1, 2]", "{\"a\": 1}", " true ", "\"text\"", "null"];
 
 /// The top-level keys the generator sets.
@@ -145,6 +166,7 @@ const SECTIONS: &[&str] = &[
     "disable-cooling",
     "save-cooldown-status",
     "transient-error-cooldown-seconds",
+    "disable-image-generation",
     "request-log",
     "logs-max-total-size-mb",
     "error-logs-max-files",
@@ -298,6 +320,9 @@ impl Configs {
                 json!(self.rng.pick(&[-1, 0, 30, 60, 3600, 5000]))
             }
             "transient-error-cooldown-seconds" => json!(self.rng.pick(&[-1, 0, 30])),
+            "disable-image-generation" => {
+                serde_json::from_str(self.rng.pick(IMAGE_GENERATION)).unwrap_or(Value::Null)
+            }
             "logs-max-total-size-mb" => json!(self.rng.pick(&[-1, 0, 10, 512])),
             "error-logs-max-files" => json!(self.rng.pick(&[-2, 0, 5, 10])),
             "request-retry" => json!(self.rng.pick(&[0, 1, 3])),

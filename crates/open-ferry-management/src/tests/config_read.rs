@@ -638,7 +638,8 @@ async fn config_is_written_as_upstream_writes_it() {
     let want = format!(
         concat!(
             r#"{{"client":{{"codex":{{"optimize-multi-agent-v2":true,"enable-apply-patch":false}}}},"#,
-            r#""proxy-url":"socks5://127.0.0.1:1080","force-model-prefix":true,"request-log":true,"#,
+            r#""proxy-url":"socks5://127.0.0.1:1080","disable-image-generation":false,"#,
+            r#""force-model-prefix":true,"request-log":true,"#,
             r#""api-keys":["k1","k2"],"passthrough-headers":true,"#,
             r#""streaming":{{"keepalive-seconds":15,"bootstrap-retries":2}},"#,
             r#""nonstream-keepalive-interval":5,"trusted-proxies":["10.0.0.0/8"],"#,
@@ -679,7 +680,8 @@ async fn config_is_written_as_upstream_writes_it() {
 
     let empty = concat!(
         r#"{"client":{"codex":{"optimize-multi-agent-v2":false,"enable-apply-patch":false}},"#,
-        r#""proxy-url":"","force-model-prefix":false,"request-log":false,"api-keys":null,"#,
+        r#""proxy-url":"","disable-image-generation":false,"force-model-prefix":false,"#,
+        r#""request-log":false,"api-keys":null,"#,
         r#""passthrough-headers":false,"streaming":{},"trusted-proxies":null,"#,
         r#""tls":{"enable":false,"cert":"","key":""},"debug":false,"commercial-mode":false,"#,
         r#""logging-to-file":false,"logs-max-total-size-mb":0,"error-logs-max-files":10,"#,
@@ -851,6 +853,81 @@ api-keys:
         assert_v8(&answer, body);
     }
     assert_unchanged(&dir, raw);
+}
+
+/// Not upstream's: `disable-image-generation` is written after `proxy-url`
+/// as upstream's `MarshalJSON` writes the mode, from either layout, and
+/// the v8 reads give it at `multimedia.disable-image-generation` as the
+/// file has it. Recorded from upstream's `GetConfig` and `ConfigV8`
+/// (v8.0.11) under Go 1.26.4.
+#[tokio::test]
+async fn disable_image_generation_is_read() {
+    for (raw, written, v8) in [
+        ("port: 1\n", "false", None),
+        (
+            "port: 1\ndisable-image-generation: false\n",
+            "false",
+            Some("false"),
+        ),
+        (
+            "port: 1\ndisable-image-generation: true\n",
+            "true",
+            Some("true"),
+        ),
+        (
+            "port: 1\ndisable-image-generation: yes\n",
+            "true",
+            Some(r#""yes""#),
+        ),
+        (
+            "port: 1\ndisable-image-generation: ' Chat '\n",
+            r#""chat""#,
+            Some(r#"" Chat ""#),
+        ),
+        (
+            "port: 1\ndisable-image-generation: passthrough\n",
+            r#""passthrough""#,
+            Some(r#""passthrough""#),
+        ),
+        (
+            "server: {port: 1}\nmultimedia: {disable-image-generation: chat}\n",
+            r#""chat""#,
+            Some(r#""chat""#),
+        ),
+    ] {
+        let answer = with_config(raw).get("/v0/management/config").await;
+        assert_eq!(answer.status, StatusCode::OK);
+        let part = format!(
+            r#""proxy-url":"","disable-image-generation":{written},"force-model-prefix":false,"#
+        );
+        assert!(answer.body.contains(&part), "{raw}: {}", answer.body);
+
+        let (dir, api) = over_file(raw);
+        let path = "/v8/management/config/multimedia/disable-image-generation";
+        match v8 {
+            Some(value) => {
+                assert_v8(&api.get(path).await, value);
+                let multimedia = format!(r#"{{"disable-image-generation":{value}}}"#);
+                assert_v8(
+                    &api.get("/v8/management/config/multimedia").await,
+                    &multimedia,
+                );
+                let whole = format!(
+                    r#"{{"config-version":8,"multimedia":{multimedia},"server":{{"port":1}}}}"#
+                );
+                assert_v8(&api.get("/v8/management/config").await, &whole);
+            }
+            None => {
+                let answer = api.get(path).await;
+                answer.assert(StatusCode::NOT_FOUND, r#"{"error":"not_found"}"#);
+            }
+        }
+        let answer = api
+            .get("/v8/management/config/disable-image-generation")
+            .await;
+        answer.assert(StatusCode::NOT_FOUND, r#"{"error":"not_found"}"#);
+        assert_unchanged(&dir, raw);
+    }
 }
 
 /// The `payload` upstream writes when the file has none.

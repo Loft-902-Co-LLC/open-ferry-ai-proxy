@@ -22,6 +22,7 @@ redis-usage-queue-retention-seconds: 120
 disable-cooling: true
 save-cooldown-status: true
 transient-error-cooldown-seconds: 30
+disable-image-generation: "chat"
 request-log: true
 logs-max-total-size-mb: 256
 error-logs-max-files: 4
@@ -221,6 +222,7 @@ redis-usage-queue-retention-seconds: 120
 disable-cooling: true
 save-cooldown-status: true
 transient-error-cooldown-seconds: -1
+disable-image-generation: true
 request-log: true
 logs-max-total-size-mb: 512
 error-logs-max-files: 3
@@ -892,6 +894,42 @@ oauth-settings:
         case("parse-error-new", "port: 1\n", "port: [\n"),
         case("parse-error-old-empty", "", "port: 1\n"),
     ];
+
+    // Each mode, and the same mode written another way, in either layout.
+    for (name, old, new) in [
+        ("off-chat", "false", "chat"),
+        ("chat-passthrough", "\"chat\"", "passthrough"),
+        ("passthrough-on", "passthrough", "true"),
+        ("on-off", "true", "false"),
+        ("unset-on", "", "yes"),
+        ("unset-off", "", "off"),
+        ("chat-padded", "\" Chat \"", "CHAT"),
+        ("on-spelled", "1", "\"on\""),
+        ("off-empty", "no", "\"\""),
+    ] {
+        let setting = |value: &str| {
+            if value.is_empty() {
+                "port: 1\n".to_owned()
+            } else {
+                format!("port: 1\ndisable-image-generation: {value}\n")
+            }
+        };
+        cases.push(case(
+            &format!("disable-image-generation-{name}"),
+            &setting(old),
+            &setting(new),
+        ));
+    }
+    cases.push(case(
+        "disable-image-generation-v8-layout",
+        "server:\n  port: 1\nmultimedia:\n  disable-image-generation: chat\n",
+        "port: 1\ndisable-image-generation: passthrough\n",
+    ));
+    cases.push(case(
+        "disable-image-generation-invalid",
+        "port: 1\n",
+        "port: 1\ndisable-image-generation: images\n",
+    ));
 
     // Ports TestFormatProxyURL, through proxy-url.
     for (name, url) in [
