@@ -82,7 +82,7 @@ impl ToolDescriptor<'_> {
 
 /// `CollectResponsesToolDescriptors`: every function and custom tool
 /// declared, with its qualified name, in the order they're found.
-fn collect_tool_descriptors<'v>(root: &'v Value) -> Vec<(String, ToolDescriptor<'v>)> {
+pub(crate) fn collect_tool_descriptors<'v>(root: &'v Value) -> Vec<(String, ToolDescriptor<'v>)> {
     let mut descriptors = Vec::new();
     let mut add =
         |name: String, local_name: String, namespace: Option<&str>, tool: &'v Value, priority| {

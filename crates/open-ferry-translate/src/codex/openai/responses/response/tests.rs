@@ -1,9 +1,8 @@
 // Ported from CLIProxyAPI internal/translator/codex/openai/responses/codex_openai-responses_response_test.go
 // (v8.0.10, MIT). https://github.com/router-for-me/CLIProxyAPI
 //
-// Of TestApplyPatchResponsesActualRequestGatesNativeCodex, only the first check
-// is ported (apply_patch_call_passes_through): the rest exercises the
-// apply_patch bridge, which is not ported yet.
+// TestApplyPatchResponsesActualRequestGatesNativeCodex is split in two:
+// apply_patch_call_passes_through and only_an_executor_bridge_converts.
 
 use serde_json::{Value, json};
 
@@ -95,4 +94,72 @@ fn apply_patch_call_passes_through() {
         "native Codex changed: {}",
         String::from_utf8_lossy(&out)
     );
+}
+
+#[test]
+fn only_an_executor_bridge_converts() {
+    let original = json!({"tools": [{"type": "custom", "name": "apply_patch"}]});
+    let mut bridged = original.clone();
+    crate::apply_patch::responses::normalize_request(&mut bridged).unwrap();
+    let raw = r#"data: {"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"a","call_id":"c","name":"apply_patch","arguments":"{\"input\":\"p\"}"}}"#;
+    let stream = CodexToOpenAIResponsesStream::new("m", &original, &bridged);
+
+    let out = stream.translate_line(raw.as_bytes());
+    assert_eq!(
+        &*out,
+        raw.as_bytes(),
+        "configuration enabled native bridging"
+    );
+
+    let mut xai = Bridge::new(&original);
+    let out = stream.translate_line_with_bridge(raw.as_bytes(), &mut xai);
+    assert_eq!(out.len(), 3, "same Codex wire format bypassed bridge");
+    assert!(out.iter().all(|line| line.starts_with(b"data: ")));
+    assert_eq!(text_at(&payload(&out[2]), "item.input"), "p");
+
+    let mut failed = Bridge::new(&original);
+    let line = br#"data: {"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","name":"apply_patch","arguments":"{}"}}"#;
+    let out = stream.translate_line_with_bridge(line, &mut failed);
+    assert_eq!(out.len(), 1);
+    assert_eq!(text_at(&payload(&out[0]), "type"), "response.failed");
+    assert!(failed.tool_input_error().is_some());
+}
+
+// Not upstream's.
+
+#[test]
+fn bridge_sees_the_model_and_converts_non_stream() {
+    let original = json!({"model": "m1", "tools": [{"type": "custom", "name": "apply_patch"}]});
+    let stream = CodexToOpenAIResponsesStream::new("m", &original, &original);
+    let mut bridge = Bridge::new(&original);
+    let out = stream.translate_line_with_bridge(
+        br#"data:{"type":"response.created","response":{"id":"r"}}"#,
+        &mut bridge,
+    );
+    assert_eq!(
+        out,
+        [br#"data: {"type":"response.created","response":{"id":"r","model":"m1"}}"#]
+    );
+    let out = stream.translate_line_with_bridge(b"event: response.created", &mut bridge);
+    assert_eq!(out, [b"event: response.created"]);
+
+    let body = json!({"type": "response.completed", "response": {"output": [
+        {"type": "function_call", "id": "a", "call_id": "c", "name": "apply_patch", "arguments": "{\"input\":\"p\"}"}
+    ]}});
+    let mut bridge = Bridge::new(&original);
+    let response =
+        convert_codex_response_to_openai_responses_non_stream_with_bridge(body, &mut bridge)
+            .unwrap();
+    assert_eq!(text_at(&response, "output.0.type"), "custom_tool_call");
+    assert_eq!(text_at(&response, "output.0.input"), "p");
+
+    let body = json!({"type": "response.completed", "response": {"output": [
+        {"type": "function_call", "name": "apply_patch", "arguments": "{}"}
+    ]}});
+    let mut bridge = Bridge::new(&original);
+    assert_eq!(
+        convert_codex_response_to_openai_responses_non_stream_with_bridge(body, &mut bridge),
+        None
+    );
+    assert!(bridge.tool_input_error().is_some());
 }

@@ -8,21 +8,28 @@
 //! The one change: when `response.created` or `response.in_progress` names no
 //! model, we fill in the one the client asked for.
 //!
+//! An executor whose provider speaks this format but only knows function
+//! tools can also pass the events through an `apply_patch`
+//! [`Bridge`](crate::apply_patch::responses::Bridge) it owns, with
+//! [`CodexToOpenAIResponsesStream::translate_line_with_bridge`] and
+//! [`convert_codex_response_to_openai_responses_non_stream_with_bridge`].
+//! Upstream passes the bridge in the translator's parameter. Its Codex
+//! executor never does; its xAI and Meta executors run their events through
+//! the bridge themselves, before translating.
+//!
 //! Deviations from upstream:
 //! - An event we add the model to is written as compact JSON. Upstream inserts
 //!   the field into the line's original text.
 //! - A `data:` line that is not valid JSON passes through unchanged. gjson
 //!   reads what it can from malformed JSON, so upstream may still add a model.
-//! - Not ported yet: the `apply_patch` bridge, which an executor turns on
-//!   through a parameter the translator doesn't otherwise use. Upstream's
-//!   Codex executor never does; its xAI, Meta and Kimi executors, which
-//!   aren't ported, do.
 
 use std::borrow::Cow;
 
 use serde_json::{Map, Value};
 
+use crate::apply_patch::responses::Bridge;
 use crate::common::request_model_name;
+use crate::go;
 use crate::json::str_of;
 
 /// Translates a Codex event stream into Responses events, one line at a time.
@@ -44,25 +51,47 @@ impl CodexToOpenAIResponsesStream {
     /// Translates one line of the Codex event stream into one line for the
     /// client. Lines that need no change are returned as they are.
     pub fn translate_line<'l>(&self, line: &'l [u8]) -> Cow<'l, [u8]> {
-        let Some(model) = &self.model else {
-            return Cow::Borrowed(line);
-        };
         let (prefix, data) = match line.strip_prefix(b"data:") {
             Some(data) => (&b"data: "[..], data),
             None => (&b""[..], line),
         };
-        let event = std::str::from_utf8(data)
-            .ok()
-            .and_then(|data| serde_json::from_str(data.trim()).ok());
-        let Some(mut event) = event else {
-            return Cow::Borrowed(line);
-        };
-        if !set_model(&mut event, model) {
-            return Cow::Borrowed(line);
+        match self.updated(data) {
+            Some(event) => Cow::Owned([prefix, &event].concat()),
+            None => Cow::Borrowed(line),
         }
-        let mut out = prefix.to_vec();
-        serde_json::to_writer(&mut out, &event).expect("a JSON value always serializes");
-        Cow::Owned(out)
+    }
+
+    /// [`translate_line`](Self::translate_line), then the `apply_patch`
+    /// bridge. Returns the lines to send: none once the bridge has failed or
+    /// the response has ended, and a `data:` line for each event when the
+    /// line was one. The bridge's error, if it fails, is
+    /// [`Bridge::tool_input_error`].
+    pub fn translate_line_with_bridge(&self, line: &[u8], bridge: &mut Bridge) -> Vec<Vec<u8>> {
+        let (sse, data) = match line.strip_prefix(b"data:") {
+            Some(data) => (true, go::trim_space(data)),
+            None => (false, line),
+        };
+        let updated = self.updated(data);
+        let (events, _) = bridge.transform(updated.as_deref().unwrap_or(data));
+        if !sse {
+            return events;
+        }
+        events
+            .into_iter()
+            .map(|event| [&b"data: "[..], &event].concat())
+            .collect()
+    }
+
+    /// The event with the model filled in, or `None` if it needs no change.
+    fn updated(&self, data: &[u8]) -> Option<Vec<u8>> {
+        let model = self.model.as_ref()?;
+        let mut event = std::str::from_utf8(data)
+            .ok()
+            .and_then(|data| serde_json::from_str(data.trim()).ok())?;
+        if !set_model(&mut event, model) {
+            return None;
+        }
+        Some(serde_json::to_vec(&event).expect("a JSON value always serializes"))
     }
 }
 
@@ -110,6 +139,17 @@ pub fn convert_codex_response_to_openai_responses_non_stream(mut event: Value) -
     } else {
         None
     }
+}
+
+/// [`convert_codex_response_to_openai_responses_non_stream`] after the
+/// `apply_patch` bridge. Returns `None` as well if the bridge fails; its
+/// error is [`Bridge::tool_input_error`].
+pub fn convert_codex_response_to_openai_responses_non_stream_with_bridge(
+    event: Value,
+    bridge: &mut Bridge,
+) -> Option<Value> {
+    let event = bridge.transform_non_stream_value(event).ok()?;
+    convert_codex_response_to_openai_responses_non_stream(event)
 }
 
 #[cfg(test)]

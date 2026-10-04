@@ -6,9 +6,11 @@
 //! Codex declares `apply_patch` as a custom tool whose input is the raw patch
 //! text. A client that only knows function tools calls it as a function with
 //! the arguments `{"input": "<patch>"}`. These helpers declare that function,
-//! and wrap and unwrap the envelope. [`input`] decodes it as it streams in.
+//! and wrap and unwrap the envelope. The `input` module decodes it as it
+//! streams in, and [`responses`] bridges a Responses stream.
 
 pub(crate) mod input;
+pub mod responses;
 
 use serde_json::Value;
 
@@ -38,7 +40,7 @@ Example input:
 *** End Patch";
 
 /// `IsCustomTool`: whether a tool declaration is the custom `apply_patch` tool.
-pub(crate) fn is_custom_tool(tool: &Value) -> bool {
+pub fn is_custom_tool(tool: &Value) -> bool {
     str_of(tool.get("type")) == "custom" && str_of(tool.get("name")).trim() == "apply_patch"
 }
 
@@ -86,7 +88,7 @@ pub(crate) fn escape_input_fragment(fragment: &str) -> String {
 /// `UnwrapInput`: the patch text from function arguments, which must be one
 /// JSON object holding one string field, `input`, and nothing else. Upstream
 /// reads them with Go's JSON tokenizer and returns an error otherwise.
-pub(crate) fn unwrap_input(arguments: &str) -> Option<String> {
+pub fn unwrap_input(arguments: &str) -> Option<String> {
     let mut json = Tokens(arguments.as_bytes());
     json.expect(b'{')?;
     if json.string()? != "input" {

@@ -12,7 +12,7 @@
 //! `openai/openai/responses`), and `openai::chat_completions` passes Chat
 //! Completions through (upstream's `openai/openai/chat-completions`).
 
-mod apply_patch;
+pub mod apply_patch;
 pub mod claude;
 pub mod codex;
 pub mod codex_client;
