@@ -893,3 +893,38 @@ async fn overload_directly_after_timeout_delivered_in_stream() {
     let (_, error) = drain(response).await;
     assert!(error.is_some(), "the overload must come in-stream");
 }
+
+// Not upstream's: the lines held back while the stream starts have the
+// secrets the request sent redacted, as the ones that follow do: a comment
+// and an event that quote the token reach the client without it.
+#[tokio::test]
+async fn held_lines_that_echo_the_token_hide_it() {
+    const TOKEN: &str = "sk-codex-echo-0123456789";
+    let created = format!(
+        r#"{{"type":"response.created","response":{{"id":"resp_1","note":"key {TOKEN}"}}}}"#
+    );
+    let body = format!(
+        ": key {TOKEN}\n\nevent: response.created\ndata: {created}\n\nevent: response.in_progress\ndata: {IN_PROGRESS_EVENT}\n\nevent: response.output_text.delta\ndata: {OUTPUT_DELTA_EVENT}\n\nevent: response.completed\ndata: {COMPLETED_EVENT}\n\n"
+    );
+    let url = serve_raw(body).await;
+    let mut keyed = (*auth(&url)).clone();
+    keyed.attributes.insert("api_key".into(), TOKEN.into());
+    let request = Request {
+        model: "gpt-5.6-terra".into(),
+        payload: Bytes::from_static(br#"{"model":"gpt-5.6-terra","input":"hello"}"#),
+    };
+    let options = Options {
+        stream: true,
+        ..Options::new(Format::from("openai-response".to_owned()))
+    };
+    let response = started(
+        buffering(true)
+            .execute_stream(Arc::new(keyed), request, options)
+            .await,
+    );
+    let (shown, error) = drain(response).await;
+    assert!(error.is_none(), "unexpected chunk error: {error:?}");
+    assert!(shown.contains(r#""type":"response.created""#), "{shown}");
+    assert!(!shown.contains(TOKEN), "{shown}");
+    assert!(shown.contains("key [redacted]"), "{shown}");
+}

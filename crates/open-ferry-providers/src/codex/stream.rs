@@ -36,7 +36,14 @@
 //! - Usage reporting and request logging are left to the call's taps,
 //!   which see each chunk as it is read (see the crate's `observe_send`
 //!   module). Image tool usage isn't ported.
+//! - Each line has the secrets the request sent redacted before it is
+//!   read, if they are of eight bytes or more, as every client error is (see
+//!   [`crate::redact`] and its `Policy::Client`). So an error that quotes
+//!   one, and what a model echoes back in its output, which upstream passes
+//!   on as it is, reach the client without it. The call's taps see each line
+//!   as Codex sent it.
 
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
@@ -62,6 +69,7 @@ use super::terminal::{
 use super::usage::ensure_responses_usage_details;
 use crate::json::{get, str_at, str_of};
 use crate::observe_send::{self, BodyTap};
+use crate::redact::Policy;
 
 /// The longest line read, as upstream's scanner allows.
 pub(crate) const MAX_LINE: usize = 52_428_800;
@@ -248,8 +256,7 @@ pub(crate) struct StreamSetup {
     pub(crate) preserve_native: bool,
     /// Whether the client is a Grok Build one.
     pub(crate) grok: bool,
-    /// The secrets the request sent, redacted from the errors made from
-    /// Codex's events.
+    /// The secrets the request sent, redacted from each line Codex sends.
     pub(crate) secrets: crate::redact::Secrets,
     /// Whether a usage limit cools only the model
     /// (`codex.model-level-cooling`).
@@ -499,6 +506,12 @@ impl State {
 
     /// Checks and translates one line.
     async fn process(&mut self, line: Vec<u8>) -> Result<Frame, Failure> {
+        // What the client gets is read without the secrets the request sent,
+        // as the error made from it is; the taps read the line as it came.
+        let line = match self.setup.secrets.bytes(&line, Policy::Client) {
+            Cow::Owned(redacted) => redacted,
+            Cow::Borrowed(_) => line,
+        };
         let mut terminal = false;
         let mut handshake = true;
         let translated_line = if self.setup.grok && is_keepalive_line(&line) {

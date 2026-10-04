@@ -2159,3 +2159,168 @@ async fn errors_hide_every_secret_sent() {
         }
     }
 }
+
+/// A token a model could echo back: longer than the eight bytes under which
+/// a secret isn't redacted from what a client gets.
+const ECHOED_TOKEN: &str = "sk-codex-echo-0123456789";
+
+/// A credential with [`ECHOED_TOKEN`] as its API key.
+fn echoing_auth(base_url: &str) -> Arc<Auth> {
+    let mut auth = (*api_key_auth(base_url)).clone();
+    auth.attributes
+        .insert("api_key".into(), ECHOED_TOKEN.into());
+    Arc::new(auth)
+}
+
+/// Codex's stream for an answer in which the model says the token: a delta
+/// and the completed response.
+fn stream_saying_the_token() -> String {
+    format!(
+        concat!(
+            "data: {{\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"key {token}\"}}\n\n",
+            "data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"resp_1\",\"status\":\"completed\",\"output\":[{{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{{\"type\":\"output_text\",\"text\":\"key {token}\"}}]}}],\"usage\":{{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}}}}\n\n",
+        ),
+        token = ECHOED_TOKEN
+    )
+}
+
+/// A compact answer that has the token in it, as a 200 with an `error`
+/// object can.
+fn compact_quoting_the_token() -> String {
+    format!(
+        r#"{{"id":"resp_1","object":"response.compaction","error":{{"message":"bad key {ECHOED_TOKEN}"}},"usage":{{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}}"#
+    )
+}
+
+// Not upstream's: an answer that succeeds but quotes the token, as a model
+// can echo it back or a 200 can hold an `error` object, reaches the client
+// with it redacted: a compact answer whole, and the stream a call that isn't
+// streamed reads line by line, for a Responses client and for one that gets
+// the answer translated.
+#[tokio::test]
+async fn a_successful_answer_that_echoes_the_token_hides_it() {
+    let payload = r#"{"model":"gpt-5.5","input":"hello"}"#;
+    for (name, reply, options) in [
+        (
+            "a completion",
+            Reply::sse(&stream_saying_the_token()),
+            options("openai-response"),
+        ),
+        (
+            "a completion for a chat client",
+            Reply::sse(&stream_saying_the_token()),
+            options("openai"),
+        ),
+        (
+            "a compact answer",
+            Reply::json(&compact_quoting_the_token()),
+            compact_options("openai-response"),
+        ),
+    ] {
+        let mock = Mock::start(reply).await;
+        let response = executor()
+            .execute(
+                echoing_auth(&mock.url),
+                request("gpt-5.5", payload),
+                options,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+        let shown = String::from_utf8_lossy(&response.payload);
+        assert!(!shown.contains(ECHOED_TOKEN), "{name}: {shown}");
+        assert!(shown.contains("[redacted]"), "{name}: {shown}");
+    }
+}
+
+// Not upstream's: the same for a stream, whose lines are redacted one at a
+// time, an event's or not: a JSON answer of 200 with an `error` object is a
+// line that no `data:` frames, which the stream passes on as it is.
+#[tokio::test]
+async fn a_stream_that_echoes_the_token_hides_it() {
+    let error_object = format!(r#"{{"error":{{"message":"bad key {ECHOED_TOKEN}"}}}}"#);
+    for (name, body, format) in [
+        (
+            "events for a Responses client",
+            stream_saying_the_token(),
+            "openai-response",
+        ),
+        (
+            "events for a chat client",
+            stream_saying_the_token(),
+            "openai",
+        ),
+        (
+            "an error object for a Responses client",
+            error_object,
+            "openai-response",
+        ),
+    ] {
+        let mock = Mock::start(Reply::sse(&body)).await;
+        let response = executor()
+            .execute_stream(
+                echoing_auth(&mock.url),
+                request("gpt-5.5", r#"{"model":"gpt-5.5","input":"hello"}"#),
+                stream_options(format),
+            )
+            .await
+            .unwrap();
+        let (shown, _) = collect(response).await;
+        assert!(!shown.contains(ECHOED_TOKEN), "{name}: {shown}");
+        assert!(shown.contains("[redacted]"), "{name}: {shown}");
+    }
+}
+
+// Not upstream's: the redaction is of what the client gets; the taps, which
+// write to disk with their own redaction, read Codex's answer as it came, for
+// a call that isn't streamed, a stream and a compaction.
+#[tokio::test]
+async fn the_taps_see_the_answer_as_it_came() {
+    let payload = r#"{"model":"gpt-5.5","input":"hello"}"#;
+    for (name, reply, options) in [
+        (
+            "a call",
+            Reply::sse(&stream_saying_the_token()),
+            options("openai-response"),
+        ),
+        (
+            "a stream",
+            Reply::sse(&stream_saying_the_token()),
+            stream_options("openai-response"),
+        ),
+        (
+            "a compaction",
+            Reply::json(&compact_quoting_the_token()),
+            compact_options("openai-response"),
+        ),
+    ] {
+        let mock = Mock::start(reply).await;
+        let (observation, raw) = crate::secret_echo::Raw::observe();
+        let options = Options {
+            observation: Some(observation),
+            ..options
+        };
+        let shown = if options.stream {
+            let response = executor()
+                .execute_stream(
+                    echoing_auth(&mock.url),
+                    request("gpt-5.5", payload),
+                    options,
+                )
+                .await
+                .unwrap();
+            collect(response).await.0
+        } else {
+            let response = executor()
+                .execute(
+                    echoing_auth(&mock.url),
+                    request("gpt-5.5", payload),
+                    options,
+                )
+                .await
+                .unwrap();
+            String::from_utf8_lossy(&response.payload).into_owned()
+        };
+        assert!(!shown.contains(ECHOED_TOKEN), "{name}: {shown}");
+        assert!(raw.seen().contains(ECHOED_TOKEN), "{name}: {}", raw.seen());
+    }
+}

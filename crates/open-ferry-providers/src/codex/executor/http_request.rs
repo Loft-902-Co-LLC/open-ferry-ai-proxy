@@ -28,13 +28,16 @@
 //!   which the WHATWG parser would drop or encode, fails before anything is
 //!   sent, as Go's does, with Go's message (`net/url: invalid control
 //!   character in URL`) but without the URL, which may hold a secret.
-//! - An answer whose status isn't a success has every secret the request
-//!   sent, of eight bytes or more, redacted from its body, as a client's
-//!   error is (see
-//!   [`observe_send::secrets`] and [`crate::redact`]): the token, the
-//!   credential headers after the custom ones, each cookie, the URL's
-//!   credentials and the proxy's password. Upstream hands the body to the
-//!   handler as it came.
+//! - An answer, of any status, has every secret the request sent redacted
+//!   from its body, if it is of eight bytes or more, as every client error is
+//!   (see `Policy::Client`, [`observe_send::secrets`] and
+//!   [`crate::redact`]): the token, the credential headers after the custom
+//!   ones, each cookie, the URL's credentials and the proxy's password. So a
+//!   search that quotes one in its results, as well as a failure that does
+//!   in its error, reaches the handler without it, where upstream hands the
+//!   body on as it came. The call's taps read the body as it came.
+
+use std::borrow::Cow;
 
 use bytes::Bytes;
 use http::header::{self, HeaderValue};
@@ -51,8 +54,8 @@ use crate::redact::Policy;
 
 impl CodexExecutor {
     /// Sends `call` with the credential's token and custom headers, and
-    /// reads the answer, whatever its status (`HttpRequest`); a failure's
-    /// body without the secrets the request sent.
+    /// reads the answer, whatever its status (`HttpRequest`); the body
+    /// without the secrets the request sent.
     pub(super) async fn http_request_inner(
         &self,
         auth: &Auth,
@@ -128,9 +131,7 @@ impl CodexExecutor {
         if let Some(error) = &read_error {
             observe_send::attempt_error(tap.as_ref(), error);
         }
-        if !(200..300).contains(&status)
-            && let std::borrow::Cow::Owned(scrubbed) = secrets.bytes(&body, Policy::Client)
-        {
+        if let Cow::Owned(scrubbed) = secrets.bytes(&body, Policy::Client) {
             body = scrubbed;
         }
         Ok(HttpReply {
@@ -164,6 +165,16 @@ mod tests {
 
     use super::*;
     use crate::codex::request::CONTROL_CHARACTER;
+
+    /// The API key of the credentials that quote it.
+    const TOKEN: &str = "alpha-token-0123456789";
+    /// A search's results that quote the token, as a page can.
+    const RESULTS_QUOTING_TOKEN: &str =
+        r#"{"results":[{"snippet":"the key is alpha-token-0123456789"}]}"#;
+    /// A body that answers a success with an error object that quotes the
+    /// token.
+    const ERROR_QUOTING_TOKEN: &str =
+        r#"{"error":{"message":"bad key alpha-token-0123456789","type":"auth"}}"#;
 
     /// One request the mock received.
     #[derive(Clone, Debug)]
@@ -384,7 +395,6 @@ mod tests {
     // nor the password of a proxy that answers 407.
     #[tokio::test]
     async fn a_failures_body_hides_every_secret_sent() {
-        const TOKEN: &str = "alpha-token-0123456789";
         let api_key = |base_url: &str| {
             let mut auth = Auth::default();
             auth.attributes.insert("base_url".into(), base_url.into());
@@ -403,6 +413,34 @@ mod tests {
             let body = String::from_utf8_lossy(&reply.body);
             assert!(!body.contains(TOKEN), "{body}");
             case.check_text(&body);
+        }
+    }
+
+    // Not upstream's: an answer that succeeds hides the secrets the request
+    // sent as well: a page that quotes the token, and a 200 with an `error`
+    // object that does, reach the handler without it, while the call's taps
+    // read the body as it came.
+    #[tokio::test]
+    async fn a_successful_body_hides_every_secret_sent() {
+        for (name, body) in [
+            ("results", RESULTS_QUOTING_TOKEN),
+            ("an error object", ERROR_QUOTING_TOKEN),
+        ] {
+            let (url, _) = serve(200, body).await;
+            let mut auth = Auth::default();
+            auth.attributes.insert("api_key".into(), TOKEN.into());
+            let (observation, raw) = crate::secret_echo::Raw::observe();
+            let mut search = call(HttpTarget::Url(format!("{url}/alpha/search")), "{}");
+            search.observation = Some(observation);
+            let reply = CodexExecutor::new("direct")
+                .http_request_inner(&auth, search)
+                .await
+                .unwrap();
+            assert_eq!(reply.status, 200);
+            let shown = String::from_utf8_lossy(&reply.body);
+            assert!(!shown.contains(TOKEN), "{name}: {shown}");
+            assert!(shown.contains("[redacted]"), "{name}: {shown}");
+            assert_eq!(raw.seen(), body, "{name}: the taps read it as it came");
         }
     }
 }

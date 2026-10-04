@@ -35,11 +35,16 @@
 //!   same. Error bodies are read up to 4 MiB and compact bodies up to
 //!   50 MiB.
 //! - A dropped call or stream stops at once; upstream checks its context.
-//! - An error body or terminal failure event that quotes a secret the
-//!   request sent has it redacted if it is of eight bytes or more, as every
-//!   client error is (see `Policy::Client` in the crate's `redact` module):
-//!   the credential headers after the custom ones, each cookie, the URL's
+//! - A secret the request sent is redacted from every answer that quotes it,
+//!   an error body, a terminal failure event or what a model says in a
+//!   successful answer, if it is of eight bytes or more, as every client
+//!   error is (see `Policy::Client` in the crate's `redact` module): the
+//!   credential headers after the custom ones, each cookie, the URL's
 //!   credentials, the proxy's password and the credential's key or tokens.
+//!   A compact answer is redacted whole, before it is translated, and a
+//!   stream, a non-streaming call's included, a line at a time, before the
+//!   line is read. Upstream passes all of it on as it came. The call's taps
+//!   read the answer as it came.
 //! - Usage reporting and request logging are left to the call's taps (see
 //!   the crate's `observe_send` module), and payload rules to
 //!   [`crate::payload`]. The Home-service refresh isn't ported.
@@ -60,6 +65,7 @@
 //!   sent, as Go's does, with Go's message (`net/url: invalid control
 //!   character in URL`) but without the URL, which may hold a secret.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -303,6 +309,12 @@ impl CodexExecutor {
         let data = read_body(response, MAX_LINE)
             .await
             .map_err(|error| ExecError::new(ErrorKind::Upstream, error.to_string()))?;
+        // Whole, before it is restored and translated; the taps read it as it
+        // came.
+        let data = match secrets.bytes(&data, Policy::Client) {
+            Cow::Owned(redacted) => redacted,
+            Cow::Borrowed(_) => data,
+        };
         let data = ext::restore(&prepared.turn, &data).into_owned();
         let original = original_request(request, options);
         let context = ResponseContext {
@@ -372,6 +384,11 @@ impl CodexExecutor {
                     reader.report(&error);
                     break;
                 }
+            };
+            // Each line, as it is read; the taps read it as it came.
+            let line = match secrets.bytes(&line, Policy::Client) {
+                Cow::Owned(redacted) => redacted,
+                Cow::Borrowed(_) => line,
             };
             let Some(rest) = line.strip_prefix(b"data:") else {
                 continue;
