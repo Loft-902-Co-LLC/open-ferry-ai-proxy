@@ -21,10 +21,6 @@
 //! - Upstream builds a new connection pool for every call; this port keeps
 //!   a client per proxy, at most 16, and starts over when that is reached.
 //!   Idle connections close after 90 seconds, as upstream's would.
-//! - Of the API key lists upstream looks in, the `gemini-api-key`,
-//!   `claude-api-key`, `codex-api-key` and `openai-compatibility` ones are
-//!   ported; a key of the unported providers (Gemini interactions, xAI,
-//!   Meta) never finds a proxy in the config.
 //!
 //! As upstream, a `vertex-api-key` entry's proxy isn't looked up here: the
 //! credential made from it already carries that proxy.
@@ -229,10 +225,15 @@ fn proxy_url_from_api_key_config(config: &Config, auth: &Auth) -> String {
         "gemini" => {
             resolve_api_key_config(&config.gemini_api_key, auth).map(ApiKeyEntry::proxy_url)
         }
+        "gemini-interactions" => {
+            resolve_api_key_config(&config.interactions_api_key, auth).map(ApiKeyEntry::proxy_url)
+        }
         "claude" => {
             resolve_api_key_config(&config.claude_api_key, auth).map(ApiKeyEntry::proxy_url)
         }
         "codex" => resolve_api_key_config(&config.codex_api_key, auth).map(ApiKeyEntry::proxy_url),
+        "xai" => resolve_api_key_config(&config.xai_api_key, auth).map(ApiKeyEntry::proxy_url),
+        "meta" => resolve_api_key_config(&config.meta_api_key, auth).map(ApiKeyEntry::proxy_url),
         _ => None,
     };
     proxy.unwrap_or_default().trim().to_owned()
@@ -449,10 +450,9 @@ mod tests {
         );
     }
 
-    // The gemini, claude and codex cases of
-    // TestAPICallTransportAPIKeyAuthFallsBackToConfigProxyURL (the xAI and
-    // Meta ones are dropped: those providers aren't ported), with a Vertex
-    // key, which upstream doesn't look up.
+    // The gemini, claude, codex, xai and meta cases of
+    // TestAPICallTransportAPIKeyAuthFallsBackToConfigProxyURL, with an
+    // interactions key, and a Vertex key, which upstream doesn't look up.
     #[test]
     fn api_key_auth_falls_back_to_config_proxy_url() {
         let mut config = Config::default();
@@ -472,6 +472,21 @@ mod tests {
             proxy_url: "http://codex-proxy.example.com:8080".into(),
             ..CodexKey::default()
         }];
+        config.xai_api_key = vec![CodexKey {
+            api_key: "xai-key".into(),
+            proxy_url: "http://xai-proxy.example.com:8080".into(),
+            ..CodexKey::default()
+        }];
+        config.meta_api_key = vec![CodexKey {
+            api_key: "meta-key".into(),
+            proxy_url: "http://meta-proxy.example.com:8080".into(),
+            ..CodexKey::default()
+        }];
+        config.interactions_api_key = vec![GeminiKey {
+            api_key: "interactions-key".into(),
+            proxy_url: "http://interactions-proxy.example.com:8080".into(),
+            ..GeminiKey::default()
+        }];
         config.vertex_api_key = vec![VertexCompatKey {
             api_key: "vertex-key".into(),
             proxy_url: "http://vertex-proxy.example.com:8080".into(),
@@ -489,6 +504,13 @@ mod tests {
                 "http://claude-proxy.example.com:8080",
             ),
             ("codex", "codex-key", "http://codex-proxy.example.com:8080"),
+            ("xai", "xai-key", "http://xai-proxy.example.com:8080"),
+            ("meta", "meta-key", "http://meta-proxy.example.com:8080"),
+            (
+                "gemini-interactions",
+                "interactions-key",
+                "http://interactions-proxy.example.com:8080",
+            ),
             (
                 "vertex",
                 "vertex-key",
