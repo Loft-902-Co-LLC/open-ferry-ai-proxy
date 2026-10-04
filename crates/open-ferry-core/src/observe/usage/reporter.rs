@@ -1,0 +1,1030 @@
+// Ported from CLIProxyAPI internal/runtime/executor/helps/usage_helpers.go
+// (NewUsageReporter, NewExecutorUsageReporter, publishWithOutcome,
+// EnsurePublished, publishAttemptRecord, buildRecordForModel,
+// failFromErrors, latency, warnModelSubstitution, authIndexForLog,
+// resolveUsageSource, resolveUsageAuthType, StreamUsageBuffer.Publish,
+// StreamUsageBuffer.PublishFailure), the usage reporting of
+// internal/runtime/executor/claude_executor_execute.go,
+// claude_executor_stream.go, codex_executor_execute.go,
+// codex_executor_stream.go, codex_executor_terminal.go
+// (observeCodexTokenEvent), codex_websockets_executor.go,
+// gemini_executor.go, gemini_vertex_executor.go and
+// openai_compat_executor.go, internal/redisqueue/plugin.go (HandleUsage's
+// gate), sdk/cliproxy/auth/token_fingerprint.go (AccessTokenSHA256,
+// accessTokenForFingerprint), sdk/cliproxy/auth/conductor_execution.go
+// (requestedModelAliasFromOptions, generateFromOptions),
+// sdk/cliproxy/usage/manager.go (ServiceTierFromContext,
+// GenerateFromContext, GenerateEnabled) and
+// sdk/cliproxy/session/identity.go (NormalizeExplicitID) (v8.0.10, MIT).
+// https://github.com/router-for-me/CLIProxyAPI
+
+//! The usage reporter: the [`Tap`] that turns each executor call of a
+//! client's call into one usage record.
+//!
+//! The tap sees each executor call's attempts, their answers and how the
+//! call ended, and reads the answer as the executor would have:
+//! - An answer read whole (a non-streaming call) is kept, up to
+//!   [`BODY_BOUND`], and read when the call completes: Claude's as JSON, or
+//!   line by line when it came as an event stream; Gemini's and an
+//!   OpenAI-compatible provider's as JSON; Codex's lines up to its
+//!   `response.completed` or `response.incomplete`; a Codex compaction's
+//!   as OpenAI JSON.
+//! - A stream is read line by line as it comes, each line up to
+//!   [`LINE_BOUND`]: the latest token counts and the model it names are
+//!   kept. A Codex stream, and each message on a Codex WebSocket, is read
+//!   event by event, and its counts are those of its first
+//!   `response.completed`, `response.incomplete` or `response.done`.
+//!
+//! The record is published once per executor call, when it ends: with the
+//! counts read, or with none when the answer named none, or as a failure
+//! with the call's error. A call canceled before its answer came is a
+//! failure with status 499. Each record keeps the time to first token
+//! (see [`super::ttft`]), the latest answer's headers with credentials
+//! masked, and the model the answer named. When that model is not the one
+//! asked for, a warning is logged, once per credential and model pair in
+//! ten minutes.
+//!
+//! A record's `session_id` is the first of the session headers the client
+//! sent (`X-Claude-Code-Session-Id`, `Session-Id`, `Session_id`,
+//! `X-Session-Id`) that holds no control character and is no longer than
+//! 256 bytes once trimmed. Nothing else is ever taken for one (policy).
+//!
+//! Deviations from upstream:
+//! - The tap reads the traffic the executor reports instead of the
+//!   executor publishing its own record, so a call's `requested_at` and
+//!   latency start at its first attempt, not when the executor started
+//!   building it. An executor call that failed before it sent anything
+//!   is recorded from the credential the manager gave it, its model the
+//!   one routed.
+//! - A Codex stream's counts are kept at its terminal event and published
+//!   when the call ends, with the latency of that event: open-ferry's
+//!   executor turns a terminal failure into an error after it, which makes
+//!   the record a failure.
+//! - Gemini stream lines are read without upstream's
+//!   `FilterSSEUsageMetadata`, which only drops usage from lines before
+//!   the last.
+//! - `reasoning_effort` is always empty: upstream reads it from the
+//!   translated request, which the tap doesn't see.
+//! - A failure's body is the error's text, scrubbed of the attempt's
+//!   secrets and the client's key. Upstream writes the error's response
+//!   body as it is.
+//! - The answer's headers are masked as the request log masks them.
+//! - The substitution warning is a `tracing` warning with the request's
+//!   ID as a field.
+
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
+
+use chrono::{DateTime, Utc};
+use http::HeaderMap;
+use open_ferry_translate::go;
+use open_ferry_translate::thinking::base_model_name;
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+
+use super::Inner;
+use super::accounting::Detail;
+use super::json::{self, Doc};
+use super::parse::{
+    StreamUsageBuffer, parse_claude_usage, parse_codex_usage, parse_gemini_stream_usage,
+    parse_gemini_usage, parse_openai_usage,
+};
+use super::record_json::Record;
+use super::response_model::{
+    ResponseModel, ThrottleKey, is_model_substituted, normalize_model_name,
+};
+use super::ttft::{Ttft, is_responses_token_event};
+use crate::auth::Auth;
+use crate::exec::{ExecError, Format, Options, Request};
+use crate::observe::{
+    AttemptKind, AttemptRequest, Outcome, RequestContext, SelectedAuth, Tap, mask, redact,
+};
+
+/// The most of an answer read whole that is kept to read its tokens; past
+/// it, the answer is recorded without them.
+pub(crate) const BODY_BOUND: usize = 32 << 20;
+
+/// The longest stream line read; a longer one is skipped.
+pub(crate) const LINE_BOUND: usize = 16 << 20;
+
+/// The session headers a client may send, in the order they are read
+/// (upstream's client request metadata).
+const SESSION_HEADERS: [&str; 4] = [
+    "x-claude-code-session-id",
+    "session-id",
+    "session_id",
+    "x-session-id",
+];
+
+/// The longest session header taken (upstream's `NormalizeExplicitID`).
+const MAX_SESSION_ID_LENGTH: usize = 256;
+
+/// The service tier of a request that names none (upstream's
+/// `DefaultServiceTier`).
+const DEFAULT_SERVICE_TIER: &str = "auto";
+
+/// A call canceled before its answer came, as Go's context error says it.
+const CANCELED_MESSAGE: &str = "context canceled";
+
+/// The status of a canceled call (upstream's `HTTPStatusFromError` for
+/// `context.Canceled`).
+const CANCELED_STATUS: i64 = 499;
+
+/// What the records of one client call share, read when the call is made.
+struct Shared {
+    /// The model as the client named it, trimmed.
+    alias: String,
+    /// The model routed, for a call that sent nothing.
+    request_model: String,
+    session_id: String,
+    service_tier: String,
+    generate: bool,
+    stream: bool,
+}
+
+impl Shared {
+    fn new(request: &Request, options: &Options) -> Self {
+        let payload = &options.original_request;
+        let doc = (contains(payload, br#""service_tier""#) || contains(payload, br#""generate""#))
+            .then(|| Doc::scan(payload));
+        let service_tier = doc
+            .as_ref()
+            .map(|doc| doc.get("service_tier").string().trim().to_owned())
+            .filter(|tier| !tier.is_empty())
+            .unwrap_or_else(|| DEFAULT_SERVICE_TIER.to_owned());
+        let generate = generate_enabled(
+            doc.as_ref()
+                .and_then(|doc| doc.get("generate").value().and_then(Value::as_bool)),
+        );
+        Self {
+            alias: options.metadata.requested_model.trim().to_owned(),
+            request_model: request.model.clone(),
+            session_id: session_id(&options.headers),
+            service_tier,
+            generate,
+            stream: options.stream,
+        }
+    }
+}
+
+/// Whether a call asked for generation, from the client's `generate` flag
+/// if it sent one: only `false` turns it off (upstream's `GenerateEnabled`
+/// and `GenerateFromContext`).
+pub(crate) fn generate_enabled(generate: Option<bool>) -> bool {
+    generate.unwrap_or(true)
+}
+
+/// The first session header the client sent that may be taken as it is.
+fn session_id(headers: &HeaderMap) -> String {
+    SESSION_HEADERS
+        .iter()
+        .flat_map(|name| headers.get_all(*name))
+        .map(|value| normalize_explicit_id(&String::from_utf8_lossy(value.as_bytes())))
+        .find(|id| !id.is_empty())
+        .unwrap_or_default()
+}
+
+/// `raw` trimmed, or empty when it holds a control character or is longer
+/// than [`MAX_SESSION_ID_LENGTH`] bytes (upstream's `NormalizeExplicitID`).
+pub(crate) fn normalize_explicit_id(raw: &str) -> String {
+    if raw.chars().any(char::is_control) {
+        return String::new();
+    }
+    let trimmed = raw.trim();
+    if trimmed.len() > MAX_SESSION_ID_LENGTH {
+        return String::new();
+    }
+    trimmed.to_owned()
+}
+
+/// Whether `haystack` holds `needle`.
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+/// How an executor call's answer is read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    /// Not recorded: a token count, a plain HTTP call, or a WebSocket that
+    /// isn't Codex's.
+    Ignored,
+    ClaudeExecute,
+    ClaudeStream,
+    GeminiExecute,
+    GeminiStream,
+    OpenAiExecute,
+    OpenAiStream,
+    CodexCompact,
+    CodexExecute,
+    CodexStream,
+    CodexWebsocket,
+}
+
+impl Mode {
+    fn of(provider: &str, kind: AttemptKind, format: &Format) -> Self {
+        match (provider, kind) {
+            (_, AttemptKind::CountTokens | AttemptKind::Http) => Self::Ignored,
+            ("codex", AttemptKind::Websocket) => Self::CodexWebsocket,
+            ("codex", AttemptKind::Execute)
+                if format.as_str() == Format::OPENAI_RESPONSE.as_str() =>
+            {
+                Self::CodexCompact
+            }
+            ("codex", AttemptKind::Execute) => Self::CodexExecute,
+            ("codex", AttemptKind::Stream) => Self::CodexStream,
+            (_, AttemptKind::Websocket) => Self::Ignored,
+            ("claude", AttemptKind::Execute) => Self::ClaudeExecute,
+            ("claude", AttemptKind::Stream) => Self::ClaudeStream,
+            ("gemini" | "vertex", AttemptKind::Execute) => Self::GeminiExecute,
+            ("gemini" | "vertex", AttemptKind::Stream) => Self::GeminiStream,
+            (_, AttemptKind::Execute) => Self::OpenAiExecute,
+            (_, AttemptKind::Stream) => Self::OpenAiStream,
+        }
+    }
+
+    /// Whether the answer is read whole, when the call completes.
+    fn reads_whole(self) -> bool {
+        matches!(
+            self,
+            Self::ClaudeExecute
+                | Self::GeminiExecute
+                | Self::OpenAiExecute
+                | Self::CodexCompact
+                | Self::CodexExecute
+        )
+    }
+}
+
+/// The name of the upstream executor type that serves `provider`, as
+/// upstream's records name it (upstream's `ExecutorTypeName`).
+fn executor_type(provider: &str, kind: Option<AttemptKind>) -> &'static str {
+    match provider {
+        "codex" if kind == Some(AttemptKind::Websocket) => "CodexWebsocketsExecutor",
+        "codex" => "CodexExecutor",
+        "claude" => "ClaudeExecutor",
+        "gemini" => "GeminiExecutor",
+        "vertex" => "GeminiVertexExecutor",
+        _ => "OpenAICompatExecutor",
+    }
+}
+
+/// What a record says of the credential.
+#[derive(Default)]
+struct Credential {
+    id: String,
+    index: String,
+    auth_type: &'static str,
+    source: String,
+    access_token_sha256: String,
+}
+
+impl Credential {
+    fn of(auth: &Auth, client_key: &str) -> Self {
+        Self {
+            id: auth.id.clone(),
+            index: auth.index.trim().to_owned(),
+            auth_type: auth.auth_kind().map_or("", |kind| kind.as_str()),
+            source: usage_source(auth, client_key),
+            access_token_sha256: access_token_sha256(auth),
+        }
+    }
+}
+
+/// The account or key a record is counted under (upstream's
+/// `resolveUsageSource`): a Vertex credential's project, the account the
+/// credential names, its email or key, else the client's key.
+pub(crate) fn usage_source(auth: &Auth, client_key: &str) -> String {
+    fn trimmed(value: Option<&str>) -> Option<&str> {
+        value.map(str::trim).filter(|value| !value.is_empty())
+    }
+    if go::equal_fold(auth.provider.trim(), "vertex")
+        && let Some(project) = trimmed(auth.metadata_str("project_id"))
+            .or_else(|| trimmed(auth.metadata_str("project")))
+    {
+        return project.to_owned();
+    }
+    [
+        auth.account_info().map(|(_, value)| value),
+        auth.metadata_str("email"),
+        auth.attribute("api_key"),
+        Some(client_key),
+    ]
+    .into_iter()
+    .find_map(trimmed)
+    .unwrap_or_default()
+    .to_owned()
+}
+
+/// The SHA-256 of the credential's access token in hex, or empty when it
+/// has none (upstream's `AccessTokenSHA256`).
+pub(crate) fn access_token_sha256(auth: &Auth) -> String {
+    let token_of = |object: &serde_json::Map<String, Value>| {
+        ["access_token", "accessToken"].into_iter().find_map(|key| {
+            object
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|token| !token.is_empty())
+                .map(str::to_owned)
+        })
+    };
+    let token = token_of(&auth.metadata).or_else(|| {
+        ["token", "Token"]
+            .into_iter()
+            .find_map(|key| match auth.metadata.get(key) {
+                Some(Value::Object(object)) => token_of(object),
+                _ => None,
+            })
+    });
+    let Some(token) = token else {
+        return String::new();
+    };
+    Sha256::digest(token.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Go's `textproto.CanonicalMIMEHeaderKey`: each word's first letter in
+/// upper case and the rest in lower case; a name with a byte that can't be
+/// in a header name is left as it is.
+pub(crate) fn canonical_header_key(name: &str) -> String {
+    let token = |b: u8| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b);
+    if !name.bytes().all(token) {
+        return name.to_owned();
+    }
+    let mut upper = true;
+    name.chars()
+        .map(|c| {
+            let out = if upper {
+                c.to_ascii_uppercase()
+            } else {
+                c.to_ascii_lowercase()
+            };
+            upper = c == '-';
+            out
+        })
+        .collect()
+}
+
+/// `headers` as a record keeps them: canonical names in byte order, each
+/// with its values, credentials masked.
+fn record_headers(headers: &HeaderMap) -> Vec<(String, Vec<String>)> {
+    let mut out: Vec<(String, Vec<String>)> = headers
+        .keys()
+        .map(|name| {
+            let canonical = canonical_header_key(name.as_str());
+            let values = headers
+                .get_all(name)
+                .iter()
+                .map(|value| {
+                    mask::mask_header_value(&canonical, &String::from_utf8_lossy(value.as_bytes()))
+                })
+                .collect();
+            (canonical, values)
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+/// Stream lines, split as they come in chunks.
+#[derive(Default)]
+struct Lines {
+    partial: Vec<u8>,
+    /// The line being read is past [`LINE_BOUND`] and is skipped.
+    skipping: bool,
+}
+
+impl Lines {
+    /// Gives `each` every line `chunk` ends, without its `\r\n` or `\n`.
+    fn feed(&mut self, chunk: &[u8], mut each: impl FnMut(&[u8])) {
+        let mut rest = chunk;
+        while let Some(newline) = rest.iter().position(|&b| b == b'\n') {
+            let head = rest.get(..newline).unwrap_or_default();
+            rest = rest.get(newline + 1..).unwrap_or_default();
+            if self.skipping {
+                self.skipping = false;
+                self.partial.clear();
+                continue;
+            }
+            if self.partial.is_empty() {
+                if head.len() <= LINE_BOUND {
+                    each(trim_cr(head));
+                }
+            } else if self.partial.len() + head.len() <= LINE_BOUND {
+                self.partial.extend_from_slice(head);
+                each(trim_cr(&self.partial));
+                self.partial.clear();
+            } else {
+                self.partial.clear();
+            }
+        }
+        if rest.is_empty() || self.skipping {
+            return;
+        }
+        if self.partial.len() + rest.len() > LINE_BOUND {
+            self.partial = Vec::new();
+            self.skipping = true;
+        } else {
+            self.partial.extend_from_slice(rest);
+        }
+    }
+
+    /// Gives `each` the last line, which had no line end.
+    fn flush(&mut self, mut each: impl FnMut(&[u8])) {
+        let partial = std::mem::take(&mut self.partial);
+        if !self.skipping && !partial.is_empty() {
+            each(trim_cr(&partial));
+        }
+        self.skipping = false;
+    }
+}
+
+fn trim_cr(line: &[u8]) -> &[u8] {
+    line.strip_suffix(b"\r").unwrap_or(line)
+}
+
+/// Lines of an answer read whole.
+fn lines_of(body: &[u8]) -> impl Iterator<Item = &[u8]> {
+    body.split(|&b| b == b'\n').map(trim_cr)
+}
+
+/// A Codex event's terminal success, if `payload` is one of `types`.
+fn is_terminal(payload: &[u8], types: &[&str]) -> bool {
+    if !types.iter().any(|t| contains(payload, t.as_bytes())) {
+        return false;
+    }
+    let event = Doc::scan(payload).get("type").string().into_owned();
+    types.contains(&event.as_str())
+}
+
+/// Whether a stream line is `[DONE]`.
+fn is_done(line: &[u8]) -> bool {
+    let line = json::trim_space(line);
+    let data = line.strip_prefix(b"data:").map_or(line, json::trim_space);
+    data == b"[DONE]"
+}
+
+/// Why a call failed.
+#[derive(Clone, Default)]
+struct Failure {
+    status: i64,
+    body: String,
+}
+
+impl Failure {
+    fn of(error: &ExecError) -> Self {
+        Self {
+            status: i64::from(error.http_status()),
+            body: error.to_string().trim().to_owned(),
+        }
+    }
+
+    fn canceled() -> Self {
+        Self {
+            status: CANCELED_STATUS,
+            body: CANCELED_MESSAGE.to_owned(),
+        }
+    }
+}
+
+/// What a call publishes.
+struct Publication {
+    detail: Detail,
+    failure: Option<Failure>,
+    latency: Duration,
+}
+
+/// A Codex terminal success, kept until the call ends.
+struct Held {
+    /// The counts, or none for an answer that named none.
+    detail: Option<Detail>,
+    /// The latency at the event, for a stream.
+    latency: Option<Duration>,
+}
+
+/// The executor call being read.
+struct Call {
+    mode: Mode,
+    provider: String,
+    model: String,
+    executor_type: &'static str,
+    credential: Credential,
+    requested_at: DateTime<Utc>,
+    started: Instant,
+    secrets: Vec<String>,
+    ttft: Ttft,
+    response_model: ResponseModel,
+    buffer: StreamUsageBuffer,
+    lines: Lines,
+    body: Vec<u8>,
+    /// The answer outgrew [`BODY_BOUND`].
+    body_overflow: bool,
+    event_stream: bool,
+    headers: Vec<(String, Vec<String>)>,
+    seen_done: bool,
+    held: Option<Held>,
+}
+
+impl Call {
+    fn new(
+        mode: Mode,
+        provider: String,
+        model: String,
+        executor_type: &'static str,
+        credential: Credential,
+        started: Instant,
+    ) -> Self {
+        Self {
+            mode,
+            provider,
+            model,
+            executor_type,
+            credential,
+            requested_at: Utc::now(),
+            started,
+            secrets: Vec::new(),
+            ttft: Ttft::default(),
+            response_model: ResponseModel::default(),
+            buffer: StreamUsageBuffer::default(),
+            lines: Lines::default(),
+            body: Vec::new(),
+            body_overflow: false,
+            event_stream: false,
+            headers: Vec::new(),
+            seen_done: false,
+            held: None,
+        }
+    }
+
+    /// A call whose executor failed before it sent anything, made with
+    /// `selected`.
+    fn unattempted(selected: &SelectedAuth, model: &str, client_key: &str, now: Instant) -> Self {
+        let provider = selected.provider().to_owned();
+        let executor_type = executor_type(&provider, None);
+        let elapsed = (Utc::now() - selected.selected_at)
+            .to_std()
+            .unwrap_or_default();
+        let mut call = Self::new(
+            Mode::Ignored,
+            provider,
+            base_model_name(model).to_owned(),
+            executor_type,
+            Credential::of(&selected.auth, client_key),
+            now.checked_sub(elapsed).unwrap_or(now),
+        );
+        call.requested_at = selected.selected_at;
+        call
+    }
+
+    /// Another attempt is sent: its answer starts afresh.
+    fn attempt(&mut self, request: &AttemptRequest<'_>, client_key: &str, now: Instant) {
+        self.mode = Mode::of(request.provider, request.kind, request.format);
+        self.provider = request.provider.to_owned();
+        self.model = request.model.to_owned();
+        self.executor_type = executor_type(request.provider, Some(request.kind));
+        self.credential = Credential::of(request.auth, client_key);
+        for secret in request.secrets {
+            if !self.secrets.iter().any(|kept| kept == secret) {
+                self.secrets.push((*secret).to_owned());
+            }
+        }
+        self.lines = Lines::default();
+        self.body = Vec::new();
+        self.body_overflow = false;
+        self.event_stream = false;
+        self.ttft.start(now);
+    }
+
+    fn response_head(&mut self, headers: &HeaderMap) {
+        self.headers = record_headers(headers);
+        self.event_stream = headers
+            .get_all(http::header::CONTENT_TYPE)
+            .iter()
+            .any(|value| contains(value.as_bytes(), b"text/event-stream"));
+    }
+
+    fn chunk(&mut self, chunk: &[u8], now: Instant) {
+        match self.mode {
+            Mode::Ignored => {}
+            mode if mode.reads_whole() => {
+                self.ttft.mark_first_response_byte(now);
+                if self.body_overflow {
+                    return;
+                }
+                if self.body.len() + chunk.len() > BODY_BOUND {
+                    self.body = Vec::new();
+                    self.body_overflow = true;
+                } else {
+                    self.body.extend_from_slice(chunk);
+                }
+            }
+            Mode::CodexWebsocket => self.codex_stream_payload(json::trim_space(chunk), now),
+            mode => {
+                if mode == Mode::CodexStream {
+                    self.ttft.observe_token_event(false, now);
+                } else {
+                    self.ttft.mark_first_response_byte(now);
+                }
+                let mut lines = std::mem::take(&mut self.lines);
+                lines.feed(chunk, |line| self.line(line, now));
+                self.lines = lines;
+            }
+        }
+    }
+
+    /// Reads a line of a stream, or of an answer read whole.
+    fn line(&mut self, line: &[u8], now: Instant) {
+        match self.mode {
+            Mode::ClaudeExecute | Mode::ClaudeStream => {
+                self.response_model.observe(line, &self.provider);
+                self.buffer.observe_claude_stream(line);
+            }
+            Mode::GeminiStream => {
+                self.response_model.observe(line, &self.provider);
+                self.buffer.observe(parse_gemini_stream_usage(line));
+            }
+            Mode::OpenAiStream => {
+                self.response_model.observe(line, &self.provider);
+                self.buffer.observe_openai_stream(line);
+                if is_done(line) {
+                    self.seen_done = true;
+                }
+            }
+            Mode::CodexExecute => {
+                if let Some(rest) = line.strip_prefix(b"data:") {
+                    self.codex_execute_payload(json::trim_space(rest));
+                }
+            }
+            Mode::CodexStream => {
+                if let Some(rest) = line.strip_prefix(b"data:") {
+                    self.codex_stream_payload(json::trim_space(rest), now);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Reads an event of a Codex answer read whole.
+    fn codex_execute_payload(&mut self, payload: &[u8]) {
+        if self.held.is_some() {
+            return;
+        }
+        self.response_model.observe(payload, "codex");
+        if is_terminal(payload, &["response.completed", "response.incomplete"]) {
+            self.held = Some(Held {
+                detail: parse_codex_usage(payload),
+                latency: None,
+            });
+        }
+    }
+
+    /// Reads an event of a Codex stream or WebSocket (upstream's
+    /// `observeCodexTokenEvent` and its terminal handling).
+    fn codex_stream_payload(&mut self, payload: &[u8], now: Instant) {
+        if payload.is_empty() {
+            return;
+        }
+        if !self.ttft.is_set() {
+            self.ttft
+                .observe_token_event(is_responses_token_event(payload), now);
+        }
+        self.response_model.observe(payload, "codex");
+        if self.held.is_none()
+            && is_terminal(
+                payload,
+                &["response.completed", "response.incomplete", "response.done"],
+            )
+        {
+            self.held = Some(Held {
+                detail: parse_codex_usage(payload),
+                latency: Some(now.saturating_duration_since(self.started)),
+            });
+        }
+    }
+
+    /// Takes the model the stream buffer read, unless one was read already
+    /// (upstream's `StreamUsageBuffer.Publish`).
+    fn adopt_buffer_model(&mut self) {
+        if self.response_model.get().is_empty() && !self.buffer.response_model().is_empty() {
+            let model = self.buffer.response_model().to_owned();
+            self.response_model.set(&model);
+        }
+    }
+
+    /// The stream buffer's counts, if it read any.
+    fn buffered(&mut self) -> Option<Detail> {
+        let detail = self.buffer.detail().cloned()?;
+        self.adopt_buffer_model();
+        Some(detail)
+    }
+
+    /// The counts of an answer read whole; none when it is not recorded.
+    fn whole_answer(&mut self) -> Option<Detail> {
+        let body = std::mem::take(&mut self.body);
+        match self.mode {
+            Mode::ClaudeExecute => {
+                let trimmed = json::trim_space(&body);
+                if self.event_stream
+                    || trimmed.starts_with(b"event:")
+                    || trimmed.starts_with(b"data:")
+                {
+                    let now = self.started;
+                    for line in lines_of(&body) {
+                        self.line(line, now);
+                    }
+                    self.buffered()
+                } else {
+                    self.response_model.observe(&body, &self.provider);
+                    Some(parse_claude_usage(&body))
+                }
+            }
+            Mode::GeminiExecute => {
+                self.response_model.observe(&body, &self.provider);
+                Some(parse_gemini_usage(&body))
+            }
+            Mode::OpenAiExecute => {
+                self.response_model.observe(&body, &self.provider);
+                Some(parse_openai_usage(&body))
+            }
+            Mode::CodexCompact => Some(parse_openai_usage(&body)),
+            Mode::CodexExecute => {
+                let now = self.started;
+                for line in lines_of(&body) {
+                    self.line(line, now);
+                }
+                self.held.take().and_then(|held| held.detail)
+            }
+            _ => None,
+        }
+    }
+
+    /// What the call publishes for how it ended, if anything.
+    fn conclude(
+        &mut self,
+        outcome: Outcome,
+        error: Option<Failure>,
+        now: Instant,
+    ) -> Option<Publication> {
+        let latency = now.saturating_duration_since(self.started);
+        let success = |detail: Detail| Publication {
+            detail,
+            failure: None,
+            latency,
+        };
+        let failure = |detail: Detail, failure: Failure| Publication {
+            detail,
+            failure: Some(failure),
+            latency,
+        };
+        let error = error.unwrap_or_default();
+        if !matches!(self.mode, Mode::Ignored | Mode::CodexWebsocket) && !self.mode.reads_whole() {
+            let mut lines = std::mem::take(&mut self.lines);
+            lines.flush(|line| self.line(line, now));
+        }
+        match (self.mode, outcome) {
+            (Mode::Ignored, _) => None,
+            (mode, Outcome::Failed) if mode.reads_whole() => {
+                Some(failure(Detail::default(), error))
+            }
+            (mode, Outcome::Canceled) if mode.reads_whole() => {
+                Some(failure(Detail::default(), Failure::canceled()))
+            }
+            (mode, Outcome::Completed) if mode.reads_whole() => self.whole_answer().map(success),
+            (Mode::ClaudeStream, Outcome::Failed) => {
+                self.adopt_buffer_model();
+                Some(failure(self.buffer.raw_detail().clone(), error))
+            }
+            (Mode::ClaudeStream, _) => self.buffered().map(success),
+            (Mode::GeminiStream | Mode::OpenAiStream, Outcome::Failed) => {
+                Some(failure(Detail::default(), error))
+            }
+            (Mode::GeminiStream, _) | (Mode::OpenAiStream, Outcome::Completed) => {
+                Some(success(self.buffered().unwrap_or_default()))
+            }
+            (Mode::OpenAiStream, _) => match self.buffered() {
+                Some(detail) => Some(success(detail)),
+                None => self.seen_done.then(|| success(Detail::default())),
+            },
+            (_, Outcome::Failed) => Some(failure(Detail::default(), error)),
+            (_, outcome) => match self.held.take() {
+                Some(held) => Some(Publication {
+                    detail: held.detail.unwrap_or_default(),
+                    failure: None,
+                    latency: held.latency.unwrap_or(latency),
+                }),
+                None => (outcome == Outcome::Completed).then(|| success(Detail::default())),
+            },
+        }
+    }
+}
+
+/// What the tap keeps between events.
+#[derive(Default)]
+struct State {
+    call: Option<Call>,
+    error: Option<Failure>,
+}
+
+/// The usage reporter of one client call: one record per executor call.
+pub(super) struct UsageTap {
+    inner: Arc<Inner>,
+    context: Arc<RequestContext>,
+    shared: Shared,
+    state: Mutex<State>,
+}
+
+impl UsageTap {
+    pub(super) fn new(
+        inner: Arc<Inner>,
+        context: Arc<RequestContext>,
+        request: &Request,
+        options: &Options,
+    ) -> Self {
+        Self {
+            inner,
+            context,
+            shared: Shared::new(request, options),
+            state: Mutex::new(State::default()),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn client_key(&self) -> &str {
+        self.context.client_key().unwrap_or_default()
+    }
+
+    /// `body` without the call's secrets.
+    fn scrub(&self, body: String, secrets: &[String]) -> String {
+        secrets
+            .iter()
+            .map(String::as_str)
+            .chain([self.client_key()])
+            .fold(body, redact::text)
+    }
+
+    fn record(&self, call: &Call, publication: Publication) -> Record {
+        let (failed, fail_status, fail_body) = match publication.failure {
+            Some(failure) => (
+                true,
+                failure.status,
+                self.scrub(failure.body, &call.secrets),
+            ),
+            None => (false, 0, String::new()),
+        };
+        let context = &self.context;
+        Record {
+            request_id: context.id.as_str().to_owned(),
+            provider: call.provider.clone(),
+            executor_type: call.executor_type.to_owned(),
+            model: call.model.clone(),
+            alias: self.shared.alias.clone(),
+            source: call.credential.source.clone(),
+            api_key: self.client_key().to_owned(),
+            session_id: self.shared.session_id.clone(),
+            auth_index: call.credential.index.clone(),
+            access_token_sha256: call.credential.access_token_sha256.clone(),
+            auth_type: call.credential.auth_type.to_owned(),
+            service_tier: self.shared.service_tier.clone(),
+            response_model: call.response_model.get().to_owned(),
+            generate: self.shared.generate,
+            stream: self.shared.stream,
+            requested_at: Some(call.requested_at),
+            latency: publication.latency,
+            ttft: call.ttft.duration(),
+            failed,
+            fail_status,
+            fail_body,
+            detail: publication.detail,
+            response_headers: call.headers.clone(),
+            endpoint: context.endpoint.clone(),
+            client_ip: context.client_ip.clone(),
+            resolved_client_ip: context.resolved_client_ip.clone(),
+            forwarded_for: context.forwarded_for.clone(),
+            user_agent: context.user_agent.clone(),
+            ..Record::default()
+        }
+    }
+
+    /// Publishes the record and warns of a substituted model (upstream's
+    /// `publishAttemptRecord`).
+    fn publish(&self, call: &Call, publication: Publication) {
+        let queue = &self.inner.queue;
+        if queue.enabled() && queue.usage_statistics_enabled() {
+            let record = self.record(call, publication);
+            queue.enqueue(record.encode().into());
+        }
+        self.warn_model_substitution(call);
+    }
+
+    /// Warns that the answer named another model than the one sent, once
+    /// per credential and model pair in the window (upstream's
+    /// `warnModelSubstitution`).
+    fn warn_model_substitution(&self, call: &Call) {
+        let served = call.response_model.get();
+        if served.is_empty() || !is_model_substituted(&call.model, served) {
+            return;
+        }
+        let provider = match call.provider.as_str() {
+            "" => "codex",
+            provider => provider,
+        };
+        let allowed = self.inner.throttle.allow(ThrottleKey {
+            provider: provider.to_owned(),
+            auth_id: call.credential.id.clone(),
+            requested: normalize_model_name(&call.model),
+            served: normalize_model_name(served),
+        });
+        if !allowed {
+            return;
+        }
+        let index = match call.credential.index.as_str() {
+            "" => "nil",
+            index => index,
+        };
+        tracing::warn!(
+            request_id = %self.context.id.as_str(),
+            "{provider} executor: upstream served model {} for requested model {} (auth_index={index})",
+            go::quote(served),
+            go::quote(&call.model),
+        );
+    }
+}
+
+impl Tap for UsageTap {
+    fn attempt_request(&self, request: &AttemptRequest<'_>) {
+        let now = (self.inner.clock)();
+        let client_key = self.client_key();
+        let mut state = self.lock();
+        let call = state.call.get_or_insert_with(|| {
+            Call::new(
+                Mode::Ignored,
+                String::new(),
+                String::new(),
+                "",
+                Credential::default(),
+                now,
+            )
+        });
+        call.attempt(request, client_key, now);
+    }
+
+    fn response_head(&self, _status: u16, headers: &HeaderMap) {
+        if let Some(call) = self.lock().call.as_mut() {
+            call.response_head(headers);
+        }
+    }
+
+    fn chunk(&self, chunk: &bytes::Bytes) {
+        let now = (self.inner.clock)();
+        if let Some(call) = self.lock().call.as_mut() {
+            call.chunk(chunk, now);
+        }
+    }
+
+    fn error(&self, error: &ExecError) {
+        self.lock().error = Some(Failure::of(error));
+    }
+
+    fn finish(&self, outcome: Outcome) {
+        let now = (self.inner.clock)();
+        let (call, error) = {
+            let mut state = self.lock();
+            (state.call.take(), state.error.take())
+        };
+        let concluded = match call {
+            Some(mut call) => call
+                .conclude(outcome, error, now)
+                .map(|publication| (call, publication)),
+            None => self.context.selected().map(|selected| {
+                let call = Call::unattempted(
+                    &selected,
+                    &self.shared.request_model,
+                    self.client_key(),
+                    now,
+                );
+                let latency = now.saturating_duration_since(call.started);
+                let failure = match outcome {
+                    Outcome::Completed => None,
+                    Outcome::Failed => Some(error.unwrap_or_default()),
+                    Outcome::Canceled => Some(Failure::canceled()),
+                };
+                let publication = Publication {
+                    detail: Detail::default(),
+                    failure,
+                    latency,
+                };
+                (call, publication)
+            }),
+        };
+        if let Some((call, publication)) = concluded {
+            self.publish(&call, publication);
+        }
+    }
+}

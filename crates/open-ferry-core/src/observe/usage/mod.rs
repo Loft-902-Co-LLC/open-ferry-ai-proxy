@@ -1,61 +1,227 @@
-//! Usage statistics: a record of each call's tokens, latency and outcome,
-//! queued for the management API's usage queue, and the error events of
-//! failed calls (upstream's sdk/cliproxy/usage, the usage reporter in
-//! internal/runtime/executor/helps/usage_helpers.go and
-//! internal/redisqueue). Not ported yet (P3 WP-C).
+// Ported from CLIProxyAPI internal/redisqueue/usage_toggle.go
+// (SetUsageStatisticsEnabled, UsageStatisticsEnabled) and the usage
+// queue's wiring in internal/api/server.go (managementRoutesEnabled) and
+// sdk/cliproxy/service.go (v8.0.10, MIT).
+// https://github.com/router-for-me/CLIProxyAPI
+
+//! Usage statistics: a record of each executor call's tokens, latency and
+//! outcome, queued for the management API's usage queue, and the error
+//! events of failed calls (upstream's sdk/cliproxy/usage, the usage
+//! reporter in internal/runtime/executor/helps/usage_helpers.go and
+//! internal/redisqueue).
 //!
-//! What is here are the hooks the rest of the proxy calls, with the
-//! signatures the port keeps: the binary makes the [`Usage`] at start,
-//! [`reconfigure`]s it on every config load and gives the manager its
-//! [`Usage::error_events`], and the server asks it for a [`Tap`] for each
-//! call. For now it records nothing and gives no tap.
+//! The binary makes the [`Usage`] at start, [`reconfigure`]s it on every
+//! config load and gives the manager its [`Usage::error_events`]; the
+//! server asks it for a [`Tap`] for each call, which publishes a record
+//! for each executor call (see the reporter's module). The management API
+//! takes the records with [`Usage::pop_oldest`]; subscribers get them as
+//! they come with [`Usage::subscribe_usage`] and the error events with
+//! [`Usage::subscribe_errors`].
+//!
+//! The queue is kept only while the management API serves requests, and
+//! records are made only while `usage-statistics-enabled` is on; both are
+//! read on every config load. A call to a token count makes no record.
+//!
+//! The parsers of upstream answers ([`parse_openai_usage`] and the rest),
+//! the token breakdown ([`ensure_token_breakdown_for_provider`]), the
+//! TTFT classifiers ([`is_responses_token_event`] and the rest) and the
+//! response model's checks ([`is_model_substituted`],
+//! [`StreamResponseModelObserver`]) are public for the parity tool.
 //!
 //! A record's `session_id` may only come from a session header the client
 //! sent, read from the call's [`Options::headers`]; it is never derived
-//! (policy).
+//! (policy). Records keep the client's key and the credential's account in
+//! clear, as upstream's do: the queue is only served to the management
+//! API.
 //!
-//! Deviations from upstream: nothing is recorded yet.
+//! Deviations from upstream:
+//! - Records are made by a tap that reads the executor's traffic, not by
+//!   the executors (see the reporter's module for what differs).
+//! - The queue keeps at most [`MAX_QUEUED`] records (see the queue's
+//!   module).
+//! - The Redis protocol listener is not ported yet (P3 WP-F): until it is,
+//!   the usage queue is served by the management API only.
+//! - Not ported: session derivation and hierarchy, the
+//!   Antigravity, Interactions and Codex image tool parsers, the credits
+//!   markers, and the usage plugins of the SDK's `usage.Manager` beyond
+//!   the queue.
 
+mod accounting;
 mod error_events;
+mod json;
+mod parse;
+mod queue;
+mod record_json;
+mod reporter;
+mod response_model;
+mod ttft;
 
+use std::fmt;
 use std::sync::Arc;
+use std::time::Instant;
+
+use bytes::Bytes;
+use tokio::sync::mpsc;
+
+pub use accounting::{
+    Detail, InputBreakdown, OutputBreakdown, Quality, TOKEN_ACCOUNTING_SCHEMA_VERSION,
+    TokenBreakdown, ensure_token_breakdown_for_provider,
+};
+pub use parse::{
+    StreamUsageBuffer, merge_stream_usage_detail, parse_claude_stream_usage, parse_claude_usage,
+    parse_codex_usage, parse_gemini_stream_usage, parse_gemini_usage, parse_openai_stream_usage,
+    parse_openai_usage,
+};
+pub use queue::{
+    DEFAULT_RETENTION_SECONDS, MAX_QUEUED, MAX_RETENTION_SECONDS, SUBSCRIBER_BUFFER, Subscription,
+    USAGE_REFRESH_PAYLOAD, USAGE_SUPPORT_REFRESH_PAYLOAD,
+};
+pub use response_model::{
+    MAX_LINES_PER_STREAM_EVENT, STREAM_MODEL_BUFFER_BOUND, StreamResponseModelObserver,
+    is_model_substituted,
+};
+pub use ttft::{
+    is_chat_token_event, is_claude_token_event, is_gemini_token_event, is_responses_token_event,
+};
 
 use super::{RequestContext, Tap};
 use crate::config::Config;
 use crate::exec::{Options, Request};
 use crate::manager::ErrorEvents;
+use queue::Queue;
+use response_model::{Clock, Throttle};
 
 #[cfg(test)]
 mod tests;
 
+/// What the handles of one [`Usage`] share.
+struct Inner {
+    queue: Queue,
+    throttle: Throttle,
+    clock: Clock,
+}
+
 /// The usage statistics. Cloning gives another handle to the same
 /// statistics.
-#[derive(Clone, Debug, Default)]
-pub struct Usage {}
+#[derive(Clone)]
+pub struct Usage {
+    inner: Arc<Inner>,
+}
+
+impl Default for Usage {
+    fn default() -> Self {
+        Self::with_clock(Arc::new(Instant::now))
+    }
+}
+
+impl fmt::Debug for Usage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Usage")
+            .field("enabled", &self.inner.queue.enabled())
+            .field(
+                "usage_statistics_enabled",
+                &self.inner.queue.usage_statistics_enabled(),
+            )
+            .finish_non_exhaustive()
+    }
+}
 
 impl Usage {
-    /// The statistics for `config`.
+    /// The statistics for `config`, with the queue off until
+    /// [`reconfigure`] turns it on.
     pub fn new(config: &Config) -> Self {
-        let _ = config;
-        Self::default()
+        let usage = Self::default();
+        usage
+            .inner
+            .queue
+            .set_usage_statistics_enabled(config.usage_statistics_enabled);
+        usage
+            .inner
+            .queue
+            .set_retention_seconds(config.redis_usage_queue_retention_seconds);
+        usage
     }
 
-    /// The tap that builds the usage record of a call made for the request
-    /// of `context`, or `None` when none is kept.
+    /// Statistics reading `clock` for the queue's retention, latencies and
+    /// the warnings' throttle.
+    pub(crate) fn with_clock(clock: Clock) -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                queue: Queue::new(Arc::clone(&clock)),
+                throttle: Throttle::new(Arc::clone(&clock)),
+                clock,
+            }),
+        }
+    }
+
+    /// The tap that builds the usage records of a call made with `request`
+    /// and `options` for the request of `context`, or `None` when none is
+    /// kept: the queue is off, records are off, or the call counts tokens.
     pub fn tap(
         &self,
         context: &Arc<RequestContext>,
         request: &Request,
         options: &Options,
     ) -> Option<Arc<dyn Tap>> {
-        let _ = (context, request, options);
-        None
+        let queue = &self.inner.queue;
+        if !queue.enabled() || !queue.usage_statistics_enabled() {
+            return None;
+        }
+        let path = &options.metadata.request_path;
+        if path.ends_with("/count_tokens") || path.contains(":countTokens") {
+            return None;
+        }
+        Some(Arc::new(reporter::UsageTap::new(
+            Arc::clone(&self.inner),
+            Arc::clone(context),
+            request,
+            options,
+        )))
     }
 
     /// What the manager tells about failed calls, for the usage queue's
     /// error subscribers (upstream's `publishErrorEvent`).
     pub fn error_events(&self) -> Arc<dyn ErrorEvents> {
         Arc::new(error_events::UsageErrorEvents::new(self))
+    }
+
+    /// Whether the queue is on: while the management API serves requests
+    /// (upstream's `Enabled`).
+    pub fn enabled(&self) -> bool {
+        self.inner.queue.enabled()
+    }
+
+    /// Sends `record` to the usage subscribers, or queues it when there are
+    /// none; while the queue is off it is dropped (upstream's `Enqueue`).
+    /// The taps publish each call's record this way.
+    pub fn enqueue(&self, record: Bytes) {
+        self.inner.queue.enqueue(record);
+    }
+
+    /// Takes up to `count` of the queued records, oldest first, as JSON
+    /// (upstream's `PopOldest`).
+    pub fn pop_oldest(&self, count: usize) -> Vec<Bytes> {
+        self.inner.queue.pop_oldest(count)
+    }
+
+    /// Subscribes to the usage records as they are made; the first payload
+    /// is [`USAGE_SUPPORT_REFRESH_PAYLOAD`] (upstream's `SubscribeUsage`).
+    /// A subscriber that falls [`SUBSCRIBER_BUFFER`] payloads behind is
+    /// dropped.
+    pub fn subscribe_usage(&self) -> (mpsc::Receiver<Bytes>, Subscription) {
+        self.inner.queue.subscribe_usage()
+    }
+
+    /// Subscribes to the error events of failed calls (upstream's
+    /// `SubscribeErrors`).
+    pub fn subscribe_errors(&self) -> (mpsc::Receiver<Bytes>, Subscription) {
+        self.inner.queue.subscribe_errors()
+    }
+
+    /// Tells the usage subscribers to refresh, with
+    /// [`USAGE_REFRESH_PAYLOAD`] (upstream's `NotifyUsageRefresh`).
+    pub fn notify_usage_refresh(&self) {
+        self.inner.queue.notify_usage_refresh();
     }
 }
 
@@ -70,5 +236,9 @@ pub fn reconfigure(
     config: &Config,
     management_available: bool,
 ) {
-    let _ = (usage, previous, config, management_available);
+    let _ = previous;
+    let queue = &usage.inner.queue;
+    queue.set_enabled(management_available);
+    queue.set_usage_statistics_enabled(config.usage_statistics_enabled);
+    queue.set_retention_seconds(config.redis_usage_queue_retention_seconds);
 }
