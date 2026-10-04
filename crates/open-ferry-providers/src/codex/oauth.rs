@@ -114,24 +114,36 @@ impl Endpoints {
     }
 }
 
-/// A failed OAuth call. The text never holds a token or code.
+/// A failed OAuth call. The text may quote an endpoint's answer.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Error(String);
+pub struct Error {
+    message: String,
+    status: u16,
+}
 
 impl Error {
     fn new(message: impl Into<String>) -> Self {
-        Self(message.into())
+        Self {
+            message: message.into(),
+            status: 0,
+        }
     }
 
     /// What went wrong.
     pub fn message(&self) -> &str {
-        &self.0
+        &self.message
+    }
+
+    /// The token endpoint's error status, when a code exchange got one;
+    /// else 0.
+    pub fn status(&self) -> u16 {
+        self.status
     }
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.message)
     }
 }
 
@@ -351,10 +363,13 @@ impl CodexAuth {
             .await
             .map_err(|e| Error::new(format!("failed to read token response: {e}")))?;
         if status != 200 {
-            return Err(Error::new(format!(
-                "token exchange failed with status {status}: {}",
-                String::from_utf8_lossy(&body)
-            )));
+            return Err(Error {
+                message: format!(
+                    "token exchange failed with status {status}: {}",
+                    String::from_utf8_lossy(&body)
+                ),
+                status,
+            });
         }
         let tokens = decode_token_response(&body)
             .map_err(|e| Error::new(format!("failed to parse token response: {e}")))?;
@@ -511,7 +526,7 @@ impl CodexAuth {
                 }
             }
         }
-        let last = last_error.map_or_else(|| "%!w(<nil>)".to_owned(), |error| error.0);
+        let last = last_error.map_or_else(|| "%!w(<nil>)".to_owned(), |error| error.message);
         Err(Error::new(format!(
             "token refresh failed after {max_retries} attempts: {last}"
         )))
@@ -550,7 +565,7 @@ static REFRESHES: LazyLock<Mutex<HashMap<[u8; 32], SharedRefresh>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn is_non_retryable_refresh_error(error: &Error) -> bool {
-    to_lower(&error.0).contains("refresh_token_reused")
+    to_lower(&error.message).contains("refresh_token_reused")
 }
 
 /// The token endpoint's answer.
@@ -719,7 +734,7 @@ where
         .exchange_code_for_tokens(&code, &pkce)
         .await
         .map_err(|error| {
-            LoginError::authentication(AuthenticationErrorKind::CodeExchangeFailed, error.0)
+            LoginError::authentication(AuthenticationErrorKind::CodeExchangeFailed, error.message)
         })?;
     build_auth_record(&bundle).map_err(LoginError::Other)
 }
@@ -776,7 +791,7 @@ where
         .exchange_code_for_tokens_with_redirect(code, DEVICE_REDIRECT_URI, &pkce)
         .await
         .map_err(|error| {
-            LoginError::authentication(AuthenticationErrorKind::CodeExchangeFailed, error.0)
+            LoginError::authentication(AuthenticationErrorKind::CodeExchangeFailed, error.message)
         })?;
     build_auth_record(&bundle).map_err(LoginError::Other)
 }
@@ -1075,6 +1090,29 @@ mod tests {
         assert!(decode_token_response(br#"{"access_token":1}"#).is_err());
         assert!(decode_token_response(b"null").is_ok());
         assert!(decode_token_response(b"[]").is_err());
+    }
+
+    #[tokio::test]
+    async fn exchange_reports_status_errors() {
+        let router = Router::new().route(
+            "/oauth/token",
+            post(|| async { (StatusCode::BAD_REQUEST, r#"{"error":"invalid_grant"}"#) }),
+        );
+        let auth = auth_for(&serve(router).await);
+        let error = auth
+            .exchange_code_for_tokens("code", &Pkce::generate())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.message(),
+            r#"token exchange failed with status 400: {"error":"invalid_grant"}"#
+        );
+        assert_eq!(error.status(), 400);
+        let error = auth_for("http://127.0.0.1:9")
+            .exchange_code_for_tokens("code", &Pkce::generate())
+            .await
+            .unwrap_err();
+        assert_eq!(error.status(), 0);
     }
 
     #[tokio::test]

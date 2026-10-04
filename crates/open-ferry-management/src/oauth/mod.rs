@@ -199,6 +199,19 @@ impl Sessions {
     }
 }
 
+/// A secret as `Debug` shows it: `"[redacted]"`, or `""` when it is empty.
+struct Redacted<'a>(&'a str);
+
+impl fmt::Debug for Redacted<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(if self.0.is_empty() {
+            "\"\""
+        } else {
+            "\"[redacted]\""
+        })
+    }
+}
+
 /// The routes this module serves.
 pub(crate) fn routes() -> Vec<Route> {
     let callback = || get(callback::get).post(callback::post);

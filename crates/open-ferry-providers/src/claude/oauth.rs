@@ -124,7 +124,7 @@ impl Endpoints {
     }
 }
 
-/// A failed OAuth call. The text never holds a token or code.
+/// A failed OAuth call. The text may quote an endpoint's answer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Error {
     message: String,
@@ -378,10 +378,14 @@ impl ClaudeAuth {
             .await
             .map_err(|e| Error::new(format!("failed to read token response: {e}")))?;
         if status != 200 {
-            return Err(Error::new(format!(
-                "token exchange failed with status {status}: {}",
-                String::from_utf8_lossy(&body)
-            )));
+            return Err(Error {
+                message: format!(
+                    "token exchange failed with status {status}: {}",
+                    String::from_utf8_lossy(&body)
+                ),
+                status,
+                retryable: status >= 500 || status == 429,
+            });
         }
         let tokens = decode_token_response(&body)
             .map_err(|e| Error::new(format!("failed to parse token response: {e}")))?;
@@ -1117,6 +1121,7 @@ mod tests {
             error.message(),
             r#"token exchange failed with status 400: {"error":"invalid_grant"}"#
         );
+        assert_eq!(error.status(), 400);
     }
 
     #[test]

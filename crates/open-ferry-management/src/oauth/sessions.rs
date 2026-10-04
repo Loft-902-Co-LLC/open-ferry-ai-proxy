@@ -30,12 +30,14 @@
 //!   plugin host and embedders use, aren't ported.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use open_ferry_translate::go::to_lower;
 use tokio::sync::oneshot;
 
+use super::Redacted;
 use crate::go::equal_fold;
 
 /// How long a session lasts after it starts or fails (`oauthSessionTTL`).
@@ -51,11 +53,21 @@ const MAX_STATE_LENGTH: usize = 128;
 pub(crate) const MAX_SESSIONS: usize = 1024;
 
 /// What came back to a login's callback, trimmed: the code, or the error
-/// the provider reported.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// the provider reported. Its `Debug` hides both, as the error may quote
+/// the code.
+#[derive(Clone, Default, PartialEq, Eq)]
 pub(crate) struct Callback {
     pub(crate) code: String,
     pub(crate) error: String,
+}
+
+impl fmt::Debug for Callback {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Callback")
+            .field("code", &Redacted(&self.code))
+            .field("error", &Redacted(&self.error))
+            .finish()
+    }
 }
 
 /// A session, as [`Store::get`] shows it.
@@ -84,25 +96,29 @@ impl Session {
 pub(crate) struct NotPending;
 
 /// The sessions, by state (upstream's `oauthSessionStore`). Expired
-/// sessions are dropped as the store is next used.
-#[derive(Debug)]
+/// sessions are dropped as the store is next used. Its `Debug` shows no
+/// state.
 pub(crate) struct Store {
     inner: Mutex<Inner>,
 }
 
-#[derive(Debug)]
 struct Inner {
     ttl: Duration,
     completed_ttl: Duration,
     sessions: HashMap<String, Entry>,
 }
 
-#[derive(Debug)]
 struct Entry {
     session: Session,
     /// Where the session's callback goes, until one has gone or the session
     /// stops being pending. Dropping it wakes the waiting login.
     callback: Option<oneshot::Sender<Callback>>,
+}
+
+impl fmt::Debug for Store {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Store").finish_non_exhaustive()
+    }
 }
 
 impl Default for Store {

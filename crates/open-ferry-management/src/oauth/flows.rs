@@ -18,6 +18,11 @@
 //! wait at once, and a login cancelled while it exchanges the code saves
 //! nothing.
 //!
+//! No log or answer holds a login's code, PKCE verifier or tokens. A
+//! failed exchange is logged with a fixed message and the token endpoint's
+//! status, and a callback's error with a fixed message and the error, only
+//! when it is one RFC 6749 defines.
+//!
 //! With `is_webui` set (to `1`, `true`, `yes` or `on`), a callback
 //! forwarder is started on the port of the provider's redirect URI, which
 //! sends the browser on to the main server's callback page, over `https`
@@ -33,6 +38,11 @@
 //! - A login that can't start its forwarder, or can't tell where the main
 //!   server listens, drops its session; upstream leaves it pending, with
 //!   nothing waiting on it.
+//! - A failed exchange is logged with a fixed message and the token
+//!   endpoint's status, where upstream logs the error, which quotes the
+//!   endpoint's answer, and so may hold the code. A Codex session's status
+//!   keeps upstream's wording, the answer included, but with the login's
+//!   code and PKCE verifier replaced by `[redacted]`.
 //! - A login can't start while 1024 sessions are kept: it answers 429
 //!   `{"error":"too many oauth sessions"}`.
 //! - A credential without an email isn't saved: the session fails with
@@ -45,6 +55,7 @@
 //!   code error`.
 //! - The status of a login doesn't poll a plugin.
 
+use std::fmt::Write as _;
 use std::time::Duration;
 
 use axum::extract::{RawQuery, State};
@@ -75,6 +86,21 @@ const EXCHANGE_FAILED: &str = "Failed to exchange authorization code for tokens"
 
 /// The status of a login whose credential couldn't be saved.
 const SAVE_FAILED: &str = "Failed to save authentication tokens";
+
+/// What stands in a session's status for a secret.
+const REDACTED: &str = "[redacted]";
+
+/// The errors RFC 6749 (section 4.1.2.1) lets an authorization server send
+/// to the redirect URI: the only callback errors logged as they came.
+const CALLBACK_ERRORS: [&str; 7] = [
+    "invalid_request",
+    "unauthorized_client",
+    "access_denied",
+    "unsupported_response_type",
+    "invalid_scope",
+    "server_error",
+    "temporarily_unavailable",
+];
 
 /// `GET /v0/management/anthropic-auth-url` (`RequestAnthropicToken`).
 pub(super) async fn anthropic_auth_url(
@@ -231,8 +257,9 @@ impl Client {
     }
 
     /// The credential `code` gives, or the session's status saying why
-    /// there is none.
+    /// there is none, which may quote the token endpoint's answer.
     async fn credential(&self, code: &str, state: &str, pkce: &Pkce) -> Result<Auth, String> {
+        let provider = self.provider();
         match self {
             Self::Claude(auth) => {
                 // Claude may give the code with `#` and the state after it.
@@ -241,7 +268,7 @@ impl Client {
                     .exchange_code_for_tokens(code, state, pkce)
                     .await
                     .map_err(|error| {
-                        tracing::error!("{EXCHANGE_FAILED}: {error}");
+                        log_exchange_failure(provider, error.status());
                         EXCHANGE_FAILED.to_owned()
                     })?;
                 claude::build_auth_record(&bundle)
@@ -252,7 +279,7 @@ impl Client {
                     .exchange_code_for_tokens(code, pkce)
                     .await
                     .map_err(|error| {
-                        tracing::error!("{EXCHANGE_FAILED}: {error}");
+                        log_exchange_failure(provider, error.status());
                         error_with_cause(EXCHANGE_FAILED, error.message())
                     })?;
                 codex::build_auth_record(&bundle)
@@ -288,10 +315,7 @@ async fn wait(
         return;
     };
     if !callback.error.is_empty() {
-        tracing::error!(
-            "The {provider} OAuth callback reported an error: {:?}",
-            callback.error
-        );
+        log_callback_error(provider, &callback.error);
         store.set_error(&login.state, provider.callback_error());
         return;
     }
@@ -302,7 +326,11 @@ async fn wait(
     {
         Ok(record) => record,
         Err(status) => {
-            store.set_error(&login.state, &status);
+            // Codex's status quotes the token endpoint's answer, which may
+            // quote the request: the code, as is or as sent.
+            let code = &callback.code;
+            let secrets = [code, &query_escape(code), &login.pkce.verifier];
+            store.set_error(&login.state, &redact(&status, &secrets));
             return;
         }
     };
@@ -320,6 +348,61 @@ async fn wait(
             store.set_error(&login.state, SAVE_FAILED);
         }
     }
+}
+
+/// Logs that `provider`'s code exchange failed, with the token endpoint's
+/// `status` if it answered with one, but nothing it said: its answer may
+/// quote the code.
+fn log_exchange_failure(provider: Provider, status: u16) {
+    if status == 0 {
+        tracing::error!("{EXCHANGE_FAILED} ({provider})");
+    } else {
+        tracing::error!("{EXCHANGE_FAILED} ({provider}): the token endpoint answered {status}");
+    }
+}
+
+/// Logs that `provider`'s OAuth callback reported `error`, naming it only
+/// when RFC 6749 defines it: anyone may send the callback anything.
+fn log_callback_error(provider: Provider, error: &str) {
+    if CALLBACK_ERRORS.contains(&error) {
+        tracing::error!("The {provider} OAuth callback reported an error: {error}");
+    } else {
+        tracing::error!("The {provider} OAuth callback reported an error");
+    }
+}
+
+/// `text` with each of `secrets` that isn't empty replaced by
+/// `[redacted]`, the longest first.
+fn redact(text: &str, secrets: &[&String]) -> String {
+    let mut secrets: Vec<&str> = secrets
+        .iter()
+        .map(|secret| secret.as_str())
+        .filter(|secret| !secret.is_empty())
+        .collect();
+    secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
+    let mut text = text.to_owned();
+    for secret in secrets {
+        text = text.replace(secret, REDACTED);
+    }
+    text
+}
+
+/// `text` as Go's `url.QueryEscape` gives it, as the Codex exchange sends
+/// the code.
+fn query_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for &byte in text.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(char::from(byte));
+            }
+            b' ' => out.push('+'),
+            _ => {
+                let _ = write!(out, "%{byte:02X}");
+            }
+        }
+    }
+    out
 }
 
 /// `GET /v0/management/get-auth-status` (`GetAuthStatus`): `ok` once the

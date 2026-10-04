@@ -257,6 +257,8 @@ Deviations, each also noted in its module:
 
 - **A cancelled login stops at once.** Cancelling a session wakes its login, which stops its forwarder, and a login cancelled while it exchanges the code saves nothing. Upstream's login notices on its next poll.
 
+- **No log or unauthenticated answer quotes the token endpoint's answer**, which may quote the code and the PKCE verifier. A failed exchange is logged with a fixed message and the endpoint's status, where upstream logs the error with the answer in it. `oauth-callback`, which needs no key, answers a callback for a failed login 409 `{"error":"oauth flow failed","status":"error"}`, where upstream answers the session's status. That status, which `get-auth-status` answers with the key, keeps upstream's wording, a Codex one quoting the answer, but with the login's code and verifier replaced by `[redacted]`.
+
 - **A login that can't start its forwarder, or can't tell the server's port, drops its session**, where upstream leaves it pending with nothing waiting on it.
 
 - **Forwarders listen on 127.0.0.1 only**, where upstream listens on every interface. A connection is closed 5 seconds after it connected or was last answered; upstream gives 5 seconds each to send a request's headers and to take the answer, and leaves an idle connection open. A stopped forwarder closes its listener at once and leaves its open connections to their deadline, where upstream gives them up to 2 seconds.

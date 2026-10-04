@@ -36,7 +36,10 @@
 //! - The v8 contract's OAuth checks are ported here rather than with the
 //!   rest of `TestManagementV8IndependentContract`.
 
+use std::cell::RefCell;
+use std::fmt::{self, Write as _};
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex, Once};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
@@ -47,6 +50,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
+use tracing::subscriber::Interest;
 
 use super::{
     Answer, Api, AuthDir, LOCAL, Upstream, http_response, keyed, keyed_config, request_from,
@@ -296,6 +300,96 @@ fn assert_page(answer: &Answer, what: &str) {
         Some("text/html; charset=utf-8"),
         "{what}"
     );
+}
+
+thread_local! {
+    /// Where this thread's logs go while a test captures them.
+    static CAPTURED: RefCell<Option<Arc<Mutex<String>>>> = const { RefCell::new(None) };
+}
+
+/// What a test logs on its thread, one event a line: the message, then
+/// any other field as ` name=value`.
+#[derive(Clone, Default)]
+struct Logs(Arc<Mutex<String>>);
+
+impl Logs {
+    /// Captures what this thread logs until the guard is dropped. A
+    /// `#[tokio::test]` runs its tasks on its thread, so their logs too.
+    ///
+    /// The subscriber is the global one, for every thread: a scoped one
+    /// misses events whose callsite another thread registered first.
+    fn capture() -> (Self, Capturing) {
+        static INSTALL: Once = Once::new();
+        INSTALL.call_once(|| {
+            let _ = tracing::subscriber::set_global_default(Capture);
+            tracing::callsite::rebuild_interest_cache();
+        });
+        let logs = Self::default();
+        CAPTURED.with(|captured| *captured.borrow_mut() = Some(Arc::clone(&logs.0)));
+        (logs, Capturing)
+    }
+
+    fn text(&self) -> String {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+/// Ends this thread's capture when dropped.
+struct Capturing;
+
+impl Drop for Capturing {
+    fn drop(&mut self) {
+        CAPTURED.with(|captured| captured.borrow_mut().take());
+    }
+}
+
+/// The subscriber that keeps the events of a thread that captures them.
+struct Capture;
+
+impl tracing::Subscriber for Capture {
+    fn register_callsite(&self, _: &'static tracing::Metadata<'static>) -> Interest {
+        Interest::sometimes()
+    }
+
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        CAPTURED.with(|captured| captured.borrow().is_some())
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        let Some(text) = CAPTURED.with(|captured| captured.borrow().clone()) else {
+            return;
+        };
+        let mut line = String::new();
+        event.record(&mut Fields(&mut line));
+        let mut text = text.lock().unwrap();
+        text.push_str(&line);
+        text.push('\n');
+    }
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// Writes an event's fields as [`Logs`] keeps them.
+struct Fields<'a>(&'a mut String);
+
+impl tracing::field::Visit for Fields<'_> {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn fmt::Debug) {
+        if field.name() == "message" {
+            let _ = write!(self.0, "{value:?}");
+        } else {
+            let _ = write!(self.0, " {}={value:?}", field.name());
+        }
+    }
 }
 
 #[test]
@@ -705,12 +799,12 @@ async fn oauth_callback_checks_and_hands_over_the_callback() {
         })
     );
 
-    // A failed login answers its status.
+    // A failed login answers that it failed, but not why.
     store.set_error("claude-state", "Bad request");
     let body = json!({ "state": "claude-state", "code": "a" }).to_string();
     post(&body)
         .await
-        .assert(StatusCode::CONFLICT, &failed("Bad request"));
+        .assert(StatusCode::CONFLICT, &failed("oauth flow failed"));
 
     // Without a key set, the routes are unported.
     let api = Api::with(Config::default(), None);
@@ -856,7 +950,7 @@ async fn failed_logins_say_why() {
         assert!(!api.state.oauth_sessions().store().cancel(&state));
         api.send(request_from(LOCAL, Method::POST, CALLBACK, &body))
             .await
-            .assert(StatusCode::CONFLICT, &failed(status));
+            .assert(StatusCode::CONFLICT, &failed("oauth flow failed"));
     }
 
     // The exchange's error.
@@ -1152,4 +1246,185 @@ fn expired_sessions_are_dropped() {
     store.complete("completed");
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(store.get("completed"), None);
+}
+
+// Not upstream's: a failed exchange is logged with a fixed message and the
+// token endpoint's status, and `oauth-callback` answers anyone that the
+// login failed, not why, though the endpoint's answer quotes the code and
+// the PKCE verifier; the status a key reads keeps upstream's wording with
+// both redacted. A login that succeeds logs no token.
+#[tokio::test]
+async fn exchange_failures_keep_secrets_out_of_answers_and_logs() {
+    let (logs, _guard) = Logs::capture();
+    let echo = Upstream::start(|_, request| {
+        let body = format!("invalid_grant: {}", request_body(request));
+        http_response("400 Bad Request", &[], body.as_bytes())
+    })
+    .await;
+    let auth_dir = AuthDir::new();
+    let api = login_api(&auth_dir, &echo.url);
+    let mut verifiers = Vec::new();
+    let mut statuses = Vec::new();
+    for (n, path) in [CLAUDE_AUTH_URL, CODEX_AUTH_URL].into_iter().enumerate() {
+        let state = start_login(&api, path).await;
+        let callback = format!("{CALLBACK}?state={state}&code=MARKER-code%2Fx%20y");
+        api.send(request_from(REMOTE, Method::GET, &callback, ""))
+            .await
+            .assert(StatusCode::OK, r#"{"status":"ok"}"#);
+        let status = failure(&api, &state).await;
+
+        // The token endpoint was sent the code and the verifier, and
+        // answered with both.
+        let request = echo.requests()[n].clone();
+        let body = request_body(&request);
+        let (verifier, want) = if path == CLAUDE_AUTH_URL {
+            let sent: Value = serde_json::from_str(body).unwrap();
+            assert_eq!(sent["code"], "MARKER-code/x y");
+            let want = "Failed to exchange authorization code for tokens".to_owned();
+            (sent["code_verifier"].as_str().unwrap().to_owned(), want)
+        } else {
+            assert!(body.contains("code=MARKER-code%2Fx+y&"), "{body}");
+            let verifier = url::form_urlencoded::parse(body.as_bytes())
+                .find(|(name, _)| name == "code_verifier")
+                .unwrap()
+                .1
+                .into_owned();
+            let want = "Failed to exchange authorization code for tokens: token exchange \
+                        failed with status 400: invalid_grant: \
+                        client_id=app_EMoamEEZ73f0CkXaXp7hrann&code=[redacted]\
+                        &code_verifier=[redacted]&grant_type=authorization_code\
+                        &redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback";
+            (verifier, want.to_owned())
+        };
+        assert!(!verifier.is_empty());
+        assert_eq!(status, want, "{path}");
+
+        // A key reads the status; anyone calling back learns only that the
+        // login failed.
+        let answer = api.get(&format!("{STATUS}?state={state}")).await;
+        let body = answer.expect(StatusCode::OK);
+        assert_eq!(body, json!({ "error": status, "status": "error" }));
+        api.send(request_from(REMOTE, Method::GET, &callback, ""))
+            .await
+            .assert(StatusCode::CONFLICT, &failed("oauth flow failed"));
+        let body = json!({ "state": state, "code": "a" }).to_string();
+        api.send(request_from(REMOTE, Method::POST, CALLBACK, &body))
+            .await
+            .assert(StatusCode::CONFLICT, &failed("oauth flow failed"));
+        verifiers.push(verifier);
+        statuses.push(status);
+    }
+
+    // Logins that succeed.
+    let id_token = codex_id_token(Some("oauth-user@example.test"), "");
+    let upstream = Upstream::answering(codex_tokens(&id_token)).await;
+    let api = login_api(&auth_dir, &upstream.url);
+    let state = start_login(&api, CODEX_AUTH_URL).await;
+    deliver(&api, &state, "codex", code("MARKER-good-code"));
+    completed(&api, &state).await;
+    let upstream = Upstream::answering(claude_tokens()).await;
+    let api = login_api(&auth_dir, &upstream.url);
+    let state = start_login(&api, CLAUDE_AUTH_URL).await;
+    deliver(&api, &state, "anthropic", code("MARKER-good-code"));
+    completed(&api, &state).await;
+
+    let logs = logs.text();
+    for provider in ["Claude", "Codex"] {
+        let failed = format!(
+            "Failed to exchange authorization code for tokens ({provider}): \
+             the token endpoint answered 400\n"
+        );
+        assert!(logs.contains(&failed), "{logs}");
+        let saved = format!("{provider} authentication successful; credential saved to ");
+        assert!(logs.contains(&saved), "{logs}");
+    }
+    let tokens = [
+        "access-codex",
+        "refresh-codex",
+        &id_token,
+        "access-claude",
+        "refresh-claude",
+    ];
+    for secret in verifiers.iter().map(String::as_str).chain(tokens) {
+        assert!(!logs.contains(secret), "{secret}: {logs}");
+        for status in &statuses {
+            assert!(!status.contains(secret), "{secret}: {status}");
+        }
+    }
+    assert!(!logs.contains("MARKER"), "{logs}");
+    assert!(!statuses.concat().contains("MARKER"), "{statuses:?}");
+}
+
+// Not upstream's: a callback's error is logged with a fixed message,
+// naming the error only when RFC 6749 defines it, and never with its
+// description or code; the session's status keeps upstream's wording.
+#[tokio::test]
+async fn callback_errors_are_logged_without_what_they_carry() {
+    let (logs, _guard) = Logs::capture();
+    let api = Api::new();
+    let api = &api;
+    let page = |path: String| async move {
+        let answer = api.send(request_from(REMOTE, Method::GET, &path, "")).await;
+        assert_page(&answer, &path);
+    };
+
+    let state = start_login(api, CODEX_AUTH_URL).await;
+    page(format!(
+        "/codex/callback?state={state}&code=MARKER-code&error=access_denied\
+         &error_description=MARKER-description"
+    ))
+    .await;
+    assert_eq!(failure(api, &state).await, "Bad Request");
+
+    let state = start_login(api, CLAUDE_AUTH_URL).await;
+    page(format!(
+        "/anthropic/callback?state={state}&code=MARKER-code\
+         &error_description=MARKER-description%20MARKER-code"
+    ))
+    .await;
+    assert_eq!(failure(api, &state).await, "Bad request");
+
+    let state = start_login(api, CODEX_AUTH_URL).await;
+    let path = format!("{CALLBACK}?state={state}&code=MARKER-code&error=MARKER-error");
+    api.send(request_from(REMOTE, Method::GET, &path, ""))
+        .await
+        .assert(StatusCode::OK, r#"{"status":"ok"}"#);
+    assert_eq!(failure(api, &state).await, "Bad Request");
+
+    let logs = logs.text();
+    let reported: Vec<&str> = logs
+        .lines()
+        .filter(|line| line.contains("OAuth callback reported"))
+        .collect();
+    assert_eq!(
+        reported,
+        [
+            "The Codex OAuth callback reported an error: access_denied",
+            "The Claude OAuth callback reported an error",
+            "The Codex OAuth callback reported an error",
+        ]
+    );
+    assert!(!logs.contains("MARKER"), "{logs}");
+}
+
+// Not upstream's: what a login holds doesn't show in `Debug`.
+#[test]
+fn debug_hides_what_logins_hold() {
+    let callback = Callback {
+        code: "MARKER-code".into(),
+        error: "MARKER-error".into(),
+    };
+    assert_eq!(
+        format!("{callback:?}"),
+        r#"Callback { code: "[redacted]", error: "[redacted]" }"#
+    );
+    assert_eq!(
+        format!("{:?}", Callback::default()),
+        r#"Callback { code: "", error: "" }"#
+    );
+
+    let store = store();
+    let _callback = register(&store, "MARKER-state", "codex");
+    store.deliver("MARKER-state", "codex", callback).unwrap();
+    assert_eq!(format!("{store:?}"), "Store { .. }");
 }

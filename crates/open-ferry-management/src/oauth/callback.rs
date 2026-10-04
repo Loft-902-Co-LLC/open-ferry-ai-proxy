@@ -22,6 +22,12 @@
 //!   state` or `unsupported provider`; there are no plugin sessions.
 //! - A code that isn't UTF-8 once decoded from the query is read with each
 //!   bad byte as U+FFFD; Go keeps its bytes.
+//! - A callback for a failed login is answered 409 `{"error":"oauth flow
+//!   failed","status":"error"}`. Upstream answers with the session's status,
+//!   which may quote the token endpoint's answer, to anyone, as this route
+//!   needs no key; the key-protected `get-auth-status` still answers it.
+
+use std::fmt;
 
 use axum::body::Body;
 use axum::extract::{RawQuery, State};
@@ -30,8 +36,8 @@ use http::{HeaderValue, StatusCode, header};
 use open_ferry_translate::go::trim_space;
 use serde::de::MapAccess;
 
-use super::Provider;
 use super::sessions::{Callback, is_valid_state, normalize_callback_provider};
+use super::{Provider, Redacted};
 use crate::bind::{self, GoStruct, set_string};
 use crate::go::{equal_fold, lossy};
 use crate::json::{self, Json};
@@ -45,14 +51,31 @@ const SUCCESS_PAGE: &str = "<html><head><meta charset=\"utf-8\"><title>Authentic
     <body><h1>Authentication successful!</h1><p>You can close this window.</p><p>This window \
     will close automatically in 5 seconds.</p></body></html>";
 
-/// What a callback carries (`oauthCallbackRequest`).
-#[derive(Debug, Default)]
+/// What `oauth-callback` answers for a login that failed.
+const FLOW_FAILED: &str = "oauth flow failed";
+
+/// What a callback carries (`oauthCallbackRequest`). Its `Debug` hides all
+/// but the provider: the redirect's URL holds the code, and the error may
+/// quote it.
+#[derive(Default)]
 struct CallbackRequest {
     provider: String,
     redirect_url: String,
     code: String,
     state: String,
     error: String,
+}
+
+impl fmt::Debug for CallbackRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CallbackRequest")
+            .field("provider", &self.provider)
+            .field("redirect_url", &Redacted(&self.redirect_url))
+            .field("code", &Redacted(&self.code))
+            .field("state", &Redacted(&self.state))
+            .field("error", &Redacted(&self.error))
+            .finish()
+    }
 }
 
 impl GoStruct for CallbackRequest {
@@ -146,8 +169,10 @@ fn handle(state: &ManagementState, request: CallbackRequest) -> Response {
     let Some(provider) = normalize_callback_provider(provider) else {
         return failure(StatusCode::BAD_REQUEST, "unsupported provider");
     };
+    // The status may quote the token endpoint's answer: only a key reads
+    // it.
     if !session.status.is_empty() {
-        return failure(StatusCode::CONFLICT, &session.status);
+        return failure(StatusCode::CONFLICT, FLOW_FAILED);
     }
     if !equal_fold(&session.provider, &provider) {
         return failure(StatusCode::BAD_REQUEST, "provider does not match state");
@@ -159,7 +184,7 @@ fn handle(state: &ManagementState, request: CallbackRequest) -> Response {
     {
         return match store.active(&oauth_state) {
             Some(session) if !session.status.is_empty() => {
-                failure(StatusCode::CONFLICT, &session.status)
+                failure(StatusCode::CONFLICT, FLOW_FAILED)
             }
             _ => failure(StatusCode::CONFLICT, "oauth flow is not pending"),
         };
@@ -292,5 +317,26 @@ mod tests {
             ),
             ("codex", "u", "c", "s", "")
         );
+    }
+
+    /// Not upstream's: a callback's `Debug` shows its provider and nothing
+    /// that may hold the code.
+    #[test]
+    fn debug_hides_the_callback() {
+        let request = CallbackRequest {
+            provider: "codex".into(),
+            redirect_url: "http://h/cb?code=MARKER-code".into(),
+            code: "MARKER-code".into(),
+            state: "MARKER-state".into(),
+            error: "MARKER-error".into(),
+        };
+        let shown = format!("{request:?}");
+        assert!(!shown.contains("MARKER"), "{shown}");
+        assert_eq!(
+            shown,
+            "CallbackRequest { provider: \"codex\", redirect_url: \"[redacted]\", \
+             code: \"[redacted]\", state: \"[redacted]\", error: \"[redacted]\" }"
+        );
+        assert!(format!("{:?}", CallbackRequest::default()).contains("code: \"\""));
     }
 }
