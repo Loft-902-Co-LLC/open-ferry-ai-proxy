@@ -1399,16 +1399,28 @@ mod tests {
             panic!("expected an added event");
         };
         assert_eq!(&*file.data, data.as_bytes());
-        for shown in [
+        assert_eq!(
             format!("{file:?}"),
+            format!(
+                "AuthFile {{ path: {:?}, data_len: {} }}",
+                file.path,
+                data.len()
+            )
+        );
+        // A derived `Debug` writes the bytes as numbers.
+        let bytes: Vec<String> = "SECRET".bytes().map(|b| b.to_string()).collect();
+        for shown in [
             format!("{file:#?}"),
             format!("{event:?}"),
             format!("{step:#?}"),
         ] {
             assert!(!shown.contains("SECRET"), "{shown}");
-            assert!(!shown.contains("demo"), "{shown}");
+            assert!(!shown.contains(&bytes.join(", ")), "{shown}");
             assert!(shown.contains("marker.json"), "{shown}");
-            assert!(shown.contains(&data.len().to_string()), "{shown}");
+            assert!(
+                shown.contains(&format!("data_len: {}", data.len())),
+                "{shown}"
+            );
         }
     }
 
