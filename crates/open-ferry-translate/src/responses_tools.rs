@@ -196,7 +196,7 @@ fn tool_name(tool: &Value) -> String {
 }
 
 /// `responsesToolDescription`: `description`, or else `function.description`.
-fn tool_description(tool: &Value) -> String {
+pub(crate) fn tool_description(tool: &Value) -> String {
     let description = str_of(tool.get("description"));
     if !description.is_empty() {
         return description.into_owned();
@@ -205,7 +205,7 @@ fn tool_description(tool: &Value) -> String {
 }
 
 /// `responsesToolParameters`: the first of the places a schema can be given.
-fn tool_parameters(tool: &Value) -> Option<&Value> {
+pub(crate) fn tool_parameters(tool: &Value) -> Option<&Value> {
     [
         "parameters",
         "parametersJsonSchema",
