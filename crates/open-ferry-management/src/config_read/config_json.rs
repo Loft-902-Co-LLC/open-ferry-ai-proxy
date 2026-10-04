@@ -244,8 +244,26 @@ pub(super) fn config(config: &Config) -> Json {
             slice(&config.gemini_api_key, |key| gemini_key(key, "")),
         )
         .with(
+            "interactions-api-key",
+            slice(&config.interactions_api_key, |key| gemini_key(key, "")),
+        )
+        .with(
             "codex-api-key",
             slice(&config.codex_api_key, |key| codex_key(key, "")),
+        )
+        .with(
+            "xai-api-key",
+            slice(&config.xai_api_key, |key| codex_key(key, "")),
+        )
+        .with(
+            "meta-api-key",
+            slice(&config.meta_api_key, |key| codex_key(key, "")),
+        )
+        .with(
+            "xai",
+            Fields::new()
+                .with("inject-x-search", Json::Bool(config.xai.inject_x_search))
+                .done(),
         )
         .with(
             "codex",
@@ -407,8 +425,9 @@ pub(super) fn scoped_errors(entries: &BTreeMap<String, Vec<RequestScopedErrorRul
     list_map(entries, scoped_error)
 }
 
-/// A `gemini-api-key` entry, with its credential's `auth-index` when that
-/// isn't empty (upstream's `GeminiKey` and `geminiKeyWithAuthIndex`).
+/// A `gemini-api-key` or `interactions-api-key` entry, with its
+/// credential's `auth-index` when that isn't empty (upstream's `GeminiKey`
+/// and `geminiKeyWithAuthIndex`).
 pub(super) fn gemini_key(key: &GeminiKey, auth_index: &str) -> Json {
     Fields::new()
         .with("api-key", string(&key.api_key))
@@ -457,8 +476,9 @@ pub(super) fn claude_key(key: &ClaudeKey, auth_index: &str) -> Json {
         .done()
 }
 
-/// A `codex-api-key` entry, with its credential's `auth-index` when that
-/// isn't empty (upstream's `CodexKey` and `codexKeyWithAuthIndex`).
+/// A `codex-api-key`, `xai-api-key` or `meta-api-key` entry, with its
+/// credential's `auth-index` when that isn't empty (upstream's `CodexKey`,
+/// which `XAIKey` and `MetaKey` alias, and `codexKeyWithAuthIndex`).
 pub(super) fn codex_key(key: &CodexKey, auth_index: &str) -> Json {
     Fields::new()
         .with("api-key", string(&key.api_key))

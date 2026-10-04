@@ -652,7 +652,9 @@ async fn config_is_written_as_upstream_writes_it() {
             r#""max-retry-interval":30,"quota-exceeded":{{"switch-project":true,"#,
             r#""switch-preview-model":true,"antigravity-credits":true}},"#,
             r#""routing":{{"strategy":"RR"}},"ws-auth":true,"gemini-api-key":{gemini},"#,
-            r#""codex-api-key":{codex},"codex":{{"stream-bootstrap-buffering":true,"#,
+            r#""interactions-api-key":null,"codex-api-key":{codex},"xai-api-key":null,"#,
+            r#""meta-api-key":null,"xai":{{"inject-x-search":false}},"#,
+            r#""codex":{{"stream-bootstrap-buffering":true,"#,
             r#""orphan-delegation-compatibility":false,"model-level-cooling":true,"#,
             r#""response-steering":false}},"codex-header-defaults":{{"beta-features":"x"}},"#,
             r#""claude":{{"model-level-cooling":true}},"claude-api-key":{claude},"#,
@@ -687,7 +689,9 @@ async fn config_is_written_as_upstream_writes_it() {
         r#""auth-auto-refresh-workers":0,"request-retry":0,"max-retry-credentials":0,"#,
         r#""max-retry-interval":0,"quota-exceeded":{"switch-project":false,"#,
         r#""switch-preview-model":false,"antigravity-credits":false},"routing":{},"#,
-        r#""ws-auth":true,"gemini-api-key":null,"codex-api-key":null,"#,
+        r#""ws-auth":true,"gemini-api-key":null,"interactions-api-key":null,"#,
+        r#""codex-api-key":null,"xai-api-key":null,"meta-api-key":null,"#,
+        r#""xai":{"inject-x-search":false},"#,
         r#""codex":{"stream-bootstrap-buffering":false,"orphan-delegation-compatibility":false,"#,
         r#""model-level-cooling":false,"response-steering":false},"#,
         r#""codex-header-defaults":{"beta-features":""},"claude":{"model-level-cooling":false},"#,
@@ -699,6 +703,154 @@ async fn config_is_written_as_upstream_writes_it() {
         let answer = with_config(text).get("/v0/management/config").await;
         answer.assert(StatusCode::OK, empty);
     }
+}
+
+/// A legacy config with interactions, xAI and Meta keys, some of which the
+/// loader drops: a repeated interactions key, an xAI key without a base URL,
+/// and Meta keys that are empty or start with `dca:`.
+const NEW_KEYS: &str = r#"port: 1
+interactions-api-key:
+  - api-key: i1
+    priority: 1
+    weight: 2
+    base-url: https://i.example
+    models: [{name: gemini-2.5-flash, alias: nf}]
+  - api-key: i1
+    base-url: https://i.example
+    models: [{name: gemini-2.5-flash, alias: nf}]
+xai-api-key:
+  - api-key: x1
+    base-url: https://x.example
+    alpha-search: true
+    websockets: true
+    excluded-models: [grok-2*]
+  - api-key: x2
+meta-api-key:
+  - api-key: m1
+    prefix: team
+    headers: {X-A: a}
+  - api-key: "dca:abc"
+  - api-key: ""
+    base-url: https://m.example
+xai: {inject-x-search: true}
+"#;
+
+/// Not upstream's: the interactions, xAI and Meta keys and the xAI settings
+/// are written at upstream's positions, as the loader leaves them (an xAI
+/// key loses `alpha-search`, a Meta key gets its default base URL).
+/// Recorded from upstream's `GetConfig` under Go 1.26.4.
+#[tokio::test]
+async fn interactions_xai_and_meta_keys_are_written() {
+    let answer = with_config(NEW_KEYS).get("/v0/management/config").await;
+    assert_eq!(answer.status, StatusCode::OK);
+    let part = concat!(
+        r#""ws-auth":true,"gemini-api-key":null,"#,
+        r#""interactions-api-key":[{"api-key":"i1","priority":1,"weight":2,"#,
+        r#""base-url":"https://i.example","models":[{"name":"gemini-2.5-flash","alias":"nf"}]}],"#,
+        r#""codex-api-key":null,"#,
+        r#""xai-api-key":[{"api-key":"x1","base-url":"https://x.example","websockets":true,"#,
+        r#""proxy-url":"","models":null,"excluded-models":["grok-2*"]}],"#,
+        r#""meta-api-key":[{"api-key":"m1","prefix":"team","base-url":"https://api.meta.ai/v1","#,
+        r#""proxy-url":"","models":null,"headers":{"X-A":"a"}}],"#,
+        r#""xai":{"inject-x-search":true},"codex":{"#,
+    );
+    assert!(answer.body.contains(part), "{}", answer.body);
+}
+
+/// Not upstream's: the interactions, xAI and Meta keys read in the v8
+/// layout, grouped under `api-keys`, and the xAI settings under
+/// `upstream.xai` and its historical `oauth.providers.xai`, from a legacy
+/// file and from a v8 one. The legacy file is read as it is, with the
+/// entries the loader drops. Recorded from upstream's `ConfigV8` (v8.0.11)
+/// under Go 1.26.4.
+#[tokio::test]
+async fn config_v8_reads_interactions_xai_and_meta_keys() {
+    let interactions = concat!(
+        r#"[{"base-url":"https://i.example","keys":[{"api-key":"i1","weight":2}],"#,
+        r#""models":[{"alias":"nf","name":"gemini-2.5-flash"}],"name":"interactions-1","#,
+        r#""priority":1},{"base-url":"https://i.example","keys":[{"api-key":"i1"}],"#,
+        r#""models":[{"alias":"nf","name":"gemini-2.5-flash"}],"name":"interactions-2"}]"#,
+    );
+    let meta = concat!(
+        r#"[{"headers":{"X-A":"a"},"keys":[{"api-key":"m1"}],"name":"meta-1","prefix":"team"},"#,
+        r#"{"keys":[{"api-key":"dca:abc"}],"name":"meta-2"},"#,
+        r#"{"base-url":"https://m.example","keys":[{"api-key":""}],"name":"meta-3"}]"#,
+    );
+    let xai = concat!(
+        r#"[{"base-url":"https://x.example","excluded-models":["grok-2*"],"#,
+        r#""keys":[{"alpha-search":true,"api-key":"x1","websockets":true}],"name":"xai-1"},"#,
+        r#"{"keys":[{"api-key":"x2"}],"name":"xai-2"}]"#,
+    );
+    let (dir, api) = over_file(NEW_KEYS);
+    let keys = format!(r#"{{"interactions":{interactions},"meta":{meta},"xai":{xai}}}"#);
+    let whole = format!(
+        r#"{{"api-keys":{keys},"config-version":8,"server":{{"port":1}},"upstream":{{"xai":{{"inject-x-search":true}}}}}}"#
+    );
+    for (path, body) in [
+        ("", whole.as_str()),
+        ("api-keys", keys.as_str()),
+        ("api-keys/interactions", interactions),
+        ("api-keys/xai", xai),
+        ("api-keys/meta", meta),
+        ("upstream/xai", r#"{"inject-x-search":true}"#),
+        ("upstream/xai/inject-x-search", "true"),
+        ("oauth/providers/xai", r#"{"inject-x-search":true}"#),
+        ("oauth/providers/xai/inject-x-search", "true"),
+    ] {
+        let answer = api.get(&format!("/v8/management/config/{path}")).await;
+        assert_v8(&answer, body);
+    }
+    for path in ["xai-api-key", "xai/inject-x-search"] {
+        let answer = api.get(&format!("/v8/management/config/{path}")).await;
+        answer.assert(StatusCode::NOT_FOUND, r#"{"error":"not_found"}"#);
+    }
+    assert_unported(&api, Method::PUT, "/v8/management/config/api-keys/xai").await;
+    assert_unchanged(&dir, NEW_KEYS);
+
+    let raw = concat!(
+        "config-version: 8
+api-keys:
+  interactions:
+",
+        "    - base-url: https://i.example
+      keys: [{api-key: i1, weight: 2}]
+",
+        "  xai:
+    - base-url: https://x.example
+      excluded-models: [grok-2*]
+",
+        "      keys: [{api-key: x1}, {api-key: x2}]
+",
+        "  meta:
+    - prefix: team
+      keys: [{api-key: m1}]
+",
+        "upstream:
+  xai: {inject-x-search: true}
+",
+    );
+    let (dir, api) = over_file(raw);
+    let interactions = r#"[{"base-url":"https://i.example","keys":[{"api-key":"i1","weight":2}]}]"#;
+    let xai = concat!(
+        r#"[{"base-url":"https://x.example","excluded-models":["grok-2*"],"#,
+        r#""keys":[{"api-key":"x1"},{"api-key":"x2"}]}]"#,
+    );
+    let meta = r#"[{"keys":[{"api-key":"m1"}],"prefix":"team"}]"#;
+    let keys = format!(r#"{{"interactions":{interactions},"meta":{meta},"xai":{xai}}}"#);
+    let whole = format!(
+        r#"{{"api-keys":{keys},"config-version":8,"upstream":{{"xai":{{"inject-x-search":true}}}}}}"#
+    );
+    for (path, body) in [
+        ("", whole.as_str()),
+        ("api-keys/interactions", interactions),
+        ("api-keys/xai", xai),
+        ("api-keys/meta", meta),
+        ("oauth/providers/xai/inject-x-search", "true"),
+    ] {
+        let answer = api.get(&format!("/v8/management/config/{path}")).await;
+        assert_v8(&answer, body);
+    }
+    assert_unchanged(&dir, raw);
 }
 
 /// The `payload` upstream writes when the file has none.
