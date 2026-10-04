@@ -1055,6 +1055,125 @@ async fn restore_skips_what_upstream_skips() {
     assert_eq!(saved, ["live"]);
 }
 
+/// A saved record for `auth-1` on `model` (credential-wide if empty), that
+/// is to run out at `until` and was written at `written`.
+fn saved_cooldown(model: &str, until: Timestamp, written: Timestamp) -> Record {
+    Record {
+        provider: "xai".into(),
+        auth_id: "auth-1".into(),
+        model: model.into(),
+        status: "cooling".into(),
+        next_retry_after: Some(until),
+        reason: "saved".into(),
+        last_error: Some(AuthError {
+            message: "saved".into(),
+            http_status: 429,
+            ..AuthError::default()
+        }),
+        updated_at: Some(written),
+        ..Record::default()
+    }
+}
+
+/// Not upstream's, which applies a credential-wide record whatever the
+/// credential holds: a fresh cooldown keeps its deadline, its time and its
+/// error against an older record that would run out sooner.
+#[tokio::test(start_paused = true)]
+async fn a_restore_keeps_a_fresher_credential_wide_cooldown() {
+    let h = Harness::new(Settings::default());
+    set_debounce(&h.manager, Duration::from_secs(3600));
+    register(&h.manager, "auth-1", "xai");
+    h.manager
+        .mark_result(&failure("auth-1", "xai", "", 401, "bad token"));
+    let fresh = h.get("auth-1");
+    let now = h.now();
+    assert_eq!(fresh.next_retry_after, Some(now + TimeDelta::minutes(30)));
+    let store = RecordingStore::with_load(vec![saved_cooldown(
+        "",
+        now + TimeDelta::minutes(5),
+        now - TimeDelta::hours(1),
+    )]);
+    install_store(&h.manager, store.clone());
+
+    restore_now(&h.manager);
+
+    let auth = h.get("auth-1");
+    assert_eq!(auth.next_retry_after, fresh.next_retry_after, "deadline");
+    assert_eq!(auth.updated_at, fresh.updated_at, "time");
+    assert_eq!(auth.status_message, "unauthorized");
+    assert_eq!(
+        auth.last_error.as_ref().map(|err| err.http_status),
+        Some(401)
+    );
+    assert_eq!(auth.generation, fresh.generation, "nothing changed");
+}
+
+/// Not upstream's: a credential-wide record newer than the cooldown the
+/// credential holds replaces it, and one that is for a credential with
+/// nothing is applied whenever it was written.
+#[tokio::test(start_paused = true)]
+async fn a_restore_applies_a_credential_wide_record_that_is_newer() {
+    let h = Harness::new(Settings::default());
+    set_debounce(&h.manager, Duration::from_secs(3600));
+    register(&h.manager, "auth-1", "xai");
+    register(&h.manager, "auth-2", "xai");
+    h.manager
+        .mark_result(&failure("auth-1", "xai", "", 401, "bad token"));
+    h.clock.advance(Duration::from_secs(600));
+    let now = h.now();
+    let until = now + TimeDelta::minutes(5);
+    let store = RecordingStore::with_load(vec![
+        saved_cooldown("", until, now - TimeDelta::minutes(1)),
+        Record {
+            auth_id: "auth-2".into(),
+            ..saved_cooldown("", until, now - TimeDelta::days(30))
+        },
+    ]);
+    install_store(&h.manager, store.clone());
+
+    restore_now(&h.manager);
+
+    let newer = h.get("auth-1");
+    assert_eq!(newer.next_retry_after, Some(until), "newer replaces");
+    assert_eq!(newer.updated_at, Some(now - TimeDelta::minutes(1)));
+    assert_eq!(newer.status_message, "saved");
+    let empty = h.get("auth-2");
+    assert_eq!(empty.next_retry_after, Some(until), "old but nothing held");
+    assert!(empty.unavailable);
+}
+
+/// Not upstream's: a model's cooldown that a later success cleared isn't
+/// brought back by an older record; a model with no state, and one the
+/// record is newer than, get theirs.
+#[tokio::test(start_paused = true)]
+async fn a_restore_does_not_bring_back_a_cooldown_a_later_result_cleared() {
+    let h = Harness::new(Settings::default());
+    set_debounce(&h.manager, Duration::from_secs(3600));
+    register(&h.manager, "auth-1", "xai");
+    for model in ["cleared", "cleared-since"] {
+        h.manager
+            .mark_result(&failure("auth-1", "xai", model, 429, "rate limited"));
+        h.manager.mark_result(&success("auth-1", "xai", model));
+    }
+    let now = h.now();
+    let until = now + TimeDelta::minutes(5);
+    let store = RecordingStore::with_load(vec![
+        saved_cooldown("cleared", until, now - TimeDelta::hours(1)),
+        saved_cooldown("cleared-since", until, now + TimeDelta::minutes(1)),
+        saved_cooldown("unseen", until, now - TimeDelta::hours(1)),
+    ]);
+    install_store(&h.manager, store.clone());
+
+    restore_now(&h.manager);
+
+    let auth = h.get("auth-1");
+    let state = |model: &str| auth.model_states.get(model).expect(model);
+    assert!(!state("cleared").unavailable, "cleared stays cleared");
+    assert!(state("cleared").next_retry_after.is_none());
+    assert_eq!(state("cleared-since").next_retry_after, Some(until));
+    assert_eq!(state("unseen").next_retry_after, Some(until));
+}
+
 /// Not upstream's: an empty load saves nothing, and nothing is saved to a
 /// store before it has been restored from.
 #[tokio::test(start_paused = true)]

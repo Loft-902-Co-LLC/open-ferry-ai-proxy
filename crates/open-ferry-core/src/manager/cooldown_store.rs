@@ -53,6 +53,15 @@
 //!   before the store moves, and the watcher brings the new one's after
 //!   the store has restored from it, so the last save to the old directory
 //!   and the first to the new leave them out, and remove their files.
+//! - A restore doesn't put back what a credential holds newer. A
+//!   credential-wide record is applied only if its `updated_at` is later than
+//!   that of the cooldown the credential already held, so a fresh cooldown
+//!   keeps its deadline and its time; upstream applies it whatever it holds.
+//!   A model's record isn't applied over a state a later result cleared;
+//!   against a cooldown it is merged as upstream merges it. A credential
+//!   whose own cooldown was cleared by a success looks like one that never
+//!   had one, as the manager keeps no time for the clear, so a record for it
+//!   is applied.
 //! - Load and save failures are logged; there is no context to cancel them.
 //! - A save that fails is not forgotten: the store stays dirty, the worker
 //!   tries again after the debounce doubled for each failure in a row (up to
@@ -63,7 +72,7 @@
 mod file;
 mod record;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
@@ -74,6 +83,7 @@ use super::cooldown::{
     update_aggregated_availability,
 };
 use super::credential::is_zero;
+use super::text::canonical_model_key;
 use super::{Entry, Manager, Settings, Shared, lock};
 use crate::auth::{Auth, ModelState, QuotaState, Status, Timestamp};
 use crate::config::Config;
@@ -555,9 +565,19 @@ fn apply(manager: &Manager, records: &[Record]) -> usize {
     let (model_records, auth_records): (Vec<&Record>, Vec<&Record>) = records
         .iter()
         .partition(|record| !record.model.trim().is_empty());
+    // Taken before the models are restored, which move a credential's own
+    // cooldown too.
+    let held: BTreeMap<String, Option<Timestamp>> = auth_records
+        .iter()
+        .filter_map(|record| {
+            let id = record.auth_id.trim();
+            let auth = &state.auths.get(id)?.auth;
+            holds_cooldown(auth).then(|| (id.to_owned(), record::nonzero(auth.updated_at)))
+        })
+        .collect();
     let mut changed = BTreeSet::new();
     for record in model_records.into_iter().chain(auth_records) {
-        if let Some(id) = restore_record(&settings, &mut state.auths, record, now) {
+        if let Some(id) = restore_record(&settings, &mut state.auths, &held, record, now) {
             changed.insert(id);
         }
     }
@@ -567,12 +587,29 @@ fn apply(manager: &Manager, records: &[Record]) -> usize {
     changed.len()
 }
 
-/// Puts one record back on its credential, if it is still to run out and
-/// the credential cools down; returns the credential's ID if so (upstream's
-/// `restoreCooldownRecordLocked`).
+/// Whether `auth` has a cooldown of its own, running or not (as upstream's
+/// `clearCooldownStateForAuth` counts one).
+fn holds_cooldown(auth: &Auth) -> bool {
+    auth.unavailable
+        || !is_zero(auth.next_retry_after)
+        || auth.quota.exceeded
+        || !is_zero(auth.quota.next_recover_at)
+}
+
+/// Puts one record back on its credential, if it is still to run out, the
+/// credential cools down, and the credential holds nothing newer; returns
+/// the credential's ID if so (upstream's `restoreCooldownRecordLocked`).
+///
+/// A credential-wide record is dropped unless it is newer than what the
+/// credential holds: `held` has the credentials that held a cooldown of
+/// their own before the restore, with when that was set. A model's record is
+/// dropped when the model's state is newer and has no cooldown, as one that
+/// a later result cleared; against one with a cooldown it is merged, as
+/// upstream merges it, so the longer deadline and the newer text stay.
 fn restore_record(
     settings: &Settings,
-    auths: &mut std::collections::BTreeMap<String, Entry>,
+    auths: &mut BTreeMap<String, Entry>,
+    held: &BTreeMap<String, Option<Timestamp>>,
     record: &Record,
     now: Timestamp,
 ) -> Option<String> {
@@ -591,6 +628,23 @@ fn restore_record(
     let updated_at = record::nonzero(record.updated_at).unwrap_or(now);
     let reason = record.reason.trim();
     let model = record.model.trim();
+    if model.is_empty() {
+        if held
+            .get(auth_id)
+            .is_some_and(|held_at| Some(updated_at) <= *held_at)
+        {
+            return None;
+        }
+    } else if entry
+        .auth
+        .model_states
+        .get(&canonical_model_key(model))
+        .is_some_and(|state| {
+            !state.unavailable && state.updated_at.is_some_and(|at| at > updated_at)
+        })
+    {
+        return None;
+    }
     let mut quota = record.quota.clone();
     if quota.exceeded && is_zero(quota.next_recover_at) {
         quota.next_recover_at = Some(next_retry_after);
