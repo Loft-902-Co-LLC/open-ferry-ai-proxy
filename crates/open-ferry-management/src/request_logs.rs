@@ -28,6 +28,10 @@
 //! aren't, as upstream's do.
 //!
 //! Deviations from upstream:
+//! - A log that is a symbolic link or other reparse point, isn't a plain
+//!   file, or has more than one hard link is refused with upstream's
+//!   answer to a directory, a 400 `invalid log file`, not followed (see
+//!   [`open_log_file`]). It is checked on the handle the log is read from.
 //! - A log is read whole and sent as `text/plain; charset=utf-8`, with its
 //!   `Last-Modified`; Go's `http.ServeFile` sniffs the type and answers
 //!   range and conditional requests.
@@ -38,7 +42,7 @@
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
-use std::io;
+use std::io::{self, Read as _};
 use std::path::{Path as FsPath, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -56,7 +60,7 @@ use crate::Route;
 use crate::auth_files::run_blocking;
 use crate::go::lossy;
 use crate::json::{self, Json};
-use crate::log_dir::log_directory;
+use crate::log_dir::{Access, is_refused, log_directory, open_log_file};
 use crate::query::Query;
 use crate::state::ManagementState;
 
@@ -268,20 +272,21 @@ fn serve(dir: &FsPath, file_name: OsString, name: &str) -> Response {
         Err(error) => return internal(&format!("failed to resolve log directory: {error}")),
     };
     let path = dir.join(file_name);
-    let meta = match fs::metadata(&path) {
-        Ok(meta) => meta,
+    // Upstream's `os.Stat` and `ServeFile`'s open, in one.
+    let (mut file, meta) = match open_log_file(&path, Access::Read) {
+        Ok(opened) => opened,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return json::error(StatusCode::NOT_FOUND, "log file not found");
         }
-        Err(error) => return internal(&format!("failed to read log file: {error}")),
-    };
-    if meta.is_dir() {
-        return json::error(StatusCode::BAD_REQUEST, "invalid log file");
-    }
-    let data = match fs::read(&path) {
-        Ok(data) => data,
+        Err(error) if is_refused(&error) => {
+            return json::error(StatusCode::BAD_REQUEST, "invalid log file");
+        }
         Err(error) => return serve_error(&error),
     };
+    let mut data = Vec::new();
+    if let Err(error) = file.read_to_end(&mut data) {
+        return serve_error(&error);
+    }
     let mut response = Response::new(Body::from(data));
     let headers = response.headers_mut();
     if let Ok(value) = HeaderValue::from_str(&content_disposition(name)) {

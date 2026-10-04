@@ -369,6 +369,57 @@ async fn downloads_error_logs() {
     }
 }
 
+/// Checks that an error log and a request's log that `link` makes lead to
+/// a file outside the log directory are refused, not sent.
+async fn assert_links_are_refused(link: impl Fn(&Path, &Path) -> bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let logs = dir.path().join("logs");
+    fs::create_dir(&logs).unwrap();
+    let outside = dir.path().join("outside.txt");
+    fs::write(&outside, "OUTSIDE-SECRET").unwrap();
+    let error_log = "error-v1-responses-2026-09-23T100000-aaaaaaaa.log";
+    if !link(&outside, &logs.join(error_log)) {
+        return;
+    }
+    assert!(link(
+        &outside,
+        &logs.join("v1-responses-2026-09-23T100000-bbbbbbbb.log")
+    ));
+    let api = api(&logs);
+    let refused = r#"{"error":"invalid log file"}"#;
+    for path in ERRORS {
+        api.get(&format!("{path}/{error_log}"))
+            .await
+            .assert(StatusCode::BAD_REQUEST, refused);
+    }
+    for path in BY_ID {
+        for id in ["aaaaaaaa", "bbbbbbbb"] {
+            api.get(&format!("{path}/{id}"))
+                .await
+                .assert(StatusCode::BAD_REQUEST, refused);
+        }
+    }
+}
+
+// Not upstream's: a log hard-linked to a file outside the log directory
+// is refused.
+#[tokio::test]
+async fn hard_linked_logs_are_refused() {
+    assert_links_are_refused(|target, link| {
+        fs::hard_link(target, link).unwrap();
+        true
+    })
+    .await;
+}
+
+// Not upstream's: a log that is a symbolic link to a file outside the log
+// directory is refused, not followed. Skipped where the tests can't make
+// one.
+#[tokio::test]
+async fn symbolic_linked_logs_are_refused() {
+    assert_links_are_refused(crate::log_dir::symlink_file).await;
+}
+
 // Not upstream's: the routes need the management key.
 #[tokio::test]
 async fn needs_the_key() {

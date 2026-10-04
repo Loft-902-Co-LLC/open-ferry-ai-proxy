@@ -19,9 +19,13 @@
 //! by name or, once `main.log` has been rotated, by fingerprint, and reads
 //! the complete lines after the offset, then those of the newer files.
 //!
-//! Deviations from upstream: none.
+//! Deviations from upstream: a file is looked at through a handle of it
+//! opened as the routes open one, which refuses links (see
+//! [`open_log_file`](crate::log_dir::open_log_file)), and a cursor's
+//! fingerprint is taken from the handle the file's size came from;
+//! upstream follows links, and opens the file again for the fingerprint.
 
-use std::fs;
+use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -290,22 +294,16 @@ fn should_reset_ambiguous_empty_main_cursor(
     if !is_empty_main(cursor) {
         return false;
     }
-    let Some(info) = files
-        .get(main_index)
-        .and_then(|path| fs::metadata(path).ok())
-    else {
+    let Some(info) = files.get(main_index).and_then(|path| file_info(path).ok()) else {
         return false;
     };
-    if info.is_dir()
-        || (file_size(&info) == cursor.size
-            && mod_time(&info).1 == cursor_mod_time_unix_nano(cursor))
-    {
+    if file_size(&info) == cursor.size && mod_time(&info).1 == cursor_mod_time_unix_nano(cursor) {
         return false;
     }
     files.iter().enumerate().any(|(index, path)| {
         index != main_index
             && file_name(path) != MAIN_LOG
-            && fs::metadata(path).is_ok_and(|info| !info.is_dir() && info.len() != 0)
+            && file_info(path).is_ok_and(|info| info.len() != 0)
             && !log_file_changed_after_cursor(path, cursor)
     })
 }
@@ -313,24 +311,26 @@ fn should_reset_ambiguous_empty_main_cursor(
 /// Whether the file at `path` isn't empty and was modified after the
 /// cursor's file (upstream's `logFileChangedAfterCursor`).
 fn log_file_changed_after_cursor(path: &Path, cursor: &LogCursor) -> bool {
-    fs::metadata(path).is_ok_and(|info| {
-        !info.is_dir() && info.len() != 0 && mod_time(&info).1 > cursor_mod_time_unix_nano(cursor)
-    })
+    file_info(path)
+        .is_ok_and(|info| info.len() != 0 && mod_time(&info).1 > cursor_mod_time_unix_nano(cursor))
+}
+
+/// The metadata of the file at `path`, opened as the routes open one: a
+/// directory or a link fails.
+fn file_info(path: &Path) -> io::Result<fs::Metadata> {
+    open_log_file(path).map(|(_, info)| info)
 }
 
 /// How the file at `path` compares with `cursor` (upstream's
 /// `logFileMatchesCursor`).
 fn log_file_matches_cursor(path: &Path, cursor: &LogCursor) -> io::Result<Match> {
-    let info = fs::metadata(path)?;
-    if info.is_dir() {
-        return Err(invalid("invalid log file"));
-    }
+    let (mut file, info) = open_log_file(path)?;
     let size = file_size(&info);
     let boundary = cursor_fingerprint_boundary(cursor.offset, cursor.size);
     if size < cursor.offset || size < boundary {
         return Ok(Match::Truncated);
     }
-    let fingerprint = log_file_fingerprint(path, boundary)?;
+    let fingerprint = log_file_fingerprint(&mut file, size, boundary)?;
     Ok(if fingerprint == cursor.fingerprint {
         Match::Same
     } else {
@@ -405,15 +405,13 @@ fn validate_log_cursor(cursor: &LogCursor) -> Result<(), &'static str> {
 /// A cursor at `offset` in the file at `path`, carrying `latest`
 /// (upstream's `newLogCursor`).
 pub(crate) fn new_log_cursor(path: &Path, offset: i64, latest: i64) -> io::Result<String> {
-    let info = fs::metadata(path)?;
-    if info.is_dir() {
-        return Err(invalid("invalid log file"));
-    }
+    let (mut file, info) = open_log_file(path)?;
     let size = file_size(&info);
     if offset < 0 || offset > size {
         return Err(invalid("invalid cursor offset"));
     }
-    let fingerprint = log_file_fingerprint(path, cursor_fingerprint_boundary(offset, size))?;
+    let boundary = cursor_fingerprint_boundary(offset, size);
+    let fingerprint = log_file_fingerprint(&mut file, size, boundary)?;
     let (seconds, nanos) = mod_time(&info);
     Ok(encode_log_cursor(&LogCursor {
         version: VERSION,
@@ -461,37 +459,31 @@ fn mod_time(info: &fs::Metadata) -> (i64, i64) {
     (seconds, nanos as i64)
 }
 
-/// The fingerprint of the file at `path` up to `boundary`: a hash of the
-/// boundary and the first and last 4 KiB before it (upstream's
+/// The fingerprint of `file`, `size` bytes long, up to `boundary`: a hash
+/// of the boundary and the first and last 4 KiB before it (upstream's
 /// `logFileFingerprint`).
-fn log_file_fingerprint(path: &Path, boundary: i64) -> io::Result<String> {
+fn log_file_fingerprint(file: &mut File, size: i64, boundary: i64) -> io::Result<String> {
     if boundary < 0 {
         return Err(invalid("invalid fingerprint boundary"));
     }
-    let (mut file, size) = open_log_file(path)?;
     if boundary > size {
         return Err(invalid("invalid fingerprint boundary"));
     }
     let mut hash = Sha256::new();
     hash.update(format!("log-cursor-v1:{boundary}:"));
     let first_len = boundary.min(FINGERPRINT_MAX);
-    write_file_range(&mut hash, &mut file, 0, first_len)?;
+    write_file_range(&mut hash, file, 0, first_len)?;
     let tail_len = boundary.min(FINGERPRINT_MAX);
     let tail_start = boundary - tail_len;
     hash.update(format!(":{tail_start}:"));
-    write_file_range(&mut hash, &mut file, tail_start, tail_len)?;
+    write_file_range(&mut hash, file, tail_start, tail_len)?;
     let sum = hash.finalize();
     Ok(URL_RAW.encode(sum.get(..12).unwrap_or_default()))
 }
 
 /// Hashes `length` bytes of `file` from `start`; the file ending first
 /// fails with Go's `EOF` (upstream's `writeFileRange`).
-fn write_file_range(
-    hash: &mut Sha256,
-    file: &mut fs::File,
-    start: i64,
-    length: i64,
-) -> io::Result<()> {
+fn write_file_range(hash: &mut Sha256, file: &mut File, start: i64, length: i64) -> io::Result<()> {
     let Ok(mut remaining) = usize::try_from(length) else {
         return Ok(());
     };

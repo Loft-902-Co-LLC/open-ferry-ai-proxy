@@ -27,6 +27,12 @@
 //! without sharing it is retried a few times before the removal fails.
 //!
 //! Deviations from upstream:
+//! - A file that is a symbolic link or other reparse point, isn't a plain
+//!   file, or has more than one hard link is refused, not followed: `GET`
+//!   and `DELETE` fail with `invalid log file` (see
+//!   [`open_log_file`](crate::log_dir::open_log_file)). A rotation is
+//!   checked so before it is removed; the removal takes only its name out
+//!   of the directory, so a file swapped in between is never reached.
 //! - An I/O error's text is Rust's, without Go's operation and path.
 //! - Rotated files of the same order are listed in the order Go's
 //!   insertion sort gives at any count, where Go's sort of twelve or more
@@ -39,7 +45,7 @@ mod tests;
 mod timestamp;
 
 use std::collections::{BTreeMap, VecDeque};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -59,7 +65,7 @@ use crate::Route;
 use crate::auth_files::run_blocking;
 use crate::go::atoi;
 use crate::json::{self, Json};
-use crate::log_dir::log_directory;
+use crate::log_dir::{self, Access, log_directory};
 use crate::query::Query;
 use crate::state::ManagementState;
 
@@ -280,8 +286,8 @@ impl Accumulator {
 
     /// Adds the lines of the file at `path`, if there is one.
     fn consume_file(&mut self, path: &Path) -> io::Result<()> {
-        match File::open(path) {
-            Ok(file) => scan_lines(file, |line| self.add_line(line)),
+        match open_log_file(path) {
+            Ok((file, _)) => scan_lines(file, |line| self.add_line(line)),
             Err(error) if is_not_found(&error) => Ok(()),
             Err(error) => Err(error),
         }
@@ -317,7 +323,11 @@ fn clear_logs(dir: &Path) -> Result<usize, Failure> {
     let mut removed = 0;
     for entry in entries.into_iter().filter(|entry| !entry.is_dir) {
         if entry.name == MAIN_LOG {
-            let truncate = || OpenOptions::new().write(true).open(&entry.path)?.set_len(0);
+            let truncate = || {
+                log_dir::open_log_file(&entry.path, Access::Write)?
+                    .0
+                    .set_len(0)
+            };
             match retry_shared(truncate) {
                 Err(error) if !is_not_found(&error) => {
                     return Err(internal(format!("failed to truncate log file: {error}")));
@@ -326,7 +336,11 @@ fn clear_logs(dir: &Path) -> Result<usize, Failure> {
             }
         }
         if is_rotated_log_file(&entry.name) {
-            match retry_shared(|| fs::remove_file(&entry.path)) {
+            let remove = || {
+                drop(open_log_file(&entry.path)?);
+                fs::remove_file(&entry.path)
+            };
+            match retry_shared(remove) {
                 Err(error) if !is_not_found(&error) => {
                     return Err(internal(format!(
                         "failed to remove {}: {error}",
@@ -451,15 +465,11 @@ fn timestamp_rotation_order(name: &str) -> Option<i64> {
     Some(i64::MAX.wrapping_sub(unix))
 }
 
-/// The file at `path`, opened to read, and its size; a directory is
-/// refused.
-fn open_log_file(path: &Path) -> io::Result<(File, i64)> {
-    let file = File::open(path)?;
-    let info = file.metadata()?;
-    if info.is_dir() {
-        return Err(invalid("invalid log file"));
-    }
-    Ok((file, file_size(&info)))
+/// The file at `path`, opened to read, and its metadata; a link, anything
+/// but a plain file and a file with another hard link are refused (see
+/// [`log_dir::open_log_file`]).
+fn open_log_file(path: &Path) -> io::Result<(File, fs::Metadata)> {
+    log_dir::open_log_file(path, Access::Read)
 }
 
 /// A file's size as Go's `int64`.

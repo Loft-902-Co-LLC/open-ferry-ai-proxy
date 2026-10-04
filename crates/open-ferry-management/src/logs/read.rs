@@ -10,7 +10,11 @@
 //! complete lines after an offset, where the last complete line ends, and
 //! the last lines of the files.
 //!
-//! Deviations from upstream: none.
+//! Deviations from upstream: a file is opened as the routes open one,
+//! which refuses links (see
+//! [`open_log_file`](crate::log_dir::open_log_file)), and the last lines of
+//! a file are found and read through one handle of it, where upstream
+//! opens it for each step.
 
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
@@ -18,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 use super::cursor::new_log_cursor;
 use super::timestamp::parse_timestamp;
-use super::{invalid, is_not_found, open_log_file};
+use super::{file_size, invalid, is_not_found, open_log_file};
 
 /// The longest line read (upstream's `logScannerMaxBuffer`).
 pub(super) const MAX_LINE: usize = 8 * 1024 * 1024;
@@ -98,8 +102,19 @@ pub(crate) fn read_complete_log_lines(
     max_offset: Option<i64>,
     limit: usize,
 ) -> io::Result<CompleteRead> {
+    let (mut file, info) = open_log_file(path)?;
+    read_complete_lines(&mut file, file_size(&info), offset, max_offset, limit)
+}
+
+/// [`read_complete_log_lines`] of `file`, `size` bytes long.
+fn read_complete_lines(
+    file: &mut File,
+    size: i64,
+    offset: i64,
+    max_offset: Option<i64>,
+    limit: usize,
+) -> io::Result<CompleteRead> {
     let start = u64::try_from(offset).map_err(|_| invalid("invalid log offset"))?;
-    let (mut file, size) = open_log_file(path)?;
     let max_offset = max_offset.filter(|&max| max <= size).unwrap_or(size);
     if offset > max_offset {
         return Err(invalid("invalid log offset"));
@@ -160,13 +175,18 @@ fn line_too_long() -> io::Error {
 /// The offset just after the last `\n` in the file at `path`, or 0
 /// (upstream's `completeLogBoundary`).
 pub(crate) fn complete_log_boundary(path: &Path) -> io::Result<i64> {
-    let (mut file, size) = open_log_file(path)?;
+    let (mut file, info) = open_log_file(path)?;
+    log_boundary(&mut file, file_size(&info))
+}
+
+/// [`complete_log_boundary`] of `file`, `size` bytes long.
+fn log_boundary(file: &mut File, size: i64) -> io::Result<i64> {
     let mut buf = vec![0; CHUNK];
     let mut pos = size;
     while pos > 0 {
         let chunk = pos.min(len_i64(CHUNK));
         pos -= chunk;
-        let data = read_at(&mut file, &mut buf, chunk, pos)?;
+        let data = read_at(file, &mut buf, chunk, pos)?;
         if let Some(index) = data.iter().rposition(|&b| b == b'\n') {
             return Ok(pos + len_i64(index) + 1);
         }
@@ -174,21 +194,20 @@ pub(crate) fn complete_log_boundary(path: &Path) -> io::Result<i64> {
     Ok(0)
 }
 
-/// Where the last `limit` complete lines before `boundary` start in the
-/// file at `path`; 0 when `limit` is 0 or there are no more lines than
-/// that (upstream's `tailStartOffset`).
-fn tail_start_offset(path: &Path, boundary: i64, limit: usize) -> io::Result<i64> {
+/// Where the last `limit` complete lines before `boundary` start in
+/// `file`; 0 when `limit` is 0 or there are no more lines than that
+/// (upstream's `tailStartOffset`).
+fn tail_start_offset(file: &mut File, boundary: i64, limit: usize) -> io::Result<i64> {
     if limit == 0 {
         return Ok(0);
     }
-    let mut file = File::open(path)?;
     let mut buf = vec![0; CHUNK];
     let mut pos = boundary;
     let mut line_breaks = 0;
     while pos > 0 {
         let chunk = pos.min(len_i64(CHUNK));
         pos -= chunk;
-        let mut data = read_at(&mut file, &mut buf, chunk, pos)?;
+        let mut data = read_at(file, &mut buf, chunk, pos)?;
         while let Some(index) = data.iter().rposition(|&b| b == b'\n') {
             line_breaks += 1;
             if line_breaks > limit {
@@ -221,14 +240,17 @@ fn read_at<'a>(file: &mut File, buf: &'a mut [u8], len: i64, pos: i64) -> io::Re
 }
 
 /// The last `limit` complete lines of the file at `path`, all of them when
-/// `limit` is 0 (upstream's `readTailLogLines`).
+/// `limit` is 0 (upstream's `readTailLogLines`), read from one handle of
+/// it, where upstream opens it for each step.
 fn read_tail_log_lines(path: &Path, limit: usize) -> io::Result<CompleteRead> {
-    let boundary = complete_log_boundary(path)?;
+    let (mut file, info) = open_log_file(path)?;
+    let size = file_size(&info);
+    let boundary = log_boundary(&mut file, size)?;
     if boundary == 0 {
         return Ok(CompleteRead::default());
     }
-    let start = tail_start_offset(path, boundary, limit)?;
-    read_complete_log_lines(path, start, Some(boundary), limit)
+    let start = tail_start_offset(&mut file, boundary, limit)?;
+    read_complete_lines(&mut file, size, start, Some(boundary), limit)
 }
 
 /// The last `limit` complete lines of `files`, oldest first, all of them

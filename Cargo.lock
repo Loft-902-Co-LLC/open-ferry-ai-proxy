@@ -1407,6 +1407,7 @@ dependencies = [
  "flate2",
  "http",
  "http-body-util",
+ "libc",
  "open-ferry-core",
  "open-ferry-providers",
  "open-ferry-translate",
@@ -1420,6 +1421,7 @@ dependencies = [
  "tower",
  "tracing",
  "url",
+ "winapi-util",
 ]
 
 [[package]]

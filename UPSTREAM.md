@@ -389,6 +389,7 @@ Deviations, each also noted in its module:
 - **Not ported**: the client's own WebSocket timeline (only the upstream one is written), the handshake event and `Stage` line of an upstream WebSocket error, the Codex quota headers' merge into the answer, and the context values that override the bodies logged.
 - **Names** also turn `\` into `-`, and keep at most 120 characters of the path. Headers are written sorted, in Go's canonical form.
 - **The routes** send a log read whole as `text/plain; charset=utf-8`, with its `Last-Modified`, without Go's type sniffing or range and conditional requests. Error logs with the same change time are listed in name order.
+- **The routes refuse a log that is a link**: a symbolic link or other reparse point, anything but a plain file, or a file with another hard link, which may be outside the log directory, answers upstream's 400 for a directory, `invalid log file`. The checks are of the handle the log is then read from. Upstream's follow links.
 - **Errors** are worded as Rust words them, for decoding and for the files.
 
 ### Log files and config changes
@@ -410,6 +411,7 @@ Deviations, each also noted in its module:
 - **A log directory that can't be made** is logged and the output stays as it was; upstream's start exits.
 - **A line's fields** come from the event and the spans it is in, and a field is quoted when its value was recorded as text.
 - **The access line is logged once the response's body is sent or dropped**, and a WebSocket's once its handshake is answered, where gin's comes when the connection closes. The path is written as the client sent it, percent-encoded, except that a key-like query value of one or two bytes is hidden whole, as `...`, where upstream writes it as it is.
+- **The logs routes refuse a link.** A `main.log` or rotation that is a symbolic link or other reparse point, isn't a plain file, or has another hard link, which may be outside the log directory, is neither read, emptied nor removed: `GET` and `DELETE` fail with `invalid log file`. The checks are of the handle the file is then read or emptied through, opened without following a link (`O_NOFOLLOW` on Unix, `FILE_FLAG_OPEN_REPARSE_POINT` on Windows), so the file can't be swapped in between; a rotation is checked so, then removed by name, which never reaches a file outside. Upstream's routes follow links. On Windows every reparse point is refused, those a filter such as a cloud-sync client keeps on plain files too.
 - **The logs routes' I/O errors** carry Rust's text, without Go's operation and path.
 - **Only the settings open-ferry types have change lines**, and a list or mapping that is missing isn't told from one that is empty. Where two OAuth channel names differ only in case or surrounding spaces, the one sorting last wins.
 

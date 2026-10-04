@@ -27,6 +27,12 @@ tokio = { version = "1.53.1", features = ["rt", "time", "sync", "macros", "io-ut
 tracing = "0.1.44"
 url = "2.5.8"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.189"
+
+[target.'cfg(windows)'.dependencies]
+winapi-util = "0.1.11"
+
 [dev-dependencies]
 aws-lc-rs = "1.18.1"
 http-body-util = "0.1.5"

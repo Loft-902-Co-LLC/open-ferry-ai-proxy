@@ -745,6 +745,95 @@ async fn delete_empties_main_log_and_removes_rotations() {
     );
 }
 
+/// A log directory, `logs`, and a file outside it, `outside.txt`, holding
+/// a secret; and the API over the log directory.
+fn outside_and_logs() -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    Api,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let logs = dir.path().join("logs");
+    fs::create_dir(&logs).unwrap();
+    let outside = dir.path().join("outside.txt");
+    fs::write(&outside, "[2026-06-15 10:00:00] OUTSIDE-SECRET\n").unwrap();
+    let api = api(&logs, true);
+    (dir, logs, outside, api)
+}
+
+/// Checks that neither `GET` nor `DELETE` reads or empties the file
+/// outside the log directory that `main.log` and then `main.log.1` lead
+/// to, `link` making each.
+async fn assert_links_are_refused(link: impl Fn(&Path, &Path) -> bool) {
+    let (_dir, logs, outside, api) = outside_and_logs();
+    if !link(&outside, &logs.join(MAIN_LOG)) {
+        return;
+    }
+    let first = api.get("/v0/management/logs?limit=1").await;
+    first.assert(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        r#"{"error":"failed to read log files: invalid log file"}"#,
+    );
+    for target in ["/v0/management/logs", "/v0/management/logs?after=1"] {
+        api.get(target).await.assert(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            r#"{"error":"failed to read log file: invalid log file"}"#,
+        );
+    }
+    api.send(keyed(Method::DELETE, "/v0/management/logs", ""))
+        .await
+        .assert(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            r#"{"error":"failed to truncate log file: invalid log file"}"#,
+        );
+    let secret = "[2026-06-15 10:00:00] OUTSIDE-SECRET\n";
+    assert_eq!(fs::read_to_string(&outside).unwrap(), secret);
+
+    // A cursor from a plain `main.log` isn't followed into a link either.
+    fs::remove_file(logs.join(MAIN_LOG)).unwrap();
+    write_main_log(&logs, "[2026-06-15 09:00:00] mine\n");
+    let plain = get_logs(&api, "/v0/management/logs?limit=1").await;
+    fs::remove_file(logs.join(MAIN_LOG)).unwrap();
+    assert!(link(&outside, &logs.join(MAIN_LOG)));
+    api.get(&from_cursor(&plain.next_cursor, 1)).await.assert(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        r#"{"error":"failed to read log files: invalid log file"}"#,
+    );
+
+    // A rotation linked so is refused, and stays.
+    fs::remove_file(logs.join(MAIN_LOG)).unwrap();
+    write_main_log(&logs, "[2026-06-15 09:00:00] mine\n");
+    assert!(link(&outside, &logs.join("main.log.1")));
+    api.send(keyed(Method::DELETE, "/v0/management/logs", ""))
+        .await
+        .assert(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            r#"{"error":"failed to remove main.log.1: invalid log file"}"#,
+        );
+    assert_eq!(names(&logs), [MAIN_LOG, "main.log.1"]);
+    assert_eq!(fs::read_to_string(&outside).unwrap(), secret);
+}
+
+/// Not upstream's: a `main.log` or rotation hard-linked to a file outside
+/// the log directory is refused, not read, emptied or removed.
+#[tokio::test]
+async fn hard_linked_logs_are_refused() {
+    assert_links_are_refused(|target, link| {
+        fs::hard_link(target, link).unwrap();
+        true
+    })
+    .await;
+}
+
+/// Not upstream's: a `main.log` or rotation that is a symbolic link to a
+/// file outside the log directory is refused, not followed. Skipped where
+/// the tests can't make one.
+#[tokio::test]
+async fn symbolic_linked_logs_are_refused() {
+    assert_links_are_refused(crate::log_dir::symlink_file).await;
+}
+
 /// Not upstream's: `DELETE` of a missing directory answers 404, and with
 /// `logging-to-file` off 400.
 #[tokio::test]
