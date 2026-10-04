@@ -62,6 +62,9 @@
 //!   whose own cooldown was cleared by a success looks like one that never
 //!   had one, as the manager keeps no time for the clear, so a record for it
 //!   is applied.
+//! - A load reads at most 4 MiB of a file and restores at most 10,000
+//!   records from it, skipping a file over either with a warning; upstream
+//!   reads a file whole and restores every record.
 //! - Load and save failures are logged; there is no context to cancel them.
 //! - A save that fails is not forgotten: the store stays dirty, the worker
 //!   tries again after the debounce doubled for each failure in a row (up to
@@ -90,7 +93,7 @@ use crate::config::Config;
 
 pub(crate) use file::FileStore;
 #[cfg(test)]
-pub(crate) use file::sanitize;
+pub(crate) use file::{Limits, MAX_FILE_BYTES, sanitize};
 pub(crate) use record::Record;
 
 /// How long the worker waits after a change for more before saving.

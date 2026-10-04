@@ -35,8 +35,8 @@ use serde_json::json;
 use super::support::*;
 use crate::auth::{AuthError, QuotaState, Status, Timestamp};
 use crate::manager::cooldown_store::{
-    FileStore, Record, StateStore, StoreError, flush, install_store, restore_now, sanitize,
-    set_debounce,
+    FileStore, Limits, MAX_FILE_BYTES, Record, StateStore, StoreError, flush, install_store,
+    restore_now, sanitize, set_debounce,
 };
 use crate::manager::{CallResult, Manager, Settings, lock};
 
@@ -470,6 +470,86 @@ fn files_are_read_as_go_reads_them() {
             "{bad}: {err}"
         );
     }
+}
+
+/// Not upstream's, which reads a file whole and restores every record in
+/// it: a file over the size limit, or with more records than the limit, is
+/// skipped and the others are loaded; a save replaces or removes it.
+#[test]
+fn files_over_the_limits_are_skipped() {
+    let dir = temp_dir();
+    let root = dir.path();
+    let records = [
+        record_for(&root.join("small.json"), "m"),
+        record_for(&root.join("three.json"), "m1"),
+        record_for(&root.join("three.json"), "m2"),
+        record_for(&root.join("three.json"), "m3"),
+    ];
+    FileStore::new(root.to_path_buf())
+        .save(&records, at(0, 0, 0))
+        .expect("save");
+    let len = |name: &str| std::fs::metadata(root.join(name)).expect("meta").len();
+    let (small, three) = (len("small.cds"), len("three.cds"));
+    assert!(three > small);
+
+    let load = |bytes: u64, records: usize| {
+        let store = FileStore::with_limits(root.to_path_buf(), Limits { bytes, records });
+        let mut ids: Vec<String> = store
+            .load()
+            .expect("load")
+            .into_iter()
+            .map(|record| format!("{}:{}", record.auth_id, record.model))
+            .collect();
+        ids.sort();
+        ids
+    };
+    let all = [
+        "small.json:m",
+        "three.json:m1",
+        "three.json:m2",
+        "three.json:m3",
+    ];
+    assert_eq!(load(three, 3), all, "at the limits");
+    assert_eq!(load(three, 2), ["small.json:m"], "too many records");
+    assert_eq!(load(small, 3), ["small.json:m"], "too big");
+    assert!(load(small - 1, 3).is_empty(), "both too big");
+
+    let store = FileStore::with_limits(
+        root.to_path_buf(),
+        Limits {
+            bytes: small,
+            records: 3,
+        },
+    );
+    store
+        .save(&[record_for(&root.join("small.json"), "m")], at(0, 0, 0))
+        .expect("save");
+    assert_eq!(files(root), ["small.cds"], "the file left over is removed");
+}
+
+/// Not upstream's: at its own limit, a file is read only so far: one with a
+/// record and then as many spaces as a file may have is skipped, though
+/// all that is in it is a record.
+#[test]
+fn a_file_is_not_read_past_the_size_limit() {
+    let dir = temp_dir();
+    let root = dir.path();
+    let store = FileStore::new(root.to_path_buf());
+    store
+        .save(&[record_for(&root.join("a.json"), "m")], at(0, 0, 0))
+        .expect("save");
+    let record = std::fs::read(root.join("a.cds")).expect("read");
+    let pad = |name: &str, len: u64| {
+        let mut data = record.clone();
+        data.resize(usize::try_from(len).expect("len"), b' ');
+        std::fs::write(root.join(name), data).expect("write");
+    };
+    pad("b.cds", MAX_FILE_BYTES);
+    assert_eq!(store.load().expect("load").len(), 2, "at the limit");
+    pad("b.cds", MAX_FILE_BYTES + 1);
+    assert_eq!(store.load().expect("load").len(), 1, "a byte over");
+    pad("b.cds", 3 * MAX_FILE_BYTES);
+    assert_eq!(store.load().expect("load").len(), 1, "well over");
 }
 
 /// Not upstream's: a save removes `.cds` files and nothing else, under

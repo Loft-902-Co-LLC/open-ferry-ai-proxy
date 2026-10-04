@@ -15,7 +15,9 @@
 //! file through a temporary file and a rename, then removes every other
 //! `.cds` file under the directory; with nothing to save it removes them
 //! all. A load reads every `.cds` file, and one that doesn't parse fails
-//! it.
+//! it; one that is over [`MAX_FILE_BYTES`], or holds more than
+//! [`MAX_FILE_RECORDS`] records, is skipped with a warning, and a save then
+//! replaces or removes it as it does any other.
 //!
 //! Nothing here deletes, renames over or writes anything but a `.cds` file:
 //! removal checks the name first, and the temporary files are
@@ -35,6 +37,10 @@
 //!   directory fails this is skipped with a warning and the rest are saved;
 //!   upstream follows the link and writes outside the directory. The auth
 //!   directory itself may be a link.
+//! - A file is read only up to [`MAX_FILE_BYTES`] and restores at most
+//!   [`MAX_FILE_RECORDS`] records; upstream reads a file whole, of any size,
+//!   and restores every record in it. A file over either is skipped with a
+//!   warning and the rest are loaded.
 //! - On Windows, paths that differ only in case are the same file, and a
 //!   rename or removal the file system refuses for a moment (a sharing
 //!   violation or access denied, as from a virus scanner) is tried three
@@ -43,7 +49,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, Write as _};
+use std::io::{self, Read as _, Write as _};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
@@ -56,6 +62,30 @@ use crate::auth::Timestamp;
 use crate::auth::path::{clean, join, rel};
 use crate::manager::lock;
 
+/// The most a load reads of one `.cds` file: a credential's file holds a
+/// record for each model it has cooling, a few hundred bytes each, so this
+/// is well over any file the store writes.
+pub(crate) const MAX_FILE_BYTES: u64 = 4 << 20;
+
+/// The most records a load restores from one `.cds` file.
+pub(crate) const MAX_FILE_RECORDS: usize = 10_000;
+
+/// What a load reads of a file.
+#[derive(Clone, Copy)]
+pub(crate) struct Limits {
+    pub(crate) bytes: u64,
+    pub(crate) records: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            bytes: MAX_FILE_BYTES,
+            records: MAX_FILE_RECORDS,
+        }
+    }
+}
+
 /// The store of `.cds` files under one auth directory (upstream's
 /// `FileCooldownStateStore` with its directory and auth directory the
 /// same).
@@ -63,6 +93,7 @@ pub(crate) struct FileStore {
     dir: PathBuf,
     /// Serializes saves.
     mu: Mutex<()>,
+    limits: Limits,
 }
 
 impl FileStore {
@@ -71,6 +102,16 @@ impl FileStore {
         Self {
             dir,
             mu: Mutex::new(()),
+            limits: Limits::default(),
+        }
+    }
+
+    /// The store in `dir`, reading no more of a file than `limits`.
+    #[cfg(test)]
+    pub(crate) fn with_limits(dir: PathBuf, limits: Limits) -> Self {
+        Self {
+            limits,
+            ..Self::new(dir)
         }
     }
 
@@ -257,7 +298,7 @@ impl StateStore for FileStore {
             if !is_cds(name) || is_temp(name) {
                 return Ok(());
             }
-            records.extend(read_file(path)?);
+            records.extend(read_file(path, self.limits)?);
             Ok(())
         })
         .map_err(|err| StoreError(format!("read cooldown state directory: {err}")))?;
@@ -370,27 +411,53 @@ fn remove_cds(path: &Path) -> io::Result<()> {
 }
 
 /// A file's records; an empty or missing file has none (upstream's
-/// `readCooldownStateFile`).
-fn read_file(path: &Path) -> io::Result<Vec<Record>> {
-    let data = match fs::read(path) {
-        Ok(data) => data,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => {
-            return Err(io::Error::new(
-                err.kind(),
-                format!("read cooldown state {}: {err}", path.display()),
-            ));
-        }
+/// `readCooldownStateFile`), and neither has one over `limits`, which is
+/// skipped with a warning.
+fn read_file(path: &Path, limits: Limits) -> io::Result<Vec<Record>> {
+    let read_error = |err: io::Error| {
+        io::Error::new(
+            err.kind(),
+            format!("read cooldown state {}: {err}", path.display()),
+        )
     };
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(read_error(err)),
+    };
+    // One byte past the limit tells a file that is over it, however long the
+    // file system says it is, and is as much as is ever read.
+    let mut data = Vec::new();
+    file.take(limits.bytes.saturating_add(1))
+        .read_to_end(&mut data)
+        .map_err(read_error)?;
+    if u64::try_from(data.len()).is_ok_and(|len| len > limits.bytes) {
+        tracing::warn!(
+            path = %path.display(),
+            limit = limits.bytes,
+            "skipping a cooldown state file over the size limit"
+        );
+        return Ok(Vec::new());
+    }
     if data.iter().all(u8::is_ascii_whitespace) {
         return Ok(Vec::new());
     }
-    record::decode_file(&data).map_err(|err| {
+    let records = record::decode_file(&data).map_err(|err| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("parse cooldown state {}: {err}", path.display()),
         )
-    })
+    })?;
+    if records.len() > limits.records {
+        tracing::warn!(
+            path = %path.display(),
+            records = records.len(),
+            limit = limits.records,
+            "skipping a cooldown state file with too many records"
+        );
+        return Ok(Vec::new());
+    }
+    Ok(records)
 }
 
 /// Calls `visit` with each regular file under `dir`, in name order, as Go's
