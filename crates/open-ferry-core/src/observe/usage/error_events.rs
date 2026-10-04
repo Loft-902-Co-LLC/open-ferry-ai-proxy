@@ -17,8 +17,8 @@
 //! Deviations from upstream:
 //! - Times are in UTC; upstream writes the local time with its offset.
 //! - The body and the credential's and model's status messages are
-//!   scrubbed of the credential's keys and tokens (see
-//!   [`Secrets::add_auth`]).
+//!   scrubbed of the credential's keys and tokens, each however short, as
+//!   a file is (see [`Secrets::add_auth`]).
 //! - Upstream skips the events in its Home mode, which open-ferry doesn't
 //!   have.
 
@@ -123,7 +123,7 @@ pub(crate) fn error_event_payload(result: &CallResult, auth: &Auth) -> String {
     event.str("auth_index", auth.index.trim());
     event.raw("status_code", &status_code(error).to_string());
     let secrets = credential_secrets(auth);
-    event.str("body", &secrets.text(body(error), Policy::Client));
+    event.str("body", &secrets.text(body(error), Policy::Disk));
     if let Some(error) = error {
         event.str_omitempty("code", error.code.trim());
         if error.retryable {
@@ -177,7 +177,7 @@ fn auth_status(model: &str, auth: &Auth, secrets: &Secrets) -> String {
     status.str("status", auth.status.as_str());
     status.str_omitempty(
         "status_message",
-        &secrets.str(auth.status_message.trim(), Policy::Client),
+        &secrets.str(auth.status_message.trim(), Policy::Disk),
     );
     status.bool("disabled", auth.disabled);
     status.bool("unavailable", auth.unavailable);
@@ -194,7 +194,7 @@ fn auth_status(model: &str, auth: &Auth, secrets: &Secrets) -> String {
         object.str("status", state.status.as_str());
         object.str_omitempty(
             "status_message",
-            &secrets.str(state.status_message.trim(), Policy::Client),
+            &secrets.str(state.status_message.trim(), Policy::Disk),
         );
         object.bool("unavailable", state.unavailable);
         object.time_omitempty("next_retry_after", state.next_retry_after);

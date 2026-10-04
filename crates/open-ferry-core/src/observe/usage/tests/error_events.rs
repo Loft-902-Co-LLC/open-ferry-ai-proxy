@@ -215,3 +215,32 @@ fn error_event_status_messages_are_scrubbed() {
         );
     }
 }
+
+/// Not upstream's: a credential's token shorter than the client errors'
+/// minimum is still scrubbed from the event, as from a file.
+#[test]
+fn error_event_scrubs_short_secrets() {
+    let (usage, manager) = manager_with_events();
+    let (mut subscriber, _subscription) = usage.subscribe_errors();
+    let mut credential = codex_auth("auth-short");
+    credential
+        .metadata
+        .insert("access_token".to_owned(), json!("tk-42"));
+    let auth = manager.register_unsaved(credential).expect("register");
+    manager.mark_result(&CallResult {
+        auth_id: auth.id.clone(),
+        provider: "codex".to_owned(),
+        model: "gpt-5".to_owned(),
+        success: false,
+        error: Some(AuthError {
+            message: "invalid tk-42".to_owned(),
+            http_status: 401,
+            ..AuthError::default()
+        }),
+        ..CallResult::default()
+    });
+    let event: Value =
+        serde_json::from_slice(&subscriber.try_recv().expect("an error event")).expect("JSON");
+    let text = event.to_string();
+    assert!(!text.contains("tk-42"), "{text}");
+}
