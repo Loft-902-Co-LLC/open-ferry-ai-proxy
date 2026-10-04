@@ -12,7 +12,7 @@ use super::{answer, files, logger};
 use crate::auth::Auth;
 use crate::exec::Format;
 use crate::observe::redact::Secrets;
-use crate::observe::request_log::{Downstream, Mode, RequestBody, finish};
+use crate::observe::request_log::{Answer, Downstream, Mode, RequestBody, finish};
 use crate::observe::{AttemptKind, AttemptRequest, Outcome, RequestContext, Tap};
 
 const COOKIE: &str = "cookie-secret-0123456789";
@@ -219,6 +219,63 @@ fn decodes_compressed_request_bodies_before_scrubbing() {
     for log in logs {
         assert!(!log.contains(key), "{log}");
         assert!(!log.contains('\u{1f}'), "{log}");
+    }
+}
+
+/// An answer to a request, `application/json` in the `encoding` it names.
+fn encoded_answer(encoding: &'static str, body: Vec<u8>) -> Answer {
+    let mut encoded = answer(200, "application/json", b"");
+    encoded
+        .headers
+        .insert("content-encoding", HeaderValue::from_static(encoding));
+    encoded.body.push(&Bytes::from(body));
+    encoded
+}
+
+// Not upstream's: a compressed answer is decoded before it is scrubbed, and
+// one that can't be decoded, or has an encoding not known here, is left out,
+// never written as it came.
+#[test]
+fn decodes_compressed_answers_before_scrubbing() {
+    let dir = tempfile::tempdir().unwrap();
+    let logger = logger(dir.path(), true);
+    let key = "client-secret-0123456789";
+    let json = format!("{{\"echo\":\"{key}\"}}");
+    let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    gzip.write_all(json.as_bytes()).unwrap();
+    let gzip = gzip.finish().unwrap();
+    for (encoding, body) in [
+        ("gzip", gzip.clone()),
+        ("gzip", b"RAWANSWERBYTES".to_vec()),
+        ("compress", gzip),
+    ] {
+        let context = context_with_key("/v1/chat/completions", key);
+        logger.start(&context).unwrap();
+        finish(
+            &context,
+            downstream_with("/v1/chat/completions", &[], b"{}".to_vec()),
+            encoded_answer(encoding, body),
+        );
+    }
+    logger.flush();
+
+    let files = files(dir.path());
+    assert_eq!(files.len(), 3, "{files:?}");
+    let logs: Vec<&str> = files.iter().map(|(_, log)| log.as_str()).collect();
+    for expected in [
+        "=== RESPONSE ===\nStatus: 200\nContent-Encoding: gzip\nContent-Type: application/json\n\n{\"echo\":\"[redacted]\"}\n",
+        "[ENCODED RESPONSE BODY OMITTED: it couldn't be decoded]\n",
+        "[ENCODED RESPONSE BODY OMITTED: its Content-Encoding isn't supported]\n",
+    ] {
+        assert!(
+            logs.iter().any(|log| log.contains(expected)),
+            "{expected}: {logs:?}"
+        );
+    }
+    for log in logs {
+        assert!(!log.contains(key), "{log}");
+        assert!(!log.contains("RAWANSWERBYTES"), "{log}");
+        assert!(!log.contains("DECOMPRESSION ERROR"), "{log}");
     }
 }
 

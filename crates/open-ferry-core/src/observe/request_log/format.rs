@@ -25,15 +25,16 @@
 //! - Every credential header's value is masked, the answer's included (see
 //!   [`mask::mask_header_value`]); upstream masks only the client's
 //!   request headers and the upstream requests', and fewer names.
-//! - A decoded answer is cut at a limit (see [`DECODE_LIMIT`]); the texts
-//!   of the decoding errors are Rust's.
-//! - A compressed request body is decoded for `gzip`, `deflate`, `br` and
-//!   `zstd`, to at most a limit, and one that can't be decoded, has an
-//!   encoding not known here, or decodes past the limit is shown as a
-//!   one-line placeholder ([`decode_request_body`]), never as it came,
-//!   since a secret compressed in it couldn't be scrubbed. Upstream decodes
-//!   only `zstd`, shows any other body as it came, and cuts one past its
-//!   limit with a marker.
+//! - A compressed request body or answer is decoded for `gzip`, `deflate`,
+//!   `br` and `zstd`, to at most a limit (see [`DECODE_LIMIT`]), and one
+//!   that can't be decoded, has an encoding not known here, or decodes past
+//!   the limit is shown as a one-line placeholder ([`decode_request_body`],
+//!   [`decompress_response`]), never as it came, since a secret compressed
+//!   in it couldn't be scrubbed. A streamed answer is shown so too, where it
+//!   is compressed. Upstream decodes only a request body's `zstd` and an
+//!   answer's `gzip`, `deflate`, `br` and `zstd`, shows any other body as it
+//!   came, and for an answer that can't be decoded writes the compressed
+//!   bytes and the error; it cuts a body past its limit with a marker.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -53,10 +54,10 @@ use crate::observe::mask;
 /// request body only).
 pub(crate) const DECODE_LIMIT: usize = 32 << 20;
 
-/// What a log shows for a compressed request body it can't show decoded,
-/// with the reason.
-fn omitted(reason: &str) -> Vec<u8> {
-    format!("[ENCODED REQUEST BODY OMITTED: {reason}]").into_bytes()
+/// What a log shows for a compressed body it can't show decoded: the
+/// `what` (`REQUEST` or `RESPONSE`) and the reason.
+fn omitted(what: &str, reason: &str) -> Vec<u8> {
+    format!("[ENCODED {what} BODY OMITTED: {reason}]").into_bytes()
 }
 
 /// Go's `CanonicalMIMEHeaderKey`: each `-`-separated word of `name` with
@@ -283,7 +284,6 @@ fn write_response_section(
     status: u16,
     headers: &HeaderMap,
     body: &[u8],
-    decode_error: Option<&str>,
     trailing_newline: bool,
 ) {
     let mut head = format!("=== RESPONSE ===\nStatus: {status}\n");
@@ -293,9 +293,6 @@ fn write_response_section(
         out.push(b'\n');
     }
     out.extend_from_slice(body);
-    if let Some(error) = decode_error {
-        out.extend_from_slice(format!("\n[DECOMPRESSION ERROR: {error}]").as_bytes());
-    }
     if trailing_newline {
         out.push(b'\n');
     }
@@ -326,21 +323,21 @@ pub(crate) fn non_streaming(sections: &Sections<'_>) -> Vec<u8> {
         "=== API RESPONSE",
         sections.api_response,
     );
-    let (body, error) = decompress_response(sections.response_headers, sections.response);
+    let body = decompress_response(sections.response_headers, sections.response);
     write_response_section(
         &mut out,
         sections.status,
         sections.response_headers,
         &body,
-        error.as_deref(),
         true,
     );
     out
 }
 
 /// The log of a request answered with a stream (upstream's
-/// `writeFinalLog`): its answer is shown as it was sent, and the upstream
-/// errors are left out.
+/// `writeFinalLog`): its answer is shown as it was sent, unless it is
+/// compressed (see [`decompress_response`]), and the upstream errors are
+/// left out.
 pub(crate) fn streaming(sections: &Sections<'_>) -> Vec<u8> {
     let mut out = Vec::new();
     write_request_info(&mut out, sections, "http");
@@ -362,12 +359,12 @@ pub(crate) fn streaming(sections: &Sections<'_>) -> Vec<u8> {
         "=== API RESPONSE",
         sections.api_response,
     );
+    let body = decompress_response(sections.response_headers, sections.response);
     write_response_section(
         &mut out,
         sections.status,
         sections.response_headers,
-        sections.response,
-        None,
+        &body,
         false,
     );
     out
@@ -391,50 +388,19 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window == needle)
 }
 
-/// The answer's body decoded as its first `Content-Encoding` says, and
-/// the error when it can't be (upstream's `decompressResponse`); the body
-/// as it is on an error, or for an encoding it doesn't know.
-pub(crate) fn decompress_response<'a>(
-    headers: &HeaderMap,
-    body: &'a [u8],
-) -> (Cow<'a, [u8]>, Option<String>) {
-    if headers.is_empty() || body.is_empty() {
-        return (Cow::Borrowed(body), None);
-    }
+/// The answer's body as a log shows it: decoded as its `Content-Encoding`
+/// says, as a request body is (see [`decode_request_body`]), to at most
+/// [`DECODE_LIMIT`] bytes (upstream's `decompressResponse`). One that can't
+/// be decoded, has an encoding not known here, or decodes past the limit is
+/// replaced by a one-line placeholder, never kept as it came.
+pub(crate) fn decompress_response<'a>(headers: &HeaderMap, body: &'a [u8]) -> Cow<'a, [u8]> {
     let encoding = headers
-        .get(http::header::CONTENT_ENCODING)
-        .map(|value| String::from_utf8_lossy(value.as_bytes()).to_lowercase())
-        .unwrap_or_default();
-    let decoded = match encoding.as_str() {
-        "gzip" => read_limited(
-            flate2::read::MultiGzDecoder::new(body),
-            "gzip",
-            DECODE_LIMIT,
-        ),
-        "deflate" => read_limited(
-            flate2::read::DeflateDecoder::new(body),
-            "deflate",
-            DECODE_LIMIT,
-        ),
-        "br" => read_limited(
-            brotli_decompressor::Decompressor::new(body, 4096),
-            "brotli",
-            DECODE_LIMIT,
-        ),
-        "zstd" => decode_zstd(body, DECODE_LIMIT)
-            .map_err(|error| format!("failed to decompress zstd data: {error}")),
-        _ => return (Cow::Borrowed(body), None),
-    };
-    match decoded {
-        Ok((decoded, false)) => (Cow::Owned(decoded), None),
-        Ok((decoded, true)) => (
-            Cow::Owned(decoded),
-            Some(format!(
-                "decompressed body is over {DECODE_LIMIT} bytes; the rest is left out"
-            )),
-        ),
-        Err(error) => (Cow::Borrowed(body), Some(error)),
-    }
+        .get_all(http::header::CONTENT_ENCODING)
+        .iter()
+        .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned())
+        .collect::<Vec<_>>()
+        .join(", ");
+    decode_body(body, &encoding, DECODE_LIMIT, "RESPONSE")
 }
 
 /// Reads `reader` to its end or to `limit` bytes, saying whether there was
@@ -514,6 +480,12 @@ pub(crate) fn decode_request_body<'a>(
     encoding: &str,
     limit: usize,
 ) -> Cow<'a, [u8]> {
+    decode_body(raw, encoding, limit, "REQUEST")
+}
+
+/// `raw` decoded as `encoding` says (see [`decode_request_body`]), its
+/// placeholder naming `what`, `REQUEST` or `RESPONSE`.
+fn decode_body<'a>(raw: &'a [u8], encoding: &str, limit: usize, what: &str) -> Cow<'a, [u8]> {
     let encoding = encoding.trim();
     if raw.is_empty() || encoding.is_empty() || encoding.eq_ignore_ascii_case("identity") {
         return Cow::Borrowed(raw);
@@ -532,14 +504,15 @@ pub(crate) fn decode_request_body<'a>(
                 limit,
             ),
             "zstd" => decode_zstd(&body, limit),
-            _ => return Cow::Owned(omitted("its Content-Encoding isn't supported")),
+            _ => return Cow::Owned(omitted(what, "its Content-Encoding isn't supported")),
         };
         body = match decoded {
             Ok((decoded, false)) => Cow::Owned(decoded),
             Ok((_, true)) => {
-                return Cow::Owned(omitted(&format!("it decodes to over {limit} bytes")));
+                let reason = format!("it decodes to over {limit} bytes");
+                return Cow::Owned(omitted(what, &reason));
             }
-            Err(_) => return Cow::Owned(omitted("it couldn't be decoded")),
+            Err(_) => return Cow::Owned(omitted(what, "it couldn't be decoded")),
         };
     }
     body
@@ -664,7 +637,8 @@ mod tests {
     }
 
     // Not upstream's: a compressed answer is shown decoded, and one that
-    // can't be decoded as it came, with the error.
+    // can't be decoded, or that decodes past the limit, or has an encoding
+    // not known here, as a placeholder, never as it came.
     #[test]
     fn decompresses_answers() {
         let mut headers = HeaderMap::new();
@@ -672,26 +646,58 @@ mod tests {
         let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
         gzip.write_all(b"hello").unwrap();
         let gzip = gzip.finish().unwrap();
-        let (body, error) = decompress_response(&headers, &gzip);
-        assert_eq!((&*body, error), (&b"hello"[..], None));
+        assert_eq!(&*decompress_response(&headers, &gzip), b"hello");
 
         headers.insert("content-encoding", HeaderValue::from_static("ZSTD"));
         let compressed = zstd(b"hi");
-        let (body, error) = decompress_response(&headers, &compressed);
-        assert_eq!((&*body, error), (&b"hi"[..], None));
+        assert_eq!(&*decompress_response(&headers, &compressed), b"hi");
 
-        headers.insert("content-encoding", HeaderValue::from_static("deflate"));
-        let (body, error) = decompress_response(&headers, b"not deflate at all");
-        assert_eq!(&*body, b"not deflate at all");
-        assert!(
-            error
-                .unwrap()
-                .starts_with("failed to decompress deflate data: ")
-        );
+        headers.insert("content-encoding", HeaderValue::from_static("gzip, zstd"));
+        let stacked = zstd(&gzip);
+        assert_eq!(&*decompress_response(&headers, &stacked), b"hello");
 
         headers.insert("content-encoding", HeaderValue::from_static("identity"));
-        let (body, error) = decompress_response(&headers, b"plain");
-        assert_eq!((&*body, error), (&b"plain"[..], None));
+        assert_eq!(&*decompress_response(&headers, b"plain"), b"plain");
+        assert_eq!(&*decompress_response(&HeaderMap::new(), b"plain"), b"plain");
+
+        let undecodable = b"[ENCODED RESPONSE BODY OMITTED: it couldn't be decoded]";
+        headers.insert("content-encoding", HeaderValue::from_static("deflate"));
+        assert_eq!(
+            &*decompress_response(&headers, b"not deflate at all"),
+            undecodable
+        );
+        headers.insert("content-encoding", HeaderValue::from_static("gzip"));
+        assert_eq!(
+            &*decompress_response(&headers, &gzip[..gzip.len() - 4]),
+            undecodable,
+            "cut short"
+        );
+        headers.insert("content-encoding", HeaderValue::from_static("compress"));
+        assert_eq!(
+            &*decompress_response(&headers, &gzip),
+            b"[ENCODED RESPONSE BODY OMITTED: its Content-Encoding isn't supported]"
+        );
+        assert_eq!(
+            &*decode_body(&zstd(&[b'x'; 1024]), "zstd", 64, "RESPONSE"),
+            b"[ENCODED RESPONSE BODY OMITTED: it decodes to over 64 bytes]"
+        );
+    }
+
+    // Not upstream's: a streamed answer that is compressed is shown as a
+    // placeholder where it can't be decoded, as a non-streamed one is.
+    #[test]
+    fn a_compressed_streamed_answer_is_never_written_as_it_came() {
+        let headers = HeaderMap::new();
+        let mut response_headers = HeaderMap::new();
+        response_headers.insert("content-encoding", HeaderValue::from_static("gzip"));
+        let mut sections = sections(&headers, &response_headers);
+        sections.response = b"\x1f\x8bRAWBYTES";
+        let log = String::from_utf8(streaming(&sections)).unwrap();
+        assert!(
+            log.ends_with("\n[ENCODED RESPONSE BODY OMITTED: it couldn't be decoded]"),
+            "{log:?}"
+        );
+        assert!(!log.contains("RAWBYTES"), "{log:?}");
     }
 
     /// `input` as a brotli stream: one uncompressed meta-block, then an
