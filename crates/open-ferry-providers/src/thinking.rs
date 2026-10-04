@@ -21,7 +21,8 @@
 //!
 //! [`crate::claude::thinking`], [`crate::gemini::thinking`],
 //! [`crate::codex::thinking`] (`reasoning.effort`) and
-//! [`crate::openai_compat::thinking`] (`reasoning_effort`) are the targets.
+//! [`crate::openai_compat::thinking`] (`reasoning_effort`) are the targets, with
+//! [`crate::gemini::interactions`] (`generation_config.thinking_level`).
 //!
 //! Deviations from upstream:
 //! - The caller looks the model up (see each target); upstream asks its

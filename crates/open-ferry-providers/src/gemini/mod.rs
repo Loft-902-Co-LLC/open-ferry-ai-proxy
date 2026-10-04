@@ -15,14 +15,15 @@
 //! translated back to the client's format; a stream line by line
 //! (`stream`).
 //!
+//! [`InteractionsExecutor`] calls Gemini's Interactions API for the
+//! `gemini-interactions` provider (see [`interactions`]).
+//!
 //! Requests carry the client's `User-Agent`, else this project's, and the
 //! credential's `header:` attributes. Nothing else identifies the caller:
 //! no `x-goog-api-client` or other header of Google's own clients is sent,
 //! and a `header:x-goog-api-client` attribute is dropped with a warning.
 //!
 //! Left out, as for the other providers:
-//! - Gemini's Interactions API and the `gemini-interactions` provider:
-//!   requests always go to `generateContent`.
 //! - AI Studio, which upstream serves through a websocket relay.
 //! - The Home service (its credential options and refresh).
 //! - The model that the credential manager resolved for an API key
@@ -55,6 +56,7 @@
 
 mod executor;
 mod image;
+pub mod interactions;
 mod sse;
 mod stream;
 #[cfg(test)]
@@ -65,6 +67,7 @@ mod turns;
 mod vertex;
 
 pub use executor::GeminiExecutor;
+pub use interactions::InteractionsExecutor;
 pub use token::normalize_service_account;
 pub use vertex::VertexExecutor;
 

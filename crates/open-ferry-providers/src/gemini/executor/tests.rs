@@ -8,8 +8,8 @@
 //!   the payload rules' tests (P3 WP-D).
 //! - `InteractionsWithGeminiAPIKeyUsesGeminiEndpoint`, every
 //!   `NativeInteractions` test and
-//!   `NativeInteractionsSourceFormatAllowsSupportedEntryProtocols`: the
-//!   Interactions API isn't ported.
+//!   `NativeInteractionsSourceFormatAllowsSupportedEntryProtocols`: they
+//!   are the Interactions executor's (see `interactions`' tests).
 //!
 //! Changed:
 //! - `CountTokensPrependsLeadingUser` doesn't check the upstream-attempt
