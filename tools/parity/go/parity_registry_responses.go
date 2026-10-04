@@ -1,8 +1,12 @@
-// WP4-C imports internal/translator/openai/interactions/responses
-// here, as blank imports, so that sdk/translator's default registry, which
-// the registry/* entries run, holds their pairs. It does so in the same
-// commit as the Rust registry gains them, in
+// WP4-C's blank import: internal/translator/openai/interactions/responses
+// registers openai-response -> interactions and interactions ->
+// openai-response in sdk/translator's default registry, which the registry/*
+// entries run. The Rust registry holds the same pairs, in
 // crates/open-ferry-translate/src/registry/builtin/interactions/responses.rs,
-// and maps them to its suites in tools/parity/src/interactions/responses.rs.
-// Not ported yet: nothing is imported.
+// and tools/parity/src/interactions/responses/request.rs and response.rs map
+// them to their suites.
 package main
+
+import (
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/openai/interactions/responses"
+)

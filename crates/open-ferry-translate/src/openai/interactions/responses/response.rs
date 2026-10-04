@@ -48,8 +48,8 @@
 //! - A tool input error says the arguments were invalid in fewer words than
 //!   upstream's: [`InputError`](crate::apply_patch::input::InputError)'s.
 //! - Upstream's `FunctionCallIndexes`, which nothing reads, is not kept.
-//! - [`translate`](InteractionsToOpenAIResponsesStream::translate) returns
-//!   one event's frames joined, where upstream returns them apart.
+//! - Each stream's `translate` returns one event's frames joined, where
+//!   upstream returns them apart; the registry splits them again.
 
 mod items;
 mod read;

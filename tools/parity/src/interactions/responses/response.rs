@@ -22,12 +22,10 @@
 //! Hand-written cases are in [`cases`], and random ones in
 //! `crate::generate::interactions::responses::response`.
 //!
-//! The pairs are not registered yet (WP4-C1's request translators are not on
-//! main), so [`Family::native`] maps nothing and the `registry_*` functions
-//! give no cases. Once they are, `native` maps the response stages of
-//! `interactions` → `openai-response` and `openai-response` →
-//! `interactions` to these suites, and the `registry_*` functions give
-//! their cases.
+//! The registry runs these translators for `interactions` to
+//! `openai-response` and `openai-response` to `interactions` (see
+//! [`Family::native`]); the `registry_*` functions send the same
+//! hand-written and random cases through it.
 
 mod cases;
 
@@ -149,10 +147,6 @@ impl Family for Kind {
                     .collect();
                 if self == Self::ToResponsesStream {
                     events
-                } else if case.events.is_empty() {
-                    // Upstream's stream state only exists once an event has
-                    // come, so the harness has nothing to finalize.
-                    json!({ "events": "", "finalize": "", "failed": false }).to_string()
                 } else {
                     let finalize = stream.finalize_tool_input();
                     let failed = stream.tool_input_error().is_some();
@@ -227,26 +221,51 @@ impl Family for Kind {
     }
 
     fn native(stage: Stage, from: &str, to: &str) -> Option<Self> {
-        let _ = (stage, from, to);
-        None
+        match (stage, from, to) {
+            (Stage::Stream, INTERACTIONS, RESPONSES) => Some(Self::ToResponsesStream),
+            (Stage::NonStream, INTERACTIONS, RESPONSES) => Some(Self::ToResponsesNonStream),
+            (Stage::Stream, RESPONSES, INTERACTIONS) => Some(Self::ToInteractionsStream),
+            (Stage::NonStream, RESPONSES, INTERACTIONS) => Some(Self::ToInteractionsNonStream),
+            _ => None,
+        }
     }
 }
 
-/// The hand-written registry stream cases for the pairs, each list
-/// with its pair. None until the pairs are registered.
+/// The registry's name for the Interactions format.
+const INTERACTIONS: &str = "interactions";
+
+/// The registry's name for the OpenAI Responses format.
+const RESPONSES: &str = "openai-response";
+
+/// The hand-written registry stream cases for the pairs, each list with its
+/// pair: the provider's format, then the client's.
 pub fn registry_streams() -> Vec<(Pair, Vec<Case>)> {
-    Vec::new()
+    vec![
+        ((INTERACTIONS, RESPONSES), cases::to_responses_streams()),
+        ((RESPONSES, INTERACTIONS), cases::to_interactions_streams()),
+    ]
 }
 
-/// The hand-written registry non-streaming cases for the pairs, each
-/// list with its pair. None until the pairs are registered.
+/// The hand-written registry non-streaming cases for the pairs, each list
+/// with its pair.
 pub fn registry_finals() -> Vec<(Pair, Vec<Case>)> {
-    Vec::new()
+    vec![
+        ((INTERACTIONS, RESPONSES), cases::to_responses_finals()),
+        ((RESPONSES, INTERACTIONS), cases::to_interactions_finals()),
+    ]
 }
 
 /// `count` random registry stream cases, and as many non-streaming ones,
-/// for each of the pairs. None until the pairs are registered.
+/// for each of the pairs.
 pub fn registry_response_cases(seed: u64, count: usize) -> Vec<ResponseCases> {
-    let _ = (seed, count);
-    Vec::new()
+    vec![
+        (
+            (INTERACTIONS, RESPONSES),
+            generate::to_responses_cases(seed, count),
+        ),
+        (
+            (RESPONSES, INTERACTIONS),
+            generate::to_interactions_cases(seed, count),
+        ),
+    ]
 }
