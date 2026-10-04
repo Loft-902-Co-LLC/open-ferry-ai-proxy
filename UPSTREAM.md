@@ -356,7 +356,27 @@ Deviations, each also noted in its module:
 
 ### Request logs
 
-Not ported yet: the request log and the error logs (`request-log`, `error-logs-max-files`), with the attempts the taps see, the `X-CPA-TRACE-ID` header, the `commercial-mode` check, and the routes `request-error-logs`, `request-error-logs/:name` and `request-log-by-id/:id`.
+The request log is ported (`open_ferry_core::observe::request_log`, with the server's capture layer in `open-ferry-server`'s `request_log`):
+
+- **With `request-log` on**, every logged request gets a file in the log directory, named after its path, the local time and the last eight characters of its ID, as upstream names it: `v1-chat-completions-2026-09-23T101500-1234abcd.log`, with `_1`, `_2` and on for a name taken. The file has upstream's sections: the client's request, its headers and body (a zstd body decoded), the upstream WebSocket timeline, each upstream attempt's request and answer as the taps saw them (`=== API REQUEST n ===`, `=== API RESPONSE n ===`), the errors the handlers recorded, and the answer. A streamed answer is written as it was sent.
+- **With it off**, a request that fails gets an `error-*.log` file, unless the client left; upstream's rules for what counts are kept (`hasActionableError`). The oldest error logs beyond `error-logs-max-files` are removed.
+- **What is logged**: not a `GET`, unless it is a Responses WebSocket upgrade, nor the management API. A WebSocket session's log is written when it ends, with the attempts of all its turns.
+- **`commercial-mode`** turns the request log off, and **`X-CPA-TRACE-ID`** is set on every answer whose request picked a credential before the answer's head: the time it was picked, the credential's index and the request's ID.
+- **The routes** `GET request-error-logs`, `request-error-logs/:name` and `request-log-by-id/:id` (v8: `observability/logs/errors`, `errors/:name` and `requests/:id`) list the error logs, send one, and send a request's newest log by its full or short ID, for clients with the management key. They read the log directory the binary resolved at start. The request logger takes a relative directory from the config file's directory instead, as upstream's does, so with a relative log directory and a config file outside the working directory the routes look elsewhere than the logs are, as upstream's do.
+
+Deviations, each also noted in its module:
+
+- **More is kept out of the files.** `Cookie`, `Set-Cookie`, `Proxy-Authorization`, `X-Management-Key` and `X-Local-Password` are masked along with upstream's sensitive headers, in the answer's headers too. Every secret an attempt used, and the client's key, is scrubbed from the whole file. The files have mode 0600 on Unix.
+- **OAuth callbacks** (a path ending `/callback`) aren't logged.
+- **Bodies are kept in memory, up to 32 MiB each**, and a line at the end of the file counts what was left out; upstream spills them to temporary files. The answer is kept as it is sent, and the file written once the request is done, by a writer thread of its own, which nothing waits on. When its queue of 1024 is full a log is dropped, and the drops are warned about at most once a minute.
+- **With `request-log` on, the client's body is read before the handler runs, up to the server's body limit**, and a longer one is logged cut at the limit with a marker. With it off, the body is kept as the handler reads it, with markers saying what it didn't read; upstream reads a body of up to 1 MiB ahead of the handler.
+- **The settings are read for each request.** The layer is always installed and checks `commercial-mode` live; upstream installs it only without `commercial-mode`. A request keeps the mode it arrived in.
+- **A client that leaves before the answer's head** is logged with status 499; one that leaves during the body, with what was sent.
+- **The trace ID is the latest selection's**, taken when the answer's head is ready.
+- **Not ported**: the client's own WebSocket timeline (only the upstream one is written), the handshake event and `Stage` line of an upstream WebSocket error, the Codex quota headers' merge into the answer, and the context values that override the bodies logged. An `=== API ERROR RESPONSE ===` section comes only from a handler calling `RequestState::record_api_error`.
+- **Names** also turn `\` into `-`, and keep at most 120 characters of the path. Headers are written sorted, in Go's canonical form.
+- **The routes** send a log read whole as `text/plain; charset=utf-8`, with its `Last-Modified`, without Go's type sniffing or range and conditional requests. Error logs with the same change time are listed in name order.
+- **Errors** are worded as Rust words them, for decoding and for the files.
 
 ### Log files and config changes
 
