@@ -534,6 +534,186 @@ fn symbolic_links_are_skipped() {
     assert!(dir.path().join("l.cds").symlink_metadata().is_ok());
 }
 
+/// The kinds of directory link a platform has.
+#[derive(Clone, Copy, Debug)]
+enum LinkKind {
+    Symlink,
+    /// A directory junction, which Windows makes without a privilege.
+    #[cfg(windows)]
+    Junction,
+}
+
+#[cfg(unix)]
+const LINK_KINDS: [LinkKind; 1] = [LinkKind::Symlink];
+#[cfg(windows)]
+const LINK_KINDS: [LinkKind; 2] = [LinkKind::Junction, LinkKind::Symlink];
+
+/// Makes `link`, a directory link to `target`, as `kind`.
+fn link_dir(kind: LinkKind, target: &Path, link: &Path) -> std::io::Result<()> {
+    match kind {
+        #[cfg(unix)]
+        LinkKind::Symlink => std::os::unix::fs::symlink(target, link),
+        #[cfg(windows)]
+        LinkKind::Symlink => std::os::windows::fs::symlink_dir(target, link),
+        #[cfg(windows)]
+        LinkKind::Junction => {
+            let out = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .output()?;
+            if out.status.success() {
+                Ok(())
+            } else {
+                Err(std::io::Error::other(
+                    String::from_utf8_lossy(&out.stdout).trim().to_owned(),
+                ))
+            }
+        }
+    }
+}
+
+/// Makes a link, or says why not, for a test to skip: making a symbolic
+/// link on Windows takes a privilege.
+fn try_link_dir(kind: LinkKind, target: &Path, link: &Path) -> bool {
+    match link_dir(kind, target, link) {
+        Ok(()) => true,
+        Err(err) if err.raw_os_error() == Some(1314) => {
+            eprintln!("skipping {kind:?}: creating symbolic links needs a privilege: {err}");
+            false
+        }
+        Err(err) => panic!("{kind:?}: {err}"),
+    }
+}
+
+fn record_for(auth_file: &Path, model: &str) -> Record {
+    Record {
+        provider: "xai".into(),
+        auth_id: auth_file
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        auth_file: auth_file.to_string_lossy().into_owned(),
+        model: model.into(),
+        status: "cooling".into(),
+        next_retry_after: Some(at(1, 0, 0)),
+        updated_at: Some(at(0, 0, 0)),
+        ..Record::default()
+    }
+}
+
+fn entries(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .expect("read dir")
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+/// Not upstream's: a file whose directory is, or is below, a link isn't
+/// written through it, and what is behind the link isn't removed; upstream
+/// writes outside the auth directory. The other files are saved.
+#[test]
+fn a_file_is_not_written_or_removed_through_a_link() {
+    for kind in LINK_KINDS {
+        let dir = temp_dir();
+        let outside = temp_dir();
+        let root = dir.path();
+        std::fs::write(outside.path().join("old.cds"), "{}").expect("write");
+        std::fs::create_dir(root.join("sub")).expect("mkdir");
+        if !try_link_dir(kind, outside.path(), &root.join("linked"))
+            || !try_link_dir(kind, outside.path(), &root.join("sub").join("deeper"))
+        {
+            continue;
+        }
+        let store = FileStore::new(root.to_path_buf());
+        let records = [
+            record_for(&root.join("linked").join("a.json"), "m"),
+            record_for(&root.join("linked").join("new").join("b.json"), "m"),
+            record_for(&root.join("sub").join("deeper").join("c.json"), "m"),
+            record_for(&root.join("sub").join("d.json"), "m"),
+            record_for(&root.join("plain").join("e.json"), "m"),
+        ];
+        store.save(&records, at(0, 0, 0)).expect("save");
+
+        assert_eq!(entries(outside.path()), ["old.cds"], "{kind:?}");
+        assert!(root.join("sub").join("d.cds").is_file(), "{kind:?}");
+        assert!(root.join("plain").join("e.cds").is_file(), "{kind:?}");
+        assert!(
+            root.join("linked")
+                .symlink_metadata()
+                .expect("link")
+                .is_symlink(),
+            "{kind:?}"
+        );
+
+        store.save(&[], at(0, 0, 0)).expect("save nothing");
+        assert_eq!(entries(outside.path()), ["old.cds"], "{kind:?}");
+        assert!(!root.join("sub").join("d.cds").exists(), "{kind:?}");
+        assert!(!root.join("plain").join("e.cds").exists(), "{kind:?}");
+    }
+}
+
+/// Not upstream's: a link in the file's directory is refused at any depth,
+/// including one that is made where a directory was to be.
+#[test]
+fn a_link_where_a_directory_is_made_is_refused() {
+    for kind in LINK_KINDS {
+        let dir = temp_dir();
+        let outside = temp_dir();
+        let root = dir.path();
+        let store = FileStore::new(root.to_path_buf());
+        let file = root.join("a").join("b").join("c.json");
+
+        // The first save makes `a` and `b`; `b` is then replaced by a link.
+        store
+            .save(&[record_for(&file, "m")], at(0, 0, 0))
+            .expect("save");
+        assert!(root.join("a").join("b").join("c.cds").is_file());
+        std::fs::remove_dir_all(root.join("a").join("b")).expect("remove");
+        if !try_link_dir(kind, outside.path(), &root.join("a").join("b")) {
+            continue;
+        }
+        store
+            .save(&[record_for(&file, "m")], at(0, 0, 0))
+            .expect("save through a link");
+        assert!(entries(outside.path()).is_empty(), "{kind:?}");
+    }
+}
+
+/// Not upstream's: the auth directory may itself be a link; only what is
+/// below it may not.
+#[test]
+fn a_linked_auth_directory_is_used() {
+    for kind in LINK_KINDS {
+        let real = temp_dir();
+        let parent = temp_dir();
+        let link = parent.path().join("auth");
+        if !try_link_dir(kind, real.path(), &link) {
+            continue;
+        }
+        let store = FileStore::new(link.clone());
+        let records = [
+            record_for(&link.join("a.json"), "m"),
+            record_for(&link.join("sub").join("b.json"), "m"),
+        ];
+        store.save(&records, at(0, 0, 0)).expect("save");
+        assert!(real.path().join("a.cds").is_file(), "{kind:?}");
+        assert!(real.path().join("sub").join("b.cds").is_file(), "{kind:?}");
+        assert_eq!(store.load().expect("load").len(), 2, "{kind:?}");
+        store.save(&[], at(0, 0, 0)).expect("save nothing");
+        assert!(!real.path().join("a.cds").exists(), "{kind:?}");
+        assert!(!real.path().join("sub").join("b.cds").exists(), "{kind:?}");
+    }
+}
+
 /// Not upstream's: on Windows, file names that differ only in case are one
 /// file, and the save doesn't remove the file it just wrote.
 #[cfg(windows)]

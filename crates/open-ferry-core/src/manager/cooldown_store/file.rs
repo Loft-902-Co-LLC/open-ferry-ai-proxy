@@ -27,6 +27,14 @@
 //!   left.
 //! - Symbolic links are skipped, files and directories alike; upstream
 //!   reads and removes a linked file.
+//! - A file is never written or removed through a link: before either, each
+//!   directory from the auth directory down to the file's is looked at
+//!   without being followed (a symbolic link, or on Windows a junction, is
+//!   refused), the missing ones are made one at a time, and the real path of
+//!   the file's directory must lie under the auth directory's. A file whose
+//!   directory fails this is skipped with a warning and the rest are saved;
+//!   upstream follows the link and writes outside the directory. The auth
+//!   directory itself may be a link.
 //! - On Windows, paths that differ only in case are the same file, and a
 //!   rename or removal the file system refuses for a moment (a sharing
 //!   violation or access denied, as from a virus scanner) is tried three
@@ -96,11 +104,88 @@ impl FileStore {
         cds_path_for_rel(path)
     }
 
+    /// Checks that `dir` is the auth directory or a real directory below it,
+    /// with no link between them, making the directories that are missing
+    /// when `create` is set. A link is where a write would leave the auth
+    /// directory (upstream follows it).
+    ///
+    /// Each directory below the auth directory is looked at without following
+    /// it, and made one at a time, so that a link can't be made through; the
+    /// real path of `dir` must then lie under the real path of the auth
+    /// directory, which also catches a link of a kind that isn't known to be
+    /// one. The auth directory itself may be a link.
+    fn check_dir(&self, dir: &Path, create: bool) -> io::Result<DirCheck> {
+        let Some(relative) = rel(&self.dir, dir) else {
+            return Ok(DirCheck::Refused(dir.to_path_buf()));
+        };
+        let mut current = self.dir.clone();
+        for component in relative.components() {
+            match component {
+                Component::CurDir => continue,
+                Component::Normal(part) => current.push(part),
+                _ => return Ok(DirCheck::Refused(dir.to_path_buf())),
+            }
+            let mut found = inspect(&current)?;
+            if found == Found::Missing {
+                if !create {
+                    return Ok(DirCheck::Missing);
+                }
+                match create_dir(&current) {
+                    Ok(()) => {}
+                    Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
+                    Err(err) => return Err(err),
+                }
+                // Looked at again: it is what it is now, not what it was made
+                // as.
+                found = inspect(&current)?;
+            }
+            match found {
+                Found::Directory => {}
+                Found::Link => return Ok(DirCheck::Refused(current)),
+                Found::Missing => return Ok(DirCheck::Missing),
+                Found::Other => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotADirectory,
+                        format!("{} is not a directory", current.display()),
+                    ));
+                }
+            }
+        }
+        let real_dir = match fs::canonicalize(dir) {
+            Ok(real_dir) => real_dir,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(DirCheck::Missing),
+            Err(err) => return Err(err),
+        };
+        if real_dir.starts_with(fs::canonicalize(&self.dir)?) {
+            Ok(DirCheck::Ready)
+        } else {
+            Ok(DirCheck::Refused(dir.to_path_buf()))
+        }
+    }
+
     fn write_group(&self, path: &Path, records: &mut [Record], now: Timestamp) -> io::Result<()> {
         records.sort_by(|a, b| a.model.as_bytes().cmp(b.model.as_bytes()));
         let data = record::encode_file(records, now);
         let dir = path.parent().unwrap_or(&self.dir);
-        create_dir_all(dir).map_err(|err| context("create cooldown state directory", err))?;
+        match self
+            .check_dir(dir, true)
+            .map_err(|err| context("create cooldown state directory", err))?
+        {
+            DirCheck::Ready => {}
+            DirCheck::Refused(at) => {
+                tracing::warn!(
+                    path = %at.display(),
+                    "not saving a cooldown state file through a link out of the auth directory"
+                );
+                return Ok(());
+            }
+            DirCheck::Missing => {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "create cooldown state directory: the directory went away",
+                ));
+            }
+        }
         let name = path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -138,6 +223,19 @@ impl FileStore {
             }
             if desired.is_some_and(|desired| desired.contains(&key(&clean(path)))) {
                 return Ok(());
+            }
+            // The walk didn't go through a link, but one may have been made
+            // since, and a file's removal goes through its directory.
+            match self.check_dir(path.parent().unwrap_or(&self.dir), false)? {
+                DirCheck::Ready => {}
+                DirCheck::Missing => return Ok(()),
+                DirCheck::Refused(at) => {
+                    tracing::warn!(
+                        path = %at.display(),
+                        "not removing a cooldown state file through a link out of the auth directory"
+                    );
+                    return Ok(());
+                }
             }
             remove_cds(path).map_err(|err| {
                 io::Error::new(
@@ -331,6 +429,49 @@ fn key(path: &Path) -> OsString {
     } else {
         path.as_os_str().to_owned()
     }
+}
+
+/// What [`FileStore::check_dir`] found.
+enum DirCheck {
+    /// A real directory in the auth directory, or the auth directory.
+    Ready,
+    /// Not there, and not made.
+    Missing,
+    /// The path of a link, or of a directory that is outside the auth
+    /// directory in some other way.
+    Refused(PathBuf),
+}
+
+/// What a path is, looked at without following it.
+#[derive(PartialEq, Eq)]
+enum Found {
+    Missing,
+    Directory,
+    /// A symbolic link, or on Windows a junction (a reparse point that names
+    /// another path, as Rust's `is_symlink` does).
+    Link,
+    Other,
+}
+
+fn inspect(path: &Path) -> io::Result<Found> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => Ok(Found::Link),
+        Ok(meta) if meta.is_dir() => Ok(Found::Directory),
+        Ok(_) => Ok(Found::Other),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Found::Missing),
+        Err(err) => Err(err),
+    }
+}
+
+#[cfg(unix)]
+fn create_dir(dir: &Path) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    fs::DirBuilder::new().mode(0o700).create(dir)
+}
+
+#[cfg(not(unix))]
+fn create_dir(dir: &Path) -> io::Result<()> {
+    fs::create_dir(dir)
 }
 
 #[cfg(unix)]
