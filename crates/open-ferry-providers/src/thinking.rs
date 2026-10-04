@@ -20,7 +20,7 @@
 //! a suffix overrides it.
 //!
 //! [`crate::claude::thinking`], [`crate::gemini::thinking`],
-//! [`crate::codex::thinking`] (`reasoning.effort`) and
+//! [`crate::codex::thinking`] and the xAI executor's (`reasoning.effort`) and
 //! [`crate::openai_compat::thinking`] (`reasoning_effort`) are the targets, with
 //! [`crate::gemini::interactions`] (`generation_config.thinking_level`).
 //!
@@ -38,7 +38,7 @@
 //!   `extractCodexConfig` reads what gjson finds in it. A Claude model bound
 //!   to a request would also need `stripInferredClaudeSummaryActivation`,
 //!   which isn't ported.
-//! - The xAI, Kimi and Antigravity targets aren't ported.
+//! - The Kimi and Antigravity targets aren't ported.
 //! - A plugin's request normalizer (`normalizedUpdatesChanged`) isn't
 //!   ported, so the client's Responses request is always read for its
 //!   effort updates.
