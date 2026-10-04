@@ -57,7 +57,7 @@ use super::terminal::{
 };
 use super::usage::ensure_responses_usage_details;
 use crate::json::{get, str_at, str_of};
-use crate::observe_send::BodyTap;
+use crate::observe_send::{self, BodyTap};
 
 /// The longest line read, as upstream's scanner allows.
 pub(crate) const MAX_LINE: usize = 52_428_800;
@@ -117,6 +117,12 @@ impl LineReader {
             scanned: 0,
             state: ReaderState::Reading,
         }
+    }
+
+    /// Tells the call's taps, if any see it, the stream failed with `error`
+    /// (see [`BodyTap::error`]).
+    pub(crate) fn report(&self, error: &dyn fmt::Display) {
+        observe_send::attempt_error(self.tap.as_ref(), error);
     }
 
     /// The next line, or `None` at the end. A line that wouldn't fit in
@@ -281,6 +287,10 @@ struct Failure {
     body: Option<String>,
 }
 
+/// What upstream records for a stream that ended before its first chunk,
+/// which the caller sees as an empty stream.
+const CLOSED_BEFORE_FIRST_PAYLOAD: &str = "upstream stream closed before first payload";
+
 /// The state of one translated stream.
 struct State {
     reader: LineReader,
@@ -368,6 +378,7 @@ impl State {
             Some(Ok(line)) => line,
             Some(Err(error)) => {
                 tracing::debug!("codex: stream read failed: {error}");
+                self.reader.report(&error);
                 return self.end_early();
             }
             None => return self.end_early(),
@@ -396,6 +407,7 @@ impl State {
         while let Some(line) = self.reader.next_line().await {
             let line = line.map_err(|error| {
                 tracing::debug!("codex: stream read failed: {error}");
+                self.reader.report(&error);
                 ExecError::new(ErrorKind::Upstream, error.to_string())
             })?;
             let line_len = line.len();
@@ -454,9 +466,12 @@ impl State {
             return Ok(());
         }
         if held_any {
-            return Err(incomplete_stream_error().into());
+            let error: ExecError = incomplete_stream_error().into();
+            self.reader.report(&error);
+            return Err(error);
         }
         tracing::debug!("codex: upstream stream closed before first payload");
+        self.reader.report(&CLOSED_BEFORE_FIRST_PAYLOAD);
         self.finished = true;
         Ok(())
     }
@@ -489,8 +504,10 @@ impl State {
             let mut event: Value = serde_json::from_slice(&data).unwrap_or(Value::Null);
             if let Some((error, body)) = terminal_failure(&event, self.setup.model_level_cooling) {
                 ext::on_failure(&self.setup.turn, error.status, body.as_bytes());
+                let error: ExecError = error.redacted(&self.setup.secret).into();
+                self.reader.report(&error);
                 return Err(Failure {
-                    error: error.redacted(&self.setup.secret).into(),
+                    error,
                     body: Some(body),
                 });
             }
@@ -498,10 +515,9 @@ impl State {
                 self.saw_output_delta = true;
             }
             if is_terminal_empty_incomplete(&event, self.items.len(), self.saw_output_delta) {
-                return Err(Failure {
-                    error: empty_incomplete_stream_error().into(),
-                    body: None,
-                });
+                let error: ExecError = empty_incomplete_stream_error().into();
+                self.reader.report(&error);
+                return Err(Failure { error, body: None });
             }
             let event_type = str_at(&event, "type");
             handshake = is_bootstrap_bufferable_event(&event_type, &data, &event);
@@ -567,9 +583,12 @@ impl State {
         self.finished = true;
         if self.emitted == 0 {
             tracing::debug!("codex: upstream stream closed before first payload");
+            self.reader.report(&CLOSED_BEFORE_FIRST_PAYLOAD);
             return Ok(());
         }
-        Err(incomplete_stream_error().into())
+        let error: ExecError = incomplete_stream_error().into();
+        self.reader.report(&error);
+        Err(error)
     }
 }
 

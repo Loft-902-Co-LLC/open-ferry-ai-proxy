@@ -95,7 +95,7 @@ use super::tokens::{count_input_tokens, tokenizer_for};
 use super::usage::ensure_responses_usage_details;
 use super::websocket;
 use crate::json::str_at;
-use crate::observe_send::{self, Attempt};
+use crate::observe_send::{self, Attempt, BodyTap};
 use crate::redact;
 
 /// The `alt` of a `/responses/compact` call.
@@ -362,6 +362,7 @@ impl CodexExecutor {
                 Ok(line) => line,
                 Err(error) => {
                     tracing::debug!("codex: response read failed: {error}");
+                    reader.report(&error);
                     break;
                 }
             };
@@ -445,9 +446,12 @@ impl CodexExecutor {
             .await?;
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {
+            let tap = BodyTap::of(&response);
             let (body, error) = read_body_prefix(response, MAX_ERROR_BODY).await;
             if let Some(error) = error {
-                return Err(ExecError::new(ErrorKind::Upstream, error_chain(&error)));
+                let error = ExecError::new(ErrorKind::Upstream, error_chain(&error));
+                observe_send::attempt_error(tap.as_ref(), &error);
+                return Err(error);
             }
             tracing::debug!(status, "codex: request error");
             ext::on_failure(&prepared.turn, status, &body);

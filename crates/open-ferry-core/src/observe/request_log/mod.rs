@@ -49,8 +49,6 @@
 //! - With `request-log` off, the client's body is kept as the handler reads
 //!   it, whatever its size, where upstream reads a body of up to 1 MiB
 //!   ahead of the handler.
-//! - Upstream's API error sections come only from handlers that call
-//!   [`RequestState::record_api_error`].
 //! - The downstream WebSocket timeline isn't kept: a Responses WebSocket
 //!   session's log has its upgrade request, the upstream attempts of all
 //!   its turns, and a `101` answer.
@@ -488,6 +486,15 @@ impl RequestState {
                 });
             }
         });
+    }
+
+    /// The errors recorded so far with [`Self::record_api_error`] (what
+    /// upstream keeps as `API_RESPONSE_ERROR`).
+    pub fn api_errors(&self) -> Vec<ApiError> {
+        self.lock()
+            .as_ref()
+            .map(|capture| capture.api_errors.clone())
+            .unwrap_or_default()
     }
 }
 

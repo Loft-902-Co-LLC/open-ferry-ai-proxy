@@ -470,6 +470,39 @@ fn shows_deferred_bodies_with_their_markers() {
     );
 }
 
+// Not upstream's: a handler's errors are kept with `request-log` on only,
+// as upstream's `LoggingAPIResponseError` keeps them, and none are kept
+// for a request that isn't logged.
+#[test]
+fn keeps_api_errors_with_the_request_log_on_only() {
+    let dir = tempfile::tempdir().unwrap();
+    for (request_log, kept) in [(true, 1), (false, 0)] {
+        let context = context("/v1/responses");
+        logger(dir.path(), request_log).start(&context);
+        context
+            .request_log()
+            .record_api_error(502, "upstream went away", false);
+        let errors = context.request_log().api_errors();
+        assert_eq!(errors.len(), kept, "{request_log}: {errors:?}");
+        if let Some(error) = errors.first() {
+            assert_eq!(
+                *error,
+                ApiError {
+                    status: 502,
+                    message: "upstream went away".to_owned(),
+                    canceled: false,
+                }
+            );
+        }
+    }
+    let unlogged = context("/v1/responses");
+    unlogged
+        .request_log()
+        .record_api_error(502, "upstream went away", false);
+    assert!(unlogged.request_log().api_errors().is_empty());
+    assert!(files(dir.path()).is_empty());
+}
+
 // Not upstream's: an error a handler records is shown in Full mode only,
 // and a WebSocket session's log is written when its context goes.
 #[test]
@@ -514,6 +547,152 @@ fn records_api_errors_and_finishes_later() {
     );
     assert!(log.contains("Error: context canceled\n"), "{log}");
     assert!(log.contains("=== RESPONSE ===\nStatus: 101\n"), "{log}");
+}
+
+// Not upstream's: a failure after the answer's head is written where the
+// executor tells it, after the body read so far, and the call's error after
+// it isn't written again; a send that failed is written from the call's
+// error. Off, nothing is.
+#[test]
+fn records_each_attempt_error_once() {
+    for request_log in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let logger = logger(dir.path(), request_log);
+        let context = context("/v1/responses");
+        logger.start(&context);
+        let tap = logger.tap(&context).unwrap();
+        let body = Bytes::new();
+        let request = AttemptRequest {
+            kind: AttemptKind::Stream,
+            method: &Method::POST,
+            url: "https://api.example.com/v1/responses",
+            headers: &HeaderMap::new(),
+            body: &body,
+            provider: "codex",
+            model: "gpt-5",
+            format: &Format::from("codex"),
+            auth: &Auth::default(),
+            secrets: &[],
+        };
+        tap.attempt_request(&request);
+        tap.response_head(200, &HeaderMap::new());
+        tap.chunk(&Bytes::from_static(b"data: {\"a\":1}\n\ndata: {\"b\""));
+        tap.attempt_error("unexpected EOF");
+        tap.error(&ExecError::new(
+            crate::exec::ErrorKind::Upstream,
+            "stream broke: unexpected EOF",
+        ));
+        tap.finish(Outcome::Failed);
+        tap.attempt_request(&request);
+        tap.error(&ExecError::new(
+            crate::exec::ErrorKind::Upstream,
+            "connection refused",
+        ));
+        tap.finish(Outcome::Failed);
+        drop(tap);
+
+        let mut response = Vec::new();
+        context
+            .request_log()
+            .with(|capture| response = capture.attempts.api_response());
+        let response = String::from_utf8(response).unwrap();
+        if !request_log {
+            assert_eq!(response, "");
+            continue;
+        }
+        let (first, second) = response.split_once("=== API RESPONSE 2 ===").unwrap();
+        // Right after the body, as upstream writes it.
+        assert!(
+            first.contains("data: {\"b\"Error: unexpected EOF\n"),
+            "{first:?}"
+        );
+        assert_eq!(first.matches("Error:").count(), 1, "{first:?}");
+        assert!(
+            second.contains("\nError: connection refused\n"),
+            "{second:?}"
+        );
+        assert!(!second.contains("Status:"), "{second:?}");
+    }
+}
+
+// Not upstream's: on an upstream WebSocket, an error the executor tells as
+// the attempt's goes to an API RESPONSE block, under a missing request, and
+// not to the timeline, as upstream records an empty `response.incomplete`;
+// any other error of the call goes to the timeline.
+#[test]
+fn records_a_websocket_attempt_error_as_upstream_does() {
+    let dir = tempfile::tempdir().unwrap();
+    let logger = logger(dir.path(), true);
+    let context = context("/v1/responses");
+    logger.start(&context);
+    let tap = logger.tap(&context).unwrap();
+    let body = Bytes::from_static(b"{\"type\":\"response.create\"}");
+    let request = AttemptRequest {
+        kind: AttemptKind::Websocket,
+        method: &Method::GET,
+        url: "wss://api.example.com/v1/responses",
+        headers: &HeaderMap::new(),
+        body: &body,
+        provider: "codex",
+        model: "gpt-5",
+        format: &Format::from("codex"),
+        auth: &Auth::default(),
+        secrets: &[],
+    };
+    let incomplete = "upstream returned response.incomplete without output";
+    tap.attempt_request(&request);
+    tap.chunk(&Bytes::from_static(b"{\"type\":\"response.incomplete\"}"));
+    tap.attempt_error(incomplete);
+    tap.error(&ExecError::new(
+        crate::exec::ErrorKind::Upstream,
+        incomplete,
+    ));
+    tap.finish(Outcome::Failed);
+    tap.attempt_request(&request);
+    tap.error(&ExecError::new(
+        crate::exec::ErrorKind::Upstream,
+        "websocket closed",
+    ));
+    tap.finish(Outcome::Failed);
+    drop(tap);
+
+    let (mut api_request, mut api_response, mut timeline) = (Vec::new(), Vec::new(), Vec::new());
+    context.request_log().with(|capture| {
+        api_request = capture.attempts.api_request();
+        api_response = capture.attempts.api_response();
+        timeline = capture.attempts.timeline().to_vec();
+    });
+    let (api_request, api_response, timeline) = (
+        String::from_utf8(api_request).unwrap(),
+        String::from_utf8(api_response).unwrap(),
+        String::from_utf8(timeline).unwrap(),
+    );
+    assert_eq!(
+        api_request,
+        "=== API REQUEST 1 ===
+<missing>
+
+"
+    );
+    assert!(
+        api_response.starts_with(
+            "=== API RESPONSE 1 ===
+Timestamp: "
+        ),
+        "{api_response:?}"
+    );
+    assert!(
+        api_response.ends_with(&format!(
+            "
+
+Error: {incomplete}
+"
+        )),
+        "{api_response:?}"
+    );
+    assert!(!timeline.contains(incomplete), "{timeline:?}");
+    assert_eq!(timeline.matches("Event: api.websocket.error").count(), 1);
+    assert!(timeline.contains("Error: websocket closed"), "{timeline:?}");
 }
 
 // Ports TestFormatCPATraceID.

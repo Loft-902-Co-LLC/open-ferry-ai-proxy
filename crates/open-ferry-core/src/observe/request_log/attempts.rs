@@ -14,19 +14,24 @@
 //! With the request log on, each attempt gets an `=== API REQUEST n ===`
 //! block, written when the log is, and an `=== API RESPONSE n ===` block,
 //! built as its answer comes: the status and headers, then the body, a
-//! line of a stream at a time, and the error when the call failed without
-//! an answer. A message on an upstream WebSocket goes to the API WebSocket
-//! timeline instead. With it off, the tap keeps each upstream request for
-//! the error log of a request that fails.
+//! line of a stream at a time, and the error when the attempt failed. A
+//! message on an upstream WebSocket goes to the API WebSocket timeline
+//! instead, with the call's error; but an error the executor tells as the
+//! attempt's ([`Tap::attempt_error`]) goes to an API RESPONSE block, as
+//! upstream's executors record an empty `response.incomplete`. With it off,
+//! the tap keeps each upstream request for the error log of a request that
+//! fails.
 //!
 //! Deviations from upstream:
 //! - The tap sees what the executors report (see [`Tap`]), where upstream's
 //!   executors write into the request's context themselves. A stream's
 //!   chunks are split into lines here, as upstream's executors scan them;
 //!   any other answer is one chunk.
-//! - An error is written for an attempt that got no answer, or one whose
-//!   connection failed, as upstream's executors record transport errors
-//!   only.
+//! - The call's error is written for an attempt that got no answer, as
+//!   upstream's executors record every failed send. A failure after the
+//!   answer's head is written as the executor tells it
+//!   ([`Tap::attempt_error`]), where upstream's executors record one; the
+//!   call's error that follows isn't written again.
 //! - The upstream URL's user info and key-like query parameters are masked,
 //!   the headers' values masked as [`mask::mask_header_value`] masks them,
 //!   and the bodies scrubbed of the attempt's secrets when written; upstream
@@ -331,7 +336,7 @@ impl Attempts {
         }
     }
 
-    /// An error with no answer (upstream's `RecordAPIResponseError`).
+    /// The attempt's error (upstream's `RecordAPIResponseError`).
     pub(crate) fn record_error(&mut self, message: &str) {
         let budget = &mut self.responses;
         let Some(attempt) = Self::current(&mut self.list, budget) else {
@@ -514,6 +519,9 @@ struct Call {
     body: Vec<u8>,
     /// The part of a stream's line read so far.
     line: Vec<u8>,
+    /// Whether the executor told the latest attempt's failure
+    /// ([`Tap::attempt_error`]).
+    told: bool,
 }
 
 impl Call {
@@ -572,6 +580,7 @@ impl Tap for RequestLogTap {
         self.flush(&mut call);
         call.kind = Some(request.kind);
         call.status = None;
+        call.told = false;
         self.with(|capture| {
             capture.add_secrets(request.secrets);
             match (capture.mode, request.kind) {
@@ -638,11 +647,24 @@ impl Tap for RequestLogTap {
         });
     }
 
+    fn attempt_error(&self, message: &str) {
+        let mut call = self.call();
+        self.flush(&mut call);
+        call.told = true;
+        drop(call);
+        self.with(|capture| {
+            if capture.mode == Mode::Full {
+                capture.attempts.record_error(message);
+            }
+        });
+    }
+
     fn error(&self, error: &ExecError) {
         let mut call = self.call();
         self.flush(&mut call);
         let kind = call.kind;
         let answered = call.status.is_some();
+        let told = call.told;
         drop(call);
         let message = error.to_string();
         self.with(|capture| {
@@ -650,10 +672,13 @@ impl Tap for RequestLogTap {
                 return;
             }
             match kind {
+                // An error upstream records as the attempt's
+                // (`RecordAPIResponseError`) isn't on the timeline.
+                Some(AttemptKind::Websocket) if told => {}
                 Some(AttemptKind::Websocket) => capture.attempts.ws_error(&message),
-                Some(_) if !answered || error.transport.is_some() => {
-                    capture.attempts.record_error(&message);
-                }
+                // A failure after the head was told through
+                // `attempt_error` where upstream records one.
+                Some(_) if !answered => capture.attempts.record_error(&message),
                 _ => {}
             }
         });

@@ -49,6 +49,10 @@ use crate::codex::usage::ensure_responses_usage_details;
 /// The most data a frame may hold, joined: as much as one line may.
 const MAX_FRAME: usize = MAX_LINE;
 
+/// What the call's taps are told of an error that holds the provider's
+/// payload (`publishStreamError`'s `containsPayload`).
+const ERROR_PAYLOAD: &str = "upstream stream returned an error payload";
+
 /// What a streaming call needs to translate the provider's events.
 pub(crate) struct StreamSetup {
     /// Translates the provider's OpenAI chunks to the client's format.
@@ -153,7 +157,7 @@ impl State {
         {
             // Comments and fields that don't concern us.
         } else if trimmed.starts_with(b"{") || trimmed.starts_with(b"[") {
-            self.fail(StatusError::new(502, String::from_utf8_lossy(trimmed)));
+            self.fail_with_payload(StatusError::new(502, String::from_utf8_lossy(trimmed)));
             self.end(None).await;
         }
     }
@@ -200,7 +204,7 @@ impl State {
                 return true;
             }
             if let Some(error) = stream_data_error(payload, &event) {
-                self.fail(error);
+                self.fail_with_payload(error);
                 return true;
             }
         }
@@ -249,11 +253,26 @@ impl State {
         }
     }
 
-    /// Queues an error, after which nothing more is sent.
+    /// Queues an error, after which nothing more is sent, and tells the
+    /// call's taps of it (`publishStreamError`).
     fn fail(&mut self, error: StatusError) {
+        let error: ExecError = error.redacted(&self.setup.secret).into();
+        self.reader.report(&error);
+        self.stop(error);
+    }
+
+    /// [`Self::fail`] for an error that holds the provider's payload, which
+    /// the taps are told only as [`ERROR_PAYLOAD`], as upstream records it.
+    fn fail_with_payload(&mut self, error: StatusError) {
+        self.reader.report(&ERROR_PAYLOAD);
+        self.stop(error.redacted(&self.setup.secret).into());
+    }
+
+    /// Queues `error`, after which nothing more is sent, without telling
+    /// the taps.
+    fn stop(&mut self, error: ExecError) {
         self.failed = true;
-        let error = error.redacted(&self.setup.secret);
-        self.pending.push_back(Err(error.into()));
+        self.pending.push_back(Err(error));
     }
 
     /// Ends the stream, after a read `error` or once it is over: sends a
@@ -272,11 +291,13 @@ impl State {
         let tool_input_failed = self.setup.translator.tool_input_error().is_some();
         self.queue(chunks);
         if tool_input_failed {
-            self.fail(StatusError::new(502, APPLY_PATCH_ERROR_MESSAGE));
+            // Upstream's `EndApplyPatchStream` doesn't record it.
+            self.stop(StatusError::new(502, APPLY_PATCH_ERROR_MESSAGE).into());
             return;
         }
         if let Some(error) = error {
             tracing::debug!("openai compat executor: stream read failed: {error}");
+            self.reader.report(&error);
             self.pending
                 .push_back(Err(ExecError::new(ErrorKind::Upstream, error.to_string())));
         } else if !self.seen_done {

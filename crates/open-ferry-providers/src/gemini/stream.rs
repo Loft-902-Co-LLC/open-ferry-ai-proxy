@@ -193,6 +193,7 @@ impl State {
         }
         if let Some(error) = error {
             tracing::debug!("{}: stream read failed: {error}", self.setup.name);
+            self.reader.report(&error);
             self.pending
                 .push_back(Err(ExecError::new(ErrorKind::Upstream, error.to_string())));
         }

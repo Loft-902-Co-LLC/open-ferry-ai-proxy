@@ -279,6 +279,7 @@ impl State {
                 self.setup.status,
                 plain_error(error.to_string()),
             );
+            self.reader.report(&error);
             self.pending.push_back(Err(error));
         }
     }

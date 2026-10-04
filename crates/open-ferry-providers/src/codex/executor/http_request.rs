@@ -39,7 +39,7 @@ use super::CodexExecutor;
 use crate::codex::client::{USER_AGENT, error_chain, read_body_prefix};
 use crate::codex::request::{credentials, refuse_control_characters};
 use crate::custom_headers;
-use crate::observe_send::{self, Attempt};
+use crate::observe_send::{self, Attempt, BodyTap};
 
 impl CodexExecutor {
     /// Sends `call` with the credential's token and custom headers, and
@@ -109,12 +109,17 @@ impl CodexExecutor {
         observe_send::response(tap, &mut response);
         let status = response.status().as_u16();
         let headers = response.headers().clone();
+        let tap = BodyTap::of(&response);
         let (body, read_error) = read_body_prefix(response, response_limit).await;
+        let read_error = read_error.map(|error| error_chain(&error));
+        if let Some(error) = &read_error {
+            observe_send::attempt_error(tap.as_ref(), error);
+        }
         Ok(HttpReply {
             status,
             headers,
             body: Bytes::from(body),
-            read_error: read_error.map(|error| error_chain(&error)),
+            read_error,
         })
     }
 

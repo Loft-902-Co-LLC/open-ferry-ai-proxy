@@ -10,7 +10,9 @@
 //! For each executor call a tap sees, in order: for each upstream attempt
 //! the executor makes, the request ([`Tap::attempt_request`]), then once an
 //! answer comes its head ([`Tap::response_head`]) and its body as it is read
-//! ([`Tap::chunk`]); then, when the call failed, its error ([`Tap::error`]);
+//! ([`Tap::chunk`]), and what failed if reading it did
+//! ([`Tap::attempt_error`]); then, when the call failed, its error
+//! ([`Tap::error`]);
 //! and last how it ended ([`Tap::finish`]), once. The executor reports the
 //! attempts, and the manager the error and the end, so a call the manager
 //! retries on another credential or model gives the taps another such
@@ -21,7 +23,9 @@
 //!   usage reporter themselves; here they report to the taps, and each tap
 //!   keeps what it wants.
 //! - The error is the executor call's [`ExecError`], where upstream records
-//!   the transport error and the usage failure apart.
+//!   the transport error and the usage failure apart. An attempt's failure
+//!   after its head is told apart, as text, where upstream's executors
+//!   record it.
 
 use std::fmt;
 use std::sync::Arc;
@@ -45,6 +49,14 @@ pub trait Tap: Send + Sync {
 
     /// The next part of the attempt's answer body, as it came off the wire.
     fn chunk(&self, _chunk: &Bytes) {}
+
+    /// The attempt failed after its answer's head came, as the executor
+    /// saw it: its body couldn't be read, its stream broke off or failed,
+    /// or an upstream WebSocket's turn ended empty. The executor tells this
+    /// where upstream's executors record
+    /// the error (`RecordAPIResponseError`); the call's error comes after
+    /// through [`Tap::error`] all the same.
+    fn attempt_error(&self, _message: &str) {}
 
     /// The executor call failed with `error`.
     fn error(&self, _error: &ExecError) {}
@@ -175,6 +187,13 @@ impl Observation {
     pub fn chunk(&self, chunk: &Bytes) {
         for tap in &self.taps {
             tap.chunk(chunk);
+        }
+    }
+
+    /// Tells every tap the attempt failed after its answer's head came.
+    pub fn attempt_error(&self, message: &str) {
+        for tap in &self.taps {
+            tap.attempt_error(message);
         }
     }
 

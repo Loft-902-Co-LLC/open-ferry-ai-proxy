@@ -57,6 +57,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::fmt;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
@@ -75,7 +76,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use super::dial::{DialError, Dialed, WsStream};
 use super::errors::{self, Failure};
-use crate::observe_send::BodyTap;
+use crate::observe_send::{self, BodyTap};
 
 /// How long a connection may go without a message
 /// (`codexResponsesWebsocketIdleTimeout`).
@@ -795,6 +796,12 @@ impl Hold {
     /// Has `tap` see the messages read from now on.
     pub(super) fn observe(&mut self, tap: Option<BodyTap>) {
         self.tap = tap;
+    }
+
+    /// Tells the call's taps, if any see it, the call failed with `error`
+    /// where upstream records it (see [`BodyTap::error`]).
+    pub(super) fn report(&self, error: &dyn fmt::Display) {
+        observe_send::attempt_error(self.tap.as_ref(), error);
     }
 
     pub(super) fn conn(&self) -> &Arc<Conn> {

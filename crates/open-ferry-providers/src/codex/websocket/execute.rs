@@ -263,7 +263,9 @@ pub(in crate::codex) async fn execute(
                 if is_terminal_empty_incomplete(&event, items.len(), saw_output_delta) {
                     hold.invalidate("terminal_empty_incomplete");
                     hold.release();
-                    return Err(empty_incomplete_stream_error().into());
+                    let error: ExecError = empty_incomplete_stream_error().into();
+                    hold.report(&error);
+                    return Err(error);
                 }
                 let patched = items.patch(&mut event);
                 if event_type != "response.incomplete" {

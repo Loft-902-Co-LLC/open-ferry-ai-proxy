@@ -1,7 +1,9 @@
 //! What a call's taps see of its upstream attempts: each request as it is
-//! sent, with the credential's headers set, then the answer's head, and its
-//! body as it is read (the `RecordAPIRequest`, `RecordAPIResponseMetadata`
-//! and `AppendAPIResponseChunk` calls of upstream's executors).
+//! sent, with the credential's headers set, then the answer's head, its
+//! body as it is read, and what failed after the head (the
+//! `RecordAPIRequest`, `RecordAPIResponseMetadata`, `AppendAPIResponseChunk`
+//! and `RecordAPIResponseError` calls of upstream's executors). A send that
+//! fails is told by the manager, with the call's error.
 //!
 //! A send site is given its call's [`Attempt`]. When a tap sees the call,
 //! it tells them the request with [`announce`] before it sends; once the
@@ -14,6 +16,7 @@
 //! Deviations from upstream: the whole module (see
 //! [`open_ferry_core::observe`]).
 
+use std::fmt;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -117,6 +120,20 @@ impl BodyTap {
     pub(crate) fn chunk(&self, chunk: &Bytes) {
         self.0.chunk(chunk);
     }
+
+    /// Tells the taps the attempt failed with `error` after its head came,
+    /// where upstream's executors record it (`RecordAPIResponseError`).
+    pub(crate) fn error(&self, error: &dyn fmt::Display) {
+        self.0.attempt_error(&error.to_string());
+    }
+}
+
+/// Tells `tap`, if any, the attempt failed with `error` (see
+/// [`BodyTap::error`]).
+pub(crate) fn attempt_error(tap: Option<&BodyTap>, error: &dyn fmt::Display) {
+    if let Some(tap) = tap {
+        tap.error(error);
+    }
 }
 
 #[cfg(test)]
@@ -145,6 +162,10 @@ mod tests {
 
         fn chunk(&self, chunk: &Bytes) {
             self.push(format!("chunk {}", String::from_utf8_lossy(chunk)));
+        }
+
+        fn attempt_error(&self, message: &str) {
+            self.push(format!("error {message}"));
         }
     }
 
@@ -213,5 +234,32 @@ mod tests {
         let mut answer = reqwest::Response::from(http::Response::new("hello"));
         response(None, &mut answer);
         assert!(BodyTap::of(&answer).is_none());
+    }
+
+    /// Not upstream's: a body that fails to read is told to the taps as the
+    /// attempt's error after what was read, as upstream's executors record
+    /// a failed `io.ReadAll`; an untapped answer tells nobody.
+    #[tokio::test]
+    async fn tells_a_failed_read() {
+        let recorder = Arc::new(Recorder::default());
+        let context = Arc::new(RequestContext::new(Method::POST, "/v1/responses".into()));
+        let observation = Arc::new(Observation::new(context, vec![recorder.clone()]));
+        let mut answer = reqwest::Response::from(http::Response::new("hello"));
+        response(Some(BodyTap(observation)), &mut answer);
+        let error = crate::codex::client::read_body(answer, 3)
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "response body is larger than 3 bytes");
+        assert_eq!(
+            *recorder.0.lock().unwrap(),
+            [
+                "head 200",
+                "chunk hello",
+                "error response body is larger than 3 bytes",
+            ]
+        );
+
+        let answer = reqwest::Response::from(http::Response::new("hello"));
+        assert!(crate::codex::client::read_body(answer, 3).await.is_err());
     }
 }

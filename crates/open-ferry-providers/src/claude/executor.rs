@@ -77,7 +77,7 @@ use super::token::{CREDENTIAL_TYPE, now_rfc3339};
 use super::usage::ensure_responses_usage_details;
 use crate::codex::compat;
 use crate::json::{self, Body};
-use crate::observe_send::{self, Attempt};
+use crate::observe_send::{self, Attempt, BodyTap};
 use crate::payload;
 use crate::redact;
 
@@ -273,6 +273,7 @@ impl ClaudeExecutor {
             let error = plain_error(format!(
                 "claude executor: unsupported response content encoding {encoding:?}"
             ));
+            observe_send::attempt_error(BodyTap::of(&response).as_ref(), &error);
             return Err(wrap_fast(fast, status, error));
         }
         Ok(response)
@@ -318,11 +319,15 @@ impl ClaudeExecutor {
         let response = self.check(response, fast, &target.key).await?;
         let status = response.status().as_u16();
         let response_headers = response.headers().clone();
+        let tap = BodyTap::of(&response);
         let data = read_body(response, MAX_LINE)
             .await
             .map_err(|error| wrap_fast(fast, status, plain_error(error.to_string())))?;
         if upstream_stream {
-            stream::validate(&data).map_err(|error| wrap_fast(fast, status, error))?;
+            stream::validate(&data).map_err(|error| {
+                observe_send::attempt_error(tap.as_ref(), &error);
+                wrap_fast(fast, status, error)
+            })?;
         }
 
         let original = original_request(request, options);

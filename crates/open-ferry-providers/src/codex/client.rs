@@ -28,7 +28,7 @@ use std::error::Error as StdError;
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
-use crate::observe_send::BodyTap;
+use crate::observe_send::{self, BodyTap};
 
 /// What our requests call themselves, unless the client sent its own.
 pub const USER_AGENT: &str = concat!("open-ferry/", env!("CARGO_PKG_VERSION"));
@@ -265,9 +265,22 @@ pub(crate) async fn read_body(
     limit: usize,
 ) -> Result<Vec<u8>, ReadError> {
     let tap = BodyTap::of(&response);
+    let read = read_whole(&mut response, limit, tap.as_ref()).await;
+    if let Err(error) = &read {
+        observe_send::attempt_error(tap.as_ref(), error);
+    }
+    read
+}
+
+/// Reads the body for [`read_body`], giving `tap` each chunk.
+async fn read_whole(
+    response: &mut reqwest::Response,
+    limit: usize,
+    tap: Option<&BodyTap>,
+) -> Result<Vec<u8>, ReadError> {
     let mut body = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(ReadError::Http)? {
-        if let Some(tap) = &tap {
+        if let Some(tap) = tap {
             tap.chunk(&chunk);
         }
         if body.len().saturating_add(chunk.len()) > limit {

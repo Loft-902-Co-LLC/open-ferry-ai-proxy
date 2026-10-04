@@ -182,9 +182,9 @@ impl State {
         if is_terminal_empty_incomplete(&event, self.items.len(), self.saw_output_delta) {
             self.hold.invalidate("terminal_empty_incomplete");
             self.hold.unlock();
-            return Err(Fault::EmptyIncomplete(
-                empty_incomplete_stream_error().into(),
-            ));
+            let error: ExecError = empty_incomplete_stream_error().into();
+            self.hold.report(&error);
+            return Err(Fault::EmptyIncomplete(error));
         }
         if event_type == "response.output_item.done" {
             self.items.collect(&event);
