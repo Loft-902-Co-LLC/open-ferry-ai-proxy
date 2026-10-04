@@ -4,10 +4,10 @@
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The main log's output: every log line, in upstream's format (see
-//! [`format`]), goes to standard output, or with `logging-to-file` to
-//! `main.log` in the log directory, rotated at 10 MB (see [`writer`]). With
-//! `logs-max-total-size-mb` a cleaner keeps the directory's logs under the
-//! limit (see [`cleaner`]).
+//! [`format`](mod@format)), goes to standard output, or with
+//! `logging-to-file` to `main.log` in the log directory, rotated at 10 MB
+//! (see [`writer`]). With `logs-max-total-size-mb` a cleaner keeps the
+//! directory's logs under the limit (see [`cleaner`]).
 //!
 //! The logger installs the layer [`init`] gives, which writes every log
 //! line, and [`reconfigure`] applies each config as it is loaded: at start,

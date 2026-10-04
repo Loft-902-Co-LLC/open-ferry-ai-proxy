@@ -14,7 +14,7 @@
 //! changed. Secrets never show: API keys and the management key are only
 //! said to be created, updated or deleted, key lists are counted, header
 //! values are left out, and a base or proxy URL shows only its scheme and
-//! host ([`format_url`]), so no user information, path or query.
+//! host (`format_url`), so no user information, path or query.
 //!
 //! Deviations from upstream:
 //! - Only the settings open-ferry types have lines. The sections it reads
