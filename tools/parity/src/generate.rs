@@ -24,9 +24,9 @@
 //! [`codex_models`] generates registrations for the Codex client model list.
 //! [`multi_agent`] generates Codex clients' multi-agent v2 requests, Codex
 //! sub-agents' delegation outputs, and upstream events to restore.
-//! [`payload`], [`usage`], [`ttft`] and [`config_diff`] will generate input
-//! for the payload rules, usage parsing, first-token events and config
-//! change details (P3); none yet.
+//! [`config_diff`] generates config pairs for the config change details.
+//! [`payload`], [`usage`] and [`ttft`] will generate input for the payload
+//! rules, usage parsing and first-token events (P3); none yet.
 
 pub mod chat;
 pub mod claude_chat;

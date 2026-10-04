@@ -10,11 +10,6 @@
 //! allows, where upstream's allows those of the main log and its
 //! rotations; each caller passes its own.
 
-#![cfg_attr(
-    not(test),
-    allow(dead_code, reason = "for the log routes, which aren't ported yet")
-)]
-
 use std::path::{Path, PathBuf};
 
 use open_ferry_core::observe::dirs::resolve_log_directory;
