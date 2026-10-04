@@ -10,8 +10,7 @@
 //! `crate::generate::interactions::responses::request`. [`Family::native`]
 //! maps the request stage of `openai-response` → `interactions` and
 //! `interactions` → `openai-response` to these suites, and the `registry_*`
-//! functions give their cases. Until WP4-C2 registers the pairs, the registry
-//! passes those requests through on both sides, and they are read as JSON.
+//! functions give their cases.
 
 mod cases;
 

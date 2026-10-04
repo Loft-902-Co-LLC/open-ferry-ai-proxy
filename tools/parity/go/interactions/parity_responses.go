@@ -18,8 +18,7 @@
 // event.
 //
 // The request entries (interactions/openai-responses/request and
-// openai-responses/interactions/request) are WP4-C1's, in a file of their
-// own.
+// openai-responses/interactions/request) are in parity_responses_request.go.
 package main
 
 import (

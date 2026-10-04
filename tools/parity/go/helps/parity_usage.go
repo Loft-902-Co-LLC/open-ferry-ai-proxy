@@ -6,8 +6,10 @@
 // "openai" (ParseOpenAIUsage), "openai-stream" (ParseOpenAIStreamUsage),
 // "claude" (ParseClaudeUsage), "claude-stream" (ParseClaudeStreamUsage),
 // "gemini" (ParseGeminiUsage) or "gemini-stream" (ParseGeminiStreamUsage).
-// The Antigravity, Interactions and Codex image tool parsers aren't ported,
-// so have no entry.
+// The Antigravity and Codex image tool parsers aren't ported, so have no
+// entry. The Interactions parsers are ported, in
+// crates/open-ferry-core/src/observe/usage/parse.rs, but have no entry here
+// either; that file's tests cover them.
 //
 // It is in go/helps/main.go's harness, not go/main.go's, because importing
 // helps registers a translator the registry/* entries must not see (see
