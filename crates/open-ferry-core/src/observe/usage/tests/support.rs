@@ -146,7 +146,7 @@ pub(super) struct Driver {
 /// The format a provider's executor sends.
 fn format_of(provider: &str) -> Format {
     match provider {
-        "codex" => Format::CODEX,
+        "codex" | "meta" => Format::CODEX,
         "claude" => Format::CLAUDE,
         "gemini" | "vertex" => Format::GEMINI,
         _ => Format::OPENAI,
@@ -283,14 +283,19 @@ impl Warnings {
         &self.dispatch
     }
 
-    /// The substitution warnings logged so far.
-    pub(super) fn substitutions(&self) -> Vec<String> {
+    /// Every warning logged so far.
+    pub(super) fn all(&self) -> Vec<String> {
         self.lines
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .iter()
+            .clone()
+    }
+
+    /// The substitution warnings logged so far.
+    pub(super) fn substitutions(&self) -> Vec<String> {
+        self.all()
+            .into_iter()
             .filter(|line| line.contains("upstream served model"))
-            .cloned()
             .collect()
     }
 }

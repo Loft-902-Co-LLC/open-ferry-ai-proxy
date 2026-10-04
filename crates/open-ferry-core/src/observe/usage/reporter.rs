@@ -91,6 +91,21 @@
 //! - The answer's headers are masked as the request log masks them.
 //! - The substitution warning is a `tracing` warning with the request's
 //!   ID as a field.
+//! - The models a record names, the one sent and the one the answer served,
+//!   and the two the substitution warning quotes, are scrubbed of the
+//!   secrets the attempts sent, the credential's own and the client's key,
+//!   each however short, as a failure's body is: the served model is
+//!   whatever the upstream said, and may echo a token it was sent, while the
+//!   record is served to the management API and written to disk and the
+//!   warning goes to main.log. The substituted-model check and the warning's
+//!   throttle still read the models as they are. Upstream records and logs
+//!   both as they are.
+//! - Meta's calls are read as Codex's, an Execute as the Codex Execute and a
+//!   Stream as the Codex stream, and recorded as `MetaExecutor`'s. The tap
+//!   keeps the counts of the first terminal event of either (a stream's
+//!   `response.done` too, as for Codex), where upstream's Meta executor
+//!   takes the latest `response.completed` or `response.incomplete` of a
+//!   stream and the one its translation found in an Execute's.
 //! - A stream's reading stops at its terminal line, not at the blank line
 //!   after it: an OpenAI-compatible stream at the `[DONE]` line, where
 //!   upstream's scanner leaves its loop at the next line, and Claude's at
@@ -280,6 +295,8 @@ impl Mode {
             ("codex", AttemptKind::Execute) => Self::CodexExecute,
             ("codex", AttemptKind::Stream) => Self::CodexStream,
             (_, AttemptKind::Websocket) => Self::Ignored,
+            ("meta", AttemptKind::Execute) => Self::CodexExecute,
+            ("meta", AttemptKind::Stream) => Self::CodexStream,
             ("claude", AttemptKind::Execute) => Self::ClaudeExecute,
             ("claude", AttemptKind::Stream) => Self::ClaudeStream,
             ("gemini" | "vertex", AttemptKind::Execute) => Self::GeminiExecute,
@@ -312,6 +329,7 @@ fn executor_type(provider: &str, kind: Option<AttemptKind>) -> &'static str {
         "codex" if kind == Some(AttemptKind::Websocket) => "CodexWebsocketsExecutor",
         "codex" => "CodexExecutor",
         "claude" => "ClaudeExecutor",
+        "meta" => "MetaExecutor",
         "gemini" | "gemini-interactions" => "GeminiExecutor",
         "vertex" => "GeminiVertexExecutor",
         _ => "OpenAICompatExecutor",
@@ -997,7 +1015,7 @@ impl UsageTap {
             request_id: context.id.as_str().to_owned(),
             provider: call.provider.clone(),
             executor_type: call.executor_type.to_owned(),
-            model: call.model.clone(),
+            model: self.scrub(call.model.clone(), &call.secrets),
             alias: self.shared.alias.clone(),
             source: call.credential.source.clone(),
             api_key: self.client_key().to_owned(),
@@ -1006,7 +1024,7 @@ impl UsageTap {
             access_token_sha256: call.credential.access_token_sha256.clone(),
             auth_type: call.credential.auth_type.to_owned(),
             service_tier: self.shared.service_tier.clone(),
-            response_model: call.response_model.get().to_owned(),
+            response_model: self.scrub(call.response_model.get().to_owned(), &call.secrets),
             generate: self.shared.generate,
             stream: self.shared.stream,
             requested_at: Some(call.requested_at),
@@ -1062,11 +1080,16 @@ impl UsageTap {
             "" => "nil",
             index => index,
         };
+        // The served model is whatever the upstream said, and the requested
+        // one what the client sent; either may quote a secret, and main.log
+        // is a file, so both are scrubbed as a file is.
+        let served = self.scrub(served.to_owned(), &call.secrets);
+        let requested = self.scrub(call.model.clone(), &call.secrets);
         tracing::warn!(
             request_id = %self.context.id.as_str(),
             "{provider} executor: upstream served model {} for requested model {} (auth_index={index})",
-            go::quote(served),
-            go::quote(&call.model),
+            go::quote(&served),
+            go::quote(&requested),
         );
     }
 }

@@ -20,7 +20,8 @@
 //!
 //! Deviations from upstream:
 //! - The request carries no client identity of Meta's: no `X-Client-Id`
-//!   (a credential's custom header of that name is dropped), and no
+//!   (a credential's custom header of that name is dropped with the other
+//!   identity headers, see [`crate::custom_headers`]), and no
 //!   `muse-build` user agent. The user agent is the client's, as for the
 //!   other providers, else `open-ferry/<version>`; a credential's
 //!   `header:User-Agent` doesn't set it (see [`crate::custom_headers`]).
@@ -33,12 +34,15 @@
 //!   the compatibility translator (`is_compat`), which belongs to Codex's
 //!   `codex-api-key` entries.
 
+use std::fmt;
+
 use bytes::Bytes;
 use http::header::{self, HeaderMap, HeaderValue};
 use open_ferry_core::auth::Auth;
 use open_ferry_core::config::Config;
 use open_ferry_core::exec::{ErrorKind, ExecError, Format, Options, Request};
 use open_ferry_core::models::ModelCatalog;
+use open_ferry_core::observe::redact::REDACTED;
 use open_ferry_translate::codex_client::{header_value, tool_integers};
 use open_ferry_translate::registry::Registry;
 use serde_json::Value;
@@ -79,12 +83,58 @@ const DROPPED_FIELDS: [&str; 5] = [
 ];
 
 /// Where a call goes and the token it carries.
-#[derive(Debug, PartialEq, Eq)]
+///
+/// Its `Debug` shows neither the token nor the secrets a base URL can hold:
+/// its user info, query and fragment.
+#[derive(PartialEq, Eq)]
 pub(super) struct Creds {
     /// The API's base URL.
     pub(super) base_url: String,
     /// The API key or access token; empty if the credential has none.
     pub(super) token: String,
+}
+
+impl fmt::Debug for Creds {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let token = if self.token.is_empty() { "" } else { REDACTED };
+        f.debug_struct("Creds")
+            .field("base_url", &redact_url(&self.base_url))
+            .field("token", &token)
+            .finish()
+    }
+}
+
+/// `url` with its user info, and its query and fragment (kept from their
+/// first mark on), replaced by `[redacted]`.
+fn redact_url(url: &str) -> String {
+    let (before, tail) = url
+        .split_at_checked(url.find(['?', '#']).unwrap_or(url.len()))
+        .unwrap_or((url, ""));
+    let (scheme, rest) = before
+        .split_once("://")
+        .map_or(("", before), |(scheme, rest)| (scheme, rest));
+    let (authority, path) = rest
+        .split_at_checked(rest.find(['/', '\\']).unwrap_or(rest.len()))
+        .unwrap_or((rest, ""));
+    let mut out = String::with_capacity(url.len());
+    if !scheme.is_empty() {
+        out.push_str(scheme);
+        out.push_str("://");
+    }
+    match authority.rsplit_once('@') {
+        Some((_, host)) => {
+            out.push_str(REDACTED);
+            out.push('@');
+            out.push_str(host);
+        }
+        None => out.push_str(authority),
+    }
+    out.push_str(path);
+    if let Some(mark) = tail.chars().next() {
+        out.push(mark);
+        out.push_str(REDACTED);
+    }
+    out
 }
 
 /// The base URL and token of `auth` (`metaCreds`).
@@ -145,7 +195,8 @@ pub(super) fn missing_token() -> ExecError {
 /// The headers of a request to Meta, which always asks for an event stream
 /// (`applyMetaAPIHeaders`): the JSON content type, the token as a bearer
 /// (left out when empty), the user agent, what the stream needs, and the
-/// credential's custom headers, which can't set `X-Client-Id`.
+/// credential's custom headers, which can't set `X-Client-Id`, as no
+/// custom header can (see [`custom_headers::is_identity_header`]).
 pub(super) fn build_headers(
     auth: &Auth,
     token: &str,
@@ -175,9 +226,6 @@ pub(super) fn build_headers(
     );
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     custom_headers::apply(&mut headers, &auth.attributes, client, "meta");
-    if headers.remove("x-client-id").is_some() {
-        tracing::warn!("meta: a custom X-Client-Id header would identify the client; not sent");
-    }
     Ok(headers)
 }
 
@@ -402,6 +450,55 @@ mod tests {
         // A DCA token key is never a token, in any form.
         let (_, token) = creds_of(&auth(&[("dca_token", "dca:minted")], &[("dca_token", "x")]));
         assert_eq!(token, "");
+    }
+
+    // Not upstream's: `Debug` shows neither the token nor the secrets in the
+    // base URL (user info, query, fragment), in either layout, for the
+    // credential as read.
+    #[test]
+    fn creds_debug_hides_the_token_and_the_urls_secrets() {
+        let secrets = [
+            "echoed-dummy-meta-secret",
+            "dummy-user",
+            "dummy-password",
+            "dummy-query-secret",
+            "dummy-fragment-secret",
+        ];
+        let creds = creds(&auth(
+            &[
+                ("api_key", "echoed-dummy-meta-secret"),
+                (
+                    "base_url",
+                    "https://dummy-user:dummy-password@api.meta.ai/v1?key=dummy-query-secret#dummy-fragment-secret",
+                ),
+            ],
+            &[],
+        ));
+        // The URL is read as it is, so the secrets are in it.
+        assert!(creds.base_url.contains("dummy-password"));
+        for shown in [format!("{creds:?}"), format!("{creds:#?}")] {
+            for secret in secrets {
+                assert!(!shown.contains(secret), "{secret} in {shown}");
+            }
+            assert!(shown.contains("api.meta.ai/v1"), "{shown}");
+            assert!(shown.contains("[redacted]@api.meta.ai"), "{shown}");
+            assert!(shown.contains("token: \"[redacted]\""), "{shown}");
+        }
+
+        // No token shows as none, and a URL without secrets as it is.
+        let shown = format!("{:?}", super::creds(&Auth::default()));
+        assert_eq!(
+            shown,
+            format!("Creds {{ base_url: {DEFAULT_BASE_URL:?}, token: \"\" }}")
+        );
+        // A URL without a scheme still loses its user info.
+        let bare = Creds {
+            base_url: "dummy-user:dummy-password@api.meta.ai/v1".to_owned(),
+            token: String::new(),
+        };
+        let shown = format!("{bare:?}");
+        assert!(!shown.contains("dummy-"), "{shown}");
+        assert!(shown.contains("[redacted]@api.meta.ai/v1"), "{shown}");
     }
 
     #[test]

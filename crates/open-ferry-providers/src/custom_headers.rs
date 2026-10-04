@@ -18,12 +18,17 @@
 //!   `Originator`, `Session_id`, `Session-Id`, `Conversation_id`,
 //!   `Conversation-Id`, `Thread-Id`, `Thread_id`, `X-Codex-Window-Id`,
 //!   `X-Claude-Code-Session-Id`, `X-Claude-Code-Agent-Id`,
-//!   `X-Claude-Code-Parent-Agent-Id`, `X-Claude-Remote-Session-Id` and
-//!   `X-Claude-Remote-Container-Id`, in any case. Such an attribute is
-//!   dropped with a warning that names the header but not the value, so
-//!   these headers carry only what the client sent, or this project's own
-//!   user agent. Upstream sets whatever is configured, which lets a
-//!   credential pass for another client or one of its sessions.
+//!   `X-Claude-Code-Parent-Agent-Id`, `X-Claude-Remote-Session-Id`,
+//!   `X-Claude-Remote-Container-Id`, and the vendors' own: `X-Goog-Api-Client`
+//!   (Google's API client), `X-Client-Id` (Meta's client), `X-Xai-Token-Auth`
+//!   (xAI's client token) and any `X-Msh-*` (Kimi's platform, version and
+//!   device) or `X-Grok-Client-*` (xAI's client version and identifier), in
+//!   any case. Such an attribute is dropped with a warning that
+//!   names the header but not the value, whether its value is a literal or
+//!   a `$Name` taken from the client, so these headers carry only what the
+//!   client sent, or this project's own user agent. Upstream sets whatever
+//!   is configured, which lets a credential pass for another client or one
+//!   of its sessions.
 //! - A value that names `$CPA-SESSION-ID` is skipped, since session IDs
 //!   aren't derived.
 //! - An attribute whose name or value isn't a valid HTTP header is skipped
@@ -39,9 +44,11 @@ use crate::json::eq_fold;
 /// The client identity headers no attribute may set, lowercased as
 /// [`HeaderName`] keeps them: the client, and the session, conversation,
 /// thread, window, agent or container IDs that upstream's executors pass on
-/// from Codex and Claude Code clients or make up. Any `x-stainless-*`
-/// header counts too.
-const IDENTITY_HEADERS: [&str; 15] = [
+/// from Codex and Claude Code clients or make up, and the headers by which
+/// Google's API client (`x-goog-api-client`), Meta (`x-client-id`) and xAI
+/// (`x-xai-token-auth`) name theirs. Any `x-stainless-*`, `x-msh-*` (Kimi's)
+/// or `x-grok-client-*` (xAI's) header counts too.
+const IDENTITY_HEADERS: [&str; 18] = [
     "user-agent",
     "x-app",
     "originator",
@@ -57,13 +64,19 @@ const IDENTITY_HEADERS: [&str; 15] = [
     "x-claude-code-parent-agent-id",
     "x-claude-remote-session-id",
     "x-claude-remote-container-id",
+    "x-goog-api-client",
+    "x-client-id",
+    "x-xai-token-auth",
 ];
+
+/// The prefixes of the identity header families, lowercased.
+const IDENTITY_PREFIXES: [&str; 3] = ["x-stainless-", "x-msh-", "x-grok-client-"];
 
 /// Whether `name` says which client is calling, so no attribute may set it
 /// (nor a credential's quota probe).
 pub fn is_identity_header(name: &HeaderName) -> bool {
     let name = name.as_str();
-    IDENTITY_HEADERS.contains(&name) || name.starts_with("x-stainless-")
+    IDENTITY_HEADERS.contains(&name) || IDENTITY_PREFIXES.iter().any(|p| name.starts_with(p))
 }
 
 /// The headers that frame a request's body, which Go's HTTP client writes
@@ -183,6 +196,23 @@ mod tests {
             "X-Claude-Code-Parent-Agent-Id",
             "X-Claude-Remote-Session-Id",
             "X-CLAUDE-REMOTE-CONTAINER-ID",
+            "X-Goog-Api-Client",
+            "x-goog-api-client",
+            "X-GOOG-API-CLIENT",
+            "X-Client-Id",
+            "x-client-id",
+            "X-CLIENT-ID",
+            "X-Xai-Token-Auth",
+            "x-xai-token-auth",
+            "X-XAI-TOKEN-AUTH",
+            "X-Msh-Platform",
+            "x-msh-version",
+            "X-Msh-Device-Id",
+            "X-MSH-DEVICE-NAME",
+            "x-msh-anything-else",
+            "X-Grok-Client-Version",
+            "x-grok-client-identifier",
+            "X-GROK-CLIENT-SESSION-ID",
         ] {
             let header = HeaderName::from_bytes(name.as_bytes()).unwrap();
             assert!(is_identity_header(&header), "{name}");
@@ -197,6 +227,15 @@ mod tests {
             "X-App-Version",
             "Anthropic-Beta",
             "Authorization",
+            "X-Goog-Api-Key",
+            "X-Goog-User-Project",
+            "X-Client",
+            "X-Xai-Token",
+            "X-Msh",
+            "X-Mshx-Version",
+            "X-Grok",
+            "X-Grok-Client",
+            "X-Grok-Clients",
         ] {
             let header = HeaderName::from_bytes(name.as_bytes()).unwrap();
             assert!(!is_identity_header(&header), "{name}");
@@ -228,6 +267,17 @@ mod tests {
                 ("header:X-Codex-Window-Id", "invented-window"),
                 ("header:X-Claude-Code-Agent-Id", "invented-agent"),
                 ("header:X-Claude-Remote-Container-Id", "invented-container"),
+                ("header:X-Goog-Api-Client", "gl-node/22 gdcl/9"),
+                ("header:x-goog-api-client", "$X-Source"),
+                ("header:X-Client-Id", "tbh:tui"),
+                ("header:x-client-id", "$X-Source"),
+                ("header:X-Xai-Token-Auth", "invented-token"),
+                ("header:X-XAI-TOKEN-AUTH", "$X-Source"),
+                ("header:X-Msh-Platform", "kimi_cli"),
+                ("header:X-Msh-Device-Id", "invented-device"),
+                ("header:x-msh-version", "$X-Source"),
+                ("header:X-Grok-Client-Version", "9.9.9"),
+                ("header:x-grok-client-identifier", "$X-Source"),
                 ("header:X-Team", "blue"),
                 ("header:X-Forward", "$X-Source"),
                 ("header:X-Agent-Copy", "$User-Agent"),
@@ -250,6 +300,14 @@ mod tests {
             "x-codex-window-id",
             "x-claude-code-agent-id",
             "x-claude-remote-container-id",
+            "x-goog-api-client",
+            "x-client-id",
+            "x-xai-token-auth",
+            "x-msh-platform",
+            "x-msh-device-id",
+            "x-msh-version",
+            "x-grok-client-version",
+            "x-grok-client-identifier",
         ] {
             assert!(target.get(absent).is_none(), "{absent}");
         }

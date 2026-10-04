@@ -22,8 +22,10 @@
 //! `muse-*` user agent, nor anything Dynamic Client Assertion: the request
 //! carries `Authorization`, `Content-Type`, `Accept`, `Cache-Control`, the
 //! credential's custom headers, and the client's user agent or
-//! `open-ferry/<version>`. A credential's `X-Client-Id` is dropped and its
-//! `User-Agent` ignored, and a `dca:` token is never sent as a bearer.
+//! `open-ferry/<version>`. A credential's `X-Client-Id`, and the other
+//! vendors' identity headers the shared custom-header filter blocks, are
+//! dropped and its `User-Agent` ignored, and a `dca:` token is never sent as
+//! a bearer.
 //!
 //! Adapted: `ExecuteNonStreamMultiEventSSE_RecordsModelAndWarnsOnSubstitution`
 //! checks the served model through upstream's usage plugin and its log
@@ -438,17 +440,31 @@ async fn passes_the_clients_user_agent_on() {
     assert_no_client_identity(&mock.last(), "curl/8.7.1");
 }
 
-// A credential's custom headers go, except those that would name a client of
-// Meta's: `X-Client-Id` is dropped and `User-Agent` isn't set by it.
+// A credential's custom headers go, except those that would name a client:
+// Meta's `X-Client-Id` and the other vendors' identity headers (the shared
+// filter's, see `custom_headers`) are dropped, as a literal or a `$Name` the
+// client sent, and `User-Agent` isn't set by it.
 #[tokio::test]
 async fn custom_headers_cannot_name_a_client() {
     let mock = Mock::start(Reply::sse(&ok_stream("ok"))).await;
     let mut auth = (*api_key_auth(&mock.url)).clone();
+    let vendor_identity = [
+        ("header:X-Goog-Api-Client", "gl-node/22 gdcl/9"),
+        ("header:X-Msh-Platform", "kimi_cli"),
+        ("header:X-Msh-Device-Id", "$X-Source"),
+        ("header:X-Grok-Client-Version", "9.9.9"),
+        ("header:X-Grok-Client-Identifier", "$X-Source"),
+        ("header:X-Xai-Token-Auth", "$X-Source"),
+        ("header:x-client-id", "$X-Source"),
+    ];
     for (name, value) in [
         ("header:X-Client-Id", "tbh:tui"),
         ("header:User-Agent", "muse-build/9.9"),
         ("header:X-Extra", "kept"),
-    ] {
+    ]
+    .into_iter()
+    .chain(vendor_identity)
+    {
         auth.attributes.insert(name.into(), value.into());
     }
     for stream in [false, true] {
@@ -457,7 +473,7 @@ async fn custom_headers_cannot_name_a_client() {
                 .execute_stream(
                     Arc::new(auth.clone()),
                     request("muse-spark-1.3", CHAT),
-                    stream_options("openai"),
+                    with_header(stream_options("openai"), "x-source", "from-client"),
                 )
                 .await
                 .unwrap();
@@ -467,13 +483,24 @@ async fn custom_headers_cannot_name_a_client() {
                 .execute(
                     Arc::new(auth.clone()),
                     request("muse-spark-1.3", CHAT),
-                    options("openai"),
+                    with_header(options("openai"), "x-source", "from-client"),
                 )
                 .await
                 .unwrap();
         }
         let seen = mock.last();
         assert_eq!(seen.header("x-extra"), Some("kept"));
+        for name in [
+            "x-goog-api-client",
+            "x-msh-platform",
+            "x-msh-device-id",
+            "x-grok-client-version",
+            "x-grok-client-identifier",
+            "x-xai-token-auth",
+            "x-client-id",
+        ] {
+            assert!(seen.header(name).is_none(), "{name} was sent");
+        }
         assert_no_client_identity(&seen, USER_AGENT);
     }
 }
