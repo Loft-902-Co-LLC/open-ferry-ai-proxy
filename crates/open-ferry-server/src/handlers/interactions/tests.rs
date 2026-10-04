@@ -3,7 +3,8 @@
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! `POST /v1beta/interactions` end to end against a fake dispatcher, which
-//! records the calls the handler makes.
+//! records the calls the handler makes, and, in `native`, through the
+//! credential manager and the real `gemini-interactions` executor.
 //!
 //! Changed from upstream:
 //! - The `TestInteractionsRejects*` tests go through the router, and check
@@ -11,12 +12,10 @@
 //! - `TestBuildInteractionsExecutionRequestUsesAgentAuthSelectionModel`
 //!   checks the call the dispatcher gets, since the forced provider and the
 //!   selection model are the call's metadata here.
-//! - `TestInteractionsAgentUsesNativeInteractionsEndpoint` checks that the
-//!   call reaches the dispatcher forced to `gemini-interactions` and that
-//!   its reply comes back as it is. The `gemini-interactions` executor and
-//!   the path it calls upstream are its own tests'.
 //! - `TestInteractionsAntigravityModelUsesTranslatorBridge` isn't ported:
 //!   the Antigravity provider isn't.
+
+mod native;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -299,8 +298,7 @@ async fn needs_the_key_and_a_post() {
     );
 }
 
-// TestBuildInteractionsExecutionRequestUsesAgentAuthSelectionModel, and the
-// handler's half of TestInteractionsAgentUsesNativeInteractionsEndpoint.
+// TestBuildInteractionsExecutionRequestUsesAgentAuthSelectionModel.
 #[tokio::test]
 async fn an_agent_is_forced_to_gemini_interactions() {
     let reply = r#"{"id":"interaction_1","object":"interaction","status":"completed"}"#;
