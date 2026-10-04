@@ -890,13 +890,27 @@ enum TimestampLayout {
     Date,
 }
 
+/// A timestamp's fields, as Go's `time.Parse` reads them.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Timestamp {
+    year: u32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+    nanosecond: u32,
+    /// The zone's offset, in seconds east of UTC.
+    offset: i64,
+}
+
 /// yaml.v3's `parseTimestamp`, using Go's `time.Parse` rules for its four
 /// layouts.
-fn is_timestamp(text: &str) -> bool {
+fn parse_timestamp(text: &str) -> Option<Timestamp> {
     let bytes = text.as_bytes();
     let year_digits = bytes.iter().take_while(|b| b.is_ascii_digit()).count();
     if year_digits != 4 || bytes.get(4) != Some(&b'-') {
-        return false;
+        return None;
     }
     [
         TimestampLayout::DateTime(b'T'),
@@ -905,7 +919,42 @@ fn is_timestamp(text: &str) -> bool {
         TimestampLayout::Date,
     ]
     .into_iter()
-    .any(|layout| parse_timestamp(bytes, layout).is_some())
+    .find_map(|layout| parse_layout(bytes, layout))
+}
+
+fn is_timestamp(text: &str) -> bool {
+    parse_timestamp(text).is_some()
+}
+
+/// A timestamp as Go's JSON encoder writes the `time.Time` yaml.v3 decodes
+/// it to: RFC 3339, with as much of the fraction as isn't trailing zeros,
+/// and `Z` for UTC. `None` when `text` isn't a timestamp, or when the
+/// encoder refuses it, its zone being 24 hours or more from UTC.
+pub(crate) fn timestamp_json_text(text: &str) -> Option<String> {
+    let time = parse_timestamp(text)?;
+    let mut out = String::new();
+    let _ = write!(
+        out,
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+        time.year, time.month, time.day, time.hour, time.minute, time.second
+    );
+    if time.nanosecond != 0 {
+        let fraction = format!("{:09}", time.nanosecond);
+        out.push('.');
+        out.push_str(fraction.trim_end_matches('0'));
+    }
+    if time.offset == 0 {
+        out.push('Z');
+        return Some(out);
+    }
+    let minutes = time.offset.unsigned_abs() / 60;
+    let (hours, minutes) = (minutes / 60, minutes % 60);
+    if hours >= 24 {
+        return None;
+    }
+    let sign = if time.offset < 0 { '-' } else { '+' };
+    let _ = write!(out, "{sign}{hours:02}:{minutes:02}");
+    Some(out)
 }
 
 /// Go's `getnum` without the fixed flag: one or two digits.
@@ -939,7 +988,7 @@ fn days_in(month: u32, year: u32) -> u32 {
     }
 }
 
-fn parse_timestamp(bytes: &[u8], layout: TimestampLayout) -> Option<()> {
+fn parse_layout(bytes: &[u8], layout: TimestampLayout) -> Option<Timestamp> {
     let year = bytes
         .get(..4)?
         .iter()
@@ -951,11 +1000,17 @@ fn parse_timestamp(bytes: &[u8], layout: TimestampLayout) -> Option<()> {
     }
     let rest = rest.strip_prefix(b"-")?;
     let (day, mut rest) = get_number(rest)?;
+    let mut time = Timestamp {
+        year,
+        month,
+        day,
+        ..Timestamp::default()
+    };
     match layout {
         TimestampLayout::Date => {}
         TimestampLayout::DateTime(separator) => {
             rest = rest.strip_prefix(&[separator])?;
-            rest = parse_clock(rest)?;
+            rest = parse_clock(rest, &mut time)?;
             if let Some(after) = rest.strip_prefix(b"Z") {
                 rest = after;
             } else {
@@ -968,6 +1023,12 @@ fn parse_timestamp(bytes: &[u8], layout: TimestampLayout) -> Option<()> {
                 if hours > 24 || minutes > 60 {
                     return None;
                 }
+                let offset = i64::from(hours * 3600 + minutes * 60);
+                time.offset = if zone.first() == Some(&b'-') {
+                    -offset
+                } else {
+                    offset
+                };
                 rest = rest.get(6..)?;
             }
         }
@@ -979,17 +1040,18 @@ fn parse_timestamp(bytes: &[u8], layout: TimestampLayout) -> Option<()> {
                 let spaces = rest.iter().take_while(|b| **b == b' ').count();
                 rest = rest.get(spaces..)?;
             }
-            rest = parse_clock(rest)?;
+            rest = parse_clock(rest, &mut time)?;
         }
     }
     if !rest.is_empty() || day < 1 || day > days_in(month, year) {
         return None;
     }
-    Some(())
+    Some(time)
 }
 
-/// `15:4:5.999999999`: hour, minute, second and an optional fraction.
-fn parse_clock(bytes: &[u8]) -> Option<&[u8]> {
+/// `15:4:5.999999999`: hour, minute, second and an optional fraction, of
+/// which Go keeps nine digits.
+fn parse_clock<'a>(bytes: &'a [u8], time: &mut Timestamp) -> Option<&'a [u8]> {
     let (hour, rest) = get_number(bytes)?;
     let rest = rest.strip_prefix(b":")?;
     let (minute, rest) = get_number(rest)?;
@@ -1006,8 +1068,16 @@ fn parse_clock(bytes: &[u8]) -> Option<&[u8]> {
             .skip(1)
             .take_while(|b| b.is_ascii_digit())
             .count();
+        let kept = digits.min(9);
+        let fraction = rest
+            .iter()
+            .skip(1)
+            .take(kept)
+            .fold(0u32, |acc, b| acc * 10 + u32::from(b - b'0'));
+        time.nanosecond = (kept..9).fold(fraction, |acc, _| acc * 10);
         rest = rest.get(1 + digits..)?;
     }
+    (time.hour, time.minute, time.second) = (hour, minute, second);
     Some(rest)
 }
 
@@ -1503,6 +1573,45 @@ mod tests {
             ("0x", "!!str"),
         ] {
             assert_eq!(tag_of(input), tag, "{input:?}");
+        }
+    }
+
+    /// Not upstream's: a timestamp is written as Go's JSON encoder writes
+    /// the `time.Time` yaml.v3 decodes it to.
+    #[test]
+    fn timestamps_are_written_as_go_writes_them() {
+        for (input, want) in [
+            ("2002-12-14", Some("2002-12-14T00:00:00Z")),
+            (
+                "2001-12-14t21:59:43.10-05:00",
+                Some("2001-12-14T21:59:43.1-05:00"),
+            ),
+            ("2024-1-2T3:4:5Z", Some("2024-01-02T03:04:05Z")),
+            ("2024-01-02   03:04:05.5", Some("2024-01-02T03:04:05.5Z")),
+            ("2024-01-02 03:04:05,25", Some("2024-01-02T03:04:05.25Z")),
+            (
+                "2024-01-02T03:04:05.1234567891234+05:30",
+                Some("2024-01-02T03:04:05.123456789+05:30"),
+            ),
+            (
+                "2024-01-02T03:04:05.000+00:00",
+                Some("2024-01-02T03:04:05Z"),
+            ),
+            ("2024-01-02T03:04:05-00:00", Some("2024-01-02T03:04:05Z")),
+            (
+                "2024-01-02T03:04:05+23:59",
+                Some("2024-01-02T03:04:05+23:59"),
+            ),
+            ("2024-01-02T03:04:05+24:00", None),
+            ("2024-01-02T03:04:05+23:60", None),
+            ("0000-02-29", Some("0000-02-29T00:00:00Z")),
+            (
+                "2024-01-02T03:04:05.000000001Z",
+                Some("2024-01-02T03:04:05.000000001Z"),
+            ),
+            ("2024-01-02T03:04:05", None),
+        ] {
+            assert_eq!(timestamp_json_text(input).as_deref(), want, "{input:?}");
         }
     }
 

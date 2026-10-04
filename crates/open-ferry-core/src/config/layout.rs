@@ -43,7 +43,7 @@ use super::v8::{
 };
 use super::yaml::{
     Kind, Node, Scalar, delete_yaml_path, expand_merges, find_map_key_index, parse_document,
-    resolve_node, scalar_string, set_yaml_path, yaml_path,
+    resolve_node, scalar_string, set_yaml_path, timestamp_json_text, yaml_path,
 };
 use super::{ConfigError, ConfigErrorKind};
 
@@ -391,9 +391,11 @@ pub enum AnyValue {
     /// A larger integer that fits in a `uint64`.
     Uint(u64),
     Float(f64),
-    /// A string; a timestamp stays as written, as yaml.v3 leaves one bound
-    /// for `any`.
     Str(String),
+    /// A timestamp, which yaml.v3 decodes to a `time.Time`: the RFC 3339
+    /// text Go's JSON encoder writes for it, or `None` when the encoder
+    /// refuses it (a zone 24 hours or more from UTC).
+    Time(Option<String>),
     Seq(Vec<AnyValue>),
     /// A mapping whose keys are all strings, sorted.
     Map(BTreeMap<String, AnyValue>),
@@ -697,7 +699,7 @@ fn decode_any(node: &Node) -> Result<AnyValue, String> {
     }
 }
 
-/// A scalar: `!!str` and unknown tags as strings, a timestamp as written,
+/// A scalar: `!!str` and unknown tags as strings, a timestamp as a time,
 /// `!!binary` decoded (yaml.v3's `decoder.scalar`).
 fn decode_scalar(node: &Node) -> Result<AnyValue, String> {
     let resolved = resolve_node(node).map_err(|error| error.message())?;
@@ -707,7 +709,7 @@ fn decode_scalar(node: &Node) -> Result<AnyValue, String> {
         Scalar::Int(value) => AnyValue::Int(value),
         Scalar::Uint(value) => AnyValue::Uint(value),
         Scalar::Float(value) => AnyValue::Float(value),
-        Scalar::Timestamp => AnyValue::Str(node.value.clone()),
+        Scalar::Timestamp => AnyValue::Time(timestamp_json_text(&node.value)),
         Scalar::Str(value) => AnyValue::Str(value),
     })
 }
@@ -1007,7 +1009,7 @@ mod tests {
         assert_eq!(
             get(&document, "plugins/configs"),
             Some(map(&[
-                ("a", text("2024-01-02")),
+                ("a", AnyValue::Time(Some("2024-01-02T00:00:00Z".to_owned()))),
                 ("b", AnyValue::Uint(9_999_999_999_999_999_999)),
                 ("c", AnyValue::Float(1.5)),
                 ("d", AnyValue::Null),
