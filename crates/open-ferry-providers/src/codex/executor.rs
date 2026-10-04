@@ -36,9 +36,10 @@
 //!   50 MiB.
 //! - A dropped call or stream stops at once; upstream checks its context.
 //! - An error body or terminal failure event that quotes a secret the
-//!   request sent has it redacted: the credential headers after the custom
-//!   ones, each cookie, the URL's credentials, the proxy's password and the
-//!   credential's key or tokens (see the crate's `redact` module).
+//!   request sent has it redacted if it is of eight bytes or more, as every
+//!   client error is (see `Policy::Client` in the crate's `redact` module):
+//!   the credential headers after the custom ones, each cookie, the URL's
+//!   credentials, the proxy's password and the credential's key or tokens.
 //! - Usage reporting and request logging are left to the call's taps (see
 //!   the crate's `observe_send` module), and payload rules to
 //!   [`crate::payload`]. The Home-service refresh isn't ported.

@@ -29,7 +29,8 @@
 //!   sent, as Go's does, with Go's message (`net/url: invalid control
 //!   character in URL`) but without the URL, which may hold a secret.
 //! - An answer whose status isn't a success has every secret the request
-//!   sent redacted from its body, as a client's error is (see
+//!   sent, of eight bytes or more, redacted from its body, as a client's
+//!   error is (see
 //!   [`observe_send::secrets`] and [`crate::redact`]): the token, the
 //!   credential headers after the custom ones, each cookie, the URL's
 //!   credentials and the proxy's password. Upstream hands the body to the

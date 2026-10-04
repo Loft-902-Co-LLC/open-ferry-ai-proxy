@@ -33,10 +33,11 @@
 //!   base URL are resolved, where Go sends them as written. A base URL with
 //!   an ASCII control character fails before anything is sent, as Go's
 //!   does, but the error doesn't quote the URL, which may hold a secret.
-//! - An error body that quotes a secret the request sent has it redacted:
-//!   the credential headers after the custom ones, each cookie, the URL's
-//!   credentials, the proxy's password and the credential's key; see
-//!   [`crate::redact`].
+//! - An error body that quotes a secret the request sent has it redacted if
+//!   it is of eight bytes or more, as every client error is (see
+//!   `Policy::Client` in [`crate::redact`]): the credential headers after
+//!   the custom ones, each cookie, the URL's credentials, the proxy's
+//!   password and the credential's key.
 //! - Usage reporting and request logging are left to the call's taps (see
 //!   the crate's `observe_send` module), and payload rules to
 //!   [`crate::payload`]. The Home service (its credential options and

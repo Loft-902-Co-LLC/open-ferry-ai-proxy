@@ -37,15 +37,19 @@
 //!   typed token storage. A credential holds an API key or an access token
 //!   itself, and `refresh` returns it as it is.
 //! - The request names no Meta client: upstream sends `X-Client-Id:
-//!   tbh:tui` and a `muse-build/…` user agent. See the `request` module.
+//!   tbh:tui` and a `muse-build/…` user agent, and no custom header can set
+//!   either (see the crate's `custom_headers` module). See the `request`
+//!   module.
 //! - Requests go through `reqwest` with rustls, one shared client per proxy;
 //!   upstream builds a client per request. Error bodies are read up to
-//!   4 MiB, and an error body or event that quotes anything the request
+//!   4 MiB, and an error body or event that quotes a secret the request
 //!   sent (the token, the other headers, the URL's user info, the proxy's
-//!   password) has it redacted (see the crate's `redact` module).
+//!   password) has it redacted if it is of eight bytes or more, as every
+//!   client error is (see `Policy::Client` in the crate's `redact` module).
 //! - Usage reporting, the served model and request logging are left to the
 //!   call's taps (see the crate's `observe_send` module), and payload rules
-//!   to [`crate::payload`].
+//!   to [`crate::payload`]. The usage tap reads a Meta answer as Codex's
+//!   Responses usage and records it as `MetaExecutor`.
 //! - Two of upstream's 401s can't happen here and are left out: the base URL
 //!   always has a default, and a call always has a credential.
 //! - There is no executor hook for upstream's `SupportsApplyPatch`: the

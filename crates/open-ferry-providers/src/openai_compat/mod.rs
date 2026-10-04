@@ -15,7 +15,9 @@
 //!   its own `User-Agent`, which passes through; upstream always sends
 //!   `cli-proxy-openai-compat`. A credential's `header:` attributes (the
 //!   entry's `headers`) can't set `User-Agent` or another header that says
-//!   which client is calling.
+//!   which client is calling, another vendor's included (`X-Goog-Api-Client`,
+//!   `X-Client-Id`, `X-Xai-Token-Auth`, `X-Msh-*`, `X-Grok-Client-*`; see
+//!   the crate's `custom_headers` module).
 //! - No `prompt_cache_key` is made up: one the client sent passes through
 //!   to a provider with `support-prompt-cache-key`, but upstream's derived
 //!   keys (from a Claude Code prompt or a session) aren't.

@@ -17,10 +17,11 @@
 //! token starts once the connection is up, not at the dial.
 //!
 //! A failed handshake is the call's error: its status and body (the secrets
-//! the handshake sent redacted; see [`observe_send::secrets`]), with a usage
-//! limit's cooling as for HTTP. Another failure to connect, such as a
-//! refused `CONNECT`, is the call's error too, also with the secrets
-//! redacted. A 426 for a client not
+//! the handshake sent redacted if they are of eight bytes or more, as in
+//! every client error; see [`observe_send::secrets`] and `Policy::Client`),
+//! with a usage limit's cooling as for HTTP. Another failure to connect,
+//! such as a refused `CONNECT`, is the call's error too, also with the
+//! secrets redacted. A 426 for a client not
 //! on a WebSocket goes over HTTP instead, as upstream does; the WebSocket
 //! route only takes WebSocket clients, so this only happens when the route
 //! is called directly.
@@ -33,8 +34,9 @@
 //!   as the first handshake does; upstream gives gorilla's `websocket: bad
 //!   handshake`.
 //! - A dropped call closes its connection; see [`super::session`].
-//! - A failure to connect has the secrets the handshake sent redacted from
-//!   its text, as a refused handshake's body has; upstream passes them on.
+//! - A failure to connect has the secrets the handshake sent, of eight
+//!   bytes or more, redacted from its text, as a refused handshake's body
+//!   has; upstream passes them on.
 //! - The taps are told the request is going out, just before the send,
 //!   once the connection is up. Upstream starts the time to first token
 //!   there (`StartResponseTTFT`) but logs the request before it dials; the

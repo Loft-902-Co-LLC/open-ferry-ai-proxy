@@ -18,8 +18,9 @@
 //! - The secrets the connection sent (its credential headers after the
 //!   custom ones, each cookie, the URL's credentials, the proxy's password
 //!   and the credential's key or tokens) are redacted from an error event's
-//!   body, a close reason and the text of another connection failure; see
-//!   [`crate::redact`].
+//!   body, a close reason and the text of another connection failure if
+//!   they are of eight bytes or more, as in every client error; see
+//!   [`crate::redact`] and its `Policy::Client`.
 //! - A message past the size limit ends the connection with `websocket: read
 //!   limit exceeded`; upstream sets no limit.
 

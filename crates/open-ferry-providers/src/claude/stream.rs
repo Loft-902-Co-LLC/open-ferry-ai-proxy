@@ -19,7 +19,9 @@
 //! - An `error` event has the secrets the request sent (the API key or
 //!   token among them) redacted before it is passed on or translated, so
 //!   none reaches the client in an error the stream carries; see
-//!   [`crate::redact`]. The other events go out as Claude sent them.
+//!   [`crate::redact`], whose `Policy::Client` leaves a secret shorter than
+//!   eight bytes alone, as for every client error. The other events go out as
+//!   Claude sent them.
 //! - An event that grows past 50 MiB goes out in pieces rather than whole;
 //!   upstream buffers it however large it gets.
 //! - Dropping the stream stops reading, where upstream watches its context.

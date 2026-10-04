@@ -19,7 +19,9 @@
 //! Deviations from upstream:
 //! - Every line has the secrets the request sent (the API key or token
 //!   among them) redacted before it is read, so none reaches the client in
-//!   an error the stream carries, or anywhere else; see [`crate::redact`].
+//!   an error the stream carries, or anywhere else; see [`crate::redact`],
+//!   whose `Policy::Client` leaves a secret shorter than eight bytes alone,
+//!   as for every client error.
 //! - Dropping the stream stops reading, where upstream watches its context.
 //! - Usage reporting and request logging are left to the call's taps,
 //!   which see each chunk as it is read (see the crate's `observe_send`

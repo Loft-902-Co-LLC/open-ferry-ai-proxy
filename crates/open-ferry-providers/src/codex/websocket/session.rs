@@ -40,9 +40,10 @@
 //! - The target includes the token, so a refreshed token connects again;
 //!   upstream keeps the connection.
 //! - The secrets the connection's handshake sent, the token among them,
-//!   are redacted (see [`crate::redact`]) from its failures, as Codex's
-//!   close reason may quote them, before a call gets one or it is logged;
-//!   upstream passes them on.
+//!   are redacted (see [`crate::redact`]; a secret of eight bytes or more,
+//!   as in every client error) from its failures, as Codex's close reason
+//!   may quote them, before a call gets one or it is logged; upstream
+//!   passes them on.
 //! - A closed session stays closed: a handshake under way is abandoned, and
 //!   a connection that comes up after is dropped before `response.create`
 //!   is sent. Upstream gives the closed session the new connection, which

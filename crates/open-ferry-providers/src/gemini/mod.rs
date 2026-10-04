@@ -43,13 +43,18 @@
 //! - A request without a client `User-Agent` carries this project's, where
 //!   upstream sends Go's default.
 //! - A `header:x-goog-api-client` attribute isn't applied, so a credential
-//!   can't pass for one of Google's client libraries; upstream sets it.
+//!   can't pass for one of Google's client libraries; upstream sets it. The
+//!   shared custom-header filter drops it, with the other vendors' identity
+//!   headers (see the crate's `custom_headers` module), and the executor
+//!   removes it again, whatever sets it.
 //! - The body is written as `serde_json` writes it, compact.
 //! - A dropped call or stream stops at once; upstream checks its context.
-//! - An error body that quotes a secret the request sent has it redacted:
-//!   the credential headers after the custom ones (the API key or access
-//!   token among them), each cookie, the URL's credentials, the proxy's
-//!   password and the credential's key (see the crate's `redact` module).
+//! - An error body that quotes a secret the request sent has it redacted if
+//!   it is of eight bytes or more, as every client error is (see
+//!   `Policy::Client` in the crate's `redact` module): the credential
+//!   headers after the custom ones (the API key or access token among
+//!   them), each cookie, the URL's credentials, the proxy's password and the
+//!   credential's key.
 //! - Usage reporting and request logging are left to the call's taps (see
 //!   the crate's `observe_send` module), and payload rules to
 //!   [`crate::payload`].

@@ -29,8 +29,9 @@
 //!   no fields; see [`super::status`].
 //! - A frame's data, joined, may hold at most 50 MiB, as one line may; a
 //!   bigger frame ends the stream with a 502. Upstream holds any amount.
-//! - An error that quotes a secret the request sent has it redacted; see
-//!   [`crate::redact`].
+//! - An error that quotes a secret the request sent has it redacted if it is
+//!   of eight bytes or more, as every client error is; see
+//!   [`crate::redact`] and its `Policy::Client`.
 
 use std::collections::VecDeque;
 

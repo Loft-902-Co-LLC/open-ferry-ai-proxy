@@ -35,8 +35,9 @@
 //!   looked up as `gemini` registered them, as upstream does.
 //! - `RequestToFormat` is [`InteractionsExecutor::request_to_format`]: the
 //!   executor trait has no such method, so nothing outside asks it.
-//! - An error answer is read up to 4 MiB, with the secrets the request sent
-//!   redacted; upstream reads it whole, as it is.
+//! - An error answer is read up to 4 MiB, with the secrets of eight bytes or
+//!   more the request sent redacted, as in every client error (see
+//!   `Policy::Client`); upstream reads it whole, as it is.
 //! - Refresh returns the credential as it is; the Home service isn't
 //!   ported.
 
