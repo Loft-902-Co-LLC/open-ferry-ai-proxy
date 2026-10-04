@@ -35,6 +35,9 @@
 //! is closed. When the channel is full it waits for the consumer, and still
 //! stops if the [`ConfigWatcher`] is dropped meanwhile.
 //!
+//! The `Debug` of an [`AuthFile`], and of an event carrying one, shows the
+//! file's path and the length of its contents, never the credential.
+//!
 //! Deviations from upstream:
 //! - Events go out on a channel; upstream calls a reload callback and builds
 //!   and dispatches auth records itself. An auth event carries the contents
@@ -138,13 +141,23 @@ pub enum WatchEvent {
     AuthRemoved(PathBuf, u64),
 }
 
-/// An auth file and the contents the watcher read and checked.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// An auth file and the contents the watcher read and checked. Its `Debug`
+/// shows the contents' length, not the credential they hold.
+#[derive(Clone, PartialEq, Eq)]
 pub struct AuthFile {
     /// The file, in the auth directory.
     pub path: PathBuf,
     /// Its contents when the watcher read them: a JSON object or `null`.
     pub data: Arc<[u8]>,
+}
+
+impl fmt::Debug for AuthFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AuthFile")
+            .field("path", &self.path)
+            .field("data_len", &self.data.len())
+            .finish()
+    }
 }
 
 /// Why a watcher couldn't start.
@@ -1370,6 +1383,33 @@ mod tests {
         assert_eq!(&*file.data, &data[..]);
         // Outside a string it is still a syntax error.
         assert!(check_auth_json(&[b'{', 0xff, b'}']).is_err());
+    }
+
+    /// Not upstream's: the `Debug` of an auth file, and of an event
+    /// carrying one, shows its path and length, never the credential.
+    #[test]
+    fn auth_file_debug_leaves_out_the_credential() {
+        let fixture = Fixture::new();
+        let mut state = fixture.state();
+        let data =
+            r#"{"type":"demo","access_token":"TOKEN-SECRET","refresh_token":"REFRESH-SECRET"}"#;
+        let path = fixture.write_auth("marker.json", data);
+        let step = state.add_or_update(&path, path_key(&path));
+        let Step::Send(event @ WatchEvent::AuthAdded(file, _)) = &step else {
+            panic!("expected an added event");
+        };
+        assert_eq!(&*file.data, data.as_bytes());
+        for shown in [
+            format!("{file:?}"),
+            format!("{file:#?}"),
+            format!("{event:?}"),
+            format!("{step:#?}"),
+        ] {
+            assert!(!shown.contains("SECRET"), "{shown}");
+            assert!(!shown.contains("demo"), "{shown}");
+            assert!(shown.contains("marker.json"), "{shown}");
+            assert!(shown.contains(&data.len().to_string()), "{shown}");
+        }
     }
 
     #[test]

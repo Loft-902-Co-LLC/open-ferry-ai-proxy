@@ -19,6 +19,9 @@
 //! shortest decimal that reads back the same, the nearest when two are as
 //! short, ties to even.
 //!
+//! A [`Json`]'s `Debug` shows its shape, kinds, keys and lengths, never a
+//! string or a number, which may be a secret.
+//!
 //! Deviations from upstream:
 //! - A value decoded into `any` comes from serde_json, which read it with
 //!   the credential: an integer `-0` is written back as `0`, where Go
@@ -26,7 +29,7 @@
 //!   decode, is written as it was read.
 
 use std::collections::BTreeMap;
-use std::fmt::Write as _;
+use std::fmt::{self, Write as _};
 
 use axum::response::{IntoResponse, Response};
 use http::{HeaderValue, StatusCode, header};
@@ -36,8 +39,8 @@ use serde_json::Value;
 
 use crate::go::decode_rune;
 
-/// A value to write as JSON.
-#[derive(Clone, Debug, PartialEq)]
+/// A value to write as JSON. Its `Debug` shows only its shape.
+#[derive(Clone, PartialEq)]
 pub(crate) enum Json {
     Null,
     Bool(bool),
@@ -57,6 +60,45 @@ pub(crate) enum Json {
     Map(BTreeMap<String, Json>),
     /// A value decoded into Go's `any`: objects sorted, numbers float64.
     Any(Value),
+}
+
+/// Kinds, keys and lengths: a response body may hold a credential's token
+/// or a secret in any string or number.
+impl fmt::Debug for Json {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Null => f.write_str("Null"),
+            Self::Bool(_) => f.write_str("Bool(..)"),
+            Self::Int(_) => f.write_str("Int(..)"),
+            Self::Uint(_) => f.write_str("Uint(..)"),
+            Self::Str(s) => f.debug_struct("Str").field("len", &s.len()).finish(),
+            Self::Bytes(bytes) => f.debug_struct("Bytes").field("len", &bytes.len()).finish(),
+            Self::Time(_) => f.write_str("Time(..)"),
+            Self::Array(items) => f.debug_tuple("Array").field(items).finish(),
+            Self::Struct(fields) => f.debug_tuple("Struct").field(fields).finish(),
+            Self::Map(entries) => f.debug_tuple("Map").field(entries).finish(),
+            Self::Any(value) => f.debug_tuple("Any").field(&Shape(value)).finish(),
+        }
+    }
+}
+
+/// The `Debug` of a decoded value: kinds, object keys and string lengths.
+struct Shape<'a>(&'a Value);
+
+impl fmt::Debug for Shape<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Value::Null => f.write_str("Null"),
+            Value::Bool(_) => f.write_str("Bool(..)"),
+            Value::Number(_) => f.write_str("Number(..)"),
+            Value::String(s) => f.debug_struct("String").field("len", &s.len()).finish(),
+            Value::Array(items) => f.debug_list().entries(items.iter().map(Shape)).finish(),
+            Value::Object(entries) => f
+                .debug_map()
+                .entries(entries.iter().map(|(key, value)| (key, Shape(value))))
+                .finish(),
+        }
+    }
 }
 
 impl Json {
@@ -248,6 +290,59 @@ mod tests {
     /// A backslash, `u` and `hex`, built so the source holds no escape.
     fn u(hex: &str) -> String {
         format!("{}u{hex}", '\\')
+    }
+
+    /// Not upstream's: a value's `Debug` shows its kinds, keys and lengths,
+    /// never a string, a number or a time.
+    #[test]
+    fn debug_shows_only_the_shape() {
+        let value = Json::Struct(vec![
+            ("access_token", Json::Str("TOKEN-SECRET".to_owned())),
+            ("body", Json::Bytes(b"BYTES-SECRET".to_vec())),
+            ("int", Json::Int(4_242_424_242)),
+            ("uint", Json::Uint(5_353_535_353)),
+            ("disabled", Json::Bool(true)),
+            (
+                "at",
+                Json::Time(Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 5).unwrap()),
+            ),
+            (
+                "list",
+                Json::Array(vec![Json::Str("ITEM-SECRET".to_owned()), Json::Null]),
+            ),
+            (
+                "header",
+                Json::map([("authorization", Json::Str("MAP-SECRET".to_owned()))]),
+            ),
+            (
+                "metadata",
+                Json::Any(json!({
+                    "api_key": "ANY-SECRET",
+                    "expires": 6_464_646_464.5,
+                    "nested": [{"refresh": "DEEP-SECRET"}, false],
+                })),
+            ),
+        ]);
+        let shown = [format!("{value:?}"), format!("{value:#?}")];
+        for shown in &shown {
+            for hidden in ["SECRET", "4242", "5353", "6464", "2026", "true", "false"] {
+                assert!(!shown.contains(hidden), "{hidden} in {shown}");
+            }
+            for key in ["access_token", "authorization", "api_key", "refresh"] {
+                assert!(shown.contains(key), "{key} not in {shown}");
+            }
+        }
+        assert_eq!(
+            format!(
+                "{:?}",
+                Json::Struct(vec![("k", Json::Str("abc".to_owned()))])
+            ),
+            r#"Struct([("k", Str { len: 3 })])"#
+        );
+        assert_eq!(
+            format!("{:?}", Json::Any(json!({"k": ["ab", 1, null, true, {}]}))),
+            r#"Any({"k": [String { len: 2 }, Number(..), Null, Bool(..), {}]})"#
+        );
     }
 
     #[test]
