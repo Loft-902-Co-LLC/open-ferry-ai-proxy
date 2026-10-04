@@ -225,7 +225,9 @@ Deviations, each also noted in its module:
 
 - **A field change holds the credential lock**, as a status change does; upstream takes none. A change to a credential removed meanwhile answers 404 `auth file not found`, where upstream hands its stale copy to the hook and registers it again.
 
-- **Lookups take the first credential by ID** when two match a name; upstream takes whichever its map yields first. A refresh body that fails to decode answers 400 `invalid request body` without Go's decoder error after it. A field body nested more than 128 deep is refused; Go allows 10000. A refresh's query value that isn't UTF-8 has each bad byte read as U+FFFD.
+- **Lookups take the first credential by ID** when two match a name; upstream takes whichever its map yields first. A refresh body that fails to decode answers 400 `invalid request body` without Go's decoder error after it. A refresh's query value that isn't UTF-8 has each bad byte read as U+FFFD.
+
+- **A field change can't nest deeper than the store reads back.** A body nested more than 127 deep is refused as an invalid request body, and so is a field whose dotted parts plus its value's own depth pass 127, which would nest the credential's file deeper than `serde_json` reads it. Go's decoder allows 10000, and upstream builds whatever a dotted name asks for, writing a file it can't read back past that.
 
 - **The refreshed credential is written field by field as Go writes upstream's `Auth`**, but without `registration_epoch` and `generation`, which the manager doesn't keep, with the quota's `observed_at` always Go's zero time and no `signals`, and with `"unknown"` for a status that isn't known, where Go writes `""`.
 

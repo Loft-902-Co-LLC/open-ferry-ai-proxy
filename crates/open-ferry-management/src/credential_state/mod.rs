@@ -61,8 +61,12 @@
 //!   without Go's decoder error after it.
 //! - When two credentials match a name, the first by ID is taken; upstream
 //!   takes whichever its map yields first.
-//! - A field body nested more than 128 deep is refused as invalid; Go's
-//!   decoder allows 10000.
+//! - A field body nested more than 127 deep is refused as an invalid
+//!   request body, and so is a field whose dotted parts plus its value's
+//!   own depth pass 127, which would nest the credential's file deeper
+//!   than the store reads back. Go's decoder allows 10000, and upstream
+//!   builds whatever a dotted name asks for, writing a file it can't read
+//!   back past that.
 //! - A query value that isn't UTF-8 is read with each bad byte replaced by
 //!   U+FFFD.
 //! - There is no plugin host, so there are no plugin virtual credentials
@@ -113,6 +117,10 @@ const CONFIG_API_KEY_REFUSAL: &str =
 
 /// The status message of a credential turned off here.
 const DISABLED_MESSAGE: &str = "disabled via management API";
+
+/// The deepest the store reads a credential's file back: `serde_json`
+/// refuses arrays and objects nested 128 deep.
+const MAX_FILE_DEPTH: usize = 127;
 
 /// The routes this module serves.
 pub(crate) fn routes() -> Vec<Route> {
@@ -296,6 +304,33 @@ fn decode_fields(body: &[u8]) -> Option<Map<String, Value>> {
         Ok(Value::Null) => Some(Map::new()),
         _ => None,
     }
+}
+
+/// How deep `value` nests: 0 for a scalar, 1 for an array or object of
+/// scalars, and so on.
+fn value_depth(value: &Value) -> usize {
+    let mut deepest = 0;
+    let mut pending = vec![(value, 0)];
+    while let Some((value, depth)) = pending.pop() {
+        let depth = depth + 1;
+        match value {
+            Value::Array(items) => pending.extend(items.iter().map(|item| (item, depth))),
+            Value::Object(map) => pending.extend(map.values().map(|item| (item, depth))),
+            _ => continue,
+        }
+        deepest = deepest.max(depth);
+    }
+    deepest
+}
+
+/// Whether one of `fields` would nest the credential's file deeper than
+/// the store reads back. The file's object holds a field's first part, and
+/// each further part is an object inside the one before, so the file nests
+/// at least as deep as the parts plus the value's own depth.
+fn nests_too_deep(fields: &Map<String, Value>) -> bool {
+    fields
+        .iter()
+        .any(|(key, value)| key.split('.').count() + value_depth(value) > MAX_FILE_DEPTH)
 }
 
 /// The fields with their paths normalized: the key trimmed, each dotted
@@ -673,7 +708,9 @@ async fn fields(State(state): State<ManagementState>, body: Body) -> Response {
         Ok(body) => body,
         Err(response) => return response,
     };
-    let Some(mut request) = decode_fields(&body) else {
+    // A field nesting the file deeper than the store reads back is refused
+    // before anything is built from it.
+    let Some(mut request) = decode_fields(&body).filter(|fields| !nests_too_deep(fields)) else {
         return json::error(StatusCode::BAD_REQUEST, "invalid request body");
     };
     let name = match request.shift_remove("name") {

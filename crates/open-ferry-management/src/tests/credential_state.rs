@@ -53,7 +53,9 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Utc};
 use http::{Method, StatusCode};
-use open_ferry_core::auth::{Auth, AuthError, ModelState, QuotaState, Status, Timestamp};
+use open_ferry_core::auth::{
+    Auth, AuthError, AuthStore as _, ModelState, QuotaState, Status, Timestamp,
+};
 use open_ferry_core::config::AuthFile;
 use open_ferry_core::exec::{ErrorKind, ExecError, Options, Request, Response, StreamResponse};
 use open_ferry_core::executor::ProviderExecutor;
@@ -1106,6 +1108,58 @@ async fn fields_errors() {
             StatusCode::SERVICE_UNAVAILABLE,
             r#"{"error":"post-auth persist hook failed: credential sync unavailable: the service has stopped"}"#,
         );
+}
+
+// Not upstream's: a field can't nest the credential's file deeper than the
+// store reads back, 127, however many parts its dotted name has. Upstream
+// builds whatever the name asks for, and a name of 5000 parts overflowed
+// the stack here.
+#[tokio::test]
+async fn fields_refuse_nesting_the_file_too_deep() {
+    let dir = AuthDir::new();
+    let api = Api::over(&dir);
+    let name = "deep.json";
+    api.register(codex_file(&dir, name, r#"{"type":"codex"}"#));
+    let before = dir.read_json(name);
+    let dotted = |root: &str, parts: usize| vec![root; parts].join(".");
+    let nested = |depth: usize| format!("{}true{}", "[".repeat(depth), "]".repeat(depth));
+
+    for (key, value) in [
+        (dotted("a", 5000), nested(0)),
+        (dotted("a", 128), nested(0)),
+        (dotted("a", 100), nested(28)),
+        (dotted("a", 1), nested(127)),
+    ] {
+        let body = format!(r#"{{"name":"deep.json","{key}":{value}}}"#);
+        patch(&api, FIELDS, &body).await.assert(
+            StatusCode::BAD_REQUEST,
+            r#"{"error":"invalid request body"}"#,
+        );
+    }
+    assert!(upserts(&api).is_empty());
+    assert_eq!(dir.read_json(name), before);
+
+    // Right at the limit, the file is saved and the store reads it back.
+    let body = format!(
+        r#"{{"name":"deep.json","{}":{},"{}":{}}}"#,
+        dotted("b", 127),
+        nested(0),
+        dotted("c", 100),
+        nested(27),
+    );
+    patch(&api, FIELDS, &body)
+        .await
+        .assert(StatusCode::OK, r#"{"status":"ok"}"#);
+    let data = dir.read_json(name);
+    let pointer = |root: &str, parts: usize| format!("/{}", vec![root; parts].join("/"));
+    assert_eq!(data.pointer(&pointer("b", 127)), Some(&json!(true)));
+    let mut value = data.pointer(&pointer("c", 100)).unwrap();
+    for _ in 0..27 {
+        value = &value[0];
+    }
+    assert_eq!(value, &json!(true));
+    let listed = dir.store.list().unwrap();
+    assert!(listed.iter().any(|auth| auth.id == name), "{listed:?}");
 }
 
 // Not upstream's: a Codex refresh against a token endpoint on 127.0.0.1;
