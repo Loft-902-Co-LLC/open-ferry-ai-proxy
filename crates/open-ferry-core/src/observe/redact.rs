@@ -24,6 +24,7 @@
 
 use std::borrow::Cow;
 use std::fmt;
+use std::sync::OnceLock;
 
 use aho_corasick::{AhoCorasick, Input, MatchKind};
 use base64::Engine as _;
@@ -76,7 +77,62 @@ pub enum Policy {
 
 /// A set of secrets to scrub. `Debug` shows only how many it holds.
 #[derive(Clone, Default, PartialEq, Eq)]
-pub struct Secrets(Vec<String>);
+pub struct Secrets(Vec<String>, Searchers);
+
+/// The searchers [`Secrets::bytes`] built, one for each policy, kept so a
+/// stream scrubbed line by line builds each once. Adding a secret drops
+/// them. They don't count in equality.
+#[derive(Clone, Default)]
+struct Searchers([OnceLock<Searcher>; 2]);
+
+impl Searchers {
+    const fn new() -> Self {
+        Self([OnceLock::new(), OnceLock::new()])
+    }
+
+    /// `policy`'s searcher, built by `build` the first time.
+    fn get(&self, policy: Policy, build: impl FnOnce() -> Searcher) -> &Searcher {
+        let [client, disk] = &self.0;
+        match policy {
+            Policy::Client => client,
+            Policy::Disk => disk,
+        }
+        .get_or_init(build)
+    }
+}
+
+impl PartialEq for Searchers {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for Searchers {}
+
+/// The forms of the secrets one policy hides, and the automaton that finds
+/// them (`None` when there are none, or it couldn't be built).
+#[derive(Clone)]
+struct Searcher {
+    patterns: Vec<String>,
+    automaton: Option<AhoCorasick>,
+}
+
+impl Searcher {
+    fn new(patterns: Vec<String>) -> Self {
+        let automaton = if patterns.is_empty() {
+            None
+        } else {
+            AhoCorasick::builder()
+                .match_kind(MatchKind::LeftmostLongest)
+                .build(&patterns)
+                .ok()
+        };
+        Self {
+            patterns,
+            automaton,
+        }
+    }
+}
 
 impl fmt::Debug for Secrets {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -97,7 +153,7 @@ impl<S: AsRef<str>> FromIterator<S> for Secrets {
 impl Secrets {
     /// An empty set.
     pub const fn new() -> Self {
-        Self(Vec::new())
+        Self(Vec::new(), Searchers::new())
     }
 
     /// Whether it holds no secret.
@@ -116,6 +172,7 @@ impl Secrets {
         let secret = secret.trim();
         if !secret.is_empty() && !self.0.iter().any(|kept| kept == secret) {
             self.0.push(secret.to_owned());
+            self.1 = Searchers::default();
         }
     }
 
@@ -255,19 +312,19 @@ impl Secrets {
     /// `body` with every copy of each secret `policy` hides replaced by
     /// [`REDACTED`].
     pub fn bytes<'a>(&self, body: &'a [u8], policy: Policy) -> Cow<'a, [u8]> {
-        let patterns = self.patterns(policy);
-        if patterns.is_empty() || body.is_empty() {
+        if body.is_empty() {
             return Cow::Borrowed(body);
         }
-        let searcher = AhoCorasick::builder()
-            .match_kind(MatchKind::LeftmostLongest)
-            .build(&patterns);
-        let Ok(matches) = searcher
+        let searcher = self.1.get(policy, || Searcher::new(self.patterns(policy)));
+        if searcher.patterns.is_empty() {
+            return Cow::Borrowed(body);
+        }
+        let Some(Ok(matches)) = searcher
+            .automaton
             .as_ref()
-            .map_err(|_| ())
-            .and_then(|searcher| searcher.try_find_iter(Input::new(body)).map_err(|_| ()))
+            .map(|automaton| automaton.try_find_iter(Input::new(body)))
         else {
-            return replace_each(body, patterns);
+            return replace_each(body, searcher.patterns.clone());
         };
         let mut out: Option<Vec<u8>> = None;
         let mut last = 0;
@@ -490,6 +547,28 @@ mod tests {
             text("key sk-secret-1234.".to_owned(), "sk-secret-1234"),
             "key [redacted]."
         );
+    }
+
+    #[test]
+    fn a_secret_added_after_a_scrub_is_hidden_by_the_next() {
+        let mut secrets = Secrets::from_iter(["first-secret-1234"]);
+        let body = "first-secret-1234 then second-secret-5678";
+        assert_eq!(
+            secrets.text(body.to_owned(), Policy::Client),
+            "[redacted] then second-secret-5678"
+        );
+        assert_eq!(secrets.text("short".to_owned(), Policy::Disk), "short");
+        secrets.add("second-secret-5678");
+        secrets.add("short");
+        assert_eq!(
+            secrets.text(body.to_owned(), Policy::Client),
+            "[redacted] then [redacted]"
+        );
+        assert_eq!(
+            secrets.clone().text("short".to_owned(), Policy::Disk),
+            "[redacted]"
+        );
+        assert_eq!(secrets.clone(), secrets);
     }
 
     #[test]
