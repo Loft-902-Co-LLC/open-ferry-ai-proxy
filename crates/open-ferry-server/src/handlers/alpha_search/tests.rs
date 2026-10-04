@@ -5,7 +5,8 @@
 // TestCodexAlphaSearchOptInAPIKeyUsesConfiguredEndpoint,
 // TestCodexAlphaSearchOptInAPIKeyStripsCredentialPrefix,
 // TestCodexAlphaSearchOptInAPIKeyResolvesModelAlias,
-// TestCodexAlphaSearchOptInAPIKeyWithoutBaseURLFailsClosed) (v8.0.10, MIT).
+// TestCodexAlphaSearchOptInAPIKeyWithoutBaseURLFailsClosed,
+// TestCodexAlphaSearchRecordsRequestLog) (v8.0.10, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Codex Alpha Search through the whole router: the client key, the
@@ -17,8 +18,12 @@
 //!   through the Codex executor to the mock, so they check what goes on the
 //!   wire, and an API key's base URL is the mock's.
 //! - ForwardsRequest checks that no `Originator` goes out, where upstream
-//!   checks for `codex_cli_rs`, and doesn't check `X-CPA-TRACE-ID`: request
-//!   logging isn't ported.
+//!   checks for `codex_cli_rs`.
+//! - RecordsRequestLog goes through the router with a request logger writing
+//!   to a directory of its own, and reads the log file that is written,
+//!   where upstream reads the `API_REQUEST` and `API_RESPONSE` the handler
+//!   left in gin's context. The upstream URL is the mock's, and the log is
+//!   also checked for the credential's token and the client key.
 //! - CredentialPolicy counts on the API key sorting first, so round robin
 //!   would pick it without the policy, where upstream sets a selector that
 //!   picks API keys first: custom selectors aren't ported.
@@ -33,11 +38,12 @@
 //!     and gin's context aren't ported.
 //!   - TestCodexAlphaSearchUsesRequestIDForSessionAffinity: session affinity
 //!     isn't ported.
-//!   - TestCodexAlphaSearchRecordsRequestLog: request logging isn't ported.
 //!   - TestAuditHomeCodexSearchBusyReturnsTrustedRetryAfter,
 //!     TestAuditHomeCodexSearchBodyCloseBeforeRelease and the four
 //!     TestHomeCodexAlphaSearch* tests: Home isn't ported.
 
+use std::fs;
+use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use axum::Router;
@@ -48,8 +54,11 @@ use http::{HeaderMap, Request, StatusCode, header};
 use http_body_util::BodyExt;
 use open_ferry_core::auth::Auth;
 use open_ferry_core::auth::classification::ATTRIBUTE_CODEX_ALPHA_SEARCH;
+use open_ferry_core::config::Config;
 use open_ferry_core::manager::{ApiKeyEntry, Manager, ModelAlias, Settings};
 use open_ferry_core::models::ModelInfo;
+use open_ferry_core::observe::Observability;
+use open_ferry_core::observe::request_log::{CPA_TRACE_ID_HEADER, RequestLogger};
 use open_ferry_core::registry::ModelRegistry;
 use open_ferry_providers::codex::CodexExecutor;
 use serde_json::{Map, Value, json};
@@ -59,7 +68,7 @@ use tower::ServiceExt;
 use crate::config::ServerConfig;
 use crate::router;
 use crate::state::AppState;
-use crate::testing::{FakeCatalog, FakeDispatcher, state};
+use crate::testing::{FakeCatalog, FakeDispatcher, TempDir, state};
 
 /// What the mock answers every request with.
 const RESULTS: &str = r#"{"results":[{"url":"https://example.com"}]}"#;
@@ -135,15 +144,15 @@ impl Mock {
     }
 }
 
-/// The router with client key `test-key`, over a manager with `settings`,
+/// The state with client key `test-key`, over a manager with `settings`,
 /// `credentials` and a Codex executor whose ChatGPT base is `chatgpt`.
-/// `models` registers each credential's models.
-fn proxy(
+/// `models` registers each credential's models. The manager comes too.
+fn build(
     settings: Settings,
     chatgpt: &str,
     credentials: Vec<Auth>,
     models: &[(&str, &str)],
-) -> Router {
+) -> (AppState, Arc<Manager>) {
     let registry = Arc::new(ModelRegistry::new());
     let manager = Arc::new(Manager::new(settings, registry.clone(), None));
     manager.register_executor(Arc::new(
@@ -166,7 +175,18 @@ fn proxy(
         api_keys: vec!["test-key".into()],
         ..ServerConfig::default()
     };
-    router(AppState::new(config, manager, Arc::new(FakeCatalog::new())))
+    let state = AppState::new(config, manager.clone(), Arc::new(FakeCatalog::new()));
+    (state, manager)
+}
+
+/// The router over [`build`]'s state.
+fn proxy(
+    settings: Settings,
+    chatgpt: &str,
+    credentials: Vec<Auth>,
+    models: &[(&str, &str)],
+) -> Router {
+    router(build(settings, chatgpt, credentials, models).0)
 }
 
 /// A Codex sign-in with `metadata`.
@@ -238,6 +258,33 @@ fn content_type(headers: &HeaderMap) -> &str {
         .map_or("", |value| value.to_str().unwrap())
 }
 
+/// Checks that `stamp` is a `yyyymmddHHMMSS` time, as Go's
+/// `time.Parse("20060102150405", ..)` takes it.
+fn assert_timestamp(stamp: &str) {
+    assert!(
+        stamp.len() == 14 && stamp.bytes().all(|b| b.is_ascii_digit()),
+        "trace timestamp = {stamp:?}"
+    );
+    let part = |range: std::ops::Range<usize>| stamp[range].parse::<u32>().unwrap();
+    assert!((1..=12).contains(&part(4..6)), "month of {stamp:?}");
+    assert!((1..=31).contains(&part(6..8)), "day of {stamp:?}");
+    assert!(part(8..10) < 24, "hour of {stamp:?}");
+    assert!(part(10..12) < 60, "minute of {stamp:?}");
+    assert!(part(12..14) < 60, "second of {stamp:?}");
+}
+
+/// The part of `log` from the line `title` to the next section.
+fn section<'a>(log: &'a str, title: &str) -> &'a str {
+    let start = log
+        .find(title)
+        .unwrap_or_else(|| panic!("no {title}: {log}"));
+    let rest = &log[start..];
+    let end = rest[title.len()..]
+        .find("\n=== ")
+        .map_or(rest.len(), |end| title.len() + end + 1);
+    &rest[..end]
+}
+
 // Ports TestCodexAlphaSearchForwardsRequest.
 #[tokio::test]
 async fn codex_alpha_search_forwards_request() {
@@ -246,7 +293,8 @@ async fn codex_alpha_search_forwards_request() {
         "codex-auth",
         json!({"access_token": "codex-token", "account_id": "account-123"}),
     );
-    let app = proxy(Settings::default(), &mock.url, vec![credential], &[]);
+    let (state, manager) = build(Settings::default(), &mock.url, vec![credential], &[]);
+    let app = router(state);
     let request = search(
         "/v1/alpha/search",
         r#"{"query":"GPT-5.6"}"#,
@@ -256,6 +304,19 @@ async fn codex_alpha_search_forwards_request() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body, RESULTS);
     assert_eq!(content_type(&headers), "application/json");
+    // The trace ID is `<timestamp>-<credential index>-<request ID>`.
+    let index = manager.get("codex-auth").unwrap().index.clone();
+    assert!(!index.is_empty());
+    let trace = headers.get(CPA_TRACE_ID_HEADER).unwrap().to_str().unwrap();
+    let mut parts = trace.splitn(3, '-');
+    let (stamp, trace_index, request_id) = (
+        parts.next().unwrap(),
+        parts.next().unwrap(),
+        parts.next().unwrap(),
+    );
+    assert_eq!(trace_index, index, "{trace}");
+    assert!(uuid::Uuid::parse_str(request_id).is_ok(), "{trace}");
+    assert_timestamp(stamp);
 
     let upstream = mock.only();
     assert_eq!(upstream.path, "/backend-api/codex/alpha/search");
@@ -275,6 +336,53 @@ async fn codex_alpha_search_forwards_request() {
         "{:?}",
         upstream.header("user-agent")
     );
+}
+
+// Ports TestCodexAlphaSearchRecordsRequestLog.
+#[tokio::test]
+async fn codex_alpha_search_records_request_log() {
+    let mock = Mock::ok().await;
+    let credential = oauth(
+        "codex-auth",
+        json!({"access_token": "codex-token", "account_id": "account-123"}),
+    );
+    let dir = TempDir::new();
+    let mut config = Config::default();
+    config.request_log = true;
+    config.error_logs_max_files = 10;
+    let logger = RequestLogger::new(&config, dir.path(), Path::new(""));
+    let (state, _) = build(Settings::default(), &mock.url, vec![credential], &[]);
+    let app = router(state.with_observability(Observability {
+        log_dir: Some(dir.path().to_path_buf()),
+        request_log: logger.clone(),
+        ..Observability::default()
+    }));
+
+    let request = search("/v1/alpha/search", r#"{"query":"GPT-5.6"}"#, &[]);
+    let (status, _, body) = send(&app, request).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    logger.flush();
+    let files: Vec<_> = fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(files.len(), 1, "{files:?}");
+    let log = fs::read_to_string(&files[0]).unwrap();
+
+    let upstream = section(&log, "=== API REQUEST 1 ===");
+    let url = format!("{}/backend-api/codex/alpha/search", mock.url);
+    assert!(upstream.contains(&url), "missing upstream URL: {upstream}");
+    assert!(
+        upstream.contains(r#"{"query":"GPT-5.6"}"#),
+        "missing body: {upstream}"
+    );
+    let answer = section(&log, "=== API RESPONSE 1 ===");
+    assert!(answer.contains(RESULTS), "missing body: {answer}");
+    // Not upstream's: no secret is written to the file.
+    for secret in ["codex-token", "test-key"] {
+        assert!(!log.contains(secret), "{secret} leaked: {log}");
+    }
 }
 
 // Ports TestCodexAlphaSearchSanitizesResponsesOnlyFields.

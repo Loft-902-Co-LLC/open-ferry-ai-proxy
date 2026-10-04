@@ -16,6 +16,10 @@
 //! its answer couldn't be read, or the URL holds an ASCII control
 //! character; and a `Retry-After` when every credential is cooling down.
 //!
+//! The call is in the request log, as an `API REQUEST` and an `API RESPONSE`
+//! of the credential's call, and the answer carries `X-CPA-TRACE-ID`. As
+//! upstream's, it has no usage record.
+//!
 //! Deviations from upstream:
 //! - A payload over 16 MiB (or the configured body limit, when lower) gets
 //!   the proxy's usual 413, and one that fails to arrive its usual 400.
@@ -23,8 +27,6 @@
 //!   `{"error":"Failed to read search request"}`.
 //! - An answer without a `Content-Type` goes out without one, where Go's
 //!   server sniffs one from the body.
-//! - `X-CPA-TRACE-ID` isn't set and nothing is logged about the call:
-//!   request logging isn't ported.
 //!
 //! [`Dispatcher::codex_alpha_search`]: open_ferry_core::exec::Dispatcher::codex_alpha_search
 

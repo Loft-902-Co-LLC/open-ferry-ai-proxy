@@ -1,6 +1,8 @@
 //! Test doubles for the catalog and the dispatcher.
 
 use std::collections::{HashMap, VecDeque};
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -320,4 +322,30 @@ pub(crate) fn state(
 ) -> AppState {
     let dispatcher: Arc<dyn Dispatcher> = dispatcher.clone();
     AppState::new(config, dispatcher, Arc::new(catalog))
+}
+
+/// A directory of the test's own, removed when it is dropped.
+pub(crate) struct TempDir(PathBuf);
+
+impl TempDir {
+    pub(crate) fn new() -> Self {
+        let path = std::env::temp_dir().join(format!("ofp-server-test-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&path).unwrap();
+        Self(path)
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        for _ in 0..3 {
+            if fs::remove_dir_all(&self.0).is_ok() || !self.0.exists() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
 }

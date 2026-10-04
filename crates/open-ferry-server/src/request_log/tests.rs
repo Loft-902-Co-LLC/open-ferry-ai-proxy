@@ -8,9 +8,8 @@
 //! directory of its own.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
@@ -31,39 +30,13 @@ use tower::ServiceExt as _;
 use crate::config::ServerConfig;
 use crate::request_context;
 use crate::state::AppState;
-use crate::testing::{FakeCatalog, FakeDispatcher, state};
+use crate::testing::{FakeCatalog, FakeDispatcher, TempDir, state};
 
 mod api_errors;
 mod cpa_trace;
 mod redaction;
 mod request_logging;
 mod response_writer;
-
-/// A directory of the test's own, removed when it is dropped.
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new() -> Self {
-        let path = std::env::temp_dir().join(format!("ofp-request-log-{}", uuid::Uuid::now_v7()));
-        fs::create_dir_all(&path).unwrap();
-        Self(path)
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        for _ in 0..3 {
-            if fs::remove_dir_all(&self.0).is_ok() || !self.0.exists() {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    }
-}
 
 /// A server whose request logger writes to a directory of its own.
 struct Harness {
