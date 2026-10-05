@@ -87,7 +87,7 @@ const HELLO: &str =
 const COMPLETED: &str = r#"{"type":"response.completed","response":{"id":"resp-xai-1","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}"#;
 
 /// An executor that doesn't use the environment's proxy.
-fn executor() -> XaiExecutor {
+pub(crate) fn executor() -> XaiExecutor {
     XaiExecutor::new("direct")
 }
 
@@ -97,7 +97,7 @@ fn auth(base_url: &str) -> Arc<Auth> {
 }
 
 /// [`auth`] with the ID `id` and the key `key`.
-fn auth_as(id: &str, key: &str, base_url: &str) -> Arc<Auth> {
+pub(crate) fn auth_as(id: &str, key: &str, base_url: &str) -> Arc<Auth> {
     let mut auth = Auth {
         id: id.into(),
         provider: "xai".into(),
@@ -127,7 +127,7 @@ fn request(payload: &str) -> Request {
 
 /// Options of a client on the Responses WebSocket in the session `session`
 /// (none when it is empty).
-fn ws_options(session: &str) -> Options {
+pub(crate) fn ws_options(session: &str) -> Options {
     let mut options = Options {
         stream: true,
         downstream_websocket: true,
@@ -144,14 +144,14 @@ fn json(text: &str) -> Value {
 }
 
 /// Waits for `future`, failing the test after a while.
-async fn within<T>(what: &str, future: impl Future<Output = T>) -> T {
+pub(crate) async fn within<T>(what: &str, future: impl Future<Output = T>) -> T {
     tokio::time::timeout(WAIT, future)
         .await
         .unwrap_or_else(|_| panic!("timed out waiting for {what}"))
 }
 
 /// Reads a stream to its end: its chunks and its error.
-async fn collect(response: StreamResponse) -> (Vec<String>, Option<ExecError>) {
+pub(crate) async fn collect(response: StreamResponse) -> (Vec<String>, Option<ExecError>) {
     let mut chunks = response.chunks;
     let mut out = Vec::new();
     let mut error = None;
@@ -214,6 +214,17 @@ async fn refused(
         Ok(_) => panic!("the call went through"),
         Err(error) => error,
     }
+}
+
+/// Whether the session `id` names holds a connection (upstream's
+/// `getOrCreateSession(id).conn != nil`).
+pub(crate) fn has_conn(executor: &XaiExecutor, id: &str) -> bool {
+    executor
+        .websockets
+        .store
+        .get_or_create(id)
+        .and_then(|session| session.conn())
+        .is_some()
 }
 
 /// The JSON of each chunk.

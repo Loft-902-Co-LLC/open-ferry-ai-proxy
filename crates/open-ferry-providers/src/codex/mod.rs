@@ -61,3 +61,5 @@ pub(crate) mod xai_replay_cache;
 
 pub use client::USER_AGENT;
 pub use executor::CodexExecutor;
+#[cfg(test)]
+pub(crate) use executor::bootstrap_tests;

@@ -51,16 +51,16 @@ const COMPLETED_EVENT: &str = r#"{"type":"response.completed","response":{"id":"
 const EMPTY_INCOMPLETE_EVENT: &str = r#"{"type":"response.incomplete","response":{"id":"resp_1","output":[],"usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1}}}"#;
 
 /// Writes a mock response's body a piece at a time.
-struct Writer(mpsc::UnboundedSender<Bytes>);
+pub(crate) struct Writer(mpsc::UnboundedSender<Bytes>);
 
 impl Writer {
-    fn write(&self, text: &str) {
+    pub(crate) fn write(&self, text: &str) {
         // The client may have gone; what it misses doesn't matter.
         let _ = self.0.send(Bytes::from(text.to_owned()));
     }
 
     /// Waits until the client has gone.
-    async fn closed(&self) {
+    pub(crate) async fn closed(&self) {
         self.0.closed().await;
     }
 }
@@ -68,7 +68,7 @@ impl Writer {
 /// A server on an ephemeral 127.0.0.1 port that answers every request with
 /// `status` and a body that `script` writes, ending when it returns.
 /// Returns the server's URL.
-async fn serve<S, F>(status: u16, script: S) -> String
+pub(crate) async fn serve<S, F>(status: u16, script: S) -> String
 where
     S: Fn(Writer) -> F + Clone + Send + Sync + 'static,
     F: Future<Output = ()> + Send + 'static,

@@ -44,3 +44,5 @@ mod tools;
 mod websocket;
 
 pub use executor::XaiExecutor;
+#[cfg(test)]
+pub(crate) use websocket::tests as websocket_tests;

@@ -396,7 +396,7 @@ impl Session {
 
     /// The session's connection.
     #[cfg(test)]
-    pub(super) fn conn(&self) -> Option<Arc<Conn>> {
+    pub(crate) fn conn(&self) -> Option<Arc<Conn>> {
         self.state().conn.clone()
     }
 

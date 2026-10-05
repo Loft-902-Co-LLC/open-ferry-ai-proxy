@@ -12,6 +12,8 @@
 
 #[cfg(test)]
 mod apply_patch_bridge_tests;
+#[cfg(test)]
+mod apply_patch_integration_tests;
 pub mod apply_patch_responses;
 pub mod claude;
 mod claude_code_session;

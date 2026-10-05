@@ -51,6 +51,8 @@ pub(crate) struct Reply {
     status: u16,
     content_type: &'static str,
     body: String,
+    /// Whether the connection fails after the body.
+    cut_off: bool,
 }
 
 impl Reply {
@@ -59,6 +61,7 @@ impl Reply {
             status: 200,
             content_type: "application/json",
             body: body.to_owned(),
+            cut_off: false,
         }
     }
 
@@ -73,6 +76,14 @@ impl Reply {
         Self {
             status,
             ..Self::json(body)
+        }
+    }
+
+    /// The reply, with the connection failing after the body.
+    pub(crate) fn cut_off(self) -> Self {
+        Self {
+            cut_off: true,
+            ..self
         }
     }
 }
@@ -111,11 +122,21 @@ impl Mock {
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .push(request);
-                let parts = vec![Ok::<_, io::Error>(Bytes::from(reply.body))];
+                let mut parts = vec![Ok::<_, io::Error>(Bytes::from(reply.body))];
+                if reply.cut_off {
+                    parts.push(Err(io::Error::other("connection cut off")));
+                }
+                let body = futures_util::stream::iter(parts).then(|part| async move {
+                    if part.is_err() {
+                        // Let the body out before the connection fails.
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                    part
+                });
                 axum::response::Response::builder()
                     .status(reply.status)
                     .header("content-type", reply.content_type)
-                    .body(Body::from_stream(futures_util::stream::iter(parts)))
+                    .body(Body::from_stream(body))
                     .unwrap()
             }
         });

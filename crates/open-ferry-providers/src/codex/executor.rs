@@ -672,7 +672,7 @@ impl ProviderExecutor for CodexExecutor {
 mod http_request;
 
 #[cfg(test)]
-mod bootstrap_tests;
+pub(crate) mod bootstrap_tests;
 #[cfg(test)]
 mod manager_tests;
 #[cfg(test)]

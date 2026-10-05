@@ -68,7 +68,7 @@ pub mod interactions;
 mod sse;
 mod stream;
 #[cfg(test)]
-mod testing;
+pub(crate) mod testing;
 pub(crate) mod thinking;
 mod token;
 mod turns;
