@@ -18,6 +18,11 @@
 //! the API rejects removed from its input (`request`). A stream asks for
 //! one with `stream: true`, and its frames are translated to the client's
 //! format, or passed on as they came to an Interactions client (`stream`).
+//! A stream to an OpenAI Responses client whose request declares the custom
+//! `apply_patch` tool fails with the patch error if it ends before it
+//! finishes, even if the API sent nothing at all
+//! (`InitializeApplyPatchStream`; see `initialize_stream` in the crate's
+//! `apply_patch_responses` module).
 //! Any other request, and every token count, is the Gemini executor's,
 //! which calls `generateContent` (see [`super::GeminiExecutor`]).
 //!
@@ -69,6 +74,7 @@ use self::request::{
 };
 use self::stream::StreamSetup;
 use super::{Credential, GeminiExecutor, build_headers, post, read_answer, reject_compact};
+use crate::apply_patch_responses;
 use crate::codex::client::Clients;
 use crate::codex::request::{
     base_model, original_request, response_format, set_bool_if_different, set_string_if_different,
@@ -258,7 +264,7 @@ fn translate_stream(
     let headers = response.headers().clone();
     let format = response_format(options);
     let original = original_request(request, options);
-    let translator = Registry::global().response_stream(
+    let mut translator = Registry::global().response_stream(
         &Format::INTERACTIONS,
         &format,
         &ResponseContext {
@@ -267,6 +273,7 @@ fn translate_stream(
             request: sent,
         },
     );
+    apply_patch_responses::initialize_stream(&mut translator, &format, &original);
     let original_bytes = if options.original_request.is_empty() {
         request.payload.clone()
     } else {

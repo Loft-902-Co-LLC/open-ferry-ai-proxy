@@ -1029,3 +1029,63 @@ fn released_events_are_not_counted() {
     // What stays is the calls and their keys, and no events.
     assert!(s.records.iter().all(|call| call.events.is_empty()));
 }
+
+// Not upstream's: `requested` and `initialize_stream`, from
+// helps/apply_patch.go, which the executors' apply_patch tests drive end to
+// end (see the crate's `apply_patch_integration_tests`).
+
+#[test]
+fn requested_reads_the_winning_custom_declarations() {
+    assert!(requested(&json(PATCH)));
+    assert!(requested(&json(NAMESPACED)));
+    assert!(!requested(&json(
+        r#"{"tools":[{"type":"function","name":"apply_patch"}]}"#
+    )));
+    assert!(!requested(&json(
+        r#"{"tools":[{"type":"function","name":"apply_patch"},{"type":"custom","name":"apply_patch"}]}"#
+    )));
+    assert!(!requested(&json("{}")));
+    // A wrapped request is read from inside, if it holds a model, input or
+    // tools.
+    assert!(requested(&json(&format!(r#"{{"request":{PATCH}}}"#))));
+    assert!(!requested(&json(
+        r#"{"request":{"model":"m"},"tools":[{"type":"custom","name":"apply_patch"}]}"#
+    )));
+    assert!(requested(&json(
+        r#"{"request":{"other":1},"tools":[{"type":"custom","name":"apply_patch"}]}"#
+    )));
+}
+
+#[test]
+fn an_initialized_stream_fails_a_requested_patch_without_a_chunk() {
+    use open_ferry_translate::registry::{Registry, ResponseContext};
+
+    let stream = |original: &Value| {
+        Registry::global().response_stream(
+            &Format::OPENAI,
+            &Format::OPENAI_RESPONSE,
+            &ResponseContext {
+                model: "m",
+                original_request: original,
+                request: original,
+            },
+        )
+    };
+    let original = json(PATCH);
+
+    let mut initialized = stream(&original);
+    initialize_stream(&mut initialized, &Format::OPENAI_RESPONSE, &original);
+    assert!(shown(&initialized.finish()).contains("response.failed"));
+    assert!(initialized.tool_input_error().is_some());
+
+    // A translator never given a chunk has nothing to finish.
+    let mut untouched = stream(&original);
+    assert!(untouched.finish().is_empty());
+    assert!(untouched.tool_input_error().is_none());
+
+    // Only a Responses client's stream is initialized.
+    let mut other = stream(&original);
+    initialize_stream(&mut other, &Format::CLAUDE, &original);
+    assert!(other.finish().is_empty());
+    assert!(other.tool_input_error().is_none());
+}

@@ -1,4 +1,5 @@
 // Ported from CLIProxyAPI internal/runtime/executor/helps/apply_patch_responses.go
+// and helps/apply_patch.go (ApplyPatchRequested, InitializeApplyPatchStream)
 // (v8.0.10, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
@@ -23,6 +24,10 @@
 //! events until it knows which child was called, then restores the child's
 //! name, namespace and arguments. A patch child whose evidence disagrees
 //! anywhere fails the stream.
+//!
+//! An executor that translates another format's stream to Responses readies
+//! the translator with `initialize_stream`, so that a stream that ends
+//! before sending anything still fails a requested patch.
 //!
 //! Deviations from upstream:
 //! - An event the state changes or makes, such as a restored dispatcher call,
@@ -54,6 +59,7 @@ use open_ferry_translate::apply_patch::responses::{
 };
 use open_ferry_translate::apply_patch::{is_custom_tool, unwrap_input};
 use open_ferry_translate::go;
+use open_ferry_translate::registry::ResponseStream;
 use serde_json::{Value, json};
 
 use crate::codex::stream::MAX_LINE;
@@ -111,6 +117,40 @@ fn limit_error() -> Error {
 /// What a list of buffers costs.
 fn held_size(buffers: &[Vec<u8>]) -> usize {
     buffers.iter().map(|buffer| buffer.len() + ENTRY_COST).sum()
+}
+
+/// `ApplyPatchRequested`: whether a custom `apply_patch` tool wins its name
+/// in the client's `original` request. As upstream reads the request's tools
+/// for Gemini (`ResponsesToolReverseIdentityMap`), a request wrapped in a
+/// `request` that holds a model, input or tools is read from inside it.
+pub(crate) fn requested(original: &Value) -> bool {
+    let mut root = original;
+    if let Some(request) = original.get("request")
+        && ["model", "input", "tools"]
+            .iter()
+            .any(|key| request.get(*key).is_some())
+    {
+        root = request;
+    }
+    Bridge::new(root).active()
+}
+
+/// `InitializeApplyPatchStream`: readies `translator`, which translates a
+/// response to the client's `original` request into `response_format`, by
+/// giving it an empty chunk, if the client gets Responses events and
+/// [`requested`] a patch. A translator that never saw a chunk has nothing to
+/// finish, so without this a stream that ends before sending anything would
+/// end without failing the patch. What the empty chunk gives is dropped, as
+/// upstream drops it.
+pub(crate) fn initialize_stream(
+    translator: &mut ResponseStream,
+    response_format: &Format,
+    original: &Value,
+) {
+    if *response_format != Format::OPENAI_RESPONSE || !requested(original) {
+        return;
+    }
+    let _ = translator.translate(b"");
 }
 
 /// `NormalizeApplyPatchResponsesRequest`: opts a request to a provider that

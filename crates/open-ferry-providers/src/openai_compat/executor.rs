@@ -23,6 +23,12 @@
 //! `prompt_cache_key`. A stream asks for usage in its last chunk. A token
 //! count is made on the request with its thinking setting applied.
 //!
+//! A stream to an OpenAI Responses client whose request declares the custom
+//! `apply_patch` tool fails with the patch error if it ends before it
+//! finishes, even if the provider sent nothing at all
+//! (`InitializeApplyPatchStream`; see `initialize_stream` in the crate's
+//! `apply_patch_responses` module).
+//!
 //! Deviations from upstream:
 //! - Requests go through `reqwest` with rustls, one shared client per proxy;
 //!   `reqwest` adds `Accept: */*` to a request that sets no `Accept`.
@@ -74,6 +80,7 @@ use super::stream::{self, StreamSetup};
 use super::thinking;
 use super::tokens::{count_chat_tokens, tokenizer_for, usage_json};
 use super::tool_results::{normalize_tool_results_text_only, should_normalize_tool_results};
+use crate::apply_patch_responses;
 use crate::codex::client::{Clients, USER_AGENT, error_chain, read_body, read_body_prefix};
 use crate::codex::compat;
 use crate::codex::reasoning::sanitize_reasoning;
@@ -423,7 +430,7 @@ impl OpenAiCompatExecutor {
         let response_headers = response.headers().clone();
 
         let original = original_request(&request, &options);
-        let translator = Registry::global().response_stream(
+        let mut translator = Registry::global().response_stream(
             &Format::OPENAI,
             &format,
             &ResponseContext {
@@ -432,6 +439,7 @@ impl OpenAiCompatExecutor {
                 request: &prepared.body,
             },
         );
+        apply_patch_responses::initialize_stream(&mut translator, &format, &original);
         let original_bytes = if options.original_request.is_empty() {
             request.payload.clone()
         } else {
