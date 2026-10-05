@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/translator/openai/interactions/responses/interactions_openai_responses_response_test.go (v8.0.10, MIT).
+// Ported from CLIProxyAPI internal/translator/openai/interactions/responses/interactions_openai_responses_response_test.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Both directions, streamed and whole: event order, text and arguments
@@ -548,6 +548,177 @@ fn model_output_done_includes_text() {
     assert_eq!(s(&part, "part.text"), "hello world", "{part}");
     let item = find(&out, "response.output_item.done");
     assert_eq!(s(&item, "item.content.0.text"), "hello world", "{item}");
+}
+
+// Ports TestConvertInteractionsResponseToOpenAIResponsesStreamReasoningSummaryLifecycle.
+#[test]
+fn stream_reasoning_summary_lifecycle() {
+    let cases: [(&str, &[&str], bool); 4] = [
+        ("single_frame", &["thinking"], false),
+        (
+            "multiple_frames_late_signature",
+            &["think", " carefully"],
+            true,
+        ),
+        ("signature_only", &[], true),
+        ("empty_summary", &[""], false),
+    ];
+    for (name, chunks, signed) in cases {
+        let mut stream = stream_for("{}");
+        let mut out = Vec::new();
+        let mut push = |raw: String| {
+            let frames = send(&mut stream, format!("data: {raw}\n\n"));
+            out.extend(frames.iter().cloned());
+            frames
+        };
+        push(
+            r#"{"index":3,"step":{"id":"reasoning_3","type":"thought"},"event_type":"step.start"}"#
+                .into(),
+        );
+        for (i, chunk) in chunks.iter().enumerate() {
+            let chunk_json = Value::from(*chunk);
+            let field = if i % 2 == 0 {
+                format!(r#""content":{{"type":"text","text":{chunk_json}}}"#)
+            } else {
+                format!(r#""text":{chunk_json}"#)
+            };
+            let frames = push(format!(
+                r#"{{"index":3,"delta":{{"type":"thought_summary",{field}}},"event_type":"step.delta"}}"#
+            ));
+            assert_eq!(
+                names(&frames),
+                "response.reasoning_summary_text.delta",
+                "{name}: frame {i}"
+            );
+            assert_eq!(frames.len(), 1, "{name}: frame {i}");
+            let payload = find(&frames, "response.reasoning_summary_text.delta");
+            assert_eq!(
+                get(&payload, "delta"),
+                Some(&chunk_json),
+                "{name}: {payload}"
+            );
+        }
+        let signature = if signed {
+            gpt_reasoning_signature()
+        } else {
+            String::new()
+        };
+        if signed {
+            for value in [signature.as_str(), ""] {
+                let frames = push(format!(
+                    r#"{{"index":3,"delta":{{"type":"thought_signature","signature":"{value}"}},"event_type":"step.delta"}}"#
+                ));
+                assert!(frames.is_empty(), "{name}: signature emitted {frames:?}");
+            }
+        }
+        push(r#"{"index":3,"event_type":"step.stop"}"#.into());
+        push(r#"{"interaction":{"id":"interaction_1","status":"completed"},"event_type":"interaction.completed"}"#.into());
+        let mut want_names = vec![
+            "response.output_item.added",
+            "response.reasoning_summary_part.added",
+        ];
+        want_names.extend(
+            chunks
+                .iter()
+                .map(|_| "response.reasoning_summary_text.delta"),
+        );
+        want_names.extend([
+            "response.reasoning_summary_text.done",
+            "response.reasoning_summary_part.done",
+            "response.output_item.done",
+            "response.completed",
+        ]);
+        assert_eq!(names(&out), want_names.join(","), "{name}");
+        assert_eq!(out.len(), want_names.len(), "{name}");
+        let mut previous_sequence = 0;
+        for (i, (payload, want)) in out.iter().zip(&want_names).enumerate() {
+            let sequence = get(payload, "sequence_number").and_then(Value::as_i64);
+            assert!(
+                sequence.is_some() && (i == 0 || sequence == Some(previous_sequence + 1)),
+                "{name}: invalid sequence: {payload}"
+            );
+            previous_sequence = sequence.unwrap_or_default();
+            if *want == "response.completed" {
+                continue;
+            }
+            assert_eq!(
+                get(payload, "output_index").and_then(Value::as_i64),
+                Some(3),
+                "{name}: invalid output_index: {payload}"
+            );
+            let mut id_path = "item.id";
+            if want.starts_with("response.reasoning_summary_") {
+                id_path = "item_id";
+                assert_eq!(
+                    get(payload, "summary_index").and_then(Value::as_i64),
+                    Some(0),
+                    "{name}: invalid summary_index: {payload}"
+                );
+            }
+            assert_eq!(
+                get(payload, id_path).and_then(Value::as_str),
+                Some("reasoning_3"),
+                "{name}: invalid item identity: {payload}"
+            );
+        }
+        let text = chunks.concat();
+        for (event, path, want) in [
+            ("response.output_item.added", "item.status", "in_progress"),
+            (
+                "response.reasoning_summary_part.added",
+                "part.type",
+                "summary_text",
+            ),
+            ("response.reasoning_summary_part.added", "part.text", ""),
+            ("response.reasoning_summary_text.done", "text", &text),
+            (
+                "response.reasoning_summary_part.done",
+                "part.type",
+                "summary_text",
+            ),
+            ("response.reasoning_summary_part.done", "part.text", &text),
+            ("response.output_item.done", "item.type", "reasoning"),
+            ("response.output_item.done", "item.status", "completed"),
+            (
+                "response.output_item.done",
+                "item.summary.0.type",
+                "summary_text",
+            ),
+            ("response.output_item.done", "item.summary.0.text", &text),
+            (
+                "response.output_item.done",
+                "item.encrypted_content",
+                &signature,
+            ),
+        ] {
+            let payload = find(&out, event);
+            assert_eq!(
+                get(&payload, path).and_then(Value::as_str),
+                Some(want),
+                "{name}: {event} {path} = {payload}"
+            );
+        }
+        let done = find(&out, "response.output_item.done");
+        let done = get(&done, "item").cloned().unwrap_or_default();
+        let completed = find(&out, "response.completed");
+        let completed = get(&completed, "response.output")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            get(&done, "summary")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(1),
+            "{name}: {done}"
+        );
+        assert_eq!(completed.len(), 1, "{name}: {completed:?}");
+        assert_eq!(
+            completed.first().map(Value::to_string),
+            Some(done.to_string()),
+            "{name}: terminal reasoning items differ"
+        );
+    }
 }
 
 /// A thought stream signed with `signature`.

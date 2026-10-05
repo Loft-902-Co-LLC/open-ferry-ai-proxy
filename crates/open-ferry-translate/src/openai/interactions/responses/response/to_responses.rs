@@ -11,7 +11,7 @@
 // recordResponsesTextOutput, setResponsesCompletedOutput,
 // responsesFunctionCallArguments, responsesCompletedOutputItem,
 // responsesReasoningItem, setResponsesUsageFromInteractions, FinalizeToolInput)
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Interactions responses → OpenAI Responses events and responses.
@@ -437,12 +437,25 @@ impl InteractionsToOpenAIResponsesStream {
                 });
                 set(&mut added, "sequence_number", self.next_seq());
                 set(&mut added, "output_index", index);
-                set(&mut added, "item.id", item_id);
+                set(&mut added, "item.id", item_id.as_str());
                 let signature = self.encrypted(index);
                 if !signature.is_empty() {
                     set(&mut added, "item.encrypted_content", signature);
                 }
-                vec![emit("response.output_item.added", &added)]
+                let mut part = json!({
+                    "type": "response.reasoning_summary_part.added",
+                    "item_id": "",
+                    "output_index": 0,
+                    "summary_index": 0,
+                    "part": { "type": "summary_text", "text": "" },
+                });
+                set(&mut part, "sequence_number", self.next_seq());
+                set(&mut part, "item_id", item_id);
+                set(&mut part, "output_index", index);
+                vec![
+                    emit("response.output_item.added", &added),
+                    emit("response.reasoning_summary_part.added", &part),
+                ]
             }
             _ => Vec::new(),
         }
@@ -502,10 +515,13 @@ impl InteractionsToOpenAIResponsesStream {
                 }
                 let mut payload = json!({
                     "type": "response.reasoning_summary_text.delta",
+                    "item_id": "",
                     "output_index": 0,
+                    "summary_index": 0,
                     "delta": "",
                 });
                 set(&mut payload, "sequence_number", self.next_seq());
+                set(&mut payload, "item_id", self.item_id(index));
                 set(&mut payload, "output_index", index);
                 set(&mut payload, "delta", summary);
                 vec![emit("response.reasoning_summary_text.delta", &payload)]
@@ -604,6 +620,7 @@ impl InteractionsToOpenAIResponsesStream {
         match self.item_type(index) {
             "model_output" => self.message_done(index, &item_id),
             "function_call" => self.call_done(index, &item_id, updates),
+            "thought" => self.reasoning_done(index, &item_id),
             _ => {
                 let mut done = json!({
                     "type": "response.output_item.done",
@@ -616,6 +633,47 @@ impl InteractionsToOpenAIResponsesStream {
                 vec![emit("response.output_item.done", &done)]
             }
         }
+    }
+
+    /// A reasoning item's stop: its summary text, its summary part and
+    /// itself done. The summary is one part, with all the summary text.
+    fn reasoning_done(&mut self, index: i64, item_id: &str) -> Events {
+        let text = self.reasoning_summary(index);
+        let mut text_done = json!({
+            "type": "response.reasoning_summary_text.done",
+            "item_id": "",
+            "output_index": 0,
+            "summary_index": 0,
+            "text": "",
+        });
+        set(&mut text_done, "sequence_number", self.next_seq());
+        set(&mut text_done, "item_id", item_id);
+        set(&mut text_done, "output_index", index);
+        set(&mut text_done, "text", text.as_str());
+        let mut part = json!({
+            "type": "response.reasoning_summary_part.done",
+            "item_id": "",
+            "output_index": 0,
+            "summary_index": 0,
+            "part": { "type": "summary_text", "text": "" },
+        });
+        set(&mut part, "sequence_number", self.next_seq());
+        set(&mut part, "item_id", item_id);
+        set(&mut part, "output_index", index);
+        set(&mut part, "part.text", text);
+        let mut done = json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {},
+        });
+        set(&mut done, "sequence_number", self.next_seq());
+        set(&mut done, "output_index", index);
+        set(&mut done, "item", self.reasoning_item(index));
+        vec![
+            emit("response.reasoning_summary_text.done", &text_done),
+            emit("response.reasoning_summary_part.done", &part),
+            emit("response.output_item.done", &done),
+        ]
     }
 
     /// A message's stop: its text, its part and itself done.
@@ -1039,27 +1097,33 @@ impl InteractionsToOpenAIResponsesStream {
         }
     }
 
-    /// `responsesReasoningItem`
+    /// `responsesReasoningItem`: completed, with one summary part holding
+    /// all the summary text, empty if there was none.
     fn reasoning_item(&self, index: i64) -> Value {
-        let mut item =
-            json!({ "id": "", "type": "reasoning", "encrypted_content": "", "summary": [] });
+        let mut item = json!({
+            "id": "",
+            "type": "reasoning",
+            "status": "completed",
+            "encrypted_content": "",
+            "summary": [],
+        });
         set(&mut item, "id", self.item_id(index));
         let signature = self.encrypted(index);
         if !signature.is_empty() {
             set(&mut item, "encrypted_content", signature);
         }
-        if let Some(summaries) = self
-            .reasoning_summaries
-            .get(&index)
-            .filter(|s| !s.is_empty())
-        {
-            let blocks: Vec<Value> = summaries
-                .iter()
-                .map(|text| json!({ "type": "summary_text", "text": text }))
-                .collect();
-            set(&mut item, "summary", blocks);
-        }
+        let part = json!({ "type": "summary_text", "text": self.reasoning_summary(index) });
+        set(&mut item, "summary", vec![part]);
         item
+    }
+
+    /// The summary text of the reasoning item at `index`, its fragments
+    /// joined.
+    fn reasoning_summary(&self, index: i64) -> String {
+        self.reasoning_summaries
+            .get(&index)
+            .map(|summaries| summaries.concat())
+            .unwrap_or_default()
     }
 
     /// `responsesFunctionCallArgumentsDeltaToResponses`
