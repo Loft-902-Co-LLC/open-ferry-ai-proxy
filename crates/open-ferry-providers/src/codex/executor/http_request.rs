@@ -375,12 +375,14 @@ mod tests {
 
     #[tokio::test]
     async fn a_connection_failure_is_an_error_without_the_url() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        // Bound but never listening, so a connection is refused, and the
+        // port stays ours: no other test's server can be given it.
+        let closed = tokio::net::TcpSocket::new_v4().unwrap();
+        closed.bind("127.0.0.1:0".parse().unwrap()).unwrap();
         let url = format!(
             "http://{}/alpha/search?key=secret",
-            listener.local_addr().unwrap()
+            closed.local_addr().unwrap()
         );
-        drop(listener);
         let err = CodexExecutor::new("direct")
             .http_request_inner(&Auth::default(), call(HttpTarget::Url(url), "{}"))
             .await

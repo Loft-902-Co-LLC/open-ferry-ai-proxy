@@ -744,9 +744,11 @@ async fn codex_alpha_search_copies_the_answer() {
 // off is a 502 that says so.
 #[tokio::test]
 async fn codex_alpha_search_reports_failed_calls() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let closed = format!("http://{}", listener.local_addr().unwrap());
-    drop(listener);
+    // Bound but never listening, so a connection is refused, and the port
+    // stays ours: no other test's server can be given it.
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let closed = format!("http://{}", socket.local_addr().unwrap());
     let credential = oauth("codex-auth", json!({"access_token": "codex-token"}));
     let app = proxy(Settings::default(), &closed, vec![credential], &[]);
     let (status, headers, body) = send(&app, search("/v1/alpha/search", "{}", &[])).await;

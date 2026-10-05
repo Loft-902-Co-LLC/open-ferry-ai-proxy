@@ -33,7 +33,7 @@ use std::sync::Arc;
 use http::StatusCode;
 use open_ferry_core::auth::{Auth, FileStore};
 use serde_json::{Value, json};
-use tokio::net::TcpListener;
+use tokio::net::TcpSocket;
 
 use super::{Api, Upstream, http_response, keyed_config};
 
@@ -562,9 +562,11 @@ async fn api_call_caps_the_response_body() {
 
 #[tokio::test]
 async fn api_call_failures_never_show_the_token() {
-    let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    // Bound but never listening, so a connection is refused, and the port
+    // stays ours: no other test's server can be given it.
+    let closed = TcpSocket::new_v4().unwrap();
+    closed.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let address = closed.local_addr().unwrap();
-    drop(closed);
     let api = Api::new();
     let mut auth = Auth {
         id: "secret-holder".into(),

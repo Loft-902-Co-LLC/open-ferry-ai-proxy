@@ -1937,9 +1937,11 @@ async fn custom_headers_cannot_set_the_clients_identity() {
 
 #[tokio::test]
 async fn connection_failures_are_upstream_errors() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    drop(listener);
+    // Bound but never listening, so a connection is refused, and the port
+    // stays ours: no other test's server can be given it.
+    let closed = tokio::net::TcpSocket::new_v4().unwrap();
+    closed.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let url = format!("http://{}", closed.local_addr().unwrap());
     let error = executor()
         .execute(
             api_key_auth(&url),

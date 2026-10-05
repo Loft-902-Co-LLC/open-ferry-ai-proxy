@@ -8,7 +8,7 @@ use base64::engine::general_purpose::STANDARD;
 use open_ferry_core::auth::Auth;
 use open_ferry_core::exec::ExecError;
 use open_ferry_core::executor::ProviderExecutor;
-use tokio::net::TcpListener;
+use tokio::net::TcpSocket;
 
 use super::super::dial::{self, Route};
 use super::super::mock::{Proxy, Server};
@@ -275,9 +275,11 @@ async fn http_proxy_tunnels_with_connect() {
 // proxy's status.
 #[tokio::test]
 async fn refused_connect_fails_the_call() {
-    let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    // Bound but never listening, so a connection is refused, and the port
+    // stays ours: no other test's server can be given it.
+    let closed = TcpSocket::new_v4().unwrap();
+    closed.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let base_url = format!("http://{}", closed.local_addr().unwrap());
-    drop(closed);
     let proxy = Proxy::start().await;
     let auth = Auth {
         proxy_url: proxy.url.clone(),
