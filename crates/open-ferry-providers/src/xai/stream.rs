@@ -28,7 +28,15 @@
 //! - Usage reporting and request logging are left to the call's taps,
 //!   which see each chunk as it is read (see the crate's `observe_send`
 //!   module).
+//! - Each line has the secrets the request sent redacted before it is
+//!   read, if they are of eight bytes or more, as every client error is (see
+//!   [`crate::redact`] and its `Policy::Client`), and so has the text of a
+//!   read error. So an error that quotes one, a `response.failed` event
+//!   among them, and what a model echoes back in its output, which upstream
+//!   passes on as it is, reach the client without it. The call's taps see
+//!   each line as xAI sent it.
 
+use std::borrow::Cow;
 use std::collections::VecDeque;
 
 use bytes::Bytes;
@@ -50,6 +58,7 @@ use crate::codex::claude_tokens;
 use crate::codex::stream::LineReader;
 use crate::codex::terminal::{APPLY_PATCH_ERROR_MESSAGE, OutputItems, StatusError};
 use crate::json::str_at;
+use crate::redact::{Policy, Secrets};
 
 /// The tag of an SSE data line (`xaiDataTag`).
 const DATA_TAG: &[u8] = b"data:";
@@ -65,6 +74,8 @@ pub(crate) struct StreamSetup {
     pub(crate) source_format: Format,
     /// The prepared request.
     pub(crate) prepared: Prepared,
+    /// The secrets the request sent, redacted from each line xAI sends.
+    pub(crate) secrets: Secrets,
 }
 
 /// The state of one translated stream.
@@ -76,6 +87,8 @@ struct State {
     items: OutputItems,
     filter: XSearchFilter,
     restorer: NamespaceRestorer,
+    /// The secrets the request sent.
+    secrets: Secrets,
     /// The `event:` line waiting for its data.
     pending_event_line: Option<Vec<u8>>,
     pending: VecDeque<Bytes>,
@@ -90,6 +103,7 @@ pub(crate) fn translate(response: reqwest::Response, setup: StreamSetup) -> Chun
         translator,
         source_format,
         mut prepared,
+        secrets,
     } = setup;
     let claude = claude_tokens::State::new(&source_format, &prepared.to, &prepared.response_format);
     let filter = XSearchFilter::new(
@@ -105,6 +119,7 @@ pub(crate) fn translate(response: reqwest::Response, setup: StreamSetup) -> Chun
         items: OutputItems::default(),
         filter,
         restorer,
+        secrets,
         pending_event_line: None,
         pending: VecDeque::new(),
         failure: None,
@@ -145,9 +160,17 @@ impl State {
                 tracing::debug!("xai: stream read failed: {error}");
                 self.reader.report(&error);
                 self.finish().await?;
-                return Err(ExecError::new(ErrorKind::Upstream, error.to_string()));
+                return Err(ExecError::new(
+                    ErrorKind::Upstream,
+                    self.secrets.text(error.to_string(), Policy::Client),
+                ));
             }
             None => return self.finish().await,
+        };
+        // Each line, as it is read; the taps read it as it came.
+        let line = match self.secrets.bytes(&line, Policy::Client) {
+            Cow::Owned(redacted) => redacted,
+            Cow::Borrowed(_) => line,
         };
         if line.starts_with(EVENT_TAG) {
             if let Some(pending) = self.pending_event_line.replace(line) {

@@ -205,3 +205,35 @@ async fn a_failure_body_hides_every_secret_sent() {
         case.check_text(&body);
     }
 }
+
+// Not upstream's: an answer that succeeds hides the secrets the request sent
+// as well: a body that quotes the key, and a 200 with an `error` object that
+// does, reach the caller without it, while the call's taps read the body as
+// it came.
+#[tokio::test]
+async fn a_successful_body_hides_every_secret_sent() {
+    for (name, body) in [
+        (
+            "a success",
+            r#"{"data":[{"note":"the key is xai-http-key"}]}"#,
+        ),
+        (
+            "an error object",
+            r#"{"error":{"message":"bad key xai-http-key","type":"auth"}}"#,
+        ),
+    ] {
+        let (url, _) = serve(200, body).await;
+        let (observation, raw) = crate::secret_echo::Raw::observe();
+        let mut files = call(HttpTarget::Path("/files".into()));
+        files.observation = Some(observation);
+        let reply = XaiExecutor::new("direct")
+            .http_request_inner(&api_key(&url), files)
+            .await
+            .unwrap();
+        assert_eq!(reply.status, 200);
+        let shown = String::from_utf8_lossy(&reply.body);
+        assert!(!shown.contains(KEY), "{name}: {shown}");
+        assert!(shown.contains("[redacted]"), "{name}: {shown}");
+        assert_eq!(raw.seen(), body, "{name}: the taps read it as it came");
+    }
+}

@@ -12,6 +12,7 @@ use super::{auth_as, executor, refused, streamed, ws_options};
 use crate::codex::websocket::mock::{Answer, Server};
 use crate::codex::xai_replay_cache::tests::grok_content;
 use crate::json::{exists, str_at};
+use crate::redact::REDACTED;
 
 /// The JSON events of SSE chunks.
 fn sse_events(chunks: &[String]) -> Vec<Value> {
@@ -255,6 +256,65 @@ async fn compaction_trigger_needs_context_and_a_compaction() {
     );
     assert_eq!(server.record().bodies.len(), 1);
     executor.close_execution_session("bad-compaction");
+}
+
+// Not upstream's, which passes the compaction on as it came: the events a
+// trigger gets are made from the compact answer with the key redacted, while
+// the session keeps the compaction as xAI sent it, so the next turn sends it
+// back whole.
+#[tokio::test]
+async fn compaction_trigger_has_the_key_redacted() {
+    const KEY: &str = "xai-review-fake-key-0123";
+    let said = format!("your key is {KEY}");
+    let compact = json!({"id": "resp_compact_secret", "output": [{"type": "compaction", "encrypted_content": "ZW5jcnlwdGVk", "summary": said}]}).to_string();
+    let server = Server::start(move |n| {
+        if n == 0 {
+            return compact_answer(&compact);
+        }
+        Answer::accept(|mut peer| async move {
+            if peer.recv().await.is_some() {
+                peer.send(super::COMPLETED).await;
+                peer.hold().await;
+            }
+        })
+    })
+    .await;
+    let executor = executor();
+    let auth = auth_as("xai-auth-compaction-secret", KEY, &server.url);
+    let session = "xai-compaction-secret-session";
+
+    let chunks = streamed(
+        &executor,
+        &auth,
+        r#"{"model":"grok-4.3","stream":true,"input":[{"type":"message","id":"msg-1","role":"user","content":"hello"},{"type":"compaction_trigger"}]}"#,
+        ws_options(session),
+    )
+    .await;
+    for chunk in &chunks {
+        assert!(!chunk.contains(KEY), "the key reached the client: {chunk}");
+    }
+    let done = sse_events(&chunks)
+        .into_iter()
+        .rfind(|event| event["type"] == "response.output_item.done")
+        .unwrap_or_else(|| panic!("no response.output_item.done: {chunks:?}"));
+    assert_eq!(
+        done["item"]["summary"],
+        format!("your key is {REDACTED}"),
+        "{done}"
+    );
+    assert_eq!(done["item"]["encrypted_content"], "ZW5jcnlwdGVk", "{done}");
+
+    streamed(
+        &executor,
+        &auth,
+        r#"{"model":"grok-4.3","stream":true,"previous_response_id":"resp_compact_secret","input":[{"type":"message","id":"msg-2","role":"user","content":"next"}]}"#,
+        ws_options(session),
+    )
+    .await;
+    let next = super::message(&server, 0);
+    assert_eq!(next["input"][0]["type"], "compaction", "{next}");
+    assert_eq!(next["input"][0]["summary"], said, "{next}");
+    executor.close_execution_session(session);
 }
 
 // TestValidateXAIWebsocketCompactionResponse

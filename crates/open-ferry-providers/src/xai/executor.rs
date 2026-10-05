@@ -34,11 +34,17 @@
 //!   the terminal event is ignored. Error bodies are read up to 4 MiB and
 //!   compact bodies up to 50 MiB.
 //! - A dropped call or stream stops at once; upstream checks its context.
-//! - An error body that quotes a secret the request sent has it redacted if
-//!   it is of eight bytes or more, as every client error is (see
-//!   `Policy::Client` in the crate's `redact` module): the credential
-//!   headers after the custom ones, each cookie, the URL's credentials, the
-//!   proxy's password and the credential's key.
+//! - A secret the request sent is redacted from every answer that quotes it,
+//!   an error body, a `response.failed` or `error` event, a compact answer's
+//!   `error` object or what a model says in a successful answer, if it is of
+//!   eight bytes or more, as every client error is (see `Policy::Client` in
+//!   the crate's `redact` module): the credential headers after the custom
+//!   ones, each cookie, the URL's credentials, the proxy's password and the
+//!   credential's key. A compact answer is redacted whole, before it is
+//!   translated or made into a compaction trigger's events, and a stream, a
+//!   non-streaming call's included, a line at a time, before the line is
+//!   read. Upstream passes all of it on as it came. The call's taps read the
+//!   answer as it came.
 //! - Usage reporting and request logging are left to the call's taps (see
 //!   the crate's `observe_send` module), and payload rules to
 //!   [`crate::payload`].
@@ -53,6 +59,7 @@
 //! - The URL is read as a WHATWG URL, and one with an ASCII control
 //!   character fails before anything is sent, as Codex's does.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -188,15 +195,16 @@ impl XaiExecutor {
     }
 
     /// Sends a compact call and reads its answer
-    /// (`executeCompactRequest`): the prepared request, xAI's body and its
-    /// headers.
+    /// (`executeCompactRequest`): the prepared request, xAI's body as it
+    /// came and its headers, and the secrets the call sent, which the body
+    /// is redacted of before the client gets anything made from it.
     pub(super) async fn compact_request(
         &self,
         auth: &Auth,
         request: &Request,
         options: &Options,
         kind: AttemptKind,
-    ) -> Result<(Prepared, Vec<u8>, HeaderMap), ExecError> {
+    ) -> Result<(Prepared, Vec<u8>, HeaderMap, Secrets), ExecError> {
         let mut prepared = prepare(
             self.context(auth),
             request,
@@ -236,7 +244,7 @@ impl XaiExecutor {
             .await
             .map_err(|error| ExecError::new(ErrorKind::Upstream, error.to_string()))?;
         replay::clear_after_compaction(&prepared.replay);
-        Ok((prepared, data, response_headers))
+        Ok((prepared, data, response_headers, secrets))
     }
 
     /// `Execute` for `responses/compact` (`executeCompact`).
@@ -246,9 +254,11 @@ impl XaiExecutor {
         request: &Request,
         options: &Options,
     ) -> Result<Response, ExecError> {
-        let (mut prepared, data, headers) = self
+        let (mut prepared, data, headers, secrets) = self
             .compact_request(auth, request, options, AttemptKind::Execute)
             .await?;
+        // Whole, before it is translated; the taps read it as it came.
+        let data = secrets.bytes(&data, Policy::Client);
         let converted = prepared
             .apply_patch
             .bridge
@@ -270,13 +280,16 @@ impl XaiExecutor {
         request: &Request,
         options: &Options,
     ) -> Result<StreamResponse, ExecError> {
-        let (prepared, data, mut headers) = self
+        let (prepared, data, mut headers, secrets) = self
             .compact_request(auth, request, options, AttemptKind::Stream)
             .await?;
         headers.insert(
             header::CONTENT_TYPE,
             HeaderValue::from_static("text/event-stream"),
         );
+        // Whole, before the events are made from it; the taps read it as it
+        // came.
+        let data = secrets.bytes(&data, Policy::Client);
         let chunks = compact::trigger_stream_chunks(&prepared, &data, SystemTime::now());
         Ok(StreamResponse {
             headers,
@@ -345,6 +358,11 @@ impl XaiExecutor {
                         secrets.text(error.to_string(), Policy::Client),
                     ));
                 }
+            };
+            // Each line, as it is read; the taps read it as it came.
+            let line = match secrets.bytes(&line, Policy::Client) {
+                Cow::Owned(redacted) => redacted,
+                Cow::Borrowed(_) => line,
             };
             let Some(rest) = line.strip_prefix(b"data:") else {
                 continue;
@@ -457,6 +475,7 @@ impl XaiExecutor {
                 translator,
                 source_format: options.source_format.clone(),
                 prepared,
+                secrets,
             },
         );
         Ok(StreamResponse {

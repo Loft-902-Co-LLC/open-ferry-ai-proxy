@@ -50,7 +50,9 @@
 //!   crate's `redact` module); upstream passes them on. The redaction comes
 //!   before anything else reads the message, so the session's transcript
 //!   keeps the redacted text too; the call's taps see each message as it
-//!   came.
+//!   came. A `compaction_trigger`'s events are made from the compact answer
+//!   redacted whole, while the transcript keeps the compaction as xAI sent
+//!   it, since it goes back to xAI (see the `compaction` module).
 //! - Usage reporting and request logging are left to the call's taps, as
 //!   for Codex's WebSocket (see [`crate::codex::websocket`]).
 

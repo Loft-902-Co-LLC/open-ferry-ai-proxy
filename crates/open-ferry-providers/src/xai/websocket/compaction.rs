@@ -38,11 +38,9 @@ use super::message::{compaction_payload, validate_compaction};
 use crate::codex::request::parse_object;
 use crate::codex::terminal::StatusError;
 use crate::json::{get, set, str_at};
-use crate::observe_send;
 use crate::redact::Policy;
 use crate::xai::XaiExecutor;
 use crate::xai::compact::{self, COMPACTION_TRIGGER, remove_input_items_by_type};
-use crate::xai::request::{build_headers, endpoint};
 
 /// Compacts the session's history for a `compaction_trigger` request and
 /// streams the compaction back
@@ -102,7 +100,7 @@ pub(super) async fn fallback(
         model: request.model.clone(),
         payload: Bytes::from(payload.to_string()),
     };
-    let (prepared, data, mut headers) = executor
+    let (prepared, data, mut headers, secrets) = executor
         .compact_request(auth, &compact_request, options, AttemptKind::Stream)
         .await?;
     let (response_id, item) = validate_compaction(&data, SystemTime::now())?;
@@ -113,13 +111,8 @@ pub(super) async fn fallback(
         header::CONTENT_TYPE,
         HeaderValue::from_static("text/event-stream"),
     );
-    // The secrets the compact call sent, as it worked them out.
-    let secrets = observe_send::secrets(
-        &endpoint(auth, true),
-        &build_headers(auth, &options.headers, false, &prepared.session_id)?,
-        &executor.proxy_for(auth),
-        auth,
-    );
+    // Whole, before the events are made from it; the session keeps it as it
+    // came.
     let data = secrets.bytes(&data, Policy::Client);
     let chunks = compact::trigger_stream_chunks(&prepared, &data, SystemTime::now());
     Ok(StreamResponse {

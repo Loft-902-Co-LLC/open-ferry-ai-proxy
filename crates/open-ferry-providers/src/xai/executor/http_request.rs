@@ -21,10 +21,14 @@
 //!   dropped; a connection error reads as no answer, without the URL.
 //! - The URL is read as a WHATWG URL; one with an ASCII control character
 //!   fails before anything is sent.
-//! - An answer whose status isn't a success has every secret the request
-//!   sent, of eight bytes or more, redacted from its body, as every client
-//!   error is (see `Policy::Client`, [`observe_send::secrets`] and
-//!   [`crate::redact`]). Upstream hands the body on as it came.
+//! - An answer, of any status, has every secret the request sent redacted
+//!   from its body, if it is of eight bytes or more, as every client error is
+//!   (see `Policy::Client`, [`observe_send::secrets`] and
+//!   [`crate::redact`]). So a success that quotes one, as well as a failure
+//!   that does in its error, reaches the caller without it, where upstream
+//!   hands the body on as it came. The call's taps read the body as it came.
+
+use std::borrow::Cow;
 
 use bytes::Bytes;
 use http::HeaderName;
@@ -43,8 +47,8 @@ use crate::xai::request::{CONV_ID_HEADER, PROVIDER, base_url, strip_forbidden_he
 
 impl XaiExecutor {
     /// Sends `call` with the credential's key and custom headers, and reads
-    /// the answer, whatever its status (`HttpRequest`); a failure's body
-    /// without the secrets the request sent.
+    /// the answer, whatever its status (`HttpRequest`); the body without
+    /// the secrets the request sent.
     pub(super) async fn http_request_inner(
         &self,
         auth: &Auth,
@@ -125,9 +129,7 @@ impl XaiExecutor {
         if let Some(error) = &read_error {
             observe_send::attempt_error(tap.as_ref(), error);
         }
-        if !(200..300).contains(&status)
-            && let std::borrow::Cow::Owned(scrubbed) = secrets.bytes(&body, Policy::Client)
-        {
+        if let Cow::Owned(scrubbed) = secrets.bytes(&body, Policy::Client) {
             body = scrubbed;
         }
         Ok(HttpReply {
