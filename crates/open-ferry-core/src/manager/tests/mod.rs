@@ -73,6 +73,7 @@ mod retry_deadline;
 mod scheduler;
 mod selector;
 mod service_cooldown_store;
+mod stream_dropped_queued_failure;
 mod stream_request_span;
 mod stream_startup_cancel;
 mod support;

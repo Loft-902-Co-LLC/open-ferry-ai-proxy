@@ -33,13 +33,20 @@
 //! - Removing `generate` from a WebSocket fallback payload re-serializes the
 //!   JSON (keeping key order and numbers), where sjson edits it in place.
 //! - When the client drops a stream, its task stops reading at once and
-//!   records nothing, as upstream records nothing once its context ends.
+//!   marks no further result, as upstream's goroutine discards the rest
+//!   once its context ends. What the taps are told is in the next point.
 //! - Each executor call's end is reported to the request's taps here (see
 //!   [`CallReport`]), where upstream's executors publish their usage and
 //!   request-log records themselves. A stream's report is made before its
 //!   executor is awaited, at the first attempt and at the retry after a
 //!   refresh, so a client that leaves while the executor is still connecting
-//!   ends the call for the taps once, as canceled.
+//!   ends the call for the taps once, as canceled. A stream the client drops
+//!   reports a failure its executor has already queued, such as the 502
+//!   behind an `apply_patch` failure's `response.failed` frame, which
+//!   upstream's executors record before they send it; otherwise it ends the
+//!   call as canceled, where upstream's reader, if it is waiting on the body
+//!   at that moment, reads a failed body, finalizes the translator and
+//!   records the patch 502.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};

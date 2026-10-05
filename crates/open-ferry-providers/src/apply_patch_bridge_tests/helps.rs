@@ -42,11 +42,12 @@
 //! - `TestApplyPatchCanceledEOFStillRecordsFailure` checks that the usage
 //!   upstream's executor publishes itself is a failure even when the
 //!   context is canceled at the end of the stream. Here the manager's usage
-//!   tap records the call from the error the stream ends with, and
-//!   dropping the stream stops reading where upstream watches its context,
-//!   so the test checks that the Gemini executor's stream, at the end of an
-//!   empty answer, gives the failure frame with the 502 ready right behind
-//!   it, nothing to wait for between them.
+//!   tap records the call from the error the stream ends with, and a
+//!   dropped stream records an error it already has ready but waits for
+//!   nothing, where upstream watches its context, so the test checks that
+//!   the Gemini executor's stream, at the end of an empty answer, gives the
+//!   failure frame with the 502 ready right behind it, nothing to wait for
+//!   between them.
 
 use bytes::Bytes;
 use futures_util::FutureExt as _;

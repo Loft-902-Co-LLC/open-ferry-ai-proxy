@@ -12,19 +12,41 @@
 //! stream it returns, so a call dropped at any point, even before the
 //! executor answers, tells its taps once that it was canceled.
 //!
+//! A stream dropped before its end first looks at what its executor already
+//! has ready: it takes, without waiting, up to 16 more items, and stops at
+//! the first that isn't ready. An error among them ends the call as a
+//! failure, as it would have had the client read on; the chunks before it
+//! go nowhere. So a client that leaves just after an `apply_patch` failure's
+//! `response.failed` frame, before the 502 the executor queued behind it,
+//! leaves the 502 recorded. Otherwise the call was canceled.
+//!
 //! Deviations from upstream: the whole module. Upstream's executors publish
 //! their usage and request-log records themselves, and a context's end
-//! tells them the client went away.
+//! tells them the client went away. They record an `apply_patch` failure
+//! before they send it (`RecordApplyPatchStreamFailure`); here a failure
+//! the executor has queued is recorded when the stream is dropped. A client
+//! that leaves before the executor has queued it ends the call as canceled,
+//! where upstream's reader, if it is waiting on the body at that moment,
+//! reads a failed body, finalizes the translator and records the patch 502.
 
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll, ready};
+use std::task::{Context, Poll, Waker, ready};
 
 use bytes::Bytes;
 use futures_core::Stream;
 
 use super::{Observation, Outcome};
 use crate::exec::{ChunkStream, ExecError, Options, StreamResponse};
+
+/// How many items a stream dropped before its end takes, at most, to find
+/// an error its executor has already queued. An executor queues an error
+/// right behind the chunks made from the same line or from the stream's
+/// end: an `apply_patch` failure behind its one `response.failed` frame, a
+/// read error behind the translator's closing events and `[DONE]`, a few
+/// for each output item still open. Sixteen covers those, and bounds what
+/// is read and translated for a client that is gone.
+const READY_ITEMS: usize = 16;
 
 /// Reports an executor call's end to its taps. Dropped before it is
 /// finished, as when the call's future is dropped, it reports the call
@@ -54,14 +76,9 @@ impl CallReport {
     /// Reports a non-streaming call's `result`: its error and a failure, or
     /// that it completed.
     pub fn finish<T>(mut self, result: &Result<T, ExecError>) {
-        if let Some(observation) = self.observation.take() {
-            match result {
-                Ok(_) => observation.finish(Outcome::Completed),
-                Err(error) => {
-                    observation.error(error);
-                    observation.finish(Outcome::Failed);
-                }
-            }
+        match result {
+            Ok(_) => self.end(Outcome::Completed),
+            Err(error) => self.fail(error),
         }
     }
 
@@ -74,39 +91,53 @@ impl CallReport {
         mut self,
         result: Result<StreamResponse, ExecError>,
     ) -> Result<StreamResponse, ExecError> {
-        let Some(observation) = self.observation.take() else {
+        if self.observation.is_none() {
             return result;
-        };
+        }
         match result {
             Ok(response) => Ok(StreamResponse {
                 headers: response.headers,
                 chunks: Box::pin(ObservedChunks {
                     inner: response.chunks,
-                    observation: Some(observation),
+                    report: self,
                 }),
             }),
             Err(error) => {
-                observation.error(&error);
-                observation.finish(Outcome::Failed);
+                self.fail(&error);
                 Err(error)
             }
+        }
+    }
+
+    /// Reports the call's failure with `error`, unless its end is reported.
+    fn fail(&mut self, error: &ExecError) {
+        if let Some(observation) = self.observation.take() {
+            observation.error(error);
+            observation.finish(Outcome::Failed);
+        }
+    }
+
+    /// Reports that the call ended with `outcome`, unless its end is
+    /// reported.
+    fn end(&mut self, outcome: Outcome) {
+        if let Some(observation) = self.observation.take() {
+            observation.finish(outcome);
         }
     }
 }
 
 impl Drop for CallReport {
     fn drop(&mut self) {
-        if let Some(observation) = self.observation.take() {
-            observation.finish(Outcome::Canceled);
-        }
+        self.end(Outcome::Canceled);
     }
 }
 
 /// A stream's chunks, reporting how it ends.
 struct ObservedChunks {
     inner: ChunkStream,
-    /// `None` once the end is reported.
-    observation: Option<Arc<Observation>>,
+    /// Reports the end, once. Dropped before then, as when looking at what
+    /// is ready panics, it reports the call canceled.
+    report: CallReport,
 }
 
 impl Stream for ObservedChunks {
@@ -117,17 +148,8 @@ impl Stream for ObservedChunks {
         let item = ready!(this.inner.as_mut().poll_next(cx));
         match &item {
             Some(Ok(_)) => {}
-            Some(Err(error)) => {
-                if let Some(observation) = this.observation.take() {
-                    observation.error(error);
-                    observation.finish(Outcome::Failed);
-                }
-            }
-            None => {
-                if let Some(observation) = this.observation.take() {
-                    observation.finish(Outcome::Completed);
-                }
-            }
+            Some(Err(error)) => this.report.fail(error),
+            None => this.report.end(Outcome::Completed),
         }
         Poll::Ready(item)
     }
@@ -139,10 +161,32 @@ impl Stream for ObservedChunks {
 
 impl Drop for ObservedChunks {
     fn drop(&mut self) {
-        if let Some(observation) = self.observation.take() {
-            observation.finish(Outcome::Canceled);
+        // Nothing is polled while a panic unwinds, which a second panic
+        // would turn into an abort.
+        if self.report.observation.is_some()
+            && !std::thread::panicking()
+            && let Some(error) = ready_error(&mut self.inner)
+        {
+            self.report.fail(&error);
+        }
+        self.report.end(Outcome::Canceled);
+    }
+}
+
+/// The first error among the next [`READY_ITEMS`] items `chunks` already
+/// has, taken without waiting: polled with a waker that does nothing, it
+/// stops at an item that isn't ready, and at its end. The chunks before
+/// the error go nowhere.
+fn ready_error(chunks: &mut ChunkStream) -> Option<ExecError> {
+    let mut cx = Context::from_waker(Waker::noop());
+    for _ in 0..READY_ITEMS {
+        match chunks.as_mut().poll_next(&mut cx) {
+            Poll::Ready(Some(Ok(_))) => {}
+            Poll::Ready(Some(Err(error))) => return Some(error),
+            Poll::Ready(None) | Poll::Pending => return None,
         }
     }
+    None
 }
 
 #[cfg(test)]
@@ -274,6 +318,113 @@ mod tests {
             .unwrap();
         assert!(response.chunks.next().await.is_some());
         drop(response);
+        assert_eq!(recorder.take(), ["Canceled"]);
+    }
+
+    fn ok() -> Result<Bytes, ExecError> {
+        Ok(Bytes::from_static(b"a"))
+    }
+
+    // Not upstream's: a stream dropped with an error its executor already
+    // queued, as the 502 behind an `apply_patch` failure's frame, reports
+    // that error; one further back than READY_ITEMS is not looked at.
+    #[tokio::test]
+    async fn reports_an_error_ready_when_a_stream_is_dropped() {
+        let (options, recorder) = tapped();
+        let mut response = CallReport::start(&options)
+            .stream(Ok(chunks(vec![ok(), Err(failure())])))
+            .unwrap();
+        assert!(response.chunks.next().await.unwrap().is_ok());
+        assert!(recorder.take().is_empty());
+        drop(response);
+        assert_eq!(recorder.take(), ["error boom", "Failed"]);
+
+        let mut items = vec![ok(); READY_ITEMS];
+        items[READY_ITEMS - 1] = Err(failure());
+        let response = CallReport::start(&options)
+            .stream(Ok(chunks(items)))
+            .unwrap();
+        drop(response);
+        assert_eq!(recorder.take(), ["error boom", "Failed"]);
+
+        let mut items = vec![ok(); READY_ITEMS + 1];
+        items[READY_ITEMS] = Err(failure());
+        let response = CallReport::start(&options)
+            .stream(Ok(chunks(items)))
+            .unwrap();
+        drop(response);
+        assert_eq!(recorder.take(), ["Canceled"]);
+    }
+
+    // Not upstream's: a stream dropped while its executor is still waiting
+    // was canceled, whatever would have come next; nothing waits for it.
+    #[tokio::test]
+    async fn a_stream_dropped_while_waiting_was_canceled() {
+        let (options, recorder) = tapped();
+        let mut response = CallReport::start(&options)
+            .stream(Ok(StreamResponse {
+                headers: HeaderMap::new(),
+                chunks: stream::iter([ok()]).chain(stream::pending()).boxed(),
+            }))
+            .unwrap();
+        assert!(response.chunks.next().await.unwrap().is_ok());
+        drop(response);
+        assert_eq!(recorder.take(), ["Canceled"]);
+
+        // An error behind an item that isn't ready yet isn't reached.
+        let mut polls = 0;
+        let mut response = CallReport::start(&options)
+            .stream(Ok(StreamResponse {
+                headers: HeaderMap::new(),
+                chunks: stream::poll_fn(move |_| {
+                    polls += 1;
+                    match polls {
+                        1 => Poll::Ready(Some(ok())),
+                        2 => Poll::Pending,
+                        _ => Poll::Ready(Some(Err(failure()))),
+                    }
+                })
+                .boxed(),
+            }))
+            .unwrap();
+        assert!(response.chunks.next().await.unwrap().is_ok());
+        drop(response);
+        assert_eq!(recorder.take(), ["Canceled"]);
+    }
+
+    /// A stream with one chunk ready, that panics when polled after it.
+    fn panicking() -> StreamResponse {
+        let mut polled = false;
+        StreamResponse {
+            headers: HeaderMap::new(),
+            chunks: stream::poll_fn(move |_| {
+                assert!(!std::mem::replace(&mut polled, true), "polled again");
+                Poll::Ready(Some(ok()))
+            })
+            .boxed(),
+        }
+    }
+
+    // Not upstream's: a stream that panics when looked at on its drop still
+    // reports the call canceled, and one dropped while a panic unwinds isn't
+    // looked at, which would abort.
+    #[tokio::test]
+    async fn a_dropped_stream_that_panics_was_canceled() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        let (options, recorder) = tapped();
+        let mut response = CallReport::start(&options).stream(Ok(panicking())).unwrap();
+        assert!(response.chunks.next().await.unwrap().is_ok());
+        assert!(catch_unwind(AssertUnwindSafe(move || drop(response))).is_err());
+        assert_eq!(recorder.take(), ["Canceled"]);
+
+        let mut response = CallReport::start(&options).stream(Ok(panicking())).unwrap();
+        assert!(response.chunks.next().await.unwrap().is_ok());
+        let unwound = catch_unwind(AssertUnwindSafe(move || {
+            let _response = response;
+            panic!("leaving");
+        }));
+        assert!(unwound.is_err());
         assert_eq!(recorder.take(), ["Canceled"]);
     }
 
