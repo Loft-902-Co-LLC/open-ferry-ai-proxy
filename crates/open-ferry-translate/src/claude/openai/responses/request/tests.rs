@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/claude/openai/responses/claude_openai-responses_request_test.go
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use std::collections::HashMap;
@@ -1777,7 +1777,23 @@ fn fable_only_assistant_message_yields_fallback_user() {
 
 #[test]
 fn unsupported_prefill_models_strip_trailing_assistant() {
-    for model in ["claude-fable-5", "claude-opus-5", "claude-sonnet-4-6"] {
+    for model in [
+        "claude-fable-5",
+        "claude-opus-5",
+        "claude-sonnet-4-6",
+        "fable",
+        "opus-5",
+        "sonnet-4.6",
+        "anthropic/claude-opus-5-thinking",
+        "claude-sonnet-4.6",
+        "claude-sonnet-4-7",
+        "claude-sonnet-4-10",
+        "claude-sonnet-5",
+        "claude-opus-6",
+        "claude-opus-5.1",
+        "claude-sonnet-4-6-20260217",
+        " ANTHROPIC/CLAUDE-OPUS-5-THINKING ",
+    ] {
         let out = convert(
             model,
             &json!({
@@ -1801,7 +1817,24 @@ fn unsupported_prefill_models_strip_trailing_assistant() {
 
 #[test]
 fn supported_prefill_models_preserve_assistant_prefill() {
-    for model in ["claude-sonnet-4-5", "claude-haiku-4-5"] {
+    for model in [
+        "claude-sonnet-4-5",
+        "claude-haiku-4-5",
+        "claude-3-opus-20240229",
+        "claude-opus-20240229",
+        "claude-sonnet-4-20260217",
+        "claude-sonnet-4.5",
+        "not-a-fable-model",
+        "my-custom-opus-5-wrapper",
+        "my-sonnet-4-6-wrapper",
+        "claude-fabled-5",
+        "claude-opus-5foo",
+        "claude-sonnet-4-6foo",
+        "fable/gpt-4o",
+        "opus",
+        "sonnet",
+        "",
+    ] {
         let out = convert(
             model,
             &json!({

@@ -69,7 +69,9 @@ pub fn event_cases(seed: u64, count: usize) -> (Vec<Case>, Vec<Case>) {
 }
 
 /// Claude models with effort levels, with budgets only, that reject an
-/// assistant prefill, or unknown to the catalog.
+/// assistant prefill, or unknown to the catalog. Some reject a prefill by a
+/// version that follows a provider namespace, is dotted or comes before a
+/// snapshot date; some name a family only in passing and don't.
 const MODELS: &[&str] = &[
     "claude-opus-4-6",
     "claude-opus-4-6",
@@ -77,6 +79,12 @@ const MODELS: &[&str] = &[
     "claude-opus-4-7",
     "claude-opus-5-5",
     "claude-fable-5-1",
+    "anthropic/claude-opus-5-thinking",
+    "claude-sonnet-4.6",
+    "claude-sonnet-4-10",
+    " CLAUDE-OPUS-6 ",
+    "claude-sonnet-4-20260217",
+    "my-sonnet-4-6-wrapper",
     "claude-sonnet-4-5-20250929",
     "claude-sonnet-4-5-20250929",
     "claude-haiku-4-5-20251001",

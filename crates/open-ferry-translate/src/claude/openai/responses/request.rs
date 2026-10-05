@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/claude/openai/responses/claude_openai-responses_request.go
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! OpenAI Responses request → Claude Messages request.
@@ -962,13 +962,43 @@ fn tool_result_text_parts(block: &Value) -> Vec<Value> {
     }
 }
 
-/// `claudeModelRejectsAssistantPrefill`: the model families that reject a
-/// conversation ending with an assistant turn.
+/// `claudeModelRejectsAssistantPrefill`: whether the model rejects a
+/// conversation ending with an assistant turn: Fable, Opus 5 and later, and
+/// Sonnet 4.6 and later. The family is read after any provider namespace
+/// and `claude-` prefix, and the versions after it, with `.` read as `-`.
 fn rejects_assistant_prefill(model_name: &str) -> bool {
-    let model = go::to_lower(model_name.trim());
-    ["fable", "opus-5", "sonnet-4-6"]
-        .into_iter()
-        .any(|family| model.contains(family))
+    let normalized = go::to_lower(model_name.trim());
+    // Provider namespaces are not part of the model family.
+    let normalized = normalized.rsplit('/').next().unwrap_or_default();
+    let normalized = normalized.strip_prefix("claude-").unwrap_or(normalized);
+    let normalized = normalized.replace('.', "-");
+    let tokens: Vec<&str> = normalized.split('-').collect();
+    let family = tokens.first().copied().unwrap_or_default();
+    if family == "fable" {
+        return true;
+    }
+    if family != "opus" && family != "sonnet" {
+        return false;
+    }
+    let version = |position: usize| {
+        tokens
+            .get(position)
+            .and_then(|token| prefill_version(token))
+    };
+    match version(1) {
+        Some(major) if major >= 5 => true,
+        Some(4) => family == "sonnet" && version(2).is_some_and(|minor| minor >= 6),
+        _ => false,
+    }
+}
+
+/// A model name's version number: up to seven ASCII digits. Eight digits
+/// make a snapshot date, which is never a version.
+fn prefill_version(token: &str) -> Option<u32> {
+    if token.is_empty() || token.len() >= 8 || !token.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    token.parse().ok()
 }
 
 /// `claudeMessageInvariantProblems`: the ways the messages still break
