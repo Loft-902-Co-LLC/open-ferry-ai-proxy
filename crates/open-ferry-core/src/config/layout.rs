@@ -22,7 +22,8 @@
 //! [`V8Document::project_aliases`] then moves settings back to an earlier
 //! v8 spelling when that is what a read asks for, and
 //! [`V8Document::value`] decodes the node at a path as yaml.v3 decodes into
-//! Go's `any`.
+//! Go's `any`. For a JSON read, [`V8Document::set_api_key_auth_indexes`]
+//! first shows on each API key the index of the credential it makes.
 //!
 //! Upstream writes the migrated tree out as YAML and reads it back before
 //! using it, which can change what a value decodes to: a timestamp in a
@@ -43,6 +44,8 @@
 //! - A value whose scalars aliases expanded to more than 64 MiB of text
 //!   fails to decode with `yaml: document contains excessive aliasing`;
 //!   upstream decodes it.
+
+mod auth_index;
 
 use std::collections::BTreeMap;
 use std::fmt;

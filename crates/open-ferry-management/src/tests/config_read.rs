@@ -7,7 +7,9 @@
 // (TestManagementV8RoutesShareAccessControl,
 // TestManagementV8IndependentContract) (v8.0.10, MIT), and
 // config_v8_compatibility_test.go (TestConfigV8HistoricalFieldPaths,
-// TestConfigV8HistoricalProviderSubtrees) (v8.0.11, MIT).
+// TestConfigV8HistoricalProviderSubtrees) (v8.0.11, MIT), and
+// config_v8_auth_index_test.go
+// (TestConfigV8APIKeysExposeAuthIndex_Issue6287) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Tests of the routes of `crate::config_read`.
@@ -25,6 +27,8 @@
 //!   `TestConfigV8HistoricalProviderSubtrees` read a file that already holds
 //!   what upstream's writes put there, and `TestConfigV8JSONTURNSecrets`
 //!   drops its `PUT` round trips.
+//! - `TestConfigV8APIKeysExposeAuthIndex_Issue6287` drops its cases 5, 6
+//!   and 10, which write the config back with the `auth_index` it read.
 //! - `TestManagementV8RoutesShareAccessControl` requests only this module's
 //!   routes (the credential list is checked in `server_management_v8`), and
 //!   drops its Home mode case: Home mode isn't ported.
@@ -46,6 +50,8 @@
 //!   config_weight_test.go, config_lists_delete_keys_test.go and
 //!   config_apikey_disable_test.go) only `PATCH`, `PUT` or `DELETE` them,
 //!   and are dropped. The reads are checked by tests that aren't upstream's.
+
+use std::collections::HashSet;
 
 use http::{Method, StatusCode};
 use open_ferry_core::auth::synthesizer::{
@@ -172,6 +178,15 @@ fn over_file(raw: &str) -> (AuthDir, Api) {
 fn assert_unchanged(dir: &AuthDir, raw: &str) {
     let data = std::fs::read_to_string(dir.config_path()).unwrap();
     assert_eq!(data, raw, "the config file changed");
+}
+
+/// `body` with each key of `indexes` it holds followed by its `auth_index`,
+/// as a v8 read writes it.
+fn with_indexes(body: &str, indexes: &[(&str, &str)]) -> String {
+    indexes.iter().fold(body.to_owned(), |body, (key, index)| {
+        let entry = format!(r#""api-key":"{key}""#);
+        body.replace(&entry, &format!(r#"{entry},"auth_index":"{index}""#))
+    })
 }
 
 /// Checks a read that succeeded: `body`, as JSON not to be cached.
@@ -769,26 +784,35 @@ async fn interactions_xai_and_meta_keys_are_written() {
 /// layout, grouped under `api-keys`, and the xAI settings under
 /// `upstream.xai` and its historical `oauth.providers.xai`, from a legacy
 /// file and from a v8 one. The legacy file is read as it is, with the
-/// entries the loader drops. Recorded from upstream's `ConfigV8` (v8.0.11)
+/// entries the loader drops. Each key shows the `auth_index` of the
+/// credential it makes, derived as the manager holds none; the keys the
+/// loader drops have none: the xAI key without a base URL, and the empty
+/// and `dca:` Meta keys. Recorded from upstream's `ConfigV8` (v8.0.15)
 /// under Go 1.26.4.
 #[tokio::test]
 async fn config_v8_reads_interactions_xai_and_meta_keys() {
-    let interactions = concat!(
+    let indexes = [
+        ("i1", "1785391da8774cf1"),
+        ("m1", "3f921a26544c0bac"),
+        ("x1", "a80eea00a62ef2aa"),
+    ];
+    let index = |body: &str| with_indexes(body, &indexes);
+    let interactions = index(concat!(
         r#"[{"base-url":"https://i.example","keys":[{"api-key":"i1","weight":2}],"#,
         r#""models":[{"alias":"nf","name":"gemini-2.5-flash"}],"name":"interactions-1","#,
         r#""priority":1},{"base-url":"https://i.example","keys":[{"api-key":"i1"}],"#,
         r#""models":[{"alias":"nf","name":"gemini-2.5-flash"}],"name":"interactions-2"}]"#,
-    );
-    let meta = concat!(
+    ));
+    let meta = index(concat!(
         r#"[{"headers":{"X-A":"a"},"keys":[{"api-key":"m1"}],"name":"meta-1","prefix":"team"},"#,
         r#"{"keys":[{"api-key":"dca:abc"}],"name":"meta-2"},"#,
         r#"{"base-url":"https://m.example","keys":[{"api-key":""}],"name":"meta-3"}]"#,
-    );
-    let xai = concat!(
+    ));
+    let xai = index(concat!(
         r#"[{"base-url":"https://x.example","excluded-models":["grok-2*"],"#,
         r#""keys":[{"alpha-search":true,"api-key":"x1","websockets":true}],"name":"xai-1"},"#,
         r#"{"keys":[{"api-key":"x2"}],"name":"xai-2"}]"#,
-    );
+    ));
     let (dir, api) = over_file(NEW_KEYS);
     let keys = format!(r#"{{"interactions":{interactions},"meta":{meta},"xai":{xai}}}"#);
     let whole = format!(
@@ -797,9 +821,9 @@ async fn config_v8_reads_interactions_xai_and_meta_keys() {
     for (path, body) in [
         ("", whole.as_str()),
         ("api-keys", keys.as_str()),
-        ("api-keys/interactions", interactions),
-        ("api-keys/xai", xai),
-        ("api-keys/meta", meta),
+        ("api-keys/interactions", interactions.as_str()),
+        ("api-keys/xai", xai.as_str()),
+        ("api-keys/meta", meta.as_str()),
         ("upstream/xai", r#"{"inject-x-search":true}"#),
         ("upstream/xai/inject-x-search", "true"),
         ("oauth/providers/xai", r#"{"inject-x-search":true}"#),
@@ -838,27 +862,443 @@ api-keys:
 ",
     );
     let (dir, api) = over_file(raw);
-    let interactions = r#"[{"base-url":"https://i.example","keys":[{"api-key":"i1","weight":2}]}]"#;
-    let xai = concat!(
+    let indexes = [
+        ("i1", "1785391da8774cf1"),
+        ("m1", "3f921a26544c0bac"),
+        ("x1", "a80eea00a62ef2aa"),
+        ("x2", "bc733c015e6abf4f"),
+    ];
+    let index = |body: &str| with_indexes(body, &indexes);
+    let interactions =
+        index(r#"[{"base-url":"https://i.example","keys":[{"api-key":"i1","weight":2}]}]"#);
+    let xai = index(concat!(
         r#"[{"base-url":"https://x.example","excluded-models":["grok-2*"],"#,
         r#""keys":[{"api-key":"x1"},{"api-key":"x2"}]}]"#,
-    );
-    let meta = r#"[{"keys":[{"api-key":"m1"}],"prefix":"team"}]"#;
+    ));
+    let meta = index(r#"[{"keys":[{"api-key":"m1"}],"prefix":"team"}]"#);
     let keys = format!(r#"{{"interactions":{interactions},"meta":{meta},"xai":{xai}}}"#);
     let whole = format!(
         r#"{{"api-keys":{keys},"config-version":8,"upstream":{{"xai":{{"inject-x-search":true}}}}}}"#
     );
     for (path, body) in [
         ("", whole.as_str()),
-        ("api-keys/interactions", interactions),
-        ("api-keys/xai", xai),
-        ("api-keys/meta", meta),
+        ("api-keys/interactions", interactions.as_str()),
+        ("api-keys/xai", xai.as_str()),
+        ("api-keys/meta", meta.as_str()),
         ("oauth/providers/xai/inject-x-search", "true"),
     ] {
         let answer = api.get(&format!("/v8/management/config/{path}")).await;
         assert_v8(&answer, body);
     }
     assert_unchanged(&dir, raw);
+}
+
+/// The v8 file whose `api-keys` are `keys`, the API over it, and the index
+/// of each credential the config makes, after checking that they are the
+/// ones for the keys `made`, in order, each with its own index. The manager
+/// holds the credentials if `held`.
+fn auth_index_file(
+    keys: &str,
+    made: &[Option<&str>],
+    held: bool,
+) -> (AuthDir, Api, String, Vec<String>) {
+    let raw = format!("config-version: 8\nport: 8317\napi-keys:\n{keys}");
+    let (dir, api) = over_file(&raw);
+    let config = Config::parse(&raw).unwrap();
+    let ctx = SynthesisContext::new("", chrono::Utc::now());
+    let auths = synthesize_config_auths(&config, &ctx, &mut StableIdGenerator::new()).unwrap();
+    let keys: Vec<Option<&str>> = auths.iter().map(|auth| auth.attribute("api_key")).collect();
+    assert_eq!(keys, made, "{raw}");
+    let indexes: Vec<String> = auths
+        .into_iter()
+        .map(|mut auth| {
+            let index = auth.ensure_index().to_owned();
+            if held {
+                assert_eq!(api.register(auth), index);
+            }
+            index
+        })
+        .collect();
+    let distinct: HashSet<&String> = indexes.iter().collect();
+    assert_eq!(distinct.len(), indexes.len(), "{raw}");
+    (dir, api, raw, indexes)
+}
+
+/// The `auth_index` a v8 read shows for each group of `groups` and for each
+/// of its keys, as positions in the credentials' `indexes`: `None` where
+/// there is none.
+type GroupIndexes<'a> = &'a [(Option<usize>, &'a [Option<usize>])];
+
+/// Checks the `auth_index` of each group of `groups` and of its keys.
+fn assert_auth_indexes(groups: &Value, want: GroupIndexes<'_>, indexes: &[String], case: &str) {
+    fn shown(entry: &Value) -> Option<&str> {
+        entry.get("auth_index").map(|index| index.as_str().unwrap())
+    }
+    let at = |at: &Option<usize>| at.map(|at| indexes[at].as_str());
+    let groups = groups
+        .as_array()
+        .unwrap_or_else(|| panic!("{case}: {groups}"));
+    assert_eq!(groups.len(), want.len(), "{case}: {groups:?}");
+    for (group, (index, keys)) in groups.iter().zip(want) {
+        assert_eq!(shown(group), at(index), "{case}: {group}");
+        let shown: Vec<Option<&str>> = group["keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(shown)
+            .collect();
+        let want: Vec<Option<&str>> = keys.iter().map(at).collect();
+        assert_eq!(shown, want, "{case}: {group}");
+    }
+}
+
+/// Ported from upstream's config_v8_auth_index_test.go
+/// (TestConfigV8APIKeysExposeAuthIndex_Issue6287), its cases 1 to 4 and 7:
+/// each key of the v8 `api-keys`, and a keyless OpenAI-compatible group,
+/// shows the `auth_index` of the credential it makes, read alone, with the
+/// other providers' or in the whole config, whether the manager holds the
+/// credentials or not, and `config.yaml` has none. Its cases 5 and 6 write
+/// the config, and are dropped.
+#[tokio::test]
+async fn config_v8_api_keys_expose_auth_index() {
+    let keys = "  codex:
+    - name: codex-group
+      base-url: https://api.openai.invalid
+      keys:
+        - api-key: sk-codex-1
+        - api-key: sk-codex-2
+  claude:
+    - name: claude-group
+      base-url: https://api.anthropic.invalid
+      keys:
+        - api-key: sk-claude-1
+  openai-compatibility:
+    - name: compat-provider
+      base-url: https://api.compat.invalid
+      keys:
+        - api-key: sk-compat-1
+    - name: keyless-provider
+      base-url: https://api.keyless.invalid
+      keys: []
+";
+    let made = [
+        Some("sk-claude-1"),
+        Some("sk-codex-1"),
+        Some("sk-codex-2"),
+        Some("sk-compat-1"),
+        None,
+    ];
+    let codex: GroupIndexes<'_> = &[(None, &[Some(1), Some(2)])];
+    for held in [true, false] {
+        let (dir, api, raw, indexes) = auth_index_file(keys, &made, held);
+        let case = format!("held: {held}");
+        let groups = api
+            .get("/v8/management/config/api-keys/codex")
+            .await
+            .expect(StatusCode::OK);
+        assert_auth_indexes(&groups, codex, &indexes, &case);
+
+        let all = api
+            .get("/v8/management/config/api-keys")
+            .await
+            .expect(StatusCode::OK);
+        assert_auth_indexes(&all["codex"], codex, &indexes, &case);
+        assert_auth_indexes(&all["claude"], &[(None, &[Some(0)])], &indexes, &case);
+        let compat: GroupIndexes<'_> = &[(None, &[Some(3)]), (Some(4), &[])];
+        assert_auth_indexes(&all["openai-compatibility"], compat, &indexes, &case);
+
+        let whole = api
+            .get("/v8/management/config")
+            .await
+            .expect(StatusCode::OK);
+        assert_auth_indexes(&whole["api-keys"]["codex"], codex, &indexes, &case);
+
+        let yaml = api.get("/v8/management/config.yaml").await;
+        assert_eq!(yaml.status, StatusCode::OK);
+        assert!(!yaml.body.contains("auth_index"), "{}", yaml.body);
+        assert_unchanged(&dir, &raw);
+    }
+}
+
+/// Ported from upstream's config_v8_auth_index_test.go
+/// (TestConfigV8APIKeysExposeAuthIndex_Issue6287), its cases 8, 9 and 11 to
+/// 23: a key shows the index of the credential it makes as the loader makes
+/// it (with a default base URL, an inherited or explicitly empty proxy URL,
+/// a normalized prefix), keys the loader merges share an index, and keys
+/// the loader drops (in a group without a base URL, an empty Claude or Meta
+/// key, a `dca:` Meta key) have none. Its case 10 writes the config, and is
+/// dropped; that a header named `auth_index` reads as it is, is checked
+/// instead (not upstream's; recorded from upstream's `ConfigV8` (v8.0.15)
+/// under Go 1.26.4).
+#[tokio::test]
+async fn config_v8_api_keys_expose_auth_index_as_the_loader_makes_them() {
+    type Case<'a> = (
+        &'a str,
+        &'a str,
+        &'a [Option<&'a str>],
+        bool,
+        GroupIndexes<'a>,
+    );
+    let cases: [Case<'_>; 15] = [
+        (
+            "8",
+            "  meta:
+    - name: meta-group
+      keys:
+        - api-key: sk-meta-default-base
+",
+            &[Some("sk-meta-default-base")],
+            true,
+            &[(None, &[Some(0)])],
+        ),
+        (
+            "9",
+            r#"  vertex:
+    - name: vertex-group
+      base-url: https://api.vertex.invalid
+      proxy-url: http://proxy.group.invalid:8080
+      keys:
+        - api-key: sk-vertex-inherited
+        - api-key: sk-vertex-explicit-empty
+          proxy-url: ""
+"#,
+            &[
+                Some("sk-vertex-inherited"),
+                Some("sk-vertex-explicit-empty"),
+            ],
+            true,
+            &[(None, &[Some(0), Some(1)])],
+        ),
+        (
+            "11",
+            "  vertex:
+    - name: vertex-group
+      base-url: https://api.vertex.invalid
+      keys:
+        - api-key: sk-vertex-shared
+        - api-key: sk-vertex-shared
+",
+            &[Some("sk-vertex-shared")],
+            true,
+            &[(None, &[Some(0), Some(0)])],
+        ),
+        (
+            "12",
+            "  codex:
+    - name: codex-team
+      prefix: /team/
+      base-url: https://api.openai.invalid
+      keys:
+        - api-key: sk-codex-team
+",
+            &[Some("sk-codex-team")],
+            true,
+            &[(None, &[Some(0)])],
+        ),
+        (
+            "13",
+            "  gemini:
+    - name: gemini-group
+      base-url: https://api.gemini.invalid
+      keys:
+        - api-key: sk-gemini-a
+        - api-key: sk-gemini-a
+        - api-key: sk-gemini-b
+",
+            &[Some("sk-gemini-a"), Some("sk-gemini-b")],
+            true,
+            &[(None, &[Some(0), Some(0), Some(1)])],
+        ),
+        (
+            "14",
+            r#"  openai-compatibility:
+    - name: invalid-group-no-base
+      keys:
+        - api-key: sk-invalid
+    - name: mixed-group
+      base-url: https://api.mixed.invalid
+      keys:
+        - api-key: ""
+        - api-key: sk-compat-b
+"#,
+            &[None, Some("sk-compat-b")],
+            true,
+            &[(None, &[None]), (None, &[Some(0), Some(1)])],
+        ),
+        (
+            "15",
+            r#"  gemini:
+    - name: gemini-emulator
+      base-url: http://emulator.invalid:8080
+      keys:
+        - api-key: ""
+"#,
+            &[None],
+            false,
+            &[(None, &[Some(0)])],
+        ),
+        (
+            "16",
+            r#"  openai-compatibility:
+    - name: multi-empty-group
+      base-url: https://api.multi.invalid
+      keys:
+        - api-key: ""
+          proxy-url: http://proxy1.invalid:8080
+        - api-key: ""
+          proxy-url: http://proxy2.invalid:8080
+"#,
+            &[None, None],
+            false,
+            &[(None, &[Some(0), Some(1)])],
+        ),
+        (
+            "17",
+            r#"  gemini:
+    - name: gemini-proxy-group
+      base-url: http://emulator.invalid:8080
+      keys:
+        - api-key: ""
+          proxy-url: http://proxy1.invalid:8080
+        - api-key: ""
+          proxy-url: http://proxy1.invalid:8080
+        - api-key: ""
+          proxy-url: http://proxy2.invalid:8080
+"#,
+            &[None, None],
+            true,
+            &[(None, &[Some(0), Some(0), Some(1)])],
+        ),
+        (
+            "18",
+            r#"  openai-compatibility:
+    - name: shared-name
+      base-url: https://api.shared.invalid
+      keys:
+        - api-key: ""
+          proxy-url: http://proxyA.invalid:8080
+    - name: shared-name
+      base-url: https://api.shared.invalid
+      keys:
+        - api-key: ""
+          proxy-url: http://proxyB.invalid:8080
+"#,
+            &[None, None],
+            true,
+            &[(None, &[Some(0)]), (None, &[Some(1)])],
+        ),
+        (
+            "19",
+            r#"  gemini:
+    - name: gemini-prefix-group
+      base-url: http://emulator.invalid:8080
+      keys:
+        - api-key: ""
+          prefix: /team-a/
+        - api-key: ""
+          prefix: /team-a/
+        - api-key: ""
+          prefix: /team-b/
+"#,
+            &[None, None],
+            true,
+            &[(None, &[Some(0), Some(0), Some(1)])],
+        ),
+        (
+            "20",
+            "  openai-compatibility:
+    - base-url: https://api.unnamed-keyless.invalid
+      keys: []
+    - base-url: https://api.unnamed-keyed.invalid
+      keys:
+        - api-key: sk-unnamed-key
+",
+            &[None, Some("sk-unnamed-key")],
+            true,
+            &[(Some(0), &[]), (None, &[Some(1)])],
+        ),
+        (
+            "21",
+            "  claude:
+    - name: claude-group
+      keys:
+        - {}
+        - api-key: sk-claude-real-a
+        - api-key: sk-claude-real-b
+",
+            &[Some("sk-claude-real-a"), Some("sk-claude-real-b")],
+            true,
+            &[(None, &[None, Some(0), Some(1)])],
+        ),
+        (
+            "22",
+            r#"  codex:
+    - name: codex-models-group
+      base-url: https://api.openai.invalid
+      keys:
+        - api-key: ""
+          models:
+            - name: gpt-5
+              alias: gpt-5
+        - api-key: ""
+          models:
+            - name: gpt-6
+              alias: gpt-6
+"#,
+            &[None, None],
+            false,
+            &[(None, &[Some(0), Some(1)])],
+        ),
+        (
+            "23",
+            r#"  meta:
+    - name: meta-filtered-group
+      keys:
+        - api-key: ""
+        - api-key: dca:some-oauth-token
+        - api-key: sk-meta-real-a
+        - api-key: sk-meta-real-b
+"#,
+            &[Some("sk-meta-real-a"), Some("sk-meta-real-b")],
+            false,
+            &[(None, &[None, None, Some(0), Some(1)])],
+        ),
+    ];
+    for (case, keys, made, held, want) in cases {
+        let (dir, api, raw, indexes) = auth_index_file(keys, made, held);
+        let (provider, _) = keys.trim_start().split_once(':').unwrap();
+        let groups = api
+            .get(&format!("/v8/management/config/api-keys/{provider}"))
+            .await
+            .expect(StatusCode::OK);
+        assert_auth_indexes(&groups, want, &indexes, case);
+        assert_unchanged(&dir, &raw);
+    }
+
+    let (dir, api, raw, _) = auth_index_file(
+        "  codex:
+    - name: codex-group
+      base-url: https://api.openai.invalid
+      headers:
+        auth_index: keep-group-header
+      keys:
+        - api-key: sk-codex-headers
+          headers:
+            auth_index: keep-key-header
+",
+        &[Some("sk-codex-headers")],
+        false,
+    );
+    let answer = api.get("/v8/management/config/api-keys/codex").await;
+    assert_v8(
+        &answer,
+        concat!(
+            r#"[{"base-url":"https://api.openai.invalid","headers":{"auth_index":"keep-group-header"},"#,
+            r#""keys":[{"api-key":"sk-codex-headers","auth_index":"702aaedbe1086ed3","#,
+            r#""headers":{"auth_index":"keep-key-header"}}],"name":"codex-group"}]"#,
+        ),
+    );
+    assert_unchanged(&dir, &raw);
 }
 
 /// Not upstream's: `disable-image-generation` is written after `proxy-url`

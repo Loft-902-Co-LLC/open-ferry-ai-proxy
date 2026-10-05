@@ -1,7 +1,8 @@
 // Ported from CLIProxyAPI internal/config/config_v8.go (the v8 path tables,
-// flattenV8, expandV8Groups, normalizeV8PrivateIPAlias), weight.go
+// flattenV8, normalizeV8PrivateIPAlias), weight.go
 // (validateCredentialWeightYAML and its helpers) and
-// internal/credentialweight/weight.go (Normalize) (v8.0.11, MIT).
+// internal/credentialweight/weight.go (Normalize) (v8.0.11, MIT), and
+// config_v8.go's expandV8Groups (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Reads the v8 config layout by moving it into the legacy one.
@@ -13,7 +14,9 @@
 //! present wins over its legacy spelling, and the result is decoded.
 //!
 //! This follows v8.0.11, whose `config_v8.go` differs from v8.0.10's: it
-//! adds the shared `upstream.*` paths.
+//! adds the shared `upstream.*` paths. Expanding the `api-keys` groups
+//! follows v8.0.15, which drops the read-only `auth_index` a management read
+//! adds to them.
 //!
 //! Deviations from upstream:
 //! - [`V8_PATHS`] is a fixed table. Upstream builds it by reflecting over its
@@ -655,8 +658,14 @@ pub(crate) fn normalize_private_ip_alias(root: &mut Node) -> Result<(), ConfigEr
     Ok(())
 }
 
+/// The read-only `auth_index` a management read adds to `api-keys` groups
+/// and keys, in both spellings. Loading drops it, so a config saved from a
+/// read loads as it did.
+const AUTH_INDEX_FIELDS: [&str; 2] = ["auth_index", "auth-index"];
+
 /// Upstream's `expandV8Groups`: one legacy entry per key, each inheriting
-/// its group's endpoint and shared fields.
+/// its group's endpoint and shared fields, without the `auth_index` a
+/// management read shows.
 fn expand_v8_groups(groups: &Node, provider: &str) -> Result<Node, ConfigError> {
     if groups.kind != Kind::Sequence {
         return Err(invalid(format!("api-keys.{provider} must be a list")));
@@ -677,7 +686,16 @@ fn expand_v8_groups(groups: &Node, provider: &str) -> Result<Node, ConfigError> 
         if provider == "openai-compatibility" {
             let mut item = group.clone();
             delete_yaml_path(&mut item, "keys");
-            set_yaml_path(&mut item, "api-key-entries", keys);
+            for field in AUTH_INDEX_FIELDS {
+                delete_yaml_path(&mut item, field);
+            }
+            let mut clean_keys = keys.clone();
+            for key in &mut clean_keys.content {
+                for field in AUTH_INDEX_FIELDS {
+                    delete_yaml_path(key, field);
+                }
+            }
+            set_yaml_path(&mut item, "api-key-entries", &clean_keys);
             out.content.push(item);
             continue;
         }
@@ -708,6 +726,9 @@ fn expand_v8_groups(groups: &Node, provider: &str) -> Result<Node, ConfigError> 
                 }
             }
             for (field, value) in key.pairs() {
+                if AUTH_INDEX_FIELDS.contains(&field.value.as_str()) {
+                    continue;
+                }
                 if value.tag != "!!null" {
                     set_yaml_path(&mut item, &field.value, value);
                 }
@@ -1008,6 +1029,61 @@ mod tests {
             yaml_path(&compat.root, "openai-compatibility").and_then(|list| list.content.first());
         assert!(entry.is_some_and(|entry| yaml_path(entry, "api-key-entries").is_some()));
         assert!(entry.is_some_and(|entry| yaml_path(entry, "keys").is_none()));
+    }
+
+    // Not upstream's: upstream (0fb50a18) tests the read-only auth_index
+    // through a management PUT; this checks that loading drops it.
+    #[test]
+    fn auth_index_is_dropped_on_load() {
+        let flattened = flatten(
+            "api-keys:
+  codex:
+    - base-url: https://example.invalid
+      keys:
+        - {api-key: a, auth_index: x1, auth-index: x2, priority: 4}
+  openai-compatibility:
+    - name: p
+      base-url: u
+      auth_index: g1
+      auth-index: g2
+      keys:
+        - {api-key: k, auth_index: k1, auth-index: k2}
+        - plain
+",
+        );
+        let flattened = flattened.unwrap_or_else(|error| panic!("{error}"));
+        let codex =
+            yaml_path(&flattened.root, "codex-api-key").and_then(|list| list.content.first());
+        let codex = codex.cloned().unwrap_or_default();
+        assert_eq!(
+            yaml_path(&codex, "api-key").map(|node| node.value.to_string()),
+            Some("a".to_owned())
+        );
+        assert_eq!(
+            yaml_path(&codex, "priority").map(|node| node.value.to_string()),
+            Some("4".to_owned())
+        );
+        assert!(yaml_path(&codex, "auth_index").is_none());
+        assert!(yaml_path(&codex, "auth-index").is_none());
+        let compat = yaml_path(&flattened.root, "openai-compatibility")
+            .and_then(|list| list.content.first());
+        let compat = compat.cloned().unwrap_or_default();
+        assert!(yaml_path(&compat, "auth_index").is_none());
+        assert!(yaml_path(&compat, "auth-index").is_none());
+        let entries = yaml_path(&compat, "api-key-entries").map(|list| list.content.clone());
+        let entries = entries.unwrap_or_default();
+        assert_eq!(entries.len(), 2);
+        let first = entries.first().cloned().unwrap_or_default();
+        assert_eq!(
+            yaml_path(&first, "api-key").map(|node| node.value.to_string()),
+            Some("k".to_owned())
+        );
+        assert!(yaml_path(&first, "auth_index").is_none());
+        assert!(yaml_path(&first, "auth-index").is_none());
+        assert_eq!(
+            entries.get(1).map(|node| node.value.to_string()),
+            Some("plain".to_owned())
+        );
     }
 
     #[test]

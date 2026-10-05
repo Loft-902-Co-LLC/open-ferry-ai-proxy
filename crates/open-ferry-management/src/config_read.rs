@@ -8,8 +8,9 @@
 // GetOpenAICompat, GetVertexCompatKeys, GetOAuthExcludedModels,
 // GetOAuthModelAlias, GetOAuthRequestScopedErrors)
 // and config_auth_index.go (liveAuthIndexByID and the `*WithAuthIndex`
-// lists) (v8.0.10, MIT), and config_v8.go (ConfigV8's reads) (v8.0.11,
-// MIT).
+// lists) (v8.0.10, MIT), config_v8.go (ConfigV8's reads) (v8.0.11, MIT),
+// and config_v8.go (ConfigV8's reads, with the `auth_index` of
+// config_auth_index.go's injectV8APIKeyAuthIndexesLocked) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Reading the config: as JSON, as the file it was loaded from, one
@@ -31,7 +32,11 @@
 //!   credential.
 //! - `GET /v8/management/config`, `config/*path` and `config.yaml` read the
 //!   config file in the v8 layout: the whole of it or the value at a path
-//!   such as `config/server/tls`, as JSON, or the file.
+//!   such as `config/server/tls`, as JSON, or the file. In the JSON, each
+//!   API key under `api-keys` shows the `auth_index` of the credential it
+//!   makes (an OpenAI-compatible group without keys shows its own): the
+//!   running credential's index, or the one it would get when the manager
+//!   doesn't hold it. Keys the loader drops show none.
 //!
 //! The config is only ever read: open-ferry never writes it, so its `PUT`,
 //! `PATCH` and `DELETE` routes stay unported, and answer with the empty
@@ -86,14 +91,17 @@ mod config_json;
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::path::PathBuf;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use axum::extract::rejection::PathRejection;
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{MethodRouter, get};
+use chrono::Utc;
 use http::{HeaderValue, StatusCode, header};
-use open_ferry_core::auth::synthesizer::{StableIdGenerator, format_sorted_headers};
+use open_ferry_core::auth::synthesizer::{
+    StableIdGenerator, SynthesisContext, format_sorted_headers, synthesize_config_auths,
+};
 use open_ferry_core::config::{AnyValue, Config, V8Document};
 use open_ferry_translate::go::{json_float, to_lower};
 
@@ -553,6 +561,7 @@ enum V8Read {
 /// Reads the config file in the v8 layout and answers `read`.
 async fn read_v8(state: &ManagementState, read: V8Read) -> Response {
     let path = state.config_path().map(PathBuf::from);
+    let state = state.clone();
     run_blocking(move || {
         let Some(data) = path.and_then(|path| std::fs::read(path).ok()) else {
             return json::error(StatusCode::INTERNAL_SERVER_ERROR, "read_failed");
@@ -579,6 +588,7 @@ async fn read_v8(state: &ManagementState, read: V8Read) -> Response {
         let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
         document.project_aliases(&parts.join("."));
         document.redact_turn_secrets();
+        set_auth_indexes(&state, &data, &mut document);
         let value = match document.value(&parts) {
             None => return json::error(StatusCode::NOT_FOUND, "not_found"),
             Some(Err(_)) => json::error(StatusCode::INTERNAL_SERVER_ERROR, "decode_failed"),
@@ -587,6 +597,27 @@ async fn read_v8(state: &ManagementState, read: V8Read) -> Response {
         no_store(value)
     })
     .await
+}
+
+/// Sets the `auth_index` of each API key in the v8 `document` (upstream's
+/// `injectV8APIKeyAuthIndexesLocked`). The credentials are the ones the
+/// config file `data` makes, or the running config when the file doesn't
+/// load; each shows the index of the running credential with its ID, or
+/// else the index it derives. Upstream parses the file as migrated, which
+/// loads as the file does.
+fn set_auth_indexes(state: &ManagementState, data: &[u8], document: &mut V8Document) {
+    let config = Config::parse(data).map_or_else(|_| state.config(), Arc::new);
+    let ctx = SynthesisContext::new("", Utc::now());
+    let Ok(auths) = synthesize_config_auths(&config, &ctx, &mut StableIdGenerator::new()) else {
+        return;
+    };
+    let live = Indexes::new(state).live;
+    document.set_api_key_auth_indexes(&config, &auths, |auth| {
+        live.get(&auth.id)
+            .map(|index| index.trim())
+            .filter(|index| !index.is_empty())
+            .map_or_else(|| auth_index(auth), str::to_owned)
+    });
 }
 
 /// `{"error":"invalid_config","message":message}` with a 500.

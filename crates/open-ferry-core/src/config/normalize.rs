@@ -229,7 +229,7 @@ fn check_family_weights(
 
 /// Upstream's `normalizeModelPrefix`: trimmed of space and slashes; empty
 /// when it still contains a slash.
-fn normalize_model_prefix(prefix: &str) -> String {
+pub(crate) fn normalize_model_prefix(prefix: &str) -> String {
     let trimmed = prefix.trim().trim_matches('/');
     if trimmed.contains('/') {
         String::new()
@@ -240,7 +240,7 @@ fn normalize_model_prefix(prefix: &str) -> String {
 
 /// Upstream's `NormalizeHeaders`: names and values trimmed, empty pairs
 /// dropped.
-fn normalize_headers(headers: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+pub(crate) fn normalize_headers(headers: &BTreeMap<String, String>) -> BTreeMap<String, String> {
     headers
         .iter()
         .map(|(key, value)| (key.trim(), value.trim()))
