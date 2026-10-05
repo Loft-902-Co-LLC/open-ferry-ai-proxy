@@ -1877,3 +1877,15 @@ fn stream_terminal_hydrates_interleaved_function_calls() {
         assert_parallel_tool_calls(terminal_type, &blocks);
     }
 }
+
+// Not upstream's: upstream sets the arguments' text as the tool input
+// (`SetRawBytes`), so each number keeps its spelling.
+#[test]
+fn non_stream_tool_input_keeps_number_text() {
+    let response = r#"{"type":"response.completed","response":{"output":[{"type":"function_call","call_id":"c","name":"f","arguments":"{\"n\":1e400,\"z\":-0,\"e\":1E20}"}]}}"#;
+    let out = convert_non_stream(EMPTY_REQUEST, response);
+    assert_eq!(
+        out["content"][0]["input"].to_string(),
+        r#"{"n":1e400,"z":-0,"e":1E20}"#
+    );
+}

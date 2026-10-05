@@ -23,7 +23,7 @@ use serde_json::{Map, Value, json};
 
 use super::request::{build_tool_name_map, shorten_call_id};
 use crate::common::claude::sanitize_tool_id;
-use crate::json::{int_of, path, str_of};
+use crate::json::{exact, int_of, object, path, str_of};
 
 /// Stands in for a missing event or item, as an empty gjson result does upstream.
 static NONE: Value = Value::Null;
@@ -738,31 +738,34 @@ pub fn convert_codex_response_to_claude_non_stream(
                 has_tool_call = true;
                 let name = str_of(item.get("name"));
                 let name = tool_names.get(&*name).map_or(&*name, String::as_str);
-                let input = serde_json::from_str::<Value>(&str_of(item.get("arguments")))
+                let input = exact::from_str(&str_of(item.get("arguments")))
                     .ok()
                     .filter(Value::is_object)
                     .unwrap_or_else(|| json!({}));
-                content.push(json!({
-                    "type": "tool_use",
-                    "id": shorten_call_id(&sanitize_tool_id(&str_of(item.get("call_id")))),
-                    "name": name,
-                    "input": input
-                }));
+                let id = sanitize_tool_id(&str_of(item.get("call_id")));
+                let id = shorten_call_id(&id).into_owned();
+                content.push(object([
+                    ("type", "tool_use".into()),
+                    ("id", id.into()),
+                    ("name", name.into()),
+                    ("input", input),
+                ]));
             }
             _ => {}
         }
     }
 
-    Some(json!({
-        "id": str_of(response.get("id")),
-        "type": "message",
-        "role": "assistant",
-        "model": str_of(response.get("model")),
-        "content": content,
-        "stop_reason": claude_stop_reason(&codex_stop_reason(response), has_tool_call),
-        "stop_sequence": stop_sequence(response),
-        "usage": claude_usage(response.get("usage"))
-    }))
+    let stop_reason = claude_stop_reason(&codex_stop_reason(response), has_tool_call);
+    Some(object([
+        ("id", str_of(response.get("id")).into()),
+        ("type", "message".into()),
+        ("role", "assistant".into()),
+        ("model", str_of(response.get("model")).into()),
+        ("content", Value::Array(content)),
+        ("stop_reason", stop_reason.into()),
+        ("stop_sequence", stop_sequence(response)),
+        ("usage", claude_usage(response.get("usage"))),
+    ]))
 }
 
 /// The text of a reasoning summary or content: each part's `text`, or the

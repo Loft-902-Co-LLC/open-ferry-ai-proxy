@@ -20,6 +20,7 @@ use super::super::signature_carrier::{PREFIX, decode};
 use super::super::test_support::{GEMINI_SIGNATURE, different_gemini_signature, sse_events};
 use super::super::{array_of, convert_openai_responses_request_to_gemini};
 use super::*;
+use crate::json::exact;
 
 /// The model Go's signature tests stream from and replay to.
 const MODEL: &str = "gemini-3.6-flash-high";
@@ -1915,4 +1916,31 @@ fn parse_rfc3339_rejects_trailing_text() {
     // A zone is required.
     assert_eq!(parse_rfc3339("2024-01-02T15:04:05"), None);
     assert_eq!(parse_rfc3339(""), None);
+}
+
+// Not upstream's: Go writes a float64 negative zero as `-0`, both where it
+// reads a field as a float (`temperature`) and where it reads one as a value
+// (`tools`).
+#[test]
+fn stream_echo_keeps_negative_zero() {
+    let original_request = exact::from_str(
+        r#"{"temperature":-0,"top_p":-0.0,"tools":[{"type":"function","name":"f","parameters":{"minimum":-0,"maximum":1E20}}]}"#,
+    )
+    .unwrap();
+    let mut stream = GeminiToOpenAIResponsesStream::new("m", &original_request, &Value::Null);
+    let mut out = stream.translate_line(
+        br#"data: {"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]},"finishReason":"STOP"}]}"#,
+    );
+    out.push_str(&stream.translate_line(b"data: [DONE]"));
+    let completed = out
+        .split("\n\n")
+        .find(|frame| frame.starts_with("event: response.completed"))
+        .expect("the stream completes");
+    for want in [
+        r#""temperature":-0,"#,
+        r#""top_p":-0,"#,
+        r#""parameters":{"maximum":100000000000000000000,"minimum":-0}"#,
+    ] {
+        assert!(completed.contains(want), "{want} in {completed}");
+    }
 }

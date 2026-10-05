@@ -127,6 +127,25 @@ fn non_stream_preserves_function_call_id() {
     );
 }
 
+// Not upstream's: upstream sets the arguments' text as the call's `args`
+// (`SetRaw`), so each number keeps its spelling.
+#[test]
+fn function_call_args_keep_number_text() {
+    let want = r#"{"n":1e400,"z":-0,"e":1E20}"#;
+    let mut translator = stream(r#"{"tools":[]}"#);
+    translator.translate_line(br#"data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"c","name":"f","arguments":"{\"n\":1e400,\"z\":-0,\"e\":1E20}"}}"#);
+    let out = translator.translate_line(br#"data: {"type":"response.completed","response":{}}"#);
+    let call = &out[0]["candidates"][0]["content"]["parts"][0]["functionCall"];
+    assert_eq!(call["args"].to_string(), want);
+
+    let out = non_stream(
+        r#"{"tools":[]}"#,
+        r#"{"type":"response.completed","response":{"output":[{"type":"function_call","call_id":"c","name":"f","arguments":"{\"n\":1e400,\"z\":-0,\"e\":1E20}"}]}}"#,
+    );
+    let call = &out["candidates"][0]["content"]["parts"][0]["functionCall"];
+    assert_eq!(call["args"].to_string(), want);
+}
+
 #[test]
 fn function_call_names_map_back_to_declared_names() {
     let long = format!("mcp__server__{}", "a".repeat(70));

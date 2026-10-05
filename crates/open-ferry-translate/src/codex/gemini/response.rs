@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 use super::request::{build_short_name_map, declared_names};
 use crate::common::gemini_response::{create_time, gemini_token_count_json};
 use crate::go;
-use crate::json::{int_of, object, path, str_of};
+use crate::json::{exact, int_of, object, path, str_of};
 
 /// The `createTime` upstream's stream template starts with, kept when an
 /// event has no `response.created_at`.
@@ -339,9 +339,10 @@ fn function_call(item: &Value, tool_names: &HashMap<String, String>, order: Call
     object([("functionCall", Value::Object(call))])
 }
 
-/// Function call arguments, if they are a JSON object.
+/// Function call arguments, if they are a JSON object, each number as
+/// written.
 fn arguments_object(arguments: &str) -> Option<Value> {
-    match serde_json::from_str(arguments) {
+    match exact::from_str(arguments) {
         Ok(args @ Value::Object(_)) => Some(args),
         _ => None,
     }

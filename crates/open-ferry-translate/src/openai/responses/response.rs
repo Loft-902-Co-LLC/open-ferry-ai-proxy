@@ -73,7 +73,7 @@ use crate::apply_patch::input::{CallState, InputError, failure};
 use crate::common::request_model_name;
 use crate::common::responses::{echo_fields, pick_request};
 use crate::go;
-use crate::json::{go_value, int_of, path, raw, str_of};
+use crate::json::{go_value, int_of, object, path, raw, str_of};
 
 /// Translates a Chat Completions stream into Responses events, one line at a
 /// time. Keep one per response.
@@ -1041,10 +1041,13 @@ impl OpenAIToOpenAIResponsesStream {
             counts.insert("total_tokens".into(), total.into());
             response.insert("usage".into(), Value::Object(counts));
         }
-        (
-            event,
-            json!({"type": event, "sequence_number": seq, "response": response}),
-        )
+        // Not `json!`, which re-reads `response` and respells its numbers.
+        let response = object([
+            ("type", event.into()),
+            ("sequence_number", seq.into()),
+            ("response", Value::Object(response)),
+        ]);
+        (event, response)
     }
 
     fn fail_tool_input(&mut self, error: ToolInputError, out: &mut String) {

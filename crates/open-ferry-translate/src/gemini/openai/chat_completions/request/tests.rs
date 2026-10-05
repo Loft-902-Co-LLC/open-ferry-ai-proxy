@@ -1100,3 +1100,16 @@ fn data_url_slicing_in_detail() {
         )
     );
 }
+
+// Not upstream's: upstream copies the parameters' text into
+// `parametersJsonSchema` (`SetRaw`), so each number keeps its spelling.
+#[test]
+fn tool_parameters_keep_number_text() {
+    let request = crate::json::exact::from_str(
+        r#"{"tools":[{"type":"function","function":{"name":"f","parameters":{"type":"object","properties":{"x":{"type":"number","minimum":-0,"maximum":1E20}}}}}]}"#,
+    )
+    .unwrap();
+    let output = convert_openai_request_to_gemini("m", &request, false).to_string();
+    let want = r#""x":{"type":"number","minimum":-0,"maximum":1E20}"#;
+    assert!(output.contains(want), "{output}");
+}

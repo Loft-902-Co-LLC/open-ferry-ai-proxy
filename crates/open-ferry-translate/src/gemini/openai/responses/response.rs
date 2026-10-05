@@ -103,7 +103,7 @@ use crate::common::request_model_name;
 use crate::common::responses::{echo_fields, pick_request, set_tool_call_identity};
 use crate::common::sse::push_event;
 use crate::go;
-use crate::json::{bool_of, int_of, path, raw, str_of};
+use crate::json::{bool_of, int_of, object, path, raw, str_of};
 use crate::responses_tools::{
     ToolIdentity, responses_tool_reverse_identity_map, unwrap_responses_custom_tool_input,
 };
@@ -1871,11 +1871,11 @@ impl GeminiToOpenAIResponsesStream {
         if self.usage.present {
             response["usage"] = self.usage.to_json();
         }
-        let completed = json!({
-            "type": event_type,
-            "sequence_number": seq,
-            "response": response,
-        });
+        let completed = object([
+            ("type", event_type.into()),
+            ("sequence_number", seq.into()),
+            ("response", response),
+        ]);
         push_event(out, event_type, &completed);
         self.completed = true;
     }

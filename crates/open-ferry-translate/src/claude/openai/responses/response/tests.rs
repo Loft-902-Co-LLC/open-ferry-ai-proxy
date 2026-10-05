@@ -2448,3 +2448,27 @@ fn unreadable_snapshot_fails_before_the_name_arrives() {
     let (out, error) = patch_complete(PATCH_REQUEST, &Value::Null, &lines);
     assert_complete_failure(&out, error.as_ref(), "unreadable snapshot");
 }
+
+// Not upstream's: Go writes a float64 negative zero as `-0`, both where it
+// reads a field as a float (`top_p`) and where it reads one as a value
+// (`tools`).
+#[test]
+fn completed_echo_keeps_negative_zero() {
+    let original_request = crate::json::exact::from_str(
+        r#"{"top_p":-0,"tools":[{"type":"function","name":"f","parameters":{"minimum":-0.0}}]}"#,
+    )
+    .unwrap();
+    let mut stream =
+        ClaudeToOpenAIResponsesStream::new("claude-test", &original_request, &Value::Null);
+    let out: String = [MESSAGE_START, r#"data: {"type":"message_stop"}"#]
+        .iter()
+        .map(|line| stream.translate_line(line.as_bytes()))
+        .collect();
+    let completed = out
+        .split("\n\n")
+        .find(|frame| frame.starts_with("event: response.completed"))
+        .expect("the stream completes");
+    for want in [r#""top_p":-0,"#, r#""parameters":{"minimum":-0}"#] {
+        assert!(completed.contains(want), "{want} in {completed}");
+    }
+}

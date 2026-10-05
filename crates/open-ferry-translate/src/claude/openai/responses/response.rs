@@ -68,7 +68,7 @@ use crate::apply_patch::input::{CallState, InputError, failure};
 use crate::apply_patch::is_custom_tool;
 use crate::common::request_model_name;
 use crate::common::responses::{echo_fields, pick_request};
-use crate::json::{go_value, int_of, path, raw, str_of};
+use crate::json::{go_value, int_of, object, path, raw, str_of};
 
 /// Translates a Claude event stream into Responses events, one line at a
 /// time. Keep one per response.
@@ -830,11 +830,11 @@ impl ClaudeToOpenAIResponsesStream {
             response.insert("usage".into(), usage);
         }
         self.completed = true;
-        let event = json!({
-            "type": event_type,
-            "sequence_number": seq,
-            "response": response,
-        });
+        let event = object([
+            ("type", event_type.into()),
+            ("sequence_number", seq.into()),
+            ("response", Value::Object(response)),
+        ]);
         push_event(out, event_type, &event);
     }
 

@@ -26,7 +26,7 @@ use serde_json::{Map, Value};
 use crate::common::gemini_response::gemini_token_count_json;
 use crate::go;
 use crate::json::lenient::{self, Found};
-use crate::json::{int_of, object, path, str_of};
+use crate::json::{exact, int_of, object, path, str_of};
 
 /// Converts a token count into a Gemini `countTokens` response body.
 pub fn gemini_token_count(count: i64) -> Value {
@@ -391,7 +391,7 @@ fn args_object(arguments: &str) -> Value {
     }
     if trimmed.starts_with('{')
         && go::gjson_valid(trimmed.as_bytes())
-        && let Ok(object @ Value::Object(_)) = serde_json::from_str(trimmed)
+        && let Ok(object @ Value::Object(_)) = exact::from_str(trimmed)
     {
         return object;
     }
@@ -467,7 +467,7 @@ fn tolerant_object(text: &str) -> Map<String, Value> {
             '{' | '[' => match bracketed(&chars, i) {
                 Some((segment, next)) => {
                     let value = go::gjson_valid(segment.as_bytes())
-                        .then(|| serde_json::from_str(&segment).ok())
+                        .then(|| exact::from_str(&segment).ok())
                         .flatten()
                         .unwrap_or(Value::String(segment));
                     set_key(&mut result, &key, value);
@@ -581,7 +581,7 @@ fn scalar(token: &str) -> Value {
     // mantissas. It reads infinity and NaN, which Go writes as `+Inf` and
     // `NaN`; those stay text.
     if let Some(float) = go::parse_float_checked(token).filter(|float| float.is_finite())
-        && let Ok(number) = serde_json::from_str(&go::format_float(float))
+        && let Ok(number) = exact::from_str(&go::format_float(float))
     {
         return number;
     }

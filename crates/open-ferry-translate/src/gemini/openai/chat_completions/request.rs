@@ -560,7 +560,8 @@ fn convert_tools(out: &mut Value, tools: Option<&Value>, allowed: Option<&Allowe
 
     let mut items = Vec::new();
     if !converted.declarations.is_empty() {
-        items.push(json!({"functionDeclarations": converted.declarations}));
+        let declarations = Value::Array(converted.declarations.clone());
+        items.push(object([("functionDeclarations", declarations)]));
     }
     items.extend(builtin.into_iter().flatten());
     if !items.is_empty() {

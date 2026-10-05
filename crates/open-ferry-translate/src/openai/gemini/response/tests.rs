@@ -275,6 +275,12 @@ fn arguments_read_leniently() {
         ),
         (r#"{"a": [1, 2"#, "{}"),
         ("[1,2]", "{}"),
+        // Copied as written, numbers and all.
+        (
+            r#"{"a": -0, "b": [1E20, 1e3]}"#,
+            r#"{"a":-0,"b":[1E20,1e3]}"#,
+        ),
+        (r#"{"a": [-0, 1E20], "b": c}"#, r#"{"a":[-0,1E20],"b":"c"}"#),
         (
             r#"{"a": 1, "a": 2, "x": 0x10, "y": +5, "z": .5}"#,
             r#"{"a":2,"x":"0x10","y":5,"z":0.5}"#,
@@ -284,7 +290,7 @@ fn arguments_read_leniently() {
             r#"{"a":1000,"b":10.5,"c":8,"d":"_1","e":"1__0","f":"1_.5","g":0.5,"h":"1e_5","k":0,"l":9223372036854775808,"m":-9223372036854776000}"#,
         ),
     ] {
-        let want: Value = serde_json::from_str(want).unwrap();
+        let want = crate::json::exact::from_str(want).unwrap();
         assert_eq!(
             args_object(arguments).to_string(),
             want.to_string(),

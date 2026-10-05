@@ -2090,3 +2090,30 @@ fn finalize_without_lines_gives_nothing() {
     );
     assert!(stream.tool_input_error().is_some());
 }
+
+#[test]
+fn stream_echo_keeps_negative_zero() {
+    // Not upstream's: upstream writes the repeated `temperature` and `top_p`
+    // as float64s and the tools as `Value()` gives them, so negative zero as
+    // `-0`; so must the completed event.
+    let original_request = crate::json::exact::from_str(
+        r#"{"temperature":-0,"top_p":-0.0,"tools":[{"type":"function","name":"f","parameters":{"minimum":-0,"maximum":1E20}}]}"#,
+    )
+    .unwrap();
+    let mut stream = OpenAIToOpenAIResponsesStream::new("m", &original_request, &Value::Null);
+    let mut out = stream.translate_line(
+        br#"data: {"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}"#,
+    );
+    out.push_str(&stream.translate_line(b"data: [DONE]"));
+    let completed = out
+        .split("\n\n")
+        .find(|frame| frame.starts_with("event: response.completed"))
+        .expect("the stream completes");
+    for want in [
+        r#""temperature":-0,"#,
+        r#""top_p":-0,"#,
+        r#""parameters":{"maximum":100000000000000000000,"minimum":-0}"#,
+    ] {
+        assert!(completed.contains(want), "{want} in {completed}");
+    }
+}
