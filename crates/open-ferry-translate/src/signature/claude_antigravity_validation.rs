@@ -12,7 +12,8 @@
 //!
 //! The check is structural. It cannot prove that a signature verifies, or that
 //! another account can replay it. Only the observed layout is accepted, both
-//! layers must be canonical base64, and deeper wrapping is rejected.
+//! layers must be canonical base64, deeper wrapping is rejected, and so is a
+//! second container or channel block.
 //!
 //! Deviations from upstream: none.
 
@@ -54,7 +55,7 @@ pub(super) fn inspect_unprefixed_antigravity_caqs(
     let decoded = STRICT_STD
         .decode(&inner)
         .map_err(|err| error!("invalid Antigravity CAQS inner encoding: {err}"))?;
-    let info = inspect_claude_cais_payload(&decoded)
+    let info = inspect_claude_cais_payload(&decoded, true)
         .map_err(|err| error!("invalid Antigravity CAQS payload: {err}"))?;
     // Only the observed Google thinking channel. Other versions and channels
     // need their own capture and replay checks.

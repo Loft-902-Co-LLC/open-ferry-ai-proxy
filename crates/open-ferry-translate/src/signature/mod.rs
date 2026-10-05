@@ -279,6 +279,11 @@ pub fn detect_signature_provider_for_block(raw: &str, block_kind: BlockKind) -> 
     }
 
     if let Some((prefixed, unprefixed)) = split_signature_provider_prefix(sig) {
+        // The validators strip a cache prefix themselves, so a second one could
+        // make detection judge a different payload from the one replayed.
+        if unprefixed.contains('#') {
+            return Provider::Unknown;
+        }
         let matches = match prefixed {
             Provider::Gemini if is_gemini_thought_signature_bypass(unprefixed) => {
                 return Provider::GeminiBypass;
@@ -377,11 +382,16 @@ pub fn decide_signature_compatibility_for_model(
     }
 
     if provider_matches_target(target, detected) {
-        decision.compatible = true;
-        decision.action = Action::Preserve;
-        decision.normalized_signature = normalize_compatible_signature(target, raw);
-        decision.reason = compatible_signature_reason(target, raw, target_model);
-        return decision;
+        // A matching family isn't enough: the signature must also normalize,
+        // or a sanitizer would keep the client's text as it is.
+        let normalized = normalize_compatible_signature(target, raw);
+        if !normalized.is_empty() {
+            decision.compatible = true;
+            decision.action = Action::Preserve;
+            decision.normalized_signature = normalized;
+            decision.reason = compatible_signature_reason(target, raw, target_model);
+            return decision;
+        }
     }
 
     let (action, reason) = match target {

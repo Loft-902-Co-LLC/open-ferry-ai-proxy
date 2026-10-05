@@ -14,6 +14,7 @@ use super::*;
 use crate::protowire;
 
 mod claude;
+mod claude_antigravity_boundaries;
 mod claude_antigravity_validation;
 mod claude_messages_sanitize;
 mod gemini_sanitize;

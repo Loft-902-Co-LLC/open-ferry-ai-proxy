@@ -542,13 +542,15 @@ pub fn inspect_claude_cais_signature(raw: &str) -> Result<ClaudeCaisSignatureInf
     let decoded = STD
         .decode(sig)
         .map_err(|err| error!("invalid Claude CAIS signature: base64 decode failed: {err}"))?;
-    inspect_claude_cais_payload(&decoded)
+    inspect_claude_cais_payload(&decoded, false)
 }
 
 /// `inspectClaudeCAISPayload`: checks a decoded CAIS envelope. The Q-form
-/// check shares it.
+/// check shares it and alone rejects a second container or channel block;
+/// elsewhere the last one counts.
 pub(super) fn inspect_claude_cais_payload(
     decoded: &[u8],
+    reject_duplicate_messages: bool,
 ) -> Result<ClaudeCaisSignatureInfo, Error> {
     let first_byte = match decoded.first() {
         None => return Err(error!("invalid Claude CAIS signature: empty after decode")),
@@ -579,7 +581,16 @@ pub(super) fn inspect_claude_cais_payload(
                 info.envelope_version =
                     cais_varint(raw, typ, "CAIS top-level field 1 envelope version")?;
             }
-            2 => container = Some(cais_bytes(raw, typ, "CAIS top-level field 2 container")?),
+            2 => {
+                // A field that fails to decode ends the walk, so `Some` means
+                // an earlier container was seen.
+                if reject_duplicate_messages && container.is_some() {
+                    return Err(error!(
+                        "invalid Antigravity CAQS signature: duplicate container"
+                    ));
+                }
+                container = Some(cais_bytes(raw, typ, "CAIS top-level field 2 container")?);
+            }
             3 => {
                 cais_varint(raw, typ, "CAIS top-level field 3 trailer")?;
             }
@@ -598,6 +609,11 @@ pub(super) fn inspect_claude_cais_payload(
     walk_fields(container, |num, typ, raw| {
         match num {
             1 => {
+                if reject_duplicate_messages && channel_block.is_some() {
+                    return Err(error!(
+                        "invalid Antigravity CAQS signature: duplicate channel block"
+                    ));
+                }
                 channel_block = Some(cais_bytes(
                     raw,
                     typ,
