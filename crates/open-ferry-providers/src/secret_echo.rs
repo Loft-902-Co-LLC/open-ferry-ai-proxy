@@ -2,9 +2,12 @@
 //! share. An upstream or proxy that echoes what it was sent in its error
 //! must not get any of it back to the client: the credential headers after
 //! the custom ones, each cookie, the URL's credentials and the proxy's
-//! password. The mocks listen on ephemeral ports of 127.0.0.1.
+//! password. The mocks listen on ephemeral ports of 127.0.0.1. [`Logs`]
+//! captures what a test logs, for the tests that keep secrets out of logs.
 
-use std::sync::{Arc, Mutex, PoisonError};
+use std::cell::RefCell;
+use std::fmt::{self, Write as _};
+use std::sync::{Arc, Mutex, Once, PoisonError};
 
 use axum::Router;
 use axum::http::Uri;
@@ -15,7 +18,9 @@ use http::{HeaderMap, HeaderValue, Method};
 use open_ferry_core::auth::Auth;
 use open_ferry_core::exec::ExecError;
 use open_ferry_core::observe::{Observation, RequestContext, Tap};
+use tracing::subscriber::Interest;
 
+use crate::codex::websocket::mock::{Answer, Server};
 use crate::redact::REDACTED;
 
 /// The client's key, which the credential forwards upstream.
@@ -206,4 +211,152 @@ pub(crate) async fn cases(auth: impl Fn(&str) -> Auth) -> [Case; 2] {
             echo: proxy,
         },
     ]
+}
+
+/// The custom key header a WebSocket test's credential sets.
+pub(crate) const KEY_HEADER: &str = "header:X-Upstream-Key";
+/// The key header's value for the first turn of a WebSocket session.
+pub(crate) const OLD_KEY: &str = "old-header-secret-0123";
+/// The key header's value by the second turn.
+pub(crate) const NEW_KEY: &str = "new-header-secret-0123";
+
+/// A WebSocket server answering each message on a connection with a delta
+/// and a completed response (`resp-1`, `resp-2`, ... on the connection),
+/// both saying `key <value>` for the `X-Upstream-Key` its handshake sent.
+pub(crate) async fn echoing_the_handshake() -> Server {
+    Server::start(|_| {
+        Answer::accept(|mut peer| async move {
+            let key = peer
+                .handshake()
+                .header("x-upstream-key")
+                .unwrap_or_default()
+                .to_owned();
+            let mut turn = 0;
+            while peer.recv().await.is_some() {
+                turn += 1;
+                peer.send(&format!(
+                    r#"{{"type":"response.output_text.delta","item_id":"msg-{turn}","output_index":0,"content_index":0,"delta":"key {key}"}}"#
+                ))
+                .await;
+                peer.send(&format!(
+                    r#"{{"type":"response.completed","response":{{"id":"resp-{turn}","status":"completed","output":[{{"type":"message","id":"msg-{turn}","role":"assistant","content":[{{"type":"output_text","text":"key {key}"}}]}}],"usage":{{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}}}}"#
+                ))
+                .await;
+            }
+        })
+    })
+    .await
+}
+
+/// Checks the chunks of a turn on a connection opened with [`OLD_KEY`]
+/// don't have it, and have it redacted.
+pub(crate) fn assert_old_key_redacted(turn: &str, chunks: &[String]) {
+    for chunk in chunks {
+        assert!(
+            !chunk.contains(OLD_KEY),
+            "{turn}: the key reached the client: {chunk}"
+        );
+    }
+    assert!(
+        chunks
+            .iter()
+            .any(|chunk| chunk.contains(&format!("key {REDACTED}"))),
+        "{turn}: {chunks:?}"
+    );
+}
+
+thread_local! {
+    /// Where this thread's logs go while a test captures them.
+    static CAPTURED: RefCell<Option<Arc<Mutex<String>>>> = const { RefCell::new(None) };
+}
+
+/// What a test logs on its thread, one event a line: the message, then
+/// any other field as ` name=value` (as `open-ferry-management`'s OAuth
+/// tests capture them). Shared by every test of the crate that reads its
+/// logs, as a test binary has one global subscriber.
+#[derive(Clone, Default)]
+pub(crate) struct Logs(Arc<Mutex<String>>);
+
+impl Logs {
+    /// Captures what this thread logs until the guard is dropped. A
+    /// `#[tokio::test]` runs its tasks on its thread, so their logs too.
+    ///
+    /// The subscriber is the global one, for every thread: a scoped one
+    /// misses events whose callsite another thread registered first.
+    pub(crate) fn capture() -> (Self, Capturing) {
+        static INSTALL: Once = Once::new();
+        INSTALL.call_once(|| {
+            let _ = tracing::subscriber::set_global_default(Capture);
+            tracing::callsite::rebuild_interest_cache();
+        });
+        let logs = Self::default();
+        CAPTURED.with(|captured| *captured.borrow_mut() = Some(Arc::clone(&logs.0)));
+        (logs, Capturing)
+    }
+
+    /// What was captured so far.
+    pub(crate) fn text(&self) -> String {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
+/// Ends this thread's capture when dropped.
+pub(crate) struct Capturing;
+
+impl Drop for Capturing {
+    fn drop(&mut self) {
+        CAPTURED.with(|captured| captured.borrow_mut().take());
+    }
+}
+
+/// The subscriber that keeps the events of a thread that captures them.
+struct Capture;
+
+impl tracing::Subscriber for Capture {
+    fn register_callsite(&self, _: &'static tracing::Metadata<'static>) -> Interest {
+        Interest::sometimes()
+    }
+
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        CAPTURED.with(|captured| captured.borrow().is_some())
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        let Some(text) = CAPTURED.with(|captured| captured.borrow().clone()) else {
+            return;
+        };
+        let mut line = String::new();
+        event.record(&mut Fields(&mut line));
+        let mut text = text.lock().unwrap_or_else(PoisonError::into_inner);
+        text.push_str(&line);
+        text.push('\n');
+    }
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// Writes an event's fields as [`Logs`] keeps them.
+struct Fields<'a>(&'a mut String);
+
+impl tracing::field::Visit for Fields<'_> {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn fmt::Debug) {
+        if field.name() == "message" {
+            let _ = write!(self.0, "{value:?}");
+        } else {
+            let _ = write!(self.0, " {}={value:?}", field.name());
+        }
+    }
 }

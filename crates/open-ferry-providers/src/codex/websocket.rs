@@ -49,7 +49,11 @@
 //!   it is read, if they are of eight bytes or more, as every client error
 //!   is (see `Policy::Client` in the crate's `redact` module), what a model
 //!   says in a successful answer as well as a failure; upstream passes each
-//!   on as it came. The taps read each message as it came.
+//!   on as it came. The taps read each message as it came. A call keeping
+//!   a connection redacts the secrets its handshake sent as well, as a
+//!   custom header may have changed since.
+//! - The connection log lines hide every secret its handshake sent, however
+//!   short, from each field; upstream logs them as they are.
 
 pub(crate) mod dial;
 pub(crate) mod errors;

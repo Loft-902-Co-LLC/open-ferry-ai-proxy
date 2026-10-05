@@ -52,7 +52,12 @@
 //!   keeps the redacted text too; the call's taps see each message as it
 //!   came. A `compaction_trigger`'s events are made from the compact answer
 //!   redacted whole, while the transcript keeps the compaction as xAI sent
-//!   it, since it goes back to xAI (see the `compaction` module).
+//!   it, since it goes back to xAI (see the `compaction` module). A call
+//!   keeping a connection redacts the secrets that connection's handshake
+//!   sent as well as its own, as a custom header may have changed since
+//!   the connection opened, and xAI may quote either.
+//! - The log lines hide those secrets, however short, from every field
+//!   they fill in; upstream logs them as they are.
 //! - Usage reporting and request logging are left to the call's taps, as
 //!   for Codex's WebSocket (see [`crate::codex::websocket`]).
 

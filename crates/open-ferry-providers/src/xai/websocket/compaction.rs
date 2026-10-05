@@ -22,11 +22,15 @@
 //!   redacted if they are of eight bytes or more, as every client error is
 //!   (see `Policy::Client` in the crate's `redact` module); upstream passes
 //!   them on. The session keeps the compaction as xAI sent it.
+//! - The log line hides the credential's secrets and its URL's, however
+//!   short, from the session and the credential's ID; upstream logs them as
+//!   they are.
 
 use std::time::SystemTime;
 
 use bytes::Bytes;
 use futures_util::StreamExt as _;
+use http::HeaderMap;
 use http::header::{self, HeaderValue};
 use open_ferry_core::auth::Auth;
 use open_ferry_core::exec::{ExecError, Options, Request, StreamResponse};
@@ -38,9 +42,11 @@ use super::message::{compaction_payload, validate_compaction};
 use crate::codex::request::parse_object;
 use crate::codex::terminal::StatusError;
 use crate::json::{get, set, str_at};
+use crate::observe_send;
 use crate::redact::Policy;
 use crate::xai::XaiExecutor;
 use crate::xai::compact::{self, COMPACTION_TRIGGER, remove_input_items_by_type};
+use crate::xai::request::base_url;
 
 /// Compacts the session's history for a `compaction_trigger` request and
 /// streams the compaction back
@@ -90,10 +96,17 @@ pub(super) async fn fallback(
         let count = transcript.len();
         (compaction_payload(&client, transcript), count)
     };
+    // The log line hides what the compact call will send, however short.
+    let logged = observe_send::secrets(
+        base_url(auth),
+        &HeaderMap::new(),
+        &executor.proxy_for(auth),
+        auth,
+    );
     tracing::info!(
         "xai websockets: compact fallback session={} auth={} input_items={input_items} keep_previous_response_id={keep_previous_response_id}",
-        session_id,
-        auth.id.trim(),
+        logged.str(session_id, Policy::Disk),
+        logged.str(auth.id.trim(), Policy::Disk),
     );
 
     let compact_request = Request {

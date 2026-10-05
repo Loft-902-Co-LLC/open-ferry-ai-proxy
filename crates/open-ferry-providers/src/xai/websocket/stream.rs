@@ -17,9 +17,10 @@
 //! with xAI's status and body (see [`crate::xai::errors`]).
 //!
 //! Each message xAI sends then has the handshake's secrets redacted (see
-//! [`super`]). An error event ends the stream with its error (see
-//! [`super::errors`]) and lets the connection go. Any other event is
-//! undone and bridged as the HTTP stream's are (see [`crate::xai::stream`]):
+//! [`super`]), and those of a kept connection's handshake too. An error
+//! event ends the stream with its error (see [`super::errors`]) and lets
+//! the connection go. Any other event is undone and bridged as the HTTP
+//! stream's are (see [`crate::xai::stream`]):
 //! reasoning text becomes a summary, namespace tools and a client's
 //! `web_search` get their names back, X search's own calls are dropped, and
 //! the `apply_patch` bridge restores the client's tool, failing the call
@@ -50,7 +51,12 @@
 //! - A dropped call closes its connection, as Codex's does.
 //! - Each message has the handshake's secrets of eight bytes or more
 //!   redacted, as every client error is (see `Policy::Client`), before it is
-//!   read; see [`super`].
+//!   read; see [`super`]. A call keeping a connection redacts the secrets
+//!   that connection's handshake sent as well, from its messages and its
+//!   errors, as a custom header may have changed since.
+//! - The log lines hide those secrets, however short (`Policy::Disk`), from
+//!   every field: the session, the credential's ID, the URL, and the event
+//!   type and IDs xAI or the client sent; upstream logs them as they are.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -183,16 +189,23 @@ pub(in crate::xai) async fn execute_stream(
         && (request_type.trim() != "response.append"
             || mapper.as_ref().is_some_and(Mapper::replayed));
     let warmup = generate_false(&message);
+    let mut secrets = observe_send::secrets(&url, &headers, &proxy, auth);
+    let conn_target =
+        session::Target::new(&auth.id, &url, &proxy, token(auth)).with_secrets(&secrets);
+    // A connection kept for the call was opened with the secrets of an
+    // earlier one, which xAI may quote back too.
+    if let Some(kept) = session.kept_secrets(&conn_target) {
+        secrets.extend(&kept);
+    }
     let log = Log {
         session: session_id.clone(),
         auth: auth.id.trim().to_owned(),
         url: url.clone(),
     };
-    log.request(&message);
+    log.request(&message, &secrets);
 
     // Opening the call (`ensureUpstreamConn`, then the send).
     let text = message.to_string();
-    let secrets = observe_send::secrets(&url, &headers, &proxy, auth);
     let tap = options.tapped().map(|observation| {
         let body = Bytes::from(text.clone());
         observe_send::announce(
@@ -208,14 +221,13 @@ pub(in crate::xai) async fn execute_stream(
             .request(&Method::GET, &url, &headers, &body, &secrets),
         )
     });
-    let conn_target =
-        session::Target::new(&auth.id, &url, &proxy, token(auth)).with_secrets(&secrets);
     let connect = || dial::dial(&proxy, &url, &headers);
     let (conn, mut response_headers) = match session.ensure_conn(conn_target.clone(), connect).await
     {
         Ok(found) => found,
         Err(error) => return Err(dial_error(error, &secrets)),
     };
+    secrets.extend(conn.secrets());
     if !ephemeral {
         sessions.record_target(&session_id, &target);
     }
@@ -224,6 +236,7 @@ pub(in crate::xai) async fn execute_stream(
     hold.observe(tap);
     observe_send::request_sent(sender.as_ref());
     if let Err(failure) = hold.conn().send(text.clone()).await {
+        let failure = failure.redacted(&secrets);
         let error = write_error(hold.conn().disconnect_code(), &failure);
         hold.invalidate("send_error");
         if ephemeral || !should_retry(&error) {
@@ -240,9 +253,11 @@ pub(in crate::xai) async fn execute_stream(
             }
         };
         sessions.record_target(&session_id, &target);
+        secrets.extend(conn.secrets());
         hold.switch(conn);
         observe_send::request_sent(sender.as_ref());
         if let Err(failure) = hold.conn().send(text).await {
+            let failure = failure.redacted(&secrets);
             let error = write_error(hold.conn().disconnect_code(), &failure);
             hold.invalidate("send_error");
             hold.release();
@@ -295,7 +310,8 @@ fn dial_error(error: DialError, secrets: &Secrets) -> ExecError {
     }
 }
 
-/// What the call's log lines name.
+/// What the call's log lines name. Each line hides the call's secrets,
+/// however short, from every field it fills in (`Policy::Disk`).
 struct Log {
     session: String,
     auth: String,
@@ -304,7 +320,7 @@ struct Log {
 
 impl Log {
     /// `logXAIWebsocketRequest`.
-    fn request(&self, message: &Value) {
+    fn request(&self, message: &Value, secrets: &Secrets) {
         let generate =
             get(message, "generate").map_or_else(|| "default".to_owned(), Value::to_string);
         let input_items = match get(message, "input") {
@@ -313,35 +329,40 @@ impl Log {
             Some(_) => 1,
         };
         tracing::info!(
-            "xai websockets: upstream request sent session={} auth={} url={} event={} previous_response_id={} generate={generate} input_items={input_items}",
-            self.session,
-            self.auth,
-            self.url,
-            str_at(message, "type").trim(),
-            str_at(message, "previous_response_id").trim(),
+            "xai websockets: upstream request sent session={} auth={} url={} event={} previous_response_id={} generate={} input_items={input_items}",
+            secrets.str(&self.session, Policy::Disk),
+            secrets.str(&self.auth, Policy::Disk),
+            secrets.str(&self.url, Policy::Disk),
+            secrets.str(str_at(message, "type").trim(), Policy::Disk),
+            secrets.str(str_at(message, "previous_response_id").trim(), Policy::Disk),
+            secrets.str(&generate, Policy::Disk),
         );
     }
 
     /// `logXAIWebsocketWarmupCompleted`.
-    fn warmup_completed(&self, created: &Value) {
+    fn warmup_completed(&self, created: &Value, secrets: &Secrets) {
         tracing::info!(
             "xai websockets: upstream warmup completed session={} auth={} url={} response_id={}",
-            self.session,
-            self.auth,
-            self.url,
-            str_at(created, "response.id").trim(),
+            secrets.str(&self.session, Policy::Disk),
+            secrets.str(&self.auth, Policy::Disk),
+            secrets.str(&self.url, Policy::Disk),
+            secrets.str(str_at(created, "response.id").trim(), Policy::Disk),
         );
     }
 
     /// `logXAIWebsocketTerminalResponse`.
-    fn terminal(&self, event_type: &str, event: &Value) {
+    fn terminal(&self, event_type: &str, event: &Value, secrets: &Secrets) {
         tracing::info!(
-            "xai websockets: upstream terminal response session={} auth={} url={} event={event_type} response_id={} previous_response_id={}",
-            self.session,
-            self.auth,
-            self.url,
-            str_at(event, "response.id").trim(),
-            str_at(event, "response.previous_response_id").trim(),
+            "xai websockets: upstream terminal response session={} auth={} url={} event={} response_id={} previous_response_id={}",
+            secrets.str(&self.session, Policy::Disk),
+            secrets.str(&self.auth, Policy::Disk),
+            secrets.str(&self.url, Policy::Disk),
+            secrets.str(event_type, Policy::Disk),
+            secrets.str(str_at(event, "response.id").trim(), Policy::Disk),
+            secrets.str(
+                str_at(event, "response.previous_response_id").trim(),
+                Policy::Disk
+            ),
         );
     }
 }
@@ -365,7 +386,9 @@ struct State {
     warmup: bool,
     /// Whether the turn went into the transcript.
     recorded: bool,
-    /// The secrets the handshake sent, redacted from every message.
+    /// The secrets the call's handshake sent and, for a kept connection,
+    /// those its own handshake sent, redacted from every message, from the
+    /// call's errors and from its log lines.
     secrets: Secrets,
     log: Log,
     pending: VecDeque<Bytes>,
@@ -385,7 +408,7 @@ impl State {
                     let (events, _) = self.prepared.apply_patch.bridge.fail(error);
                     self.fail_patch(events);
                 } else {
-                    self.failure = Some(read_error(&failure));
+                    self.failure = Some(read_error(&failure.redacted(&self.secrets)));
                 }
                 self.end();
                 return;
@@ -456,12 +479,12 @@ impl State {
             "response.created" if self.warmup => {
                 let completed = warmup_completed(&event);
                 self.record(&completed);
-                self.log.warmup_completed(&event);
+                self.log.warmup_completed(&event, &self.secrets);
                 warmup_completed_payload = Some(completed);
             }
             "response.output_item.done" => self.items.collect(&event),
             "response.completed" => {
-                self.log.terminal(&event_type, &event);
+                self.log.terminal(&event_type, &event, &self.secrets);
                 payload = patch_completed_output(payload, &self.items);
                 payload = normalize_summary_data(payload);
                 replay::cache_completed(&self.prepared.replay, &payload);
@@ -470,7 +493,7 @@ impl State {
                 }
             }
             "response.done" => {
-                self.log.terminal(&event_type, &event);
+                self.log.terminal(&event_type, &event, &self.secrets);
                 if !self.warmup {
                     self.record(&payload);
                 }

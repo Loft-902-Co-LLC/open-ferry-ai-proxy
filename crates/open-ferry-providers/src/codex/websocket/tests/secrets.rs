@@ -3,19 +3,19 @@
 //! alike. None of these is upstream's: upstream passes close reasons,
 //! connection errors and messages on, and logs them, as they came.
 
-use std::cell::RefCell;
-use std::fmt::{self, Write as _};
-use std::sync::{Arc, Mutex, Once};
+use std::sync::Arc;
 
 use open_ferry_core::auth::Auth;
 use open_ferry_core::executor::ProviderExecutor;
-use tracing::subscriber::Interest;
 
 use super::super::mock::{Answer, Server};
 use super::{
     HELLO, auth_with, collect, executor, options, refused, request, with_header, within, ws_options,
 };
 use crate::redact::REDACTED;
+use crate::secret_echo::{
+    KEY_HEADER, Logs, NEW_KEY, OLD_KEY, assert_old_key_redacted, echoing_the_handshake,
+};
 
 /// The credential's secret, as Codex or a proxy might quote it.
 const TOKEN: &str = "sk-review-fake-token";
@@ -365,93 +365,59 @@ async fn failure_events_have_the_token_redacted() {
     }
 }
 
-thread_local! {
-    /// Where this thread's logs go while a test captures them.
-    static CAPTURED: RefCell<Option<Arc<Mutex<String>>>> = const { RefCell::new(None) };
+// Not upstream's: a turn that keeps the session's connection, though the
+// credential's custom key header changed since it opened (the target is
+// the credential, URL, proxy and token, as upstream's), has the key the
+// connection's handshake sent redacted from what Codex quotes back, as
+// well as its own.
+#[tokio::test]
+async fn a_kept_connection_has_its_handshakes_secrets_redacted() {
+    let server = echoing_the_handshake().await;
+    let executor = executor();
+    for (turn, key) in [("turn one", OLD_KEY), ("turn two", NEW_KEY)] {
+        let auth = auth_with(&server.url, &[("api_key", TOKEN), (KEY_HEADER, key)]);
+        let response = within(
+            turn,
+            executor.execute_stream(
+                Arc::new(auth),
+                request("gpt-5-codex", HELLO),
+                ws_options("kept-connection"),
+            ),
+        )
+        .await
+        .unwrap();
+        let (chunks, error) = collect(response).await;
+        assert!(error.is_none(), "{turn}: {error:?}");
+        assert_eq!(chunks.len(), 2, "{turn}: {chunks:?}");
+        assert_old_key_redacted(turn, &chunks);
+    }
+    let handshakes = server.record().handshakes;
+    assert_eq!(handshakes.len(), 1);
+    assert_eq!(handshakes[0].header("x-upstream-key"), Some(OLD_KEY));
 }
 
-/// What a test logs on its thread, one event a line: the message, then
-/// any other field as ` name=value` (as `open-ferry-management`'s OAuth
-/// tests capture them).
-#[derive(Clone, Default)]
-struct Logs(Arc<Mutex<String>>);
-
-impl Logs {
-    /// Captures what this thread logs until the guard is dropped. A
-    /// `#[tokio::test]` runs its tasks on its thread, so their logs too.
-    ///
-    /// The subscriber is the global one, for every thread: a scoped one
-    /// misses events whose callsite another thread registered first.
-    fn capture() -> (Self, Capturing) {
-        static INSTALL: Once = Once::new();
-        INSTALL.call_once(|| {
-            let _ = tracing::subscriber::set_global_default(Capture);
-            tracing::callsite::rebuild_interest_cache();
-        });
-        let logs = Self::default();
-        CAPTURED.with(|captured| *captured.borrow_mut() = Some(Arc::clone(&logs.0)));
-        (logs, Capturing)
-    }
-
-    fn text(&self) -> String {
-        self.0.lock().unwrap().clone()
-    }
-}
-
-/// Ends this thread's capture when dropped.
-struct Capturing;
-
-impl Drop for Capturing {
-    fn drop(&mut self) {
-        CAPTURED.with(|captured| captured.borrow_mut().take());
-    }
-}
-
-/// The subscriber that keeps the events of a thread that captures them.
-struct Capture;
-
-impl tracing::Subscriber for Capture {
-    fn register_callsite(&self, _: &'static tracing::Metadata<'static>) -> Interest {
-        Interest::sometimes()
-    }
-
-    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-        CAPTURED.with(|captured| captured.borrow().is_some())
-    }
-
-    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        tracing::span::Id::from_u64(1)
-    }
-
-    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-
-    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-
-    fn event(&self, event: &tracing::Event<'_>) {
-        let Some(text) = CAPTURED.with(|captured| captured.borrow().clone()) else {
-            return;
-        };
-        let mut line = String::new();
-        event.record(&mut Fields(&mut line));
-        let mut text = text.lock().unwrap();
-        text.push_str(&line);
-        text.push('\n');
-    }
-
-    fn enter(&self, _: &tracing::span::Id) {}
-
-    fn exit(&self, _: &tracing::span::Id) {}
-}
-
-/// Writes an event's fields as [`Logs`] keeps them.
-struct Fields<'a>(&'a mut String);
-
-impl tracing::field::Visit for Fields<'_> {
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn fmt::Debug) {
-        if field.name() == "message" {
-            let _ = write!(self.0, "{value:?}");
-        } else {
-            let _ = write!(self.0, " {}={value:?}", field.name());
-        }
-    }
+// Not upstream's: the connection's log lines hide a key in the base URL's
+// query, however short, from the URL they name.
+#[tokio::test]
+async fn the_connection_logs_hide_a_short_url_key() {
+    let (logs, _capturing) = Logs::capture();
+    let server = Server::once(&[super::COMPLETED]).await;
+    let base_url = format!("{}/v1?api_key=zq7x", server.url);
+    let response = within(
+        "the call",
+        executor().execute_stream(
+            Arc::new(auth_with(&base_url, &[])),
+            request("gpt-5-codex", HELLO),
+            ws_options("logged"),
+        ),
+    )
+    .await
+    .unwrap();
+    let (_, error) = collect(response).await;
+    assert!(error.is_none(), "{error:?}");
+    assert_eq!(server.record().handshakes.len(), 1);
+    let logs = logs.text();
+    assert!(logs.contains("upstream connected"), "{logs}");
+    assert!(logs.contains(&format!("api_key={REDACTED}")), "{logs}");
+    assert!(!logs.contains("zq7x"), "{logs}");
 }

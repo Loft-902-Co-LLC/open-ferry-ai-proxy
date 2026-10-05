@@ -28,7 +28,9 @@
 //!
 //! [`execute`] reads Codex's events to the completed response and
 //! translates it, as the HTTP call does. Each message has the secrets the
-//! call sent redacted before it is read.
+//! call sent redacted before it is read, and so do the call's errors; a
+//! call keeping a connection redacts the secrets its handshake sent too,
+//! which the taps are told as well.
 //!
 //! Deviations from upstream:
 //! - A failed handshake when trying the send again gives its status error,
@@ -47,7 +49,9 @@
 //!   is (see `Policy::Client` in the crate's `redact` module): a failure
 //!   event, an error event, and what a model says in a successful answer,
 //!   which upstream passes on as it came. The call's taps read each message
-//!   as it came.
+//!   as it came. A call keeping a connection redacts the secrets its
+//!   handshake sent as well, from its messages and its errors, as a custom
+//!   header may have changed since (see [`super::session`]).
 
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -82,8 +86,9 @@ pub(super) struct Call {
     pub(super) hold: Hold,
     /// The handshake's response headers, when the call connected.
     pub(super) headers: Option<HeaderMap>,
-    /// The secrets the call sends, redacted from each message Codex sends
-    /// and from the call's errors (see [`observe_send::secrets`]).
+    /// The secrets the call sends and those its connection's handshake
+    /// sent, redacted from each message Codex sends and from the call's
+    /// errors (see [`observe_send::secrets`]).
     pub(super) secrets: Secrets,
 }
 
@@ -118,7 +123,14 @@ pub(super) async fn open(
         None => (store.ephemeral(), true, None),
     };
     let proxy = executor.proxy_for(auth);
-    let secrets = observe_send::secrets(&prepared.url, &prepared.headers, &proxy, auth);
+    let mut secrets = observe_send::secrets(&prepared.url, &prepared.headers, &proxy, auth);
+    let token = crate::codex::request::credentials(auth).0;
+    let target = Target::new(&auth.id, &prepared.url, &proxy, token).with_secrets(&secrets);
+    // A connection kept for the call was opened with the secrets of an
+    // earlier one, which Codex may quote back too.
+    if let Some(kept) = session.kept_secrets(&target) {
+        secrets.extend(&kept);
+    }
     // The handshake and the message, told once, before connecting.
     let tap = options.tapped().map(|observation| {
         let model = str_at(&prepared.body, "model");
@@ -143,8 +155,6 @@ pub(super) async fn open(
         )
     });
     let model_level_cooling = executor.model_level_cooling();
-    let token = crate::codex::request::credentials(auth).0;
-    let target = Target::new(&auth.id, &prepared.url, &proxy, token).with_secrets(&secrets);
 
     let connect = || dial::dial(&proxy, &prepared.url, &prepared.headers);
     let (conn, mut headers) = match session.ensure_conn(target.clone(), connect).await {
@@ -154,6 +164,7 @@ pub(super) async fn open(
         }
         Err(error) => return Err(dial_error(error, &secrets, model_level_cooling)),
     };
+    secrets.extend(conn.secrets());
 
     let mut hold = Hold::new(Arc::clone(&session), ephemeral, guard, conn);
     let sender = tap.clone();
@@ -163,6 +174,7 @@ pub(super) async fn open(
         .set_multi_agent_v2_restore(restores(prepared, &session, hold.conn().id()));
     observe_send::request_sent(sender.as_ref());
     if let Err(failure) = hold.conn().send(prepared.message.clone()).await {
+        let failure = failure.redacted(&secrets);
         let error = errors::write_error(hold.conn().disconnect_code(), &failure);
         hold.invalidate("send_error");
         if ephemeral || !errors::should_retry(&error) {
@@ -178,12 +190,14 @@ pub(super) async fn open(
                 return Err(dial_error(error, &secrets, model_level_cooling));
             }
         };
+        secrets.extend(conn.secrets());
         hold.switch(conn);
         prepared
             .turn
             .set_multi_agent_v2_restore(restores(prepared, &session, hold.conn().id()));
         observe_send::request_sent(sender.as_ref());
         if let Err(failure) = hold.conn().send(prepared.message.clone()).await {
+            let failure = failure.redacted(&secrets);
             let error = errors::write_error(hold.conn().disconnect_code(), &failure);
             hold.invalidate("send_error");
             hold.release();
@@ -262,7 +276,7 @@ pub(in crate::codex) async fn execute(
             Ok(payload) => payload,
             Err(failure) => {
                 hold.release();
-                return Err(errors::error(&failure));
+                return Err(errors::error(&failure.redacted(&secrets)));
             }
         };
         if payload.is_empty() {

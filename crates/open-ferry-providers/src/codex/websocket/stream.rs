@@ -33,7 +33,9 @@
 //!   `redact` module). So what a model says in a successful answer reaches
 //!   the client without them, as a failure or error event's error does;
 //!   upstream passes each message on as it came. The call's taps read each
-//!   message as it came.
+//!   message as it came. A call keeping a connection redacts the secrets its
+//!   handshake sent as well, from its messages and from a broken
+//!   connection's error (see [`super::session`]).
 
 use std::collections::VecDeque;
 use std::time::SystemTime;
@@ -148,8 +150,8 @@ struct State {
     /// Whether a native client sent the request, so the completed response
     /// is kept as Codex sent it.
     native: bool,
-    /// The secrets the call sent, redacted from each message Codex sends
-    /// and from the call's errors.
+    /// The secrets the call sent and those its connection's handshake sent,
+    /// redacted from each message Codex sends and from the call's errors.
     secrets: Secrets,
     model_level_cooling: bool,
     items: OutputItems,
@@ -167,7 +169,7 @@ impl State {
             .hold
             .recv()
             .await
-            .map_err(|failure| Fault::Read(errors::error(&failure)))?;
+            .map_err(|failure| Fault::Read(errors::error(&failure.redacted(&self.secrets))))?;
         if payload.is_empty() {
             return Ok(None);
         }

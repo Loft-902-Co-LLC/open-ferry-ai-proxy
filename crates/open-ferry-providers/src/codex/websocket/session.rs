@@ -42,8 +42,14 @@
 //! - The secrets the connection's handshake sent, the token among them,
 //!   are redacted (see [`crate::redact`]; a secret of eight bytes or more,
 //!   as in every client error) from its failures, as Codex's close reason
-//!   may quote them, before a call gets one or it is logged; upstream
-//!   passes them on.
+//!   may quote them, before a call gets one; upstream passes them on. A
+//!   call keeping the connection redacts them from all it reads, as well as
+//!   its own secrets (see [`Session::kept_secrets`]): a custom header that
+//!   changed since isn't part of the target, so the two may differ.
+//! - The log lines have every one of those secrets, however short, hidden
+//!   from each field (`Policy::Disk`): the session, the credential's ID,
+//!   the URL, the last event's type and the failure; upstream logs them as
+//!   they are.
 //! - A closed session stays closed: a handshake under way is abandoned, and
 //!   a connection that comes up after is dropped before `response.create`
 //!   is sent. Upstream gives the closed session the new connection, which
@@ -79,7 +85,7 @@ use tokio_tungstenite::tungstenite::Message;
 use super::dial::{DialError, Dialed, WsStream};
 use super::errors::{self, Failure};
 use crate::observe_send::{self, BodyTap};
-use crate::redact::Secrets;
+use crate::redact::{Policy, Secrets};
 
 /// How long a connection may go without a message
 /// (`codexResponsesWebsocketIdleTimeout`).
@@ -259,6 +265,11 @@ impl Conn {
 
     pub(crate) fn id(&self) -> u64 {
         self.id
+    }
+
+    /// The secrets the connection's handshake sent.
+    pub(crate) fn secrets(&self) -> &Secrets {
+        &self.target.secrets
     }
 
     /// Sends a text message (`writeMessage`); a closed connection fails.
@@ -523,26 +534,38 @@ impl Session {
         }
     }
 
+    /// The secrets the handshake of the connection [`Self::ensure_conn`]
+    /// would keep for `target` sent, if there is one: a call that keeps it
+    /// redacts them as well as its own.
+    pub(crate) fn kept_secrets(&self, target: &Target) -> Option<Secrets> {
+        let state = self.state();
+        let conn = state.conn.as_ref()?;
+        (conn.target == *target && !conn.is_closed()).then(|| conn.target.secrets.clone())
+    }
+
     fn log_disconnected(&self, conn: &Conn, reason: &str, failure: Option<&Failure>) {
+        let secrets = &conn.target.secrets;
         let last_event = conn.last_event();
+        let error = failure.map(Failure::text).unwrap_or_default();
         tracing::debug!(
-            session = %self.id,
-            auth = %conn.target.auth_id,
-            url = %conn.target.url,
+            session = %secrets.str(&self.id, Policy::Disk),
+            auth = %secrets.str(&conn.target.auth_id, Policy::Disk),
+            url = %secrets.str(&conn.target.url, Policy::Disk),
             session_object = self.kind(),
             reason,
-            last_event = %last_event,
+            last_event = %secrets.str(&last_event, Policy::Disk),
             is_terminal = is_terminal_event(&last_event),
-            error = %failure.map(Failure::text).unwrap_or_default(),
+            error = %secrets.str(&error, Policy::Disk),
             "codex websockets: upstream disconnected"
         );
     }
 
     fn log_connected(&self, conn: &Conn, reused: bool) {
+        let secrets = &conn.target.secrets;
         tracing::debug!(
-            session = %self.id,
-            auth = %conn.target.auth_id,
-            url = %conn.target.url,
+            session = %secrets.str(&self.id, Policy::Disk),
+            auth = %secrets.str(&conn.target.auth_id, Policy::Disk),
+            url = %secrets.str(&conn.target.url, Policy::Disk),
             session_object = self.kind(),
             reused,
             "codex websockets: upstream connected"

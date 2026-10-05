@@ -130,7 +130,7 @@ impl Failure {
     /// The failure with every copy of the `secrets` the connection sent in
     /// its text redacted, as a client's error is (see [`crate::redact`]):
     /// Codex's close reason, or a network error, may quote the token.
-    pub(super) fn redacted(self, secrets: &Secrets) -> Self {
+    pub(crate) fn redacted(self, secrets: &Secrets) -> Self {
         match self {
             Self::Close { code, reason } => Self::Close {
                 code,
