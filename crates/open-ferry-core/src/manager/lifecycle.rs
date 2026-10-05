@@ -2,9 +2,10 @@
 // (RegisterExecutor, UnregisterExecutor, Register, Update,
 // UpdateRefreshedAuth, Remove, Load and persist), MarkResult,
 // recordAvailabilityNeutralResult, ResetQuota and clearDisabledCooldownStates
-// in sdk/cliproxy/auth/conductor_cooldown.go, and
-// ReconcileRegistryModelStates in sdk/cliproxy/auth/conductor_selection.go
-// (v8.0.10, MIT).
+// in sdk/cliproxy/auth/conductor_cooldown.go,
+// ReconcileRegistryModelStates in sdk/cliproxy/auth/conductor_selection.go,
+// and lockAuthMutation in sdk/cliproxy/auth/conductor_persistence.go
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Adding, changing and removing credentials and executors, recording call
@@ -17,6 +18,15 @@
 //! [`Manager::update_unsaved`] change a credential without saving it, for
 //! one just read from its file or the config (upstream's `WithSkipPersist`).
 //!
+//! A reload ([`Manager::load`]) and the changes that save never overlap:
+//! registering, updating, removing, recording a call's outcome, resetting a
+//! quota and reconciling model states take the reload barrier shared, from
+//! before the change is made until it is saved, and a reload takes it
+//! alone, from before it lists the store until it has replaced every
+//! credential. So a reload never reads a save that hasn't landed, nor drops
+//! a credential registered while it read. Store I/O happens with the state
+//! lock released, so credentials stay readable and selectable throughout.
+//!
 //! Deviations from upstream:
 //! - A registration or update takes the live registration epoch and
 //!   generation, whatever the credential carries: upstream refuses an
@@ -24,7 +34,19 @@
 //!   than the live one.
 //! - A replaced credential starts with no `invalid_grant` failures counted;
 //!   upstream keeps whatever count the caller's copy held.
-//! - Saves happen after the state lock is released.
+//! - A registration or update is published, then saved. Upstream saves a
+//!   copy with its lock released, merges back what the store changed in
+//!   it (`mergeAuthSaveDelta`, which keeps edits made meanwhile), checks the
+//!   registration didn't move, then publishes. Here the store gets the
+//!   published snapshot and can't change it ([`crate::auth::AuthStore`]
+//!   takes `&Auth`), so there is nothing to merge back, and a failed or
+//!   slow save never holds the credential back from calls.
+//! - There are no per-credential mutation locks: each change is made whole
+//!   under the state lock, and saves of one credential are ordered by
+//!   epoch and generation, a stale one skipped. The reload barrier is an
+//!   `RwLock`, so waiting on it can't be given up as upstream's contexts
+//!   allow, and a refresh's result is committed with no point between
+//!   where it could be dropped (upstream's `context.WithoutCancel`).
 //! - `load` doesn't reschedule refreshes, as upstream; start the refresh
 //!   loop after loading. It restarts the rotation, as upstream's scheduler
 //!   rebuild does.
@@ -202,6 +224,7 @@ impl Manager {
         if auth.id.is_empty() {
             auth.id = new_uuid();
         }
+        let gate = self.mutation_gate();
         let now = self.now();
         if auth.created_at.is_none() {
             auth.created_at = Some(now);
@@ -244,6 +267,7 @@ impl Manager {
                 "failed to persist registered auth: {err}"
             );
         }
+        drop(gate);
         Ok(snapshot)
     }
 
@@ -294,6 +318,7 @@ impl Manager {
         normalize_credential_metadata(&mut auth.metadata);
         validate_weight(&auth)
             .map_err(|err| ManagerError::InvalidWeight(format!("update auth: {err}")))?;
+        let gate = self.mutation_gate();
         let now = self.now();
         let (snapshot, epoch, generation) = {
             let mut guard = self.lock();
@@ -393,6 +418,7 @@ impl Manager {
                 "failed to persist updated auth: {err}"
             );
         }
+        drop(gate);
         Ok(Some((snapshot, generation)))
     }
 
@@ -404,6 +430,7 @@ impl Manager {
         if id.is_empty() {
             return;
         }
+        let gate = self.mutation_gate();
         let provider = {
             let mut guard = self.lock();
             let state = &mut *guard;
@@ -418,6 +445,7 @@ impl Manager {
                 .saturating_add(1);
             existing.auth.provider.trim().to_owned()
         };
+        drop(gate);
         self.queue_refresh_unschedule(id);
         cooldown_store::changed(self);
         if !provider.is_empty()
@@ -430,12 +458,16 @@ impl Manager {
     /// Replaces every credential with the store's (upstream's `Load`).
     /// Credentials without an ID or with an invalid weight are skipped.
     /// Without a store this does nothing.
+    ///
+    /// It waits for changes being saved to land, and changes made meanwhile
+    /// wait for it. The store is listed with the state lock released.
     pub fn load(&self) -> Result<(), ManagerError> {
         let Some(store) = &self.shared.store else {
             return Ok(());
         };
-        let mut guard = self.lock();
+        let _reload = self.reload_gate();
         let items = store.list().map_err(ManagerError::Store)?;
+        let mut guard = self.lock();
         let state = &mut *guard;
         let previous = std::mem::take(&mut state.auths);
         for mut auth in items {
@@ -524,6 +556,7 @@ impl Manager {
         if result.auth_id.is_empty() {
             return;
         }
+        let gate = self.mutation_gate();
         let now = self.now();
         let mut model_key = canonical_model_key(&result.model);
         let (snapshot, epoch, generation) = {
@@ -556,6 +589,7 @@ impl Manager {
             committed
         };
         let _ = self.persist(&snapshot, epoch, generation, Save::Yes);
+        drop(gate);
         cooldown_store::changed(self);
         self.publish_projections(&snapshot, generation, now, true);
         self.publish_error_event(result, &snapshot);
@@ -568,6 +602,7 @@ impl Manager {
         if result.auth_id.is_empty() {
             return;
         }
+        let gate = self.mutation_gate();
         let now = self.now();
         let (snapshot, epoch, generation) = {
             let mut state = self.lock();
@@ -585,6 +620,7 @@ impl Manager {
             )
         };
         let _ = self.persist(&snapshot, epoch, generation, Save::Yes);
+        drop(gate);
         self.publish_error_event(result, &snapshot);
     }
 
@@ -605,6 +641,7 @@ impl Manager {
             .filter(|model| !model.trim().is_empty())
             .map(|model| canonical_model_key(model))
             .collect();
+        let gate = self.mutation_gate();
         let (snapshot, models, epoch, generation) = {
             let mut state = self.lock();
             let Some(entry) = state.auths.get_mut(id) else {
@@ -624,6 +661,7 @@ impl Manager {
             committed
         };
         let persisted = self.persist(&snapshot, epoch, generation, Save::Yes);
+        drop(gate);
         cooldown_store::changed(self);
         self.publish_projections(&snapshot, generation, now, false);
         persisted.map(|()| {
@@ -642,6 +680,7 @@ impl Manager {
         if id.is_empty() {
             return;
         }
+        let gate = self.mutation_gate();
         let now = self.now();
         let models = self.models();
         let mut committed = None;
@@ -697,6 +736,7 @@ impl Manager {
                 "failed to persist auth changes during model state reconciliation: {err}"
             );
         }
+        drop(gate);
         cooldown_store::changed(self);
         let (settings, oauth) = self.resolver_parts();
         let resolver = Resolver {

@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/conductor.go (the Manager type,
-// NewManager, SetConfig and CloseExecutionSession) (v8.0.10, MIT).
+// NewManager, SetConfig and CloseExecutionSession) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The credential manager: the [`Dispatcher`] that picks a credential for
@@ -38,7 +38,12 @@
 //! - Maps are walked in key order, where Go's order is random.
 //! - The refresh failure count lives in the manager, not on [`Auth`].
 //! - Saves go through the synchronous [`AuthStore`] after the state lock is
-//!   released, still ordered per credential by epoch and generation.
+//!   released, still ordered per credential by epoch and generation. A
+//!   change is published before it is saved, where upstream saves first;
+//!   the store gets a copy, so nothing it does is merged back (upstream's
+//!   `mergeAuthSaveDelta`). There are no per-credential mutation locks: a
+//!   change is made whole under the state lock. The reload barrier is a
+//!   lock that can't be given up while waiting (see `lifecycle`).
 //! - The executor's [`ProviderExecutor::refresh_lead`] replaces upstream's
 //!   registry of refresh leads.
 //! - The selected credential goes to the `selected_auth` callback and the
@@ -92,7 +97,9 @@ pub use settings::{
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::io;
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
+use std::sync::{
+    Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak,
+};
 
 use chrono::Utc;
 use futures_core::future::BoxFuture;
@@ -146,6 +153,12 @@ pub(crate) struct Shared {
     persist_locks: Mutex<HashMap<String, PersistLock>>,
     /// Serializes refreshes per credential (upstream's `refreshLocks`).
     refresh_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// The reload barrier (upstream's `authLoadGate`): held shared by a
+    /// change from before its publication until its save is done, and
+    /// exclusively by [`Manager::load`] from listing the store until every
+    /// credential is replaced. Taken before the state lock, never twice by
+    /// one thread.
+    load_gate: RwLock<()>,
     refresh_loop: Mutex<Option<RefreshLoopHandle>>,
     /// What failed calls are told to, once set.
     error_events: OnceLock<Arc<dyn ErrorEvents>>,
@@ -257,6 +270,7 @@ impl Manager {
             clock,
             persist_locks: Mutex::new(HashMap::new()),
             refresh_locks: Mutex::new(HashMap::new()),
+            load_gate: RwLock::new(()),
             refresh_loop: Mutex::new(None),
             error_events: OnceLock::new(),
             cooldown_store: cooldown_store::CooldownStore::default(),
@@ -270,6 +284,25 @@ impl Manager {
 
     pub(crate) fn lock(&self) -> MutexGuard<'_, State> {
         lock(&self.shared.state)
+    }
+
+    /// Takes the reload barrier for one change, to hold from before the
+    /// state lock until the change is saved (upstream's `lockAuthMutation`,
+    /// less its per-credential lock). Waits while a reload runs.
+    pub(crate) fn mutation_gate(&self) -> RwLockReadGuard<'_, ()> {
+        self.shared
+            .load_gate
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Takes the reload barrier for a reload: waits for every change being
+    /// published or saved, and holds new ones off.
+    pub(crate) fn reload_gate(&self) -> RwLockWriteGuard<'_, ()> {
+        self.shared
+            .load_gate
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     pub(crate) fn now(&self) -> Timestamp {
@@ -347,9 +380,7 @@ impl Manager {
 /// Locks a mutex, taking the data back from a poisoned one: every update
 /// leaves the state whole, so a panic elsewhere doesn't corrupt it.
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 impl Dispatcher for Manager {

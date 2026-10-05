@@ -684,7 +684,7 @@ impl Manager {
 
     /// Records a queued refresh and holds the credential's next check while
     /// it waits (upstream's `markRefreshPending`).
-    fn mark_refresh_pending(
+    pub(crate) fn mark_refresh_pending(
         &self,
         loop_id: u64,
         id: &str,

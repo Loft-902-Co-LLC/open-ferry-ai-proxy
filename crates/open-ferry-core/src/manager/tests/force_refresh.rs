@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI sdk/cliproxy/auth/force_refresh_test.go (v8.0.10, MIT).
+// Ported from CLIProxyAPI sdk/cliproxy/auth/force_refresh_test.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Forced refreshes: of one credential, which clears its error, and of
@@ -12,7 +12,9 @@
 //! - `ForceRefreshAll_DynamicCancellationSkipsRemaining`: dropping the call
 //!   while two refreshes run stops the other four from starting, as
 //!   upstream does, but also drops the two running, so there are no results
-//!   and no successes to count.
+//!   and no successes to count. Upstream's two finish, and it checks their
+//!   rotated tokens are saved and published whatever the cancellation; here
+//!   neither is, as their refreshes never return.
 //! - `RefreshWorkersResolution`: the worker count is unsigned, so upstream's
 //!   negative case can't be expressed.
 

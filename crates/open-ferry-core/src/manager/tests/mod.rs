@@ -28,6 +28,7 @@ mod conductor_execution_error_priority;
 mod conductor_executor_replace;
 mod conductor_fast_error;
 mod conductor_force_mapping;
+mod conductor_load_persistence;
 mod conductor_oauth_alias_nofork;
 mod conductor_oauth_alias_suspension;
 mod conductor_oauth_request_scoped_errors;
