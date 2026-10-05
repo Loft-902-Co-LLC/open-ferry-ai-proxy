@@ -92,14 +92,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
 pub(super) type WsStream = WebSocketStream<Box<dyn Io>>;
 
 /// A connection made, with the handshake's response headers.
-pub(super) struct Dialed {
+pub(crate) struct Dialed {
     pub(super) stream: WsStream,
     pub(super) headers: HeaderMap,
 }
 
 /// Why connecting failed.
 #[derive(Debug)]
-pub(super) enum DialError {
+pub(crate) enum DialError {
     /// Codex answered the handshake but refused it (gorilla's
     /// `ErrBadHandshake`), with the start of its body.
     Handshake { status: u16, body: Vec<u8> },
@@ -115,7 +115,7 @@ impl From<ExecError> for DialError {
 
 /// Connects to `url` (`ws` or `wss`) through `proxy`, sending `headers` with
 /// the handshake.
-pub(super) fn dial(
+pub(crate) fn dial(
     proxy: &str,
     url: &str,
     headers: &HeaderMap,

@@ -56,7 +56,7 @@ pub mod token;
 pub(crate) mod tokens;
 pub(crate) mod tool_schema;
 pub(crate) mod usage;
-mod websocket;
+pub(crate) mod websocket;
 pub(crate) mod xai_replay_cache;
 
 pub use client::USER_AGENT;

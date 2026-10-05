@@ -49,7 +49,7 @@ pub(super) fn message_too_big() -> ExecError {
 
 /// Why reading from or writing to the connection failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum Failure {
+pub(crate) enum Failure {
     /// Codex closed the connection with `code` (gorilla's `CloseError`).
     Close { code: u16, reason: String },
     /// Anything else, with its text; `transient` for a network failure that
@@ -76,7 +76,7 @@ impl Failure {
     }
 
     /// The connection was closed on our side.
-    pub(super) fn closed() -> Self {
+    pub(crate) fn closed() -> Self {
         Self::Other {
             message: "codex websockets executor: use of closed network connection".to_owned(),
             transient: true,
@@ -144,7 +144,7 @@ impl Failure {
     }
 
     /// The text upstream's error would have.
-    pub(super) fn text(&self) -> String {
+    pub(crate) fn text(&self) -> String {
         match self {
             Self::Close { code, reason } => {
                 let mut text = format!("websocket: close {code}{}", close_description(*code));
@@ -180,7 +180,7 @@ fn close_description(code: u16) -> &'static str {
 
 /// The error for a failed read (`mapCodexWebsocketReadError`): close 1009
 /// is a message too big, anything else keeps its text.
-pub(super) fn error(failure: &Failure) -> ExecError {
+pub(crate) fn error(failure: &Failure) -> ExecError {
     if let Failure::Close {
         code: CLOSE_MESSAGE_TOO_BIG,
         ..
@@ -203,7 +203,7 @@ pub(super) fn error(failure: &Failure) -> ExecError {
 
 /// The error for a failed send (`mapCodexWebsocketWriteError`): a message
 /// too big when Codex closed with 1009, else the send's own error.
-pub(super) fn write_error(disconnect: Option<u16>, failure: &Failure) -> ExecError {
+pub(crate) fn write_error(disconnect: Option<u16>, failure: &Failure) -> ExecError {
     if disconnect == Some(CLOSE_MESSAGE_TOO_BIG) {
         return message_too_big();
     }
@@ -212,7 +212,7 @@ pub(super) fn write_error(disconnect: Option<u16>, failure: &Failure) -> ExecErr
 
 /// Whether a failed send is worth one more try on a new connection
 /// (`shouldRetryCodexWebsocketSend`): not when it was the request's fault.
-pub(super) fn should_retry(error: &ExecError) -> bool {
+pub(crate) fn should_retry(error: &ExecError) -> bool {
     !error.request_scoped
 }
 
@@ -225,7 +225,7 @@ pub(super) fn should_retry(error: &ExecError) -> bool {
 /// status's text. A usage limit is scoped to the credential unless
 /// `model_level_cooling` keeps it to the model; a connection limit without
 /// a reset time may be retried at once.
-pub(super) fn parse_ws_error(
+pub(crate) fn parse_ws_error(
     event: &Value,
     model_level_cooling: bool,
     secrets: &Secrets,

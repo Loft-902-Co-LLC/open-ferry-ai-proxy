@@ -90,13 +90,13 @@ const READ_CAPACITY: usize = 4096;
 const CLOSE_REPLY_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// The sessions of an executor, by execution session ID.
-pub(in crate::codex) struct Store {
+pub(crate) struct Store {
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     idle: Duration,
 }
 
 impl Store {
-    pub(in crate::codex) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
             idle: IDLE_TIMEOUT,
@@ -105,7 +105,7 @@ impl Store {
 
     /// A store whose connections close after `idle` without a message.
     #[cfg(test)]
-    pub(in crate::codex) fn with_idle(idle: Duration) -> Self {
+    pub(crate) fn with_idle(idle: Duration) -> Self {
         Self {
             idle,
             ..Self::new()
@@ -118,7 +118,7 @@ impl Store {
 
     /// The session `id` names, made if new; `None` for a blank ID
     /// (`getOrCreateSession`).
-    pub(super) fn get_or_create(&self, id: &str) -> Option<Arc<Session>> {
+    pub(crate) fn get_or_create(&self, id: &str) -> Option<Arc<Session>> {
         let id = id.trim();
         if id.is_empty() {
             return None;
@@ -131,13 +131,13 @@ impl Store {
     }
 
     /// A session for one call (`newEphemeralCodexWebsocketSession`).
-    pub(super) fn ephemeral(&self) -> Arc<Session> {
+    pub(crate) fn ephemeral(&self) -> Arc<Session> {
         Arc::new(Session::new("", self.idle))
     }
 
     /// Closes the session `id` names, or all of them for
     /// [`CLOSE_ALL_EXECUTION_SESSIONS`] (`CloseExecutionSession`).
-    pub(in crate::codex) fn close(&self, id: &str) {
+    pub(crate) fn close(&self, id: &str) {
         let id = id.trim();
         if id.is_empty() {
             return;
@@ -161,7 +161,7 @@ impl Store {
 
     /// How many sessions there are.
     #[cfg(test)]
-    pub(super) fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.sessions().len()
     }
 }
@@ -169,7 +169,7 @@ impl Store {
 /// What a connection was opened for; another target needs another
 /// connection (`websocketSessionTargetMatches`, with the token).
 #[derive(Clone)]
-pub(super) struct Target {
+pub(crate) struct Target {
     pub(super) auth_id: String,
     pub(super) url: String,
     pub(super) proxy: String,
@@ -192,7 +192,7 @@ impl PartialEq for Target {
 impl Eq for Target {}
 
 impl Target {
-    pub(super) fn new(auth_id: &str, url: &str, proxy: &str, token: &str) -> Self {
+    pub(crate) fn new(auth_id: &str, url: &str, proxy: &str, token: &str) -> Self {
         Self {
             auth_id: auth_id.trim().to_owned(),
             url: url.trim().to_owned(),
@@ -203,7 +203,7 @@ impl Target {
     }
 
     /// The target, its connection's failures also redacting `secrets`.
-    pub(super) fn with_secrets(mut self, secrets: &Secrets) -> Self {
+    pub(crate) fn with_secrets(mut self, secrets: &Secrets) -> Self {
         self.secrets.extend(secrets);
         self
     }
@@ -226,7 +226,7 @@ impl Read {
 static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
 
 /// A connection to Codex.
-pub(super) struct Conn {
+pub(crate) struct Conn {
     id: u64,
     target: Target,
     /// The sending half, `None` once the connection is let go.
@@ -253,16 +253,16 @@ impl Conn {
 
     /// A connection without a socket, for tests of the bookkeeping.
     #[cfg(test)]
-    pub(super) fn detached(target: Target) -> Arc<Self> {
+    pub(crate) fn detached(target: Target) -> Arc<Self> {
         Arc::new(Self::new(target, None))
     }
 
-    pub(super) fn id(&self) -> u64 {
+    pub(crate) fn id(&self) -> u64 {
         self.id
     }
 
     /// Sends a text message (`writeMessage`); a closed connection fails.
-    pub(super) async fn send(&self, text: String) -> Result<(), Failure> {
+    pub(crate) async fn send(&self, text: String) -> Result<(), Failure> {
         let mut closing = self.closing.subscribe();
         if *closing.borrow_and_update() {
             return Err(Failure::closed());
@@ -286,17 +286,17 @@ impl Conn {
     }
 
     /// Whether the connection was closed.
-    pub(super) fn is_closed(&self) -> bool {
+    pub(crate) fn is_closed(&self) -> bool {
         *self.closing.borrow()
     }
 
     /// The code Codex closed with, if it did.
-    pub(super) fn disconnect_code(&self) -> Option<u16> {
+    pub(crate) fn disconnect_code(&self) -> Option<u16> {
         *lock(&self.disconnect)
     }
 
     /// Notes the code Codex closed with, unless one was noted.
-    pub(super) fn set_disconnect(&self, code: u16) {
+    pub(crate) fn set_disconnect(&self, code: u16) {
         lock(&self.disconnect).get_or_insert(code);
     }
 
@@ -348,7 +348,7 @@ struct State {
 }
 
 /// A session (`codexWebsocketSession`).
-pub(super) struct Session {
+pub(crate) struct Session {
     /// The execution session ID; empty for an ephemeral session.
     id: String,
     idle: Duration,
@@ -384,7 +384,7 @@ impl Session {
     }
 
     /// Waits for the calls before to end, then holds the session.
-    pub(super) async fn lock_requests(&self) -> OwnedMutexGuard<()> {
+    pub(crate) async fn lock_requests(&self) -> OwnedMutexGuard<()> {
         Arc::clone(&self.requests).lock_owned().await
     }
 
@@ -403,7 +403,7 @@ impl Session {
     /// Sets `conn` as the session's connection, for tests of the
     /// bookkeeping.
     #[cfg(test)]
-    pub(super) fn set_conn(&self, conn: Arc<Conn>) {
+    pub(crate) fn set_conn(&self, conn: Arc<Conn>) {
         let mut state = self.state();
         state.conn = Some(conn);
         state.multi_agent = None;
@@ -557,7 +557,7 @@ impl Session {
     /// A closed session fails. One that closes during the handshake
     /// abandons it, and one that closed as it finished drops the new
     /// connection.
-    pub(super) async fn ensure_conn<F, Fut>(
+    pub(crate) async fn ensure_conn<F, Fut>(
         self: &Arc<Self>,
         target: Target,
         dial: F,
@@ -782,7 +782,7 @@ async fn read_loop(
 /// the active channel, and whether the call ended. Dropping it before
 /// [`release`](Hold::release) closes the connection (the call was
 /// cancelled).
-pub(super) struct Hold {
+pub(crate) struct Hold {
     session: Arc<Session>,
     ephemeral: bool,
     guard: Option<OwnedMutexGuard<()>>,
@@ -797,7 +797,7 @@ pub(super) struct Hold {
 impl Hold {
     /// Makes `conn` the active connection of `session` for a call that
     /// holds `guard`.
-    pub(super) fn new(
+    pub(crate) fn new(
         session: Arc<Session>,
         ephemeral: bool,
         guard: Option<OwnedMutexGuard<()>>,
@@ -817,7 +817,7 @@ impl Hold {
     }
 
     /// Has `tap` see the messages read from now on.
-    pub(super) fn observe(&mut self, tap: Option<BodyTap>) {
+    pub(crate) fn observe(&mut self, tap: Option<BodyTap>) {
         self.tap = tap;
     }
 
@@ -827,12 +827,12 @@ impl Hold {
         observe_send::attempt_error(self.tap.as_ref(), error);
     }
 
-    pub(super) fn conn(&self) -> &Arc<Conn> {
+    pub(crate) fn conn(&self) -> &Arc<Conn> {
         &self.conn
     }
 
     /// The next read of the connection (`readCodexWebsocketMessage`).
-    pub(super) async fn recv(&mut self) -> Result<String, Failure> {
+    pub(crate) async fn recv(&mut self) -> Result<String, Failure> {
         loop {
             match self.rx.recv().await {
                 None => return Err(Failure::channel_closed()),
@@ -848,7 +848,7 @@ impl Hold {
     }
 
     /// Lets the connection go.
-    pub(super) fn invalidate(&self, reason: &str) {
+    pub(crate) fn invalidate(&self, reason: &str) {
         self.session.invalidate(&self.conn, reason, None);
     }
 
@@ -859,7 +859,7 @@ impl Hold {
 
     /// Moves the call to `conn`, a new connection after a failed send
     /// (`clearRetryActiveState`, then `activate`).
-    pub(super) fn switch(&mut self, conn: Arc<Conn>) {
+    pub(crate) fn switch(&mut self, conn: Arc<Conn>) {
         self.session.clear_active(self.conn.id, self.token);
         let (token, rx) = self.session.activate(conn.id);
         self.conn = conn;
@@ -869,7 +869,7 @@ impl Hold {
 
     /// Ends the call: it is no longer active, the next call may go, and an
     /// ephemeral session is closed.
-    pub(super) fn release(&mut self) {
+    pub(crate) fn release(&mut self) {
         if self.finished {
             return;
         }

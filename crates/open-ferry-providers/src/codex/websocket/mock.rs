@@ -28,15 +28,15 @@ const WAIT: Duration = Duration::from_secs(10);
 
 /// A request head the server or proxy read.
 #[derive(Clone, Debug)]
-pub(in crate::codex) struct Handshake {
-    pub(in crate::codex) method: String,
+pub(crate) struct Handshake {
+    pub(crate) method: String,
     /// The request target: a path, or `CONNECT`'s authority.
-    pub(in crate::codex) path: String,
-    pub(in crate::codex) headers: HeaderMap,
+    pub(crate) path: String,
+    pub(crate) headers: HeaderMap,
 }
 
 impl Handshake {
-    pub(in crate::codex) fn header(&self, name: &str) -> Option<&str> {
+    pub(crate) fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .get(name)
             .map(|value| value.to_str().expect("a header that isn't text"))
@@ -45,21 +45,23 @@ impl Handshake {
 
 /// What the server saw.
 #[derive(Clone, Debug, Default)]
-pub(in crate::codex) struct Record {
-    pub(in crate::codex) handshakes: Vec<Handshake>,
+pub(crate) struct Record {
+    pub(crate) handshakes: Vec<Handshake>,
     /// The text messages read, on any connection.
-    pub(in crate::codex) messages: Vec<String>,
+    pub(crate) messages: Vec<String>,
+    /// The bodies of the plain HTTP requests read, such as a compact call's.
+    pub(crate) bodies: Vec<String>,
     /// How many connections the client ended while [`Peer::hold`] held
     /// them, or an [`Answer::Held`] held their handshake.
-    pub(in crate::codex) client_closed: usize,
+    pub(crate) client_closed: usize,
 }
 
 /// What a script does with an accepted connection.
-pub(in crate::codex) type Script =
+pub(crate) type Script =
     Arc<dyn Fn(Peer) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 /// How the server answers a connection.
-pub(in crate::codex) enum Answer {
+pub(crate) enum Answer {
     /// Refuses the handshake with `status`, `headers` and `body`.
     Refuse {
         status: u16,
@@ -78,7 +80,7 @@ pub(in crate::codex) enum Answer {
 }
 
 impl Answer {
-    pub(in crate::codex) fn refuse(status: u16, body: &str) -> Self {
+    pub(crate) fn refuse(status: u16, body: &str) -> Self {
         Self::Refuse {
             status,
             headers: Vec::new(),
@@ -86,7 +88,7 @@ impl Answer {
         }
     }
 
-    pub(in crate::codex) fn accept<F, Fut>(script: F) -> Self
+    pub(crate) fn accept<F, Fut>(script: F) -> Self
     where
         F: Fn(Peer) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ()> + Send + 'static,
@@ -96,7 +98,7 @@ impl Answer {
 }
 
 /// The server's end of an accepted connection.
-pub(in crate::codex) struct Peer {
+pub(crate) struct Peer {
     ws: WebSocketStream<TcpStream>,
     handshake: Handshake,
     record: Arc<watch::Sender<Record>>,
@@ -104,12 +106,12 @@ pub(in crate::codex) struct Peer {
 
 impl Peer {
     /// The handshake that opened the connection.
-    pub(in crate::codex) fn handshake(&self) -> &Handshake {
+    pub(crate) fn handshake(&self) -> &Handshake {
         &self.handshake
     }
 
     /// The next text message, recorded; `None` once the connection ends.
-    pub(in crate::codex) async fn recv(&mut self) -> Option<String> {
+    pub(crate) async fn recv(&mut self) -> Option<String> {
         loop {
             match self.ws.next().await {
                 Some(Ok(Message::Text(text))) => {
@@ -127,19 +129,19 @@ impl Peer {
 
     /// Sends a text message; a failure is ignored, as the client may have
     /// gone.
-    pub(in crate::codex) async fn send(&mut self, text: &str) {
+    pub(crate) async fn send(&mut self, text: &str) {
         let _ = self.ws.send(Message::text(text)).await;
     }
 
     /// Sends each of `frames`.
-    pub(in crate::codex) async fn send_all(&mut self, frames: &[String]) {
+    pub(crate) async fn send_all(&mut self, frames: &[String]) {
         for frame in frames {
             self.send(frame).await;
         }
     }
 
     /// Sends a close frame with `code` and `reason`.
-    pub(in crate::codex) async fn close(&mut self, code: u16, reason: &str) {
+    pub(crate) async fn close(&mut self, code: u16, reason: &str) {
         let frame = CloseFrame {
             code: CloseCode::from(code),
             reason: reason.into(),
@@ -148,7 +150,7 @@ impl Peer {
     }
 
     /// Pings the client and reads until its pong; whether it came.
-    pub(in crate::codex) async fn ping_pong(&mut self) -> bool {
+    pub(crate) async fn ping_pong(&mut self) -> bool {
         if self
             .ws
             .send(Message::Ping(b"mock".to_vec().into()))
@@ -167,7 +169,7 @@ impl Peer {
     }
 
     /// Reads until the client ends the connection, and records that.
-    pub(in crate::codex) async fn hold(mut self) {
+    pub(crate) async fn hold(mut self) {
         while self.recv().await.is_some() {}
         self.record.send_modify(|record| record.client_closed += 1);
     }
@@ -177,18 +179,16 @@ impl Peer {
 type Handler = Arc<dyn Fn(usize) -> Answer + Send + Sync>;
 
 /// A mock Codex Responses WebSocket.
-pub(in crate::codex) struct Server {
+pub(crate) struct Server {
     /// `http://127.0.0.1:<port>`, a credential's `base_url`.
-    pub(in crate::codex) url: String,
+    pub(crate) url: String,
     record: Arc<watch::Sender<Record>>,
 }
 
 impl Server {
     /// A server that answers its `n`th connection (from 0) with
     /// `handler(n)`.
-    pub(in crate::codex) async fn start(
-        handler: impl Fn(usize) -> Answer + Send + Sync + 'static,
-    ) -> Self {
+    pub(crate) async fn start(handler: impl Fn(usize) -> Answer + Send + Sync + 'static) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let record = Arc::new(watch::Sender::new(Record::default()));
@@ -207,7 +207,7 @@ impl Server {
 
     /// A server whose every connection reads one message, sends `frames`
     /// and drops the connection (upstream's `codexWebsocketServer`).
-    pub(in crate::codex) async fn once(frames: &[&str]) -> Self {
+    pub(crate) async fn once(frames: &[&str]) -> Self {
         let frames = owned(frames);
         Self::start(move |_| {
             let frames = frames.clone();
@@ -225,7 +225,7 @@ impl Server {
 
     /// A server whose every connection answers each message with `frames`
     /// until the client ends it.
-    pub(in crate::codex) async fn turns(frames: &[&str]) -> Self {
+    pub(crate) async fn turns(frames: &[&str]) -> Self {
         let frames = owned(frames);
         Self::start(move |_| {
             let frames = frames.clone();
@@ -243,23 +243,19 @@ impl Server {
     }
 
     /// A server that refuses every handshake with `status` and `body`.
-    pub(in crate::codex) async fn refusing(status: u16, body: &str) -> Self {
+    pub(crate) async fn refusing(status: u16, body: &str) -> Self {
         let body = body.to_owned();
         Self::start(move |_| Answer::refuse(status, &body)).await
     }
 
     /// What the server saw so far.
-    pub(in crate::codex) fn record(&self) -> Record {
+    pub(crate) fn record(&self) -> Record {
         self.record.borrow().clone()
     }
 
     /// Waits until what the server saw satisfies `ready`, or fails the
     /// test after a while.
-    pub(in crate::codex) async fn wait_for(
-        &self,
-        what: &str,
-        ready: impl FnMut(&Record) -> bool,
-    ) -> Record {
+    pub(crate) async fn wait_for(&self, what: &str, ready: impl FnMut(&Record) -> bool) -> Record {
         let mut receiver = self.record.subscribe();
         match tokio::time::timeout(WAIT, receiver.wait_for(ready)).await {
             Ok(Ok(record)) => record.clone(),
@@ -268,7 +264,7 @@ impl Server {
     }
 
     /// Waits until `count` connections were ended by the client.
-    pub(in crate::codex) async fn wait_closed(&self, count: usize) -> Record {
+    pub(crate) async fn wait_closed(&self, count: usize) -> Record {
         self.wait_for(&format!("{count} closed connections"), |record| {
             record.client_closed >= count
         })
@@ -296,6 +292,10 @@ async fn serve(mut tcp: TcpStream, answer: Answer, record: Arc<watch::Sender<Rec
             Ok(0) | Err(_) => break,
             Ok(read) => rest.extend_from_slice(&chunk[..read]),
         }
+    }
+    if length > 0 {
+        let body = String::from_utf8_lossy(&rest[..length.min(rest.len())]).into_owned();
+        record.send_modify(|record| record.bodies.push(body));
     }
     let key = handshake
         .headers
@@ -394,14 +394,14 @@ async fn read_head(tcp: &mut TcpStream) -> Option<(Handshake, Vec<u8>)> {
 }
 
 /// An HTTP proxy on an ephemeral 127.0.0.1 port that tunnels `CONNECT`s.
-pub(in crate::codex) struct Proxy {
+pub(crate) struct Proxy {
     /// `http://127.0.0.1:<port>`.
-    pub(in crate::codex) url: String,
+    pub(crate) url: String,
     connects: Arc<Mutex<Vec<Handshake>>>,
 }
 
 impl Proxy {
-    pub(in crate::codex) async fn start() -> Self {
+    pub(crate) async fn start() -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let connects = Arc::new(Mutex::new(Vec::new()));
@@ -438,7 +438,7 @@ impl Proxy {
     }
 
     /// The `CONNECT` requests the proxy read.
-    pub(in crate::codex) fn connects(&self) -> Vec<Handshake> {
+    pub(crate) fn connects(&self) -> Vec<Handshake> {
         self.connects
             .lock()
             .unwrap_or_else(PoisonError::into_inner)

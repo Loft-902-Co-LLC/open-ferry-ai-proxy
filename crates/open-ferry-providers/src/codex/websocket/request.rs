@@ -251,7 +251,7 @@ pub(super) fn websocket_url(http_url: &str) -> Result<String, ExecError> {
 /// A URL's scheme and the rest after its `:`, as Go's `getScheme` finds
 /// them: letters first, then letters, digits, `+`, `-` or `.`. No scheme is
 /// empty.
-fn split_scheme(url: &str) -> (&str, &str) {
+pub(crate) fn split_scheme(url: &str) -> (&str, &str) {
     for (index, byte) in url.bytes().enumerate() {
         match byte {
             b'a'..=b'z' | b'A'..=b'Z' => {}

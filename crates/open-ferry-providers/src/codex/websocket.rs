@@ -45,13 +45,13 @@
 //!   told again, and connection errors are only the call's; upstream
 //!   records each. The image generation tool isn't added.
 
-mod dial;
-mod errors;
+pub(crate) mod dial;
+pub(crate) mod errors;
 mod execute;
 #[cfg(test)]
-pub(super) mod mock;
-mod request;
-mod session;
+pub(crate) mod mock;
+pub(crate) mod request;
+pub(crate) mod session;
 mod stream;
 #[cfg(test)]
 mod tests;
@@ -77,7 +77,7 @@ pub(super) fn routes(auth: &Auth, options: &Options) -> bool {
 
 /// Whether the credential's `websockets` attribute, or else its metadata,
 /// turns the WebSocket on (`codexWebsocketsEnabled`).
-pub(super) fn websockets_enabled(auth: &Auth) -> bool {
+pub(crate) fn websockets_enabled(auth: &Auth) -> bool {
     if let Some(raw) = auth.attribute("websockets").map(str::trim)
         && !raw.is_empty()
         && let Some(parsed) = parse_bool(raw)
