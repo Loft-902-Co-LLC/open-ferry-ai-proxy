@@ -54,18 +54,21 @@
 //! saves those it changes itself, as after a refresh.
 //!
 //! Deviations from upstream:
-//! - Only the Codex, Claude, Gemini, Gemini Interactions, Vertex AI and OpenAI-compatible
-//!   executors are registered, the native ones at start rather than as
-//!   their first credential comes. Upstream gives a credential of a provider
-//!   it has no executor for (such as `gemini-cli` or `aistudio`) an
-//!   OpenAI-compatible executor keyed by that provider; here such a
-//!   credential has no executor, and isn't served.
-//! - Executors are made again on a reload only when a setting they use
-//!   changed (for the native ones `proxy-url` or
-//!   `claude.model-level-cooling`, and for the OpenAI-compatible ones
-//!   `proxy-url` or `openai-compatibility`); upstream makes them again on
-//!   every reload, which ends their WebSocket sessions. Remaking the Vertex
-//!   AI executor drops the access tokens it cached.
+//! - Only the Codex, Meta, Claude, Gemini, Gemini Interactions, Vertex AI,
+//!   xAI and OpenAI-compatible executors are registered, the native ones at
+//!   start rather than as their first credential comes. Upstream gives a
+//!   credential of a provider it has no executor for (such as `gemini-cli`
+//!   or `aistudio`) an OpenAI-compatible executor keyed by that provider;
+//!   here such a credential has no executor, and isn't served.
+//! - Executors are made again on a reload only when the config changed:
+//!   the Codex, Meta and xAI ones on any change, which ends their WebSocket
+//!   sessions; the other native ones when `proxy-url`,
+//!   `claude.model-level-cooling`, `codex.orphan-delegation-compatibility`
+//!   or `client.codex.optimize-multi-agent-v2` changes; and the
+//!   OpenAI-compatible ones when `proxy-url`, `openai-compatibility` or
+//!   either of those Codex settings changes. Upstream makes them all again
+//!   on every reload, which ends their WebSocket sessions. Remaking the
+//!   Vertex AI executor drops the access tokens it cached.
 //! - An OpenAI-compatible executor that no credential uses any more after a
 //!   reload is unregistered; upstream keeps it.
 //! - With an empty `host` the server listens on every IPv6 and IPv4
@@ -494,11 +497,7 @@ impl Service {
                 .with_config(Arc::clone(&self.config))
                 .with_models(Arc::clone(&self.registry) as _),
         ));
-        self.manager.register_executor(Arc::new(
-            XaiExecutor::new(proxy_url.clone())
-                .with_config(Arc::clone(&self.config))
-                .with_models(Arc::clone(&self.registry) as _),
-        ));
+        self.register_xai_executor();
         self.manager.register_executor(Arc::new(
             VertexExecutor::new(proxy_url)
                 .with_config(Arc::clone(&self.config))
@@ -519,6 +518,15 @@ impl Service {
     fn register_meta_executor(&self) {
         self.manager.register_executor(Arc::new(
             MetaExecutor::new(self.config.proxy_url.clone())
+                .with_config(Arc::clone(&self.config))
+                .with_models(Arc::clone(&self.registry) as _),
+        ));
+    }
+
+    /// Registers the xAI executor for the current config.
+    fn register_xai_executor(&self) {
+        self.manager.register_executor(Arc::new(
+            XaiExecutor::new(self.config.proxy_url.clone())
                 .with_config(Arc::clone(&self.config))
                 .with_models(Arc::clone(&self.registry) as _),
         ));
@@ -879,9 +887,10 @@ impl Service {
         {
             self.register_native_executors();
         } else if previous != config {
-            // The Codex and Meta executors follow the whole config.
+            // The Codex, Meta and xAI executors follow the whole config.
             self.register_codex_executor();
             self.register_meta_executor();
+            self.register_xai_executor();
         }
         // Made again before the credentials change, as upstream does, so no
         // credential of the new config is served by an executor of the old.
@@ -1867,9 +1876,8 @@ mod tests {
     /// Ports `TestRegisterAvailableExecutors` of CLIProxyAPI
     /// sdk/cliproxy/service_executor_registration_test.go (v8.0.10, MIT)
     /// for the executors ported: Codex, Meta, Claude, Gemini, Gemini
-    /// Interactions, Vertex AI and the baseline OpenAI-compatible one. The
-    /// plugin executor and the other
-    /// providers' aren't ported.
+    /// Interactions, Vertex AI, xAI and the baseline OpenAI-compatible one.
+    /// The plugin executor and the other providers' aren't ported.
     #[tokio::test]
     async fn registers_the_available_executors() {
         let dir = tempfile::tempdir().unwrap();
@@ -1881,6 +1889,7 @@ mod tests {
             "gemini",
             "gemini-interactions",
             "vertex",
+            "xai",
             "openai-compatibility",
         ] {
             assert_eq!(executor_id(&service, provider).as_deref(), Some(provider));
@@ -2166,6 +2175,89 @@ mod tests {
             let seen = seen.lock().unwrap();
             assert_eq!(seen.len(), 2);
             assert_eq!(seen[1].2, chat("up-2"));
+        }
+    }
+
+    /// Not upstream's: `xai.inject-x-search` reaches the xAI executor on a
+    /// reload, whether it turns on or off, as upstream's every reload makes
+    /// the executor again.
+    mod xai_requests {
+        use std::sync::{Arc, Mutex};
+
+        use axum::body::Bytes;
+        use serde_json::Value;
+        use tokio::net::TcpListener;
+        use tokio::sync::watch;
+
+        use super::super::serve;
+        use super::compat_requests::send;
+        use super::{reload, service};
+
+        /// The one event of xAI's answer.
+        const COMPLETED: &str = "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":0,\"status\":\"completed\",\"model\":\"grok-4.5\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n";
+
+        /// The bodies xAI was sent.
+        type Seen = Arc<Mutex<Vec<String>>>;
+
+        /// xAI on a 127.0.0.1 ephemeral port, answering every request
+        /// with [`COMPLETED`]; its base URL.
+        async fn xai() -> (String, Seen) {
+            let seen = Seen::default();
+            let record = Arc::clone(&seen);
+            let app = axum::Router::new().fallback(move |body: Bytes| {
+                let record = Arc::clone(&record);
+                async move {
+                    let body = String::from_utf8_lossy(&body).into_owned();
+                    record.lock().unwrap().push(body);
+                    ([("content-type", "text/event-stream")], COMPLETED)
+                }
+            });
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(listener, app).await });
+            (format!("http://{addr}/v1"), seen)
+        }
+
+        /// A config with an xAI key for `base_url`, injecting X search if
+        /// `inject`.
+        fn config(base_url: &str, inject: bool) -> String {
+            format!(
+                "api-keys: ['client-key']\nxai:\n  inject-x-search: {inject}\nxai-api-key:\n  - api-key: xai-reload-key\n    base-url: {base_url}\n    models:\n      - name: grok-4.5\n        alias: grok-reload\n"
+            )
+        }
+
+        /// Whether `body` has Grok's X search tool.
+        fn has_x_search(body: &str) -> bool {
+            let body: Value = serde_json::from_str(body).unwrap();
+            body["tools"]
+                .as_array()
+                .is_some_and(|tools| tools.iter().any(|tool| tool["type"] == "x_search"))
+        }
+
+        #[tokio::test]
+        async fn inject_x_search_follows_reloads() {
+            let dir = tempfile::tempdir().unwrap();
+            let (base_url, seen) = xai().await;
+            let mut service = service(dir.path(), &config(&base_url, false));
+            service.sync_config_auths();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (_stop, stopped) = watch::channel(false);
+            tokio::spawn(serve(listener, None, service.app(), stopped));
+
+            let request = r#"{"model":"grok-reload","input":"hello"}"#;
+            let (status, body) = send(addr, "POST", "/v1/responses", request).await;
+            assert_eq!(status, 200, "{body}");
+            reload(&mut service, dir.path(), &config(&base_url, true));
+            let (status, body) = send(addr, "POST", "/v1/responses", request).await;
+            assert_eq!(status, 200, "{body}");
+            reload(&mut service, dir.path(), &config(&base_url, false));
+            let (status, body) = send(addr, "POST", "/v1/responses", request).await;
+            assert_eq!(status, 200, "{body}");
+
+            let seen = seen.lock().unwrap();
+            let injected: Vec<bool> = seen.iter().map(|body| has_x_search(body)).collect();
+            assert_eq!(injected, [false, true, false], "{seen:?}");
         }
     }
 
