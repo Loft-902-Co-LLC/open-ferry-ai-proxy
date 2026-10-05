@@ -113,8 +113,9 @@ pub(crate) fn int_of(value: &Value) -> i64 {
     }
 }
 
-/// gjson `Float()`, written as sjson writes a `float64`. `None` if it isn't
-/// finite, which sjson writes as `+Inf`, `-Inf` or `NaN`: not JSON.
+/// gjson `Float()`, written as sjson writes a `float64`, negative zero as
+/// `-0`. `None` if it isn't finite, which sjson writes as `+Inf`, `-Inf` or
+/// `NaN`: not JSON.
 pub(crate) fn float_of(value: &Value) -> Option<Value> {
     let float: f64 = match value {
         Value::Number(number) => number.to_string().parse().unwrap_or(0.0),
@@ -125,7 +126,7 @@ pub(crate) fn float_of(value: &Value) -> Option<Value> {
     if !float.is_finite() {
         return None;
     }
-    serde_json::from_str(&go::format_float(float)).ok()
+    exact::from_str(&go::format_float(float)).ok()
 }
 
 /// gjson `Bool()`.
@@ -154,9 +155,8 @@ pub(crate) fn object<const N: usize>(fields: [(&str, Value); N]) -> Value {
 /// gjson `Value()` as sjson then writes it. Numbers become `float64`, which
 /// sjson writes as plain decimals. Objects and arrays go through `json.Marshal`,
 /// which sorts object keys and writes numbers in exponent form below 1e-6 and
-/// from 1e21. A number beyond `f64`'s range is kept as written; Go can't write it.
-/// Negative zero comes out as `0` where Go writes `-0`: serde_json reads `-0`
-/// as the integer 0.
+/// from 1e21, and negative zero as `-0`. A number beyond `f64`'s range is kept
+/// as written; Go can't write it.
 pub(crate) fn go_value(value: &Value) -> Value {
     match value {
         Value::Number(number) => go_float(number, false),
@@ -197,7 +197,7 @@ fn go_float(number: &Number, marshaled: bool) -> Value {
     } else {
         go::format_float(f)
     };
-    serde_json::from_str(&text).unwrap_or_else(|_| Value::Number(number.clone()))
+    exact::from_str(&text).unwrap_or_else(|_| Value::Number(number.clone()))
 }
 
 /// gjson's strict integer parser: optional `-`, then ASCII digits only.
@@ -269,6 +269,9 @@ mod tests {
                 "0.000000029802322387695312",
             ),
             (json!(true), "1"),
+            (exact::from_str("-0").unwrap(), "-0"),
+            (exact::from_str("-0.0").unwrap(), "-0"),
+            (json!("-0"), "-0"),
         ] {
             let written = float_of(&value).map(|value| value.to_string());
             assert_eq!(written.as_deref(), Some(want), "{value}");
@@ -348,15 +351,16 @@ mod tests {
 
     #[test]
     fn go_value_matches_sjson() {
-        let parse = |text: &str| serde_json::from_str::<Value>(text).unwrap();
-        let written = |text: &str| go_value(&parse(text)).to_string();
+        let written = |text: &str| go_value(&exact::from_str(text).unwrap()).to_string();
         assert_eq!(written("1.50"), "1.5");
         assert_eq!(written("1E+2"), "100");
-        assert_eq!(written("-0.0"), "0");
+        assert_eq!(written("-0.0"), "-0");
+        assert_eq!(written("-0"), "-0");
+        assert_eq!(written("[-0,-0.0]"), "[-0,-0]");
         assert_eq!(written("9007199254740993"), "9007199254740992");
         assert_eq!(written("1e21"), "1000000000000000000000");
-        // Kept as serde_json read it, which adds the exponent's sign.
-        assert_eq!(written("1e400"), "1e+400");
+        // Kept as written.
+        assert_eq!(written("1e400"), "1e400");
         assert_eq!(written(r#""x""#), r#""x""#);
         assert_eq!(written("null"), "null");
         assert_eq!(

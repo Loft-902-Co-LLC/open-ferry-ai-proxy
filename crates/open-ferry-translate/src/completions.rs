@@ -21,7 +21,6 @@
 //! - A number too large for `f64` in a choice's `logprobs`, such as `1e400`,
 //!   is kept as written. Go can't marshal it, so upstream writes `choices`
 //!   with no value, which isn't JSON.
-//! - Negative zero becomes `0`, where Go writes `-0`.
 //! - A number too large for `i64` in `max_tokens`, `top_logprobs`, `created`
 //!   or a choice's `index`, such as `1e30`, saturates. Go's result depends on
 //!   the CPU; amd64 gives the minimum `i64`.

@@ -47,8 +47,7 @@
 //!   Upstream embeds it as JSON.
 //! - A `temperature`, `top_p`, `presence_penalty` or `frequency_penalty`
 //!   that isn't a finite number, such as `1e400` or the string `"NaN"`, is
-//!   left out. Go writes it as `+Inf` or `NaN`, which isn't JSON. One that
-//!   is negative zero is written `0`, where Go writes the float64 as `-0`.
+//!   left out. Go writes it as `+Inf` or `NaN`, which isn't JSON.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};

@@ -33,7 +33,6 @@
 //!   so it reads other path syntax in a key, such as `|`, `@`, `\` or a
 //!   leading `:`: it may leave that `type` as it was, or lowercase the `type`
 //!   of another key, adding it if it's missing (`:7` sets `7`).
-//! - Negative zero in a tool schema is written as `0`. Go writes `-0`.
 
 use std::collections::VecDeque;
 

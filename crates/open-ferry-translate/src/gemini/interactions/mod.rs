@@ -32,8 +32,6 @@
 //! - A generation config leaf whose path sjson reads as more than 128 keys (a
 //!   key of many dots, say) is left out, where upstream nests a value for
 //!   each key, however many.
-//! - Negative zero in a value upstream writes as a float64, such as a number
-//!   in a tool it writes with `json.Marshal`, is written `0`; Go writes `-0`.
 
 mod case;
 mod passthrough;
