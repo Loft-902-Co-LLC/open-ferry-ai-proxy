@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/auth/claude/anthropic_auth.go, errors.go
-// and oauth_response.go, and sdk/auth/claude.go (v8.0.10, MIT).
+// and oauth_response.go, and sdk/auth/claude.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Claude's OAuth: the browser login with PKCE, the code exchange and the
@@ -133,11 +133,15 @@ pub struct Error {
 }
 
 impl Error {
+    /// An error without a status from the token endpoint. Retrying it isn't
+    /// safe: after a transport or decoding failure, Anthropic may have used
+    /// up the single-use refresh token even though its answer was lost, and
+    /// a replay would turn that into `invalid_grant`.
     fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
             status: 0,
-            retryable: true,
+            retryable: false,
         }
     }
 
@@ -160,8 +164,9 @@ impl Error {
         self.status
     }
 
-    /// Whether trying again may help: anything but an error status below
-    /// 500, or a 429.
+    /// Whether trying again is safe and may help. Only an error status can
+    /// be: 500 or more from a refresh, and also 429 from a code exchange.
+    /// A transport or decoding error never is.
     pub fn is_retryable(&self) -> bool {
         self.retryable
     }
@@ -495,8 +500,9 @@ impl ClaudeAuth {
     }
 
     /// [`refresh_tokens`](Self::refresh_tokens), tried up to `max_retries`
-    /// times, waiting a second more before each retry. An error that
-    /// retrying won't fix, such as a 4xx status, stops it
+    /// times, waiting a second more before each retry. Only a 5xx status is
+    /// tried again. Any other error stops it, including a lost or unreadable
+    /// answer, after which the token may already be used up
     /// (`RefreshTokensWithRetry`).
     pub async fn refresh_tokens_with_retry(
         &self,
@@ -1211,6 +1217,91 @@ mod tests {
             auth.refresh_tokens("").await.unwrap_err().message(),
             "refresh token is required"
         );
+    }
+
+    /// A loopback token endpoint that writes `response` to each connection
+    /// and closes it, counting connections.
+    async fn serve_raw(response: &'static [u8]) -> (String, Arc<AtomicUsize>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                counted.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    if !response.is_empty() {
+                        // Read the request head before answering.
+                        let mut buffer = [0_u8; 4096];
+                        let _ = stream.read(&mut buffer).await;
+                        let _ = stream.write_all(response).await;
+                    }
+                    // Dropping the stream closes the connection.
+                });
+            }
+        });
+        (format!("http://{address}"), calls)
+    }
+
+    // Ports TestRefreshTokensWithRetry_DoesNotReplayAfterResponseReadError:
+    // the body ends before its Content-Length.
+    #[tokio::test]
+    async fn refresh_does_not_replay_after_a_response_read_error() {
+        let (base, calls) =
+            serve_raw(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{\"access").await;
+        let error = auth_for(&base)
+            .refresh_tokens_with_retry("rt-single-use-read", 3)
+            .await
+            .unwrap_err();
+        assert!(
+            error.message().contains("failed to read refresh response"),
+            "{error}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    // Ports TestRefreshTokensWithRetry_DoesNotReplayAfterJSONDecodeError.
+    #[tokio::test]
+    async fn refresh_does_not_replay_after_a_json_decode_error() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let router = Router::new()
+            .route(
+                "/v1/oauth/token",
+                post(|State(calls): State<Arc<AtomicUsize>>| async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    "invalid json payload"
+                }),
+            )
+            .with_state(calls.clone());
+        let error = auth_for(&serve(router).await)
+            .refresh_tokens_with_retry("rt-single-use-json", 3)
+            .await
+            .unwrap_err();
+        assert!(
+            error.message().contains("failed to parse token response"),
+            "{error}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    // Ports TestRefreshTokensWithRetry_DoesNotReplayAfterTransportError: the
+    // endpoint takes the connection and closes it without an answer.
+    #[tokio::test]
+    async fn refresh_does_not_replay_after_a_transport_error() {
+        let (base, calls) = serve_raw(b"").await;
+        let error = auth_for(&base)
+            .refresh_tokens_with_retry("rt-single-use-transport", 3)
+            .await
+            .unwrap_err();
+        assert!(
+            error.message().contains("token refresh request failed"),
+            "{error}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
