@@ -18,13 +18,15 @@ pub(crate) mod responses_ws;
 use axum::response::Response;
 use bytes::Bytes;
 use http::HeaderMap;
+use open_ferry_translate::json::exact;
 use serde_json::Value;
 
 use crate::errors::{JSON_UTF8, error_response};
 
-/// A body parsed as JSON, or `null` when it isn't JSON.
+/// A body parsed as JSON, each number as the client wrote it (see
+/// [`exact`]), or `null` when it isn't JSON.
 pub(crate) fn parse_body(raw: &[u8]) -> Value {
-    serde_json::from_slice(raw).unwrap_or(Value::Null)
+    exact::from_slice(raw).unwrap_or(Value::Null)
 }
 
 /// A field as gjson's `String()` gives it: a string as it is, `true` or
@@ -59,5 +61,14 @@ mod tests {
         assert_eq!(gjson_string(body.get("missing")), "");
         assert_eq!(parse_body(b"{nope"), Value::Null);
         assert_eq!(parse_body(b"[1]"), json!([1]));
+    }
+
+    /// Not upstream's: gjson reads the client's bytes, so a number is as the
+    /// client wrote it.
+    #[test]
+    fn keeps_number_text() {
+        let body = parse_body(br#"{"a":-0,"b":1E20,"c":[1e5]}"#);
+        assert_eq!(body.to_string(), r#"{"a":-0,"b":1E20,"c":[1e5]}"#);
+        assert_eq!(gjson_string(body.get("b")), "1E20");
     }
 }

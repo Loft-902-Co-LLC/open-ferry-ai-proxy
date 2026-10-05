@@ -117,6 +117,25 @@ fn readies_collaboration_tools_at_the_boundary() {
     }
 }
 
+/// Not upstream's: sjson edits the body in place, so a rewritten body keeps
+/// each of the client's numbers as written.
+#[test]
+fn keeps_the_clients_numbers() {
+    let payload = br#"{"temperature":-0,"max":1E20,"tools":[{"type":"function","name":"send_message","parameters":{"properties":{"message":{"encrypted":true},"n":{"default":1e5}}}}]}"#;
+    let got = prepare(
+        &config(true, false),
+        &FakeCatalog::new(),
+        &headers(&[("user-agent", CODEX_CLI)]),
+        payload,
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        String::from_utf8(got).unwrap(),
+        r#"{"temperature":-0,"max":1E20,"tools":[{"type":"function","name":"send_message","parameters":{"properties":{"message":{},"n":{"default":1e5}}}}]}"#
+    );
+}
+
 #[test]
 fn lists_the_models_for_spawn_agent() {
     let catalog = FakeCatalog::new().models(vec![ModelInfo {

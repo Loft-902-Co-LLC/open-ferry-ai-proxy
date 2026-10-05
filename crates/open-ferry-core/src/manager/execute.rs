@@ -48,6 +48,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures_util::StreamExt;
 use http::HeaderMap;
+use open_ferry_translate::json::exact;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tracing::Instrument as _;
@@ -330,7 +331,7 @@ fn sanitize_downstream_websocket_fallback_request(
     if !opts.downstream_websocket || websockets_enabled(auth) || req.payload.is_empty() {
         return req;
     }
-    let Ok(Value::Object(mut body)) = serde_json::from_slice::<Value>(&req.payload) else {
+    let Ok(Value::Object(mut body)) = exact::from_slice(&req.payload) else {
         return req;
     };
     if body.shift_remove("generate").is_none() {
@@ -1471,6 +1472,20 @@ mod tests {
         o.downstream_websocket = false;
         let out = sanitize_downstream_websocket_fallback_request(&o, &auth, &req);
         assert_eq!(out.payload, req.payload);
+    }
+
+    /// Not upstream's: sjson deletes `generate` in place, so the client's
+    /// numbers keep their text.
+    #[test]
+    fn websocket_fallback_keeps_number_text() {
+        let mut o = opts();
+        o.downstream_websocket = true;
+        let req = Request {
+            model: "m".into(),
+            payload: Bytes::from_static(br#"{"a":-0,"generate":false,"b":[1E20,1e5]}"#),
+        };
+        let out = sanitize_downstream_websocket_fallback_request(&o, &Auth::default(), &req);
+        assert_eq!(&out.payload[..], br#"{"a":-0,"b":[1E20,1e5]}"#);
     }
 
     #[test]

@@ -35,9 +35,10 @@
 //! - The Home dispatcher and the plugin model router aren't ported, so the
 //!   payload's `model` is the route model as it is.
 //! - A changed payload has its top-level keys sorted and `<`, `>`, `&`,
-//!   U+2028 and U+2029 escaped, as Go writes it, but nested values are
-//!   written as serde_json writes them, where Go copies them as the client
-//!   wrote them, without spaces. A model that only differs in how it is
+//!   U+2028 and U+2029 escaped, as Go writes it, but nested strings are
+//!   escaped as serde_json escapes them, where Go copies them as the client
+//!   wrote them. Like Go, it writes nested values without spaces and each
+//!   number as the client wrote it. A model that only differs in how it is
 //!   escaped isn't rewritten.
 //! - A payload `serde_json` can't read, though Go's decoder can (with
 //!   invalid UTF-8, a lone surrogate escape, or nested more than 128 deep),
@@ -55,6 +56,7 @@ use bytes::Bytes;
 use http::Method;
 use http::header::{self, HeaderMap, HeaderName, HeaderValue};
 use open_ferry_translate::go::trim_space;
+use open_ferry_translate::json::exact;
 use serde_json::{Map, Value};
 
 use self::routing::payload_model;
@@ -197,9 +199,10 @@ fn account_id(auth: &Auth) -> Option<HeaderValue> {
     }
 }
 
-/// The payload as a JSON object, unless it isn't one.
+/// The payload as a JSON object, each number as the client wrote it (see
+/// [`exact`]), unless it isn't one.
 fn parse_object(raw: &[u8]) -> Option<Map<String, Value>> {
-    match serde_json::from_slice(raw) {
+    match exact::from_slice(raw) {
         Ok(Value::Object(object)) => Some(object),
         _ => None,
     }
@@ -302,6 +305,15 @@ mod tests {
                 r#"","z":{"b":1,"a":2.50}}"#
             )
         );
+        // Each number as the client wrote it, as Go copies a
+        // `json.RawMessage`.
+        assert_eq!(
+            rewrite_model(
+                Bytes::from_static(br#"{"model":"x","n":[-0,1E20,1e5,-0.0]}"#),
+                "gpt"
+            ),
+            r#"{"model":"gpt","n":[-0,1E20,1e5,-0.0]}"#
+        );
     }
 
     // Not upstream's: what sanitizing removes and keeps. The handler test
@@ -312,6 +324,8 @@ mod tests {
             br#"{"model":"m","prompt_cache_key":"cache-123","prompt_cache_retention":"24h","id":"s"}"#,
         );
         assert_eq!(sanitize_body(body), r#"{"id":"s","model":"m"}"#);
+        let body = Bytes::from_static(br#"{"prompt_cache_key":"k","n":{"x":-0,"y":1E20}}"#);
+        assert_eq!(sanitize_body(body), r#"{"n":{"x":-0,"y":1E20}}"#);
         let untouched = Bytes::from_static(br#"{ "query": "x", "Prompt_Cache_Key": 1 }"#);
         assert_eq!(sanitize_body(untouched.clone()), untouched);
         assert_eq!(sanitize_body(Bytes::from_static(b"null")), "null");

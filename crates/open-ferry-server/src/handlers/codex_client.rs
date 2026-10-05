@@ -25,13 +25,14 @@
 //!   shares that spelling with API keys, and v8.0.11 drops the check.
 //! - A body that isn't a JSON object is left as it is, as is one that
 //!   doesn't change; one that changes is written again, as the
-//!   `codex_client` module says.
+//!   `codex_client` module says, each number as the client wrote it.
 
 use http::HeaderMap;
 use http::header::{HeaderValue, USER_AGENT};
 use open_ferry_core::codex_models::spawn_agent::spawn_agent_model_list;
 use open_ferry_core::models::ModelCatalog;
 use open_ferry_translate::codex_client::{header_value, multi_agent_v2, orphan_delegation};
+use open_ferry_translate::json::exact;
 use serde_json::Value;
 
 use crate::config::ServerConfig;
@@ -62,7 +63,7 @@ pub(crate) fn prepare(
     {
         return None;
     }
-    let mut body = match serde_json::from_slice(raw) {
+    let mut body = match exact::from_slice(raw) {
         Ok(Value::Object(fields)) => Value::Object(fields),
         _ => return None,
     };
