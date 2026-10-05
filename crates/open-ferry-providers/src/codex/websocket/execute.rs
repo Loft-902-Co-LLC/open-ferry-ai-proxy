@@ -27,7 +27,8 @@
 //! is called directly.
 //!
 //! [`execute`] reads Codex's events to the completed response and
-//! translates it, as the HTTP call does.
+//! translates it, as the HTTP call does. Each message has the secrets the
+//! call sent redacted before it is read.
 //!
 //! Deviations from upstream:
 //! - A failed handshake when trying the send again gives its status error,
@@ -41,6 +42,12 @@
 //!   once the connection is up. Upstream starts the time to first token
 //!   there (`StartResponseTTFT`) but logs the request before it dials; the
 //!   taps get both as separate steps.
+//! - Each message Codex sends has the secrets the call sent redacted before
+//!   it is read, if they are of eight bytes or more, as every client error
+//!   is (see `Policy::Client` in the crate's `redact` module): a failure
+//!   event, an error event, and what a model says in a successful answer,
+//!   which upstream passes on as it came. The call's taps read each message
+//!   as it came.
 
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -75,8 +82,8 @@ pub(super) struct Call {
     pub(super) hold: Hold,
     /// The handshake's response headers, when the call connected.
     pub(super) headers: Option<HeaderMap>,
-    /// The secrets the call sends, redacted from its errors (see
-    /// [`observe_send::secrets`]).
+    /// The secrets the call sends, redacted from each message Codex sends
+    /// and from the call's errors (see [`observe_send::secrets`]).
     pub(super) secrets: Secrets,
 }
 
@@ -261,6 +268,8 @@ pub(in crate::codex) async fn execute(
         if payload.is_empty() {
             continue;
         }
+        // Each message, as it is read; the taps read it as it came.
+        let payload = secrets.text(payload, Policy::Client);
         let data = ext::restore(&prepared.turn, payload.as_bytes());
         let mut event: Value = serde_json::from_slice(&data).unwrap_or(Value::Null);
         if let Some((error, status, raw)) =

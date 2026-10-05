@@ -4,8 +4,8 @@
 
 //! The streaming call over the WebSocket.
 //!
-//! Each of Codex's events reaches the client as a chunk, as Codex sent it,
-//! with the usage details an OpenAI Responses client expects. The
+//! Each of Codex's events reaches the client as a chunk, as Codex sent it
+//! but for the secrets the call sent (see below), with the usage details an OpenAI Responses client expects. The
 //! completed response (`response.completed`, `response.done` or
 //! `response.incomplete`) goes as `response.completed`, its output filled
 //! in from the items streamed before unless a native client sent the
@@ -26,6 +26,13 @@
 //!   upstream's SSE translation for other clients isn't ported, as only
 //!   those clients take this route.
 //! - The response steering duplex isn't ported.
+//! - Each message has the secrets the call sent redacted before it is read,
+//!   held back while the stream starts or not, if they are of eight bytes
+//!   or more, as every client error is (see `Policy::Client` in the crate's
+//!   `redact` module). So what a model says in a successful answer reaches
+//!   the client without them, as a failure or error event's error does;
+//!   upstream passes each message on as it came. The call's taps read each
+//!   message as it came.
 
 use std::collections::VecDeque;
 use std::time::SystemTime;
@@ -52,6 +59,7 @@ use crate::codex::terminal::{
 };
 use crate::codex::usage::ensure_responses_usage_details;
 use crate::json::str_at;
+use crate::redact::{Policy, Secrets};
 
 /// A streaming call over the WebSocket (`ExecuteStream`).
 pub(in crate::codex) async fn execute_stream(
@@ -139,8 +147,9 @@ struct State {
     /// Whether a native client sent the request, so the completed response
     /// is kept as Codex sent it.
     native: bool,
-    /// The secrets the call sent, redacted from its errors.
-    secrets: crate::redact::Secrets,
+    /// The secrets the call sent, redacted from each message Codex sends
+    /// and from the call's errors.
+    secrets: Secrets,
     model_level_cooling: bool,
     items: OutputItems,
     saw_output_delta: bool,
@@ -161,6 +170,8 @@ impl State {
         if payload.is_empty() {
             return Ok(None);
         }
+        // Each message, as it is read; the taps read it as it came.
+        let payload = self.secrets.text(payload, Policy::Client);
         let data = ext::restore(&self.turn, payload.as_bytes()).into_owned();
         let event: Value = serde_json::from_slice(&data).unwrap_or(Value::Null);
         if let Some((error, status, raw)) = errors::parse_ws_error(

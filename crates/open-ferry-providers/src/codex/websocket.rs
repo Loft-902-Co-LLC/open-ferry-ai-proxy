@@ -10,7 +10,8 @@
 //! (or metadata) is on, and the call isn't `responses/compact`; any other
 //! call goes over HTTP. Each request goes out as a `response.create`
 //! message and Codex's events come back as messages, which reach the client
-//! as they are.
+//! as they are but for the secrets the call sent, redacted from each (see
+//! [`stream`] and [`execute`]).
 //!
 //! The calls of one Responses WebSocket session (its
 //! `execution_session_id`) share a connection, one call at a time, which
@@ -44,6 +45,11 @@
 //!   `observe_send` module). A send tried again on a new connection isn't
 //!   told again, and connection errors are only the call's; upstream
 //!   records each. The image generation tool isn't added.
+//! - Each message Codex sends has the secrets the call sent redacted before
+//!   it is read, if they are of eight bytes or more, as every client error
+//!   is (see `Policy::Client` in the crate's `redact` module), what a model
+//!   says in a successful answer as well as a failure; upstream passes each
+//!   on as it came. The taps read each message as it came.
 
 pub(crate) mod dial;
 pub(crate) mod errors;

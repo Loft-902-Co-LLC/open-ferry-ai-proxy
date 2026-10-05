@@ -1,6 +1,7 @@
-//! The credential's secret kept out of a connection's failures: the call's
-//! error and the logs. None of these is upstream's: upstream passes close
-//! reasons and connection errors on, and logs them, as they came.
+//! The credential's secret kept out of a connection's failures, the call's
+//! error and the logs, and out of Codex's messages, successes and failures
+//! alike. None of these is upstream's: upstream passes close reasons,
+//! connection errors and messages on, and logs them, as they came.
 
 use std::cell::RefCell;
 use std::fmt::{self, Write as _};
@@ -12,7 +13,7 @@ use tracing::subscriber::Interest;
 
 use super::super::mock::{Answer, Server};
 use super::{
-    HELLO, auth_with, collect, executor, refused, request, with_header, within, ws_options,
+    HELLO, auth_with, collect, executor, options, refused, request, with_header, within, ws_options,
 };
 use crate::redact::REDACTED;
 
@@ -218,6 +219,150 @@ async fn a_refused_connect_has_the_proxys_password_redacted() {
         error.message,
         format!("codex websockets executor: proxy CONNECT failed: 407 bad {REDACTED} {REDACTED}")
     );
+}
+
+/// Codex's messages for an answer in which the model says the token, the
+/// client's key and its cookie: a delta and the completed response.
+fn turn_saying_the_secrets() -> [String; 2] {
+    let said = format!("token {TOKEN} key {FORWARDED_KEY} cookie {COOKIE}");
+    [
+        format!(
+            r#"{{"type":"response.output_text.delta","item_id":"msg-1","output_index":0,"content_index":0,"delta":"{said}"}}"#
+        ),
+        format!(
+            r#"{{"type":"response.completed","response":{{"id":"resp-1","status":"completed","output":[{{"type":"message","id":"msg-1","role":"assistant","content":[{{"type":"output_text","text":"{said}"}}]}}],"usage":{{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}}}}"#
+        ),
+    ]
+}
+
+/// Checks `text` has none of the secrets the client sent, and has them
+/// redacted.
+fn assert_redacted(what: &str, text: &str) {
+    for secret in [TOKEN, FORWARDED_KEY, COOKIE] {
+        assert!(!text.contains(secret), "{what}: {secret} in {text}");
+    }
+    assert!(
+        text.contains(&format!(
+            "token {REDACTED} key {REDACTED} cookie {REDACTED}"
+        )),
+        "{what}: {text}"
+    );
+}
+
+// Not upstream's: a streaming call's messages, in which the model says the
+// token and the client's key and cookie that the credential forwards, reach
+// the client with them redacted, while the call's taps read each message as
+// it came.
+#[tokio::test]
+async fn a_successful_stream_has_every_secret_sent_redacted() {
+    let frames = turn_saying_the_secrets();
+    let server = Server::once(&[frames[0].as_str(), frames[1].as_str()]).await;
+    let (observation, raw) = crate::secret_echo::Raw::observe();
+    let options = open_ferry_core::exec::Options {
+        observation: Some(observation),
+        ..client_options()
+    };
+    let response = within(
+        "the call",
+        executor().execute_stream(
+            Arc::new(forwarding(&server.url)),
+            request("gpt-5-codex", HELLO),
+            options,
+        ),
+    )
+    .await
+    .unwrap();
+    let (chunks, error) = collect(response).await;
+    assert!(error.is_none(), "{error:?}");
+    assert_eq!(chunks.len(), 2, "{chunks:?}");
+    for chunk in &chunks {
+        assert_redacted("a chunk", chunk);
+    }
+    assert!(raw.seen().contains(TOKEN), "{}", raw.seen());
+}
+
+// Not upstream's: the same for a call that isn't streamed, whose completed
+// response is translated from the messages redacted.
+#[tokio::test]
+async fn a_successful_call_has_every_secret_sent_redacted() {
+    let frames = turn_saying_the_secrets();
+    let server = Server::once(&[frames[0].as_str(), frames[1].as_str()]).await;
+    let (observation, raw) = crate::secret_echo::Raw::observe();
+    let options = with_header(
+        with_header(options("openai-response"), "x-client-key", FORWARDED_KEY),
+        "cookie",
+        &format!("sid={COOKIE}"),
+    );
+    let options = open_ferry_core::exec::Options {
+        observation: Some(observation),
+        ..options
+    };
+    let response = within(
+        "the call",
+        super::super::execute(
+            &executor(),
+            &forwarding(&server.url),
+            &request("gpt-5-codex", HELLO),
+            &options,
+        ),
+    )
+    .await
+    .unwrap();
+    assert_redacted("the answer", &String::from_utf8_lossy(&response.payload));
+    assert!(raw.seen().contains(TOKEN), "{}", raw.seen());
+}
+
+// Not upstream's: a `response.failed` and an error event that quote the
+// token fail the call, streamed or not, with it redacted from the error.
+#[tokio::test]
+async fn failure_events_have_the_token_redacted() {
+    let failed = format!(
+        r#"{{"type":"response.failed","response":{{"id":"resp-1","status":"failed","error":{{"code":"invalid_api_key","message":"Incorrect API key provided: {TOKEN}"}}}}}}"#
+    );
+    let error_event = format!(
+        r#"{{"type":"error","status":401,"error":{{"code":"invalid_api_key","message":"Incorrect API key provided: {TOKEN}"}}}}"#
+    );
+    for (name, frame) in [
+        ("a failed response", failed),
+        ("an error event", error_event),
+    ] {
+        let server = Server::once(&[frame.as_str()]).await;
+        let auth = auth_with(&server.url, &[("api_key", TOKEN)]);
+        let response = within(
+            "the stream",
+            executor().execute_stream(
+                Arc::new(auth.clone()),
+                request("gpt-5-codex", HELLO),
+                ws_options(""),
+            ),
+        )
+        .await
+        .unwrap();
+        let (chunks, error) = collect(response).await;
+        for chunk in &chunks {
+            assert!(!chunk.contains(TOKEN), "{name}: {chunk}");
+        }
+        let error = error.unwrap_or_else(|| panic!("{name}: the stream ended without an error"));
+        assert!(!error.message.contains(TOKEN), "{name}: {error:?}");
+        assert!(error.message.contains(REDACTED), "{name}: {error:?}");
+
+        let server = Server::once(&[frame.as_str()]).await;
+        let auth = auth_with(&server.url, &[("api_key", TOKEN)]);
+        let error = refused(
+            within(
+                "the call",
+                super::super::execute(
+                    &executor(),
+                    &auth,
+                    &request("gpt-5-codex", HELLO),
+                    &options("openai-response"),
+                ),
+            )
+            .await,
+        );
+        assert!(!error.message.contains(TOKEN), "{name}: {error:?}");
+        assert!(error.message.contains(REDACTED), "{name}: {error:?}");
+    }
 }
 
 thread_local! {
