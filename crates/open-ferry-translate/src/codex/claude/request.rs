@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/translator/codex/claude/codex_claude_request.go (v8.0.10, MIT).
+// Ported from CLIProxyAPI internal/translator/codex/claude/codex_claude_request.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Claude Messages request → Codex (OpenAI Responses) request.
@@ -103,7 +103,16 @@ fn convert(model_name: &str, request: &Value, preserve_unknown_signatures: bool)
     }
     out.insert("stream".into(), true.into());
     out.insert("store".into(), false.into());
-    out.insert("include".into(), json!(["reasoning.encrypted_content"]));
+    // A request with a web search tool also asks for the sources it found.
+    let mut include = vec!["reasoning.encrypted_content"];
+    if tools.is_some_and(|tools| {
+        tools
+            .iter()
+            .any(|tool| is_web_search_tool_type(&str_of(tool.get("type"))))
+    }) {
+        include.push("web_search_call.action.sources");
+    }
+    out.insert("include".into(), json!(include));
     if let Some(format) = text_format(request) {
         out.insert("text".into(), object([("format", format)]));
     }

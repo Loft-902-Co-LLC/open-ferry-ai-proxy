@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/codex/claude/codex_claude_request_test.go,
-// codex_claude_compat_test.go and noop_optimization_test.go (v8.0.10, MIT).
+// codex_claude_compat_test.go and noop_optimization_test.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use serde_json::{Value, json};
@@ -374,6 +374,73 @@ fn tool_choice_specific_function_uses_converted_name() {
     let choice_name = text_at(&out, "tool_choice.name");
     assert_eq!(choice_name, text_at(&out, "tools.0.name"), "{out}");
     assert_ne!(choice_name, long_name, "{out}");
+}
+
+// TestConvertClaudeRequestToCodex_WebSearchSourcesInclude. The translator
+// takes no stream flag, so Go's two passes are one.
+#[test]
+fn web_search_sources_include() {
+    let cases = [
+        ("no tools", "", false),
+        ("empty tools", "[]", false),
+        (
+            "ordinary function",
+            r#"[{"name":"lookup","input_schema":{"type":"object"}}]"#,
+            false,
+        ),
+        (
+            "same name function",
+            r#"[{"name":"web_search","input_schema":{"type":"object"}}]"#,
+            false,
+        ),
+        (
+            "unsupported type",
+            r#"[{"type":"web_search_20990101","name":"web_search"}]"#,
+            false,
+        ),
+        (
+            "20250305",
+            r#"[{"type":"web_search_20250305","name":"web_search"}]"#,
+            true,
+        ),
+        (
+            "20260209",
+            r#"[{"type":"web_search_20260209","name":"web_search"}]"#,
+            true,
+        ),
+        (
+            "custom name",
+            r#"[{"type":"web_search_20250305","name":"browser_search"}]"#,
+            true,
+        ),
+        (
+            "nameless search",
+            r#"[{"type":"web_search_20250305"}]"#,
+            true,
+        ),
+        (
+            "multiple searches and function",
+            r#"[{"type":"web_search_20250305","name":"search_one"},{"type":"web_search_20260209","name":"search_two"},{"name":"lookup","input_schema":{"type":"object"}}]"#,
+            true,
+        ),
+    ];
+    for (name, tools, want_sources) in cases {
+        let mut request =
+            r#"{"model":"claude-opus-4-7","messages":[{"role":"user","content":"hello"}]"#
+                .to_owned();
+        if !tools.is_empty() {
+            request.push_str(r#","tools":"#);
+            request.push_str(tools);
+        }
+        request.push('}');
+        let out = convert("test-model", &request);
+        let want = if want_sources {
+            r#"["reasoning.encrypted_content","web_search_call.action.sources"]"#
+        } else {
+            r#"["reasoning.encrypted_content"]"#
+        };
+        assert_eq!(out["include"].to_string(), want, "{name}");
+    }
 }
 
 #[test]
