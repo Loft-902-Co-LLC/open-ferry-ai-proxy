@@ -2,7 +2,7 @@
 // (GeminiVertexExecutor: Execute, ExecuteStream, CountTokens, Refresh and
 // their service-account and API-key variants, isImagenModel,
 // getVertexAction, convertImagenToGeminiResponse, convertToImagenRequest,
-// vertexCreds, vertexAPICreds, vertexBaseURL) (v8.0.10, MIT).
+// vertexCreds, vertexAPICreds, vertexBaseURL) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! [`VertexExecutor`]: calls Gemini models on Vertex AI.
@@ -129,7 +129,7 @@ impl VertexExecutor {
 
     /// Sends service-account calls to `base_url` instead of Google's.
     #[cfg(test)]
-    fn with_service_account_base_url(mut self, base_url: impl Into<String>) -> Self {
+    pub(super) fn with_service_account_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.service_account_base_url = Some(base_url.into());
         self
     }

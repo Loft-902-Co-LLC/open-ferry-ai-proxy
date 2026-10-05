@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/runtime/executor/gemini_executor.go and
 // gemini_vertex_executor.go (the parts the two executors share)
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Calls to Gemini: [`GeminiExecutor`] for the Gemini API with API keys, and
@@ -67,6 +67,8 @@ mod image;
 pub mod interactions;
 mod sse;
 mod stream;
+#[cfg(test)]
+mod terminal_tests;
 #[cfg(test)]
 pub(crate) mod testing;
 pub(crate) mod thinking;

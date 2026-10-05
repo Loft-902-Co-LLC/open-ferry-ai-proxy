@@ -285,3 +285,42 @@ pub(crate) fn test_service_account(token_uri: &str) -> Map<String, Value> {
     };
     fields
 }
+
+/// A credential with the test service account of project `proxy-test` at
+/// `location`, which gets its tokens from `token_uri`.
+pub(crate) fn service_account_auth(token_uri: &str, location: &str) -> Auth {
+    let mut auth = Auth {
+        provider: "vertex".into(),
+        ..Auth::default()
+    };
+    auth.metadata.insert("type".into(), "vertex".into());
+    auth.metadata
+        .insert("project_id".into(), "proxy-test".into());
+    auth.metadata.insert("location".into(), location.into());
+    auth.metadata.insert(
+        "service_account".into(),
+        Value::Object(test_service_account(token_uri)),
+    );
+    auth
+}
+
+/// Upstream's `executorPatchRequest`.
+pub(crate) const PATCH_REQUEST: &str = r#"{"tools":[{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"apply_patch","format":{"type":"grammar","definition":"start: patch"}}]}],"input":"patch a file"}"#;
+/// Upstream's `executorPatchResponse`.
+pub(crate) const PATCH_RESPONSE: &str = r#"{"responseId":"patch","candidates":[{"content":{"parts":[{"functionCall":{"name":"functions__apply_patch","args":{"input":"  *** Begin Patch\n*** End Patch\n "}}}]},"finishReason":"STOP"}]}"#;
+/// Upstream's `executorPatchInput`.
+pub(crate) const PATCH_INPUT: &str = "  *** Begin Patch\n*** End Patch\n ";
+
+/// Upstream's `assertExecutorPatchOutput`.
+pub(crate) fn assert_patch_output(response: &Value) {
+    let item = response["output"]
+        .as_array()
+        .and_then(|items| items.iter().find(|item| item["type"] == "custom_tool_call"))
+        .unwrap_or(&Value::Null);
+    assert!(
+        item["input"] == PATCH_INPUT
+            && item["name"] == "apply_patch"
+            && item["namespace"] == "functions",
+        "wrong patch output: {response}"
+    );
+}

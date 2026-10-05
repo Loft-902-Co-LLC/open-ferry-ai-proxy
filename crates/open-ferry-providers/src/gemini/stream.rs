@@ -3,7 +3,7 @@
 // executeStreamWithServiceAccount and executeStreamWithAPIKey),
 // helps/apply_patch.go (EndApplyPatchStream, StopApplyPatchStream) and
 // helps/claude_input_tokens.go (TranslateStreamWithClaudeInputTokens)
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A Gemini or Vertex AI SSE stream, read a line at a time and translated
@@ -13,8 +13,10 @@
 //! last chunk's (see [`super::sse`]), and only the JSON object on a line is
 //! translated; blank lines, event names and `[DONE]` are skipped. From
 //! Vertex AI, each line goes to the translator as it is. Either way, when
-//! the stream ends, or the connection fails, the translator finishes and a
-//! final `[DONE]` is translated, then the read error, if any, follows.
+//! the stream ends, the translator finishes and a final `[DONE]` is
+//! translated. When the connection fails instead, the translator finishes
+//! and the read error follows, with no `[DONE]`, so the client gets no
+//! terminal event for an answer that was cut off.
 //!
 //! Deviations from upstream:
 //! - Every line has the secrets the request sent (the API key or token
@@ -177,7 +179,8 @@ impl State {
     }
 
     /// Ends the stream, after a read `error` or at its end: sends what the
-    /// translator still holds and a translated `[DONE]`, then the error.
+    /// translator still holds, then the error or, at the end, a translated
+    /// `[DONE]`.
     async fn end(&mut self, error: Option<LineError>) {
         self.finished = true;
         let chunks = self.setup.translator.finish();
@@ -186,15 +189,16 @@ impl State {
         if tool_input_failed {
             return self.fail();
         }
-        self.send(b"[DONE]").await;
-        if self.setup.translator.tool_input_error().is_some() {
-            return self.fail();
-        }
         if let Some(error) = error {
             tracing::debug!("{}: stream read failed: {error}", self.setup.name);
             self.reader.report(&error);
             self.pending
                 .push_back(Err(ExecError::new(ErrorKind::Upstream, error.to_string())));
+            return;
+        }
+        self.send(b"[DONE]").await;
+        if self.setup.translator.tool_input_error().is_some() {
+            self.fail();
         }
     }
 }

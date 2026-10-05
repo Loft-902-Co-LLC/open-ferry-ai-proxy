@@ -18,8 +18,9 @@ use serde_json::json;
 
 use super::*;
 use crate::gemini::testing::{
-    CLAUDE_SIGNATURE, Mock, OK_ANSWER, OK_STREAM, Reply, collect, function_call_payload, key_auth,
-    native_gemini_signature, options, request, stream_options, test_service_account,
+    CLAUDE_SIGNATURE, Mock, OK_ANSWER, OK_STREAM, PATCH_INPUT, PATCH_REQUEST, PATCH_RESPONSE,
+    Reply, assert_patch_output, collect, function_call_payload, key_auth, native_gemini_signature,
+    options, request, service_account_auth, stream_options,
 };
 
 /// An executor that doesn't use the environment's proxy.
@@ -29,24 +30,6 @@ fn executor() -> VertexExecutor {
 
 fn auth(mock: &Mock) -> Arc<Auth> {
     key_auth("vertex", "test-vertex-key", &mock.url)
-}
-
-/// A credential with the test service account of project `proxy-test` at
-/// `location`, which gets its tokens from `token_uri`.
-fn service_account_auth(token_uri: &str, location: &str) -> Auth {
-    let mut auth = Auth {
-        provider: "vertex".into(),
-        ..Auth::default()
-    };
-    auth.metadata.insert("type".into(), "vertex".into());
-    auth.metadata
-        .insert("project_id".into(), "proxy-test".into());
-    auth.metadata.insert("location".into(), location.into());
-    auth.metadata.insert(
-        "service_account".into(),
-        Value::Object(test_service_account(token_uri)),
-    );
-    auth
 }
 
 /// A token endpoint that hands out `sa-token`.
@@ -163,10 +146,6 @@ async fn execute_leaves_unsigned_request_alone() {
     );
 }
 
-const PATCH_REQUEST: &str = r#"{"tools":[{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"apply_patch","format":{"type":"grammar","definition":"start: patch"}}]}],"input":"patch a file"}"#;
-const PATCH_RESPONSE: &str = r#"{"responseId":"patch","candidates":[{"content":{"parts":[{"functionCall":{"name":"functions__apply_patch","args":{"input":"  *** Begin Patch\n*** End Patch\n "}}}]},"finishReason":"STOP"}]}"#;
-const PATCH_INPUT: &str = "  *** Begin Patch\n*** End Patch\n ";
-
 /// Upstream's `assertExecutorPatchDeclaration`.
 fn assert_patch_declaration(body: &Value) {
     let declaration = &body["tools"][0]["functionDeclarations"][0];
@@ -179,20 +158,6 @@ fn assert_patch_declaration(body: &Value) {
             && schema["properties"]["input"]["type"] == "string"
             && schema["additionalProperties"] == false,
         "missing standard patch declaration: {body}"
-    );
-}
-
-/// Upstream's `assertExecutorPatchOutput`.
-fn assert_patch_output(response: &Value) {
-    let item = response["output"]
-        .as_array()
-        .and_then(|items| items.iter().find(|item| item["type"] == "custom_tool_call"))
-        .unwrap_or(&Value::Null);
-    assert!(
-        item["input"] == PATCH_INPUT
-            && item["name"] == "apply_patch"
-            && item["namespace"] == "functions",
-        "wrong patch output: {response}"
     );
 }
 
