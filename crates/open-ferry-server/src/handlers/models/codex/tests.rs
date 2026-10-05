@@ -1,4 +1,4 @@
-//! Ports these CLIProxyAPI tests (v8.0.10, MIT):
+//! Ports these CLIProxyAPI tests (v8.0.15, MIT):
 //! - internal/api/server_test.go: `TestModelsWithClientVersionReturnsCodexCatalog`,
 //!   `TestCodexClientModelsEndpoint_FiltersMaxAndUltraForOlderClientVersion`
 //!   and `TestModelsWithClientVersionApplyPatchRequiresExecutor`;
@@ -402,11 +402,11 @@ async fn apply_patch_follows_config_reloads() {
             let mut seen = 0;
             for entry in entries(&body) {
                 let want = match entry["slug"].as_str().unwrap() {
-                    "gpt-5.5" | "config-patch-synthetic" if want => json!("freeform"),
-                    "gpt-5.5"
-                    | "config-patch-synthetic"
-                    | "gpt-image-2"
-                    | "config-patch-unknown" => Value::Null,
+                    "gpt-5.5" => json!("freeform"),
+                    "config-patch-synthetic" if want => json!("freeform"),
+                    "config-patch-synthetic" | "gpt-image-2" | "config-patch-unknown" => {
+                        Value::Null
+                    }
                     _ => continue,
                 };
                 seen += 1;
@@ -653,7 +653,11 @@ fn apply_patch_routing() {
             assert_eq!(entries.len(), supported.len() + unsupported.len());
             for entry in &entries {
                 let slug = entry["slug"].as_str().unwrap();
-                let want = if enabled && supported.contains(&slug) {
+                // Models Codex alone serves keep the tool their templates
+                // declare.
+                let want = if (enabled && supported.contains(&slug))
+                    || (!enabled && ["gpt-5.5", "gpt-reserve"].contains(&slug))
+                {
                     json!("freeform")
                 } else {
                     Value::Null

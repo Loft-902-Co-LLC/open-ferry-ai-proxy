@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/client/codex/models/models.go
 // (BuildResponseForClientWithToolCapabilities, MarshalCompact,
 // buildCodexClientModelsWithToolCapabilities and what they call) and
-// apply_patch.go (applyCodexClientApplyPatchCapability) (v8.0.10, MIT).
+// apply_patch.go (applyCodexClientApplyPatchCapability) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The model list Codex clients fetch: `GET /v1/models?client_version=…`.
@@ -22,8 +22,9 @@
 //! - image and video models are hidden;
 //! - models without a template of their own come after the catalog's, in
 //!   order of display name;
-//! - `apply_patch_tool_type` is `freeform` only when the caller says every
-//!   provider routing the model supports the tool, and the model takes text.
+//! - `apply_patch_tool_type` is `freeform` only for a model that takes text
+//!   and that the caller says every provider routing it supports, or, when
+//!   the caller gives no capability, whose entry's template declares it.
 //!
 //! [`marshal_compact`] writes the list as upstream's `MarshalCompact` does.
 //!
@@ -108,7 +109,8 @@ const DEFAULT_PRIORITY: i64 = 100;
 ///
 /// `catalog` gives the models' registered details. `providers_for_model`,
 /// if given, narrows capabilities to the providers serving each model;
-/// `apply_patch`, if given, decides `apply_patch_tool_type`.
+/// `apply_patch`, if given, decides `apply_patch_tool_type`; otherwise a
+/// model keeps what its template declares.
 /// `optimize_multi_agent_v2` advertises multi-agent v2 for every model, and
 /// `client_version` is the client's, which decides its reasoning levels.
 pub fn build_response(
@@ -474,15 +476,15 @@ impl Builder<'_> {
         }
     }
 
-    /// Sets `apply_patch_tool_type`: `freeform` when the capability says so
-    /// for a text model that isn't an image or video model, else `null`
-    /// (`applyCodexClientApplyPatchCapability`). Hidden text models keep the
-    /// tool; entries that don't take text don't get it.
+    /// Sets `apply_patch_tool_type` for a text model that isn't an image or
+    /// video model: `freeform` when the capability says so, or, without a
+    /// capability, when the entry still declares `freeform` from its
+    /// template; else `null` (`applyCodexClientApplyPatchCapability`). Hidden
+    /// text models keep the tool; entries that don't take text don't get it.
     fn apply_apply_patch_capability(&self, entry: &mut Map<String, Value>, id: &str) {
+        let template_supported =
+            entry.get("apply_patch_tool_type").and_then(Value::as_str) == Some("freeform");
         entry.insert("apply_patch_tool_type".into(), Value::Null);
-        let Some(capability) = self.apply_patch else {
-            return;
-        };
         let lower = go::to_lower(id.trim());
         let base_id = match lower.rfind('/') {
             Some(slash) => lower[slash + 1..].trim(),
@@ -502,6 +504,12 @@ impl Builder<'_> {
         if !supports_text && (has_modalities || hidden) {
             return;
         }
+        let Some(capability) = self.apply_patch else {
+            if template_supported {
+                entry.insert("apply_patch_tool_type".into(), "freeform".into());
+            }
+            return;
+        };
         if capability(id.trim()) {
             entry.insert("apply_patch_tool_type".into(), "freeform".into());
         }

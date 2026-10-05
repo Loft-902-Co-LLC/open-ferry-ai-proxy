@@ -1,5 +1,5 @@
 //! Ports CLIProxyAPI internal/client/codex/models/apply_patch_test.go
-//! (v8.0.10, MIT).
+//! (v8.0.15, MIT).
 //!
 //! Changed:
 //! - `TestCodexCatalogApplyPatchCapability` builds its baseline without a
@@ -97,7 +97,19 @@ fn catalog_apply_patch_capability() {
                         build_response(&registry, &available, providers, capability, true, version);
                     let mut response_entries = entries(&response);
                     assert_eq!(response_entries.len(), 1, "{name}");
-                    let want = if want { json!("freeform") } else { Value::Null };
+                    // Without a capability, a model whose template declares
+                    // the tool keeps it, unless other providers serve it.
+                    let template = capability.is_none()
+                        && providers.is_none()
+                        && matches!(
+                            id,
+                            "gpt-5.5" | "catalog-patch-alias" | "team/gpt-5.5" | "gpt-reserve"
+                        );
+                    let want = if want || template {
+                        json!("freeform")
+                    } else {
+                        Value::Null
+                    };
                     assert_eq!(
                         response_entries[0].get("apply_patch_tool_type"),
                         Some(&want),
@@ -124,9 +136,13 @@ fn catalog_apply_patch_without_capability_is_unknown() {
     for version in ["", "0.153.4", "cpa"] {
         let response = build_response(&registry, &available, None, None, false, version);
         for entry in entries(&response) {
+            let want = match entry["slug"].as_str() {
+                Some("gpt-5.5" | "gpt-reserve") => json!("freeform"),
+                _ => Value::Null,
+            };
             assert_eq!(
                 entry.get("apply_patch_tool_type"),
-                Some(&Value::Null),
+                Some(&want),
                 "{version:?} {}",
                 entry["slug"]
             );
@@ -179,4 +195,42 @@ fn apply_patch_field_modalities() {
         );
         assert_eq!(called.get(), want, "{name}: callback called");
     }
+}
+
+// TestCodexCatalogApplyPatch_TemplateModelsRetainFreeformByDefault_Issue6286
+#[test]
+fn template_models_retain_freeform_by_default_issue_6286() {
+    let registry = ModelRegistry::new();
+    let only_entry = |id: &str| {
+        let available = [ModelInfo {
+            id: id.to_owned(),
+            ..ModelInfo::default()
+        }];
+        let response = build_response(&registry, &available, None, None, false, "0.153.4");
+        let mut entries = entries(&response);
+        assert_eq!(entries.len(), 1, "{id}");
+        entries.remove(0)
+    };
+    for id in [
+        "gpt-6.1-sol",
+        "gpt-6-astra",
+        "gpt-6-sol",
+        "gpt-6-luna",
+        "gpt-reserve",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.5",
+    ] {
+        assert_eq!(
+            only_entry(id).get("apply_patch_tool_type"),
+            Some(&json!("freeform")),
+            "{id}"
+        );
+    }
+    // A model without a template of its own still gets null.
+    assert_eq!(
+        only_entry("non-template-custom-model").get("apply_patch_tool_type"),
+        Some(&Value::Null)
+    );
 }
