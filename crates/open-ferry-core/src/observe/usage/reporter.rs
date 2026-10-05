@@ -8,6 +8,7 @@
 // claude_executor_stream.go, codex_executor_execute.go,
 // codex_executor_stream.go, codex_executor_terminal.go
 // (observeCodexTokenEvent), codex_websockets_executor.go,
+// xai_websockets_executor.go,
 // xai_executor_execute.go, xai_executor_stream.go,
 // gemini_executor.go (including executeInteractions and
 // executeInteractionsStream), gemini_vertex_executor.go and
@@ -62,6 +63,11 @@
 //! counts are those of its last `response.completed` or
 //! `response.incomplete`, published when it ends, with none when it named
 //! none; a compaction, streamed or not, is read whole as OpenAI JSON.
+//! Each message on an xAI WebSocket is read as an event, as upstream's
+//! `XAIWebsocketsExecutor` reads it: its time to first token starts when
+//! its request is sent, as a Codex WebSocket's does, and ends at its first
+//! message; its counts are those of its `response.completed` or
+//! `response.done`, published when it ends, with none when it named none.
 //!
 //! A record's `session_id` is the first of the session headers the client
 //! sent (`X-Claude-Code-Session-Id`, `Session-Id`, `Session_id`,
@@ -274,7 +280,7 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
     /// Not recorded: a token count, a plain HTTP call, or a WebSocket that
-    /// isn't Codex's.
+    /// isn't Codex's or xAI's.
     Ignored,
     ClaudeExecute,
     ClaudeStream,
@@ -289,6 +295,7 @@ enum Mode {
     CodexStream,
     CodexWebsocket,
     XaiStream,
+    XaiWebsocket,
 }
 
 impl Mode {
@@ -314,6 +321,7 @@ impl Mode {
             }
             ("xai", AttemptKind::Execute) => Self::CodexExecute,
             ("xai", AttemptKind::Stream) => Self::XaiStream,
+            ("xai", AttemptKind::Websocket) => Self::XaiWebsocket,
             (_, AttemptKind::Websocket) => Self::Ignored,
             ("meta", AttemptKind::Execute) => Self::CodexExecute,
             ("meta", AttemptKind::Stream) => Self::CodexStream,
@@ -347,6 +355,7 @@ impl Mode {
 fn executor_type(provider: &str, kind: Option<AttemptKind>) -> &'static str {
     match provider {
         "codex" if kind == Some(AttemptKind::Websocket) => "CodexWebsocketsExecutor",
+        "xai" if kind == Some(AttemptKind::Websocket) => "XAIWebsocketsExecutor",
         "codex" => "CodexExecutor",
         "claude" => "ClaudeExecutor",
         "meta" => "MetaExecutor",
@@ -701,9 +710,9 @@ impl Call {
         self.event_stream = false;
         self.answered = false;
         self.ended = false;
-        // A Codex WebSocket's clock starts when its request is sent, once
-        // connected (see `Self::request_sent`), not at the dial.
-        if self.mode != Mode::CodexWebsocket {
+        // A Codex or xAI WebSocket's clock starts when its request is sent,
+        // once connected (see `Self::request_sent`), not at the dial.
+        if !matches!(self.mode, Mode::CodexWebsocket | Mode::XaiWebsocket) {
             self.ttft.start(now);
         }
     }
@@ -740,6 +749,7 @@ impl Call {
                 }
             }
             Mode::CodexWebsocket => self.codex_stream_payload(json::trim_space(chunk), now),
+            Mode::XaiWebsocket => self.xai_websocket_payload(json::trim_space(chunk), now),
             _ if self.ended => {}
             mode => {
                 if mode == Mode::CodexStream {
@@ -851,6 +861,20 @@ impl Call {
         }
         self.response_model.observe(payload, &self.provider);
         if is_terminal(payload, &["response.completed", "response.incomplete"]) {
+            self.buffer.observe(parse_codex_usage(payload));
+        }
+    }
+
+    /// Reads a message of an xAI WebSocket: its first marks the first
+    /// byte, and the counts of its `response.completed` or `response.done`
+    /// are kept (upstream's `XAIWebsocketsExecutor.ExecuteStream`).
+    fn xai_websocket_payload(&mut self, payload: &[u8], now: Instant) {
+        if payload.is_empty() {
+            return;
+        }
+        self.ttft.mark_first_response_byte(now);
+        self.response_model.observe(payload, &self.provider);
+        if is_terminal(payload, &["response.completed", "response.done"]) {
             self.buffer.observe(parse_codex_usage(payload));
         }
     }
@@ -983,6 +1007,7 @@ impl Call {
             },
             (_, Outcome::Failed) => Some(failure(Detail::default(), error)),
             (Mode::XaiStream, _) => self.buffered().map(success),
+            (Mode::XaiWebsocket, _) => self.buffered().map(success),
             (_, outcome) => match self.held.take() {
                 Some(held) => Some(Publication {
                     detail: held.detail.unwrap_or_default(),

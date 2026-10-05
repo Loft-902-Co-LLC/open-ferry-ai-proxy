@@ -143,9 +143,8 @@ fn incremental_input_for_model() {
     assert!(found.is_some_and(|auth| auth.websockets && auth.serves_model));
 }
 
-// TestWebsocketUpstreamSupportsIncrementalInputForXAI, inverted: xAI's
-// WebSocket executor isn't ported, so an xAI credential with websockets on,
-// by attribute or metadata, is served over HTTP.
+// TestWebsocketUpstreamSupportsIncrementalInputForXAI, with websockets on
+// by metadata as well as by attribute.
 #[test]
 fn incremental_input_for_xai() {
     let h = Harness::new(Settings::default());
@@ -157,28 +156,28 @@ fn incremental_input_for_xai() {
         Some("auth-xai-ws"),
     )
     .auth;
-    assert!(found.is_some_and(|auth| !auth.websockets && auth.serves_model));
+    assert!(found.is_some_and(|auth| auth.websockets && auth.serves_model));
 
-    let mut off = ws_auth("auth-xai-off", "xai");
-    off.attributes.clear();
-    off.metadata
+    let mut by_metadata = ws_auth("auth-xai-metadata", "xai");
+    by_metadata.attributes.clear();
+    by_metadata
+        .metadata
         .insert("websockets".to_owned(), serde_json::Value::from("TRUE"));
-    h.add(off, &["xai-test-model"]);
+    h.add(by_metadata, &["xai-test-model"]);
     let found = support(
         &h,
         &providers(&["xai"]),
         "xai-test-model",
-        Some("auth-xai-off"),
+        Some("auth-xai-metadata"),
     )
     .auth;
-    assert!(
-        found.is_some_and(|auth| !auth.websockets),
-        "xAI is served over HTTP"
-    );
+    assert!(found.is_some_and(|auth| auth.websockets && auth.serves_model));
 }
 
-// TestResponsesWebsocketUsesUpstreamWebsocketPassthroughForXAI, inverted:
-// xAI's WebSocket executor isn't ported, so there is no passthrough.
+// TestResponsesWebsocketUsesUpstreamWebsocketPassthroughForXAI. The
+// compaction-replay assertion is ours: upstream's
+// `websocketUpstreamSupportsCompactionReplayForModel` is Codex's alone, as
+// here.
 #[test]
 fn upstream_passthrough_for_xai() {
     let h = Harness::new(Settings::default());
@@ -186,7 +185,7 @@ fn upstream_passthrough_for_xai() {
     let model = "xai-passthrough-model";
     h.add(ws_auth("auth-xai-ws", "xai"), &[model]);
     let support = support(&h, &providers(&["xai"]), model, None);
-    assert!(!support.upstream_passthrough);
+    assert!(support.upstream_passthrough);
     assert!(!support.compaction_replay);
 }
 

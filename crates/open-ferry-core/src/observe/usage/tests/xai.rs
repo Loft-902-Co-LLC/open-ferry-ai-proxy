@@ -184,3 +184,88 @@ fn compaction_reads_openai_usage() {
         );
     }
 }
+
+/// An xAI WebSocket call: its request is announced, sent `dial_ms` later,
+/// and each of `messages` comes 10ms after the one before, the first
+/// `wait_ms` after the send.
+fn websocket_call(harness: &Harness, dial_ms: u64, wait_ms: u64, messages: &[&str]) -> Driver {
+    let driver = ClientCall::new(MODEL).stream().tap(harness);
+    driver.attempt_with(
+        AttemptKind::Websocket,
+        "xai",
+        MODEL,
+        &Format::CODEX,
+        &auth("xai-1", "0", "xai"),
+        &[],
+        "{}",
+    );
+    harness.advance_ms(dial_ms);
+    driver.request_sent();
+    harness.advance_ms(wait_ms);
+    for message in messages {
+        driver.chunk(message);
+        harness.advance_ms(10);
+    }
+    driver
+}
+
+/// Not upstream's: each message on an xAI WebSocket is read as an event,
+/// and the counts are those of its `response.completed` or `response.done`,
+/// published when it ends, as upstream's `XAIWebsocketsExecutor` names
+/// itself; its time to first token runs from the send to the first
+/// message, not from the dial.
+#[test]
+fn websocket_reads_codex_usage_at_its_end() {
+    let created =
+        r#"{"type":"response.created","response":{"id":"resp_1","model":"grok-4.3-0709"}}"#;
+    let completed = COMPLETED
+        .lines()
+        .find_map(|line| line.strip_prefix("data: "))
+        .unwrap();
+    for terminal in ["response.completed", "response.done"] {
+        let harness = Harness::new();
+        let terminal_event = completed.replace("response.completed", terminal);
+        let driver = websocket_call(&harness, 300, 25, &[created, &terminal_event]);
+        assert!(harness.records().is_empty(), "published before the end");
+        driver.finish(Outcome::Completed);
+        let record = harness.record();
+        assert_eq!(
+            str_field(&record, "executor_type"),
+            "XAIWebsocketsExecutor",
+            "{record}"
+        );
+        assert!(!bool_at(&record, "/failed"), "{record}");
+        assert_eq!(int_at(&record, "/tokens/total_tokens"), 150, "{terminal}");
+        assert_eq!(int_at(&record, "/tokens/cached_tokens"), 80, "{terminal}");
+        assert_eq!(
+            int_at(&record, "/tokens/reasoning_tokens"),
+            12,
+            "{terminal}"
+        );
+        assert_eq!(int_at(&record, "/ttft_ms"), 25, "{terminal}");
+        assert_eq!(str_field(&record, "response_model"), "grok-4.3-0709");
+    }
+}
+
+/// Not upstream's: an xAI WebSocket that named no counts (its
+/// `response.incomplete` isn't read, as upstream's executor doesn't) publishes
+/// nothing; a failed one is a failure.
+#[test]
+fn websocket_without_counts_or_failed() {
+    let incomplete = COMPLETED
+        .lines()
+        .find_map(|line| line.strip_prefix("data: "))
+        .unwrap()
+        .replace("response.completed", "response.incomplete");
+    let harness = Harness::new();
+    let driver = websocket_call(&harness, 0, 5, &[&incomplete]);
+    driver.finish(Outcome::Completed);
+    assert!(harness.records().is_empty());
+
+    let driver = websocket_call(&harness, 0, 5, &[r#"{"type":"response.created"}"#]);
+    driver.fail(&ExecError::upstream(502, "upstream failed"));
+    let record = harness.record();
+    assert!(bool_at(&record, "/failed"), "{record}");
+    assert_eq!(str_field(&record, "executor_type"), "XAIWebsocketsExecutor");
+    assert_eq!(int_at(&record, "/fail/status_code"), 502);
+}
