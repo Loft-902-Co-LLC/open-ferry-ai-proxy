@@ -15,7 +15,8 @@
 //! searches with their results, usage split between `message_start` and
 //! `message_delta`, and lines that aren't events. Each comes with a generated
 //! request as the client's original, so tool names are mapped back and
-//! request fields echoed.
+//! request fields echoed. The non-streaming translator also gets the whole
+//! Messages responses such streams build (see [`super::claude_native`]).
 //!
 //! Upstream's stream translator finishes pending tool calls by ranging over a
 //! Go map, so with two or more pending at once its output order is random;
@@ -66,6 +67,30 @@ pub fn event_cases(seed: u64, count: usize) -> (Vec<Case>, Vec<Case>) {
             (case(lines), case(vec![body]))
         })
         .unzip()
+}
+
+/// Builds `count` random whole Messages responses, as Claude answers a call
+/// that doesn't stream, for the non-streaming translator: each the message a
+/// random event stream builds, with the client's request it answers.
+pub fn native_cases(seed: u64, count: usize) -> Vec<Case> {
+    (0..count as u64)
+        .map(|index| {
+            let mut generator = Generator::new(seed.rotate_left(53), index);
+            let model =
+                generator
+                    .rng
+                    .pick(&["claude-opus-4-6", "claude-sonnet-4-5-20250929", "", " "]);
+            let request = generator.original_request();
+            let translated_request = generator.translated_request();
+            let events = generator.events();
+            let body = super::claude_native::body(&mut generator.rng, &events);
+            Case {
+                translated_request,
+                events: vec![body],
+                ..Case::new(format!("native-{seed}-{index}"), model, request)
+            }
+        })
+        .collect()
 }
 
 /// Claude models with effort levels, with budgets only, that reject an
@@ -2292,6 +2317,19 @@ mod tests {
                 r#""type":"web_search_call""#,
                 r#""status":"incomplete""#,
                 r#""created_at":"(now)""#,
+            ],
+        );
+        let natives = outputs(Translator::ClaudeResponsesNonStream, &native_cases(1, 1000));
+        check(
+            &natives,
+            &[
+                r#""type":"message""#,
+                r#""type":"reasoning""#,
+                r#""type":"function_call""#,
+                r#""type":"web_search_call""#,
+                r#""annotations":[{"#,
+                r#""status":"incomplete""#,
+                r#""cached_tokens""#,
             ],
         );
     }

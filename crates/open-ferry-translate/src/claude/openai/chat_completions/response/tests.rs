@@ -1,5 +1,6 @@
-// Ported from CLIProxyAPI internal/translator/claude/openai/chat-completions/claude_openai_response_test.go
-// and noop_optimization_test.go (v8.0.10, MIT). https://github.com/router-for-me/CLIProxyAPI
+// Ported from CLIProxyAPI internal/translator/claude/openai/chat-completions/claude_openai_response_test.go,
+// claude_openai_native_response_test.go and noop_optimization_test.go (v8.0.15, MIT).
+// https://github.com/router-for-me/CLIProxyAPI
 
 use serde_json::{Value, json};
 
@@ -495,5 +496,91 @@ fn non_stream_finish_reasons() {
             want,
             "{name}: payload={out}"
         );
+    }
+}
+
+// Ports TestConvertClaudeResponseToOpenAINonStream_NativeMessagesJSON.
+#[test]
+fn non_stream_native_messages_json() {
+    for (name, content, stop_reason, finish_reason, tools) in [
+        (
+            "text",
+            r#"[{"type":"text","text":"Hello "},{"type":"text","text":"world!"}]"#,
+            "end_turn",
+            "stop",
+            false,
+        ),
+        (
+            "tools",
+            r#"[{"type":"text","text":"Hello world!"},{"type":"tool_use","id":"toolu_weather","name":"get_weather","input":{"city":"Paris","days":2}},{"type":"tool_use","id":"toolu_clock","name":"get_time","input":{}}]"#,
+            "tool_use",
+            "tool_calls",
+            true,
+        ),
+        (
+            "max_tokens",
+            r#"[{"type":"text","text":"Hello world!"}]"#,
+            "max_tokens",
+            "length",
+            false,
+        ),
+    ] {
+        let raw = format!(
+            r#"{{"id":"msg_native","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":{content},"stop_reason":"{stop_reason}","stop_sequence":null,"usage":{{"input_tokens":13,"cache_read_input_tokens":7,"cache_creation_input_tokens":3,"output_tokens":5}}}}"#
+        );
+        let out = convert_claude_response_to_openai_chat_completions_non_stream(raw.as_bytes());
+        for (path, want) in [
+            ("id", "msg_native"),
+            ("object", "chat.completion"),
+            ("model", "claude-sonnet-4-6"),
+            ("choices.0.message.role", "assistant"),
+            ("choices.0.message.content", "Hello world!"),
+            ("choices.0.finish_reason", finish_reason),
+        ] {
+            assert_eq!(text_at(&out, path), want, "{name}: {path} in {out}");
+        }
+        assert_eq!(
+            at(&out, "choices").and_then(Value::as_array).map(Vec::len),
+            Some(1)
+        );
+        for (path, want) in [
+            ("usage.prompt_tokens", 23),
+            ("usage.completion_tokens", 5),
+            ("usage.total_tokens", 28),
+            ("usage.prompt_tokens_details.cached_tokens", 7),
+            ("usage.prompt_tokens_details.cached_creation_tokens", 3),
+        ] {
+            assert_eq!(
+                at(&out, path).and_then(Value::as_i64),
+                Some(want),
+                "{name}: {path} in {out}"
+            );
+        }
+        let calls = at(&out, "choices.0.message.tool_calls")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if !tools {
+            assert!(calls.is_empty(), "{name}: unexpected tool calls in {out}");
+            continue;
+        }
+        let calls = Value::Array(calls);
+        assert_eq!(calls.as_array().map(Vec::len), Some(2), "{name}: {out}");
+        for (path, want) in [
+            ("0.id", "toolu_weather"),
+            ("0.type", "function"),
+            ("0.function.name", "get_weather"),
+            ("1.id", "toolu_clock"),
+            ("1.type", "function"),
+            ("1.function.name", "get_time"),
+        ] {
+            assert_eq!(text_at(&calls, path), want, "{name}: tool_calls.{path}");
+        }
+        let arguments: Value =
+            serde_json::from_str(&text_at(&calls, "0.function.arguments")).expect("JSON");
+        assert_eq!(arguments, json!({"city": "Paris", "days": 2}), "{name}");
+        let empty: Value =
+            serde_json::from_str(&text_at(&calls, "1.function.arguments")).expect("JSON");
+        assert_eq!(empty, json!({}), "{name}");
     }
 }

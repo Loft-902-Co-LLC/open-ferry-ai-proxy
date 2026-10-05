@@ -9,7 +9,8 @@
 //! translators, [`responses`] input for the Responses translators, [`chat`]
 //! and [`claude_chat`] input for the Chat Completions translators to Codex and
 //! Claude, [`claude_responses`] input for the Responses translators to
-//! Claude, [`openai_responses`] and [`openai_claude`] input for the
+//! Claude, with whole Messages responses from [`claude_native`] for both,
+//! [`openai_responses`] and [`openai_claude`] input for the
 //! translators between Chat Completions and Responses or Claude,
 //! [`openai_chat`] the Chat Completions responses those read and input for
 //! the Chat Completions passthrough, [`completions`] input for the legacy
@@ -32,6 +33,7 @@
 
 pub mod chat;
 pub mod claude_chat;
+pub mod claude_native;
 pub mod claude_responses;
 pub mod codex_models;
 pub mod completions;

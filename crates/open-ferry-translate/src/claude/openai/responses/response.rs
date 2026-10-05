@@ -7,11 +7,13 @@
 //! [`ClaudeToOpenAIResponsesStream`] turns each Claude event into the
 //! Responses events it implies, and
 //! [`convert_claude_response_to_openai_responses_non_stream`] turns a whole
-//! event stream into one Responses object. Output items are numbered in the
-//! order they start. Text blocks that follow one another share an assistant
-//! message. Thinking blocks become reasoning items; a redacted block's data
-//! rides in `encrypted_content` behind a marker. A server-side web search and
-//! its result fold into one `web_search_call`.
+//! event stream, or a whole Messages response, into one Responses object,
+//! which names the model a whole Messages response names, if any, over the
+//! request's. Output items are numbered in the order they start. Text blocks
+//! that follow one another share an assistant message. Thinking blocks become
+//! reasoning items; a redacted block's data rides in `encrypted_content`
+//! behind a marker. A server-side web search and its result fold into one
+//! `web_search_call`.
 //!
 //! A call to the client's `apply_patch` custom tool streams as custom tool
 //! input: the patch text is decoded from the arguments as they arrive.
@@ -28,7 +30,9 @@
 //!   unpaired surrogate escape or bytes that aren't UTF-8 ends the response
 //!   with `response.failed` if the request declares `apply_patch`, since the
 //!   event could carry part of a patch. Otherwise it gives nothing. Upstream
-//!   reads it.
+//!   reads it. A whole Messages response that can't be read for one of these
+//!   reasons is taken as such a line (see
+//!   [`claude_native_response`](crate::common::claude_native_response)).
 //! - A non-string value read as text is written as compact JSON, where
 //!   upstream uses its JSON text. Where a key appears twice in an object, the
 //!   last one counts; gjson reads the first. Two things are read as upstream
@@ -66,9 +70,10 @@ use super::web_search::{
 };
 use crate::apply_patch::input::{CallState, InputError, failure};
 use crate::apply_patch::is_custom_tool;
+use crate::common::claude_native_response::{Native, messages_json_to_sse};
 use crate::common::request_model_name;
 use crate::common::responses::{echo_fields, pick_request};
-use crate::json::{go_value, int_of, object, path, raw, str_of};
+use crate::json::{go_value, int_of, object, path, raw, set_path, str_of};
 
 /// Translates a Claude event stream into Responses events, one line at a
 /// time. Keep one per response.
@@ -1250,9 +1255,9 @@ impl ClaudeToOpenAIResponsesStream {
 }
 
 /// `ConvertClaudeResponseToOpenAIResponsesNonStream`: a whole Claude event
-/// stream as one Responses object. Lines up to the first `message_stop` are
-/// read. If an `apply_patch` call's arguments are invalid, the result is a
-/// failed response that says nothing about them.
+/// stream, or a whole Messages response, as one Responses object. Lines up to
+/// the first `message_stop` are read. If an `apply_patch` call's arguments
+/// are invalid, the result is a failed response that says nothing about them.
 pub fn convert_claude_response_to_openai_responses_non_stream(
     original_request: &Value,
     request: &Value,
@@ -1316,6 +1321,16 @@ fn non_stream(
     let fail = |response_id: &str, error: ToolInputError| {
         let mut failed = failure(response_id, 0);
         (failed["response"].take(), Some(error))
+    };
+
+    let native = messages_json_to_sse(response);
+    let (response, native_model) = match &native {
+        Native::Events { sse, model } => (sse.as_bytes(), model.as_str()),
+        // Read as a `data:` line that can't be read: it could carry a patch.
+        Native::Unreadable if patch_enabled(&tools) => {
+            return fail(&response_id, ToolInputError::Unreadable);
+        }
+        Native::Unreadable | Native::Other => (response, ""),
     };
 
     for line in response.split(|&b| b == b'\n') {
@@ -1558,6 +1573,11 @@ fn non_stream(
         for (key, value) in echo_fields(request, |_| None) {
             out[key] = value;
         }
+    }
+    // A whole Messages response names the model that answered, over the
+    // request's.
+    if !native_model.is_empty() {
+        set_path(&mut out, "model", native_model.into());
     }
 
     let mut output = Vec::with_capacity(items.len());

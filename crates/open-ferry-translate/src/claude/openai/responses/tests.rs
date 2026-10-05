@@ -6,6 +6,7 @@
 // - claude_openai_responses_compat_test.go → `compat`
 // - noop_optimization_test.go → `noop_optimization`
 // - claude_openai-responses_pause_test.go → `pause`
+// - claude_openai_native_response_test.go → `native`
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Tests that exercise both directions of the translator, often as a round
@@ -1272,5 +1273,124 @@ mod pause {
 
             check("buffered", &non_stream(&lines));
         }
+    }
+}
+
+// Ports claude_openai_native_response_test.go.
+mod native {
+    use super::*;
+
+    // TestConvertClaudeResponseToOpenAIResponsesNonStream_NativeMessagesJSON:
+    // a whole Messages response becomes a whole Responses response.
+    #[test]
+    fn non_stream_native_messages_json() {
+        for (name, content, stop_reason, status, tools) in [
+            (
+                "text",
+                r#"[{"type":"text","text":"Hello "},{"type":"text","text":"world!"}]"#,
+                "end_turn",
+                "completed",
+                false,
+            ),
+            (
+                "tools",
+                r#"[{"type":"text","text":"Hello world!"},{"type":"tool_use","id":"toolu_weather","name":"get_weather","input":{"city":"Paris","days":2}},{"type":"tool_use","id":"toolu_clock","name":"get_time","input":{}}]"#,
+                "tool_use",
+                "completed",
+                true,
+            ),
+            (
+                "max_tokens",
+                r#"[{"type":"text","text":"Hello world!"}]"#,
+                "max_tokens",
+                "incomplete",
+                false,
+            ),
+        ] {
+            let raw = format!(
+                r#"{{"id":"msg_native","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":{content},"stop_reason":"{stop_reason}","stop_sequence":null,"usage":{{"input_tokens":13,"cache_read_input_tokens":7,"cache_creation_input_tokens":3,"output_tokens":5}}}}"#
+            );
+            let request = json!({"model": "claude-sonnet-4-6"});
+            let out = convert_claude_response_to_openai_responses_non_stream(
+                &request,
+                &request,
+                raw.as_bytes(),
+            );
+            for (path, want) in [
+                ("id", "msg_native"),
+                ("object", "response"),
+                ("model", "claude-sonnet-4-6"),
+                ("status", status),
+                ("output.0.type", "message"),
+                ("output.0.role", "assistant"),
+                ("output.0.status", status),
+                ("output.0.content.0.type", "output_text"),
+                ("output.0.content.0.text", "Hello world!"),
+            ] {
+                assert_eq!(text_at(&out, path), want, "{name}: {path} in {out}");
+            }
+            for (path, want) in [
+                ("usage.input_tokens", 23),
+                ("usage.output_tokens", 5),
+                ("usage.total_tokens", 28),
+                ("usage.input_tokens_details.cached_tokens", 7),
+            ] {
+                assert_eq!(
+                    at(&out, path).map(int_of),
+                    Some(want),
+                    "{name}: {path} in {out}"
+                );
+            }
+            if status == "incomplete" {
+                assert_eq!(
+                    text_at(&out, "incomplete_details.reason"),
+                    "max_output_tokens",
+                    "{name}"
+                );
+            } else {
+                assert_eq!(at(&out, "incomplete_details"), Some(&Value::Null), "{name}");
+            }
+            if !tools {
+                assert_eq!(count_at(&out, "output"), 1, "{name}: {out}");
+                continue;
+            }
+            assert_eq!(count_at(&out, "output"), 3, "{name}: {out}");
+            for (path, want) in [
+                ("output.1.call_id", "toolu_weather"),
+                ("output.1.type", "function_call"),
+                ("output.1.name", "get_weather"),
+                ("output.1.status", "completed"),
+                ("output.2.call_id", "toolu_clock"),
+                ("output.2.type", "function_call"),
+                ("output.2.name", "get_time"),
+                ("output.2.status", "completed"),
+            ] {
+                assert_eq!(text_at(&out, path), want, "{name}: {path} in {out}");
+            }
+            let arguments: Value =
+                serde_json::from_str(&text_at(&out, "output.1.arguments")).expect("JSON");
+            assert_eq!(arguments, json!({"city": "Paris", "days": 2}), "{name}");
+            let empty: Value =
+                serde_json::from_str(&text_at(&out, "output.2.arguments")).expect("JSON");
+            assert_eq!(empty, json!({}), "{name}");
+        }
+    }
+
+    // TestNativeMessagesJSONCitations: a text block's citations become the
+    // annotations of its output text.
+    #[test]
+    fn citations() {
+        let raw = r#"{"id":"msg_citations","type":"message","model":"claude-native","content":[{"type":"text","text":"Answer.","citations":[{"type":"web_search_result_location","url":"https://example.com","title":"Source","cited_text":"Answer.","encrypted_index":"IDX"}]}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":2}}"#;
+        let out = non_stream(&[raw.to_owned()]);
+        let annotations = "output.0.content.0.annotations";
+        assert_eq!(count_at(&out, annotations), 1, "{out}");
+        assert_eq!(
+            text_at(&out, &format!("{annotations}.0.url")),
+            "https://example.com"
+        );
+        assert_eq!(
+            text_at(&out, &format!("{annotations}.0.encrypted_index")),
+            "IDX"
+        );
     }
 }

@@ -960,8 +960,20 @@ pub fn streams() -> Vec<Case> {
     cases
 }
 
-/// The same streams as SSE bodies, for the non-streaming translator.
+/// The same streams as SSE bodies, and the whole Messages responses of the
+/// Chat Completions cases, for the non-streaming translator. Upstream's
+/// example of citations answers no request.
 pub fn finals() -> Vec<Case> {
+    let natives = super::claude_chat::native_messages()
+        .into_iter()
+        .map(|(name, body)| {
+            let request = if name == "native-citations" {
+                String::new()
+            } else {
+                original_request()
+            };
+            Case::new(name, "claude-sonnet-4-6", request).with_events(vec![body])
+        });
     event_streams()
         .into_iter()
         .map(|(name, answers, events)| {
@@ -979,6 +991,7 @@ pub fn finals() -> Vec<Case> {
             };
             Case::new(name, "claude-sonnet-4-6", request).with_events(vec![body])
         })
+        .chain(natives)
         .chain([
             Case::new("empty-body", "claude-sonnet-4-6", "").with_events(vec![String::new()]),
             Case::new("no-body", "claude-sonnet-4-6", ""),

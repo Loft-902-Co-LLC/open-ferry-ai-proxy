@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/claude/openai/chat-completions/claude_openai_response.go
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Claude Messages events → OpenAI Chat Completions responses.
@@ -7,13 +7,16 @@
 //! [`ClaudeToOpenAIChatCompletionsStream`] turns each Claude event into at
 //! most one `chat.completion.chunk`, and
 //! [`convert_claude_response_to_openai_chat_completions_non_stream`] turns a
-//! whole event stream into one `chat.completion`. Text and thinking stream as
-//! they come. A tool call is sent whole once its block ends, since Chat
-//! Completions clients expect a call's name and ID with its first chunk.
+//! whole event stream, or a whole Messages response, into one
+//! `chat.completion`. Text and thinking stream as they come. A tool call is
+//! sent whole once its block ends, since Chat Completions clients expect a
+//! call's name and ID with its first chunk.
 //!
 //! Deviations from upstream:
 //! - A `data:` line that is not valid JSON or UTF-8 gives nothing. gjson
-//!   reads what it can from malformed JSON.
+//!   reads what it can from malformed JSON. So does a whole Messages
+//!   response that isn't UTF-8 or that serde_json can't read (see
+//!   [`claude_native_response`](crate::common::claude_native_response)).
 //! - A non-string value read as text is written as compact JSON, where
 //!   upstream uses its JSON text.
 //! - A token count too large for `i64`, such as `1e400`, saturates. Go's result
@@ -27,6 +30,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value, json};
 
+use crate::common::claude_native_response::{Native, messages_json_to_sse};
 use crate::json::{int_of, object, path, str_of};
 
 /// Translates a Claude event stream into Chat Completions chunks, one line at
@@ -207,9 +211,15 @@ fn set_delta(chunk: &mut Map<String, Value>, key: &str, value: Value) {
     }
 }
 
-/// Converts a complete Claude event stream, as SSE text, into one Chat
-/// Completions response. The response names the model Claude reports.
+/// Converts a complete Claude event stream, as SSE text, or a whole Messages
+/// response, into one Chat Completions response. The response names the
+/// model Claude reports.
 pub fn convert_claude_response_to_openai_chat_completions_non_stream(response: &[u8]) -> Value {
+    let native = messages_json_to_sse(response);
+    let response = match &native {
+        Native::Events { sse, .. } => sse.as_bytes(),
+        Native::Other | Native::Unreadable => response,
+    };
     let mut message_id = String::new();
     let mut model = String::new();
     let mut created_at = 0;

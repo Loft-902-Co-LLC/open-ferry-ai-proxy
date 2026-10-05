@@ -8,7 +8,9 @@
 //!
 //! Event streams are Claude's: text, thinking and tool use blocks streamed in
 //! deltas, usage split between `message_start` and `message_delta`, loosely
-//! typed indexes and counts, and lines that aren't events.
+//! typed indexes and counts, and lines that aren't events. The non-streaming
+//! translator also gets the whole Messages responses such streams build (see
+//! [`super::claude_native`]).
 
 use std::ops::{Deref, DerefMut};
 
@@ -54,6 +56,27 @@ pub fn event_cases(seed: u64, count: usize) -> (Vec<Case>, Vec<Case>) {
             (case(lines), case(vec![body]))
         })
         .unzip()
+}
+
+/// Builds `count` random whole Messages responses, as Claude answers a call
+/// that doesn't stream, for the non-streaming translator: each the message a
+/// random event stream builds.
+pub fn native_cases(seed: u64, count: usize) -> Vec<Case> {
+    (0..count as u64)
+        .map(|index| {
+            let mut generator = Generator::new(seed.rotate_left(53), index);
+            let model =
+                generator
+                    .rng
+                    .pick(&["claude-opus-4-6", "claude-sonnet-4-5-20250929", "", " "]);
+            let events = generator.events();
+            let body = super::claude_native::body(&mut generator.rng, &events);
+            Case {
+                events: vec![body],
+                ..Case::new(format!("native-{seed}-{index}"), model, "")
+            }
+        })
+        .collect()
 }
 
 /// Claude models with effort levels, with budgets only, or unknown, and names
@@ -860,6 +883,18 @@ mod tests {
                 r#""finish_reason":"tool_calls""#,
                 r#""cached_tokens""#,
                 r#""created":"(now)""#,
+            ],
+        );
+        let natives = outputs(Translator::ClaudeChatNonStream, &native_cases(1, 1000));
+        check(
+            &natives,
+            &[
+                r#""content":""#,
+                r#""reasoning_content":""#,
+                r#""tool_calls":[{"#,
+                r#""finish_reason":"tool_calls""#,
+                r#""finish_reason":"length""#,
+                r#""cached_tokens""#,
             ],
         );
     }

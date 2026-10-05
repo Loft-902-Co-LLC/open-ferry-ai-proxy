@@ -221,7 +221,10 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
         (
             Translator::ClaudeChatNonStream,
             cases::claude_chat::finals(),
-            claude_chat_finals,
+            claude_chat_finals
+                .into_iter()
+                .chain(generate::claude_chat::native_cases(seed, random / 2))
+                .collect(),
         ),
         (
             Translator::ClaudeResponsesRequest,
@@ -241,7 +244,10 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
         (
             Translator::ClaudeResponsesNonStream,
             cases::claude_responses::finals(),
-            claude_responses_finals,
+            claude_responses_finals
+                .into_iter()
+                .chain(generate::claude_responses::native_cases(seed, random / 2))
+                .collect(),
         ),
         (
             Translator::OpenAIResponsesRequest,

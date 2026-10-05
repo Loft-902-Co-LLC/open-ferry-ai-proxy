@@ -301,9 +301,9 @@ pub fn openai_finals() -> Vec<Case> {
     super::openai_chat::finals()
 }
 
-/// The hand-written Claude streams and bodies. All but the last stream and
-/// the last two bodies hold the same events in turn, so their tool input is
-/// repaired together.
+/// The hand-written Claude streams and bodies. Each stream but the last holds
+/// the same events as the body in its place, so their tool input is repaired
+/// together; the bodies after those are whole Messages responses and empty.
 fn claude_cases() -> (Vec<Case>, Vec<Case>) {
     let mut streams = super::claude_chat::streams();
     let mut finals = super::claude_chat::finals();

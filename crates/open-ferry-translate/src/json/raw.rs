@@ -51,6 +51,29 @@ pub(crate) fn element(array: &str, index: usize) -> Option<&str> {
     None
 }
 
+/// gjson `Array()` on the JSON array `array`: each element as written.
+/// Empty if `array` isn't an array. `array` must be valid JSON.
+pub(crate) fn elements(array: &str) -> Vec<&str> {
+    let bytes = array.as_bytes();
+    let mut found = Vec::new();
+    let mut i = skip_space(bytes, 0);
+    if bytes.get(i) != Some(&b'[') {
+        return found;
+    }
+    i = skip_space(bytes, i + 1);
+    while bytes.get(i).is_some_and(|&b| b != b']') {
+        let Some(end) = scan_value(bytes, i, usize::MAX) else {
+            break;
+        };
+        found.extend(array.get(i..end));
+        i = skip_space(bytes, end);
+        if bytes.get(i) == Some(&b',') {
+            i = skip_space(bytes, i + 1);
+        }
+    }
+    found
+}
+
 /// Whether the quoted, possibly escaped key `raw` is `key`.
 fn key_is(raw: &str, key: &str) -> bool {
     match raw.get(1..raw.len() - 1) {
@@ -243,6 +266,17 @@ mod tests {
         assert_eq!(element(array, 3), None);
         assert_eq!(element("[]", 0), None);
         assert_eq!(element("{}", 0), None);
+    }
+
+    // Not upstream's: the elements of an array, each as written.
+    #[test]
+    fn elements_are_the_values_as_written() {
+        let array = r#" [ {"a": "]"} , 1.50,"x", [ ] ] "#;
+        assert_eq!(elements(array), [r#"{"a": "]"}"#, "1.50", r#""x""#, "[ ]"]);
+        assert!(elements("[]").is_empty());
+        assert!(elements(" [ ] ").is_empty());
+        assert!(elements("{}").is_empty());
+        assert!(elements(r#""[1]""#).is_empty());
     }
 
     #[test]

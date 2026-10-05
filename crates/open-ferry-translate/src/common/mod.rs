@@ -5,6 +5,7 @@
 
 pub(crate) mod cache_control;
 pub(crate) mod claude;
+pub(crate) mod claude_native_response;
 pub(crate) mod file_data;
 pub(crate) mod gemini;
 pub(crate) mod gemini_response;

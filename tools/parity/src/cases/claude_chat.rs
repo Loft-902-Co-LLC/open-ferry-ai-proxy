@@ -584,7 +584,8 @@ pub fn streams() -> Vec<Case> {
     cases
 }
 
-/// The same streams as SSE bodies, for the non-streaming translator.
+/// The same streams as SSE bodies, and whole Messages responses, for the
+/// non-streaming translator.
 pub fn finals() -> Vec<Case> {
     event_streams()
         .into_iter()
@@ -598,9 +599,96 @@ pub fn finals() -> Vec<Case> {
                 .collect();
             Case::new(name, "claude-sonnet-4-6", "").with_events(vec![body])
         })
+        .chain(
+            native_messages().into_iter().map(|(name, body)| {
+                Case::new(name, "claude-sonnet-4-6", "").with_events(vec![body])
+            }),
+        )
         .chain([
             Case::new("empty-body", "claude-sonnet-4-6", "").with_events(vec![String::new()]),
             Case::new("no-body", "claude-sonnet-4-6", ""),
         ])
         .collect()
+}
+
+/// Whole Messages responses, as Claude answers a call that doesn't stream,
+/// with their names: upstream's examples, a search with its results and
+/// citations, blocks written with white space and characters Go escapes,
+/// loosely typed values, and bodies that aren't one.
+pub fn native_messages() -> Vec<(&'static str, String)> {
+    let message = |content: &str, stop_reason: &str| {
+        format!(
+            r#"{{"id":"msg_native","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":{content},"stop_reason":"{stop_reason}","stop_sequence":null,"usage":{{"input_tokens":13,"cache_read_input_tokens":7,"cache_creation_input_tokens":3,"output_tokens":5}}}}"#
+        )
+    };
+    let web_search = format!(
+        r#"{{"id":"msg_search","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[
+  {{"type": "server_tool_use", "id": "srvtoolu_01", "name": "web_search", "input": {{ "query": "rust <serde> & json{}" }}}},
+  {{"type":"web_search_tool_result","tool_use_id":"srvtoolu_01","content":[{{"type":"web_search_result","url":"https://example.com/r","title":"Result","encrypted_content":"EqgfCioIARgBIiQ3","page_age":"2 days ago"}}]}},
+  {{"type":"text","text":"Rust is fast.","citations":[{{"type":"web_search_result_location","url":"https://example.com/r","title":"Result","encrypted_index":"Eo8BCioIBxgCIiQ4","cited_text":"Rust is fast."}}]}}
+],"stop_reason":"end_turn","usage":{{"input_tokens":10,"output_tokens":20,"server_tool_use":{{"web_search_requests":1}}}}}}"#,
+        '\u{2028}'
+    );
+    vec![
+        (
+            "native-text",
+            message(
+                r#"[{"type":"text","text":"Hello "},{"type":"text","text":"world!"}]"#,
+                "end_turn",
+            ),
+        ),
+        (
+            "native-tools",
+            message(
+                r#"[{"type":"text","text":"Hello world!"},{"type":"tool_use","id":"toolu_weather","name":"get_weather","input":{"city":"Paris","days":2}},{"type":"tool_use","id":"toolu_clock","name":"get_time","input":{}}]"#,
+                "tool_use",
+            ),
+        ),
+        (
+            "native-max-tokens",
+            message(r#"[{"type":"text","text":"Hello world!"}]"#, "max_tokens"),
+        ),
+        (
+            "native-citations",
+            r#"{"id":"msg_citations","type":"message","model":"claude-native","content":[{"type":"text","text":"Answer.","citations":[{"type":"web_search_result_location","url":"https://example.com","title":"Source","cited_text":"Answer.","encrypted_index":"IDX"}]}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":2}}"#
+                .to_owned(),
+        ),
+        (
+            "native-every-block",
+            r#"{
+	"id":"msg_native","type":"message","role":"assistant","model":"claude-native",
+	"content":[
+		{"type":"text","text":"line 1\n\"quoted\" \ 雪 <tag>"},
+		{"type":"tool_use","id":"tool_nested","name":"lookup","input":{"nested":{"text":"line\n\"quoted\"","items":[true,null,2]},"empty":{}}},
+		{"type":"tool_use","id":"tool_empty","name":"clock","input":{}},
+		{"type":"thinking","thinking":"plan\nnext","signature":"sig\"native"},
+		{"type":"redacted_thinking","data":"opaque"}
+	],
+	"stop_reason":"stop_sequence","stop_sequence":"END\n",
+	"usage":{"input_tokens":13,"output_tokens":5,"cache_read_input_tokens":7,"cache_creation_input_tokens":3}
+}"#
+            .to_owned(),
+        ),
+        ("native-web-search", web_search),
+        (
+            "native-loose-values",
+            r#" {"type":"message","model":7,"content":[
+                "loose",
+                {"type":"text","text":{"b": 1, "a": 2},"citations":{"url":"u"}},
+                {"type":"thinking","thinking":1.50,"signature":null},
+                {"type":"tool_use","id":"toolu_x","name":"get_weather","input":"text"},
+                {"type":"tool_use","id":"toolu_y","name":"get_time"}
+            ],"stop_reason":1.50,"stop_sequence":{"b":1,"a":[2.50]},"usage":null} "#
+                .to_owned(),
+        ),
+        (
+            "native-not-a-message",
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#
+                .to_owned(),
+        ),
+        (
+            "native-content-not-a-list",
+            r#"{"type":"message","content":"Hello","stop_reason":"end_turn"}"#.to_owned(),
+        ),
+    ]
 }
