@@ -180,9 +180,10 @@ pub(crate) fn safe_log_file_path(
     if !allowed(name) {
         return Err("invalid log file".to_owned());
     }
+    // Go's `filepath.Abs`, which cleans the path too.
     let dir =
         std::path::absolute(dir).map_err(|error| format!("resolve log directory: {error}"))?;
-    Ok(dir.join(name))
+    Ok(open_ferry_core::auth::path::clean(&dir).join(name))
 }
 
 #[cfg(test)]

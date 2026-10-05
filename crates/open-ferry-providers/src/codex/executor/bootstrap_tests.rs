@@ -551,27 +551,43 @@ async fn content_frame_releases_before_overload() {
 // a call is cancelled, closes Codex's connection.
 #[tokio::test]
 async fn dropping_the_call_during_bootstrap_closes_the_upstream() {
+    let arrived = Arc::new(Notify::new());
     let (closed, gone) = oneshot::channel();
     let closed = Arc::new(Mutex::new(Some(closed)));
-    let url = serve(200, move |writer| {
-        let closed = Arc::clone(&closed);
-        async move {
-            writer.write(&format!("data: {CREATED_EVENT}\n\n"));
-            writer.closed().await;
-            if let Some(closed) = closed.lock().unwrap_or_else(PoisonError::into_inner).take() {
-                let _ = closed.send(());
+    let url = serve(200, {
+        let arrived = Arc::clone(&arrived);
+        move |writer| {
+            let arrived = Arc::clone(&arrived);
+            let closed = Arc::clone(&closed);
+            async move {
+                writer.write(&format!("data: {CREATED_EVENT}\n\n"));
+                arrived.notify_one();
+                writer.closed().await;
+                if let Some(closed) = closed.lock().unwrap_or_else(PoisonError::into_inner).take() {
+                    let _ = closed.send(());
+                }
             }
         }
     })
     .await;
     let executor = buffering(true);
-    let call = start(&executor, &url);
+    let mut call = Box::pin(start(&executor, &url));
+    // Codex has the request before the call is dropped: on a busy machine a
+    // fixed wait can end before the call has even connected.
+    tokio::select! {
+        result = &mut call => {
+            panic!("a held handshake must keep the call waiting (ok: {})", result.is_ok());
+        }
+        () = tokio::time::sleep(Duration::from_secs(10)) => panic!("the call must reach Codex"),
+        () = arrived.notified() => {}
+    }
     assert!(
-        tokio::time::timeout(Duration::from_millis(150), call)
+        tokio::time::timeout(Duration::from_millis(150), &mut call)
             .await
             .is_err(),
         "a held handshake must keep the call waiting"
     );
+    drop(call);
     tokio::time::timeout(Duration::from_secs(10), gone)
         .await
         .expect("dropping the call must close Codex's connection")

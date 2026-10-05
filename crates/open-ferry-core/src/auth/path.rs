@@ -57,7 +57,7 @@ fn assemble(prefix: Option<&OsStr>, rooted: bool, parts: &[&OsStr]) -> PathBuf {
 
 /// Go's `filepath.Clean`: the shortest path naming the same file, worked out
 /// without touching the file system.
-pub(crate) fn clean(path: &Path) -> PathBuf {
+pub fn clean(path: &Path) -> PathBuf {
     let parts = split(path);
     assemble(parts.prefix, parts.rooted, &parts.parts)
 }
@@ -111,7 +111,7 @@ pub(crate) fn join(dir: &Path, name: &Path) -> PathBuf {
 
 /// Go's `filepath.Abs`: `path` made absolute against the working directory
 /// and cleaned. A path that can't be made absolute is only cleaned.
-pub(crate) fn absolute(path: &Path) -> PathBuf {
+pub fn absolute(path: &Path) -> PathBuf {
     clean(&std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()))
 }
 

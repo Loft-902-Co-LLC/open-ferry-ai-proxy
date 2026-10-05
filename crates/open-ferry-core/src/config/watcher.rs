@@ -596,9 +596,11 @@ fn normalize_path(os: Os, path: &str) -> String {
     }
 }
 
-/// `path` made absolute, as the file watcher makes it.
+/// `path` made absolute and cleaned, as Go's `filepath.Abs` makes it: on
+/// Unix, [`std::path::absolute`] alone keeps `..`.
 fn absolute(path: &Path, what: &str) -> Result<PathBuf, WatchError> {
     std::path::absolute(path)
+        .map(|path| crate::auth::path::clean(&path))
         .map_err(|error| WatchError::new(format!("{what} {}: {error}", path.display())))
 }
 

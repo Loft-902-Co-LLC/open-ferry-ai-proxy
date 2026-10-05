@@ -267,8 +267,9 @@ fn read_dir(dir: &FsPath) -> io::Result<Vec<Entry>> {
 /// File `file_name` of `dir` as an attachment named `name` (upstream's
 /// checks, then gin's `FileAttachment`).
 fn serve(dir: &FsPath, file_name: OsString, name: &str) -> Response {
+    // Go's `filepath.Abs`, which cleans the path too.
     let dir = match std::path::absolute(dir) {
-        Ok(dir) => dir,
+        Ok(dir) => open_ferry_core::auth::path::clean(&dir),
         Err(error) => return internal(&format!("failed to resolve log directory: {error}")),
     };
     let path = dir.join(file_name);

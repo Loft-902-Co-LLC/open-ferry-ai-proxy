@@ -821,18 +821,13 @@ pub(crate) fn is_linked(error: &io::Error) -> bool {
     error.get_ref().is_some_and(|inner| inner.is::<Linked>())
 }
 
-/// Whether `meta` is a link's: a symlink, or on Windows any reparse point,
-/// a junction included.
+/// Whether `meta` is a link's: a symlink, or any reparse point, a junction
+/// included.
+#[cfg(windows)]
 fn is_link(meta: &fs::Metadata) -> bool {
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-        if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-            return true;
-        }
-    }
-    meta.file_type().is_symlink()
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 || meta.file_type().is_symlink()
 }
 
 /// Reads the file at `path` as

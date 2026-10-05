@@ -35,7 +35,7 @@ mod go;
 mod index;
 pub(crate) mod json;
 pub mod metadata;
-pub(crate) mod path;
+pub mod path;
 mod recent;
 pub mod synthesizer;
 pub mod weight;

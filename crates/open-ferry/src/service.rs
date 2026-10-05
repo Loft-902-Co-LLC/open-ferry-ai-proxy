@@ -971,10 +971,14 @@ fn compat_provider(auth: &Auth) -> Option<String> {
     auth.openai_compat_info().map(|(provider, _)| provider)
 }
 
-/// `dir` made absolute against the current directory, as the watcher makes
-/// it; unchanged when that fails, as for an empty path.
+/// `dir` made absolute against the current directory and cleaned, as the
+/// watcher makes it, so that both name an auth file alike; unchanged when
+/// that fails, as for an empty path.
 fn absolute_dir(dir: PathBuf) -> PathBuf {
-    std::path::absolute(&dir).unwrap_or(dir)
+    match std::path::absolute(&dir) {
+        Ok(absolute) => open_ferry_core::auth::path::clean(&absolute),
+        Err(_) => dir,
+    }
 }
 
 /// Creates the auth directory if needed, readable by its owner only
@@ -1582,6 +1586,18 @@ mod tests {
         assert!(!is_stale(&existing, &at(3, 5)));
         assert!(!is_stale(&existing, &at(0, 0)));
         assert!(!is_stale(&existing, &at(2, 0)));
+    }
+
+    /// Not upstream's: Go's `filepath.Abs` cleans, but on Unix
+    /// `std::path::absolute` alone keeps `..`.
+    #[test]
+    fn the_auth_dir_is_made_absolute_and_cleaned() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            absolute_dir(PathBuf::from("auths/../creds/.")),
+            cwd.join("creds")
+        );
+        assert_eq!(absolute_dir(PathBuf::new()), PathBuf::new());
     }
 
     /// `path` relative to the current directory, when they share a root.
