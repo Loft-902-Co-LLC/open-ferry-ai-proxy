@@ -2,7 +2,9 @@
 // config_types.go, config_load.go, config_v8.go, config_normalization.go,
 // parse.go, config_defaults.go and what they call), internal/safemode and
 // internal/watcher (watcher.go, config_reload.go, events.go, dispatcher.go)
-// (v8.0.10, MIT; config_v8.go and oauth_scope.go as of v8.0.11).
+// (v8.0.10, MIT; config_v8.go and oauth_scope.go as of v8.0.11; config.go's
+// `models` section and internal/registry/catalog_config.go (CatalogSources)
+// as of v8.0.15).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The proxy's configuration: loading it and watching it for changes.
@@ -49,9 +51,9 @@
 //! - Session affinity: `routing.session-affinity`,
 //!   `routing.session-affinity-ttl` and `routing.session-affinity-subagents`.
 //! - Other providers: `antigravity`, `antigravity-signature-*`, `devin`.
-//! - Features not ported here: `plugins`, `pprof`, `discovery`,
-//!   `gpt-image-2-base-model`, `video-result-auth-cache-ttl`,
-//!   `codex.live-media-relay`.
+//! - Features not ported here: `plugins`, `pprof`, `discovery`, `models`
+//!   (the model catalog sources), `gpt-image-2-base-model`,
+//!   `video-result-auth-cache-ttl`, `codex.live-media-relay`.
 //! - Deferred: `credential-concurrency` and `credential-in-flight`.
 //!
 //! Upstream's `home` section has no YAML form and isn't read.
@@ -61,6 +63,9 @@
 //!   management key, no removal of overridden legacy fields).
 //! - The ignored sections above aren't typed, so a value of the wrong type
 //!   inside them isn't an error.
+//! - The `models` sources aren't checked: a `catalog`, `codex-catalog` or
+//!   `devin-catalog` that is neither an http(s) URL nor an absolute path
+//!   loads here, where upstream refuses the config.
 //! - Each submodule lists its own deviations.
 
 mod decode;

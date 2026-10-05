@@ -1,5 +1,5 @@
 // Ported from the flag definitions in CLIProxyAPI cmd/server/main.go, read
-// the way Go's flag package reads them (v8.0.10, MIT).
+// the way Go's flag package reads them (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The command line.
@@ -85,7 +85,7 @@ const DEFINITIONS: [Definition; 7] = [
     },
     Definition {
         name: "local-model",
-        usage: "Use the embedded model catalog only (remote catalog updates aren't ported, so this is always so)",
+        usage: "Use the embedded model catalogs only (remote catalog updates and catalog sources aren't ported, so this is always so)",
         kind: Kind::Bool(|flags| &mut flags.local_model),
     },
     Definition {

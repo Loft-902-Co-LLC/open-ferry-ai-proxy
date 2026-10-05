@@ -1,6 +1,7 @@
 // Ported from CLIProxyAPI internal/config/config_load.go (LoadConfig),
 // parse.go (ParseConfigBytes), config_v8.go (Config.UnmarshalYAML) and
-// weight.go (validateCredentialWeightYAML) (v8.0.10, MIT).
+// weight.go (validateCredentialWeightYAML) (v8.0.10, MIT), without the
+// `models` check Config.UnmarshalYAML makes as of v8.0.15.
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Loading a config file or parsing a config payload.
@@ -2271,5 +2272,29 @@ mod tests {
                  line 1: cannot unmarshal !!map into []string"
             ))
         );
+    }
+
+    // Not upstream's: model_catalogs_test.go's TestModelCatalogConfigValidation
+    // (v8.0.15) has upstream refuse the first six sources. The catalog
+    // sources aren't ported, so `models` is read and ignored, and they load.
+    #[test]
+    fn model_catalog_sources_are_ignored() {
+        let base = parse("port: 8317\n");
+        for field in ["catalog", "codex-catalog", "devin-catalog"] {
+            for source in [
+                "relative.json",
+                "./models.json",
+                "~/models.json",
+                "ftp://example.com/models",
+                "file:///tmp/models.json",
+                "https:///models",
+                "https://example.com/models.json",
+                "",
+            ] {
+                let config = parse(&format!("port: 8317\nmodels:\n  {field}: '{source}'\n"));
+                assert_eq!(config, base, "{field}: {source}");
+            }
+        }
+        assert_eq!(parse("port: 8317\nmodels: {}\n"), base);
     }
 }

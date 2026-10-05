@@ -1,9 +1,11 @@
 // Ported from CLIProxyAPI internal/config/config_v8.go (NormalizeConfigLayout
 // as a v8 write runs it, groupLegacyKeys, commentUnknownV8Sections,
-// commentUnknownV8Fields, v8AllowedRoots), config_v8_api.go
-// (ProjectV8ConfigAliases) and internal/api/handlers/management/config_v8.go
-// (configV8Node, deleteConfigV8Path and the TURN secret redaction of
-// ConfigV8) (v8.0.11, MIT), with the rules of gopkg.in/yaml.v3 v3.0.1
+// commentUnknownV8Fields), config_v8_api.go (ProjectV8ConfigAliases) and
+// internal/api/handlers/management/config_v8.go (configV8Node,
+// deleteConfigV8Path and the TURN secret redaction of ConfigV8) (v8.0.11,
+// MIT), and config_v8.go (v8AllowedRoots, and the `models` section
+// commentUnknownV8Sections keeps) (v8.0.15, MIT), with the rules of
+// gopkg.in/yaml.v3 v3.0.1
 // decode.go (decoding into `any`: decoder.scalar, decoder.mapping,
 // isStringMap; Apache-2.0).
 // https://github.com/router-for-me/CLIProxyAPI
@@ -36,8 +38,8 @@
 //!
 //! Deviations from upstream:
 //! - The tables of v8 sections and the fields they hold are fixed tables
-//!   generated from v8.0.11; upstream builds them by reflecting over its
-//!   `Config` struct.
+//!   generated from v8.0.11, with v8.0.15's `models` section; upstream
+//!   builds them by reflecting over its `Config` struct.
 //! - Upstream comments out the sections it drops, and logs a warning for
 //!   each; they are dropped here without a trace, as the result is never
 //!   written.
@@ -102,6 +104,7 @@ const V8_ROOTS: &[&str] = &[
     "config-version",
     "credentials",
     "management",
+    "models",
     "multimedia",
     "oauth",
     "observability",
@@ -165,6 +168,7 @@ const V8_CHILDREN: &[(&str, &[&str])] = &[
             "secret-key",
         ],
     ),
+    ("models", &["catalog", "codex-catalog", "devin-catalog"]),
     (
         "multimedia",
         &[
@@ -1006,6 +1010,42 @@ mod tests {
                 ("base-url", text("u")),
                 ("keys", AnyValue::Seq(vec![map(&[("api-key", text("k"))])])),
             ])]))
+        );
+    }
+
+    /// Not upstream's: the `models` section (v8.0.15) is kept, from a legacy
+    /// file or a v8 one, less the keys it doesn't know, and a source is
+    /// read as the file has it, even one the loader would refuse. Recorded
+    /// from upstream's `ConfigV8` (v8.0.15) under Go 1.26.4.
+    #[test]
+    fn model_catalog_sources_are_kept() {
+        let document = migrate(
+            "port: 1\nmodels:\n  catalog: https://catalog.invalid/models.json\n  \
+             codex-catalog: ''\n  bogus: 1\n",
+        );
+        assert_eq!(
+            get(&document, "models"),
+            Some(map(&[
+                ("catalog", text("https://catalog.invalid/models.json")),
+                ("codex-catalog", text("")),
+            ]))
+        );
+        let document = migrate(
+            "config-version: 8\nmodels: {devin-catalog: https://devin.invalid/d.json, extra: [1]}\n\
+             server: {port: 2}\n",
+        );
+        assert_eq!(
+            get(&document, "models"),
+            Some(map(&[(
+                "devin-catalog",
+                text("https://devin.invalid/d.json")
+            )]))
+        );
+        assert_eq!(get(&document, "models/catalog"), None);
+        let document = migrate("port: 1\nmodels: {catalog: relative/models.json}\n");
+        assert_eq!(
+            get(&document, "models"),
+            Some(map(&[("catalog", text("relative/models.json"))]))
         );
     }
 

@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI cmd/server/main.go (v8.0.10, MIT).
+// Ported from CLIProxyAPI cmd/server/main.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The `open-ferry` command: serves the proxy, or runs a login.
@@ -10,8 +10,11 @@
 //! Deviations from upstream:
 //! - The cloud-deploy, home, Postgres, object-store and git-store modes, the
 //!   TUI, plugins and the other providers' logins aren't ported.
-//! - Remote model catalog updates aren't ported, so `-local-model` changes
-//!   nothing but a log line: the built-in catalog is always the one used.
+//! - Remote model catalog updates and the catalog sources of the `models`
+//!   section (`catalog`, `codex-catalog`, `devin-catalog`) aren't ported, so
+//!   `-local-model` changes nothing but a log line: the built-in catalogs are
+//!   always the ones used. Its usage and log line say so, where upstream's
+//!   say an explicit catalog source still overrides the embedded catalogs.
 //! - A config that won't load, or an auth directory that won't resolve,
 //!   exits with 1; upstream logs it and exits with 0.
 
