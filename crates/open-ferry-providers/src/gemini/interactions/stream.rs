@@ -1,7 +1,8 @@
 // Ported from CLIProxyAPI internal/runtime/executor/gemini_executor.go
 // (executeInteractionsStream's reader, geminiInteractionsSSEPayload,
-// geminiInteractionsSSEDone), helps/apply_patch.go (EndApplyPatchStream,
-// StopApplyPatchStream) and helps/claude_input_tokens.go
+// geminiInteractionsSSEDone), helps/apply_patch.go
+// (InitializeApplyPatchStream, EndApplyPatchStream, StopApplyPatchStream)
+// and helps/claude_input_tokens.go
 // (TranslateStreamWithClaudeInputTokens) (v8.0.10, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
@@ -14,7 +15,11 @@
 //! `[DONE]`, or that is an `event: done` frame, is translated as `[DONE]`,
 //! and a frame that is bare JSON as it is. When the stream ends, or the
 //! connection fails, the last frame is sent and the translator finishes,
-//! then the read error, if any, follows; no `[DONE]` is added.
+//! then the read error, if any, follows; no `[DONE]` is added. For an
+//! OpenAI Responses client the translator is started before the first
+//! frame, so that a request with the `apply_patch` tool whose stream ends
+//! before its terminal event, even with nothing at all, fails with one
+//! `response.failed` and the `apply_patch` 502.
 //!
 //! Deviations from upstream:
 //! - Every line has the secrets the request sent (the API key among them)
@@ -70,7 +75,14 @@ struct State {
 }
 
 /// Translates the Interactions stream in `response` to the client's format.
-pub(super) fn translate(response: reqwest::Response, setup: StreamSetup) -> ChunkStream {
+pub(super) fn translate(response: reqwest::Response, mut setup: StreamSetup) -> ChunkStream {
+    if setup.response_format == Format::OPENAI_RESPONSE {
+        // `InitializeApplyPatchStream`: an empty chunk starts the
+        // translator, so it fails a patch request at the end of even an
+        // empty stream. Upstream also checks the request has the patch
+        // tool; the translator only fails a stream for one that has.
+        setup.translator.translate(b"");
+    }
     let claude = claude_tokens::State::new(
         &setup.source_format,
         &Format::INTERACTIONS,

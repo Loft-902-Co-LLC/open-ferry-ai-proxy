@@ -1,6 +1,7 @@
 // Ported from CLIProxyAPI internal/runtime/executor/openai_compat_executor.go
 // (the stream reader of ExecuteStream), helps/apply_patch.go
-// (EndApplyPatchStream) and helps/claude_input_tokens.go
+// (InitializeApplyPatchStream, EndApplyPatchStream) and
+// helps/claude_input_tokens.go
 // (TranslateStreamWithClaudeInputTokens) (v8.0.10, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
@@ -17,7 +18,10 @@
 //!
 //! A stream that closes without `[DONE]` is finished as if it had sent one,
 //! except for an OpenAI Responses client, which needs a terminal event and
-//! gets a 502 instead.
+//! gets a 502 instead. For such a client the translator is started before
+//! the first line, so that a request with the `apply_patch` tool whose
+//! stream ends before its terminal event, even with nothing at all, fails
+//! with one `response.failed` and the `apply_patch` 502.
 //!
 //! Deviations from upstream:
 //! - Dropping the stream stops reading, where upstream watches its context.
@@ -94,7 +98,14 @@ struct State {
 }
 
 /// Translates the provider's stream in `response` to the client's format.
-pub(crate) fn translate(response: reqwest::Response, setup: StreamSetup) -> ChunkStream {
+pub(crate) fn translate(response: reqwest::Response, mut setup: StreamSetup) -> ChunkStream {
+    if setup.response_format == Format::OPENAI_RESPONSE {
+        // `InitializeApplyPatchStream`: an empty line starts the translator,
+        // so it fails a patch request at the end of even an empty stream.
+        // Upstream also checks the request has the patch tool; the
+        // translator only fails a stream for one that has.
+        setup.translator.translate(b"");
+    }
     let claude = claude_tokens::State::new(
         &setup.source_format,
         &Format::OPENAI,

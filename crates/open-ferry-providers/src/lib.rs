@@ -10,6 +10,8 @@
 //! [`payload`] applies the config's payload rules to the bodies the
 //! executors send.
 
+#[cfg(test)]
+mod apply_patch_bridge_tests;
 pub mod apply_patch_responses;
 pub mod claude;
 mod claude_code_session;
