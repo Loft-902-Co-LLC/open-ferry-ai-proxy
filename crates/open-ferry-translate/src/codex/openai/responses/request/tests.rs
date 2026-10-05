@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/codex/openai/responses/codex_openai-responses_request_test.go
-// (v8.0.10, MIT). https://github.com/router-for-me/CLIProxyAPI
+// (v8.0.15, MIT). https://github.com/router-for-me/CLIProxyAPI
 
 use serde_json::{Value, json};
 
@@ -216,6 +216,120 @@ fn reuses_normalized_payload() {
         convert_openai_responses_request_to_codex("gpt-5.6", serde_json::from_str(raw).unwrap());
 
     assert_eq!(out.to_string(), raw, "normalized request changed");
+}
+
+// TestConvertOpenAIResponsesRequestToCodex_PreservesWebSearchSourcesInclude.
+// The translator takes no stream flag here, so Go's two passes are one. Go
+// also checks the caller's bytes are unchanged; Rust takes the request by
+// value.
+#[test]
+fn preserves_web_search_sources_include() {
+    let reasoning_only = ["reasoning.encrypted_content"].as_slice();
+    let reasoning_and_sources = [
+        "reasoning.encrypted_content",
+        "web_search_call.action.sources",
+    ]
+    .as_slice();
+    let cases = [
+        ("missing include", "", reasoning_only),
+        ("null include", "null", reasoning_only),
+        (
+            "string include",
+            r#""web_search_call.action.sources""#,
+            reasoning_only,
+        ),
+        (
+            "object include",
+            r#"{"web_search_call.action.sources":true}"#,
+            reasoning_only,
+        ),
+        ("non-string entries", "[42,true]", reasoning_only),
+        ("empty array", "[]", reasoning_only),
+        (
+            "sources alone",
+            r#"["web_search_call.action.sources"]"#,
+            reasoning_and_sources,
+        ),
+        (
+            "reasoning then sources",
+            r#"["reasoning.encrypted_content","web_search_call.action.sources"]"#,
+            reasoning_and_sources,
+        ),
+        (
+            "sources before reasoning",
+            r#"["web_search_call.action.sources","reasoning.encrypted_content"]"#,
+            reasoning_and_sources,
+        ),
+        (
+            "duplicate sources",
+            r#"["web_search_call.action.sources","web_search_call.action.sources"]"#,
+            reasoning_and_sources,
+        ),
+        (
+            "unsupported entries filtered",
+            r#"["file_search_call.results","web_search_call.action.sources","code_interpreter_call.outputs"]"#,
+            reasoning_and_sources,
+        ),
+        (
+            "non-string entries alongside sources",
+            r#"[42,"web_search_call.action.sources",null]"#,
+            reasoning_and_sources,
+        ),
+    ];
+    for (name, include, want) in cases {
+        let mut input = json!({
+            "model": "gpt-5.6",
+            "input": [{"type": "message", "role": "user", "content": "hi"}]
+        });
+        if !include.is_empty() {
+            input["include"] = serde_json::from_str(include).unwrap();
+        }
+        let out = convert_openai_responses_request_to_codex("gpt-5.6", input);
+        assert_eq!(at(&out, "include"), Some(&json!(want)), "{name}: {out}");
+    }
+}
+
+// TestConvertOpenAIResponsesRequestToCodex_WebSearchToolDoesNotOptIntoSources
+#[test]
+fn web_search_tool_does_not_opt_into_sources() {
+    let out = convert_openai_responses_request_to_codex(
+        "gpt-5.6",
+        json!({
+            "model": "gpt-5.6",
+            "input": "find python asyncio docs",
+            "tools": [{"type": "web_search"}],
+            "tool_choice": "required"
+        }),
+    );
+    assert_eq!(
+        at(&out, "include"),
+        Some(&json!(["reasoning.encrypted_content"])),
+        "{out}"
+    );
+}
+
+// TestConvertOpenAIResponsesRequestToCodexReusesNormalizedPayloadWithSources.
+// As in reuses_normalized_payload, this compares the text; the request comes
+// parsed, so the spaces the client wrote aren't kept.
+#[test]
+fn reuses_normalized_payload_with_sources() {
+    for include in [
+        r#"["reasoning.encrypted_content","web_search_call.action.sources"]"#,
+        r#"[ "reasoning.encrypted_content" , "web_search_call.action.sources" ]"#,
+        r#"[ "reasoning.encrypted_content" ]"#,
+    ] {
+        let raw = format!(
+            r#"{{"model":"gpt-5.6","stream":true,"store":false,"parallel_tool_calls":true,"include":{include},"service_tier":"priority","input":[{{"type":"message","role":"user","content":"hello"}}]}}"#
+        );
+        let input: Value = serde_json::from_str(&raw).unwrap();
+        let want = input.to_string();
+        let out = convert_openai_responses_request_to_codex("gpt-5.6", input);
+        assert_eq!(
+            out.to_string(),
+            want,
+            "normalized request changed: {include}"
+        );
+    }
 }
 
 #[test]

@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/codex/openai/responses/codex_openai-responses_response_test.go
-// (v8.0.10, MIT). https://github.com/router-for-me/CLIProxyAPI
+// (v8.0.15, MIT). https://github.com/router-for-me/CLIProxyAPI
 //
 // TestApplyPatchResponsesActualRequestGatesNativeCodex is split in two:
 // apply_patch_call_passes_through and only_an_executor_bridge_converts.
@@ -77,6 +77,137 @@ fn non_stream_incomplete() {
         text_at(&out, "incomplete_details.reason"),
         "max_output_tokens",
         "payload={out}"
+    );
+}
+
+const SEARCH_ITEM: &str = r#"{"id":"ws_fixture_0123456789abcdef0123456789abcdef","type":"web_search_call","status":"completed","action":{"type":"search","queries":["python asyncio documentation"],"query":"python asyncio documentation","sources":[{"type":"url","url":"https://docs.python.org/3.13/library/asyncio.html"},{"type":"url","url":"https://docs.python.org/3/library/asyncio-task.html?highlight=n"}]}}"#;
+const MESSAGE_ITEM: &str = r#"{"id":"msg_fixture_0123456789abcdef0123456789abcdef","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Python docs","annotations":[{"type":"url_citation","start_index":0,"end_index":11,"title":"asyncio","url":"https://docs.python.org/3/library/asyncio.html?trk=article-ssr-frontend-pulse_little-text-block&utm_source=openai"}]}]}"#;
+const CITATION_URL: &str = "https://docs.python.org/3/library/asyncio.html?trk=article-ssr-frontend-pulse_little-text-block&utm_source=openai";
+
+// TestConvertCodexResponseToOpenAIResponses_PreservesWebSearchSources
+#[test]
+fn preserves_web_search_sources() {
+    let request = json!({});
+    let stream = CodexToOpenAIResponsesStream::new("gpt-6-luna", &request, &request);
+
+    let done = format!(
+        r#"data: {{"type":"response.output_item.done","output_index":0,"item":{SEARCH_ITEM}}}"#
+    );
+    let out = payload(&stream.translate_line(done.as_bytes()));
+    assert_eq!(
+        text_at(&out, "item.id"),
+        "ws_fixture_0123456789abcdef0123456789abcdef"
+    );
+    let sources = at(&out, "item.action.sources")
+        .and_then(Value::as_array)
+        .expect("sources");
+    assert_eq!(sources.len(), 2, "{out}");
+    assert_eq!(
+        text_at(&out, "item.action.sources.0.url"),
+        "https://docs.python.org/3.13/library/asyncio.html"
+    );
+    assert_eq!(
+        text_at(&out, "item.action.sources.1.url"),
+        "https://docs.python.org/3/library/asyncio-task.html?highlight=n"
+    );
+
+    let completed = format!(
+        r#"data: {{"type":"response.completed","response":{{"id":"resp_04f9","status":"completed","output":[{SEARCH_ITEM},{MESSAGE_ITEM}]}}}}"#
+    );
+    let out = payload(&stream.translate_line(completed.as_bytes()));
+    assert_eq!(
+        text_at(&out, "response.output.0.action.sources.1.url"),
+        "https://docs.python.org/3/library/asyncio-task.html?highlight=n"
+    );
+    assert_eq!(
+        text_at(&out, "response.output.1.id"),
+        "msg_fixture_0123456789abcdef0123456789abcdef"
+    );
+    assert_eq!(
+        text_at(&out, "response.output.1.content.0.annotations.0.url"),
+        CITATION_URL
+    );
+}
+
+// TestConvertCodexResponseToOpenAIResponsesNonStream_PreservesWebSearchSources
+#[test]
+fn non_stream_preserves_web_search_sources() {
+    let raw = format!(
+        r#"{{"type":"response.completed","response":{{"id":"resp_04f9","status":"completed","output":[{SEARCH_ITEM},{MESSAGE_ITEM}]}}}}"#
+    );
+    let out =
+        convert_codex_response_to_openai_responses_non_stream(serde_json::from_str(&raw).unwrap())
+            .expect("terminal event converts");
+
+    assert_eq!(
+        text_at(&out, "output.0.id"),
+        "ws_fixture_0123456789abcdef0123456789abcdef"
+    );
+    let sources = at(&out, "output.0.action.sources")
+        .and_then(Value::as_array)
+        .expect("sources");
+    assert_eq!(sources.len(), 2, "{out}");
+    assert_eq!(
+        text_at(&out, "output.0.action.sources.0.url"),
+        "https://docs.python.org/3.13/library/asyncio.html"
+    );
+    assert_eq!(
+        text_at(&out, "output.0.action.sources.1.url"),
+        "https://docs.python.org/3/library/asyncio-task.html?highlight=n"
+    );
+    assert_eq!(
+        text_at(&out, "output.1.content.0.annotations.0.type"),
+        "url_citation"
+    );
+    assert_eq!(
+        text_at(&out, "output.1.content.0.annotations.0.url"),
+        CITATION_URL
+    );
+}
+
+// TestConvertCodexResponseToOpenAIResponses_MissingSourcesStayAbsentWithCitation
+#[test]
+fn missing_sources_stay_absent_with_citation() {
+    let search_item = r#"{"id":"ws_missing","type":"web_search_call","status":"completed","action":{"type":"search","query":"python asyncio documentation"}}"#;
+    let message_item =
+        MESSAGE_ITEM.replace("msg_fixture_0123456789abcdef0123456789abcdef", "msg_cited");
+    let request = json!({});
+    let stream = CodexToOpenAIResponsesStream::new("gpt-6-luna", &request, &request);
+
+    let done = format!(
+        r#"data: {{"type":"response.output_item.done","output_index":0,"item":{search_item}}}"#
+    );
+    let out = payload(&stream.translate_line(done.as_bytes()));
+    assert!(
+        at(&out, "item.action.sources").is_none(),
+        "sources should not be fabricated on output_item.done: {out}"
+    );
+
+    let completed = format!(
+        r#"{{"type":"response.completed","response":{{"id":"resp_missing","status":"completed","output":[{search_item},{message_item}]}}}}"#
+    );
+    let out = payload(&stream.translate_line(format!("data: {completed}").as_bytes()));
+    assert!(
+        at(&out, "response.output.0.action.sources").is_none(),
+        "sources should not be fabricated on response.completed: {out}"
+    );
+    assert_eq!(
+        text_at(&out, "response.output.1.content.0.annotations.0.type"),
+        "url_citation",
+        "{out}"
+    );
+
+    let out = convert_codex_response_to_openai_responses_non_stream(
+        serde_json::from_str(&completed).unwrap(),
+    )
+    .expect("terminal event converts");
+    assert!(
+        at(&out, "output.0.action.sources").is_none(),
+        "sources should not be fabricated on non-stream response: {out}"
+    );
+    assert_eq!(
+        text_at(&out, "output.1.content.0.annotations.0.url"),
+        CITATION_URL
     );
 }
 

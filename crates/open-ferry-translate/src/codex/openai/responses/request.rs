@@ -1,13 +1,14 @@
 // Ported from CLIProxyAPI internal/translator/codex/openai/responses/codex_openai-responses_request.go
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! OpenAI Responses request → Codex request.
 //!
 //! Codex speaks the Responses API, so the request mostly passes through. We set
 //! the fields Codex requires, drop the ones it rejects, and rename what it
-//! spells differently. The request is edited in place, so a body that needs no
-//! changes comes back without being copied.
+//! spells differently. `include` asks for the encrypted reasoning, and keeps
+//! asking for web search sources when the client did. The request is edited in
+//! place, so a body that needs no changes comes back without being copied.
 //!
 //! Deviations from upstream:
 //! - `prompt_cache_breakpoint` is removed from `input` even when the key is
@@ -35,6 +36,12 @@ const UNSUPPORTED_FIELDS: &[&str] = &[
 
 const CACHE_BREAKPOINT: &str = "prompt_cache_breakpoint";
 
+/// The `include` entry asking for encrypted reasoning, which Codex requires.
+const ENCRYPTED_REASONING: &str = "reasoning.encrypted_content";
+
+/// The `include` entry asking for a web search call's sources.
+const WEB_SEARCH_SOURCES: &str = "web_search_call.action.sources";
+
 /// Converts a Responses request into the request Codex expects. `model` is
 /// unused: the executor sets the upstream model.
 pub fn convert_openai_responses_request_to_codex(_model: &str, mut request: Value) -> Value {
@@ -58,13 +65,7 @@ pub fn convert_openai_responses_request_to_codex(_model: &str, mut request: Valu
     require(fields, "stream", Value::Bool(true));
     require(fields, "store", Value::Bool(false));
     require(fields, "parallel_tool_calls", Value::Bool(true));
-    let include_ok = matches!(
-        fields.get("include"),
-        Some(Value::Array(items)) if items.len() == 1 && items[0] == "reasoning.encrypted_content"
-    );
-    if !include_ok {
-        fields.insert("include".into(), json!(["reasoning.encrypted_content"]));
-    }
+    require_include(fields);
     normalize_service_tier(fields);
     for key in UNSUPPORTED_FIELDS {
         fields.shift_remove(*key);
@@ -91,6 +92,29 @@ pub fn convert_openai_responses_request_to_codex(_model: &str, mut request: Valu
 fn require(fields: &mut Map<String, Value>, key: &str, value: Value) {
     if fields.get(key) != Some(&value) {
         fields.insert(key.into(), value);
+    }
+}
+
+/// Sets `include` to the encrypted reasoning, followed by web search sources
+/// if the client asked for them; every other entry is dropped
+/// (`setCodexRequiredInclude`). An `include` already in that form is kept.
+fn require_include(fields: &mut Map<String, Value>) {
+    let include_sources = matches!(
+        fields.get("include"),
+        Some(Value::Array(items)) if items.iter().any(|item| item == WEB_SEARCH_SOURCES)
+    );
+    let want: &[&str] = if include_sources {
+        &[ENCRYPTED_REASONING, WEB_SEARCH_SOURCES]
+    } else {
+        &[ENCRYPTED_REASONING]
+    };
+    let normalized = matches!(
+        fields.get("include"),
+        Some(Value::Array(items)) if items.len() == want.len()
+            && items.iter().zip(want).all(|(item, want)| item == *want)
+    );
+    if !normalized {
+        fields.insert("include".into(), json!(want));
     }
 }
 
