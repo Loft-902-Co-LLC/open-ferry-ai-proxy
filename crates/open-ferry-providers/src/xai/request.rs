@@ -3,7 +3,11 @@
 // applyXAIDefaultHeaders, applyXAICustomHeaders, xaiExecutionSessionID,
 // normalizeXAIImageRefs, preserveXAIResponsesOutputControls) and the
 // image/video routing of xai_executor_execute.go and xai_executor_media.go
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
+// https://github.com/router-for-me/CLIProxyAPI
+//
+// Also ported from CLIProxyAPI internal/runtime/executor/helps/payload_finalizer.go
+// (NewPayloadFinalizer, for xAI) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The body, headers and URL of an xAI request.
@@ -11,12 +15,17 @@
 //! The client's payload is translated to Codex's Responses format (or, for
 //! `responses/compact`, to OpenAI's), keeps the client's output limits and
 //! sampling settings, has its thinking setting applied (see
-//! [`super::thinking`]) and the config's payload rules, and is adjusted as
-//! upstream does: the model without its thinking suffix, `stream` set as the
-//! call needs, fields xAI refuses dropped, a custom `apply_patch` tool
-//! declared as a function (see [`crate::apply_patch_responses`]), the tools
-//! reshaped for Grok (see [`super::tools`]), reasoning xAI can't take
-//! dropped (see [`super::reasoning`]), and `instructions` filled in.
+//! [`super::thinking`]), and is adjusted as upstream does: the model without
+//! its thinking suffix, `stream` set as the call needs, fields xAI refuses
+//! dropped, a custom `apply_patch` tool declared as a function (see
+//! [`crate::apply_patch_responses`]), the tools reshaped for Grok (see
+//! [`super::tools`]), reasoning xAI can't take dropped (see
+//! [`super::reasoning`]), and `instructions` filled in.
+//!
+//! The config's payload rules apply last, to the body as it is sent
+//! ([`Prepared::finalize`]): each call applies them once it has shaped the
+//! body, a compact call or a token count included, and the WebSocket call to
+//! its message (see [`Finalizer`]).
 //!
 //! Calls go to `<base>/responses` (or `/responses/compact`), where `<base>`
 //! is the credential's `base_url` attribute, else its `base_url` metadata,
@@ -143,6 +152,57 @@ pub(crate) struct Prepared {
     pub(crate) web_search_alias: String,
     /// The session whose reasoning is replayed.
     pub(crate) replay: replay::Scope,
+    /// Applies the config's payload rules.
+    pub(crate) finalizer: Finalizer,
+}
+
+impl Prepared {
+    /// Applies the config's payload rules to the body, which is then as it
+    /// is sent (`prepared.finalizePayload`).
+    pub(crate) fn finalize(
+        &mut self,
+        config: Option<&Config>,
+        request: &Request,
+        options: &Options,
+    ) {
+        self.finalizer
+            .apply(config, request, options, &mut self.body);
+    }
+}
+
+/// The config's payload rules for a prepared request
+/// (`helps.NewPayloadFinalizer`), applied once to the body as it is sent.
+pub(crate) struct Finalizer {
+    /// The model without its thinking suffix.
+    model: String,
+    /// The format the body is in.
+    to: Format,
+    stream: bool,
+    /// The client's request, translated as the body was, which the rules'
+    /// conditions read.
+    original: Value,
+}
+
+impl Finalizer {
+    /// Applies the config's payload rules to `body`.
+    pub(crate) fn apply(
+        &self,
+        config: Option<&Config>,
+        request: &Request,
+        options: &Options,
+        body: &mut Value,
+    ) {
+        let target = payload::Target {
+            executor: PROVIDER,
+            protocol: &self.to,
+            model: &self.model,
+            root: "",
+            stream: self.stream,
+            tracked: &[],
+            translate: Some(&|_| self.original.clone()),
+        };
+        payload::apply(config, &target, request, options, body);
+    }
 }
 
 /// Whether the call is for upstream's image or video handler, which isn't
@@ -268,16 +328,6 @@ pub(crate) fn prepare(
         &json::Body::parse(&options.original_request),
         context.models,
     )?;
-    let target = payload::Target {
-        executor: PROVIDER,
-        protocol: &to,
-        model: &base,
-        root: "",
-        stream,
-        tracked: &[],
-        translate: Some(&|_| original_translated.clone()),
-    };
-    payload::apply(config, &target, request, options, &mut body);
     set_string_if_different(&mut body, "model", &base);
     set_bool_if_different(&mut body, "stream", stream);
     for field in DROPPED_FIELDS {
@@ -351,6 +401,12 @@ pub(crate) fn prepare(
     if !session_id.is_empty() {
         set_string_if_different(&mut body, "prompt_cache_key", &session_id);
     }
+    let finalizer = Finalizer {
+        model: base.clone(),
+        to: to.clone(),
+        stream,
+        original: original_translated,
+    };
     Ok(Prepared {
         apply_patch,
         base_model: base,
@@ -365,6 +421,7 @@ pub(crate) fn prepare(
         session_id,
         web_search_alias,
         replay,
+        finalizer,
     })
 }
 

@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/runtime/executor/gemini_executor.go
 // (GeminiExecutor: Execute, ExecuteStream, CountTokens, Refresh,
 // geminiAPIKey, resolveGeminiBaseURL, capGeminiMaxOutputTokens)
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! [`GeminiExecutor`]: calls the Gemini API with the credential's API key.
@@ -104,22 +104,36 @@ impl GeminiExecutor {
             self.models(),
             PROVIDER,
         )?;
-        let target = payload::Target {
-            executor: PROVIDER,
-            protocol: &Format::GEMINI,
-            model: base,
-            root: "",
-            stream,
-            tracked: &[],
-            translate: None,
-        };
-        payload::apply(self.config.as_deref(), &target, request, options, &mut body);
         set_string_if_different(&mut body, "model", base);
         cap_max_output_tokens(&mut body, base, self.models());
         sanitize_gemini_request_thought_signatures(&mut body, "contents");
         turns::ensure_boundary_user(&mut body, "contents");
         json::delete(&mut body, "session_id");
+        self.apply_payload_rules(request, options, stream, None, &mut body);
         Ok(body)
+    }
+
+    /// Applies the config's payload rules to `body`, as it is sent. The
+    /// default rules check the client's request as `translate` translates
+    /// it, else as it is translated to Gemini.
+    fn apply_payload_rules(
+        &self,
+        request: &Request,
+        options: &Options,
+        stream: bool,
+        translate: Option<&dyn Fn(Value) -> Value>,
+        body: &mut Value,
+    ) {
+        let target = payload::Target {
+            executor: PROVIDER,
+            protocol: &Format::GEMINI,
+            model: base_model(&request.model),
+            root: "",
+            stream,
+            tracked: &[],
+            translate,
+        };
+        payload::apply(self.config.as_deref(), &target, request, options, body);
     }
 
     async fn execute_inner(
@@ -215,6 +229,7 @@ impl GeminiExecutor {
             PROVIDER,
         )?;
         prepare_count_body(&mut body, base);
+        self.apply_payload_rules(request, options, false, None, &mut body);
         let url = model_url(auth, base, "countTokens");
         let headers = build_headers(auth, options, &Credential::ApiKey(api_key(auth)), NAME)?;
         let (response, secrets) = post(

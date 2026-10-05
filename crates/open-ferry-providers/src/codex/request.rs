@@ -5,7 +5,7 @@
 // helps/payload_mutations.go, internal/util/codex.go,
 // internal/util/header_helpers.go, internal/misc/header_utils.go,
 // internal/thinking/suffix.go and helps/model_capabilities.go
-// (ApplyRequestThinking) (v8.0.10, MIT).
+// (ApplyRequestThinking) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The body, headers and URL of a Codex request.
@@ -17,7 +17,10 @@
 //! dropped, `instructions` filled in, reasoning items and tool schemas
 //! cleaned, `parallel_tool_calls` matched to the tools, and input item IDs
 //! made acceptable. A credential's compatibility models and Codex clients'
-//! multi-agent requests are handled as the `compat` module says.
+//! multi-agent requests are handled as the `compat` module says. The
+//! config's payload rules apply last, to the body as it is sent, a token
+//! count's included; the answer is translated against the body as it was
+//! before the prompt cache key, the item IDs and the rules.
 //!
 //! Deviations from upstream:
 //! - No `User-Agent`, `Originator`, `Session-Id` or `X-Codex-Routing-Hint`
@@ -118,8 +121,9 @@ pub(crate) struct Context<'a> {
 pub(crate) struct Body {
     /// What to send.
     pub(crate) body: Value,
-    /// The translated request before the prompt cache key and item IDs were
-    /// set, which response translators see as the request.
+    /// The translated request before the prompt cache key, the item IDs
+    /// and the payload rules were applied, which response translators see
+    /// as the request.
     pub(crate) translated: Value,
     /// Whether a native Codex client sent it ([`is_native`]).
     pub(crate) native: bool,
@@ -352,10 +356,10 @@ pub(crate) fn prepare_body(
         &json::Body::parse(&options.original_request),
         context.models,
     )?;
-    // Upstream counts tokens without the payload rules. A Codex target
-    // skips the Codex clients' integer pass, which `payload::apply` runs
-    // for the other executors.
-    if kind != Kind::CountTokens {
+    // The payload rules apply last, to the body as it is sent. A Codex
+    // target skips the Codex clients' integer pass, which `payload::apply`
+    // runs for the other executors.
+    let apply_rules = |body: &mut Value| {
         let target = payload::Target {
             executor: "codex",
             protocol: &to,
@@ -367,8 +371,8 @@ pub(crate) fn prepare_body(
                 compat::translate(kind, context, request, options, &to, stream, payload)
             }),
         };
-        payload::apply(context.config, &target, request, options, &mut body);
-    }
+        payload::apply(context.config, &target, request, options, body);
+    };
 
     match kind {
         Kind::Execute => {
@@ -403,6 +407,7 @@ pub(crate) fn prepare_body(
     }
     normalize_instructions(&mut body, native);
     if kind == Kind::CountTokens {
+        apply_rules(&mut body);
         let translated = body.clone();
         return Ok(Body {
             body,
@@ -421,6 +426,7 @@ pub(crate) fn prepare_body(
         set_string_if_different(&mut body, "prompt_cache_key", &key);
     }
     sanitize_input_item_ids(&mut body);
+    apply_rules(&mut body);
     Ok(Body {
         body,
         translated,

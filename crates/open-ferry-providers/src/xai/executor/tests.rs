@@ -749,11 +749,12 @@ async fn compact_uses_compact_endpoint() {
         "max_output_tokens",
         "temperature",
         "top_p",
-        "top_k",
         "stop",
     ] {
         assert!(!exists(&body, field), "{field} in {body}");
     }
+    // The rules apply after the compact body is shaped.
+    assert_eq!(body["top_k"], 10, "{body}");
     assert_eq!(body["input"][0]["encrypted_content"], encrypted);
     assert_eq!(body["input"][1]["role"], "user");
     assert_eq!(

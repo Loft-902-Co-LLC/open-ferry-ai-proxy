@@ -1,7 +1,8 @@
 //! Tests of the payload rules, ported from upstream's
 //! internal/runtime/executor/helps/payload_helpers_codex_integer_test.go,
-//! payload_helpers_disable_image_generation_test.go and
-//! payload_mutations_test.go, and from the executors' payload tests.
+//! payload_helpers_disable_image_generation_test.go,
+//! payload_mutations_test.go and payload_finalizer_test.go, and from the
+//! executors' payload tests (see [`executors`]).
 //!
 //! Upstream tests not ported:
 //! - `TestSetStringIfDifferentReusesCanonicalValue`,
@@ -22,11 +23,15 @@
 //! - The executors' payload tests for features not ported: cloaking,
 //!   billing headers, sensitive words, Fable,
 //!   AI Studio, Antigravity and xAI.
+//! - `TestPayloadFinalizerDevinBusinessFieldsAndCredentials` and
+//!   `TestPayloadFinalizerMultipartPreservesFiles` test the Devin protobuf
+//!   and multipart media bodies, which aren't ported.
 
 mod codex_integer;
 mod disable_image_generation;
 mod engine;
 mod executors;
+mod finalizer;
 mod payload_mutations;
 
 use http::HeaderMap;

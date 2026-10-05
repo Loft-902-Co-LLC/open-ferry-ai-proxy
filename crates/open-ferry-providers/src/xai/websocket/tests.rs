@@ -1,6 +1,7 @@
-// Ported from CLIProxyAPI internal/runtime/executor/xai_websockets_executor_test.go
-// and the WebSocket mode of xai_executor_test.go's
-// TestXAIApplyPatchDispatcherEvidenceLifecycle (v8.0.10, MIT).
+// Ported from CLIProxyAPI internal/runtime/executor/xai_websockets_executor_test.go,
+// the WebSocket mode of xai_executor_test.go's
+// TestXAIApplyPatchDispatcherEvidenceLifecycle and payload_barrier_test.go's
+// TestPayloadBarrierXAIWebsocketRetry (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The Responses WebSocket upstream against a mock xAI on 127.0.0.1 (Codex's
@@ -451,15 +452,56 @@ async fn sends_response_create_with_previous_response_id() {
 // TestBuildXAIWebsocketRequestBodySetsStoreAndKeepsPromptCacheKey
 #[test]
 fn request_message_sets_store_and_keeps_prompt_cache_key() {
-    let message = super::message::request_message(&json(
-        r#"{"model":"grok-4.3","stream":true,"stream_options":{"include_usage":true},"background":true,"prompt_cache_key":"cache-1","previous_response_id":"resp-prev","instructions":"system prompt","input":[{"type":"message","role":"user","content":"hello"}]}"#,
-    ));
+    let message = super::message::request_message(
+        &json(
+            r#"{"model":"grok-4.3","stream":true,"stream_options":{"include_usage":true},"background":true,"prompt_cache_key":"cache-1","previous_response_id":"resp-prev","instructions":"system prompt","input":[{"type":"message","role":"user","content":"hello"}]}"#,
+        ),
+        |_| {},
+    );
     assert_eq!(str_at(&message, "type"), "response.create");
     for field in ["stream", "stream_options", "background", "instructions"] {
         assert!(!exists(&message, field), "{field}: {message}");
     }
     assert_eq!(str_at(&message, "prompt_cache_key"), "cache-1");
     assert_eq!(message["store"], json!(true));
+}
+
+// TestPayloadBarrierXAIWebsocketRetry: the config's payload rules apply to
+// the message as it is framed, the `type` stays, and a retry sends the same
+// message. Changed: the body is prepared as a call prepares it.
+#[test]
+fn payload_rules_apply_to_the_message_once() {
+    let config = open_ferry_core::config::Config::parse(
+        "payload:\n  override:\n    - models:\n        - name: \"*\"\n      params:\n        store: false\n        instructions: configured\n  filter:\n    - models:\n        - name: \"*\"\n      params:\n        - input.0\n        - previous_response_id\n",
+    )
+    .expect("config parses");
+    let request = Request {
+        model: "grok-4.3".into(),
+        payload: Bytes::from_static(
+            br#"{"previous_response_id":"previous","input":[{"content":"first"},{"content":"second"}]}"#,
+        ),
+    };
+    let options = open_ferry_core::exec::Options::new(Format::OPENAI_RESPONSE);
+    let context = crate::codex::request::Context {
+        auth: None,
+        config: Some(&config),
+        models: None,
+    };
+    let prepared = crate::xai::request::prepare(context, &request, &options, true, Format::CODEX)
+        .expect("prepares");
+    let finalize = |message: &mut Value| {
+        prepared
+            .finalizer
+            .apply(Some(&config), &request, &options, message);
+    };
+    let first = super::message::request_message(&prepared.body, finalize);
+    let retry = super::message::request_message(&prepared.body, finalize);
+    assert_eq!(first, retry);
+    assert_eq!(first["store"], json!(false), "{first}");
+    assert_eq!(str_at(&first, "instructions"), "configured", "{first}");
+    assert!(!exists(&first, "previous_response_id"), "{first}");
+    assert_eq!(first["input"].as_array().map(Vec::len), Some(1), "{first}");
+    assert_eq!(str_at(&first, "type"), "response.create", "{first}");
 }
 
 // TestXAIWebsocketsExecuteStreamCompletesGenerateFalseWarmup

@@ -1,8 +1,9 @@
 // Ported from CLIProxyAPI internal/runtime/executor/codex_websockets_executor_test.go,
 // codex_websockets_executor_store_test.go, websocket_proxy_reuse_test.go,
 // websocket_session_target_test.go, websocket_lifecycle_bind_test.go,
-// websocket_upstream_disconnect_test.go and
-// codex_websockets_spawn_agent_test.go (v8.0.15, MIT).
+// websocket_upstream_disconnect_test.go, codex_websockets_spawn_agent_test.go
+// and the WebSocket half of payload_barrier_test.go's
+// TestPayloadBarrierCodexImageFilter (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The Responses WebSocket upstream against a mock Codex on 127.0.0.1 (see
@@ -405,6 +406,62 @@ async fn stream_responses_lite_turns_parallel_tool_calls_off() {
         get(&message(&server, 0), "parallel_tool_calls"),
         Some(&json!(false))
     );
+}
+
+// TestPayloadBarrierCodexImageFilter, on the WebSocket, without the image
+// generation tool, which isn't ported: a filter removes the `instructions`
+// and the `prompt_cache_key` the message gets after the translation, from a
+// call and a stream.
+#[tokio::test]
+async fn payload_filter_applies_to_the_message() {
+    let config = Config::parse(
+        r#"
+payload:
+  filter:
+    - models:
+        - name: gpt-5.6-sol
+      params:
+        - 'tools.#(type=="image_generation")#'
+        - instructions
+        - prompt_cache_key
+"#,
+    )
+    .unwrap();
+    let executor = executor_with(config);
+    for stream in [false, true] {
+        for model in ["gpt-5.6-sol", "gpt-5.6-luna"] {
+            let server = Server::once(&[COMPLETED]).await;
+            let request = request(
+                model,
+                r#"{"input":"hello","prompt_cache_key":"injected-cache"}"#,
+            );
+            let auth = auth(&server.url);
+            if stream {
+                let options = Options {
+                    stream: true,
+                    ..options("openai-response")
+                };
+                let response = super::execute_stream(&executor, &auth, request, options)
+                    .await
+                    .unwrap();
+                let (_, error) = collect(response).await;
+                assert!(error.is_none(), "{error:?}");
+            } else {
+                within(
+                    "the call",
+                    super::execute(&executor, &auth, &request, &options("openai-response")),
+                )
+                .await
+                .unwrap();
+            }
+            let sent = message(&server, 0);
+            let filtered = model == "gpt-5.6-sol";
+            let case = format!("{model} stream={stream}: {sent}");
+            assert_eq!(!exists(&sent, "instructions"), filtered, "{case}");
+            assert_eq!(!exists(&sent, "prompt_cache_key"), filtered, "{case}");
+            assert_eq!(str_at(&sent, "type"), "response.create", "{case}");
+        }
+    }
 }
 
 // TestCodexWebsocketsExecutePreservesPreviousResponseIDUpstream

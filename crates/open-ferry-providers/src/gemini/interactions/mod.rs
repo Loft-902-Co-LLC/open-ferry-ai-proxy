@@ -3,7 +3,7 @@
 // Identifier, RequestToFormat, the Interactions branches of Execute and
 // ExecuteStream, executeInteractions, executeInteractionsStream,
 // shouldExecuteNativeInteractions, nativeInteractionsSourceFormat,
-// isNativeInteractionsAuth) (v8.0.10, MIT).
+// isNativeInteractionsAuth) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! [`InteractionsExecutor`]: the `gemini-interactions` provider, which
@@ -14,9 +14,10 @@
 //! credential, goes to `{base_url}/v1beta/interactions`: the client's
 //! request is translated to Interactions (an Interactions client's is
 //! copied), its `model` set to the model without its suffix, its thinking
-//! setting applied (`thinking`), the payload rules applied, and the IDs
-//! the API rejects removed from its input (`request`). A stream asks for
-//! one with `stream: true`, and its frames are translated to the client's
+//! setting applied (`thinking`), and the IDs the API rejects removed from
+//! its input (`request`). A stream asks for one with `stream: true`. The
+//! payload rules apply last, to the body as it is sent. A stream's frames
+//! are translated to the client's
 //! format, or passed on as they came to an Interactions client (`stream`).
 //! A stream to an OpenAI Responses client whose request declares the custom
 //! `apply_patch` tool fails with the patch error if it ends before it
@@ -177,11 +178,12 @@ impl InteractionsExecutor {
             tracked: &[],
             translate: Some(&translate),
         };
-        payload::apply(config, &target, request, options, &mut body);
         sanitize_input_ids(&mut body);
         if stream {
             set_bool_if_different(&mut body, "stream", true);
         }
+        // The rules see the body as it is sent.
+        payload::apply(config, &target, request, options, &mut body);
         Ok(body)
     }
 

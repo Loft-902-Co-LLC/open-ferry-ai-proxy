@@ -4,8 +4,8 @@
 // body preparation of codex_websockets_execute.go (Execute) and
 // codex_websockets_stream.go (prepareCodexWebsocketStream), and
 // codex_websockets_connection.go (buildCodexResponsesWebsocketURL,
-// buildCodexWebsocketRequestBody, normalizeCodexWebsocketParallelToolCalls)
-// (v8.0.10, MIT).
+// buildCodexWebsocketRequestBody, frameCodexWebsocketRequestBody,
+// normalizeCodexWebsocketParallelToolCalls) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The `response.create` message, URL and handshake headers of a WebSocket
@@ -16,8 +16,10 @@
 //! `stream` and drops only `prompt_cache_retention` and
 //! `safety_identifier`; a streaming one drops nothing; and
 //! `parallel_tool_calls` is only turned off for a Responses Lite request,
-//! never dropped. The message is the body with its input item IDs made
-//! acceptable and `"type":"response.create"` added.
+//! never dropped. Once the prompt cache key is set, the input item IDs are
+//! made acceptable and the config's payload rules apply last, so they see
+//! the body as it is sent; the message is that body with
+//! `"type":"response.create"` added, for a retry too.
 //!
 //! The handshake sends the token, `OpenAI-Beta:
 //! responses_websockets=2026-02-06` (or the client's own value if it names
@@ -40,8 +42,7 @@
 //!   native client's thread and window headers when it's off), the routing
 //!   hint and models.json `override_header` aren't ported.
 //! - No `Content-Type` or `Accept` is sent, as upstream sends none.
-//! - The image generation tool isn't added, and payload rules are left to
-//!   [`crate::payload`], as for HTTP.
+//! - The image generation tool isn't added, as for HTTP.
 //! - The URL is read as a WHATWG URL when connecting, so its `.` and `..`
 //!   segments are resolved, percent-encoded ones such as `%2e%2e` included,
 //!   and a `\` reads as `/`. Gorilla sends `/a/%2e%2e/v1/responses` as
@@ -146,26 +147,6 @@ pub(super) fn prepare(
         &json::Body::parse(&options.original_request),
         context.models,
     )?;
-    let target = payload::Target {
-        executor: "codex-websockets",
-        protocol: &to,
-        model: base,
-        root: "",
-        stream: kind == Kind::Stream,
-        tracked: &[],
-        translate: Some(&|payload| {
-            compat::translate(
-                kind,
-                context,
-                request,
-                options,
-                &to,
-                kind == Kind::Stream,
-                payload,
-            )
-        }),
-    };
-    payload::apply(context.config, &target, request, options, &mut body);
     set_string_if_different(&mut body, "model", base);
     if kind == Kind::Execute {
         set_bool_if_different(&mut body, "stream", true);
@@ -189,8 +170,30 @@ pub(super) fn prepare(
     {
         set_string_if_different(&mut body, "prompt_cache_key", &key);
     }
+    sanitize_input_item_ids(&mut body);
+    // The rules see the body as it is sent.
+    let target = payload::Target {
+        executor: "codex-websockets",
+        protocol: &to,
+        model: base,
+        root: "",
+        stream: kind == Kind::Stream,
+        tracked: &[],
+        translate: Some(&|payload| {
+            compat::translate(
+                kind,
+                context,
+                request,
+                options,
+                &to,
+                kind == Kind::Stream,
+                payload,
+            )
+        }),
+    };
+    payload::apply(context.config, &target, request, options, &mut body);
     let headers = build_headers(auth, &options.headers, native)?;
-    let message = message(&body);
+    let message = frame(&body);
     Ok(Prepared {
         body,
         native,
@@ -203,10 +206,19 @@ pub(super) fn prepare(
     })
 }
 
-/// The `response.create` message for `body` (`buildCodexWebsocketRequestBody`).
+/// The `response.create` message for `body`, its input item IDs made
+/// acceptable (`buildCodexWebsocketRequestBody`).
+#[cfg(test)]
 pub(super) fn message(body: &Value) -> String {
+    let mut body = body.clone();
+    sanitize_input_item_ids(&mut body);
+    frame(&body)
+}
+
+/// The `response.create` message for a prepared `body`, which framing
+/// leaves as it is (`frameCodexWebsocketRequestBody`).
+pub(super) fn frame(body: &Value) -> String {
     let mut message = body.clone();
-    sanitize_input_item_ids(&mut message);
     set(&mut message, "type", Value::from("response.create"));
     message.to_string()
 }

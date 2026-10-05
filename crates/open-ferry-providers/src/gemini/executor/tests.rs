@@ -4,8 +4,8 @@
 //! headers, errors and streams.
 //!
 //! Dropped:
-//! - `AppliesPayloadRulesBeforeLeadingUserNormalization`: it belongs to
-//!   the payload rules' tests (P3 WP-D).
+//! - `AppliesPayloadRulesAfterLeadingUserNormalization`: it belongs to
+//!   the payload rules' tests (see `crate::payload`'s).
 //! - `InteractionsWithGeminiAPIKeyUsesGeminiEndpoint`, every
 //!   `NativeInteractions` test and
 //!   `NativeInteractionsSourceFormatAllowsSupportedEntryProtocols`: they

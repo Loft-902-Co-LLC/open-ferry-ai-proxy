@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/runtime/executor/xai_websockets_executor.go
 // (buildXAIWebsocketRequestBody, xaiWebsocketGenerateFalse,
 // buildXAIWebsocketWarmupCompletedPayload, buildXAIWebsocketCompactionPayload,
-// validateXAIWebsocketCompactionResponse) (v8.0.10, MIT).
+// validateXAIWebsocketCompactionResponse) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The `response.create` message, and what is made up for the client: the
@@ -36,8 +36,10 @@ fn zero_usage() -> Value {
 
 /// The message for the prepared `body` (`buildXAIWebsocketRequestBody`): a
 /// `response.create`, stored, without the HTTP call's streaming fields, and
-/// without instructions when it continues a previous response.
-pub(super) fn request_message(body: &Value) -> Value {
+/// without instructions when it continues a previous response. `finalize`
+/// (the config's payload rules) then sees the message as it is sent, and
+/// the `type` is set again after it.
+pub(super) fn request_message(body: &Value, finalize: impl FnOnce(&mut Value)) -> Value {
     let mut message = body.clone();
     set(&mut message, "type", Value::from("response.create"));
     for field in ["stream", "stream_options", "background"] {
@@ -47,6 +49,8 @@ pub(super) fn request_message(body: &Value) -> Value {
     if !str_at(&message, "previous_response_id").trim().is_empty() {
         delete(&mut message, "instructions");
     }
+    finalize(&mut message);
+    set(&mut message, "type", Value::from("response.create"));
     message
 }
 

@@ -1,6 +1,7 @@
 // Ported from CLIProxyAPI internal/runtime/executor/helps/payload_helpers.go
 // (ApplyPayloadConfigWithTrackedPathsForExecutor, isCodexTargetExecutor,
-// PayloadRequestedModel, PayloadRequestPath) (v8.0.10, MIT).
+// PayloadRequestedModel, PayloadRequestPath) and helps/payload_finalizer.go
+// (NewPayloadFinalizer) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The config's payload rules applied to the bodies sent upstream:
@@ -8,9 +9,14 @@
 //! conditions on the body (upstream's internal/runtime/executor/helps/
 //! payload_helpers.go).
 //!
-//! Each executor calls [`apply`] once its body is translated, where
-//! upstream calls `ApplyPayloadConfigWithTrackedPathsForExecutor` or one of
-//! its wrappers. In order, it:
+//! Each executor calls [`apply`] once per request it sends, as the last
+//! change to the body (upstream's final barrier, `NewPayloadFinalizer` or
+//! `ApplyPayloadConfigWithTrackedPathsForExecutor` and its wrappers): after
+//! the translation and every built-in change, so a rule's conditions see
+//! the body as it is sent and nothing undoes what a rule wrote or removed.
+//! Only framing (a WebSocket message's `type`), moving a Claude body's
+//! `betas` to its header, and serialization follow. A token count's body
+//! has the rules applied too. In order, [`apply`]:
 //! 1. declares a Codex client's whole-number tool parameters `integer`
 //!    again (the translation can move them to where the pass before it
 //!    didn't look), unless the body goes to a Codex executor;
@@ -72,7 +78,8 @@
 //!   when one of them comes to a path; upstream translates it for every
 //!   call.
 //! - Every executor names itself in [`Target::executor`]; upstream names
-//!   only the Codex and xAI ones, and only the Codex names change anything.
+//!   only some (Codex's, xAI's, and each executor's token count), and only
+//!   the Codex names change anything.
 
 mod gjson;
 mod image;

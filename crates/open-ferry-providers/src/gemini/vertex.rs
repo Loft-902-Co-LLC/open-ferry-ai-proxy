@@ -154,22 +154,52 @@ impl VertexExecutor {
             self.models(),
             PROVIDER,
         )?;
-        let target = payload::Target {
-            executor: PROVIDER,
-            protocol: &Format::GEMINI,
-            model: base,
-            root: "",
-            stream,
-            tracked: &[],
-            translate: None,
-        };
-        payload::apply(self.config.as_deref(), &target, request, options, &mut body);
         set_string_if_different(&mut body, "model", base);
         turns::strip_vertex_tool_call_ids(&mut body, options.source_format.as_str());
         sanitize_gemini_request_thought_signatures(&mut body, "contents");
         turns::ensure_boundary_user(&mut body, "contents");
         json::delete(&mut body, "session_id");
+        self.apply_payload_rules(request, options, stream, None, &mut body);
         Ok(body)
+    }
+
+    /// The body of an Imagen `predict` call with a service account: the
+    /// client's request as an Imagen request, with the payload rules
+    /// applied. The default rules check the client's original request,
+    /// which must also make an Imagen request.
+    fn prepare_imagen(&self, request: &Request, options: &Options) -> Result<Value, ExecError> {
+        let mut body = convert_to_imagen_request(&request.payload)?;
+        let original = if options.original_request.is_empty() {
+            body.clone()
+        } else {
+            convert_to_imagen_request(&options.original_request)?
+        };
+        let translate = |_: Value| original.clone();
+        self.apply_payload_rules(request, options, false, Some(&translate), &mut body);
+        Ok(body)
+    }
+
+    /// Applies the config's payload rules to `body`, as it is sent. The
+    /// default rules check the client's request as `translate` translates
+    /// it, else as it is translated to Gemini.
+    fn apply_payload_rules(
+        &self,
+        request: &Request,
+        options: &Options,
+        stream: bool,
+        translate: Option<&dyn Fn(Value) -> Value>,
+        body: &mut Value,
+    ) {
+        let target = payload::Target {
+            executor: PROVIDER,
+            protocol: &Format::GEMINI,
+            model: base_model(&request.model),
+            root: "",
+            stream,
+            tracked: &[],
+            translate,
+        };
+        payload::apply(self.config.as_deref(), &target, request, options, body);
     }
 
     /// The URL of `action` on `model` for `target`.
@@ -236,7 +266,7 @@ impl VertexExecutor {
         // Only a service account calls Imagen with its own request.
         let imagen = is_imagen(base) && matches!(target, Target::ServiceAccount { .. });
         let body = if imagen {
-            convert_to_imagen_request(&request.payload)?
+            self.prepare_imagen(request, options)?
         } else {
             self.prepare(request, options, false)?
         };
@@ -335,6 +365,7 @@ impl VertexExecutor {
         )?;
         turns::strip_vertex_tool_call_ids(&mut body, options.source_format.as_str());
         prepare_count_body(&mut body, base);
+        self.apply_payload_rules(request, options, false, None, &mut body);
         let url = self.url(&target, base, "countTokens");
         let headers = self.headers(auth, options, &target).await?;
         let (response, secrets) = post(

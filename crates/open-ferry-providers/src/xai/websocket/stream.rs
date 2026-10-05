@@ -1,14 +1,15 @@
 // Ported from CLIProxyAPI internal/runtime/executor/xai_websockets_executor.go
 // (ExecuteStream, prepareResponsesWebsocketRequest, applyXAIWebsocketHeaders,
 // ensureUpstreamConn, logXAIWebsocketRequest, logXAIWebsocketWarmupCompleted,
-// logXAIWebsocketTerminalResponse) (v8.0.10, MIT).
+// logXAIWebsocketTerminalResponse) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The streaming call over the WebSocket.
 //!
 //! The request is prepared as the HTTP call's is, keeping the client's
 //! `previous_response_id` (xAI's ID for it; see [`super::ids`]), and goes
-//! out as a `response.create` message (see [`super::message`]). The call
+//! out as a `response.create` message (see [`super::message`]), to which
+//! the config's payload rules apply; a retry sends the same message. The call
 //! takes its session (the client's, or one for this call alone), waits for
 //! the session's call before to end, connects if the session has no
 //! connection for this credential, URL, proxy and token, and sends. A send
@@ -183,7 +184,12 @@ pub(in crate::xai) async fn execute_stream(
 
     let mut headers = build_headers(auth, &options.headers, false, &prepared.session_id)?;
     headers.remove(header::ACCEPT);
-    let message = request_message(&prepared.body);
+    let message = request_message(&prepared.body, |message| {
+        let config = executor.context(auth).config;
+        prepared
+            .finalizer
+            .apply(config, &request, &options, message);
+    });
     let request_type = str_at(&client, "type");
     let transcript_reset = str_at(&message, "previous_response_id").trim().is_empty()
         && (request_type.trim() != "response.append"

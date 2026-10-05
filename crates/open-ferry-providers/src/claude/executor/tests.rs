@@ -434,9 +434,9 @@ async fn oauth_alone_gets_only_the_oauth_beta() {
 
 // Not upstream's: a `betas` that a payload rule writes reaches the
 // `anthropic-beta` header, and leaves the body, exactly as the same `betas`
-// in the client's body do. Upstream applies the rules first and then
-// `extractAndRemoveBetas` (claude_executor_execute.go), and nothing filters
-// either, so the rule's betas are the operator's choice.
+// in the client's body do. Upstream applies the rules at its final barrier,
+// before `extractAndRemoveBetas` (claude_executor_execute.go), and nothing
+// filters either, so the rule's betas are the operator's choice.
 #[tokio::test]
 async fn betas_a_rule_writes_are_handled_as_the_clients_are() {
     let rules = Arc::new(
@@ -501,6 +501,79 @@ payload:
         assert_eq!(by_client.header("anthropic-beta"), Some(expected));
         assert!(by_rule.json().get("betas").is_none(), "{}", by_rule.body);
         assert_eq!(by_rule.json(), by_client.json());
+    }
+}
+
+// TestClaudeExecutor_ExecutePayloadStreamOverrideDoesNotChangeResponseParser:
+// a rule's `stream` is sent, and the answer is still asked for (`Accept`)
+// and read as the call needs it. Changed: no `Accept-Encoding` is sent (see
+// `DISGUISE_HEADERS`), so neither upstream's attribute for it nor its value
+// is checked.
+#[tokio::test]
+async fn a_stream_rule_leaves_the_answers_parser() {
+    const MODEL: &str = "claude-3-5-sonnet-20241022";
+    let events = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_123\",\"model\":\"claude-3-5-sonnet-20241022\"}}\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n",
+        "event: message_delta\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":2,\"output_tokens\":1}}\n",
+        "event: message_stop\n",
+        "data: {\"type\":\"message_stop\"}\n",
+    );
+    let message = r#"{"id":"msg_123","type":"message","role":"assistant","model":"claude-3-5-sonnet-20241022","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":2,"output_tokens":1}}"#;
+    for (source, answer, want_stream) in [
+        (Format::OPENAI, Format::OPENAI, true),
+        (Format::OPENAI, Format::CLAUDE, false),
+        (Format::CLAUDE, Format::OPENAI, true),
+        (Format::CLAUDE, Format::CLAUDE, false),
+    ] {
+        let case = format!("{source} to {answer}");
+        let reply = if want_stream {
+            Reply::sse(events)
+        } else {
+            Reply::json(message)
+        };
+        let mock = Mock::start(reply).await;
+        let rules = Config::parse(format!(
+            "payload:\n  override:\n    - models:\n        - name: {MODEL}\n          protocol: claude\n      params:\n        stream: {}\n",
+            !want_stream
+        ))
+        .unwrap();
+        let mut auth = (*gateway_auth(&mock.url)).clone();
+        if want_stream {
+            auth.attributes
+                .insert("header:Accept".into(), "application/json".into());
+        }
+        let options = Options {
+            response_format: answer,
+            ..with_header(options(source), "anthropic-beta", "client-beta")
+        };
+        ClaudeExecutor::new("direct")
+            .with_config(Arc::new(rules))
+            .execute(
+                Arc::new(auth),
+                Request {
+                    model: MODEL.into(),
+                    payload: Bytes::from_static(
+                        br#"{"model":"claude-3-5-sonnet-20241022","stream":false,"messages":[{"role":"user","content":"hi"}]}"#,
+                    ),
+                },
+                options,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{case}: {error:?}"));
+        let seen = mock.last();
+        assert_eq!(seen.json()["stream"], !want_stream, "{case}: {}", seen.body);
+        let accept = if want_stream {
+            "text/event-stream"
+        } else {
+            "application/json"
+        };
+        assert_eq!(seen.header("accept"), Some(accept), "{case}");
+        let betas = seen.header("anthropic-beta").unwrap_or_default();
+        assert!(betas.contains("client-beta"), "{case}: {betas}");
     }
 }
 

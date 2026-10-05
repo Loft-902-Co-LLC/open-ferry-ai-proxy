@@ -1,7 +1,8 @@
 // Ported from CLIProxyAPI internal/runtime/executor/xai_executor.go
 // (XAIExecutor, Identifier), xai_executor_execute.go (Execute,
-// executeCompact, executeCompactRequest, executeCompactionTriggerStream) and
-// xai_executor_stream.go (ExecuteStream) (v8.0.10, MIT).
+// executeCompact, executeCompactRequest, executeCompactionTriggerStream),
+// xai_executor_stream.go (ExecuteStream) and xai_executor_tokens.go
+// (CountTokens) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! [`XaiExecutor`], which calls Grok's Responses API with an API key.
@@ -213,6 +214,7 @@ impl XaiExecutor {
             Format::OPENAI_RESPONSE,
         )?;
         compact::shape_body(&mut prepared.body, &request.payload);
+        prepared.finalize(self.context(auth).config, request, options);
         // Standard API headers: a compact call is never the chat proxy's.
         let headers = build_headers(auth, &options.headers, false, &prepared.session_id)?;
         let url = endpoint(auth, true);
@@ -313,6 +315,7 @@ impl XaiExecutor {
             return self.execute_compact(auth, request, options).await;
         }
         let mut prepared = prepare(self.context(auth), request, options, true, Format::CODEX)?;
+        prepared.finalize(self.context(auth).config, request, options);
         let headers = build_headers(auth, &options.headers, true, &prepared.session_id)?;
         let url = endpoint(auth, false);
         let (response, secrets) = self
@@ -427,7 +430,8 @@ impl XaiExecutor {
                 .compaction_trigger_stream(auth, &request, &options)
                 .await;
         }
-        let prepared = prepare(self.context(auth), &request, &options, true, Format::CODEX)?;
+        let mut prepared = prepare(self.context(auth), &request, &options, true, Format::CODEX)?;
+        prepared.finalize(self.context(auth).config, &request, &options);
         let headers = build_headers(auth, &options.headers, true, &prepared.session_id)?;
         let url = endpoint(auth, false);
         let (response, secrets) = self
@@ -492,7 +496,8 @@ impl XaiExecutor {
         request: &Request,
         options: &Options,
     ) -> Result<Response, ExecError> {
-        let prepared = prepare(self.context(auth), request, options, false, Format::CODEX)?;
+        let mut prepared = prepare(self.context(auth), request, options, false, Format::CODEX)?;
+        prepared.finalize(self.context(auth).config, request, options);
         let Prepared {
             body,
             to,

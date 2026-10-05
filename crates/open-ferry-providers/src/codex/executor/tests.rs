@@ -1247,6 +1247,33 @@ async fn count_tokens_keeps_tool_number_types() {
     }
 }
 
+/// Not upstream's: a token count's body has the config's payload rules
+/// applied once its `instructions` are set, as upstream's `CountTokens`
+/// does, so a filter removes them.
+#[test]
+fn count_tokens_applies_the_rules_last() {
+    let config = open_ferry_core::config::Config::parse(
+        "payload:\n  filter:\n    - models:\n        - name: gpt-5.4\n      params:\n        - instructions\n",
+    )
+    .unwrap();
+    let request = request("gpt-5.4", r#"{"input":"hi"}"#);
+    let options = options("openai-response");
+    let unfiltered =
+        prepare_body(Kind::CountTokens, Context::default(), &request, &options).unwrap();
+    assert_eq!(
+        get(&unfiltered.body, "instructions"),
+        Some(&json!("")),
+        "{}",
+        unfiltered.body
+    );
+    let context = Context {
+        config: Some(&config),
+        ..Context::default()
+    };
+    let filtered = prepare_body(Kind::CountTokens, context, &request, &options).unwrap();
+    assert!(!exists(&filtered.body, "instructions"), "{}", filtered.body);
+}
+
 /// Not upstream's: review 11a F2's request. Upstream copies the client's
 /// JSON as written (gjson's `Raw` into sjson), so a call's arguments reach
 /// Codex with each number as the client wrote it, as do the client's own

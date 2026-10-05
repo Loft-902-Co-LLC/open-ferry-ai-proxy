@@ -2,7 +2,7 @@
 // (metaCreds), meta_executor_execute.go (prepareResponsesRequest,
 // applyMetaAPIHeaders) and meta_test.go (TestMetaExecutor_MetaCredsResolution,
 // TestMetaExecutor_PreservesPreviousResponseID, and the
-// ClientIdHeader_Issue6117 tests, inverted) (v8.0.10, MIT).
+// ClientIdHeader_Issue6117 tests, inverted) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! What a Meta call is made of: the credential's token and base URL, the
@@ -10,13 +10,15 @@
 //! takes (Codex's, without what only Codex reads).
 //!
 //! The body is the client's, translated, then adjusted by the thinking
-//! suffix and the payload rules, with these fields dropped: `generate`,
+//! suffix, with these fields dropped: `generate`,
 //! `prompt_cache_retention`, `safety_identifier`, `stream_options` and
 //! `client_metadata`. `previous_response_id` is kept, unlike for Codex. A
 //! custom `apply_patch` tool is declared as a function (see
 //! [`crate::apply_patch_responses`]), `instructions` is filled in, and
 //! reasoning items, `web_search` tools and a Codex client's tool parameter
-//! types are made fit for Meta.
+//! types are made fit for Meta. The payload rules apply last, to the body
+//! as it is sent, so a field a rule writes is sent even if it is one of
+//! those dropped.
 //!
 //! Deviations from upstream:
 //! - The request carries no client identity of Meta's: no `X-Client-Id`
@@ -304,17 +306,6 @@ pub(super) fn prepare(
         models,
     )?;
 
-    let protocol = META;
-    let target = payload::Target {
-        executor: "meta",
-        protocol: &protocol,
-        model: base,
-        root: "",
-        stream,
-        tracked: &[],
-        translate: Some(&|_| original_translated.clone()),
-    };
-    payload::apply(config, &target, request, options, &mut body);
     set_string_if_different(&mut body, "model", base);
     set_bool_if_different(&mut body, "stream", stream);
     for field in DROPPED_FIELDS {
@@ -336,6 +327,18 @@ pub(super) fn prepare(
             .map(HeaderValue::as_bytes),
     );
     tool_integers::normalize(&mut body, &user_agent);
+    // The rules see the body as it is sent.
+    let protocol = META;
+    let target = payload::Target {
+        executor: "meta",
+        protocol: &protocol,
+        model: base,
+        root: "",
+        stream,
+        tracked: &[],
+        translate: Some(&|_| original_translated.clone()),
+    };
+    payload::apply(config, &target, request, options, &mut body);
 
     Ok(Prepared {
         body,

@@ -30,7 +30,9 @@ fn config(yaml: &str) -> Config {
     Config::parse(yaml).expect("config parses")
 }
 
-/// [`prepare`] for a Codex body, with the config and models given.
+/// [`prepare`] for a Codex body, with the config and models given, and
+/// with the config's payload rules applied as a call applies them
+/// ([`Prepared::finalize`]).
 fn prepare_with(
     config: Option<&Config>,
     models: Option<&dyn ModelCatalog>,
@@ -43,7 +45,9 @@ fn prepare_with(
         config,
         models,
     };
-    prepare(context, request, options, stream, Format::CODEX).expect("prepares")
+    let mut prepared = prepare(context, request, options, stream, Format::CODEX).expect("prepares");
+    prepared.finalize(config, request, options);
+    prepared
 }
 
 /// The body [`prepare`] makes of an OpenAI Responses `payload` for `model`.
@@ -186,20 +190,28 @@ fn output_controls_of_other_sources_are_left_alone() {
     assert_eq!(body, json!({"max_output_tokens": 5, "temperature": 1}));
 }
 
-// TestXAIExecutorPrepareResponsesRequestDropsPayloadStopOverride.
+// TestXAIExecutorPrepareResponsesRequestDropsPayloadStopOverride, which,
+// like upstream's, checks the prepared body before the rules apply. Then,
+// not upstream's: the rules apply last, so a rule's `stop` is sent.
 #[test]
 fn drops_payload_stop_override() {
     let config = config(
         "payload:\n  override:\n    - models:\n        - name: grok-4.5\n      params:\n        stop: [END]\n",
     );
-    let prepared = prepare_with(
-        Some(&config),
-        None,
-        &request("grok-4.5", r#"{"model":"grok-4.5","input":"hello"}"#),
-        &options("openai-response"),
-        true,
+    let request = request(
+        "grok-4.5",
+        r#"{"model":"grok-4.5","input":"hello","stop":["X"]}"#,
     );
+    let options = options("openai-response");
+    let context = Context {
+        auth: None,
+        config: Some(&config),
+        models: None,
+    };
+    let mut prepared = prepare(context, &request, &options, true, Format::CODEX).expect("prepares");
     assert!(!exists(&prepared.body, "stop"), "{}", prepared.body);
+    prepared.finalize(Some(&config), &request, &options);
+    assert_eq!(prepared.body["stop"], json!(["END"]), "{}", prepared.body);
 }
 
 // TestXAIExecutorPrepareResponsesRequestRewritesCodexAgentMessage.

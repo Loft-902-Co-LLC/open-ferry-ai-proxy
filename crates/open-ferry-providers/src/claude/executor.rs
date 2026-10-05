@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/runtime/executor/claude_executor.go,
 // claude_executor_execute.go, claude_executor_stream.go,
-// claude_executor_tokens.go and claude_executor_auth.go (v8.0.10, MIT).
+// claude_executor_tokens.go and claude_executor_auth.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! [`ClaudeExecutor`], which calls Anthropic's Messages API with an API key
@@ -12,6 +12,13 @@
 //! for one reply: a non-streaming call then reads the whole stream, checks
 //! that it holds a complete reply, and translates it. Token counts go to
 //! `<base>/v1/messages/count_tokens?beta=true`.
+//!
+//! The config's payload rules apply once, to the body as it is sent: after
+//! every built-in change, and before the `betas` in the body move to the
+//! `anthropic-beta` header. A token count's apply last of all, once its
+//! `betas` have moved and the fields Anthropic's count rejects are gone. The
+//! answer is translated against the body as it was before the rules, and
+//! read as the call asked for it whatever `stream` a rule writes.
 //!
 //! The key is the `api_key` attribute, or else the OAuth access token,
 //! which [`refresh`](ClaudeExecutor::refresh) renews 4 hours before it
@@ -190,17 +197,6 @@ impl ClaudeExecutor {
     ) -> Result<Prepared, ExecError> {
         let config = self.config.as_deref();
         let mut body = translate_request(config, request, options, base_model, upstream_stream)?;
-        // Upstream tracks paths only for its cloaking, which isn't ported.
-        let target = payload::Target {
-            executor: "claude",
-            protocol: &Format::CLAUDE,
-            model: base_model,
-            root: "",
-            stream: upstream_stream,
-            tracked: &[],
-            translate: None,
-        };
-        payload::apply(config, &target, request, options, &mut body);
         ensure_model_max_tokens(&mut body, base_model, self.models.as_deref());
         disable_thinking_if_tool_choice_forced(&mut body);
         normalize_sampling(&mut body);
@@ -212,14 +208,40 @@ impl ClaudeExecutor {
         if set_stream && body.get("stream") != Some(&Value::Bool(upstream_stream)) {
             json::set(&mut body, "stream", Value::Bool(upstream_stream));
         }
-        let extra_betas = extract_and_remove_betas(&mut body);
         let translation = body.clone();
         sanitize_for_upstream(&mut body, base_model);
+        // The rules see the body as it is sent. Upstream tracks only the
+        // diagnostics path, for its cloaking, which isn't ported.
+        self.apply_payload_rules(request, options, base_model, upstream_stream, &mut body);
+        let extra_betas = extract_and_remove_betas(&mut body);
         Ok(Prepared {
             upstream: body,
             translation,
             extra_betas,
         })
+    }
+
+    /// Applies the config's payload rules to `body`, the body as it is sent
+    /// (`helps.NewPayloadFinalizer`); the original request is translated
+    /// streaming if `stream`.
+    fn apply_payload_rules(
+        &self,
+        request: &Request,
+        options: &Options,
+        base_model: &str,
+        stream: bool,
+        body: &mut Value,
+    ) {
+        let target = payload::Target {
+            executor: "claude",
+            protocol: &Format::CLAUDE,
+            model: base_model,
+            root: "",
+            stream,
+            tracked: &[],
+            translate: None,
+        };
+        payload::apply(self.config.as_deref(), &target, request, options, body);
     }
 
     /// Posts `body`, telling the call's taps; with the answer come the
@@ -463,6 +485,7 @@ impl ClaudeExecutor {
         for field in ["metadata", "context_management", "diagnostics"] {
             json::delete(&mut body, field);
         }
+        self.apply_payload_rules(request, options, base_model, translate_stream, &mut body);
         let headers = headers::build(&Inputs {
             key: &target.key,
             bearer: target.bearer,

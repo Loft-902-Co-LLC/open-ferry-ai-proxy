@@ -2,7 +2,7 @@
 // (OpenAICompatExecutor: Execute, ExecuteStream, CountTokens, Refresh,
 // applyPromptCacheKey, resolveCredentials, resolveCompatConfig),
 // helps/payload_helpers.go (PayloadRequestedModel) and
-// helps/model_capabilities.go (ApplyRequestThinking) (v8.0.10, MIT).
+// helps/model_capabilities.go (ApplyRequestThinking) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! [`OpenAiCompatExecutor`], which calls a provider configured under
@@ -20,8 +20,10 @@
 //! in the provider's `models` decides whether its limit is `max_tokens` or
 //! `max_completion_tokens` and whether its tool results go as plain text,
 //! and a provider with `support-prompt-cache-key` gets the client's
-//! `prompt_cache_key`. A stream asks for usage in its last chunk. A token
-//! count is made on the request with its thinking setting applied.
+//! `prompt_cache_key`. A stream asks for usage in its last chunk. The
+//! config's payload rules apply last, to the body as it is sent. A token
+//! count is made on the request with its thinking setting and the payload
+//! rules applied.
 //!
 //! A stream to an OpenAI Responses client whose request declares the custom
 //! `apply_patch` tool fails with the patch error if it ends before it
@@ -235,16 +237,6 @@ impl OpenAiCompatExecutor {
             translate_stream,
         );
         self.apply_thinking(&mut body, request, options, &to)?;
-        let target = payload::Target {
-            executor: &self.provider,
-            protocol: &to,
-            model: base,
-            root: "",
-            stream: translate_stream,
-            tracked: &[],
-            translate: None,
-        };
-        payload::apply(Some(&*self.config), &target, request, options, &mut body);
 
         let compat = self.compat_config(auth);
         let requested = requested_model(request, options);
@@ -264,6 +256,17 @@ impl OpenAiCompatExecutor {
             delete(&mut body, "stream");
             sanitize_reasoning(&mut body, false);
         }
+        // The rules see the body as it is sent.
+        let target = payload::Target {
+            executor: &self.provider,
+            protocol: &to,
+            model: base,
+            root: "",
+            stream: translate_stream,
+            tracked: &[],
+            translate: None,
+        };
+        payload::apply(Some(&*self.config), &target, request, options, &mut body);
 
         let headers = build_headers(auth, api_key, &options.headers, stream)?;
         let url = format!("{}{path}", base_url.strip_suffix('/').unwrap_or(base_url));
@@ -474,6 +477,18 @@ impl OpenAiCompatExecutor {
             false,
         );
         self.apply_thinking(&mut body, request, options, &Format::OPENAI)?;
+        {
+            let target = payload::Target {
+                executor: &self.provider,
+                protocol: &Format::OPENAI,
+                model: &model,
+                root: "",
+                stream: false,
+                tracked: &[],
+                translate: None,
+            };
+            payload::apply(Some(&*self.config), &target, request, options, &mut body);
+        }
         let count =
             tokio::task::spawn_blocking(move || count_chat_tokens(tokenizer_for(&model), &body))
                 .await
