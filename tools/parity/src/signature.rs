@@ -86,6 +86,7 @@ pub fn inspect(model: &str, raw: &str, options: &Value) -> Value {
             "double_layer": fallible(signature::inspect_claude_double_layer_signature(raw), claude_tree),
             "cais": fallible(signature::inspect_claude_cais_signature(raw), cais_info),
             "antigravity": signature::compatible_antigravity_claude_thinking_signature(raw),
+            "antigravity_caqs": fallible(signature::inspect_antigravity_claude_caqs_signature(raw), cais_info),
         },
         "gemini": {
             "bypass": signature::is_gemini_thought_signature_bypass(raw),
@@ -299,11 +300,13 @@ fn cais_info(info: ClaudeCaisSignatureInfo) -> Value {
     json!({
         "FirstByte": info.first_byte,
         "EnvelopeVersion": info.envelope_version,
+        "Infrastructure": info.infrastructure,
         "ChannelID": info.channel_id,
         "ModelText": info.model_text,
         "BlockKind": info.block_kind,
         "ContextID": info.context_id,
         "SignatureLen": info.signature_len,
+        "SignatureInContainer": info.signature_in_container,
     })
 }
 

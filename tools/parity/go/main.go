@@ -605,6 +605,7 @@ func inspectSignature(in input) []byte {
 		DoubleLayer      any  `json:"double_layer"`
 		CAIS             any  `json:"cais"`
 		Antigravity      any  `json:"antigravity"`
+		AntigravityCAQS  any  `json:"antigravity_caqs"`
 	}
 	type geminiReport struct {
 		Bypass  bool     `json:"bypass"`
@@ -657,6 +658,7 @@ func inspectSignature(in input) []byte {
 			DoubleLayer:      fallible(signature.InspectClaudeDoubleLayerSignature(raw)),
 			CAIS:             fallible(signature.InspectClaudeCAISSignature(raw)),
 			Antigravity:      optional(signature.CompatibleAntigravityClaudeThinkingSignature(raw)),
+			AntigravityCAQS:  fallible(signature.InspectAntigravityClaudeCAQSSignature(raw)),
 		},
 		Gemini: geminiReport{
 			Bypass:  signature.IsGeminiThoughtSignatureBypass(raw),

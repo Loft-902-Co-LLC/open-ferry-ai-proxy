@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/signature/claude_validation.go (v8.0.10, MIT).
+// Ported from CLIProxyAPI internal/signature/claude_validation.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Claude thinking signatures.
@@ -24,11 +24,25 @@
 //! bytes may sit in container field 5 instead, the model text is omitted, and
 //! the block kind in field 8 must be `thinking` or `narration`.
 //!
-//! Antigravity replays Claude signatures only in R form; Claude itself takes E.
+//! Antigravity's Claude 5.5 signatures are a CAQS envelope in a second base64
+//! layer, so they start with `Q` (see
+//! [`inspect_antigravity_claude_caqs_signature`](super::inspect_antigravity_claude_caqs_signature)).
+//! A Q signature is always checked in full, whatever the options say.
+//!
+//! Antigravity replays classic signatures in R form and Q signatures as they
+//! are. Claude itself takes E, and never Q.
+//!
+//! Deviations from upstream:
+//! - A Q signature is checked as it is once its cache prefix is stripped.
+//!   Upstream's validators strip the prefix and then call the Q check, which
+//!   strips up to a `#` a second time. So a signature such as
+//!   `x#Qjunk#Q<valid>` passes as `Qjunk#Q<valid>`, which isn't a valid
+//!   signature, and normalizing it returns that text. Here it fails.
 
 use serde_json::Value;
 
 use super::Error;
+use super::claude_antigravity_validation::inspect_unprefixed_antigravity_caqs;
 use crate::go::base64::STD;
 use crate::go::quote;
 use crate::json::str_of;
@@ -37,17 +51,20 @@ use crate::protowire::{self, BYTES_TYPE, Number, Type, VARINT_TYPE};
 pub const MAX_CLAUDE_THINKING_SIGNATURE_LEN: usize = 32 * 1024 * 1024;
 
 /// How far Claude thinking signatures are inspected. By default the cache
-/// prefix, the base64 layers and the decoded `0x12` marker are checked.
+/// prefix, the base64 layers and the decoded `0x12` marker are checked. A Q
+/// signature is always checked in full.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ClaudeValidationOptions {
-    /// Only check for an `E` or `R` signature after an optional cache prefix.
+    /// Only check for an `E` or `R` signature after an optional cache prefix,
+    /// or a valid Q signature.
     pub prefix_only: bool,
-    /// Check the prefix and that the base64 layers decode, but not the payload.
+    /// Check the prefix and that the base64 layers decode, but not the payload
+    /// (except a Q signature's).
     pub base64_only: bool,
     /// When stripping blocks, keep a thinking placeholder with no signature and
     /// no text.
     pub allow_empty_signature_with_empty_text: bool,
-    /// Also check the protobuf tree.
+    /// Also check the protobuf tree of an E or R signature.
     pub strict: bool,
 }
 
@@ -80,11 +97,16 @@ pub struct ClaudeSignatureTree {
 pub struct ClaudeCaisSignatureInfo {
     pub first_byte: u8,
     pub envelope_version: u64,
+    /// Channel field 2, if present: 1 is AWS, 2 is Google.
+    pub infrastructure: Option<u64>,
     pub channel_id: u64,
     pub model_text: String,
     pub block_kind: String,
     pub context_id: String,
     pub signature_len: usize,
+    /// Whether the signature bytes came from container field 5 rather than
+    /// channel field 5.
+    pub signature_in_container: bool,
 }
 
 /// `IsValidClaudeThinkingSignature`.
@@ -99,15 +121,16 @@ pub fn is_valid_claude_thinking_signature(raw: &str, opt: ClaudeValidationOption
 }
 
 /// `HasDecodableClaudeThinkingSignature`: whether `raw` is an `E` or `R`
-/// signature whose base64 layers decode.
+/// signature whose base64 layers decode, or a valid Q signature.
 pub fn has_decodable_claude_thinking_signature(raw: &str) -> bool {
     let sig = strip_claude_signature_prefix(raw);
-    if sig.is_empty() || sig.len() > MAX_CLAUDE_THINKING_SIGNATURE_LEN {
+    if sig.len() > MAX_CLAUDE_THINKING_SIGNATURE_LEN {
         return false;
     }
-    match sig.as_bytes()[0] {
-        b'E' => STD.decode(sig).is_ok_and(|decoded| !decoded.is_empty()),
-        b'R' => match STD.decode(sig) {
+    match sig.as_bytes().first() {
+        Some(b'Q') => inspect_unprefixed_antigravity_caqs(sig).is_ok(),
+        Some(b'E') => STD.decode(sig).is_ok_and(|decoded| !decoded.is_empty()),
+        Some(b'R') => match STD.decode(sig) {
             Ok(decoded) if decoded.first() == Some(&b'E') => {
                 STD.decode(&decoded).is_ok_and(|inner| !inner.is_empty())
             }
@@ -118,17 +141,19 @@ pub fn has_decodable_claude_thinking_signature(raw: &str) -> bool {
 }
 
 /// `HasClaudeThinkingSignaturePrefix`: whether `raw` starts with `E` or `R`
-/// after an optional cache prefix.
+/// after an optional cache prefix, or is a valid Q signature.
 pub fn has_claude_thinking_signature_prefix(raw: &str) -> bool {
-    matches!(
-        strip_claude_signature_prefix(raw).as_bytes().first(),
-        Some(b'E' | b'R')
-    )
+    let sig = strip_claude_signature_prefix(raw);
+    match sig.as_bytes().first() {
+        Some(b'Q') => inspect_unprefixed_antigravity_caqs(sig).is_ok(),
+        Some(b'E' | b'R') => true,
+        _ => false,
+    }
 }
 
 /// Trims `raw` and drops anything up to the first `#`. Unlike
 /// [`super::split_signature_provider_prefix`], any prefix is accepted.
-fn strip_claude_signature_prefix(raw: &str) -> &str {
+pub(super) fn strip_claude_signature_prefix(raw: &str) -> &str {
     let sig = raw.trim();
     match sig.find('#') {
         Some(index) => sig[index + 1..].trim(),
@@ -168,7 +193,8 @@ pub fn validate_claude_thinking_signatures(
 }
 
 /// `NormalizeClaudeThinkingSignature`: validates `raw` and returns it in the
-/// double-layer R form, without its cache prefix.
+/// form Antigravity replays, without its cache prefix: double-layer R, or Q
+/// as it is.
 pub fn normalize_claude_thinking_signature(
     raw: &str,
     opt: ClaudeValidationOptions,
@@ -176,7 +202,7 @@ pub fn normalize_claude_thinking_signature(
     use base64::Engine;
 
     let sig = checked_signature(raw, opt)?;
-    Ok(if sig.starts_with('R') {
+    Ok(if sig.starts_with(['R', 'Q']) {
         sig.to_owned()
     } else {
         base64::engine::general_purpose::STANDARD.encode(sig)
@@ -184,12 +210,13 @@ pub fn normalize_claude_thinking_signature(
 }
 
 /// `NormalizeClaudeProviderNativeThinkingSignature`: validates `raw` and
-/// returns it in the single-layer E form that Claude itself expects.
+/// returns it in the single-layer E form that Claude itself expects. A Q
+/// signature is rejected.
 pub fn normalize_claude_provider_native_thinking_signature(
     raw: &str,
     opt: ClaudeValidationOptions,
 ) -> Result<String, Error> {
-    let sig = checked_signature(raw, opt)?;
+    let sig = checked_native_signature(raw, opt)?;
     if !sig.starts_with('R') {
         return Ok(sig.to_owned());
     }
@@ -198,18 +225,29 @@ pub fn normalize_claude_provider_native_thinking_signature(
     Ok(String::from_utf8_lossy(&decoded).into_owned())
 }
 
-/// Validates an E or R signature and returns it without its cache prefix.
+/// Validates an E, R or Q signature and returns it without its cache prefix.
 fn checked_signature(raw: &str, opt: ClaudeValidationOptions) -> Result<&str, Error> {
-    let sig = strip_claude_signature_prefix(raw);
-    if sig.is_empty() {
-        return Err(error!("empty signature"));
+    let (sig, first) = unprefixed_signature(raw)?;
+    match first {
+        b'Q' => {
+            inspect_unprefixed_antigravity_caqs(sig)?;
+        }
+        b'R' => validate_double_layer(sig, opt)?,
+        b'E' => validate_single_layer(sig.as_bytes(), 1, opt)?,
+        first => {
+            return Err(error!(
+                "invalid signature: expected 'E', 'R' or 'Q' prefix, got {}",
+                quote_byte(first)
+            ));
+        }
     }
-    if sig.len() > MAX_CLAUDE_THINKING_SIGNATURE_LEN {
-        return Err(error!(
-            "signature exceeds maximum length ({MAX_CLAUDE_THINKING_SIGNATURE_LEN} bytes)"
-        ));
-    }
-    match sig.as_bytes()[0] {
+    Ok(sig)
+}
+
+/// Validates an E or R signature and returns it without its cache prefix.
+fn checked_native_signature(raw: &str, opt: ClaudeValidationOptions) -> Result<&str, Error> {
+    let (sig, first) = unprefixed_signature(raw)?;
+    match first {
         b'R' => validate_double_layer(sig, opt)?,
         b'E' => validate_single_layer(sig.as_bytes(), 1, opt)?,
         first => {
@@ -220,6 +258,21 @@ fn checked_signature(raw: &str, opt: ClaudeValidationOptions) -> Result<&str, Er
         }
     }
     Ok(sig)
+}
+
+/// `raw` without its cache prefix, and its first byte, if its length is in
+/// bounds.
+fn unprefixed_signature(raw: &str) -> Result<(&str, u8), Error> {
+    let sig = strip_claude_signature_prefix(raw);
+    let Some(&first) = sig.as_bytes().first() else {
+        return Err(error!("empty signature"));
+    };
+    if sig.len() > MAX_CLAUDE_THINKING_SIGNATURE_LEN {
+        return Err(error!(
+            "signature exceeds maximum length ({MAX_CLAUDE_THINKING_SIGNATURE_LEN} bytes)"
+        ));
+    }
+    Ok((sig, first))
 }
 
 /// `%q` of `string(b)`: Go converts the byte to the character with that code point.
@@ -401,7 +454,7 @@ fn inspect_channel_block(
 }
 
 /// The last `field_num` field of `msg`, which must be bytes.
-fn extract_bytes_field<'m>(
+pub(super) fn extract_bytes_field<'m>(
     msg: &'m [u8],
     field_num: Number,
     scope: &str,
@@ -489,28 +542,38 @@ pub fn inspect_claude_cais_signature(raw: &str) -> Result<ClaudeCaisSignatureInf
     let decoded = STD
         .decode(sig)
         .map_err(|err| error!("invalid Claude CAIS signature: base64 decode failed: {err}"))?;
-    match decoded.first() {
+    inspect_claude_cais_payload(&decoded)
+}
+
+/// `inspectClaudeCAISPayload`: checks a decoded CAIS envelope. The Q-form
+/// check shares it.
+pub(super) fn inspect_claude_cais_payload(
+    decoded: &[u8],
+) -> Result<ClaudeCaisSignatureInfo, Error> {
+    let first_byte = match decoded.first() {
         None => return Err(error!("invalid Claude CAIS signature: empty after decode")),
         Some(&first) if first != CAIS_MARKER => {
             return Err(error!(
                 "invalid Claude CAIS signature: expected first byte 0x{CAIS_MARKER:02x}, got 0x{first:02x}"
             ));
         }
-        Some(_) => {}
-    }
+        Some(&first) => first,
+    };
 
     let mut info = ClaudeCaisSignatureInfo {
-        first_byte: decoded[0],
+        first_byte,
         envelope_version: 0,
+        infrastructure: None,
         channel_id: 0,
         model_text: String::new(),
         block_kind: String::new(),
         context_id: String::new(),
         signature_len: 0,
+        signature_in_container: false,
     };
 
     let mut container = None;
-    walk_fields(&decoded, |num, typ, raw| {
+    walk_fields(decoded, |num, typ, raw| {
         match num {
             1 => {
                 info.envelope_version =
@@ -564,6 +627,13 @@ pub fn inspect_claude_cais_signature(raw: &str) -> Result<ClaudeCaisSignatureInf
                 info.channel_id = cais_varint(raw, typ, "CAIS channel field 1 channel_id")?;
                 have_channel_id = true;
             }
+            2 => {
+                info.infrastructure = Some(cais_varint(
+                    raw,
+                    typ,
+                    "CAIS channel field 2 infrastructure",
+                )?);
+            }
             3 => {
                 cais_varint(raw, typ, "CAIS channel field 3 version")?;
             }
@@ -611,6 +681,7 @@ pub fn inspect_claude_cais_signature(raw: &str) -> Result<ClaudeCaisSignatureInf
     })?;
     if !have_signature && info.envelope_version >= 4 && !container_signature.is_empty() {
         info.signature_len = container_signature.len();
+        info.signature_in_container = true;
         have_signature = true;
     }
     if !have_channel_id {

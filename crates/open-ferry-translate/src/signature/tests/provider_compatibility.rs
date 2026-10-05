@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/signature/provider_compatibility_test.go
-// (v8.0.10, MIT). https://github.com/router-for-me/CLIProxyAPI
+// (v8.0.15, MIT). https://github.com/router-for-me/CLIProxyAPI
 
 use super::*;
 
@@ -51,7 +51,7 @@ fn base64_alphabet_set_matches_encoder_alphabets() {
 /// envelope that carries replayable state. Every entry must survive the
 /// structural pre-filter, because losing one would silently reclassify that
 /// provider.
-fn replay_safe_envelope_fixtures() -> [(&'static str, String, Provider); 5] {
+fn replay_safe_envelope_fixtures() -> [(&'static str, String, Provider); 6] {
     [
         (
             "claude single-layer E",
@@ -66,6 +66,11 @@ fn replay_safe_envelope_fixtures() -> [(&'static str, String, Provider); 5] {
         (
             "claude CAIS",
             test_claude_cais_signature("claude-fable-5"),
+            Provider::Claude,
+        ),
+        (
+            "antigravity CAQS",
+            signaturetest::antigravity_caqs(),
             Provider::Claude,
         ),
         (

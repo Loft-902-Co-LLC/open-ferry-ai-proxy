@@ -5,36 +5,43 @@
 //!
 //! Signature validation depends on details that Rust base64 crates handle
 //! differently. Go skips `\r` and `\n` anywhere in the input, accepts non-zero
-//! trailing bits (outside `Strict` mode), and reports where decoding failed.
+//! trailing bits (outside [`Encoding::strict`] mode), and reports where
+//! decoding failed.
 
 use std::fmt;
 
-/// A base64 variant: the alphabet, and whether output is padded with `=`.
+/// A base64 variant: the alphabet, whether output is padded with `=`, and
+/// whether non-zero trailing bits are rejected.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Encoding {
     url_safe: bool,
     padded: bool,
+    strict: bool,
 }
 
 /// `base64.StdEncoding`.
 pub(crate) const STD: Encoding = Encoding {
     url_safe: false,
     padded: true,
+    strict: false,
 };
 /// `base64.RawStdEncoding`.
 pub(crate) const RAW_STD: Encoding = Encoding {
     url_safe: false,
     padded: false,
+    strict: false,
 };
 /// `base64.URLEncoding`.
 pub(crate) const URL: Encoding = Encoding {
     url_safe: true,
     padded: true,
+    strict: false,
 };
 /// `base64.RawURLEncoding`.
 pub(crate) const RAW_URL: Encoding = Encoding {
     url_safe: true,
     padded: false,
+    strict: false,
 };
 
 /// Go's `base64.CorruptInputError`: the input byte offset where decoding failed.
@@ -48,6 +55,15 @@ impl fmt::Display for CorruptInputError {
 }
 
 impl Encoding {
+    /// `Strict`: the same encoding, rejecting non-zero trailing bits. Newlines
+    /// are still skipped.
+    pub(crate) const fn strict(self) -> Self {
+        Self {
+            strict: true,
+            ..self
+        }
+    }
+
     /// `DecodeString`.
     pub(crate) fn decode(self, src: impl AsRef<[u8]>) -> Result<Vec<u8>, CorruptInputError> {
         let src = src.as_ref();
@@ -140,6 +156,17 @@ impl Encoding {
             | u32::from(dbuf[2]) << 6
             | u32::from(dbuf[3]);
         let bytes = [(value >> 16) as u8, (value >> 8) as u8, value as u8];
+        if self.strict {
+            // The bits after the last whole byte must be zero. This check comes
+            // before any trailing-garbage error, as in Go.
+            match len {
+                3 if bytes[2] != 0 => return Err(CorruptInputError(si.saturating_sub(1))),
+                2 if bytes[1] != 0 || bytes[2] != 0 => {
+                    return Err(CorruptInputError(si.saturating_sub(2)));
+                }
+                _ => {}
+            }
+        }
         out.extend_from_slice(&bytes[..len - 1]);
         match trailing_garbage {
             Some(error) => Err(error),
@@ -172,5 +199,24 @@ mod tests {
         assert_eq!(RAW_URL.decode("a"), Err(CorruptInputError(0)));
         assert_eq!(STD.decode(""), Ok(Vec::new()));
         assert_eq!(STD.decode("\n\n"), Ok(Vec::new()));
+    }
+
+    // Not upstream's: checks Strict() against Go's answers.
+    #[test]
+    fn strict_decodes_like_go() {
+        let strict = STD.strict();
+        assert_eq!(strict.decode("aGVsbG8="), Ok(b"hello".to_vec()));
+        assert_eq!(strict.decode("aGVsbG9="), Err(CorruptInputError(7)));
+        assert_eq!(strict.decode("aGVsbA=="), Ok(b"hell".to_vec()));
+        assert_eq!(strict.decode("aGVsbB=="), Err(CorruptInputError(6)));
+        assert_eq!(strict.decode("aGVs\r\nbG8="), Ok(b"hello".to_vec()));
+        assert_eq!(strict.decode("aGVsbG9=x"), Err(CorruptInputError(7)));
+        assert_eq!(strict.decode("aGVsbG8=x"), Err(CorruptInputError(8)));
+        assert_eq!(strict.decode("aGVsbB=\n="), Err(CorruptInputError(7)));
+        assert_eq!(strict.decode("aGVsbB==\n"), Err(CorruptInputError(7)));
+        let raw = RAW_STD.strict();
+        assert_eq!(raw.decode("aGVsbG8"), Ok(b"hello".to_vec()));
+        assert_eq!(raw.decode("aGVsbG9"), Err(CorruptInputError(6)));
+        assert_eq!(raw.decode("aGVsbB"), Err(CorruptInputError(4)));
     }
 }

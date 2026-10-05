@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/signature (v8.0.10, MIT); this file from
+// Ported from CLIProxyAPI internal/signature (v8.0.15, MIT); this file from
 // provider_compatibility.go. https://github.com/router-for-me/CLIProxyAPI
 
 //! Reasoning-signature validation and replay decisions.
@@ -26,6 +26,7 @@ macro_rules! error {
 }
 
 mod claude;
+mod claude_antigravity_validation;
 mod claude_messages_sanitize;
 mod claude_validation;
 mod gemini_sanitize;
@@ -37,6 +38,7 @@ mod kimi_validation;
 pub use claude::{
     strip_invalid_claude_thinking_blocks, strip_invalid_claude_thinking_blocks_and_empty_messages,
 };
+pub use claude_antigravity_validation::inspect_antigravity_claude_caqs_signature;
 pub use claude_messages_sanitize::{
     ClaudeMessagesSanitizeOptions, SanitizeReport, sanitize_claude_messages_for_claude_upstream,
     sanitize_claude_messages_signatures_for_model, sanitize_claude_messages_signatures_for_target,
@@ -235,11 +237,12 @@ pub struct Decision {
 ///
 /// - `C`: `0x08..=0x0b`, Claude CAIS (`0x08`)
 /// - `E`: `0x10..=0x13`, Claude single-layer and Gemini field-2 (`0x12`)
+/// - `Q`: `0x40..=0x43`, Antigravity double-layer CAQS (`0x43`, an inner `C`)
 /// - `R`: `0x44..=0x47`, Claude double-layer (`0x45`, an inner `E`)
 /// - `g`: `0x80..=0x83`, GPT Fernet reasoning (`0x80`)
 ///
 /// Gemini's ASCII UUID payload is left out because it is never replay-safe.
-const SELF_DESCRIBING_FIRST_CHARS: &[u8] = b"CERg";
+const SELF_DESCRIBING_FIRST_CHARS: &[u8] = b"CEQRg";
 
 /// Whether `sig` could be a self-describing provider envelope. `false` is
 /// conclusive; `true` only narrows the candidates.
@@ -319,7 +322,7 @@ pub fn detect_signature_provider_for_block(raw: &str, block_kind: BlockKind) -> 
         }
     }
     // Kimi has no envelope, so it is claimed only after every envelope probe
-    // declined. Its base64 starts with one of the envelope characters about 6%
+    // declined. Its base64 starts with one of the envelope characters about 8%
     // of the time, which is why the pre-filter above doesn't return early.
     if is_valid_kimi_thinking_signature(sig) {
         return Provider::Kimi;
@@ -361,6 +364,17 @@ pub fn decide_signature_compatibility_for_model(
         normalized_signature: String::new(),
         reason: String::new(),
     };
+
+    // A Claude envelope in Google's wrapper is for Antigravity's replay, not
+    // Claude's own endpoints.
+    if target == Provider::Claude
+        && detected == Provider::Claude
+        && signature_payload_without_provider_prefix(raw).starts_with('Q')
+    {
+        decision.action = Action::DropBlock;
+        decision.reason = "Antigravity CAQS wrapper requires Antigravity replay".to_owned();
+        return decision;
+    }
 
     if provider_matches_target(target, detected) {
         decision.compatible = true;
@@ -452,9 +466,10 @@ pub fn compatible_signature_for_provider_block(
         .then_some(decision.normalized_signature)
 }
 
-/// `CompatibleAntigravityClaudeThinkingSignature`: the double-layer R form that
-/// Antigravity's Claude replay requires. Only signatures strictly identified as
-/// Claude qualify, so a Gemini envelope that also starts with `E` cannot.
+/// `CompatibleAntigravityClaudeThinkingSignature`: the double-layer R or Q form
+/// that Antigravity's Claude replay requires. Only signatures strictly
+/// identified as Claude qualify, so a Gemini envelope that also starts with `E`
+/// cannot.
 pub fn compatible_antigravity_claude_thinking_signature(raw: &str) -> Option<String> {
     if detect_signature_provider_for_block(raw, BlockKind::ClaudeThinking) != Provider::Claude {
         return None;

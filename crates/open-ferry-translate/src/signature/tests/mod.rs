@@ -1,4 +1,4 @@
-// Ported from the tests in CLIProxyAPI internal/signature (v8.0.10, MIT).
+// Ported from the tests in CLIProxyAPI internal/signature (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Each submodule ports the upstream test file of the same name. This module
@@ -14,6 +14,7 @@ use super::*;
 use crate::protowire;
 
 mod claude;
+mod claude_antigravity_validation;
 mod claude_messages_sanitize;
 mod gemini_sanitize;
 mod gemini_validation;
@@ -22,6 +23,7 @@ mod grok_validation;
 mod kimi_validation;
 mod observed;
 mod provider_compatibility;
+mod signaturetest;
 
 pub(crate) use observed::*;
 
