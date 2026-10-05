@@ -43,6 +43,60 @@ fn doubling(levels: usize) -> Value {
     })
 }
 
+/// A schema whose property `a` refers to definition `n<links>`, each
+/// definition past `n0` only a reference to the one before.
+fn reference_chain(links: usize) -> Value {
+    let mut defs = serde_json::Map::new();
+    defs.insert("n0".to_owned(), json!({"type": "string"}));
+    for link in 1..=links {
+        defs.insert(
+            format!("n{link}"),
+            json!({"$ref": format!("#/$defs/n{}", link - 1)}),
+        );
+    }
+    json!({
+        "type": "object",
+        "properties": {"a": {"$ref": format!("#/$defs/n{links}")}},
+        "$defs": defs,
+    })
+}
+
+/// A schema whose property `a` refers to definition `n<links>`, each
+/// definition past `n0` an object whose property `next` refers to the one
+/// before, and `n0` being `last`: inlined, each link nests two levels
+/// deeper.
+fn nesting_chain(links: usize, last: Value) -> Value {
+    let mut defs = serde_json::Map::new();
+    defs.insert("n0".to_owned(), last);
+    for link in 1..=links {
+        defs.insert(
+            format!("n{link}"),
+            json!({
+                "type": "object",
+                "properties": {"next": {"$ref": format!("#/$defs/n{}", link - 1)}},
+            }),
+        );
+    }
+    json!({
+        "type": "object",
+        "properties": {"a": {"$ref": format!("#/$defs/n{links}")}},
+        "$defs": defs,
+    })
+}
+
+/// How deep the walk goes in [`nesting_chain`] with a string `n0`: the
+/// root and its `properties`, then for each definition from `n<links>`
+/// down to `n0` the reference to it followed and the definition itself,
+/// and the `properties` of each but `n0`.
+fn chain_walk_depth(links: usize) -> usize {
+    2 + 2 * (links + 1) + links
+}
+
+/// `levels` arrays, each holding the one before, around `null`.
+fn nested_arrays(levels: usize) -> Value {
+    (0..levels).fold(Value::Null, |inner, _| Value::Array(vec![inner]))
+}
+
 /// How many times `n0`'s schema appears in `value`.
 fn leaves(value: &Value) -> usize {
     match value {
@@ -249,6 +303,101 @@ fn size_counts_values_and_bytes() {
         1 + 2 + 1 + 1 + 2
     );
     assert!(size(&json!([[1, 2], [3, 4]]), 2) <= 4);
+}
+
+// Not upstream's: a chain of 100,000 definitions, each only a reference to
+// the one before (about 3 MB), is too deep to inline, which a thread with
+// a 2 MiB stack finds out without overflowing it. Copying a reference costs
+// nothing, so only the depth bound stops the chain. Upstream's goroutine
+// stacks grow, and it inlines the chain.
+#[test]
+fn inline_local_refs_stops_a_long_reference_chain() {
+    let schema = reference_chain(99_999);
+    let outcome = std::thread::Builder::new()
+        .stack_size(2 << 20)
+        .spawn(move || inline_local_refs(&schema))
+        .expect("the thread starts")
+        .join()
+        .expect("the thread ends");
+    assert_eq!(outcome, Inlined::TooLarge);
+}
+
+// Not upstream's: a chain whose every link nests two levels deeper isn't
+// inlined once its walk goes one level past the bound, though it is small;
+// nor is a long one. Upstream inlines both.
+#[test]
+fn inline_local_refs_stops_past_the_depth_bound() {
+    let string = json!({"type": "string"});
+    let past = (0..)
+        .find(|&links| chain_walk_depth(links) > MAX_DEPTH)
+        .expect("a chain past the bound");
+    assert_eq!(chain_walk_depth(past), MAX_DEPTH + 3);
+    assert_eq!(
+        inline_local_refs(&nesting_chain(past, string.clone())),
+        Inlined::TooLarge
+    );
+    assert_eq!(
+        inline_local_refs(&nesting_chain(1_000, string)),
+        Inlined::TooLarge
+    );
+}
+
+// Not upstream's: a chain whose walk goes exactly as deep as the bound
+// allows is inlined as before, each link holding the next.
+#[test]
+fn inline_local_refs_inlines_up_to_the_depth_bound() {
+    let links = (MAX_DEPTH - 4) / 3;
+    assert_eq!(chain_walk_depth(links), MAX_DEPTH);
+    let inlined = inlined(&nesting_chain(links, json!({"type": "string"})))
+        .expect("the references are inlined");
+    let mut node = &inlined["properties"]["a"];
+    for _ in 0..links {
+        assert_eq!(node["type"], "object", "{node}");
+        node = &node["properties"]["next"];
+    }
+    assert_eq!(node, &json!({"type": "string"}));
+    assert_eq!(nesting(&inlined), 3 + 2 * links);
+}
+
+// Not upstream's: an inlined schema nests no deeper than the bound, the
+// copy a cycle's hint makes of the referring schema's keywords included,
+// however deep down a chain the cycle is reached.
+#[test]
+fn inlined_schemas_nest_within_the_depth_bound() {
+    let mut inlined = 0;
+    for links in [0, 5, 10, 15] {
+        for levels in (0..=60).step_by(4) {
+            let cycle = json!({
+                "type": "object",
+                "properties": {
+                    "again": {"$ref": "#/$defs/n0", "examples": nested_arrays(levels)},
+                },
+            });
+            match inline_local_refs(&nesting_chain(links, cycle)) {
+                Inlined::Schema(schema) => {
+                    inlined += 1;
+                    let depth = nesting(&schema);
+                    assert!(
+                        depth <= MAX_DEPTH,
+                        "{links} links, {levels} levels: {depth}"
+                    );
+                }
+                Inlined::TooLarge => {}
+                Inlined::Unchanged => panic!("{links} links, {levels} levels: unchanged"),
+            }
+        }
+    }
+    assert!(inlined > 0);
+}
+
+// Not upstream's: a value's nesting counts its objects and arrays, itself
+// included.
+#[test]
+fn nesting_counts_objects_and_arrays() {
+    assert_eq!(nesting(&json!("a")), 0);
+    assert_eq!(nesting(&json!({})), 1);
+    assert_eq!(nesting(&json!({"a": [1, {"b": []}], "c": 2})), 4);
+    assert_eq!(nesting(&nested_arrays(70)), 70);
 }
 
 // Not upstream's: the hint is added once.

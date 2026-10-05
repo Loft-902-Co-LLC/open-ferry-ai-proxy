@@ -12,8 +12,9 @@
 //! - Local `$ref`s are inlined ([`inline_local_refs`]), each use getting its
 //!   own copy with the referring schema's other keywords on top; a cycle
 //!   ends in a `See: <name>` description. Parameters whose copies would
-//!   outgrow the schema by more than [`COPY_ALLOWANCE`] aren't inlined, and
-//!   get the permissive object schema below.
+//!   outgrow the schema by more than [`COPY_ALLOWANCE`], or whose walk would
+//!   go deeper than [`MAX_DEPTH`], aren't inlined, and get the permissive
+//!   object schema below.
 //! - A root `anyOf` or `oneOf` branch with no `type` gets `"type":"object"`
 //!   when the root is an object schema ([`type_root_union_branches`]).
 //! - Parameters xAI would still reject, or that make it hang, are replaced
@@ -34,6 +35,19 @@
 //!   reference, and since each use gets its own copy, a definition used
 //!   twice by one used twice by another doubles with each level: seventeen
 //!   levels turn 1.5 KB into 11.6 MB.
+//! - Inlining also stops once the walk would go more than [`MAX_DEPTH`]
+//!   levels deep, each object, array and reference followed counting one,
+//!   with the same outcome. The walk recurses, and a chain of references
+//!   costs nothing to copy, so a long one (100,000 links, about 3 MB) would
+//!   overflow the thread's stack and abort the process; Go's stacks grow,
+//!   so upstream inlines it. The bound also keeps the inlined schema within
+//!   [`MAX_DEPTH`] levels of nesting (a cycle's hint, which copies the
+//!   referring schema's other keywords as they are, counts with its own
+//!   nesting), which leaves the request carrying it a few levels down
+//!   (three under the body's `tools`, a few more under an `additional_tools`
+//!   item or a namespace) well inside the 128 levels a JSON parser reads by
+//!   default, and keeps every recursive step after it (sorting the keys,
+//!   writing, dropping and checking the schema) shallow.
 
 use std::collections::HashSet;
 
@@ -59,6 +73,13 @@ const AUTOMATION_UPDATE: &str = "automation_update";
 /// [`size`]'s units; see the module docs.
 pub(crate) const COPY_ALLOWANCE: usize = 1 << 18;
 
+/// How deep the walk that inlines references may go, each object, array
+/// and reference followed counting one level; the inlined schema nests no
+/// deeper. Half the 128 levels `serde_json` parses, so the request around
+/// the schema has room, and far beyond any real schema; see the module
+/// docs.
+pub(crate) const MAX_DEPTH: usize = 64;
+
 /// What [`inline_local_refs`] made of a schema.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Inlined {
@@ -67,7 +88,7 @@ pub(crate) enum Inlined {
     /// With its references inlined.
     Schema(Value),
     /// Not inlined, as its copies would outgrow it by more than
-    /// [`COPY_ALLOWANCE`].
+    /// [`COPY_ALLOWANCE`], or the walk would go deeper than [`MAX_DEPTH`].
     TooLarge,
 }
 
@@ -91,7 +112,7 @@ pub(crate) fn inline_local_refs(schema: &Value) -> Inlined {
         active: HashSet::new(),
         budget: size(schema, usize::MAX).saturating_add(COPY_ALLOWANCE),
     };
-    let Some(mut resolved) = inliner.resolve(schema) else {
+    let Some(mut resolved) = inliner.resolve(schema, 0) else {
         return Inlined::TooLarge;
     };
     sort_keys(&mut resolved);
@@ -119,16 +140,18 @@ impl Inliner<'_> {
         Some(())
     }
 
-    /// `resolveLocalRefs`: `value` with its references inlined, or `None`
-    /// once the copies outgrow the budget. Each value is paid for before it
-    /// is copied.
-    fn resolve(&mut self, value: &Value) -> Option<Value> {
+    /// `resolveLocalRefs`: `value`, `depth` levels down the walk, with its
+    /// references inlined, or `None` once the copies outgrow the budget or
+    /// the walk would go deeper than [`MAX_DEPTH`]. Each value is paid for
+    /// before it is copied.
+    fn resolve(&mut self, value: &Value, depth: usize) -> Option<Value> {
         match value {
             Value::Array(items) => {
+                let depth = enter(depth)?;
                 self.charge(1)?;
                 let items = items
                     .iter()
-                    .map(|item| self.resolve(item))
+                    .map(|item| self.resolve(item, depth))
                     .collect::<Option<Vec<_>>>()?;
                 Some(Value::Array(items))
             }
@@ -139,28 +162,39 @@ impl Inliner<'_> {
                 {
                     if self.active.contains(reference) {
                         let fallback = cyclic_fallback(node, target, reference);
+                        // The fallback is copied as it is, so it must fit
+                        // in what is left of the depth too.
+                        if depth.saturating_add(nesting(&fallback)) > MAX_DEPTH {
+                            return None;
+                        }
                         self.charge(size(&fallback, self.budget))?;
                         return Some(fallback);
                     }
+                    let followed = enter(depth)?;
                     self.active.insert(reference.clone());
-                    let resolved = self.resolve(target);
+                    let resolved = self.resolve(target, followed);
                     self.active.remove(reference);
                     if let Value::Object(mut out) = resolved? {
+                        // The other keywords join the target's object, one
+                        // level below the reference followed, which the
+                        // target's walk has already entered.
+                        let inside = followed.saturating_add(1);
                         for (key, item) in node {
                             if key != "$ref" {
                                 self.charge(key.len())?;
-                                let item = self.resolve(item)?;
+                                let item = self.resolve(item, inside)?;
                                 out.insert(key.clone(), item);
                             }
                         }
                         return Some(Value::Object(out));
                     }
                 }
+                let depth = enter(depth)?;
                 self.charge(1)?;
                 let mut out = Map::new();
                 for (key, item) in node {
                     self.charge(key.len())?;
-                    let item = self.resolve(item)?;
+                    let item = self.resolve(item, depth)?;
                     out.insert(key.clone(), item);
                 }
                 Some(Value::Object(out))
@@ -171,6 +205,29 @@ impl Inliner<'_> {
             }
         }
     }
+}
+
+/// The depth one level further down the walk than `depth`; `None` past
+/// [`MAX_DEPTH`].
+fn enter(depth: usize) -> Option<usize> {
+    let next = depth.saturating_add(1);
+    (next <= MAX_DEPTH).then_some(next)
+}
+
+/// How many levels of objects and arrays `value` nests, itself included;
+/// none for a value that is neither.
+fn nesting(value: &Value) -> usize {
+    let mut deepest = 0;
+    let mut stack = vec![(value, 1)];
+    while let Some((value, level)) = stack.pop() {
+        match value {
+            Value::Object(fields) => stack.extend(fields.values().map(|child| (child, level + 1))),
+            Value::Array(items) => stack.extend(items.iter().map(|child| (child, level + 1))),
+            _ => continue,
+        }
+        deepest = deepest.max(level);
+    }
+    deepest
 }
 
 /// The size of `value`: one for each value in it, itself included, and

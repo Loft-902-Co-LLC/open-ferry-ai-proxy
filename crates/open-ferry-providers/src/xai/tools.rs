@@ -42,9 +42,10 @@
 //!   compactly, and neither has Go's `\u003c`-style escapes of `<`, `>`
 //!   and `&`.
 //! - A custom call's object `input` is written compactly as parsed.
-//! - A function whose parameters' references are too large to inline gets
-//!   the permissive object schema, and a folded namespace lists that schema
-//!   for such a child (see [`super::schema`]); upstream inlines them all.
+//! - A function whose parameters' references are too large or too deep to
+//!   inline gets the permissive object schema, and a folded namespace lists
+//!   that schema for such a child (see [`super::schema`]); upstream inlines
+//!   them all.
 
 use std::collections::{HashMap, HashSet};
 
