@@ -73,7 +73,7 @@
 //! - `codex_websockets_routing_hint_test.go` (the routing hint is made up)
 //!   and the `codex_websockets_duplex_*_test.go` files (response steering
 //!   isn't ported).
-//! - The xAI subtests: xAI isn't ported.
+//! - The xAI subtests: xAI shares the store tested here (see `crate::xai::websocket`).
 //! - `BenchmarkBuildCodexWebsocketRequestBodyLargePayload`: a benchmark.
 
 use std::sync::Arc;
