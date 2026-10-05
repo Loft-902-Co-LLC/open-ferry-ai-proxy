@@ -3,9 +3,9 @@
 // FinalizeToolInput, geminiResponsesUsage, geminiResponsesTerminalState,
 // geminiRecordFunctionEvidence, geminiPendingIdentityError, determineWebSearchStreamMode,
 // hasEffectiveGoogleSearchTool, isUpstreamGeminiRequest, pickRequestJSON, unwrapRequestRoot,
-// unwrapGeminiResponseRoot) (v8.0.11, MIT), and internal/util/translator.go
-// (SanitizedToolNameMap, RestoreSanitizedToolName) and Go's time.Parse with the
-// RFC 3339 layout (v8.0.10, MIT).
+// unwrapGeminiResponseRoot) and internal/util/translator.go (SanitizedToolNameMap,
+// RestoreSanitizedToolName) (v8.0.15, MIT), and Go's time.Parse with the RFC 3339
+// layout.
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Gemini responses → OpenAI Responses events.
@@ -32,9 +32,8 @@
 //! settled, and a stream that ends early all end the response with
 //! `response.failed`; a whole response then gives nothing.
 //!
-//! This follows v8.0.11, whose `gemini_openai-responses_response.go` differs
-//! from v8.0.10's: a stream finishes only when a finish reason has come and
-//! a chunk with usage or `[DONE]` arrives; a `MAX_TOKENS` finish ends it with
+//! A stream finishes only when a finish reason has come and a chunk with
+//! usage or `[DONE]` arrives; a `MAX_TOKENS` finish ends it with
 //! `response.incomplete`, and the message open then, as `incomplete`; usage is
 //! kept as five cumulative counts, each replaced when a chunk has it, and
 //! always written with all five; a whole response takes its `status` and

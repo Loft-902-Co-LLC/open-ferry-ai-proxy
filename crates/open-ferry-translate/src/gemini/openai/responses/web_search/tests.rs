@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/translator/gemini/openai/responses/gemini_openai-responses_web_search_test.go (v8.0.10, MIT).
+// Ported from CLIProxyAPI internal/translator/gemini/openai/responses/gemini_openai-responses_web_search_test.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Tests web search for a Responses client on Gemini: the `googleSearch`
@@ -29,8 +29,8 @@
 //! - convert_gemini_response_to_openai_responses_stream_model_alias_uses_effective_request:
 //!   changed, the registration is dropped; `gemini-3.7-flash-high`, the model upstream
 //!   registers, is in the catalog with web search. It also sends a trailing `[DONE]`, as
-//!   v8.0.11's copy of this test does: the stream translator follows v8.0.11 and finishes
-//!   only on a chunk with usage or `[DONE]`, and this test's last chunk has no usage.
+//!   upstream's copy of this test does since v8.0.11: the stream translator finishes only on
+//!   a chunk with usage or `[DONE]`, and this test's last chunk has no usage.
 //! - model_supports_web_search_static_veto_takes_precedence: changed. Upstream registers a
 //!   model whose dynamic flag says it searches and whose static capability says it doesn't,
 //!   and expects the static `false` to win. Models can't be registered here and the catalog
