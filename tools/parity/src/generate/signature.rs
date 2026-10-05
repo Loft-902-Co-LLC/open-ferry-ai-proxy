@@ -3,9 +3,11 @@
 //!
 //! Each provider's signatures are built with its real layout (see the
 //! signature module of open-ferry-translate), with fields left out or changed
-//! now and then. Some are then damaged: a cache prefix, whitespace, a cut, a
-//! changed or inserted character. The aim is to land on both sides of every
-//! check, not to look like real traffic.
+//! now and then. Antigravity's Q-form Claude signatures change one thing at a
+//! time, in the protobuf or in either base64 layer. Some signatures are then
+//! damaged: a cache prefix, whitespace, a cut, a changed or inserted
+//! character. The aim is to land on both sides of every check, not to look
+//! like real traffic.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
@@ -191,8 +193,9 @@ impl Generator {
             0..=24 => self.gpt_signature(),
             25..=37 => self.grok_signature(),
             38..=52 => self.claude_signature(),
-            53..=62 => self.cais_signature(),
-            63..=79 => self.gemini_signature(),
+            53..=58 => self.cais_signature(),
+            59..=63 => self.antigravity_caqs_signature(),
+            64..=79 => self.gemini_signature(),
             80..=81 => self.kimi_signature(),
             82..=85 => self.swe_signature(),
             _ => self.odd_signature(),
@@ -382,6 +385,14 @@ impl Generator {
                 channel.varint(1, self.rng.pick(&[16, 16, 17, 0]))
             };
         }
+        if self.rng.chance(15) {
+            // The infrastructure class, which the Q form requires.
+            channel = if self.rng.chance(10) {
+                channel.bytes(2, b"\x02")
+            } else {
+                channel.varint(2, self.rng.pick(&[2, 2, 1]))
+            };
+        }
         if self.rng.chance(85) {
             channel = channel.varint(3, 2);
         }
@@ -434,6 +445,126 @@ impl Generator {
             STANDARD_NO_PAD.encode(&payload.0)
         } else {
             STANDARD.encode(&payload.0)
+        }
+    }
+
+    /// Antigravity's Q form of a Claude 5.5 signature: a CAQS protobuf for
+    /// Google's thinking channel inside two layers of base64. Often the
+    /// observed layout; otherwise one thing about it is changed, in the
+    /// protobuf or in either layer.
+    fn antigravity_caqs_signature(&mut self) -> String {
+        let variant = if self.rng.chance(45) {
+            0
+        } else {
+            1 + self.rng.below(23)
+        };
+        if variant == 23 {
+            // A native CAIS or CAQS signature in a second layer.
+            let native = self.cais_signature();
+            return STANDARD.encode(native);
+        }
+
+        let channel_id = if variant == 1 {
+            self.rng.pick(&[16, 17, 0, 19])
+        } else {
+            18
+        };
+        let mut channel = Pb::default().varint(1, channel_id);
+        channel = match variant {
+            2 => channel.varint(2, self.rng.pick(&[0, 1, 3])),
+            3 => channel,
+            4 => channel.bytes(2, b"\x02"),
+            _ => channel.varint(2, 2),
+        };
+        channel = channel.varint(3, 2);
+        let signature_len = self.rng.pick(&[1020, 1020, 64, 511, 1021]);
+        if variant == 7 {
+            // The signature where CAIS keeps it, not in the container.
+            channel = channel.bytes(5, &self.random_bytes(signature_len));
+        }
+        if variant == 12 {
+            channel = channel.string(6, self.rng.pick(CLAUDE_MODEL_TEXTS));
+        }
+        channel = channel.varint(7, 1);
+        channel = match variant {
+            6 if self.rng.chance(25) => channel,
+            6 => channel.string(
+                8,
+                self.rng
+                    .pick(&["narration", "redacted_thinking", "Thinking", ""]),
+            ),
+            _ => channel.string(8, "thinking"),
+        };
+        if variant == 12 {
+            let context_id = self.uuid();
+            channel = channel.string(11, &context_id);
+        }
+        let channel = channel.0;
+
+        let mut container = Pb::default();
+        if variant == 10 {
+            let first = first_duplicate(self.rng.below(3), &channel);
+            container = container.bytes(1, &first);
+        }
+        container = container.bytes(1, &channel);
+        for (field, len) in [(2, 12), (3, 12), (4, 48)] {
+            container = container.bytes(field, &self.random_bytes(len));
+        }
+        container = match variant {
+            7 | 9 => container,
+            8 => container.bytes(5, &[]),
+            _ => container.bytes(5, &self.random_bytes(signature_len)),
+        };
+        let container = container.0;
+
+        let version = if variant == 5 {
+            self.rng.pick(&[5, 3, 2])
+        } else {
+            4
+        };
+        let mut payload = Pb::default().varint(1, version);
+        if variant == 11 {
+            let first = first_duplicate(self.rng.below(3), &container);
+            payload = payload.bytes(2, &first);
+        }
+        let mut payload = payload.bytes(2, &container).varint(3, 1).0;
+        if variant == 21 {
+            let at = 1 + self.rng.below(payload.len() - 1);
+            payload.truncate(at);
+        }
+
+        let mut inner = match variant {
+            15 => STANDARD_NO_PAD.encode(&payload),
+            20 => URL_SAFE.encode(&payload),
+            _ => STANDARD.encode(&payload),
+        };
+        if variant == 13 {
+            inner = with_trailing_bits(&inner);
+        }
+        if variant == 14 {
+            let inserted = self
+                .rng
+                .pick(&[" ", "#", "\t", "\r\n", "\n", "=", "claude#"]);
+            let at = if inserted == "claude#" {
+                0
+            } else {
+                self.char_boundary(&inner)
+            };
+            inner.insert_str(at, inserted);
+        }
+        let outer = match variant {
+            16 => STANDARD_NO_PAD.encode(&inner),
+            19 => STANDARD.encode(STANDARD.encode(&inner)),
+            22 => URL_SAFE.encode(&inner),
+            _ => STANDARD.encode(&inner),
+        };
+        match variant {
+            17 => with_trailing_bits(&outer),
+            18 => {
+                let at = self.char_boundary(&outer);
+                format!("{}\r\n{}", &outer[..at], &outer[at..])
+            }
+            _ => outer,
         }
     }
 
@@ -798,6 +929,16 @@ impl Pb {
     }
 }
 
+/// The first of two channel blocks or containers: broken, empty or a copy of
+/// the second.
+fn first_duplicate(choice: usize, copy: &[u8]) -> Vec<u8> {
+    match choice {
+        0 => vec![0x80],
+        1 => Vec::new(),
+        _ => copy.to_vec(),
+    }
+}
+
 /// Sets padding bits in the last base64 character, which strict decoders
 /// reject. Text that doesn't end in a base64 character is returned unchanged.
 fn with_trailing_bits(sig: &str) -> String {
@@ -845,6 +986,23 @@ mod tests {
                 serde_json::from_str::<Value>(&case.request).expect("valid JSON");
             }
         }
+    }
+
+    #[test]
+    fn antigravity_caqs_signatures_land_on_both_sides() {
+        use open_ferry_translate::signature::inspect_antigravity_claude_caqs_signature;
+        let (mut valid, mut invalid) = (0, 0);
+        for index in 0..200 {
+            let signature = Generator::new(7, index).antigravity_caqs_signature();
+            match inspect_antigravity_claude_caqs_signature(&signature) {
+                Ok(_) => valid += 1,
+                Err(_) => invalid += 1,
+            }
+        }
+        assert!(
+            valid > 50 && invalid > 50,
+            "{valid} valid, {invalid} invalid"
+        );
     }
 
     #[test]
