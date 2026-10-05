@@ -2,7 +2,7 @@
 // sdk/api/handlers/handlers.go (BuildErrorResponseBodyWithError),
 // sdk/api/handlers/handlers_errors.go, executionErrorMessage in
 // sdk/api/handlers/handlers_execution.go and the error helpers in
-// sdk/api/handlers/claude/code_handlers.go (v8.0.10, MIT).
+// sdk/api/handlers/claude/code_handlers.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Errors as clients see them: [`ErrorMessage`], and the OpenAI and Claude
@@ -13,6 +13,7 @@ use axum::response::Response;
 use bytes::Bytes;
 use http::{HeaderMap, HeaderValue, StatusCode, header};
 use open_ferry_core::exec::ExecError;
+use open_ferry_core::manager::clienterror::is_claude_thread_not_found;
 use open_ferry_translate::go;
 use serde_json::{Map, Value, json};
 
@@ -192,7 +193,10 @@ pub(crate) fn openai_error_response(message: &ErrorMessage, passthrough: bool) -
     )
 }
 
-/// The Claude error body for `message` (upstream's `toClaudeError`).
+/// The Claude error body for `message` (upstream's `toClaudeError`). The
+/// 404 Anthropic answers a stale `previous_message_id` with is marked with
+/// the `thread_not_found` error code, telling the client to replay the
+/// whole conversation.
 pub(crate) fn claude_error_json(message: &ErrorMessage) -> String {
     let status = message.http_status();
     let text = match message.text.trim() {
@@ -200,7 +204,13 @@ pub(crate) fn claude_error_json(message: &ErrorMessage) -> String {
         text => text,
     };
     let (kind, message) = claude_error_detail(status, text);
-    json!({"type": "error", "error": {"type": kind, "message": message}}).to_string()
+    let mut error = json!({"type": kind, "message": message});
+    if is_claude_thread_not_found(status, text)
+        && let Value::Object(error) = &mut error
+    {
+        error.insert("details".into(), json!({"error_code": "thread_not_found"}));
+    }
+    json!({"type": "error", "error": error}).to_string()
 }
 
 /// The type and message of a Claude error (upstream's
@@ -249,9 +259,9 @@ fn claude_error_type(status: u16) -> &'static str {
         402 => "billing_error",
         403 => "permission_error",
         404 => "not_found_error",
+        408 | 504 => "timeout_error",
         413 => "request_too_large",
         429 => "rate_limit_error",
-        504 => "timeout_error",
         529 => "overloaded_error",
         500.. => "api_error",
         _ => "invalid_request_error",
@@ -383,6 +393,72 @@ mod tests {
             claude_error_json(&none),
             r#"{"type":"error","error":{"type":"api_error","message":"Internal Server Error"}}"#
         );
+    }
+
+    // TestClaudeErrorTypeFromStatus.
+    #[test]
+    fn claude_error_types_follow_the_status() {
+        for (status, want) in [
+            (400, "invalid_request_error"),
+            (408, "timeout_error"),
+            (429, "rate_limit_error"),
+            (500, "api_error"),
+            (504, "timeout_error"),
+        ] {
+            assert_eq!(claude_error_type(status), want, "{status}");
+        }
+    }
+
+    const MISSING_THREAD: &str = r#"{"type":"error","error":{"type":"not_found_error","message":"No thread state was found for the requested previous_message_id. Replay the full conversation with thread create to start a new Thread."}}"#;
+
+    fn error_code(body: &str) -> Value {
+        let body: Value = serde_json::from_str(body).unwrap();
+        body["error"]["details"]["error_code"].clone()
+    }
+
+    // TestClaudeErrorMarksMissingThreadForClientReplay.
+    #[test]
+    fn claude_errors_mark_a_missing_thread_for_replay() {
+        let body = claude_error_json(&ErrorMessage::new(404, MISSING_THREAD));
+        assert_eq!(error_code(&body), "thread_not_found", "{body}");
+        assert_eq!(
+            body,
+            r#"{"type":"error","error":{"type":"not_found_error","message":"No thread state was found for the requested previous_message_id. Replay the full conversation with thread create to start a new Thread.","details":{"error_code":"thread_not_found"}}}"#
+        );
+        // Not upstream's: the same body with another status, or another
+        // 404, isn't marked.
+        let body = claude_error_json(&ErrorMessage::new(500, MISSING_THREAD));
+        assert!(!body.contains("details"), "{body}");
+        let body = claude_error_json(&ErrorMessage::new(
+            404,
+            r#"{"error":{"type":"not_found_error","message":"Not Found"}}"#,
+        ));
+        assert!(!body.contains("details"), "{body}");
+    }
+
+    // TestClaudeErrorMarksWrappedMissingThreadForClientReplay. A call's
+    // error carries the provider's body as its text, so there is no
+    // separate response body to prefer.
+    #[test]
+    fn claude_errors_mark_a_missing_thread_from_a_call() {
+        let error = ExecError::upstream(
+            404,
+            r#"{"type":"error","error":{"type":"not_found_error","message":"No thread state was found for the requested previous_message_id."}}"#,
+        );
+        let body = claude_error_json(&ErrorMessage::from_exec(error));
+        assert_eq!(error_code(&body), "thread_not_found", "{body}");
+    }
+
+    // TestWriteClaudeDirectErrorMarksMissingThreadForClientReplay.
+    #[tokio::test]
+    async fn claude_error_responses_mark_a_missing_thread_for_replay() {
+        use http_body_util::BodyExt;
+
+        let response = claude_error_response(&ErrorMessage::new(404, MISSING_THREAD), false);
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert_eq!(error_code(&body), "thread_not_found", "{body}");
     }
 
     #[test]

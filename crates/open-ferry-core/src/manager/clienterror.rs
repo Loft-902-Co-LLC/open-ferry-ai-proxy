@@ -1,5 +1,6 @@
 // Ported from CLIProxyAPI internal/clienterror/client_error.go (IsRequestFault,
-// IsItemNotPersisted and the body checks) (v8.0.10, MIT).
+// IsItemNotPersisted, IsClaudeThreadNotFound and the body checks) (v8.0.15,
+// MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Whether an upstream failure is the client request's fault, which only the
@@ -64,6 +65,11 @@ pub fn is_request_fault(status: u16, text: &str) -> bool {
     if status == 401 && body_has(text, &TYPE_PATHS, |kind| kind == "authentication_error") {
         return false;
     }
+    // Claude's missing thread state comes from a stale continuation, not the
+    // credential: the client replays the whole conversation.
+    if is_claude_thread_not_found(status, text) {
+        return true;
+    }
     // A credential that can't serve the model isn't the caller's fault.
     if body_has(text, &CODE_PATHS, |code| {
         code == "model_not_found" || code == "model_not_found_error"
@@ -90,6 +96,27 @@ pub fn is_item_not_persisted(message: &str) -> bool {
     lower.contains("item with id")
         && lower.contains("not found")
         && lower.contains("items are not persisted when `store` is set to false")
+}
+
+/// Whether a failure with `status` and error text `text` is Claude's 404
+/// for a stale `previous_message_id` continuation, whose thread state is
+/// gone (`IsClaudeThreadNotFound`).
+pub fn is_claude_thread_not_found(status: u16, text: &str) -> bool {
+    if status != 404 {
+        return false;
+    }
+    let body = text.trim();
+    if body.is_empty() {
+        return false;
+    }
+    let Ok(root) = serde_json::from_str::<Value>(body) else {
+        return false;
+    };
+    let kind = str_of(get_path(&root, "error.type"));
+    let message = go_lower(&str_of(get_path(&root, "error.message")));
+    kind.trim().eq_ignore_ascii_case("not_found_error")
+        && message.contains("thread state")
+        && message.contains("previous_message_id")
 }
 
 /// Whether `text` is a JSON body with a value at one of `paths` that, lower
@@ -144,5 +171,36 @@ mod tests {
         ));
         assert!(!is_request_fault(404, "not found"));
         assert!(!is_request_fault(503, "{"));
+    }
+
+    // The Claude cases of TestIsRequestFault. Upstream's "in response body"
+    // case reads the body an error carries beside its text; a call's error
+    // carries the provider's body as its text.
+    #[test]
+    fn claude_missing_thread_state_is_the_request_fault() {
+        assert!(is_request_fault(
+            404,
+            r#"{"type":"error","error":{"type":"not_found_error","message":"No thread state was found for the requested previous_message_id. Replay the full conversation with thread create to start a new Thread."}}"#
+        ));
+        assert!(is_request_fault(
+            404,
+            r#"{"type":"error","error":{"type":"not_found_error","message":"No thread state was found for the requested previous_message_id."}}"#
+        ));
+        // Generic Claude not found.
+        assert!(!is_request_fault(
+            404,
+            r#"{"error":{"type":"not_found_error","message":"Not Found"}}"#
+        ));
+        // Claude missing thread on server error.
+        assert!(!is_request_fault(
+            500,
+            r#"{"error":{"type":"not_found_error","message":"No thread state was found for the requested previous_message_id."}}"#
+        ));
+        // Not upstream's: the type is matched ignoring case and surrounding
+        // space, the message ignoring case.
+        assert!(is_claude_thread_not_found(
+            404,
+            r#" {"error":{"type":" Not_Found_Error ","message":"THREAD STATE gone for PREVIOUS_MESSAGE_ID"}} "#
+        ));
     }
 }

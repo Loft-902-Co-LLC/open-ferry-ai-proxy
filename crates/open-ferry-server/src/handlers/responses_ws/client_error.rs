@@ -1,12 +1,13 @@
 // Ported from IsRequestFault, IsItemNotPersisted, hasModelNotFoundErrorBody,
 // hasAuthenticationErrorBody and hasRequestFaultBody in CLIProxyAPI
-// internal/clienterror/client_error.go (v8.0.10, MIT).
+// internal/clienterror/client_error.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Whether an upstream failure is the client request's fault, which only the
 //! client can fix. A private copy until the package is ported for the
-//! credential manager.
+//! credential manager; Claude's missing thread state is the manager's check.
 
+use open_ferry_core::manager::clienterror::is_claude_thread_not_found;
 use open_ferry_translate::go;
 
 use crate::json;
@@ -58,6 +59,9 @@ pub(super) fn is_request_fault(status: u16, text: &str) -> bool {
     if status == 401 && body_has(text, &TYPE_PATHS, |kind| kind == "authentication_error") {
         return false;
     }
+    if is_claude_thread_not_found(status, text) {
+        return true;
+    }
     // A credential that can't serve the model isn't the caller's fault.
     if body_has(text, &CODE_PATHS, |code| {
         code == "model_not_found" || code == "model_not_found_error"
@@ -99,4 +103,21 @@ fn body_has(text: &str, paths: &[&str], matches: impl Fn(&str) -> bool) -> bool 
             .unwrap_or_default();
         matches(go::to_lower(&value).trim())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The Claude cases of TestIsRequestFault.
+    #[test]
+    fn claude_missing_thread_state_is_the_request_fault() {
+        let missing = r#"{"type":"error","error":{"type":"not_found_error","message":"No thread state was found for the requested previous_message_id."}}"#;
+        assert!(is_request_fault(404, missing));
+        assert!(!is_request_fault(500, missing));
+        assert!(!is_request_fault(
+            404,
+            r#"{"error":{"type":"not_found_error","message":"Not Found"}}"#
+        ));
+    }
 }

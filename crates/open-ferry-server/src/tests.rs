@@ -503,6 +503,47 @@ async fn claude_messages() {
     assert_eq!(calls[3].options.response_format, Format::from_static(""));
 }
 
+// TestClaudeIncompleteStreamError: a 408 is a `timeout_error`, as JSON and
+// as the one error event that ends a stream that has started.
+#[tokio::test]
+async fn claude_incomplete_streams_are_timeout_errors() {
+    const MESSAGE: &str = "stream error: stream disconnected before completion: stream closed before response.completed";
+    let (app, _) = app(
+        ServerConfig::default(),
+        vec![
+            Outcome::Fail(ExecError::upstream(408, MESSAGE)),
+            Outcome::Stream(
+                HeaderMap::new(),
+                vec![
+                    Ok(Bytes::from_static(b"event: message_start\ndata: {}\n\n")),
+                    Err(ExecError::upstream(408, MESSAGE)),
+                ],
+            ),
+        ],
+    );
+    let check = |body: &str| {
+        let body: Value = serde_json::from_str(body.trim()).unwrap();
+        assert_eq!(body["type"], "error");
+        assert_eq!(body["error"]["type"], "timeout_error");
+        assert_eq!(body["error"]["message"], MESSAGE);
+    };
+
+    let (status, _, body) = send(
+        &app,
+        authed(Method::POST, "/v1/messages", r#"{"model":"claude-sonnet"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::REQUEST_TIMEOUT);
+    check(&body);
+
+    let stream = r#"{"model":"claude-sonnet","stream":true}"#;
+    let (status, _, body) = send(&app, authed(Method::POST, "/v1/messages", stream)).await;
+    assert_eq!(status, StatusCode::OK);
+    const PREFIX: &str = "event: error\ndata: ";
+    assert_eq!(body.matches(PREFIX).count(), 1, "{body}");
+    check(body.split_once(PREFIX).unwrap().1);
+}
+
 #[tokio::test]
 async fn bodies_are_limited_and_decoded() {
     let config = ServerConfig {
