@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_cooldown.go (the error
-// classifiers) and the error codes in sdk/cliproxy/auth/errors.go (v8.0.10,
+// classifiers) and the error codes in sdk/cliproxy/auth/errors.go (v8.0.15,
 // MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
@@ -323,8 +323,10 @@ pub(crate) fn is_unauthorized_error(err: ErrView<'_>) -> bool {
     raw.contains("status 401") || raw.contains("401 unauthorized")
 }
 
-/// Whether the credential's last failure was a 401 with no refresh pending
-/// (upstream's `hasUnauthorizedAuthFailure` and `HasUnauthorizedAuthFailure`).
+/// Whether the credential's last failure was a 401 with no refresh or retry
+/// pending: it is out of rotation until its tokens change or a forced
+/// refresh works (upstream's `hasUnauthorizedAuthFailure` and
+/// `HasUnauthorizedAuthFailure`).
 pub fn has_unauthorized_auth_failure(auth: &Auth) -> bool {
     let Some(last) = &auth.last_error else {
         return false;
@@ -332,6 +334,7 @@ pub fn has_unauthorized_auth_failure(auth: &Auth) -> bool {
     auth.unavailable
         && auth.status == Status::Error
         && is_zero(auth.next_refresh_after)
+        && is_zero(auth.next_retry_after)
         && (last.http_status == 401 || equal_fold(&last.code, "unauthorized"))
 }
 

@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_scheduler_targeted_update_test.go (v8.0.10, MIT).
+// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_scheduler_targeted_update_test.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Results that touch one model or the whole credential, as picks and the
@@ -466,9 +466,12 @@ async fn scheduler_credential_level_recovery_via_model_success_updates_all_shard
         let err = pick_by_call(&h, &executor, provider, model)
             .await
             .expect_err(model);
+        // The 401 cools the credential down for 30 minutes; with a retry
+        // pending it isn't terminal.
         assert_eq!(err.kind, ErrorKind::AuthUnavailable, "{model}: {err}");
         assert_eq!(err.status, 503);
-        assert!(err.terminal_auth, "{model}");
+        assert!(!err.terminal_auth, "{model}");
+        assert_eq!(err.retry_after, Some(Duration::from_secs(30 * 60)));
         assert_eq!(
             err.to_string(),
             "auth_unavailable: no auth available (last upstream error: unauthorized: 401 Unauthorized)"

@@ -4,7 +4,7 @@
 // cooldownStateRecordsForAuthLocked, authCooldownStateRecord,
 // modelCooldownStateRecord and ApplyConfigWithCooldownStateStore),
 // sdk/cliproxy/auth/cooldown_state.go (cooldownAuthFile) and
-// sdk/cliproxy/service_auth.go (resolveCooldownStateStore) (v8.0.10, MIT).
+// sdk/cliproxy/service_auth.go (resolveCooldownStateStore) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The cooldown state store: while `save-cooldown-status` is on, the
@@ -88,6 +88,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
+use super::classify::has_unauthorized_auth_failure;
 use super::cooldown::{
     cooldown_disabled_for_auth, cooldown_reason, ensure_model_state, merge_model_state,
     update_aggregated_availability,
@@ -638,7 +639,8 @@ fn holds_cooldown(auth: &Auth) -> bool {
 }
 
 /// Puts one record back on its credential, if it is still to run out, the
-/// credential cools down, and the credential holds nothing newer; returns
+/// credential cools down, isn't out of rotation for a rejected token, and
+/// holds nothing newer; returns
 /// the credential's ID if so (upstream's `restoreCooldownRecordLocked`).
 ///
 /// A credential-wide record is dropped unless it is newer than what the
@@ -663,6 +665,7 @@ fn restore_record(
     if entry.auth.disabled
         || entry.auth.status == Status::Disabled
         || cooldown_disabled_for_auth(settings, &entry.auth)
+        || has_unauthorized_auth_failure(&entry.auth)
     {
         return None;
     }

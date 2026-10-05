@@ -3,7 +3,7 @@
 // clearCooldownStateForAuth and ResetQuota), clientModelProjectionForAuth in
 // sdk/cliproxy/auth/conductor_models.go, ReconcileRegistryModelStates in
 // sdk/cliproxy/auth/conductor_selection.go and applyCooldownFields in
-// sdk/cliproxy/auth/quota_signals.go (v8.0.10, MIT).
+// sdk/cliproxy/auth/quota_signals.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! What a call's outcome does to a credential: the cooldowns that keep a
@@ -26,8 +26,8 @@ use std::time::Duration;
 use chrono::{DateTime, TimeDelta, Utc};
 
 use super::classify::{
-    CODE_FORCE_COOLDOWN, is_cloudflare_challenge_result_error, is_invalid_grant_result_error,
-    is_model_support_result_error, should_skip_credential_cooldown,
+    CODE_FORCE_COOLDOWN, has_unauthorized_auth_failure, is_cloudflare_challenge_result_error,
+    is_invalid_grant_result_error, is_model_support_result_error, should_skip_credential_cooldown,
 };
 use super::credential::{disable_cooling_override, is_zero};
 use super::models::{Resolver, resolve_openai_compat_config};
@@ -328,6 +328,12 @@ pub(crate) fn model_state_is_clean(state: &ModelState) -> bool {
 /// Derives the credential's availability from its model states (upstream's
 /// `updateAggregatedAvailability`).
 pub(crate) fn update_aggregated_availability(auth: &mut Auth, now: Timestamp) {
+    // A credential whose tokens were both rejected stays out of rotation
+    // until they change; a model's result doesn't bring it back.
+    if has_unauthorized_auth_failure(auth) {
+        auth.unavailable = true;
+        return;
+    }
     if is_credential_quota_active(&auth.quota, now) {
         auth.unavailable = true;
         return;
@@ -411,8 +417,13 @@ pub(crate) fn has_model_error(auth: &Auth, now: Timestamp) -> bool {
     })
 }
 
-/// Upstream's `clearAuthStateOnSuccess`.
+/// Upstream's `clearAuthStateOnSuccess`. A credential out of rotation for a
+/// rejected token stays out.
 pub(crate) fn clear_auth_state_on_success(auth: &mut Auth, now: Timestamp) {
+    if has_unauthorized_auth_failure(auth) {
+        auth.unavailable = true;
+        return;
+    }
     auth.unavailable = false;
     auth.status = Status::Active;
     auth.status_message.clear();
@@ -424,8 +435,12 @@ pub(crate) fn clear_auth_state_on_success(auth: &mut Auth, now: Timestamp) {
 
 /// Clears every cooldown on the credential and its models (upstream's
 /// `clearCooldownStateForAuth`). Returns whether anything changed; the
-/// caller bumps the generation when it did.
+/// caller bumps the generation when it did. A credential out of rotation
+/// for a rejected token is left as it is.
 pub(crate) fn clear_cooldown_state_for_auth(auth: &mut Auth, now: Timestamp) -> bool {
+    if has_unauthorized_auth_failure(auth) {
+        return false;
+    }
     let mut changed = false;
     if auth.unavailable
         || !is_zero(auth.next_retry_after)
@@ -463,6 +478,10 @@ pub(crate) fn clear_cooldown_state_for_auth(auth: &mut Auth, now: Timestamp) -> 
 /// Applies a call's outcome to a credential, as upstream's `MarkResult` does
 /// under its lock. `model_key` is the canonical model the outcome belongs
 /// to, or empty.
+///
+/// A credential out of rotation for a rejected token stays out: a call that
+/// was already running when it was taken out only updates its model's
+/// state.
 pub(crate) fn apply_result(
     settings: &Settings,
     auth: &mut Auth,
@@ -470,8 +489,42 @@ pub(crate) fn apply_result(
     model_key: &str,
     now: Timestamp,
 ) {
+    let was_terminal_unauthorized = has_unauthorized_auth_failure(auth);
+    apply_outcome(
+        settings,
+        auth,
+        result,
+        model_key,
+        now,
+        was_terminal_unauthorized,
+    );
+    if was_terminal_unauthorized {
+        auth.unavailable = true;
+        auth.status = Status::Error;
+        auth.next_refresh_after = None;
+        auth.next_retry_after = None;
+    }
+}
+
+/// The body of [`apply_result`].
+fn apply_outcome(
+    settings: &Settings,
+    auth: &mut Auth,
+    result: &CallResult,
+    model_key: &str,
+    now: Timestamp,
+    was_terminal_unauthorized: bool,
+) {
     if result.success {
-        if auth.quota.reason == "credential_quota" && after(auth.quota.next_recover_at, now) {
+        if was_terminal_unauthorized {
+            if !model_key.is_empty()
+                && let Some(key) = ensure_model_state(auth, model_key)
+                && let Some(state) = auth.model_states.get_mut(&key)
+            {
+                reset_model_state(state, now);
+            }
+        } else if auth.quota.reason == "credential_quota" && after(auth.quota.next_recover_at, now)
+        {
             // An active credential-scoped cooldown stays.
         } else if !model_key.is_empty() {
             if let Some(key) = ensure_model_state(auth, model_key)
@@ -495,6 +548,9 @@ pub(crate) fn apply_result(
         .as_ref()
         .is_some_and(|err| err.code == CODE_FORCE_COOLDOWN);
     if model_key.is_empty() {
+        if was_terminal_unauthorized {
+            return;
+        }
         let disable_cooling = cooldown_disabled_for_auth(settings, auth) && !force_cooldown;
         apply_auth_failure_state(
             settings,
@@ -523,8 +579,10 @@ pub(crate) fn apply_result(
     if let Some(err) = &result.error {
         state.last_error = Some(err.clone());
         state.status_message = err.message.clone();
-        auth.last_error = Some(err.clone());
-        auth.status_message = err.message.clone();
+        if !was_terminal_unauthorized {
+            auth.last_error = Some(err.clone());
+            auth.status_message = err.message.clone();
+        }
     }
     let err = result.error.as_ref();
     let status = err.map_or(0, |e| e.http_status);
@@ -540,7 +598,7 @@ pub(crate) fn apply_result(
             next_cloudflare_cooldown(state.quota.backoff_level, disable_cooling, now);
         state.next_retry_after = next;
         state.status_message = "cloudflare challenge".into();
-        if auth.last_error.is_some() {
+        if auth.last_error.is_some() && !was_terminal_unauthorized {
             auth.status_message = "cloudflare challenge".into();
         }
         state.quota = QuotaState {
@@ -625,18 +683,20 @@ pub(crate) fn apply_result(
                             backoff_level: level,
                         };
                     }
-                    auth.unavailable = true;
-                    let mut auth_next = credential_next;
-                    if auth_credential_quota && auth.quota.next_recover_at > auth_next {
-                        auth_next = auth.quota.next_recover_at;
+                    if !was_terminal_unauthorized {
+                        auth.unavailable = true;
+                        let mut auth_next = credential_next;
+                        if auth_credential_quota && auth.quota.next_recover_at > auth_next {
+                            auth_next = auth.quota.next_recover_at;
+                        }
+                        auth.quota = QuotaState {
+                            exceeded: true,
+                            reason: "credential_quota".into(),
+                            next_recover_at: auth_next,
+                            backoff_level: level,
+                        };
+                        auth.next_retry_after = auth_next;
                     }
-                    auth.quota = QuotaState {
-                        exceeded: true,
-                        reason: "credential_quota".into(),
-                        next_recover_at: auth_next,
-                        backoff_level: level,
-                    };
-                    auth.next_retry_after = auth_next;
                 }
             }
             408 | 500 | 502 | 503 | 504 | 520..=526 => {
@@ -929,7 +989,11 @@ pub(crate) fn reset_quota(
         models.extend(registered.iter().cloned());
     }
     let models = dedupe_strings(models);
-    if !auth.disabled && auth.status != Status::Disabled && !has_model_error(auth, now) {
+    if !auth.disabled
+        && auth.status != Status::Disabled
+        && !has_model_error(auth, now)
+        && !has_unauthorized_auth_failure(auth)
+    {
         auth.last_error = None;
         auth.status_message.clear();
         auth.status = Status::Active;

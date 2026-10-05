@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_refresh.go and
-// sdk/cliproxy/auth/auto_refresh_loop.go (v8.0.10, MIT).
+// sdk/cliproxy/auth/auto_refresh_loop.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Token refresh: the background loop that refreshes OAuth credentials
@@ -49,7 +49,7 @@ use super::credential::{
 };
 use super::text::{equal_fold, go_lower};
 use super::{Manager, ManagerError, Shared, State, lock};
-use crate::auth::{Auth, Status, Timestamp};
+use crate::auth::{Auth, AuthError, Status, Timestamp};
 use crate::exec::{ErrorKind, ExecError};
 
 /// How often the loop checks when no interval is given
@@ -366,6 +366,30 @@ enum AfterFailure {
     Reschedule,
     Unschedule,
     Nothing,
+}
+
+/// The refresh that failed, for [`Manager::record_refresh_failure`].
+struct FailedRefresh<'a> {
+    /// The registration it started from.
+    base_epoch: u64,
+    /// The access token the provider rejected, or empty.
+    failed_token: &'a str,
+    /// Whether it was a forced refresh.
+    force: bool,
+}
+
+/// The status message of a credential whose tokens were both rejected.
+const TERMINAL_UNAUTHORIZED_MESSAGE: &str = "unauthorized (refresh token invalid)";
+
+/// The error recorded on a credential whose tokens were both rejected: a
+/// 401, so it stays out of rotation (see [`has_unauthorized_auth_failure`]).
+fn terminal_unauthorized_error(err: &ExecError) -> AuthError {
+    AuthError {
+        code: "unauthorized".into(),
+        message: ErrView::Exec(err).text(),
+        http_status: 401,
+        ..AuthError::default()
+    }
 }
 
 /// The loop's own handle to the manager, which doesn't keep the loop going.
@@ -785,6 +809,9 @@ impl Manager {
         if !is_unauthorized_error(ErrView::Exec(err)) || !has_refresh_credential(auth) {
             return None;
         }
+        if has_unauthorized_auth_failure(auth) {
+            return None;
+        }
         tracing::debug!(
             auth_id = %auth.id,
             provider = %auth.provider,
@@ -803,13 +830,15 @@ impl Manager {
     }
 
     /// Refreshes a credential now, whether or not it is due (upstream's
-    /// `ForceRefreshAuth`).
+    /// `ForceRefreshAuth`). It refreshes a credential taken out of rotation
+    /// for rejected tokens or turned off after `invalid_grant` too, which
+    /// nothing else refreshes; a failure leaves such a credential out.
     pub async fn force_refresh(&self, id: &str) -> Result<Arc<Auth>, ManagerError> {
         let id = id.trim();
         if id.is_empty() {
             return Err(ManagerError::Other("auth id is empty".into()));
         }
-        self.refresh_at_epoch(id, "", 0).await
+        self.refresh_with(id, "", 0, true).await
     }
 
     /// Refreshes every enabled credential that has a refresh token,
@@ -851,6 +880,18 @@ impl Manager {
         failed_token: &str,
         epoch: u64,
     ) -> Result<Arc<Auth>, ManagerError> {
+        self.refresh_with(id, failed_token, epoch, false).await
+    }
+
+    /// [`refresh_at_epoch`](Self::refresh_at_epoch); with `force`, as a
+    /// forced refresh (upstream's `withForceRefresh` context).
+    async fn refresh_with(
+        &self,
+        id: &str,
+        failed_token: &str,
+        epoch: u64,
+        force: bool,
+    ) -> Result<Arc<Auth>, ManagerError> {
         let id = id.trim();
         if id.is_empty() {
             return Err(ManagerError::Other("auth id is empty".into()));
@@ -876,10 +917,13 @@ impl Manager {
                 "auth registration changed before refresh".into(),
             ));
         }
-        if has_disabled_invalid_grant_failure(&auth) {
+        if has_disabled_invalid_grant_failure(&auth) && !force {
             return Err(ManagerError::Other(
                 "auth is disabled with invalid grant".into(),
             ));
+        }
+        if has_unauthorized_auth_failure(&auth) && !force {
+            return Err(ManagerError::Other("auth is unauthorized".into()));
         }
         // Another call may have refreshed the credential already.
         if !failed_token.is_empty() {
@@ -899,7 +943,12 @@ impl Manager {
             }
             Err(err) => {
                 tracing::debug!(auth_id = %id, status = err.status, "refresh failed");
-                self.record_refresh_failure(id, base_epoch, &err, now);
+                let attempt = FailedRefresh {
+                    base_epoch,
+                    failed_token,
+                    force,
+                };
+                self.record_refresh_failure(id, &attempt, &err, now);
                 return Err(ManagerError::Refresh(err));
             }
         };
@@ -935,8 +984,21 @@ impl Manager {
     /// Records a failed refresh on the live credential and sets when to try
     /// again (the failure branch of upstream's
     /// `refreshAuthForRequestAtEpoch`). Nothing changes when the credential
-    /// was registered again meanwhile.
-    fn record_refresh_failure(&self, id: &str, base_epoch: u64, err: &ExecError, now: Timestamp) {
+    /// was registered again meanwhile, or, unless the refresh was forced,
+    /// when it is out of rotation for rejected tokens.
+    ///
+    /// When the refresh token is refused (`invalid_grant`) after the
+    /// provider rejected the access token, neither can recover without a new
+    /// login: the credential goes out of rotation and off the refresh queue
+    /// until its tokens change, however long its access token claims to
+    /// last. A failed forced refresh of such a credential leaves it out.
+    fn record_refresh_failure(
+        &self,
+        id: &str,
+        attempt: &FailedRefresh<'_>,
+        err: &ExecError,
+        now: Timestamp,
+    ) {
         let unauthorized = is_unauthorized_error(ErrView::Exec(err));
         let invalid_grant = is_invalid_grant_error(ErrView::Exec(err));
         let after = {
@@ -944,15 +1006,37 @@ impl Manager {
             let Some(entry) = state.auths.get_mut(id) else {
                 return;
             };
-            if entry.auth.registration_epoch != base_epoch {
+            if entry.auth.registration_epoch != attempt.base_epoch {
+                return;
+            }
+            let was_terminal_unauthorized = has_unauthorized_auth_failure(&entry.auth);
+            if was_terminal_unauthorized && !attempt.force {
                 return;
             }
             let mut failures = entry.refresh_failures;
             let auth = Arc::make_mut(&mut entry.auth);
             auth.generation = auth.generation.saturating_add(1);
             auth.updated_at = Some(now);
+            if was_terminal_unauthorized {
+                auth.unavailable = true;
+                auth.status = Status::Error;
+                auth.next_refresh_after = None;
+                auth.next_retry_after = None;
+                if unauthorized || invalid_grant {
+                    auth.last_error = Some(terminal_unauthorized_error(err));
+                    auth.status_message = TERMINAL_UNAUTHORIZED_MESSAGE.into();
+                }
+                state.sync_scheduler(self.models(), id, now);
+                drop(state);
+                self.queue_refresh_unschedule(id);
+                return;
+            }
             auth.last_error = Some(refresh_error_from_error(ErrView::Exec(err)));
             let disabled = is_disabled(auth);
+            // The provider rejected this very access token, so its expiry no
+            // longer says it works.
+            let access_token_rejected =
+                !attempt.failed_token.is_empty() && access_token(auth) == attempt.failed_token;
             let after = if disabled && invalid_grant {
                 auth.unavailable = true;
                 auth.status = Status::Disabled;
@@ -968,11 +1052,21 @@ impl Manager {
                     auth.status_message = "disabled".into();
                 }
                 AfterFailure::Reschedule
+            } else if access_token_rejected && invalid_grant {
+                auth.unavailable = true;
+                auth.status = Status::Error;
+                auth.next_refresh_after = None;
+                auth.next_retry_after = None;
+                failures = 0;
+                auth.last_error = Some(terminal_unauthorized_error(err));
+                auth.status_message = TERMINAL_UNAUTHORIZED_MESSAGE.into();
+                AfterFailure::Unschedule
             } else if !auth.has_valid_access_token(now) {
                 auth.unavailable = true;
                 auth.status = Status::Error;
                 if unauthorized {
                     auth.next_refresh_after = None;
+                    auth.next_retry_after = None;
                     failures = 0;
                     auth.status_message = "unauthorized".into();
                     AfterFailure::Nothing
