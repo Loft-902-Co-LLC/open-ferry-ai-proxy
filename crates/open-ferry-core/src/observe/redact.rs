@@ -8,7 +8,11 @@
 //! ([`Secrets::add_url`]), its proxy's password ([`Secrets::add_proxy`]) and
 //! its credential's own keys and tokens ([`Secrets::add_auth`]). Every copy
 //! of each, as it is or escaped as a JSON string, becomes [`REDACTED`], in
-//! one pass, the longest winning where two overlap.
+//! one pass, the longest winning where two overlap. Only those forms are
+//! recognised (with a URL's credentials read percent-decoded as well, and
+//! the `Basic` credential made of them): a secret written any other way,
+//! with other escapes, in another encoding, or split across lines or
+//! messages, is left as it is.
 //!
 //! An upstream's error body, or the payload of an error in its stream,
 //! reaches the client as the error's message. A provider that quotes the key
