@@ -14,6 +14,7 @@
 
 mod cases;
 
+use open_ferry_translate::json::exact;
 use open_ferry_translate::openai::interactions::responses::{
     convert_interactions_request_to_openai_responses,
     convert_openai_responses_request_to_interactions,
@@ -22,7 +23,7 @@ use serde_json::Value;
 
 use super::super::{Family, Pair, Stage};
 use crate::cases::Case;
-use crate::compare::{Deviation, JsonAt, JsonForm};
+use crate::compare::{Deviation, FloatPaths, JsonAt, JsonForm};
 use crate::generate::interactions::responses::request as generate;
 
 /// The suites, a variant each.
@@ -85,7 +86,7 @@ impl Family for Kind {
     }
 
     fn run(self, case: &Case) -> Result<Value, String> {
-        let request: Value = serde_json::from_str(&case.request)
+        let request = exact::from_str(&case.request)
             .map_err(|err| format!("case {} is not valid JSON: {err}", case.name))?;
         // As the harness's streamOption reads it.
         let stream = case.options["stream"].as_bool().unwrap_or(false);
@@ -99,14 +100,29 @@ impl Family for Kind {
         })
     }
 
+    /// The request as JSON, each number kept as written.
     fn read(self, _case: &Case, output: &[u8]) -> Option<Value> {
-        serde_json::from_slice(output).ok()
+        exact::from_slice(output).ok()
     }
 
     fn embedded_json(self, _case: &Case) -> &'static [JsonAt] {
         match self {
             Self::ResponsesToInteractions => RESPONSES_TO_INTERACTIONS_JSON,
             Self::InteractionsToResponses => INTERACTIONS_TO_RESPONSES_JSON,
+        }
+    }
+
+    /// The sampling settings of a Responses request, which upstream reads
+    /// with gjson's `Float`.
+    fn float_paths(self, _case: &Case) -> FloatPaths {
+        match self {
+            Self::ResponsesToInteractions => &[
+                "$.generation_config.temperature",
+                "$.generation_config.top_p",
+                "$.generation_config.presence_penalty",
+                "$.generation_config.frequency_penalty",
+            ],
+            Self::InteractionsToResponses => &[],
         }
     }
 

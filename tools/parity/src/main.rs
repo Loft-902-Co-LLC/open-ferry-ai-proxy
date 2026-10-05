@@ -758,7 +758,13 @@ fn evaluate(translator: Translator, case: &Case, go: &GoResult) -> Evaluated {
 
     let outcome = match (&go_value, &rust_output) {
         (Some(go), Ok(rust)) => {
-            let mut comparison = compare::compare(go, rust, translator.embedded_json(case));
+            let mut comparison = compare::compare_numbers(
+                go,
+                rust,
+                translator.embedded_json(case),
+                translator.numbers(case),
+                translator.float_paths(case),
+            );
             comparison.deviations.extend(omitted);
             if !comparison.differences.is_empty() {
                 Outcome::Different(comparison.differences)

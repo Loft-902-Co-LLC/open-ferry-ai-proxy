@@ -38,7 +38,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 
 use crate::cases::Case;
-use crate::compare::{self, Deviation, JsonAt};
+use crate::compare::{self, Deviation, FloatPaths, JsonAt};
 use crate::translator::{CREATED_NOW, Translator};
 
 /// A suite as `main` runs it: the translator, its hand-written cases and
@@ -97,6 +97,11 @@ pub trait Family: Copy {
     /// Where the translator writes JSON it read compactly while upstream
     /// copies its text (see [`Translator::embedded_json`]).
     fn embedded_json(self, case: &Case) -> &'static [JsonAt];
+    /// Where the translator writes a number upstream reads as a float64 (see
+    /// [`Translator::float_paths`]): nowhere, for most.
+    fn float_paths(self, _case: &Case) -> FloatPaths {
+        &[]
+    }
     /// Takes out of upstream's output what we leave out on purpose (see
     /// [`Translator::drop_deliberate_omissions`]).
     fn drop_deliberate_omissions(self, case: &Case, go: &mut Value) -> Option<Deviation>;
@@ -159,6 +164,10 @@ impl Kind {
 
     pub fn embedded_json(self, case: &Case) -> &'static [JsonAt] {
         dispatch!(self, kind => kind.embedded_json(case))
+    }
+
+    pub fn float_paths(self, case: &Case) -> FloatPaths {
+        dispatch!(self, kind => kind.float_paths(case))
     }
 
     pub fn drop_deliberate_omissions(self, case: &Case, go: &mut Value) -> Option<Deviation> {

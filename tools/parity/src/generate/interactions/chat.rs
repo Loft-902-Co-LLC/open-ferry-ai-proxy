@@ -16,9 +16,10 @@
 //! - [`event_cases`]: Interactions event streams and responses from the
 //!   parent module.
 
+use open_ferry_translate::json::exact;
 use serde_json::{Map, Value, json};
 
-use super::super::{EFFORTS, NUMBERS, Rng, num};
+use super::super::{EFFORTS, NUMBERS, Rng, lit};
 use super::{odd_value, render, text};
 use crate::cases::Case;
 
@@ -65,7 +66,7 @@ const MIME_TYPES: &[&str] = &[
 const AUDIO_FORMATS: &[&str] = &["wav", "mp3", "flac", "opus", "pcm16", " WAV ", "aac", ""];
 
 /// Builds `count` Chat Completions requests for the translator to
-/// Interactions.
+/// Interactions. A request added to is read keeping its numbers as written.
 pub fn chat_request_cases(seed: u64, count: usize) -> Vec<Case> {
     let source = seed.rotate_left(23);
     crate::generate::chat::request_cases(source, count)
@@ -74,7 +75,7 @@ pub fn chat_request_cases(seed: u64, count: usize) -> Vec<Case> {
         .map(|(index, mut case)| {
             let mut rng = super::rng(source, (index as u64) ^ 0x4348_4154);
             if rng.chance(60)
-                && let Ok(Value::Object(mut request)) = serde_json::from_str(&case.request)
+                && let Ok(Value::Object(mut request)) = exact::from_str(&case.request)
             {
                 add_chat_fields(&mut rng, &mut request);
                 case.request = render(&mut rng, &Value::Object(request));
@@ -92,7 +93,8 @@ pub fn chunk_cases(seed: u64, count: usize) -> (Vec<Case>, Vec<Case>) {
 }
 
 /// Builds `count` Interactions requests for the translator to Chat
-/// Completions.
+/// Completions. A request added to is read keeping its numbers as written,
+/// such as those in call arguments (see `super::arguments`).
 pub fn request_cases(seed: u64, count: usize) -> Vec<Case> {
     let source = seed.rotate_left(31);
     super::request_cases(source, count)
@@ -101,7 +103,7 @@ pub fn request_cases(seed: u64, count: usize) -> Vec<Case> {
         .map(|(index, mut case)| {
             let mut rng = super::rng(source, (index as u64) ^ 0x4F41_4943);
             if rng.chance(60)
-                && let Ok(Value::Object(mut request)) = serde_json::from_str(&case.request)
+                && let Ok(Value::Object(mut request)) = exact::from_str(&case.request)
             {
                 add_interactions_fields(&mut rng, &mut request);
                 case.request = render(&mut rng, &Value::Object(request));
@@ -118,7 +120,8 @@ pub fn event_cases(seed: u64, count: usize) -> (Vec<Case>, Vec<Case>) {
 }
 
 /// Adds to a Chat Completions request some of what only the translator to
-/// Interactions reads.
+/// Interactions reads. Its numbers are as written: upstream copies their
+/// text, or reads them as integers for an agent.
 fn add_chat_fields(rng: &mut Rng, request: &mut Map<String, Value>) {
     if rng.chance(60)
         && let Some(Value::Array(messages)) = request.get_mut("messages")
@@ -175,7 +178,7 @@ fn add_chat_fields(rng: &mut Rng, request: &mut Map<String, Value>) {
         "frequency_penalty",
     ] {
         if rng.chance(8) {
-            fields.push((key, num(rng.pick(NUMBERS))));
+            fields.push((key, lit(rng.pick(NUMBERS))));
         }
     }
     if rng.chance(10) {
@@ -248,7 +251,8 @@ fn chat_part(rng: &mut Rng) -> Value {
 }
 
 /// Adds to an Interactions request some of what only the translator to
-/// Chat Completions reads.
+/// Chat Completions reads. Its numbers are as written, as upstream copies
+/// their text.
 fn add_interactions_fields(rng: &mut Rng, request: &mut Map<String, Value>) {
     if rng.chance(50)
         && let Some(Value::Array(input)) = request.get_mut("input")
@@ -265,7 +269,7 @@ fn add_interactions_fields(rng: &mut Rng, request: &mut Map<String, Value>) {
         if rng.chance(10) {
             let value = match key {
                 "parallel_tool_calls" => json!(rng.chance(50)),
-                "seed" => num(rng.pick(NUMBERS)),
+                "seed" => lit(rng.pick(NUMBERS)),
                 "user" => text(rng).into(),
                 _ => json!({ "max_total_tokens": 100 }),
             };
@@ -296,7 +300,7 @@ fn add_interactions_fields(rng: &mut Rng, request: &mut Map<String, Value>) {
                 let value = match key {
                     "stopSequences" => json!([text(rng)]),
                     "thinkingLevel" => rng.pick(EFFORTS).into(),
-                    _ => num(rng.pick(NUMBERS)),
+                    _ => lit(rng.pick(NUMBERS)),
                 };
                 config.insert(key.into(), value);
             }
@@ -318,7 +322,7 @@ fn add_interactions_fields(rng: &mut Rng, request: &mut Map<String, Value>) {
         "stop",
     ] {
         if rng.chance(5) {
-            fields.push((key, num(rng.pick(NUMBERS))));
+            fields.push((key, lit(rng.pick(NUMBERS))));
         }
     }
     for (key, value) in fields {
@@ -345,5 +349,36 @@ fn interactions_part(rng: &mut Rng) -> Value {
         }),
         6 => json!({ "type": "text", "text": text(rng) }),
         _ => json!({ "text": text(rng) }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn copied_numbers_keep_their_spelling() {
+        // Not upstream's: the settings upstream copies as text, added to
+        // either request, carry each number as written (see `lit`), and so
+        // do the parent module's arguments where a request is added to: none
+        // is respelled as `serde_json` would (`1E+2` as `1e+2`).
+        let plain = |cases: Vec<Case>| -> String {
+            cases
+                .iter()
+                .flat_map(|case| case.request.chars())
+                .filter(|c| !c.is_whitespace() && *c != '\\')
+                .collect()
+        };
+        let chat = plain(chat_request_cases(13, 1000));
+        for spelled in [r#""n":-0}"#, r#""presence_penalty":1E+2"#] {
+            assert!(chat.contains(spelled), "{spelled}");
+        }
+        let interactions = plain(request_cases(13, 1000));
+        for spelled in [r#""seed":-0,"#, r#""topP":1E+2"#, r#""count":1E+2}"#] {
+            assert!(interactions.contains(spelled), "{spelled}");
+        }
+        for respelled in [r#""count":1e+2}"#, r#""count":1e+3}"#] {
+            assert!(!interactions.contains(respelled), "{respelled}");
+        }
     }
 }

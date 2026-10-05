@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 
+use open_ferry_translate::json::exact;
 use serde_json::{Map, Value};
 
 /// A documented way our output may differ from upstream's (see UPSTREAM.md).
@@ -24,6 +25,11 @@ pub enum Deviation {
     /// Go converted a float too large for int64 as amd64 does, to the minimum
     /// int64; we saturate, as arm64 does.
     SaturatedInt,
+    /// Go wrote negative zero, a number it read as a float64, as `-0`; we
+    /// write `0` (see UPSTREAM.md, "Numbers beyond f64"). Only at the paths
+    /// the suite lists (see [`FloatPaths`]), and so only where numbers are
+    /// read as written (see [`Numbers`]): `serde_json` reads `-0` as `0`.
+    NegativeZero,
     /// Upstream made up a user ID for a client that sent none; we leave it out.
     SyntheticUserId,
     /// A Gemini response's `createTime` is the same instant, which upstream
@@ -46,6 +52,7 @@ impl Deviation {
             Self::CharBoundary => "cut at a character boundary",
             Self::ProtoErrorPrefix => "protobuf error prefix space",
             Self::SaturatedInt => "out-of-range number saturated",
+            Self::NegativeZero => "negative zero written as 0",
             Self::SyntheticUserId => "made-up user ID left out",
             Self::UtcCreateTime => "createTime written in UTC",
             Self::CompactCallIdSource => "call ID derived from compact JSON",
@@ -68,12 +75,15 @@ pub enum JsonForm {
 }
 
 impl JsonForm {
-    /// Whether `rust` is `go` with its JSON written in this form.
-    fn matches(self, go: &str, rust: &str) -> bool {
+    /// Whether `rust` is `go` with its JSON, read with `numbers`, written in
+    /// this form.
+    fn matches(self, go: &str, rust: &str, numbers: Numbers) -> bool {
         match self {
-            Self::Whole => serde_json::from_str(go).is_ok_and(|value| compact(&value) == rust),
+            Self::Whole => numbers
+                .read(go)
+                .is_some_and(|value| compact(&value) == rust),
             Self::InText => {
-                let (go, rust) = (json_parts(go), json_parts(rust));
+                let (go, rust) = (parts(go, numbers), parts(rust, numbers));
                 go.len() == rust.len()
                     && go.iter().zip(&rust).all(|((go, value), (rust, _))| {
                         go == rust || value.as_ref().is_some_and(|value| compact(value) == *rust)
@@ -89,11 +99,53 @@ fn compact(value: &Value) -> String {
     value.to_string()
 }
 
+/// How a suite's translators keep the numbers in JSON they read, and so how
+/// JSON held in a string is read to compare it (see [`JsonForm`]). Numbers
+/// outside strings are compared by their text either way, as each suite's
+/// `read` gives it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Numbers {
+    /// As `serde_json` reads them, which writes `-0` as `0` and an exponent
+    /// with a small `e` and a sign (`1E20` as `1e+20`). The suites other than
+    /// the Interactions ones, whose translators keep no more.
+    Respelled,
+    /// Exactly as written, `-0` and exponents included (see
+    /// [`exact`]). The Interactions suites, whose translators keep each
+    /// number's text where upstream copies it.
+    AsWritten,
+}
+
+impl Numbers {
+    /// `text` as one JSON value, its numbers read this way.
+    ///
+    /// # Errors
+    ///
+    /// `serde_json`'s, where `text` isn't one JSON value.
+    pub fn parse(self, text: &str) -> serde_json::Result<Value> {
+        match self {
+            Self::Respelled => serde_json::from_str(text),
+            Self::AsWritten => exact::from_str(text),
+        }
+    }
+
+    /// [`Self::parse`], or `None` where `text` isn't one JSON value.
+    pub fn read(self, text: &str) -> Option<Value> {
+        self.parse(text).ok()
+    }
+}
+
 /// A string where a translator writes JSON in a [`JsonForm`]: its path, with
 /// `[*]` for every array index as [`Difference::shape`] writes it, and the form.
 /// `**` in a path stands for any run of keys and indices, none included, for
 /// strings at any depth of a schema.
 pub type JsonAt = (&'static str, JsonForm);
+
+/// Paths, as [`JsonAt`] writes them, of numbers upstream reads as a
+/// float64 and writes again, where Go writes negative zero as `-0` and we
+/// write `0` (see [`Deviation::NegativeZero`]). Anywhere else, `-0` must stay
+/// `-0`. The first path that matches decides; one that starts with `!` marks
+/// a part of such a place that isn't one, listed before it.
+pub type FloatPaths = &'static [&'static str];
 
 /// Whether `shape`, a path as [`Difference::shape`] writes it, is `path`.
 fn path_matches(path: &str, shape: &str) -> bool {
@@ -159,12 +211,29 @@ pub struct Comparison {
     pub differences: Vec<Difference>,
 }
 
-/// Compares the outputs. JSON in a string may differ from upstream's only at
-/// the paths in `embedded_json`, and only in the form given there.
+/// [`compare_numbers`] for a suite whose numbers are respelled as
+/// `serde_json` reads them, as most tests compare.
+#[cfg(test)]
 pub fn compare(go: &Value, rust: &Value, embedded_json: &[JsonAt]) -> Comparison {
+    compare_numbers(go, rust, embedded_json, Numbers::Respelled, &[])
+}
+
+/// Compares the outputs. JSON in a string may differ from upstream's only at
+/// the paths in `embedded_json`, and only in the form given there, its
+/// numbers read as `numbers` says. Go's `-0` may be our `0` only at the
+/// paths in `floats`.
+pub fn compare_numbers(
+    go: &Value,
+    rust: &Value,
+    embedded_json: &[JsonAt],
+    numbers: Numbers,
+    floats: FloatPaths,
+) -> Comparison {
     let mut walker = Walker {
         path: Vec::new(),
         embedded_json,
+        numbers,
+        floats,
         out: Comparison::default(),
     };
     walker.walk(go, rust);
@@ -204,6 +273,8 @@ fn cut_in_a_character(go: &str, rust: &str) -> bool {
 struct Walker<'a> {
     path: Vec<Segment<'a>>,
     embedded_json: &'a [JsonAt],
+    numbers: Numbers,
+    floats: FloatPaths,
     out: Comparison,
 }
 
@@ -235,6 +306,11 @@ impl<'a> Walker<'a> {
                 if go.to_string() == GO_AMD64_OUT_OF_RANGE && rust.as_i64() == Some(i64::MAX) =>
             {
                 self.out.deviations.insert(Deviation::SaturatedInt);
+            }
+            (Value::Number(go), Value::Number(rust))
+                if go.to_string() == "-0" && rust.to_string() == "0" && self.at_float() =>
+            {
+                self.out.deviations.insert(Deviation::NegativeZero);
             }
             (go, rust) => self.differ(go.to_string(), rust.to_string()),
         }
@@ -293,7 +369,10 @@ impl<'a> Walker<'a> {
             self.out.deviations.insert(Deviation::UtcCreateTime);
             return;
         }
-        if self.json_form().is_some_and(|form| form.matches(go, rust)) {
+        if self
+            .json_form()
+            .is_some_and(|form| form.matches(go, rust, self.numbers))
+        {
             self.out.deviations.insert(Deviation::EmbeddedJson);
             return;
         }
@@ -308,6 +387,19 @@ impl<'a> Walker<'a> {
             .iter()
             .find(|(path, _)| path_matches(path, &shape))
             .map(|&(_, form)| form)
+    }
+
+    /// Whether the walk is at a number upstream writes as a float64 (see
+    /// [`FloatPaths`]).
+    fn at_float(&self) -> bool {
+        let shape = self.path_text(false);
+        self.floats
+            .iter()
+            .find_map(|path| match path.strip_prefix('!') {
+                Some(path) => path_matches(path, &shape).then_some(false),
+                None => path_matches(path, &shape).then_some(true),
+            })
+            == Some(true)
     }
 
     /// Reports whether the walk is inside `tools[i].parameters`, or a Chat
@@ -425,6 +517,11 @@ fn days_from_civil(year: i128, month: i128, day: i128) -> Option<i128> {
 /// Splits `text` into the JSON objects and arrays embedded in it, each with
 /// its value, and the runs of other text between them.
 pub fn json_parts(text: &str) -> Vec<(&str, Option<Value>)> {
+    parts(text, Numbers::Respelled)
+}
+
+/// [`json_parts`], with each value's numbers read as `numbers` says.
+fn parts(text: &str, numbers: Numbers) -> Vec<(&str, Option<Value>)> {
     let mut parts = Vec::new();
     let (mut plain, mut at) = (0, 0);
     while let Some(offset) = text[at..].find(['{', '[']) {
@@ -438,7 +535,11 @@ pub fn json_parts(text: &str) -> Vec<(&str, Option<Value>)> {
             parts.push((&text[plain..start], None));
         }
         let end = start + values.byte_offset();
-        parts.push((&text[start..end], Some(value)));
+        let value = match numbers {
+            Numbers::Respelled => Some(value),
+            Numbers::AsWritten => numbers.read(&text[start..end]),
+        };
+        parts.push((&text[start..end], value));
         (plain, at) = (end, end);
     }
     if plain < text.len() {
@@ -603,6 +704,42 @@ mod tests {
     }
 
     #[test]
+    fn number_text_in_listed_json_counts_where_kept() {
+        // Upstream copies `-0`, `1E20` and `1e5` as written. Read as
+        // `serde_json` reads them, compact JSON respells them; where the
+        // translators keep them, it must not.
+        let go = json!({ "arguments": "{ \"x\": -0, \"y\": 1E20, \"z\": [1e5] }" });
+        let respelled = json!({ "arguments": r#"{"x":0,"y":1e+20,"z":[1e+5]}"# });
+        let kept = json!({ "arguments": r#"{"x":-0,"y":1E20,"z":[1e5]}"# });
+        let respelled_cmp = compare(&go, &respelled, JSON_AT);
+        assert!(respelled_cmp.differences.is_empty());
+        assert_eq!(compare(&go, &kept, JSON_AT).differences.len(), 1);
+
+        let as_written = |rust| compare_numbers(&go, rust, JSON_AT, Numbers::AsWritten, &[]);
+        let cmp = as_written(&kept);
+        assert!(cmp.differences.is_empty(), "{:?}", cmp.differences);
+        assert_eq!(cmp.deviations, BTreeSet::from([Deviation::EmbeddedJson]));
+        assert_eq!(as_written(&respelled).differences.len(), 1);
+
+        // Within text too.
+        let go = json!({ "text": "x { \"n\": -0 } [ 1E2 ] y" });
+        let kept = json!({ "text": r#"x {"n":-0} [1E2] y"# });
+        let respelled = json!({ "text": r#"x {"n":0} [1e+2] y"# });
+        assert!(
+            compare_numbers(&go, &kept, JSON_AT, Numbers::AsWritten, &[])
+                .differences
+                .is_empty()
+        );
+        assert_eq!(
+            compare_numbers(&go, &respelled, JSON_AT, Numbers::AsWritten, &[])
+                .differences
+                .len(),
+            1
+        );
+        assert!(compare(&go, &respelled, JSON_AT).differences.is_empty());
+    }
+
+    #[test]
     fn listed_json_must_be_in_its_form() {
         let go = json!({ "arguments": "{\n  \"a\": [1.50]\n}" });
         let rust = json!({ "arguments": "{\"a\":[1.50]}" });
@@ -706,6 +843,26 @@ mod tests {
             compare(&go, &json!({ "n": 0 }), JSON_AT).differences.len(),
             1
         );
+    }
+
+    #[test]
+    fn negative_zero_from_go_may_be_zero_only_where_upstream_reads_a_float() {
+        // Not upstream's: where upstream writes a float64, Go writes `-0`
+        // and we `0`; where it copies the text, `-0` must stay.
+        const FLOATS: FloatPaths = &["$.t", "!$.m.raw**", "$.m.**"];
+        let go = exact::from_str(r#"{"t":-0,"n":-0,"m":{"a":[-0],"raw":{"b":-0}}}"#).unwrap();
+        let rust = json!({ "t": 0, "n": 0, "m": { "a": [0], "raw": { "b": 0 } } });
+        let cmp = compare_numbers(&go, &rust, JSON_AT, Numbers::AsWritten, FLOATS);
+        assert_eq!(cmp.deviations, BTreeSet::from([Deviation::NegativeZero]));
+        let paths: Vec<String> = cmp.differences.into_iter().map(|d| d.path).collect();
+        assert_eq!(paths, ["$.n", "$.m.raw.b"]);
+
+        // Not the other way, nor for other spellings.
+        let go = exact::from_str(r#"{"t":0,"m":{"b":-0.0,"c":1E2}}"#).unwrap();
+        let rust = exact::from_str(r#"{"t":-0,"m":{"b":0,"c":1e+2}}"#).unwrap();
+        let cmp = compare_numbers(&go, &rust, JSON_AT, Numbers::AsWritten, FLOATS);
+        assert_eq!(cmp.differences.len(), 3);
+        assert!(cmp.deviations.is_empty());
     }
 
     #[test]

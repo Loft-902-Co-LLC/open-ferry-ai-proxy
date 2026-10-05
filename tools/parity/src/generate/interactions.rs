@@ -24,7 +24,7 @@ pub mod responses;
 
 use serde_json::{Value, json};
 
-use super::{EFFORTS, NUMBERS, Rng, SERVICE_TIERS, TEXTS, escape_text, num, to_object};
+use super::{EFFORTS, NUMBERS, Rng, SERVICE_TIERS, TEXTS, escape_text, lit, num, to_object};
 use crate::cases::Case;
 
 /// Models, with the `models/` prefix some clients send. None names
@@ -254,11 +254,16 @@ fn input(rng: &mut Rng, names: &[String]) -> Value {
     }
 }
 
-/// A turn: a role with its steps, Gemini-style parts, or content.
+/// A turn: a role with its steps, Gemini-style parts, or content. Steps are
+/// put in directly, not through `json!`, whose `to_value` would respell the
+/// numbers [`lit`] keeps.
 fn turn(rng: &mut Rng, names: &[String]) -> Value {
     let role = rng.pick(ROLES);
     match rng.below(3) {
-        0 => json!({ "role": role, "steps": steps(rng, names) }),
+        0 => to_object(vec![
+            ("role", role.into()),
+            ("steps", steps(rng, names).into()),
+        ]),
         1 => json!({ "role": role, "parts": [{ "text": text(rng) }] }),
         _ => json!({ "role": role, "content": contents(rng) }),
     }
@@ -357,9 +362,14 @@ fn call_step(rng: &mut Rng, id: &str, name: &str) -> Value {
     to_object(fields)
 }
 
-/// A call's arguments: an object, its JSON text, or something else.
+/// A call's arguments: an object, its JSON text, or something else. Its
+/// number is as written, as upstream copies arguments, so the object is
+/// built directly: `json!` would respell it.
 fn arguments(rng: &mut Rng) -> Value {
-    let object = json!({ "city": text(rng), "count": num(rng.pick(NUMBERS)) });
+    let object = to_object(vec![
+        ("city", text(rng).into()),
+        ("count", lit(rng.pick(NUMBERS))),
+    ]);
     match rng.below(10) {
         0..=5 => object,
         6 | 7 => object.to_string().into(),
@@ -384,7 +394,10 @@ fn result_step(rng: &mut Rng, calls: &[(String, String)]) -> Value {
     }
     let result = match rng.below(5) {
         0 | 1 => text(rng).into(),
-        2 => json!({ "temperature": num(rng.pick(NUMBERS)), "note": text(rng) }),
+        2 => to_object(vec![
+            ("temperature", lit(rng.pick(NUMBERS))),
+            ("note", text(rng).into()),
+        ]),
         3 => json!([{ "type": "text", "text": text(rng) }]),
         _ => odd_value(rng),
     };
@@ -460,7 +473,7 @@ fn generation_config(rng: &mut Rng, names: &[String]) -> Value {
         fields.push(("stop_sequences", json!([text(rng)])));
     }
     if rng.chance(10) {
-        fields.push(("seed", num(rng.pick(NUMBERS))));
+        fields.push(("seed", lit(rng.pick(NUMBERS))));
     }
     if rng.chance(30) {
         fields.push(("thinking_level", rng.pick(THINKING_LEVELS).into()));
@@ -557,11 +570,20 @@ impl Interaction {
                     summary: text(rng),
                     signature: rng.pick(SIGNATURES).to_owned(),
                 },
-                _ => Step::Call {
-                    id: format!("call_{}", rng.below(1000)),
-                    name: rng.pick(TOOL_NAMES).to_owned(),
-                    arguments: json!({ "city": text(rng) }),
-                },
+                _ => {
+                    let call = rng.below(1000);
+                    Step::Call {
+                        id: format!("call_{call}"),
+                        name: rng.pick(TOOL_NAMES).to_owned(),
+                        // A number as written, as upstream copies arguments.
+                        // It comes from the call's, which leaves the draws
+                        // as they were before it was added.
+                        arguments: to_object(vec![
+                            ("city", text(rng).into()),
+                            ("count", lit(NUMBERS[call % NUMBERS.len()])),
+                        ]),
+                    }
+                }
             })
             .collect();
         let usage = rng.chance(70).then(|| {
@@ -730,6 +752,8 @@ impl Interaction {
 
     /// The interaction whole, as a non-streaming response: its steps,
     /// status and usage, sometimes under `interaction`, or only an error.
+    /// What holds a call's arguments is built directly, as `json!` would
+    /// respell the numbers [`lit`] keeps.
     fn body(&self, rng: &mut Rng) -> Value {
         let (status, finish_reason) = match &self.end {
             End::Failed { message, code } => {
@@ -756,12 +780,12 @@ impl Interaction {
                     id,
                     name,
                     arguments,
-                } => json!({
-                    "type": "function_call",
-                    rng.pick(&["id", "call_id"]): id,
-                    "name": name,
-                    "arguments": arguments,
-                }),
+                } => to_object(vec![
+                    ("type", "function_call".into()),
+                    (rng.pick(&["id", "call_id"]), id.as_str().into()),
+                    ("name", name.as_str().into()),
+                    ("arguments", arguments.clone()),
+                ]),
             })
             .collect();
         let mut fields: Vec<(&str, Value)> = Vec::new();
@@ -782,7 +806,7 @@ impl Interaction {
         }
         let interaction = to_object(fields);
         if rng.chance(20) {
-            json!({ "interaction": interaction })
+            to_object(vec![("interaction", interaction)])
         } else {
             interaction
         }
@@ -831,6 +855,51 @@ mod tests {
         }
         for body in finals.iter().flat_map(|case| &case.events) {
             serde_json::from_str::<Value>(body).expect("a response is JSON");
+        }
+    }
+
+    #[test]
+    fn copied_numbers_keep_their_spelling() {
+        // Not upstream's: a call's arguments, a result and a generation
+        // config's seed, whose text upstream copies, carry each number as
+        // written (see `lit`) in requests, and the arguments in responses.
+        // The text is read without white space or escapes, which some JSON
+        // in strings and pretty-printed cases have.
+        let requests = request_cases(13, 1000);
+        let (streams, finals) = event_cases(13, 1000);
+        let plain = |texts: Vec<&str>| -> String {
+            texts
+                .concat()
+                .chars()
+                .filter(|c| !c.is_whitespace() && *c != '\\')
+                .collect()
+        };
+        let events = |cases: &[Case]| -> String {
+            plain(
+                cases
+                    .iter()
+                    .flat_map(|case| case.events.iter().map(String::as_str))
+                    .collect(),
+            )
+        };
+        let requests = plain(requests.iter().map(|case| case.request.as_str()).collect());
+        for spelled in [
+            r#""count":-0}"#,
+            r#""count":1E+2}"#,
+            r#""temperature":1e3,"#,
+            r#""seed":1E+2"#,
+        ] {
+            assert!(requests.contains(spelled), "{spelled}");
+        }
+        for text in [events(&streams), events(&finals)] {
+            for spelled in [r#""count":-0}"#, r#""count":1E+2}"#, r#""count":1e3}"#] {
+                assert!(text.contains(spelled), "{spelled}");
+            }
+        }
+        for text in [requests, events(&streams), events(&finals)] {
+            for respelled in [r#""count":1e+2}"#, r#""count":1e+3}"#] {
+                assert!(!text.contains(respelled), "{respelled}");
+            }
         }
     }
 

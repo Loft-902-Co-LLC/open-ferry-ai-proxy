@@ -29,6 +29,7 @@ use open_ferry_translate::interactions::claude::{
     convert_claude_request_to_interactions_with_compat,
     convert_interactions_response_to_claude_non_stream,
 };
+use open_ferry_translate::json::exact;
 
 use super::{Family, Pair, ResponseCases, Stage, Suite};
 use crate::cases::Case;
@@ -156,7 +157,7 @@ impl Family for Kind {
 
     fn run(self, case: &Case) -> Result<Value, String> {
         let request = || {
-            serde_json::from_str::<Value>(&case.request)
+            exact::from_str(&case.request)
                 .map_err(|err| format!("case {} is not valid JSON: {err}", case.name))
         };
         let stream = case.options["stream"].as_bool().unwrap_or(false);
@@ -201,8 +202,8 @@ impl Family for Kind {
     }
 
     /// Reads a request or a body as JSON, and a stream's list of chunks as
-    /// a list of frames (see [`frame`]), then masks the IDs and times read
-    /// from the clock.
+    /// a list of frames (see [`frame`]), each number kept as written, then
+    /// masks the IDs and times read from the clock.
     fn read(self, case: &Case, output: &[u8]) -> Option<Value> {
         let _ = case;
         let mut value = match self.frame_end() {
@@ -210,7 +211,7 @@ impl Family for Kind {
                 let chunks: Vec<String> = serde_json::from_slice(output).ok()?;
                 chunks.iter().map(|chunk| frame(chunk, end)).collect()
             }
-            None => serde_json::from_slice(output).ok()?,
+            None => exact::from_slice(output).ok()?,
         };
         super::mask_volatile(&mut value);
         Some(value)
@@ -257,8 +258,9 @@ impl Family for Kind {
 }
 
 /// A chunk as `{"event", "data"}`, if it is one SSE frame of an `event:`
-/// line and a `data:` line, ending in `end`, with its data read as JSON or
-/// kept as text (such as `[DONE]`); otherwise `{"unparsed": chunk}`.
+/// line and a `data:` line, ending in `end`, with its data read as JSON,
+/// each number kept as written, or kept as text (such as `[DONE]`);
+/// otherwise `{"unparsed": chunk}`.
 fn frame(chunk: &str, end: &str) -> Value {
     let parts = chunk
         .strip_prefix("event: ")
@@ -267,7 +269,7 @@ fn frame(chunk: &str, end: &str) -> Value {
         .filter(|(event, data)| !event.contains('\n') && !data.contains('\n'));
     match parts {
         Some((event, data)) => {
-            let data = serde_json::from_str(data).unwrap_or_else(|_| Value::from(data));
+            let data = exact::from_str(data).unwrap_or_else(|_| Value::from(data));
             json!({ "event": event, "data": data })
         }
         None => json!({ "unparsed": chunk }),

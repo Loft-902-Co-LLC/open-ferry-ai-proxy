@@ -53,6 +53,7 @@ pub mod to_gemini;
 pub mod ttft;
 pub mod usage;
 
+use open_ferry_translate::json::exact;
 use serde_json::{Value, json};
 
 use crate::cases::Case;
@@ -116,10 +117,12 @@ const TEXTS: &[&str] = &[
     "1.50",
 ];
 
-/// Number literals, kept as text so `1.50` and `1e3` reach the translator as written.
-/// The last three are float64s halfway between two shortest decimals, which
-/// Go rounds to even: `2156163594508435.2`, `-628643006909686.2` and
-/// `2.9802322387695312e-8`.
+/// Number literals. Through [`num`], `1.50` and long integers reach the
+/// translator as written, but `-0`, `-0.0`'s sign aside, and exponents are
+/// respelled as `serde_json` reads them; through [`lit`], all are as
+/// written. The last three are float64s halfway between two shortest
+/// decimals, which Go rounds to even: `2156163594508435.2`,
+/// `-628643006909686.2` and `2.9802322387695312e-8`.
 const NUMBERS: &[&str] = &[
     "0",
     "-0",
@@ -1251,9 +1254,20 @@ fn to_object(fields: Vec<(&str, Value)>) -> Value {
     )
 }
 
-/// Parses a number literal, keeping its text (`serde_json` has `arbitrary_precision` on).
+/// Parses a number literal as `serde_json` reads it, which keeps its digits
+/// (`arbitrary_precision` is on) but writes `-0` as `0` and an exponent with
+/// a small `e` and a sign (`1E+2` as `1e+2`, `1e3` as `1e+3`). For a place
+/// upstream reads as a number, where it converts the value anyway.
 fn num(text: &str) -> Value {
     serde_json::from_str(text).expect("number literals are valid JSON")
+}
+
+/// Parses a number literal keeping its text exactly as written, `-0` and
+/// exponents included. For a place where upstream copies the client's JSON
+/// text (gjson's `Raw` into sjson's `SetRaw`), which the Interactions
+/// translators keep as written.
+fn lit(text: &str) -> Value {
+    exact::from_str(text).expect("number literals are valid JSON")
 }
 
 /// Escapes every non-ASCII character as `\uXXXX`, and `/` as `\/`. Both only
@@ -1277,6 +1291,18 @@ fn escape_text(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_lit_keeps_every_spelling() {
+        for text in ["-0", "1E+2", "1e3", "-1.5e-3", "1.50", "-0.0"] {
+            assert_eq!(lit(text).to_string(), text);
+        }
+        let respelled: Vec<String> = ["-0", "1E+2", "1e3", "1.50", "-0.0"]
+            .iter()
+            .map(|text| num(text).to_string())
+            .collect();
+        assert_eq!(respelled, ["0", "1e+2", "1e+3", "1.50", "-0.0"]);
+    }
 
     #[test]
     fn cases_are_reproducible_and_valid_json() {

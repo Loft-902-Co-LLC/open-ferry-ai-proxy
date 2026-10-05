@@ -19,6 +19,7 @@
 
 mod cases;
 
+use open_ferry_translate::json::exact;
 use open_ferry_translate::openai::interactions::chat_completions::{
     InteractionsToOpenAIStream, OpenAIToInteractionsStream, convert_interactions_request_to_openai,
     convert_interactions_response_to_openai_non_stream, convert_openai_request_to_interactions,
@@ -30,7 +31,7 @@ use super::{Family, Pair, ResponseCases, Stage, Suite, mask_volatile};
 use crate::cases::Case;
 use crate::compare::{Deviation, JsonAt, JsonForm};
 use crate::generate::interactions::chat as generate;
-use crate::translator::{Translator, sse_frames};
+use crate::translator::{Translator, sse_frames_as_written};
 
 /// The family's suites, a variant each.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -227,8 +228,9 @@ impl Family for Kind {
 
     /// A request as JSON, a Chat Completions stream as an array of its
     /// chunks (each as JSON, or text if it isn't), an Interactions stream as
-    /// its frames (see [`sse_frames`]), and a response as JSON, with the
-    /// clock's readings masked (see [`mask_volatile`]). A Chat Completions
+    /// its frames (see [`sse_frames_as_written`]), and a response as JSON,
+    /// each number kept as written, with the clock's readings masked (see
+    /// [`mask_volatile`]). A Chat Completions
     /// chunk or response with no ID makes one up from the clock each time,
     /// so those are all masked alike.
     fn read(self, case: &Case, output: &[u8]) -> Option<Value> {
@@ -236,19 +238,17 @@ impl Family for Kind {
         let text = String::from_utf8_lossy(output);
         let mut value = match self {
             Self::ChatRequest | Self::InteractionsRequest => {
-                return serde_json::from_str(&text).ok();
+                return exact::from_str(&text).ok();
             }
-            Self::ChatNonStream | Self::InteractionsNonStream => {
-                serde_json::from_str(&text).ok()?
-            }
+            Self::ChatNonStream | Self::InteractionsNonStream => exact::from_str(&text).ok()?,
             Self::ChatStream => {
                 let chunks: Vec<String> = serde_json::from_str(&text).ok()?;
                 chunks
                     .into_iter()
-                    .map(|chunk| serde_json::from_str(&chunk).unwrap_or(Value::String(chunk)))
+                    .map(|chunk| exact::from_str(&chunk).unwrap_or(Value::String(chunk)))
                     .collect()
             }
-            Self::InteractionsStream => sse_frames(&text),
+            Self::InteractionsStream => sse_frames_as_written(&text),
         };
         mask_volatile(&mut value);
         if matches!(self, Self::ChatStream | Self::ChatNonStream) {
@@ -295,10 +295,11 @@ impl Family for Kind {
 const OPENAI: &str = "openai";
 const INTERACTIONS: &str = "interactions";
 
-/// A provider's body or event as JSON. One that isn't valid JSON reads as
-/// having no fields, as the ports read it.
+/// A request, or a provider's body, as JSON, each number kept as written,
+/// as the registry reads it. One that isn't valid JSON reads as having no
+/// fields, as the ports read it.
 fn parse(text: &str) -> Value {
-    serde_json::from_str(text).unwrap_or(Value::Null)
+    exact::from_str(text).unwrap_or(Value::Null)
 }
 
 /// Turns each masked Chat Completions ID, `chatcmpl_(generated-<n>)`, into

@@ -28,13 +28,14 @@ use open_ferry_translate::gemini::interactions::{
     convert_interactions_response_passthrough_non_stream,
     convert_interactions_response_to_gemini_non_stream,
 };
+use open_ferry_translate::json::exact;
 use serde_json::Value;
 
 use super::{Family, Pair, ResponseCases, Stage, Suite, mask_volatile};
 use crate::cases::Case;
-use crate::compare::{Deviation, JsonAt, JsonForm};
+use crate::compare::{Deviation, FloatPaths, JsonAt, JsonForm};
 use crate::generate::interactions::gemini as generate;
-use crate::translator::{Translator, sse_frames};
+use crate::translator::{Translator, sse_frames_as_written};
 
 /// The family's suites, a variant each.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -335,7 +336,7 @@ impl Family for Kind {
 
     fn run(self, case: &Case) -> Result<Value, String> {
         let request = || -> Result<Value, String> {
-            serde_json::from_str(&case.request)
+            exact::from_str(&case.request)
                 .map_err(|err| format!("case {} is not valid JSON: {err}", case.name))
         };
         let stream = case.options["stream"].as_bool().unwrap_or(false);
@@ -413,22 +414,22 @@ impl Family for Kind {
         let mut value = match self {
             Self::InteractionsToGeminiRequest
             | Self::GeminiToInteractionsRequest
-            | Self::PassthroughRequest => return serde_json::from_str(&text).ok(),
+            | Self::PassthroughRequest => return exact::from_str(&text).ok(),
             Self::PassthroughNonStream => return Some(text.into_owned().into()),
             Self::PassthroughStream => {
                 let chunks: Vec<String> = serde_json::from_str(&text).ok()?;
                 return Some(chunks.into_iter().map(Value::String).collect());
             }
-            Self::GeminiToInteractionsStream => sse_frames(&text),
+            Self::GeminiToInteractionsStream => sse_frames_as_written(&text),
             Self::InteractionsToGeminiStream => {
                 let chunks: Vec<String> = serde_json::from_str(&text).ok()?;
                 chunks
                     .into_iter()
-                    .map(|chunk| serde_json::from_str(&chunk).unwrap_or(Value::String(chunk)))
+                    .map(|chunk| exact::from_str(&chunk).unwrap_or(Value::String(chunk)))
                     .collect()
             }
             Self::GeminiToInteractionsNonStream | Self::InteractionsToGeminiNonStream => {
-                serde_json::from_str(&text).ok()?
+                exact::from_str(&text).ok()?
             }
         };
         mask_step_ids(&mut value);
@@ -445,6 +446,19 @@ impl Family for Kind {
             Self::InteractionsToGeminiStream => TO_GEMINI_STREAM_JSON,
             Self::InteractionsToGeminiNonStream => TO_GEMINI_RESPONSE_JSON,
             Self::PassthroughRequest | Self::PassthroughStream | Self::PassthroughNonStream => &[],
+        }
+    }
+
+    /// A tool upstream decodes into a Go map and writes with `json.Marshal`:
+    /// any but function declarations, whose text upstream copies. A built-in
+    /// tool's settings, which upstream copies too, are at the paths a map's
+    /// renamed keys give, so they count as such a tool's.
+    fn float_paths(self, _case: &Case) -> FloatPaths {
+        match self {
+            Self::InteractionsToGeminiRequest => {
+                &["!$.tools[*].functionDeclarations**", "$.tools[*].**"]
+            }
+            _ => &[],
         }
     }
 

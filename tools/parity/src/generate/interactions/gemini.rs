@@ -29,6 +29,7 @@
 //! saturates. No chunk or body is JSON cut short, which gjson reads in
 //! part and the port reads as nothing. No model names antigravity.
 
+use open_ferry_translate::json::exact;
 use serde_json::{Value, json};
 
 use super::{
@@ -36,7 +37,7 @@ use super::{
     text, token_count,
 };
 use crate::cases::Case;
-use crate::generate::{NUMBERS, Rng, num, to_gemini, to_object};
+use crate::generate::{NUMBERS, Rng, lit, num, to_gemini, to_object};
 
 /// Generation config keys, as either client writes them, and keys sjson
 /// reads as more than a name.
@@ -64,6 +65,8 @@ const CONFIG_KEYS: &[&str] = &[
     "-1",
     ":0",
     ":",
+    "a.:0",
+    "a.:0.b",
     "",
     "a\\.b",
     "a\\b",
@@ -77,10 +80,11 @@ const CONFIG_KEYS: &[&str] = &[
     "a b",
 ];
 
-/// Values for a generation config's leaves.
+/// Values for a generation config's leaves, numbers as written, as upstream
+/// copies each leaf's text.
 fn config_leaf(rng: &mut Rng) -> Value {
     match rng.below(6) {
-        0 | 1 => num(rng.pick(NUMBERS)),
+        0 | 1 => lit(rng.pick(NUMBERS)),
         2 => text(rng).into(),
         3 => json!(rng.chance(50)),
         4 => Value::Null,
@@ -274,6 +278,8 @@ const RESULTS: &[&str] = &[
     "5",
     "null",
     r#"{"ok":true}"#,
+    r#"{"x":-0,"y":[1E20,1e5,0.10]}"#,
+    r#""{\"x\":-0,\"y\":[1E20,1e5,0.10]}""#,
 ];
 
 const ARGUMENTS: &[&str] = &[
@@ -283,11 +289,14 @@ const ARGUMENTS: &[&str] = &[
     "[1]",
     r#"{"q":"x"}"#,
     "null",
+    r#"{"n":-0,"m":[1E20,1e5,0.10]}"#,
+    r#""{\"n\":-0,\"m\":[1E20,1e5,0.10]}""#,
 ];
 
-/// Parses one of the JSON literals above.
+/// Parses one of the JSON literals above, each number as written: upstream
+/// copies results and arguments as the client wrote them.
 fn literal(rng: &mut Rng, literals: &[&str]) -> Value {
-    serde_json::from_str(rng.pick(literals)).expect("the literals are JSON")
+    exact::from_str(rng.pick(literals)).expect("the literals are JSON")
 }
 
 /// An Interactions step only these translators read something special in.
@@ -555,12 +564,15 @@ fn gemini_part(rng: &mut Rng) -> Value {
             }
             if rng.chance(85) {
                 call["args"] = match rng.below(5) {
-                    0..=2 => json!({ "city": text(rng), "n": num(rng.pick(NUMBERS)) }),
+                    0..=2 => to_object(vec![
+                        ("city", text(rng).into()),
+                        ("n", lit(rng.pick(NUMBERS))),
+                    ]),
                     3 => json!("text"),
                     _ => odd_value(rng),
                 };
             }
-            json!({ "functionCall": call })
+            to_object(vec![("functionCall", call)])
         }
         8 => {
             let mut response = json!({ "name": name });
@@ -638,12 +650,12 @@ fn gemini_request(rng: &mut Rng) -> Value {
                 if rng.chance(5) {
                     json!({ "role": role })
                 } else {
-                    json!({ "role": role, "parts": parts })
+                    to_object(vec![("role", role.into()), ("parts", parts.into())])
                 }
             })
             .collect();
         let contents = if rng.chance(5) {
-            json!({ "a": contents.first().cloned().unwrap_or_default() })
+            to_object(vec![("a", contents.first().cloned().unwrap_or_default())])
         } else {
             Value::Array(contents)
         };
@@ -742,18 +754,20 @@ const FINISH_REASONS: &[&str] = &[
     "",
 ];
 
-/// A Gemini chunk or response holding `parts`, and the rest given.
+/// A Gemini chunk or response holding `parts`, and the rest given. The parts
+/// are put in directly: `json!` would respell the numbers [`lit`] keeps.
 fn gemini_chunk(
     parts: Vec<Value>,
     finish: Option<&str>,
     usage: Option<(&str, Value)>,
     response_id: Option<&str>,
 ) -> Value {
-    let mut candidate = json!({ "content": { "role": "model", "parts": parts } });
+    let content = to_object(vec![("role", "model".into()), ("parts", parts.into())]);
+    let mut candidate = to_object(vec![("content", content)]);
     if let Some(reason) = finish {
         candidate["finishReason"] = reason.into();
     }
-    let mut chunk = json!({ "candidates": [candidate] });
+    let mut chunk = to_object(vec![("candidates", vec![candidate].into())]);
     if let Some((key, usage)) = usage {
         chunk[key] = usage;
     }
@@ -1072,7 +1086,7 @@ fn summed_in_range(event: &str) -> String {
         _ => 0,
     };
     let (prefix, data) = event.split_at(at);
-    let Ok(mut value) = serde_json::from_str::<Value>(data) else {
+    let Ok(mut value) = exact::from_str(data) else {
         return event.to_owned();
     };
     if sum_in_range(&mut value) {
@@ -1208,6 +1222,36 @@ mod tests {
                 assert!(names.insert(a.name.clone()), "{}", a.name);
                 serde_json::from_str::<Value>(&a.request).expect("a request is JSON");
             }
+        }
+    }
+
+    #[test]
+    fn copied_numbers_keep_their_spelling() {
+        // Not upstream's: a generation config's leaves and a call's args,
+        // whose text upstream copies, carry each number as written (see
+        // `lit`), in requests and responses alike. The text is read without
+        // white space or escapes.
+        let plain = |cases: &[Case]| -> String {
+            cases
+                .iter()
+                .flat_map(|case| std::iter::once(&case.request).chain(&case.events))
+                .flat_map(|text| text.chars())
+                .filter(|c| !c.is_whitespace() && *c != '\\')
+                .collect()
+        };
+        let (streams, finals) = gemini_event_cases(13, 1000);
+        for text in [
+            plain(&gemini_request_cases(13, 1000)),
+            plain(&streams),
+            plain(&finals),
+        ] {
+            for spelled in [r#""n":-0}"#, r#""n":1E+2}"#] {
+                assert!(text.contains(spelled), "{spelled}");
+            }
+        }
+        let configs = plain(&interactions_request_cases(13, 1000));
+        for spelled in [":-0,", ":1E+2", ":-1.5e-3"] {
+            assert!(configs.contains(spelled), "{spelled}");
         }
     }
 

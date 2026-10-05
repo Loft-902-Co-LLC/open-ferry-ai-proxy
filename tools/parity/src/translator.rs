@@ -82,7 +82,7 @@ use sha2::{Digest, Sha256};
 
 use crate::cases::Case;
 use crate::codex_models;
-use crate::compare::{self, Deviation, JsonAt, JsonForm};
+use crate::compare::{self, Deviation, FloatPaths, JsonAt, JsonForm, Numbers};
 use crate::config_diff;
 use crate::interactions::{self, Stage};
 use crate::multi_agent;
@@ -522,8 +522,11 @@ impl Translator {
     }
 
     /// Runs our port on `case`, returning its output in the form [`Self::read`] gives.
+    /// The request, and a registry case's translated request, are read with
+    /// their numbers as the translator keeps them (see [`Self::numbers`]).
     pub fn run_rust(self, case: &Case) -> Result<Value, String> {
-        let request = serde_json::from_str::<Value>(&case.request);
+        let numbers = self.numbers(case);
+        let request = numbers.parse(&case.request);
         let final_event = || {
             case.events
                 .first()
@@ -1008,7 +1011,7 @@ impl Translator {
             Self::RegistryStream => {
                 let (from, to) = registry_formats(case);
                 let original = request.unwrap_or_default();
-                let translated = serde_json::from_str(&case.translated_request).unwrap_or_default();
+                let translated = numbers.parse(&case.translated_request).unwrap_or_default();
                 let context = ResponseContext {
                     model: &case.model,
                     original_request: &original,
@@ -1040,7 +1043,7 @@ impl Translator {
             Self::RegistryNonStream => {
                 let (from, to) = registry_formats(case);
                 let original = request.unwrap_or_default();
-                let translated = serde_json::from_str(&case.translated_request).unwrap_or_default();
+                let translated = numbers.parse(&case.translated_request).unwrap_or_default();
                 let context = ResponseContext {
                     model: &case.model,
                     original_request: &original,
@@ -1193,6 +1196,34 @@ impl Translator {
             Self::Usage => usage::parse(case),
             Self::Ttft => ttft::token_event(case),
             Self::ConfigDiff => config_diff::details(case),
+        }
+    }
+
+    /// How this translator keeps the numbers in JSON it reads, which is how
+    /// its cases' requests are read for it and JSON in its output's strings is
+    /// compared (see [`Numbers`]): exactly as written for an Interactions
+    /// suite, or a registry case read as one, and as `serde_json` reads them
+    /// for the rest. Each Interactions suite's `read` keeps them as written
+    /// too.
+    pub fn numbers(self, case: &Case) -> Numbers {
+        match self {
+            Self::Interactions(_) => Numbers::AsWritten,
+            _ if matches!(self.native(case), Some(Self::Interactions(_))) => Numbers::AsWritten,
+            _ => Numbers::Respelled,
+        }
+    }
+
+    /// Where this translator writes a number upstream reads as a float64,
+    /// whose negative zero Go writes as `-0` and we as `0` (see
+    /// [`FloatPaths`]): only in some Interactions suites, as the others read
+    /// `-0` as `0` (see [`Self::numbers`]).
+    pub fn float_paths(self, case: &Case) -> FloatPaths {
+        match self {
+            Self::Interactions(kind) => kind.float_paths(case),
+            Self::RegistryRequest | Self::RegistryStream | Self::RegistryNonStream => self
+                .native(case)
+                .map_or(&[], |native| native.float_paths(case)),
+            _ => &[],
         }
     }
 
@@ -1968,6 +1999,17 @@ fn sse_chunk(chunk: &str) -> Value {
 /// text after the last blank line as `{"unended": text}`, so they show up as
 /// differences.
 pub(crate) fn sse_frames(text: &str) -> Value {
+    sse_frames_read(text, Numbers::Respelled)
+}
+
+/// [`sse_frames`], with the data's numbers kept as written (see
+/// [`Numbers::AsWritten`]).
+pub(crate) fn sse_frames_as_written(text: &str) -> Value {
+    sse_frames_read(text, Numbers::AsWritten)
+}
+
+/// [`sse_frames`], with the data's numbers read as `numbers` says.
+fn sse_frames_read(text: &str, numbers: Numbers) -> Value {
     let mut frames = Vec::new();
     let mut rest = text;
     while let Some((frame, after)) = rest.split_once("\n\n") {
@@ -1975,7 +2017,7 @@ pub(crate) fn sse_frames(text: &str) -> Value {
             .strip_prefix("event: ")
             .and_then(|rest| rest.split_once("\ndata: "))
             .and_then(|(event, data)| {
-                let data: Value = serde_json::from_str(data).ok()?;
+                let data = numbers.read(data)?;
                 Some(json!({ "event": event, "data": data }))
             });
         frames.push(parsed.unwrap_or_else(|| json!({ "unparsed": frame })));

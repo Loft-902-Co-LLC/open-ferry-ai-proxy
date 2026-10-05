@@ -39,13 +39,14 @@ use open_ferry_translate::codex::interactions::{
     CodexToInteractionsStream, convert_codex_response_to_interactions_non_stream,
     convert_interactions_request_to_codex,
 };
+use open_ferry_translate::json::exact;
 use serde_json::Value;
 
 use super::{Family, Pair, ResponseCases, Stage, Suite, mask_volatile};
 use crate::cases::Case;
 use crate::compare::{Deviation, JsonAt, JsonForm};
 use crate::generate::interactions::codex as generate;
-use crate::translator::{Translator, sse_frames};
+use crate::translator::{Translator, sse_frames_as_written};
 
 /// The family's suites, a variant each.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -122,7 +123,7 @@ impl Family for Kind {
     fn run(self, case: &Case) -> Result<Value, String> {
         let output = match self {
             Self::Request => {
-                let request: Value = serde_json::from_str(&case.request)
+                let request = exact::from_str(&case.request)
                     .map_err(|err| format!("case {} is not valid JSON: {err}", case.name))?;
                 // As the harness's streamOption reads it.
                 let stream = case.options["stream"].as_bool().unwrap_or(false);
@@ -140,7 +141,7 @@ impl Family for Kind {
                 let event = case
                     .events
                     .first()
-                    .and_then(|event| serde_json::from_str(event).ok())
+                    .and_then(|event| exact::from_str(event).ok())
                     .unwrap_or(Value::Null);
                 convert_codex_response_to_interactions_non_stream(&case.model, &event).to_string()
             }
@@ -149,16 +150,20 @@ impl Family for Kind {
             .ok_or_else(|| "output is not JSON".to_owned())
     }
 
+    /// Reads the output as JSON, a stream as its frames (see
+    /// [`sse_frames_as_written`]), each number kept as written, with a
+    /// request's settings in upstream's order (see
+    /// [`settings_in_listed_order`]) and the clock's readings masked.
     fn read(self, case: &Case, output: &[u8]) -> Option<Value> {
         let text = String::from_utf8_lossy(output);
         let mut value = match self {
             Self::Request => {
-                let mut request = serde_json::from_str(&text).ok()?;
+                let mut request = exact::from_str(&text).ok()?;
                 settings_in_listed_order(case, &mut request);
                 request
             }
-            Self::Stream => sse_frames(&text),
-            Self::NonStream => serde_json::from_str(&text).ok()?,
+            Self::Stream => sse_frames_as_written(&text),
+            Self::NonStream => exact::from_str(&text).ok()?,
         };
         mask_volatile(&mut value);
         Some(value)
