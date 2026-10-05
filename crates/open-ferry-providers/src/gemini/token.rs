@@ -2,7 +2,7 @@
 // (NormalizeServiceAccountMap, sanitizePrivateKey, ensureRSAPrivateKey,
 // rebuildPEM, filterBase64, stripANSIEscape) and
 // internal/runtime/executor/gemini_vertex_executor.go (vertexAccessToken)
-// (v8.0.10, MIT), with the service-account token exchange of
+// (v8.0.15, MIT), with the service-account token exchange of
 // golang.org/x/oauth2 v0.30.0 (google.CredentialsFromJSON, jwt.Config,
 // jws.Encode, internal.ParseKey) and Go's encoding/pem (Decode)
 // (BSD-3-Clause).

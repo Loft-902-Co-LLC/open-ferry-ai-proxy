@@ -2,7 +2,7 @@
 // lookup, match, getnum, cutspace, skip, atoi, leadingInt,
 // parseNanoseconds, parseTimeZone, parseGMT, parseSignedOffset) (go1.26,
 // BSD-3-Clause), as CLIProxyAPI
-// internal/api/handlers/management/plugin_quota.go uses it (v8.0.10, MIT).
+// internal/api/handlers/management/plugin_quota.go uses it (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 // https://github.com/golang/go
 

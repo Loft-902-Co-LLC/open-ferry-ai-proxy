@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/api/handlers/management/handler.go
 // (Handler, NewHandler, SetConfig, SetTokenStore, SetPostAuthPersistHook)
 // and internal/api/server.go (NewServer's MANAGEMENT_PASSWORD lookup)
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! What the management handlers share: the current config, the credential

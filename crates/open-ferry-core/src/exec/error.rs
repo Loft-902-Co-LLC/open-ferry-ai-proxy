@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/errors.go, the modelCooldownError
 // in sdk/cliproxy/auth/selector.go, SafeResponseHeaders in
 // sdk/cliproxy/auth/home_concurrency.go and HTTPStatusFromError in
-// internal/clienterror/client_error.go (v8.0.10, MIT).
+// internal/clienterror/client_error.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use std::fmt;

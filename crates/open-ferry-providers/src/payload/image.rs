@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/runtime/executor/helps/payload_helpers.go
 // (isImagesEndpointRequestPath, shouldStripImageGeneration,
 // removeToolTypeFromPayloadWithRoot, removeToolChoiceFromPayloadWithRoot,
-// removeToolChoiceFromPayload, removeToolTypeFromToolsArray) (v8.0.10,
+// removeToolChoiceFromPayload, removeToolTypeFromToolsArray) (v8.0.15,
 // MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 

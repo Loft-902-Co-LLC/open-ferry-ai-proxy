@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/translator/codex/gemini/codex_gemini_response.go (v8.0.10, MIT).
+// Ported from CLIProxyAPI internal/translator/codex/gemini/codex_gemini_response.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Codex (OpenAI Responses) events → Gemini `generateContent` responses.

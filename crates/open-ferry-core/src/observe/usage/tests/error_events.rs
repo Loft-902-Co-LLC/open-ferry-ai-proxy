@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/error_events_test.go
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Tests of the error events the manager's failed calls publish.

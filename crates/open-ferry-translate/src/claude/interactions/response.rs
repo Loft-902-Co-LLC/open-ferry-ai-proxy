@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/translator/claude/interactions/interactions_claude_response.go
 // (ConvertClaudeResponseToInteractions, ConvertClaudeResponseToInteractionsNonStream)
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Claude Messages responses → Gemini Interactions responses.

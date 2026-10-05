@@ -2,7 +2,7 @@
 // (parseCodexWebsocketErrorWithCooling, buildCodexWebsocketErrorPayload,
 // isCodexWebsocketConnectionLimitError, parseCodexWebsocketErrorHeaders) and
 // codex_websockets_connection.go (mapCodexWebsocketWriteError,
-// shouldRetryCodexWebsocketSend, mapCodexWebsocketReadError) (v8.0.10, MIT).
+// shouldRetryCodexWebsocketSend, mapCodexWebsocketReadError) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Failures of the Responses WebSocket as upstream's errors: error events,

@@ -1,10 +1,8 @@
 // Ported from CLIProxyAPI internal/config (config.go, sdk_config.go,
 // config_types.go, config_load.go, config_v8.go, config_normalization.go,
-// parse.go, config_defaults.go and what they call), internal/safemode and
+// parse.go, config_defaults.go and what they call), internal/safemode,
 // internal/watcher (watcher.go, config_reload.go, events.go, dispatcher.go)
-// (v8.0.10, MIT; config_v8.go and oauth_scope.go as of v8.0.11; config.go's
-// `models` section and internal/registry/catalog_config.go (CatalogSources)
-// as of v8.0.15).
+// and internal/registry/catalog_config.go (CatalogSources) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The proxy's configuration: loading it and watching it for changes.

@@ -1,5 +1,5 @@
 // Modelled on the keys of CLIProxyAPI sdk/config's SDKConfig that the HTTP
-// handlers read (v8.0.10, MIT).
+// handlers read (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Settings for the HTTP layer.

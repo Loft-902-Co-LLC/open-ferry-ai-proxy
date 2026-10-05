@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_remove_test.go (v8.0.10, MIT).
+// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_remove_test.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Removing a credential: it is gone, a late update doesn't bring it back,

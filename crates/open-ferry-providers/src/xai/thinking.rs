@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/thinking/provider/xai/apply.go (Applier)
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Thinking settings on a request going to xAI: a level in

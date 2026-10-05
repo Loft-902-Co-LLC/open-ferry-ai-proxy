@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/translator/claude/gemini/claude_gemini_response.go (v8.0.10, MIT).
+// Ported from CLIProxyAPI internal/translator/claude/gemini/claude_gemini_response.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Claude Messages events → Gemini `generateContent` responses.

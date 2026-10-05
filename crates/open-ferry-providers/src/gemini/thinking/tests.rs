@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI test/thinking_conversion_test.go (v8.0.10, MIT).
+// Ported from CLIProxyAPI test/thinking_conversion_test.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The Gemini cases of the thinking conversion matrix, and the applier's

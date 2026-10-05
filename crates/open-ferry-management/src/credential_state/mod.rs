@@ -6,7 +6,7 @@
 // authFileHeadersStringMap, syncAuthFileMetadataFields and the attribute
 // syncs it calls, authFileIntValue, authFileBoolValue),
 // auth_files_refresh.go (RefreshAuthFiles) and auth_files.go
-// (lookupAuthFile, matchesAuthFileLookup) (v8.0.10, MIT).
+// (lookupAuthFile, matchesAuthFileLookup) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A credential's state: turning it on and off, changing its settings and

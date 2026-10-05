@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_selection.go (the
-// request retry rounds: retrySettings through waitForCooldown) (v8.0.10,
+// request retry rounds: retrySettings through waitForCooldown) (v8.0.15,
 // MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 

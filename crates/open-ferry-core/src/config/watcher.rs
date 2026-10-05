@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/watcher (watcher.go, events.go,
 // config_reload.go, and the auth-file bookkeeping of clients.go;
-// dispatcher.go is replaced by the event channel) (v8.0.10, MIT).
+// dispatcher.go is replaced by the event channel) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Watching the config file and the auth directory.

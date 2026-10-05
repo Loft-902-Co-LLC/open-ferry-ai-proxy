@@ -3,7 +3,7 @@
 // isAllowedLogCursorFile, parseCutoff, parseLimit, isRotatedLogFile,
 // rotationOrder, numericRotationOrder, timestampRotationOrder) and
 // internal/api/server_management.go and server_management_v8.go (their
-// routes) (v8.0.10, MIT).
+// routes) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The main log's routes, for clients with the management key:

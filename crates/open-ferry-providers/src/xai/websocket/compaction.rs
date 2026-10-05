@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/runtime/executor/xai_websockets_executor.go
-// (executeCompactionTriggerFromWebsocketContext) (v8.0.10, MIT).
+// (executeCompactionTriggerFromWebsocketContext) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A `compaction_trigger` on the WebSocket, answered over HTTP.

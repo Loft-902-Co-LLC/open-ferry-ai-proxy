@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/translator/openai/interactions/responses/interactions_openai_responses_response.go
 // (interactionsResolveStepIndex, interactionsHasPatchBridge,
-// interactionsUpdateFunctionCall, interactionsFinishPatchCalls) (v8.0.10, MIT).
+// interactionsUpdateFunctionCall, interactionsFinishPatchCalls) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Settling which call each step event is about, and announcing a call once

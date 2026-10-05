@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI
-// sdk/api/handlers/openai/openai_responses_multi_agent_test.go (v8.0.10, MIT).
+// sdk/api/handlers/openai/openai_responses_multi_agent_test.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The Responses boundary's preparation, alone and through the routes.
@@ -8,9 +8,6 @@
 //! - The checks of the prepared marker
 //!   (`CodexMultiAgentV2ToolsPreparedContextKey`) are left out, as there is
 //!   no marker.
-//! - `TestClientMultiAgentPreparationDoesNotWaitForOAuthCredential` expects
-//!   the orphan rewrite, as v8.0.11's does: the setting is shared with API
-//!   keys.
 //! - The routes are checked against a scripted dispatcher, where upstream
 //!   registers a capturing executor with an auth manager and the model
 //!   registry.
@@ -192,8 +189,7 @@ fn leaves_other_clients_alone() {
     assert_eq!(got, None);
 }
 
-// TestClientMultiAgentPreparationDoesNotWaitForOAuthCredential, as v8.0.11
-// has it.
+// TestClientMultiAgentPreparationDoesNotWaitForOAuthCredential.
 #[test]
 fn readies_tools_and_orphans_together() {
     let payload = br#"{"input":[{"type":"function_call_output","name":"create_thread","namespace":"codex_app","output":"<codex_delegation>task</codex_delegation>"}],"tools":[{"type":"function","name":"send_message","parameters":{"properties":{"message":{"encrypted":true}}}}]}"#;

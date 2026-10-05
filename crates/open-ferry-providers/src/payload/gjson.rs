@@ -3,7 +3,7 @@
 // queryMatches, trueish, falseish, nullish, parseUint, unescape, trim) and
 // tidwall/match v1.1.1 match.go (MatchLimit, match, matchTrimSuffix) (MIT),
 // as CLIProxyAPI uses them in internal/runtime/executor/helps/
-// payload_helpers.go (v8.0.10, MIT).
+// payload_helpers.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 // https://github.com/tidwall/gjson
 // https://github.com/tidwall/match

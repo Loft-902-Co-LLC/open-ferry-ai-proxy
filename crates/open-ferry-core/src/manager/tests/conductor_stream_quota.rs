@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_stream_quota_test.go (v8.0.10, MIT).
+// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_stream_quota_test.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A 429 that ends a stream after its first chunk reaches the client as is,

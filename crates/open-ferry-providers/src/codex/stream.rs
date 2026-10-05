@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/runtime/executor/codex_executor_stream.go,
 // helps/claude_input_tokens.go (TranslateStreamWithClaudeInputTokens) and
-// internal/client/grokbuild/keepalive.go (v8.0.10, MIT).
+// internal/client/grokbuild/keepalive.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Codex's SSE stream, read a line at a time and translated to the

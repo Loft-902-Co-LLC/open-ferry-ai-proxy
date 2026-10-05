@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/thinking/provider/codex/apply.go,
 // internal/thinking/apply.go (ApplyThinkingWithModelInfo) and
-// internal/registry/model_registry.go (LookupModelInfo) (v8.0.10, MIT).
+// internal/registry/model_registry.go (LookupModelInfo) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Thinking settings on a request going to Codex, or to an OpenAI Responses

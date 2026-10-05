@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/client/codex/optimize-multi-agent-v2/
-// optimize_multi_agent_v2.go (headerValueCaseInsensitive) (v8.0.10, MIT).
+// optimize_multi_agent_v2.go (headerValueCaseInsensitive) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Rewrites of requests from Codex clients, upstream's

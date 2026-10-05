@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/logging/global_logger.go (SetupBaseLogger,
 // ConfigureLogOutput) and internal/api/server_reload.go (the log output's
-// part of the reload) (v8.0.10, MIT).
+// part of the reload) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The main log's output: every log line, in upstream's format (see

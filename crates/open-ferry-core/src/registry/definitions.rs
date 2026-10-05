@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/registry/model_definitions.go and the
 // catalog loading and checks in internal/registry/model_updater.go
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The static model catalog: upstream's `models.json`, built in, which lists

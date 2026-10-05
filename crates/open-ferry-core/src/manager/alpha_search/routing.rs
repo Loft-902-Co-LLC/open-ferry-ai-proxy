@@ -2,7 +2,7 @@
 // string field, unquote; fold.go: foldName, foldRune; scanner.go:
 // checkValid) (go1.26, BSD-3-Clause), as CLIProxyAPI
 // internal/api/server_routes.go (codexAlphaSearch) decodes its routing
-// struct with it (v8.0.10, MIT).
+// struct with it (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 // https://github.com/golang/go
 

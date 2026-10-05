@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI
 // internal/runtime/executor/helps/gemini_content_turns_test.go and
-// helps/vertex_payload_helpers_test.go (v8.0.10, MIT).
+// helps/vertex_payload_helpers_test.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Dropped:

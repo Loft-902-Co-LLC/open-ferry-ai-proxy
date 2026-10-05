@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/openai/claude/openai_claude_request_test.go
-// and openai_claude_compat_test.go (v8.0.10, MIT).
+// and openai_claude_compat_test.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 // All 28 request tests and 5 compat tests are ported. Table-driven tests

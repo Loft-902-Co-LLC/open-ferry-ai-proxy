@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/translator/openai/interactions/chat-completions/openai_interactions_request.go
 // (ConvertOpenAIRequestToInteractions) and interactions_openai_response.go
 // (ConvertOpenAIResponseToInteractions, ConvertOpenAIResponseToInteractionsNonStream)
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Into Interactions: a Chat Completions request becomes an Interactions

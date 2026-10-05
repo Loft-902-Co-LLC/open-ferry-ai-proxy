@@ -1,5 +1,5 @@
 //! Ports CLIProxyAPI internal/api/middleware/response_writer_test.go
-//! (v8.0.10, MIT).
+//! (v8.0.15, MIT).
 //!
 //! Upstream finalizes a hand-built `ResponseWriterWrapper` with a spy
 //! logger; here a request goes through the capture layer to a logger

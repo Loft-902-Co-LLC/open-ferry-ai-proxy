@@ -1,5 +1,5 @@
 //! Ports CLIProxyAPI internal/logging/request_logger_collision_test.go
-//! (v8.0.10, MIT): a log never overwrites another.
+//! (v8.0.15, MIT): a log never overwrites another.
 
 use std::collections::HashSet;
 use std::fs;

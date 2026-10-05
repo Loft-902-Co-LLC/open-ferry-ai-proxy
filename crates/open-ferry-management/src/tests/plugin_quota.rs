@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/api/handlers/management/plugin_quota_test.go
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! `POST /v0/management/quota/fetch`, probing servers on 127.0.0.1.

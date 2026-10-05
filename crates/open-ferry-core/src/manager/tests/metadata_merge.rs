@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI sdk/cliproxy/auth/metadata_merge_test.go (v8.0.10, MIT).
+// Ported from CLIProxyAPI sdk/cliproxy/auth/metadata_merge_test.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Folding a refreshed credential into the live one: new tokens land,

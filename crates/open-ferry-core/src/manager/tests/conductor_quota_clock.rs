@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_quota_clock_test.go (v8.0.10, MIT).
+// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_quota_clock_test.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Quota deadlines set by `mark_result` for a model or a whole credential,

@@ -1,7 +1,7 @@
 //! Request and response translation between OpenAI (Chat Completions, Responses),
 //! Anthropic (Messages) and Gemini formats.
 //!
-//! Ported from CLIProxyAPI `internal/translator` and `sdk/translator` (v8.0.10, MIT).
+//! Ported from CLIProxyAPI `internal/translator` and `sdk/translator` (v8.0.15, MIT).
 //! <https://github.com/router-for-me/CLIProxyAPI>
 //!
 //! Modules are named after upstream's layout: `codex::claude` converts between

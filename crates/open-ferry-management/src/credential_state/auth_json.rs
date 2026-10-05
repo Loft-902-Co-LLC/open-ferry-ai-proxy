@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/types.go (Auth, QuotaState,
 // ModelState) and errors.go (Error), as encoding/json writes them from
-// their tags (v8.0.10, MIT).
+// their tags (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A credential as upstream's management API writes one: the JSON of Go's

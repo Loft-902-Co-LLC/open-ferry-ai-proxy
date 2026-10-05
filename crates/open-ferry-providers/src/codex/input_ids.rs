@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/runtime/executor/helps/codex_input_ids.go
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Input item IDs as Codex takes them: at most 64 characters, and with the

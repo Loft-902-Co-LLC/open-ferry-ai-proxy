@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/logging/global_logger.go
 // (ResolveLogDirectory, isDirWritable) and internal/util/util.go
-// (WritablePath) (v8.0.10, MIT).
+// (WritablePath) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Where the logs live: the main log, the request logs and the error logs

@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/runtime/executor/helps/apply_patch_responses.go
 // and helps/apply_patch.go (ApplyPatchRequested, InitializeApplyPatchStream)
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The `apply_patch` bridge as an executor runs it, for a provider that

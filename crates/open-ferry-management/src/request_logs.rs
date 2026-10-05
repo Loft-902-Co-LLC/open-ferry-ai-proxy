@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/api/handlers/management/logs.go
 // (GetRequestErrorLogs, DownloadRequestErrorLog, GetRequestLogByID),
 // internal/api/server_management.go and server_management_v8.go (their
-// routes) (v8.0.10, MIT), with gin's Context.FileAttachment.
+// routes) (v8.0.15, MIT), with gin's Context.FileAttachment.
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The request log's routes, for clients with the management key:

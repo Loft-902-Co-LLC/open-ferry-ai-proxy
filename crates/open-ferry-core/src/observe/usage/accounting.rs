@@ -5,7 +5,7 @@
 // tokenBreakdownForSemantics, unclassifiedTokenLowerBound,
 // tokenAccountingSemanticsFor, inconsistentTokenBreakdown,
 // resolveAccountingTotal, nonNegativeSum) and sdk/cliproxy/usage/manager.go
-// (Detail) (v8.0.10, MIT).
+// (Detail) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A call's token counts ([`Detail`]), and their canonical breakdown

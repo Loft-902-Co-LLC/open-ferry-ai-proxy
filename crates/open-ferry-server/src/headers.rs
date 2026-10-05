@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI sdk/api/handlers/header_filter.go (v8.0.10, MIT).
+// Ported from CLIProxyAPI sdk/api/handlers/header_filter.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Which of a provider's response headers reach the client.

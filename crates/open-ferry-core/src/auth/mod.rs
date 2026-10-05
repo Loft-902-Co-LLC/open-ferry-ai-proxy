@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/types.go, status.go and the Error
 // type in errors.go, and the Store interface in sdk/cliproxy/auth/store.go
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Credentials: an [`Auth`] record for each account or API key, and the

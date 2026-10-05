@@ -3,7 +3,7 @@
 // and claude.go; the saving in sdk/auth/manager.go's Login;
 // internal/util/ssh_helper.go's PrintSSHTunnelInstructions; and
 // GetUserFriendlyMessage in internal/auth/codex/errors.go, which
-// internal/auth/claude repeats (v8.0.10, MIT).
+// internal/auth/claude repeats (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The `-codex-login`, `-codex-device-login` and `-claude-login` commands.

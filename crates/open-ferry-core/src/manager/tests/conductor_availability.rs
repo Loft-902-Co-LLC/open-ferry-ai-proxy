@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_availability_test.go (v8.0.10, MIT).
+// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_availability_test.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A credential's availability as its model states make it, disabled

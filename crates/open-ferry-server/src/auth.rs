@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/access/config_access/provider.go,
 // sdk/access/manager.go and AuthMiddleware in
-// internal/api/server_middleware.go (v8.0.10, MIT).
+// internal/api/server_middleware.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Client keys.

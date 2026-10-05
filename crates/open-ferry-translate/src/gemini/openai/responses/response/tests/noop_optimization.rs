@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/translator/gemini/openai/responses/noop_optimization_test.go (v8.0.10, MIT).
+// Ported from CLIProxyAPI internal/translator/gemini/openai/responses/noop_optimization_test.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The generation config the request translator builds from sampling, stop

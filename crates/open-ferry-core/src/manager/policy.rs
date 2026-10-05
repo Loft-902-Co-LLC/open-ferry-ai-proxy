@@ -2,7 +2,7 @@
 // (credentialPolicyAllows), sdk/cliproxy/auth/conductor_selection.go
 // (pickNextLegacy, SelectAuthWithCredentialPolicy) and
 // sdk/cliproxy/auth/conductor_models.go (ResolveExecutionModel,
-// executionModelCandidates) (v8.0.10, MIT).
+// executionModelCandidates) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Credential policies, which narrow the credentials a call may pick, the

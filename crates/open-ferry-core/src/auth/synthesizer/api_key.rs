@@ -5,7 +5,7 @@
 // addRequestScopedErrorsToMetadata in helpers.go, ComputeGeminiModelsHash,
 // ComputeClaudeModelsHash and ComputeCodexModelsHash in
 // internal/modelconfig/model_hash.go, and ValidateCredentialWeights in
-// internal/config/weight.go (v8.0.10, MIT).
+// internal/config/weight.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Records for the API keys in the config's `gemini-api-key`,

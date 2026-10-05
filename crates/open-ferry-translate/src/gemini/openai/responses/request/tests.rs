@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/translator/gemini/openai/responses/gemini_openai-responses_request_test.go (v8.0.10, MIT).
+// Ported from CLIProxyAPI internal/translator/gemini/openai/responses/gemini_openai-responses_request_test.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Tests for the OpenAI Responses to Gemini request translator: thought

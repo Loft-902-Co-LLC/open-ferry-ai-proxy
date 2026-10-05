@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI sdk/cliproxy/auth/cooldown_view.go (v8.0.10, MIT).
+// Ported from CLIProxyAPI sdk/cliproxy/auth/cooldown_view.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The cooldowns a credential is under, as the management API lists them:

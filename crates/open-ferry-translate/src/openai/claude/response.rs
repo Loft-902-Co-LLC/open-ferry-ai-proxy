@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/translator/openai/claude/openai_claude_response.go
 // (ConvertOpenAIResponseToClaude, ConvertOpenAIResponseToClaudeNonStream, ClaudeTokenCount)
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! OpenAI Chat Completions responses → Claude Messages responses.

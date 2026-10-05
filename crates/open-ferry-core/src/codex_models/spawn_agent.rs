@@ -3,7 +3,7 @@
 // codexSpawnAgentModelsFromTemplates, codexSpawnAgentModelFromMetadata,
 // applyCodexSpawnAgentThinking, codexReasoningMetadata,
 // normalizeCodexReasoningEffort, codexServiceTierIDs, mapString, mapInt)
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The models a Codex client's `spawn_agent` tool may pick, for step 2 of

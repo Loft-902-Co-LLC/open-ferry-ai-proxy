@@ -2,7 +2,7 @@
 // (AppendCodexReasoningReplayItemsBestEffort,
 // CacheCodexReasoningReplayItemsBestEffort, GetCodexReasoningReplayItems,
 // GetCodexReasoningReplayItem, DeleteCodexReasoningReplayItem and their
-// helpers) (v8.0.10, MIT).
+// helpers) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The reasoning replay cache: the reasoning items and tool calls of a

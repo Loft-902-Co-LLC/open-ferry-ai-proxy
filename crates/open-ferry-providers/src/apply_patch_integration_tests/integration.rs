@@ -4,7 +4,7 @@
 // TestApplyPatchHTTPGatewayErrorMatrix, TestApplyPatchSDKOriginalRequestFallback,
 // TestApplyPatchFailureStopsConsumptionAndNextAttemptIsFresh,
 // TestApplyPatchXAIWebsocketFailureMatrix,
-// TestApplyPatchInteractionsSourceFailureIsSealed) (v8.0.10, MIT).
+// TestApplyPatchInteractionsSourceFailureIsSealed) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! `apply_patch_integration_test.go`: an invalid or unfinished call to

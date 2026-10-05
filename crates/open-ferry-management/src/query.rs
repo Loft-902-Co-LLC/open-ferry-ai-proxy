@@ -2,7 +2,7 @@
 // initQueryCache) (MIT) and Go's net/url/url.go (ParseQuery, parseQuery,
 // QueryUnescape) (go1.27, BSD-3-Clause), as CLIProxyAPI
 // internal/api/handlers/management/auth_files.go (ListAuthFiles,
-// GetAuthFileModels) uses them (v8.0.10, MIT).
+// GetAuthFileModels) uses them (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 // https://github.com/gin-gonic/gin
 // https://github.com/golang/go

@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/signature/gpt_validation.go (v8.0.10, MIT).
+// Ported from CLIProxyAPI internal/signature/gpt_validation.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! GPT and Codex reasoning `encrypted_content`.

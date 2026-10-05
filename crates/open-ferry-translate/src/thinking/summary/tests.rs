@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/thinking/summary_test.go (v8.0.10, MIT).
+// Ported from CLIProxyAPI internal/thinking/summary_test.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use serde_json::json;

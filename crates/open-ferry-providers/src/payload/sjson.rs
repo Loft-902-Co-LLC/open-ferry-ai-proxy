@@ -1,7 +1,7 @@
 // Ported from tidwall/sjson v1.2.5 sjson.go (isSimpleChar, parsePath,
 // appendBuild, atoui, appendRawPaths, set, setComplexPath) (MIT), as
 // CLIProxyAPI uses it in internal/runtime/executor/helps/payload_helpers.go
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 // https://github.com/tidwall/sjson
 

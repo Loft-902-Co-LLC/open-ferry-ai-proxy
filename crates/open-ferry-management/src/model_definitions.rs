@@ -2,7 +2,7 @@
 // model_definitions.go (GetStaticModelDefinitions), the channel names of
 // internal/registry/model_definitions.go (GetStaticModelDefinitionsByChannel)
 // and the JSON layout of internal/registry/model_registry.go (ModelInfo)
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! `GET /v0/management/model-definitions/:channel` (also

@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/translator/openai/gemini/openai_gemini_request.go (v8.0.10, MIT).
+// Ported from CLIProxyAPI internal/translator/openai/gemini/openai_gemini_request.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Gemini `generateContent` request → OpenAI Chat Completions request.

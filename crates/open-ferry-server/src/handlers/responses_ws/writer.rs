@@ -2,7 +2,7 @@
 // and its methods, and truncateWebsocketCloseReason in CLIProxyAPI
 // sdk/api/handlers/openai/openai_responses_websocket.go, and
 // writeResponsesWebsocketPayload in
-// sdk/api/handlers/openai/openai_responses_websocket_timeline.go (v8.0.10,
+// sdk/api/handlers/openai/openai_responses_websocket_timeline.go (v8.0.15,
 // MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 

@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/translator/gemini/openai/responses/trailing_signature_test.go (v8.0.11, MIT).
+// Ported from CLIProxyAPI internal/translator/gemini/openai/responses/trailing_signature_test.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Tests for signatures that trail a message's text: the response stream

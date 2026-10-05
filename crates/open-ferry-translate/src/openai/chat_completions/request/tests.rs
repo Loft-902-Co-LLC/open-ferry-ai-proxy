@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/openai/openai/chat-completions/openai_openai_request_test.go
-// (v8.0.10, MIT). https://github.com/router-for-me/CLIProxyAPI
+// (v8.0.15, MIT). https://github.com/router-for-me/CLIProxyAPI
 //
 // reuses_matching_model_payload checks the request comes back unchanged;
 // upstream checks it comes back without a copy, which a request passed by

@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI
 // internal/runtime/executor/helps/openai_compat_tool_results.go
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Tool results as text, for a model that takes no images.

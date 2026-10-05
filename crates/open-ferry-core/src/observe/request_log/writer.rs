@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/logging/request_logger_writer.go
 // (logRequestWithSources, ensureLogsDir, cleanupOldErrorLogs) and
 // internal/api/middleware/response_writer.go (Finalize, extractRequestBody)
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The writer thread: it renders each finished request's log, scrubs it

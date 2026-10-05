@@ -1,4 +1,4 @@
-# Copied from CLIProxyAPI config.example.yaml (v8.0.11, MIT) for the loader tests.
+# Copied from CLIProxyAPI config.example.yaml (v8.0.15, MIT) for the loader tests.
 # https://github.com/router-for-me/CLIProxyAPI
 # Configuration template using the v8 layout.
 # Copy this file to config.yaml and replace the client keys and any enabled examples.
@@ -10,6 +10,17 @@
 # migrate a legacy file; a successful configuration write through /v8/management does.
 # The compatibility notes at the end show old spellings for existing deployments.
 config-version: 8
+
+# Optional model catalog sources: http(s) URLs or absolute local file paths.
+# Each explicit source overrides --local-model; otherwise --local-model uses
+# embedded catalogs, and normal mode uses the official remote sources.
+# Failed refreshes retain the last valid catalog; custom sources never fall back
+# to official URLs. Files and URLs are refreshed every 3 hours and on source changes.
+# Home mode never loads the general catalog, even when explicitly configured.
+models:
+  catalog: ""
+  codex-catalog: ""
+  devin-catalog: ""
 
 # Listener, TLS, network discovery, and server operation.
 server:

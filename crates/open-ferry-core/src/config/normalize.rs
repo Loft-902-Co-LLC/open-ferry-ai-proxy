@@ -1,9 +1,9 @@
 // Ported from CLIProxyAPI internal/config/config_normalization.go,
 // vertex_compat.go (SanitizeVertexCompatKeys), trusted_proxies.go, weight.go (ValidateCredentialWeights), the post-decode
 // steps of config_load.go and parse.go, config_validation.go
-// (SanitizePayloadRules), and internal/util/util.go
-// (ResolveAuthDir) (v8.0.10, MIT), and internal/config/oauth_scope.go
-// (ForAPIKey) (v8.0.11, MIT).
+// (SanitizePayloadRules), internal/util/util.go
+// (ResolveAuthDir), and internal/config/oauth_scope.go
+// (ForAPIKey) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The checks and clean-ups upstream applies after decoding.

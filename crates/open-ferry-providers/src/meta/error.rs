@@ -2,7 +2,7 @@
 // (parseMetaRetryAfter, metaRateLimitError, isMetaSubscriptionQuota),
 // meta_executor_execute.go (wrapMetaUpstreamError, metaStreamEventError,
 // metaNotFoundCooldown) and meta_test.go (TestMetaExecutor_ParseRetryAfter,
-// TestMetaExecutor_NotFoundCooldown) (v8.0.10, MIT).
+// TestMetaExecutor_NotFoundCooldown) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Meta's errors: what a failure status or an `error` event in the stream

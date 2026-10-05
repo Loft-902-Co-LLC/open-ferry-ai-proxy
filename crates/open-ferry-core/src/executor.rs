@@ -1,5 +1,5 @@
 // Ported from the ProviderExecutor and ExecutionSessionCloser interfaces in
-// CLIProxyAPI sdk/cliproxy/auth/conductor.go (v8.0.10, MIT).
+// CLIProxyAPI sdk/cliproxy/auth/conductor.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! What calls a provider: a [`ProviderExecutor`] for each provider, which

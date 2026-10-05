@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/error_events.go
-// (publishErrorEvent's guard) (v8.0.10, MIT).
+// (publishErrorEvent's guard) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The hook the manager tells about failed calls: the usage statistics

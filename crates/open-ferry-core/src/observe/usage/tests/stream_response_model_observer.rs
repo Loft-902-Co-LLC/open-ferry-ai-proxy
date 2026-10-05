@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI
 // internal/runtime/executor/helps/stream_response_model_observer_test.go
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Tests of the stream observer that reads the served model wherever the

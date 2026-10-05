@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/registry/codex_client_models.go
 // (ValidateCodexClientModelsJSON and the embedded catalog) and
 // internal/client/codex/models/models.go
-// (loadCodexClientModelTemplatesSnapshot) (v8.0.10, MIT).
+// (loadCodexClientModelTemplatesSnapshot) (v8.0.15, MIT).
 // models/codex_client_models.json is upstream's
 // internal/registry/models/codex_client_models.json, unchanged.
 // https://github.com/router-for-me/CLIProxyAPI

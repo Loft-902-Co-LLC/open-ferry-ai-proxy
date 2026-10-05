@@ -18,7 +18,7 @@
 // (requestedModelAliasFromOptions, generateFromOptions),
 // sdk/cliproxy/usage/manager.go (ServiceTierFromContext,
 // GenerateFromContext, GenerateEnabled) and
-// sdk/cliproxy/session/identity.go (NormalizeExplicitID) (v8.0.10, MIT).
+// sdk/cliproxy/session/identity.go (NormalizeExplicitID) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The usage reporter: the [`Tap`] that turns each executor call of a

@@ -1,7 +1,7 @@
 // Ported from Go's encoding/json (decode.go: Unmarshal, unquote, and how
 // decodeState fills structs, slices and interfaces; scanner.go: checkValid)
 // (go1.26, BSD-3-Clause), as CLIProxyAPI decodes into structs with it
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 // https://github.com/golang/go
 

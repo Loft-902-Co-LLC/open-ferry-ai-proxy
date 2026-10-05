@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/gemini/gemini/gemini_gemini_request_test.go
-// (v8.0.10, MIT). https://github.com/router-for-me/CLIProxyAPI
+// (v8.0.15, MIT). https://github.com/router-for-me/CLIProxyAPI
 //
 // TestConvertGeminiRequestToGeminiReusesLargeNormalizedPayload and
 // BenchmarkConvertGeminiRequestToGeminiLargeInlineData are dropped: they check

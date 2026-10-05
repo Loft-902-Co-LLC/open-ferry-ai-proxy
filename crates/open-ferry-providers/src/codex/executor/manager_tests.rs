@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI test/codex_quota_failover_test.go (TestCodexTerminalQuotaCoolsAccountAcrossModels, TestCodexModelLevelCoolingPreservesSiblingModel) (v8.0.10, MIT).
+// Ported from CLIProxyAPI test/codex_quota_failover_test.go (TestCodexTerminalQuotaCoolsAccountAcrossModels, TestCodexModelLevelCoolingPreservesSiblingModel) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The executor under the credential manager, against a mock Codex server

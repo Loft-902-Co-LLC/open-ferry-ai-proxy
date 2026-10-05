@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI
 // internal/runtime/executor/helps/openai_compat_max_tokens.go and
 // normalizeOpenAICompatibilityModelName in
-// helps/openai_compat_tool_results.go (v8.0.10, MIT).
+// helps/openai_compat_tool_results.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! `max_tokens` or `max_completion_tokens`, whichever the model takes.

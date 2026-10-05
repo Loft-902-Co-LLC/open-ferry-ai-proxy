@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/translator/openai/interactions/responses/apply_patch_test.go (v8.0.10, MIT).
+// Ported from CLIProxyAPI internal/translator/openai/interactions/responses/apply_patch_test.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The client's `apply_patch` custom tool called through an Interactions

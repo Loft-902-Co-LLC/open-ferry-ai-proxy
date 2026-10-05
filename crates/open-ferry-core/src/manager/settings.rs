@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/config/config.go and
 // internal/config/config_types.go (the fields the auth manager reads), and the
-// strategy names in sdk/cliproxy/service_config.go (v8.0.10, MIT).
+// strategy names in sdk/cliproxy/service_config.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The settings the manager runs with, as a plain struct made from the

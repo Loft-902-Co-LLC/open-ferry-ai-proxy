@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/scheduler.go, selector.go (the
 // round-robin, fill-first and weighted selectors and the availability
 // checks), conductor_selection.go (pickNextMixed and its legacy path) and
-// the unavailable errors in errors.go (v8.0.10, MIT).
+// the unavailable errors in errors.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Picking a credential for a call.

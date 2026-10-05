@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI test/thinking_conversion_test.go and
 // internal/thinking/summary_test.go
-// (TestApplySummaryConfig_OpenAIChatProviderDialects) (v8.0.10, MIT).
+// (TestApplySummaryConfig_OpenAIChatProviderDialects) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The OpenAI Chat Completions cases of the thinking conversion matrix,

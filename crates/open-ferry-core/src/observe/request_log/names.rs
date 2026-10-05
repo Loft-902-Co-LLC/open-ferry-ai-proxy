@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/logging/request_logger_writer.go
 // (generateFilename, generateErrorFilename, createUniqueLogFile,
 // sanitizeForFilename) and internal/api/handlers/management/logs.go
-// (parseLogMetadata, logFileIsNewer) (v8.0.10, MIT).
+// (parseLogMetadata, logFileIsNewer) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The names of the request log's files: how a log is named when it is

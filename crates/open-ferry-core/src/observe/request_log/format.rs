@@ -6,7 +6,7 @@
 // (writeFinalLog), internal/api/middleware/request_logging.go
 // (decodeCapturedRequestBodyForLogWithLimit) and
 // internal/runtime/executor/helps/logging_helpers.go (writeHeaders)
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! How a request log reads: the sections of a log file, byte for byte as

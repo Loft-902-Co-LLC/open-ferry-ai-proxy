@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/gemini/common/safety.go (DefaultSafetySettings
-// and AttachDefaultSafetySettings) (v8.0.10, MIT).
+// and AttachDefaultSafetySettings) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Helpers shared by the translators to a Gemini upstream.

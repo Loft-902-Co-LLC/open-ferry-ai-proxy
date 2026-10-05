@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/credentialweight/weight.go and
-// sdk/cliproxy/auth/weight.go (v8.0.10, MIT).
+// sdk/cliproxy/auth/weight.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Credential weights: a credential's share of its provider's traffic under

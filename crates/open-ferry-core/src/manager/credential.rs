@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/types.go (the expiry and override
 // readers), sdk/cliproxy/auth/classification.go, internal/credentialweight/
 // weight.go, the auth readers in sdk/cliproxy/auth/selector.go and the token
-// readers in sdk/cliproxy/auth/conductor_refresh.go (v8.0.10, MIT).
+// readers in sdk/cliproxy/auth/conductor_refresh.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! What the manager reads off a credential: its kind and source, priority,

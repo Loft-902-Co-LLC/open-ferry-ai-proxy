@@ -2,7 +2,7 @@
 // oauth_sessions_test.go, oauth_callback_test.go and
 // oauth_codex_concurrency_test.go, and the OAuth checks of
 // internal/api/server_management_v8_test.go
-// (TestManagementV8IndependentContract) (v8.0.10, MIT).
+// (TestManagementV8IndependentContract) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Tests of the routes of `crate::oauth`: the login sessions, the callback

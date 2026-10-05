@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/openai/interactions/chat-completions/init.go
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The Chat Completions and Interactions translators' registrations: Chat

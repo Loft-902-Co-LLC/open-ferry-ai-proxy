@@ -1,5 +1,5 @@
 //! Ported from CLIProxyAPI internal/client/codex/optimize-multi-agent-v2/
-//! orphan_delegation_test.go (v8.0.10, MIT).
+//! orphan_delegation_test.go (v8.0.15, MIT).
 //!
 //! `TestRewriteCodexOrphanDelegationInput` is ported case by case.
 //! `TestTranslateRequestWithCodexMultiAgentV2OrphanDelegation` tests the

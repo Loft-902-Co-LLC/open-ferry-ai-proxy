@@ -20,7 +20,7 @@
 // buildOpenAIResponsesReasoningFunctionCallModelContent,
 // buildOpenAIResponsesReasoningModelContent, openAIResponsesGeminiThoughtSignature,
 // applyOpenAIResponsesTextFormatToGemini), and the parts of Go's net/url
-// (Parse) and path/filepath (Base, Ext) it relies on (v8.0.10, MIT).
+// (Parse) and path/filepath (Base, Ext) it relies on (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! An OpenAI Responses request as a Gemini `generateContent` request.

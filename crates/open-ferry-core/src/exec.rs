@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI sdk/cliproxy/executor/types.go and the methods of
-// sdk/cliproxy/auth's Manager that the HTTP handlers call (v8.0.10, MIT).
+// sdk/cliproxy/auth's Manager that the HTTP handlers call (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A call to a provider, as the HTTP layer makes it: a [`Request`] and its

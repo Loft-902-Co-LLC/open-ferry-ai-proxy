@@ -10,7 +10,7 @@
 // (RewriteCodexOrphanDelegationInputForConfig,
 // TranslateRequestEnvelopeWithCodexMultiAgentV2), and
 // sdk/cliproxy/auth/api_key_model_capabilities.go (CodexAPIKeyModelIsCompat)
-// with conductor_models.go (resolveAPIKeyConfig) (v8.0.10, MIT).
+// with conductor_models.go (resolveAPIKeyConfig) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Codex clients' requests, and compatibility models, around translation.
@@ -52,10 +52,6 @@
 //!   aren't compatibility models, as they don't resolve the flag.
 //! - The translator plugin hooks aren't ported, so a compatibility
 //!   translation isn't passed to them.
-//! - Upstream v8.0.10 keeps a v8 document's
-//!   `oauth.providers.codex.orphan-delegation-compatibility` from API key
-//!   credentials. The config here, as v8.0.11's, applies it to every
-//!   credential, so API keys get orphan delegation compatibility too.
 //! - An executor without a model catalog lists no models for `spawn_agent`,
 //!   which leaves its description as it is.
 
@@ -460,8 +456,8 @@ fn rewrite_orphans(body: &mut Value, headers: &HeaderMap) {
 /// renamed, so that responses must be restored.
 ///
 /// Upstream reads the config through `cfg.ForAPIKey()` for an API key
-/// credential. That resets none of the settings read here: this config, as
-/// v8.0.11's, shares `codex.orphan-delegation-compatibility` with API keys
+/// credential. That resets none of the settings read here: the config
+/// shares `codex.orphan-delegation-compatibility` with API keys
 /// however a v8 document spells it, and the multi-agent switch is a client
 /// setting.
 pub(crate) fn prepare(

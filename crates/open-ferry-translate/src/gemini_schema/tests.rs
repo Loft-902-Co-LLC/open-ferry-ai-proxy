@@ -1,4 +1,4 @@
-//! Ports internal/util/gemini_schema_test.go (v8.0.10).
+//! Ports internal/util/gemini_schema_test.go (v8.0.15).
 //!
 //! Upstream runs most of these tests against several of its cleaners. Only
 //! `CleanJSONSchemaForGeminiJSONSchema` is ported, so they run against it. A

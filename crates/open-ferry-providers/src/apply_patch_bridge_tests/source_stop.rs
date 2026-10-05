@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/runtime/executor/apply_patch_source_stop_test.go
-// (TestApplyPatchInteractionsSourceStopActualFailures) (v8.0.10, MIT).
+// (TestApplyPatchInteractionsSourceStopActualFailures) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A Gemini Interactions `apply_patch` call whose step stops before its

@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI test/thinking_conversion_test.go and
-// test/summary_intent_translation_test.go (v8.0.10, MIT).
+// test/summary_intent_translation_test.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The Interactions thinking conversion matrix

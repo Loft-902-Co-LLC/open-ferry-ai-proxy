@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI sdk/api/handlers/handlers.go (the endpoint and
 // client metadata of GetContextWithCancel) and the request ID of
-// internal/logging/gin_logger.go (GinLogrusLogger) (v8.0.10, MIT).
+// internal/logging/gin_logger.go (GinLogrusLogger) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The request context: the [`RequestContext`] the outermost layer makes

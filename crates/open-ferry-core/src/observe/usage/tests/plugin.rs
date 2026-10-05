@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/redisqueue/plugin_test.go (v8.0.10, MIT).
+// Ported from CLIProxyAPI internal/redisqueue/plugin_test.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Tests of the usage records as the queue holds them.

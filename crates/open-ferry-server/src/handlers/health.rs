@@ -1,5 +1,5 @@
 // Ported from the health and root handlers in CLIProxyAPI setupRoutes,
-// internal/api/server_routes.go (v8.0.10, MIT).
+// internal/api/server_routes.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! `/healthz` and `/`.

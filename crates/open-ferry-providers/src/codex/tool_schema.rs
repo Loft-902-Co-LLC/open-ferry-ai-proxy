@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/runtime/executor/helps/codex_tool_schema.go
 // and HasUnsupportedUnicodePropertyEscape, SchemaMapKeywords and
-// SchemaValueKeywords in internal/util/claude_schema.go (v8.0.10, MIT).
+// SchemaValueKeywords in internal/util/claude_schema.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Tool schemas Codex would refuse, made acceptable

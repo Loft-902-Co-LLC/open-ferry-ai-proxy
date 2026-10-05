@@ -3,7 +3,7 @@
 // assertTask6PatchError, assertTask6FailedStream, task6CaptureFailureUsage,
 // task6Gateway) and internal/runtime/executor/apply_patch_repair_test.go
 // (task6RepairSource, task6RepairSSE, task6RepairChunkType,
-// task6RepairReadStream) (v8.0.10, MIT).
+// task6RepairReadStream) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The `apply_patch` bridge end to end: each served executor against a mock

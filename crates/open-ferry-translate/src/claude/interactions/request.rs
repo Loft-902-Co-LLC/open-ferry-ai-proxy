@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/claude/interactions/interactions_claude_request.go
-// (ConvertInteractionsRequestToClaude) (v8.0.10, MIT).
+// (ConvertInteractionsRequestToClaude) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Gemini Interactions request → Claude Messages request.

@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/api/handlers/management/
 // auth_files_upload_test.go, auth_files_batch_test.go,
 // auth_files_delete_test.go, auth_files_download_test.go and
-// auth_files_download_windows_test.go (v8.0.10, MIT).
+// auth_files_download_windows_test.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Tests of the routes of `crate::credential_files`: downloading,

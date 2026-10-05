@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/types.go (ExpirationTime,
 // AccessTokenExpirationTime, HasValidAccessToken and their helpers) and
-// authAccessToken in sdk/cliproxy/auth/conductor_refresh.go (v8.0.10, MIT).
+// authAccessToken in sdk/cliproxy/auth/conductor_refresh.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! When a credential's tokens expire, read from its metadata.

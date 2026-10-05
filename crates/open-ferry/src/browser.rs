@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/browser/browser.go (v8.0.10, MIT).
+// Ported from CLIProxyAPI internal/browser/browser.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Opening a URL in the user's browser, for the OAuth logins.

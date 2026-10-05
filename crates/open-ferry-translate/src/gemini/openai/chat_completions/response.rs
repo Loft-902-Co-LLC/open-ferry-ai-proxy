@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/translator/gemini/openai/chat-completions/gemini_openai_response.go
 // (ConvertGeminiResponseToOpenAI and ConvertGeminiResponseToOpenAINonStream)
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Gemini response → OpenAI Chat Completions response.

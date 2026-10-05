@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/api/server_management.go and
 // internal/api/server_management_v8.go (the OAuth login routes) and
 // internal/api/server_routes.go (the /anthropic/callback and
-// /codex/callback routes) (v8.0.10, MIT).
+// /codex/callback routes) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! OAuth logins started from the management API, for Claude and Codex

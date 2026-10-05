@@ -22,7 +22,7 @@ Read [UPSTREAM.md](UPSTREAM.md) first. In short:
 - **Headers.** Every ported file starts with a header naming its upstream source and the pinned version:
 
   ```rust
-  // Ported from CLIProxyAPI internal/translator/codex/claude (v8.0.10, MIT).
+  // Ported from CLIProxyAPI internal/translator/codex/claude (v8.0.15, MIT).
   // https://github.com/router-for-me/CLIProxyAPI
   ```
 

@@ -3,7 +3,7 @@
 // and the helpers they call) and interactions_gemini_response.go
 // (ConvertGeminiResponseToInteractions, ConvertGeminiResponseToInteractionsNonStream,
 // ConvertInteractionsResponseToGemini, ConvertInteractionsResponseToGeminiNonStream and the
-// helpers they call) (v8.0.10, MIT).
+// helpers they call) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Gemini response → Gemini Interactions response, and Gemini Interactions

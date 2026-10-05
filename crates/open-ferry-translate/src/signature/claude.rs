@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/signature/claude.go (v8.0.10, MIT).
+// Ported from CLIProxyAPI internal/signature/claude.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Removing Claude thinking blocks that Claude would reject.

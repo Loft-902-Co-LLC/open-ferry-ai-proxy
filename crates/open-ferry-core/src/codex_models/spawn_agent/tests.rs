@@ -1,6 +1,6 @@
 //! Ports the model list tests of CLIProxyAPI
 //! internal/client/codex/optimize-multi-agent-v2/optimize_multi_agent_v2_test.go
-//! (v8.0.10, MIT); the rest are in open-ferry-translate's
+//! (v8.0.15, MIT); the rest are in open-ferry-translate's
 //! `codex_client/multi_agent_v2/tests.rs`.
 //!
 //! Upstream's model maps become [`ModelInfo`]s, and tests that register

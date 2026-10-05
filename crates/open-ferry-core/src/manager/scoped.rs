@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_request_scoped_errors.go
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Operator rules for upstream errors: a rule names a status and text to

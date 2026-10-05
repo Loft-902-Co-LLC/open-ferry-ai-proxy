@@ -6,7 +6,7 @@
 // normalizedPayloadResult, normalizedPayloadValue, normalizedPayloadJSON,
 // payloadFromProtocolMatches, normalizePayloadFromProtocol,
 // payloadHeadersMatch, payloadHeaderValues, payloadModelCandidates,
-// matchModelPattern) (v8.0.10, MIT).
+// matchModelPattern) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Which rules apply to a call: model names with `*` wildcards, the

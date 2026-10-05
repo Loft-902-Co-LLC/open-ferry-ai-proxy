@@ -12,7 +12,7 @@ Already in place:
 
 Still to come:
 
-- **Parity with the latest CLIProxyAPI release for every provider we support:** Codex, Claude, Gemini, Gemini Interactions, Vertex AI, Meta (API keys and access tokens), xAI (API keys) and any OpenAI-compatible upstream. We follow upstream's releases; the pin is moving from v8.0.10 to v8.0.15. What we do differently is listed in UPSTREAM.md.
+- **Parity with the latest CLIProxyAPI release for every provider we support:** Codex, Claude, Gemini, Gemini Interactions, Vertex AI, Meta (API keys and access tokens), xAI (API keys) and any OpenAI-compatible upstream. We follow upstream's releases; the pin is at v8.0.15. What we do differently is listed in UPSTREAM.md.
 - **Image and video endpoints:** `/v1/images/generations`, `/v1/images/edits` and the `/v1/videos` routes, for the supported providers that offer them.
 - **Management writes:** the routes that change the config and credentials, which the dashboard and the TUI need. Each write is checked before it lands, is atomic, and keeps the previous file.
 - **A web dashboard** that is much easier to use than CLIProxyAPI's management center:

@@ -6,7 +6,7 @@
 // DiffOAuthRequestScopedErrorsChanges,
 // summarizeOAuthRequestScopedErrorsList) and oauth_settings.go
 // (SummarizeOAuthSettings, DiffOAuthSettingsChanges,
-// summarizeOAuthSettingsList) (v8.0.10, MIT).
+// summarizeOAuthSettingsList) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The change lines of the per-channel OAuth maps: `oauth-excluded-models`,

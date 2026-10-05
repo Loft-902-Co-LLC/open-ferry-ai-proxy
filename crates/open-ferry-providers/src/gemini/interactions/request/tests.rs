@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/runtime/executor/gemini_interactions_translate_test.go (v8.0.10, MIT).
+// Ported from CLIProxyAPI internal/runtime/executor/gemini_interactions_translate_test.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! How the body and the payload rules' baseline are translated.

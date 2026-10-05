@@ -4,7 +4,7 @@
 // xaiIsInternalXSearchCallID, xaiIsInternalXSearchCall,
 // xaiNamespaceRestorer, unwrapXAIDispatcherArguments,
 // restoreXAINamespaceToolCalls, restoreXAIClientWebSearchName,
-// xaiPatchCompletedOutput) (v8.0.10, MIT).
+// xaiPatchCompletedOutput) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! xAI's response events, turned back into what the client sent.

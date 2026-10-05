@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/api/handlers/management/logs.go
 // (writeLogsResponse, logAccumulator.addLine, logAccumulator.append)
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The body of `GET /v0/management/logs` (upstream's `writeLogsResponse`):

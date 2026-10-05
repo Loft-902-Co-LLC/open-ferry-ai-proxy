@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/cooldown_state.go
 // (CooldownStateRecord, cooldownStateFile, readCooldownStateFile and the
-// marshaling in writeCooldownStateGroup) (v8.0.10, MIT).
+// marshaling in writeCooldownStateGroup) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A saved cooldown, and the JSON of the `.cds` file that holds one

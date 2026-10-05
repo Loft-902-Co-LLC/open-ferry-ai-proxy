@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/classification.go, and
-// AccountInfo and ProxyInfo in sdk/cliproxy/auth/types.go (v8.0.10, MIT).
+// AccountInfo and ProxyInfo in sdk/cliproxy/auth/types.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! What kind of credential an [`Auth`] is, where it came from, and the

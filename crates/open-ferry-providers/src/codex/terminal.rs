@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/runtime/executor/codex_executor_terminal.go,
 // statusErr in openai_compat_executor.go, normalizeCodexWebsocketCompletion in
 // codex_websockets_errors.go and helps/codex_terminal_incomplete.go
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Codex's failures as errors: an HTTP error status, a stream's terminal

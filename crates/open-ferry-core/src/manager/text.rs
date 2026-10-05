@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/thinking/suffix.go (ParseSuffix), the
 // canonicalModelKey in sdk/cliproxy/auth/selector.go, and parseDurationString in
-// sdk/cliproxy/auth/conductor_refresh.go (v8.0.10, MIT).
+// sdk/cliproxy/auth/conductor_refresh.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Go standard library behaviour the manager's decisions depend on: string

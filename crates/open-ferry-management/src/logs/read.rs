@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/api/handlers/management/logs.go
 // (logAccumulator's file scan, completeLogRead, logReadResult,
 // tailLogFiles, readTailLogLines, tailStartOffset, cursorForLatestLogFile,
-// readCompleteLogLines, completeLogBoundary) (v8.0.10, MIT), with Go's
+// readCompleteLogLines, completeLogBoundary) (v8.0.15, MIT), with Go's
 // bufio/scan.go (Scanner, ScanLines) (go1.27, BSD-3-Clause).
 // https://github.com/router-for-me/CLIProxyAPI
 // https://github.com/golang/go

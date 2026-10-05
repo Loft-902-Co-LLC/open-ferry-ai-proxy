@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/runtime/executor/helps/payload_helpers.go
 // (buildPayloadPath, payloadRuleTargetsPath, resolvePayloadRulePaths,
 // splitPayloadRulePath, parsePayloadQueryPathPart, findPayloadQueryClose,
-// appendPayloadPathPart, payloadValueAtPath) (v8.0.10, MIT).
+// appendPayloadPathPart, payloadValueAtPath) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A rule's path under the call's root, and the paths it stands for in a

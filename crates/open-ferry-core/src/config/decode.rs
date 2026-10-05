@@ -1,5 +1,5 @@
 // Ported from gopkg.in/yaml.v3 v3.0.1 decode.go (Apache-2.0), the decoder
-// CLIProxyAPI internal/config/config_v8.go (v8.0.10, MIT) decodes its
+// CLIProxyAPI internal/config/config_v8.go (v8.0.15, MIT) decodes its
 // config with.
 // https://github.com/router-for-me/CLIProxyAPI
 // https://github.com/go-yaml/yaml

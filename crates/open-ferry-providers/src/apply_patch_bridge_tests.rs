@@ -5,7 +5,7 @@
 // apply_patch_identity_test.go (assertApplyPatchIdentityLifecycle),
 // apply_patch_integration_test.go (task6PatchRequest, task6ProviderFixture,
 // assertTask6PatchError, assertTask6FailedStream) and
-// apply_patch_repair_test.go (task6RepairSSE) (v8.0.10, MIT).
+// apply_patch_repair_test.go (task6RepairSSE) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! upstream's executor-level `apply_patch` tests, part 1: the bridge

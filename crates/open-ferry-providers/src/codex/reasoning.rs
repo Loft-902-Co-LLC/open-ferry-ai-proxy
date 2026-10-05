@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/runtime/executor/openai_responses_signature.go
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Cleans the `reasoning` items of a Responses `input` before it goes to

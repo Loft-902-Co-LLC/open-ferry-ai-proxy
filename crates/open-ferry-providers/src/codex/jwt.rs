@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/auth/codex/jwt_parser.go (v8.0.10, MIT).
+// Ported from CLIProxyAPI internal/auth/codex/jwt_parser.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The claims in a Codex `id_token`: the account ID, email and plan.

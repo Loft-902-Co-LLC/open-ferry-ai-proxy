@@ -4,7 +4,7 @@
 // gemini_ttft_helpers.go (IsGeminiTokenEvent) and usage_helpers.go
 // (StartResponseTTFT, IsTTFTSet, IsFirstPacketSet, RecordFirstPacket,
 // ObserveTokenEvent, MarkFirstResponseByte, setTTFT, ttftDuration)
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Time to first token: how long an upstream attempt took to give its first

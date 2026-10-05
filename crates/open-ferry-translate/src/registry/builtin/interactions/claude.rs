@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/interactions/claude/init.go and
-// internal/translator/claude/interactions/init.go (v8.0.10, MIT).
+// internal/translator/claude/interactions/init.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The Claude and Interactions translators' registrations: Claude Messages

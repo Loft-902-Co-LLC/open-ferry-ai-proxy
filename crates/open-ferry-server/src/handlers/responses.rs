@@ -1,7 +1,7 @@
 // Ported from Responses, Compact, handleNonStreamingResponse,
 // handleStreamingResponse, forwardResponsesStream,
 // isCodexResponsesClientRequest and logResponsesStreamError in CLIProxyAPI
-// sdk/api/handlers/openai/openai_responses_handlers.go (v8.0.10, MIT).
+// sdk/api/handlers/openai/openai_responses_handlers.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! `POST /v1/responses` and `POST /v1/responses/compact`, also served under

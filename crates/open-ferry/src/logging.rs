@@ -1,5 +1,5 @@
 // Ported from the log setup in CLIProxyAPI internal/logging and
-// internal/util's SetLogLevel (v8.0.10, MIT).
+// internal/util's SetLogLevel (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Logging, at debug level when the config's `debug` is on and at info

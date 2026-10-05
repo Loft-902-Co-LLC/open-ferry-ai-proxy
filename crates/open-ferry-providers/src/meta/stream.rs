@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/runtime/executor/meta_executor_stream.go
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Translates Meta's event stream to the client's format, a line at a time.

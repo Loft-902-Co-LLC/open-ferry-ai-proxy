@@ -1,5 +1,5 @@
 //! Ports CLIProxyAPI internal/api/handlers/management/logs_test.go
-//! (v8.0.10, MIT): the `GetRequestLogByID` tests. The rest of that file,
+//! (v8.0.15, MIT): the `GetRequestLogByID` tests. The rest of that file,
 //! the main log's, is P3 WP-B's.
 //!
 //! Upstream calls the handler with a hand-built gin context; here each

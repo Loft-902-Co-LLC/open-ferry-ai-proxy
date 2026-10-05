@@ -1,6 +1,6 @@
 // Ported from prepareCodexMultiAgentV2Tools and prepareCodexOrphanDelegation
 // in CLIProxyAPI sdk/api/handlers/openai/openai_responses_handlers.go
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A Codex client's Responses request, readied before it is routed.
@@ -20,9 +20,6 @@
 //!   again. That writes the same model list over the one written here,
 //!   unless the models changed in between, when the newer list wins where
 //!   upstream keeps the older.
-//! - Upstream v8.0.10 skips orphan delegation here when a v8 document put
-//!   the setting under `oauth.providers`. The config here, as v8.0.11's,
-//!   shares that spelling with API keys, and v8.0.11 drops the check.
 //! - A body that isn't a JSON object is left as it is, as is one that
 //!   doesn't change; one that changes is written again, as the
 //!   `codex_client` module says, each number as the client wrote it.

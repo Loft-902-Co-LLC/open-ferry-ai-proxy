@@ -5,7 +5,7 @@
 // requestedAuthFileNamesForDelete, uniqueAuthFileNames,
 // deleteAuthFileByName, findAuthForDelete, authIDForPath), auth_files.go
 // (isUnsafeAuthFileName) and auth_files_fields.go (removeAuth,
-// removeAuthsForPath, deleteTokenRecord) (v8.0.10, MIT), with gin-gonic/gin
+// removeAuthsForPath, deleteTokenRecord) (v8.0.15, MIT), with gin-gonic/gin
 // v1.10.1 context.go (ContentType, QueryArray, MultipartForm) (MIT) and
 // Go's mime/multipart formdata.go (ReadForm) and multipart.go (FormName,
 // FileName, parseContentDisposition), mime/mediatype.go (ParseMediaType,

@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/openai/claude/openai_claude_request.go
-// (ConvertClaudeRequestToOpenAI, ConvertClaudeRequestToOpenAIWithCompat) (v8.0.10, MIT).
+// (ConvertClaudeRequestToOpenAI, ConvertClaudeRequestToOpenAIWithCompat) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Claude Messages request → OpenAI Chat Completions request.

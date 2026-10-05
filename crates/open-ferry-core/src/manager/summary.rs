@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/selector.go (ExtractUpstreamErrorSummary
-// and SanitizeUpstreamErrorSummary) (v8.0.10, MIT).
+// and SanitizeUpstreamErrorSummary) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A short, sanitized summary of a provider error, for the "last upstream

@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/common/apply_patch_responses.go
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The `apply_patch` bridge for a provider that speaks the Responses API but

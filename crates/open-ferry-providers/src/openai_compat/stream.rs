@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/runtime/executor/openai_compat_executor.go
 // (the stream reader of ExecuteStream), helps/apply_patch.go
 // (EndApplyPatchStream) and helps/claude_input_tokens.go
-// (TranslateStreamWithClaudeInputTokens) (v8.0.10, MIT).
+// (TranslateStreamWithClaudeInputTokens) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! An OpenAI-compatible provider's SSE stream, read a frame at a time and

@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/translator/gemini/openai/responses/gemini_openai-responses_request_test.go
 // (testResponsesGeminiThoughtSignature), gemini_openai-responses_response_test.go
 // (parseSSEEvent, differentResponsesGeminiThoughtSignature) and
-// gemini_openai-responses_web_search_test.go (collectResponsesStreamEvents) (v8.0.10, MIT).
+// gemini_openai-responses_web_search_test.go (collectResponsesStreamEvents) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Fixtures shared by this translator's tests.

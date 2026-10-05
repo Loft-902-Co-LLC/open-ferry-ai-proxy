@@ -2,7 +2,7 @@
 // MaskAuthorizationHeader, MaskSensitiveHeaderValue, MaskSensitiveQuery,
 // shouldMaskQueryParam) and internal/logging/diagnostic.go
 // (SafeDiagnosticForLog, SafeErrorDiagnostic, diagnosticRunePrefix,
-// truncateDiagnosticLogExcerpt) (v8.0.10, MIT), and Go's net/url/url.go
+// truncateDiagnosticLogExcerpt) (v8.0.15, MIT), and Go's net/url/url.go
 // (QueryUnescape, PathUnescape, QueryEscape, shouldEscape) (go1.26,
 // BSD-3-Clause).
 // https://github.com/router-for-me/CLIProxyAPI

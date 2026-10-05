@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/runtime/executor/codex_executor.go,
 // codex_executor_execute.go, codex_executor_stream.go,
-// codex_executor_tokens.go and codex_executor_auth.go (v8.0.10, MIT).
+// codex_executor_tokens.go and codex_executor_auth.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! [`CodexExecutor`], which calls Codex with a ChatGPT sign-in or an API

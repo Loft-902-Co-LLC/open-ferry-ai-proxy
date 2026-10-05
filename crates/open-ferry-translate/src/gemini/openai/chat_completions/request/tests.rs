@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI
 // internal/translator/gemini/openai/chat-completions/gemini_openai_request_test.go,
 // gemini_openai_file_data_test.go, gemini_openai_signature_test.go and the
-// request test in noop_optimization_test.go (v8.0.10, MIT).
+// request test in noop_optimization_test.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 //
 // All tests are ported; table-driven Go subtests become one table per test.

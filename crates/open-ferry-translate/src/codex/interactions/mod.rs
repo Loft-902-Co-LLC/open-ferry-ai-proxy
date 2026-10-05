@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/translator/codex/interactions
 // (ConvertInteractionsRequestToCodex, ConvertCodexResponseToInteractions,
-// ConvertCodexResponseToInteractionsNonStream) (v8.0.10, MIT).
+// ConvertCodexResponseToInteractionsNonStream) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Gemini Interactions clients talking to a Codex upstream: the request

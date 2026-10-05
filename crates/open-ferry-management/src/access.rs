@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/api/handlers/management/handler.go
 // (Middleware, AuthenticateManagementKey, purgeStaleAttempts) and
-// internal/api/server_management.go (managementAvailable) (v8.0.10, MIT),
+// internal/api/server_management.go (managementAvailable) (v8.0.15, MIT),
 // with how golang.org/x/crypto/bcrypt reads a hash (CompareHashAndPassword,
 // newFromHash, decodeVersion, decodeCost; v0.54.0, BSD-3-Clause).
 // https://github.com/router-for-me/CLIProxyAPI

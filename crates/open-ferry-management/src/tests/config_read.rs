@@ -5,9 +5,9 @@
 // (TestConfigV8ClientMultiAgentMigration) and
 // internal/api/server_management_v8_test.go
 // (TestManagementV8RoutesShareAccessControl,
-// TestManagementV8IndependentContract) (v8.0.10, MIT), and
+// TestManagementV8IndependentContract),
 // config_v8_compatibility_test.go (TestConfigV8HistoricalFieldPaths,
-// TestConfigV8HistoricalProviderSubtrees) (v8.0.11, MIT), and
+// TestConfigV8HistoricalProviderSubtrees) and
 // config_v8_auth_index_test.go
 // (TestConfigV8APIKeysExposeAuthIndex_Issue6287) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI

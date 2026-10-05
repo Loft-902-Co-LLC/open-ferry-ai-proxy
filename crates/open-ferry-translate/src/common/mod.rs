@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/translator/common/request.go (v8.0.10, MIT).
+// Ported from CLIProxyAPI internal/translator/common/request.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Helpers shared by translators of every format.

@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/runtime/executor/xai_executor_stream.go
 // (ExecuteStream's reading goroutine) and
 // helps/claude_input_tokens.go (TranslateStreamWithClaudeInputTokens)
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! xAI's SSE stream, read a line at a time and translated to the client's

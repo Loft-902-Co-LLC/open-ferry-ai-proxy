@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/runtime/executor/helps/gemini_content_turns.go
 // (EnsureGeminiLeadingUserContent, EnsureGeminiTrailingUserContent,
 // EnsureGeminiBoundaryUserContent) and helps/vertex_payload_helpers.go
-// (StripVertexOpenAIResponsesToolCallIDs) (v8.0.10, MIT).
+// (StripVertexOpenAIResponsesToolCallIDs) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The turns of a Gemini request's `contents`, as Gemini and Vertex AI take

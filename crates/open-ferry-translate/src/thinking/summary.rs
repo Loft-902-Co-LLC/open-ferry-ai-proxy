@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/thinking/summary.go (v8.0.10, MIT).
+// Ported from CLIProxyAPI internal/thinking/summary.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Whether a client asked to see reasoning summaries, and asking the

@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/client/grokbuild/grokbuild.go
 // (IsGrokShellUserAgent, BuildResponse) and internal/api/server_routes.go
 // (the Grok branch of unifiedModelsHandler, grokModelsFromRegistryInfos and
-// handleGrokModels) (v8.0.10, MIT).
+// handleGrokModels) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The model list the Grok shell gets from `GET /v1/models`.

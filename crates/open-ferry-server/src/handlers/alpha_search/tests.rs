@@ -6,7 +6,7 @@
 // TestCodexAlphaSearchOptInAPIKeyStripsCredentialPrefix,
 // TestCodexAlphaSearchOptInAPIKeyResolvesModelAlias,
 // TestCodexAlphaSearchOptInAPIKeyWithoutBaseURLFailsClosed,
-// TestCodexAlphaSearchRecordsRequestLog) (v8.0.10, MIT).
+// TestCodexAlphaSearchRecordsRequestLog) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Codex Alpha Search through the whole router: the client key, the

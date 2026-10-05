@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/redisqueue/plugin.go (HandleUsage,
 // queuedUsageDetail, requestDetail, tokenStats, failDetail, resolveFail)
 // and sdk/cliproxy/session/identity.go (NormalizeToCanonicalUUID's UUID
-// case) (v8.0.10, MIT).
+// case) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A usage record as the usage queue holds it: one JSON object per

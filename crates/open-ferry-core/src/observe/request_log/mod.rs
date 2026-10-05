@@ -4,7 +4,7 @@
 // (Finalize, shouldBufferResponseBody, hasActionableError,
 // hasActionableAPIResponseErrors, isClientCancellationErrorMessage),
 // internal/clienterror/client_error.go (IsClientCancellation) and
-// internal/logging/cpa_trace.go (FormatCPATraceID) (v8.0.10, MIT).
+// internal/logging/cpa_trace.go (FormatCPATraceID) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The request log: a file per request, with the client's request, each

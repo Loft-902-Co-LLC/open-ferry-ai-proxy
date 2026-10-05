@@ -1,5 +1,5 @@
 // Ported from Go's time.ParseDuration (src/time/format.go, go1.27, BSD-3-Clause),
-// which CLIProxyAPI internal/config/config_types.go uses (v8.0.10, MIT).
+// which CLIProxyAPI internal/config/config_types.go uses (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 // https://github.com/golang/go
 

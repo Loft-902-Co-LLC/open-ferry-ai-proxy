@@ -7,7 +7,7 @@
 // builder.go (runtimeAuthSyncHook), the
 // order of internal/watcher/synthesizer/config.go (Synthesize), and the
 // auth dispatch of internal/watcher's clients.go and config_reload.go
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Serving the proxy.
@@ -1569,7 +1569,7 @@ mod tests {
     }
 
     /// Not upstream's: `is_stale` decides as upstream's `isStaleCoreAuth`
-    /// (sdk/cliproxy/service_auth.go), which v8.0.10 doesn't test.
+    /// (sdk/cliproxy/service_auth.go), which upstream doesn't test.
     #[test]
     fn stale_credentials_are_older_by_epoch_or_generation() {
         let existing = Auth {
@@ -1895,7 +1895,7 @@ mod tests {
     }
 
     /// Ports `TestRegisterAvailableExecutors` of CLIProxyAPI
-    /// sdk/cliproxy/service_executor_registration_test.go (v8.0.10, MIT)
+    /// sdk/cliproxy/service_executor_registration_test.go (v8.0.15, MIT)
     /// for the executors ported: Codex, Meta, Claude, Gemini, Gemini
     /// Interactions, Vertex AI, xAI and the baseline OpenAI-compatible one.
     /// The plugin executor and the other providers' aren't ported.
@@ -2515,7 +2515,7 @@ mod tests {
     /// The management API as the binary serves it, over TCP.
     ///
     /// Ports the management parts of CLIProxyAPI
-    /// internal/api/server_test.go (v8.0.10, MIT):
+    /// internal/api/server_test.go (v8.0.15, MIT):
     /// - `TestManagementResponseExposesPluginSupportHeaderForCORS`, without
     ///   its `X-CPA-SUPPORT-PLUGIN` check: the plugin host isn't ported and
     ///   the header isn't sent.

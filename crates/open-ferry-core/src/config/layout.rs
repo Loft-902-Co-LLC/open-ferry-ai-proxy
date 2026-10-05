@@ -2,8 +2,8 @@
 // as a v8 write runs it, groupLegacyKeys, commentUnknownV8Sections,
 // commentUnknownV8Fields), config_v8_api.go (ProjectV8ConfigAliases) and
 // internal/api/handlers/management/config_v8.go (configV8Node,
-// deleteConfigV8Path and the TURN secret redaction of ConfigV8) (v8.0.11,
-// MIT), and config_v8.go (v8AllowedRoots, and the `models` section
+// deleteConfigV8Path and the TURN secret redaction of ConfigV8), and
+// config_v8.go (v8AllowedRoots, and the `models` section
 // commentUnknownV8Sections keeps) (v8.0.15, MIT), with the rules of
 // gopkg.in/yaml.v3 v3.0.1
 // decode.go (decoding into `any`: decoder.scalar, decoder.mapping,

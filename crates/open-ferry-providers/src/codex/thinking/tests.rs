@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/thinking/apply_codex_usage_test.go and
-// test/thinking_conversion_test.go (v8.0.10, MIT).
+// test/thinking_conversion_test.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The Codex cases of the thinking conversion matrix, how a Responses

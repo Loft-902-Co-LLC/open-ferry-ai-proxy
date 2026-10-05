@@ -1,8 +1,7 @@
 // Ported from CLIProxyAPI internal/config/config_v8.go (the v8 path tables,
-// flattenV8, normalizeV8PrivateIPAlias), weight.go
+// flattenV8, normalizeV8PrivateIPAlias, expandV8Groups), weight.go
 // (validateCredentialWeightYAML and its helpers) and
-// internal/credentialweight/weight.go (Normalize) (v8.0.11, MIT), and
-// config_v8.go's expandV8Groups (v8.0.15, MIT).
+// internal/credentialweight/weight.go (Normalize) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Reads the v8 config layout by moving it into the legacy one.
@@ -13,10 +12,8 @@
 //! rewrites the tree into the legacy layout, where a v8 setting that is
 //! present wins over its legacy spelling, and the result is decoded.
 //!
-//! This follows v8.0.11, whose `config_v8.go` differs from v8.0.10's: it
-//! adds the shared `upstream.*` paths. Expanding the `api-keys` groups
-//! follows v8.0.15, which drops the read-only `auth_index` a management read
-//! adds to them.
+//! The shared `upstream.*` paths are read too, and expanding the `api-keys`
+//! groups drops the read-only `auth_index` a management read adds to them.
 //!
 //! Deviations from upstream:
 //! - [`V8_PATHS`] is a fixed table. Upstream builds it by reflecting over its

@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/cache/xai_reasoning_replay_cache.go
 // (StoreXAIReasoningReplayItems, GetXAIReasoningReplayItems,
-// DeleteXAIReasoningReplayItem and their helpers) (v8.0.10, MIT).
+// DeleteXAIReasoningReplayItem and their helpers) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The xAI reasoning replay cache: the reasoning, message and tool-call

@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/translator/gemini/interactions/interactions_gemini_response.go
 // (ConvertInteractionsRequestToInteractions, ConvertInteractionsResponsePassthrough,
-// ConvertInteractionsResponsePassthroughNonStream) (v8.0.10, MIT).
+// ConvertInteractionsResponsePassthroughNonStream) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Gemini Interactions → Gemini Interactions: requests and responses pass

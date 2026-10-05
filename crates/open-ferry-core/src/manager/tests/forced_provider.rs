@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI sdk/api/handlers/model_execution_test.go
 // (TestExecuteProtocolWithAuthManagerUsesForcedProvider and
 // TestExecuteProtocol[Stream]WithAuthManagerAgentUsesSelectionModelForAuth)
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A call with a forced provider: only that provider is tried, and with an

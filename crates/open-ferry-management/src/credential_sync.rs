@@ -2,7 +2,7 @@
 // (internal/api/handlers/management/handler.go, SetPostAuthPersistHook;
 // internal/api/server_options.go, WithPostAuthPersistHook) and the hook the
 // service sets there, sdk/cliproxy/builder.go (runtimeAuthSyncHook)
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! [`CredentialSync`]: how the management handlers tell the running

@@ -6,10 +6,9 @@
 // GetSwitchPreviewModel), config_lists.go (GetAPIKeys, GetGeminiKeys,
 // GetInteractionsKeys, GetClaudeKeys, GetCodexKeys, GetXAIKeys, GetMetaKeys,
 // GetOpenAICompat, GetVertexCompatKeys, GetOAuthExcludedModels,
-// GetOAuthModelAlias, GetOAuthRequestScopedErrors)
-// and config_auth_index.go (liveAuthIndexByID and the `*WithAuthIndex`
-// lists) (v8.0.10, MIT), config_v8.go (ConfigV8's reads) (v8.0.11, MIT),
-// and config_v8.go (ConfigV8's reads, with the `auth_index` of
+// GetOAuthModelAlias, GetOAuthRequestScopedErrors),
+// config_auth_index.go (liveAuthIndexByID and the `*WithAuthIndex`
+// lists) and config_v8.go (ConfigV8's reads, with the `auth_index` of
 // config_auth_index.go's injectV8APIKeyAuthIndexesLocked) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 

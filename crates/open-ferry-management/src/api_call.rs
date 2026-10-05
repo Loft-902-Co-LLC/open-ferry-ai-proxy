@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/api/handlers/management/api_tools.go
 // (APICall, apiCallRequest, apiCallResponse, firstNonEmptyString,
 // tokenValueForAuth, resolveTokenForAuth, tokenValueFromMetadata)
-// (v8.0.10, MIT), with what of Go's net/http client it relies on
+// (v8.0.15, MIT), with what of Go's net/http client it relies on
 // (client.go: Client.do, redirectBehavior, makeHeadersCopier,
 // shouldCopyHeaderOnRedirect, isDomainOrSubdomain, refererForURL, send's
 // basic auth; request.go: validMethod, Request.write's Host handling and
