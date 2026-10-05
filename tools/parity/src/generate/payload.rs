@@ -6,7 +6,9 @@
 //! kind of YAML scalar, sequence and mapping, and raw JSON; clients'
 //! requests that do and don't hold what a default would write;
 //! `disable-image-generation` with image tools and `tool_choice` in each
-//! form; tracked paths; and Codex clients' tools for the integer pass.
+//! form; tracked paths; and Codex clients' tools for the integer pass, flat
+//! and in namespaces, with whole-number parameters at the top of a schema
+//! and inside objects, array items and union branches.
 //!
 //! Upstream applies a rule's params in Go's random map order, so each
 //! rule's params start with distinct plain keys. The cases stay clear of
@@ -142,6 +144,113 @@ const REQUEST_PATHS: &[&str] = &[
 ];
 
 const IMAGE_MODES: &[&str] = &["true", "false", "chat", "passthrough"];
+
+/// Codex's tools with the paths of their whole-number parameters, as the
+/// integer pass knows them, then names it doesn't know.
+const CODEX_TOOLS: &[(&str, &[&str])] = &[
+    (
+        "exec_command",
+        &["yield_time_ms", "max_output_tokens", "timeout_ms"],
+    ),
+    (
+        "write_stdin",
+        &["session_id", "yield_time_ms", "max_output_tokens"],
+    ),
+    ("sleep", &["duration_ms"]),
+    ("wait_agent", &["timeout_ms"]),
+    ("wait", &["yield_time_ms", "max_tokens"]),
+    ("tool_search", &["limit"]),
+    (
+        "test_sync_tool",
+        &[
+            "sleep_before_ms",
+            "participants",
+            "barrier.properties.participants",
+            "barrier.properties.timeout_ms",
+        ],
+    ),
+    ("create_goal", &["token_budget"]),
+    ("get_channels", &["limit"]),
+    ("list_threads", &["limit", "max_chars_per_post"]),
+    ("search_posts", &["limit", "max_chars_per_post"]),
+    ("read_thread", &["limit", "max_chars_per_post"]),
+    ("read_post", &["offset_chars", "limit_chars"]),
+    ("memories__list", &["max_results"]),
+    ("memories__read", &["line_offset", "max_lines"]),
+    ("memories__search", &["context_lines", "max_results"]),
+    ("history__list_windows", &["limit"]),
+    ("history__list_items", &["limit", "max_chars_per_item"]),
+    ("history__read_item", &["offset_chars", "limit_chars"]),
+    ("history__search_contents", &["limit"]),
+    ("notes__list_files_by_prefix", &["max_results"]),
+    (
+        "notes__read_file",
+        &[
+            "start_line",
+            "stop_line",
+            "start_line.anyOf.0",
+            "stop_line.anyOf.0",
+        ],
+    ),
+    (
+        "notes__search_contents",
+        &["max_matches_per_file", "max_files"],
+    ),
+    ("image_gen__imagegen", &["num_last_images_to_include"]),
+    (
+        "web__run",
+        &[
+            "search_query.items.properties.recency",
+            "image_query.items.properties.recency",
+            "open.items.properties.lineno",
+            "click.items.properties.id",
+            "screenshot.items.properties.pageno",
+            "weather.items.properties.duration",
+            "sports.items.properties.num_games",
+        ],
+    ),
+    ("collaboration__wait_agent", &["timeout_ms"]),
+    ("multi_agent_v1__wait_agent", &["timeout_ms"]),
+    ("collaboration__read_post", &["offset_chars", "limit_chars"]),
+    (
+        "collaboration__list_threads",
+        &["limit", "max_chars_per_post"],
+    ),
+    ("functions__create_goal", &["token_budget"]),
+    ("collab__exec_command", &["timeout_ms"]),
+    (" sleep ", &["duration_ms"]),
+    ("mcp__server__read_post", &["offset_chars"]),
+    ("user_tools__read_post", &["limit_chars"]),
+    ("multi_agent_v1__read_post", &["offset_chars"]),
+    ("read", &["line_offset"]),
+    ("run", &["open.items.properties.lineno"]),
+    ("unknown", &["timeout_ms", "limit"]),
+];
+
+/// Parameter paths of no tool, or of another tool than the one drawn, or
+/// that stop short of or go past a whole-number parameter.
+const CODEX_OTHER_FIELDS: &[&str] = &[
+    "other",
+    "limit",
+    "timeout_ms",
+    "barrier.properties.ratio",
+    "barrier.participants",
+    "start_line.anyOf.1",
+    "open.items.0.properties.lineno",
+    "open.items.properties.lineno.items",
+    "search_query.items.properties.recency",
+];
+
+/// The `type`s a parameter is declared with.
+const CODEX_TYPES: &[&str] = &[
+    r#""number""#,
+    r#""number""#,
+    r#""number""#,
+    r#"["number","null"]"#,
+    r#"["null","number","number","integer"]"#,
+    r#""integer""#,
+    r#""string""#,
+];
 
 /// Object keys in bodies and paths. Only `b.c` needs an escape in a path.
 const KEYS: &[&str] = &[
@@ -517,22 +626,99 @@ impl Draw {
         }
     }
 
+    /// Tools for the integer pass, in `tools` or an `additional_tools` item.
     fn codex_tools(&mut self, map: &mut Map<String, Value>) {
-        let schema = json!({
-            "type": "object",
-            "properties": {
-                "yield_time_ms": { "type": "number" },
-                "timeout_ms": { "type": ["number", "null"] },
-                "other": { "type": "number" },
-            },
-        });
-        let name = self.pick(&["exec_command", "write_stdin", "sleep", "unknown"]);
-        let tool = match self.below(3) {
-            0 => json!({ "type": "function", "name": name, "parameters": schema }),
-            1 => json!({ "type": "function", "function": { "name": name, "parameters": schema } }),
-            _ => json!({ "name": name, "input_schema": schema }),
+        let tools: Vec<Value> = (0..1 + self.below(3)).map(|_| self.codex_tool()).collect();
+        if self.chance(25) {
+            let item = json!({ "type": "additional_tools", "tools": tools });
+            map.insert("input".into(), json!([item]));
+        } else {
+            map.insert("tools".into(), Value::Array(tools));
+        }
+    }
+
+    /// A Codex tool or another, in one of the formats the integer pass
+    /// reads, sometimes in a namespace, named or not, or in two.
+    fn codex_tool(&mut self) -> Value {
+        let (name, fields) = self.0.rng.pick(CODEX_TOOLS);
+        let mut properties = Value::Object(Map::new());
+        for field in fields {
+            if self.chance(75) {
+                let kind = self.pick(CODEX_TYPES);
+                self.codex_field(&mut properties, field, kind);
+            }
+        }
+        for _ in 0..self.below(3) {
+            let field = self.pick(CODEX_OTHER_FIELDS);
+            let kind = self.pick(CODEX_TYPES);
+            self.codex_field(&mut properties, field, kind);
+        }
+        let schema = json!({ "type": "object", "properties": properties });
+        let (namespace, name) = match name.split_once("__") {
+            Some((namespace, tool)) if self.chance(50) => (Some(namespace), tool),
+            _ => (None, name),
         };
-        map.insert("tools".into(), json!([tool]));
+        let tool = match self.below(5) {
+            0 | 1 => json!({ "type": "function", "name": name, "parameters": schema }),
+            2 => json!({ "type": "function", "function": { "name": name, "parameters": schema } }),
+            3 => json!({ "name": name, "input_schema": schema }),
+            _ if self.chance(50) => {
+                json!({ "function_declarations": [{ "name": name, "parameters": schema }] })
+            }
+            _ => {
+                json!({ "functionDeclarations": [{ "name": name, "parametersJsonSchema": schema }] })
+            }
+        };
+        let Some(namespace) = namespace else {
+            return tool;
+        };
+        match self.below(10) {
+            0 => json!({ "type": "namespace", "tools": [tool] }),
+            1 => json!({ "type": "namespace", "name": "", "tools": [tool] }),
+            2 => json!({ "type": "namespace", "name": "outer", "tools": [
+                { "type": "namespace", "name": namespace, "tools": [tool] },
+            ] }),
+            _ => json!({ "type": "namespace", "name": namespace, "tools": [tool] }),
+        }
+    }
+
+    /// Declares the parameter at `path` in `properties` with the type
+    /// `kind`, adding the objects and arrays on the way: an array where the
+    /// next step is an index, padded with another branch before it.
+    fn codex_field(&mut self, properties: &mut Value, path: &str, kind: &str) {
+        let steps: Vec<&str> = path.split('.').collect();
+        let mut at = properties;
+        for (i, step) in steps.iter().enumerate() {
+            let next = match steps.get(i + 1) {
+                Some(next) if next.bytes().all(|b| b.is_ascii_digit()) => json!([]),
+                _ => json!({}),
+            };
+            let slot = match at {
+                Value::Object(map) => map.entry(step.to_string()).or_insert(next),
+                Value::Array(items) => {
+                    let index: usize = step.parse().unwrap_or(0);
+                    while items.len() <= index {
+                        items.push(json!({ "type": "null" }));
+                    }
+                    let slot = &mut items[index];
+                    if !slot.is_object() && !slot.is_array() {
+                        *slot = next;
+                    }
+                    slot
+                }
+                _ => return,
+            };
+            at = slot;
+        }
+        if let Value::Object(map) = at {
+            map.insert(
+                "type".into(),
+                serde_json::from_str(kind).unwrap_or(Value::Null),
+            );
+            if self.chance(30) {
+                map.insert("description".into(), json!("Whole number"));
+            }
+        }
     }
 
     /// A config with payload rules, sometimes `disable-image-generation`

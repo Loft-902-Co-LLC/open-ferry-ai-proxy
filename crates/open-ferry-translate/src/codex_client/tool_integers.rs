@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/client/codex/tool-schema/tool_schema.go
 // (IsCodexUserAgent, NormalizeCodexToolIntegerTypes, matchCodexTargetTool,
 // normalizeCodexToolFieldTypes, normalizeToolIntegerTypesInArray,
-// normalizeToolIntegerTypesInElement) (v8.0.10, MIT).
+// normalizeToolIntegerTypesInElement) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Integer parameter types for Codex's own tools, when a Codex client's
@@ -14,6 +14,14 @@
 //! Responses and Chat Completions functions, Claude's `input_schema`,
 //! Gemini's function declarations and `parametersJsonSchema`, and tools
 //! inside namespaces.
+//!
+//! The tools are Codex's own, known by name. A tool in a namespace is known
+//! by both names, as `<namespace>__<tool>` (`memories__read`), and a
+//! namespace inside another is left alone. A parameter is named by its path
+//! from the schema's `properties`, which reaches into nested objects
+//! (`barrier.properties.participants`), array items
+//! (`open.items.properties.lineno`) and the branches of a union
+//! (`start_line.anyOf.0`).
 //!
 //! Deviations from upstream:
 //! - Upstream logs at debug level when it changed a type; this crate doesn't
@@ -30,8 +38,10 @@ use crate::go;
 use crate::json::str_of;
 
 /// The parameters of each Codex tool that take whole numbers
-/// (`codexClientToolIntegerFields`).
-const INTEGER_FIELDS: [(&str, &[&str]); 7] = [
+/// (`codexClientToolIntegerFields`). Each is a path from the schema's
+/// `properties`, of object keys and array indexes joined by dots, rather than
+/// a name looked for at any depth.
+const INTEGER_FIELDS: [(&str, &[&str]); 25] = [
     (
         "exec_command",
         &["yield_time_ms", "max_output_tokens", "timeout_ms"],
@@ -51,6 +61,49 @@ const INTEGER_FIELDS: [(&str, &[&str]); 7] = [
             "sleep_after_ms",
             "participants",
             "timeout_ms",
+            "barrier.properties.participants",
+            "barrier.properties.timeout_ms",
+        ],
+    ),
+    ("create_goal", &["token_budget"]),
+    ("get_channels", &["limit"]),
+    ("list_threads", &["limit", "max_chars_per_post"]),
+    ("search_posts", &["limit", "max_chars_per_post"]),
+    ("read_thread", &["limit", "max_chars_per_post"]),
+    ("read_post", &["offset_chars", "limit_chars"]),
+    ("memories__list", &["max_results"]),
+    ("memories__read", &["line_offset", "max_lines"]),
+    ("memories__search", &["context_lines", "max_results"]),
+    ("history__list_windows", &["limit"]),
+    ("history__list_items", &["limit", "max_chars_per_item"]),
+    ("history__read_item", &["offset_chars", "limit_chars"]),
+    ("history__search_contents", &["limit"]),
+    ("notes__list_files_by_prefix", &["max_results"]),
+    (
+        "notes__read_file",
+        // Codex declares the signed line numbers in a union's first branch.
+        &[
+            "start_line",
+            "stop_line",
+            "start_line.anyOf.0",
+            "stop_line.anyOf.0",
+        ],
+    ),
+    (
+        "notes__search_contents",
+        &["max_matches_per_file", "max_files"],
+    ),
+    ("image_gen__imagegen", &["num_last_images_to_include"]),
+    (
+        "web__run",
+        &[
+            "search_query.items.properties.recency",
+            "image_query.items.properties.recency",
+            "open.items.properties.lineno",
+            "click.items.properties.id",
+            "screenshot.items.properties.pageno",
+            "weather.items.properties.duration",
+            "sports.items.properties.num_games",
         ],
     ),
 ];
@@ -73,42 +126,53 @@ pub fn normalize(body: &mut Value, user_agent: &str) -> bool {
     }
     let mut changed = false;
     if let Some(tools) = body.get_mut("tools") {
-        changed |= normalize_tools(tools);
+        changed |= normalize_tools(tools, "");
     }
     if let Some(Value::Array(input)) = body.get_mut("input") {
         for item in input {
             if str_of(item.get("type")) == "additional_tools"
                 && let Some(tools) = item.get_mut("tools")
             {
-                changed |= normalize_tools(tools);
+                changed |= normalize_tools(tools, "");
             }
         }
     }
     changed
 }
 
-/// `normalizeToolIntegerTypesInArray`.
-fn normalize_tools(tools: &mut Value) -> bool {
+/// `normalizeToolIntegerTypesInArray`: the tools of `namespace`, or of no
+/// namespace when it is `""`.
+fn normalize_tools(tools: &mut Value, namespace: &str) -> bool {
     let Value::Array(tools) = tools else {
         return false;
     };
     let mut changed = false;
     for tool in tools {
         if let Value::Object(tool) = tool {
-            changed |= normalize_tool(tool);
+            changed |= normalize_tool(tool, namespace);
         }
     }
     changed
 }
 
 /// `normalizeToolIntegerTypesInElement`.
-fn normalize_tool(tool: &mut Map<String, Value>) -> bool {
+fn normalize_tool(tool: &mut Map<String, Value>, namespace: &str) -> bool {
     if str_of(tool.get("type")) == "namespace" {
-        return tool.get_mut("tools").is_some_and(normalize_tools);
+        // Namespaces don't nest, and one without a name names no tool.
+        if !namespace.is_empty() {
+            return false;
+        }
+        let namespace = str_of(tool.get("name")).into_owned();
+        if namespace.is_empty() {
+            return false;
+        }
+        return tool
+            .get_mut("tools")
+            .is_some_and(|tools| normalize_tools(tools, &namespace));
     }
     for key in ["function_declarations", "functionDeclarations"] {
         if let Some(declarations @ Value::Array(_)) = tool.get_mut(key) {
-            return normalize_tools(declarations);
+            return normalize_tools(declarations, namespace);
         }
     }
 
@@ -139,6 +203,9 @@ fn normalize_tool(tool: &mut Map<String, Value>) -> bool {
         return false;
     };
 
+    if !namespace.is_empty() {
+        name = format!("{namespace}__{name}");
+    }
     let Some(fields) = integer_fields(&name) else {
         return false;
     };
@@ -153,24 +220,36 @@ fn normalize_tool(tool: &mut Map<String, Value>) -> bool {
 }
 
 /// The whole-number parameters of the Codex tool `name`, which may have a
-/// `functions__` or `collab__` prefix (`matchCodexTargetTool`).
+/// `functions__` or `collab__` prefix (`matchCodexTargetTool`). The
+/// `collaboration` and `multi_agent_v1` namespaces' tools are the flat tools
+/// of the same names.
 fn integer_fields(name: &str) -> Option<&'static [&'static str]> {
     let name = name.trim();
     let name = name
         .strip_prefix("functions__")
         .or_else(|| name.strip_prefix("collab__"))
         .unwrap_or(name);
+    let name = match name {
+        "multi_agent_v1__wait_agent" | "collaboration__wait_agent" => "wait_agent",
+        "collaboration__get_channels"
+        | "collaboration__list_threads"
+        | "collaboration__search_posts"
+        | "collaboration__read_thread"
+        | "collaboration__read_post" => name.strip_prefix("collaboration__").unwrap_or(name),
+        name => name,
+    };
     INTEGER_FIELDS
         .iter()
         .find(|(tool, _)| *tool == name)
         .map(|(_, fields)| *fields)
 }
 
-/// `normalizeCodexToolFieldTypes`.
+/// `normalizeCodexToolFieldTypes`: declares the schemas at the paths
+/// `fields` in `properties` integers, where they are numbers.
 fn normalize_properties(properties: &mut Map<String, Value>, fields: &[&str]) -> bool {
     let mut changed = false;
     for field in fields {
-        let Some(Value::Object(property)) = properties.get_mut(*field) else {
+        let Some(property) = property_mut(properties, field) else {
             continue;
         };
         let Some(kind) = property.get_mut("type") else {
@@ -204,6 +283,26 @@ fn normalize_properties(properties: &mut Map<String, Value>, fields: &[&str]) ->
         }
     }
     changed
+}
+
+/// The schema object at `path` in `properties`, as gjson reads the path: a
+/// dot separates the steps, each a key in an object or an index in an array.
+fn property_mut<'v>(
+    properties: &'v mut Map<String, Value>,
+    path: &str,
+) -> Option<&'v mut Map<String, Value>> {
+    let mut steps = path.split('.');
+    let mut value = properties.get_mut(steps.next()?)?;
+    for step in steps {
+        value = match value {
+            Value::Object(map) => map.get_mut(step)?,
+            Value::Array(items) if !step.is_empty() && step.bytes().all(|b| b.is_ascii_digit()) => {
+                items.get_mut(step.parse::<usize>().ok()?)?
+            }
+            _ => return None,
+        };
+    }
+    value.as_object_mut()
 }
 
 #[cfg(test)]
