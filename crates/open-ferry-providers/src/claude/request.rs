@@ -2,7 +2,7 @@
 // claude_executor_request.go and claude_executor_cloaking.go (the cache-control
 // helpers), helps/claude_upstream.go, helps/claude_diagnostics.go
 // (ClaudePayloadHas1hTTL) and sdk/cliproxy/auth/classification.go
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A credential's key and base URL, and the changes a Messages body needs
@@ -487,8 +487,14 @@ fn strip_cache_controls(blocks: &mut [Value], keep: Option<usize>, excess: &mut 
 
 /// `enforceCacheControlLimit`: removes breakpoints beyond `max`, least
 /// valuable first: system blocks but the last, tools but the last, message
-/// blocks, then the last system block and the last tool.
+/// blocks, then the last system block and the last tool. A body with a
+/// non-null `thread` gets one breakpoint fewer, which Anthropic keeps for
+/// continuing the thread.
 pub(crate) fn enforce_cache_control_limit(body: &mut Value, max: usize) {
+    let mut max = max;
+    if body.get("thread").is_some_and(|thread| !thread.is_null()) && max > 0 {
+        max -= 1;
+    }
     let total = count_cache_controls(body);
     if total <= max {
         return;
@@ -850,6 +856,37 @@ mod tests {
         enforce_cache_control_limit(&mut body, 1);
         assert_eq!(count_cache_controls(&body), 1);
         assert!(body["tools"][1].get("cache_control").is_some());
+    }
+
+    // TestEnforceCacheControlLimit_ReservesThreadMarker.
+    #[test]
+    fn reserves_a_breakpoint_for_a_thread() {
+        let cc = || json!({"type": "ephemeral"});
+        let body = json!({
+            "thread": {"type": "create"},
+            "tools": [{"name": "t1", "cache_control": cc()}],
+            "system": [
+                {"type": "text", "text": "s1", "cache_control": cc()},
+                {"type": "text", "text": "s2", "cache_control": cc()}
+            ],
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "u1", "cache_control": cc()},
+                {"type": "text", "text": "u2", "cache_control": cc()}
+            ]}]
+        });
+        let mut out = body.clone();
+        enforce_cache_control_limit(&mut out, MAX_CACHE_BREAKPOINTS);
+        assert_eq!(count_cache_controls(&out), 3);
+
+        // Not upstream's: a null thread reserves nothing, and a limit of
+        // zero stays zero.
+        let mut out = body.clone();
+        json::set(&mut out, "thread", Value::Null);
+        enforce_cache_control_limit(&mut out, MAX_CACHE_BREAKPOINTS);
+        assert_eq!(count_cache_controls(&out), 4);
+        let mut out = body;
+        enforce_cache_control_limit(&mut out, 0);
+        assert_eq!(count_cache_controls(&out), 0);
     }
 
     // TestNormalizeCacheControlTTL and TestClaudePayloadHas1hTTL.
