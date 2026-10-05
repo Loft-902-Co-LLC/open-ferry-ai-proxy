@@ -1,8 +1,10 @@
-// Ported from unifiedModelsHandler and isAnthropicModelsRequest in CLIProxyAPI
-// internal/api/server_routes.go, OpenAIModels in
-// sdk/api/handlers/openai/openai_handlers.go, BuildResponse in
+// Ported from unifiedModelsHandler, the `/models/*model` route and
+// isAnthropicModelsRequest in CLIProxyAPI internal/api/server_routes.go,
+// OpenAIModels in sdk/api/handlers/openai/openai_handlers.go, the model
+// detail selection of WriteModelListResponse in
+// sdk/api/handlers/handlers_interceptors.go, BuildResponse in
 // internal/client/claude/models/models.go and convertModelToMap in
-// internal/registry/model_registry.go (v8.0.10, MIT).
+// internal/registry/model_registry.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! `GET /v1/models`, in the OpenAI or the Anthropic format, as the Grok
@@ -10,6 +12,12 @@
 //! shell, or as the Codex client model list ([`codex`]) for a request with a
 //! `client_version` parameter, which Codex sends. The Grok shell is checked
 //! first.
+//!
+//! `GET /v1/models/<model>` is one model's entry in the list
+//! `GET /v1/models` would give the same request: the first in `data`, then
+//! in `models`, whose `id` (or `slug`, when it has no ID) is `<model>`, as
+//! it is written in the list. `<model>` is the rest of the path,
+//! percent-decoded, slashes and all. A model not in the list is a 404.
 //!
 //! Deviations from upstream:
 //! - The OpenAI list is sorted by ID. Upstream's order varies.
@@ -20,15 +28,18 @@
 mod codex;
 mod grok;
 
-use axum::extract::State;
+use axum::extract::rejection::PathRejection;
+use axum::extract::{Path, State};
 use axum::response::Response;
+use bytes::Bytes;
 use http::{HeaderMap, Uri, header};
 use open_ferry_core::models::ModelInfo;
 use serde_json::{Map, Value, json};
 
 use super::json_utf8;
-use crate::query;
+use crate::errors::{JSON_UTF8, error_response};
 use crate::state::AppState;
+use crate::{json, query};
 
 /// Claude's default for `max_input_tokens` when a model's context length is
 /// unknown (`DefaultClaudeMaxInputTokens`).
@@ -44,19 +55,109 @@ pub(crate) async fn unified(
     headers: HeaderMap,
     uri: Uri,
 ) -> Response {
-    if grok::is_grok_shell(&headers) {
-        return json_utf8(grok::list(state.catalog().available_models()).to_string());
+    json_utf8(list(&state, &headers, &uri))
+}
+
+/// `GET /v1/models/<model>`: the model's entry in the list.
+pub(crate) async fn detail(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: Uri,
+    model: Result<Path<String>, PathRejection>,
+) -> Response {
+    // `GET /v1/models/` names no model, and a name that isn't UTF-8 names
+    // none in the list.
+    let id = model.map(|Path(id)| id).unwrap_or_default();
+    let list = list(&state, &headers, &uri);
+    let (status, body) = match select_model(list.as_bytes(), &id) {
+        Ok(entry) => (200, Bytes::copy_from_slice(entry)),
+        Err(Unselected::NotFound) => (404, Bytes::from_static(MODEL_NOT_FOUND)),
+        Err(Unselected::Invalid) => (502, Bytes::from_static(INVALID_CATALOG)),
+    };
+    error_response(status, HeaderMap::new(), body, JSON_UTF8)
+}
+
+/// The 404 for a model not in the list, its keys in the order gin writes
+/// them.
+const MODEL_NOT_FOUND: &[u8] = br#"{"error":{"code":"model_not_found","message":"Model not found","type":"invalid_request_error"}}"#;
+
+/// The 502 for a list that isn't one.
+const INVALID_CATALOG: &[u8] =
+    br#"{"error":{"message":"Invalid model catalog","type":"api_error"}}"#;
+
+/// The model list for a request, as written (`unifiedModelsHandler`).
+fn list(state: &AppState, headers: &HeaderMap, uri: &Uri) -> String {
+    if grok::is_grok_shell(headers) {
+        return grok::list(state.catalog().available_models()).to_string();
     }
     let params = query::parse(uri.query().unwrap_or(""));
     if let Some(client_version) = query::first(&params, "client_version") {
-        return json_utf8(codex::response(&state, client_version));
+        return codex::response(state, client_version);
     }
     let models = state.catalog().available_models();
-    if is_anthropic_request(&headers) {
-        json_utf8(claude_list(models).to_string())
+    if is_anthropic_request(headers) {
+        claude_list(models).to_string()
     } else {
-        json_utf8(openai_list(models).to_string())
+        openai_list(models).to_string()
     }
+}
+
+/// Why a model list has no entry to give.
+#[derive(Debug, PartialEq, Eq)]
+enum Unselected {
+    /// No entry is the model's.
+    NotFound,
+    /// The list isn't one: not JSON, not an object, or with a `data` or
+    /// `models` that isn't an array.
+    Invalid,
+}
+
+/// The entry for the model `id` in the model list `list`, as written: the
+/// first in `data`, then in `models`, whose `id`, or `slug` when its `id`
+/// is empty, is `id`. An entry that isn't an object, or whose `id` or
+/// `slug` isn't a string, is passed over, as Go fails to decode it.
+fn select_model<'a>(list: &'a [u8], id: &str) -> Result<&'a [u8], Unselected> {
+    if !json::valid(list) {
+        return Err(Unselected::Invalid);
+    }
+    let root = json::Val::parse(list).ok_or(Unselected::Invalid)?;
+    if root.is_null() {
+        return Err(Unselected::NotFound);
+    }
+    if !root.is_object() {
+        return Err(Unselected::Invalid);
+    }
+    let mut entries = Vec::new();
+    for key in ["data", "models"] {
+        match root.get(key) {
+            Some(items) if items.is_array() => entries.extend(items.array()),
+            Some(items) if !items.is_null() => return Err(Unselected::Invalid),
+            _ => {}
+        }
+    }
+    entries
+        .into_iter()
+        .find(|entry| {
+            entry_id(entry).is_some_and(|entry_id| !entry_id.is_empty() && entry_id == id)
+        })
+        .map(|entry| entry.raw)
+        .ok_or(Unselected::NotFound)
+}
+
+/// An entry's `id`, or its `slug` when the ID is empty; `None` for an entry
+/// Go can't decode.
+fn entry_id(entry: &json::Val<'_>) -> Option<String> {
+    if !entry.is_object() {
+        return None;
+    }
+    let text = |key: &str| match entry.get(key) {
+        None => Some(String::new()),
+        Some(value) if value.is_null() || value.is_string() => Some(value.str()),
+        Some(_) => None,
+    };
+    let id = text("id")?;
+    let slug = text("slug")?;
+    Some(if id.is_empty() { slug } else { id })
 }
 
 /// Whether the client wants the Anthropic format: it sends
@@ -182,6 +283,62 @@ mod tests {
             created,
             display_name: display_name.into(),
             ..ModelInfo::default()
+        }
+    }
+
+    // The selection of TestIssue5190ModelDetailLifecycle's catalogs (a
+    // visible model, a missing one, a catalog that isn't JSON) and of
+    // TestIssue5190ModelDetailUsesVisibleCatalog's, without the plugin host
+    // that gives them, which isn't ported.
+    #[test]
+    fn selects_a_model_from_the_list() {
+        assert_eq!(
+            select_model(br#"{"data":[{"id":"visible"}]}"#, "visible"),
+            Ok(&br#"{"id":"visible"}"#[..])
+        );
+        assert_eq!(
+            select_model(br#"{"data":[]}"#, "visible"),
+            Err(Unselected::NotFound)
+        );
+        assert_eq!(
+            select_model(b"invalid", "visible"),
+            Err(Unselected::Invalid)
+        );
+        let catalog = br#"{"object":"list","data":[{"id":"vendor/visible","object":"model","owned_by":"plugin"}]}"#;
+        assert_eq!(
+            select_model(catalog, "vendor/visible"),
+            Ok(&br#"{"id":"vendor/visible","object":"model","owned_by":"plugin"}"#[..])
+        );
+        assert_eq!(select_model(catalog, "hidden"), Err(Unselected::NotFound));
+    }
+
+    // Not upstream's: `data` comes before `models`, the first match wins, a
+    // slug stands in for an empty ID only, entries Go can't decode are
+    // passed over, and a list that isn't an object of arrays is invalid.
+    #[test]
+    fn selects_as_go_decodes_the_list() {
+        let list = br#"{"models":[{"slug":"m","from":"models"}],"data":[1,null,{"id":7},{"id":"m","slug":2},{"id":"","slug":"m","from":"slug"},{"id":"m","from":"second"}]}"#;
+        assert_eq!(
+            select_model(list, "m"),
+            Ok(&br#"{"id":"","slug":"m","from":"slug"}"#[..])
+        );
+        let list = br#"{"data":[{"id":"other","slug":"m"}],"models":[{"slug":"m"}]}"#;
+        assert_eq!(select_model(list, "m"), Ok(&br#"{"slug":"m"}"#[..]));
+        assert_eq!(
+            select_model(br#"{"data":[{"id":""}]}"#, ""),
+            Err(Unselected::NotFound)
+        );
+        for list in [&b"null"[..], br#"{"data":null}"#, br#"{"other":1}"#] {
+            assert_eq!(select_model(list, "m"), Err(Unselected::NotFound));
+        }
+        for list in [
+            &b"[]"[..],
+            b"\"list\"",
+            br#"{"data":{}}"#,
+            br#"{"models":"m"}"#,
+            br#"{"data":[]"#,
+        ] {
+            assert_eq!(select_model(list, "m"), Err(Unselected::Invalid));
         }
     }
 

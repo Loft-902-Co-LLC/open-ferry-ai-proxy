@@ -1,5 +1,5 @@
 // Ported from the routes in CLIProxyAPI internal/api/server_routes.go and the
-// middleware in internal/api/server_middleware.go (v8.0.10, MIT).
+// middleware in internal/api/server_middleware.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The router, and the middleware every request passes through: from the
@@ -56,6 +56,7 @@ pub fn router_with(state: AppState, extra: Router) -> Router {
     };
     let compact_route = || post(responses::compact.layer(auth.clone()));
     let alpha_search_route = || post(alpha_search::search.layer(auth.clone()));
+    let model_detail_route = || get(models::detail.layer(auth.clone())).head(not_found);
     let gemini_action_routes = || {
         get(gemini::model.layer(auth.clone()))
             .head(not_found)
@@ -68,6 +69,9 @@ pub fn router_with(state: AppState, extra: Router) -> Router {
             "/v1/models",
             get(models::unified.layer(auth.clone())).head(not_found),
         )
+        // As for the Gemini actions, gin's catch-all matches an empty rest.
+        .route("/v1/models/", model_detail_route())
+        .route("/v1/models/{*model}", model_detail_route())
         .route(
             "/v1/chat/completions",
             post(openai::chat_completions.layer(auth.clone())),

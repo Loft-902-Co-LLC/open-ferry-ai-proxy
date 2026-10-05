@@ -97,8 +97,10 @@ async fn serves_health_and_turns_away_unknown_routes() {
 
     for request in [
         get("/nope"),
-        get("/v1/models/"),
         Request::delete("/v1/models").body(Body::empty()).unwrap(),
+        Request::delete("/v1/models/gpt-5")
+            .body(Body::empty())
+            .unwrap(),
     ] {
         let (status, headers, body) = send(&app, request).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
@@ -195,6 +197,75 @@ async fn lists_models_in_either_format() {
         .collect();
     assert_eq!(slugs, ["claude-sonnet", "gpt-5"]);
     assert!(list.get("object").is_none());
+}
+
+// TestIssue5190ModelDetailHomeVisibility without Home, which isn't ported:
+// a model in the list is served to a client with a key only. Then, not
+// upstream's: the entry is as the list writes it, in each format, the ID
+// is read percent-decoded, and a model not in the list is a 404.
+#[tokio::test]
+async fn serves_one_model_from_the_list() {
+    let (app, _) = app(ServerConfig::default(), vec![]);
+    let detail = |uri: &str, header: Option<(&'static str, &'static str)>| {
+        let mut request = authed(Method::GET, uri, "");
+        if let Some((name, value)) = header {
+            request
+                .headers_mut()
+                .insert(name, http::HeaderValue::from_static(value));
+        }
+        request
+    };
+    // gpt-5's entry in a list, by its ID or slug.
+    let entry = |list: &str, key: &str| {
+        let list: Value = serde_json::from_str(list).unwrap();
+        list[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == "gpt-5" || entry["slug"] == "gpt-5")
+            .unwrap()
+            .to_string()
+    };
+
+    for (uri, header, key) in [
+        ("/v1/models", None, "data"),
+        (
+            "/v1/models",
+            Some(("anthropic-version", "2023-06-01")),
+            "data",
+        ),
+        ("/v1/models?client_version=1", None, "models"),
+        ("/v1/models", Some(("user-agent", "grok-shell/1.0")), "data"),
+    ] {
+        let (_, _, list) = send(&app, detail(uri, header)).await;
+        let one = uri.replacen("/v1/models", "/v1/models/gpt%2D5", 1);
+        let (status, headers, body) = send(&app, detail(&one, header)).await;
+        assert_eq!(status, StatusCode::OK, "{one}: {body}");
+        assert_eq!(content_type(&headers), "application/json; charset=utf-8");
+        assert_eq!(body, entry(&list, key), "{one} {header:?}");
+    }
+
+    let unauthenticated = Request::get("/v1/models/gpt-5")
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, _) = send(&app, unauthenticated).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _, _) = send(
+        &app,
+        Request::get("/v1/models/").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    for uri in ["/v1/models/missing", "/v1/models/", "/v1/models/gpt-5/x"] {
+        let (status, headers, body) = send(&app, authed(Method::GET, uri, "")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
+        assert_eq!(content_type(&headers), "application/json; charset=utf-8");
+        assert_eq!(
+            body,
+            r#"{"error":{"code":"model_not_found","message":"Model not found","type":"invalid_request_error"}}"#
+        );
+    }
 }
 
 #[tokio::test]
