@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/security/advisories/new
+    about: Please report security problems privately, not in a public issue.
+  - name: A problem with CLIProxyAPI itself
+    url: https://github.com/router-for-me/CLIProxyAPI/issues
+    about: open-ferry is a separate project. Report CLIProxyAPI's bugs upstream.

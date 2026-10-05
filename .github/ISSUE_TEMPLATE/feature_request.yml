@@ -1,0 +1,22 @@
+name: Feature request
+description: Suggest something open-ferry should do.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please check [ROADMAP.md](https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/blob/main/ROADMAP.md) first. Features that work by posing as another company's client are out of scope.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you're trying to do, and what gets in the way today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you'd like
+      description: How it could work. If CLIProxyAPI already does it, say where.
+    validations:
+      required: true
