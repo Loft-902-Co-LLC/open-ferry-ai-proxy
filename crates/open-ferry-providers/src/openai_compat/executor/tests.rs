@@ -457,6 +457,48 @@ fn prompt_cache_key_ignores_config_index_for_non_config_auth() {
     );
 }
 
+/// Not upstream's: upstream copies the client's JSON as written (gjson's
+/// `Raw` into sjson), so a Claude tool input reaches the provider as
+/// arguments with each number as the client wrote it, as do the fields of a
+/// Chat Completions request.
+#[tokio::test]
+async fn sends_the_clients_numbers_as_written() {
+    let mock = Mock::start(Reply::json(CHAT_ANSWER)).await;
+    let executor = executor(vec![entry("compat", false)]);
+    let auth = Arc::new(compat_auth(&mock.base_url(), "compat"));
+    let claude = concat!(
+        r#"{"model":"m","max_tokens":64,"messages":[{"role":"user","content":"hi"},"#,
+        r#"{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"f","input":{"x":-0,"y":1E20,"z":[1e5,-0.0]}}]},"#,
+        r#"{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}]}"#
+    );
+    executor
+        .execute(auth.clone(), request("m", claude), options(&Format::CLAUDE))
+        .await
+        .unwrap();
+    let body = mock.last().json();
+    let calls = get(&body, "messages.1.tool_calls").cloned();
+    assert_eq!(
+        calls
+            .as_ref()
+            .and_then(|calls| get(calls, "0.function.arguments")),
+        Some(&json!(r#"{"x":-0,"y":1E20,"z":[1e5,-0.0]}"#)),
+        "{body}"
+    );
+
+    let chat = r#"{"model":"m","messages":[{"role":"user","content":"hi"}],"temperature":-0,"tools":[{"type":"function","function":{"name":"f","parameters":{"type":"object","properties":{"n":{"type":"number","minimum":-0,"maximum":1E20}}}}}]}"#;
+    executor
+        .execute(auth, request("m", chat), options(&Format::OPENAI))
+        .await
+        .unwrap();
+    let body = mock.last().body;
+    for kept in [
+        r#""temperature":-0"#,
+        r#""n":{"type":"number","minimum":-0,"maximum":1E20}"#,
+    ] {
+        assert!(body.contains(kept), "{kept} in {body}");
+    }
+}
+
 #[tokio::test]
 async fn prompt_cache_key_execute() {
     let mock = Mock::start(Reply::json(CHAT_ANSWER)).await;

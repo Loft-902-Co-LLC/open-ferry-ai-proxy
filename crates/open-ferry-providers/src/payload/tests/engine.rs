@@ -348,7 +348,8 @@ payload:
       params:
         float: 1.0
         big: 1e21
-        list: [1, a, true]
+        negative-zero: -0.0
+        list: [1, a, true, -0.0]
         map: {z: 1, a: 2}
         nan: .nan
   override-raw:
@@ -356,6 +357,7 @@ payload:
         - name: m
       params:
         raw: '{"k":[1,2]}'
+        spelled: '{"x":-0,"y":1E20,"z":1e5}'
         nothing: ~
 "#;
     let out = Args {
@@ -363,10 +365,12 @@ payload:
         ..Args::default()
     }
     .run(config, "{}");
+    // Go writes a negative zero float64 as `-0`, and a raw value's text as
+    // it is.
     assert_eq!(
         serde_json::to_string(&out).ok().as_deref(),
         Some(
-            r#"{"float":1,"big":1000000000000000000000,"list":[1,"a",true],"map":{"a":2,"z":1},"raw":{"k":[1,2]}}"#
+            r#"{"float":1,"big":1000000000000000000000,"negative-zero":-0,"list":[1,"a",true,-0],"map":{"a":2,"z":1},"raw":{"k":[1,2]},"spelled":{"x":-0,"y":1E20,"z":1e5}}"#
         )
     );
 }

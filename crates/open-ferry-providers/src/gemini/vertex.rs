@@ -46,6 +46,7 @@ use open_ferry_core::exec::{
 use open_ferry_core::executor::ProviderExecutor;
 use open_ferry_core::models::ModelCatalog;
 use open_ferry_core::observe::AttemptKind;
+use open_ferry_translate::json::exact;
 use open_ferry_translate::signature::sanitize_gemini_request_thought_signatures;
 use serde_json::{Map, Value, json};
 
@@ -441,7 +442,7 @@ fn action(model: &str, stream: bool) -> &'static str {
 /// `aspectRatio`, `sampleCount` and `negativePrompt` are taken as they
 /// are.
 fn convert_to_imagen_request(payload: &[u8]) -> Result<Value, ExecError> {
-    let payload: Value = serde_json::from_slice(payload).unwrap_or(Value::Null);
+    let payload: Value = exact::from_slice(payload).unwrap_or(Value::Null);
     let mut prompt = json::get(&payload, "contents.0.parts.0.text")
         .map(|text| json::str_of(Some(text)))
         .unwrap_or_default();

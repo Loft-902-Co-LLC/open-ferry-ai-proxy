@@ -116,6 +116,36 @@ async fn execute_prepends_leading_user() {
     assert_eq!(body["contents"][0]["parts"][0]["text"], "");
 }
 
+/// Not upstream's: upstream sends the client's Gemini body as its bytes,
+/// edited in place with sjson, so a call's arguments and the settings keep
+/// each number as the client wrote it.
+#[tokio::test]
+async fn execute_sends_the_clients_numbers_as_written() {
+    let mock = Mock::start(Reply::json(OK_ANSWER)).await;
+    let payload = concat!(
+        r#"{"contents":[{"role":"user","parts":[{"text":"hi"}]},"#,
+        r#"{"role":"model","parts":[{"functionCall":{"name":"f","args":{"x":-0,"y":1E20,"z":[1e5,-0.0]}}}]},"#,
+        r#"{"role":"user","parts":[{"functionResponse":{"name":"f","response":{"n":-0}}}]}],"#,
+        r#""generationConfig":{"temperature":-0,"topP":1E-1}}"#
+    );
+    executor()
+        .execute(
+            auth(&mock),
+            request("gemini-3.7-flash", payload),
+            options(&Format::GEMINI),
+        )
+        .await
+        .unwrap();
+    let body = mock.last().body;
+    for kept in [
+        r#""args":{"x":-0,"y":1E20,"z":[1e5,-0.0]}"#,
+        r#""response":{"n":-0}"#,
+        r#""temperature":-0,"topP":1E-1"#,
+    ] {
+        assert!(body.contains(kept), "{kept} in {body}");
+    }
+}
+
 /// Upstream's `issue4959ResponsesModelFirstPayload`: a Responses history
 /// that starts with a reasoning carrier and a function call.
 fn issue4959_payload() -> String {

@@ -9,9 +9,9 @@
 //!
 //! A value is written as upstream writes it: a string as a JSON string, a
 //! YAML float as Go's `strconv.FormatFloat(f, 'f', -1, 64)` gives it (so
-//! `1.0` is written `1` and `1e21` in full), a sequence or mapping as Go's
-//! `encoding/json` encodes it, and a raw rule's string as the JSON it
-//! holds.
+//! `1.0` is written `1`, `1e21` in full and `-0.0` as `-0`), a sequence or
+//! mapping as Go's `encoding/json` encodes it, and a raw rule's string as
+//! the JSON it holds, each number as written.
 //!
 //! Deviations from upstream:
 //! - A value that can't be written is dropped at load with a warning naming
@@ -37,7 +37,8 @@ use open_ferry_core::config::{
     AnyValue, Config, DisableImageGeneration, PayloadModelRule, PayloadRule,
 };
 use open_ferry_translate::go::{format_float, json_float};
-use serde_json::{Map, Number, Value};
+use open_ferry_translate::json::exact;
+use serde_json::{Map, Value};
 
 use super::matchers::{ModelRule, Norm, norm_any, normalize_from_protocol};
 use super::{Shape, sjson};
@@ -226,9 +227,10 @@ fn paths(paths: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// JSON from Go-encoded `text`, which is always valid.
+/// JSON from Go-encoded `text`, which is always valid, written as Go wrote
+/// it: negative zero is `-0` (see [`exact`]).
 fn number(text: &str) -> Value {
-    serde_json::from_str::<Number>(text).map_or(Value::Null, Value::Number)
+    exact::from_str(text).unwrap_or(Value::Null)
 }
 
 /// What an `override` or `default` rule writes for `value`
@@ -252,7 +254,7 @@ fn encode_value(value: &AnyValue) -> Result<Value, ()> {
 fn encode_raw(value: &AnyValue) -> Result<Value, bool> {
     match value {
         AnyValue::Null => Err(false),
-        AnyValue::Str(raw) => serde_json::from_str(raw).map_err(|_| true),
+        AnyValue::Str(raw) => exact::from_str(raw).map_err(|_| true),
         _ => marshal(value).map_err(|()| true),
     }
 }

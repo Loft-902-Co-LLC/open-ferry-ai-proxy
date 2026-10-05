@@ -1247,6 +1247,48 @@ async fn count_tokens_keeps_tool_number_types() {
     }
 }
 
+/// Not upstream's: review 11a F2's request. Upstream copies the client's
+/// JSON as written (gjson's `Raw` into sjson), so a call's arguments reach
+/// Codex with each number as the client wrote it, as do the client's own
+/// fields of a Responses request.
+#[tokio::test]
+async fn sends_the_clients_numbers_as_written() {
+    let mock = Mock::start(Reply::sse(COMPLETED_WITH_USAGE)).await;
+    let payload = r#"{"input":[{"type":"function_call","id":"a","name":"f","arguments":{"x":-0,"y":1E20,"z":[1e5,-0.0]}}]}"#;
+    executor()
+        .execute(
+            api_key_auth(&mock.url),
+            request("gpt-5.5", payload),
+            options("interactions"),
+        )
+        .await
+        .unwrap();
+    let body = mock.last().json();
+    let call = find(body.get("input"), "type", "function_call");
+    assert_eq!(
+        call.get("arguments"),
+        Some(&json!(r#"{"x":-0,"y":1E20,"z":[1e5,-0.0]}"#)),
+        "{body}"
+    );
+
+    let payload = r#"{"input":"hi","tools":[{"type":"function","name":"f","parameters":{"type":"object","properties":{"n":{"type":"number","minimum":-0,"maximum":1E20}}}}]}"#;
+    executor()
+        .execute(
+            api_key_auth(&mock.url),
+            request("gpt-5.5", payload),
+            options("openai-response"),
+        )
+        .await
+        .unwrap();
+    assert!(
+        mock.last()
+            .body
+            .contains(r#""properties":{"n":{"type":"number","minimum":-0,"maximum":1E20}}"#),
+        "{}",
+        mock.last().body
+    );
+}
+
 #[tokio::test]
 async fn count_tokens_answers_in_the_clients_format() {
     let payload = r#"{"model":"gpt-5.4","instructions":"be brief","input":"hello there"}"#;

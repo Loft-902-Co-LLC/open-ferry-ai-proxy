@@ -54,6 +54,7 @@ use std::collections::{HashMap, HashSet};
 use open_ferry_core::exec::{Format, Options, Request};
 use open_ferry_translate::codex::claude::{sanitize_tool_id, shorten_call_id};
 use open_ferry_translate::go::to_lower;
+use open_ferry_translate::json::exact;
 use open_ferry_translate::signature::inspect_gpt_reasoning_signature;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -175,7 +176,7 @@ pub(crate) fn session_key(request: &Request, options: &Options, body: &Value) ->
         return key;
     }
     if !request.payload.is_empty() {
-        let payload = serde_json::from_slice(&request.payload).unwrap_or(Value::Null);
+        let payload = exact::from_slice(&request.payload).unwrap_or(Value::Null);
         let key = session_key_from_payload(&payload);
         if !key.is_empty() {
             return key;

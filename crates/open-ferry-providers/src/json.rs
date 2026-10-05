@@ -7,9 +7,11 @@
 //! Paths are dotted, as gjson's: each part is an object key or, on an array,
 //! an index.
 
+use open_ferry_translate::json::exact;
 use serde_json::{Map, Value};
 
-/// A request body as upstream holds it, in bytes: empty, not JSON, or JSON.
+/// A request body as upstream holds it, in bytes: empty, not JSON, or JSON,
+/// each number as written (see [`exact`]).
 pub(crate) enum Body {
     Empty,
     Invalid,
@@ -21,7 +23,7 @@ impl Body {
         if bytes.is_empty() {
             return Self::Empty;
         }
-        serde_json::from_slice(bytes).map_or(Self::Invalid, Self::Json)
+        exact::from_slice(bytes).map_or(Self::Invalid, Self::Json)
     }
 
     pub(crate) fn is_empty(&self) -> bool {

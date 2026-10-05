@@ -47,6 +47,7 @@ use open_ferry_core::config::Config;
 use open_ferry_core::exec::{ErrorKind, ExecError, Format, Options, Request};
 use open_ferry_core::models::ModelCatalog;
 use open_ferry_translate::go::trim_space;
+use open_ferry_translate::json::exact;
 use serde_json::{Map, Value};
 
 use super::client::USER_AGENT;
@@ -150,9 +151,12 @@ pub(crate) fn format_is(format: &Format, want: &Format) -> bool {
     eq_fold(format.as_str().trim(), want.as_str())
 }
 
-/// A JSON payload as an object; anything else is an empty one.
+/// A JSON payload as an object; anything else is an empty one. Each
+/// number keeps its text as the client wrote it (see
+/// [`open_ferry_translate::json::exact`]), as upstream moves the client's
+/// bytes.
 pub(crate) fn parse_object(raw: &[u8]) -> Value {
-    match serde_json::from_slice(raw) {
+    match exact::from_slice(raw) {
         Ok(value @ Value::Object(_)) => value,
         _ => Value::Object(Map::new()),
     }

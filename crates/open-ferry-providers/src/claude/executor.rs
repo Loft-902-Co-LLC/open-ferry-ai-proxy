@@ -67,6 +67,7 @@ use open_ferry_core::exec::{ExecError, Format, Options, Request, Response, Strea
 use open_ferry_core::executor::ProviderExecutor;
 use open_ferry_core::models::ModelCatalog;
 use open_ferry_core::observe::AttemptKind;
+use open_ferry_translate::json::exact;
 use open_ferry_translate::registry::{Registry, ResponseContext};
 use serde_json::{Map, Value};
 
@@ -665,9 +666,10 @@ fn response_format(options: &Options) -> Format {
     }
 }
 
-/// A JSON object from `raw`, or an empty one.
+/// A JSON object from `raw`, or an empty one, each number as the client
+/// wrote it (see [`exact`]).
 fn parse_object(raw: &[u8]) -> Value {
-    match serde_json::from_slice(raw) {
+    match exact::from_slice(raw) {
         Ok(value @ Value::Object(_)) => value,
         _ => Value::Object(Map::new()),
     }

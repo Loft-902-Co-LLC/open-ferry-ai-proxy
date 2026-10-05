@@ -12,9 +12,10 @@
 //! - The patched `message_start` is written by `serde_json`.
 //! - Raw JSON (tool inputs and schemas, untyped blocks) is counted as
 //!   `serde_json` writes it, compact, where upstream compacts the client's
-//!   bytes; the two agree but for number spelling and escapes.
+//!   bytes; the two agree but for escapes, as each number keeps its text.
 
 use open_ferry_core::exec::Format;
+use open_ferry_translate::json::exact;
 use serde_json::Value;
 
 use crate::json::{get, int_of, set, str_of};
@@ -170,7 +171,7 @@ fn collect_segments(payload: &[u8]) -> Result<Vec<String>, String> {
     if open_ferry_translate::go::trim_space(payload).is_empty() {
         return Ok(Vec::new());
     }
-    let root: Value = serde_json::from_slice(payload)
+    let root: Value = exact::from_slice(payload)
         .map_err(|_| "count Claude input tokens: invalid Claude request JSON".to_owned())?;
     let mut segments = Segments::default();
     segments.system(get(&root, "system"));

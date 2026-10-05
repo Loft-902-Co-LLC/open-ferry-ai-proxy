@@ -385,6 +385,36 @@ async fn oauth_call_passes_the_client_through() {
     assert_eq!(body["model"], "claude-sonnet-4-5");
 }
 
+/// Not upstream's: upstream sends the client's Messages body as its bytes,
+/// edited in place with sjson, so a tool's input and schema keep each number
+/// as the client wrote it.
+#[tokio::test]
+async fn sends_the_clients_numbers_as_written() {
+    let mock = Mock::start(Reply::json(MESSAGE)).await;
+    let payload = concat!(
+        r#"{"model":"claude-sonnet-4-5","max_tokens":64,"#,
+        r#""tools":[{"name":"f","input_schema":{"type":"object","properties":{"x":{"type":"number","minimum":-0,"maximum":1E20}}}}],"#,
+        r#""messages":[{"role":"user","content":"hi"},"#,
+        r#"{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"f","input":{"x":-0,"y":1E20,"z":[1e5,-0.0]}}]},"#,
+        r#"{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}]}"#
+    );
+    let request = Request {
+        model: "claude-sonnet-4-5".into(),
+        payload: Bytes::from_static(payload.as_bytes()),
+    };
+    mock.executor()
+        .execute(api_key_auth(), request, options(Format::CLAUDE))
+        .await
+        .unwrap();
+    let body = mock.last().body;
+    for kept in [
+        r#""input":{"x":-0,"y":1E20,"z":[1e5,-0.0]}"#,
+        r#""x":{"type":"number","minimum":-0,"maximum":1E20}"#,
+    ] {
+        assert!(body.contains(kept), "{kept} in {body}");
+    }
+}
+
 #[tokio::test]
 async fn oauth_alone_gets_only_the_oauth_beta() {
     let mock = Mock::start(Reply::json(MESSAGE)).await;
