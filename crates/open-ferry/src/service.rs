@@ -1159,8 +1159,13 @@ mod tests {
 
         let listener = bind(" 127.0.0.1 ", 0).unwrap();
         assert!(listener.local_addr().unwrap().ip().is_loopback());
-        let listener = bind("", 0).unwrap();
-        assert!(listener.local_addr().unwrap().ip().is_unspecified());
+        // Listening on every interface makes Windows Firewall ask about each
+        // test binary built, one per worktree; Linux CI checks it.
+        #[cfg(not(windows))]
+        {
+            let listener = bind("", 0).unwrap();
+            assert!(listener.local_addr().unwrap().ip().is_unspecified());
+        }
         // Without brackets "::1:0" doesn't parse as an address; a machine
         // without IPv6 fails to bind instead.
         match bind("::1", 0) {

@@ -33,7 +33,7 @@ Read [UPSTREAM.md](UPSTREAM.md) first. In short:
 
 - **No panics in non-test code:** no `unwrap`, `expect`, or unchecked indexing or slicing.
 - **Never log a secret.** Tokens and keys are masked on disk and redacted in what clients see.
-- **Tests don't touch the network.** They use loopback servers on ephemeral ports with dummy keys, and never real provider, OAuth or GitHub endpoints.
+- **Tests don't touch the network.** They use loopback servers on ephemeral ports with dummy keys, listening on 127.0.0.1 rather than every interface (on Windows that would bring up a firewall prompt for each test binary built), and never real provider, OAuth or GitHub endpoints.
 
 ## Checks
 
