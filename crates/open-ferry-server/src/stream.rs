@@ -1,9 +1,18 @@
 // Ported from CLIProxyAPI sdk/api/handlers/stream_forwarder.go and
-// StartNonStreamingKeepAlive in sdk/api/handlers/handlers.go (v8.0.10, MIT).
+// StartNonStreamingKeepAlive in sdk/api/handlers/handlers.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Writing results to clients: streams, with keep-alives and a terminal
 //! error, and non-streaming results that take a while.
+//!
+//! A stream's bytes go out as its body gives them; nothing here writes or
+//! flushes them. When a write to the client fails, the server drops the
+//! body, which drops the call's stream and so cancels the call at once, as
+//! upstream's handlers cancel it on a failed write or flush. A stream that
+//! goes well ends with its provider's stream, not at its completion event:
+//! upstream ends a Responses stream at `response.completed` only for a
+//! provider that acknowledges delivery, which only its Antigravity executor
+//! does.
 
 use std::convert::Infallible;
 use std::future::Future;

@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI sdk/api/handlers/openai/openai_responses_handlers_stream_test.go,
-// openai_responses_handlers_stream_error_test.go and
-// openai_responses_compact_test.go (v8.0.10, MIT).
+// openai_responses_handlers_stream_error_test.go,
+// openai_responses_compact_test.go and issue6332_test.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The Responses stream writer, from upstream's tests, and the routes end to
@@ -1103,6 +1103,49 @@ async fn streams_keep_alive_while_the_provider_is_quiet() {
     assert_eq!(next().await, CREATED);
     assert_eq!(next().await, ": keep-alive\n\n");
     assert_eq!(next().await, ": keep-alive\n\n");
+}
+
+// TestIssue6332NativeGeminiCompletedWithoutEOF, against the fake
+// dispatcher: a provider's stream that stays open after its
+// `response.completed` isn't cancelled by the completion, and the response
+// stays open until the stream ends (`streams_events` shows it ends then).
+// The usage record isn't checked: the manager this dispatcher stands in for
+// records it. Then, not upstream's: a client that leaves, as when a write
+// fails (upstream's write and flush errors), drops the body, which cancels
+// the call at once.
+#[tokio::test(start_paused = true)]
+async fn a_completed_stream_waits_for_the_providers_end() {
+    let (app, dispatcher) = app(
+        ServerConfig::default(),
+        vec![Outcome::Hang(
+            HeaderMap::new(),
+            vec![
+                Ok(Bytes::from_static(CREATED.as_bytes())),
+                Ok(Bytes::from_static(COMPLETED.as_bytes())),
+            ],
+        )],
+    );
+    let response = app
+        .oneshot(post("/v1/responses", STREAM, None))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body();
+    let mut sent = String::new();
+    while !sent.contains("response.completed") {
+        let frame = body.frame().await.unwrap().unwrap();
+        sent.push_str(std::str::from_utf8(&frame.into_data().unwrap()).unwrap());
+    }
+    assert_eq!(sent, format!("{CREATED}{COMPLETED}"));
+    let next = tokio::time::timeout(Duration::from_secs(60), body.frame()).await;
+    assert!(
+        next.is_err(),
+        "the response ended before the provider's stream"
+    );
+    assert_eq!(dispatcher.live_streams(), 1);
+
+    drop(body);
+    assert_eq!(dispatcher.live_streams(), 0);
 }
 
 // An event the provider's stream is checked for that grows past the limit
