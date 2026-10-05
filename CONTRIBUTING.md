@@ -2,6 +2,8 @@
 
 Thanks for helping. open-ferry is a credited Rust port of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI). Most work is either porting upstream behaviour faithfully or building the parts on the [roadmap](ROADMAP.md).
 
+Everyone taking part follows the [Code of Conduct](CODE_OF_CONDUCT.md).
+
 ## Before you start
 
 - **Open an issue first for anything larger than a small fix,** so we can agree on the approach before you spend time on it.

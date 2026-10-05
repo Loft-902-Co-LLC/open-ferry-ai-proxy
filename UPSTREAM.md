@@ -673,7 +673,7 @@ See [tools/parity/README.md](tools/parity/README.md).
 
 - **Client impersonation:** TLS fingerprinting (uTLS), synthetic user IDs, forged client build fingerprints, related "cloaking" code, and `cmd/fetch_codex_models`, which downloads the Codex client model catalog posing as the Codex CLI. We send each provider's documented OAuth headers and nothing that disguises the client. OpenAI-compatible upstreams get `User-Agent: open-ferry/<version>` rather than upstream's `cli-proxy-openai-compat`.
 - **Providers beyond Codex, Claude, Gemini, Gemini Interactions, Vertex AI, Meta (API keys and access tokens only), xAI (API keys only) and OpenAI-compatible upstreams** for now (Antigravity, Gemini CLI, Kimi, Meta's and xAI's sign-in, Devin, AI Studio relay). Their reasoning signatures are recognized, because a conversation can move between providers and each signature must be kept, dropped or replaced before it's replayed.
-- **Plugin host and store**, **cluster mode** (CLIProxyAPIHome), **TUI**, **Realtime/WebRTC**, **images and video** endpoints.
+- **Not yet, but on the [roadmap](ROADMAP.md):** the images and video endpoints and the TUI (v1), Realtime over WebSocket and WebRTC (v2), the plugin host and store (v3), and cluster mode with CLIProxyAPIHome (v4).
 
 ## Upstream issues we intend to address
 

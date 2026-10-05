@@ -42,7 +42,7 @@ First, survey the plugins people actually use with CLIProxyAPI: its plugin store
 
 Plugins run third-party code, so a store needs its own security design before it ships.
 
-## Undecided: Home and cluster mode
+## v4: Home and cluster mode
 
 [CLIProxyAPIHome](https://github.com/router-for-me/CLIProxyAPIHome) is a separate server for large deployments.
 - **How it works:** many CLIProxyAPI nodes connect to it over mutually authenticated TLS, speaking the Redis protocol. Home keeps everything in SQLite or PostgreSQL.
@@ -54,7 +54,7 @@ Plugins run third-party code, so a store needs its own security design before it
   - counts usage;
   - hands out plugins.
 
-It only matters to someone running many proxy instances against one pool of accounts, so it isn't planned. If people ask for several instances, we would first consider letting open-ferry instances share a credential store. Speaking Home's protocol, which another project owns and changes often, would come after that.
+It only matters to someone running many proxy instances against one pool of accounts, so it comes last. How open-ferry gets there is decided then: by letting its instances share a credential store, or by speaking Home's protocol, which another project owns and changes often.
 
 ## Not planned
 
