@@ -1,8 +1,12 @@
-// Ported from ChatCompletions, Completions and their response handlers in
-// CLIProxyAPI sdk/api/handlers/openai/openai_handlers.go (v8.0.10, MIT).
+// Ported from ChatCompletions, Completions, their response handlers and
+// chunkHasFinishReason in CLIProxyAPI
+// sdk/api/handlers/openai/openai_handlers.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! `POST /v1/chat/completions` and `POST /v1/completions`.
+//!
+//! A stream that ends without any chunk carrying a `finish_reason` was cut
+//! short: it ends with an error, not `[DONE]`, so the client can tell.
 
 use axum::body::Body;
 use axum::extract::State;
@@ -15,6 +19,7 @@ use open_ferry_translate::completions::{
     convert_chat_completions_stream_chunk_to_completions,
     convert_completions_request_to_chat_completions,
 };
+use open_ferry_translate::go;
 use open_ferry_translate::openai::responses::convert_openai_responses_request_to_openai_chat_completions;
 use serde_json::Value;
 
@@ -22,6 +27,7 @@ use super::{gjson_string, parse_body};
 use crate::body;
 use crate::errors::{ErrorMessage, openai_body, openai_error_response};
 use crate::exec::{Call, ClientRequest, HandlerStream};
+use crate::json;
 use crate::state::AppState;
 use crate::stream::{Peeked, StreamWriter, forward, json_response, keep_alive, peek, sse_response};
 
@@ -176,16 +182,24 @@ async fn stream_chat(
                     std::future::ready(item)
                 })
                 .boxed();
-            sse_response(&headers, forward(items, ChatWriter, keepalive))
+            let writer = ChatWriter::default();
+            sse_response(&headers, forward(items, writer, keepalive))
         }
     }
 }
 
 /// Writes a Chat Completions event stream.
-struct ChatWriter;
+#[derive(Default)]
+struct ChatWriter {
+    /// Whether a chunk written has carried a `finish_reason`.
+    saw_finish_reason: bool,
+}
 
 impl StreamWriter for ChatWriter {
     fn write_chunk(&mut self, chunk: Bytes, out: &mut BytesMut) {
+        if !self.saw_finish_reason && chunk_has_finish_reason(&chunk) {
+            self.saw_finish_reason = true;
+        }
         out.extend_from_slice(b"data: ");
         out.extend_from_slice(&chunk);
         out.extend_from_slice(b"\n\n");
@@ -198,9 +212,35 @@ impl StreamWriter for ChatWriter {
         out.extend_from_slice(b"\n\n");
     }
 
+    fn close_error(&mut self) -> Option<ErrorMessage> {
+        (!self.saw_finish_reason).then(|| {
+            ErrorMessage::new(
+                502,
+                "upstream stream closed before any chunk carried finish_reason",
+            )
+        })
+    }
+
     fn write_done(&mut self, out: &mut BytesMut) {
         out.extend_from_slice(b"data: [DONE]\n\n");
     }
+}
+
+/// Whether a chunk, with or without its `data:` prefix, has a choice whose
+/// `finish_reason` is there and neither `null` nor empty
+/// (`chunkHasFinishReason`).
+fn chunk_has_finish_reason(chunk: &[u8]) -> bool {
+    let mut chunk = go::trim_space(chunk);
+    if let Some(rest) = chunk.strip_prefix(b"data:") {
+        chunk = go::trim_space(rest);
+    }
+    json::get(chunk, "choices").is_some_and(|choices| {
+        choices.array().iter().any(|choice| {
+            choice
+                .get("finish_reason")
+                .is_some_and(|reason| !reason.is_null() && !reason.str().is_empty())
+        })
+    })
 }
 
 #[cfg(test)]
@@ -217,6 +257,29 @@ mod tests {
         ));
         assert!(!is_responses_format(&json!({"model": "m"})));
         assert!(!is_responses_format(&Value::Null));
+    }
+
+    // Not upstream's: chunkHasFinishReason on its own.
+    #[test]
+    fn spots_a_finish_reason() {
+        for chunk in [
+            r#"{"choices":[{"finish_reason":"stop"}]}"#,
+            r#" data: {"choices":[{"index":0},{"finish_reason":"length"}]} "#,
+            r#"{"choices":{"finish_reason":"stop"}}"#,
+            r#"{"choices":[{"finish_reason":false}]}"#,
+        ] {
+            assert!(chunk_has_finish_reason(chunk.as_bytes()), "{chunk}");
+        }
+        for chunk in [
+            r#"{"choices":[{"finish_reason":null}]}"#,
+            r#"{"choices":[{"finish_reason":""}]}"#,
+            r#"{"choices":[]}"#,
+            r#"{"finish_reason":"stop"}"#,
+            "data: [DONE]",
+            "",
+        ] {
+            assert!(!chunk_has_finish_reason(chunk.as_bytes()), "{chunk}");
+        }
     }
 
     #[test]

@@ -309,7 +309,11 @@ async fn chat_completions_stream() {
     let (app, dispatcher) = app(
         ServerConfig::default(),
         vec![
-            Outcome::chunks(&[r#"{"n":1}"#, "", r#"{"n":2}"#]),
+            Outcome::chunks(&[
+                r#"{"n":1}"#,
+                "",
+                r#"{"n":2,"choices":[{"finish_reason":"stop"}]}"#,
+            ]),
             Outcome::Stream(
                 HeaderMap::new(),
                 vec![
@@ -329,7 +333,7 @@ async fn chat_completions_stream() {
     assert_eq!(content_type(&headers), "text/event-stream");
     assert_eq!(
         body,
-        "data: {\"n\":1}\n\ndata: {\"n\":2}\n\ndata: [DONE]\n\n"
+        "data: {\"n\":1}\n\ndata: {\"n\":2,\"choices\":[{\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
     );
     assert!(dispatcher.calls()[0].options.stream);
 
@@ -368,14 +372,17 @@ async fn streams_restart_when_they_fail_before_their_first_payload() {
                 HeaderMap::new(),
                 vec![Err(ExecError::upstream(503, "busy"))],
             ),
-            Outcome::chunks(&[r#"{"n":1}"#]),
+            Outcome::chunks(&[r#"{"n":1,"choices":[{"finish_reason":"stop"}]}"#]),
             Outcome::Stream(HeaderMap::new(), vec![Err(ExecError::upstream(400, "no"))]),
         ],
     );
     let chat = r#"{"model":"gpt-5","messages":[],"stream":true}"#;
     let (status, _, body) = send(&app, authed(Method::POST, "/v1/chat/completions", chat)).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, "data: {\"n\":1}\n\ndata: [DONE]\n\n");
+    assert_eq!(
+        body,
+        "data: {\"n\":1,\"choices\":[{\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+    );
     assert_eq!(dispatcher.calls().len(), 2);
 
     // A 400 isn't worth a restart.
@@ -393,7 +400,7 @@ async fn completions_convert_to_and_from_chat() {
                 r#"{"id":"c1","object":"chat.completion","created":1,"model":"gpt-5","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}"#,
             ),
             Outcome::chunks(&[
-                r#"{"id":"c2","object":"chat.completion.chunk","created":1,"model":"gpt-5","choices":[{"index":0,"delta":{"content":"yo"}}]}"#,
+                r#"{"id":"c2","object":"chat.completion.chunk","created":1,"model":"gpt-5","choices":[{"index":0,"delta":{"content":"yo"},"finish_reason":"stop"}]}"#,
             ]),
         ],
     );
@@ -435,6 +442,142 @@ async fn completions_convert_to_and_from_chat() {
     assert_eq!(chunk["choices"][0]["text"], "yo");
     assert!(body.ends_with("data: [DONE]\n\n"), "{body}");
     assert_eq!(dispatcher.calls()[1].options.alt, "");
+}
+
+/// What a Chat Completions (`completions` false) or Completions stream
+/// whose provider sends `chunks` and ends gives the client.
+async fn finished_stream(completions: bool, chunks: &[&str]) -> String {
+    let (app, _) = app(ServerConfig::default(), vec![Outcome::chunks(chunks)]);
+    let (uri, body) = if completions {
+        (
+            "/v1/completions",
+            r#"{"model":"gpt-5","prompt":"hi","stream":true}"#,
+        )
+    } else {
+        (
+            "/v1/chat/completions",
+            r#"{"model":"gpt-5","messages":[{"role":"user","content":"hi"}],"stream":true}"#,
+        )
+    };
+    let (status, _, body) = send(&app, authed(Method::POST, uri, body)).await;
+    assert_eq!(status, StatusCode::OK);
+    body
+}
+
+const TRUNCATED: &str = r#"data: {"error":{"message":"upstream stream closed before any chunk carried finish_reason","type":"server_error","code":"internal_server_error"}}"#;
+
+fn assert_truncated(out: &str) {
+    assert!(!out.contains("data: [DONE]"), "{out}");
+    assert!(out.ends_with(&format!("{TRUNCATED}\n\n")), "{out}");
+}
+
+fn assert_completed(out: &str) {
+    assert!(out.ends_with("data: [DONE]\n\n"), "{out}");
+    assert!(!out.contains("upstream stream closed before"), "{out}");
+}
+
+// TestChatCompletionsStreamWithoutFinishReasonIsReportedAsError,
+// TestChatCompletionsStreamExplicitNullOrEmptyFinishReasonIsReportedAsError
+// and TestChatCompletionsStreamSingleChunkWithoutFinishReasonIsReportedAsError.
+#[tokio::test]
+async fn chat_streams_without_a_finish_reason_end_with_an_error() {
+    assert_truncated(
+        &finished_stream(
+            false,
+            &[
+                r#"{"choices":[{"index":0,"delta":{"role":"assistant"}}]}"#,
+                r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"do_thing","arguments":"{\"a\":1"}}]}}]}"#,
+            ],
+        )
+        .await,
+    );
+    assert_truncated(
+        &finished_stream(
+            false,
+            &[
+                r#"{"choices":[{"index":0,"delta":{"role":"assistant","content":"part1"},"finish_reason":null}]}"#,
+                r#"{"choices":[{"index":0,"delta":{"content":"part2"},"finish_reason":""}]}"#,
+            ],
+        )
+        .await,
+    );
+    assert_truncated(
+        &finished_stream(
+            false,
+            &[r#"{"choices":[{"index":0,"delta":{"role":"assistant","content":"hello"}}]}"#],
+        )
+        .await,
+    );
+}
+
+// TestChatCompletionsStreamWithFinishReasonStillCompletes,
+// TestChatCompletionsStreamSingleChunkWithFinishReasonStillCompletes and
+// TestChatCompletionsStreamUsageAfterFinishReasonStillCompletes.
+#[tokio::test]
+async fn chat_streams_with_a_finish_reason_complete() {
+    assert_completed(
+        &finished_stream(
+            false,
+            &[
+                r#"{"choices":[{"index":0,"delta":{"role":"assistant"}}]}"#,
+                r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"do_thing","arguments":"{\"a\":1}"}}]}}]}"#,
+                r#"{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#,
+            ],
+        )
+        .await,
+    );
+    assert_completed(
+        &finished_stream(
+            false,
+            &[r#"{"choices":[{"index":0,"delta":{"content":"instant"},"finish_reason":"stop"}]}"#],
+        )
+        .await,
+    );
+    assert_completed(
+        &finished_stream(
+            false,
+            &[
+                r#"{"choices":[{"index":0,"delta":{"content":"hi"}}]}"#,
+                r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
+                r#"{"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}"#,
+            ],
+        )
+        .await,
+    );
+}
+
+// TestCompletionsStreamWithoutFinishReasonIsReportedAsError,
+// TestCompletionsStreamWithFinishReasonStillCompletes and
+// TestCompletionsStreamSingleChunkWithFinishReasonStillCompletes.
+#[tokio::test]
+async fn completions_streams_need_a_finish_reason() {
+    assert_truncated(
+        &finished_stream(
+            true,
+            &[
+                r#"{"choices":[{"index":0,"delta":{"role":"assistant"}}]}"#,
+                r#"{"choices":[{"index":0,"delta":{"content":"trunc"}}]}"#,
+            ],
+        )
+        .await,
+    );
+    assert_completed(
+        &finished_stream(
+            true,
+            &[
+                r#"{"choices":[{"index":0,"delta":{"role":"assistant"}}]}"#,
+                r#"{"choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":"stop"}]}"#,
+            ],
+        )
+        .await,
+    );
+    assert_completed(
+        &finished_stream(
+            true,
+            &[r#"{"choices":[{"index":0,"delta":{"content":"single"},"finish_reason":"stop"}]}"#],
+        )
+        .await,
+    );
 }
 
 #[tokio::test]
@@ -611,12 +754,17 @@ async fn streams_keep_alive_while_the_provider_is_quiet() {
 async fn chat_completions_take_responses_bodies() {
     let (app, dispatcher) = app(
         ServerConfig::default(),
-        vec![Outcome::chunks(&[r#"{"n":1}"#])],
+        vec![Outcome::chunks(&[
+            r#"{"n":1,"choices":[{"finish_reason":"stop"}]}"#,
+        ])],
     );
     let body = r#"{"model":"gpt-5","instructions":"be brief","input":"hi","stream":true}"#;
     let (status, _, body) = send(&app, authed(Method::POST, "/v1/chat/completions", body)).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, "data: {\"n\":1}\n\ndata: [DONE]\n\n");
+    assert_eq!(
+        body,
+        "data: {\"n\":1,\"choices\":[{\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+    );
 
     let call = &dispatcher.calls()[0];
     assert!(call.options.stream);
