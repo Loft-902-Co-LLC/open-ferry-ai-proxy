@@ -80,7 +80,7 @@ pub(crate) fn input_has_item_type(payload: &[u8], item_type: &str) -> bool {
 }
 
 /// Drops the input items of `item_type` (`xaiRemoveInputItemsByType`).
-fn remove_input_items_by_type(body: &mut Value, item_type: &str) {
+pub(crate) fn remove_input_items_by_type(body: &mut Value, item_type: &str) {
     if let Some(Value::Array(input)) = body.get_mut("input") {
         input.retain(|item| str_of(item.get("type")) != item_type);
     }
@@ -118,7 +118,7 @@ fn unix(now: SystemTime) -> (i64, u128) {
 
 /// The compaction stream's response ID (`xaiCompactionResponseID`): the
 /// compaction's own, as a response ID, or one made of the time.
-fn response_id(compact: &Value, now: SystemTime) -> String {
+pub(crate) fn response_id(compact: &Value, now: SystemTime) -> String {
     let id = str_of(get(compact, "id"));
     let id = id.trim();
     if id.is_empty() {
@@ -140,7 +140,7 @@ fn item_id(response_id: &str) -> String {
 
 /// The compaction's first output item, with a type and an ID
 /// (`xaiCompactionOutputItem`).
-fn output_item(compact: &Value, response_id: &str) -> Value {
+pub(crate) fn output_item(compact: &Value, response_id: &str) -> Value {
     let mut item = match get(compact, "output.0") {
         Some(item @ (Value::Object(_) | Value::Array(_))) => item.clone(),
         _ => json!({"type": "compaction"}),

@@ -18,6 +18,9 @@
 //! (the `replay` module).
 //! Token counts are estimated locally with `o200k_base` (the `tokens`
 //! module).
+//! A streaming call from a client on the Responses WebSocket goes over
+//! xAI's WebSocket when the credential has websockets on (the `websocket`
+//! module).
 //!
 //! Deviations from upstream (each module lists its own):
 //! - Only API keys are served: no xAI sign-in, no Grok CLI chat proxy, and
@@ -25,8 +28,6 @@
 //! - No session is made up: `x-grok-conv-id` and `prompt_cache_key` are the
 //!   client's own `prompt_cache_key` or absent.
 //! - Image and video generation are refused with a 400.
-//! - HTTP only: upstream's WebSocket executor and reasoning replay aren't
-//!   ported yet.
 
 mod compact;
 mod errors;
@@ -40,5 +41,6 @@ mod stream;
 mod thinking;
 mod tokens;
 mod tools;
+mod websocket;
 
 pub use executor::XaiExecutor;

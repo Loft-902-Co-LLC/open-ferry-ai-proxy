@@ -82,7 +82,7 @@ pub(crate) const DEFAULT_BASE_URL: &str = "https://api.x.ai/v1";
 
 /// Grok's CLI chat proxy (`xaiauth.CLIChatProxyBaseURL`), which a compact
 /// call never goes to.
-const CLI_CHAT_PROXY_BASE_URL: &str = "https://cli-chat-proxy.grok.com/v1";
+pub(crate) const CLI_CHAT_PROXY_BASE_URL: &str = "https://cli-chat-proxy.grok.com/v1";
 
 /// The executor's provider.
 pub(crate) const PROVIDER: &str = "xai";

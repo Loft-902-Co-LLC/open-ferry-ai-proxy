@@ -44,8 +44,9 @@
 //!   [`crate::payload`].
 //! - Only API keys: no xAI sign-in, refresh or Grok CLI chat proxy, so
 //!   refresh returns the credential as it is. Image and video generation
-//!   aren't ported. One executor makes HTTP calls only; upstream wraps an
-//!   HTTP and a WebSocket executor in an `XAIAutoExecutor`.
+//!   aren't ported. One executor serves HTTP and the WebSocket (see the
+//!   `websocket` module); upstream wraps an HTTP and a WebSocket executor
+//!   in an `XAIAutoExecutor`.
 //! - Reasoning replay keeps a session's last completed turn in memory, as
 //!   upstream does without Home mode, and only for a client-named session
 //!   (see the `replay` module).
@@ -84,6 +85,7 @@ use super::response::{
 };
 use super::stream::{self, StreamSetup};
 use super::tokens;
+use super::websocket;
 use crate::codex::client::{Clients, error_chain, read_body, read_body_prefix};
 use crate::codex::request::{Context, refuse_control_characters};
 use crate::codex::stream::{LineReader, MAX_LINE};
@@ -106,6 +108,7 @@ pub struct XaiExecutor {
     clients: Clients,
     config: Option<Arc<Config>>,
     models: Option<Arc<dyn ModelCatalog>>,
+    pub(super) websockets: websocket::Sessions,
 }
 
 impl XaiExecutor {
@@ -117,6 +120,7 @@ impl XaiExecutor {
             clients: Clients::new(global_proxy_url).for_provider(PROVIDER),
             config: None,
             models: None,
+            websockets: websocket::Sessions::new(),
         }
     }
 
@@ -133,12 +137,12 @@ impl XaiExecutor {
     }
 
     /// The proxy setting `auth`'s calls go through (see [`Self::new`]).
-    fn proxy_for(&self, auth: &Auth) -> String {
+    pub(super) fn proxy_for(&self, auth: &Auth) -> String {
         self.clients.effective_proxy(&auth.proxy_url).to_owned()
     }
 
     /// What a call with `auth` is prepared with.
-    fn context<'a>(&'a self, auth: &'a Auth) -> Context<'a> {
+    pub(super) fn context<'a>(&'a self, auth: &'a Auth) -> Context<'a> {
         Context {
             auth: Some(auth),
             config: self.config.as_deref(),
@@ -186,7 +190,7 @@ impl XaiExecutor {
     /// Sends a compact call and reads its answer
     /// (`executeCompactRequest`): the prepared request, xAI's body and its
     /// headers.
-    async fn compact_request(
+    pub(super) async fn compact_request(
         &self,
         auth: &Auth,
         request: &Request,
@@ -541,7 +545,13 @@ impl ProviderExecutor for XaiExecutor {
         request: Request,
         options: Options,
     ) -> BoxFuture<'_, Result<StreamResponse, ExecError>> {
-        async move { self.execute_stream_inner(&auth, request, options).await }.boxed()
+        async move {
+            if websocket::routes(&auth, &options) {
+                return websocket::execute_stream(self, &auth, request, options).await;
+            }
+            self.execute_stream_inner(&auth, request, options).await
+        }
+        .boxed()
     }
 
     fn count_tokens(
@@ -556,6 +566,10 @@ impl ProviderExecutor for XaiExecutor {
     /// An API key has nothing to refresh.
     fn refresh(&self, auth: Arc<Auth>) -> BoxFuture<'_, Result<Auth, ExecError>> {
         async move { Ok((*auth).clone()) }.boxed()
+    }
+
+    fn close_execution_session(&self, session_id: &str) {
+        self.websockets.close(session_id);
     }
 
     fn http_request(
