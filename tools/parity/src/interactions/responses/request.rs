@@ -23,7 +23,7 @@ use serde_json::Value;
 
 use super::super::{Family, Pair, Stage};
 use crate::cases::Case;
-use crate::compare::{Deviation, FloatPaths, JsonAt, JsonForm};
+use crate::compare::{Deviation, JsonAt, JsonForm};
 use crate::generate::interactions::responses::request as generate;
 
 /// The suites, a variant each.
@@ -109,20 +109,6 @@ impl Family for Kind {
         match self {
             Self::ResponsesToInteractions => RESPONSES_TO_INTERACTIONS_JSON,
             Self::InteractionsToResponses => INTERACTIONS_TO_RESPONSES_JSON,
-        }
-    }
-
-    /// The sampling settings of a Responses request, which upstream reads
-    /// with gjson's `Float`.
-    fn float_paths(self, _case: &Case) -> FloatPaths {
-        match self {
-            Self::ResponsesToInteractions => &[
-                "$.generation_config.temperature",
-                "$.generation_config.top_p",
-                "$.generation_config.presence_penalty",
-                "$.generation_config.frequency_penalty",
-            ],
-            Self::InteractionsToResponses => &[],
         }
     }
 

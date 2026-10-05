@@ -35,7 +35,7 @@ use super::{Family, Pair, ResponseCases, Stage, Suite};
 use crate::cases::Case;
 use crate::compare::{Deviation, JsonAt, JsonForm};
 use crate::generate::interactions::claude as generate;
-use crate::translator::Translator;
+use crate::translator::{Translator, object};
 
 /// The family's suites, a variant each, named after the upstream package
 /// they run (`interactions/claude` or `claude/interactions`).
@@ -270,7 +270,7 @@ fn frame(chunk: &str, end: &str) -> Value {
     match parts {
         Some((event, data)) => {
             let data = exact::from_str(data).unwrap_or_else(|_| Value::from(data));
-            json!({ "event": event, "data": data })
+            object([("event", event.into()), ("data", data)])
         }
         None => json!({ "unparsed": chunk }),
     }

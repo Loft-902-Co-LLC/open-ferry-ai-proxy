@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use super::{Family, Pair, ResponseCases, Stage, Suite};
 use crate::cases::Case;
-use crate::compare::{Deviation, FloatPaths, JsonAt};
+use crate::compare::{Deviation, JsonAt};
 use crate::translator::Translator;
 
 /// A request suite or a response suite.
@@ -75,10 +75,6 @@ impl Family for Kind {
 
     fn embedded_json(self, case: &Case) -> &'static [JsonAt] {
         dispatch!(self, kind => kind.embedded_json(case))
-    }
-
-    fn float_paths(self, case: &Case) -> FloatPaths {
-        dispatch!(self, kind => kind.float_paths(case))
     }
 
     fn drop_deliberate_omissions(self, case: &Case, go: &mut Value) -> Option<Deviation> {

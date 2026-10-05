@@ -58,6 +58,7 @@ use open_ferry_translate::gemini::openai::responses::{
     GeminiToOpenAIResponsesStream, convert_gemini_response_to_openai_responses_non_stream,
     convert_openai_responses_request_to_gemini,
 };
+use open_ferry_translate::json::exact;
 use open_ferry_translate::models::ModelCatalog;
 use open_ferry_translate::openai::chat_completions::{
     OpenAIToOpenAIStream, convert_openai_request_to_openai,
@@ -82,7 +83,7 @@ use sha2::{Digest, Sha256};
 
 use crate::cases::Case;
 use crate::codex_models;
-use crate::compare::{self, Deviation, FloatPaths, JsonAt, JsonForm, Numbers};
+use crate::compare::{self, Deviation, JsonAt, JsonForm, Numbers};
 use crate::config_diff;
 use crate::interactions::{self, Stage};
 use crate::multi_agent;
@@ -525,12 +526,12 @@ impl Translator {
     /// The request, and a registry case's translated request, are read with
     /// their numbers as the translator keeps them (see [`Self::numbers`]).
     pub fn run_rust(self, case: &Case) -> Result<Value, String> {
-        let numbers = self.numbers(case);
+        let numbers = self.numbers();
         let request = numbers.parse(&case.request);
         let final_event = || {
             case.events
                 .first()
-                .and_then(|event| serde_json::from_str(event).ok())
+                .and_then(|event| exact::from_str(event).ok())
                 .unwrap_or_default()
         };
         match self {
@@ -595,7 +596,7 @@ impl Translator {
                 ))
             }
             Self::ResponsesStream => {
-                let translated = serde_json::from_str(&case.translated_request).unwrap_or_default();
+                let translated = numbers.parse(&case.translated_request).unwrap_or_default();
                 let stream = CodexToOpenAIResponsesStream::new(
                     &case.model,
                     &request.unwrap_or_default(),
@@ -705,7 +706,7 @@ impl Translator {
             Self::ClaudeResponsesStream => {
                 // An original request that isn't JSON counts as absent, as
                 // upstream's pickRequestJSON skips it.
-                let translated = serde_json::from_str(&case.translated_request).unwrap_or_default();
+                let translated = numbers.parse(&case.translated_request).unwrap_or_default();
                 let mut stream = ClaudeToOpenAIResponsesStream::new(
                     &case.model,
                     &request.unwrap_or_default(),
@@ -739,7 +740,7 @@ impl Translator {
             Self::OpenAIResponsesStream => {
                 // An original request that isn't JSON counts as absent, as
                 // upstream's pickRequestJSON skips it.
-                let translated = serde_json::from_str(&case.translated_request).unwrap_or_default();
+                let translated = numbers.parse(&case.translated_request).unwrap_or_default();
                 let mut stream = OpenAIToOpenAIResponsesStream::new(
                     &case.model,
                     &request.unwrap_or_default(),
@@ -758,7 +759,7 @@ impl Translator {
                     .expect("streams always read"))
             }
             Self::OpenAIResponsesNonStream => {
-                let translated = serde_json::from_str(&case.translated_request).unwrap_or_default();
+                let translated = numbers.parse(&case.translated_request).unwrap_or_default();
                 let body = case.events.first().map_or(&b""[..], |body| body.as_bytes());
                 let output =
                     convert_openai_chat_completions_response_to_openai_responses_non_stream(
@@ -1075,7 +1076,7 @@ impl Translator {
                 }))
             }
             Self::ClaudeResponsesNonStream => {
-                let translated = serde_json::from_str(&case.translated_request).unwrap_or_default();
+                let translated = numbers.parse(&case.translated_request).unwrap_or_default();
                 let body = case.events.first().map_or(&b""[..], |body| body.as_bytes());
                 let output = convert_claude_response_to_openai_responses_non_stream(
                     &request.unwrap_or_default(),
@@ -1124,7 +1125,7 @@ impl Translator {
             Self::GeminiResponsesStream => {
                 // An original request that isn't JSON counts as absent, as
                 // upstream's pickRequestJSON skips it.
-                let translated = serde_json::from_str(&case.translated_request).unwrap_or_default();
+                let translated = numbers.parse(&case.translated_request).unwrap_or_default();
                 let mut stream = GeminiToOpenAIResponsesStream::new(
                     &case.model,
                     &request.unwrap_or_default(),
@@ -1143,7 +1144,7 @@ impl Translator {
                     .expect("streams always read"))
             }
             Self::GeminiResponsesNonStream => {
-                let translated = serde_json::from_str(&case.translated_request).unwrap_or_default();
+                let translated = numbers.parse(&case.translated_request).unwrap_or_default();
                 let body = case.events.first().map_or(&b""[..], |body| body.as_bytes());
                 let output = convert_gemini_response_to_openai_responses_non_stream(
                     &request.unwrap_or_default(),
@@ -1174,7 +1175,7 @@ impl Translator {
                     crate::cases::thinking::model_info(&case.options["model_info"]),
                 )
                 .err();
-                Ok(json!({ "body": body, "error": error }))
+                Ok(object([("body", body), ("error", json!(error))]))
             }
             Self::CodexModels => Ok(codex_models::list(&case.options)),
             Self::MultiAgentPrepare
@@ -1201,30 +1202,11 @@ impl Translator {
 
     /// How this translator keeps the numbers in JSON it reads, which is how
     /// its cases' requests are read for it and JSON in its output's strings is
-    /// compared (see [`Numbers`]): exactly as written for an Interactions
-    /// suite, or a registry case read as one, and as `serde_json` reads them
-    /// for the rest. Each Interactions suite's `read` keeps them as written
-    /// too.
-    pub fn numbers(self, case: &Case) -> Numbers {
-        match self {
-            Self::Interactions(_) => Numbers::AsWritten,
-            _ if matches!(self.native(case), Some(Self::Interactions(_))) => Numbers::AsWritten,
-            _ => Numbers::Respelled,
-        }
-    }
-
-    /// Where this translator writes a number upstream reads as a float64,
-    /// whose negative zero Go writes as `-0` and we as `0` (see
-    /// [`FloatPaths`]): only in some Interactions suites, as the others read
-    /// `-0` as `0` (see [`Self::numbers`]).
-    pub fn float_paths(self, case: &Case) -> FloatPaths {
-        match self {
-            Self::Interactions(kind) => kind.float_paths(case),
-            Self::RegistryRequest | Self::RegistryStream | Self::RegistryNonStream => self
-                .native(case)
-                .map_or(&[], |native| native.float_paths(case)),
-            _ => &[],
-        }
+    /// compared (see [`Numbers`]): exactly as written, for every suite, as
+    /// the proxy hands each translator the client's JSON. Each suite's `read`
+    /// keeps them as written too.
+    pub fn numbers(self) -> Numbers {
+        Numbers::AsWritten
     }
 
     /// Where this translator writes JSON it read compactly while upstream
@@ -1648,7 +1630,7 @@ impl Translator {
             Self::Interactions(kind) => return kind.read(case, output),
             Self::RegistryRequest if native.is_some() => return native?.read(case, output),
             Self::RegistryRequest | Self::RegistryLookup => {
-                return serde_json::from_str(&text).ok();
+                return exact::from_str(&text).ok();
             }
             Self::Request
             | Self::RequestCompat
@@ -1680,9 +1662,9 @@ impl Translator {
             | Self::Payload
             | Self::Usage
             | Self::Ttft
-            | Self::ConfigDiff => return serde_json::from_str(&text).ok(),
+            | Self::ConfigDiff => return exact::from_str(&text).ok(),
             Self::OpenAIGeminiRequest => {
-                let mut value: Value = serde_json::from_str(&text).ok()?;
+                let mut value: Value = exact::from_str(&text).ok()?;
                 replace_compact_call_ids(&mut value, case);
                 return Some(value);
             }
@@ -1691,8 +1673,7 @@ impl Translator {
                 let chunks = chunks
                     .into_iter()
                     .map(|chunk| {
-                        let mut value =
-                            serde_json::from_str(&chunk).unwrap_or(Value::String(chunk));
+                        let mut value = exact::from_str(&chunk).unwrap_or(Value::String(chunk));
                         match self {
                             Self::ClaudeGeminiStream => mask_create_time_now(&mut value),
                             Self::OpenAIGeminiStream => sort_function_calls(&mut value),
@@ -1760,29 +1741,29 @@ impl Translator {
             Self::ResponsesNonStream
             | Self::CodexGeminiNonStream
             | Self::OpenAIGeminiNonStream
-            | Self::GeminiClaudeNonStream => return serde_json::from_str(&text).ok(),
+            | Self::GeminiClaudeNonStream => return exact::from_str(&text).ok(),
             Self::ClaudeGeminiNonStream => {
-                let mut value: Value = serde_json::from_str(&text).ok()?;
+                let mut value: Value = exact::from_str(&text).ok()?;
                 mask_create_time_now(&mut value);
                 return Some(value);
             }
             Self::GeminiChatNonStream => {
-                let mut value: Value = serde_json::from_str(&text).ok()?;
+                let mut value: Value = exact::from_str(&text).ok()?;
                 mask_function_call_ids(&mut value);
                 return Some(value);
             }
             Self::ChatNonStream | Self::ClaudeChatNonStream => {
-                let mut value: Value = serde_json::from_str(&text).ok()?;
+                let mut value: Value = exact::from_str(&text).ok()?;
                 mask_time_now(&mut value, "created");
                 return Some(value);
             }
             Self::ClaudeResponsesNonStream => {
-                let mut value: Value = serde_json::from_str(&text).ok()?;
+                let mut value: Value = exact::from_str(&text).ok()?;
                 mask_time_now(&mut value, "created_at");
                 return Some(value);
             }
             Self::OpenAIResponsesNonStream => {
-                let mut value: Value = serde_json::from_str(&text).ok()?;
+                let mut value: Value = exact::from_str(&text).ok()?;
                 mask_time_now(&mut value, "created_at");
                 mask_generated_response_id(&mut value, case);
                 return Some(value);
@@ -1791,20 +1772,20 @@ impl Translator {
                 let chunks: Vec<String> = serde_json::from_str(&text).ok()?;
                 chunks
                     .iter()
-                    .map(|chunk| match serde_json::from_str::<Value>(chunk) {
-                        Ok(message) => json!({ "json": message }),
-                        Err(_) => json!({ "sse": sse_frames(chunk) }),
+                    .map(|chunk| match exact::from_str(chunk) {
+                        Ok(message) => object([("json", message)]),
+                        Err(_) => object([("sse", sse_frames(chunk))]),
                     })
                     .collect()
             }
-            Self::OpenAIClaudeNonStream => serde_json::from_str(&text).ok()?,
+            Self::OpenAIClaudeNonStream => exact::from_str(&text).ok()?,
             Self::ClaudeChatRequest
             | Self::ClaudeChatRequestCompat
             | Self::ClaudeResponsesRequest
             | Self::ClaudeResponsesRequestCompat
-            | Self::ClaudeGeminiRequest => serde_json::from_str(&text).ok()?,
+            | Self::ClaudeGeminiRequest => exact::from_str(&text).ok()?,
             Self::Stream => sse_frames(&text),
-            Self::NonStream => serde_json::from_str(&text).ok()?,
+            Self::NonStream => exact::from_str(&text).ok()?,
             Self::GeminiResponsesStream => {
                 let mut frames = sse_frames(&text);
                 mask_gemini_responses_ids(&mut frames, case);
@@ -1814,7 +1795,7 @@ impl Translator {
                 return Some(NO_OUTPUT.into());
             }
             Self::GeminiResponsesNonStream => {
-                let mut value: Value = serde_json::from_str(&text).ok()?;
+                let mut value: Value = exact::from_str(&text).ok()?;
                 mask_gemini_responses_ids(&mut value, case);
                 return Some(value);
             }
@@ -1833,16 +1814,16 @@ impl Translator {
 /// JSON line, and `{"line": text}` for anything else.
 pub(crate) fn read_lines(text: &str) -> Option<Value> {
     let lines: Vec<String> = serde_json::from_str(text).ok()?;
-    let json = |text: &str| serde_json::from_str::<Value>(text).ok();
+    let json = |text: &str| exact::from_str(text).ok();
     let lines = lines
         .into_iter()
         .map(|line| {
             if line == UNCHANGED {
                 Value::String(line)
             } else if let Some(data) = line.strip_prefix("data: ").and_then(json) {
-                json!({ "data": data })
+                object([("data", data)])
             } else if let Some(value) = json(&line) {
-                json!({ "json": value })
+                object([("json", value)])
             } else {
                 json!({ "line": line })
             }
@@ -1860,7 +1841,7 @@ pub(crate) fn read_chunks(text: &str) -> Option<Value> {
         .into_iter()
         .map(|chunk| match chunk {
             None => Value::Null,
-            Some(chunk) => match serde_json::from_str(&chunk) {
+            Some(chunk) => match exact::from_str(&chunk) {
                 Ok(value) => value,
                 Err(_) => Value::String(chunk),
             },
@@ -1881,7 +1862,7 @@ fn read_registry_non_stream(case: &Case, native: Option<Translator>, text: &str)
     match native {
         Some(native) => native.read(case, output.as_bytes()),
         None if output.is_empty() => Some(NO_OUTPUT.into()),
-        None => Some(serde_json::from_str(output).unwrap_or_else(|_| output.into())),
+        None => Some(exact::from_str(output).unwrap_or_else(|_| output.into())),
     }
 }
 
@@ -1994,22 +1975,11 @@ fn sse_chunk(chunk: &str) -> Value {
     Value::Array(frames)
 }
 
-/// Splits SSE text into `{"event": …, "data": …}` frames. Anything that isn't
-/// an `event: …\ndata: <JSON>\n\n` frame is kept as `{"unparsed": text}`, and
-/// text after the last blank line as `{"unended": text}`, so they show up as
-/// differences.
+/// Splits SSE text into `{"event": …, "data": …}` frames, each number in
+/// the data kept as written. Anything that isn't an `event: …\ndata:
+/// <JSON>\n\n` frame is kept as `{"unparsed": text}`, and text after the
+/// last blank line as `{"unended": text}`, so they show up as differences.
 pub(crate) fn sse_frames(text: &str) -> Value {
-    sse_frames_read(text, Numbers::Respelled)
-}
-
-/// [`sse_frames`], with the data's numbers kept as written (see
-/// [`Numbers::AsWritten`]).
-pub(crate) fn sse_frames_as_written(text: &str) -> Value {
-    sse_frames_read(text, Numbers::AsWritten)
-}
-
-/// [`sse_frames`], with the data's numbers read as `numbers` says.
-fn sse_frames_read(text: &str, numbers: Numbers) -> Value {
     let mut frames = Vec::new();
     let mut rest = text;
     while let Some((frame, after)) = rest.split_once("\n\n") {
@@ -2017,8 +1987,8 @@ fn sse_frames_read(text: &str, numbers: Numbers) -> Value {
             .strip_prefix("event: ")
             .and_then(|rest| rest.split_once("\ndata: "))
             .and_then(|(event, data)| {
-                let data = numbers.read(data)?;
-                Some(json!({ "event": event, "data": data }))
+                let data = exact::from_str(data).ok()?;
+                Some(object([("event", event.into()), ("data", data)]))
             });
         frames.push(parsed.unwrap_or_else(|| json!({ "unparsed": frame })));
         rest = after;
@@ -2027,6 +1997,17 @@ fn sse_frames_read(text: &str, numbers: Numbers) -> Value {
         frames.push(json!({ "unended": rest }));
     }
     Value::Array(frames)
+}
+
+/// An object of `fields`, in order. Unlike `json!`, which re-reads a
+/// `Value` it is given, it keeps each number as written.
+pub(crate) fn object<const N: usize>(fields: [(&str, Value); N]) -> Value {
+    Value::Object(
+        fields
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value))
+            .collect(),
+    )
 }
 
 /// Splits SSE text whose frames each end with `end` into `{"event": …,
@@ -2040,8 +2021,8 @@ pub(crate) fn sse_frames_ended_by(text: &str, end: &str) -> Value {
                 .strip_prefix("event: ")
                 .and_then(|rest| rest.split_once("\ndata: "))
                 .and_then(|(event, data)| {
-                    let data: Value = serde_json::from_str(data).ok()?;
-                    Some(json!({ "event": event, "data": data }))
+                    let data = exact::from_str(data).ok()?;
+                    Some(object([("event", event.into()), ("data", data)]))
                 })
                 .unwrap_or_else(|| json!({ "unparsed": frame }))
         })

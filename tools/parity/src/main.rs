@@ -762,8 +762,7 @@ fn evaluate(translator: Translator, case: &Case, go: &GoResult) -> Evaluated {
                 go,
                 rust,
                 translator.embedded_json(case),
-                translator.numbers(case),
-                translator.float_paths(case),
+                translator.numbers(),
             );
             comparison.deviations.extend(omitted);
             if !comparison.differences.is_empty() {

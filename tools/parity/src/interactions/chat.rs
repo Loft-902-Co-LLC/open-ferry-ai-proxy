@@ -31,7 +31,7 @@ use super::{Family, Pair, ResponseCases, Stage, Suite, mask_volatile};
 use crate::cases::Case;
 use crate::compare::{Deviation, JsonAt, JsonForm};
 use crate::generate::interactions::chat as generate;
-use crate::translator::{Translator, sse_frames_as_written};
+use crate::translator::{Translator, sse_frames};
 
 /// The family's suites, a variant each.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -228,7 +228,7 @@ impl Family for Kind {
 
     /// A request as JSON, a Chat Completions stream as an array of its
     /// chunks (each as JSON, or text if it isn't), an Interactions stream as
-    /// its frames (see [`sse_frames_as_written`]), and a response as JSON,
+    /// its frames (see [`sse_frames`]), and a response as JSON,
     /// each number kept as written, with the clock's readings masked (see
     /// [`mask_volatile`]). A Chat Completions
     /// chunk or response with no ID makes one up from the clock each time,
@@ -248,7 +248,7 @@ impl Family for Kind {
                     .map(|chunk| exact::from_str(&chunk).unwrap_or(Value::String(chunk)))
                     .collect()
             }
-            Self::InteractionsStream => sse_frames_as_written(&text),
+            Self::InteractionsStream => sse_frames(&text),
         };
         mask_volatile(&mut value);
         if matches!(self, Self::ChatStream | Self::ChatNonStream) {

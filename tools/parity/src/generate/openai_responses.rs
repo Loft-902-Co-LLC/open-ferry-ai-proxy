@@ -21,8 +21,8 @@
 //! and calls to `apply_patch` a patch, whole, cut short or not a patch at
 //! all. The client's request is sometimes missing or not JSON, and the
 //! translated one missing, translated from it, or a few fields that the
-//! response repeats. Neither holds a negative zero or a number too large for
-//! `int64`, which upstream writes as no JSON encoder would.
+//! response repeats. Neither holds a number too large for `int64`, which
+//! upstream reads by the CPU's rules.
 
 use std::ops::{Deref, DerefMut};
 
@@ -1318,17 +1318,13 @@ fn declare_apply_patch(request: &mut Value) {
     }
 }
 
-/// Replaces negative zeros, and numbers too large for `int64`, with numbers
-/// of their own: upstream repeats some request fields as Go writes them, a
-/// negative zero as `-0`, and reads a count beyond `int64` by the CPU's
-/// rules (see UPSTREAM.md).
+/// Replaces numbers too large for `int64` with a number of its own:
+/// upstream reads a count beyond `int64` by the CPU's rules (see
+/// UPSTREAM.md).
 fn tame_numbers(value: &mut Value) {
     match value {
         Value::Number(number) => {
-            let float = number.as_f64().unwrap_or(0.0);
-            if float == 0.0 && number.to_string().starts_with('-') {
-                *value = json!(0);
-            } else if float.abs() >= 9.2e18 {
+            if number.as_f64().unwrap_or(0.0).abs() >= 9.2e18 {
                 *value = json!(7);
             }
         }

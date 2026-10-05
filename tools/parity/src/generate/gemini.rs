@@ -10,8 +10,8 @@
 //! client user IDs. Each asks for a stream or not. They leave out what we
 //! write differently on purpose, as the translators' docs say: a
 //! `temperature` or `topP` that isn't a finite number, a schema `type` that
-//! isn't a string or a property named `type`, negative zero in a schema, and
-//! property names holding sjson path syntax.
+//! isn't a string or a property named `type`, and property names holding
+//! sjson path syntax.
 //!
 //! Responses reuse other generators' streams: Codex's ([`super::response`])
 //! answering a Gemini request that declares the tools they call, sometimes
@@ -917,8 +917,9 @@ impl Generator {
     }
 }
 
-/// Numbers for a schema: no negative zero, which we write as `0`.
-const FINITE_SCHEMA: &[&str] = &["0", "1", "0.5", "1.50", "-7", "1e3", "42"];
+/// Numbers for a schema, all finite. Negative zero is `-0.0`: `num` reads
+/// `-0` as `0`.
+const FINITE_SCHEMA: &[&str] = &["0", "1", "0.5", "1.50", "-7", "1e3", "42", "-0.0"];
 
 /// A Codex stream line with the arguments upstream would copy as broken
 /// JSON replaced, and `created_at` set on the response it carries.

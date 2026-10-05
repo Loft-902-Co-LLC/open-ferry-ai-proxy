@@ -10,6 +10,8 @@ use open_ferry_core::registry::ModelRegistry;
 use open_ferry_translate::codex_client::{header_value, multi_agent_v2, orphan_delegation};
 use serde_json::{Value, json};
 
+use crate::translator::object;
+
 /// `multi-agent/prepare`: the request with its collaboration tools readied.
 pub fn prepare(mut body: Value, options: &Value) -> Value {
     let registry = registry(options);
@@ -32,7 +34,7 @@ pub fn optimize(mut body: Value, options: &Value) -> Value {
         options["enabled"] == true,
         || spawn_agent_model_list(&registry),
     );
-    json!({ "body": body, "optimized": optimized })
+    object([("body", body), ("optimized", optimized.into())])
 }
 
 /// `multi-agent/input`: the request with its agent messages rewritten for

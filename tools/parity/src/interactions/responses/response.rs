@@ -41,7 +41,7 @@ use super::super::{Family, Pair, ResponseCases, Stage, mask_volatile};
 use crate::cases::Case;
 use crate::compare::{Deviation, JsonAt, JsonForm};
 use crate::generate::interactions::responses::response as generate;
-use crate::translator::{NO_OUTPUT, sse_frames_as_written};
+use crate::translator::{NO_OUTPUT, object, sse_frames};
 
 /// The suites, a variant each.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -180,21 +180,21 @@ impl Family for Kind {
             .ok_or_else(|| "output is not of the expected kind".to_owned())
     }
 
-    /// Reads a stream as its frames (see [`sse_frames_as_written`]) and a
+    /// Reads a stream as its frames (see [`sse_frames`]) and a
     /// response as JSON, each number kept as written, with the clock's
     /// readings masked.
     fn read(self, case: &Case, output: &[u8]) -> Option<Value> {
         let _ = case;
         let text = String::from_utf8_lossy(output);
         let mut value = match self {
-            Self::ToResponsesStream | Self::ToInteractionsStream => sse_frames_as_written(&text),
+            Self::ToResponsesStream | Self::ToInteractionsStream => sse_frames(&text),
             Self::ToolInputError => {
                 let report: Value = serde_json::from_str(&text).ok()?;
-                json!({
-                    "events": sse_frames_as_written(report.get("events")?.as_str()?),
-                    "finalize": sse_frames_as_written(report.get("finalize")?.as_str()?),
-                    "failed": report.get("failed")?.as_bool()?,
-                })
+                object([
+                    ("events", sse_frames(report.get("events")?.as_str()?)),
+                    ("finalize", sse_frames(report.get("finalize")?.as_str()?)),
+                    ("failed", report.get("failed")?.as_bool()?.into()),
+                ])
             }
             Self::ToResponsesNonStream | Self::ToInteractionsNonStream => {
                 if text.is_empty() {

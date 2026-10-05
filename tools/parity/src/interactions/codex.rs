@@ -46,7 +46,7 @@ use super::{Family, Pair, ResponseCases, Stage, Suite, mask_volatile};
 use crate::cases::Case;
 use crate::compare::{Deviation, JsonAt, JsonForm};
 use crate::generate::interactions::codex as generate;
-use crate::translator::{Translator, sse_frames_as_written};
+use crate::translator::{Translator, sse_frames};
 
 /// The family's suites, a variant each.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -151,7 +151,7 @@ impl Family for Kind {
     }
 
     /// Reads the output as JSON, a stream as its frames (see
-    /// [`sse_frames_as_written`]), each number kept as written, with a
+    /// [`sse_frames`]), each number kept as written, with a
     /// request's settings in upstream's order (see
     /// [`settings_in_listed_order`]) and the clock's readings masked.
     fn read(self, case: &Case, output: &[u8]) -> Option<Value> {
@@ -162,7 +162,7 @@ impl Family for Kind {
                 settings_in_listed_order(case, &mut request);
                 request
             }
-            Self::Stream => sse_frames_as_written(&text),
+            Self::Stream => sse_frames(&text),
             Self::NonStream => exact::from_str(&text).ok()?,
         };
         mask_volatile(&mut value);

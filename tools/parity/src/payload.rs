@@ -6,7 +6,8 @@
 use http::{HeaderMap, HeaderName, HeaderValue};
 use open_ferry_core::config::Config;
 use open_ferry_providers::payload::{Call, Rules, apply_call};
-use serde_json::{Value, json};
+use open_ferry_translate::json::exact;
+use serde_json::{Map, Value, json};
 
 use crate::cases::Case;
 
@@ -41,11 +42,11 @@ pub fn apply(case: &Case) -> Result<Value, String> {
     let original = match options["original"].as_str() {
         None | Some("") => None,
         Some(original) => {
-            Some(serde_json::from_str(original).map_err(|error| format!("original: {error}"))?)
+            Some(exact::from_str(original).map_err(|error| format!("original: {error}"))?)
         }
     };
     let mut body: Value =
-        serde_json::from_str(&case.request).map_err(|error| format!("body: {error}"))?;
+        exact::from_str(&case.request).map_err(|error| format!("body: {error}"))?;
     let call = Call {
         executor: text("executor"),
         protocol: text("protocol"),
@@ -58,5 +59,10 @@ pub fn apply(case: &Case) -> Result<Value, String> {
         tracked: &tracked,
     };
     let touched = apply_call(rules.as_ref(), &call, || original, &mut body);
-    Ok(json!({ "body": body, "touched": touched.iter().collect::<Vec<_>>() }))
+    // Not `json!`, which re-reads `body` and respells its numbers.
+    let touched = touched.iter().map(Value::from).collect();
+    Ok(Value::Object(Map::from_iter([
+        ("body".to_owned(), body),
+        ("touched".to_owned(), Value::Array(touched)),
+    ])))
 }

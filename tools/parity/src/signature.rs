@@ -12,6 +12,8 @@ use open_ferry_translate::signature::{
 };
 use serde_json::{Value, json};
 
+use crate::translator::object;
+
 /// Every block kind, in the order reports list per-kind results.
 const BLOCK_KINDS: [BlockKind; 5] = [
     BlockKind::Unknown,
@@ -141,27 +143,41 @@ pub fn claude_messages(model: &str, payload: &Value, options: &Value) -> Value {
     let sanitize = |f: &dyn Fn(&mut Value) -> SanitizeReport| {
         let mut payload = payload.clone();
         let report = f(&mut payload);
-        json!({ "payload": payload, "report": sanitize_report(&report) })
+        object([("payload", payload), ("report", sanitize_report(&report))])
     };
 
-    json!({
-        "strip": strip,
-        "strip_and_empty": strip_and_empty,
-        "validate": error_text(signature::validate_claude_thinking_signatures(payload, validation)),
-        "for_model": sanitize(&|payload| {
-            signature::sanitize_claude_messages_signatures_for_model(payload, model)
-        }),
-        "claude_upstream": sanitize(&|payload| {
-            signature::sanitize_claude_messages_for_claude_upstream(
-                payload,
-                model,
-                target.preserve_empty_thinking_blocks,
-            )
-        }),
-        "for_target": sanitize(&|payload| {
-            signature::sanitize_claude_messages_signatures_for_target(payload, target)
-        }),
-    })
+    object([
+        ("strip", strip),
+        ("strip_and_empty", strip_and_empty),
+        (
+            "validate",
+            error_text(signature::validate_claude_thinking_signatures(
+                payload, validation,
+            )),
+        ),
+        (
+            "for_model",
+            sanitize(&|payload| {
+                signature::sanitize_claude_messages_signatures_for_model(payload, model)
+            }),
+        ),
+        (
+            "claude_upstream",
+            sanitize(&|payload| {
+                signature::sanitize_claude_messages_for_claude_upstream(
+                    payload,
+                    model,
+                    target.preserve_empty_thinking_blocks,
+                )
+            }),
+        ),
+        (
+            "for_target",
+            sanitize(&|payload| {
+                signature::sanitize_claude_messages_signatures_for_target(payload, target)
+            }),
+        ),
+    ])
 }
 
 /// `signature/gemini`: the Gemini sanitizer and validators on one request.
@@ -179,12 +195,19 @@ pub fn gemini(payload: &Value, options: &Value) -> Value {
     let mut clean = payload.clone();
     signature::sanitize_gemini_request_thought_signatures(&mut clean, contents_path);
 
-    json!({
-        "sanitized": clean,
-        "validate": error_text(signature::validate_gemini_thought_signatures(payload, validation)),
-        "validate_sanitized": error_text(signature::validate_gemini_thought_signatures(&clean, validation)),
-        "pairing": error_text(signature::validate_gemini_function_call_pairing(payload)),
-    })
+    let validate = error_text(signature::validate_gemini_thought_signatures(
+        payload, validation,
+    ));
+    let validate_sanitized = error_text(signature::validate_gemini_thought_signatures(
+        &clean, validation,
+    ));
+    let pairing = error_text(signature::validate_gemini_function_call_pairing(payload));
+    object([
+        ("sanitized", clean),
+        ("validate", validate),
+        ("validate_sanitized", validate_sanitized),
+        ("pairing", pairing),
+    ])
 }
 
 /// A provider by upstream's name. The harness sends only names upstream defines.
