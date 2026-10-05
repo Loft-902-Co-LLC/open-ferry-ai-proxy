@@ -1,5 +1,6 @@
 // Ported from CLIProxyAPI internal/translator/openai/openai/responses/responses_tool_index.go
-// and the index methods in openai_openai-responses_tools.go (v8.0.10, MIT).
+// and the index methods in openai_openai-responses_tools.go and shell_tool.go
+// (isShell, shellName) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The Chat Completions names of a request's tools: for naming the calls and
@@ -14,6 +15,7 @@ use std::ops::Deref;
 
 use serde_json::Value;
 
+use super::shell_tool;
 use super::tools::{Declaration, cap, chat_tool, declarations, qualify, raw_qualified_name};
 use crate::apply_patch::is_custom_tool;
 
@@ -37,6 +39,9 @@ pub(super) struct ToolNames {
     by_local: HashMap<String, String>,
     /// The Chat Completions names whose first declaration is a custom tool.
     custom: HashSet<String>,
+    /// The local shell's Chat Completions name, or `""` if the request
+    /// declares no local shell.
+    shell_name: String,
 }
 
 /// What the lookups keep of the first declaration given a name.
@@ -45,6 +50,8 @@ struct Winner {
     namespace: String,
     /// Whether it is the `apply_patch` custom tool.
     apply_patch: bool,
+    /// Whether it is the client's local shell.
+    shell: bool,
 }
 
 impl<'a> ToolIndex<'a> {
@@ -57,9 +64,13 @@ impl<'a> ToolIndex<'a> {
             by_raw: HashMap::new(),
             by_local: HashMap::new(),
             custom: HashSet::new(),
+            shell_name: String::new(),
         };
         for declaration in &declarations {
             let chat_name = &declaration.chat_name;
+            if declaration.shell && names.shell_name.is_empty() {
+                names.shell_name.clone_from(chat_name);
+            }
             names
                 .by_identity
                 .entry((
@@ -81,6 +92,7 @@ impl<'a> ToolIndex<'a> {
                 local_name: declaration.local_name.clone(),
                 namespace: declaration.namespace.clone(),
                 apply_patch: declaration.custom && is_custom_tool(declaration.tool),
+                shell: declaration.shell,
             });
             match names.by_local.entry(declaration.local_name.clone()) {
                 Entry::Occupied(mut owner) => owner.get_mut().clear(),
@@ -107,9 +119,12 @@ impl<'a> ToolIndex<'a> {
             if seen.contains(declaration.chat_name.as_str()) {
                 continue;
             }
-            if let Some(tool) =
+            let tool = if declaration.shell {
+                Some(shell_tool::chat_tool(&declaration.chat_name))
+            } else {
                 chat_tool(declaration.tool, &declaration.chat_name, declaration.custom)
-            {
+            };
+            if let Some(tool) = tool {
                 tools.push(tool);
                 seen.insert(declaration.chat_name.as_str());
             }
@@ -203,6 +218,28 @@ impl ToolNames {
     /// Whether any name's first declaration is the `apply_patch` custom tool.
     pub(super) fn patch_enabled(&self) -> bool {
         self.by_chat.values().any(|winner| winner.apply_patch)
+    }
+
+    /// `isShell`: whether the first declaration named `name` is the client's
+    /// local shell, whose calls are shell calls.
+    pub(super) fn is_shell(&self, name: &str) -> bool {
+        self.by_chat.get(name).is_some_and(|winner| winner.shell)
+    }
+
+    /// `shellName`: the local shell's Chat Completions name, or `""` if the
+    /// request declares no local shell.
+    pub(super) fn shell_name(&self) -> &str {
+        &self.shell_name
+    }
+
+    /// Every name the lookups know a tool by: Chat Completions names, uncut
+    /// qualified names and local names.
+    pub(super) fn known_names(&self) -> impl Iterator<Item = &str> {
+        self.by_chat
+            .keys()
+            .chain(self.by_raw.keys())
+            .chain(self.by_local.keys())
+            .map(String::as_str)
     }
 
     /// The Chat Completions names whose first declaration is a custom tool:

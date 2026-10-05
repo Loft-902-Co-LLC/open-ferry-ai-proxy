@@ -6,9 +6,11 @@
 //! summaries, function and custom tool calls with IDs missing, repeated or
 //! padded, their outputs paired, duplicated, orphaned, out of place or ahead
 //! of the call, as text, as parts with images or as JSON text holding them,
-//! tools declared at the top level, in namespaces and in `additional_tools`
-//! items with names around the 64-byte limit, and every shape of
-//! `tool_choice`, `text.format`, token limit and reasoning setting.
+//! the client's local shell's calls and outputs, in its environment or
+//! another, tools declared at the top level, in namespaces and in
+//! `additional_tools` items with names around the 64-byte limit, the local
+//! shell among them and names the shell's function would take, and every
+//! shape of `tool_choice`, `text.format`, token limit and reasoning setting.
 //!
 //! Custom tool call input is never an object or array here: upstream copies
 //! its JSON text into the call's arguments, and we write it compactly, which
@@ -18,8 +20,11 @@
 //! answering such a request, with calls to its tools by the names the
 //! translated request gives them, by the names the client wrote and by names
 //! neither declares. Calls to custom tools carry `{"input": ...}` arguments,
-//! and calls to `apply_patch` a patch, whole, cut short or not a patch at
-//! all. The client's request is sometimes missing or not JSON, and the
+//! calls to `apply_patch` a patch, whole, cut short or not a patch at all,
+//! and calls to the local shell's function a shell action, valid or not.
+//! Neither a shell action nor a shell call item holds a key twice, as the
+//! port reads the last where upstream checks the first (see UPSTREAM.md).
+//! The client's request is sometimes missing or not JSON, and the
 //! translated one missing, translated from it, or a few fields that the
 //! response repeats. Neither holds a number too large for `int64`, which
 //! upstream reads by the CPU's rules.
@@ -31,7 +36,7 @@ use serde_json::{Value, json};
 
 use super::claude_responses::qualify;
 use super::openai_chat::Call;
-use super::{EFFORTS, Rng, escape_text, num};
+use super::{EFFORTS, Rng, escape_text, lit, num};
 use crate::cases::Case;
 
 /// Builds `count` random Responses requests for a Chat Completions upstream.
@@ -61,6 +66,13 @@ pub fn event_cases(seed: u64, count: usize) -> (Vec<Case>, Vec<Case>) {
                 // does, so its calls stream often enough.
                 declare_apply_patch(&mut original);
                 generator.tool_names.push(json!("apply_patch"));
+            }
+            if generator.rng.chance(30) {
+                // And the local shell, for the same reason.
+                declare(
+                    &mut original,
+                    json!({ "type": "shell", "environment": { "type": "local" } }),
+                );
             }
             tame_numbers(&mut original);
             let calls = calls(&original, &generator.tool_names);
@@ -163,6 +175,54 @@ const PATCH_ARGUMENTS: &[&str] = &[
     "",
 ];
 
+/// The arguments of a call to the local shell's function: actions with and
+/// without limits, written loosely, and arguments that aren't a valid action
+/// for each reason upstream has. None holds a key twice or an unpaired
+/// surrogate, which the port reads differently (see UPSTREAM.md).
+const SHELL_ARGUMENTS: &[&str] = &[
+    r#"{"commands":["ls -la"]}"#,
+    r#"{"commands":["pwd","echo 'café 🚀' > a.txt"],"timeout_ms":1000}"#,
+    r#"{"commands":["cat a"],"timeout_ms":1e3,"max_output_length":4096.0}"#,
+    r#"{ "max_output_length" : 1E3 , "commands" : [ "line\nbreak \"quoted\"" ] }"#,
+    r#"{"commands":["ls"],"timeout_ms":null,"max_output_length":null}"#,
+    r#"{"commands":["ls"],"timeout_ms":1e400}"#,
+    r#" {"commands":["ls"]} "#,
+    r#"{"commands":["ls"],"timeout_ms":0}"#,
+    r#"{"commands":["ls"],"timeout_ms":-0}"#,
+    r#"{"commands":["ls"],"max_output_length":-1}"#,
+    r#"{"commands":["ls"],"timeout_ms":1.5}"#,
+    r#"{"commands":["ls"],"timeout_ms":"1000"}"#,
+    r#"{"commands":["ls"],"extra":true}"#,
+    r#"{"commands":[]}"#,
+    r#"{"commands":["  "]}"#,
+    r#"{"commands":["ls",5]}"#,
+    r#"{"commands":"ls"}"#,
+    r#"{"command":["ls","-la"]}"#,
+    r#"[{"commands":["ls"]}]"#,
+    r#"{"commands":["ls"]"#,
+    "not json",
+    "",
+];
+
+/// The local shell's function's names, which other tools and calls take too.
+const SHELL_NAMES: &[&str] = &[
+    "__cpa_local_shell",
+    "__cpa_local_shell_1",
+    " __cpa_local_shell ",
+];
+
+/// Commands in a shell call's action, some blank, which only a response's
+/// action has to avoid.
+const SHELL_COMMANDS: &[&str] = &[
+    "ls -la",
+    "pwd",
+    "echo 'café 🚀' > a.txt",
+    "cat \"quoted file\" | grep -n x",
+    "line\nbreak",
+    "  ",
+    "",
+];
+
 /// Reasoning text, from a small pool so repeats are common, with the
 /// placeholder upstream writes for reasoning it can't show.
 const REASONING: &[&str] = &[
@@ -200,6 +260,9 @@ struct Generator {
     /// their calls by the request's translation, so in a response suite the
     /// two would read every call to such a tool differently.
     whole_cuts: bool,
+    /// Whether a tool declared so far is the client's local shell, for
+    /// `tool_choice` to force more often.
+    local_shell: bool,
 }
 
 impl Deref for Generator {
@@ -304,6 +367,7 @@ impl Generator {
             },
             namespaces: Vec::new(),
             whole_cuts: false,
+            local_shell: false,
         }
     }
 
@@ -336,7 +400,16 @@ impl Generator {
             fields.push(("instructions", instructions));
         }
         if self.rng.chance(35) {
-            fields.push(("tool_choice", self.tool_choice()));
+            let choice = if self.local_shell && self.rng.chance(60) {
+                // Forcing the local shell, which few requests declare.
+                self.one_of(&[
+                    json!({ "type": "shell" }),
+                    json!({ "type": "shell", "x": 1 }),
+                ])
+            } else {
+                self.tool_choice()
+            };
+            fields.push(("tool_choice", choice));
         }
         if self.rng.chance(30) {
             fields.push(("parallel_tool_calls", self.bool_like()));
@@ -378,7 +451,7 @@ impl Generator {
     }
 
     fn tool(&mut self) -> Value {
-        match self.rng.below(24) {
+        match self.rng.below(26) {
             0..=8 => self.function_tool(),
             9 | 10 => self.custom_tool(),
             11 => self.apply_patch_tool(),
@@ -423,13 +496,49 @@ impl Generator {
                 let schema = self.schema(0);
                 json!({ "name": name, "parameters": schema })
             }
+            21 | 22 => self.shell_tool(),
             _ => self.one_of(&[json!(1), json!("Bash"), Value::Null, json!([])]),
         }
     }
 
-    /// A tool name, remembered for calls and `tool_choice` to use.
+    /// A `shell` tool: the client's local shell mostly, one in a container,
+    /// or one whose environment is missing or odd.
+    fn shell_tool(&mut self) -> Value {
+        let tool_type = if self.rng.chance(90) {
+            "shell"
+        } else {
+            " shell "
+        };
+        let mut fields = vec![("type", json!(tool_type))];
+        let environment = match self.rng.below(12) {
+            0..=6 => {
+                self.local_shell = true;
+                Some(json!({ "type": "local" }))
+            }
+            7 => Some(json!({ "type": "container_auto" })),
+            8 => Some(json!({ "type": "container_reference", "container_id": "cntr_1" })),
+            9 => Some(self.one_of(&[json!({ "type": "LOCAL" }), json!({ "type": " local " })])),
+            10 => Some(self.one_of(&[json!({}), json!("local"), Value::Null])),
+            _ => None,
+        };
+        if let Some(environment) = environment {
+            fields.push(("environment", environment));
+        }
+        if self.rng.chance(10) {
+            // A name, which the shell's function doesn't take.
+            fields.push(("name", json!("shell")));
+        }
+        self.object(fields)
+    }
+
+    /// A tool name, remembered for calls and `tool_choice` to use: now and
+    /// then one the local shell's function would take.
     fn declared_name(&mut self) -> Value {
-        let name = self.tool_name();
+        let name = if self.rng.chance(5) {
+            json!(self.rng.pick(SHELL_NAMES))
+        } else {
+            self.tool_name()
+        };
         self.tool_names.push(name.clone());
         name
     }
@@ -575,8 +684,12 @@ impl Generator {
             1 if !namespace.is_empty() => format!("{namespace}__read"),
             2 if !namespace.is_empty() => namespace.to_owned(),
             3 => " padded ".to_owned(),
-            // Names other namespaces' children share.
-            4 | 5 => self.rng.pick(&["read", "search", "read_file"]).to_owned(),
+            // Names other namespaces' children share, and the local shell's
+            // function's.
+            4 | 5 => self
+                .rng
+                .pick(&["read", "search", "read_file", "__cpa_local_shell"])
+                .to_owned(),
             _ => match self.tool_name() {
                 Value::String(name) => name,
                 _ => "read".to_owned(),
@@ -592,10 +705,15 @@ impl Generator {
         self.tool_names.push(qualify(namespace, &child).into());
         self.tool_names.push(child.trim().into());
         let mut fields = Vec::new();
-        match self.rng.below(10) {
+        match self.rng.below(11) {
             0..=5 => fields.push(("type", json!("function"))),
             6 => fields.push(("type", json!("custom"))),
             7 => fields.push(("type", json!("web_search"))),
+            8 => {
+                // The local shell, which only counts outside a namespace.
+                fields.push(("type", json!("shell")));
+                fields.push(("environment", json!({ "type": "local" })));
+            }
             _ => {}
         }
         fields.push(("name", json!(child)));
@@ -912,6 +1030,9 @@ impl Generator {
     }
 
     fn tool_call(&mut self, id: Option<(&'static str, Value)>) -> Value {
+        if self.rng.chance(12) {
+            return self.shell_call(id);
+        }
         let custom = self.rng.chance(25);
         let item_type = if custom {
             "custom_tool_call"
@@ -928,6 +1049,9 @@ impl Generator {
         }
         let name = if !self.tool_names.is_empty() && self.rng.chance(75) {
             self.base.rng.pick(&self.base.tool_names)
+        } else if self.rng.chance(8) {
+            // A name the shell's calls would be replayed under.
+            json!(self.rng.pick(SHELL_NAMES))
         } else {
             self.tool_name()
         };
@@ -965,6 +1089,135 @@ impl Generator {
         self.object(fields)
     }
 
+    /// A `shell_call` item: the client's local shell, named or not, or a
+    /// shell elsewhere, running an action that is whole, odd or missing.
+    fn shell_call(&mut self, id: Option<(&'static str, Value)>) -> Value {
+        let mut fields = vec![("type", json!("shell_call"))];
+        if let Some((key, id)) = id {
+            fields.push((key, id));
+        }
+        if self.rng.chance(30) && !fields.iter().any(|(key, _)| *key == "id") {
+            let id = format!("sh_{}", self.alphanumeric(10));
+            fields.push(("id", id.into()));
+        }
+        let environment = match self.rng.below(12) {
+            0..=4 => None,
+            5..=8 => Some(json!({ "type": "local" })),
+            9 => Some(json!({ "type": "container_auto" })),
+            10 => Some(self.one_of(&[
+                json!({ "type": "container_reference", "container_id": "cntr_1" }),
+                json!({ "type": "LOCAL" }),
+                json!({ "type": null }),
+            ])),
+            _ => Some(self.one_of(&[json!({}), json!("local"), Value::Null])),
+        };
+        if let Some(environment) = environment {
+            fields.push(("environment", environment));
+        }
+        if self.rng.chance(92) {
+            let action = self.shell_action();
+            fields.push(("action", action));
+        }
+        if self.rng.chance(30) {
+            let status = self.loose_choice(&["completed", "in_progress", "incomplete"]);
+            fields.push(("status", status));
+        }
+        if self.rng.chance(5) {
+            fields.push(("reasoning_content", self.reasoning_text()));
+        }
+        self.object(fields)
+    }
+
+    /// A shell call's action: commands with limits or without, written as
+    /// upstream copies them, or something that isn't an action.
+    fn shell_action(&mut self) -> Value {
+        match self.rng.below(12) {
+            0..=7 => {
+                let count = 1 + self.rng.below(3);
+                let commands = (0..count)
+                    .map(|_| json!(self.rng.pick(SHELL_COMMANDS)))
+                    .collect();
+                let mut fields = vec![("commands", Value::Array(commands))];
+                if self.rng.chance(40) {
+                    fields.push(("timeout_ms", self.shell_limit()));
+                }
+                if self.rng.chance(30) {
+                    fields.push(("max_output_length", self.shell_limit()));
+                }
+                self.object(fields)
+            }
+            8 => json!({ "command": ["ls", "-la"], "env": {} }),
+            9 => json!({ "commands": [] }),
+            10 => json!("ls -la"),
+            _ => self.one_of(&[Value::Null, json!(5), json!([["ls"]])]),
+        }
+    }
+
+    /// A shell action's limit, its text kept as written.
+    fn shell_limit(&mut self) -> Value {
+        self.one_of(&[
+            json!(1000),
+            json!(4096),
+            lit("1e3"),
+            lit("1.0"),
+            lit("-0"),
+            Value::Null,
+            json!(0),
+            json!(-1),
+            lit("1.5"),
+            json!("1000"),
+        ])
+    }
+
+    /// A `shell_call_output` item, which upstream gives the model whole.
+    fn shell_call_output(&mut self, id: Option<Value>) -> Value {
+        let mut fields = vec![("type", json!("shell_call_output"))];
+        if let Some(id) = id {
+            let key = match self.rng.below(20) {
+                0..=17 => "call_id",
+                18 => "callId",
+                _ => "tool_call_id",
+            };
+            fields.push((key, id));
+        }
+        if self.rng.chance(30) {
+            fields.push(("id", format!("sho_{}", self.alphanumeric(8)).into()));
+        }
+        if self.rng.chance(92) {
+            let output = if self.rng.chance(90) {
+                let count = self.rng.below(3);
+                Value::Array((0..count).map(|_| self.shell_output()).collect())
+            } else {
+                self.one_of(&[json!("done"), Value::Null, json!({ "stdout": "x" })])
+            };
+            fields.push(("output", output));
+        }
+        if self.rng.chance(30) {
+            fields.push(("max_output_length", lit("4096")));
+        }
+        if self.rng.chance(15) {
+            fields.push(("status", json!("completed")));
+        }
+        self.object(fields)
+    }
+
+    /// One command's result in a shell call's output.
+    fn shell_output(&mut self) -> Value {
+        let stdout = self.text();
+        let stderr = self.one_of(&[json!(""), json!("warning: x\n"), json!("é 🚀\t<&>")]);
+        let outcome = self.one_of(&[
+            json!({ "type": "exit", "exit_code": 0 }),
+            json!({ "type": "exit", "exit_code": 1 }),
+            json!({ "type": "timeout" }),
+        ]);
+        let fields = vec![
+            ("stdout", stdout.into()),
+            ("stderr", stderr),
+            ("outcome", outcome),
+        ];
+        self.object(fields)
+    }
+
     /// The ID of a call not yet answered, or none.
     fn pending_call_id(&mut self) -> Option<Value> {
         if self.tool_use_ids.is_empty() || self.rng.chance(20) {
@@ -976,6 +1229,9 @@ impl Generator {
     }
 
     fn tool_output(&mut self, id: Option<Value>) -> Value {
+        if self.rng.chance(10) {
+            return self.shell_call_output(id);
+        }
         let item_type = if self.rng.chance(80) {
             "function_call_output"
         } else {
@@ -1141,7 +1397,7 @@ impl Generator {
     // --- Other request fields ---
 
     fn tool_choice(&mut self) -> Value {
-        match self.rng.below(12) {
+        match self.rng.below(14) {
             0..=2 => self.loose_choice(&["auto", "required", "none", " auto ", "AUTO", ""]),
             3..=6 => {
                 let name = self.choice_name();
@@ -1182,6 +1438,13 @@ impl Generator {
                 json!({ "type": "auto" }),
                 json!({ "type": " function ", "name": "search" }),
                 json!({}),
+            ]),
+            // The local shell's function, if the request declares the shell.
+            11 | 12 => self.one_of(&[
+                json!({ "type": "shell" }),
+                json!({ "type": "shell" }),
+                json!({ "type": "shell", "environment": { "type": "local" } }),
+                json!({ "type": " shell " }),
             ]),
             _ => self.one_of(&[Value::Null, json!(5), json!(["auto"])]),
         }
@@ -1306,10 +1569,15 @@ impl Generator {
 
 /// Adds the `apply_patch` custom tool to a request's tools.
 fn declare_apply_patch(request: &mut Value) {
+    let tool = json!({ "type": "custom", "name": "apply_patch", "description": "Edit files." });
+    declare(request, tool);
+}
+
+/// Adds `tool` to a request's tools.
+fn declare(request: &mut Value, tool: Value) {
     let Value::Object(fields) = request else {
         return;
     };
-    let tool = json!({ "type": "custom", "name": "apply_patch", "description": "Edit files." });
     match fields.get_mut("tools") {
         Some(Value::Array(tools)) => tools.push(tool),
         _ => {
@@ -1337,7 +1605,7 @@ fn tame_numbers(value: &mut Value) {
 /// The calls a model might make to a request's tools: by the names the
 /// translated request gives them, by the names the client wrote (`declared`)
 /// and by a name neither declares, each with arguments of the kind its tool
-/// takes.
+/// takes, a shell action for the local shell's function.
 fn calls(request: &Value, declared: &[Value]) -> Vec<Call> {
     let translated =
         convert_openai_responses_request_to_openai_chat_completions("gpt-4o", request, true);
@@ -1347,10 +1615,14 @@ fn calls(request: &Value, declared: &[Value]) -> Vec<Call> {
             let Some(name) = tool.pointer("/function/name").and_then(Value::as_str) else {
                 continue;
             };
+            let required = tool.pointer("/function/parameters/required");
             let arguments = if name == "apply_patch" {
                 PATCH_ARGUMENTS
-            } else if tool.pointer("/function/parameters/required") == Some(&json!(["input"])) {
+            } else if required == Some(&json!(["input"])) {
                 CUSTOM_ARGUMENTS
+            } else if required == Some(&json!(["commands"])) {
+                // The local shell's function.
+                SHELL_ARGUMENTS
             } else {
                 super::openai_chat::ARGUMENTS
             };
@@ -1415,6 +1687,12 @@ mod tests {
                 r#""tools":[{"function":{"description":"#,
                 r#""name":"apply_patch""#,
                 "_1\"",
+                r#""name":"__cpa_local_shell""#,
+                r#""name":"__cpa_local_shell_1""#,
+                r#""tool_choice":{"type":"shell""#,
+                r#""tool_choice":{"type":"function","function":{"name":"__cpa_local_shell"#,
+                r#""arguments":"{\"commands\":["#,
+                r#"\"type\":\"shell_call_output\""#,
             ],
         );
 
@@ -1493,6 +1771,9 @@ mod tests {
                 r#""event":"response.reasoning_summary_text.delta""#,
                 r#""event":"response.output_text.delta""#,
                 r#""type":"custom_tool_call""#,
+                r#""type":"shell_call""#,
+                r#""action":{"commands":[""#,
+                "invalid shell action",
                 r#""namespace":"#,
                 r#""instructions":"#,
                 r#""cached_tokens":12"#,
@@ -1505,6 +1786,8 @@ mod tests {
                 r#""status":"incomplete""#,
                 r#""type":"custom_tool_call""#,
                 r#""type":"function_call""#,
+                r#""type":"shell_call""#,
+                "invalid shell action",
                 r#""type":"reasoning""#,
                 r#""max_output_tokens":"#,
                 r#""id":"resp_(generated)""#,

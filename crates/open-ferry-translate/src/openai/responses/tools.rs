@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/openai/openai/responses/openai_openai-responses_tools.go
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The tools a Responses request declares, as Chat Completions functions.
@@ -9,7 +9,9 @@
 //! Strict Chat Completions upstreams limit function names to 64 bytes, so a
 //! longer name keeps its last 64, where the child's own name is. Declarations
 //! that only collide once cut get `_1`-style suffixes. A custom (freeform) tool
-//! becomes a function with one string argument, `input`.
+//! becomes a function with one string argument, `input`, and the client's
+//! local shell a function named so that it is none of the other tools' names
+//! (see [`super::shell_tool`]).
 //!
 //! The lookups by name, including those that map a call's name back for the
 //! response translator, are in [`super::tool_index`].
@@ -22,6 +24,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::{Value, json};
 
+use super::shell_tool;
 use crate::apply_patch;
 use crate::json::lenient::{self, Found};
 use crate::json::{go_value, object, path, str_of};
@@ -30,8 +33,8 @@ use crate::json::{go_value, object, path, str_of};
 /// Completions upstreams accept, in bytes.
 const NAME_LIMIT: usize = 64;
 
-/// One function or custom tool declaration and the Chat Completions name it
-/// gets (`responsesToolDeclaration`).
+/// One function, custom tool or local shell declaration and the Chat
+/// Completions name it gets (`responsesToolDeclaration`).
 pub(super) struct Declaration<'a> {
     pub(super) tool: &'a Value,
     pub(super) chat_name: String,
@@ -40,11 +43,13 @@ pub(super) struct Declaration<'a> {
     /// The namespace it was declared in, trimmed, or `""`.
     pub(super) namespace: String,
     pub(super) custom: bool,
+    /// Whether it is the client's local shell.
+    pub(super) shell: bool,
 }
 
-/// `walkResponsesToolDeclarations`: the request's function and custom tools,
-/// top-level `tools` first, then those in `additional_tools` input items, with
-/// namespace children in place of their namespace.
+/// `walkResponsesToolDeclarations`: the request's function and custom tools
+/// and local shell, top-level `tools` first, then those in `additional_tools`
+/// input items, with namespace children in place of their namespace.
 pub(super) fn declarations(request: &Value) -> Vec<Declaration<'_>> {
     let mut declarations = Vec::new();
     scan(request.get("tools"), &mut declarations);
@@ -55,8 +60,37 @@ pub(super) fn declarations(request: &Value) -> Vec<Declaration<'_>> {
             }
         }
     }
+    name_shell(&mut declarations);
     disambiguate(&mut declarations);
     declarations
+}
+
+/// Names the local shell's declarations with the first shell function name
+/// that no other declaration has as its local, Chat Completions or uncut
+/// qualified name.
+fn name_shell(declarations: &mut [Declaration<'_>]) {
+    if !declarations.iter().any(|declaration| declaration.shell) {
+        return;
+    }
+    let reserved: HashSet<String> = declarations
+        .iter()
+        .filter(|declaration| !declaration.shell)
+        .flat_map(|declaration| {
+            [
+                declaration.local_name.clone(),
+                declaration.chat_name.clone(),
+                raw_qualified_name(&declaration.namespace, &declaration.local_name),
+            ]
+        })
+        .collect();
+    let name = shell_tool::unreserved_name(&reserved);
+    for declaration in declarations
+        .iter_mut()
+        .filter(|declaration| declaration.shell)
+    {
+        declaration.local_name.clone_from(&name);
+        declaration.chat_name.clone_from(&name);
+    }
 }
 
 fn scan<'a>(tools: Option<&'a Value>, declarations: &mut Vec<Declaration<'a>>) {
@@ -78,12 +112,17 @@ fn scan<'a>(tools: Option<&'a Value>, declarations: &mut Vec<Declaration<'a>>) {
 }
 
 fn emit<'a>(tool: &'a Value, namespace: &str, declarations: &mut Vec<Declaration<'a>>) {
-    let custom = match str_of(tool.get("type")).trim() {
-        "" | "function" => false,
-        "custom" => true,
+    let (custom, shell) = match str_of(tool.get("type")).trim() {
+        "" | "function" => (false, false),
+        "custom" => (true, false),
+        "shell" if shell_tool::is_local_shell(tool, namespace) => (false, true),
         _ => return,
     };
-    let local_name = tool_name(tool);
+    let local_name = if shell {
+        shell_tool::SHELL_NAME.to_owned()
+    } else {
+        tool_name(tool)
+    };
     if local_name.is_empty() {
         return;
     }
@@ -93,6 +132,7 @@ fn emit<'a>(tool: &'a Value, namespace: &str, declarations: &mut Vec<Declaration
         local_name,
         namespace: namespace.to_owned(),
         custom,
+        shell,
     });
 }
 

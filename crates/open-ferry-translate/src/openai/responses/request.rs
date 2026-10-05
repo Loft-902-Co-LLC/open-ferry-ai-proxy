@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/openai/openai/responses/openai_openai-responses_request.go
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! OpenAI Responses request → OpenAI Chat Completions request.
@@ -12,7 +12,9 @@
 //! that can be done safely. Reasoning items become `reasoning_content` on the
 //! assistant message that follows them. Tools are merged from `tools` and
 //! `additional_tools` input items, with namespace children flattened and names
-//! cut to 64 bytes (see [`super::tools`]).
+//! cut to 64 bytes (see [`super::tools`]). The client's local shell becomes a
+//! function, and its calls and their outputs in `input` become calls to that
+//! function and their outputs (see [`super::shell_tool`]).
 //!
 //! Deviations from upstream:
 //! - Tool parameter schemas are passed on as the client wrote them. Upstream
@@ -26,8 +28,9 @@
 //!   URL, `reasoning_content`, reasoning summary `text` or function call
 //!   `arguments`; a custom tool call `input` that isn't a string, inside the
 //!   call's `{"input": ...}` arguments; a tool output that isn't a string, or
-//!   a part of one that isn't text or an image; and tool names, descriptions
-//!   and namespaces.
+//!   a part of one that isn't text or an image; a `shell_call`'s `action`
+//!   and a whole `shell_call_output` item; and tool names, descriptions and
+//!   namespaces.
 //! - An empty `reasoning` object counts as no reasoning however it is
 //!   written. Upstream compares its text with `{}`, so `{ }` turns reasoning
 //!   on there, and tool call turns without reasoning get the
@@ -50,6 +53,7 @@ use std::mem;
 
 use serde_json::{Map, Value, json};
 
+use super::shell_tool;
 use super::tool_index::ToolIndex;
 use super::tools::tool_output_text;
 use crate::common::openai_tools::align_openai_tool_call_messages;
@@ -90,7 +94,7 @@ pub fn convert_openai_responses_request_to_openai_chat_completions(
         ]));
     }
     match request.get("input") {
-        Some(Value::Array(items)) => history.convert(items),
+        Some(Value::Array(items)) => history.convert(&shell_tool::history(items, &tool_index)),
         Some(Value::String(input)) => history.messages.push(object([
             ("role", "user".into()),
             ("content", input.as_str().into()),
@@ -723,13 +727,24 @@ fn is_usable_reasoning(reasoning: &str) -> bool {
     !trimmed.is_empty() && trimmed != REASONING_UNAVAILABLE
 }
 
-/// `convertResponsesToolChoiceWithIndex`: a forced function or custom tool,
-/// by its Chat Completions name. Any other choice is passed on as it is.
+/// `convertResponsesToolChoiceWithIndex`: a forced function, custom tool or
+/// local shell, by its Chat Completions name. Any other choice is passed on
+/// as it is.
 fn convert_tool_choice(tool_choice: &Value, tool_index: &ToolIndex<'_>) -> Value {
     if !tool_choice.is_object() {
         return tool_choice.clone();
     }
-    if !matches!(&*str_of(tool_choice.get("type")), "function" | "custom") {
+    let choice_type = str_of(tool_choice.get("type"));
+    if choice_type == "shell" && !tool_index.shell_name().is_empty() {
+        return object([
+            ("type", "function".into()),
+            (
+                "function",
+                object([("name", tool_index.shell_name().into())]),
+            ),
+        ]);
+    }
+    if !matches!(&*choice_type, "function" | "custom") {
         return tool_choice.clone();
     }
     let Some(name) = ["function.name", "custom.name", "name"]

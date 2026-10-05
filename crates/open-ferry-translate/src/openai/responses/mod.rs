@@ -8,6 +8,7 @@
 
 mod request;
 mod response;
+mod shell_tool;
 mod tool_index;
 mod tools;
 

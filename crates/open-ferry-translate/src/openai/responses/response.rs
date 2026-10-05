@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/translator/openai/openai/responses/openai_openai-responses_response.go
 // (ConvertOpenAIChatCompletionsResponseToOpenAIResponses,
 // ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream, FinalizeToolInput)
-// (v8.0.10, MIT).
+// and shell_tool.go (responsesToolInputFailure) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! OpenAI Chat Completions responses → OpenAI Responses responses.
@@ -27,6 +27,12 @@
 //! Arguments that aren't one valid input string, a call whose ID or name
 //! changes, and a stream that ends before `[DONE]` all end the response with
 //! `response.failed`.
+//!
+//! A call to the client's local shell (see [`super::shell_tool`]) becomes a
+//! `shell_call` item. A stream announces it once the call's ID and name are
+//! known, sends none of its arguments, and finishes it with its action when
+//! the call ends. Arguments that aren't a valid action end the response with
+//! `response.failed`, whose message says so.
 //!
 //! Deviations from upstream:
 //! - A line that is not valid JSON or UTF-8 gives nothing, and a response
@@ -67,6 +73,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value, json};
 
+use super::shell_tool::{self, tool_input_failure};
 use super::tool_index::ToolNames;
 use super::tools::unwrap_custom_tool_input;
 use crate::apply_patch::input::{CallState, InputError, failure};
@@ -188,12 +195,14 @@ impl Usage {
     }
 }
 
-/// Why a response with an `apply_patch` call failed. Upstream keeps it as an
-/// `error` for the caller.
+/// Why a response failed for a tool call's input: an `apply_patch` call's,
+/// or a shell call's. Upstream keeps it as an `error` for the caller.
 #[derive(Debug)]
 enum ToolInputError {
     /// The arguments aren't one valid input string.
     Arguments(InputError),
+    /// A shell call's arguments aren't a valid action.
+    ShellAction,
     /// The call's ID or name changed.
     ConflictingIdentity,
     /// The stream ended before `[DONE]`.
@@ -207,6 +216,7 @@ impl fmt::Display for ToolInputError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Arguments(error) => error.fmt(f),
+            Self::ShellAction => f.write_str(shell_tool::INVALID_ACTION),
             Self::ConflictingIdentity => f.write_str("conflicting apply_patch call identity"),
             Self::Unterminated => {
                 f.write_str("upstream apply_patch stream ended before protocol completion")
@@ -324,7 +334,8 @@ impl OpenAIToOpenAIResponsesStream {
         out
     }
 
-    /// `ToolInputError`: why the stream failed, if an `apply_patch` call did.
+    /// `ToolInputError`: why the stream failed, if a tool call's input was
+    /// invalid.
     pub fn tool_input_error(&self) -> Option<&(dyn Error + 'static)> {
         self.error
             .as_ref()
@@ -592,21 +603,25 @@ impl OpenAIToOpenAIResponsesStream {
             call.call_id = format!("call_{}_{}_{}", self.response_id, key.0, key.1);
         }
         call.custom = self.tools.is_custom(&call.name);
-        if call.custom && self.tools.is_apply_patch(&call.name) {
-            call.patch = Some(CallState::new(
-                format!("ctc_{}", call.call_id),
-                call.call_id.clone(),
-                call.output_index,
-            ));
-        }
-        let item = call_item(
-            &self.tools,
-            call.custom,
-            &call.call_id,
-            "in_progress",
-            "",
-            &call.name,
-        );
+        let item = if self.tools.is_shell(&call.name) {
+            shell_tool::placeholder(&call.call_id)
+        } else {
+            if call.custom && self.tools.is_apply_patch(&call.name) {
+                call.patch = Some(CallState::new(
+                    format!("ctc_{}", call.call_id),
+                    call.call_id.clone(),
+                    call.output_index,
+                ));
+            }
+            call_item(
+                &self.tools,
+                call.custom,
+                &call.call_id,
+                "in_progress",
+                "",
+                &call.name,
+            )
+        };
         let output_index = call.output_index;
         call.item_added = true;
         let seq = self.next_seq();
@@ -624,10 +639,15 @@ impl OpenAIToOpenAIResponsesStream {
 
     /// `emitPendingFunctionArgs`: sends the arguments that arrived since the
     /// last delta. A custom tool's arguments aren't streamed, except
-    /// `apply_patch`'s, which stream as decoded input.
+    /// `apply_patch`'s, which stream as decoded input, and nor are the local
+    /// shell's.
     fn emit_pending_args(&mut self, key: (i64, i64), out: &mut String) {
         let call = self.calls.get_mut(&key).expect("a tracked call");
-        if !call.item_added || self.error.is_some() || call.args.len() <= call.args_sent {
+        if !call.item_added
+            || self.error.is_some()
+            || self.tools.is_shell(&call.name)
+            || call.args.len() <= call.args_sent
+        {
             return;
         }
         let delta = &call.args[call.args_sent..];
@@ -731,10 +751,50 @@ impl OpenAIToOpenAIResponsesStream {
             } else {
                 "completed"
             };
-            if !self.finish_call(key, &args, status, out) {
+            let finished = if self.tools.is_shell(&name) {
+                self.finish_shell_call(key, &args, status, out)
+            } else {
+                self.finish_call(key, &args, status, out)
+            };
+            if !finished {
                 return;
             }
         }
+    }
+
+    /// Sends a local shell call's `output_item.done` with its action, or
+    /// fails the response if `args` aren't a valid action. Returns `false`
+    /// if the response failed.
+    fn finish_shell_call(
+        &mut self,
+        key: (i64, i64),
+        args: &str,
+        status: &str,
+        out: &mut String,
+    ) -> bool {
+        let Some(call) = self.calls.get_mut(&key) else {
+            return true;
+        };
+        let Some(item) = shell_tool::call_item(&call.call_id, args, status) else {
+            self.fail_tool_input(ToolInputError::ShellAction, out);
+            return false;
+        };
+        call.item_done = true;
+        let output_index = call.output_index;
+        let seq = self.next_seq();
+        // Not `json!`, which would read the action's numbers again and
+        // respell them.
+        push_event(
+            out,
+            "response.output_item.done",
+            &object([
+                ("type", "response.output_item.done".into()),
+                ("sequence_number", seq.into()),
+                ("output_index", output_index.into()),
+                ("item", item),
+            ]),
+        );
+        true
     }
 
     /// Sends a call's closing events with its final arguments. Returns
@@ -998,6 +1058,13 @@ impl OpenAIToOpenAIResponsesStream {
             ));
         }
         for call in self.calls.values().filter(|call| call.item_done) {
+            if self.tools.is_shell(&call.name) {
+                // Its action was valid when the call finished.
+                if let Some(item) = shell_tool::call_item(&call.call_id, &call.args, status) {
+                    output.push((call.output_index, item));
+                }
+                continue;
+            }
             let payload = match (&call.patch, call.custom) {
                 (Some(patch), _) => patch.input().to_owned(),
                 (None, true) => unwrap_custom_tool_input(&call.args),
@@ -1054,9 +1121,14 @@ impl OpenAIToOpenAIResponsesStream {
         if self.error.is_some() {
             return;
         }
+        let invalid_action = matches!(error, ToolInputError::ShellAction);
         self.error = Some(error);
         let seq = self.next_seq();
-        push_event(out, "response.failed", &failure(&self.response_id, seq));
+        push_event(
+            out,
+            "response.failed",
+            &tool_input_failure(&self.response_id, seq, invalid_action),
+        );
     }
 
     fn next_seq(&mut self) -> i64 {
@@ -1074,7 +1146,8 @@ impl OpenAIToOpenAIResponsesStream {
 /// Chat Completions response as one Responses object. A response without an
 /// `id` gets a new one, and one without `created` the current time. If an
 /// `apply_patch` call's arguments are invalid, the result is a failed
-/// response that says nothing about them.
+/// response that says nothing about them; if a shell call's are, one that
+/// says the action was invalid.
 pub fn convert_openai_chat_completions_response_to_openai_responses_non_stream(
     original_request: &Value,
     request: &Value,
@@ -1084,7 +1157,7 @@ pub fn convert_openai_chat_completions_response_to_openai_responses_non_stream(
 }
 
 /// [`convert_openai_chat_completions_response_to_openai_responses_non_stream`],
-/// or `None` if an `apply_patch` call failed: upstream's registry returns
+/// or `None` if a tool call's input was invalid: upstream's registry returns
 /// nothing then, when its caller passes a parameter to keep the error in.
 pub(crate) fn convert_openai_chat_completions_response_to_openai_responses_non_stream_checked(
     original_request: &Value,
@@ -1208,6 +1281,14 @@ fn non_stream(
             };
             let name = tools.canonical_name(&str_of(path(call, "function.name")));
             let args = str_of(path(call, "function.arguments"));
+            if tools.is_shell(&name) {
+                let Some(item) = shell_tool::call_item(&call_id, &args, status) else {
+                    let mut failed = tool_input_failure(&id, 0, true);
+                    return (failed["response"].take(), Some(ToolInputError::ShellAction));
+                };
+                output.push(item);
+                continue;
+            }
             if !tools.is_custom(&name) {
                 output.push(call_item(&tools, false, &call_id, status, &args, &name));
                 continue;
