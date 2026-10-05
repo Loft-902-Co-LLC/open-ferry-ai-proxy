@@ -23,6 +23,7 @@
 
 use std::time::SystemTime;
 
+use open_ferry_translate::json::exact;
 use serde_json::{Value, json};
 
 use super::request::Prepared;
@@ -97,7 +98,9 @@ pub(crate) fn shape_body(body: &mut Value, payload: &[u8]) {
         delete(body, field);
     }
     remove_input_items_by_type(body, COMPACTION_TRIGGER);
-    let payload: Value = serde_json::from_slice(payload).unwrap_or(Value::Null);
+    // Read keeping each number's text, so a numeric ID is sent as gjson's
+    // `String` gives it: `-0` stays `-0`.
+    let payload = exact::from_slice(payload).unwrap_or(Value::Null);
     let previous = str_of(get(&payload, "previous_response_id"));
     let previous = previous.trim();
     if !previous.is_empty() {

@@ -820,6 +820,31 @@ async fn compact_keeps_previous_response_id() {
     assert!(!exists(&chat.last().json(), "previous_response_id"));
 }
 
+// Not upstream's: a numeric previous_response_id is sent as the string
+// gjson's `String` makes of the number the client wrote, an integer as
+// written, `-0` included, and any other number in plain notation.
+#[tokio::test]
+async fn compact_sends_a_numeric_previous_response_id_as_written() {
+    for (written, sent) in [("-0", "-0"), ("1E20", "100000000000000000000")] {
+        let mock = Mock::start(Reply::json(r#"{"id":"resp_2","output":[]}"#)).await;
+        let payload =
+            format!(r#"{{"model":"grok-4.3","previous_response_id":{written},"input":"hi"}}"#);
+        executor()
+            .execute(
+                api_key_auth(&mock.url),
+                request("grok-4.3", &payload),
+                compact_options("openai-response"),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{written}: {error:?}"));
+        let body = mock.last().body;
+        assert!(
+            body.contains(&format!(r#""previous_response_id":"{sent}""#)),
+            "{written}: {body}"
+        );
+    }
+}
+
 // Not upstream's: a compact call can't stream.
 #[tokio::test]
 async fn compact_cannot_stream() {

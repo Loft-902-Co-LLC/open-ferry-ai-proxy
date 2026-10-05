@@ -46,6 +46,7 @@
 use std::collections::{HashMap, HashSet};
 
 use open_ferry_translate::go;
+use open_ferry_translate::json::exact;
 use serde_json::{Map, Value, json};
 
 use super::schema;
@@ -1075,12 +1076,13 @@ pub(crate) fn normalize_input_namespace_tool_calls(body: &mut Value, fold: bool)
 
 /// A dispatcher call's arguments: the child's `name` and, if any, its
 /// `arguments`, as JSON if they are, else as a string. Keys are sorted, as
-/// upstream marshals a Go map.
+/// upstream marshals a Go map; the arguments' numbers keep their text, as
+/// upstream's `json.RawMessage` does.
 fn dispatcher_arguments(name: String, arguments: &str) -> String {
     let mut out = Map::new();
     if !arguments.is_empty() {
         let value = go::gjson_valid(arguments.as_bytes())
-            .then(|| serde_json::from_str::<Value>(arguments).ok())
+            .then(|| exact::from_str(arguments).ok())
             .flatten()
             .unwrap_or_else(|| Value::from(arguments));
         out.insert("arguments".to_owned(), value);

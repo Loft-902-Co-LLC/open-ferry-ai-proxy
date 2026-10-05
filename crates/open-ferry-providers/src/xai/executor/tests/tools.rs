@@ -96,6 +96,32 @@ async fn execute_folds_namespaces_when_tools_exceed_200() {
     );
 }
 
+// Not upstream's: a past call folded into its namespace's dispatcher keeps
+// its arguments' numbers as the client wrote them, as upstream's
+// `json.RawMessage` does.
+#[tokio::test]
+async fn folded_input_call_keeps_its_numbers_as_written() {
+    let mock = Mock::start(Reply::sse(&folded_call("test"))).await;
+    let payload = format!(
+        r#"{{"model":"grok-4.6","tools":[{}],"input":[{{"type":"function_call","name":"tool_2","namespace":"mcp__app_0","call_id":"call_1","arguments":"{{\"q\":-0,\"n\":1E20}}"}},{{"type":"function_call_output","call_id":"call_1","output":"ok"}}]}}"#,
+        many_namespaces(false)
+    );
+    executor()
+        .execute(
+            api_key_auth(&mock.url),
+            request("grok-4.6", &payload),
+            options("openai-response"),
+        )
+        .await
+        .unwrap();
+    let body = mock.last().json();
+    assert_eq!(body["input"][0]["name"], "mcp__app_0", "{body}");
+    assert_eq!(
+        body["input"][0]["arguments"], r#"{"arguments":{"q":-0,"n":1E20},"name":"tool_2"}"#,
+        "{body}"
+    );
+}
+
 // TestXAIExecutorExecuteStreamFoldsNamespacesWhenToolsExceed200.
 #[tokio::test]
 async fn stream_folds_namespaces_when_tools_exceed_200() {
