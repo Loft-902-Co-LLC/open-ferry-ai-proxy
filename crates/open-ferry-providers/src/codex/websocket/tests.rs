@@ -1,7 +1,8 @@
 // Ported from CLIProxyAPI internal/runtime/executor/codex_websockets_executor_test.go,
 // codex_websockets_executor_store_test.go, websocket_proxy_reuse_test.go,
-// websocket_session_target_test.go, websocket_lifecycle_bind_test.go and
-// codex_websockets_spawn_agent_test.go (v8.0.10, MIT).
+// websocket_session_target_test.go, websocket_lifecycle_bind_test.go,
+// websocket_upstream_disconnect_test.go and
+// codex_websockets_spawn_agent_test.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The Responses WebSocket upstream against a mock Codex on 127.0.0.1 (see

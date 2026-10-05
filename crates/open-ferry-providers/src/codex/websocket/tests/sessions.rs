@@ -4,6 +4,7 @@
 use std::future::Ready;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use http::{HeaderMap, HeaderValue};
 use open_ferry_core::exec::{ErrorKind, ExecError};
@@ -260,6 +261,52 @@ async fn a_closed_session_keeps_no_connection() {
         .await;
     assert!(result.is_err(), "the closed session got a connection");
     assert_eq!(dials.load(Ordering::SeqCst), 0, "the closed session dialed");
+}
+
+// TestWebsocketActivationAfterUpstreamDisconnect, both cases: xAI's
+// connections are these sessions', read by the same reader. Then, not
+// upstream's: the channel ends after the failure, and a new connection
+// starts afresh.
+#[tokio::test]
+async fn activation_after_an_upstream_disconnect_fails_at_once() {
+    // The first connection is dropped once it is up; the next is kept.
+    let server = Server::start(|n| {
+        if n == 0 {
+            Answer::accept(|_peer| async {})
+        } else {
+            Answer::accept(|peer| peer.hold())
+        }
+    })
+    .await;
+    let store = Store::new();
+    let session = store.get_or_create("upstream-disconnect").unwrap();
+    let url = request::websocket_url(&server.url).unwrap();
+    let connect = || {
+        session.ensure_conn(target("auth", &url, "direct"), || {
+            dial::dial("direct", &url, &HeaderMap::new())
+        })
+    };
+    let (conn, _) = connect().await.unwrap();
+    within("the upstream disconnect to be processed", async {
+        while session.conn().is_some() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
+
+    let (_, mut rx) = session.activate(conn.id());
+    let read = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("activation after upstream disconnect blocked");
+    let result = read.map(|read| read.result);
+    assert!(matches!(result, Some(Err(_))), "{result:?}");
+    assert!(rx.recv().await.is_none(), "the channel goes on");
+    assert!(session.active_for(conn.id()).is_none());
+
+    let (fresh, _) = connect().await.unwrap();
+    assert_ne!(fresh.id(), conn.id());
+    let (_, _fresh_rx) = session.activate(fresh.id());
+    assert!(session.active_for(fresh.id()).is_some());
 }
 
 /// A server that sends the index of each connection the client ends.

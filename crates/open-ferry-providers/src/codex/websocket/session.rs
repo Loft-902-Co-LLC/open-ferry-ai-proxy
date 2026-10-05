@@ -5,10 +5,11 @@
 // sendTerminalWebsocketRead, configureConn, detachMismatchedWebsocketSessionConn,
 // websocketSessionTargetMatches, setLastEventType, getLastEventType,
 // newEphemeralCodexWebsocketSession, setUpstreamDisconnectError,
-// getOrCreateSession, ensureUpstreamConn, readUpstreamLoop,
-// invalidateUpstreamConn, CloseExecutionSession, closeAllExecutionSessions,
+// resetTerminalError, markTerminalError, getOrCreateSession,
+// ensureUpstreamConn, readUpstreamLoop, invalidateUpstreamConn,
+// CloseExecutionSession, closeAllExecutionSessions,
 // closeCodexWebsocketSession, isTerminalEvent) and codex_websockets_connection.go
-// (readCodexWebsocketMessage) (v8.0.10, MIT).
+// (readCodexWebsocketMessage) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Sessions, their connection, and the reader that hands its messages to
@@ -25,6 +26,11 @@
 //! that is active on the connection, if any, through a channel (a
 //! [`Hold`]'s); a failure goes to that call too, then the connection is let
 //! go. Nothing for five minutes is a failure as well.
+//!
+//! When the reader of the session's connection stops, the session
+//! remembers why, until it connects again: a call that becomes active on
+//! that connection after gets the failure at once, and nothing else, so it
+//! can't wait for reads that will never come.
 //!
 //! Closing a session lets its connection go at once: the reader drops the
 //! socket before it hands the failure on, which may wait for the call to
@@ -354,6 +360,9 @@ struct State {
     multi_agent: Option<u64>,
     active: Option<Active>,
     next_token: u64,
+    /// The connection whose reader stopped while it was the session's, and
+    /// why (`terminalConn` and `terminalErr`).
+    terminal: Option<(u64, Failure)>,
     /// Set once the session is closed; it connects no more.
     closed: bool,
 }
@@ -422,12 +431,20 @@ impl Session {
 
     /// Makes a channel for the reads of `conn`'s call, replacing the one
     /// before (`activate`). Returns the activation's token and the channel.
+    ///
+    /// When `conn`'s reader already stopped (see [`Self::mark_terminal`]),
+    /// the channel holds its failure and ends there, and the call before
+    /// stays active.
     pub(super) fn activate(&self, conn: u64) -> (u64, mpsc::Receiver<Read>) {
         let (tx, rx) = mpsc::channel(READ_CAPACITY);
-        let (done, _) = watch::channel(());
         let mut state = self.state();
         state.next_token += 1;
         let token = state.next_token;
+        if let Some((_, failure)) = state.terminal.as_ref().filter(|(ended, _)| *ended == conn) {
+            let _ = tx.try_send(Read::new(conn, Err(failure.clone())));
+            return (token, rx);
+        }
+        let (done, _) = watch::channel(());
         state.active = Some(Active {
             conn,
             token,
@@ -459,6 +476,23 @@ impl Session {
             .is_some_and(|active| active.conn == conn && active.token == token)
         {
             state.active = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Remembers that `conn`'s reader stopped with `failure`, if `conn` is
+    /// still the session's connection (`markTerminalError`). Returns whether
+    /// it did.
+    pub(super) fn mark_terminal(&self, conn: u64, failure: &Failure) -> bool {
+        let mut state = self.state();
+        if state
+            .conn
+            .as_ref()
+            .is_some_and(|current| current.id == conn)
+        {
+            state.terminal = Some((conn, failure.clone()));
             true
         } else {
             false
@@ -647,6 +681,8 @@ impl Session {
             }
             state.conn = Some(Arc::clone(&conn));
             state.multi_agent = None;
+            // resetTerminalError
+            state.terminal = None;
         }
         self.log_connected(&conn, false);
         tokio::spawn(read_loop(
@@ -770,11 +806,16 @@ async fn read_loop(
         }
     };
 
+    let failure = failure.redacted(&conn.target.secrets);
+    // Remembered while the connection is still the session's, so a call
+    // that becomes active on it from here on gets the failure at once.
+    if let Some(session) = session.upgrade() {
+        session.mark_terminal(conn.id, &failure);
+    }
     // Closed first: no send starts after this, so a call that becomes
     // active on the connection from here on fails to send, and one active
     // before is found below.
     conn.close();
-    let failure = failure.redacted(&conn.target.secrets);
     if peer_closed {
         // Sends the reply to Codex's close.
         let _ = timeout(CLOSE_REPLY_TIMEOUT, stream.next()).await;
