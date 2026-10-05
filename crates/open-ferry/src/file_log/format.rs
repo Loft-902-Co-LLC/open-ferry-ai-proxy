@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/logging/global_logger.go (LogFormatter,
 // logFieldOrder, quotedLogFields, pluginPathFieldOrder, formatLogFieldValue)
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The log lines, as upstream's `LogFormatter` writes them:
@@ -45,7 +45,7 @@ pub(super) const REQUEST_ID: &str = "request_id";
 const NO_REQUEST_ID: &str = "--------";
 
 /// The fields a line shows, in this order (upstream's `logFieldOrder`).
-const FIELD_ORDER: [&str; 28] = [
+const FIELD_ORDER: [&str; 34] = [
     "provider",
     "model",
     "plugin_id",
@@ -66,9 +66,15 @@ const FIELD_ORDER: [&str; 28] = [
     "error",
     "credential",
     "auth_id",
+    "auth_index",
     "connection",
     "proxy_scheme",
     "remote_transport",
+    "operation",
+    "upstream_host",
+    "reused",
+    "was_idle",
+    "idle_time",
     "media_session_id",
     "call_id",
     "peer",
@@ -77,9 +83,12 @@ const FIELD_ORDER: [&str; 28] = [
 ];
 
 /// The fields whose text is quoted (upstream's `quotedLogFields`).
-const QUOTED: [&str; 10] = [
+const QUOTED: [&str; 13] = [
     "credential",
     "auth_id",
+    "auth_index",
+    "upstream_host",
+    "operation",
     "connection",
     "proxy_scheme",
     "remote_transport",

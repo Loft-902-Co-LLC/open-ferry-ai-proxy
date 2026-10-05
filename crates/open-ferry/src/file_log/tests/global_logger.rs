@@ -3,7 +3,7 @@
 // TestLogFormatterPrintsMediaForwardingFields,
 // TestLogFormatterPrintsPluginFields,
 // TestLogFormatterOmitsGenericPathField,
-// TestLogFormatterFormatsShortRequestID) (v8.0.10, MIT).
+// TestLogFormatterFormatsShortRequestID) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The lines' format.
@@ -83,6 +83,36 @@ fn prints_media_forwarding_fields() {
         assert!(line.contains(want), "{line:?} lacks {want}");
     }
     assert_eq!(line.matches('\n').count(), 1, "{line:?}");
+}
+
+// Not upstream's: the connection reuse fields upstream's Antigravity
+// connection trace logs, which isn't ported, come in their place and are
+// quoted as upstream quotes them.
+#[test]
+fn prints_connection_trace_fields() {
+    use crate::file_log::format::FieldValue;
+
+    let mut fields = Fields::default()
+        .text("idle_time", "1.5s")
+        .text("upstream_host", "example.test")
+        .text("operation", "generate")
+        .text("auth_index", "7")
+        .text("auth_id", "auth-1")
+        .text("provider", "codex");
+    fields.set("reused", FieldValue::Plain("true".to_owned()));
+    fields.set("was_idle", FieldValue::Plain("false".to_owned()));
+    let line = line(
+        (2026, 10, 2, 22, 12, 20),
+        Level::DEBUG,
+        "upstream connection",
+        &fields,
+    );
+    assert_eq!(
+        line,
+        "[2026-10-02 22:12:20] [--------] [debug] [manager.rs:524] upstream connection \
+         provider=codex auth_id=\"auth-1\" auth_index=\"7\" operation=\"generate\" \
+         upstream_host=\"example.test\" reused=true was_idle=false idle_time=1.5s\n"
+    );
 }
 
 // Ports TestLogFormatterPrintsPluginFields.
