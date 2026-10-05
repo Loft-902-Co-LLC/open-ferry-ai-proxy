@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/codex/openai/chat-completions/codex_openai_response.go
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Codex events → OpenAI Chat Completions responses.
@@ -12,16 +12,23 @@
 //! tool becomes a function call with the arguments `{"input": "<patch>"}`, so
 //! clients that only know function tools can still apply patches.
 //!
+//! Codex's URL citations become the message's `annotations`, each sent once,
+//! with its character range counted from the start of the message's text. A
+//! stream counts the text sent before the event that carries the citation, so
+//! a citation that comes after all of its text is placed past that text, as
+//! upstream places it.
+//!
 //! Deviations from upstream:
 //! - A `data:` line that is not valid JSON gives no chunk. gjson reads what it
 //!   can from malformed JSON.
 //! - Where upstream uses a value's JSON text, we use the same JSON written
-//!   compactly. This applies to a non-string value read as text, and to the
-//!   `output_index` that names a tool call.
+//!   compactly. This applies to a non-string value read as text, so also to
+//!   the length of a non-string text delta, which places later citations, and
+//!   to the `output_index` that names a tool call.
 //! - An invalid `cache_write_tokens` count is dropped as upstream drops it, but
 //!   without its logged warning.
-//! - A token count too large for `i64`, such as `1e400`, saturates. Go's result
-//!   depends on the CPU; amd64 gives the minimum `i64`.
+//! - A token count or citation index too large for `i64`, such as `1e400`,
+//!   saturates. Go's result depends on the CPU; amd64 gives the minimum `i64`.
 
 use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -62,6 +69,11 @@ pub struct CodexToOpenAIChatCompletionsStream {
     current_call: Option<usize>,
     /// The last image sent for each image item, so a repeat isn't sent again.
     image_hashes: HashMap<String, [u8; 32]>,
+    /// The keys of the URL citations sent, so a repeat isn't sent again.
+    citation_keys: HashSet<String>,
+    /// How many characters of text have been sent, where the next citation's
+    /// range starts from.
+    text_chars: i64,
 }
 
 /// Where one tool call's arguments have got to.
@@ -109,6 +121,8 @@ impl CodexToOpenAIChatCompletionsStream {
             call_keys: HashMap::new(),
             current_call: None,
             image_hashes: HashMap::new(),
+            citation_keys: HashSet::new(),
+            text_chars: 0,
         }
     }
 
@@ -155,10 +169,15 @@ impl CodexToOpenAIChatCompletionsStream {
             }
             "response.output_text.delta" => {
                 if let Some(text) = event.get("delta") {
+                    let text = str_of(Some(text));
+                    self.text_chars = self.text_chars.wrapping_add(char_count(&text));
                     delta.insert("role".into(), "assistant".into());
-                    delta.insert("content".into(), str_of(Some(text)).into());
+                    delta.insert("content".into(), text.into());
                 }
             }
+            "response.output_text.annotation.added"
+            | "response.output_text.done"
+            | "response.content_part.done" => delta = self.citations(event)?,
             "response.image_generation_call.partial_image" => {
                 let url = self.new_image(
                     &str_of(event.get("item_id")),
@@ -240,6 +259,20 @@ impl CodexToOpenAIChatCompletionsStream {
         Some(image_url(format, b64))
     }
 
+    /// A `delta` of the URL citations in `event` that haven't been sent, or
+    /// `None` if there are none.
+    fn citations(&mut self, event: &Value) -> Option<Map<String, Value>> {
+        let annotations = event_annotations(event);
+        let citations = url_citations(annotations, self.text_chars, &mut self.citation_keys);
+        if citations.is_empty() {
+            return None;
+        }
+        let mut delta = Map::new();
+        delta.insert("role".into(), "assistant".into());
+        delta.insert("annotations".into(), Value::Array(citations));
+        Some(delta)
+    }
+
     fn tool_call_added(&mut self, event: &Value) -> Option<Map<String, Value>> {
         let item = event.get("item")?;
         if !is_tool_call(item) {
@@ -297,6 +330,9 @@ impl CodexToOpenAIChatCompletionsStream {
 
     fn item_done(&mut self, event: &Value) -> Option<Map<String, Value>> {
         let item = event.get("item")?;
+        if str_of(item.get("type")) == "message" {
+            return self.citations(event);
+        }
         if str_of(item.get("type")) == "image_generation_call" {
             let url = self.new_image(
                 &str_of(item.get("id")),
@@ -396,6 +432,10 @@ pub fn convert_codex_response_to_openai_chat_completions_non_stream(
     let mut reasoning = String::new();
     let mut tool_calls = Vec::new();
     let mut images = Vec::new();
+    let mut annotations = Vec::new();
+    let mut annotation_keys = HashSet::new();
+    // The characters of message text before the part being read.
+    let mut text_chars: i64 = 0;
     if let Some(Value::Array(output)) = response.get("output") {
         for item in output {
             match &*str_of(item.get("type")) {
@@ -413,8 +453,23 @@ pub fn convert_codex_response_to_openai_chat_completions_non_stream(
                     }
                 }
                 "message" => {
-                    if let Some(text) = first_part(item.get("content"), "output_text") {
+                    // Every text part, and the URL citations in each.
+                    let Some(Value::Array(parts)) = item.get("content") else {
+                        continue;
+                    };
+                    for part in parts {
+                        if str_of(part.get("type")) != "output_text" {
+                            continue;
+                        }
+                        let text = str_of(part.get("text"));
                         content.push_str(&text);
+                        let part_annotations = annotation_list(part.get("annotations"));
+                        annotations.extend(url_citations(
+                            part_annotations,
+                            text_chars,
+                            &mut annotation_keys,
+                        ));
+                        text_chars = text_chars.wrapping_add(char_count(&text));
                     }
                 }
                 "function_call" | "custom_tool_call" => tool_calls.push(tools.tool_call(item)),
@@ -464,6 +519,9 @@ pub fn convert_codex_response_to_openai_chat_completions_non_stream(
         Value::Array(tool_calls)
     };
     message.insert("tool_calls".into(), tool_calls);
+    if !annotations.is_empty() {
+        message.insert("annotations".into(), Value::Array(annotations));
+    }
     if !images.is_empty() {
         message.insert("images".into(), Value::Array(images));
     }
@@ -602,6 +660,86 @@ fn arguments_delta(index: usize, arguments: String) -> Map<String, Value> {
     let function = object([("arguments", arguments.into())]);
     let call = object([("index", index.into()), ("function", function)]);
     Map::from_iter([("tool_calls".into(), Value::Array(vec![call]))])
+}
+
+/// How many characters `text` has, as Go counts runes.
+fn char_count(text: &str) -> i64 {
+    i64::try_from(text.chars().count()).unwrap_or(i64::MAX)
+}
+
+/// The annotations in an `annotations` value: a list's items, or any other
+/// value as the one annotation (`codexAnnotationResults`).
+fn annotation_list(value: Option<&Value>) -> &[Value] {
+    match value {
+        None => &[],
+        Some(Value::Array(items)) => items,
+        Some(value) => std::slice::from_ref(value),
+    }
+}
+
+/// The annotations a stream event carries, wherever Codex puts them: as the
+/// event's `annotation` or `annotations`, in its content `part`, or in its
+/// output `item` and that item's content parts (`codexAnnotationsFromEvent`).
+fn event_annotations(event: &Value) -> Vec<&Value> {
+    let mut annotations = Vec::new();
+    for at in ["annotation", "annotations", "part.annotations"] {
+        annotations.extend(annotation_list(path(event, at)));
+    }
+    if let Some(item) = event.get("item") {
+        annotations.extend(annotation_list(item.get("annotations")));
+        if let Some(Value::Array(parts)) = item.get("content") {
+            for part in parts {
+                annotations.extend(annotation_list(part.get("annotations")));
+            }
+        }
+    }
+    annotations
+}
+
+/// Chat Completions `url_citation`s for the URL citations in `annotations`,
+/// their ranges moved `offset` characters on (`buildCodexURLCitations`). A
+/// citation is left out if its range is negative or backwards, or if `seen`
+/// holds its URL (or, without one, its ID) with the same start, or its ID.
+/// The keys of the others are added to `seen`.
+fn url_citations<'v>(
+    annotations: impl IntoIterator<Item = &'v Value>,
+    offset: i64,
+    seen: &mut HashSet<String>,
+) -> Vec<Value> {
+    let mut citations = Vec::new();
+    for annotation in annotations {
+        if str_of(annotation.get("type")) != "url_citation" {
+            continue;
+        }
+        let index = |key| annotation.get(key).map_or(0, int_of);
+        let raw_start = index("start_index");
+        // Go's int64 addition wraps.
+        let start = raw_start.wrapping_add(offset);
+        let end = index("end_index").wrapping_add(offset);
+        if start < 0 || end < start {
+            continue;
+        }
+
+        let url = str_of(annotation.get("url"));
+        let id = str_of(annotation.get("id"));
+        let source = if url.is_empty() { &id } else { &url };
+        let mut keys = vec![format!("{source}\0{raw_start}")];
+        if !id.is_empty() {
+            keys.push(format!("id\0{id}"));
+        }
+        if keys.iter().any(|key| seen.contains(key)) {
+            continue;
+        }
+        seen.extend(keys);
+        citations.push(object([
+            ("type", "url_citation".into()),
+            ("url", url.into()),
+            ("title", str_of(annotation.get("title")).into()),
+            ("start_index", start.into()),
+            ("end_index", end.into()),
+        ]));
+    }
+    citations
 }
 
 /// The text of the first part of `kind` in a list of content parts.

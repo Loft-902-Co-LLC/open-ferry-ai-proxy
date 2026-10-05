@@ -9,7 +9,9 @@
 //! with the request replaced by a Chat request declaring the same tools. To
 //! them are added the events only this translator reads: `apply_patch` calls
 //! streamed as custom tool input, generated images, reasoning text, service
-//! tiers, creation times and models.
+//! tiers, creation times and models, and messages of several parts whose
+//! annotations include URL citations, repeated, with odd ranges, on every
+//! event that can carry them.
 
 use std::ops::{Deref, DerefMut};
 
@@ -105,6 +107,16 @@ const IMAGES: &[&str] = &[
 const IMAGE_FORMATS: &[&str] = &["png", "jpeg", "JPG", "webp", "gif", "image/avif", "bmp", ""];
 
 const NAMESPACES: &[&str] = &["functions", "ns", "tools__", "mcp__srv"];
+
+/// Cited URLs, few so that citations repeat.
+const CITED_URLS: &[&str] = &[
+    "https://example.com/a",
+    "https://example.com/b?q=1&r=<2>",
+    "https://例え.jp/パス",
+    "",
+];
+
+const CITATION_IDS: &[&str] = &["cite_1", "cite_2", ""];
 
 /// The Claude request generator, for its leaf values: text, numbers, tool
 /// names and schemas.
@@ -823,9 +835,10 @@ impl Generator {
                     _ => None,
                 };
                 match self.rng.below(100) {
-                    0..=49 => self.custom_call(index),
-                    50..=79 => self.image(index),
-                    _ => self.reasoning_text(index),
+                    0..=39 => self.custom_call(index),
+                    40..=64 => self.image(index),
+                    65..=79 => self.reasoning_text(index),
+                    _ => self.cited_message(index),
                 }
             })
             .collect()
@@ -1007,6 +1020,171 @@ impl Generator {
             events: self.jumble(events),
             done,
         }
+    }
+
+    /// A message of one to three parts, text with annotations or a refusal.
+    /// The annotations come in `annotation.added` events, on
+    /// `output_text.done` and `content_part.done`, and on the finished item,
+    /// each time or only some of them.
+    fn cited_message(&mut self, index: Option<Value>) -> Item {
+        let id = self.item_id("msg");
+        let message = |content: Vec<Value>, status: &str| {
+            let mut fields = vec![("type", json!("message"))];
+            if let Some(id) = &id {
+                fields.push(("id", json!(id)));
+            }
+            fields.push(("role", json!("assistant")));
+            fields.push(("status", json!(status)));
+            fields.push(("content", Value::Array(content)));
+            to_object(fields)
+        };
+        let at = |content_index: usize| {
+            let mut fields = Vec::new();
+            if let Some(id) = &id {
+                fields.push(("item_id", json!(id)));
+            }
+            fields.push(("content_index", json!(content_index)));
+            fields
+        };
+
+        let mut events = vec![event(
+            "response.output_item.added",
+            &index,
+            vec![("item", message(Vec::new(), "in_progress"))],
+        )];
+        let mut parts = Vec::new();
+        for content_index in 0..1 + self.rng.below(3) {
+            if self.rng.chance(15) {
+                parts.push(json!({ "type": "refusal", "refusal": "no" }));
+                continue;
+            }
+            let text = if self.rng.chance(10) {
+                String::new()
+            } else {
+                self.text()
+            };
+            for chunk in self.chunks(&text) {
+                let mut fields = at(content_index);
+                fields.push(("delta", json!(chunk)));
+                events.push(event("response.output_text.delta", &index, fields));
+            }
+            let annotations: Vec<Value> = (0..self.rng.below(4))
+                .map(|_| self.annotation(&text))
+                .collect();
+            for (n, annotation) in annotations.iter().enumerate() {
+                if self.rng.chance(50) {
+                    let mut fields = at(content_index);
+                    fields.push(("annotation_index", json!(n)));
+                    fields.push(("annotation", annotation.clone()));
+                    events.push(event(
+                        "response.output_text.annotation.added",
+                        &index,
+                        fields,
+                    ));
+                }
+            }
+            let mut part = vec![("type", json!("output_text")), ("text", json!(text))];
+            if let Some(annotations) = self.annotations(annotations) {
+                part.push(("annotations", annotations));
+            }
+            let part = to_object(part);
+            if self.rng.chance(60) {
+                let mut fields = at(content_index);
+                fields.push(("text", json!(text)));
+                if let Some(annotations) = part.get("annotations").filter(|_| self.rng.chance(70)) {
+                    fields.push(("annotations", annotations.clone()));
+                }
+                events.push(event("response.output_text.done", &index, fields));
+            }
+            if self.rng.chance(50) {
+                let mut fields = at(content_index);
+                fields.push(("part", part.clone()));
+                events.push(event("response.content_part.done", &index, fields));
+            }
+            parts.push(part);
+        }
+        let mut done = message(parts, "completed");
+        if self.rng.chance(15) {
+            let annotation = self.annotation("item");
+            done["annotations"] = json!([annotation]);
+        }
+        events.push(event(
+            "response.output_item.done",
+            &index,
+            vec![("item", done.clone())],
+        ));
+        Item {
+            events: self.jumble(events),
+            done,
+        }
+    }
+
+    /// A text part's `annotations`: a list, now and then one annotation not
+    /// in a list or a value that isn't one, or none.
+    fn annotations(&mut self, annotations: Vec<Value>) -> Option<Value> {
+        match self.rng.below(100) {
+            0..=79 => Some(Value::Array(annotations)),
+            80..=87 => annotations.into_iter().next(),
+            88..=91 => Some(Value::Null),
+            92..=93 => Some(json!("url_citation")),
+            _ => None,
+        }
+    }
+
+    /// An annotation on `text`: usually a URL citation, with a range in the
+    /// text or not, then citations of files, annotations without a type and
+    /// values that aren't annotations.
+    fn annotation(&mut self, text: &str) -> Value {
+        let chars = text.chars().count();
+        match self.rng.below(100) {
+            0..=69 => {
+                let mut fields = vec![("type", json!("url_citation"))];
+                if self.rng.chance(90) {
+                    fields.push(("url", json!(self.rng.pick(CITED_URLS))));
+                }
+                match self.rng.below(10) {
+                    0..=7 => {
+                        fields.push(("title", json!(self.rng.pick(&["Example", "例 <&>", ""]))))
+                    }
+                    8 => fields.push(("title", json!(5))),
+                    _ => {}
+                }
+                for key in ["start_index", "end_index"] {
+                    if let Some(index) = self.citation_index(chars) {
+                        fields.push((key, index));
+                    }
+                }
+                if self.rng.chance(40) {
+                    fields.push(("id", json!(self.rng.pick(CITATION_IDS))));
+                }
+                self.object(fields)
+            }
+            70..=81 => json!({ "type": "file_citation", "file_id": "file_1", "index": 0 }),
+            82..=86 => json!({
+                "type": "container_file_citation",
+                "container_id": "cntr_1",
+                "file_id": "file_2",
+                "start_index": 0,
+                "end_index": 1,
+            }),
+            87..=93 => json!({ "url": "https://example.com/a", "start_index": 0, "end_index": 1 }),
+            _ => self.one_of(&[json!("url_citation"), Value::Null, json!(3)]),
+        }
+    }
+
+    /// A citation's start or end in a text of `chars` characters: usually in
+    /// it, sometimes negative, past it, written as text or as a fraction, or
+    /// missing.
+    fn citation_index(&mut self, chars: usize) -> Option<Value> {
+        Some(match self.rng.below(100) {
+            0..=79 => json!(self.rng.below(chars + 1)),
+            80..=83 => json!(-1),
+            84..=86 => json!(chars + 3),
+            87..=89 => json!("2"),
+            90..=92 => num("1.5"),
+            93..=94 => Value::Null,
+            _ => return None,
+        })
     }
 
     fn item_id(&mut self, prefix: &str) -> Option<String> {
@@ -1299,6 +1477,7 @@ mod tests {
                 r#""service_tier":"priority""#,
                 r#""created":1700000000"#,
                 r#""model":"gpt-5-codex""#,
+                r#""annotations":[{"type":"url_citation""#,
             ],
         );
         let finals = outputs(Translator::ChatNonStream, &finals);
@@ -1310,6 +1489,7 @@ mod tests {
                 r#"{\"input\":\""#,
                 r#""service_tier":"priority""#,
                 r#""created":"(now)""#,
+                r#""annotations":[{"type":"url_citation""#,
             ],
         );
     }

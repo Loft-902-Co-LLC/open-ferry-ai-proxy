@@ -34,7 +34,7 @@ Upstream translators live at `internal/translator/<upstream>/<client-format>/`. 
 |---|---|---|
 | `open-ferry-translate`: Claude client → Codex | `internal/translator/codex/claude` | Request (including compatibility mode) and response ported (`codex::claude`) |
 | `open-ferry-translate`: reasoning signatures | `internal/signature` | Ported (`signature`): checks for Claude (Antigravity's Q form included), Gemini, GPT, Grok, Kimi and SWE signatures, replay decisions, and the Claude Messages and Gemini sanitizers |
-| `open-ferry-translate`: Chat Completions → Codex | `internal/translator/codex/openai/chat-completions` | Request and response ported (`codex::openai::chat_completions`), including the `apply_patch` bridge |
+| `open-ferry-translate`: Chat Completions → Codex | `internal/translator/codex/openai/chat-completions` | Request and response ported (`codex::openai::chat_completions`), including the `apply_patch` bridge and URL citations as `annotations` |
 | `open-ferry-translate`: Responses → Codex | `internal/translator/codex/openai/responses` | Request and response ported (`codex::openai::responses`), including the `apply_patch` bridge (`apply_patch::responses`), which only an executor turns on. Upstream's Codex executor never does; the Meta and xAI executors turn it on |
 | `open-ferry-translate`: Chat Completions → Claude | `internal/translator/claude/openai/chat-completions` | Request (including compatibility mode) and response ported (`claude::openai::chat_completions`) |
 | `open-ferry-translate`: Responses → Claude | `internal/translator/claude/openai/responses` | Request (including compatibility mode) and response ported (`claude::openai::responses`) |

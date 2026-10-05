@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/codex/openai/chat-completions/codex_openai_response_test.go
-// and noop_optimization_test.go (v8.0.10, MIT).
+// and noop_optimization_test.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use serde_json::Value;
@@ -152,6 +152,248 @@ fn convert_codex_response_to_openai_first_chunk_uses_request_model_name() {
         .translate_line(br#"data: {"type":"response.output_text.delta","delta":"hello"}"#)
         .expect("expected 1 chunk");
     assert_eq!(text_at(&out, "model"), model_name, "chunk={out}");
+}
+
+/// `TestConvertCodexResponseToOpenAI_PreservesURLCitations`, "non-stream".
+#[test]
+fn convert_codex_response_to_openai_preserves_url_citations_non_stream() {
+    let raw = r#"{"type":"response.completed","response":{"id":"resp_citation","model":"gpt-5.5","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"前🙂"},{"type":"output_text","text":"引用","annotations":[{"type":"url_citation","url":"https://example.com","title":"Example","start_index":0,"end_index":2},{"type":"file_citation","file_id":"file_1","index":0}]}]}]}}"#;
+    let out = non_stream(&Value::Null, raw);
+
+    assert_eq!(
+        text_at(&out, "choices.0.message.content"),
+        "前🙂引用",
+        "response={out}"
+    );
+    assert!(
+        at(&out, "choices.0.message.annotations.0").is_some(),
+        "expected message annotation, response={out}"
+    );
+    let count = at(&out, "choices.0.message.annotations").and_then(Value::as_array);
+    assert_eq!(
+        count.map(Vec::len),
+        Some(1),
+        "annotation count after filtering unsupported types; response={out}"
+    );
+    let annotation = "choices.0.message.annotations.0";
+    assert_eq!(
+        text_at(&out, &format!("{annotation}.type")),
+        "url_citation",
+        "response={out}"
+    );
+    assert_eq!(
+        text_at(&out, &format!("{annotation}.url")),
+        "https://example.com",
+        "response={out}"
+    );
+    assert_eq!(
+        text_at(&out, &format!("{annotation}.title")),
+        "Example",
+        "response={out}"
+    );
+    assert_eq!(
+        int_at(&out, &format!("{annotation}.start_index")),
+        2,
+        "response={out}"
+    );
+    assert_eq!(
+        int_at(&out, &format!("{annotation}.end_index")),
+        4,
+        "response={out}"
+    );
+}
+
+/// `TestConvertCodexResponseToOpenAI_PreservesURLCitations`, "stream".
+#[test]
+fn convert_codex_response_to_openai_preserves_url_citations_stream() {
+    let mut stream = new_stream("gpt-5.5");
+    assert!(
+        stream
+            .translate_line(
+                r#"data: {"type":"response.output_text.delta","delta":"前🙂"}"#.as_bytes()
+            )
+            .is_some(),
+        "expected text delta chunk"
+    );
+
+    let out = stream
+        .translate_line(br#"data: {"type":"response.output_text.annotation.added","annotation_index":0,"annotation":{"type":"url_citation","url":"https://example.com","title":"Example","start_index":0,"end_index":1}}"#)
+        .expect("expected citation chunk");
+    let annotation = "choices.0.delta.annotations.0";
+    assert!(
+        at(&out, annotation).is_some(),
+        "expected delta annotation, chunk={out}"
+    );
+    assert_eq!(
+        text_at(&out, &format!("{annotation}.type")),
+        "url_citation",
+        "chunk={out}"
+    );
+    assert_eq!(
+        int_at(&out, &format!("{annotation}.start_index")),
+        2,
+        "chunk={out}"
+    );
+    assert_eq!(
+        int_at(&out, &format!("{annotation}.end_index")),
+        3,
+        "chunk={out}"
+    );
+
+    assert!(
+        stream
+            .translate_line(
+                r#"data: {"type":"response.output_text.delta","delta":"引用"}"#.as_bytes()
+            )
+            .is_some(),
+        "expected second text delta chunk"
+    );
+    let out = stream.translate_line(br#"data: {"type":"response.output_text.annotation.added","annotation_index":0,"annotation":{"type":"url_citation","url":"https://example.com","title":"Example","start_index":0,"end_index":2}}"#);
+    assert!(
+        out.is_none(),
+        "expected duplicate citation to be suppressed after more text, got {out:?}"
+    );
+}
+
+/// `TestConvertCodexResponseToOpenAI_PreservesURLCitations`, "stream completion
+/// annotation".
+#[test]
+fn convert_codex_response_to_openai_preserves_url_citations_stream_completion_annotation() {
+    let mut stream = new_stream("gpt-5.5");
+    for delta in ["前🙂", "引用"] {
+        let line = format!(
+            r#"data: {{"type":"response.output_text.delta","delta":{}}}"#,
+            Value::from(delta)
+        );
+        assert!(
+            stream.translate_line(line.as_bytes()).is_some(),
+            "expected text delta chunk"
+        );
+    }
+
+    let out = stream
+        .translate_line(r#"data: {"type":"response.output_text.done","text":"前🙂引用","annotations":[{"type":"url_citation","url":"https://example.com","title":"Example","start_index":0,"end_index":2}]}"#.as_bytes())
+        .expect("expected citation completion chunk");
+    assert_eq!(
+        int_at(&out, "choices.0.delta.annotations.0.start_index"),
+        4,
+        "chunk={out}"
+    );
+    assert_eq!(
+        int_at(&out, "choices.0.delta.annotations.0.end_index"),
+        6,
+        "chunk={out}"
+    );
+
+    let out = stream
+        .translate_line(r#"data: {"type":"response.content_part.done","part":{"type":"output_text","text":"前🙂引用","annotations":[{"type":"url_citation","url":"https://other.example","title":"Other","start_index":0,"end_index":1}]}}"#.as_bytes())
+        .expect("expected content-part citation chunk");
+    assert_eq!(
+        text_at(&out, "choices.0.delta.annotations.0.url"),
+        "https://other.example",
+        "chunk={out}"
+    );
+    assert_eq!(
+        int_at(&out, "choices.0.delta.annotations.0.start_index"),
+        4,
+        "chunk={out}"
+    );
+
+    let out = stream.translate_line(r#"data: {"type":"response.output_item.done","item":{"type":"message","content":[{"type":"output_text","text":"前🙂引用","annotations":[{"type":"url_citation","url":"https://example.com","title":"Example","start_index":0,"end_index":2}]}]}}"#.as_bytes());
+    assert!(
+        out.is_none(),
+        "expected duplicate completion citation to be suppressed, got {out:?}"
+    );
+}
+
+/// Not upstream's: citations across messages count the text of the messages
+/// before, a repeated ID or URL and start is left out, a citation without a
+/// URL is known by its ID, a negative or backwards range is dropped, a lone
+/// annotation counts as a list of one, and `annotations` goes after
+/// `tool_calls` and before `images`, where sjson puts it. Checked against
+/// upstream with a Go probe.
+#[test]
+fn non_stream_url_citations_across_messages() {
+    let raw = [
+        r#"{"type":"response.completed","response":{"id":"r","model":"m","created_at":1,"status":"completed","output":["#,
+        r#"{"type":"message","content":[{"type":"output_text","text":"ab","annotations":{"type":"url_citation","url":"https://a.example","title":"A","start_index":0,"end_index":2,"id":"c1"}}]},"#,
+        r#"{"type":"function_call","call_id":"call_1","name":"f","arguments":"{}"},"#,
+        r#"{"type":"message","content":[{"type":"refusal","refusal":"no"},{"type":"output_text","text":"cd","annotations":["#,
+        r#"{"type":"url_citation","url":"https://b.example","start_index":0,"end_index":1,"id":"c1"},"#,
+        r#"{"type":"url_citation","id":"c2","title":5,"start_index":"1","end_index":2},"#,
+        r#"{"type":"url_citation","url":"https://c.example","start_index":-3,"end_index":1},"#,
+        r#"{"type":"url_citation","url":"https://d.example","start_index":1,"end_index":0},"#,
+        r#"{"type":"url_citation","url":"https://a.example","start_index":0,"end_index":1}"#,
+        r#"]}]},"#,
+        r#"{"type":"image_generation_call","result":"iVBOR","output_format":"png"}"#,
+        r#"]}}"#,
+    ]
+    .concat();
+    let out = non_stream(&Value::Null, &raw);
+
+    assert_eq!(text_at(&out, "choices.0.message.content"), "abcd");
+    assert_eq!(
+        raw_at(&out, "choices.0.message.annotations"),
+        r#"[{"type":"url_citation","url":"https://a.example","title":"A","start_index":0,"end_index":2},{"type":"url_citation","url":"","title":"5","start_index":3,"end_index":4}]"#
+    );
+    let keys: Vec<&String> = at(&out, "choices.0.message")
+        .and_then(Value::as_object)
+        .map(|message| message.keys().collect())
+        .unwrap_or_default();
+    assert_eq!(
+        keys,
+        [
+            "role",
+            "content",
+            "reasoning_content",
+            "tool_calls",
+            "annotations",
+            "images"
+        ]
+    );
+}
+
+/// Not upstream's: a stream sends each citation once, from wherever the event
+/// carries it, placed after the text sent so far, counting a non-string text
+/// delta by its text; a message's `output_item.done` with nothing new sends
+/// nothing. Checked against upstream with a Go probe.
+#[test]
+fn stream_url_citations_from_every_place() {
+    let lines = [
+        r#"data: {"type":"response.output_text.delta","delta":"héllo"}"#,
+        r#"data: {"type":"response.output_text.annotation.added","annotation":{"type":"file_citation"}}"#,
+        r#"data: {"type":"response.content_part.done","part":{"annotations":[{"type":"url_citation","url":"u","start_index":0,"end_index":5}]}}"#,
+        r#"data: {"type":"response.output_item.done","item":{"type":"message","annotations":[{"type":"url_citation","url":"v","start_index":1,"end_index":2}],"content":[{"annotations":{"type":"url_citation","url":"u","start_index":0,"end_index":5}}]}}"#,
+        r#"data: {"type":"response.output_item.done","item":{"type":"message","content":[]}}"#,
+        r#"data: {"type":"response.output_text.delta","delta":1.50}"#,
+        r#"data: {"type":"response.output_text.done","annotation":{"type":"url_citation","url":"w","start_index":0,"end_index":0}}"#,
+    ];
+    let mut stream = new_stream("m");
+    let deltas: Vec<Option<String>> = lines
+        .iter()
+        .map(|line| {
+            stream
+                .translate_line(line.as_bytes())
+                .map(|chunk| raw_at(&chunk, "choices.0.delta"))
+        })
+        .collect();
+    let citation = |url: &str, start: i64, end: i64| {
+        Some(format!(
+            r#"{{"role":"assistant","annotations":[{{"type":"url_citation","url":"{url}","title":"","start_index":{start},"end_index":{end}}}]}}"#
+        ))
+    };
+    assert_eq!(
+        deltas,
+        [
+            Some(r#"{"role":"assistant","content":"héllo"}"#.to_owned()),
+            None,
+            citation("u", 5, 10),
+            citation("v", 6, 7),
+            None,
+            Some(r#"{"role":"assistant","content":"1.5"}"#.to_owned()),
+            citation("w", 8, 8),
+        ]
+    );
 }
 
 #[test]
