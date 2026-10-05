@@ -5,12 +5,13 @@
 //! The streaming call over the WebSocket.
 //!
 //! Each of Codex's events reaches the client as a chunk, as Codex sent it
-//! but for the secrets the call sent (see below), with the usage details an OpenAI Responses client expects. The
-//! completed response (`response.completed`, `response.done` or
-//! `response.incomplete`) goes as `response.completed`, its output filled
-//! in from the items streamed before unless a native client sent the
-//! request. The stream ends after it; an error event, a terminal failure
-//! or a broken connection ends it with an error.
+//! but for the secrets the call sent (see below), with the usage details an
+//! OpenAI Responses client expects. The completed response
+//! (`response.completed`, `response.done` or `response.incomplete`) goes as
+//! `response.completed`, its output filled in from the items streamed
+//! before unless a native client sent the request. The stream ends after
+//! it; an error event, a terminal failure or a broken connection ends it
+//! with an error.
 //!
 //! With `codex.stream-bootstrap-buffering` on, the events before generation
 //! starts are held back, as for HTTP: within [`MAX_BOOTSTRAP_FRAMES`]

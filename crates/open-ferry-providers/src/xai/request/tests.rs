@@ -773,6 +773,20 @@ fn session_is_the_clients_prompt_cache_key_only() {
             r#"{"prompt_cache_key":"chat-session","messages":[{"role":"user","content":"hello"}]}"#,
             "chat-session",
         ),
+        // A numeric key, as gjson's `String` gives it: an integer as
+        // written, anything else as a plain decimal.
+        (
+            "grok-4.3",
+            "openai-response",
+            r#"{"prompt_cache_key":-0,"input":"hello"}"#,
+            "-0",
+        ),
+        (
+            "grok-4.3",
+            "openai-response",
+            r#"{"prompt_cache_key":1E20,"input":"hello"}"#,
+            "100000000000000000000",
+        ),
     ];
     let auth = api_key(&[("api_key", "xai-token")]);
     for (model, format, payload, want) in cases {

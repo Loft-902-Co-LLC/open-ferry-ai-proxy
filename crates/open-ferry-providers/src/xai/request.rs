@@ -57,6 +57,7 @@ use open_ferry_core::auth::Auth;
 use open_ferry_core::config::Config;
 use open_ferry_core::exec::{ErrorKind, ExecError, Format, Options, Request};
 use open_ferry_translate::codex_client::{header_value, multi_agent_v2};
+use open_ferry_translate::json::exact;
 use open_ferry_translate::registry::Registry;
 use serde_json::Value;
 
@@ -190,8 +191,9 @@ pub(crate) fn endpoint(auth: &Auth, compact: bool) -> String {
 
 /// The session the request belongs to: the client's `prompt_cache_key`,
 /// trimmed, if it sent a non-empty one. Nothing is made up when it didn't.
+/// A numeric key is read as written, so `-0` stays `-0`, as in upstream.
 pub(crate) fn client_session_id(payload: &[u8]) -> String {
-    serde_json::from_slice::<Value>(payload)
+    exact::from_slice(payload)
         .ok()
         .map(|payload| str_of(get(&payload, "prompt_cache_key")).trim().to_owned())
         .unwrap_or_default()
