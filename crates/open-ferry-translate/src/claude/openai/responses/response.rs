@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/claude/openai/responses/claude_openai-responses_response.go
-// (v8.0.10, MIT).
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Claude Messages events → OpenAI Responses events.
@@ -745,8 +745,8 @@ impl ClaudeToOpenAIResponsesStream {
         response.insert("status".into(), status.into());
         response.insert("background".into(), false.into());
         response.insert("error".into(), Value::Null);
-        if status == "incomplete" {
-            response.insert("incomplete_details".into(), incomplete_details());
+        if let Some(details) = incomplete_details(&self.stop_reason) {
+            response.insert("incomplete_details".into(), details);
         }
         for (key, value) in self.echo.iter().flatten() {
             response.insert((*key).into(), value.clone());
@@ -1544,7 +1544,7 @@ fn non_stream(
         "status": status,
         "background": false,
         "error": null,
-        "incomplete_details": if incomplete { incomplete_details() } else { Value::Null },
+        "incomplete_details": incomplete_details(&stop_reason).unwrap_or(Value::Null),
         "output": [],
         "usage": {
             "input_tokens": 0,
@@ -1786,9 +1786,9 @@ fn reasoning_carrier(block: &Value) -> String {
 }
 
 /// `claudeResponsesTerminalState`: the final event and the response status.
-/// A `max_tokens` stop leaves the response incomplete.
+/// A stop that has [`incomplete_details`] leaves the response incomplete.
 fn terminal_state(stop_reason: &str) -> (&'static str, &'static str) {
-    if is_max_tokens(stop_reason) {
+    if incomplete_details(stop_reason).is_some() {
         ("response.incomplete", "incomplete")
     } else {
         ("response.completed", "completed")
@@ -1800,15 +1800,18 @@ fn output_status(stop_reason: &str) -> &'static str {
     terminal_state(stop_reason).1
 }
 
-/// `claudeResponsesIncompleteDetails`
-fn incomplete_details() -> Value {
-    json!({"reason": "max_output_tokens"})
-}
-
-/// `strings.EqualFold(strings.TrimSpace(stop_reason), "max_tokens")`. Go's
-/// case folding also matches the Kelvin sign with `k` and the long s with `s`.
-fn is_max_tokens(stop_reason: &str) -> bool {
-    crate::go::equal_fold(stop_reason.trim(), "max_tokens")
+/// `claudeResponsesIncompleteDetails`: the `incomplete_details` of a stop
+/// that leaves the response incomplete, or `None` for one that completes it.
+/// The stop reason is trimmed and lowercased as Go's `strings.ToLower` does,
+/// which also turns the Kelvin sign into `k`.
+fn incomplete_details(stop_reason: &str) -> Option<Value> {
+    match crate::go::to_lower(stop_reason.trim()).as_str() {
+        "max_tokens" => Some(json!({"reason": "max_output_tokens"})),
+        // Claude paused a long server tool turn. That isn't a token limit,
+        // and Responses has no reason for it, so the details stay `null`.
+        "pause_turn" => Some(Value::Null),
+        _ => None,
+    }
 }
 
 /// A reasoning output item with one summary part.

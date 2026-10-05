@@ -1,10 +1,11 @@
-// Ported from CLIProxyAPI internal/translator/claude/openai/responses/ (v8.0.10, MIT):
+// Ported from CLIProxyAPI internal/translator/claude/openai/responses/ (v8.0.15, MIT):
 // - claude_openai-responses_server_tool_test.go → `server_tool`
 // - claude_openai-responses_reasoning_order_test.go → `reasoning_order`
 // - claude_openai-responses_citations_test.go → `citations`
 // - claude_openai-responses_interleaved_search_test.go → `interleaved_search`
 // - claude_openai_responses_compat_test.go → `compat`
 // - noop_optimization_test.go → `noop_optimization`
+// - claude_openai-responses_pause_test.go → `pause`
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Tests that exercise both directions of the translator, often as a round
@@ -177,7 +178,7 @@ mod server_tool {
     use super::*;
 
     /// `claudeWebSearchStreamChunks`: one search with two results.
-    fn web_search_lines() -> Vec<String> {
+    pub(super) fn web_search_lines() -> Vec<String> {
         vec![
             message_start("msg_ws"),
             web_search_use_start(0, "srvtoolu_1"),
@@ -1197,6 +1198,79 @@ mod noop_optimization {
                 value.is_some_and(|value| int_of(value) == 0),
                 "{path} = {value:?}, want zero"
             );
+        }
+    }
+}
+
+// Ports claude_openai-responses_pause_test.go.
+mod pause {
+    use super::*;
+
+    // TestClaudeResponsesServerToolStopReason: a `pause_turn` stop, in any
+    // case and with spaces around it, leaves the response incomplete with
+    // `null` details; `max_tokens` gives its reason; the other stops
+    // complete it. The search and the usage survive either way.
+    #[test]
+    fn server_tool_stop_reason() {
+        for (reason, status, detail) in [
+            ("pause_turn", "incomplete", Some(Value::Null)),
+            (" PAUSE_TURN ", "incomplete", Some(Value::Null)),
+            (
+                "max_tokens",
+                "incomplete",
+                Some(json!({"reason": "max_output_tokens"})),
+            ),
+            ("end_turn", "completed", None),
+            ("tool_use", "completed", None),
+            ("stop_sequence", "completed", None),
+        ] {
+            let mut lines = server_tool::web_search_lines();
+            let stop = lines.pop().unwrap_or_default();
+            lines.push(data(json!({
+                "type": "message_delta",
+                "delta": {"stop_reason": reason},
+                "usage": {"output_tokens": 12},
+            })));
+            lines.push(stop);
+            let check = |mode: &str, response: &Value| {
+                assert_eq!(text_at(response, "status"), status, "{reason:?} {mode}");
+                let got = at(response, "incomplete_details");
+                match &detail {
+                    Some(want) => assert_eq!(got, Some(want), "{reason:?} {mode}: {response}"),
+                    None => assert!(
+                        got.is_none_or(Value::is_null),
+                        "{reason:?} {mode}: incomplete_details = {got:?}"
+                    ),
+                }
+                assert_eq!(
+                    text_at(response, "output.0.action.query"),
+                    "lindorm vector",
+                    "{reason:?} {mode}"
+                );
+                assert_eq!(
+                    text_at(response, "output.0.results.0.encrypted_content"),
+                    "ENC_A",
+                    "{reason:?} {mode}"
+                );
+                assert_eq!(
+                    at(response, "usage.output_tokens").map(int_of),
+                    Some(12),
+                    "{reason:?} {mode}"
+                );
+            };
+
+            let mut terminals = 0;
+            for (event, data) in stream(&lines) {
+                if event != "response.completed" && event != "response.incomplete" {
+                    continue;
+                }
+                terminals += 1;
+                assert_eq!(event, format!("response.{status}"), "{reason:?} stream");
+                check("stream", at(&data, "response").unwrap_or(&Value::Null));
+            }
+            assert_eq!(terminals, 1, "{reason:?} stream: terminal count");
+
+            check("buffered", &non_stream(&lines));
         }
     }
 }
