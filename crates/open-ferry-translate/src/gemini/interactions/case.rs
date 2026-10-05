@@ -24,6 +24,10 @@
 //!   with all its leaves. Upstream's camelCase cuts that character in two, so
 //!   sjson never finds the key it wrote and writes it again for each leaf: a
 //!   reader that keeps the last duplicate gets only the last leaf.
+//! - A leaf whose path sjson reads as more than 128 keys is left out. The
+//!   path holds the keys the leaf is nested under, and a key holding dots is
+//!   read as several. Upstream nests a value for each key, so a short key of
+//!   many dots makes a deep value: 5,000 dots make 5,000 objects.
 
 use serde_json::{Map, Value};
 
@@ -31,6 +35,10 @@ use crate::go;
 
 /// The most nulls [`set_raw`] pads an array with.
 const MAX_PADDING: usize = 65_535;
+
+/// The most keys a path [`set_raw`] sets may hold, so that the value it
+/// builds is never more than this deep.
+const MAX_SEGMENTS: usize = 128;
 
 /// `convertSnakeCaseKeysToCamelCase`: `value` with each object key in
 /// camelCase. A scalar gives `{}`.
@@ -53,6 +61,7 @@ fn convert(value: &Value, rename: &dyn Fn(&str) -> String) -> Value {
 }
 
 /// Writes each scalar under `node` into `out`, at `path` plus the renamed keys.
+/// It goes as deep as `node` does, which serde_json reads no deeper than 128.
 fn copy(out: &mut Value, path: &str, node: &Value, rename: &dyn Fn(&str) -> String) {
     match node {
         Value::Object(fields) => {
@@ -122,11 +131,30 @@ struct Segment {
 }
 
 impl Segment {
-    /// The array index sjson reads in this key: its digits, or 0 for an empty
-    /// key. `None` if it isn't digits or is forced to be a key. `Some(None)` if
-    /// it is digits but too large to use.
+    /// The array index sjson writes this key at, where the array or element
+    /// isn't there yet: its digits, or 0 for an empty key. `None` if it isn't
+    /// digits or is forced to be a key. `Some(None)` if it is digits but too
+    /// large to use.
     fn index(&self) -> Option<Option<usize>> {
-        if self.force || !self.key.bytes().all(|b| b.is_ascii_digit()) {
+        if self.force {
+            return None;
+        }
+        self.digits()
+    }
+
+    /// The element of an array sjson finds at this key, with gjson: its
+    /// digits, even where forced to be a key. An empty key finds none.
+    fn element(&self) -> Option<usize> {
+        if self.key.is_empty() {
+            return None;
+        }
+        self.digits().flatten()
+    }
+
+    /// The key read as digits: `None` if it isn't digits, `Some(None)` if it
+    /// is too large to use.
+    fn digits(&self) -> Option<Option<usize>> {
+        if !self.key.bytes().all(|b| b.is_ascii_digit()) {
             return None;
         }
         Some(self.key.bytes().try_fold(0usize, |n, digit| {
@@ -140,8 +168,8 @@ impl Segment {
     }
 }
 
-/// sjson's `parsePath`, applied to each key: `None` for an empty path or one
-/// sjson treats as a gjson query.
+/// sjson's `parsePath`, applied to each key: `None` for an empty path, one
+/// sjson treats as a gjson query, or one of more than [`MAX_SEGMENTS`] keys.
 fn parse_path(path: &str) -> Option<Vec<Segment>> {
     if path.is_empty() {
         return None;
@@ -149,6 +177,9 @@ fn parse_path(path: &str) -> Option<Vec<Segment>> {
     let mut segments = Vec::new();
     let mut rest = path;
     loop {
+        if segments.len() == MAX_SEGMENTS {
+            return None;
+        }
         let (force, body) = match rest.strip_prefix(':') {
             Some(body) => (true, body),
             None => (false, rest),
@@ -189,26 +220,37 @@ fn set_raw(out: &mut Value, path: &str, leaf: Value) {
 
 /// Sets `leaf` at `segments` under `target`, as sjson's `appendRawPaths` does.
 fn set_segments(target: &mut Value, segments: &[Segment], leaf: Value) {
-    let Some((first, rest)) = segments.split_first() else {
-        return;
-    };
-    let index = first.index();
-    let existing = match target {
-        Value::Object(fields) => fields.get_mut(&first.key),
-        // An empty key doesn't index an array, though it counts as 0 below.
-        Value::Array(items) if !first.key.is_empty() => {
-            index.flatten().and_then(|index| items.get_mut(index))
+    let mut target = target;
+    let mut segments = segments;
+    // sjson follows each key that is there already, then builds the rest.
+    let (first, rest) = loop {
+        let Some((first, rest)) = segments.split_first() else {
+            return;
+        };
+        let found = match &*target {
+            Value::Object(fields) => fields.contains_key(&first.key),
+            Value::Array(items) => first.element().is_some_and(|index| index < items.len()),
+            _ => false,
+        };
+        if !found {
+            break (first, rest);
         }
-        _ => None,
-    };
-    if let Some(existing) = existing {
+        let existing = match target {
+            Value::Object(fields) => fields.get_mut(&first.key),
+            Value::Array(items) => first.element().and_then(|index| items.get_mut(index)),
+            _ => None,
+        };
+        let Some(existing) = existing else {
+            return;
+        };
         if rest.is_empty() {
             *existing = leaf;
-        } else {
-            set_segments(existing, rest, leaf);
+            return;
         }
-        return;
-    }
+        target = existing;
+        segments = rest;
+    };
+    let index = first.index();
     let Some(built) = build(rest, leaf) else {
         return;
     };
@@ -249,26 +291,26 @@ fn set_segments(target: &mut Value, segments: &[Segment], leaf: Value) {
 }
 
 /// sjson's `appendBuild`: the value holding `leaf` under `segments`, made
-/// fresh. `None` where it would pad an array with too many nulls.
+/// fresh, from the innermost key out. `None` where it would pad an array with
+/// too many nulls.
 fn build(segments: &[Segment], leaf: Value) -> Option<Value> {
-    let Some((first, rest)) = segments.split_first() else {
-        return Some(leaf);
-    };
-    let built = build(rest, leaf)?;
-    match first.index() {
-        Some(Some(padding)) if padding <= MAX_PADDING => {
-            let mut items = vec![Value::Null; padding];
-            items.push(built);
-            Some(Value::Array(items))
-        }
-        Some(_) => None,
-        None if first.appends() => Some(Value::Array(vec![built])),
-        None => {
-            let mut fields = Map::new();
-            fields.insert(first.key.clone(), built);
-            Some(Value::Object(fields))
-        }
-    }
+    segments
+        .iter()
+        .rev()
+        .try_fold(leaf, |built, segment| match segment.index() {
+            Some(Some(padding)) if padding <= MAX_PADDING => {
+                let mut items = vec![Value::Null; padding];
+                items.push(built);
+                Some(Value::Array(items))
+            }
+            Some(_) => None,
+            None if segment.appends() => Some(Value::Array(vec![built])),
+            None => {
+                let mut fields = Map::new();
+                fields.insert(segment.key.clone(), built);
+                Some(Value::Object(fields))
+            }
+        })
 }
 
 #[cfg(test)]

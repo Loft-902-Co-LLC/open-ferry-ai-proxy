@@ -1,6 +1,7 @@
 use serde_json::Value;
 
 use super::{camel_to_snake, snake_to_camel};
+use crate::json::exact;
 
 /// Each input with upstream's camelCase and snake_case output.
 const CASES: &[(&str, &str, &str)] = &[
@@ -167,29 +168,127 @@ const CASES: &[(&str, &str, &str)] = &[
         r#"{"a b":1,"a\tb":2}"#,
         r#"{"a b":1,"a\tb":2}"#,
     ),
+    (
+        r#"{"x":-0,"y":1E20,"z":1e-7,"w":0.10,"v":123456789012345678901234567890,"u":1E+2,"t":-0.0,"s":1e5,"r":-1.5E-3,"q":[-0,1E2]}"#,
+        r#"{"x":-0,"y":1E20,"z":1e-7,"w":0.10,"v":123456789012345678901234567890,"u":1E+2,"t":-0.0,"s":1e5,"r":-1.5E-3,"q":[-0,1E2]}"#,
+        r#"{"x":-0,"y":1E20,"z":1e-7,"w":0.10,"v":123456789012345678901234567890,"u":1E+2,"t":-0.0,"s":1e5,"r":-1.5E-3,"q":[-0,1E2]}"#,
+    ),
+    // gjson finds an array's element at digits after a `:` too; the `:` only
+    // makes sjson build an object where nothing is there.
+    (r#"{"a":[1],"a.:0":2}"#, r#"{"a":[2]}"#, r#"{"a":[2]}"#),
+    (
+        r#"{"a":{"x":1},"a.:0":2}"#,
+        r#"{"a":{"x":1,"0":2}}"#,
+        r#"{"a":{"x":1,"0":2}}"#,
+    ),
+    (
+        r#"{"a":[1,[5]],"a.:1.:0":2}"#,
+        r#"{"a":[1,[2]]}"#,
+        r#"{"a":[1,[2]]}"#,
+    ),
+    (
+        r#"{"a":[[1]],"a.:0.:0":2}"#,
+        r#"{"a":[[2]]}"#,
+        r#"{"a":[[2]]}"#,
+    ),
+    (r#"{"a":[1],"a.:3":2}"#, r#"{"a":[1]}"#, r#"{"a":[1]}"#),
+    (r#"{"a":[1],"a.:-1":2}"#, r#"{"a":[1]}"#, r#"{"a":[1]}"#),
+    (r#"{"a":[1],"a.:":2}"#, r#"{"a":[1]}"#, r#"{"a":[1]}"#),
+    (
+        r#"{"a":[1],"a.:0.b":2}"#,
+        r#"{"a":[{"b":2}]}"#,
+        r#"{"a":[{"b":2}]}"#,
+    ),
+    (
+        r#"{"a":[{"b":1}],"a.:0.b":2}"#,
+        r#"{"a":[{"b":2}]}"#,
+        r#"{"a":[{"b":2}]}"#,
+    ),
+    (
+        r#"{"a":1,"a.:0":2}"#,
+        r#"{"a":{"0":2}}"#,
+        r#"{"a":{"0":2}}"#,
+    ),
+    (r#"{"a":[1],"a.:00":2}"#, r#"{"a":[2]}"#, r#"{"a":[2]}"#),
+    (
+        r#"{"a":[1,2],"a.:01":3}"#,
+        r#"{"a":[1,3]}"#,
+        r#"{"a":[1,3]}"#,
+    ),
 ];
 
-fn compact(text: &str) -> String {
-    let value: Value = serde_json::from_str(text).unwrap();
-    value.to_string()
-}
-
 // Not upstream's: checked with Go, running upstream's converters on each input.
+// Each output is compared as text, so a number keeps the text it was sent with,
+// as upstream copies it.
 #[test]
 fn converts_keys_as_upstream_sjson_does() {
     for (input, camel, snake) in CASES {
-        let value: Value = serde_json::from_str(input).unwrap();
+        let value = exact::from_str(input).unwrap();
         assert_eq!(
             snake_to_camel(&value).to_string(),
-            compact(camel),
+            *camel,
             "camel of {input}"
         );
         assert_eq!(
             camel_to_snake(&value).to_string(),
-            compact(snake),
+            *snake,
             "snake of {input}"
         );
     }
+}
+
+/// Runs `f` on a thread with a small stack, which the converters' recursion
+/// would overflow on a deep path.
+fn on_small_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    std::thread::Builder::new()
+        .stack_size(256 * 1024)
+        .spawn(f)
+        .unwrap()
+        .join()
+        .unwrap()
+}
+
+/// `{key: 1}` nested under `depth` objects keyed `n`.
+fn nested(depth: usize, key: &str) -> Value {
+    let mut value = serde_json::json!({ key: 1 });
+    for _ in 0..depth {
+        value = serde_json::json!({ "n": value });
+    }
+    value
+}
+
+// Not upstream's: upstream nests a value for each key of the path, 5,000
+// here (checked with Go); we leave out a path of more than 128 keys, so
+// neither converting nor writing out nor dropping the value goes deep.
+#[test]
+fn leaves_out_paths_of_more_than_128_keys() {
+    on_small_stack(|| {
+        let deep = vec!["a"; 5_000].join(".");
+        let value = nested(0, &deep);
+        assert_eq!(snake_to_camel(&value).to_string(), "{}");
+        assert_eq!(camel_to_snake(&value).to_string(), "{}");
+
+        let kept = vec!["a"; 128].join(".");
+        let want = format!("{}1{}", r#"{"a":"#.repeat(128), "}".repeat(128));
+        assert_eq!(snake_to_camel(&nested(0, &kept)).to_string(), want);
+        assert_eq!(camel_to_snake(&nested(0, &kept)).to_string(), want);
+        let left_out = vec!["a"; 129].join(".");
+        assert_eq!(snake_to_camel(&nested(0, &left_out)).to_string(), "{}");
+        assert_eq!(camel_to_snake(&nested(0, &left_out)).to_string(), "{}");
+
+        // The keys a leaf is nested under count too, and an escaped dot
+        // doesn't part keys.
+        let kept = vec!["a"; 28].join(".");
+        let converted = snake_to_camel(&nested(100, &kept)).to_string();
+        assert_eq!(converted.matches('{').count(), 128);
+        let left_out = vec!["a"; 29].join(".");
+        assert_eq!(snake_to_camel(&nested(100, &left_out)).to_string(), "{}");
+        assert_eq!(camel_to_snake(&nested(100, &left_out)).to_string(), "{}");
+        assert_eq!(snake_to_camel(&nested(129, "a")).to_string(), "{}");
+        let escaped = vec!["a"; 200].join("\\.");
+        let want = format!(r#"{{"{}":1}}"#, vec!["a"; 200].join("."));
+        assert_eq!(snake_to_camel(&nested(0, &escaped)).to_string(), want);
+    });
 }
 
 // Not upstream's: sjson treats these keys as gjson queries; we leave them out.
