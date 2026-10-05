@@ -803,3 +803,67 @@ fn reads_the_first_json_value() {
     assert_eq!(parse_root(b"\"text\""), Value::Null);
     assert_eq!(parse_root(b"{\"a\":"), Value::Null);
 }
+
+// Not upstream's: a function call's arguments keep each number as written
+// both ways, as upstream copies them, whole or streamed, as JSON or as text,
+// and an interaction id sent as the number -0 stays "-0", as gjson's
+// String() gives it (checked with Go).
+#[test]
+fn numbers_keep_their_text() {
+    let spelled = r#"{"x":-0,"y":1E20,"z":[1e5,0.10]}"#;
+    let text = serde_json::to_string(spelled).unwrap();
+    let call = format!(
+        r#"{{"candidates":[{{"content":{{"role":"model","parts":[{{"functionCall":{{"name":"f","args":{spelled}}}}}]}},"finishReason":"STOP"}}]}}"#
+    );
+    let out = convert_gemini_response_to_interactions_non_stream(MODEL, call.as_bytes());
+    assert_eq!(get(&out, "steps.0.arguments").unwrap().to_string(), spelled);
+    let events = gemini_stream(&[&call]);
+    let delta = format!(r#""delta":{{"arguments":{text},"type":"arguments_delta"}}"#);
+    assert!(
+        events.iter().any(|event| event.contains(&delta)),
+        "{events:?}"
+    );
+
+    for arguments in [spelled, text.as_str()] {
+        let body = format!(
+            r#"{{"id":"i1","steps":[{{"type":"function_call","id":"c1","name":"f","arguments":{arguments}}}]}}"#
+        );
+        let out = convert_interactions_response_to_gemini_non_stream(MODEL, body.as_bytes());
+        let args = get(&out, "candidates.0.content.parts.0.functionCall.args").unwrap();
+        assert_eq!(args.to_string(), spelled);
+    }
+
+    let mut stream = InteractionsToGeminiStream::new(MODEL);
+    let chunks: Vec<Value> = [
+        r#"data: {"event_type":"interaction.created","interaction":{"id":-0,"model":"m"}}"#.to_owned(),
+        r#"data: {"event_type":"step.start","index":0,"step":{"type":"function_call","id":"c1","name":"f"}}"#.to_owned(),
+        format!(
+            r#"data: {{"event_type":"step.delta","index":0,"delta":{{"type":"arguments_delta","arguments":{text}}}}}"#
+        ),
+    ]
+    .iter()
+    .filter_map(|chunk| stream.translate(chunk.as_bytes()))
+    .collect();
+    assert_eq!(chunks.len(), 1, "{chunks:?}");
+    assert_eq!(chunks[0]["responseId"], "-0");
+    let args = get(&chunks[0], "candidates.0.content.parts.0.functionCall.args").unwrap();
+    assert_eq!(args.to_string(), spelled);
+}
+
+// Not upstream's: a function result given as JSON text keeps each number as
+// written, as upstream's SetGeminiFunctionResponseRaw copies it.
+#[test]
+fn function_result_text_keeps_its_numbers() {
+    let spelled = r#"{"x":-0,"y":1E20,"z":[1e5,0.10]}"#;
+    let text = serde_json::to_string(spelled).unwrap();
+    let body = format!(
+        r#"{{"id":"i1","steps":[{{"type":"function_result","call_id":"c1","name":"f","result":{text}}}]}}"#
+    );
+    let out = convert_interactions_response_to_gemini_non_stream(MODEL, body.as_bytes());
+    let result = get(
+        &out,
+        "candidates.0.content.parts.0.functionResponse.response",
+    )
+    .unwrap();
+    assert_eq!(result.to_string(), spelled, "{out}");
+}

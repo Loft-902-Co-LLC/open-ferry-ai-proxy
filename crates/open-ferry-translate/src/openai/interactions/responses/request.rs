@@ -47,7 +47,8 @@
 //!   Upstream embeds it as JSON.
 //! - A `temperature`, `top_p`, `presence_penalty` or `frequency_penalty`
 //!   that isn't a finite number, such as `1e400` or the string `"NaN"`, is
-//!   left out. Go writes it as `+Inf` or `NaN`, which isn't JSON.
+//!   left out. Go writes it as `+Inf` or `NaN`, which isn't JSON. One that
+//!   is negative zero is written `0`, where Go writes the float64 as `-0`.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -56,7 +57,7 @@ use serde_json::{Map, Value, json};
 
 use crate::apply_patch;
 use crate::go;
-use crate::json::{bool_of, float_of, int_of, object, path, set_path, str_of};
+use crate::json::{bool_of, exact, float_of, int_of, object, path, set_path, str_of};
 use crate::responses_tools::{
     ToolIdentity, collect_tool_descriptors, collect_tool_winners, qualify_namespace_tool_name,
     tool_description, tool_parameters, unwrap_responses_custom_tool_input,
@@ -980,7 +981,7 @@ fn set_json_value(out: &mut Value, at: &str, value: Option<&Value>, default: Val
         None => default,
         Some(Value::String(text)) => {
             let embedded = if go::gjson_valid(text.as_bytes()) {
-                serde_json::from_str(text).ok()
+                exact::from_str(text).ok()
             } else {
                 None
             };

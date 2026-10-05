@@ -29,6 +29,8 @@
 //!   that would pad an array with more than 65,535 nulls or index into an
 //!   array they don't reach, are left out, where upstream's sjson reads a
 //!   query, runs out of memory or panics.
+//! - Negative zero in a value upstream writes as a float64, such as a number
+//!   in a tool it writes with `json.Marshal`, is written `0`; Go writes `-0`.
 
 mod case;
 mod passthrough;

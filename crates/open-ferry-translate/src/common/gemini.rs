@@ -315,7 +315,8 @@ pub(crate) fn set_gemini_function_response_result(
 /// Blank text stores `""`.
 pub(crate) fn set_gemini_function_response_raw(part: &mut Value, path: &str, raw: &str) {
     let trimmed = raw.trim();
-    match serde_json::from_str::<Value>(trimmed) {
+    // Each number keeps its text, as upstream copies gjson's `Raw`.
+    match crate::json::exact::from_str(trimmed) {
         Ok(result) if contains_json_ref(&result) => set_ref_result(part, path, trimmed.to_owned()),
         Ok(result) => {
             set_path(part, path, result);

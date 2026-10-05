@@ -1406,3 +1406,55 @@ fn finalize_tool_input_fails_only_an_unfinished_patch_stream() {
     assert_eq!(stream.finalize_tool_input(), "");
     assert!(stream.tool_input_error().is_none());
 }
+
+// Not upstream's: a function call's arguments keep each number as written
+// both ways, as upstream copies them, from a whole response, one with text
+// after it, or a stream, and an interaction id sent as the number -0 stays
+// "-0", as gjson's String() gives it (checked with Go).
+#[test]
+fn numbers_keep_their_text() {
+    let spelled = r#"{"x":-0,"y":1E20,"z":[1e5,0.10]}"#;
+    let text = serde_json::to_string(spelled).unwrap();
+    for tail in ["", " x"] {
+        let body = format!(
+            r#"{{"id":"i1","steps":[{{"type":"function_call","id":"c1","name":"f","arguments":{spelled}}}]}}{tail}"#
+        );
+        let out = convert_interactions_response_to_openai_responses_non_stream(
+            "m",
+            &Value::Null,
+            &Value::Null,
+            body.as_bytes(),
+        )
+        .expect("a response");
+        assert_eq!(out["output"][0]["arguments"], spelled, "{out}");
+
+        for arguments in [spelled, text.as_str()] {
+            let body = format!(
+                r#"{{"id":"r1","output":[{{"type":"function_call","call_id":"c1","name":"f","arguments":{arguments}}}]}}{tail}"#
+            );
+            let out =
+                convert_openai_responses_response_to_interactions_non_stream("m", body.as_bytes());
+            assert_eq!(out["steps"][0]["arguments"].to_string(), spelled, "{out}");
+        }
+    }
+
+    let mut stream = InteractionsToOpenAIResponsesStream::new("m", &Value::Null, &Value::Null);
+    let mut out = stream.translate(
+        br#"data: {"event_type":"interaction.created","interaction":{"id":-0,"model":"m"}}"#,
+    );
+    out += &stream.translate(
+        format!(
+            r#"data: {{"event_type":"step.start","index":0,"step":{{"type":"function_call","id":"c1","name":"f","arguments":{spelled}}}}}"#
+        )
+        .as_bytes(),
+    );
+    out += &stream.translate(br#"data: {"event_type":"step.stop","index":0}"#);
+    assert!(out.contains(r#""response":{"id":"-0","#), "{out}");
+    assert!(out.contains(&format!(r#""delta":{text}"#)), "{out}");
+    assert!(out.contains(&format!(r#""arguments":{text}"#)), "{out}");
+
+    let mut stream = OpenAIResponsesToInteractionsStream::new("m");
+    let out =
+        stream.translate(br#"data: {"type":"response.created","response":{"id":-0,"model":"m"}}"#);
+    assert!(out.contains(r#"{"interaction":{"id":"-0","#), "{out}");
+}

@@ -33,7 +33,7 @@ use crate::common::interactions_usage::interactions_usage;
 use crate::common::sse::{push_event, push_frame};
 use crate::gemini_schema;
 use crate::go;
-use crate::json::{bool_of, int_of, object, path, set_path, str_of};
+use crate::json::{bool_of, exact, int_of, object, path, set_path, str_of};
 
 /// The current Unix time in nanoseconds, which upstream puts in the IDs it
 /// makes up.
@@ -57,9 +57,7 @@ fn parse_root(bytes: &[u8]) -> Value {
     if !matches!(rest.first(), Some(b'{' | b'[')) {
         return Value::Null;
     }
-    serde_json::Deserializer::from_slice(rest)
-        .into_iter::<Value>()
-        .next()
+    exact::first(rest)
         .and_then(Result::ok)
         .unwrap_or(Value::Null)
 }
@@ -769,7 +767,7 @@ fn raw_json(text: &str) -> Option<Value> {
     if text.is_empty() || !go::gjson_valid(text.as_bytes()) {
         return None;
     }
-    serde_json::from_str(text).ok()
+    exact::from_str(text).ok()
 }
 
 /// A Gemini error for a failed interaction.

@@ -306,3 +306,16 @@ fn settings_and_held_back_reminder() {
         })
     );
 }
+
+// Not upstream's: a tool call's input, read with each number as written,
+// goes on with that text, as upstream copies it (checked with Go).
+#[test]
+fn numbers_keep_their_text() {
+    let spelled = r#"{"x":-0,"y":1E20,"z":[1e5,0.10]}"#;
+    let request = format!(
+        r#"{{"messages":[{{"role":"assistant","content":[{{"type":"tool_use","id":"a","name":"f","input":{spelled}}}]}}]}}"#
+    );
+    let request = crate::json::exact::from_str(&request).unwrap();
+    let out = convert_claude_request_to_interactions("m", &request, false);
+    assert_eq!(out["input"][0]["arguments"].to_string(), spelled);
+}

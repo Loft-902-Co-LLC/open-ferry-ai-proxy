@@ -409,6 +409,9 @@ fn set_gemini_function_response_raw_cases() {
     // The text keeps its spacing, as upstream copies it.
     assert_eq!(set(" {\"$ref\": \"#/x\"}\n"), json!("{\"$ref\": \"#/x\"}"));
     assert_eq!(set("not json"), json!(""));
+    // Not upstream's: each number keeps its text, as upstream copies it.
+    let spelled = r#"{"x":-0,"y":1E20,"z":[1e5,0.10]}"#;
+    assert_eq!(set(spelled).to_string(), spelled);
 }
 
 #[test]

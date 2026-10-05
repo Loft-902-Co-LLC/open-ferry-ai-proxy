@@ -20,7 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{Map, Value};
 
 use crate::go;
-use crate::json::{int_of, object, path, set_path, str_of};
+use crate::json::{exact, int_of, object, path, set_path, str_of};
 
 /// gjson `Get(at).String()` of `value`, `at` a dotted path of keys.
 pub(super) fn text_at<'v>(value: &'v Value, at: &str) -> Cow<'v, str> {
@@ -74,7 +74,7 @@ pub(super) fn raw_json_value(value: Option<&Value>) -> Value {
         Some(Value::String(text)) => {
             let trimmed = text.trim();
             go::gjson_valid(trimmed.as_bytes())
-                .then(|| serde_json::from_str(trimmed).ok())
+                .then(|| exact::from_str(trimmed).ok())
                 .flatten()
                 .unwrap_or_else(|| Value::String(text.clone()))
         }
@@ -263,12 +263,15 @@ mod tests {
     }
 
     // Not upstream's: setRawJSONValue keeps a string that isn't JSON, and
-    // reads one that is, once trimmed.
+    // reads one that is, once trimmed, each number as written (checked with
+    // Go).
     #[test]
     fn raw_json_values() {
         assert_eq!(raw_json_value(None), json!({}));
         assert_eq!(raw_json_value(Some(&json!(" {\"q\":1} "))), json!({"q": 1}));
         assert_eq!(raw_json_value(Some(&json!("1.50"))).to_string(), "1.50");
+        let spelled = r#"{"x":-0,"y":1E20,"z":[1e5,0.10]}"#;
+        assert_eq!(raw_json_value(Some(&json!(spelled))).to_string(), spelled);
         assert_eq!(raw_json_value(Some(&json!("{\"q\""))), json!("{\"q\""));
         assert_eq!(raw_json_value(Some(&json!([1]))), json!([1]));
     }

@@ -358,3 +358,26 @@ fn non_stream_nested_interaction() {
         })
     );
 }
+
+// Not upstream's: a function call's arguments keep each number as written in
+// the tool call's input, as upstream copies them, and an interaction id sent
+// as the number -0 stays "-0", as gjson's String() gives it (checked with
+// Go).
+#[test]
+fn numbers_keep_their_text() {
+    let spelled = r#"{"x":-0,"y":1E20,"z":[1e5,0.10]}"#;
+    let out = non_stream(
+        "m",
+        &format!(
+            r#"{{"id":"i1","steps":[{{"type":"function_call","id":"c1","name":"f","arguments":{spelled}}}]}}"#
+        ),
+    );
+    assert_eq!(out["content"][0]["input"].to_string(), spelled);
+
+    let frames = stream(
+        "m",
+        &[r#"data: {"event_type":"interaction.created","interaction":{"id":-0,"model":"m"}}"#],
+    );
+    let start = find_event(&frames, "message_start").expect("message_start");
+    assert_eq!(start["message"]["id"], "-0");
+}

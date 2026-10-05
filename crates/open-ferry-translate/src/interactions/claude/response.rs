@@ -33,7 +33,7 @@ use serde_json::{Map, Value, json};
 use super::request::first_non_empty;
 use crate::common::interactions_usage::interactions_usage;
 use crate::go;
-use crate::json::{int_of, path, set_path, str_of};
+use crate::json::{exact, int_of, path, set_path, str_of};
 
 /// Translates an Interactions event stream into Claude Messages SSE events,
 /// one event at a time. Keep one per response: it tracks the message and the
@@ -88,7 +88,7 @@ impl InteractionsToClaudeStream {
             self.message_stop(&mut out);
             return out;
         }
-        let Ok(root) = serde_json::from_slice::<Value>(&payload) else {
+        let Ok(root) = exact::from_slice(&payload) else {
             return out;
         };
         match str_of(root.get("event_type")).as_ref() {
@@ -338,7 +338,7 @@ impl InteractionsToClaudeStream {
 
 /// Converts a whole Interactions response body into a Claude message.
 pub fn convert_interactions_response_to_claude_non_stream(model_name: &str, body: &[u8]) -> Value {
-    let root: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+    let root = exact::from_slice(body).unwrap_or(Value::Null);
     let interaction = root.get("interaction").unwrap_or(&root);
     let mut out = json!({
         "id": "",

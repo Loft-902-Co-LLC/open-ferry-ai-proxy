@@ -2,7 +2,7 @@
 // (the request tests) (v8.0.10, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 //
-// All tests are ported. The test after them is new; its expected output
+// All tests are ported. The tests after them are new; their expected output
 // comes from upstream.
 
 use serde_json::{Value, json};
@@ -238,4 +238,21 @@ fn settings_turns_and_declarations() {
             ],
         })
     );
+}
+
+// Not upstream's: a call's arguments and a result, read with each number as
+// written, go on with that text, as upstream copies them (checked with Go).
+#[test]
+fn numbers_keep_their_text() {
+    let spelled = r#"{"x":-0,"y":1E20,"z":[1e5,0.10]}"#;
+    let request = format!(
+        r#"{{"input":[{{"type":"function_call","id":"a","name":"f","arguments":{spelled}}},{{"type":"function_result","call_id":"a","result":{spelled}}}]}}"#
+    );
+    let request = crate::json::exact::from_str(&request).unwrap();
+    let out = convert_interactions_request_to_claude("m", &request, false);
+    assert_eq!(
+        out["messages"][0]["content"][0]["input"].to_string(),
+        spelled
+    );
+    assert_eq!(out["messages"][1]["content"][0]["content"], spelled);
 }

@@ -34,7 +34,7 @@ use super::common::{
 };
 use crate::common::interactions_usage::interactions_usage;
 use crate::go;
-use crate::json::{bool_of, object, path, str_of};
+use crate::json::{bool_of, exact, object, path, str_of};
 
 /// `ConvertInteractionsRequestToOpenAI`: an Interactions request as a Chat
 /// Completions request for `model_name`, or for the request's own model if
@@ -539,7 +539,7 @@ impl InteractionsToOpenAIStream {
         if payload.is_empty() || go::trim_space(&payload) == b"[DONE]" {
             return Vec::new();
         }
-        let root: Value = serde_json::from_slice(&payload).unwrap_or(Value::Null);
+        let root = exact::from_slice(&payload).unwrap_or(Value::Null);
         let mut out = Vec::new();
         match text_at(&root, "event_type").as_ref() {
             "interaction.created" => {

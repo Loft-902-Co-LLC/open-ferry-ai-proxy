@@ -474,3 +474,34 @@ fn response_non_stream_steps_and_usage() {
     });
     assert_eq!(out.to_string(), want.to_string());
 }
+
+// Not upstream's: a function call's arguments sent as text keep each number
+// as written, as upstream copies them, and a response id sent as the number
+// -0 stays "-0", as gjson's String() gives it (checked with Go).
+#[test]
+fn numbers_keep_their_text() {
+    let spelled = r#"{"x":-0,"y":1E20,"z":[1e5,0.10]}"#;
+    let event = json!({"type":"response.completed","response":{"id":"r1","output":[{"type":"function_call","call_id":"c1","name":"f","arguments":spelled}]}});
+    let out = convert_codex_response_to_interactions_non_stream("m", &event);
+    assert_eq!(at(&out, "steps.0.arguments").to_string(), spelled, "{out}");
+
+    let mut stream = CodexToInteractionsStream::new("m");
+    let out = stream
+        .translate_line(br#"data: {"type":"response.created","response":{"id":-0,"model":"m"}}"#);
+    assert!(out.contains(r#"{"interaction":{"id":"-0","#), "{out}");
+}
+
+// Not upstream's: review 11a's request. A call's arguments object, read with
+// each number as written, goes on as that text, as upstream copies it
+// (checked with Go).
+#[test]
+fn request_arguments_keep_their_numbers() {
+    let spelled = r#"{"x":-0,"y":1E20,"z":[1e5,0.10]}"#;
+    let request = format!(
+        r#"{{"input":[{{"type":"function_call","id":"a","name":"f","arguments":{{"x":-0}}}},{{"type":"function_call","id":"b","name":"f","arguments":{spelled}}}]}}"#
+    );
+    let request = crate::json::exact::from_str(&request).unwrap();
+    let out = convert_interactions_request_to_codex("m", &request, false);
+    assert_eq!(at(&out, "input.0.arguments"), r#"{"x":-0}"#);
+    assert_eq!(at(&out, "input.1.arguments"), spelled);
+}

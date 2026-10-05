@@ -1044,3 +1044,20 @@ fn data_urls_split() {
     assert_eq!(parse_data_url("data:image/png"), None);
     assert_eq!(parse_data_url("https://x"), None);
 }
+
+// Not upstream's: a function call's arguments and its output, sent as JSON
+// text, keep each number as written, as upstream copies them (checked with
+// Go).
+#[test]
+fn embedded_json_keeps_numbers_as_written() {
+    let spelled = r#"{"x":-0,"y":1E20,"z":[1e5,0.10]}"#;
+    let out = to_interactions(
+        "m",
+        json!({"model":"m","input":[
+            {"type":"function_call","call_id":"c1","name":"f","arguments":spelled},
+            {"type":"function_call_output","call_id":"c1","output":spelled}
+        ]}),
+    );
+    assert_eq!(out["input"][0]["arguments"].to_string(), spelled, "{out}");
+    assert_eq!(out["input"][1]["result"].to_string(), spelled, "{out}");
+}

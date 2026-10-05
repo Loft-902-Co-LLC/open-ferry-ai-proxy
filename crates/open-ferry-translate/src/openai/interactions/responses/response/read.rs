@@ -28,6 +28,7 @@ use std::borrow::Cow;
 use serde_json::{Map, Value};
 
 use crate::go;
+use crate::json::exact;
 
 /// How deep [`read`] reads nested arrays and objects, as serde_json does.
 const MAX_DEPTH: usize = 128;
@@ -60,7 +61,7 @@ pub(super) fn sse_payload(raw: &[u8]) -> Cow<'_, [u8]> {
 pub(super) fn read(text: &[u8]) -> (Option<Value>, bool) {
     let valid = go::gjson_valid(text);
     let text = String::from_utf8_lossy(text);
-    if valid && let Ok(value) = serde_json::from_str(&text) {
+    if valid && let Ok(value) = exact::from_str(&text) {
         return (Some(value), true);
     }
     (lenient(&text), valid)
@@ -227,7 +228,10 @@ impl Reader<'_> {
             "false" => Value::Bool(false),
             "null" => Value::Null,
             _ if token.starts_with(['-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9']) => {
-                Value::Number(serde_json::from_str(token).ok()?)
+                match exact::from_str(token) {
+                    Ok(number @ Value::Number(_)) => number,
+                    _ => return None,
+                }
             }
             _ => return None,
         };

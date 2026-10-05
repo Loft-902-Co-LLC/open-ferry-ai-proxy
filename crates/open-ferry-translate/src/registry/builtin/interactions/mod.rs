@@ -10,6 +10,9 @@ mod codex;
 mod gemini;
 mod responses;
 
+use serde_json::Value;
+
+use crate::json::exact;
 use crate::registry::Registry;
 
 pub(super) fn register(registry: &Registry) {
@@ -18,4 +21,10 @@ pub(super) fn register(registry: &Registry) {
     responses::register(registry);
     codex::register(registry);
     gemini::register(registry);
+}
+
+/// A whole response's body as JSON, or `null` if it isn't, with each
+/// number's text kept for the translators that copy it as upstream does.
+fn parse(body: &[u8]) -> Value {
+    exact::from_slice(body).unwrap_or(Value::Null)
 }

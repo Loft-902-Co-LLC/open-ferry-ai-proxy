@@ -8,7 +8,8 @@
 
 use std::sync::Arc;
 
-use super::super::{events, parse, to_vec};
+use super::super::{events, to_vec};
+use super::parse;
 use crate::codex::interactions as codex_interactions;
 use crate::registry::{Format, Registry, ResponseTransform, StreamTranslator};
 
@@ -141,5 +142,27 @@ data: {\"interaction_id\":\"resp_1\",\"status\":\"in_progress\",\"event_type\":\
                 "steps": [{"type": "model_output", "content": [{"type": "text", "text": "ok"}]}]
             })
         );
+    }
+
+    // Not upstream's: a whole response's function call arguments keep each
+    // number as written, as upstream copies them (checked with Go).
+    #[test]
+    fn whole_responses_keep_numbers_as_written() {
+        let registry = Registry::builtin();
+        let request = json!({});
+        let spelled = r#"{"x":-0,"y":1E20,"z":[1e5,0.10]}"#;
+        let body = format!(
+            r#"{{"type":"response.completed","response":{{"id":"r1","output":[{{"type":"function_call","call_id":"c1","name":"f","arguments":{spelled}}}]}}}}"#
+        );
+        let out = registry
+            .translate_non_stream(
+                &Format::CODEX,
+                &Format::INTERACTIONS,
+                &context(&request),
+                body.into(),
+            )
+            .expect("the pair translates whole responses");
+        let out = String::from_utf8(out).expect("UTF-8");
+        assert!(out.contains(&format!(r#""arguments":{spelled}"#)), "{out}");
     }
 }

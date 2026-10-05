@@ -269,3 +269,42 @@ fn rfc3339_formats_utc_seconds() {
     assert_eq!(rfc3339(951_782_400), "2000-02-29T00:00:00Z");
     assert_eq!(rfc3339(1_700_000_000), "2023-11-14T22:13:20Z");
 }
+
+// Not upstream's: a tool call's input keeps each number as written, as
+// upstream copies it, whether the message is whole or streamed in pieces, and
+// a message id sent as the number -0 stays "-0", as gjson's String() gives
+// it (checked with Go).
+#[test]
+fn numbers_keep_their_text() {
+    let spelled = r#"{"x":-0,"y":1E20,"z":[1e5,0.10]}"#;
+    let out = non_stream(
+        "m",
+        &format!(
+            r#"{{"id":"msg_1","type":"message","role":"assistant","content":[{{"type":"tool_use","id":"t1","name":"f","input":{spelled}}}],"stop_reason":"tool_use"}}"#
+        ),
+    );
+    assert_eq!(out["steps"][0]["arguments"].to_string(), spelled);
+
+    let pieces = serde_json::to_string(spelled).unwrap();
+    let out = non_stream(
+        "m",
+        &format!(
+            "event: content_block_start\ndata: {{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"f\",\"input\":{{}}}}}}\n\nevent: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"input_json_delta\",\"partial_json\":{pieces}}}}}\n\nevent: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":0}}\n\n"
+        ),
+    );
+    assert_eq!(out["steps"][0]["arguments"].to_string(), spelled);
+
+    let out = non_stream(
+        "m",
+        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":-0,\"model\":\"m\"}}\n\n",
+    );
+    assert_eq!(out["id"], "-0", "{out}");
+    let frames = stream(
+        "m",
+        &[
+            r#"data: {"type":"message_start","message":{"id":-0,"model":"m","usage":{"input_tokens":1}}}"#,
+        ],
+    );
+    let created = find_event(&frames, "interaction.created").expect("interaction.created");
+    assert_eq!(created["interaction"]["id"], "-0");
+}

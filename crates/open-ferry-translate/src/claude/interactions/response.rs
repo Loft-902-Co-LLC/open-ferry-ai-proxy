@@ -32,7 +32,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{Map, Value, json};
 
 use crate::go;
-use crate::json::{int_of, raw, set_path, str_of};
+use crate::json::{exact, int_of, raw, set_path, str_of};
 
 /// The usage fields kept from Claude's events, merged as they arrive.
 const USAGE_FIELDS: [&str; 5] = [
@@ -102,7 +102,7 @@ impl ClaudeToInteractionsStream {
             self.done(&mut out);
             return out;
         }
-        let root: Value = serde_json::from_slice(payload).unwrap_or(Value::Null);
+        let root = exact::from_slice(payload).unwrap_or(Value::Null);
         match str_of(root.get("type")).as_ref() {
             "message_start" => {
                 let message = root.get("message").unwrap_or(&Value::Null);
@@ -321,7 +321,7 @@ impl ClaudeToInteractionsStream {
 /// Converts a whole Claude response into an interaction: a Claude message,
 /// or else a Claude SSE stream, read line by line.
 pub fn convert_claude_response_to_interactions_non_stream(model_name: &str, body: &[u8]) -> Value {
-    match serde_json::from_slice::<Value>(body) {
+    match exact::from_slice(body) {
         Ok(root) if root.get("content").is_some() => message_to_interaction(model_name, &root),
         _ => stream_to_interaction(model_name, body),
     }
@@ -389,7 +389,7 @@ fn stream_to_interaction(model_name: &str, body: &[u8]) -> Value {
         if payload == b"[DONE]" {
             continue;
         }
-        let root: Value = serde_json::from_slice(payload).unwrap_or(Value::Null);
+        let root = exact::from_slice(payload).unwrap_or(Value::Null);
         let index = root.get("index").map_or(0, int_of);
         match str_of(root.get("type")).as_ref() {
             "message_start" => {
@@ -448,7 +448,7 @@ fn stream_to_interaction(model_name: &str, body: &[u8]) -> Value {
                     Some("function_call") => {
                         let arguments = text.trim();
                         let arguments = (!arguments.is_empty() && raw::valid(arguments))
-                            .then(|| serde_json::from_str::<Value>(arguments).ok())
+                            .then(|| exact::from_str(arguments).ok())
                             .flatten();
                         function_call_step(&name, &id, arguments.as_ref())
                     }

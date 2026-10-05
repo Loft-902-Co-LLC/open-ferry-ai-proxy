@@ -542,3 +542,34 @@ fn translates_a_whole_response() {
         ["role", "content", "reasoning_content", "tool_calls"]
     );
 }
+
+// Not upstream's: an interaction id sent as the number -0 stays "-0", as
+// gjson's String() gives it (checked with Go).
+#[test]
+fn stream_keeps_a_number_id_as_written() {
+    let chunks = stream(
+        "m",
+        &[
+            r#"data: {"event_type":"interaction.created","interaction":{"id":-0,"model":"m"}}"#,
+            r#"data: {"event_type":"step.delta","index":0,"delta":{"type":"text","text":"hi"}}"#,
+        ],
+    );
+    assert_eq!(chunks.len(), 2, "{chunks:?}");
+    assert!(chunks.iter().all(|chunk| chunk["id"] == "-0"), "{chunks:?}");
+}
+
+// Not upstream's: a call's arguments object, read with each number as
+// written, goes on as that text, as upstream copies it (checked with Go).
+#[test]
+fn request_arguments_keep_their_numbers() {
+    let spelled = r#"{"x":-0,"y":1E20,"z":[1e5,0.10]}"#;
+    let body = crate::json::exact::from_str(&format!(
+        r#"{{"input":[{{"type":"function_call","id":"a","name":"f","arguments":{spelled}}}]}}"#
+    ))
+    .unwrap();
+    let out = convert_interactions_request_to_openai("m", &body, false);
+    assert_eq!(
+        out["messages"][0]["tool_calls"][0]["function"]["arguments"],
+        spelled
+    );
+}

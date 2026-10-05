@@ -11,7 +11,8 @@
 
 use std::sync::Arc;
 
-use super::super::{events, parse, to_vec};
+use super::super::{events, to_vec};
+use super::parse;
 use crate::openai::interactions::chat_completions as chat;
 use crate::registry::{Format, Registry, ResponseTransform, StreamTranslator};
 
@@ -214,5 +215,36 @@ mod tests {
             out["steps"],
             json!([{"type": "model_output", "content": [{"type": "text", "text": "hi"}]}])
         );
+    }
+
+    // Not upstream's: a whole response's tool call arguments keep each
+    // number as written, as upstream copies them (checked with Go).
+    #[test]
+    fn whole_responses_keep_numbers_as_written() {
+        let registry = Registry::builtin();
+        let original = json!({});
+        let ctx = context(&original);
+        let spelled = r#"{"x":-0,"y":1E20,"z":[1e5,0.10]}"#;
+
+        let body = format!(
+            r#"{{"id":"i1","steps":[{{"type":"function_call","id":"c1","name":"f","arguments":{spelled}}}]}}"#
+        );
+        let out = registry
+            .translate_non_stream(&Format::INTERACTIONS, &Format::OPENAI, &ctx, body.into())
+            .expect("a response");
+        let out: Value = serde_json::from_slice(&out).expect("JSON");
+        assert_eq!(
+            out["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"],
+            spelled
+        );
+
+        let body = format!(
+            r#"{{"id":"c1","choices":[{{"message":{{"role":"assistant","tool_calls":[{{"id":"t1","type":"function","function":{{"name":"f","arguments":{spelled}}}}}]}},"finish_reason":"tool_calls"}}]}}"#
+        );
+        let out = registry
+            .translate_non_stream(&Format::OPENAI, &Format::INTERACTIONS, &ctx, body.into())
+            .expect("a response");
+        let out = String::from_utf8(out).expect("UTF-8");
+        assert!(out.contains(&format!(r#""arguments":{spelled}"#)), "{out}");
     }
 }

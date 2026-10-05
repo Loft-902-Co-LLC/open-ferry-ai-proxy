@@ -35,7 +35,7 @@ use crate::common::file_data::normalize_openai_file_data;
 use crate::common::gemini_response::create_time;
 use crate::common::sse::{push_event, push_frame};
 use crate::go;
-use crate::json::{bool_of, object, path, set_path, str_of};
+use crate::json::{bool_of, exact, object, path, set_path, str_of};
 
 /// `ConvertOpenAIRequestToInteractions`: a Chat Completions request as an
 /// Interactions request for `model_name`, or for the request's own model if
@@ -478,7 +478,7 @@ impl OpenAIToInteractionsStream {
             }
             return out;
         }
-        let root: Value = serde_json::from_slice(&payload).unwrap_or(Value::Null);
+        let root = exact::from_slice(&payload).unwrap_or(Value::Null);
         if let Some(usage) = root.get("usage") {
             self.usage = Some(usage.clone());
         }

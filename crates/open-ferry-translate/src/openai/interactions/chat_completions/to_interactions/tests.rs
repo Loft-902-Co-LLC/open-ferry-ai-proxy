@@ -479,3 +479,34 @@ fn translates_a_whole_response() {
         ]
     );
 }
+
+// Not upstream's: a tool call's arguments keep each number as written, as
+// upstream copies them, and an id sent as the number -0 stays "-0", as
+// gjson's String() gives it (checked with Go).
+#[test]
+fn numbers_keep_their_text() {
+    let spelled = r#"{"x":-0,"y":1E20,"z":[1e5,0.10]}"#;
+    let body = json!({"id":"c1","choices":[{"message":{"role":"assistant","tool_calls":[{"id":"t1","type":"function","function":{"name":"f","arguments":spelled}}]},"finish_reason":"tool_calls"}]});
+    let out = convert_openai_response_to_interactions_non_stream("m", &body);
+    assert_eq!(out["steps"][0]["arguments"].to_string(), spelled);
+
+    let mut stream = OpenAIToInteractionsStream::new("m");
+    let out =
+        stream.translate(br#"data: {"id":-0,"choices":[{"index":0,"delta":{"content":"hi"}}]}"#);
+    assert_eq!(find(&out, "interaction.created")["interaction"]["id"], "-0");
+}
+
+// Not upstream's: review 11b's request, whose tool call arguments, JSON in a
+// string, go on with each number as written, as upstream copies them
+// (checked with Go).
+#[test]
+fn request_arguments_keep_their_numbers() {
+    let out = request(
+        "m",
+        r#"{"messages":[{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"{\"x\":-0,\"y\":1E20}"}}]}]}"#,
+    );
+    assert_eq!(
+        out["input"][0]["arguments"].to_string(),
+        r#"{"x":-0,"y":1E20}"#
+    );
+}

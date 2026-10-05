@@ -3,6 +3,9 @@
 //! Upstream reads client JSON through gjson, which coerces instead of failing:
 //! a numeric tool name becomes `"123"`, a missing field becomes `""`. These
 //! helpers reproduce that so translated output matches upstream for sloppy input.
+//!
+//! [`exact`] reads JSON keeping each number's text as written, as upstream
+//! keeps the client's text where it copies a value.
 
 use std::borrow::Cow;
 
@@ -10,6 +13,7 @@ use serde_json::{Map, Number, Value};
 
 use crate::go;
 
+pub mod exact;
 pub(crate) mod lenient;
 pub(crate) mod raw;
 

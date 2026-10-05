@@ -36,7 +36,7 @@ use serde_json::{Map, Value};
 use crate::common::gemini_response::create_time;
 use crate::common::sse::{push_event, push_frame};
 use crate::go;
-use crate::json::{int_of, object, path, str_of};
+use crate::json::{exact, int_of, object, path, str_of};
 
 /// The step kinds the stream opens.
 const MODEL_OUTPUT: &str = "model_output";
@@ -101,7 +101,7 @@ impl CodexToInteractionsStream {
         if payload.is_empty() {
             return out;
         }
-        let event: Value = serde_json::from_slice(payload).unwrap_or(Value::Null);
+        let event = exact::from_slice(payload).unwrap_or(Value::Null);
         match str_of(event.get("type")).as_ref() {
             "response.created" => self.start(&mut out, event.get("response")),
             "response.output_item.added" => {
@@ -578,7 +578,7 @@ fn item_call_id(item: &Value) -> String {
 /// string gives `{}`, and anything else nothing.
 fn arguments_object(arguments: Option<&Value>) -> Option<Value> {
     match arguments? {
-        Value::String(text) => Some(match serde_json::from_str::<Value>(text) {
+        Value::String(text) => Some(match exact::from_str(text) {
             Ok(parsed @ Value::Object(_)) => parsed,
             _ => Value::Object(Map::new()),
         }),
