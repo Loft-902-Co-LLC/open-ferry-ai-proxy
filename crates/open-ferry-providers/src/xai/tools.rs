@@ -42,6 +42,9 @@
 //!   compactly, and neither has Go's `\u003c`-style escapes of `<`, `>`
 //!   and `&`.
 //! - A custom call's object `input` is written compactly as parsed.
+//! - A function whose parameters' references are too large to inline gets
+//!   the permissive object schema, and a folded namespace lists that schema
+//!   for such a child (see [`super::schema`]); upstream inlines them all.
 
 use std::collections::{HashMap, HashSet};
 
@@ -49,7 +52,7 @@ use open_ferry_translate::go;
 use open_ferry_translate::json::exact;
 use serde_json::{Map, Value, json};
 
-use super::schema;
+use super::schema::{self, Inlined};
 use crate::codex::request::base_model;
 use crate::json::{self, str_of};
 
@@ -607,13 +610,18 @@ fn dispatcher(tool: &Value) -> Option<Value> {
 
 /// A child's parameters as a dispatcher's description lists them: local
 /// references inlined and the definitions dropped; nothing for an empty
-/// object schema.
+/// object schema. Those too large to inline are listed as the permissive
+/// object schema (see [`schema::safe_function_parameters`]).
 fn catalogue_parameters(parameters: &Value) -> String {
     let raw = parameters.to_string();
     if raw == "{}" || raw == r#"{"type":"object","properties":{}}"# {
         return String::new();
     }
-    let mut cleaned = schema::inline_local_refs(parameters).unwrap_or_else(|| parameters.clone());
+    let mut cleaned = match schema::inline_local_refs(parameters) {
+        Inlined::Schema(inlined) => inlined,
+        Inlined::Unchanged => parameters.clone(),
+        Inlined::TooLarge => return schema::safe_function_parameters().to_string(),
+    };
     if let Value::Object(object) = &mut cleaned {
         object.shift_remove("$defs");
         object.shift_remove("definitions");
@@ -693,13 +701,19 @@ fn normalize_tool(
     let mut out = tool.clone();
     let is_custom = tool_type == CUSTOM;
     let callable = tool_type == FUNCTION || is_custom;
+    // Parameters with references too large to inline are simplified.
+    let mut too_large = false;
     if callable {
-        if let Some(inlined) = out.get("parameters").and_then(schema::inline_local_refs) {
-            json::set(&mut out, "parameters", inlined);
-            if let Some(Value::Object(parameters)) = out.get_mut("parameters") {
-                parameters.shift_remove("$defs");
-                parameters.shift_remove("definitions");
+        match out.get("parameters").map(schema::inline_local_refs) {
+            Some(Inlined::Schema(inlined)) => {
+                json::set(&mut out, "parameters", inlined);
+                if let Some(Value::Object(parameters)) = out.get_mut("parameters") {
+                    parameters.shift_remove("$defs");
+                    parameters.shift_remove("definitions");
+                }
             }
+            Some(Inlined::TooLarge) => too_large = true,
+            Some(Inlined::Unchanged) | None => {}
         }
         if schema::type_root_union_branches(&mut out) {
             tracing::debug!(
@@ -710,7 +724,7 @@ fn normalize_tool(
     }
     // Read before the custom tool becomes a function and gets parameters.
     let has_parameters = out.get("parameters").is_some();
-    let simplify = callable && schema::needs_simplification(&out, namespace);
+    let simplify = callable && (too_large || schema::needs_simplification(&out, namespace));
     if is_custom {
         json::set(&mut out, "type", Value::from(FUNCTION));
     }

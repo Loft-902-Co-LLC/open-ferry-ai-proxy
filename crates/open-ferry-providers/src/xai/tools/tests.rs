@@ -334,6 +334,67 @@ fn inlines_local_refs() {
     assert!(shape.get("$defs").is_none(), "{shape}");
 }
 
+/// Parameters whose property `a` refers to definition `n<levels>`, each
+/// definition past `n0` holding two references to the one before.
+fn doubling_parameters(levels: usize) -> Value {
+    let mut defs = serde_json::Map::new();
+    defs.insert("n0".to_owned(), json!({"type": "string"}));
+    for level in 1..=levels {
+        let previous = format!("#/$defs/n{}", level - 1);
+        defs.insert(
+            format!("n{level}"),
+            json!({
+                "type": "object",
+                "properties": {"a": {"$ref": previous}, "b": {"$ref": previous}},
+            }),
+        );
+    }
+    json!({
+        "type": "object",
+        "properties": {"a": {"$ref": format!("#/$defs/n{levels}")}},
+        "$defs": defs,
+    })
+}
+
+// Not upstream's: a function whose references would be copied past the
+// allowance gets the permissive object schema, as simplified parameters
+// do, and so does a folded namespace's listing of such a child; one whose
+// shared references stay within it is inlined. Upstream inlines both,
+// doubling the first's copies with each of its forty levels.
+#[test]
+fn simplifies_references_too_large_to_inline() {
+    let body = json!({"tools": [
+        {"type": "function", "name": "deep", "strict": true, "parameters": doubling_parameters(40)},
+        {"type": "function", "name": "shallow", "strict": true, "parameters": doubling_parameters(3)},
+    ]});
+    let out = normalize(&body.to_string());
+    let tools = tools_of(&out);
+    assert_eq!(tools[0]["name"], "deep");
+    assert_eq!(tools[0]["parameters"], schema::safe_function_parameters());
+    assert_eq!(tools[0]["strict"], false);
+    let shallow = &tools[1]["parameters"];
+    assert_eq!(tools[1]["strict"], true);
+    assert!(shallow.get("$defs").is_none(), "{shallow}");
+    assert!(!shallow.to_string().contains("$ref"), "{shallow}");
+    assert_eq!(
+        shallow["properties"]["a"]["properties"]["b"]["properties"]["a"]["properties"]["b"],
+        json!({"type": "string"})
+    );
+
+    let namespace = json!({"type": "namespace", "name": "mcp__deep", "tools": [
+        {"type": "function", "name": "deep", "parameters": doubling_parameters(40)},
+    ]});
+    let tool = dispatcher(&namespace).expect("dispatcher");
+    let description = tool["description"].as_str().expect("description");
+    assert!(
+        description.ends_with(&format!(
+            "- deep\n  Parameters: {}",
+            schema::safe_function_parameters()
+        )),
+        "{description}"
+    );
+}
+
 // TestNormalizeXAITools_AddsObjectTypeToRootUnionBranches.
 #[test]
 fn adds_object_type_to_root_union_branches() {

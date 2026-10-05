@@ -11,7 +11,9 @@
 //!
 //! - Local `$ref`s are inlined ([`inline_local_refs`]), each use getting its
 //!   own copy with the referring schema's other keywords on top; a cycle
-//!   ends in a `See: <name>` description.
+//!   ends in a `See: <name>` description. Parameters whose copies would
+//!   outgrow the schema by more than [`COPY_ALLOWANCE`] aren't inlined, and
+//!   get the permissive object schema below.
 //! - A root `anyOf` or `oneOf` branch with no `type` gets `"type":"object"`
 //!   when the root is an object schema ([`type_root_union_branches`]).
 //! - Parameters xAI would still reject, or that make it hang, are replaced
@@ -25,6 +27,13 @@
 //!   whitespace alone never counts as a change.
 //! - An inlined schema is written without Go's `\u003c`-style escapes of
 //!   `<`, `>` and `&`.
+//! - Inlining stops once its copies would outgrow the schema by more than
+//!   [`COPY_ALLOWANCE`] units, a unit being a value or a byte of a key or
+//!   string; the function then gets the permissive object schema, as for
+//!   parameters xAI rejects, and isn't strict. Upstream copies every
+//!   reference, and since each use gets its own copy, a definition used
+//!   twice by one used twice by another doubles with each level: seventeen
+//!   levels turn 1.5 KB into 11.6 MB.
 
 use std::collections::HashSet;
 
@@ -46,62 +55,148 @@ const CODEX_APP_NAMESPACE: &str = "codex_app";
 /// The Codex app tool xAI hangs on (`xaiAutomationUpdateToolName`).
 const AUTOMATION_UPDATE: &str = "automation_update";
 
+/// How much more inlining references may copy than the schema holds, in
+/// [`size`]'s units; see the module docs.
+pub(crate) const COPY_ALLOWANCE: usize = 1 << 18;
+
+/// What [`inline_local_refs`] made of a schema.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Inlined {
+    /// Left alone: there is no `"$ref"` in it, or it comes out the same.
+    Unchanged,
+    /// With its references inlined.
+    Schema(Value),
+    /// Not inlined, as its copies would outgrow it by more than
+    /// [`COPY_ALLOWANCE`].
+    TooLarge,
+}
+
 /// `InlineLocalRefs`: `schema` with each local `$ref` (`#/…`) replaced by a
 /// copy of what it points to, the referring schema's other keywords taking
 /// precedence. A reference inside its own target becomes the target's
 /// `type`, `nullable` and `description` with a `See: <name>` hint.
 ///
-/// `None` when upstream leaves the text alone: there is no `"$ref"` in it,
-/// or the schema comes out the same. Like Go's encoder, the result has its
-/// keys sorted.
-pub(crate) fn inline_local_refs(schema: &Value) -> Option<Value> {
-    let text = serde_json::to_string(schema).ok()?;
+/// [`Inlined::Unchanged`] when upstream leaves the text alone: there is no
+/// `"$ref"` in it, or the schema comes out the same. Like Go's encoder, the
+/// result has its keys sorted.
+pub(crate) fn inline_local_refs(schema: &Value) -> Inlined {
+    let Ok(text) = serde_json::to_string(schema) else {
+        return Inlined::Unchanged;
+    };
     if !text.contains("\"$ref\"") {
-        return None;
+        return Inlined::Unchanged;
     }
-    let mut resolved = resolve(schema, schema, &mut HashSet::new());
+    let mut inliner = Inliner {
+        root: schema,
+        active: HashSet::new(),
+        budget: size(schema, usize::MAX).saturating_add(COPY_ALLOWANCE),
+    };
+    let Some(mut resolved) = inliner.resolve(schema) else {
+        return Inlined::TooLarge;
+    };
     sort_keys(&mut resolved);
-    let out = serde_json::to_string(&resolved).ok()?;
-    (out != text).then_some(resolved)
+    match serde_json::to_string(&resolved) {
+        Ok(out) if out != text => Inlined::Schema(resolved),
+        _ => Inlined::Unchanged,
+    }
 }
 
-/// `resolveLocalRefs`.
-fn resolve(root: &Value, value: &Value, active: &mut HashSet<String>) -> Value {
-    match value {
-        Value::Array(items) => Value::Array(
-            items
-                .iter()
-                .map(|item| resolve(root, item, active))
-                .collect(),
-        ),
-        Value::Object(node) => {
-            if let Some(Value::String(reference)) = node.get("$ref")
-                && reference.starts_with("#/")
-                && let Some(target) = pointer(root, reference)
-            {
-                if active.contains(reference) {
-                    return cyclic_fallback(node, target, reference);
-                }
-                active.insert(reference.clone());
-                let resolved = resolve(root, target, active);
-                active.remove(reference);
-                if let Value::Object(mut out) = resolved {
-                    for (key, item) in node {
-                        if key != "$ref" {
-                            out.insert(key.clone(), resolve(root, item, active));
-                        }
+/// The walk of `resolveLocalRefs` over a schema, and what it may still
+/// copy.
+struct Inliner<'v> {
+    /// The schema references point into.
+    root: &'v Value,
+    /// The references being inlined, each inside the one before.
+    active: HashSet<String>,
+    /// What may still be copied, in [`size`]'s units.
+    budget: usize,
+}
+
+impl Inliner<'_> {
+    /// Takes `cost` from the budget; `None` once it runs out.
+    fn charge(&mut self, cost: usize) -> Option<()> {
+        self.budget = self.budget.checked_sub(cost)?;
+        Some(())
+    }
+
+    /// `resolveLocalRefs`: `value` with its references inlined, or `None`
+    /// once the copies outgrow the budget. Each value is paid for before it
+    /// is copied.
+    fn resolve(&mut self, value: &Value) -> Option<Value> {
+        match value {
+            Value::Array(items) => {
+                self.charge(1)?;
+                let items = items
+                    .iter()
+                    .map(|item| self.resolve(item))
+                    .collect::<Option<Vec<_>>>()?;
+                Some(Value::Array(items))
+            }
+            Value::Object(node) => {
+                if let Some(Value::String(reference)) = node.get("$ref")
+                    && reference.starts_with("#/")
+                    && let Some(target) = pointer(self.root, reference)
+                {
+                    if self.active.contains(reference) {
+                        let fallback = cyclic_fallback(node, target, reference);
+                        self.charge(size(&fallback, self.budget))?;
+                        return Some(fallback);
                     }
-                    return Value::Object(out);
+                    self.active.insert(reference.clone());
+                    let resolved = self.resolve(target);
+                    self.active.remove(reference);
+                    if let Value::Object(mut out) = resolved? {
+                        for (key, item) in node {
+                            if key != "$ref" {
+                                self.charge(key.len())?;
+                                let item = self.resolve(item)?;
+                                out.insert(key.clone(), item);
+                            }
+                        }
+                        return Some(Value::Object(out));
+                    }
+                }
+                self.charge(1)?;
+                let mut out = Map::new();
+                for (key, item) in node {
+                    self.charge(key.len())?;
+                    let item = self.resolve(item)?;
+                    out.insert(key.clone(), item);
+                }
+                Some(Value::Object(out))
+            }
+            other => {
+                self.charge(size(other, usize::MAX))?;
+                Some(other.clone())
+            }
+        }
+    }
+}
+
+/// The size of `value`: one for each value in it, itself included, and
+/// one for each byte of its keys and strings. Counting stops once past
+/// `limit`.
+fn size(value: &Value, limit: usize) -> usize {
+    let mut total: usize = 0;
+    let mut stack = vec![value];
+    while let Some(value) = stack.pop() {
+        total = total.saturating_add(1);
+        match value {
+            Value::Object(fields) => {
+                for (key, item) in fields {
+                    total = total.saturating_add(key.len());
+                    stack.push(item);
                 }
             }
-            Value::Object(
-                node.iter()
-                    .map(|(key, item)| (key.clone(), resolve(root, item, active)))
-                    .collect(),
-            )
+            Value::Array(items) => stack.extend(items),
+            Value::String(text) => total = total.saturating_add(text.len()),
+            _ => {}
         }
-        other => other.clone(),
+        if total > limit {
+            break;
+        }
     }
+    total
 }
 
 /// `resolveJSONPointer`: what a `#/…` reference points to in `root`.
