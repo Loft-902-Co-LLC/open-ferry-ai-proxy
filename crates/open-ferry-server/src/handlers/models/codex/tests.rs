@@ -6,7 +6,12 @@
 //!   server_multi_agent_config_test.go;
 //! - sdk/api/handlers/openai/codex_client_models_test.go;
 //! - sdk/api/handlers/apply_patch_capability_test.go;
-//! - sdk/cliproxy/auth/apply_patch_capability_test.go.
+//! - sdk/cliproxy/auth/apply_patch_capability_test.go;
+//! - internal/runtime/executor/apply_patch_capability_test.go
+//!   (`TestApplyPatchActualExecutors`), and the model list half of
+//!   apply_patch_bridge_test.go's `TestApplyPatchBridgeLiveHTTPPreviewMatrix`
+//!   (`applyPatchTestCatalog`), whose stream half is in the providers
+//!   crate's `apply_patch_bridge_tests`.
 //!
 //! Whether a provider takes `apply_patch` goes by its name here (see the
 //! module docs), so upstream's test executors become provider names: one
@@ -28,13 +33,26 @@
 //! - `TestApplyPatchManagerAllCandidates` checks provider names, and also
 //!   how they match; the nil manager case is dropped.
 //! - `TestApplyPatchModelExactPublicRoute` drops its absent handler case.
+//! - `TestApplyPatchActualExecutors` asks for the name of each executor the
+//!   service makes, as the name decides here. Its OpenAI-compatible
+//!   executor for `arbitrary-plugin-provider` serves under
+//!   `openai-compatible-arbitrary-plugin-provider`, the key the service
+//!   registers it under. Its AI Studio, Antigravity, Devin and Kimi
+//!   executors aren't ported (policy). Its Codex and xAI WebSocket and
+//!   `Auto` executors are the Codex and xAI executors here, which serve
+//!   both transports under one name, so the unconfigured `Auto` executors
+//!   that don't take the tool have no counterpart; nor has `ForAPIKey`,
+//!   as the executors aren't bound to an API key's config.
+//! - The matrix's model list half calls the model list handler through the
+//!   server's router, with the model registered under each executor's
+//!   name, rather than through a gin gateway over the executor.
 //!
 //! Added: `apply_patch_routing` and `apply_patch_needs_every_provider` also
 //! check that `gemini` and `vertex` take the tool, as upstream's Gemini and
 //! Vertex AI executors say they do, and `apply_patch_needs_every_provider`
-//! that `gemini-interactions` and `meta` do, as upstream's Gemini
-//! Interactions executor (a Gemini executor) and Meta executor say, while
-//! `xai` doesn't.
+//! that `gemini-interactions`, `meta` and `xai` do, as upstream's Gemini
+//! Interactions executor (a Gemini executor), Meta executor and xAI
+//! executor say. The matrix's model list half also checks Codex.
 //!
 //! Dropped: `TestCodexClientModelsResponse_DevinDisplayName` and
 //! `TestModelsWithClientVersion_DevinDisplayName`, as Devin isn't ported, and
@@ -45,10 +63,18 @@ use std::sync::Arc;
 use axum::body::Body;
 use http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
+use open_ferry_core::auth::compat::openai_compatible_provider_key;
 use open_ferry_core::config::{CodexClientConfig, Config};
+use open_ferry_core::executor::ProviderExecutor;
 use open_ferry_core::models::{ModelInfo, ThinkingSupport};
 use open_ferry_core::registry::ModelRegistry;
 use open_ferry_core::registry::codex_client::CodexClientCatalog;
+use open_ferry_providers::claude::ClaudeExecutor;
+use open_ferry_providers::codex::CodexExecutor;
+use open_ferry_providers::gemini::{GeminiExecutor, InteractionsExecutor, VertexExecutor};
+use open_ferry_providers::meta::MetaExecutor;
+use open_ferry_providers::openai_compat::OpenAiCompatExecutor;
+use open_ferry_providers::xai::XaiExecutor;
 use serde_json::{Map, Value, json};
 use tower::ServiceExt;
 
@@ -746,4 +772,89 @@ fn apply_patch_xai() {
     assert!(supports_apply_patch_for_providers(&strings(&[
         " XAI ", "codex"
     ])));
+}
+
+/// The executors this port serves, made as the service makes them: an
+/// OpenAI-compatible one for `compat`, then Claude, Gemini, Gemini
+/// Interactions, Vertex AI, Codex (over HTTP and the Responses WebSocket),
+/// xAI (likewise) and Meta.
+fn served_executors(compat: &str) -> Vec<Arc<dyn ProviderExecutor>> {
+    let config = Arc::new(Config::default());
+    vec![
+        Arc::new(OpenAiCompatExecutor::new(compat, config)),
+        Arc::new(ClaudeExecutor::new("direct")),
+        Arc::new(GeminiExecutor::new("direct")),
+        Arc::new(InteractionsExecutor::new("direct")),
+        Arc::new(VertexExecutor::new("direct")),
+        Arc::new(CodexExecutor::new("direct")),
+        Arc::new(XaiExecutor::new("direct")),
+        Arc::new(MetaExecutor::new("direct")),
+    ]
+}
+
+// TestApplyPatchActualExecutors (executor/apply_patch_capability_test.go):
+// every executor this port serves takes the tool. Upstream asks each
+// executor; here the name it serves under decides, so the test asks for
+// each executor's name. Its OpenAI-compatible executor for
+// `arbitrary-plugin-provider` serves under
+// `openai-compatible-arbitrary-plugin-provider` here, the key the service
+// registers such a provider's executor under, and the baseline
+// `openai-compatibility` executor is checked too.
+#[test]
+fn apply_patch_actual_executors() {
+    let named = openai_compatible_provider_key("arbitrary-plugin-provider");
+    for compat in [named.as_str(), OPENAI_COMPATIBILITY] {
+        for executor in served_executors(compat) {
+            assert!(
+                supports_apply_patch_for_providers(&strings(&[executor.id()])),
+                "{} does not advertise actual support",
+                executor.id()
+            );
+        }
+    }
+}
+
+// The model list half of TestApplyPatchBridgeLiveHTTPPreviewMatrix
+// (executor/apply_patch_bridge_test.go, `applyPatchTestCatalog`): a model
+// served only by one of the matrix's executors is listed with the freeform
+// tool, and the tool turns on nothing else. Upstream's `custom-compat` is
+// `openai-compatible-custom` here, and `claude-oauth` is the Claude
+// executor, as `claude` is. Codex, which isn't in the matrix, is checked
+// too.
+#[tokio::test]
+async fn apply_patch_bridge_matrix_catalog() {
+    for executor in served_executors("openai-compatible-custom") {
+        let provider = executor.id();
+        let registry = Arc::new(ModelRegistry::new());
+        registry.register_client(
+            &format!("apply-patch-{provider}"),
+            provider,
+            &[model("test")],
+        );
+        let state = state(&registry, codex_config(true, false));
+        for version in ["0.137.0", "0.153.4", "cpa"] {
+            let body = get(
+                &state,
+                &format!("/v1/models?client_version={version}"),
+                None,
+            )
+            .await;
+            let entries = entries(&body);
+            let entry = entry(&entries, "test");
+            assert_eq!(
+                entry.get("apply_patch_tool_type"),
+                Some(&json!("freeform")),
+                "{provider} {version}: catalog not backed by the registered route: {body}"
+            );
+            let prefer_websockets = entry.get("prefer_websockets") == Some(&Value::Bool(true));
+            let service_tiers = entry
+                .get("service_tiers")
+                .and_then(Value::as_array)
+                .is_some_and(|tiers| !tiers.is_empty());
+            assert!(
+                !prefer_websockets && !service_tiers,
+                "{provider} {version}: patch support enabled unrelated capabilities: {entry:?}"
+            );
+        }
+    }
 }

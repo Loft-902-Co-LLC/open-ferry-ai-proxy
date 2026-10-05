@@ -15,7 +15,7 @@
 //!
 //! Deviations from upstream:
 //! - Whether a provider takes the tool goes by its name: `codex`, `claude`,
-//!   `gemini`, `gemini-interactions`, `vertex`, `meta` and the
+//!   `xai`, `gemini`, `gemini-interactions`, `vertex`, `meta` and the
 //!   OpenAI-compatible providers (`openai-compatibility` and
 //!   `openai-compatible-<name>`) do, the
 //!   providers whose executors say so upstream and are ported. Upstream asks
