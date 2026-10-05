@@ -606,7 +606,7 @@ The OpenAI translators share helpers with upstream's other translators, ported a
 
 The Claude translators use more of upstream's shared code:
 
-- `models` from `internal/registry`: the static model catalog, with each model's thinking settings and output token limit. `models/models.json` is upstream's `internal/registry/models/models.json`, copied unchanged.
+- `models` from `internal/registry`: the static model catalog, with each model's thinking settings and output token limit. `models/models.json` is upstream's `internal/registry/models/models.json` as of v8.0.15, copied unchanged.
 - `thinking` from `internal/thinking`: thinking budgets and levels, model-name suffixes, and whether a client asked to see reasoning summaries.
 - `common::cache_control` and `common::claude` from `internal/translator/common` and `internal/util`: `cache_control` markers, grouping messages into turns, structured output instructions, and tool name and ID sanitizing. Lining up a user message's tool results with the preceding `tool_use` IDs queues the results by ID instead of scanning them again for each ID as upstream does, so it takes linear time rather than quadratic; the output is the same.
 - `schema` from `internal/util/claude_schema.go`: making a tool's JSON Schema fit for Claude.

@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/registry/model_definitions.go and
 // model_registry.go (v8.0.10, MIT). models/models.json is upstream's
-// internal/registry/models/models.json, unchanged.
+// internal/registry/models/models.json as of v8.0.15, unchanged.
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! What each model supports, as far as translators need to know.
