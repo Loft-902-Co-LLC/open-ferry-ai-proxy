@@ -7,11 +7,11 @@
 //! call's identity are wrong.
 //!
 //! Dropped or changed tests:
-//! - TestInteractionsApplyPatchDeclarationAndHistory is dropped: it tests
-//!   the request translator, WP4-C1's.
+//! - TestInteractionsApplyPatchDeclarationAndHistory tests the request
+//!   translator, and is with its tests (`request/tests/patch_declaration.rs`).
 //! - TestInteractionsApplyPatchWinningDeclarationAndNegativeCompatibility
 //!   keeps only its response half; the check of the declaration the request
-//!   translator writes is WP4-C1's.
+//!   translator writes is with the request translator's tests.
 //! - Upstream reads the whole-response failure from the stream state it
 //!   passes in; these read it from the converter's `Err`.
 

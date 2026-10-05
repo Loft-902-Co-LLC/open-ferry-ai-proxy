@@ -20,6 +20,8 @@ use serde_json::json;
 
 use super::*;
 
+mod patch_declaration;
+
 fn to_interactions(model: &str, request: Value) -> Value {
     convert_openai_responses_request_to_interactions(model, &request, false)
 }
