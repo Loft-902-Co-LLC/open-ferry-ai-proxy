@@ -4,7 +4,7 @@ open-ferry reads CLIProxyAPI's config and auth directory as they are, so for mos
 
 ## Switching over
 
-1. **Back up** your `config.yaml` and auth directory. open-ferry doesn't change the config, but it does save credential files, as CLIProxyAPI does, when it refreshes a token or you sign in.
+1. **Back up** your `config.yaml` and auth directory. open-ferry changes the config only when you save a change through the management API or the dashboard, and it saves credential files, as CLIProxyAPI does, when it refreshes a token or you sign in.
 2. **Stop CLIProxyAPI.** Don't run both against the same auth directory at once. Each refreshes tokens on its own, and a refresh token one of them has used may then be refused to the other.
 3. **Install open-ferry** as the [README](../README.md#install) says.
 4. **Start it** where you started CLIProxyAPI, so that it finds `config.yaml` in the working directory, or pass the file with `-config`. It listens on the config's `port`, as before.
@@ -20,7 +20,7 @@ open-ferry reads CLIProxyAPI's config and auth directory as they are, so for mos
 - **Safe mode** still holds: while `api-keys` lists the example keys from CLIProxyAPI's `config.example.yaml`, the proxy refuses service until you change them. There's no warning page at `/`, though: the proxy's routes answer 403 with CLIProxyAPI's message, whose link, `/management.html?safe-mode=configure`, opens the dashboard's API key setup.
 
 **What differs:**
-- **The config is never written.** CLIProxyAPI replaces a plain `secret-key` with its bcrypt hash in the file; open-ferry leaves the file alone and compares the plain key as written. A file that already holds a hash works too. See [the foundation](../UPSTREAM.md#the-foundation).
+- **Loading the config never writes it.** CLIProxyAPI replaces a plain `secret-key` with its bcrypt hash in the file; open-ferry leaves the file alone and compares the plain key as written. A file that already holds a hash works too. The file is written only when you save a change through the management API or the dashboard. See [the foundation](../UPSTREAM.md#the-foundation).
 - **The `models` catalog sources are ignored** (`catalog`, `codex-catalog`, `devin-catalog`). The model catalogs built into the binary are always used, so `-local-model` changes nothing.
 - **Settings for features open-ferry doesn't have are read and ignored**:
   - session affinity (`routing.session-affinity` and its options);
@@ -82,7 +82,7 @@ open-ferry signs in only with each provider's own OAuth flow, and doesn't pose a
 open-ferry serves the part of `/v0/management` (and its `/v8/management` names) that T3 Code's hub uses, and more. The routes, and how each differs, are in [The management API](../UPSTREAM.md#the-management-api). What you'll notice:
 
 - **The control panel is open-ferry's own dashboard.** `/management.html` sends the browser to `/dashboard/`, keeping its query. The dashboard is built into the binary, so no panel is downloaded and `remote-management.panel-github-repository` is ignored. `disable-control-panel` turns it off, as before, and a client the management API refuses for its address (another machine, without `allow-remote`) is refused the dashboard too, where CLIProxyAPI serves its panel to anyone. See [the dashboard](../UPSTREAM.md#added-in-open-ferry-the-dashboard).
-- **The config can't be changed through the API yet.** Every route that writes it answers 503 `{"error":"config writer unavailable"}` and leaves the file as it is, until the config writer is in place. Edit `config.yaml` instead; the change is picked up on its own. See [Config writes](../UPSTREAM.md#config-writes).
+- **A config change through the API takes effect before the answer.** CLIProxyAPI answers first and reloads after; open-ferry saves the file, loads it again and then answers. A save keeps the file's comments and the settings open-ferry doesn't type, as CLIProxyAPI's does, replaces the file in one step and keeps the previous one as `config.yaml.bak`. A save that fails changes neither the file nor the running config, where CLIProxyAPI keeps the change in memory. Editing `config.yaml` by hand still works; the change is picked up on its own. See [Config writes](../UPSTREAM.md#config-writes).
 - **Also not ported:**
   - `quota/providers` and `quota/reset`;
   - the plugin routes;
