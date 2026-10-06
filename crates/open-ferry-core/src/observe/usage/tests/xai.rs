@@ -185,12 +185,18 @@ fn compaction_reads_openai_usage() {
     }
 }
 
-/// Not upstream's: an image call is read whole for the model its answer
-/// names, if any, and no counts, even ones it names, as upstream's
-/// `executeImages` reads it (`ObserveResponseModel` and `EnsurePublished`);
-/// a failed one is a failure.
+/// Not upstream's: an image or video call is read whole for the model its
+/// answer names, if any, and no counts, even ones it names, as upstream's
+/// `executeImages` and `executeVideos` read it (`ObserveResponseModel` and
+/// `EnsurePublished`); a failed one is a failure.
 #[test]
-fn image_calls_name_their_model_and_no_counts() {
+fn image_and_video_calls_name_their_model_and_no_counts() {
+    for format in [Format::OPENAI_IMAGE, Format::OPENAI_VIDEO] {
+        media_call_names_its_model_and_no_counts(&format);
+    }
+}
+
+fn media_call_names_its_model_and_no_counts(format: &Format) {
     for (answer, model) in [
         (
             concat!(
@@ -205,7 +211,7 @@ fn image_calls_name_their_model_and_no_counts() {
         ),
     ] {
         let harness = Harness::new();
-        let driver = xai_call(&harness, AttemptKind::Execute, &Format::OPENAI_IMAGE);
+        let driver = xai_call(&harness, AttemptKind::Execute, format);
         let (head, tail) = answer.split_at(30);
         driver.chunk(head);
         driver.chunk(tail);
@@ -215,15 +221,15 @@ fn image_calls_name_their_model_and_no_counts() {
         assert_eq!(
             record.get("response_model").and_then(Value::as_str),
             model,
-            "{record}"
+            "{format:?}: {record}"
         );
     }
 
     let harness = Harness::new();
-    let driver = xai_call(&harness, AttemptKind::Execute, &Format::OPENAI_IMAGE);
+    let driver = xai_call(&harness, AttemptKind::Execute, format);
     driver.fail(&ExecError::upstream(429, r#"{"error":"rate limited"}"#));
     let record = harness.record();
-    assert!(bool_at(&record, "/failed"), "{record}");
+    assert!(bool_at(&record, "/failed"), "{format:?}: {record}");
     assert_eq!(str_field(&record, "executor_type"), "XAIExecutor");
     assert_eq!(int_at(&record, "/fail/status_code"), 429);
 }

@@ -10,8 +10,8 @@
 //! Video calls and downloads against a mock xAI server on 127.0.0.1. The
 //! mock records each request's method, target, headers and body. Upstream's
 //! tests sign in with OAuth; these use a dummy API key, the only credential
-//! served. Upstream's usage checks become checks of what the call's taps
-//! read: the error's status.
+//! served. Their usage records come from a usage queue of the test's own,
+//! fed by the call's taps as a server handler's are.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -24,6 +24,7 @@ use open_ferry_core::exec::{ExecError, Format, Options, Request};
 use open_ferry_core::executor::ProviderExecutor;
 
 use super::*;
+use crate::xai::executor::tests::{assert_no_tokens, execute_observed, records, usage_queue};
 use crate::xai::request::DEFAULT_BASE_URL;
 
 /// The dummy API key the tests send.
@@ -172,16 +173,19 @@ async fn collect(body: open_ferry_core::exec::ChunkStream) -> Vec<u8> {
 
 // Ported from TestXAIExecutorExecuteVideosCreate: a create posts the body
 // as it came to /videos/generations, with the key and the idempotency key,
-// and xAI's answer comes back.
+// xAI's answer comes back, and the one usage record names the model and no
+// tokens.
 #[tokio::test]
 async fn video_create_posts_to_generations() {
     let mock = Mock::start(Reply::json(r#"{"request_id":"vid_123"}"#)).await;
+    let queue = usage_queue();
     let payload = r#"{"model":"grok-imagine-video","prompt":"animate","duration":4}"#;
     let mut options = Options::new(Format::OPENAI_VIDEO);
     options.metadata.idempotency_key = Some("idem-123".into());
 
-    let response = execute(
+    let response = execute_observed(
         &executor(),
+        &queue,
         api_key_auth(&mock.url),
         request("grok-imagine-video", payload),
         options,
@@ -204,15 +208,28 @@ async fn video_create_posts_to_generations() {
         response.headers.get("content-type").unwrap(),
         "application/json"
     );
+
+    let records = records(&queue);
+    assert_eq!(records.len(), 1, "{records:?}");
+    let record = &records[0];
+    assert_eq!(record["model"], "grok-imagine-video", "{record}");
+    assert_eq!(record["provider"], "xai", "{record}");
+    assert_eq!(record["executor_type"], "XAIExecutor", "{record}");
+    assert_eq!(record["failed"], false, "{record}");
+    assert_no_tokens(record);
+    assert!(record["ttft_ms"].as_i64().unwrap() >= 0, "{record}");
 }
 
 // Ported from TestXAIExecutorExecuteVideosPublishesFailureUsage: xAI's
-// failure is an error with its status, which the usage tap records.
+// failure is an error with its status, and the one record a failure with
+// it, naming the body's model.
 #[tokio::test]
 async fn video_failure_keeps_xais_status() {
     let mock = Mock::start(Reply::status(429, r#"{"error":"rate limited"}"#)).await;
-    let error = execute(
+    let queue = usage_queue();
+    let error = execute_observed(
         &executor(),
+        &queue,
         api_key_auth(&mock.url),
         request(
             "video-model-alias",
@@ -224,10 +241,18 @@ async fn video_failure_keeps_xais_status() {
     .unwrap_err();
     assert_eq!(error.http_status(), 429, "{error:?}");
     assert_eq!(error.message, r#"{"error":"rate limited"}"#);
+
+    let records = records(&queue);
+    assert_eq!(records.len(), 1, "{records:?}");
+    let record = &records[0];
+    assert_eq!(record["model"], "grok-imagine-video-failure", "{record}");
+    assert_eq!(record["failed"], true, "{record}");
+    assert_eq!(record["fail"]["status_code"], 429, "{record}");
 }
 
 // Ported from TestXAIExecutorExecuteVideosPublishesRequestBuildFailureUsage:
-// a base URL that isn't one fails the call before anything is sent.
+// a base URL that isn't one fails the call before anything is sent, and the
+// one record is a failure naming the request's model, the body having none.
 #[tokio::test]
 async fn video_request_with_a_broken_base_url_fails() {
     let mut auth = Auth {
@@ -236,8 +261,10 @@ async fn video_request_with_a_broken_base_url_fails() {
     };
     auth.attributes
         .insert("base_url".into(), "://invalid".into());
-    let error = execute(
+    let queue = usage_queue();
+    let error = execute_observed(
         &executor(),
+        &queue,
         Arc::new(auth),
         request("grok-imagine-video-fallback", r#"{"prompt":"animate"}"#),
         Options::new(Format::OPENAI_VIDEO),
@@ -245,6 +272,12 @@ async fn video_request_with_a_broken_base_url_fails() {
     .await
     .unwrap_err();
     assert_eq!(error.http_status(), 0, "{error:?}");
+
+    let records = records(&queue);
+    assert_eq!(records.len(), 1, "{records:?}");
+    let record = &records[0];
+    assert_eq!(record["model"], "grok-imagine-video-fallback", "{record}");
+    assert_eq!(record["failed"], true, "{record}");
 }
 
 // Ported from TestXAIExecutorExecuteVideosRetrieve: a body with a
@@ -270,6 +303,41 @@ async fn video_retrieve_gets_the_video() {
     assert!(seen.body.is_empty());
     assert_eq!(seen.header("x-idempotency-key"), None);
     assert_eq!(&response.payload[..], answer.as_bytes());
+}
+
+// Not upstream's: a retrieve publishes a record as upstream's
+// `executeVideos` does, naming the request's model, the body having none,
+// and the model xAI's answer names, with no tokens even when the answer
+// names some.
+#[tokio::test]
+async fn video_retrieves_publish_usage() {
+    let answer = concat!(
+        r#"{"status":"done","video":{"url":"https://vidgen.x.ai/video.mp4"},"#,
+        r#""model":"grok-imagine-video-0801","usage":{"input_tokens":5,"output_tokens":7,"total_tokens":12}}"#
+    );
+    let mock = Mock::start(Reply::json(answer)).await;
+    let queue = usage_queue();
+    execute_observed(
+        &executor(),
+        &queue,
+        api_key_auth(&mock.url),
+        request("grok-imagine-video", r#"{"request_id":"vid_123"}"#),
+        video_options("/openai/v1/videos/vid_123"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(mock.last().method, "GET");
+
+    let records = records(&queue);
+    assert_eq!(records.len(), 1, "{records:?}");
+    let record = &records[0];
+    assert_eq!(record["model"], "grok-imagine-video", "{record}");
+    assert_eq!(
+        record["response_model"], "grok-imagine-video-0801",
+        "{record}"
+    );
+    assert_eq!(record["failed"], false, "{record}");
+    assert_no_tokens(record);
 }
 
 // Ported from TestXAIExecutorExecuteVideosUsesNativeEndpointFromRequestPath:

@@ -30,7 +30,10 @@
 //! `x-idempotency-key`: the client's `Idempotency-Key`, trimmed, else its
 //! own `x-idempotency-key`, trimmed. xAI's answer comes back with its
 //! headers; a failure is an error with xAI's status and body (see
-//! [`super::super::errors`]).
+//! [`super::super::errors`]). Each call's usage record names that model,
+//! the model xAI's answer names, if any, and no tokens, as upstream's
+//! (`ObserveResponseModel` and `EnsurePublished`): a create, a retrieve and
+//! the lookup before a download each make one, a failure as a failure.
 //!
 //! A download ([`ProviderExecutor::download`]) fetches a URL xAI gave with
 //! a plain `GET`: no key, no custom header and no body, through the proxy
@@ -259,7 +262,7 @@ impl XaiExecutor {
         }
 
         let secrets = observe_send::secrets(&url, &headers, &self.proxy_for(auth), auth);
-        let format = Format::OPENAI;
+        let format = Format::OPENAI_VIDEO;
         let attempt = Attempt::new(
             options,
             AttemptKind::Execute,

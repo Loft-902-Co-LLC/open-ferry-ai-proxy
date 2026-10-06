@@ -12,6 +12,9 @@ use bytes::Bytes;
 use http::HeaderMap;
 use serde_json::{Value, json};
 
+use open_ferry_core::observe::usage;
+use open_ferry_core::observe::{CallReport, Observation, RequestContext};
+
 use super::*;
 use crate::codex::client::USER_AGENT;
 use crate::codex::request::CONTROL_CHARACTER;
@@ -234,6 +237,59 @@ fn last_event(text: &str, event_type: &str) -> Value {
 
 fn payload_json(response: &Response) -> Value {
     serde_json::from_slice(&response.payload).unwrap()
+}
+
+/// A usage queue of the test's own, on.
+pub(super) fn usage_queue() -> usage::Usage {
+    let mut config = Config::default();
+    config.usage_statistics_enabled = true;
+    let queue = usage::Usage::new(&config);
+    usage::reconfigure(&queue, None, &config, true);
+    queue
+}
+
+/// Runs `request` with `auth` and `options` on `executor`, its usage
+/// reported to `queue` as a server handler's taps report it, for a client
+/// request to the options' request path.
+pub(super) async fn execute_observed(
+    executor: &XaiExecutor,
+    queue: &usage::Usage,
+    auth: Arc<Auth>,
+    request: Request,
+    mut options: Options,
+) -> Result<Response, ExecError> {
+    let path = options.metadata.request_path.clone();
+    let context = Arc::new(RequestContext::new(Method::POST, path));
+    let tap = queue
+        .tap(&context, &request, &options)
+        .expect("the usage tap");
+    options.observation = Some(Arc::new(Observation::new(context, vec![tap])));
+    let report = CallReport::start(&options);
+    let result = executor.execute(auth, request, options).await;
+    report.finish(&result);
+    result
+}
+
+/// The usage records queued so far, taken.
+pub(super) fn records(queue: &usage::Usage) -> Vec<Value> {
+    queue
+        .pop_oldest(usize::MAX)
+        .iter()
+        .map(|record| serde_json::from_slice(record).expect("a JSON record"))
+        .collect()
+}
+
+/// Checks that `record` counts no tokens.
+pub(super) fn assert_no_tokens(record: &Value) {
+    for name in [
+        "input_tokens",
+        "output_tokens",
+        "reasoning_tokens",
+        "cached_tokens",
+        "total_tokens",
+    ] {
+        assert_eq!(record["tokens"][name], 0, "{name}: {record}");
+    }
 }
 
 /// Grok CLI identity headers, never sent.

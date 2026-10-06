@@ -9,10 +9,7 @@
 //! Image calls against the mock xAI server. Upstream's tests sign in with
 //! OAuth; these use the dummy API key, the only credential served. Their
 //! usage records come from a usage queue of the test's own, fed by the
-//! call's taps as a server handler's are.
-
-use open_ferry_core::observe::usage;
-use open_ferry_core::observe::{CallReport, Observation, RequestContext};
+//! call's taps as a server handler's are (see [`execute_observed`]).
 
 use super::*;
 
@@ -25,45 +22,6 @@ fn image_options(path: &str) -> Options {
     let mut options = Options::new(Format::OPENAI_IMAGE);
     options.metadata.request_path = path.into();
     options
-}
-
-/// A usage queue of the test's own, on.
-fn usage_queue() -> usage::Usage {
-    let mut config = Config::default();
-    config.usage_statistics_enabled = true;
-    let queue = usage::Usage::new(&config);
-    usage::reconfigure(&queue, None, &config, true);
-    queue
-}
-
-/// Runs the image call of `request` from `path` with `auth` on `executor`,
-/// its usage reported to `queue` as a server handler's taps report it.
-async fn execute_observed(
-    executor: &XaiExecutor,
-    queue: &usage::Usage,
-    auth: Arc<Auth>,
-    request: Request,
-    path: &str,
-) -> Result<Response, ExecError> {
-    let mut options = image_options(path);
-    let context = Arc::new(RequestContext::new(Method::POST, path.to_owned()));
-    let tap = queue
-        .tap(&context, &request, &options)
-        .expect("the usage tap");
-    options.observation = Some(Arc::new(Observation::new(context, vec![tap])));
-    let report = CallReport::start(&options);
-    let result = executor.execute(auth, request, options).await;
-    report.finish(&result);
-    result
-}
-
-/// The records queued so far, taken.
-fn records(queue: &usage::Usage) -> Vec<Value> {
-    queue
-        .pop_oldest(usize::MAX)
-        .iter()
-        .map(|record| serde_json::from_slice(record).expect("a JSON record"))
-        .collect()
 }
 
 // TestXAIExecutorExecuteImagesUsesImagesEndpointAndPublishesUsage: a
@@ -80,7 +38,7 @@ async fn image_calls_post_to_generations_and_publish_usage() {
         &queue,
         api_key_auth(&mock.url),
         request("image-model-alias", payload),
-        "/v1/images/generations",
+        image_options("/v1/images/generations"),
     )
     .await
     .unwrap();
@@ -104,15 +62,7 @@ async fn image_calls_post_to_generations_and_publish_usage() {
     assert_eq!(record["provider"], "xai", "{record}");
     assert_eq!(record["executor_type"], "XAIExecutor", "{record}");
     assert_eq!(record["failed"], false, "{record}");
-    for name in [
-        "input_tokens",
-        "output_tokens",
-        "reasoning_tokens",
-        "cached_tokens",
-        "total_tokens",
-    ] {
-        assert_eq!(record["tokens"][name], 0, "{name}: {record}");
-    }
+    assert_no_tokens(record);
     assert!(record["ttft_ms"].as_i64().unwrap() >= 0, "{record}");
 }
 
@@ -131,7 +81,7 @@ async fn image_failures_publish_failure_usage() {
             "image-model-alias",
             r#"{"model":"grok-imagine-image-quality","prompt":"draw"}"#,
         ),
-        "/v1/images/generations",
+        image_options("/v1/images/generations"),
     )
     .await
     .unwrap_err();
@@ -163,7 +113,7 @@ async fn image_request_build_failures_publish_failure_usage() {
         &queue,
         Arc::new(auth),
         request("grok-imagine-image-fallback", r#"{"prompt":"draw"}"#),
-        "/v1/images/generations",
+        image_options("/v1/images/generations"),
     )
     .await
     .unwrap_err();

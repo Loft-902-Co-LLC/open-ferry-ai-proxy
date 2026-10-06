@@ -12,7 +12,8 @@
 // (publishCodexImageToolUsage, codexImageGenerationToolModel),
 // codex_websockets_executor.go,
 // xai_websockets_executor.go,
-// xai_executor_execute.go, xai_executor_stream.go,
+// xai_executor_execute.go, xai_executor_stream.go, xai_executor_media.go
+// (executeImages, executeVideos),
 // gemini_executor.go (including executeInteractions and
 // executeInteractionsStream), gemini_vertex_executor.go and
 // openai_compat_executor.go, internal/redisqueue/plugin.go (HandleUsage's
@@ -76,8 +77,9 @@
 //! counts are those of its last `response.completed` or
 //! `response.incomplete`, published when it ends, with none when it named
 //! none; a compaction, streamed or not, is read whole as OpenAI JSON; an
-//! image call is read whole for the model it names alone, with no counts,
-//! as upstream's `executeImages` reads it (`ObserveResponseModel`).
+//! image or video call is read whole for the model it names alone, with no
+//! counts, as upstream's `executeImages` and `executeVideos` read it
+//! (`ObserveResponseModel`).
 //! Each message on an xAI WebSocket is read as an event, as upstream's
 //! `XAIWebsocketsExecutor` reads it: its time to first token starts when
 //! its request is sent, as a Codex WebSocket's does, and ends at its first
@@ -320,7 +322,8 @@ enum Mode {
     CodexExecute,
     CodexStream,
     CodexWebsocket,
-    XaiImage,
+    /// A call to xAI's Images or video API.
+    XaiMedia,
     XaiStream,
     XaiWebsocket,
 }
@@ -345,9 +348,13 @@ impl Mode {
             }
             ("codex", AttemptKind::Execute) => Self::CodexExecute,
             ("codex", AttemptKind::Stream) => Self::CodexStream,
-            // A call to xAI's Images API names a model at most, no counts.
-            ("xai", AttemptKind::Execute) if format.as_str() == Format::OPENAI_IMAGE.as_str() => {
-                Self::XaiImage
+            // A call to xAI's Images or video API names a model at most, no
+            // counts.
+            ("xai", AttemptKind::Execute)
+                if format.as_str() == Format::OPENAI_IMAGE.as_str()
+                    || format.as_str() == Format::OPENAI_VIDEO.as_str() =>
+            {
+                Self::XaiMedia
             }
             ("xai", AttemptKind::Execute)
                 if format.as_str() == Format::OPENAI_RESPONSE.as_str() =>
@@ -385,7 +392,7 @@ impl Mode {
                 | Self::OpenAiExecute
                 | Self::CodexCompact
                 | Self::CodexExecute
-                | Self::XaiImage
+                | Self::XaiMedia
         )
     }
 }
@@ -1011,7 +1018,7 @@ impl Call {
                 Some(parse_openai_usage(&body))
             }
             Mode::CodexCompact => Some(parse_openai_usage(&body)),
-            Mode::XaiImage => {
+            Mode::XaiMedia => {
                 self.response_model.observe(&body, &self.provider);
                 Some(Detail::default())
             }
