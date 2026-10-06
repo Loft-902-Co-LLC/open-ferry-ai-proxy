@@ -766,7 +766,8 @@ fn evaluate(translator: Translator, case: &Case, go: &GoResult) -> Evaluated {
     };
     let omitted = go_value
         .as_mut()
-        .and_then(|go| translator.drop_deliberate_omissions(case, go));
+        .map(|go| translator.drop_deliberate_omissions(case, go))
+        .unwrap_or_default();
 
     let outcome = match (&go_value, &rust_output) {
         (Some(go), Ok(rust)) => {

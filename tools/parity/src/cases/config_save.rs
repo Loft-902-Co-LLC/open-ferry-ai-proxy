@@ -506,6 +506,17 @@ plugins:
       enabled: false
 "#;
 
+/// A plugin's settings ending the file with a comment at their end.
+const PLUGINS_FOOT_COMMENT: &str = r#"port: 8317
+plugins:
+  configs:
+    beta:
+      settings:
+        tags:
+          - a
+        # the end of beta's settings
+"#;
+
 const PLUGINS_REWRITTEN: &str = "upstream writes the plugins section from the config it decoded; \
      open-ferry, with no plugin host, keeps the file's";
 
@@ -748,6 +759,20 @@ pub fn steps(upstream: &Path) -> Vec<Case> {
             vec![save(OAUTH_V8_CHANGED, false), save(OAUTH_V8, false)],
         ),
         case("oauth-write-v8", "", vec![write(OAUTH_V8)]),
+        // Upstream writes the comment at the end of a plugin's settings that
+        // end the file twice, from the plugin's decoded node and from the
+        // file; open-ferry keeps the file's plugins, so writes it once
+        // (counted as equivalent).
+        case(
+            "plugins-foot-comment",
+            PLUGINS_FOOT_COMMENT,
+            vec![resave(false)],
+        ),
+        case(
+            "plugins-foot-comment-migrate",
+            PLUGINS_FOOT_COMMENT,
+            vec![resave(true), resave(false)],
+        ),
         // Upstream writes `plugins.dir` as its ResolvePluginsDir cleaned it.
         case(
             "plugins-dir-cleaned",

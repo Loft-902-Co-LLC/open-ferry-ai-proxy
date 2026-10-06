@@ -1560,19 +1560,27 @@ impl Translator {
     }
 
     /// Takes out of upstream's output what we leave out on purpose, returning
-    /// the deviation that accounts for it.
+    /// the deviations that account for it.
     ///
     /// Upstream makes up a Claude `metadata.user_id` when the client sent
     /// none; we don't. The Gemini to Chat Completions translator derives call
     /// IDs from JSON text, which we write compactly: where that gives a
     /// different ID, [`Self::read`] turns ours into upstream's, and that is
     /// accounted for here.
-    pub fn drop_deliberate_omissions(self, case: &Case, go: &mut Value) -> Option<Deviation> {
+    pub fn drop_deliberate_omissions(self, case: &Case, go: &mut Value) -> Vec<Deviation> {
         if self == Self::ConfigSave {
-            return config_save::drop_unloadable(go);
+            let unloadable = config_save::drop_unloadable(go);
+            let repeated = config_save::drop_repeated_plugin_comments(case, go);
+            return unloadable.into_iter().chain(repeated).collect();
         }
+        self.drop_one_omission(case, go).into_iter().collect()
+    }
+
+    /// [`Self::drop_deliberate_omissions`] for the translators, which leave
+    /// out one thing at most.
+    fn drop_one_omission(self, case: &Case, go: &mut Value) -> Option<Deviation> {
         if let Some(native) = self.native(case) {
-            return native.drop_deliberate_omissions(case, go);
+            return native.drop_one_omission(case, go);
         }
         if let Self::Interactions(kind) = self {
             return kind.drop_deliberate_omissions(case, go);

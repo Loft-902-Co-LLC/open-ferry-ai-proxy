@@ -39,6 +39,12 @@
 //!   file's plugin settings stay as they are. Upstream writes the plugin IDs
 //!   from a map, sorted and plain, and drops an empty `plugins.configs`
 //!   mapping; and it writes `plugins.dir` as `ResolvePluginsDir` made it.
+//!   Its subtree, re-encoded from each plugin's decoded node, carries the
+//!   plugin's comments, some on other nodes than in the file (a comment
+//!   ending settings that end the file goes on the last list item, not on
+//!   the list's key), and `preserveV8Comments` then puts the file's comments
+//!   back on their keys, so upstream writes such a comment twice in a row.
+//!   It is written once here.
 
 use super::super::types::DEFAULT_PANEL_GITHUB_REPOSITORY;
 use super::super::yaml3::{
