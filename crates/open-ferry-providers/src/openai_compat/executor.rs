@@ -13,7 +13,10 @@
 //! trailing slash, and the credential's `api_key` attribute, if any, is
 //! sent as a bearer token. A credential without a `base_url` fails with a
 //! 401. A `responses/compact` call goes to `<base_url>/responses/compact` as
-//! OpenAI Responses, without `stream`, and answers with JSON.
+//! OpenAI Responses, without `stream`, and answers with JSON. A call from
+//! the OpenAI Images endpoints goes to `<base_url>/images/generations` or
+//! `/images/edits` with its body as the client sent it (see the `images`
+//! module).
 //!
 //! Before the request goes out, its thinking setting is applied (see
 //! [`super::thinking`]; a compact call's as for Codex), the model's entry
@@ -45,7 +48,8 @@
 //!   it is of eight bytes or more, as every client error is (see
 //!   `Policy::Client` in [`crate::redact`]): the credential headers after
 //!   the custom ones, each cookie, the URL's credentials, the proxy's
-//!   password and the credential's key. So has a successful answer that
+//!   password and the credential's key, and so has the error of a request
+//!   that fails to connect. So has a successful answer that
 //!   isn't a stream, a compact call's among them, whole, before it is
 //!   translated, as has each line of a stream (see `stream`); a model can
 //!   echo a secret back in its output, which upstream passes on as it is.
@@ -120,6 +124,24 @@ pub struct OpenAiCompatExecutor {
 /// The credential's API key, sent as a bearer token unless it is empty.
 fn api_key(auth: &Auth) -> &str {
     auth.attribute("api_key").unwrap_or_default().trim()
+}
+
+/// The credential's `base_url` attribute, trimmed. A credential without
+/// one fails with a 401, and one with an ASCII control character fails as
+/// Go's `url.Parse` does.
+fn base_url(auth: &Auth) -> Result<&str, ExecError> {
+    let base_url = auth.attribute("base_url").unwrap_or_default().trim();
+    if base_url.is_empty() {
+        return Err(StatusError::new(401, "missing provider baseURL").into());
+    }
+    // Go's `url.Parse` refuses these; WHATWG parsing drops some of them.
+    if base_url.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        return Err(ExecError::new(
+            ErrorKind::Upstream,
+            "net/url: invalid control character in URL",
+        ));
+    }
+    Ok(base_url)
 }
 
 /// A request ready to send.
@@ -201,18 +223,8 @@ impl OpenAiCompatExecutor {
         options: &Options,
         stream: bool,
     ) -> Result<Prepared, ExecError> {
-        let base_url = auth.attribute("base_url").unwrap_or_default().trim();
+        let base_url = base_url(auth)?;
         let api_key = api_key(auth);
-        if base_url.is_empty() {
-            return Err(StatusError::new(401, "missing provider baseURL").into());
-        }
-        // Go's `url.Parse` refuses these; WHATWG parsing drops some of them.
-        if base_url.bytes().any(|b| b < 0x20 || b == 0x7f) {
-            return Err(ExecError::new(
-                ErrorKind::Upstream,
-                "net/url: invalid control character in URL",
-            ));
-        }
         let compact = options.alt == COMPACT_ALT;
         let (to, path, translate_stream) = if stream {
             (Format::OPENAI, "/chat/completions", true)
@@ -311,6 +323,41 @@ impl OpenAiCompatExecutor {
         }
     }
 
+    /// Posts `body` to `url`, telling the call's taps, and returns the
+    /// provider's answer, whatever its status.
+    async fn post(
+        &self,
+        auth: &Auth,
+        url: &str,
+        headers: &HeaderMap,
+        body: Bytes,
+        secrets: &Secrets,
+        attempt: Attempt<'_>,
+    ) -> Result<reqwest::Response, ExecError> {
+        let tap = attempt.observation.map(|observation| {
+            observe_send::announce(
+                observation,
+                &attempt.request(&Method::POST, url, headers, &body, secrets),
+            )
+        });
+        let mut response = self
+            .clients
+            .get(&auth.proxy_url)
+            .post(url)
+            .headers(headers.clone())
+            .body(body)
+            .send()
+            .await
+            .map_err(|error| {
+                ExecError::new(
+                    ErrorKind::Upstream,
+                    secrets.text(error_chain(&error.without_url()), Policy::Client),
+                )
+            })?;
+        observe_send::response(tap, &mut response);
+        Ok(response)
+    }
+
     /// Posts the prepared request, telling the call's taps, and returns the
     /// provider's answer if its status is a success.
     async fn send(
@@ -320,30 +367,16 @@ impl OpenAiCompatExecutor {
         attempt: Attempt<'_>,
     ) -> Result<reqwest::Response, ExecError> {
         let body = Bytes::from(prepared.body.to_string());
-        let tap = attempt.observation.map(|observation| {
-            observe_send::announce(
-                observation,
-                &attempt.request(
-                    &Method::POST,
-                    &prepared.url,
-                    &prepared.headers,
-                    &body,
-                    &prepared.secrets,
-                ),
+        let response = self
+            .post(
+                auth,
+                &prepared.url,
+                &prepared.headers,
+                body,
+                &prepared.secrets,
+                attempt,
             )
-        });
-        let mut response = self
-            .clients
-            .get(&auth.proxy_url)
-            .post(&prepared.url)
-            .headers(prepared.headers.clone())
-            .body(body)
-            .send()
-            .await
-            .map_err(|error| {
-                ExecError::new(ErrorKind::Upstream, error_chain(&error.without_url()))
-            })?;
-        observe_send::response(tap, &mut response);
+            .await?;
         let status = response.status().as_u16();
         if (200..300).contains(&status) {
             return Ok(response);
@@ -361,6 +394,9 @@ impl OpenAiCompatExecutor {
         request: &Request,
         options: &Options,
     ) -> Result<Response, ExecError> {
+        if let Some(path) = images::endpoint(options) {
+            return self.execute_images(auth, request, options, path).await;
+        }
         let prepared = self.prepare(auth, request, options, false)?;
         let format = response_format(options);
         let response = self
@@ -414,6 +450,11 @@ impl OpenAiCompatExecutor {
         request: Request,
         options: Options,
     ) -> Result<StreamResponse, ExecError> {
+        if let Some(path) = images::endpoint(&options) {
+            return self
+                .execute_images_stream(auth, &request, &options, path)
+                .await;
+        }
         let prepared = self.prepare(auth, &request, &options, true)?;
         let format = response_format(&options);
         let response = self
@@ -577,11 +618,28 @@ fn build_headers(
     client: &HeaderMap,
     stream: bool,
 ) -> Result<HeaderMap, ExecError> {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::CONTENT_TYPE,
+    let mut headers = base_headers(
+        api_key,
+        client,
         HeaderValue::from_static("application/json"),
-    );
+    )?;
+    custom_headers::apply(&mut headers, &auth.attributes, client, NAME);
+    if stream {
+        stream_headers(&mut headers);
+    }
+    Ok(headers)
+}
+
+/// The headers set before the credential's custom ones: `content_type`,
+/// the API key as a bearer token, and the client's `User-Agent` or this
+/// project's.
+fn base_headers(
+    api_key: &str,
+    client: &HeaderMap,
+    content_type: HeaderValue,
+) -> Result<HeaderMap, ExecError> {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, content_type);
     if !api_key.is_empty() {
         let mut value = HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|_| {
             ExecError::new(
@@ -599,15 +657,16 @@ fn build_headers(
         .and_then(|value| HeaderValue::from_bytes(value).ok())
         .unwrap_or_else(|| HeaderValue::from_static(USER_AGENT));
     headers.insert(header::USER_AGENT, user_agent);
-    custom_headers::apply(&mut headers, &auth.attributes, client, NAME);
-    if stream {
-        headers.insert(
-            header::ACCEPT,
-            HeaderValue::from_static("text/event-stream"),
-        );
-        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
-    }
     Ok(headers)
+}
+
+/// Asks for an event stream, not cached.
+fn stream_headers(headers: &mut HeaderMap) {
+    headers.insert(
+        header::ACCEPT,
+        HeaderValue::from_static("text/event-stream"),
+    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
 }
 
 impl ProviderExecutor for OpenAiCompatExecutor {
@@ -647,6 +706,8 @@ impl ProviderExecutor for OpenAiCompatExecutor {
         async move { result }.boxed()
     }
 }
+
+mod images;
 
 #[cfg(test)]
 mod tests;

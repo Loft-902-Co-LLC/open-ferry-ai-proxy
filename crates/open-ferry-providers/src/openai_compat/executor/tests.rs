@@ -4,14 +4,13 @@
 //! `openai_compat_executor_retry_test.go` (`TestOpenAICompatExecutorPropagatesRetryAfter`),
 //! `openai_compat_executor_tool_results_test.go` and
 //! `openai_compat_executor_video_test.go`, with checks of the request
-//! headers, credentials, refresh, token counts and entry lookup.
+//! headers, credentials, refresh, token counts and entry lookup. The image
+//! calls' tests (`openai_compat_executor_images_test.go` and the image tests
+//! of the compact test file) are in `images`, and
+//! `RewriteOpenAICompatImagesMultipartPayloadPreservesStreamAndFileContentType`
+//! is with the form rewriting, in the crate's `images` module.
 //!
 //! Dropped:
-//! - `openai_compat_executor_images_test.go`, the image tests in the compact
-//!   test file (`ImagesGenerationsPassthrough`, `ImagesGenerationsStreamsUpstream`,
-//!   `ImagesEditsMultipartRewritesModel`,
-//!   `RewriteOpenAICompatImagesMultipartPayloadPreservesStreamAndFileContentType`):
-//!   this executor doesn't serve the image endpoints.
 //! - `openai_compat_home_options_test.go`: the Home service isn't ported.
 //! - `openai_compat_executor_reasoning_test.go`: the `is-compat` flag isn't
 //!   passed to translators.
@@ -44,6 +43,8 @@ use serde_json::{Value, json};
 use super::*;
 use crate::json::{exists, get};
 
+mod images;
+
 /// One request the mock received.
 #[derive(Clone, Debug)]
 struct Seen {
@@ -67,15 +68,21 @@ impl Seen {
 struct Reply {
     status: u16,
     headers: Vec<(&'static str, &'static str)>,
-    body: String,
+    /// The body, written in these parts.
+    parts: Vec<String>,
 }
 
 impl Reply {
     fn sse(body: &str) -> Self {
+        Self::chunked(&[body])
+    }
+
+    /// An event stream written in `parts`, each sent as it is written.
+    fn chunked(parts: &[&str]) -> Self {
         Self {
             status: 200,
             headers: vec![("content-type", "text/event-stream")],
-            body: body.to_owned(),
+            parts: parts.iter().map(|part| (*part).to_owned()).collect(),
         }
     }
 
@@ -121,7 +128,11 @@ impl Mock {
                         headers,
                         body: String::from_utf8_lossy(&body).into_owned(),
                     });
-                let parts = vec![Ok::<_, io::Error>(Bytes::from(reply.body))];
+                let parts: Vec<_> = reply
+                    .parts
+                    .into_iter()
+                    .map(|part| Ok::<_, io::Error>(Bytes::from(part)))
+                    .collect();
                 let mut response = axum::response::Response::builder().status(reply.status);
                 for (name, value) in reply.headers {
                     response = response.header(name, value);

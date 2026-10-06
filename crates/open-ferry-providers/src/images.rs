@@ -386,6 +386,39 @@ mod tests {
         assert!(sent.value("stream").is_none());
     }
 
+    // TestRewriteOpenAICompatImagesMultipartPayloadPreservesStreamAndFileContentType:
+    // a stream's form says so, whatever the client's said, and its file
+    // keeps its type.
+    #[test]
+    fn rewrite_preserves_stream_and_file_content_type() {
+        let (payload, content_type) = form(&[
+            ("model", None, None, b"compat-image"),
+            ("stream", None, None, b"false"),
+            (
+                "image",
+                Some("image.webp"),
+                Some("image/webp"),
+                b"webp-data",
+            ),
+        ]);
+        let (body, sent_type) =
+            prepare_payload(&payload, "upstream-image", &content_type, true).unwrap();
+        let (kind, _) = parse_media_type(sent_type.as_bytes()).unwrap();
+        assert_eq!(kind, "multipart/form-data");
+        let sent = read(&body, &sent_type);
+        let values = |name: &str| -> Vec<Bytes> {
+            sent.values()
+                .find(|(field, _)| *field == name)
+                .map(|(_, values)| values.to_vec())
+                .unwrap_or_default()
+        };
+        assert_eq!(values("model"), [Bytes::from_static(b"upstream-image")]);
+        assert_eq!(values("stream"), [Bytes::from_static(b"true")]);
+        let images = sent.files_of("image");
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].header.get_str("Content-Type"), "image/webp");
+    }
+
     // Not upstream's: a form without a boundary fails, one that doesn't read
     // fails with Go's text, and a body that is neither JSON nor a form goes
     // as it came, with its trimmed content type.

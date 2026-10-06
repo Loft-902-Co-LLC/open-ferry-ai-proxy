@@ -8,7 +8,10 @@
 //! the thinking setting of a model suffix such as `gpt-5(high)` or of the
 //! request ([`thinking`]), adjusts it as the entry's models say, and
 //! translates the answer back, chunk by chunk when streaming. Token counts
-//! are made locally with `tiktoken-rs`.
+//! are made locally with `tiktoken-rs`. A call from the OpenAI Images
+//! endpoints (`openai-image`) goes to the provider's `/images/generations`
+//! or `/images/edits` with the client's body, the model set, and its
+//! answer goes back as it came.
 //!
 //! Deviations from upstream (each module lists its own):
 //! - Requests say `User-Agent: open-ferry/<version>`, unless the client sent
@@ -21,9 +24,8 @@
 //! - No `prompt_cache_key` is made up: one the client sent passes through
 //!   to a provider with `support-prompt-cache-key`, but upstream's derived
 //!   keys (from a Claude Code prompt or a session) aren't.
-//! - Not ported: the OpenAI Images endpoints (`openai-image` requests),
-//!   which have no routes here yet, and the `is-compat` flag of a model,
-//!   which translators don't get. Payload rules are left to
+//! - Not ported: the `is-compat` flag of a model, which translators don't
+//!   get. Payload rules are left to
 //!   [`crate::payload`]. Codex clients' requests are readied for
 //!   translation as the Codex `compat` module says.
 //! - The management API's `api-call` requests through a credential
