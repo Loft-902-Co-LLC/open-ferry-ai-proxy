@@ -188,8 +188,13 @@ export function ClientSetupCard({ focusKeys = false }: ClientSetupCardProps) {
       client.invalidateQueries({ queryKey: [API_KEYS] }),
       client.invalidateQueries({ queryKey: [CLIENT_SETUP] }),
     ]);
-  // Adds one key, leaving the others: PATCH with an `old` the list hasn't
-  // appends `new`, so nothing changed meanwhile is overwritten.
+  // Adds one key and leaves the others alone, so nothing changed meanwhile
+  // is overwritten. This is upstream's own behaviour: patchStringList
+  // (internal/api/handlers/management/config_lists.go) replaces the first
+  // entry equal to `old`, and appends `new` when there is none. `old` is the
+  // new key itself, made just now from 32 random bytes, so no entry can
+  // equal it. Even if one did, replacing a key with itself changes nothing.
+  // The key goes in the body, never the URL.
   const addKey = useMutation({
     mutationFn: (key: string) =>
       call(API_KEYS, { method: "PATCH", json: { old: key, new: key } }),

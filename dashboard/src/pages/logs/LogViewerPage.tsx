@@ -35,6 +35,10 @@ type Call = ReturnType<typeof useApiCall>;
  * Reads a whole log in the route's largest pieces, as the dashboard API
  * serves it by its exact name. (The management API's download by request
  * ID picks the newest log with that ID, which may be another.)
+ *
+ * Interim: the pieces come back as text with bytes that aren't UTF-8
+ * replaced, so this isn't byte-exact for logs that hold binary bodies. It
+ * goes when the dashboard API's raw `request-logs/{name}/download` lands.
  */
 export async function readWholeLog(call: Call, name: string): Promise<string[]> {
   const parts: string[] = [];
