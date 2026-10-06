@@ -51,6 +51,13 @@
 //!   writer keeps the file's channel and adds the config's): which one Go's
 //!   loader keeps depends on its map order (UPSTREAM.md's "Maps iterate in
 //!   key order"). Such a step saves a changed config instead.
+//! - Any save once a save may have left two names in a key's `headers`
+//!   that are the same once trimmed (the writer keeps the file's
+//!   `' X-Pad '` and adds the config's `X-Pad`): which value Go's loader
+//!   keeps depends on its map order (`NormalizeHeaders`), and a save over a
+//!   file in the v8 layout loads the file to compare its keys with the
+//!   config's, and rebuilds a provider's groups, without their comments,
+//!   when they differ. Such a step sets a nested string instead.
 //! - What [`super::config_diff`]'s generator avoids, and timestamps.
 
 use std::collections::BTreeMap;
@@ -214,6 +221,12 @@ struct File {
     /// Whether a save may have added a channel beside one of those that is
     /// the same once trimmed and in lower case.
     channels_collide: bool,
+    /// Whether the file was written with a header name that isn't trimmed,
+    /// which the writer keeps.
+    raw_headers: bool,
+    /// Whether a save may have added a header beside one of those that is
+    /// the same once trimmed.
+    headers_collide: bool,
 }
 
 impl File {
@@ -222,6 +235,7 @@ impl File {
     fn saved(&mut self, migrate: bool) {
         self.v8 |= migrate || reads_as_v8(&self.typed, &self.untyped);
         self.channels_collide |= self.raw_channels;
+        self.headers_collide |= self.raw_headers;
     }
 }
 
@@ -234,6 +248,19 @@ fn raw_channels(typed: &Map<String, Value>) -> bool {
         .filter_map(|name| typed.get(*name)?.as_object())
         .flat_map(Map::keys)
         .any(|channel| channel.trim().to_lowercase() != *channel)
+}
+
+/// Whether a `headers` map in `typed` has a name that isn't trimmed.
+fn raw_headers(typed: &Map<String, Value>) -> bool {
+    typed.iter().any(|(key, value)| {
+        let names = value.as_object().filter(|_| key == "headers");
+        names.is_some_and(|names| names.keys().any(|name| name.trim() != name))
+            || match value {
+                Value::Object(map) => raw_headers(map),
+                Value::Array(items) => items.iter().filter_map(Value::as_object).any(raw_headers),
+                _ => false,
+            }
+    })
 }
 
 /// Whether upstream's `IsV8ConfigLayout` reads a legacy file with these
@@ -266,6 +293,7 @@ impl Writes {
         }
         for _ in 0..=self.rng().below(if canonical { 2 } else { 4 }) {
             let step = match self.rng().below(20) {
+                0..=12 if file.headers_collide => self.nested(&mut file),
                 0..=4 if file.channels_collide => self.save(&mut file, None),
                 0..=4 => {
                     let migrate = self.rng().chance(35);
@@ -369,11 +397,13 @@ impl Writes {
         let v8 = v8 || reads_as_v8(&typed, &untyped);
         let file = File {
             raw_channels: raw_channels(&typed),
+            raw_headers: raw_headers(&typed),
             typed,
             untyped,
             claude,
             v8,
             channels_collide: false,
+            headers_collide: false,
         };
         (text, kept, file)
     }
@@ -1279,6 +1309,28 @@ mod tests {
             Some(index) > first_save && step["op"] == "save" && step.get("config").is_none()
         });
         assert!(first_save.is_some() && !resaved, "{steps:?}");
+    }
+
+    /// Not upstream's: once a save may have left two header names that are
+    /// the same once trimmed, the file isn't saved again (seed 2's case 1931
+    /// did, after saving a file with `' X-Pad '`).
+    #[test]
+    fn colliding_headers_are_not_saved_again() {
+        let typed = |name: &str| {
+            let mut typed = Map::new();
+            let entry = json!({ "api-key": "k", "headers": { name: "a" } });
+            typed.insert("codex-api-key".to_owned(), json!([entry]));
+            typed
+        };
+        assert!(raw_headers(&typed(" X-Pad ")));
+        assert!(!raw_headers(&typed("X-Pad")));
+        let cases = step_cases(2, 1932);
+        let case = cases.last().unwrap();
+        let file = case.options["file"].as_str().unwrap();
+        assert!(file.contains("' X-Pad ':"), "{file}");
+        let steps = case.options["steps"].as_array().unwrap();
+        let saves = steps.iter().filter(|step| step["op"] == "save").count();
+        assert_eq!(saves, 1, "{steps:?}");
     }
 
     /// Not upstream's: the untyped sections of a file in the writer's own

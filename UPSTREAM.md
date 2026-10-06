@@ -463,7 +463,7 @@ Deviations, each also noted in its module:
 
 - **The client impersonation settings are skipped** wherever a request gives them, whatever their value: a Claude key's `cloak` and `fingerprint-profile`, and a Codex key's `disable-codex-cloaking`. Upstream checks them. The file keeps the ones it has, as the writer keeps every setting it doesn't type: a Claude `PUT` of the list a read shows, with a key added, keeps each key's `cloak` and `fingerprint-profile` as the file has them, as the dashboard's adding a key needs. Upstream, sent a list without them, keeps only the cloak's `mode` of the key it replaces.
 
-- **Maps iterate in key order** when a list is cleaned up: where two OAuth channels lower-case to the same name, the one that sorts last wins. Upstream's winner depends on Go's map order.
+- **Maps iterate in key order** when a list is cleaned up: where two OAuth channels lower-case to the same name, or two header names trim to the same one, the one that sorts last wins. Upstream's winner depends on Go's map order.
 
 - **Bodies are read as Go's decoder reads them into upstream's types, with three exceptions.** A key given more than once takes its last value, where Go merges a later object or list into the earlier one and a later `null` leaves a plain field as it was. Values nest at most 128 deep; Go allows 10000. A string holding an unpaired UTF-16 surrogate escape fails the read; Go reads U+FFFD.
 
