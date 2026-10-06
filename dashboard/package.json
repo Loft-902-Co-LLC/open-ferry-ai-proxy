@@ -16,7 +16,8 @@
     "typecheck": "tsc -b",
     "test": "vitest run",
     "test:watch": "vitest",
-    "e2e": "vite build && playwright test"
+    "e2e": "vite build && playwright test",
+    "e2e:real": "playwright test -c playwright.real.config.ts"
   },
   "dependencies": {
     "@codemirror/commands": "6.11.1",

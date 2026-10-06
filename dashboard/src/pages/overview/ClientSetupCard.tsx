@@ -2,7 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { KeyRound, RotateCw } from "lucide-react";
 import { useEffect, useRef, useState, type Ref } from "react";
 
-import { callProblem, isSettingsReadOnly } from "../../api/access";
+import { callProblem, saveProblem } from "../../api/access";
 import { isUnsupportedRoute } from "../../api/client";
 import { CLIENT_SETUP, type ClientSetup } from "../../api/dashboard";
 import { useApiCall, useApiQuery } from "../../api/hooks";
@@ -52,25 +52,6 @@ interface MadeKey {
   saved: boolean;
 }
 
-/** "Can't change settings yet": the key to add to config.yaml by hand. */
-function AddByHand({ made, replacing }: { made: string; replacing: boolean }) {
-  return (
-    <Alert tone="info" live title="This server can't change settings yet">
-      <p>
-        {replacing
-          ? "In config.yaml, replace the example keys under "
-          : "In config.yaml, add this key under "}
-        <Code>api-keys</Code>, and the server picks it up when it reloads the file. The setups
-        below already use it.
-      </p>
-      <div className="flex flex-wrap items-center gap-2">
-        <Code>{maskKey(made)}</Code>
-        <CopyButton text={made} label="Copy the new key" />
-      </div>
-    </Alert>
-  );
-}
-
 function SafeModeNotice({
   examples,
   replaceLabel,
@@ -109,8 +90,7 @@ function SafeModeNotice({
       </p>
       {waiting ? (
         <p role="status" className="flex items-center gap-2">
-          <Spinner /> Saved. The proxy leaves safe mode when it reloads config.yaml, in a few
-          seconds.
+          <Spinner /> Saved. Waiting for the proxy to load the new keys and leave safe mode…
         </p>
       ) : (
         <Button ref={actionRef} size="sm" variant="primary" disabled={pending} onClick={onReplace}>
@@ -234,8 +214,9 @@ export function ClientSetupCard({ focusKeys = false }: ClientSetupCardProps) {
     },
     onSettled: refresh,
   });
-  // The server leaves safe mode when it reloads config.yaml, a little after
-  // the keys are saved: look again until it has.
+  // The server saves config.yaml and loads it again before it answers, so it
+  // has normally left safe mode by the time the keys are saved. Should it
+  // still be in it, look again until it isn't.
   const setup = useApiQuery<ClientSetup>(CLIENT_SETUP, undefined, {
     refetchInterval: (query) =>
       replaceExamples.isSuccess && query.state.data?.safe_mode === true ? SAFE_MODE_POLL_MS : false,
@@ -358,24 +339,23 @@ export function ClientSetupCard({ focusKeys = false }: ClientSetupCardProps) {
             actionRef={safeModeAction}
           />
         )}
-        {focusKeys && !safeMode && (
+        {replaceExamples.isSuccess && !safeMode && (
+          <Alert tone="ok" live title="The proxy is out of safe mode">
+            <p>
+              {replaceExamples.variables === null
+                ? "The example keys are gone from config.yaml, so it serves proxy requests again."
+                : "A new key took the example keys' place in config.yaml, so it serves proxy requests again. The setups below use the new key."}
+            </p>
+          </Alert>
+        )}
+        {focusKeys && !safeMode && !replaceExamples.isSuccess && (
           <Alert tone="ok" title="The proxy isn't in safe mode">
             <p>Its client keys are no longer the examples, so it serves proxy requests.</p>
           </Alert>
         )}
-        {writeError !== null &&
-          (isSettingsReadOnly(writeError) && made !== null ? (
-            <AddByHand made={made.key} replacing={replaceExamples.isError} />
-          ) : (
-            <ProblemNotice
-              problem={
-                isSettingsReadOnly(writeError) ? { kind: "settings-read-only" } : callProblem(writeError)
-              }
-              live
-            />
-          ))}
+        {writeError !== null && <ProblemNotice problem={saveProblem(writeError)} live />}
         {keysUnsupported && (
-          <Alert tone="info" title="This server can't list its client keys yet">
+          <Alert tone="info" title="This server doesn't list its client keys">
             <p>
               The setups below show where the key goes. Make one here and add it to{" "}
               <Code>api-keys</Code> in config.yaml, or use one already there.

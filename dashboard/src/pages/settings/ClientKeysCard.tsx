@@ -4,7 +4,7 @@ import { Plus, Trash2 } from "lucide-react";
 import { useId, useState } from "react";
 import { useForm } from "react-hook-form";
 
-import { callProblem, isSettingsReadOnly } from "../../api/access";
+import { cantSaveConfig, saveProblem } from "../../api/access";
 import { isUnsupportedRoute } from "../../api/client";
 import { useApiCall, useApiQuery } from "../../api/hooks";
 import { API_KEYS } from "../../api/management";
@@ -99,7 +99,7 @@ function AddKeyDialog({
       onAdded();
     },
     onError: (error) => {
-      if (isSettingsReadOnly(error)) {
+      if (cantSaveConfig(error)) {
         onReadOnly();
       }
     },
@@ -148,7 +148,7 @@ function AddKeyDialog({
           ) : (
             <ProblemNotice
               problem={
-                isSettingsReadOnly(add.error) ? { kind: "settings-read-only" } : callProblem(add.error)
+                saveProblem(add.error)
               }
               live
             />
@@ -188,7 +188,7 @@ function KeyItem({ value, last, writable, onReadOnly }: KeyItemProps) {
       await call<unknown>(API_KEYS, { method: "DELETE", query: { index } });
     },
     onError: (error) => {
-      if (isSettingsReadOnly(error)) {
+      if (cantSaveConfig(error)) {
         onReadOnly();
       }
     },
@@ -234,9 +234,7 @@ function KeyItem({ value, last, writable, onReadOnly }: KeyItemProps) {
         ) : (
           <ProblemNotice
             problem={
-              isSettingsReadOnly(remove.error)
-                ? { kind: "settings-read-only" }
-                : callProblem(remove.error)
+              saveProblem(remove.error)
             }
             live
           />
@@ -311,12 +309,12 @@ export function ClientKeysCard() {
         </Alert>
       )}
       {(unsupported || readOnly) && (
-        <Alert tone="info" title="This server can't change settings yet">
+        <Alert tone="info" title="Client keys can't be changed here">
           <p>
             {unsupported
-              ? "It doesn't serve its client keys to the dashboard. "
-              : "It reads config.yaml but has no way to save it. "}
-            Add and remove keys under <Code>api-keys</Code> in config.yaml by hand, and the server
+              ? "This server doesn't serve its client keys to the dashboard. "
+              : "This server has no way to save config.yaml from here. "}
+            Add and remove them under <Code>api-keys</Code> in config.yaml itself, and the server
             picks them up when it reloads the file.
           </p>
         </Alert>

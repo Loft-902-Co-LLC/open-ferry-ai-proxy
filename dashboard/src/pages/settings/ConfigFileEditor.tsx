@@ -2,7 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Eye, FileDiff, RotateCw, Save, Undo2 } from "lucide-react";
 import { Suspense, lazy, useId, useState } from "react";
 
-import { callProblem, isSettingsReadOnly } from "../../api/access";
+import { callProblem, saveProblem } from "../../api/access";
 import { isApiError } from "../../api/client";
 import { useApiCall } from "../../api/hooks";
 import { CONFIG_YAML } from "../../api/management";
@@ -51,7 +51,7 @@ function SaveProblem({ error }: { error: unknown }) {
   }
   return (
     <ProblemNotice
-      problem={isSettingsReadOnly(error) ? { kind: "settings-read-only" } : callProblem(error)}
+      problem={saveProblem(error)}
       live
     />
   );

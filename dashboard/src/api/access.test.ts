@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { accessProblem, callProblem, isSettingsReadOnly } from "./access";
+import { accessProblem, callProblem, cantSaveConfig, saveProblem } from "./access";
 import { ApiError } from "./client";
 import { signInProblem } from "./signIn";
 
@@ -83,14 +83,31 @@ describe("callProblem", () => {
     });
   });
 
-  it("knows when the server can't change its settings", () => {
+  it("knows when the server can't save config.yaml", () => {
     const noWriter = management(503, "config writer unavailable");
-    expect(callProblem(noWriter)).toEqual({ kind: "settings-read-only" });
-    expect(isSettingsReadOnly(noWriter)).toBe(true);
-    expect(isSettingsReadOnly(management(404, null))).toBe(true);
-    expect(isSettingsReadOnly(management(503, "server shutting down"))).toBe(false);
-    expect(isSettingsReadOnly(management(400, "invalid body"))).toBe(false);
-    expect(isSettingsReadOnly(new Error("x"))).toBe(false);
+    expect(callProblem(noWriter)).toEqual({ kind: "config-not-saved" });
+    expect(cantSaveConfig(noWriter)).toBe(true);
+    expect(cantSaveConfig(management(404, null))).toBe(true);
+    expect(cantSaveConfig(management(503, "server shutting down"))).toBe(false);
+    expect(cantSaveConfig(management(500, "failed to save config: disk full"))).toBe(false);
+    expect(cantSaveConfig(management(400, "invalid body"))).toBe(false);
+    expect(cantSaveConfig(new Error("x"))).toBe(false);
+  });
+
+  it("names a change the server can't save, and passes other failures on", () => {
+    expect(saveProblem(management(503, "config writer unavailable"))).toEqual({
+      kind: "config-not-saved",
+    });
+    expect(saveProblem(management(404, null))).toEqual({ kind: "config-not-saved" });
+    expect(saveProblem(management(500, "failed to save config: disk full"))).toEqual({
+      kind: "server-error",
+      status: 500,
+      message: "failed to save config: disk full",
+    });
+    expect(saveProblem(management(400, "invalid body"))).toEqual({
+      kind: "invalid",
+      message: "invalid body",
+    });
   });
 });
 

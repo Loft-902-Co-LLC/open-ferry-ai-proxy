@@ -76,7 +76,13 @@ export default defineConfig([
     rules: { "no-restricted-imports": "off" },
   },
   {
-    files: ["vite.config.ts", "build/**/*.ts", "e2e/**/*.ts", "playwright.config.ts"],
+    files: [
+      "vite.config.ts",
+      "build/**/*.ts",
+      "e2e/**/*.ts",
+      "playwright.config.ts",
+      "playwright.real.config.ts",
+    ],
     languageOptions: { globals: globals.node },
   },
   {

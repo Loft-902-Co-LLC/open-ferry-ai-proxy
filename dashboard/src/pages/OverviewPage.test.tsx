@@ -200,29 +200,30 @@ describe("making a client key", () => {
     expect(await navigator.clipboard.readText()).toContain(`api_key="${body.new}"`);
   });
 
-  it("gives the key to add by hand when the server can't change settings", async () => {
+  it("says when the server can't save the new key", async () => {
     const state = server([KEY]);
-    state.api.use(route("PATCH", API_KEYS, { status: 404 }));
+    state.api.use(
+      route("PATCH", API_KEYS, { status: 503, json: { error: "config writer unavailable" } }),
+    );
     const { user } = renderApp("/");
     await setupCode();
     await user.click(screen.getByRole("button", { name: "Make a new key" }));
 
-    expect(await screen.findByText("This server can't change settings yet")).toBeVisible();
+    const notice = (await screen.findByText("This server can't save config.yaml")).parentElement;
+    expect(notice).toHaveTextContent("nothing was changed");
+    expect(notice).not.toHaveTextContent(/by hand/);
+    expect(screen.queryByText(/^Added a client key\./)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Copy the new key" })).toBeNull();
     const select = screen.getByLabelText("Client key");
     const made = within(select).getAllByRole("option").at(-1);
     expect(made).toHaveTextContent(/\(made here, not saved\)$/);
-    expect(select).toHaveValue("1");
-
-    await user.click(screen.getByRole("button", { name: "Copy the new key" }));
-    const key = await navigator.clipboard.readText();
-    expect(key).toMatch(NEW_KEY);
     expect(state.keys).toEqual([KEY]);
   });
 
   it("works without the key list on a server that can't give it", async () => {
     const api = mockApi(route("GET", CLIENT_SETUP, { json: clientSetup() }));
     renderApp("/");
-    expect(await screen.findByText("This server can't list its client keys yet")).toBeVisible();
+    expect(await screen.findByText("This server doesn't list its client keys")).toBeVisible();
     expect(screen.getByLabelText(PYTHON)).toHaveTextContent(`api_key="<your client key>"`);
     expect(screen.getByText("No key")).toBeVisible();
     expect(screen.getByLabelText("Client key")).toBeDisabled();
@@ -325,6 +326,8 @@ describe("safe mode", () => {
     ]);
     expect(state.keys).toEqual([body.new]);
     expect(state.api.callsTo("PUT", API_KEYS)).toEqual([]);
+    const lifted = (await screen.findByText("The proxy is out of safe mode")).parentElement;
+    expect(lifted).toHaveTextContent("A new key took the example keys' place in config.yaml");
     await waitFor(() => {
       expect(screen.getByLabelText(PYTHON)).toHaveTextContent(`api_key="sk-...${body.new.slice(-4)}"`);
     });
@@ -346,21 +349,24 @@ describe("safe mode", () => {
     ]);
     expect(state.api.callsTo("PATCH", API_KEYS)).toEqual([]);
     expect(state.api.callsTo("PUT", API_KEYS)).toEqual([]);
+    const lifted = (await screen.findByText("The proxy is out of safe mode")).parentElement;
+    expect(lifted).toHaveTextContent("The example keys are gone from config.yaml");
   });
 
-  it("says it's saved while the proxy has yet to reload its config", async () => {
+  it("says it's saved while the proxy has yet to leave safe mode", async () => {
     const state = server([...EXAMPLE_API_KEYS], { safe_mode: true });
-    // A server that hasn't reloaded config.yaml yet: still in safe mode.
+    // A server still in safe mode after the keys are saved.
     state.api.use(route("GET", CLIENT_SETUP, { json: clientSetup({ safe_mode: true }) }));
     const { user } = renderApp("/");
     await screen.findByText("The proxy is in safe mode");
     await user.click(screen.getByRole("button", { name: "Replace the example keys with a new key" }));
     expect(
-      await screen.findByText(/Saved\. The proxy leaves safe mode when it reloads config\.yaml/),
+      await screen.findByText(/Saved\. Waiting for the proxy to load the new keys and leave safe mode/),
     ).toBeVisible();
+    expect(screen.queryByText("The proxy is out of safe mode")).not.toBeInTheDocument();
   });
 
-  it("gives the key to put in by hand when the server can't change settings", async () => {
+  it("says when the server can't save the new key in safe mode", async () => {
     const state = server([...EXAMPLE_API_KEYS], { safe_mode: true });
     state.api.use(
       route("PATCH", API_KEYS, { status: 503, json: { error: "config writer unavailable" } }),
@@ -368,8 +374,13 @@ describe("safe mode", () => {
     const { user } = renderApp("/");
     await screen.findByText("The proxy is in safe mode");
     await user.click(screen.getByRole("button", { name: "Replace the example keys with a new key" }));
-    const notice = (await screen.findByText("This server can't change settings yet")).parentElement;
-    expect(notice).toHaveTextContent("In config.yaml, replace the example keys under api-keys");
+    const notice = (await screen.findByText("This server can't save config.yaml")).parentElement;
+    expect(notice).toHaveTextContent("nothing was changed");
+    expect(notice).not.toHaveTextContent(/by hand/);
+    // The user can try again.
+    expect(
+      screen.getByRole("button", { name: "Replace the example keys with a new key" }),
+    ).toBeEnabled();
     expect(state.api.callsTo("DELETE", API_KEYS)).toEqual([]);
     expect(state.keys).toEqual([...EXAMPLE_API_KEYS]);
   });
@@ -380,8 +391,8 @@ describe("safe mode", () => {
     const { user } = renderApp("/");
     await screen.findByText("The proxy is in safe mode");
     await user.click(screen.getByRole("button", { name: "Remove the example keys" }));
-    const notice = (await screen.findByText("This server can't change settings yet")).parentElement;
-    expect(notice).toHaveTextContent("Edit config.yaml by hand");
+    const notice = (await screen.findByText("This server can't save config.yaml")).parentElement;
+    expect(notice).toHaveTextContent("nothing was changed");
     expect(state.keys).toEqual(["your-api-key-1", KEY]);
   });
 

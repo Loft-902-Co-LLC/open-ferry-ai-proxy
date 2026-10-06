@@ -8,6 +8,8 @@ import { APP_URL } from "./e2e/origin";
 
 export default defineConfig({
   testDir: "e2e",
+  // The real-save pass runs on its own: playwright.real.config.ts.
+  testIgnore: "realSave.spec.ts",
   forbidOnly: process.env.CI !== undefined,
   reporter: process.env.CI === undefined ? "list" : [["github"], ["list"]],
   use: {

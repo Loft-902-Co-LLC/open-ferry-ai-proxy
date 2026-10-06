@@ -337,7 +337,24 @@ describe("the settings form", () => {
     expect(patches(state.api)).toEqual([]);
   });
 
-  it("says this server can't change settings yet when it can't save config.yaml", async () => {
+  it("gives the server's reason when it fails to save config.yaml", async () => {
+    const state = server();
+    state.api.use(
+      route("PATCH", `${MANAGEMENT}/debug`, {
+        status: 500,
+        json: { error: "failed to save config: disk full" },
+      }),
+    );
+    const { user } = await openSettings();
+    await user.click(screen.getByRole("checkbox", { name: "Debug logging" }));
+    await user.click(screen.getByRole("button", { name: "Review and save" }));
+    const dialog = await screen.findByRole("dialog", { name: "Review the changes" });
+    await user.click(within(dialog).getByRole("button", { name: "Save 1 setting" }));
+    expect(await within(dialog).findByText("The server failed (HTTP 500)")).toBeVisible();
+    expect(dialog).toHaveTextContent("failed to save config: disk full");
+    expect(within(dialog).queryByText("This server can't save config.yaml")).not.toBeInTheDocument();
+  });
+  it("says when this server can't save config.yaml", async () => {
     const state = server();
     state.api.use(route("PATCH", `${MANAGEMENT}/debug`, WRITER_UNAVAILABLE));
     const { user } = await openSettings();
@@ -345,7 +362,7 @@ describe("the settings form", () => {
     await user.click(screen.getByRole("button", { name: "Review and save" }));
     const dialog = await screen.findByRole("dialog", { name: "Review the changes" });
     await user.click(within(dialog).getByRole("button", { name: "Save 1 setting" }));
-    expect(await within(dialog).findByText("This server can't change settings yet")).toBeVisible();
+    expect(await within(dialog).findByText("This server can't save config.yaml")).toBeVisible();
     expect(within(dialog).queryByText("Saved some of the changes")).not.toBeInTheDocument();
     await user.click(within(dialog).getByRole("button", { name: "Close" }));
     expect(screen.getByText("1 unsaved change.")).toBeVisible();
@@ -456,17 +473,18 @@ describe("the client keys", () => {
     expect(state.keys).toEqual([]);
   });
 
-  it("says this server can't change settings yet, and stops offering changes", async () => {
+  it("says when this server can't save the client keys, and stops offering changes", async () => {
     const state = server();
     state.api.use(route("PATCH", API_KEYS, WRITER_UNAVAILABLE));
     const { user } = await openSettings();
     await user.click(screen.getByRole("button", { name: "Add a client key" }));
     const dialog = await screen.findByRole("dialog", { name: "Add a client key" });
     await user.click(within(dialog).getByRole("button", { name: "Add the key" }));
-    expect(await within(dialog).findByText("This server can't change settings yet")).toBeVisible();
+    expect(await within(dialog).findByText("This server can't save config.yaml")).toBeVisible();
     await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
     const card = screen.getByRole("region", { name: "Client API keys" });
-    expect(within(card).getByText(/has no way to save it/)).toBeVisible();
+    expect(within(card).getByText("Client keys can't be changed here")).toBeVisible();
+    expect(within(card).getByText(/no way to save config\.yaml from here/)).toBeVisible();
     expect(within(card).queryByRole("button", { name: /^Remove/ })).not.toBeInTheDocument();
     expect(within(card).queryByRole("button", { name: "Add a client key" })).not.toBeInTheDocument();
   });
@@ -554,7 +572,7 @@ describe("config.yaml", () => {
     expect(screen.getByText("Unsaved changes.")).toBeVisible();
   });
 
-  it("says this server can't change settings yet when it can't save the file", async () => {
+  it("says when this server can't save the file", async () => {
     const state = server();
     state.api.use(route("PUT", CONFIG_YAML, WRITER_UNAVAILABLE));
     const { user } = await openSettings();
@@ -563,16 +581,16 @@ describe("config.yaml", () => {
     await user.click(screen.getByRole("button", { name: "Review changes" }));
     const dialog = await screen.findByRole("dialog", { name: "Review the changes to config.yaml" });
     await user.click(within(dialog).getByRole("button", { name: "Save config.yaml" }));
-    expect(await within(dialog).findByText("This server can't change settings yet")).toBeVisible();
+    expect(await within(dialog).findByText("This server can't save config.yaml")).toBeVisible();
   });
 });
 
 describe("a server without the settings routes", () => {
-  it("says it can't change settings yet", async () => {
+  it("says the settings and client keys can't be changed here", async () => {
     mockApi();
     renderApp("/settings");
-    await waitFor(() => {
-      expect(screen.getAllByText("This server can't change settings yet")).toHaveLength(2);
-    });
+    expect(await screen.findByText("Settings can't be changed here")).toBeVisible();
+    expect(screen.getByText("Client keys can't be changed here")).toBeVisible();
+    expect(screen.queryByText(/by hand/)).not.toBeInTheDocument();
   });
 });

@@ -22,10 +22,10 @@ function SettingsTab() {
     <div className="space-y-4">
       <ClientKeysCard />
       {isUnsupportedRoute(config.error) ? (
-        <Alert tone="info" title="This server can't change settings yet">
+        <Alert tone="info" title="Settings can't be changed here">
           <p>
-            It doesn&apos;t serve its settings to the dashboard. Edit config.yaml by hand: the
-            server picks the change up when it reloads the file.
+            This server doesn&apos;t serve its settings to the dashboard. Change them in config.yaml
+            itself: the server picks the change up when it reloads the file.
           </p>
         </Alert>
       ) : (

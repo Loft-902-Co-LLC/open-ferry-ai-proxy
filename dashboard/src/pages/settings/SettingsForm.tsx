@@ -3,7 +3,7 @@ import { Save, Undo2 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useForm, useWatch, type FieldErrors, type Resolver } from "react-hook-form";
 
-import { callProblem, isSettingsReadOnly, type CallProblem } from "../../api/access";
+import { callProblem, saveProblem } from "../../api/access";
 import { useApiCall } from "../../api/hooks";
 import { CONFIG } from "../../api/management";
 import { Alert } from "../../components/Alert";
@@ -71,11 +71,6 @@ class SaveStoppedError extends Error {
 
 function plural(count: number, one: string, many: string): string {
   return `${String(count)} ${count === 1 ? one : many}`;
-}
-
-/** Why a save stopped, with a server that can't save named as such. */
-function saveProblem(reason: unknown): CallProblem {
-  return isSettingsReadOnly(reason) ? { kind: "settings-read-only" } : callProblem(reason);
 }
 
 interface ReviewDialogProps {

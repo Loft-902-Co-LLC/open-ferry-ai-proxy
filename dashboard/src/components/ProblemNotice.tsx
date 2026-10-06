@@ -102,14 +102,14 @@ export function explainProblem(problem: CallProblem): Explanation {
           </p>
         ),
       };
-    case "settings-read-only":
+    case "config-not-saved":
       return {
-        tone: "info",
-        title: "This server can't change settings yet",
+        tone: "warn",
+        title: "This server can't save config.yaml",
         body: (
           <p>
-            It reads config.yaml but has no way to save it, so nothing was changed. Edit
-            config.yaml by hand: the server picks the change up when it reloads the file.
+            It has no way to save the file from here, so nothing was changed. A change made in
+            config.yaml itself still takes effect when the server reloads the file.
           </p>
         ),
       };

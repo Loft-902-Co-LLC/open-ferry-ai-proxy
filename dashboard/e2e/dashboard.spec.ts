@@ -297,7 +297,7 @@ test("changes settings, client keys and config.yaml under the policy", async ({ 
   expectClean(watched);
 });
 
-test("says when the server can't change settings yet", async ({ page }) => {
+test("says when the server can't save config.yaml", async ({ page }) => {
   const watched = await watch(page, { writable: false });
   await signIn(page);
   await page.goto("settings");
@@ -305,8 +305,8 @@ test("says when the server can't change settings yet", async ({ page }) => {
   await page.getByRole("button", { name: "Review and save" }).click();
   const review = page.getByRole("dialog", { name: "Review the changes" });
   await review.getByRole("button", { name: "Save 1 setting" }).click();
-  await expect(review.getByText("This server can't change settings yet")).toBeVisible();
-  await shot(page, "26-settings-read-only");
+  await expect(review.getByText("This server can't save config.yaml")).toBeVisible();
+  await shot(page, "26-settings-not-saved");
   await review.getByRole("button", { name: "Close" }).click();
   await expect(page.getByText("1 unsaved change.")).toBeVisible();
   expect(watched.server.writes).toEqual(["PATCH /v0/management/debug"]);

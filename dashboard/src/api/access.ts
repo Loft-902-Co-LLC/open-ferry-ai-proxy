@@ -20,7 +20,7 @@ export type AccessProblem =
 export type CallProblem =
   | AccessProblem
   | { kind: "ledger-unavailable" }
-  | { kind: "settings-read-only" }
+  | { kind: "config-not-saved" }
   | { kind: "unsupported" }
   | { kind: "not-found" }
   | { kind: "invalid"; message: string | null }
@@ -28,10 +28,11 @@ export type CallProblem =
   | { kind: "unexpected"; status: number; message: string | null };
 
 /**
- * What the management API answers (503) to a change of config.yaml while
- * the server has nothing to save the file with.
+ * What the management API answers (503) to a change of config.yaml when it
+ * has nothing to save the file with. open-ferry's own service always has
+ * one, so this comes only from a server put together without it.
  */
-const SETTINGS_READ_ONLY = "config writer unavailable";
+const NO_CONFIG_WRITER = "config writer unavailable";
 
 const BAN_WAIT = /try again in (\S+?)\.?$/i;
 
@@ -88,8 +89,8 @@ function problemOf(error: ApiError): CallProblem {
   if (error.status === 503 && error.code === "ledger_unavailable") {
     return { kind: "ledger-unavailable" };
   }
-  if (error.status === 503 && error.code === SETTINGS_READ_ONLY) {
-    return { kind: "settings-read-only" };
+  if (error.status === 503 && error.code === NO_CONFIG_WRITER) {
+    return { kind: "config-not-saved" };
   }
   if (error.status === 404) {
     return error.code === null ? { kind: "unsupported" } : { kind: "not-found" };
@@ -104,15 +105,21 @@ function problemOf(error: ApiError): CallProblem {
 }
 
 /**
- * Whether `error` says the server can't change its settings: it doesn't
- * serve the route, or it can't save config.yaml.
+ * Whether `error` says the server can't save config.yaml for the dashboard
+ * at all, so that trying again won't help: it has nothing to save the file
+ * with, or it doesn't serve the route that changes it.
  */
-export function isSettingsReadOnly(error: unknown): boolean {
+export function cantSaveConfig(error: unknown): boolean {
   if (!isApiError(error)) {
     return false;
   }
   const kind = problemOf(error).kind;
-  return kind === "unsupported" || kind === "settings-read-only";
+  return kind === "unsupported" || kind === "config-not-saved";
+}
+
+/** As callProblem, with a change the server can't save named as such. */
+export function saveProblem(error: unknown): CallProblem {
+  return cantSaveConfig(error) ? { kind: "config-not-saved" } : callProblem(error);
 }
 
 /** Sorts any failed call into a CallProblem. */

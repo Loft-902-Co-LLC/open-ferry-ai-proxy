@@ -249,7 +249,7 @@ describe("the Usage page", () => {
     );
     const { user } = renderApp("/usage");
     await user.click(await screen.findByRole("button", { name: "Start recording" }));
-    expect(await screen.findByText("This server can't change settings yet")).toBeVisible();
+    expect(await screen.findByText("This server can't save config.yaml")).toBeVisible();
   });
 
   it("says so too when this server can't save config.yaml", async () => {
@@ -264,8 +264,8 @@ describe("the Usage page", () => {
     );
     const { user } = renderApp("/usage");
     await user.click(await screen.findByRole("button", { name: "Start recording" }));
-    const notice = (await screen.findByText("This server can't change settings yet")).parentElement;
-    expect(notice).toHaveTextContent("Set usage-statistics-enabled: true in config.yaml instead.");
+    const notice = (await screen.findByText("This server can't save config.yaml")).parentElement;
+    expect(notice).toHaveTextContent("set usage-statistics-enabled: true in config.yaml itself");
   });
 
   it("says when nothing has been recorded yet", async () => {

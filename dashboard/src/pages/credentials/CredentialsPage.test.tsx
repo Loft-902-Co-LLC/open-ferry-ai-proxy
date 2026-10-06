@@ -36,7 +36,7 @@ interface Server {
 /**
  * A server holding `files` and provider `keys`, which change as the
  * management routes change them. `keys: null` serves no key lists, as a
- * server that can't change settings.
+ * server without those routes.
  */
 function server(
   files: Credential[] = [credential()],
@@ -616,10 +616,10 @@ describe("the provider API keys", () => {
     expect(state.keys.claude).toEqual([{ "api-key": "sk-ant-test-provider-key-0009" }]);
   });
 
-  it("says when the server can't change them", async () => {
+  it("says when the server doesn't serve them", async () => {
     server([], null);
     renderApp("/credentials");
-    expect(await screen.findByText("This server can't change settings yet")).toBeVisible();
+    expect(await screen.findByText("Provider API keys can't be changed here")).toBeVisible();
     expect(screen.queryByRole("button", { name: "Add an API key" })).toBeNull();
   });
 
@@ -637,7 +637,7 @@ describe("the provider API keys", () => {
     await user.click(within(dialog).getByLabelText("API key"));
     await user.paste("AIza-test-gemini-key-0001");
     await user.click(within(dialog).getByRole("button", { name: "Add the key" }));
-    expect(await within(dialog).findByText("This server can't change settings yet")).toBeVisible();
+    expect(await within(dialog).findByText("This server can't save config.yaml")).toBeVisible();
     expect(dialog).toHaveTextContent("nothing was changed");
 
     await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
@@ -645,7 +645,7 @@ describe("the provider API keys", () => {
       expect(screen.queryByRole("dialog")).toBeNull();
     });
     const card = screen.getByRole("region", { name: "Provider API keys" });
-    expect(card).toHaveTextContent("It reads config.yaml but has no way to save it.");
+    expect(card).toHaveTextContent("This server has no way to save config.yaml from here.");
     // The keys still show, but nothing offers to change them.
     expect(within(card).getByText("sk-...0001")).toBeVisible();
     expect(within(card).queryByRole("button", { name: /^Remove/ })).toBeNull();

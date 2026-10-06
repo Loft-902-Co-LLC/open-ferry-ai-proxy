@@ -4,7 +4,7 @@ import { Plus, Trash2 } from "lucide-react";
 import { useId, useState } from "react";
 import { useForm, useWatch } from "react-hook-form";
 
-import { callProblem, isSettingsReadOnly } from "../../api/access";
+import { cantSaveConfig, saveProblem } from "../../api/access";
 import { isUnsupportedRoute } from "../../api/client";
 import {
   KEY_LISTS,
@@ -131,7 +131,7 @@ function AddKeyDialog({
       onAdded(provider);
     },
     onError: (error) => {
-      if (isSettingsReadOnly(error)) {
+      if (cantSaveConfig(error)) {
         onReadOnly();
       }
     },
@@ -208,7 +208,7 @@ function AddKeyDialog({
               <p>The server already has this key with this base URL.</p>
             </Alert>
           ) : (
-            <ProblemNotice problem={callProblem(add.error)} live />
+            <ProblemNotice problem={saveProblem(add.error)} live />
           ))}
       </form>
     </Dialog>
@@ -245,7 +245,7 @@ function KeyEntry({ provider, entry, writable, onReadOnly }: KeyEntryProps) {
       await call<unknown>(path, { method: "DELETE", query: { index } });
     },
     onError: (error) => {
-      if (isSettingsReadOnly(error)) {
+      if (cantSaveConfig(error)) {
         onReadOnly();
       }
     },
@@ -295,7 +295,7 @@ function KeyEntry({ provider, entry, writable, onReadOnly }: KeyEntryProps) {
             <p>That key was already removed.</p>
           </Alert>
         ) : (
-          <ProblemNotice problem={callProblem(remove.error)} live />
+          <ProblemNotice problem={saveProblem(remove.error)} live />
         ))}
       <ConfirmDialog
         open={confirm}
@@ -407,10 +407,12 @@ export function ProviderKeys({ adding, onAdd, onAddClosed }: ProviderKeysProps) 
         </Alert>
       )}
       {!writable && (
-        <Alert tone="info" title="This server can't change settings yet">
+        <Alert tone="info" title="Provider API keys can't be changed here">
           <p>
-            {unsupported ? "" : "It reads config.yaml but has no way to save it. "}
-            Add and remove keys in config.yaml by hand, under <Code>claude-api-key</Code>,{" "}
+            {unsupported
+              ? "This server doesn't serve its provider keys to the dashboard. "
+              : "This server has no way to save config.yaml from here. "}
+            Add and remove them in config.yaml itself, under <Code>claude-api-key</Code>,{" "}
             <Code>codex-api-key</Code> or <Code>gemini-api-key</Code>, and the server picks them up
             when it reloads the file.
           </p>
