@@ -642,8 +642,9 @@ fn apply_visibility_override(entry: &mut Map<String, Value>, id: &str) {
 }
 
 /// Whether `id`, or what follows its first `/`, is an image or video model
-/// (`isCodexClientImageOrVideoModel`).
-fn is_image_or_video_model(id: &str) -> bool {
+/// (`isCodexClientImageOrVideoModel`). The dashboard's client setup uses it
+/// too, to tell chat models from others.
+pub fn is_image_or_video_model(id: &str) -> bool {
     let mut target = id.trim();
     if let Some(slash) = target.find('/') {
         target = target[slash + 1..].trim();

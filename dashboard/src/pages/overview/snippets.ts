@@ -2,7 +2,7 @@
 // client key and model filled in, quoted for where they go. Each names the
 // documentation it follows in a comment.
 
-import type { BaseUrl, ProxyRoute } from "../../api/dashboard";
+import type { BaseUrl, ModelInfo, ProxyRoute } from "../../api/dashboard";
 
 export type Shell = "posix" | "powershell";
 
@@ -17,8 +17,11 @@ export interface SetupInput {
   root: string;
   /** The client key as it should appear: the key, masked or not, or a placeholder. */
   key: string;
-  /** The model asked for; a route that hasn't it uses its first. */
-  model: string;
+  /** The model picked, or null for each setup's suggestion. A route that
+   * hasn't the model picked names its suggestion instead. */
+  model: string | null;
+  /** The models the server describes. */
+  models: readonly ModelInfo[];
   routes: readonly ProxyRoute[];
   shell: Shell;
 }
@@ -36,7 +39,7 @@ export interface Snippet {
   route: ProxyRoute;
   /** The model it names. */
   model: string;
-  /** The model asked for isn't on this route right now. */
+  /** The model picked isn't on this route right now. */
   modelMissing: boolean;
   parts: SnippetPart[];
   /** The documentation it follows. */
@@ -129,15 +132,67 @@ export function isLoopback(root: string): boolean {
 
 const PROMPT = "Say hello.";
 
+/** What a setup names while there is no model. */
+export const MODEL_PLACEHOLDER = "<model>";
+
+/** The models a client is made for: its maker's, or those named for them. */
+export interface Suits {
+  /** The `owned_by` of its maker's models. */
+  maker: string;
+  /** How its maker's model names start, after any prefix. */
+  family: string;
+}
+
+function suitsClient(info: ModelInfo, suits: Suits): boolean {
+  const name = info.id.slice(info.id.lastIndexOf("/") + 1).toLowerCase();
+  return info.owned_by?.toLowerCase() === suits.maker || name.startsWith(suits.family);
+}
+
+/**
+ * The model to suggest on `route`: of its chat models, those that suit the
+ * client if any do, the one that came out last by the catalog. A model
+ * whose date is unknown counts as oldest, and of models with the same date
+ * the first on the route wins, so the answer is the same each time.
+ * Without a chat model it is the route's first model, if it has one.
+ */
+export function suggestedModel(
+  route: ProxyRoute,
+  models: readonly ModelInfo[],
+  suits?: Suits,
+): string | undefined {
+  const described = new Map(models.map((info) => [info.id, info]));
+  const chat = route.models.flatMap((id) => {
+    const info = described.get(id);
+    return info?.chat === true ? [info] : [];
+  });
+  const suited = suits === undefined ? [] : chat.filter((info) => suitsClient(info, suits));
+  let newest: ModelInfo | undefined;
+  for (const info of suited.length > 0 ? suited : chat) {
+    if (newest === undefined || (info.created ?? -Infinity) > (newest.created ?? -Infinity)) {
+      newest = info;
+    }
+  }
+  return newest?.id ?? route.models[0];
+}
+
 function routeFor(routes: readonly ProxyRoute[], protocol: string): ProxyRoute | undefined {
   return routes.find((route) => route.protocol === protocol);
 }
 
-function modelFor(route: ProxyRoute, wanted: string): { model: string; missing: boolean } {
-  if (route.models.includes(wanted)) {
-    return { model: wanted, missing: false };
+function modelFor(
+  route: ProxyRoute,
+  input: SetupInput,
+  suits: Suits | undefined,
+): { model: string; missing: boolean } {
+  const picked = input.model;
+  if (picked !== null && route.models.includes(picked)) {
+    return { model: picked, missing: false };
   }
-  return { model: route.models[0] ?? wanted, missing: true };
+  const suggested = suggestedModel(route, input.models, suits);
+  if (picked === null) {
+    return { model: suggested ?? MODEL_PLACEHOLDER, missing: false };
+  }
+  return { model: suggested ?? picked, missing: true };
 }
 
 function chatBody(model: string): string {
@@ -269,11 +324,32 @@ const CURL: Builder = ({ key, shell }, base, model) => {
   return { source, parts: [{ caption: "Run in a terminal", code: code.join("\n") }] };
 };
 
-const SETUPS: readonly { id: string; label: string; protocol: string; build: Builder }[] = [
+interface Setup {
+  id: string;
+  label: string;
+  protocol: string;
+  /** The models its client is made for, if any. */
+  suits?: Suits;
+  build: Builder;
+}
+
+const SETUPS: readonly Setup[] = [
   { id: "openai-python", label: "OpenAI SDK (Python)", protocol: "openai", build: OPENAI_PYTHON },
   { id: "openai-node", label: "OpenAI SDK (Node)", protocol: "openai", build: OPENAI_NODE },
-  { id: "codex", label: "Codex CLI", protocol: "openai-responses", build: CODEX },
-  { id: "claude-code", label: "Claude Code", protocol: "claude", build: CLAUDE_CODE },
+  {
+    id: "codex",
+    label: "Codex CLI",
+    protocol: "openai-responses",
+    suits: { maker: "openai", family: "gpt" },
+    build: CODEX,
+  },
+  {
+    id: "claude-code",
+    label: "Claude Code",
+    protocol: "claude",
+    suits: { maker: "anthropic", family: "claude" },
+    build: CLAUDE_CODE,
+  },
   { id: "curl", label: "curl", protocol: "openai", build: CURL },
 ];
 
@@ -285,7 +361,7 @@ export function buildSnippets(input: SetupInput): Snippet[] {
     if (route === undefined) {
       continue;
     }
-    const { model, missing } = modelFor(route, input.model);
+    const { model, missing } = modelFor(route, input, setup.suits);
     const base = `${input.root}${route.base_path}`;
     snippets.push({
       id: setup.id,

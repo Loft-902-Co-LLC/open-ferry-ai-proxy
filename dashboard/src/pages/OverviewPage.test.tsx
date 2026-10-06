@@ -79,7 +79,8 @@ describe("connecting a client", () => {
     const python = await setupCode();
     expect(python).toHaveTextContent(`base_url="http://localhost:3000/v1"`);
     expect(python).toHaveTextContent(`api_key="sk-...0001"`);
-    expect(python).toHaveTextContent(`model="claude-sonnet-4-5"`);
+    // The newest model; Claude Code's is Anthropic's.
+    expect(python).toHaveTextContent(`model="gpt-5.1-codex"`);
     expect(python).not.toHaveTextContent(KEY);
     expect(screen.getByRole("link", { name: "https://github.com/openai/openai-python#usage" })).toBeVisible();
     expect(api.unhandled).toEqual([]);
@@ -157,6 +158,42 @@ describe("connecting a client", () => {
           "The model you picked isn't on /v1/messages right now, so this setup names claude-sonnet-4-5.",
       ),
     ).toBeVisible();
+    expect(screen.getByLabelText("The Claude Code setup")).toHaveTextContent(
+      "ANTHROPIC_MODEL='claude-sonnet-4-5'",
+    );
+  });
+
+  it("suggests a model for each setup until one is picked", async () => {
+    server([KEY]);
+    const { user } = renderApp("/");
+    const python = await setupCode();
+    const model = screen.getByLabelText("Model");
+    expect(model).toHaveValue("");
+    expect(model).toHaveAccessibleDescription(/newest chat model/);
+    expect(
+      within(model)
+        .getAllByRole("option")
+        .map((option) => option.textContent),
+    ).toEqual([
+      "Suggested for each setup",
+      "Claude Sonnet 4.5 (claude-sonnet-4-5)",
+      "GPT 5.1 Codex (gpt-5.1-codex)",
+    ]);
+    expect(python).toHaveTextContent(`model="gpt-5.1-codex"`);
+
+    await user.selectOptions(model, "claude-sonnet-4-5");
+    expect(screen.getByLabelText(PYTHON)).toHaveTextContent(`model="claude-sonnet-4-5"`);
+    expect(model).not.toHaveAccessibleDescription(/newest chat model/);
+    await user.click(screen.getByRole("tab", { name: "Codex CLI" }));
+    expect(screen.getByLabelText("The Codex CLI setup, step 1")).toHaveTextContent(
+      `model = "claude-sonnet-4-5"`,
+    );
+
+    await user.selectOptions(model, "");
+    expect(screen.getByLabelText("The Codex CLI setup, step 1")).toHaveTextContent(
+      `model = "gpt-5.1-codex"`,
+    );
+    await user.click(screen.getByRole("tab", { name: "Claude Code" }));
     expect(screen.getByLabelText("The Claude Code setup")).toHaveTextContent(
       "ANTHROPIC_MODEL='claude-sonnet-4-5'",
     );

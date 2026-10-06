@@ -37,8 +37,8 @@ import {
 
 /** What the setups say while there is no key to put in them. */
 const KEY_PLACEHOLDER = "<your client key>";
-/** What they say while there is no model. */
-const MODEL_PLACEHOLDER = "<model>";
+/** The model choice that leaves each setup its suggestion. */
+const SUGGESTED = "";
 /** How often to look whether safe mode has lifted, after the keys changed. */
 const SAFE_MODE_POLL_MS = 2000;
 
@@ -295,13 +295,17 @@ export function ClientSetupCard({ focusKeys = false }: ClientSetupCardProps) {
   const addresses = addressOptions(window.location.origin, setupData.base_urls);
   const root = addresses.find((option) => option.root === address)?.root ?? addresses[0]?.root ?? "";
   const models = setupData.models;
-  const defaultModel =
-    setupData.routes.find((route) => route.protocol === "openai")?.models[0] ??
-    models[0]?.id ??
-    MODEL_PLACEHOLDER;
-  const chosenModel = model !== null && models.some((info) => info.id === model) ? model : defaultModel;
+  // A model picked that the server no longer describes gives way to the
+  // suggestions.
+  const picked = model !== null && models.some((info) => info.id === model) ? model : null;
 
-  const input: Omit<SetupInput, "key"> = { root, model: chosenModel, routes: setupData.routes, shell };
+  const input: Omit<SetupInput, "key"> = {
+    root,
+    model: picked,
+    models,
+    routes: setupData.routes,
+    shell,
+  };
   const shownKey = chosenKey === null ? KEY_PLACEHOLDER : reveal ? chosenKey : maskKey(chosenKey);
   const shownSnippets = buildSnippets({ ...input, key: shownKey });
   const copiedSnippets = buildSnippets({ ...input, key: chosenKey ?? KEY_PLACEHOLDER });
@@ -412,22 +416,30 @@ export function ClientSetupCard({ focusKeys = false }: ClientSetupCardProps) {
           </div>
           <SelectField
             label="Model"
-            value={chosenModel}
+            value={picked ?? SUGGESTED}
             disabled={models.length === 0}
             options={
               models.length === 0
-                ? [{ value: MODEL_PLACEHOLDER, label: "No models yet" }]
-                : models.map((info) => ({
-                    value: info.id,
-                    label:
-                      info.display_name === null || info.display_name === info.id
-                        ? info.id
-                        : `${info.display_name} (${info.id})`,
-                  }))
+                ? [{ value: SUGGESTED, label: "No models yet" }]
+                : [
+                    { value: SUGGESTED, label: "Suggested for each setup" },
+                    ...models.map((info) => ({
+                      value: info.id,
+                      label:
+                        info.display_name === null || info.display_name === info.id
+                          ? info.id
+                          : `${info.display_name} (${info.id})`,
+                    })),
+                  ]
             }
             onChange={(event) => {
-              setModel(event.target.value);
+              setModel(event.target.value === SUGGESTED ? null : event.target.value);
             }}
+            hint={
+              picked === null && models.length > 0
+                ? "Each setup names the newest chat model the proxy serves it: Claude Code Anthropic's and Codex OpenAI's, where there is one."
+                : undefined
+            }
           />
           <SelectField
             label="Shell"

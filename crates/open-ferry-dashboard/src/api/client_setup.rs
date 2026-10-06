@@ -1,15 +1,22 @@
 //! `GET /client-setup`: what the app needs to write client configs, from
 //! the config and the model registry.
+//!
+//! Each model says when it came out and whether it is a chat model, so the
+//! app can suggest a current model from the registry's own data rather than
+//! a list of its own that would go stale.
 
 use std::collections::BTreeSet;
 use std::net::IpAddr;
 
 use axum::extract::State;
 use axum::response::Response;
+use open_ferry_core::auth::compat::OPENAI_COMPATIBILITY;
+use open_ferry_core::codex_models::is_image_or_video_model;
 use open_ferry_core::config::Config;
 use open_ferry_core::exec::Format;
 use open_ferry_core::models::ModelInfo;
 use open_ferry_core::registry::ModelRegistry;
+use open_ferry_core::registry::registration::OPENAI_IMAGE_MODEL_TYPE;
 use open_ferry_server::entry_providers;
 use serde::Serialize;
 
@@ -41,6 +48,8 @@ pub(crate) struct Model {
     display_name: String,
     owned_by: String,
     providers: Vec<String>,
+    created: Option<i64>,
+    chat: bool,
     context_length: Option<u64>,
     max_output_tokens: Option<u64>,
 }
@@ -160,12 +169,47 @@ fn model(info: &ModelInfo, providers: Vec<String>) -> Model {
         },
         owned_by: info.owned_by.clone(),
         providers,
+        created: released(info),
+        chat: is_chat(info),
         context_length: known(info.max_context_length)
             .or_else(|| known(info.context_length))
             .or_else(|| known(info.input_token_limit)),
         max_output_tokens: known(info.max_completion_tokens)
             .or_else(|| known(info.output_token_limit)),
     }
+}
+
+/// When `info` came out, in Unix seconds, as the model catalog has it. A
+/// model defined in the config has the time the config was loaded as its
+/// `created` instead (upstream's), which says nothing of the model and
+/// changes from one load to the next, so it has none here; nor has one whose
+/// `created` is unknown.
+fn released(info: &ModelInfo) -> Option<i64> {
+    let configured = info.user_defined
+        || info.model_type == OPENAI_COMPATIBILITY
+        || info.model_type == OPENAI_IMAGE_MODEL_TYPE;
+    (info.created > 0 && !configured).then_some(info.created)
+}
+
+/// Whether `info` is a chat model, as far as its details say: not an image
+/// or video model, by the list Codex clients hide them by or as configured,
+/// and, where its details list them, answering in text alone and through
+/// `generateContent`. That leaves out Gemini's image models, Imagen and
+/// the embedding models; a model whose details list neither counts as one.
+fn is_chat(info: &ModelInfo) -> bool {
+    let text_only = info
+        .supported_output_modalities
+        .iter()
+        .all(|modality| modality.eq_ignore_ascii_case("text"));
+    let generates = info.supported_generation_methods.is_empty()
+        || info
+            .supported_generation_methods
+            .iter()
+            .any(|method| method == "generateContent");
+    text_only
+        && generates
+        && info.model_type != OPENAI_IMAGE_MODEL_TYPE
+        && !is_image_or_video_model(&info.id)
 }
 
 /// The roots the server can be reached at: from where it listens, then the

@@ -231,8 +231,8 @@ export function clientSetup(overrides: Partial<ClientSetup> = {}): ClientSetup {
       { id: "openai-responses", protocol: "openai-responses", method: "POST", path: "/v1/responses", base_path: "/v1", models },
     ],
     models: [
-      { id: "claude-sonnet-4-5", display_name: "Claude Sonnet 4.5", owned_by: "anthropic", providers: ["claude"], context_length: 200_000, max_output_tokens: 64_000 },
-      { id: "gpt-5.1-codex", display_name: "GPT 5.1 Codex", owned_by: "openai", providers: ["codex"], context_length: 400_000, max_output_tokens: 128_000 },
+      { id: "claude-sonnet-4-5", display_name: "Claude Sonnet 4.5", owned_by: "anthropic", providers: ["claude"], created: 1_759_104_000, chat: true, context_length: 200_000, max_output_tokens: 64_000 },
+      { id: "gpt-5.1-codex", display_name: "GPT 5.1 Codex", owned_by: "openai", providers: ["codex"], created: 1_762_992_000, chat: true, context_length: 400_000, max_output_tokens: 128_000 },
     ],
     ...overrides,
   };

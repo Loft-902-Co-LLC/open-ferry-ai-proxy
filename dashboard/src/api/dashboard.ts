@@ -253,6 +253,11 @@ export interface ModelInfo {
   display_name: string | null;
   owned_by: string | null;
   providers: string[];
+  /** When it came out, in Unix seconds, from the model catalog; null when
+   * unknown, or when the config defines the model. */
+  created: number | null;
+  /** Whether it is a chat model: not an image, video or embedding model. */
+  chat: boolean;
   context_length: number | null;
   max_output_tokens: number | null;
 }

@@ -1,7 +1,9 @@
 //! `GET /client-setup`, from the config and the model registry.
 
 use http::StatusCode;
+use open_ferry_core::auth::compat::OPENAI_COMPATIBILITY;
 use open_ferry_core::models::ModelInfo;
+use open_ferry_core::registry::registration::OPENAI_IMAGE_MODEL_TYPE;
 use serde_json::{Value, json};
 
 use super::{Dash, keyed_config};
@@ -31,17 +33,20 @@ fn routes(models: &[&str]) -> Value {
 
 /// Not upstream's: each route lists the models with a credential, less
 /// those only the image endpoints serve, and each model is described with
-/// its providers in order of preference and its limits where known.
+/// its providers in order of preference, when it came out and its limits
+/// where known.
 #[tokio::test]
 async fn routes_and_models_come_from_the_registry() {
     let dash = Dash::new();
     let gpt = ModelInfo {
+        created: 1_754_524_800,
         context_length: 400_000,
         max_completion_tokens: 128_000,
         ..info("gpt-5", "openai")
     };
     let claude = ModelInfo {
         display_name: "Claude Sonnet 4.5".to_owned(),
+        created: 1_759_104_000,
         input_token_limit: 200_000,
         output_token_limit: 64_000,
         ..info("claude-sonnet-4-5", "anthropic")
@@ -71,6 +76,8 @@ async fn routes_and_models_come_from_the_registry() {
                 "display_name": "Claude Sonnet 4.5",
                 "owned_by": "anthropic",
                 "providers": ["claude", "antigravity"],
+                "created": 1_759_104_000,
+                "chat": true,
                 "context_length": 200_000,
                 "max_output_tokens": 64_000,
             },
@@ -79,6 +86,8 @@ async fn routes_and_models_come_from_the_registry() {
                 "display_name": "gemini-2.5-pro",
                 "owned_by": "google",
                 "providers": ["gemini"],
+                "created": null,
+                "chat": true,
                 "context_length": 1_000_000,
                 "max_output_tokens": null,
             },
@@ -87,10 +96,108 @@ async fn routes_and_models_come_from_the_registry() {
                 "display_name": "gpt-5",
                 "owned_by": "openai",
                 "providers": ["codex"],
+                "created": 1_754_524_800,
+                "chat": true,
                 "context_length": 400_000,
                 "max_output_tokens": 128_000,
             },
         ])
+    );
+}
+
+/// Not upstream's: a model has the catalog's `created`, but none when it
+/// is defined in the config, where `created` is the time the config was
+/// loaded; and only a model that answers in text through `generateContent`,
+/// and isn't an image or video model, is a chat model.
+#[tokio::test]
+async fn models_say_when_they_came_out_and_whether_they_chat() {
+    let dash = Dash::new();
+    let strings = |items: &[&str]| items.iter().map(|&item| item.to_owned()).collect();
+    let dated = |id: &str, owned_by: &str| ModelInfo {
+        created: 1_790_000_000,
+        ..info(id, owned_by)
+    };
+    let gemini = |id: &str, outputs: &[&str], methods: &[&str]| ModelInfo {
+        supported_output_modalities: strings(outputs),
+        supported_generation_methods: strings(methods),
+        ..dated(id, "google")
+    };
+    let registry = dash.registry();
+    registry.register_client(
+        "gemini-1",
+        "gemini",
+        &[
+            gemini(
+                "gemini-3.6-flash",
+                &["TEXT"],
+                &["generateContent", "countTokens"],
+            ),
+            gemini(
+                "gemini-3-pro-image-preview",
+                &["text", "image"],
+                &["generateContent", "countTokens"],
+            ),
+            gemini("imagen-4.0-generate-001", &["image"], &["predict"]),
+            gemini("gemini-embedding-001", &["text"], &["embedContent"]),
+        ],
+    );
+    registry.register_client(
+        "claude-1",
+        "claude",
+        &[
+            dated("claude-sonnet-5-5", "anthropic"),
+            ModelInfo {
+                user_defined: true,
+                model_type: "claude".to_owned(),
+                ..dated("my-sonnet", "anthropic")
+            },
+        ],
+    );
+    registry.register_client(
+        "compat-1",
+        "openrouter",
+        &[
+            ModelInfo {
+                model_type: OPENAI_COMPATIBILITY.to_owned(),
+                ..dated("router-chat", "openrouter")
+            },
+            ModelInfo {
+                model_type: OPENAI_IMAGE_MODEL_TYPE.to_owned(),
+                ..dated("router-draw", "openrouter")
+            },
+        ],
+    );
+    registry.register_client("xai-1", "xai", &[dated("grok-imagine-video", "xai")]);
+
+    let setup = dash.get(SETUP).await.json(StatusCode::OK);
+    let Some(models) = setup["models"].as_array() else {
+        panic!("models: {setup}");
+    };
+    let described: Vec<(&str, &Value, &Value)> = models
+        .iter()
+        .map(|model| {
+            (
+                model["id"].as_str().unwrap_or_default(),
+                &model["created"],
+                &model["chat"],
+            )
+        })
+        .collect();
+    let dated = json!(1_790_000_000);
+    let (yes, no, null) = (json!(true), json!(false), Value::Null);
+    assert_eq!(
+        described,
+        vec![
+            ("claude-sonnet-5-5", &dated, &yes),
+            ("gemini-3-pro-image-preview", &dated, &no),
+            ("gemini-3.6-flash", &dated, &yes),
+            ("gemini-embedding-001", &dated, &no),
+            ("grok-imagine-video", &dated, &no),
+            ("imagen-4.0-generate-001", &dated, &no),
+            ("my-sonnet", &null, &yes),
+            ("router-chat", &null, &yes),
+            ("router-draw", &null, &no),
+        ]
     );
 }
 
