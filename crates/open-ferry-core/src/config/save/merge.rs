@@ -36,8 +36,9 @@
 //!   never pruned from an item, since the generated item lacks them.
 //! - `plugins.configs` isn't replaced from the generated tree
 //!   (`replacePluginConfigsSubtree`): the plugin host isn't ported, so the
-//!   file's plugin settings stay as they are. Upstream drops an empty
-//!   `plugins.configs` mapping.
+//!   file's plugin settings stay as they are. Upstream writes the plugin IDs
+//!   from a map, sorted and plain, and drops an empty `plugins.configs`
+//!   mapping; and it writes `plugins.dir` as `ResolvePluginsDir` made it.
 
 use super::super::types::DEFAULT_PANEL_GITHUB_REPOSITORY;
 use super::super::yaml3::{
