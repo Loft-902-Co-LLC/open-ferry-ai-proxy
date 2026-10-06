@@ -17,7 +17,9 @@
 //!
 //! A login takes a function that shows the user the URL or device code, and
 //! returns the credential record; the caller saves it with an
-//! [`AuthStore`](open_ferry_core::auth::AuthStore).
+//! [`AuthStore`](open_ferry_core::auth::AuthStore). The browser login
+//! returns its callback server too, for the caller to
+//! [finish](crate::oauth::CallbackServer::finish) once the record is saved.
 //!
 //! Deviations from upstream:
 //! - Logins don't open a browser or print; the `present` function shows the
@@ -25,6 +27,11 @@
 //! - The callback server turns away a callback with the wrong `state` and
 //!   keeps waiting (see [`crate::oauth`]), so there's no `invalid_state`
 //!   error. There's no `browser_open_failed` error either.
+//! - The browser login gives back its callback server, still up, with the
+//!   credential, so that the browser's page can say whether the credential
+//!   was saved (see [`crate::oauth`]); upstream's login stops the server once
+//!   the code is exchanged. A login that fails after the redirect tells the
+//!   page why, with the code and the PKCE verifier redacted.
 //! - Every endpoint can be changed, through [`Endpoints`].
 //! - Response bodies are read up to 1 MiB.
 //! - JSON errors after upstream's prefixes (`failed to parse token response:
@@ -55,7 +62,11 @@ use super::token::{
     AuthBundle, TokenData, create_token_storage, credential_file_name, now_rfc3339,
 };
 use crate::json;
-use crate::oauth::{CallbackError, CallbackResult, CallbackServer, Pkce, generate_state};
+use crate::oauth::page::{Failure, Outcome};
+use crate::oauth::{
+    BrowserLogin, CallbackError, CallbackResult, CallbackServer, Pkce, generate_state,
+};
+use crate::redact::{Policy, Secrets};
 
 /// OpenAI's OAuth client ID for Codex.
 pub const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -680,17 +691,22 @@ pub struct AuthorizationPrompt {
 /// Runs the browser login: starts the callback server, has `present` show
 /// the URL, waits for the redirect and exchanges its code (upstream's
 /// `CodexAuthenticator.Login`).
+///
+/// The callback server stays up for the browser's success page: the caller
+/// saves the credential and then [finishes](CallbackServer::finish) the
+/// server with how that went. A login that fails after the redirect
+/// finishes the server itself, with the reason, redacted.
 pub async fn login<F>(
     auth: &CodexAuth,
     options: LoginOptions,
     present: F,
-) -> Result<Auth, LoginError>
+) -> Result<BrowserLogin, LoginError>
 where
     F: FnOnce(&AuthorizationPrompt),
 {
     let pkce = Pkce::generate();
     let state = generate_state();
-    let mut server = CallbackServer::start(options.callback_port, CALLBACK_PATH, &state)
+    let mut server = CallbackServer::start(options.callback_port, CALLBACK_PATH, &state, "Codex")
         .await
         .map_err(|error| {
             if error.kind() == io::ErrorKind::AddrInUse {
@@ -728,15 +744,31 @@ where
             return Err(LoginError::Other(Error::new(error.to_string())));
         }
     };
-    drop(server);
     tracing::debug!("Codex authorization code received; exchanging for tokens");
-    let bundle = auth
-        .exchange_code_for_tokens(&code, &pkce)
-        .await
-        .map_err(|error| {
-            LoginError::authentication(AuthenticationErrorKind::CodeExchangeFailed, error.message)
-        })?;
-    build_auth_record(&bundle).map_err(LoginError::Other)
+    let bundle = match auth.exchange_code_for_tokens(&code, &pkce).await {
+        Ok(bundle) => bundle,
+        Err(error) => {
+            // The token endpoint's answer may quote what it was sent.
+            let escaped = query_escape(&code);
+            let secrets =
+                Secrets::from_iter([code.as_str(), escaped.as_str(), pkce.verifier.as_str()]);
+            let reason = secrets.str(error.message(), Policy::Client);
+            let failure = Failure::unfinished("Codex", &reason);
+            server.finish(Outcome::Failed(failure)).await;
+            return Err(LoginError::authentication(
+                AuthenticationErrorKind::CodeExchangeFailed,
+                error.message,
+            ));
+        }
+    };
+    match build_auth_record(&bundle) {
+        Ok(auth) => Ok(BrowserLogin { auth, server }),
+        Err(error) => {
+            let failure = Failure::unfinished("Codex", error.message());
+            server.finish(Outcome::Failed(failure)).await;
+            Err(LoginError::Other(error))
+        }
+    }
 }
 
 /// What to show the user during a device login.
@@ -1027,6 +1059,7 @@ mod tests {
 
     use super::*;
     use crate::codex::jwt::tests::make_test_jwt;
+    use crate::oauth::tests::{assert_page, fetch};
 
     /// A mock auth server on 127.0.0.1 and its base URL.
     async fn serve(router: Router) -> String {
@@ -1358,37 +1391,15 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn browser_login_exchanges_the_code() {
-        let id_token = test_jwt("team", "acc-1");
-        let token_body = json!({
-            "access_token": "at",
-            "refresh_token": "rt",
-            "id_token": id_token,
-            "expires_in": 3600,
-        })
-        .to_string();
-        let router = Router::new().route(
-            "/oauth/token",
-            post(move |headers: HeaderMap, body: String| async move {
-                let form = parse_form(&body);
-                assert_eq!(form["grant_type"], "authorization_code");
-                assert_eq!(form["code"], "the-code");
-                assert_eq!(form["redirect_uri"], REDIRECT_URI);
-                assert_eq!(form["client_id"], CLIENT_ID);
-                assert!(!form["code_verifier"].is_empty());
-                assert_eq!(headers["content-type"], "application/x-www-form-urlencoded");
-                assert_eq!(headers["accept"], "application/json");
-                assert!(
-                    headers["user-agent"]
-                        .to_str()
-                        .unwrap()
-                        .starts_with("open-ferry/")
-                );
-                token_body.clone()
-            }),
-        );
-        let auth = auth_for(&serve(router).await);
+    /// Starts a browser login against `auth` in the background, and gives
+    /// it, its callback port and its state.
+    async fn start_login(
+        auth: CodexAuth,
+    ) -> (
+        tokio::task::JoinHandle<Result<BrowserLogin, LoginError>>,
+        u16,
+        String,
+    ) {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let login = tokio::spawn(async move {
             let options = LoginOptions {
@@ -1400,26 +1411,79 @@ mod tests {
             })
             .await
         });
-        let prompt = receiver.await.unwrap();
+        let prompt: AuthorizationPrompt = receiver.await.unwrap();
         let query: HashMap<String, String> = url::Url::parse(&prompt.url)
             .unwrap()
             .query_pairs()
             .into_owned()
             .collect();
         assert_eq!(query["code_challenge_method"], "S256");
-        let callback = format!(
-            "http://127.0.0.1:{}/auth/callback?code=the-code&state={}",
-            prompt.callback_port, query["state"]
+        (login, prompt.callback_port, query["state"].clone())
+    }
+
+    /// Sends the provider's redirect with `code` to the login's callback
+    /// server on `port`, and gives where the server sends the browser on.
+    async fn redirect(port: u16, code: &str, state: &str) -> String {
+        let answer = fetch(port, &format!("/auth/callback?code={code}&state={state}")).await;
+        assert_eq!(answer.status, 302);
+        answer.header("location").unwrap().to_owned()
+    }
+
+    // Not upstream's: the login exchanges the redirect's code, and the
+    // browser, which follows the redirect to the success page once the login
+    // has the code, finds the server still up and is told the sign-in
+    // worked. (The login used to stop the server as soon as it had the code,
+    // and the browser found the port closed.)
+    #[tokio::test]
+    async fn browser_login_exchanges_the_code() {
+        let id_token = test_jwt("team", "acc-1");
+        let token_body = json!({
+            "access_token": "at",
+            "refresh_token": "rt",
+            "id_token": id_token,
+            "expires_in": 3600,
+        })
+        .to_string();
+        let exchanging = Arc::new(Notify::new());
+        let answer = Arc::new(Notify::new());
+        let router = Router::new().route(
+            "/oauth/token",
+            post({
+                let (exchanging, answer) = (Arc::clone(&exchanging), Arc::clone(&answer));
+                move |headers: HeaderMap, body: String| async move {
+                    let form = parse_form(&body);
+                    assert_eq!(form["grant_type"], "authorization_code");
+                    assert_eq!(form["code"], "the-code");
+                    assert_eq!(form["redirect_uri"], REDIRECT_URI);
+                    assert_eq!(form["client_id"], CLIENT_ID);
+                    assert!(!form["code_verifier"].is_empty());
+                    assert_eq!(headers["content-type"], "application/x-www-form-urlencoded");
+                    assert_eq!(headers["accept"], "application/json");
+                    assert!(
+                        headers["user-agent"]
+                            .to_str()
+                            .unwrap()
+                            .starts_with("open-ferry/")
+                    );
+                    exchanging.notify_one();
+                    answer.notified().await;
+                    token_body.clone()
+                }
+            }),
         );
-        reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .unwrap()
-            .get(callback)
-            .send()
-            .await
-            .unwrap();
-        let record = login.await.unwrap().unwrap();
+        let (login, port, state) = start_login(auth_for(&serve(router).await)).await;
+        let location = redirect(port, "the-code", &state).await;
+        // The login is done waiting for the redirect, and exchanging its
+        // code, when the browser follows it.
+        exchanging.notified().await;
+        let page = tokio::spawn(async move { fetch(port, &location).await });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!page.is_finished(), "the page didn't wait for the login");
+        answer.notify_one();
+        let BrowserLogin {
+            auth: record,
+            server,
+        } = login.await.unwrap().unwrap();
         let hash: String = Sha256::digest(b"acc-1")
             .iter()
             .take(4)
@@ -1432,6 +1496,58 @@ mod tests {
         assert_eq!(record.metadata_str("refresh_token"), Some("rt"));
         assert_eq!(record.metadata_str("account_id"), Some("acc-1"));
         assert_eq!(record.metadata_str("email"), Some("user@example.com"));
+        server.finish(Outcome::SignedIn).await;
+        assert_page(&page.await.unwrap(), 200, "Signed in to Codex");
+    }
+
+    // Not upstream's: a failed code exchange ends the login, and the success
+    // page the browser follows the redirect to says why, without the code
+    // the token endpoint quoted.
+    #[tokio::test]
+    async fn browser_login_reports_a_failed_exchange_on_its_page() {
+        let exchanging = Arc::new(Notify::new());
+        let router = Router::new().route(
+            "/oauth/token",
+            post({
+                let exchanging = Arc::clone(&exchanging);
+                move |body: String| async move {
+                    exchanging.notify_one();
+                    let code = parse_form(&body)["code"].clone();
+                    let error = json!({
+                        "error": "invalid_grant",
+                        "error_description": format!("unknown code {code}"),
+                    });
+                    (StatusCode::BAD_REQUEST, error.to_string())
+                }
+            }),
+        );
+        let (login, port, state) = start_login(auth_for(&serve(router).await)).await;
+        let location = redirect(port, "the-code-0123456789", &state).await;
+        exchanging.notified().await;
+        let page = fetch(port, &location).await;
+        let error = login.await.unwrap().unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                LoginError::Authentication(AuthenticationError {
+                    kind: AuthenticationErrorKind::CodeExchangeFailed,
+                    ..
+                })
+            ),
+            "{error}"
+        );
+        assert_page(&page, 400, "The sign-in didn&#39;t finish");
+        assert!(
+            page.body.contains("token exchange failed with status 400"),
+            "{}",
+            page.body
+        );
+        assert!(
+            page.body.contains("unknown code [redacted]"),
+            "{}",
+            page.body
+        );
+        assert!(!page.body.contains("0123456789"), "{}", page.body);
     }
 
     #[tokio::test]

@@ -16,8 +16,9 @@
 //! and our own `User-Agent`, `open-ferry/<version>`.
 //!
 //! A login takes a function that shows the user the URL, and returns the
-//! credential record; the caller saves it with an
-//! [`AuthStore`](open_ferry_core::auth::AuthStore).
+//! credential record and its callback server; the caller saves the record
+//! with an [`AuthStore`](open_ferry_core::auth::AuthStore), then
+//! [finishes](crate::oauth::CallbackServer::finish) the server.
 //!
 //! Deviations from upstream:
 //! - The OAuth calls send no axios headers (`User-Agent: axios/...`, its
@@ -40,6 +41,14 @@
 //! - The callback server turns away a callback with the wrong `state` and
 //!   keeps waiting (see [`crate::oauth`]), so there's no `invalid_state`
 //!   error.
+//! - The browser login gives back its callback server, still up, with the
+//!   credential, so that the browser's page can say whether the credential
+//!   was saved (see [`crate::oauth`]); upstream's login stops the server once
+//!   the code is exchanged. A login that fails after the redirect tells the
+//!   page why, with the code and the PKCE verifier redacted.
+//! - A failed code exchange is logged with the code and the PKCE verifier
+//!   redacted from the token endpoint's answer; upstream logs the answer as
+//!   it came.
 //! - Every endpoint can be changed, through [`Endpoints`].
 //! - Response bodies are read up to 1 MiB.
 //! - JSON errors after upstream's prefixes (`failed to parse token response:
@@ -68,7 +77,11 @@ use sha2::{Digest, Sha256};
 use super::client::{Clients, error_chain, read_body};
 use super::token::{AuthBundle, TokenData, create_token_storage, credential_file_name, expiry};
 use crate::json::{key_of, object_or_null, set_int, set_string};
-use crate::oauth::{CallbackError, CallbackResult, CallbackServer, Pkce, generate_state};
+use crate::oauth::page::{Failure, Outcome};
+use crate::oauth::{
+    BrowserLogin, CallbackError, CallbackResult, CallbackServer, Pkce, generate_state,
+};
+use crate::redact::{Policy, Secrets};
 
 /// Claude's OAuth client ID.
 pub const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
@@ -833,17 +846,22 @@ pub struct AuthorizationPrompt {
 /// Runs the browser login: starts the callback server, has `present` show
 /// the URL, waits for the redirect and exchanges its code (upstream's
 /// `ClaudeAuthenticator.Login`).
+///
+/// The callback server stays up for the browser's success page: the caller
+/// saves the credential and then [finishes](CallbackServer::finish) the
+/// server with how that went. A login that fails after the redirect
+/// finishes the server itself, with the reason, redacted.
 pub async fn login<F>(
     auth: &ClaudeAuth,
     options: LoginOptions,
     present: F,
-) -> Result<Auth, LoginError>
+) -> Result<BrowserLogin, LoginError>
 where
     F: FnOnce(&AuthorizationPrompt),
 {
     let pkce = Pkce::generate();
     let state = generate_state();
-    let mut server = CallbackServer::start(options.callback_port, CALLBACK_PATH, &state)
+    let mut server = CallbackServer::start(options.callback_port, CALLBACK_PATH, &state, "Claude")
         .await
         .map_err(|error| {
             if error.kind() == io::ErrorKind::AddrInUse {
@@ -881,16 +899,40 @@ where
             return Err(LoginError::Other(Error::new(error.to_string())));
         }
     };
-    drop(server);
     tracing::debug!("Claude authorization code received; exchanging for tokens");
-    let bundle = auth
-        .exchange_code_for_tokens(&code, &state, &pkce)
-        .await
-        .map_err(|error| {
-            tracing::error!("Token exchange failed: {error}");
-            LoginError::authentication(AuthenticationErrorKind::CodeExchangeFailed, error.message)
-        })?;
-    build_auth_record(&bundle).map_err(LoginError::Other)
+    let bundle = match auth.exchange_code_for_tokens(&code, &state, &pkce).await {
+        Ok(bundle) => bundle,
+        Err(error) => {
+            // The token endpoint's answer may quote what it was sent.
+            let (code_part, _) = parse_code_and_state(&code);
+            let escaped = query_escape(&code);
+            let secrets = Secrets::from_iter([
+                code.as_str(),
+                code_part,
+                escaped.as_str(),
+                pkce.verifier.as_str(),
+            ]);
+            tracing::error!(
+                "Token exchange failed: {}",
+                secrets.str(error.message(), Policy::Disk)
+            );
+            let reason = secrets.str(error.message(), Policy::Client);
+            let failure = Failure::unfinished("Claude", &reason);
+            server.finish(Outcome::Failed(failure)).await;
+            return Err(LoginError::authentication(
+                AuthenticationErrorKind::CodeExchangeFailed,
+                error.message,
+            ));
+        }
+    };
+    match build_auth_record(&bundle) {
+        Ok(auth) => Ok(BrowserLogin { auth, server }),
+        Err(error) => {
+            let failure = Failure::unfinished("Claude", error.message());
+            server.finish(Outcome::Failed(failure)).await;
+            Err(LoginError::Other(error))
+        }
+    }
 }
 
 /// The credential record for a login's tokens: named by
@@ -942,6 +984,8 @@ mod tests {
     use axum::routing::post;
     use serde_json::json;
     use tokio::sync::Notify;
+
+    use crate::oauth::tests::{assert_page, fetch};
 
     /// What the mock token endpoint saw.
     type Seen = Arc<Mutex<Option<(AxumHeaders, Value)>>>;
@@ -1476,48 +1520,130 @@ mod tests {
         }
     }
 
+    /// Starts a browser login against `auth` in the background, and gives
+    /// it, its callback port and its state.
+    async fn start_login(
+        auth: ClaudeAuth,
+    ) -> (
+        tokio::task::JoinHandle<Result<BrowserLogin, LoginError>>,
+        u16,
+        String,
+    ) {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let login = tokio::spawn(async move {
+            let options = LoginOptions {
+                callback_port: 0,
+                callback_timeout: Duration::from_secs(10),
+            };
+            login(&auth, options, |prompt| {
+                let _ = sender.send(prompt.clone());
+            })
+            .await
+        });
+        let prompt: AuthorizationPrompt = receiver.await.unwrap();
+        let state = url::Url::parse(&prompt.url)
+            .unwrap()
+            .query_pairs()
+            .find(|(key, _)| key == "state")
+            .map(|(_, value)| value.into_owned())
+            .unwrap();
+        (login, prompt.callback_port, state)
+    }
+
+    /// Sends the provider's redirect with `code` to the login's callback
+    /// server on `port`, and gives where the server sends the browser on.
+    async fn redirect(port: u16, code: &str, state: &str) -> String {
+        let answer = fetch(port, &format!("/callback?code={code}&state={state}")).await;
+        assert_eq!(answer.status, 302);
+        answer.header("location").unwrap().to_owned()
+    }
+
+    // Not upstream's: the login exchanges the redirect's code, and the
+    // browser, which follows the redirect to the success page once the login
+    // has the code, finds the server still up and is told the sign-in
+    // worked. (The login used to stop the server as soon as it had the code,
+    // and the browser found the port closed.)
     #[tokio::test]
     async fn login_exchanges_the_callback_code() {
-        let router = Router::new().route("/v1/oauth/token", post(|| async { TOKEN_BODY }));
-        let auth = auth_for(&serve(router).await);
-        let options = LoginOptions {
-            callback_port: 0,
-            callback_timeout: Duration::from_secs(5),
-        };
-        let (tx, rx) = tokio::sync::oneshot::channel::<AuthorizationPrompt>();
-        let browser = tokio::spawn(async move {
-            let prompt = rx.await.unwrap();
-            let url = url::Url::parse(&prompt.url).unwrap();
-            let state = url
-                .query_pairs()
-                .find(|(key, _)| key == "state")
-                .map(|(_, value)| value.into_owned())
-                .unwrap();
-            let callback = format!(
-                "http://127.0.0.1:{}/callback?code=the-code&state={state}",
-                prompt.callback_port
-            );
-            // The login stops the server once it has the code, so the
-            // redirect to its success page isn't followed.
-            let response = reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .unwrap()
-                .get(callback)
-                .send()
-                .await
-                .unwrap();
-            assert_eq!(response.status(), 302);
-        });
-        let record = login(&auth, options, |prompt| {
-            let _ = tx.send(prompt.clone());
-        })
-        .await
-        .unwrap();
-        browser.await.unwrap();
+        let exchanging = Arc::new(Notify::new());
+        let answer = Arc::new(Notify::new());
+        let router = Router::new().route(
+            "/v1/oauth/token",
+            post({
+                let (exchanging, answer) = (Arc::clone(&exchanging), Arc::clone(&answer));
+                move |body: String| async move {
+                    let body: Value = serde_json::from_str(&body).unwrap();
+                    assert_eq!(body["code"], "the-code");
+                    exchanging.notify_one();
+                    answer.notified().await;
+                    TOKEN_BODY
+                }
+            }),
+        );
+        let (login, port, state) = start_login(auth_for(&serve(router).await)).await;
+        let location = redirect(port, "the-code", &state).await;
+        // The login is done waiting for the redirect, and exchanging its
+        // code, when the browser follows it.
+        exchanging.notified().await;
+        let page = tokio::spawn(async move { fetch(port, &location).await });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!page.is_finished(), "the page didn't wait for the login");
+        answer.notify_one();
+        let BrowserLogin {
+            auth: record,
+            server,
+        } = login.await.unwrap().unwrap();
         assert_eq!(record.id, "claude-00f765af-user@example.com.json");
         assert_eq!(record.metadata["refresh_token"], "refresh");
         assert_eq!(record.metadata["email"], "user@example.com");
+        server.finish(Outcome::SignedIn).await;
+        assert_page(&page.await.unwrap(), 200, "Signed in to Claude");
+    }
+
+    // Not upstream's: a failed code exchange ends the login, and the success
+    // page the browser follows the redirect to says why, without the code
+    // the token endpoint quoted.
+    #[tokio::test]
+    async fn login_reports_a_failed_exchange_on_its_page() {
+        let exchanging = Arc::new(Notify::new());
+        let router = Router::new().route(
+            "/v1/oauth/token",
+            post({
+                let exchanging = Arc::clone(&exchanging);
+                move |body: String| async move {
+                    exchanging.notify_one();
+                    let body: Value = serde_json::from_str(&body).unwrap();
+                    let code = body["code"].as_str().unwrap().to_owned();
+                    let error = json!({
+                        "error": "invalid_grant",
+                        "error_description": format!("unknown code {code}"),
+                    });
+                    (StatusCode::BAD_REQUEST, error.to_string())
+                }
+            }),
+        );
+        let (login, port, state) = start_login(auth_for(&serve(router).await)).await;
+        let location = redirect(port, "the-code-0123456789", &state).await;
+        exchanging.notified().await;
+        let page = fetch(port, &location).await;
+        match login.await.unwrap() {
+            Err(LoginError::Authentication(error)) => {
+                assert_eq!(error.kind, AuthenticationErrorKind::CodeExchangeFailed);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        assert_page(&page, 400, "The sign-in didn&#39;t finish");
+        assert!(
+            page.body.contains("token exchange failed with status 400"),
+            "{}",
+            page.body
+        );
+        assert!(
+            page.body.contains("unknown code [redacted]"),
+            "{}",
+            page.body
+        );
+        assert!(!page.body.contains("0123456789"), "{}", page.body);
     }
 
     #[test]

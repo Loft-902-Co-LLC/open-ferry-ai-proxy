@@ -22,6 +22,10 @@
 //! - The port-in-use message names the port; upstream's always says 3000.
 //! - A failed login exits with 1. Upstream exits with 0, except with 13 for a
 //!   port in use, as here.
+//! - A browser login's callback server lasts until the credential is saved,
+//!   so that the browser's page can say whether it was (see
+//!   [`open_ferry_providers::oauth`]). Upstream stops it once the code is
+//!   exchanged.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -29,9 +33,11 @@ use std::process::ExitCode;
 
 use open_ferry_core::auth::FileStore;
 use open_ferry_core::config::Config;
+use open_ferry_core::observe::redact::{Policy, Secrets};
 use open_ferry_providers::claude::oauth::{self as claude_oauth, ClaudeAuth};
 use open_ferry_providers::codex::oauth::{self as codex_oauth, CodexAuth};
 use open_ferry_providers::credentials;
+use open_ferry_providers::oauth::page::{self, Outcome};
 
 use crate::browser;
 
@@ -109,6 +115,7 @@ pub async fn run(login: Login, config: &Config, auth_dir: &Path, options: Option
                 );
             })
             .await
+            .map(|login| (login.auth, Some(login.server)))
             .map_err(codex_failure)
         }
         Login::CodexDevice => {
@@ -122,6 +129,7 @@ pub async fn run(login: Login, config: &Config, auth_dir: &Path, options: Option
                 }
             })
             .await
+            .map(|auth| (auth, None))
             .map_err(codex_failure)
         }
         Login::Claude => {
@@ -139,11 +147,12 @@ pub async fn run(login: Login, config: &Config, auth_dir: &Path, options: Option
                 );
             })
             .await
+            .map(|login| (login.auth, Some(login.server)))
             .map_err(claude_failure)
         }
     };
-    let mut auth = match result {
-        Ok(auth) => auth,
+    let (mut auth, server) = match result {
+        Ok(login) => login,
         Err(failure) => return report(login, failure, options),
     };
     println!(
@@ -154,16 +163,30 @@ pub async fn run(login: Login, config: &Config, auth_dir: &Path, options: Option
             "Codex"
         }
     );
-    match credentials::save(&FileStore::new(auth_dir), &mut auth) {
+    let (outcome, code) = match credentials::save(&FileStore::new(auth_dir), &mut auth) {
         Ok(path) => {
             if !path.is_empty() {
                 println!("Authentication saved to {path}");
             }
             println!("{} authentication successful!", login.name());
-            ExitCode::SUCCESS
+            (Outcome::SignedIn, ExitCode::SUCCESS)
         }
-        Err(error) => report(login, Failure::Other(error.to_string()), options),
+        Err(error) => {
+            let mut secrets = Secrets::new();
+            secrets.add_auth(&auth);
+            let reason = secrets.text(error.to_string(), Policy::Client);
+            let outcome = Outcome::Failed(page::Failure::unsaved(&reason));
+            (
+                outcome,
+                report(login, Failure::Other(error.to_string()), options),
+            )
+        }
+    };
+    // The browser's page says how it went too.
+    if let Some(server) = server {
+        server.finish(outcome).await;
     }
+    code
 }
 
 /// The port to listen on: the provider's for 0 or less, and `None` for one
