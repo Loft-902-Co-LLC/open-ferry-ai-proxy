@@ -137,7 +137,7 @@ fn sanitize_node(value: &Value) -> Value {
 /// text is redacted and cut, and an array is redacted field by field, then
 /// cut. An object or array serde_json can't read is reported as the status's
 /// text, since it can't be redacted field by field.
-pub(super) fn stream_error_text(error: &ErrorMessage, status: u16) -> String {
+pub(crate) fn stream_error_text(error: &ErrorMessage, status: u16) -> String {
     let text = match error.text.trim() {
         "" => status_text(status),
         text => text,
@@ -182,7 +182,7 @@ pub(super) fn stream_error_text(error: &ErrorMessage, status: u16) -> String {
 
 /// `error` as a stream reports it: a status from 400 to 599, otherwise 500,
 /// and its text from [`stream_error_text`] (`sanitizeResponsesStreamErrorMessage`).
-pub(super) fn sanitize_error(error: ErrorMessage) -> ErrorMessage {
+pub(crate) fn sanitize_error(error: ErrorMessage) -> ErrorMessage {
     let status = match error.status {
         status @ 400..=599 => status,
         _ => 500,

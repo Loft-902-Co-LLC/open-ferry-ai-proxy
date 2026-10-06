@@ -39,7 +39,7 @@
 //!   both back without limit.
 
 mod framer;
-mod stream_error;
+pub(crate) mod stream_error;
 #[cfg(test)]
 mod tests;
 

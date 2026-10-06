@@ -29,8 +29,8 @@ pub enum DisableImageGeneration {
     /// `false`: the tool is left alone.
     #[default]
     Off,
-    /// `true`: the tool is taken out of every request, the images endpoints'
-    /// too.
+    /// `true`: the tool is taken out of every request, and the images
+    /// endpoints answer 404.
     All,
     /// `chat`: the tool is taken out except on the images endpoints.
     Chat,

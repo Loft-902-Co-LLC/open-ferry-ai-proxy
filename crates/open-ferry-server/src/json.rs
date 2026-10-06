@@ -603,6 +603,15 @@ pub(crate) fn compact_html(items: &[&[u8]]) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// `value` as Go's `json.Marshal` writes it, keys in `value`'s order:
+/// serde_json's text with `<`, `>`, `&`, U+2028 and U+2029 escaped, which
+/// is all Go escapes that serde_json doesn't.
+pub(crate) fn marshal_html(value: &Value) -> String {
+    let mut out = Vec::new();
+    compact_into(&mut out, value.to_string().as_bytes());
+    String::from_utf8(out).unwrap_or_default()
+}
+
 /// Go's `appendCompact` with HTML escaping, for valid JSON.
 fn compact_into(out: &mut Vec<u8>, item: &[u8]) {
     let mut in_string = false;

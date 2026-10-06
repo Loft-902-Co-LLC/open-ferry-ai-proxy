@@ -51,7 +51,8 @@ pub struct Config {
     /// An optional proxy for outbound requests.
     pub proxy_url: String,
     /// Whether the built-in `image_generation` tool is taken out of the
-    /// requests sent upstream.
+    /// requests sent upstream, and with `true`, whether the images endpoints
+    /// are taken away.
     pub disable_image_generation: DisableImageGeneration,
     /// Requires explicit model prefixes to reach prefixed credentials.
     pub force_model_prefix: bool,
@@ -923,9 +924,8 @@ pub struct OpenAiCompatibilityModel {
     pub max_context_length: i64,
     /// Rewrites model names in responses back to the alias.
     pub force_mapping: bool,
-    /// Marks the model for the `/v1/images/*` endpoints, which aren't
-    /// ported; it is listed with the type `openai-image` and no thinking
-    /// levels.
+    /// Marks the model as one the `/v1/images/*` endpoints serve; it is
+    /// listed with the type `openai-image` and no thinking levels.
     pub image: bool,
     /// What the model takes as chat input, such as `text` and `image`. A
     /// model with `text` and no `image` gets tool results as text.

@@ -1,6 +1,8 @@
 // Ported from DetectContentType in Go's net/http/sniff.go (go1.26.4,
 // BSD-3-Clause), as Go's server applies it to CLIProxyAPI
-// sdk/api/handlers/gemini/gemini_handlers.go's raw streams (v8.0.15, MIT).
+// sdk/api/handlers/gemini/gemini_handlers.go's raw streams and as
+// multipartFileToDataURL in sdk/api/handlers/openai/openai_images_handlers.go
+// calls it (v8.0.15, MIT).
 // Copyright 2011 The Go Authors. All rights reserved.
 
 //! The `Content-Type` Go's server gives a response that sets none, from the
@@ -154,7 +156,7 @@ const SIGNATURES: &[Sig] = &[
 
 /// The MIME type of `data`, from at most its first 512 bytes, or
 /// `application/octet-stream` (Go's `http.DetectContentType`).
-pub(super) fn detect_content_type(data: &[u8]) -> &'static str {
+pub(crate) fn detect_content_type(data: &[u8]) -> &'static str {
     let data = &data[..data.len().min(SNIFF_LEN)];
     let first_non_ws = data.iter().position(|&b| !is_ws(b)).unwrap_or(data.len());
     SIGNATURES

@@ -18,6 +18,7 @@ use open_ferry_translate::go;
 use serde_json::{Map, Value, json};
 
 use crate::headers::is_reserved_response_header;
+use crate::json::marshal_html;
 use crate::status::status_text;
 
 /// `Content-Type` for errors the handlers build themselves (gin's `c.JSON`).
@@ -134,13 +135,12 @@ pub(crate) fn openai_body(status: u16, err_text: &str, terminal_auth: bool) -> S
                 message = found.to_owned();
             }
         }
-        return json!({"error": {
+        return marshal_html(&json!({"error": {
             "message": message,
             "type": "authentication_error",
             "code": "upstream_authentication_required",
             "retryable": false,
-        }})
-        .to_string();
+        }}));
     }
 
     if !trimmed.is_empty() && go::json_valid(trimmed.as_bytes()) {
@@ -162,7 +162,7 @@ pub(crate) fn openai_body(status: u16, err_text: &str, terminal_auth: bool) -> S
     if !code.is_empty() {
         error.insert("code".into(), code.into());
     }
-    json!({ "error": Value::Object(error) }).to_string()
+    marshal_html(&json!({ "error": Value::Object(error) }))
 }
 
 /// The string at `key` in `object`, if it is a non-empty string.
@@ -210,7 +210,7 @@ pub(crate) fn claude_error_json(message: &ErrorMessage) -> String {
     {
         error.insert("details".into(), json!({"error_code": "thread_not_found"}));
     }
-    json!({"type": "error", "error": error}).to_string()
+    marshal_html(&json!({"type": "error", "error": error}))
 }
 
 /// The type and message of a Claude error (upstream's
@@ -291,9 +291,10 @@ pub(crate) fn invalid_request(status: u16, err: &str) -> Response {
 }
 
 /// An error the handler answers itself, in upstream's `ErrorResponse` shape
-/// with no code (gin's `c.JSON`).
+/// with no code (gin's `c.JSON`, which escapes `<`, `>` and `&` as
+/// `json.Marshal` does).
 pub(crate) fn local_error(status: u16, message: &str, kind: &str) -> Response {
-    let body = json!({"error": {"message": message, "type": kind}}).to_string();
+    let body = marshal_html(&json!({"error": {"message": message, "type": kind}}));
     error_response(status, HeaderMap::new(), Bytes::from(body), JSON_UTF8)
 }
 
@@ -360,6 +361,30 @@ mod tests {
         );
         assert_eq!(auth("plain"), expect("plain"));
         assert_eq!(auth("[1]"), expect("[1]"));
+    }
+
+    /// Not upstream's: the bodies built here escape `<`, `>`, `&`, U+2028
+    /// and U+2029 as Go's `json.Marshal` (and so gin's `c.JSON`) does.
+    #[tokio::test]
+    async fn bodies_escape_as_go_does() {
+        // Go trims U+2028 from the ends of a Claude message, as Rust does.
+        let text = "a <b> & c \u{2028} d";
+        let want = r#"a \u003cb\u003e \u0026 c \u2028 d"#;
+        assert_eq!(
+            openai_body(400, text, false),
+            format!(r#"{{"error":{{"message":"{want}","type":"invalid_request_error"}}}}"#)
+        );
+        assert!(openai_body(401, text, true).contains(want));
+        let claude = claude_error_json(&ErrorMessage::new(400, text));
+        assert!(claude.contains(want), "{claude}");
+        let response = local_error(400, text, "invalid_request_error");
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            body,
+            format!(r#"{{"error":{{"message":"{want}","type":"invalid_request_error"}}}}"#)
+        );
     }
 
     #[test]

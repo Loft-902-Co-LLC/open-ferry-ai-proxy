@@ -180,8 +180,6 @@ impl Call {
     /// image endpoints serve (upstream's `ExecuteImageWithAuthManager` and
     /// `ExecuteImageStreamWithAuthManager`). `payload` may be a multipart
     /// form, which is passed on as it is.
-    // The images handler is the caller, in a later commit.
-    #[allow(dead_code)]
     pub(crate) fn image(
         state: &AppState,
         client: &ClientRequest,

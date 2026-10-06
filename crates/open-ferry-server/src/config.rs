@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use open_ferry_core::config::{CodexClientConfig, Config};
+use open_ferry_core::config::{CodexClientConfig, Config, DisableImageGeneration};
 
 /// The default for [`ServerConfig::body_limit`]: 64 MiB.
 pub const DEFAULT_BODY_LIMIT: usize = 64 << 20;
@@ -39,6 +39,9 @@ pub struct ServerConfig {
     /// request's client address is worked out (`trusted-proxies`). They
     /// are read once, when the server starts, as upstream reads them.
     pub trusted_proxies: Vec<String>,
+    /// What `disable-image-generation` does; [`DisableImageGeneration::All`]
+    /// takes the images endpoints away.
+    pub disable_image_generation: DisableImageGeneration,
     /// How long a video's ID stays pinned to the credential that made it
     /// (`video-result-auth-cache-ttl`, 3h by default).
     pub video_auth_ttl: Duration,
@@ -55,6 +58,7 @@ impl Default for ServerConfig {
             codex_client: CodexClientConfig::default(),
             codex_orphan_delegation: false,
             trusted_proxies: Vec::new(),
+            disable_image_generation: DisableImageGeneration::Off,
             video_auth_ttl: Config::default().video_result_auth_cache_ttl_duration(),
         }
     }
@@ -95,6 +99,7 @@ impl From<&Config> for ServerConfig {
             codex_client: config.client.codex.clone(),
             codex_orphan_delegation: config.codex.orphan_delegation_compatibility,
             trusted_proxies: config.trusted_proxies.clone(),
+            disable_image_generation: config.disable_image_generation,
             video_auth_ttl: config.video_result_auth_cache_ttl_duration(),
         }
     }
@@ -121,6 +126,7 @@ mod tests {
         assert_eq!(server.streaming.bootstrap_retries, 0);
         assert_eq!(server.body_limit, DEFAULT_BODY_LIMIT);
         assert_eq!(server.trusted_proxies, ["10.0.0.0/8"]);
+        assert_eq!(server.disable_image_generation, DisableImageGeneration::Off);
         assert_eq!(server.video_auth_ttl, Duration::from_secs(3 * 60 * 60));
 
         let config =
@@ -130,6 +136,20 @@ mod tests {
         assert_eq!(server.nonstream_keepalive, Some(Duration::from_secs(5)));
         assert_eq!(server.streaming.keepalive, None);
         assert_eq!(server.streaming.bootstrap_retries, 2);
+
+        for (text, want) in [
+            (
+                "disable-image-generation: true",
+                DisableImageGeneration::All,
+            ),
+            (
+                "disable-image-generation: chat",
+                DisableImageGeneration::Chat,
+            ),
+        ] {
+            let server = ServerConfig::from(&Config::parse(text).unwrap());
+            assert_eq!(server.disable_image_generation, want, "{text}");
+        }
     }
 
     // Ported from TestVideoAuthBindingTTLUsesConfig

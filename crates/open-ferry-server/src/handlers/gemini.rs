@@ -41,7 +41,7 @@
 //! - Home mode's model list (`handleHomeGeminiModels`) isn't ported.
 //!   `POST /v1beta/interactions` is served by [`super::interactions`].
 
-mod sniff;
+pub(crate) mod sniff;
 
 #[cfg(test)]
 mod tests;

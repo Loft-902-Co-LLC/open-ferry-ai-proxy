@@ -138,14 +138,14 @@ impl<W: StreamWriter> Pump<W> {
 
 /// A ticker whose first tick comes after `period`, like Go's
 /// `time.NewTicker`.
-fn ticker(period: Duration) -> Interval {
+pub(crate) fn ticker(period: Duration) -> Interval {
     let mut ticker = tokio::time::interval_at(Instant::now() + period, period);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     ticker
 }
 
 /// The ticker's next tick, or never.
-async fn tick(ticker: &mut Option<Interval>) {
+pub(crate) async fn tick(ticker: &mut Option<Interval>) {
     match ticker {
         Some(ticker) => {
             ticker.tick().await;

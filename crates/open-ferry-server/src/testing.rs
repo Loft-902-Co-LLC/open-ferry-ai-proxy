@@ -26,6 +26,7 @@ pub(crate) struct FakeCatalog {
     providers: HashMap<String, Vec<ProviderId>>,
     first: Option<String>,
     models: Vec<ModelInfo>,
+    infos: HashMap<String, ModelInfo>,
 }
 
 impl FakeCatalog {
@@ -51,6 +52,12 @@ impl FakeCatalog {
         self.models = models;
         self
     }
+
+    /// Has `info` registered, under any provider.
+    pub(crate) fn info(mut self, info: ModelInfo) -> Self {
+        self.infos.insert(info.id.clone(), info);
+        self
+    }
 }
 
 impl ModelCatalog for FakeCatalog {
@@ -64,6 +71,10 @@ impl ModelCatalog for FakeCatalog {
 
     fn available_models(&self) -> Vec<ModelInfo> {
         self.models.clone()
+    }
+
+    fn model_info(&self, model: &str, _provider: &str) -> Option<ModelInfo> {
+        self.infos.get(model).cloned()
     }
 }
 
