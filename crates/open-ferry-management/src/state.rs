@@ -223,7 +223,7 @@ impl ManagementState {
     }
 
     /// The current config.
-    pub(crate) fn config(&self) -> Arc<Config> {
+    pub fn config(&self) -> Arc<Config> {
         Arc::clone(
             &self
                 .inner
@@ -237,8 +237,15 @@ impl ManagementState {
         &self.inner.manager
     }
 
-    pub(crate) fn registry(&self) -> &ModelRegistry {
+    /// The model registry.
+    pub fn registry(&self) -> &ModelRegistry {
         &self.inner.registry
+    }
+
+    /// The directory the logs are in: the one the binary resolved at
+    /// start, or else the config's, as the log routes read it.
+    pub fn log_directory(&self) -> PathBuf {
+        crate::log_dir::log_directory(self)
     }
 
     /// The trimmed `MANAGEMENT_PASSWORD`, or empty.

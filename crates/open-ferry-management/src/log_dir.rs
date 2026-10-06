@@ -46,8 +46,8 @@ impl fmt::Display for Refused {
 
 impl std::error::Error for Refused {}
 
-/// Whether `error` is [`open_log_file`] refusing a file.
-pub(crate) fn is_refused(error: &io::Error) -> bool {
+/// Whether `error` is `open_log_file` refusing a file.
+pub fn is_refused(error: &io::Error) -> bool {
     error.get_ref().is_some_and(|inner| inner.is::<Refused>())
 }
 

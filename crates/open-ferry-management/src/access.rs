@@ -33,6 +33,10 @@
 //! Every answer past the availability check carries `X-CPA-VERSION`,
 //! `X-CPA-COMMIT` and `X-CPA-BUILD-DATE`.
 //!
+//! open-ferry's dashboard and its API take the same checks through
+//! [`check_key`] and [`check_address`], which share the failed-attempt
+//! record, and answer a [`Refusal`] in their own form.
+//!
 //! Deviations from upstream:
 //! - Home mode and `X-CPA-SUPPORT-PLUGIN` (the plugin host) aren't ported.
 //! - `X-CPA-VERSION` is this crate's version. `X-CPA-COMMIT` and
@@ -189,6 +193,116 @@ impl Attempts {
     }
 }
 
+/// Why the management API refuses a request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// No management key is set: the API serves nothing (upstream's
+    /// `managementAvailable`).
+    Unavailable,
+    /// The address failed too often, and stays banned this long.
+    Banned(Duration),
+    /// The client isn't local, and remote management isn't allowed.
+    RemoteDisabled,
+    /// No key is set to check against.
+    KeyNotSet,
+    /// The request carries no key.
+    MissingKey,
+    /// The key is wrong.
+    InvalidKey,
+}
+
+impl Refusal {
+    /// The status the management API answers with.
+    pub fn status(&self) -> StatusCode {
+        match self {
+            Self::Unavailable => StatusCode::NOT_FOUND,
+            Self::Banned(_) | Self::RemoteDisabled | Self::KeyNotSet => StatusCode::FORBIDDEN,
+            Self::MissingKey | Self::InvalidKey => StatusCode::UNAUTHORIZED,
+        }
+    }
+
+    /// The management API's message, upstream's text.
+    pub fn message(&self) -> String {
+        match self {
+            Self::Unavailable => "management API not available".to_owned(),
+            Self::Banned(remaining) => format!(
+                "IP banned due to too many failed attempts. Try again in {}",
+                duration_string(round_to_seconds(*remaining))
+            ),
+            Self::RemoteDisabled => "remote management disabled".to_owned(),
+            Self::KeyNotSet => "remote management key not set".to_owned(),
+            Self::MissingKey => "missing management key".to_owned(),
+            Self::InvalidKey => "invalid management key".to_owned(),
+        }
+    }
+
+    /// What the management API answers: an empty 404 while it is
+    /// unavailable, else upstream's error with the build headers.
+    pub fn management_response(&self) -> Response {
+        if *self == Self::Unavailable {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        let mut response = json::error(self.status(), &self.message());
+        set_build_headers(response.headers_mut());
+        response
+    }
+}
+
+/// The client address of a request from `peer` with `headers`, as the
+/// management API reads it, and whether it is local.
+fn client_address(
+    state: &ManagementState,
+    peer: Option<SocketAddr>,
+    headers: &HeaderMap,
+) -> (String, bool) {
+    let ip = client_ip(peer, headers, state.trusted_proxies());
+    let local = ip == "127.0.0.1" || ip == "::1";
+    (ip, local)
+}
+
+/// Checks a request from `peer` with `headers` as the management API checks
+/// one: a key is set, and the request carries it from an address allowed
+/// to. A wrong or missing key counts as a failed attempt.
+pub async fn check_key(
+    state: &ManagementState,
+    peer: Option<SocketAddr>,
+    headers: &HeaderMap,
+) -> Result<(), Refusal> {
+    if !state.available() {
+        return Err(Refusal::Unavailable);
+    }
+    let (ip, local) = client_address(state, peer, headers);
+    let provided = provided_key(headers).to_vec();
+    authenticate_key(state, &ip, local, &provided).await
+}
+
+/// Checks a request from `peer` with `headers` for its address alone, as
+/// the management API does before it looks at a key: the address isn't
+/// banned, and it is local or remote management is allowed. Whether a key
+/// is set isn't asked, and no attempt is counted.
+pub fn check_address(
+    state: &ManagementState,
+    peer: Option<SocketAddr>,
+    headers: &HeaderMap,
+) -> Result<(), Refusal> {
+    let (ip, local) = client_address(state, peer, headers);
+    address_allowed(state, &ip, local)
+}
+
+/// Whether the address `ip` may use the API at all: it isn't banned, and
+/// it is local or remote management is allowed.
+fn address_allowed(state: &ManagementState, ip: &str, local: bool) -> Result<(), Refusal> {
+    let allow_remote =
+        state.config().remote_management.allow_remote || !state.env_secret().is_empty();
+    if let Some(remaining) = state.attempts().ban_remaining(ip, Instant::now()) {
+        return Err(Refusal::Banned(remaining));
+    }
+    if !local && !allow_remote {
+        return Err(Refusal::RemoteDisabled);
+    }
+    Ok(())
+}
+
 /// Answers an empty 404 while no management key is set (upstream's
 /// `managementAvailable`).
 pub(crate) async fn availability(
@@ -213,15 +327,16 @@ pub(crate) async fn authenticate(
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ConnectInfo(addr)| *addr);
-    let ip = client_ip(peer, request.headers(), state.trusted_proxies());
-    let local = ip == "127.0.0.1" || ip == "::1";
+    let (ip, local) = client_address(&state, peer, request.headers());
     let provided = provided_key(request.headers()).to_vec();
-    let mut response = match authenticate_key(&state, &ip, local, &provided).await {
-        Ok(()) => next.run(request).await,
-        Err((status, message)) => json::error(status, &message),
-    };
-    set_build_headers(response.headers_mut());
-    response
+    match authenticate_key(&state, &ip, local, &provided).await {
+        Ok(()) => {
+            let mut response = next.run(request).await;
+            set_build_headers(response.headers_mut());
+            response
+        }
+        Err(refusal) => refusal.management_response(),
+    }
 }
 
 /// The key a request offers: a bearer token, else the whole
@@ -244,7 +359,8 @@ fn provided_key(headers: &HeaderMap) -> &[u8] {
     provided
 }
 
-fn set_build_headers(headers: &mut HeaderMap) {
+/// Sets the build headers every management answer carries.
+pub fn set_build_headers(headers: &mut HeaderMap) {
     for (name, value) in [
         ("x-cpa-version", VERSION),
         ("x-cpa-commit", COMMIT),
@@ -257,43 +373,26 @@ fn set_build_headers(headers: &mut HeaderMap) {
 }
 
 /// Whether the client at `ip` may use the API with the key `provided`
-/// (upstream's `AuthenticateManagementKey`); if not, the status and
-/// message to answer with.
+/// (upstream's `AuthenticateManagementKey`); if not, why not.
 pub(crate) async fn authenticate_key(
     state: &ManagementState,
     ip: &str,
     local: bool,
     provided: &[u8],
-) -> Result<(), (StatusCode, String)> {
+) -> Result<(), Refusal> {
+    address_allowed(state, ip, local)?;
     let config = state.config();
     let env_secret = state.env_secret();
-    let allow_remote = config.remote_management.allow_remote || !env_secret.is_empty();
     let secret = config.remote_management.secret_key.as_str();
-
-    if let Some(remaining) = state.attempts().ban_remaining(ip, Instant::now()) {
-        return Err((
-            StatusCode::FORBIDDEN,
-            format!(
-                "IP banned due to too many failed attempts. Try again in {}",
-                duration_string(round_to_seconds(remaining))
-            ),
-        ));
-    }
-    if !local && !allow_remote {
-        return Err((StatusCode::FORBIDDEN, "remote management disabled".into()));
-    }
-    let fail = |message: &str| {
+    let fail = |refusal: Refusal| {
         state.attempts().fail(ip, Instant::now());
-        Err((StatusCode::UNAUTHORIZED, message.to_owned()))
+        Err(refusal)
     };
     if secret.is_empty() && env_secret.is_empty() {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "remote management key not set".into(),
-        ));
+        return Err(Refusal::KeyNotSet);
     }
     if provided.is_empty() {
-        return fail("missing management key");
+        return fail(Refusal::MissingKey);
     }
     let local_password = state.local_password();
     if local && !local_password.is_empty() && bool::from(provided.ct_eq(local_password)) {
@@ -305,7 +404,7 @@ pub(crate) async fn authenticate_key(
         return Ok(());
     }
     if secret.is_empty() || !key_matches(secret, provided).await {
-        return fail("invalid management key");
+        return fail(Refusal::InvalidKey);
     }
     state.attempts().reset(ip);
     Ok(())

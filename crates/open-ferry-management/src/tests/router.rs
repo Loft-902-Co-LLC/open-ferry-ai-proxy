@@ -564,3 +564,85 @@ async fn state_builders_set_what_the_service_sets() {
     assert!(built.credential_lock().try_lock().is_err());
     assert!(std::ptr::eq(clone.oauth_sessions(), built.oauth_sessions()));
 }
+
+/// Not upstream's: `check_key` and `check_address`, the checks the
+/// dashboard takes, refuse as the routes do and share their failed-attempt
+/// record; `check_address` counts no attempt, and doesn't ask for a key to
+/// be set.
+#[tokio::test]
+async fn the_shared_checks_refuse_as_the_routes_do() {
+    use crate::{Refusal, check_address, check_key};
+
+    let headers = |key: &str| {
+        let mut headers = http::HeaderMap::new();
+        if !key.is_empty() {
+            headers.insert("x-management-key", key.parse().unwrap());
+        }
+        headers
+    };
+    let local = Some(LOCAL.parse().unwrap());
+    let remote = Some(REMOTE.parse().unwrap());
+
+    let unkeyed = Api::with(Config::default(), None);
+    assert_eq!(
+        check_key(&unkeyed.state, local, &headers(KEY)).await,
+        Err(Refusal::Unavailable)
+    );
+    assert_eq!(check_address(&unkeyed.state, local, &headers("")), Ok(()));
+    assert_eq!(
+        check_address(&unkeyed.state, remote, &headers("")),
+        Err(Refusal::RemoteDisabled)
+    );
+
+    let api = Api::new();
+    assert_eq!(check_key(&api.state, local, &headers(KEY)).await, Ok(()));
+    assert_eq!(check_address(&api.state, local, &headers("")), Ok(()));
+    assert_eq!(
+        check_address(&api.state, remote, &headers("")),
+        Err(Refusal::RemoteDisabled)
+    );
+    assert_eq!(
+        check_key(&api.state, remote, &headers(KEY)).await,
+        Err(Refusal::RemoteDisabled)
+    );
+    assert_eq!(
+        check_key(&api.state, local, &headers("")).await,
+        Err(Refusal::MissingKey)
+    );
+    for _ in 0..20 {
+        assert_eq!(check_address(&api.state, local, &headers("")), Ok(()));
+    }
+    for _ in 0..3 {
+        assert_eq!(
+            check_key(&api.state, local, &headers("wrong")).await,
+            Err(Refusal::InvalidKey)
+        );
+    }
+    // The fifth failure, through the routes, bans the address for both.
+    let answer = list_from(&api, LOCAL, "wrong").await;
+    assert_eq!(answer.status, StatusCode::UNAUTHORIZED);
+    assert!(matches!(
+        check_address(&api.state, local, &headers("")),
+        Err(Refusal::Banned(_))
+    ));
+    let refusal = check_key(&api.state, local, &headers(KEY))
+        .await
+        .unwrap_err();
+    assert_eq!(refusal.status(), StatusCode::FORBIDDEN);
+    assert!(
+        refusal
+            .message()
+            .starts_with("IP banned due to too many failed attempts. Try again in 30m"),
+        "{}",
+        refusal.message()
+    );
+
+    let mut config = keyed_config();
+    config.remote_management.secret_key = String::new();
+    let keyless = Api::with(config, Some(KEY));
+    assert_eq!(
+        check_key(&keyless.state, remote, &headers(KEY)).await,
+        Ok(()),
+        "MANAGEMENT_PASSWORD allows remote clients"
+    );
+}

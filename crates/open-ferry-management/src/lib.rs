@@ -78,12 +78,24 @@ mod vertex_import;
 
 use open_ferry_core::observe::client_ip;
 
+pub use access::{Refusal, check_address, check_key, set_build_headers};
 pub use client_ip::TrustedProxies;
 pub use config_write::{
     ConfigReload, ConfigWriter, ReloadFuture, V8Edit, V8EditError, V8Method, WriteError,
 };
 pub use credential_sync::{CredentialSync, SyncError, SyncFuture};
+pub use log_dir::is_refused as is_refused_log_file;
 pub use state::{ManagementState, management_password_from_env};
+
+/// The log file at `path`, opened to read, and its metadata, as the log
+/// routes open one: a symbolic link or other reparse point, anything but
+/// a plain file, and a file with more than one hard link are refused, which
+/// [`is_refused_log_file`] tells.
+pub fn open_log_file(
+    path: &std::path::Path,
+) -> std::io::Result<(std::fs::File, std::fs::Metadata)> {
+    log_dir::open_log_file(path, log_dir::Access::Read)
+}
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
