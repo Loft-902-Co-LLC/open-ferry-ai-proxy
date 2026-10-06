@@ -14,10 +14,13 @@
 //! merge keys (`<<`) and aliases are treated, and the exact wording of its
 //! errors. [`parse_document`] reads the first document into a [`Node`] tree
 //! with aliases expanded, [`check_shape`] repeats upstream's
-//! `node.Decode(&map[string]any)` pass, and [`expand_merges`] and the path
-//! helpers are upstream's own tree edits. [`write_and_read_back`] gives a
-//! tree the tags yaml.v3 gives it when it writes the tree out and reads it
-//! back. `saphyr-parser` does the scanning.
+//! `node.Decode(&map[string]any)` pass, [`check_decode_any`] its decode into
+//! `any`, and [`expand_merges`] and the path helpers are upstream's own
+//! tree edits. [`write_and_read_back`] gives a tree the tags yaml.v3 gives
+//! it when it writes the tree out and reads it back, and
+//! [`from_writer_node`] turns a tree of the config writer
+//! ([`super::yaml3`]) into one of these, so it can be decoded as upstream
+//! decodes its writer's trees. `saphyr-parser` does the scanning.
 //!
 //! An alias expands to a copy of its anchor's node that shares the
 //! anchor's text, so the tree takes memory in proportion to the input
@@ -69,6 +72,8 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use saphyr_parser::{Event, Parser, ScalarStyle, ScanError, Span, Tag};
+
+use super::yaml3;
 
 /// The deepest nesting accepted, counting expanded aliases.
 pub(crate) const MAX_DEPTH: usize = 256;
@@ -600,6 +605,15 @@ fn allowed_alias_ratio(decodes: u64) -> f64 {
     }
 }
 
+/// Whether yaml.v3's decoder stops with `document contains excessive
+/// aliasing` after `decodes` nodes, `aliases` of them reached through an
+/// alias.
+fn excessive_aliasing(decodes: u64, aliases: u64) -> bool {
+    aliases > 100
+        && decodes > 1000
+        && aliases as f64 / decodes as f64 > allowed_alias_ratio(decodes)
+}
+
 fn poison(message: Text, line: usize) -> Node {
     Node {
         kind: Kind::Poison,
@@ -625,10 +639,7 @@ impl Expander<'_> {
         if aliased {
             self.aliases += 1;
         }
-        if self.aliases > 100
-            && self.decodes > 1000
-            && self.aliases as f64 / self.decodes as f64 > allowed_alias_ratio(self.decodes)
-        {
+        if excessive_aliasing(self.decodes, self.aliases) {
             self.poisoned = true;
             return Ok(poison(EXCESSIVE_ALIASING.into(), raw.line()));
         }
@@ -683,6 +694,120 @@ impl Expander<'_> {
             }
             Raw::Cyclic { message, line } => Ok(poison(message.clone(), *line)),
         }
+    }
+}
+
+/// A tree of the config writer ([`super::yaml3`]) as this module's tree,
+/// as yaml.v3's decoder walks it: aliases expanded and counted as the
+/// decoder counts them, and an alias cycle, an unknown anchor or a node of
+/// no kind kept as the error the decoder gives for it. Decoding the result
+/// fails where upstream's `node.Decode` of the writer's tree fails, with
+/// its message.
+pub(crate) fn from_writer_node(node: &yaml3::Node) -> Result<Node, YamlError> {
+    let mut converter = Converter {
+        decodes: 0,
+        aliases: 0,
+        alias_depth: 0,
+        poisoned: false,
+    };
+    converter.node(node, 1)
+}
+
+/// [`from_writer_node`]'s walk, counting decodes as [`Expander`] does.
+struct Converter {
+    decodes: u64,
+    aliases: u64,
+    alias_depth: u32,
+    poisoned: bool,
+}
+
+impl Converter {
+    fn node(&mut self, node: &yaml3::Node, depth: usize) -> Result<Node, YamlError> {
+        use yaml3::{AliasTarget, Kind as WriterKind, Style};
+
+        if node.kind == WriterKind::Document {
+            return match node.content.first() {
+                Some(root) => self.node(root, depth),
+                None => Ok(Node::scalar("!!null", "")),
+            };
+        }
+        if depth > MAX_DEPTH {
+            return Err(depth_error(node.line));
+        }
+        if self.poisoned {
+            return Ok(poison(EXCESSIVE_ALIASING.into(), node.line));
+        }
+        self.decodes += 1;
+        let aliased = self.alias_depth > 0;
+        if aliased {
+            self.aliases += 1;
+        }
+        if excessive_aliasing(self.decodes, self.aliases) {
+            self.poisoned = true;
+            return Ok(poison(EXCESSIVE_ALIASING.into(), node.line));
+        }
+        let kind = match node.kind {
+            WriterKind::Scalar => {
+                return Ok(Node {
+                    kind: Kind::Scalar,
+                    tag: node.short_tag().into(),
+                    value: node.value.as_str().into(),
+                    line: node.line,
+                    tagged: node.style.has(Style::TAGGED),
+                    aliased,
+                    ..Node::default()
+                });
+            }
+            WriterKind::Sequence => Kind::Sequence,
+            WriterKind::Mapping => Kind::Mapping,
+            WriterKind::Alias => {
+                let target = match &node.alias {
+                    Some(AliasTarget::Node(target)) => target,
+                    Some(AliasTarget::Cycle) => {
+                        let message = format!("anchor '{}' value contains itself", node.value);
+                        return Ok(poison(message.into(), node.line));
+                    }
+                    None => {
+                        let message = format!("unknown anchor '{}' referenced", node.value);
+                        return Ok(poison(message.into(), node.line));
+                    }
+                };
+                self.alias_depth += 1;
+                let expanded = self.node(target, depth);
+                self.alias_depth -= 1;
+                let mut expanded = expanded?;
+                if expanded.kind != Kind::Poison {
+                    expanded.alias = Some(Box::new(AliasRef {
+                        name: node.value.as_str().into(),
+                        line: node.line,
+                    }));
+                }
+                return Ok(expanded);
+            }
+            WriterKind::Zero if node.is_zero() => {
+                return Ok(Node {
+                    aliased,
+                    ..Node::scalar("!!null", "")
+                });
+            }
+            WriterKind::Zero | WriterKind::Document => {
+                let message = "cannot decode node with unknown kind 0";
+                return Ok(poison(message.into(), node.line));
+            }
+        };
+        let mut content = Vec::with_capacity(node.content.len());
+        for child in &node.content {
+            content.push(self.node(child, depth + 1)?);
+        }
+        Ok(Node {
+            kind,
+            tag: node.short_tag().into(),
+            content,
+            line: node.line,
+            flow: node.style.has(Style::FLOW),
+            aliased,
+            ..Node::default()
+        })
     }
 }
 
@@ -1571,6 +1696,24 @@ pub(crate) fn check_shape(root: &Node) -> Result<(), YamlError> {
         return Err(YamlError::Type(shape.errors));
     }
     match first_poison(root) {
+        Some(message) => Err(YamlError::Fatal(message.to_owned())),
+        None => Ok(()),
+    }
+}
+
+/// Runs yaml.v3's decode of `node` into Go's `any` (`node.Decode(&v)` with
+/// `var v any`): duplicate keys, merge rules, alias cycles, excessive
+/// aliasing and scalars that can't be resolved, anywhere in the tree.
+pub(crate) fn check_decode_any(node: &Node) -> Result<(), YamlError> {
+    let mut shape = Shape {
+        errors: Vec::new(),
+        merged: None,
+    };
+    shape.value(node)?;
+    if !shape.errors.is_empty() {
+        return Err(YamlError::Type(shape.errors));
+    }
+    match first_poison(node) {
         Some(message) => Err(YamlError::Fatal(message.to_owned())),
         None => Ok(()),
     }

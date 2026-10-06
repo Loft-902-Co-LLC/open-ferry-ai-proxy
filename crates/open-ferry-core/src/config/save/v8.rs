@@ -57,7 +57,7 @@ fn invalid(message: impl Into<String>) -> SaveError {
 }
 
 /// Upstream's `v8Aliases`: the client and shared paths.
-fn v8_aliases() -> impl Iterator<Item = &'static (&'static str, &'static str)> {
+pub(crate) fn v8_aliases() -> impl Iterator<Item = &'static (&'static str, &'static str)> {
     V8_CLIENT_PATHS.iter().chain(V8_SHARED_PATHS)
 }
 
@@ -591,7 +591,6 @@ fn preserve_v8_comments(dst: &mut Node, src: &Node) {
 /// `path` back to their earlier v8 spellings, with their comments, so a
 /// request for `path` finds them there. A section that holds fields of its
 /// own stays.
-#[cfg_attr(not(test), allow(dead_code))] // For the v8 config edits.
 pub(crate) fn project_v8_config_aliases(root: &mut Node, path: &str) {
     if path.is_empty() {
         return;

@@ -773,6 +773,12 @@ fn keep_keys(node: &mut Node, allowed: &[&str]) {
     }
 }
 
+/// Decodes `node` as yaml.v3 decodes into Go's `any`, with a budget of its
+/// own for the text aliases produce. The error is yaml.v3's message.
+pub(crate) fn decode_any_value(node: &Node) -> Result<AnyValue, String> {
+    decode_any(node, &AliasBudget::default())
+}
+
 /// Decodes `node` as yaml.v3 decodes into Go's `any`, counting the text
 /// aliases produce against `budget`. The error is yaml.v3's message.
 fn decode_any(node: &Node, budget: &AliasBudget) -> Result<AnyValue, String> {

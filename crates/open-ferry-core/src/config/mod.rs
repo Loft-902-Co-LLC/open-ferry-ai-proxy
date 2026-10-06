@@ -11,8 +11,9 @@
 //! accept upstream's legacy layout and its v8 layout, or a mix of the two,
 //! fill in upstream's defaults and apply its checks and clean-ups. Unknown
 //! keys are ignored. Loading never writes the file; [`save`] writes it back,
-//! with its comments and the settings this port doesn't type, when a
-//! management write asks for it.
+//! with its comments and the settings this port doesn't type, and
+//! [`v8_edit`] edits it in the v8 layout, when a management write asks for
+//! it.
 //!
 //! [`ConfigWatcher`] watches the config file and the auth directory and
 //! sends a [`WatchEvent`] when the config changes or an auth file is added,
@@ -61,8 +62,8 @@
 //! Deviations from upstream:
 //! - Loading never writes the file back: upstream replaces a plaintext
 //!   management key with its bcrypt hash in the file, and removes legacy
-//!   fields that a v8 field overrides. Only [`save`] writes the file, on a
-//!   management write.
+//!   fields that a v8 field overrides. Only [`save`] and [`v8_edit`] write
+//!   the file, on a management write.
 //! - The ignored sections above aren't typed, so a value of the wrong type
 //!   inside them isn't an error.
 //! - The `models` sources aren't checked: a `catalog`, `codex-catalog` or
@@ -85,6 +86,7 @@ pub mod save;
 mod testing;
 mod types;
 mod v8;
+pub mod v8_edit;
 mod watcher;
 mod yaml;
 pub(crate) mod yaml3;

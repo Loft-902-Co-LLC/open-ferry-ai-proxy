@@ -14,7 +14,9 @@
 //!   a file in the v8 layout stays in it (with `migrate_v8`, or when the
 //!   file already uses the v8 layout, the whole file moves to it).
 //! - [`update_nested_scalar`] sets one string at a path of mapping keys
-//!   (`SaveConfigPreserveCommentsUpdateNestedScalar`).
+//!   (`SaveConfigPreserveCommentsUpdateNestedScalar`). Upstream calls it
+//!   when loading hashes a plain management key; loading never writes here,
+//!   so only `tools/parity` calls it.
 //! - [`write_file`] writes a whole file, as the management API's
 //!   `WriteConfig` does: a file in the v8 layout is completed into it
 //!   first, and comment lines are moved to the start of their line.
@@ -59,17 +61,16 @@ use super::yaml3::compose::{self, YamlError};
 use super::yaml3::encode;
 use super::yaml3::{Kind, MAP_TAG, NULL_TAG, STR_TAG};
 
-// The tree operations the management API's v8 config edits build on.
-#[allow(unused_imports)]
+// The tree operations the v8 config edits ([`super::v8_edit`]) build on.
 pub(crate) use super::yaml3::Node;
-#[allow(unused_imports)]
 pub(crate) use tree::{
     copy_yaml_path_value, delete_yaml_path, expand_config_aliases, find_map_key_index,
     get_or_create_map_value, legacy_path, marshal, marshal_config, normalize_comment_indentation,
-    set_yaml_path, set_yaml_path_with_comments, yaml_path, yaml_path_mut,
+    remove_map_key, set_yaml_path_with_comments, yaml_path, yaml_path_mut,
 };
-#[allow(unused_imports)]
-pub(crate) use v8::{is_v8_config_layout, normalize_config_layout, project_v8_config_aliases};
+pub(crate) use v8::{
+    flatten_v8, is_v8_config_layout, normalize_config_layout, project_v8_config_aliases, v8_aliases,
+};
 
 /// Why a config write was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -351,6 +352,7 @@ pub(crate) fn render_nested_scalar(
 mod tests {
     use std::fs;
 
+    use super::tree::set_yaml_path;
     use super::*;
     use crate::config::testing::TempDir;
 
@@ -363,9 +365,15 @@ mod tests {
         yaml_path(root, path).map(|node| node.value.as_str())
     }
 
-    // Ports TestV8MovedCommentsSurviveV0Saves (config_v8_comments_test.go),
-    // but for upstream's ValidateV8Config check, which isn't ported: the
-    // load check runs instead.
+    /// Checks that `data` is a valid v8 config (upstream's
+    /// `ValidateV8Config`).
+    fn assert_valid_v8(data: &[u8]) {
+        if let Err(error) = crate::config::v8_edit::validate_v8_config(data) {
+            panic!("{error}\n{}", String::from_utf8_lossy(data));
+        }
+    }
+
+    // Ports TestV8MovedCommentsSurviveV0Saves (config_v8_comments_test.go).
     #[test]
     fn v8_moved_comments_survive_v0_saves() {
         let raw = "# DOCUMENT HEAD\nconfig-version: 8\noauth: # OAUTH INLINE\n  providers: # PROVIDERS INLINE\n    xai: # PROVIDER INLINE\n      # FIELD HEAD\n      inject-x-search: true # FIELD INLINE\n\n      # FIELD FOOT\n\n    # PROVIDER FOOT\nserver:\n  port: 8317 # UNRELATED INLINE\n# DOCUMENT FOOT\n";
@@ -377,6 +385,7 @@ mod tests {
             cfg.port = port;
             save_preserving_comments(&file, &cfg, false).expect("save");
             let data = fs::read_to_string(&file).expect("read");
+            assert_valid_v8(data.as_bytes());
             for marker in [
                 "DOCUMENT HEAD",
                 "OAUTH INLINE",
@@ -480,9 +489,9 @@ mod tests {
     }
 
     // Ports TestV0SaveUpgradesHistoricalV8Layout
-    // (config_v8_save_layout_test.go), but for its Home mode and
-    // ValidateV8Config parts, which aren't ported, and its check of the
-    // OAuth scope, which the loader's tests cover.
+    // (config_v8_save_layout_test.go), but for its Home mode part, which
+    // isn't ported, and its check of the OAuth scope, which the loader's
+    // tests cover.
     #[test]
     fn v0_save_upgrades_historical_v8_layout() {
         for version in ["", "config-version: 8\n"] {
@@ -496,6 +505,7 @@ mod tests {
             cfg.port = 8318;
             save_preserving_comments(&file, &cfg, false).expect("save");
             let data = fs::read(&file).expect("read");
+            assert_valid_v8(&data);
             let root = root(&data);
             assert!(
                 yaml_path(&root, "upstream.codex.response-steering").is_some(),
@@ -546,9 +556,7 @@ mod tests {
         assert!(text.contains("# Provider model settings"), "{text}");
     }
 
-    // Ports TestClientCodexEnableApplyPatchSave (client_test.go), but for
-    // upstream's ValidateV8Config check, which isn't ported: the load check
-    // runs instead.
+    // Ports TestClientCodexEnableApplyPatchSave (client_test.go).
     #[test]
     fn client_codex_enable_apply_patch_save() {
         let dir = TempDir::new();
@@ -558,14 +566,14 @@ mod tests {
         for enabled in [true, false] {
             cfg.client.codex.enable_apply_patch = enabled;
             save_preserving_comments(&file, &cfg, true).expect("save");
+            assert_valid_v8(&fs::read(&file).expect("read"));
             let loaded = Config::load(&file).expect("load");
             assert_eq!(loaded.client.codex.enable_apply_patch, enabled);
         }
     }
 
     // Ports TestClientCodexOptimizeMultiAgentV2Save
-    // (client_optimize_test.go), but for upstream's ValidateV8Config check,
-    // which isn't ported: the load check runs instead.
+    // (client_optimize_test.go).
     #[test]
     fn client_codex_optimize_multi_agent_v2_save() {
         for &(old, _) in loader_v8::V8_CLIENT_PATHS {
@@ -593,6 +601,7 @@ mod tests {
                 cfg.client.codex.optimize_multi_agent_v2 = enabled;
                 save_preserving_comments(&file, &cfg, true).expect("save");
                 let data = fs::read_to_string(&file).expect("read");
+                assert_valid_v8(data.as_bytes());
                 let loaded = Config::load(&file).expect("reload");
                 assert_eq!(
                     loaded.client.codex.optimize_multi_agent_v2, enabled,
@@ -608,9 +617,7 @@ mod tests {
         }
     }
 
-    // Ports TestV8SaveCommentsObsoleteSections (config_v8_test.go), but for
-    // upstream's ValidateV8Config check, which isn't ported: the load check
-    // runs instead.
+    // Ports TestV8SaveCommentsObsoleteSections (config_v8_test.go).
     #[test]
     fn v8_save_comments_obsolete_sections() {
         let dir = TempDir::new();
@@ -623,6 +630,7 @@ mod tests {
         let cfg = Config::load(&file).expect("load");
         save_preserving_comments(&file, &cfg, true).expect("save");
         let saved = fs::read_to_string(&file).expect("read");
+        assert_valid_v8(saved.as_bytes());
         for key in [
             "auth",
             "ampcode",
@@ -640,8 +648,8 @@ mod tests {
     }
 
     // Ports TestV8MigrationCommentsUnknownLegacySections
-    // (config_v8_test.go), but for upstream's ValidateV8Config check and its
-    // Home mode setting, which aren't ported.
+    // (config_v8_test.go), but for its Home mode setting, which isn't
+    // ported.
     #[test]
     fn v8_migration_comments_unknown_legacy_sections() {
         let raw: &[u8] = b"home:\n  enabled: true\n  host: ignored.example\nenable-gemini-cli-endpoint: true\nforgotten-setting:\n  items: [first, second]\nproxy-url: old\n";
@@ -650,6 +658,7 @@ mod tests {
         assert_eq!(unchanged, raw);
         let (migrated, changed) = normalize_config_layout(raw, true).expect("migrate");
         assert!(changed);
+        assert_valid_v8(&migrated);
         let migrated_root = root(&migrated);
         for key in [
             "home",
@@ -678,9 +687,8 @@ mod tests {
     }
 
     // Ports TestV8MigrationCommentsUnknownNestedFields (config_v8_test.go),
-    // but for upstream's ValidateV8Config check, which isn't ported, and its
-    // checks of `session-affinity` and `disable-codex-cloaking`, which the
-    // config doesn't type.
+    // but for its checks of `session-affinity` and `disable-codex-cloaking`,
+    // which the config doesn't type.
     #[test]
     fn v8_migration_comments_unknown_nested_fields() {
         let raw: &[u8] = b"server: {port: 8317}\nrouting: {strategy: fill-first, session-affinity: true}\noauth:\n  providers:\n    codex:\n      disable-codex-cloaking: true\n      retired-setting: {mode: old}\n";
@@ -688,6 +696,7 @@ mod tests {
         assert!(!changed);
         assert_eq!(unchanged, raw);
         let (migrated, _) = normalize_config_layout(raw, true).expect("migrate");
+        assert_valid_v8(&migrated);
         let text = String::from_utf8_lossy(&migrated).into_owned();
         assert!(
             yaml_path(&root(&migrated), "oauth.providers.codex.retired-setting").is_none(),
@@ -710,8 +719,7 @@ mod tests {
     }
 
     // Ports TestV8MigrationPreservesEmptyLegacyContainers
-    // (config_v8_test.go), but for upstream's ValidateV8Config check, which
-    // isn't ported, and with the configs compared whole where upstream
+    // (config_v8_test.go), with the configs compared whole where upstream
     // compares their legacy encodings.
     #[test]
     fn v8_migration_preserves_empty_legacy_containers() {
@@ -760,6 +768,7 @@ mod tests {
                 let (unchanged, changed) = normalize_config_layout(&raw, false).expect("read-only");
                 assert!(!changed && unchanged == raw, "{name}");
                 let (migrated, _) = normalize_config_layout(&raw, true).expect("migrate");
+                assert_valid_v8(&migrated);
                 let after = Config::parse(&migrated).expect("parse migrated");
                 assert!(before == after, "{name}: settings changed");
                 let migrated_root = root(&migrated);
