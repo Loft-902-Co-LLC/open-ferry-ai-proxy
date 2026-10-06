@@ -39,6 +39,10 @@
 //!   and the bodies scrubbed of the attempt's secrets and those of the
 //!   answer's headers when written; upstream writes the URL, the bodies and
 //!   fewer masked headers as they are.
+//! - The `Auth:` line's emails are masked ([`mask::mask_emails`]): the
+//!   credential's ID, which for a sign-in is its file's name, such as
+//!   `claude-j***@e***.com.json`, and its label, often the account's email.
+//!   Upstream writes them as they are.
 //! - With the request log off, the answers' status and headers, the bodies
 //!   of those with an error status and the attempts' errors are kept, so an
 //!   error log has an `=== API RESPONSE n ===` block for each attempt;
@@ -53,6 +57,7 @@
 //!   event no `Stage:` line, and quota headers in a Codex WebSocket message
 //!   aren't merged into the answer's headers.
 
+use std::borrow::Cow;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use bytes::Bytes;
@@ -108,7 +113,9 @@ pub(crate) fn mask_url(url: &str) -> String {
 }
 
 /// Who an attempt was made as (upstream's `formatAuthInfo`): the provider,
-/// the credential's ID and label, and its type, with an API key masked.
+/// the credential's ID and label, and its type, with an API key masked and
+/// every email masked ([`mask::mask_emails`]): an OAuth credential's ID is
+/// its file's name, and its label often its account's email.
 fn auth_info(request: &AttemptRequest<'_>) -> String {
     let mut parts = Vec::new();
     for (name, value) in [
@@ -130,7 +137,11 @@ fn auth_info(request: &AttemptRequest<'_>) -> String {
         Some(("oauth", _)) => parts.push("type=oauth".to_owned()),
         _ => {}
     }
-    parts.join(", ")
+    let info = parts.join(", ");
+    match mask::mask_emails(&info) {
+        Cow::Borrowed(_) => info,
+        Cow::Owned(masked) => masked,
+    }
 }
 
 /// An upstream request as it was sent, kept to be written with the log.
@@ -793,6 +804,42 @@ mod tests {
             rest,
             "Upstream URL: https://api.example.com/v1/responses\nHTTP Method: POST\nAuth: provider=codex, auth_id=codex-a.json, label=Team A, type=api_key value=sk-a...ijkl\n\nHeaders:\nAuthorization: Bearer sk-a...ijkl\nContent-Type: application/json\n\nBody:\n{\"model\":\"gpt-5\"}\n\n"
         );
+    }
+
+    // Not upstream's: the Auth line of a signed-in credential, in the
+    // request block and the WebSocket timeline, has its ID's and label's
+    // emails masked; upstream's writes them as they are.
+    #[test]
+    fn masks_emails_in_the_auth_line() {
+        let mut auth = Auth {
+            id: "claude-1a2b3c4d-john.doe@example.com.json".to_owned(),
+            label: "john.doe@example.com".to_owned(),
+            ..Auth::default()
+        };
+        auth.attributes
+            .insert("auth_kind".to_owned(), "oauth".to_owned());
+        let headers = HeaderMap::new();
+        let body = Bytes::from_static(b"{\"model\":\"claude-sonnet-4-5\"}");
+        let format = Format::from("claude");
+        let method = Method::POST;
+        let mut request = request(
+            "https://api.example.com/v1/messages",
+            &method,
+            &headers,
+            &body,
+            &auth,
+            &format,
+        );
+        request.provider = "claude";
+        let mut attempts = Attempts::default();
+        attempts.record_request(&request);
+        attempts.ws_request(&request);
+        let want = "\nAuth: provider=claude, auth_id=claude-1a2b3c4d-j***@e***.com.json, label=j***@e***.com, type=oauth\n";
+        let text = String::from_utf8(attempts.api_request()).unwrap();
+        assert!(text.contains(want), "{text}");
+        let events = String::from_utf8(attempts.timeline().to_vec()).unwrap();
+        assert!(events.contains(want), "{events}");
+        assert!(!format!("{text}{events}").contains("john.doe"));
     }
 
     // Not upstream's: an answer that comes before any request is numbered

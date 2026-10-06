@@ -417,6 +417,42 @@ async fn masks_an_oauth_callbacks_code_and_state() {
     assert!(!message.contains(state), "{message}");
 }
 
+/// Not upstream's: an auth file's name in a management route's `?name=`,
+/// its `@` encoded or not, and an email in the path are masked; upstream's
+/// line holds them as they came.
+#[tokio::test]
+async fn masks_emails_in_the_path_and_query() {
+    let app = logged(
+        Router::new()
+            .route(
+                "/v0/management/auth-files/download",
+                any(|| async { StatusCode::OK }),
+            )
+            .route("/users/{email}", any(|| async { StatusCode::OK })),
+    );
+    for (uri, want) in [
+        (
+            "/v0/management/auth-files/download?name=codex-1a2b3c4d-john.doe%40example.com-plus.json",
+            r#" | GET     "/v0/management/auth-files/download?name=codex-1a2b3c4d-j***%40e***.com-plus.json""#,
+        ),
+        (
+            "/v0/management/auth-files/download?name=claude-john.doe@example.com.json&key=AIza0123456789",
+            r#" | GET     "/v0/management/auth-files/download?name=claude-j***@e***.com.json&key=AIza...6789""#,
+        ),
+        (
+            "/users/john.doe@example.com",
+            r#" | GET     "/users/j***@e***.com""#,
+        ),
+    ] {
+        let (_, logged) = send(&app, request(Method::GET, uri)).await;
+        assert_eq!(logged.len(), 1, "{logged:?}");
+        let message = logged[0].message.as_str();
+        assert!(message.ends_with(want), "{message}");
+        assert!(!message.contains("john.doe"), "{message}");
+        assert!(!message.contains("example.com"), "{message}");
+    }
+}
+
 /// Not upstream's: the time taken, as gin writes it.
 #[test]
 fn latency_prints_as_go_does() {

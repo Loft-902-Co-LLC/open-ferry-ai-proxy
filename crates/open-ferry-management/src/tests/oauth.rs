@@ -1560,7 +1560,7 @@ fn expired_sessions_are_dropped() {
 // login failed, not why, though the endpoint's answer quotes the code and
 // the PKCE verifier; the status a key reads keeps upstream's wording with
 // both redacted. A login that succeeds logs no token, nor the email its
-// credential file is named with: the name is cut to its ends.
+// credential file is named with: the name's email is masked.
 #[tokio::test]
 async fn exchange_failures_keep_secrets_out_of_answers_and_logs() {
     let (logs, _guard) = Logs::capture();
@@ -1637,17 +1637,28 @@ async fn exchange_failures_keep_secrets_out_of_answers_and_logs() {
     completed(&api, &state).await;
 
     let logs = logs.text();
-    for (provider, name) in [("Claude", "clau...json"), ("Codex", "code...json")] {
+    for (provider, prefix, suffix) in [
+        ("Claude", "claude-", "-c***@e***.test.json"),
+        ("Codex", "codex-", "-o***@e***.test-free.json"),
+    ] {
         let failed = format!(
             "Failed to exchange authorization code for tokens ({provider}): \
              the token endpoint answered 400\n"
         );
         assert!(logs.contains(&failed), "{logs}");
-        let saved = format!(
-            "{provider} authentication successful; credential saved as {name}
-"
+        let saved = format!("{provider} authentication successful; credential saved as ");
+        let name = logs
+            .lines()
+            .find_map(|line| line.split_once(&saved).map(|(_, name)| name))
+            .unwrap_or_else(|| panic!("{provider}: {logs}"));
+        let hash = name
+            .strip_prefix(prefix)
+            .and_then(|rest| rest.strip_suffix(suffix))
+            .unwrap_or_else(|| panic!("{provider}: {name}"));
+        assert!(
+            hash.len() == 8 && hash.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{provider}: {name}"
         );
-        assert!(logs.contains(&saved), "{logs}");
     }
     for email in ["oauth-user@example.test", "claude-user@example.test"] {
         assert!(!logs.contains(email), "{email}: {logs}");

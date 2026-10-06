@@ -15,7 +15,15 @@
 //! its order. The request ID is the `request_id` field, of the event or of
 //! a span it is in, such as the access log's request span.
 //!
+//! Every email address in a line is masked, whoever logged it
+//! ([`mask_emails`]): `main.log`, standard output and the TUI's logs tab
+//! all get the line formatted here.
+//!
 //! Deviations from upstream:
+//! - Email addresses are masked, the message's and the fields' alike, in
+//!   file names and paths too: `claude-john@example.com.json` is written
+//!   `claude-j***@e***.com.json`. Upstream logs an account's email, and
+//!   the auth file names that hold one, as they are.
 //! - A field is quoted, where upstream quotes it, when its value was
 //!   recorded as text: a string, or a value logged with `%` or `?`. Go
 //!   quotes a `string`. Numbers and booleans aren't quoted.
@@ -24,10 +32,12 @@
 //! - A line that doesn't say which file logged it shows its target in
 //!   place of the file and line. Upstream always knows the caller.
 
+use std::borrow::Cow;
 use std::fmt::{self, Write as _};
 use std::sync::Arc;
 
 use chrono::{DateTime, Local};
+use open_ferry_core::observe::mask::mask_emails;
 use open_ferry_core::observe::short_request_id;
 use open_ferry_translate::go::{format_float_g, quote};
 use tracing::field::{Field, Visit};
@@ -201,7 +211,10 @@ pub(super) fn format(entry: &Entry<'_>) -> String {
         }
     }
     line.push('\n');
-    line
+    match mask_emails(&line) {
+        Cow::Borrowed(_) => line,
+        Cow::Owned(masked) => masked,
+    }
 }
 
 /// How the field `name` shows `value` (upstream's `formatLogFieldValue`).

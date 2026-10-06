@@ -57,9 +57,9 @@
 //!   endpoint's answer, and so may hold the code. A Codex session's status
 //!   keeps upstream's wording, the answer included, but with the login's
 //!   code and PKCE verifier replaced by `[redacted]`.
-//! - A saved credential is logged, at info, with its file name cut to its
-//!   ends, since the name holds the account's email; upstream prints the
-//!   full path to standard output.
+//! - A saved credential is logged, at info, with its file name's email
+//!   masked (`claude-j***@e***.com.json`) and without its directory;
+//!   upstream prints the full path to standard output.
 //! - A login can't start while 1024 sessions are kept: it answers 429
 //!   `{"error":"too many oauth sessions"}`.
 //! - A credential without an email isn't saved: the session fails with
@@ -406,15 +406,15 @@ async fn run(
 }
 
 /// The name a log shows for the credential file saved at `path`: the file
-/// name cut to its ends ([`hide_log_key`]), since it holds the account's
-/// email, and without the directory.
+/// name with the account's email masked ([`mask_emails`]), such as
+/// `claude-j***@e***.com.json`, and without the directory.
 ///
-/// [`hide_log_key`]: open_ferry_core::observe::mask::hide_log_key
+/// [`mask_emails`]: open_ferry_core::observe::mask::mask_emails
 fn saved_name(path: &str) -> String {
     let name = std::path::Path::new(path)
         .file_name()
         .map_or_else(|| path.into(), |name| name.to_string_lossy());
-    open_ferry_core::observe::mask::hide_log_key(&name)
+    open_ferry_core::observe::mask::mask_emails(&name).into_owned()
 }
 
 /// Logs that `provider`'s code exchange failed, with the token endpoint's

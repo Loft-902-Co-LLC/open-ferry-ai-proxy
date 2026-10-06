@@ -12,7 +12,9 @@
 //! The status, the time taken, the client's address, the method, and the
 //! path with its query, the values of the parameters that hold a secret
 //! masked and their names kept (see [`mask_sensitive_query`]): keys and
-//! tokens, and an OAuth callback's code and state. The line is logged at info
+//! tokens, and an OAuth callback's code and state; and every email in the
+//! path and query masked (see [`mask_emails`]), such as an auth file's
+//! name in a management route's `?name=`. The line is logged at info
 //! level, at warn from 400 and at error from 500. A health probe answered
 //! with a 2xx isn't logged.
 //!
@@ -41,11 +43,17 @@
 //!   ([`is_secret_query_param`]). Upstream's gin logger masks only
 //!   key-like names, so its line holds an OAuth callback's code and state
 //!   as they came.
+//! - Email addresses in the path and query are masked, an `@` written
+//!   `%40` too: `?name=codex-john%40example.com-plus.json` is logged
+//!   `?name=codex-j***%40e***.com-plus.json`. Upstream logs them as they
+//!   came. The main log masks every line's emails as it formats it; the
+//!   line masks its own so that it holds none wherever it goes.
 //!
 //! [`is_secret_query_param`]: open_ferry_core::observe::mask::is_secret_query_param
 //!
 //! [`RequestContext`]: open_ferry_core::observe::RequestContext
 
+use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -58,7 +66,7 @@ use axum::response::Response;
 use bytes::Bytes;
 use http::{Method, StatusCode};
 use http_body::{Frame, SizeHint};
-use open_ferry_core::observe::mask::mask_sensitive_query;
+use open_ferry_core::observe::mask::{mask_emails, mask_sensitive_query};
 use tracing::Instrument;
 
 use crate::request_context;
@@ -100,6 +108,9 @@ pub(crate) async fn layer(request: Request, next: Next) -> Response {
     if !query.is_empty() {
         path.push('?');
         path.push_str(&query);
+    }
+    if let Cow::Owned(masked) = mask_emails(&path) {
+        path = masked;
     }
     let line = AccessLine {
         start,

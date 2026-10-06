@@ -10,11 +10,14 @@
 
 //! Masking for what the logs and the usage records keep: an API key cut to
 //! its ends ([`hide_api_key`]), credential headers and query parameters
-//! masked ([`mask_header_value`], [`mask_sensitive_query`]), and an error's
+//! masked ([`mask_header_value`], [`mask_sensitive_query`]), an error's
 //! text bounded and scrubbed for an ordinary log line
-//! ([`safe_diagnostic_for_log`], [`safe_error_diagnostic`]).
+//! ([`safe_diagnostic_for_log`], [`safe_error_diagnostic`]), and email
+//! addresses masked ([`mask_emails`]).
 //!
 //! Deviations from upstream:
+//! - [`mask_emails`] isn't upstream's: upstream logs an account's email,
+//!   and the names of the auth files that hold one, as they are.
 //! - A key cut through a multibyte character shows U+FFFD in place of the
 //!   broken bytes; [`hide_bytes`] keeps them, as Go does.
 //! - [`is_credential_header`] and [`mask_header_value`] also mask `Cookie`,
@@ -39,6 +42,7 @@
 //!   `context.Canceled`, so no `canceled`, and the fallback names the Rust
 //!   type.
 
+use std::borrow::Cow;
 use std::error::Error;
 use std::io;
 use std::sync::LazyLock;
@@ -336,6 +340,215 @@ fn query_escape(bytes: &[u8]) -> String {
         }
     }
     out
+}
+
+/// What stands for the hidden part of an email's local part and domain.
+const HIDDEN_EMAIL_PART: &str = "***";
+
+/// The providers whose auth files are named `<provider>-<email>…json`, or
+/// `<provider>-<hash>-<email>…json`; [`mask_emails`] keeps the prefix.
+const CREDENTIAL_FILE_PREFIXES: [&str; 5] = ["antigravity", "claude", "codex", "gemini", "xai"];
+
+/// The file extensions [`mask_emails`] doesn't take for a domain's last
+/// label: an auth file's, a saved cooldown's and a temporary file's.
+const FILE_EXTENSIONS: [&str; 3] = ["json", "cds", "tmp"];
+
+/// `text` with every email address in it masked, to tell accounts apart
+/// without naming them: the first character of the local part, the first
+/// of the domain and the domain's last label, so `john.doe@example.com`
+/// becomes `j***@e***.com`.
+///
+/// An address is found wherever it stands: in a sentence, a file name, a
+/// Windows or Unix path, quotes, or a query, where its `@` may be written
+/// `%40` (kept so). An auth file's name keeps its provider prefix and
+/// hash, and its extension and plan: `claude-john@example.com.json`
+/// becomes `claude-j***@e***.com.json`, and
+/// `codex-1a2b3c4d-john@example.com-plus.json`
+/// `codex-1a2b3c4d-j***@e***.com-plus.json`.
+///
+/// An address needs a local part, a domain of two labels or more, and a
+/// last label of two letters or more, so `user@localhost`,
+/// `claude-3-5-sonnet@20240620`, `pkg@1.2.3`, `@scope/pkg` and `a@b.c`
+/// aren't masked. Masking is deterministic and idempotent, and costs one
+/// scan of a text without `@` or `%`, which is returned as it is.
+pub fn mask_emails(text: &str) -> Cow<'_, str> {
+    let mut out: Option<String> = None;
+    let mut copied = 0;
+    let mut from = 0;
+    // A local part starts after the at sign before it: `%40` is made of
+    // characters a local part may hold, so without this each `%40` of a
+    // long run would be scanned back to the run's start.
+    let mut floor = 0;
+    while let Some((at, after)) = next_at_sign(text, from) {
+        from = after;
+        let lowest = copied.max(floor);
+        floor = after;
+        let Some(email) = email_at(text, lowest, at, after) else {
+            continue;
+        };
+        let out = out.get_or_insert_with(|| String::with_capacity(text.len()));
+        out.push_str(text.get(copied..email.start).unwrap_or_default());
+        out.push_str(email.kept);
+        out.push(email.local_first);
+        out.push_str(HIDDEN_EMAIL_PART);
+        out.push_str(text.get(at..after).unwrap_or_default());
+        out.push(email.domain_first);
+        out.push_str(HIDDEN_EMAIL_PART);
+        out.push('.');
+        out.push_str(email.last_label);
+        copied = email.end;
+        from = email.end;
+    }
+    match out {
+        None => Cow::Borrowed(text),
+        Some(mut out) => {
+            out.push_str(text.get(copied..).unwrap_or_default());
+            Cow::Owned(out)
+        }
+    }
+}
+
+/// An email address found in a text.
+struct Email<'a> {
+    /// Where it starts.
+    start: usize,
+    /// Where it ends: after its last label.
+    end: usize,
+    /// The auth file prefix it keeps, such as `claude-`.
+    kept: &'a str,
+    /// The first character of its local part.
+    local_first: char,
+    /// The first character of its domain.
+    domain_first: char,
+    /// Its domain's last label.
+    last_label: &'a str,
+}
+
+/// The next `@`, or `%40`, in `text` at or after byte `from`: where it
+/// starts and where it ends.
+fn next_at_sign(text: &str, from: usize) -> Option<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let mut index = from;
+    loop {
+        let found = index
+            + bytes
+                .get(index..)?
+                .iter()
+                .position(|&b| b == b'@' || b == b'%')?;
+        if bytes.get(found) == Some(&b'@') {
+            return Some((found, found + 1));
+        }
+        if bytes.get(found + 1..found + 3) == Some(b"40".as_slice()) {
+            return Some((found, found + 3));
+        }
+        index = found + 1;
+    }
+}
+
+/// Whether `c` can be in an email's local part as a log shows it: `*`
+/// isn't, so a masked address isn't masked again.
+fn is_local_char(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '.' | '_' | '%' | '+' | '-')
+}
+
+/// Whether `c` can be in an email's domain.
+fn is_domain_char(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '.' | '-')
+}
+
+/// The email address around the at sign from byte `at` to `after` in
+/// `text`, its local part starting at byte `floor` or later, if there is
+/// one.
+fn email_at(text: &str, floor: usize, at: usize, after: usize) -> Option<Email<'_>> {
+    let before = text.get(floor..at)?;
+    let local_len: usize = before
+        .chars()
+        .rev()
+        .take_while(|&c| is_local_char(c))
+        .map(char::len_utf8)
+        .sum();
+    let local = before
+        .get(before.len().saturating_sub(local_len)..)?
+        .trim_start_matches(['.', '-']);
+    let start = at.saturating_sub(local.len());
+    let (kept, local) = local.split_at_checked(credential_prefix_len(local))?;
+    let local_first = local.chars().next()?;
+
+    let rest = text.get(after..)?;
+    let domain_len: usize = rest
+        .chars()
+        .take_while(|&c| is_domain_char(c))
+        .map(char::len_utf8)
+        .sum();
+    let mut labels = Vec::new();
+    let mut offset = 0;
+    for label in rest.get(..domain_len)?.split('.') {
+        if label.is_empty() {
+            break;
+        }
+        labels.push((offset, label));
+        offset += label.len() + 1;
+    }
+    let domain_first = labels
+        .first()?
+        .1
+        .chars()
+        .next()
+        .filter(|c| c.is_alphanumeric())?;
+    let (offset, last_label) =
+        labels
+            .iter()
+            .enumerate()
+            .skip(1)
+            .rev()
+            .find_map(|(index, &(offset, label))| {
+                if index >= 2
+                    && FILE_EXTENSIONS
+                        .iter()
+                        .any(|extension| label.eq_ignore_ascii_case(extension))
+                {
+                    return None;
+                }
+                let head = label.split('-').next().unwrap_or(label);
+                (head.chars().nth(1).is_some() && head.chars().all(char::is_alphabetic))
+                    .then_some((offset, head))
+            })?;
+    Some(Email {
+        start,
+        end: after + offset + last_label.len(),
+        kept,
+        local_first,
+        domain_first,
+        last_label,
+    })
+}
+
+/// How much of the local part `local` is an auth file's prefix: a
+/// provider of [`CREDENTIAL_FILE_PREFIXES`] and `-`, then maybe a hash of
+/// eight lowercase hex digits and `-`; none when nothing would be left.
+fn credential_prefix_len(local: &str) -> usize {
+    let Some(rest) = CREDENTIAL_FILE_PREFIXES
+        .iter()
+        .find_map(|provider| local.strip_prefix(provider)?.strip_prefix('-'))
+    else {
+        return 0;
+    };
+    let rest = match rest
+        .split_at_checked(8)
+        .filter(|(hash, _)| {
+            hash.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
+        .and_then(|(_, after)| after.strip_prefix('-'))
+    {
+        Some(after) if !after.is_empty() => after,
+        _ => rest,
+    };
+    if rest.is_empty() {
+        0
+    } else {
+        local.len().saturating_sub(rest.len())
+    }
 }
 
 /// Upstream's `SafeDiagnosticForLog`: `message` on one line, at most 300
@@ -675,6 +888,114 @@ mod tests {
             "authuser=0",
         ] {
             assert_eq!(mask_sensitive_query(kept), kept);
+        }
+    }
+
+    // Not upstream's: every email in a text is masked to its first
+    // characters and last label, wherever it stands.
+    #[test]
+    fn masks_every_email_in_a_text() {
+        for (text, want) in [
+            ("john.doe@example.com", "j***@e***.com"),
+            (
+                "from john@example.com and jane+tag@mail.example.co.uk, cc <x_y@corp-mail.io>",
+                "from j***@e***.com and j***@m***.uk, cc <x***@c***.io>",
+            ),
+            (
+                r"skipping auth file C:\Users\me\.cli-proxy-api\claude-john@example.com.json: denied",
+                r"skipping auth file C:\Users\me\.cli-proxy-api\claude-j***@e***.com.json: denied",
+            ),
+            (
+                "/home/me/.cli-proxy-api/codex-1a2b3c4d-john.doe@example.com-plus.json",
+                "/home/me/.cli-proxy-api/codex-1a2b3c4d-j***@e***.com-plus.json",
+            ),
+            (
+                "codex-john@example.com-team.json",
+                "codex-j***@e***.com-team.json",
+            ),
+            (
+                "-1a2b3c4d-john@example.com-k12.json",
+                "-1***@e***.com-k12.json",
+            ),
+            (
+                "claude-1a2b3c4d-john@example.com.json",
+                "claude-1a2b3c4d-j***@e***.com.json",
+            ),
+            ("claude-deadbeef@example.com", "claude-d***@e***.com"),
+            ("xai-john@example.com.cds", "xai-j***@e***.com.cds"),
+            (
+                ".claude-john@example.com.cds.4f2a91.tmp.cds",
+                ".claude-j***@e***.com.cds.4f2a91.tmp.cds",
+            ),
+            (
+                r#"auth_id="codex-john@example.com-plus.json" label=John@Example.COM"#,
+                r#"auth_id="codex-j***@e***.com-plus.json" label=J***@E***.COM"#,
+            ),
+            (
+                "GET \"/v0/management/auth-files/download?name=codex-john%40example.com-plus.json\"",
+                "GET \"/v0/management/auth-files/download?name=codex-j***%40e***.com-plus.json\"",
+            ),
+            ("first%2Blast%40example.com", "f***%40e***.com"),
+            ("josé.núñez@ejemplo.es", "j***@e***.es"),
+            (
+                "socks5://user:pass@proxy.example.com:1080",
+                "socks5://user:p***@p***.com:1080",
+            ),
+        ] {
+            assert_eq!(mask_emails(text), want, "{text}");
+            assert_eq!(mask_emails(want), want, "masked again: {want}");
+        }
+        // An address's domain ends at the next `@`, which then has no local
+        // part of its own.
+        assert_eq!(mask_emails("a@b.com@c.com"), "a***@b***.com@c.com");
+        // A local part starts after the at sign before it.
+        assert_eq!(mask_emails("a@b@example.com"), "a@b***@e***.com");
+        assert_eq!(mask_emails("x%40y%40example.com"), "x%40y***%40e***.com");
+    }
+
+    // Not upstream's: a long run of at signs is scanned once, not once for
+    // each, so a client's path of `%40`s can't make the access line slow.
+    #[test]
+    fn long_runs_of_at_signs_are_scanned_once() {
+        for unit in ["a%40", "%40", "a@", "@"] {
+            let text = format!("/{}", unit.repeat(64 * 1024 / unit.len()));
+            assert!(
+                matches!(mask_emails(&text), Cow::Borrowed(same) if same == text),
+                "{unit}"
+            );
+        }
+        let text = format!("{}john@example.com", "a%40".repeat(16 * 1024));
+        let want = format!("{}j***@e***.com", "a%40".repeat(16 * 1024));
+        assert_eq!(mask_emails(&text), want);
+    }
+
+    // Not upstream's: a text without an email is returned as it is.
+    #[test]
+    fn leaves_texts_without_an_email_alone() {
+        for text in [
+            "",
+            "no at sign at all",
+            "100% done, 50%4 and %4",
+            "user@localhost",
+            "admin@127.0.0.1",
+            "claude-3-5-sonnet@20240620",
+            "claude-opus-4-1@20250805",
+            "golang.org/x/net@v0.25.0",
+            "npm i pkg@1.2.3-beta.4",
+            "@scope/pkg and @mention",
+            "trailing@",
+            "a@b.c",
+            "user@.com",
+            "user@-x.com",
+            "name@sha256:0123abcd",
+            "j***@e***.com",
+            "claude-j***@e***.com.json",
+            "q=a%40b&r=%40",
+        ] {
+            assert!(
+                matches!(mask_emails(text), Cow::Borrowed(same) if same == text),
+                "{text}"
+            );
         }
     }
 

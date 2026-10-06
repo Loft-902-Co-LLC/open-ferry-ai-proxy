@@ -349,3 +349,59 @@ fn muting_drops_standard_output_and_the_tap_sees_every_line() {
     assert_eq!(text.lines().count(), 1, "{text}");
     assert!(text.trim_end().ends_with("] heard"), "{text}");
 }
+
+/// Not upstream's: an email in a line, its message's or a field's, in a
+/// file name, a path or an access line's query, reaches `main.log` and the
+/// tap masked; upstream writes it as it is.
+#[test]
+fn emails_reach_main_log_masked() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path().join("logs");
+    let file_log = FileLog::default();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let tap_seen = Arc::clone(&seen);
+    file_log.set_tap(Some(Arc::new(move |line: &[u8]| {
+        tap_seen
+            .lock()
+            .unwrap()
+            .push(String::from_utf8_lossy(line).trim_end().to_owned());
+    })));
+    file_log.configure(&dir, true, 0);
+    logged(&file_log, || {
+        tracing::warn!(
+            "skipping auth file /home/me/.cli-proxy-api/claude-john.doe@example.com.json: denied"
+        );
+        tracing::error!(
+            auth_id = "codex-1a2b3c4d-jane@example.org-plus.json",
+            "failed to refresh for jane@example.org"
+        );
+        tracing::info!(
+            "200 | 1ms | 127.0.0.1 | GET     \"/v0/management/auth-files/download?name=codex-jane%40example.org-plus.json\""
+        );
+    });
+    file_log.set_tap(None);
+
+    let text = fs::read_to_string(dir.join(MAIN_LOG)).unwrap();
+    let lines: Vec<_> = text.lines().collect();
+    assert_eq!(lines.len(), 3, "{text}");
+    assert!(
+        lines[0].ends_with(
+            "skipping auth file /home/me/.cli-proxy-api/claude-j***@e***.com.json: denied"
+        ),
+        "{text}"
+    );
+    assert!(
+        lines[1].ends_with(
+            "failed to refresh for j***@e***.org auth_id=\"codex-1a2b3c4d-j***@e***.org-plus.json\""
+        ),
+        "{text}"
+    );
+    assert!(
+        lines[2].ends_with("?name=codex-j***%40e***.org-plus.json\""),
+        "{text}"
+    );
+    for leaked in ["john.doe", "jane@", "jane%40", "example.com", "example.org"] {
+        assert!(!text.contains(leaked), "{leaked} in {text}");
+    }
+    assert_eq!(*seen.lock().unwrap(), lines);
+}
