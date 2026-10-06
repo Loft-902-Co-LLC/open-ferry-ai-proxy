@@ -24,8 +24,9 @@
 //! - Model states are checked in key order, where Go's map order is random.
 //! - The scheduler's cursor maps are capped at 4096 keys and cleared when
 //!   full; upstream's grow without bound.
-//! - Eligibility filters, plugin schedulers and session affinity aren't
-//!   ported: every credential is eligible.
+//! - Plugin schedulers, session affinity and required auth kinds aren't
+//!   ported. The only eligibility filter is the free-plan rule (see
+//!   `policy`); a credential policy has its own pick.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -35,6 +36,7 @@ use super::Entry;
 use super::classify::{auth_error_text, has_unauthorized_auth_failure};
 use super::credential::{is_zero, priority, websockets_enabled, weight};
 use super::models::{Resolver, openai_compatible_provider_key};
+use super::policy::Eligibility;
 use super::settings::RoutingStrategy;
 use super::summary::extract_upstream_error_summary;
 use super::text::{canonical_model_key, equal_fold, go_lower, parse_suffix};
@@ -984,6 +986,8 @@ pub(crate) struct PickArgs<'a> {
     pub(crate) downstream_websocket: bool,
     /// Credentials already tried.
     pub(crate) tried: &'a HashSet<String>,
+    /// What else narrows the credentials the call may pick.
+    pub(crate) eligibility: Eligibility,
 }
 
 /// A picked credential with its executor.
@@ -1104,6 +1108,9 @@ impl<'a> Selection<'a> {
     ) -> impl Fn(&Sched<'_>) -> bool + 'p {
         let require_weight = self.strategy == RoutingStrategy::Weighted;
         move |entry: &Sched<'_>| {
+            if !args.eligibility.allows(entry.auth) {
+                return false;
+            }
             if require_weight && entry.weight <= 0 {
                 return false;
             }
@@ -1361,6 +1368,7 @@ impl<'a> Selection<'a> {
                     && eligible.contains(&canonical_scheduling_provider(&executor_key_from_auth(
                         auth,
                     )))
+                    && args.eligibility.allows(auth)
                     && !args.tried.contains(&auth.id)
                     && self.resolver.selection_model_key_for_auth(auth, args.model) != route_key
             });
@@ -1411,6 +1419,9 @@ impl<'a> Selection<'a> {
             .map(|entry| &entry.auth)
             .filter(|auth| {
                 if auth.disabled || (!args.pinned.is_empty() && auth.id != args.pinned) {
+                    return false;
+                }
+                if !args.eligibility.allows(auth) {
                     return false;
                 }
                 let key = executor_key_from_auth(auth);

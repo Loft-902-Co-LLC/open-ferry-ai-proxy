@@ -74,6 +74,7 @@ fn pick_error(h: &Harness, names: &[&str], model: &str) -> ExecError {
         model,
         pinned: "",
         downstream_websocket: false,
+        eligibility: Default::default(),
         tried: &tried,
     };
     let picked = with_selection(h, |selection, state| {

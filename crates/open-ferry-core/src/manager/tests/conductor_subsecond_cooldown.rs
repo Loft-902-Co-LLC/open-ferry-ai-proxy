@@ -10,7 +10,9 @@
 //!   `closest_cooldown_wait` returns `Option<Duration>`. Upstream's
 //!   `shouldRetryAfterErrorWithAttempted` maps to `should_retry_after_error`
 //!   over a selection built from the manager's state, as the manager's own
-//!   `retry_wait` builds it. The eligibility argument isn't ported.
+//!   `retry_wait` builds it. The eligibility argument is the query's
+//!   `eligibility`, which allows every credential here as upstream's empty
+//!   one does.
 //! - Upstream's slow-pool executor mutates the first credential under the
 //!   manager's lock; here the fake executor's handler does the same through
 //!   the manager's state lock.
@@ -106,6 +108,7 @@ fn closest_wait(
             pinned: "",
             attempt: 0,
             default_retry: 5,
+            eligibility: Default::default(),
             attempted,
         };
         closest_cooldown_wait(selection, &query, status)
@@ -353,6 +356,7 @@ async fn manager_should_retry_after_error_429_enforces_cooldown_wait_even_with_l
             pinned: "",
             attempt: 0,
             default_retry: 5,
+            eligibility: Default::default(),
             attempted: &attempted,
         };
         should_retry_after_error(selection, &query, &err429, Duration::from_secs(30))

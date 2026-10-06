@@ -24,9 +24,9 @@
 //! Deviations from upstream:
 //! - Session affinity, the plugin scheduler, the Home dispatcher, derived
 //!   session IDs and fingerprints aren't ported, by policy or scope.
-//! - Eligibility filters and free-account rules aren't ported: every
-//!   credential is eligible, except where a credential policy narrows
-//!   them (only Codex Alpha Search's; see `policy`).
+//! - Of upstream's eligibility filters, required auth kinds aren't ported.
+//!   A credential policy narrows its own pick (only Codex Alpha Search's),
+//!   and the free-plan rule every pick and retry decision; see `policy`.
 //! - The scheduler isn't a separate index kept in step with every change;
 //!   picks read the credentials as they are, and keep only the rotation
 //!   cursors between calls.

@@ -28,11 +28,13 @@
 //!   published to the fake registry.
 //! - The Codex Alpha Search credential policy tests are in
 //!   `credential_policy`.
+//! - Manager_PickNextMixed_DisallowFreeAuthSkipsCodexFreePlan: the flag is
+//!   the pick's eligibility, which a call takes from its metadata.
 //! - Dropped: the plugin scheduler tests (not ported), the Home dispatcher
-//!   tests (not ported), the auth kind and free-plan tests (eligibility
-//!   filters aren't ported, see manager/mod.rs), and
-//!   CustomSelector_FallsBackToLegacyPath (the port has no pluggable
-//!   selector, only the routing strategy setting).
+//!   tests (not ported), the auth kind tests (required auth kinds aren't
+//!   ported, see manager/mod.rs), and CustomSelector_FallsBackToLegacyPath
+//!   (the port has no pluggable selector, only the routing strategy
+//!   setting).
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -42,8 +44,10 @@ use serde_json::json;
 
 use super::support::*;
 use crate::auth::{Auth, AuthError, ModelState, Status};
-use crate::exec::ExecError;
+use crate::exec::{Dispatcher, ExecError};
 use crate::manager::models::Resolver;
+use crate::manager::policy::Eligibility;
+use crate::manager::retry::{RetryQuery, should_retry_after_error};
 use crate::manager::select::{ClientModels, PickArgs, Selection, successor_index};
 use crate::manager::{CallResult, RoutingStrategy, Settings};
 
@@ -106,6 +110,7 @@ fn try_pick(
         model,
         pinned: "",
         downstream_websocket: websocket,
+        eligibility: Default::default(),
         tried,
     };
     with_selection(h, |selection, state| {
@@ -317,6 +322,7 @@ async fn manager_legacy_weighted_round_robin_keeps_independent_alias_prefixed_mo
                 model,
                 pinned: "",
                 downstream_websocket: false,
+                eligibility: Default::default(),
                 tried: &tried,
             };
             let picked = with_selection(&h, |selection, state| {
@@ -736,6 +742,172 @@ async fn manager_pick_next_mixed_uses_weighted_provider_rotation_before_credenti
     h.add(auth("claude-a", "claude"), &[]);
 
     assert_provider_rotation(&h);
+}
+
+/// The free-plan rule's eligibility.
+const NO_FREE: Eligibility = Eligibility {
+    disallow_free_auth: true,
+};
+
+/// One pick over `providers` for `model` with `eligibility`, on the
+/// scheduler path or the legacy one: the credential and its provider.
+fn pick_eligible(
+    h: &Harness,
+    providers: &[&str],
+    model: &str,
+    eligibility: Eligibility,
+    legacy: bool,
+) -> Result<(String, String), ExecError> {
+    let providers: Vec<String> = providers.iter().map(|p| (*p).to_owned()).collect();
+    let tried = HashSet::new();
+    let args = PickArgs {
+        model,
+        pinned: "",
+        downstream_websocket: false,
+        tried: &tried,
+        eligibility,
+    };
+    with_selection(h, |selection, state| {
+        let picked = if legacy {
+            selection.pick_next_mixed_legacy(state, &providers, &args)
+        } else {
+            selection.pick_next_mixed(state, &providers, &args)
+        };
+        picked.map(|picked| (picked.auth.id.clone(), picked.provider))
+    })
+}
+
+/// `TestManager_PickNextMixed_DisallowFreeAuthSkipsCodexFreePlan`.
+#[tokio::test(start_paused = true)]
+async fn manager_pick_next_mixed_disallow_free_auth_skips_codex_free_plan() {
+    let model = "gpt-5.4-mini";
+    let h = harness(RoutingStrategy::RoundRobin, &["codex"]);
+    h.add(
+        cred("codex-a-free", "codex", &[("plan_type", "free")]),
+        &[model],
+    );
+    h.add(
+        cred("codex-b-plus", "codex", &[("plan_type", "plus")]),
+        &[model],
+    );
+
+    let (id, provider) =
+        pick_eligible(&h, &["codex"], model, NO_FREE, false).expect("pick_next_mixed");
+    assert_eq!(provider, "codex");
+    assert_eq!(id, "codex-b-plus");
+}
+
+/// Not upstream's: the rule holds on the legacy path and for every pick,
+/// matches the plan and provider as upstream's `EqualFold` does, leaves
+/// other providers' free plans alone, and finds nothing when only free
+/// Codex credentials serve the model; a call that allows them picks them.
+#[tokio::test(start_paused = true)]
+async fn disallow_free_auth_holds_on_every_path() {
+    let model = "gpt-image-2";
+    let h = harness(RoutingStrategy::RoundRobin, &["codex", "gemini"]);
+    h.add(
+        cred("a-free", "Codex", &[("plan_type", " FREE ")]),
+        &[model],
+    );
+    h.add(cred("b-plus", "codex", &[("plan_type", "plus")]), &[model]);
+    h.add(cred("c-none", "codex", &[]), &[model]);
+    h.add(
+        cred("d-gemini", "gemini", &[("plan_type", "free")]),
+        &[model],
+    );
+    for legacy in [false, true] {
+        let picks: HashSet<String> = (0..6)
+            .map(|_| {
+                pick_eligible(&h, &["codex", "gemini"], model, NO_FREE, legacy)
+                    .expect("pick")
+                    .0
+            })
+            .collect();
+        let want: HashSet<String> = ["b-plus", "c-none", "d-gemini"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(picks, want, "legacy {legacy}");
+    }
+
+    let h = harness(RoutingStrategy::FillFirst, &["codex"]);
+    h.add(
+        cred("only-free", "codex", &[("plan_type", "free")]),
+        &[model],
+    );
+    for legacy in [false, true] {
+        assert!(
+            pick_eligible(&h, &["codex"], model, NO_FREE, legacy).is_err(),
+            "legacy {legacy}"
+        );
+        assert_eq!(
+            pick_eligible(&h, &["codex"], model, Eligibility::default(), legacy)
+                .expect("pick")
+                .0,
+            "only-free"
+        );
+    }
+}
+
+/// Not upstream's: a call takes the rule from its metadata, so an image
+/// call never reaches a free Codex credential, and a retry decision under
+/// the rule doesn't count one.
+#[tokio::test(start_paused = true)]
+async fn calls_take_the_rule_from_their_metadata() {
+    let model = "gpt-image-2";
+    let h = Harness::new(Settings {
+        request_retry: 2,
+        ..Settings::default()
+    });
+    let executor = FakeExecutor::new("codex");
+    h.executor(&executor);
+    h.add(cred("a-free", "codex", &[("plan_type", "free")]), &[model]);
+    h.add(cred("b-plus", "codex", &[("plan_type", "plus")]), &[model]);
+    executor.set_handler(|call| {
+        if call.auth.id == "b-plus" {
+            Reply::status(429, "slow down")
+        } else {
+            Reply::ok("ok")
+        }
+    });
+
+    let mut opts = options();
+    opts.metadata.disallow_free_auth = true;
+    let err = h
+        .manager
+        .execute(&providers(&["codex"]), request(model), opts)
+        .await
+        .expect_err("only the paid credential, which fails");
+    assert_eq!(err.status, 429);
+    assert_eq!(executor.ids(Kind::Execute), ["b-plus"]);
+
+    // After that round, only the free credential could start another at
+    // once; the rule leaves only the paid one, which waits out its 429.
+    let codex = providers(&["codex"]);
+    let attempted: HashSet<String> = ["b-plus".to_owned()].into_iter().collect();
+    let retry = |eligibility| {
+        with_selection(&h, |selection, _| {
+            let query = RetryQuery {
+                providers: &codex,
+                model,
+                pinned: "",
+                attempt: 0,
+                default_retry: 2,
+                attempted: &attempted,
+                eligibility,
+            };
+            should_retry_after_error(selection, &query, &err, Duration::ZERO)
+        })
+    };
+    assert_eq!(retry(NO_FREE), None);
+    assert_eq!(retry(Eligibility::default()), Some(Duration::ZERO));
+
+    let resp = h
+        .manager
+        .execute(&providers(&["codex"]), request(model), options())
+        .await
+        .expect("the free credential answers");
+    assert_eq!(resp.payload.as_ref(), b"ok");
 }
 
 #[tokio::test(start_paused = true)]

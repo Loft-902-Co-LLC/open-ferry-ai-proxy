@@ -71,6 +71,7 @@ fn pick_at(h: &Harness, provider: &str, model: &str, now: Timestamp) -> Result<P
         model,
         pinned: "",
         downstream_websocket: false,
+        eligibility: Default::default(),
         tried: &tried,
     };
     selection.pick_next_mixed(&mut state.selector, &providers, &args)

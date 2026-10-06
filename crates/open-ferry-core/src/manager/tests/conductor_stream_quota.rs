@@ -51,6 +51,7 @@ fn pick(h: &Harness, provider: &str, model: &str) -> String {
         model,
         pinned: "",
         downstream_websocket: false,
+        eligibility: Default::default(),
         tried: &tried,
     };
     match selection.pick_next_mixed(&mut state.selector, &providers, &args) {

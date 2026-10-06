@@ -187,6 +187,7 @@ fn select_auth(
         model: MODEL,
         pinned: "",
         downstream_websocket: false,
+        eligibility: Default::default(),
         tried: &tried,
     };
     selection

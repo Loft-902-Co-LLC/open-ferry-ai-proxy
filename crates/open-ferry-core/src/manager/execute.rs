@@ -77,6 +77,7 @@ use super::classify::{
 use super::cooldown::CallResult;
 use super::credential::websockets_enabled;
 use super::models::{AliasResult, OAuthAliasTable, Resolver};
+use super::policy::Eligibility;
 use super::retry::{
     RetryQuery, request_retry_round_exclusions, should_retry_after_error, wait_for_cooldown,
 };
@@ -508,6 +509,7 @@ impl Manager {
         route_model: &str,
         pinned: &str,
         downstream_websocket: bool,
+        eligibility: Eligibility,
         tried: &HashSet<String>,
     ) -> Result<Prepared, ExecError> {
         let now = self.now();
@@ -532,6 +534,7 @@ impl Manager {
             pinned,
             downstream_websocket,
             tried,
+            eligibility,
         };
         let picked = selection.pick_next_mixed(&mut state.selector, providers, &args)?;
         let offsets = &mut state.pool_offsets;
@@ -565,6 +568,7 @@ impl Manager {
         providers: &[String],
         model: &str,
         pinned: &str,
+        eligibility: Eligibility,
         attempt: usize,
         retry: RetrySettings,
         attempted: &HashSet<String>,
@@ -590,6 +594,7 @@ impl Manager {
             attempt,
             default_retry: retry.request_retry,
             attempted,
+            eligibility,
         };
         should_retry_after_error(&selection, &query, err, retry.max_wait)
     }
@@ -629,6 +634,7 @@ impl Manager {
                 &normalized,
                 &retry_model,
                 &pinned,
+                Eligibility::for_request(&opts),
                 attempt,
                 retry,
                 &attempted,
@@ -678,6 +684,7 @@ impl Manager {
                 &normalized,
                 &retry_model,
                 &pinned,
+                Eligibility::for_request(&opts),
                 attempt,
                 retry,
                 &attempted,
@@ -760,6 +767,7 @@ impl Manager {
                 &route_model,
                 &pinned,
                 opts.downstream_websocket,
+                Eligibility::for_request(&opts),
                 &tried,
             ) {
                 Ok(prepared) => prepared,
@@ -959,6 +967,7 @@ impl Manager {
                 &route_model,
                 &pinned,
                 opts.downstream_websocket,
+                Eligibility::for_request(&opts),
                 &tried,
             ) {
                 Ok(prepared) => prepared,

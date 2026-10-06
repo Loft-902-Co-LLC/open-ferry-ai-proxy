@@ -149,6 +149,9 @@ pub struct Metadata {
     /// (upstream's `ForcedProvider`, which an Interactions `agent` request
     /// sets).
     pub forced_provider: Option<ProviderId>,
+    /// Leave out Codex credentials on the free plan (`disallow_free_auth`,
+    /// which the images endpoints set for Codex calls).
+    pub disallow_free_auth: bool,
 }
 
 impl fmt::Debug for Metadata {
@@ -162,6 +165,7 @@ impl fmt::Debug for Metadata {
             .field("execution_session_id", &self.execution_session_id)
             .field("selected_auth", &self.selected_auth.is_some())
             .field("forced_provider", &self.forced_provider)
+            .field("disallow_free_auth", &self.disallow_free_auth)
             .finish()
     }
 }

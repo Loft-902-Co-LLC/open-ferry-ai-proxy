@@ -1,19 +1,27 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/credential_policy.go
 // (credentialPolicyAllows), sdk/cliproxy/auth/conductor_selection.go
-// (pickNextLegacy, SelectAuthWithCredentialPolicy) and
-// sdk/cliproxy/auth/conductor_models.go (ResolveExecutionModel,
-// executionModelCandidates) (v8.0.15, MIT).
+// (authSelectionEligibility, pickNextLegacy,
+// SelectAuthWithCredentialPolicy), sdk/cliproxy/auth/conductor_execution.go
+// (isFreeCodexAuth) and sdk/cliproxy/auth/conductor_models.go
+// (ResolveExecutionModel, executionModelCandidates) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
-//! Credential policies, which narrow the credentials a call may pick, the
-//! pick of one provider's credentials that honours a policy, and the
-//! upstream model a credential is sent.
+//! Credential policies and the free-plan rule, which narrow the credentials
+//! a call may pick, the pick of one provider's credentials that honours a
+//! policy, and the upstream model a credential is sent.
 //!
 //! The only policy is `codex_alpha_search_v1`, for Codex Alpha Search: a
 //! Codex ChatGPT sign-in, or a Codex API key with `alpha-search: true` (its
 //! `codex_alpha_search` attribute).
 //!
+//! A call whose metadata disallows free credentials (`disallow_free_auth`,
+//! which the images endpoints set for Codex) never picks a Codex credential
+//! whose `plan_type` attribute is `free`, in either pick or when deciding
+//! on another retry round.
+//!
 //! Deviations from upstream:
+//! - The free-plan rule reads a typed metadata flag, where upstream also
+//!   takes the strings and bytes `strconv.ParseBool` reads as true.
 //! - A policy is a type, not a name, so there is no invalid policy and no
 //!   `invalid_credential_policy` error.
 //! - The pick is the built-in strategies' only: custom selectors, the plugin
@@ -35,7 +43,7 @@ use super::select::{
 use super::text::{equal_fold, parse_suffix};
 use crate::auth::classification::ATTRIBUTE_CODEX_ALPHA_SEARCH;
 use crate::auth::{Auth, AuthKind};
-use crate::exec::{ErrorKind, ExecError};
+use crate::exec::{ErrorKind, ExecError, Options};
 
 /// Which credentials a call may pick.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,6 +71,36 @@ impl CredentialPolicy {
             }
         }
     }
+}
+
+/// What narrows the credentials a call may pick, besides a credential
+/// policy (upstream's `authSelectionEligibility` without its required kind
+/// and policy: required kinds aren't ported, and a policy has its own pick).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Eligibility {
+    /// Leave out Codex credentials on the free plan.
+    pub(crate) disallow_free_auth: bool,
+}
+
+impl Eligibility {
+    /// The eligibility a call's options ask for
+    /// (`authSelectionEligibilityForRequest`).
+    pub(crate) fn for_request(options: &Options) -> Self {
+        Self {
+            disallow_free_auth: options.metadata.disallow_free_auth,
+        }
+    }
+
+    /// Whether the call may pick `auth` (`allows`).
+    pub(crate) fn allows(self, auth: &Auth) -> bool {
+        !self.disallow_free_auth || !is_free_codex_auth(auth)
+    }
+}
+
+/// Whether `auth` is a Codex credential on the free plan
+/// (`isFreeCodexAuth`).
+pub(crate) fn is_free_codex_auth(auth: &Auth) -> bool {
+    equal_fold(auth.provider.trim(), "codex") && equal_fold(&attribute(auth, "plan_type"), "free")
 }
 
 impl Selection<'_> {

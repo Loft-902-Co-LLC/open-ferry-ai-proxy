@@ -156,6 +156,7 @@ fn should_retry_pinned(
         pinned,
         attempt,
         default_retry: state.settings.request_retry,
+        eligibility: Default::default(),
         attempted: &attempted,
     };
     should_retry_after_error(&selection, &query, err, max_wait)

@@ -216,6 +216,7 @@ impl Pool {
             model,
             pinned: "",
             downstream_websocket: false,
+            eligibility: Default::default(),
             tried: &tried,
         };
         let picked = match self.path {

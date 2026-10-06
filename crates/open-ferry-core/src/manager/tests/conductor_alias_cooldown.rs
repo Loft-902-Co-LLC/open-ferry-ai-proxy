@@ -57,6 +57,7 @@ fn select_auth(h: &Harness, provider: &str, model: &str) -> Result<Arc<Auth>, Ex
         model,
         pinned: "",
         downstream_websocket: false,
+        eligibility: Default::default(),
         tried: &tried,
     };
     selection

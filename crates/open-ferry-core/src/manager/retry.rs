@@ -13,8 +13,9 @@
 //! `max_retry_interval`.
 //!
 //! Deviations from upstream:
-//! - Eligibility filters (required kind, credential policy, free accounts)
-//!   aren't ported: every credential is eligible.
+//! - Of upstream's eligibility filters only the free-plan rule is ported
+//!   (see `policy`): required auth kinds aren't, and a credential policy
+//!   only narrows its own pick, which has no retry rounds.
 //! - Credentials are checked in ID order, where Go's map order is random;
 //!   only the shortest wait is kept, so the outcome is the same.
 
@@ -27,6 +28,7 @@ use super::classify::{
 };
 use super::cooldown::{MIN_QUOTA_COOLDOWN_FLOOR, cooldown_disabled_for_auth};
 use super::credential::{is_zero, request_retry_override};
+use super::policy::Eligibility;
 use super::select::{
     BlockReason, Selection, availability_block, executor_key_from_auth, is_auth_blocked_for_model,
 };
@@ -173,6 +175,8 @@ pub(crate) struct RetryQuery<'a> {
     pub(crate) default_retry: usize,
     /// The credentials the failed round tried.
     pub(crate) attempted: &'a HashSet<String>,
+    /// What else narrows the credentials the call may pick.
+    pub(crate) eligibility: Eligibility,
 }
 
 impl RetryQuery<'_> {
@@ -199,6 +203,9 @@ impl RetryQuery<'_> {
                 return None;
             }
             if !self.pinned.is_empty() && auth.id != self.pinned {
+                return None;
+            }
+            if !self.eligibility.allows(auth) {
                 return None;
             }
             if !provider_set.contains(&executor_key_from_auth(auth)) {

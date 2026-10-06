@@ -53,6 +53,7 @@ fn pick(h: &Harness, names: &[&str], model: &str, pinned_id: &str) -> Result<Pic
         model,
         pinned: pinned_id,
         downstream_websocket: false,
+        eligibility: Default::default(),
         tried: &tried,
     };
     let normalized = normalize_providers(&providers(names));

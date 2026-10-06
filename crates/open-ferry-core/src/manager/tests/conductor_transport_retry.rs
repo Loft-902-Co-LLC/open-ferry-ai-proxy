@@ -100,6 +100,7 @@ fn should_retry(h: &Harness, err: &ExecError, attempt: usize, model: &str) -> Op
         pinned: "",
         attempt,
         default_retry: state.settings.request_retry,
+        eligibility: Default::default(),
         attempted: &attempted,
     };
     should_retry_after_error(&selection, &query, err, Duration::ZERO)
