@@ -63,7 +63,7 @@ The management API's own errors keep upstream's shape, `{"error": "<text>"}`.
 
 ## Usage
 
-Usage comes from the **usage ledger**, a SQLite file the server keeps, `open-ferry-usage.sqlite3` in the log directory (`WRITABLE_PATH`, else beside the config). It has one row for each upstream call the server makes for a client (each attempt, as the management usage queue has them), recorded while `usage-statistics-enabled` is on. It keeps no prompt or answer text, and no client key in clear.
+Usage comes from the **usage ledger**, a SQLite file the server keeps, `open-ferry-usage.sqlite3` in the log directory (`logs` under `WRITABLE_PATH` if it's set, else the working directory's `logs` if it can be written to, else `logs` in the auth directory). It has one row for each upstream call the server makes for a client (each attempt, as the management usage queue has them), recorded while `usage-statistics-enabled` is on. It keeps no prompt or answer text, and no client key in clear.
 
 ### Filters
 
