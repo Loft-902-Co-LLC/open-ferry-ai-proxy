@@ -52,6 +52,13 @@ impl Config {
         load_bytes(&data)
     }
 
+    /// Loads a config file's contents, as [`Config::load`] loads the file:
+    /// with upstream's `LoadConfig` wording, and empty or comment-only
+    /// contents giving the defaults.
+    pub fn load_bytes(data: &[u8]) -> Result<Config, ConfigError> {
+        load_bytes(data)
+    }
+
     /// Parses a config payload, as upstream's `ParseConfigBytes` does.
     pub fn parse(data: impl AsRef<[u8]>) -> Result<Config, ConfigError> {
         let data = data.as_ref();
