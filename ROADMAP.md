@@ -10,7 +10,7 @@ Already in place:
 - The credential manager.
 - The management API subset T3 Code uses.
 - CLIProxyAPI's terminal UI (`open-ferry -tui`), as a client of the management API.
-- A web dashboard at `/dashboard/`, built into the binary in place of CLIProxyAPI's downloaded panel: usage, latency and estimated cost per request, model, credential and client key from a local SQLite ledger; a search of the request logs; and ready-made client setups.
+- A web dashboard at `/dashboard/`, built into the binary in place of CLIProxyAPI's downloaded panel: each credential's state at a glance (health, cooldowns and quota, with the reason and what to do about it), with sign-ins and uploads; usage, latency and estimated cost per request, model, credential and client key from a local SQLite ledger; a search of the request logs; and ready-made client setups.
 - Release basics: CI on Linux and Windows, a release workflow that builds binaries for Linux, macOS and Windows, a changelog, and a migration guide for CLIProxyAPI users.
 
 Still to come:
@@ -20,7 +20,6 @@ Still to come:
 - **Management writes:** the routes that change the config and credentials, which the dashboard and the TUI need. Each write is checked before it lands, is atomic, and keeps the previous file.
 - **The rest of the web dashboard**, which is to be much easier to use than CLIProxyAPI's management center:
   - **No YAML for the basics.** A first run gets you from nothing to a working client in a few steps: add a key or sign in, then copy a ready-made client setup.
-  - **Each credential's state at a glance.** Health, cooldowns and quota, each with the reason and what to do about it.
   - **Settings in forms.** Every setting is checked as you type, and a diff is shown before saving. The raw YAML is still there for those who want it.
 
 ## v2: Realtime
