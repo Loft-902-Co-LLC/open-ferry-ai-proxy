@@ -101,4 +101,4 @@ A run that failed may have made attestations already. They stay, but they only v
   - A new release target needs adding to the script's `TARGETS` too; until it is, its build fails at packaging.
 - **Actions** are pinned to full commit SHAs, and Dependabot proposes updates.
 - **Attestations** need the repository to be public, or on GitHub Enterprise Cloud if it is private.
-- **Tag protection.** Consider a ruleset that lets only the maintainer create `v*` tags, since pushing one starts a release.
+- **Tag protection.** Pushing a `v*` tag starts a release, so the repository's "Protect release tags" ruleset lets only its admins create, move or delete one.
