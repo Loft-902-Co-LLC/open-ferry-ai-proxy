@@ -46,6 +46,11 @@
 //!   writes and its `LoadConfig` refuses still come up, and count as
 //!   equivalent where open-ferry refuses the write (see
 //!   `config_save::drop_unloadable`).
+//! - A save of the file as it stands once a save may have left two OAuth
+//!   channels in it that are the same once trimmed and in lower case (the
+//!   writer keeps the file's channel and adds the config's): which one Go's
+//!   loader keeps depends on its map order (UPSTREAM.md's "Maps iterate in
+//!   key order"). Such a step saves a changed config instead.
 //! - What [`super::config_diff`]'s generator avoids, and timestamps.
 
 use std::collections::BTreeMap;
@@ -203,6 +208,12 @@ struct File {
     /// whether it carries untyped fields.
     claude: Vec<(String, bool)>,
     v8: bool,
+    /// Whether the file was written with an OAuth channel that isn't
+    /// trimmed and in lower case, which the writer keeps.
+    raw_channels: bool,
+    /// Whether a save may have added a channel beside one of those that is
+    /// the same once trimmed and in lower case.
+    channels_collide: bool,
 }
 
 impl File {
@@ -210,7 +221,19 @@ impl File {
     /// already in it, or upstream reads it so (see [`reads_as_v8`]).
     fn saved(&mut self, migrate: bool) {
         self.v8 |= migrate || reads_as_v8(&self.typed, &self.untyped);
+        self.channels_collide |= self.raw_channels;
     }
+}
+
+/// Whether an OAuth map of `typed` has a channel that isn't trimmed and in
+/// lower case.
+fn raw_channels(typed: &Map<String, Value>) -> bool {
+    OAUTH_MAPS
+        .iter()
+        .filter(|name| name.starts_with("oauth-"))
+        .filter_map(|name| typed.get(*name)?.as_object())
+        .flat_map(Map::keys)
+        .any(|channel| channel.trim().to_lowercase() != *channel)
 }
 
 /// Whether upstream's `IsV8ConfigLayout` reads a legacy file with these
@@ -243,6 +266,7 @@ impl Writes {
         }
         for _ in 0..=self.rng().below(if canonical { 2 } else { 4 }) {
             let step = match self.rng().below(20) {
+                0..=4 if file.channels_collide => self.save(&mut file, None),
                 0..=4 => {
                     let migrate = self.rng().chance(35);
                     file.saved(migrate);
@@ -344,10 +368,12 @@ impl Writes {
             .collect();
         let v8 = v8 || reads_as_v8(&typed, &untyped);
         let file = File {
+            raw_channels: raw_channels(&typed),
             typed,
             untyped,
             claude,
             v8,
+            channels_collide: false,
         };
         (text, kept, file)
     }
@@ -1227,6 +1253,32 @@ mod tests {
             "{v8} v8, {canonical} canonical"
         );
         assert_eq!(ops.len(), 3, "{ops:?}");
+    }
+
+    /// Not upstream's: once a save may have left two OAuth channels that
+    /// are the same once trimmed and in lower case, the file isn't saved as
+    /// it stands (seed 1's case 4999 did, after saving a file with
+    /// `' claude '`).
+    #[test]
+    fn colliding_channels_are_not_resaved() {
+        let typed = |channel: &str| {
+            let mut typed = Map::new();
+            typed.insert("oauth-model-alias".to_owned(), json!({ channel: [] }));
+            typed
+        };
+        assert!(raw_channels(&typed(" claude ")));
+        assert!(raw_channels(&typed("Claude")));
+        assert!(!raw_channels(&typed("claude")));
+        let cases = step_cases(1, 5000);
+        let case = cases.last().unwrap();
+        let file = case.options["file"].as_str().unwrap();
+        assert!(file.contains("' claude ':"), "{file}");
+        let steps = case.options["steps"].as_array().unwrap();
+        let first_save = steps.iter().position(|step| step["op"] == "save");
+        let resaved = steps.iter().enumerate().any(|(index, step)| {
+            Some(index) > first_save && step["op"] == "save" && step.get("config").is_none()
+        });
+        assert!(first_save.is_some() && !resaved, "{steps:?}");
     }
 
     /// Not upstream's: the untyped sections of a file in the writer's own
