@@ -136,8 +136,8 @@ jobs:
         include:
           # Each target builds natively on a runner of its own architecture:
           # rustls uses aws-lc-rs, whose C code wants the target's toolchain.
-          # The Linux runner's glibc is the oldest the Linux binaries run on
-          # (2.39 on Ubuntu 24.04). Labels are pinned so that a move of
+          # The Linux targets build in the container below, not on the
+          # runner's own Ubuntu. Labels are pinned so that a move of
           # ubuntu-latest or macos-latest doesn't change a release unseen.
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-24.04
@@ -150,9 +150,21 @@ jobs:
           - target: x86_64-pc-windows-msvc
             runner: windows-2025
     runs-on: ${{ matrix.runner }}
+    # The Linux binaries need the glibc of the system they were linked on, so
+    # they build in Debian 11 (bullseye), whose glibc is 2.31: the official
+    # Rust image, pinned by digest. The digest names a multi-platform index,
+    # so each runner pulls its own architecture. The image has what aws-lc-rs
+    # builds with (GCC 10.2; no CMake, Go or NASM needed on Linux) and
+    # rustup, which installs the toolchain rust-toolchain.toml names, as on
+    # the other runners. The other targets build on the runner itself.
+    container: ${{ endsWith(matrix.target, '-linux-gnu') && 'docker.io/library/rust:1-bullseye@sha256:4730e387a220a08a365c77da3096544dde214f9d796c16284d4be45438cad4a9' || null }}
     timeout-minutes: 90
     env:
       TARGET: ${{ matrix.target }}
+      # Read only when building for Linux: the newest glibc the binaries may
+      # need, that of the container above. The build fails if they need a
+      # newer one.
+      GLIBC_FLOOR: "2.31"
       VERSION: ${{ needs.meta.outputs.version }}
       OPEN_FERRY_COMMIT: ${{ needs.meta.outputs.commit }}
       OPEN_FERRY_BUILD_DATE: ${{ needs.meta.outputs.build-date }}
@@ -193,12 +205,20 @@ jobs:
       - name: Build
         run: cargo build --release --locked -p open-ferry --target "$TARGET"
 
-      - name: Report the glibc the binary needs
+      - name: Check the glibc the binary needs
         if: runner.os == 'Linux'
         run: |
-          glibc=$(objdump -T "target/$TARGET/release/open-ferry" | { grep -o 'GLIBC_[0-9.]*' || true; } | sort -uV | tail -n 1)
-          echo "$TARGET needs ${glibc:-no versioned glibc symbols}"
-          echo "$TARGET needs ${glibc:-no versioned glibc symbols}" >> "$GITHUB_STEP_SUMMARY"
+          # The newest glibc symbol version the binary links against.
+          glibc=$(objdump -T "target/$TARGET/release/open-ferry" | { grep -o 'GLIBC_[0-9][0-9.]*' || true; } | sed 's/^GLIBC_//' | sort -uV | tail -n 1)
+          if [ -z "$glibc" ]; then
+            echo "::error::$TARGET has no versioned glibc symbols, so its glibc can't be checked"
+            exit 1
+          fi
+          echo "$TARGET needs glibc $glibc; the floor is $GLIBC_FLOOR" | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$(printf '%s\n' "$GLIBC_FLOOR" "$glibc" | sort -V | tail -n 1)" != "$GLIBC_FLOOR" ]; then
+            echo "::error::$TARGET needs glibc $glibc, newer than the floor $GLIBC_FLOOR"
+            exit 1
+          fi
 
       - name: Package
         id: package

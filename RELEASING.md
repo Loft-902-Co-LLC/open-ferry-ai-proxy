@@ -78,14 +78,16 @@ A run that failed may have made attestations already. They stay, but they only v
 
   | Target | Runner |
   |---|---|
-  | `x86_64-unknown-linux-gnu` | `ubuntu-24.04` |
-  | `aarch64-unknown-linux-gnu` | `ubuntu-24.04-arm` |
+  | `x86_64-unknown-linux-gnu` | `ubuntu-24.04`, in the Debian 11 container |
+  | `aarch64-unknown-linux-gnu` | `ubuntu-24.04-arm`, in the Debian 11 container |
   | `x86_64-apple-darwin` | `macos-15-intel` |
   | `aarch64-apple-darwin` | `macos-15` |
   | `x86_64-pc-windows-msvc` | `windows-2025` |
 
   Each target builds natively on a runner of its own architecture. Move the labels on when GitHub deprecates an image (see the [runner images](https://github.com/actions/runner-images) announcements).
-- **glibc.** The Linux binaries need the glibc of the Ubuntu they were built on: 2.39 or newer on Ubuntu 24.04. Each build's summary shows the newest glibc symbol the binary uses. Building on a newer Ubuntu raises the requirement, so mention it in the changelog when you change the runner.
+- **glibc.** The Linux binaries need glibc 2.31 or newer, as on Debian 11 and Ubuntu 20.04. A binary needs the glibc of the system it was linked on, so the Linux targets don't build on the runner's Ubuntu but in a container of Debian 11 (bullseye): the official Rust image, `rust:1-bullseye`, pinned by digest in the workflow's `container`. The image brings GCC, which aws-lc-rs compiles its C code with, and rustup, which installs the toolchain `rust-toolchain.toml` names. Each build's summary shows the newest glibc symbol the binary uses, and the build fails if it is newer than `GLIBC_FLOOR` (2.31).
+  - Debian 11's long-term support ended in August 2026. That matters little for an image that only builds, and the digest keeps it as it is, so keep the pin unless a build needs a newer C compiler.
+  - Moving to a newer image, such as Debian 12 (glibc 2.36), raises the floor. Change `GLIBC_FLOOR`, the README's install section and this paragraph with it, and mention it in the changelog.
 - **macOS.** The binaries run on macOS 11 or newer, set by `MACOSX_DEPLOYMENT_TARGET`.
 - **Windows.** The binary links the C runtime statically, so it doesn't need the Visual C++ Redistributable.
 - **Build information.** `OPEN_FERRY_COMMIT` and `OPEN_FERRY_BUILD_DATE` are set at build time. They are the management API's `X-CPA-COMMIT` and `X-CPA-BUILD-DATE` headers. A build without them says `none` and `unknown`.

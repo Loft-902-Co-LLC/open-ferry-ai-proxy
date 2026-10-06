@@ -33,7 +33,7 @@ Each [release](https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases) 
 | macOS, Apple silicon | `open-ferry-<version>-aarch64-apple-darwin.tar.gz` |
 | Windows, x86-64 | `open-ferry-<version>-x86_64-pc-windows-msvc.zip` |
 
-- **Linux:** the binaries need glibc 2.39 or newer, as on Ubuntu 24.04, Debian 13, Fedora 40 and RHEL 10. On older systems, build from source.
+- **Linux:** the binaries need glibc 2.31 or newer, as on Debian 11, Ubuntu 20.04, Fedora 32, RHEL 9 and Amazon Linux 2023, or later. On older systems, build from source.
 - **macOS:** the binaries need macOS 11 or newer.
 
 Each archive holds the `open-ferry` binary (`open-ferry.exe` on Windows), this README and the licenses. Put the binary on your `PATH`. Run it in the directory that holds your `config.yaml`, or point to the file with `-config`.
