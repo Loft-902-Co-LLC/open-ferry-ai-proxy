@@ -36,7 +36,10 @@
 //! - Codex Alpha Search is one call, [`Dispatcher::codex_alpha_search`],
 //!   where upstream's handler picks the credential and sends the request
 //!   through the auth manager itself.
+//! - A finished video is fetched with [`Dispatcher::download`], where
+//!   upstream's handler looks the credential up and fetches it itself.
 
+mod download;
 mod error;
 mod http_call;
 
@@ -50,6 +53,7 @@ use http::HeaderMap;
 
 use crate::observe::Observation;
 
+pub use download::{Download, Downloaded};
 pub use error::{ErrorKind, ExecError, TransportFault, WsClose};
 pub use http_call::{AlphaSearch, HttpCall, HttpReply, HttpTarget};
 pub use open_ferry_translate::registry::Format;
@@ -258,6 +262,18 @@ pub trait Dispatcher: Send + Sync + 'static {
                 ExecError::new(ErrorKind::Upstream, "Codex auth manager unavailable")
                     .with_status(503),
             )
+        })
+    }
+
+    /// Fetches a file a provider made from the URL it gave, through the
+    /// proxy of the credential that made it and without its token (the
+    /// fetch in upstream's `writeVideoContentFromURL`). The answer comes
+    /// back whatever its status; an error means none came, and carries the
+    /// status to answer with. Nothing is recorded on the credential. The
+    /// default fetches nothing: 502.
+    fn download(&self, _download: Download) -> BoxFuture<'_, Result<Downloaded, ExecError>> {
+        Box::pin(async {
+            Err(ExecError::new(ErrorKind::Upstream, "downloads aren't supported").with_status(502))
         })
     }
 }

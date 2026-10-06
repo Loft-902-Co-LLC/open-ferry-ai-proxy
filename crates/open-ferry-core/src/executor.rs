@@ -19,6 +19,9 @@
 //!   The management API's `api-call` doesn't go through it.
 //! - Upstream's optional interfaces (`ExecutionSessionCloser` and others) are
 //!   methods with defaults.
+//! - [`ProviderExecutor::download`] fetches a file a provider made, which
+//!   upstream's video handler fetches with an HTTP client of its own; only
+//!   xAI's executor does, and the default refuses.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,7 +30,8 @@ use futures_core::future::BoxFuture;
 
 use crate::auth::Auth;
 use crate::exec::{
-    ErrorKind, ExecError, HttpCall, HttpReply, Options, Request, Response, StreamResponse,
+    Downloaded, ErrorKind, ExecError, HttpCall, HttpReply, Options, Request, Response,
+    StreamResponse,
 };
 
 /// Calls one provider with a credential (upstream's `ProviderExecutor`).
@@ -90,6 +94,19 @@ pub trait ProviderExecutor: Send + Sync + 'static {
             self.id()
         );
         Box::pin(async move { Err(ExecError::new(ErrorKind::Upstream, message)) })
+    }
+
+    /// Fetches `url`, a file the provider made, with no credential headers,
+    /// through `auth`'s proxy, or the global proxy without a credential
+    /// (see [`crate::exec::Download`]). The answer comes back whatever its
+    /// status; an error means none came. The default fetches nothing.
+    fn download(
+        &self,
+        _auth: Option<Arc<Auth>>,
+        _url: String,
+    ) -> BoxFuture<'_, Result<Downloaded, ExecError>> {
+        let message = format!("{} executor: downloads aren't supported", self.id());
+        Box::pin(async move { Err(ExecError::new(ErrorKind::Upstream, message).with_status(502)) })
     }
 }
 

@@ -64,6 +64,7 @@ mod cooldown;
 pub mod cooldown_store;
 mod cooldown_view;
 mod credential;
+mod download;
 mod error_events;
 mod execute;
 mod lifecycle;
@@ -106,8 +107,8 @@ use futures_core::future::BoxFuture;
 
 use crate::auth::{Auth, AuthStore, Timestamp};
 use crate::exec::{
-    AlphaSearch, Dispatcher, ExecError, HttpReply, Options, ProviderId, Request, Response,
-    StreamResponse, WebsocketSupport,
+    AlphaSearch, Dispatcher, Download, Downloaded, ExecError, HttpReply, Options, ProviderId,
+    Request, Response, StreamResponse, WebsocketSupport,
 };
 use crate::executor::ProviderExecutor;
 use models::OAuthAliasTable;
@@ -429,5 +430,9 @@ impl Dispatcher for Manager {
         request: AlphaSearch,
     ) -> BoxFuture<'_, Result<HttpReply, ExecError>> {
         Box::pin(self.alpha_search(request))
+    }
+
+    fn download(&self, download: Download) -> BoxFuture<'_, Result<Downloaded, ExecError>> {
+        Box::pin(Manager::download(self, download))
     }
 }

@@ -135,7 +135,7 @@ impl fmt::Debug for AlphaSearch {
 }
 
 /// A header map's names, for `Debug` output without the values.
-struct HeaderNames<'h>(&'h HeaderMap);
+pub(super) struct HeaderNames<'h>(pub(super) &'h HeaderMap);
 
 impl fmt::Debug for HeaderNames<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -145,7 +145,7 @@ impl fmt::Debug for HeaderNames<'_> {
 
 /// `url` with its user info, query and fragment, which may hold secrets,
 /// replaced by `[redacted]`.
-fn redact_url(url: &str) -> String {
+pub(super) fn redact_url(url: &str) -> String {
     let (before, tail) = match url.find(['?', '#']) {
         Some(cut) => (
             url.get(..cut).unwrap_or_default(),

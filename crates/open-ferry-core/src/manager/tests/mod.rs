@@ -60,6 +60,7 @@ mod cooldown_state;
 mod cooldown_state_store;
 mod cooldown_view;
 mod credential_policy;
+mod download;
 mod force_refresh;
 mod forced_provider;
 mod media_source_formats;
