@@ -1,6 +1,6 @@
 /target
 node_modules/
-/ui/dist
+/dashboard/dist
 
 # Local config and credentials: never commit these
 /config.yaml

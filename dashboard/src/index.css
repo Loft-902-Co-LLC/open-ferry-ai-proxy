@@ -1,0 +1,98 @@
+@import "tailwindcss";
+
+/*
+ * Colours are named for their role and switch with the system's light or
+ * dark preference. Each text colour meets WCAG AA (4.5:1) on the surfaces it
+ * is used on, in both themes.
+ */
+:root {
+  color-scheme: light dark;
+  --of-canvas: #f6f8fa;
+  --of-surface: #ffffff;
+  --of-raised: #eff2f5;
+  --of-fg: #1f2328;
+  --of-muted: #59636e;
+  --of-line: #d1d9e0;
+  --of-accent: #0969da;
+  --of-accent-strong: #0969da;
+  --of-accent-fg: #ffffff;
+  --of-accent-soft: #ddf4ff;
+  --of-ok: #1a7f37;
+  --of-ok-soft: #dafbe1;
+  --of-warn: #9a6700;
+  --of-warn-soft: #fff8c5;
+  --of-danger: #d1242f;
+  --of-danger-strong: #cf222e;
+  --of-danger-soft: #ffebe9;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --of-canvas: #0d1117;
+    --of-surface: #151b23;
+    --of-raised: #212830;
+    --of-fg: #f0f6fc;
+    --of-muted: #9198a1;
+    --of-line: #3d444d;
+    --of-accent: #4493f8;
+    --of-accent-strong: #1f6feb;
+    --of-accent-fg: #ffffff;
+    --of-accent-soft: #11294a;
+    --of-ok: #3fb950;
+    --of-ok-soft: #10261b;
+    --of-warn: #d29922;
+    --of-warn-soft: #2a2213;
+    --of-danger: #f85149;
+    --of-danger-strong: #da3633;
+    --of-danger-soft: #2c1619;
+  }
+}
+
+@theme inline {
+  --color-canvas: var(--of-canvas);
+  --color-surface: var(--of-surface);
+  --color-raised: var(--of-raised);
+  --color-fg: var(--of-fg);
+  --color-muted: var(--of-muted);
+  --color-line: var(--of-line);
+  --color-accent: var(--of-accent);
+  --color-accent-strong: var(--of-accent-strong);
+  --color-accent-fg: var(--of-accent-fg);
+  --color-accent-soft: var(--of-accent-soft);
+  --color-ok: var(--of-ok);
+  --color-ok-soft: var(--of-ok-soft);
+  --color-warn: var(--of-warn);
+  --color-warn-soft: var(--of-warn-soft);
+  --color-danger: var(--of-danger);
+  --color-danger-strong: var(--of-danger-strong);
+  --color-danger-soft: var(--of-danger-soft);
+  --font-sans:
+    system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans",
+    sans-serif;
+  --font-mono:
+    ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+@layer base {
+  html {
+    @apply bg-canvas font-sans text-fg antialiased;
+  }
+
+  body {
+    @apply min-h-screen text-sm leading-6;
+  }
+
+  :focus-visible {
+    @apply outline-2 outline-offset-2 outline-accent;
+  }
+
+  a {
+    @apply text-accent underline-offset-2 hover:underline;
+  }
+
+  code,
+  kbd,
+  pre {
+    @apply font-mono;
+  }
+}
