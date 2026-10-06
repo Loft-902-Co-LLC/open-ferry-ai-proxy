@@ -161,6 +161,10 @@ pub(super) fn config(config: &Config) -> Json {
             "disable-image-generation",
             image_generation(config.disable_image_generation),
         )
+        .omit_empty(
+            "video-result-auth-cache-ttl",
+            string(&config.video_result_auth_cache_ttl),
+        )
         .with("force-model-prefix", Json::Bool(config.force_model_prefix))
         .with("request-log", Json::Bool(config.request_log))
         .with("api-keys", strings(&config.api_keys))

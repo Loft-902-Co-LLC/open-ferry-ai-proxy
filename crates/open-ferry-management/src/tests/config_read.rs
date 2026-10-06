@@ -1401,6 +1401,42 @@ async fn disable_image_generation_is_read() {
     }
 }
 
+/// Not upstream's: `video-result-auth-cache-ttl` is written after
+/// `disable-image-generation` as it is in the file, from either layout,
+/// and left out when empty, as upstream's `omitempty` string field is.
+#[tokio::test]
+async fn video_result_auth_cache_ttl_is_read() {
+    for (raw, ttl) in [
+        (
+            "port: 1
+", "",
+        ),
+        (
+            "port: 1
+video-result-auth-cache-ttl: ''
+",
+            "",
+        ),
+        (
+            "port: 1
+video-result-auth-cache-ttl: 45m
+",
+            r#""video-result-auth-cache-ttl":"45m","#,
+        ),
+        (
+            "server: {port: 1}
+multimedia: {video-result-auth-cache-ttl: ' 2h '}
+",
+            r#""video-result-auth-cache-ttl":" 2h ","#,
+        ),
+    ] {
+        let answer = with_config(raw).get("/v0/management/config").await;
+        assert_eq!(answer.status, StatusCode::OK);
+        let part = format!(r#""disable-image-generation":false,{ttl}"force-model-prefix":false,"#);
+        assert!(answer.body.contains(&part), "{raw}: {}", answer.body);
+    }
+}
+
 /// The `payload` upstream writes when the file has none.
 const NO_PAYLOAD: &str =
     r#"{"default":null,"default-raw":null,"override":null,"override-raw":null,"filter":null}"#;

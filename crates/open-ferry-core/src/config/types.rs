@@ -55,6 +55,9 @@ pub struct Config {
     pub disable_image_generation: DisableImageGeneration,
     /// Requires explicit model prefixes to reach prefixed credentials.
     pub force_model_prefix: bool,
+    /// How long a video's ID stays pinned to the credential that made it,
+    /// as a Go duration such as `30m` or `3h`; empty or invalid uses 3h.
+    pub video_result_auth_cache_ttl: String,
     /// Enables detailed request logging.
     pub request_log: bool,
     /// Keys clients use to authenticate to this proxy.
@@ -170,6 +173,7 @@ impl Default for Config {
             proxy_url: String::new(),
             disable_image_generation: DisableImageGeneration::Off,
             force_model_prefix: false,
+            video_result_auth_cache_ttl: String::new(),
             request_log: false,
             api_keys: Vec::new(),
             passthrough_headers: false,
@@ -237,6 +241,16 @@ impl Config {
             _ => RoutingStrategy::RoundRobin,
         }
     }
+
+    /// How long a video's ID stays pinned to the credential that made it:
+    /// `video-result-auth-cache-ttl` when it is a positive Go duration,
+    /// else three hours (upstream's `videoAuthBindingTTL`).
+    pub fn video_result_auth_cache_ttl_duration(&self) -> Duration {
+        match parse_go_duration(self.video_result_auth_cache_ttl.trim()) {
+            Some(nanos) if nanos > 0 => Duration::from_nanos(nanos.unsigned_abs()),
+            _ => Duration::from_secs(3 * 60 * 60),
+        }
+    }
 }
 
 impl fmt::Debug for Config {
@@ -246,6 +260,10 @@ impl fmt::Debug for Config {
             .field("proxy_url", &Redacted(&self.proxy_url))
             .field("disable_image_generation", &self.disable_image_generation)
             .field("force_model_prefix", &self.force_model_prefix)
+            .field(
+                "video_result_auth_cache_ttl",
+                &self.video_result_auth_cache_ttl,
+            )
             .field("request_log", &self.request_log)
             .field("api_keys", &RedactedList(&self.api_keys))
             .field("passthrough_headers", &self.passthrough_headers)
@@ -1140,6 +1158,25 @@ mod tests {
         let mut config = Config::default();
         config.routing.strategy = "F\u{130}LL-FIRST".to_owned();
         assert_eq!(config.routing_strategy(), RoutingStrategy::FillFirst);
+    }
+
+    // Ported from TestVideoAuthBindingTTLUsesConfig
+    // (sdk/api/handlers/openai/openai_videos_handlers_test.go), plus the
+    // empty, zero and negative cases upstream's code gives 3h.
+    #[test]
+    fn video_result_auth_cache_ttl_is_a_positive_go_duration() {
+        let ttl = |text: &str| {
+            Config {
+                video_result_auth_cache_ttl: text.to_owned(),
+                ..Config::default()
+            }
+            .video_result_auth_cache_ttl_duration()
+        };
+        assert_eq!(ttl("45m"), Duration::from_secs(45 * 60));
+        assert_eq!(ttl(" 1h30m "), Duration::from_secs(90 * 60));
+        for text in ["invalid", "", "0", "0s", "-5m", "30"] {
+            assert_eq!(ttl(text), Duration::from_secs(3 * 60 * 60), "{text:?}");
+        }
     }
 
     #[test]

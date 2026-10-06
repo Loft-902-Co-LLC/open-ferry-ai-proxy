@@ -30,8 +30,9 @@
 //! `auth-auto-refresh-workers`,
 //! `request-retry`, `max-retry-credentials`, `max-retry-interval`,
 //! `quota-exceeded`, `routing.strategy`, `ws-auth`, `force-model-prefix`,
-//! `client.codex`, `codex` (minus cloaking and the live media relay),
-//! `codex-header-defaults.beta-features`, `claude.model-level-cooling`,
+//! `video-result-auth-cache-ttl`, `client.codex`, `codex` (minus cloaking
+//! and the live media relay), `codex-header-defaults.beta-features`,
+//! `claude.model-level-cooling`,
 //! `xai`, `gemini-api-key`, `interactions-api-key`, `codex-api-key`,
 //! `xai-api-key`, `meta-api-key`, `claude-api-key` (minus `cloak` and
 //! `fingerprint-profile`), `openai-compatibility`, `vertex-api-key`,
@@ -51,7 +52,7 @@
 //! - Other providers: `antigravity`, `antigravity-signature-*`, `devin`.
 //! - Features not ported here: `plugins`, `pprof`, `discovery`, `models`
 //!   (the model catalog sources), `gpt-image-2-base-model`,
-//!   `video-result-auth-cache-ttl`, `codex.live-media-relay`.
+//!   `codex.live-media-relay`.
 //! - Deferred: `credential-concurrency` and `credential-in-flight`.
 //!
 //! Upstream's `home` section has no YAML form and isn't read.
