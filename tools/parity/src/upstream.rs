@@ -47,6 +47,12 @@ impl Upstream {
     /// each `go/interactions/parity_*.go` and `go/helps/parity_*.go` joins
     /// the `main.go` beside it. The Interactions harness is then run once
     /// with no input, as no suite may use it yet.
+    ///
+    /// The builds use a Go build cache of `work_dir`'s own, `go-build`.
+    /// Every checkout overlays the same paths in the CLIProxyAPI module with
+    /// its own files, and with the shared cache, parity runs in two
+    /// checkouts at once got harnesses with the other's files, or input
+    /// they couldn't read.
     pub fn build(dir: &Path, go: &Path, work_dir: &Path) -> Result<Self, Box<dyn Error>> {
         let dir = std::path::absolute(dir)?;
         if !dir.join("go.mod").is_file() {
@@ -123,6 +129,7 @@ impl Upstream {
         ] {
             let status = Command::new(go)
                 .current_dir(&dir)
+                .env("GOCACHE", work_dir.join("go-build"))
                 .arg("build")
                 .arg("-overlay")
                 .arg(&overlay)
