@@ -83,6 +83,9 @@ mod types;
 mod v8;
 mod watcher;
 mod yaml;
+// Used by the config writer, which builds on it.
+#[allow(dead_code)]
+pub(crate) mod yaml3;
 
 use std::fmt;
 
