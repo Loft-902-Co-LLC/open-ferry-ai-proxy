@@ -8,6 +8,7 @@ import {
   USAGE_SERIES,
   USAGE_SUMMARY,
 } from "../../api/dashboard";
+import { USAGE_STATISTICS_ENABLED } from "../../api/management";
 import {
   ledger,
   logEntry,
@@ -21,7 +22,6 @@ import {
 } from "../../test/fixtures";
 import { mockApi, route, type MockRoute } from "../../test/mockApi";
 import { renderApp } from "../../test/renderApp";
-import { USAGE_STATISTICS_ENABLED } from "./LedgerNotices";
 
 /** A server with usage recorded, one call, and its log. */
 function usageServer(...overrides: MockRoute[]) {

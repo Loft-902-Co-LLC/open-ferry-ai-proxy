@@ -15,6 +15,7 @@ import {
   type UsageRequestsPage,
 } from "../../api/dashboard";
 import { useApiCall, useApiQuery } from "../../api/hooks";
+import { REQUEST_LOG_SETTING } from "../../api/management";
 import { Alert } from "../../components/Alert";
 import { Badge } from "../../components/Badge";
 import { Button } from "../../components/Button";
@@ -23,6 +24,7 @@ import { ProblemNotice } from "../../components/ProblemNotice";
 import { Loading } from "../../components/QueryState";
 import { Spinner } from "../../components/Spinner";
 import { Table, Td, Th } from "../../components/Table";
+import { TurnOnSetting } from "../../components/TurnOnSetting";
 import {
   formatCompact,
   formatCost,
@@ -264,8 +266,14 @@ export function RecentCalls({
         <Alert tone="info">
           <p>
             <span className="font-medium">request-log is off</span>, so only failed requests have
-            logs. Turn it on in Settings to log every request.
+            logs.
           </p>
+          <TurnOnSetting
+            path={REQUEST_LOG_SETTING}
+            label="Log every request"
+            configKey="request-log"
+            invalidate={[[REQUEST_LOGS]]}
+          />
         </Alert>
       )}
       {calls.isPending && <Loading>Loading calls…</Loading>}

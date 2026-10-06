@@ -11,6 +11,7 @@ import { useSession } from "../session/session";
 export const NAV_ITEMS: readonly { to: string; label: string }[] = [
   { to: "/", label: "Overview" },
   { to: "/usage", label: "Usage" },
+  { to: "/logs", label: "Logs" },
   { to: "/about", label: "About" },
 ];
 

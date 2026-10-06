@@ -16,6 +16,12 @@ const UsagePage = lazy(() =>
 const LedgerPage = lazy(() =>
   import("../pages/usage/LedgerPage").then((module) => ({ default: module.LedgerPage })),
 );
+const LogsPage = lazy(() =>
+  import("../pages/logs/LogsPage").then((module) => ({ default: module.LogsPage })),
+);
+const LogViewerPage = lazy(() =>
+  import("../pages/logs/LogViewerPage").then((module) => ({ default: module.LogViewerPage })),
+);
 
 /** Where a signed-out visit was headed, kept across the sign-in. */
 export interface ReturnTo {
@@ -45,6 +51,8 @@ export const routes: RouteObject[] = [
           { index: true, element: <OverviewPage /> },
           { path: "usage", element: <UsagePage /> },
           { path: "usage/ledger", element: <LedgerPage /> },
+          { path: "logs", element: <LogsPage /> },
+          { path: "logs/:name", element: <LogViewerPage /> },
           { path: "about", element: <AboutPage /> },
           { path: "*", element: <NotFoundPage /> },
         ],

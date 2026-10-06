@@ -5,6 +5,7 @@ import type {
   ClientSetup,
   LedgerState,
   LogEntry,
+  LogPiece,
   LogSearchPage,
   Metrics,
   Prices,
@@ -13,6 +14,7 @@ import type {
   UsageSeries,
   UsageSummary,
 } from "../api/dashboard";
+import type { ServerLogPage } from "../api/management";
 
 export function metrics(overrides: Partial<Metrics> = {}): Metrics {
   return {
@@ -165,6 +167,29 @@ export function logSearch(
     next_cursor: null,
     scanned: { files: logs.length, bytes: 48_120 * logs.length, limit_reached: false },
     request_log: true,
+    ...overrides,
+  };
+}
+
+/** A piece of `log` at `offset`: the rest of it unless `next_offset` says. */
+export function logPiece(content: string, overrides: Partial<LogPiece> = {}): LogPiece {
+  const offset = overrides.offset ?? 0;
+  return {
+    log: logEntry({ size: offset + content.length }),
+    offset,
+    next_offset: null,
+    content,
+    ...overrides,
+  };
+}
+
+/** An answer of upstream's `GET /v0/management/logs`. */
+export function serverLogPage(lines: string[], overrides: Partial<ServerLogPage> = {}): ServerLogPage {
+  return {
+    lines,
+    "line-count": lines.length,
+    "latest-timestamp": 1_791_201_482,
+    "next-cursor": "cursor-1",
     ...overrides,
   };
 }
