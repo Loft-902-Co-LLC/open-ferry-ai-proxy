@@ -18,6 +18,7 @@ import {
   type SignInStatus,
 } from "../../api/credentials";
 import { cooldown, credential, credentialList } from "../../test/fixtures";
+import { loadFirst } from "../../test/loadFirst";
 import { mockApi, route, type MockApi } from "../../test/mockApi";
 import { renderApp } from "../../test/renderApp";
 
@@ -114,6 +115,8 @@ function claudeSignIn(state: Server, statuses: SignInStatus[]) {
     }),
   );
 }
+
+loadFirst(() => import("./CredentialsPage"));
 
 describe("the credential list", () => {
   it("shows each credential's health, why, and what to do about it", async () => {

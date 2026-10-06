@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { REQUEST_LOGS, requestLogPath } from "../../api/dashboard";
 import { LOGGING_TO_FILE, REQUEST_LOG_SETTING, SERVER_LOGS } from "../../api/management";
 import { logEntry, logPiece, logSearch, serverLogPage } from "../../test/fixtures";
+import { loadFirst } from "../../test/loadFirst";
 import { mockApi, route, type MockApi } from "../../test/mockApi";
 import { renderApp } from "../../test/renderApp";
 import { KEEP_LINES, mergeServerLog } from "./ServerLog";
@@ -29,6 +30,9 @@ function lastSearch(api: MockApi) {
   }
   return search;
 }
+
+// One test opens a request log from the list.
+loadFirst(() => import("./LogsPage"), () => import("./LogViewerPage"));
 
 describe("the request log search", () => {
   it("lists the logs, newest first, each with a link to it", async () => {

@@ -9,8 +9,9 @@ const hasDom = typeof window !== "undefined";
 
 if (hasDom) {
   installDomGaps();
-  // Pages load lazily; the first load of one, with its chart library, can
-  // take over a second on a busy CI machine.
+  // A busy CI machine runs the tests several times slower than a quiet one.
+  // Lazy pages load before the tests that show them (loadFirst.ts), outside
+  // these waits.
   configure({ asyncUtilTimeout: 3000 });
 }
 

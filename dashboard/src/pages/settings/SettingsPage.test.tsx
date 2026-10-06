@@ -2,6 +2,7 @@ import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { API_KEYS, CONFIG, CONFIG_YAML, MANAGEMENT } from "../../api/management";
+import { loadFirst } from "../../test/loadFirst";
 import { mockApi, route, type MockApi } from "../../test/mockApi";
 import { renderApp } from "../../test/renderApp";
 import type { YamlEditorProps } from "./YamlEditor";
@@ -132,6 +133,8 @@ async function openSettings() {
   await screen.findByRole("textbox", { name: "Retries" });
   return view;
 }
+
+loadFirst(() => import("./SettingsPage"));
 
 describe("the settings form", () => {
   it("shows the settings as the server uses them", async () => {

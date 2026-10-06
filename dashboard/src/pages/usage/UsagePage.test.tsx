@@ -20,6 +20,7 @@ import {
   unavailableLedger,
   usageRequest,
 } from "../../test/fixtures";
+import { loadFirst } from "../../test/loadFirst";
 import { mockApi, route, type MockRoute } from "../../test/mockApi";
 import { renderApp } from "../../test/renderApp";
 
@@ -44,6 +45,8 @@ function params(api: ReturnType<typeof mockApi>, path: string, index = -1) {
   }
   return call.url.searchParams;
 }
+
+loadFirst(() => import("./UsagePage"));
 
 describe("the Usage page", () => {
   it("shows the totals, the chart's numbers and the calls", async () => {

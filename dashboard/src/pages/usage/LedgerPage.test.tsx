@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import { USAGE_LEDGER, USAGE_PRICES, USAGE_RECORDS } from "../../api/dashboard";
 import { ledger, prices } from "../../test/fixtures";
+import { loadFirst } from "../../test/loadFirst";
 import { mockApi, route, type MockRoute } from "../../test/mockApi";
 import { renderApp } from "../../test/renderApp";
 
@@ -14,6 +15,8 @@ function ledgerServer(...overrides: MockRoute[]) {
   api.use(...overrides);
   return api;
 }
+
+loadFirst(() => import("./LedgerPage"));
 
 describe("the Ledger and prices page", () => {
   it("describes the ledger", async () => {
