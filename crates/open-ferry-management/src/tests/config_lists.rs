@@ -2,7 +2,7 @@
 //! channels' lists.
 //!
 //! Upstream has no tests of these routes but those of the file they save
-//! (in config_v8_test.go), which are ported with the config writer; these
+//! (in config_v8_test.go), which are ported in `config_v8_write`; these
 //! are open-ferry's, and check the config the
 //! [`FakeWriter`](super::FakeWriter) is asked to save.
 

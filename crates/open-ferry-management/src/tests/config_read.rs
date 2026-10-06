@@ -21,7 +21,7 @@
 //! - Upstream's tests write the config through these routes and read it
 //!   back. Only their reads are kept here, over an API without a config
 //!   writer, where each write answers 503 and leaves the file as it was;
-//!   their writes are ported with the config writer. So
+//!   their writes are ported in `config_v8_write`. So
 //!   `TestConfigV8MigrationAndLegacyAPI`,
 //!   `TestConfigV8ClientMultiAgentMigration`,
 //!   `TestConfigV8HistoricalFieldPaths` and
@@ -30,7 +30,7 @@
 //!   drops its `PUT` round trips.
 //! - `TestConfigV8APIKeysExposeAuthIndex_Issue6287` leaves out its cases
 //!   5, 6 and 10, which write the config back with the `auth_index` it
-//!   read; they are ported with the config writer.
+//!   read; they are ported in `config_v8_write`.
 //! - `TestManagementV8RoutesShareAccessControl` requests only this module's
 //!   routes (the credential list is checked in `server_management_v8`), and
 //!   drops its Home mode case: Home mode isn't ported.
@@ -44,7 +44,7 @@
 //!   `TestConfigV8EmptyExcludedModelsSurvivesSave`,
 //!   `TestConfigV8DeletePreservesDocumentPresence`), the rest of
 //!   config_v8_compatibility_test.go and config_v8_upstream_test.go test
-//!   the file written, and are ported with the config writer. The other
+//!   the file written, and are ported in `config_v8_write`. The other
 //!   config_*_test.go files that test writes are ported in `config_keys`
 //!   (which lists those dropped), `config_settings` and
 //!   `crate::config_sanitize`.
@@ -218,7 +218,7 @@ async fn assert_unported(api: &Api, method: Method, path: &str) {
 
 /// Checks that `method` on `path`, a write, is refused by an API without a
 /// config writer. The writes themselves are tested with a writer in
-/// `config_write`.
+/// `config_write`, and with the file one in `config_v8_write`.
 async fn assert_needs_writer(api: &Api, method: Method, path: &str) {
     let answer = api.send(keyed(method.clone(), path, "{}")).await;
     assert_eq!(
@@ -983,7 +983,7 @@ fn assert_auth_indexes(groups: &Value, want: GroupIndexes<'_>, indexes: &[String
 /// shows the `auth_index` of the credential it makes, read alone, with the
 /// other providers' or in the whole config, whether the manager holds the
 /// credentials or not, and `config.yaml` has none. Its cases 5 and 6 write
-/// the config, and are dropped.
+/// the config, and are ported in `config_v8_write`.
 #[tokio::test]
 async fn config_v8_api_keys_expose_auth_index() {
     let keys = "  codex:
@@ -1052,9 +1052,9 @@ async fn config_v8_api_keys_expose_auth_index() {
 /// a normalized prefix), keys the loader merges share an index, and keys
 /// the loader drops (in a group without a base URL, an empty Claude or Meta
 /// key, a `dca:` Meta key) have none. Its case 10 writes the config, and is
-/// dropped; that a header named `auth_index` reads as it is, is checked
-/// instead (not upstream's; recorded from upstream's `ConfigV8` (v8.0.15)
-/// under Go 1.26.4).
+/// ported in `config_v8_write`; that a header named `auth_index` reads as it
+/// is, is checked here too (not upstream's; recorded from upstream's
+/// `ConfigV8` (v8.0.15) under Go 1.26.4).
 #[tokio::test]
 async fn config_v8_api_keys_expose_auth_index_as_the_loader_makes_them() {
     type Case<'a> = (

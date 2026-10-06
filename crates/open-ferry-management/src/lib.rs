@@ -81,7 +81,8 @@ use open_ferry_core::observe::client_ip;
 pub use access::{Refusal, check_address, check_key, set_build_headers};
 pub use client_ip::TrustedProxies;
 pub use config_write::{
-    ConfigReload, ConfigWriter, ReloadFuture, V8Edit, V8EditError, V8Method, WriteError,
+    ConfigReload, ConfigWriter, FileConfigWriter, ReloadFuture, V8Edit, V8EditError, V8Method,
+    WriteError,
 };
 pub use credential_sync::{CredentialSync, SyncError, SyncFuture};
 pub use log_dir::is_refused as is_refused_log_file;

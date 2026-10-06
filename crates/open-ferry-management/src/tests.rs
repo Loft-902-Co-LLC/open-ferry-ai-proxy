@@ -15,7 +15,10 @@
 //! [`FakeSync`] standing in for the service. The routes that write the
 //! config are tested with [`Api::writing`]: a [`FakeWriter`] records what
 //! they ask to write, and a [`FakeReload`] counts the reloads they ask
-//! for. [`Multipart`] builds the bodies of uploads.
+//! for; or, over a config file in a temporary directory, with
+//! [`Api::over_config_file`]: the [`FileConfigWriter`] the service uses
+//! writes the file, and a [`FileReload`] loads it again as the service
+//! does. [`Multipart`] builds the bodies of uploads.
 
 mod api_key_usage;
 mod api_tools;
@@ -31,6 +34,7 @@ mod config_keys;
 mod config_lists;
 mod config_read;
 mod config_settings;
+mod config_v8_write;
 mod config_write;
 mod credential_files;
 mod credential_state;
@@ -73,8 +77,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tower::ServiceExt as _;
 
 use crate::{
-    ConfigReload, ConfigWriter, CredentialSync, ManagementState, ReloadFuture, SyncError,
-    SyncFuture, V8Edit, V8EditError, WriteError, router,
+    ConfigReload, ConfigWriter, CredentialSync, FileConfigWriter, ManagementState, ReloadFuture,
+    SyncError, SyncFuture, V8Edit, V8EditError, WriteError, router,
 };
 
 /// The management key the tests set.
@@ -143,6 +147,28 @@ impl Api {
     /// reloading through the [`FakeReload`] (see [`Api::with_writer`]).
     fn writing(config: Config) -> Self {
         Self::with(config, None).with_writer()
+    }
+
+    /// The API over the config file of `dir`, written with `raw` first:
+    /// with the config the file loads as, key [`KEY`] as
+    /// `MANAGEMENT_PASSWORD` (the file need not hold one), the directory's
+    /// store, the [`FakeSync`] and the config path; saving the file with a
+    /// [`FileConfigWriter`] and reloading it with a [`FileReload`].
+    fn over_config_file(dir: &AuthDir, raw: &str) -> Self {
+        let path = dir.config_path();
+        std::fs::write(&path, raw).unwrap();
+        let config = Config::load(&path).unwrap();
+        let mut api = Self::over_with(dir, config, Some(KEY));
+        let reload = Arc::new(FileReload::new(path.clone()));
+        let state = api
+            .state
+            .clone()
+            .with_config_writer(Arc::new(FileConfigWriter::new(path)))
+            .with_config_reload(Arc::clone(&reload) as _);
+        reload.watch(state.clone());
+        api.router = router(state.clone());
+        api.state = state;
+        api
     }
 
     /// This API, saving the config through the [`FakeWriter`] and reloading
@@ -495,8 +521,6 @@ enum Written {
         config: Box<Config>,
         migrate_v8: bool,
     },
-    /// [`ConfigWriter::update_nested_scalar`].
-    Scalar(Vec<String>, String),
     /// [`ConfigWriter::write_file`].
     File(Vec<u8>),
     /// [`ConfigWriter::edit_v8`].
@@ -592,11 +616,6 @@ impl ConfigWriter for FakeWriter {
         })
     }
 
-    fn update_nested_scalar(&self, keys: &[&str], value: &str) -> Result<(), WriteError> {
-        let keys = keys.iter().map(|key| (*key).to_owned()).collect();
-        self.record(Written::Scalar(keys, value.to_owned()))
-    }
-
     fn write_file(&self, data: &[u8]) -> Result<(), WriteError> {
         self.record(Written::File(data.to_vec()))
     }
@@ -628,6 +647,41 @@ impl ConfigReload for FakeReload {
     fn reload(&self) -> ReloadFuture<'_> {
         self.count.fetch_add(1, Ordering::SeqCst);
         Box::pin(async {})
+    }
+}
+
+/// A [`ConfigReload`] that loads the config file again and gives the state
+/// the config it holds, as the service does. A file that doesn't load fails
+/// the test: every write is checked to load first.
+struct FileReload {
+    path: PathBuf,
+    /// The state given the config, once watched.
+    state: OnceLock<ManagementState>,
+}
+
+impl FileReload {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            state: OnceLock::new(),
+        }
+    }
+
+    /// Gives each config loaded to `state`. The state holds this reload,
+    /// so the two are never freed: watch only a test's own API.
+    fn watch(&self, state: ManagementState) {
+        assert!(self.state.set(state).is_ok(), "already watched");
+    }
+}
+
+impl ConfigReload for FileReload {
+    fn reload(&self) -> ReloadFuture<'_> {
+        Box::pin(async {
+            let config = Config::load(&self.path).unwrap();
+            if let Some(state) = self.state.get() {
+                state.set_config(Arc::new(config));
+            }
+        })
     }
 }
 

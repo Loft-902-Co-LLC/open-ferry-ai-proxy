@@ -22,7 +22,9 @@
 //!
 //! Only the management routes write the config, and only through the
 //! writer the service gives the state; nothing is written when the config
-//! is loaded.
+//! is loaded. The binary's service always gives one, a [`FileConfigWriter`]
+//! over the file it was started with, and has its file watcher load the
+//! file again after each save.
 //!
 //! Deviations from upstream:
 //! - Without a writer, as in a state made only with
@@ -38,11 +40,14 @@
 //!   first and reloads in the background, except for a status change on a
 //!   config API key, which it reloads first too.
 //! - Upstream numbers its reloads and skips one older than a reload
-//!   already applied. The reload here reads the file, which holds the
-//!   latest save, so there is nothing to skip.
+//!   already applied. The service's reload goes through its file watcher,
+//!   as upstream's hook goes through `ReloadConfigIfChanged`, and the
+//!   watcher's changes are applied in the order it read them, so there is
+//!   nothing to skip.
 
 use std::fmt;
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -50,6 +55,8 @@ use axum::body::{Body, Bytes};
 use axum::response::Response;
 use http::StatusCode;
 use open_ferry_core::config::Config;
+pub use open_ferry_core::config::v8_edit::{V8Edit, V8EditError, V8Method};
+use open_ferry_core::config::{save, v8_edit};
 
 use crate::auth_files::run_blocking;
 use crate::bind;
@@ -70,11 +77,6 @@ pub trait ConfigWriter: Send + Sync {
     /// legacy layout is saved in the v8 layout.
     fn save_preserving_comments(&self, config: &Config, migrate_v8: bool)
     -> Result<(), WriteError>;
-
-    /// Sets the scalar at `keys`, a path of mapping keys, to `value`,
-    /// leaving the rest of the file as it is (upstream's
-    /// `SaveConfigPreserveCommentsUpdateNestedScalar`).
-    fn update_nested_scalar(&self, keys: &[&str], value: &str) -> Result<(), WriteError>;
 
     /// Replaces the file with `data`, already checked to load (upstream's
     /// `WriteConfig`).
@@ -106,153 +108,97 @@ impl fmt::Display for WriteError {
 
 impl std::error::Error for WriteError {}
 
-/// The method of a v8 config write.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum V8Method {
-    /// Replaces the value at the path, or the whole config.
-    Put,
-    /// Merges the body into the value at the path, or into the whole
-    /// config: mappings key by key, anything else replaced. `null` is kept,
-    /// not deleted.
-    Patch,
-    /// Removes the value at the path, and the mappings it leaves empty.
-    Delete,
+/// The [`ConfigWriter`] the service uses: it writes the config file at a
+/// path with open-ferry-core's writer
+/// ([`save`](open_ferry_core::config::save) and
+/// [`v8_edit`](open_ferry_core::config::v8_edit)). Each write is checked to
+/// load, written atomically beside a backup of the file it replaces, and
+/// refused when the path is a symbolic link.
+#[derive(Clone, Debug)]
+pub struct FileConfigWriter {
+    path: PathBuf,
 }
 
-/// A v8 config write, as the route received it.
-#[derive(Clone, PartialEq, Eq)]
-pub struct V8Edit {
-    /// What to do.
-    pub method: V8Method,
-    /// The keys leading to the value, from the request path split on `/`;
-    /// empty for the whole config. A part may be empty, which the writer
-    /// refuses.
-    pub path: Vec<String>,
-    /// The request body, for `PUT` and `PATCH`.
-    pub body: Vec<u8>,
-    /// Whether the route was `PUT /v8/management/config.yaml`: the body is
-    /// YAML, and need not be JSON.
-    pub yaml: bool,
-}
+impl FileConfigWriter {
+    /// A writer for the config file at `path`.
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
 
-/// The body's length only: it may hold secrets.
-impl fmt::Debug for V8Edit {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("V8Edit")
-            .field("method", &self.method)
-            .field("path", &self.path)
-            .field("body_len", &self.body.len())
-            .field("yaml", &self.yaml)
-            .finish()
+    /// The file it writes.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 }
 
-/// Why [`ConfigWriter::edit_v8`] made no change, and so what the route
-/// answers.
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum V8EditError {
-    /// The file couldn't be read: 500 `read_failed`.
-    ReadFailed,
-    /// The file as it is doesn't read in the v8 layout: 500
-    /// `invalid_config` with the message.
-    StoredInvalid(String),
-    /// `DELETE` of the whole config: 400 `cannot_delete_config`.
-    CannotDeleteConfig,
-    /// `DELETE` of a path that doesn't exist: 404 `not_found`.
-    NotFound,
-    /// The body is empty or isn't YAML: 400 `invalid_body`.
-    InvalidBody,
-    /// A body sent to a JSON route isn't JSON: 400 `invalid_json`.
-    InvalidJson,
-    /// A body for the whole config isn't a mapping: 400
-    /// `config_must_be_object`.
-    ConfigMustBeObject,
-    /// A part of the path is empty, or passes through a value that isn't a
-    /// mapping: 400 `invalid_path`.
-    InvalidPath,
-    /// The result isn't a valid v8 config: 400 `invalid_config` with the
-    /// message.
-    InvalidConfig(String),
-    /// The write changes a field Home owns: 400 `read_only_field` naming
-    /// it.
-    ReadOnlyField(String),
-    /// The result doesn't load as a config: 422 `invalid_config` with the
-    /// message.
-    Unprocessable(String),
-    /// The file couldn't be written: 500 `write_failed` with the message.
-    WriteFailed(String),
-}
+impl ConfigWriter for FileConfigWriter {
+    fn save_preserving_comments(
+        &self,
+        config: &Config,
+        migrate_v8: bool,
+    ) -> Result<(), WriteError> {
+        save::save_preserving_comments(&self.path, config, migrate_v8)
+            .map_err(|error| WriteError::new(error.to_string()))
+    }
 
-impl V8EditError {
-    /// What a v8 route answers with (upstream's `ConfigV8`).
-    pub(crate) fn response(&self) -> Response {
-        let (status, error, detail) = match self {
-            Self::ReadFailed => (StatusCode::INTERNAL_SERVER_ERROR, "read_failed", None),
-            Self::StoredInvalid(message) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "invalid_config",
-                Some(("message", message)),
-            ),
-            Self::CannotDeleteConfig => (StatusCode::BAD_REQUEST, "cannot_delete_config", None),
-            Self::NotFound => (StatusCode::NOT_FOUND, "not_found", None),
-            Self::InvalidBody => (StatusCode::BAD_REQUEST, "invalid_body", None),
-            Self::InvalidJson => (StatusCode::BAD_REQUEST, "invalid_json", None),
-            Self::ConfigMustBeObject => (StatusCode::BAD_REQUEST, "config_must_be_object", None),
-            Self::InvalidPath => (StatusCode::BAD_REQUEST, "invalid_path", None),
-            Self::InvalidConfig(message) => (
-                StatusCode::BAD_REQUEST,
-                "invalid_config",
-                Some(("message", message)),
-            ),
-            Self::ReadOnlyField(field) => (
-                StatusCode::BAD_REQUEST,
-                "read_only_field",
-                Some(("field", field)),
-            ),
-            Self::Unprocessable(message) => (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "invalid_config",
-                Some(("message", message)),
-            ),
-            Self::WriteFailed(message) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "write_failed",
-                Some(("message", message)),
-            ),
-        };
-        let body = match detail {
-            None => Json::map([("error", Json::Str(error.to_owned()))]),
-            Some((name, value)) => Json::map([
-                ("error", Json::Str(error.to_owned())),
-                (name, Json::Str(value.clone())),
-            ]),
-        };
-        json::response(status, &body)
+    fn write_file(&self, data: &[u8]) -> Result<(), WriteError> {
+        save::write_file(&self.path, data).map_err(|error| WriteError::new(error.to_string()))
+    }
+
+    fn edit_v8(&self, edit: &V8Edit) -> Result<Config, V8EditError> {
+        v8_edit::edit_v8(&self.path, edit)
     }
 }
 
-impl fmt::Display for V8EditError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ReadFailed => f.write_str("read_failed"),
-            Self::StoredInvalid(message) => write!(f, "invalid_config: {message}"),
-            Self::CannotDeleteConfig => f.write_str("cannot_delete_config"),
-            Self::NotFound => f.write_str("not_found"),
-            Self::InvalidBody => f.write_str("invalid_body"),
-            Self::InvalidJson => f.write_str("invalid_json"),
-            Self::ConfigMustBeObject => f.write_str("config_must_be_object"),
-            Self::InvalidPath => f.write_str("invalid_path"),
-            Self::InvalidConfig(message) | Self::Unprocessable(message) => {
-                write!(f, "invalid_config: {message}")
-            }
-            Self::ReadOnlyField(field) => write!(f, "read_only_field: {field}"),
-            Self::WriteFailed(message) => write!(f, "write_failed: {message}"),
-        }
-    }
+/// What a v8 route answers when [`ConfigWriter::edit_v8`] made no change
+/// (upstream's `ConfigV8`).
+pub(crate) fn v8_error_response(error: &V8EditError) -> Response {
+    use V8EditError as E;
+    let (status, error, detail) = match error {
+        E::ReadFailed => (StatusCode::INTERNAL_SERVER_ERROR, "read_failed", None),
+        E::StoredInvalid(message) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "invalid_config",
+            Some(("message", message)),
+        ),
+        E::CannotDeleteConfig => (StatusCode::BAD_REQUEST, "cannot_delete_config", None),
+        E::NotFound => (StatusCode::NOT_FOUND, "not_found", None),
+        E::InvalidBody => (StatusCode::BAD_REQUEST, "invalid_body", None),
+        E::InvalidJson => (StatusCode::BAD_REQUEST, "invalid_json", None),
+        E::ConfigMustBeObject => (StatusCode::BAD_REQUEST, "config_must_be_object", None),
+        E::InvalidPath => (StatusCode::BAD_REQUEST, "invalid_path", None),
+        E::InvalidConfig(message) => (
+            StatusCode::BAD_REQUEST,
+            "invalid_config",
+            Some(("message", message)),
+        ),
+        E::ReadOnlyField(field) => (
+            StatusCode::BAD_REQUEST,
+            "read_only_field",
+            Some(("field", field)),
+        ),
+        E::Unprocessable(message) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_config",
+            Some(("message", message)),
+        ),
+        E::WriteFailed(message) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "write_failed",
+            Some(("message", message)),
+        ),
+        // A refusal core adds later, until it has its own answer.
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, "write_failed", None),
+    };
+    let body = match detail {
+        None => Json::map([("error", Json::Str(error.to_owned()))]),
+        Some((name, value)) => Json::map([
+            ("error", Json::Str(error.to_owned())),
+            (name, Json::Str(value.clone())),
+        ]),
+    };
+    json::response(status, &body)
 }
-
-impl std::error::Error for V8EditError {}
 
 /// The future a [`ConfigReload`] call returns: ready once the service has
 /// loaded the file and applied it.

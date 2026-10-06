@@ -5,9 +5,9 @@
 //! The routes of `crate::config_settings`, which change one setting.
 //!
 //! Upstream's tests of the file a setting is saved to (in
-//! config_v8_test.go and config_v8_compatibility_test.go) are ported with
-//! the config writer; here the config the [`FakeWriter`](super::FakeWriter)
-//! is asked to save is checked.
+//! config_v8_test.go and config_v8_compatibility_test.go) are ported in
+//! `config_v8_write`; here the config the
+//! [`FakeWriter`](super::FakeWriter) is asked to save is checked.
 //!
 //! Deviations from upstream:
 //! - `TestNormalizeRoutingStrategyWeightedRoundRobin` calls the helper;

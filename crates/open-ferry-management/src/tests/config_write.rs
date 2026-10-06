@@ -5,7 +5,7 @@
 //! Upstream has no tests of its own for this; these are open-ferry's. The
 //! routes' changes are tested in `config_settings`, `config_lists`,
 //! `config_keys` and `config_file_write`, and the file the writer writes
-//! once it is wired in.
+//! in `config_v8_write`.
 
 use futures_util::future::join_all;
 use http::{Method, StatusCode};

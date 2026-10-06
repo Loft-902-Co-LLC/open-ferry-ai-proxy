@@ -18,7 +18,7 @@
 //! Deviations from upstream:
 //! - `TestPatchPriorityForEveryProvider` and `TestPatchClaudeKeyPriority`
 //!   also look for `priority: 7` (`20`) in the file saved; that part is
-//!   ported with the config writer.
+//!   ported in `config_v8_write`.
 //! - The other tests in config_claude_key_test.go, and
 //!   config_codex_disable_cloaking_test.go, are dropped: they test the
 //!   client impersonation settings (`cloak`, `fingerprint-profile`,

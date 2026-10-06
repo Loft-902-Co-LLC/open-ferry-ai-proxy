@@ -119,7 +119,7 @@ pub(crate) fn routes() -> Vec<Route> {
                             .await
                         }
                         None => match config_write::writer(&state) {
-                            Ok(_) => V8EditError::NotFound.response(),
+                            Ok(_) => config_write::v8_error_response(&V8EditError::NotFound),
                             Err(response) => response,
                         },
                     }
@@ -184,7 +184,7 @@ async fn edit_with_body(
         Err(response) => return response,
     };
     let Some(path) = path else {
-        return V8EditError::InvalidPath.response();
+        return config_write::v8_error_response(&V8EditError::InvalidPath);
     };
     edit(
         state,
@@ -211,7 +211,7 @@ async fn edit(state: &ManagementState, edit: V8Edit) -> Response {
             let _guard = state.config_write_lock().lock().await;
             match run_blocking(move || writer.edit_v8(&edit)).await {
                 Ok(config) => state.set_config(Arc::new(config)),
-                Err(error) => return error.response(),
+                Err(error) => return config_write::v8_error_response(&error),
             }
         }
         config_write::reload(&state).await;

@@ -3,7 +3,7 @@
 //!
 //! Upstream's tests of these routes (in config_v8_test.go,
 //! config_v8_compatibility_test.go and config_v8_upstream_test.go) check
-//! the file written, and are ported with the config writer. These are
+//! the file written, and are ported in `config_v8_write`. These are
 //! open-ferry's: they check what the route asks the
 //! [`FakeWriter`](super::FakeWriter) to write, what it answers, and the
 //! config the handlers read afterwards.
