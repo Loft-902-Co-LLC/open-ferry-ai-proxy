@@ -1559,7 +1559,8 @@ fn expired_sessions_are_dropped() {
 // token endpoint's status, and `oauth-callback` answers anyone that the
 // login failed, not why, though the endpoint's answer quotes the code and
 // the PKCE verifier; the status a key reads keeps upstream's wording with
-// both redacted. A login that succeeds logs no token.
+// both redacted. A login that succeeds logs no token, nor the email its
+// credential file is named with: the name is cut to its ends.
 #[tokio::test]
 async fn exchange_failures_keep_secrets_out_of_answers_and_logs() {
     let (logs, _guard) = Logs::capture();
@@ -1636,14 +1637,20 @@ async fn exchange_failures_keep_secrets_out_of_answers_and_logs() {
     completed(&api, &state).await;
 
     let logs = logs.text();
-    for provider in ["Claude", "Codex"] {
+    for (provider, name) in [("Claude", "clau...json"), ("Codex", "code...json")] {
         let failed = format!(
             "Failed to exchange authorization code for tokens ({provider}): \
              the token endpoint answered 400\n"
         );
         assert!(logs.contains(&failed), "{logs}");
-        let saved = format!("{provider} authentication successful; credential saved to ");
+        let saved = format!(
+            "{provider} authentication successful; credential saved as {name}
+"
+        );
         assert!(logs.contains(&saved), "{logs}");
+    }
+    for email in ["oauth-user@example.test", "claude-user@example.test"] {
+        assert!(!logs.contains(email), "{email}: {logs}");
     }
     let tokens = [
         "access-codex",

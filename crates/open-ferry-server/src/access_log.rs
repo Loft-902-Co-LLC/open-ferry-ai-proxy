@@ -10,7 +10,9 @@
 //! ```
 //!
 //! The status, the time taken, the client's address, the method, and the
-//! path with its query, key-like values masked. The line is logged at info
+//! path with its query, the values of the parameters that hold a secret
+//! masked and their names kept (see [`mask_sensitive_query`]): keys and
+//! tokens, and an OAuth callback's code and state. The line is logged at info
 //! level, at warn from 400 and at error from 500. A health probe answered
 //! with a 2xx isn't logged.
 //!
@@ -34,6 +36,13 @@
 //!   AI routes' lines show it, as upstream makes one for those only.
 //! - A key-like query value of one or two bytes is hidden whole, as `...`
 //!   (see [`mask_sensitive_query`]); upstream writes it as it is.
+//! - The values of `code`, `state` and the other secret parameters beyond
+//!   upstream's key-like ones are masked too
+//!   ([`is_secret_query_param`]). Upstream's gin logger masks only
+//!   key-like names, so its line holds an OAuth callback's code and state
+//!   as they came.
+//!
+//! [`is_secret_query_param`]: open_ferry_core::observe::mask::is_secret_query_param
 //!
 //! [`RequestContext`]: open_ferry_core::observe::RequestContext
 

@@ -140,6 +140,23 @@ fn files(dir: &Path) -> Vec<(String, String)> {
     found
 }
 
+// Not upstream's: the client's URL shows an OAuth code and state masked,
+// their names kept, and both are among the secrets scrubbed from the log;
+// upstream's `captureRequestInfo` masks only key-like names.
+#[test]
+fn a_downstream_url_masks_codes_and_states() {
+    let query = Some("code=oauth-code-0123456789&state=state-0123456789&scope=user");
+    assert_eq!(
+        Downstream::url("/v1/models", query),
+        "/v1/models?code=oaut...6789&state=stat...6789&scope=user"
+    );
+    let secrets = Downstream::url_secrets("/v1/models", query);
+    assert_eq!(
+        secrets.iter().collect::<Vec<_>>(),
+        ["oauth-code-0123456789", "state-0123456789"]
+    );
+}
+
 // Not upstream's: with `request-log` on, a request's log has its request,
 // its upstream attempt and its answer, with every credential masked or
 // scrubbed.

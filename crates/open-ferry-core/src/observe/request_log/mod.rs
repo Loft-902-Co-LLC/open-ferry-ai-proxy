@@ -38,8 +38,10 @@
 //!   `X-Api-Key`, `X-Goog-Api-Key`, `Cookie`, `Set-Cookie`,
 //!   `X-Management-Key`, `Proxy-Authorization` and any other name
 //!   [`mask::is_credential_header`] knows), the answer's included; an
-//!   upstream URL's user info and key-like query parameters are masked,
-//!   and a credential of one or two bytes is hidden whole; and every copy
+//!   upstream URL's user info and the query parameters that hold a
+//!   secret are masked, the client's URL's too, beyond upstream's key-like
+//!   ones (an OAuth `code` and `state` among them, see
+//!   [`mask::is_secret_query_param`]), and a credential of one or two bytes is hidden whole; and every copy
 //!   of every secret known, however short, is scrubbed from the whole file
 //!   and from the path its name is made from (see [`redact`]): those the
 //!   attempts sent (their credential headers, cookies, URLs, proxies and
@@ -368,7 +370,8 @@ pub struct Downstream {
 
 impl Downstream {
     /// The URL a log shows for `path` and `query` (upstream's
-    /// `captureRequestInfo`): the query's key-like values masked.
+    /// `captureRequestInfo`): the values of the query's parameters that
+    /// hold a secret masked.
     pub fn url(path: &str, query: Option<&str>) -> String {
         let masked = mask::mask_sensitive_query(query.unwrap_or_default());
         if masked.is_empty() {
@@ -379,7 +382,7 @@ impl Downstream {
     }
 
     /// The secrets of the URL of `path` and `query`: the values of its
-    /// key-like query parameters (see [`Secrets::add_url`]).
+    /// query parameters that hold a secret (see [`Secrets::add_url`]).
     pub fn url_secrets(path: &str, query: Option<&str>) -> Secrets {
         let mut secrets = Secrets::new();
         if let Some(query) = query {

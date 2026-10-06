@@ -223,10 +223,10 @@ impl Secrets {
     /// Adds the secrets in `url`: its user info's password (its user, when
     /// it has no password) and the `Basic` credential an HTTP client makes
     /// of the user info, for an `Authorization` or, for a proxy's URL, a
-    /// `Proxy-Authorization`; and the values of its key-like query
-    /// parameters, as [`mask::mask_sensitive_query`] tells them, or named
-    /// for a password; each as it is and percent-decoded. A path with a
-    /// query, without a scheme or host, is read too.
+    /// `Proxy-Authorization`; and the values of its query parameters that
+    /// hold a secret, as [`mask::mask_sensitive_query`] tells them; each as
+    /// it is and percent-decoded. A path with a query, without a scheme or
+    /// host, is read too.
     pub fn add_url(&mut self, url: &str) {
         if let Some(info) = user_info(url) {
             self.add_user_info(info, true);
@@ -247,9 +247,7 @@ impl Secrets {
             let key = mask::query_unescape(key)
                 .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
                 .unwrap_or_else(|| key.to_owned());
-            if !mask::should_mask_query_param(&key)
-                && !key.to_ascii_lowercase().contains("password")
-            {
+            if !mask::is_secret_query_param(&key) {
                 continue;
             }
             self.add(value);
@@ -638,7 +636,8 @@ mod tests {
     }
 
     // Not upstream's: the secrets of credential headers, both directions'
-    // cookies and URLs are gathered, and nothing else.
+    // cookies and URLs (an OAuth callback's code and state among them) are
+    // gathered, and nothing else.
     #[test]
     fn gathers_the_secrets_of_headers_and_urls() {
         let mut headers = HeaderMap::new();
@@ -664,6 +663,7 @@ mod tests {
         secrets
             .add_url("https://user:p%40ss@example.test/v1?key=AIza-1&alt=sse&access_token=a%2Bb");
         secrets.add_url("/v1/models?api_key=client-key");
+        secrets.add_url("/callback?code=oauth-code-1&state=state-2&scope=user&db_password=pw-3");
         assert_eq!(
             secrets.iter().collect::<Vec<_>>(),
             [
@@ -685,9 +685,12 @@ mod tests {
                 "a%2Bb",
                 "a+b",
                 "client-key",
+                "oauth-code-1",
+                "state-2",
+                "pw-3",
             ]
         );
-        assert_eq!(format!("{secrets:?}"), "Secrets(18)");
+        assert_eq!(format!("{secrets:?}"), "Secrets(21)");
     }
 
     // Not upstream's: a credential's own secrets are its key, its tokens,

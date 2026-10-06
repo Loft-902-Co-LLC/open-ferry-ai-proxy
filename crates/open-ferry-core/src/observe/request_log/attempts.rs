@@ -34,7 +34,7 @@
 //!   answer's head is written as the executor tells it
 //!   ([`Tap::attempt_error`]), where upstream's executors record one; the
 //!   call's error that follows isn't written again.
-//! - The upstream URL's user info and key-like query parameters are masked,
+//! - The upstream URL's user info and secret query parameters are masked,
 //!   the headers' values masked as [`mask::mask_header_value`] masks them,
 //!   and the bodies scrubbed of the attempt's secrets and those of the
 //!   answer's headers when written; upstream writes the URL, the bodies and
@@ -72,7 +72,8 @@ fn now() -> String {
 }
 
 /// `url` as a log shows it: its user info hidden, and the values of its
-/// key-like query parameters masked (see [`mask::mask_sensitive_query`]).
+/// query parameters that hold a secret masked (see
+/// [`mask::mask_sensitive_query`]).
 pub(crate) fn mask_url(url: &str) -> String {
     let (rest, fragment) = match url.split_once('#') {
         Some((rest, fragment)) => (rest, Some(fragment)),

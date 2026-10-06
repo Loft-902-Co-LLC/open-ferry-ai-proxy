@@ -23,6 +23,12 @@
 //! - [`mask_header_value`] and [`mask_sensitive_query`] hide a credential
 //!   of one or two bytes whole, as `...`, where upstream keeps it as it is
 //!   ([`hide_log_bytes`]).
+//! - [`mask_sensitive_query`] also hides the values of `code`, `state`,
+//!   `auth` and `sig`, and of any parameter whose name holds `password`,
+//!   `passwd`, `credential`, `authorization`, `signature` or `verifier`
+//!   ([`is_secret_query_param`]). Upstream's masks only key-like names, so
+//!   its access line writes an OAuth callback's code and state as they
+//!   came.
 //! - The patterns are upstream's with Go's ASCII-only `\s` and `\b` written
 //!   out, since Rust's are Unicode-aware.
 //! - [`safe_error_diagnostic`] looks for its signals in the text of the
@@ -189,9 +195,9 @@ pub fn mask_header_value(name: &str, value: &str) -> String {
 }
 
 /// Upstream's `MaskSensitiveQuery`: a raw query with the value of every
-/// key-like parameter hidden, or the query as it is when it has none. A
-/// value of one or two bytes, which upstream keeps, is hidden whole
-/// ([`hide_log_bytes`]).
+/// parameter that holds a secret hidden ([`is_secret_query_param`]), its
+/// name kept, or the query as it is when it has none. A value of one or
+/// two bytes, which upstream keeps, is hidden whole ([`hide_log_bytes`]).
 pub fn mask_sensitive_query(raw: &str) -> String {
     if raw.is_empty() {
         return String::new();
@@ -207,7 +213,7 @@ pub fn mask_sensitive_query(raw: &str) -> String {
             let decoded_key = query_unescape(key)
                 .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
                 .unwrap_or_else(|| key.to_owned());
-            if !should_mask_query_param(&decoded_key) {
+            if !is_secret_query_param(&decoded_key) {
                 return part.to_owned();
             }
             let decoded_value = query_unescape(value).unwrap_or_else(|| value.as_bytes().to_vec());
@@ -235,6 +241,39 @@ pub(crate) fn should_mask_query_param(key: &str) -> bool {
     let key = key.strip_suffix("[]").unwrap_or(&key);
     key == "key"
         || ["api-key", "apikey", "api_key", "token", "secret"]
+            .iter()
+            .any(|part| key.contains(part))
+}
+
+/// The query parameter names, beyond upstream's, whose values a log hides:
+/// an OAuth callback's code and state, and other credentials.
+const SECRET_QUERY_NAMES: [&str; 4] = ["code", "state", "auth", "sig"];
+
+/// The parts of a query parameter name, beyond upstream's, that make its
+/// value one a log hides: passwords, a signed URL's credential and
+/// signature, and a PKCE verifier.
+const SECRET_QUERY_NAME_PARTS: [&str; 6] = [
+    "password",
+    "passwd",
+    "credential",
+    "authorization",
+    "signature",
+    "verifier",
+];
+
+/// Whether a query parameter named `key` holds a secret a log mustn't
+/// show: upstream's key-like names (its `shouldMaskQueryParam`); `code`,
+/// `state`, `auth` and `sig`; and any name holding `password`, `passwd`,
+/// `credential`, `authorization`, `signature` or `verifier`. Case and a
+/// trailing `[]` don't count.
+pub fn is_secret_query_param(key: &str) -> bool {
+    if should_mask_query_param(key) {
+        return true;
+    }
+    let key = to_lower(key.trim());
+    let key = key.strip_suffix("[]").unwrap_or(&key);
+    SECRET_QUERY_NAMES.contains(&key)
+        || SECRET_QUERY_NAME_PARTS
             .iter()
             .any(|part| key.contains(part))
 }
@@ -599,6 +638,44 @@ mod tests {
             mask_sensitive_query("monkey=1234567890"),
             "monkey=1234567890"
         );
+    }
+
+    // Not upstream's: an OAuth callback's code and state, and the other
+    // secrets beyond upstream's key-like names, are masked, their names
+    // kept; names that only hold those words aren't.
+    #[test]
+    fn masks_oauth_and_other_secret_query_parameters() {
+        assert_eq!(
+            mask_sensitive_query("code=4/0AbCdEfGhIjKlMnOp&state=s7a8t9e0x1y2z3&scope=user"),
+            "code=4%2F0A...MnOp&state=s7a8...y2z3&scope=user"
+        );
+        assert_eq!(mask_sensitive_query("State[]=ab"), "State[]=...");
+        for (name, value, masked) in [
+            ("auth", "abcdefghij", "abcd...ghij"),
+            ("sig", "abcdefghij", "abcd...ghij"),
+            ("X-Amz-Signature", "0123456789abcdef", "0123...cdef"),
+            ("X-Amz-Credential", "AKIA1234%2F2026", "AKIA...2026"),
+            ("code_verifier", "verifier-0123", "veri...0123"),
+            ("PASSWORD", "hunter2xyz", "hunt...2xyz"),
+            ("db_passwd", "hunter2xyz", "hunt...2xyz"),
+            ("proxy-authorization", "Basic+dXNlcjpwYXNz", "Basi...YXNz"),
+        ] {
+            assert_eq!(
+                mask_sensitive_query(&format!("{name}={value}&alt=sse")),
+                format!("{name}={masked}&alt=sse"),
+                "{name}"
+            );
+        }
+        for kept in [
+            "codes=123456789",
+            "decode=123456789",
+            "statement=123456789",
+            "author=123456789",
+            "signed=123456789",
+            "authuser=0",
+        ] {
+            assert_eq!(mask_sensitive_query(kept), kept);
+        }
     }
 
     // Ports TestSafeDiagnosticForLogPreservesAccessTokenExpiredAndRedactsCredentials.

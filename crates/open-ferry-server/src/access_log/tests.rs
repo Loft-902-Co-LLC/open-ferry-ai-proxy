@@ -390,6 +390,33 @@ async fn hides_short_keys_whole() {
     );
 }
 
+/// Not upstream's: an OAuth callback's code and state are masked, their
+/// names kept; upstream's line holds them as they came.
+#[tokio::test]
+async fn masks_an_oauth_callbacks_code_and_state() {
+    let app = logged(Router::new().route("/anthropic/callback", any(|| async { StatusCode::OK })));
+    let code = "ac_0123456789abcdefghij";
+    let state = "st_9876543210zyxwvuts";
+    let (_, logged) = send(
+        &app,
+        request(
+            Method::GET,
+            &format!("/anthropic/callback?code={code}&state={state}&scope=user"),
+        ),
+    )
+    .await;
+    assert_eq!(logged.len(), 1, "{logged:?}");
+    let message = logged[0].message.as_str();
+    assert!(
+        message.ends_with(
+            r#" | GET     "/anthropic/callback?code=ac_0...ghij&state=st_9...vuts&scope=user""#
+        ),
+        "{message}"
+    );
+    assert!(!message.contains(code), "{message}");
+    assert!(!message.contains(state), "{message}");
+}
+
 /// Not upstream's: the time taken, as gin writes it.
 #[test]
 fn latency_prints_as_go_does() {
