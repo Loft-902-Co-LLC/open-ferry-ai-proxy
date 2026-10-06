@@ -17,6 +17,8 @@
 //!   say an explicit catalog source still overrides the embedded catalogs.
 //! - A config that won't load, or an auth directory that won't resolve,
 //!   exits with 1; upstream logs it and exits with 0.
+//! - A `.env` file in the working directory isn't loaded; upstream loads it
+//!   into the environment before it reads the config.
 
 mod browser;
 mod file_log;
