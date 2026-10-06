@@ -227,7 +227,7 @@ const PLACEHOLDER: &str = "<!doctype html>
 <body>
 <h1>The dashboard isn't built into this binary</h1>
 <p>This open-ferry was built without the dashboard app, so there is nothing to show here.</p>
-<p>To build it in, build the app first, with Node.js 22.12 or newer, then build open-ferry again:</p>
+<p>To build it in, build the app first, with Node.js 22.22.2 or newer, then build open-ferry again:</p>
 <pre>cd dashboard
 npm ci
 npm run build

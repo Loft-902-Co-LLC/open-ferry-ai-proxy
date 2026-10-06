@@ -292,7 +292,7 @@ async fn without_an_app_a_page_says_how_to_build_it() {
             "{}",
             answer.body
         );
-        for step in ["npm ci", "npm run build", "Node.js 22.12"] {
+        for step in ["npm ci", "npm run build", "Node.js 22.22.2"] {
             assert!(answer.body.contains(step), "{step}");
         }
         for inline in ["<script", "<style", "style="] {
