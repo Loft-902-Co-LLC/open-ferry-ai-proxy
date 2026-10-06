@@ -144,6 +144,15 @@ impl Dash {
         Self::build(config, Assets::fixture(APP), true)
     }
 
+    /// With `config`, the test app, an open ledger, and `password` as the
+    /// local management password.
+    pub(crate) fn with_local_password(config: Config, password: &str) -> Self {
+        let mut dash = Self::with_config(config);
+        dash.state.management = dash.state.management.clone().with_local_password(password);
+        dash.router = router_from(dash.state.clone());
+        dash
+    }
+
     /// With `config`, `assets`, and an open ledger if `ledger`, else one
     /// that is unavailable.
     pub(crate) fn build(config: Config, assets: Assets, ledger: bool) -> Self {

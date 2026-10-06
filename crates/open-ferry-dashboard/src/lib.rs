@@ -10,8 +10,9 @@
 //!
 //! The dashboard API checks access with the management API's own code
 //! ([`check_key`](open_ferry_management::check_key)): the key in the same
-//! header forms, the local and remote rule, and one record of failed
-//! attempts for both APIs. The app's own paths check only the address
+//! header forms, the local management password from 127.0.0.1 and ::1,
+//! the local and remote rule, and one record of failed attempts for both
+//! APIs. The app's own paths check only the address
 //! ([`check_address`](open_ferry_management::check_address)), so the app
 //! loads before the user has typed a key, or set one.
 //!

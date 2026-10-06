@@ -121,6 +121,53 @@ async fn remote_clients_and_an_unset_key() {
     }
 }
 
+/// Not upstream's: the local management password is a key from 127.0.0.1
+/// and ::1 only, as the management API takes it, and doesn't stand in for
+/// a management key.
+#[tokio::test]
+async fn the_local_password_is_for_local_clients() {
+    let with_password = |peer: &str| {
+        let mut call = request(peer, Method::GET, LEDGER, "");
+        call.headers_mut()
+            .insert(header::AUTHORIZATION, "Bearer local-pass".parse().unwrap());
+        call
+    };
+    let mut config = keyed_config();
+    config.remote_management.allow_remote = true;
+    let dash = Dash::with_local_password(config, "local-pass");
+    for peer in [LOCAL, "[::1]:50000"] {
+        dash.send(with_password(peer)).await.json(StatusCode::OK);
+    }
+    // From elsewhere it is a wrong key, whatever the client claims.
+    let mut forwarded = with_password(REMOTE);
+    forwarded
+        .headers_mut()
+        .insert("x-forwarded-for", "127.0.0.1".parse().unwrap());
+    for call in [with_password(REMOTE), forwarded] {
+        dash.send(call)
+            .await
+            .error(StatusCode::UNAUTHORIZED, "invalid_management_key");
+    }
+    let mut remote = request(REMOTE, Method::GET, LEDGER, "");
+    remote.headers_mut().insert(
+        header::AUTHORIZATION,
+        format!("Bearer {KEY}").parse().unwrap(),
+    );
+    dash.send(remote).await.json(StatusCode::OK);
+
+    // Without allow-remote a remote client is refused before its key.
+    let dash = Dash::with_local_password(keyed_config(), "local-pass");
+    dash.send(with_password(REMOTE))
+        .await
+        .error(StatusCode::FORBIDDEN, "remote_management_disabled");
+
+    // Without a management key the password lets nothing in.
+    let dash = Dash::with_local_password(Config::default(), "local-pass");
+    dash.send(with_password(LOCAL))
+        .await
+        .error(StatusCode::NOT_FOUND, "management_disabled");
+}
+
 /// Not upstream's: a path under `/open-ferry/` that isn't a route, and a
 /// method a route doesn't take, are answered before the key is checked,
 /// and aren't counted as failed attempts.
