@@ -13,7 +13,8 @@
 //! keys are ignored. Loading never writes the file; [`save`] writes it back,
 //! with its comments and the settings this port doesn't type, and
 //! [`v8_edit`] edits it in the v8 layout, when a management write asks for
-//! it.
+//! it. [`sanitize`] gives the clean-ups loading applies, for the management
+//! handlers to apply to what they change.
 //!
 //! [`ConfigWatcher`] watches the config file and the auth directory and
 //! sends a [`WatchEvent`] when the config changes or an auth file is added,
@@ -108,6 +109,18 @@ pub use types::{
 };
 pub(crate) use types::{Redacted, RedactedUrl};
 pub use watcher::{AuthFile, ConfigWatcher, WatchError, WatchEvent, next_revision};
+
+/// The clean-ups loading applies to a section, as upstream's handlers call
+/// them on what a management write changes.
+pub mod sanitize {
+    pub use super::normalize::{
+        META_BASE_URL, normalize_excluded_models, normalize_headers, normalize_model_prefix,
+        normalize_oauth_excluded_models, sanitize_claude_keys, sanitize_codex_keys,
+        sanitize_gemini_keys, sanitize_meta_keys, sanitize_oauth_model_alias,
+        sanitize_oauth_request_scoped_errors, sanitize_openai_compatibility, sanitize_vertex_keys,
+        sanitize_xai_keys,
+    };
+}
 
 /// What kind of problem stopped a config from loading.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

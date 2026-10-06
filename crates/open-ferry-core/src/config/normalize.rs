@@ -227,9 +227,12 @@ fn check_family_weights(
     Ok(())
 }
 
+/// The base URL a Meta key without one gets.
+pub const META_BASE_URL: &str = "https://api.meta.ai/v1";
+
 /// Upstream's `normalizeModelPrefix`: trimmed of space and slashes; empty
 /// when it still contains a slash.
-pub(crate) fn normalize_model_prefix(prefix: &str) -> String {
+pub fn normalize_model_prefix(prefix: &str) -> String {
     let trimmed = prefix.trim().trim_matches('/');
     if trimmed.contains('/') {
         String::new()
@@ -240,7 +243,7 @@ pub(crate) fn normalize_model_prefix(prefix: &str) -> String {
 
 /// Upstream's `NormalizeHeaders`: names and values trimmed, empty pairs
 /// dropped.
-pub(crate) fn normalize_headers(headers: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+pub fn normalize_headers(headers: &BTreeMap<String, String>) -> BTreeMap<String, String> {
     headers
         .iter()
         .map(|(key, value)| (key.trim(), value.trim()))
@@ -251,7 +254,7 @@ pub(crate) fn normalize_headers(headers: &BTreeMap<String, String>) -> BTreeMap<
 
 /// Upstream's `NormalizeExcludedModels`: trimmed, lower case, without
 /// empties or repeats, in first-seen order.
-fn normalize_excluded_models(models: &[String]) -> Vec<String> {
+pub fn normalize_excluded_models(models: &[String]) -> Vec<String> {
     let mut seen = HashSet::new();
     models
         .iter()
@@ -261,7 +264,7 @@ fn normalize_excluded_models(models: &[String]) -> Vec<String> {
 }
 
 /// Upstream's `NormalizeOAuthExcludedModels`.
-fn normalize_oauth_excluded_models(
+pub fn normalize_oauth_excluded_models(
     entries: &BTreeMap<String, Vec<String>>,
 ) -> BTreeMap<String, Vec<String>> {
     let mut out = BTreeMap::new();
@@ -279,7 +282,7 @@ fn normalize_oauth_excluded_models(
 /// (`sanitizeGeminiKeyEntries`): drops entries with neither a key nor a base
 /// URL, cleans up the rest, and keeps the first of entries alike in key,
 /// base URL, proxy, prefix and headers.
-fn sanitize_gemini_keys(keys: &mut Vec<GeminiKey>) {
+pub fn sanitize_gemini_keys(keys: &mut Vec<GeminiKey>) {
     let mut seen = HashSet::new();
     keys.retain_mut(|key| {
         key.api_key = key.api_key.trim().to_owned();
@@ -310,7 +313,7 @@ fn gemini_key_dedup_id(key: &GeminiKey) -> String {
 /// Upstream's `SanitizeVertexCompatKeys`: drops entries without a key and
 /// models without both a name and an alias, cleans up the rest, and keeps
 /// the first of entries alike in key and base URL.
-fn sanitize_vertex_keys(keys: &mut Vec<VertexCompatKey>) {
+pub fn sanitize_vertex_keys(keys: &mut Vec<VertexCompatKey>) {
     let mut seen = HashSet::new();
     keys.retain_mut(|key| {
         key.api_key = key.api_key.trim().to_owned();
@@ -332,7 +335,7 @@ fn sanitize_vertex_keys(keys: &mut Vec<VertexCompatKey>) {
 }
 
 /// Upstream's `SanitizeCodexKeys`: drops keys without a base URL.
-fn sanitize_codex_keys(keys: &mut Vec<CodexKey>) {
+pub fn sanitize_codex_keys(keys: &mut Vec<CodexKey>) {
     for key in keys.iter_mut() {
         key.prefix = normalize_model_prefix(&key.prefix);
         key.base_url = key.base_url.trim().to_owned();
@@ -344,7 +347,7 @@ fn sanitize_codex_keys(keys: &mut Vec<CodexKey>) {
 
 /// Upstream's `SanitizeXAIKeys`: the Codex keys' clean-up, and no alpha
 /// search, which only Codex offers.
-fn sanitize_xai_keys(keys: &mut Vec<CodexKey>) {
+pub fn sanitize_xai_keys(keys: &mut Vec<CodexKey>) {
     sanitize_codex_keys(keys);
     for key in keys.iter_mut() {
         key.alpha_search = false;
@@ -354,7 +357,7 @@ fn sanitize_xai_keys(keys: &mut Vec<CodexKey>) {
 /// Upstream's `SanitizeMetaKeys` (`sanitizeMetaKeyEntries`): drops entries
 /// without a key or with a `dca:` token, which needs an OAuth credential
 /// file, defaults the base URL and cleans up the rest.
-fn sanitize_meta_keys(keys: &mut Vec<CodexKey>) {
+pub fn sanitize_meta_keys(keys: &mut Vec<CodexKey>) {
     keys.retain_mut(|key| {
         key.api_key = key.api_key.trim().to_owned();
         if key.api_key.is_empty() || key.api_key.starts_with("dca:") {
@@ -363,7 +366,7 @@ fn sanitize_meta_keys(keys: &mut Vec<CodexKey>) {
         key.prefix = normalize_model_prefix(&key.prefix);
         key.base_url = key.base_url.trim().to_owned();
         if key.base_url.is_empty() {
-            key.base_url = "https://api.meta.ai/v1".to_owned();
+            key.base_url = META_BASE_URL.to_owned();
         }
         key.headers = normalize_headers(&key.headers);
         key.excluded_models = normalize_excluded_models(&key.excluded_models);
@@ -373,7 +376,7 @@ fn sanitize_meta_keys(keys: &mut Vec<CodexKey>) {
 }
 
 /// Upstream's `SanitizeClaudeKeys`.
-fn sanitize_claude_keys(keys: &mut [ClaudeKey]) {
+pub fn sanitize_claude_keys(keys: &mut [ClaudeKey]) {
     for key in keys {
         key.prefix = normalize_model_prefix(&key.prefix);
         key.headers = normalize_headers(&key.headers);
@@ -383,7 +386,7 @@ fn sanitize_claude_keys(keys: &mut [ClaudeKey]) {
 
 /// Upstream's `SanitizeOpenAICompatibility`: names, prefixes, base URLs and
 /// headers cleaned up, and providers without a base URL dropped.
-fn sanitize_openai_compatibility(providers: &mut Vec<OpenAiCompatibility>) {
+pub fn sanitize_openai_compatibility(providers: &mut Vec<OpenAiCompatibility>) {
     for provider in providers.iter_mut() {
         provider.name = provider.name.trim().to_owned();
         provider.prefix = normalize_model_prefix(&provider.prefix);
@@ -395,7 +398,7 @@ fn sanitize_openai_compatibility(providers: &mut Vec<OpenAiCompatibility>) {
 
 /// Upstream's `SanitizeOAuthModelAlias`: trimmed, channels in lower case,
 /// no empty or self aliases, each alias once per channel.
-fn sanitize_oauth_model_alias(
+pub fn sanitize_oauth_model_alias(
     channels: &BTreeMap<String, Vec<OAuthModelAlias>>,
 ) -> BTreeMap<String, Vec<OAuthModelAlias>> {
     let mut out = BTreeMap::new();
@@ -469,7 +472,7 @@ fn sanitize_oauth_settings(
 
 /// Upstream's `SanitizeOAuthRequestScopedErrors`: trimmed, actions in lower
 /// case, and rules without a status, a match or an action dropped.
-fn sanitize_oauth_request_scoped_errors(
+pub fn sanitize_oauth_request_scoped_errors(
     channels: &BTreeMap<String, Vec<RequestScopedErrorRule>>,
 ) -> BTreeMap<String, Vec<RequestScopedErrorRule>> {
     let mut out = BTreeMap::new();
