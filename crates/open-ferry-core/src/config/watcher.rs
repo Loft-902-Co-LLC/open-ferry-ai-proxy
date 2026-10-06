@@ -25,6 +25,15 @@
 //! non-empty one is remembered, so later events with the same contents are
 //! skipped.
 //!
+//! [`ConfigWatcher::reload_config`] reloads the config file at once, as the
+//! management API has it reloaded after a save (upstream's
+//! `ReloadConfigIfChanged`): on the watcher thread, with the same hash
+//! check, so the debounced reload that the save's own write events bring
+//! finds nothing new. Its [`WatchEvent::ConfigChanged`], if any, comes
+//! before the [`WatchEvent::Reloaded`] that answers it, on the channel that
+//! carries every other event, so the consumer never applies a config read
+//! before one it already applied.
+//!
 //! Each auth event carries a revision from [`next_revision`], taken before
 //! the file was read or found gone. The service takes its revisions for the
 //! management API's changes from the same counter once they are saved, and
@@ -139,6 +148,10 @@ pub enum WatchEvent {
     /// that never parsed are known too, so this may name a file that was
     /// never added.
     AuthRemoved(PathBuf, u64),
+    /// The reload asked for with [`ConfigWatcher::reload_config`] and this
+    /// ticket was made: the config change it found, if any, was sent
+    /// before.
+    Reloaded(u64),
 }
 
 /// An auth file and the contents the watcher read and checked. Its `Debug`
@@ -186,7 +199,7 @@ impl std::error::Error for WatchError {}
 pub struct ConfigWatcher {
     config_path: PathBuf,
     auth_dir: PathBuf,
-    stop: std_mpsc::Sender<Message>,
+    messages: std_mpsc::Sender<Message>,
     stopped: Arc<AtomicBool>,
     _watcher: RecommendedWatcher,
 }
@@ -261,7 +274,7 @@ impl ConfigWatcher {
         let watcher = Self {
             config_path,
             auth_dir,
-            stop: sender,
+            messages: sender,
             stopped,
             _watcher: watcher,
         };
@@ -277,6 +290,17 @@ impl ConfigWatcher {
     pub fn auth_dir(&self) -> &Path {
         &self.auth_dir
     }
+
+    /// Reloads the config file now rather than once it has been quiet,
+    /// then sends [`WatchEvent::Reloaded`] with `ticket` (upstream's
+    /// `ReloadConfigIfChanged`). As for a change the watcher sees, the file
+    /// is reloaded only when its SHA-256 differs from the last config that
+    /// loaded, and the [`WatchEvent::ConfigChanged`] or
+    /// [`WatchEvent::ConfigInvalid`] it makes comes first. Nothing is sent
+    /// once the watcher has stopped.
+    pub fn reload_config(&self, ticket: u64) {
+        let _ = self.messages.send(Message::Reload(ticket));
+    }
 }
 
 impl fmt::Debug for ConfigWatcher {
@@ -291,13 +315,15 @@ impl fmt::Debug for ConfigWatcher {
 impl Drop for ConfigWatcher {
     fn drop(&mut self) {
         self.stopped.store(true, Ordering::Release);
-        let _ = self.stop.send(Message::Stop);
+        let _ = self.messages.send(Message::Stop);
     }
 }
 
 /// What the watcher thread receives.
 enum Message {
     Fs(notify::Result<notify::Event>),
+    /// [`ConfigWatcher::reload_config`] with its ticket.
+    Reload(u64),
     Stop,
 }
 
@@ -674,6 +700,19 @@ fn run(
         };
         let event = match message {
             Message::Stop => return,
+            Message::Reload(ticket) => {
+                // A debounced reload still waiting finds the hash this one
+                // leaves, as upstream's timer does.
+                if let Some(event) = state.reload_config_if_changed()
+                    && !send(events, stopped, event)
+                {
+                    return;
+                }
+                if !send(events, stopped, WatchEvent::Reloaded(ticket)) {
+                    return;
+                }
+                continue;
+            }
             Message::Fs(Err(error)) => {
                 warn!(%error, "file watcher error");
                 continue;
@@ -1523,7 +1562,42 @@ mod tests {
             WatchEvent::AuthRemoved(path, _) => ("removed", path_key(path)),
             WatchEvent::ConfigChanged(_) => ("config", String::new()),
             WatchEvent::ConfigInvalid(_) => ("invalid", String::new()),
+            WatchEvent::Reloaded(ticket) => ("reloaded", ticket.to_string()),
         }
+    }
+
+    // Upstream's ReloadConfigIfChanged, as the management API calls it
+    // after a save: the change comes at once and before the answer, and the
+    // debounced reload the write brings, finding the same hash, sends
+    // nothing.
+    #[tokio::test]
+    async fn reload_config_reloads_at_once_and_once() {
+        let fixture = Fixture::new();
+        let config = Config::load(&fixture.config_path).expect("load config");
+        let (watcher, mut receiver) =
+            ConfigWatcher::start(&fixture.config_path, &config).expect("start watcher");
+
+        fixture.write_config("port: 3\n");
+        watcher.reload_config(7);
+        match next(&mut receiver).await {
+            WatchEvent::ConfigChanged(config) => assert_eq!(config.port, 3),
+            other => panic!("expected a config change, got {other:?}"),
+        }
+        assert_eq!(next(&mut receiver).await, WatchEvent::Reloaded(7));
+
+        // The same contents: nothing to reload.
+        watcher.reload_config(8);
+        assert_eq!(next(&mut receiver).await, WatchEvent::Reloaded(8));
+        let quiet = tokio::time::timeout(CONFIG_RELOAD_DEBOUNCE * 4, receiver.recv()).await;
+        assert!(quiet.is_err(), "unexpected event: {quiet:?}");
+
+        // A change after it is followed as before.
+        fixture.write_config("port: 4\n");
+        match next(&mut receiver).await {
+            WatchEvent::ConfigChanged(config) => assert_eq!(config.port, 4),
+            other => panic!("expected a config change, got {other:?}"),
+        }
+        drop(watcher);
     }
 
     #[tokio::test]

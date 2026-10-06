@@ -40,6 +40,16 @@
 //! it, and the API waits until it is. Once the loop has stopped, the API's
 //! changes fail, and it answers 503.
 //!
+//! The management API saves the config file through a
+//! [`FileConfigWriter`] over the file the service was started with, and
+//! once it has saved, the loop has the watcher reload the file at once
+//! (upstream's reload hook, which calls the watcher's
+//! `ReloadConfigIfChanged`): the config is applied as for a change the
+//! watcher sees, before the API answers, and the reload the save's own
+//! write events bring finds nothing new. Without a watcher the loop loads
+//! the file itself. Once the loop has stopped, a save still goes to the
+//! file, and is loaded at the next start.
+//!
 //! Changes are ordered as upstream's service orders them. Each one carries
 //! a revision from one counter: the watcher takes its event's before it
 //! reads the file, and the API's change takes one once it is saved. A
@@ -110,7 +120,7 @@
 //!   the discovery advertiser, the WebSocket gateway, plugins and Home
 //!   aren't ported.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::io;
 use std::net::{Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -133,7 +143,8 @@ use open_ferry_core::observe::Observability;
 use open_ferry_core::registry::{ModelRegistry, RegistrationRules};
 use open_ferry_dashboard::Ledger;
 use open_ferry_management::{
-    CredentialSync, ManagementState, SyncError, SyncFuture, management_password_from_env,
+    ConfigReload, CredentialSync, FileConfigWriter, ManagementState, ReloadFuture, SyncError,
+    SyncFuture, management_password_from_env,
 };
 use open_ferry_providers::claude::ClaudeExecutor;
 use open_ferry_providers::codex::CodexExecutor;
@@ -159,6 +170,10 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 /// How many credential changes from the management API may wait for the
 /// service loop.
 const SYNC_QUEUE: usize = 32;
+
+/// How many config reloads the management API asks for may wait for the
+/// service loop.
+const RELOAD_QUEUE: usize = 32;
 
 /// How long shutdown waits for the usage ledger to write the records it
 /// was sent.
@@ -267,6 +282,7 @@ pub async fn run(
         Err(error) => {
             tracing::error!("failed to create watcher: {error}");
             service.close_sync();
+            service.close_reloads();
             shut_down(&service, &stop_server, server).await;
             return ExitCode::FAILURE;
         }
@@ -297,20 +313,24 @@ pub async fn run(
                 return exit_code(result);
             }
             event = next_event(&mut events) => match event {
-                Some(event) => match service.handle(event, &config_path) {
-                    Watching::Same => {}
-                    Watching::Restarted(next) => events = Some(next),
-                    Watching::Stopped => events = None,
-                },
+                Some(event) => {
+                    let watching = service.handle(event, &config_path);
+                    service.follow(watching, &mut events);
+                }
                 None => {
                     tracing::warn!("file watcher stopped; config and auth changes are no longer followed");
-                    events = None;
+                    service.follow(Watching::Stopped, &mut events);
                 }
             },
             Some(request) = service.sync_requests.recv() => service.apply_sync(request),
+            Some(applied) = service.reload_requests.recv() => {
+                let watching = service.request_reload(applied, &config_path);
+                service.follow(watching, &mut events);
+            }
         }
     }
     service.close_sync();
+    service.close_reloads();
     shut_down(&service, &stop_server, server).await
 }
 
@@ -446,6 +466,27 @@ impl CredentialSync for SyncSender {
     }
 }
 
+/// The service's [`ConfigReload`], which the management API calls once it
+/// has saved the config (upstream's reload hook, which calls the watcher's
+/// `ReloadConfigIfChanged`): each call waits in a bounded queue for the
+/// service loop, which has the watcher reload the file and says when the
+/// config it found is applied. Once the loop has stopped, a call returns at
+/// once; the file holds the change, which the next start loads.
+struct ReloadSender {
+    requests: mpsc::Sender<oneshot::Sender<()>>,
+}
+
+impl ConfigReload for ReloadSender {
+    fn reload(&self) -> ReloadFuture<'_> {
+        Box::pin(async move {
+            let (applied, done) = oneshot::channel();
+            if self.requests.send(applied).await.is_ok() {
+                let _ = done.await;
+            }
+        })
+    }
+}
+
 /// The credential manager, the model registry, the server and management
 /// state, and what was registered from the config and the auth directory.
 struct Service {
@@ -476,6 +517,12 @@ struct Service {
     compat_executors: BTreeSet<String>,
     /// The management API's credential changes, waiting for the loop.
     sync_requests: mpsc::Receiver<SyncRequest>,
+    /// The management API's config reloads, waiting for the loop.
+    reload_requests: mpsc::Receiver<oneshot::Sender<()>>,
+    /// The reloads the watcher was asked for, by ticket, oldest first.
+    pending_reloads: VecDeque<(u64, oneshot::Sender<()>)>,
+    /// The ticket of the last reload asked for.
+    last_reload: u64,
 }
 
 impl Service {
@@ -502,6 +549,7 @@ impl Service {
         )
         .with_observability(observability.clone());
         let (requests, sync_requests) = mpsc::channel(SYNC_QUEUE);
+        let (reloads, reload_requests) = mpsc::channel(RELOAD_QUEUE);
         let management = ManagementState::new(
             Arc::clone(&config),
             manager.clone(),
@@ -510,6 +558,8 @@ impl Service {
         )
         .with_store(Arc::clone(&store))
         .with_sync(Arc::new(SyncSender { requests }))
+        .with_config_writer(Arc::new(FileConfigWriter::new(config_path.clone())))
+        .with_config_reload(Arc::new(ReloadSender { requests: reloads }))
         .with_config_path(config_path)
         .with_observability(observability.clone());
         Self {
@@ -529,6 +579,9 @@ impl Service {
             revisions: HashMap::new(),
             compat_executors: BTreeSet::new(),
             sync_requests,
+            reload_requests,
+            pending_reloads: VecDeque::new(),
+            last_reload: 0,
         }
     }
 
@@ -848,9 +901,85 @@ impl Service {
                 self.load_auth_file(&file, revision);
             }
             WatchEvent::AuthRemoved(path, revision) => self.remove_auth_file(&path, revision),
+            WatchEvent::Reloaded(ticket) => self.reloaded(ticket),
             _ => {}
         }
         Watching::Same
+    }
+
+    /// Follows what applying an event or a reload did to the watcher. A new
+    /// watcher is asked again for the reloads the old one hadn't answered;
+    /// once there is none, they are answered, as the config the watcher
+    /// last found is applied.
+    fn follow(&mut self, watching: Watching, events: &mut Option<mpsc::Receiver<WatchEvent>>) {
+        match watching {
+            Watching::Same => {}
+            Watching::Restarted(next) => {
+                *events = Some(next);
+                if let Some(watcher) = &self.watcher {
+                    for (ticket, _) in &self.pending_reloads {
+                        watcher.reload_config(*ticket);
+                    }
+                }
+            }
+            Watching::Stopped => {
+                *events = None;
+                self.watcher = None;
+                self.settle_reloads();
+            }
+        }
+    }
+
+    /// Has the config file reloaded for the management API, which saved it,
+    /// and `applied` told once the config is applied: by the watcher, so
+    /// that the reload its own events for the save bring finds nothing new,
+    /// or here when there is no watcher. A file that doesn't load is logged
+    /// and the current config kept, as for the watcher's reloads.
+    fn request_reload(&mut self, applied: oneshot::Sender<()>, config_path: &Path) -> Watching {
+        if let Some(watcher) = &self.watcher {
+            self.last_reload += 1;
+            watcher.reload_config(self.last_reload);
+            self.pending_reloads.push_back((self.last_reload, applied));
+            return Watching::Same;
+        }
+        let watching = match load_config(config_path) {
+            Ok(config) => self.apply_config(Arc::new(config), config_path),
+            Err(error) => {
+                tracing::error!("failed to reload config: {error}; keeping the current one");
+                Watching::Same
+            }
+        };
+        // The config stands even if the handler has gone.
+        let _ = applied.send(());
+        watching
+    }
+
+    /// Answers the reloads up to `ticket`, which the watcher has made.
+    fn reloaded(&mut self, ticket: u64) {
+        while let Some((next, _)) = self.pending_reloads.front()
+            && *next <= ticket
+        {
+            if let Some((_, applied)) = self.pending_reloads.pop_front() {
+                let _ = applied.send(());
+            }
+        }
+    }
+
+    /// Answers every reload the watcher was asked for.
+    fn settle_reloads(&mut self) {
+        for (_, applied) in self.pending_reloads.drain(..) {
+            let _ = applied.send(());
+        }
+    }
+
+    /// Takes no more reloads from the management API, and answers those
+    /// asked for, so no handler waits on a loop that has stopped.
+    fn close_reloads(&mut self) {
+        self.reload_requests.close();
+        while let Ok(applied) = self.reload_requests.try_recv() {
+            let _ = applied.send(());
+        }
+        self.settle_reloads();
     }
 
     /// Applies a credential change from the management API, then says so,
@@ -1074,6 +1203,17 @@ fn compat_provider(auth: &Auth) -> Option<String> {
         return None;
     }
     auth.openai_compat_info().map(|(provider, _)| provider)
+}
+
+/// The config file at `path`, loaded as the watcher loads it after a
+/// change: with its `auth-dir` resolved.
+fn load_config(path: &Path) -> Result<Config, open_ferry_core::config::ConfigError> {
+    let mut config = Config::load(path)?;
+    match config.resolve_auth_dir() {
+        Ok(dir) => config.auth_dir = dir.to_string_lossy().into_owned(),
+        Err(error) => tracing::error!("failed to resolve auth directory from config: {error}"),
+    }
+    Ok(config)
 }
 
 /// `dir` made absolute against the current directory and cleaned, as the
@@ -1482,6 +1622,90 @@ mod tests {
         assert_eq!(error, SyncError::Stopped);
         assert_eq!(error.status().as_u16(), 503);
         assert_eq!(service.manager.list().len(), 1);
+    }
+
+    // Not upstream's: a reload the management API asks for is answered once
+    // the watcher's reload is applied, those of a watcher that stops are
+    // answered, and once the loop stops a reload returns at once.
+    #[tokio::test]
+    async fn management_reloads_are_answered_once_applied() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.yaml");
+        let text = |port: u16| format!("auth-dir: '{}'\nport: {port}\n", dir.path().display());
+        std::fs::write(&config_path, text(1)).unwrap();
+        let mut service = service(dir.path(), "port: 1\n");
+        let (watcher, events) = ConfigWatcher::start(&config_path, &service.config).unwrap();
+        service.watcher = Some(watcher);
+        let mut events = Some(events);
+        let (requests, receiver) = mpsc::channel(1);
+        service.reload_requests = receiver;
+        let reload = Arc::new(ReloadSender { requests });
+
+        std::fs::write(&config_path, text(2)).unwrap();
+        let reloaded = tokio::spawn({
+            let reload = Arc::clone(&reload);
+            async move { reload.reload().await }
+        });
+        let applied = service.reload_requests.recv().await.unwrap();
+        let watching = service.request_reload(applied, &config_path);
+        service.follow(watching, &mut events);
+        let changed = next_watched(&mut events).await;
+        assert!(
+            matches!(changed, WatchEvent::ConfigChanged(_)),
+            "{changed:?}"
+        );
+        let watching = service.handle(changed, &config_path);
+        service.follow(watching, &mut events);
+        assert_eq!(service.config.port, 2);
+        assert!(!reloaded.is_finished());
+        let answer = next_watched(&mut events).await;
+        assert_eq!(answer, WatchEvent::Reloaded(1));
+        service.handle(answer, &config_path);
+        tokio::time::timeout(Duration::from_secs(10), reloaded)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // A watcher that stops answers the reloads it was asked for.
+        let (applied, done) = oneshot::channel();
+        let watching = service.request_reload(applied, &config_path);
+        service.follow(watching, &mut events);
+        service.follow(Watching::Stopped, &mut events);
+        assert!(service.watcher.is_none() && events.is_none());
+        assert_eq!(done.await, Ok(()));
+
+        // Without a watcher the file is loaded here.
+        std::fs::write(&config_path, text(3)).unwrap();
+        let (applied, done) = oneshot::channel();
+        let watching = service.request_reload(applied, &config_path);
+        service.follow(watching, &mut events);
+        assert_eq!(done.await, Ok(()));
+        assert_eq!(service.config.port, 3);
+
+        // Once the loop stops, a waiting reload is answered and later ones
+        // return at once.
+        let (applied, done) = oneshot::channel();
+        reload.requests.try_send(applied).unwrap();
+        service.close_reloads();
+        assert_eq!(done.await, Ok(()));
+        tokio::time::timeout(Duration::from_secs(10), reload.reload())
+            .await
+            .unwrap();
+    }
+
+    /// The watcher's next event, skipping the auth directory's scan.
+    async fn next_watched(events: &mut Option<mpsc::Receiver<WatchEvent>>) -> WatchEvent {
+        loop {
+            let next = tokio::time::timeout(Duration::from_secs(10), next_event(events));
+            match next
+                .await
+                .expect("no watch event")
+                .expect("watcher stopped")
+            {
+                WatchEvent::AuthAdded(..) => {}
+                event => return event,
+            }
+        }
     }
 
     /// The access token in credential `id`'s metadata.
@@ -2644,18 +2868,21 @@ mod tests {
         use std::fmt::Write as _;
         use std::net::SocketAddr;
         use std::path::Path;
+        use std::process::ExitCode;
         use std::sync::Arc;
+        use std::time::Duration;
 
         use axum::body::Bytes;
         use open_ferry_core::config::{Config, WatchEvent};
         use open_ferry_core::observe::usage;
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
         use tokio::net::{TcpListener, TcpStream};
-        use tokio::sync::watch;
+        use tokio::sync::{oneshot, watch};
 
-        use super::super::{Service, serve, shut_down};
+        use super::super::{Options, Service, run, serve, shut_down};
         use super::service;
         use crate::keep_alive::{self, KeepAlive};
+        use crate::logging::LogLevel;
 
         const KEYED: &str = "remote-management:\n  secret-key: test-secret\n";
         const LIST: &str = "/v0/management/auth-files";
@@ -2695,12 +2922,32 @@ mod tests {
             path: &str,
             headers: &[(&str, &str)],
         ) -> Answer {
+            send(addr, method, path, headers, "").await
+        }
+
+        /// Sends `method path` with `headers` and `body`, JSON when there
+        /// is one, and reads the answer.
+        async fn send(
+            addr: SocketAddr,
+            method: &str,
+            path: &str,
+            headers: &[(&str, &str)],
+            body: &str,
+        ) -> Answer {
             let mut stream = TcpStream::connect(addr).await.unwrap();
             let mut request = format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\n");
             for (name, value) in headers {
                 let _ = write!(request, "{name}: {value}\r\n");
             }
+            if !body.is_empty() {
+                let _ = write!(
+                    request,
+                    "Content-Type: application/json\r\nContent-Length: {}\r\n",
+                    body.len()
+                );
+            }
             request.push_str("Connection: close\r\n\r\n");
+            request.push_str(body);
             stream.write_all(request.as_bytes()).await.unwrap();
             let mut response = Vec::new();
             stream.read_to_end(&mut response).await.unwrap();
@@ -3002,6 +3249,114 @@ mod tests {
             service.handle(config(dir.path(), ""), Path::new(""));
             let answer = fetch(addr, "GET", LIST, &[key]).await;
             assert_eq!((answer.status, answer.body.as_str()), (404, ""));
+        }
+
+        /// Waits until `addr` takes connections.
+        async fn wait_listening(addr: SocketAddr) {
+            for _ in 0..500 {
+                if TcpStream::connect(addr).await.is_ok() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            panic!("nothing listens on {addr}");
+        }
+
+        /// Waits until `/v1/models` answers `status` to client key `key`.
+        async fn wait_models(addr: SocketAddr, key: &str, status: u16) {
+            let header = format!("Bearer {key}");
+            for _ in 0..500 {
+                let answer = fetch(addr, "GET", "/v1/models", &[("Authorization", &header)]).await;
+                if answer.status == status {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            panic!("/v1/models never answered {status} to {key}");
+        }
+
+        // Not upstream's: the service `run` serves gives the management API
+        // the config writer and the reload. A change is saved to the file,
+        // keeping its comments, and applied before the answer is sent, so
+        // the proxy takes a client key the change added at once; changes
+        // made to the file by hand are still followed after it.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn management_saves_are_applied_before_the_answer() {
+            let dir = tempfile::tempdir().unwrap();
+            let auth_dir = dir.path().join("auth");
+            std::fs::create_dir(&auth_dir).unwrap();
+            let port = std::net::TcpListener::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port();
+            let path = dir.path().join("config.yaml");
+            let head = format!(
+                "# Kept.\nhost: 127.0.0.1\nport: {port}\nauth-dir: '{}'\n{KEYED}",
+                auth_dir.display()
+            );
+            std::fs::write(&path, format!("{head}api-keys: ['client-key']\n")).unwrap();
+            let config = Config::load(&path).unwrap();
+            let (stop, stopped) = oneshot::channel::<()>();
+            let served = tokio::spawn(run(
+                config,
+                path.clone(),
+                auth_dir,
+                LogLevel::detached(),
+                Options::default(),
+                async move {
+                    let _ = stopped.await;
+                },
+            ));
+            let addr = SocketAddr::from(([127, 0, 0, 1], port));
+            wait_listening(addr).await;
+            wait_models(addr, "client-key", 200).await;
+
+            let key = ("Authorization", "Bearer test-secret");
+            let keys = r#"["client-key","added-key"]"#;
+            let answer = send(addr, "PUT", "/v0/management/api-keys", &[key], keys).await;
+            assert_eq!(
+                (answer.status, answer.body.as_str()),
+                (200, r#"{"status":"ok"}"#)
+            );
+            let added = ("Authorization", "Bearer added-key");
+            let answer = fetch(addr, "GET", "/v1/models", &[added]).await;
+            assert_eq!(answer.status, 200, "{}", answer.body);
+            let saved = std::fs::read_to_string(&path).unwrap();
+            assert!(saved.starts_with("# Kept.\n"), "{saved}");
+            let saved = Config::load(&path).unwrap();
+            assert_eq!(saved.api_keys, ["client-key", "added-key"]);
+
+            // A failed save changes nothing, in the file or in the service.
+            // The backup the first save left is in the way of the next.
+            let backup = dir.path().join("config.yaml.bak");
+            assert!(backup.is_file());
+            std::fs::remove_file(&backup).unwrap();
+            std::fs::create_dir(&backup).unwrap();
+            let answer = send(addr, "PUT", "/v0/management/api-keys", &[key], "[]").await;
+            assert_eq!(answer.status, 500, "{}", answer.body);
+            assert!(
+                answer
+                    .body
+                    .starts_with(r#"{"error":"failed to save config: "#),
+                "{}",
+                answer.body
+            );
+            assert_eq!(Config::load(&path).unwrap().api_keys, saved.api_keys);
+            let answer = fetch(addr, "GET", "/v1/models", &[added]).await;
+            assert_eq!(answer.status, 200, "{}", answer.body);
+            std::fs::remove_dir(&backup).unwrap();
+
+            std::fs::write(&path, format!("{head}api-keys: ['hand-key']\n")).unwrap();
+            wait_models(addr, "hand-key", 200).await;
+            wait_models(addr, "added-key", 401).await;
+
+            stop.send(()).unwrap();
+            let code = tokio::time::timeout(Duration::from_secs(60), served)
+                .await
+                .expect("the service didn't stop")
+                .unwrap();
+            assert_eq!(code, ExitCode::SUCCESS);
         }
 
         #[tokio::test]
