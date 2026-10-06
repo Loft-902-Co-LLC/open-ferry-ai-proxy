@@ -1,7 +1,7 @@
 # Releasing
 
 How the maintainer makes a release. Pushing a tag runs [the release workflow](.github/workflows/release.yml), which does the following:
-- builds the binaries;
+- builds the web dashboard once, and each binary with it built in;
 - writes `SHA256SUMS`;
 - attests each archive's build provenance;
 - creates a **draft** release.
@@ -90,6 +90,7 @@ A run that failed may have made attestations already. They stay, but they only v
 - **Windows.** The binary links the C runtime statically, so it doesn't need the Visual C++ Redistributable.
 - **Build information.** `OPEN_FERRY_COMMIT` and `OPEN_FERRY_BUILD_DATE` are set at build time. They are the management API's `X-CPA-COMMIT` and `X-CPA-BUILD-DATE` headers. A build without them says `none` and `unknown`.
 - **No cache.** Release builds start from scratch, so nothing a cache holds can get into a release.
+- **The dashboard.** The `dashboard` job builds the web app in `dashboard/` once, with the Node version in `dashboard/.nvmrc`, `npm ci --ignore-scripts` and `npm run build`, without an npm cache. Every build job downloads the result into `dashboard/dist` and builds with `OPEN_FERRY_REQUIRE_DASHBOARD=1`, so a binary can't ship without it. Each archive's `licenses/dashboard-third-party-licenses.txt` lists the npm packages built into the dashboard, with their licenses. The dashboard build fails if one of them isn't MIT, ISC, Apache-2.0 or BSD; replace the package, or settle its license, before releasing. To move to a newer Node, change `.nvmrc`; `engines.node` in `dashboard/package.json` is the oldest Node that builds it.
 - **Actions** are pinned to full commit SHAs, and Dependabot proposes updates.
 - **Attestations** need the repository to be public, or on GitHub Enterprise Cloud if it is private.
 - **Tag protection.** Consider a ruleset that lets only the maintainer create `v*` tags, since pushing one starts a release.

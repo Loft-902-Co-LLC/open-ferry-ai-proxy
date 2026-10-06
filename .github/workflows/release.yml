@@ -84,9 +84,52 @@ jobs:
             echo "prerelease=$prerelease"
           } >> "$GITHUB_OUTPUT"
 
+  dashboard:
+    name: Build the dashboard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No npm cache, as no cargo cache: every package comes from the
+      # registry, checked against package-lock.json's integrity hashes.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: dashboard/.nvmrc
+          package-manager-cache: false
+
+      # --ignore-scripts: no package runs code at install time.
+      - name: Install
+        run: npm ci --ignore-scripts
+
+      - name: Build
+        run: npm run build
+
+      - name: Check the build
+        run: |
+          for file in index.html third-party-licenses.txt; do
+            if [ ! -s "dist/$file" ]; then
+              echo "::error::The dashboard build has no dist/$file"
+              exit 1
+            fi
+          done
+
+      # Built once, so every target embeds the same files. The name mustn't
+      # match open-ferry-*, which the checksum and publish jobs collect.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dashboard-dist
+          path: dashboard/dist
+          if-no-files-found: error
+
   build:
     name: build (${{ matrix.target }})
-    needs: meta
+    needs: [meta, dashboard]
     strategy:
       fail-fast: false
       matrix:
@@ -121,10 +164,18 @@ jobs:
       CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
       # Keeps macOS tar from adding ._ files for extended attributes.
       COPYFILE_DISABLE: "1"
+      # A release must embed the dashboard: without dashboard/dist the build
+      # fails instead of serving the "built without the dashboard" page.
+      OPEN_FERRY_REQUIRE_DASHBOARD: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dashboard-dist
+          path: dashboard/dist
 
       # No cache: a release is built from scratch, so nothing a cache holds
       # can find its way into it.
@@ -159,6 +210,8 @@ jobs:
           cp "target/$TARGET/release/$exe" LICENSE README.md "dist/$name/"
           if [ "$RUNNER_OS" != Windows ]; then chmod 755 "dist/$name/$exe"; fi
           cp -R licenses "dist/$name/"
+          # The licenses of the npm packages built into the dashboard.
+          cp dashboard/dist/third-party-licenses.txt "dist/$name/licenses/dashboard-third-party-licenses.txt"
           if [ -f config.example.yaml ]; then cp config.example.yaml "dist/$name/"; fi
           cd dist
           if [ "$RUNNER_OS" = Windows ]; then
