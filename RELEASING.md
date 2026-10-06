@@ -50,7 +50,7 @@ open-ferry follows [Semantic Versioning](https://semver.org/). Until 1.0.0, a mi
 
 7. **Review the draft.** When the workflow finishes, the draft is on the [Releases](https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases) page. Check that:
    - it has five archives and `SHA256SUMS`;
-   - an archive's `licenses/` holds `rust-third-party-licenses.txt` for its own target and `dashboard-third-party-licenses.txt`;
+   - an archive holds `config.example.yaml`, and its `licenses/` holds `rust-third-party-licenses.txt` for its own target and `dashboard-third-party-licenses.txt`;
    - the notes are the changelog section;
    - an archive downloads and checks out as the README's [install section](README.md#install) says: its hash against `SHA256SUMS`, and its attestation with `gh attestation verify`;
    - the binary runs (`open-ferry -h`).

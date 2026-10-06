@@ -119,9 +119,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::config::RoutingStrategy;
-    use crate::config::testing::TempDir;
+    use crate::config::testing::{TempDir, logged};
     use crate::config::types::{CodexModel, GeminiModel, RoutingConfig};
+    use crate::config::{PayloadConfig, RoutingStrategy};
     use ConfigErrorKind::{Decode, Invalid, Syntax};
 
     const LOAD: &str = "failed to parse config file: ";
@@ -1540,6 +1540,120 @@ mod tests {
         assert!(config.quota_exceeded.antigravity_credits);
         assert!(!config.quota_exceeded.switch_project);
         assert!(!config.quota_exceeded.switch_preview_model);
+    }
+
+    /// The `config.example.yaml` the release archives ship.
+    const ROOT_EXAMPLE: &str = include_str!("../../../../config.example.yaml");
+
+    /// The commented blocks of `ROOT_EXAMPLE` an operator would uncomment,
+    /// each from the line starting with one of these to the next blank line.
+    const ROOT_EXAMPLE_BLOCKS: [&str; 10] = [
+        "  # base-url:",
+        "  # streaming:",
+        "  # payload:",
+        "# api-keys:",
+        "  # auth-auto-refresh-workers:",
+        "  # model-alias:",
+        "  # settings:",
+        "  # excluded-models:",
+        "  # request-scoped-errors:",
+        "  # gpt-image-2-base-model:",
+    ];
+
+    /// `ROOT_EXAMPLE` with its commented blocks uncommented.
+    fn uncommented_root_example() -> String {
+        let mut text = ROOT_EXAMPLE.replace("\r\n", "\n");
+        for first in ROOT_EXAMPLE_BLOCKS {
+            let start = text
+                .find(&format!("\n{first}"))
+                .unwrap_or_else(|| panic!("{first:?} not found"))
+                + 1;
+            let end = text[start..]
+                .find("\n\n")
+                .map_or(text.len(), |end| start + end + 1);
+            let indent = first.len() - first.trim_start().len();
+            let block: String = text[start..end]
+                .split_inclusive('\n')
+                .map(|line| {
+                    let (lead, rest) = line.split_at(indent);
+                    assert!(lead.trim().is_empty(), "{line:?}");
+                    let rest = rest
+                        .strip_prefix('#')
+                        .unwrap_or_else(|| panic!("{line:?} isn't commented"));
+                    format!("{lead}{}", rest.strip_prefix(' ').unwrap_or(rest))
+                })
+                .collect();
+            text.replace_range(start..end, &block);
+        }
+        text
+    }
+
+    // Not upstream's: the root config.example.yaml, our port of upstream's
+    // example, loads with no warning, as it ships and with its examples
+    // uncommented, and its example api-keys put the proxy in safe mode.
+    #[test]
+    fn root_example_loads() {
+        // The warnings parsing can log are seen.
+        let (_, warnings) = logged(|| parse("redis-usage-queue-retention-seconds: 7200\n"));
+        assert_eq!(
+            warnings,
+            ["redis-usage-queue-retention-seconds too large; clamping to 3600"]
+        );
+        let (_, warnings) = logged(|| {
+            parse("payload:\n  default-raw:\n    - models: [{name: m}]\n      params: {a: '{'}\n")
+        });
+        assert_eq!(warnings, ["payload rule dropped: invalid raw JSON"]);
+
+        let (config, warnings) = logged(|| parse(ROOT_EXAMPLE));
+        assert_eq!(warnings, Vec::<String>::new());
+        assert_eq!(config.port, 8317);
+        assert_eq!(
+            config.api_keys,
+            ["your-api-key-1", "your-api-key-2", "your-api-key-3"]
+        );
+        assert!(config.has_example_api_keys());
+        assert_eq!(config.request_retry, 3);
+        assert_eq!(config.redis_usage_queue_retention_seconds, 60);
+        assert!(config.codex_api_key.is_empty() && config.claude_api_key.is_empty());
+        assert!(config.gemini_api_key.is_empty() && config.vertex_api_key.is_empty());
+        assert!(config.xai_api_key.is_empty() && config.meta_api_key.is_empty());
+        assert!(config.interactions_api_key.is_empty());
+        assert!(config.openai_compatibility.is_empty());
+        assert!(config.oauth_model_alias.is_empty());
+        assert_eq!(config.payload, PayloadConfig::default());
+
+        let text = uncommented_root_example();
+        let (config, warnings) = logged(|| parse(&text));
+        assert_eq!(warnings, Vec::<String>::new());
+        assert!(config.has_example_api_keys());
+        assert_eq!(config.gemini_api_key.len(), 3);
+        assert_eq!(config.codex_api_key.len(), 1);
+        assert_eq!(config.claude_api_key.len(), 2);
+        assert_eq!(config.vertex_api_key.len(), 1);
+        assert_eq!(config.xai_api_key.len(), 1);
+        assert_eq!(config.meta_api_key.len(), 1);
+        assert_eq!(config.interactions_api_key.len(), 1);
+        assert_eq!(config.openai_compatibility.len(), 1);
+        assert_eq!(
+            config.remote_management.base_url,
+            "https://proxy.example.com"
+        );
+        assert_eq!(config.streaming.keepalive_seconds, 15);
+        assert_eq!(config.streaming.bootstrap_retries, 1);
+        // Every raw rule holds valid JSON: none is dropped.
+        let payload = &config.payload;
+        assert_eq!(payload.default.len(), 1);
+        assert_eq!(payload.default_raw.len(), 1);
+        assert_eq!(payload.r#override.len(), 3);
+        assert_eq!(payload.override_raw.len(), 1);
+        assert_eq!(payload.filter.len(), 2);
+        assert_eq!(config.auth_auto_refresh_workers, 16);
+        let channels = ["claude", "codex", "meta", "vertex", "xai"];
+        assert!(config.oauth_model_alias.keys().eq(channels));
+        assert!(config.oauth_excluded_models.keys().eq(channels));
+        assert!(config.oauth_request_scoped_errors.keys().eq(channels));
+        assert!(config.oauth_settings.keys().eq(["codex"]));
+        assert_eq!(config.gpt_image_2_base_model, "gpt-5.4-mini");
     }
 
     #[test]

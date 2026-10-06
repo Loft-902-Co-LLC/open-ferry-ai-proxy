@@ -17,7 +17,7 @@ open-ferry reads CLIProxyAPI's config and auth directory as they are, so for mos
 - **The auth directory** is the config's `auth-dir`, by default `~/.cli-proxy-api`, with the same credential files.
 - **The management key** is still `remote-management.secret-key` or `MANAGEMENT_PASSWORD`.
 - **Log files** go to the same place: `WRITABLE_PATH` if set, else beside the config.
-- **Safe mode** still holds: while `api-keys` lists the example keys from CLIProxyAPI's `config.example.yaml`, the proxy refuses service until you change them. There's no warning page at `/`, though: the proxy's routes answer 403 with CLIProxyAPI's message, whose link, `/management.html?safe-mode=configure`, opens the dashboard's API key setup.
+- **Safe mode** still holds: while `api-keys` lists the example keys from CLIProxyAPI's `config.example.yaml`, the proxy refuses service until you change them. open-ferry's own [`config.example.yaml`](../config.example.yaml), in each release archive, keeps those keys, so a config copied from it is refused too until you change them. There's no warning page at `/`, though: the proxy's routes answer 403 with CLIProxyAPI's message, whose link, `/management.html?safe-mode=configure`, opens the dashboard's API key setup.
 
 **What differs:**
 - **Loading the config never writes it.** CLIProxyAPI replaces a plain `secret-key` with its bcrypt hash in the file; open-ferry leaves the file alone and compares the plain key as written. A file that already holds a hash works too. The file is written only when you save a change through the management API or the dashboard. See [the foundation](../UPSTREAM.md#the-foundation).
@@ -29,7 +29,7 @@ open-ferry reads CLIProxyAPI's config and auth directory as they are, so for mos
   - the Antigravity and Devin sections;
   - the client impersonation ("cloaking") settings.
 
-  The full list is in the docs of `crates/open-ferry-core/src/config/mod.rs`.
+  The full list is in the docs of `crates/open-ferry-core/src/config/mod.rs`. open-ferry's [`config.example.yaml`](../config.example.yaml) leaves these settings out.
 - **Credential files of providers open-ferry doesn't serve** are left alone in the auth directory, but nothing is served from them. CLIProxyAPI hands a credential of an unknown type to its OpenAI-compatible executor.
 - **No `.env` file.** A `.env` file in the working directory isn't loaded, so set its variables in the environment instead.
 - **No remote storage or cloud mode.** The config and credentials must be local files. The Postgres, git and object stores, the cloud deploy mode and Home mode aren't ported, so these variables are ignored:

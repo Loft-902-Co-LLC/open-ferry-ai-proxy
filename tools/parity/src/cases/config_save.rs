@@ -4,7 +4,7 @@
 //! upstream's save tests, each saved unchanged, saved with changes, and
 //! migrated to the v8 layout; nested scalar updates; and management
 //! writes of whole files. Upstream's own `config.example.yaml` is read from
-//! the checkout and put through each writer.
+//! the checkout and put through each writer, and so is ours.
 
 use std::fs;
 use std::path::Path;
@@ -12,6 +12,7 @@ use std::path::Path;
 use serde_json::{Value, json};
 
 use super::Case;
+use super::config_diff::{ROOT_EXAMPLE, uncomment_root_example};
 
 fn case(name: &str, file: &str, steps: Vec<Value>) -> Case {
     Case::new(name, "", "").with_options(json!({ "file": file, "steps": steps }))
@@ -801,6 +802,24 @@ pub fn steps(upstream: &Path) -> Vec<Case> {
             ),
         ]);
     }
+    // Not upstream's: the root config.example.yaml, ours, put through each
+    // writer as upstream's is.
+    let uncommented = uncomment_root_example();
+    cases.extend([
+        case("root-example-resave", ROOT_EXAMPLE, vec![resave(false)]),
+        case("root-example-migrate", ROOT_EXAMPLE, vec![resave(true)]),
+        case("root-example-write", "", vec![write(ROOT_EXAMPLE)]),
+        case(
+            "root-example-uncommented-resave",
+            &uncommented,
+            vec![resave(false)],
+        ),
+        case(
+            "root-example-uncommented-write",
+            "",
+            vec![write(&uncommented)],
+        ),
+    ]);
     cases
 }
 

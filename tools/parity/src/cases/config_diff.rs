@@ -1,11 +1,57 @@
 //! Hand-written cases for config change details: the scenarios of
 //! upstream's diff tests, written as the YAML a reload reads, with every
 //! setting open-ferry types, the clean-ups parsing applies before the
-//! diff, and the URL forms the lines redact.
+//! diff, and the URL forms the lines redact; and our root
+//! `config.example.yaml`, which both loaders must read alike.
 
 use serde_json::json;
 
 use super::Case;
+
+/// The root `config.example.yaml`, our port of upstream's, which the
+/// release archives ship.
+pub(crate) const ROOT_EXAMPLE: &str = include_str!("../../../../config.example.yaml");
+
+/// `ROOT_EXAMPLE` with the commented blocks an operator would uncomment
+/// taken out of comments: the API-key providers and the commented settings,
+/// each from a line starting with one of these to the next blank line.
+pub(crate) fn uncomment_root_example() -> String {
+    const BLOCKS: [&str; 10] = [
+        "  # base-url:",
+        "  # streaming:",
+        "  # payload:",
+        "# api-keys:",
+        "  # auth-auto-refresh-workers:",
+        "  # model-alias:",
+        "  # settings:",
+        "  # excluded-models:",
+        "  # request-scoped-errors:",
+        "  # gpt-image-2-base-model:",
+    ];
+    let mut out = String::new();
+    let mut indent = None;
+    for line in ROOT_EXAMPLE.split_inclusive('\n') {
+        if line.trim().is_empty() {
+            indent = None;
+        } else if indent.is_none() {
+            indent = BLOCKS
+                .iter()
+                .find(|first| line.starts_with(**first))
+                .map(|first| first.len() - first.trim_start().len());
+        }
+        let uncommented = indent
+            .and_then(|indent| line.split_at_checked(indent))
+            .and_then(|(lead, rest)| Some((lead, rest.strip_prefix('#')?)));
+        match uncommented {
+            Some((lead, rest)) => {
+                out.push_str(lead);
+                out.push_str(rest.strip_prefix(' ').unwrap_or(rest));
+            }
+            None => out.push_str(line),
+        }
+    }
+    out
+}
 
 fn case(name: &str, old: &str, new: &str) -> Case {
     Case::new(name, "", "").with_options(json!({ "old": old, "new": new }))
@@ -1008,5 +1054,15 @@ oauth-settings:
             &format!("proxy-url: {}\n", serde_json::Value::from(url)),
         ));
     }
+
+    // Not upstream's: the root config.example.yaml reads the same under
+    // both loaders, as it ships and with its examples uncommented.
+    let minimal = "server:\n  port: 8317\n";
+    cases.push(case("root-example", minimal, ROOT_EXAMPLE));
+    cases.push(case(
+        "root-example-uncommented",
+        minimal,
+        &uncomment_root_example(),
+    ));
     cases
 }

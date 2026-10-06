@@ -8,6 +8,7 @@ use axum::body::Body;
 use bytes::Bytes;
 use http::{HeaderMap, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
+use open_ferry_core::config::Config;
 use open_ferry_core::exec::{ExecError, Format};
 use open_ferry_core::models::ModelInfo;
 use serde_json::{Value, json};
@@ -164,6 +165,32 @@ async fn safe_mode_shuts_the_proxy_routes() {
             "message": "Proxy API endpoints are disabled because api-keys contains template values. Open /management.html?safe-mode=configure, update api-keys in Management, then retry.",
         })
     );
+    let (status, _, _) = send(&app, Request::get("/healthz").body(Body::empty()).unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+// Not upstream's: the config.example.yaml the release archives ship keeps
+// upstream's example api-keys, so a proxy started from a copy of it refuses
+// service, even to one of those keys, until they are replaced.
+#[tokio::test]
+async fn the_shipped_example_starts_in_safe_mode() {
+    let example = Config::parse(include_str!("../../../config.example.yaml")).unwrap();
+    let dispatcher = FakeDispatcher::new([]);
+    let app = router(state(
+        ServerConfig::from(&example),
+        FakeCatalog::new(),
+        &dispatcher,
+    ));
+    let mut request = authed(Method::GET, "/v1/models", "");
+    request.headers_mut().insert(
+        header::AUTHORIZATION,
+        "Bearer your-api-key-1".parse().unwrap(),
+    );
+    let (status, headers, body) = send(&app, request).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(headers["x-cpa-safe-mode"], "example-api-key");
+    let body: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(body["error"], "unsafe_example_api_key");
     let (status, _, _) = send(&app, Request::get("/healthz").body(Body::empty()).unwrap()).await;
     assert_eq!(status, StatusCode::OK);
 }

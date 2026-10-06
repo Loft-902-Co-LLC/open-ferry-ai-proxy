@@ -265,7 +265,7 @@ jobs:
           exe=open-ferry
           if [ "$RUNNER_OS" = Windows ]; then exe=open-ferry.exe; fi
           mkdir -p "dist/$name"
-          cp "target/$TARGET/release/$exe" LICENSE README.md "dist/$name/"
+          cp "target/$TARGET/release/$exe" LICENSE README.md config.example.yaml "dist/$name/"
           if [ "$RUNNER_OS" != Windows ]; then chmod 755 "dist/$name/$exe"; fi
           cp -R licenses "dist/$name/"
           # The licenses of the npm packages built into the dashboard.
@@ -276,7 +276,6 @@ jobs:
             exit 1
           fi
           cp "rust-licenses/$TARGET.txt" "dist/$name/licenses/rust-third-party-licenses.txt"
-          if [ -f config.example.yaml ]; then cp config.example.yaml "dist/$name/"; fi
           cd dist
           if [ "$RUNNER_OS" = Windows ]; then
             # Windows' own tar is bsdtar, which writes zip files; Git Bash's
