@@ -13,7 +13,10 @@
 //! with no translator. Codex call arguments that start as a JSON object but
 //! aren't one are replaced with `{}` before they go to Gemini, or to
 //! Interactions in a final event, as upstream copies them into its output as
-//! they are, which makes it invalid JSON (see UPSTREAM.md).
+//! they are, which makes it invalid JSON (see UPSTREAM.md). Streams sent from
+//! Gemini to Responses lose the lines that aren't JSON but that gjson reads
+//! in part, as `not json`, which upstream starts the response on and its port
+//! reads as nothing.
 //!
 //! The Gemini Interactions families' requests and responses for their pairs
 //! (see `crate::interactions`) are treated the same way, after the others,
@@ -288,8 +291,9 @@ pub fn response_cases(seed: u64, count: usize) -> (Vec<Case>, Vec<Case>) {
             // Upstream copies some broken tool arguments into its output as
             // they are, whichever pair the events were made for (for
             // Interactions only in a whole response; its stream sends them
-            // as text); and the Gemini to Responses port fails on lines it
-            // can't read when `apply_patch` may be declared.
+            // as text); and the Gemini to Responses port reads nothing in
+            // lines gjson reads in part, and fails on lines it can't read
+            // when `apply_patch` may be declared.
             let (stream, last) = match (from, to) {
                 ("codex", "gemini") => (
                     super::gemini::repair_codex_case(stream),

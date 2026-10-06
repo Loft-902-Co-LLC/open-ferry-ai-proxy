@@ -112,11 +112,13 @@ pub fn json_arguments(request: &mut Value) {
 }
 
 /// Makes another suite's stream and response fit the Gemini → Responses
-/// translators, for the registry to send them through that pair. If the
-/// request may declare `apply_patch`, the stream's lines the port can't read
-/// are left out, and a response it can't read becomes `{}`: the port fails
-/// the response there, where upstream reads them as nothing (see the module
-/// docs).
+/// translators, for the registry to send them through that pair (see the
+/// module docs). The stream's lines the port can't read but gjson reads in
+/// part (such as `not json`, which it reads as NaN) are left out: the port
+/// reads them as nothing, where upstream starts the response on them. If the
+/// request may declare `apply_patch`, so are the other lines the port can't
+/// read, and a response it can't read becomes `{}`: the port fails the
+/// response there, where upstream reads them as nothing.
 pub fn readable_with_patch(mut stream: Case, mut last: Case) -> (Case, Case) {
     fn may_patch(case: &Case) -> bool {
         case.request.contains("apply_patch") || case.translated_request.contains("apply_patch")
@@ -125,6 +127,9 @@ pub fn readable_with_patch(mut stream: Case, mut last: Case) -> (Case, Case) {
         let text = text.trim();
         text.is_empty() || text == "[DONE]" || serde_json::from_str::<Value>(text).is_ok()
     }
+    stream
+        .events
+        .retain(|line| !read_in_part(line.strip_prefix("data:").unwrap_or(line)));
     if may_patch(&stream) {
         stream
             .events
@@ -138,6 +143,19 @@ pub fn readable_with_patch(mut stream: Case, mut last: Case) -> (Case, Case) {
         }
     }
     (stream, last)
+}
+
+/// Whether gjson reads `text` in part where `serde_json` can't read it: its
+/// first character other than space starts a value for gjson (an object, an
+/// array, a number, `null`, `true`, `false` or a string, and `n` other than
+/// `null` as NaN).
+fn read_in_part(text: &str) -> bool {
+    let text = text.trim();
+    let starts_value = text
+        .chars()
+        .next()
+        .is_some_and(|first| "{[+-0123456789iINntf\"".contains(first));
+    starts_value && text != "[DONE]" && serde_json::from_str::<Value>(text).is_err()
 }
 
 /// Makes a response of this suite's that comes with a `data:` prefix the
@@ -2645,6 +2663,53 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Not upstream's: lines gjson reads in part leave another suite's stream
+    /// whatever its request declares, and the others stay unless it may
+    /// declare `apply_patch`.
+    #[test]
+    fn lines_read_in_part_are_left_out() {
+        let lines = [
+            "not json",
+            "data: not json",
+            " {not json",
+            "\"open",
+            "garbage",
+            ": comment",
+            "5",
+            "null",
+            "",
+            "data: [DONE]",
+            "data: {}",
+        ];
+        for line in lines {
+            assert_eq!(
+                read_in_part(line.strip_prefix("data:").unwrap_or(line)),
+                reading(line, true).is_none(),
+                "{line:?}"
+            );
+        }
+        let case = |request: &str| {
+            let events = lines.iter().map(|line| (*line).to_owned()).collect();
+            Case::response("stream", request, events)
+        };
+        let (stream, _) = readable_with_patch(case("{}"), case("{}"));
+        assert_eq!(
+            stream.events,
+            [
+                "garbage",
+                ": comment",
+                "5",
+                "null",
+                "",
+                "data: [DONE]",
+                "data: {}"
+            ]
+        );
+        let patch = r#"{"tools":[{"type":"apply_patch"}]}"#;
+        let (stream, _) = readable_with_patch(case(patch), case(patch));
+        assert_eq!(stream.events, ["5", "null", "", "data: [DONE]", "data: {}"]);
     }
 
     #[test]
