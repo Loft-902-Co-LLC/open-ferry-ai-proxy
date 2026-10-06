@@ -1,0 +1,28 @@
+   仪表盘    配置    认证文件    API 密钥    OAuth    日志
+⚙ 配置
+
+  ✗ invalid integer: abc
+  [↑↓/jk] 导航 • [Enter/Space] 编辑 • [r] 刷新
+  布尔: Enter 切换 • 文本/数字: Enter 输入, Enter 确认, Esc 取消
+
+
+  ── 服务器
+  Port                              8317
+  Host                              127.0.0.1
+  Debug                             ○ OFF
+  Proxy URL                         socks5://127.0.0.1:1080
+  Request Retry                     3
+  Max Retry Interval (s)            30
+  Force Model Prefix
+
+  ── 日志与统计
+  Logging to File                   ● ON
+  Logs Max Total Size (MB)          0
+  Error Logs Max Files              10
+  Usage Stats Enabled               ● ON
+  Request Log                       ○ OFF
+
+  ── 配额超限处理
+  Switch Project on Quota           ● ON
+  Switch Preview Model              ● ON
+  CLIProxyAPI 管理终端                               Tab/Shift+Tab: 切换 • L: 语言 • q/Ctrl+C: 退出

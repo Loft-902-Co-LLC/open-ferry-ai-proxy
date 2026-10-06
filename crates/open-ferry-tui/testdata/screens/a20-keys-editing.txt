@@ -1,0 +1,28 @@
+   Dashboard    Config    Auth Files    API Keys    OAuth    Logs
+🔐 API Keys
+
+ [↑↓/jk] Navigate • [a] Add • [e] Edit • [d] Delete • [c] Copy • [r] Refresh
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  Access API Keys (3)
+─────────────────────
+▸ 1. sk-t**********7890
+  Edit Key: sk-test-1234567890
+    Enter: Save • Esc: Cancel
+  2. *****
+  3. abcd**ghij
+
+  Gemini API Keys (1)
+─────────────────────
+  1. AIza**********0000 (prefix: g) → https://gemini.example.invalid
+
+  Claude API Keys (1)
+─────────────────────
+  1. sk-a*********0000
+
+  OpenAI Compatibility (1)
+──────────────────────────
+  1. local (prefix: loc) → http://127.0.0.1:9/v1
+
+
+
+  CLIProxyAPI Management TUI                       Tab/Shift+Tab: switch • L: lang • q/Ctrl+C: quit

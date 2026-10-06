@@ -1,0 +1,11 @@
+   Dashboard    Config    Auth Files
+ API Keys    OAuth    Logs
+⚙ Configuration
+
+  [↑↓/jk] Navigate • [Enter/Space] Edit
+  Bool: Enter to toggle • String/Int: En
+
+
+  ── Server
+▸ Port                              8317
+  CLIProxyAPI Management TUITab/Shift+T

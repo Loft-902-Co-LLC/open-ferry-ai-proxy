@@ -1,0 +1,28 @@
+   Dashboard    Config    Auth Files    API Keys    OAuth    Logs
+🔐 OAuth Login
+
+
+  Select a provider and press [Enter] to start OAuth login:
+
+▸  🟧 Claude (Anthropic)
+   🟩 Codex (OpenAI)
+
+  [↑↓/jk] Navigate • [Enter] Login • [Esc] Clear status
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  CLIProxyAPI Management TUI                       Tab/Shift+Tab: switch • L: lang • q/Ctrl+C: quit

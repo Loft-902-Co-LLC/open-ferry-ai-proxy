@@ -1,0 +1,11 @@
+   Dashboard    Config    Auth Files
+ API Keys    OAuth    Logs
+📊 Dashboard
+
+ [r] Refresh • [↑↓] Scroll
+
+● Connected  http://127.0.0.1:58121
+
+╭───────────────────╮ ╭─────────────────
+│ 🔑 3              │ │ 📄 2
+  CLIProxyAPI Management TUITab/Shift+T

@@ -1,0 +1,28 @@
+   Dashboard    Config    Auth Files    API Keys    OAuth    Logs
+ 📋 Logs  ● AUTO-SCROLL  Filter: ALL  Lines: 4
+
+ [a] Auto-scroll • [c] Clear • [1] All [2] info+ [3] warn+ [4] error • [↑↓] Scroll
+────────────────────────────────────────────────────────────────────────────────────────────────────
+[2026-01-01 00:00:00] [--------] [info ] [main.go:10] server started
+[2026-01-01 00:00:01] [--------] [warn ] [auth.go:20] token expires soon
+[2026-01-01 00:00:02] [abcd1234] [error] [proxy.go:30] upstream failed
+[2026-01-01 00:00:03] [--------] [debug] [x.go:1] detail
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  CLIProxyAPI Management TUI                       Tab/Shift+Tab: switch • L: lang • q/Ctrl+C: quit

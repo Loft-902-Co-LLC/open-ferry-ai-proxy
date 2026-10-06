@@ -1,0 +1,28 @@
+   Dashboard    Config    Auth Files    API Keys    OAuth    Logs
+🔐 OAuth Login
+
+
+  ✦ Codex (OpenAI) OAuth
+
+  Authorization URL:
+  https://auth.example.invalid/device
+
+  User code:
+   ABCD-1234
+
+  Device-code login: open the URL above and approve access. No callback URL paste is required.
+  Device code expires in 600 seconds.
+
+  Waiting for authentication...
+  Press [Esc] to cancel
+
+
+
+
+
+
+
+
+
+
+  CLIProxyAPI Management TUI                       Tab/Shift+Tab: switch • L: lang • q/Ctrl+C: quit
