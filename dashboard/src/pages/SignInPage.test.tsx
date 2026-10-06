@@ -74,6 +74,10 @@ describe("sign in", () => {
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("That management key is wrong");
     expect(alert).toHaveTextContent("thirty minutes");
+    // The local password is a key only from the server's own computer.
+    expect(alert).toHaveTextContent(
+      "The local password, from -password or the terminal UI's standalone mode, is taken only from the computer the server runs on.",
+    );
     expect(readStoredKey()).toBeNull();
     // A refused candidate isn't a rejected session.
     expect(screen.queryByText("You were signed out")).toBeNull();
@@ -109,6 +113,22 @@ describe("sign in", () => {
     expect(box).not.toBeNull();
     expect(within(box as HTMLElement).getByText("remote-management.secret-key")).toBeVisible();
     expect(within(box as HTMLElement).getByText("MANAGEMENT_PASSWORD")).toBeVisible();
+    // A local password alone isn't a management key.
+    expect(box).toHaveTextContent("doesn't turn management on by itself");
+  });
+
+  it("explains the management API's refusal while only a local password is set", async () => {
+    serverWithKey({ status: 403, json: { error: "remote management key not set" } });
+    const { user } = renderApp("/signin", { key: null });
+    await submitKey(user, "local-password");
+    expect(await screen.findByText("Management is switched off on this server")).toBeVisible();
+  });
+
+  it("names the local password as a way in", async () => {
+    serverWithKey();
+    renderApp("/signin", { key: null });
+    const field = await screen.findByLabelText("Management key");
+    expect(field).toHaveAccessibleDescription(/its local password works too/);
   });
 
   it("explains a server that doesn't answer", async () => {

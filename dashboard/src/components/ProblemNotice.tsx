@@ -42,6 +42,10 @@ export function explainProblem(problem: CallProblem): Explanation {
               config.yaml now shows a hash starting with <Code>$2a$</Code>, the server hashed your
               key: enter the key itself, not the hash.
             </p>
+            <p>
+              The local password, from <Code>-password</Code> or the terminal UI&apos;s standalone
+              mode, is taken only from the computer the server runs on.
+            </p>
             <p>Five wrong keys from one address lock that address out for thirty minutes.</p>
           </>
         ),
@@ -82,7 +86,8 @@ export function explainProblem(problem: CallProblem): Explanation {
             No management key is set, so the server answers no management calls and the dashboard
             can't work. Set <Code>remote-management.secret-key</Code> in config.yaml, or start the
             server with the <Code>MANAGEMENT_PASSWORD</Code> environment variable set, then try
-            again.
+            again. A local password, from <Code>-password</Code> or the terminal UI&apos;s
+            standalone mode, doesn&apos;t turn management on by itself.
           </p>
         ),
       };
