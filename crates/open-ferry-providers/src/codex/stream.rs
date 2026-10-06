@@ -35,7 +35,7 @@
 //!   reading, where upstream watches its context.
 //! - Usage reporting and request logging are left to the call's taps,
 //!   which see each chunk as it is read (see the crate's `observe_send`
-//!   module). Image tool usage isn't ported.
+//!   module), the image generation tool's record among them.
 //! - Each line has the secrets the request sent redacted before it is
 //!   read, if they are of eight bytes or more, as every client error is (see
 //!   [`crate::redact`] and its `Policy::Client`). So an error that quotes

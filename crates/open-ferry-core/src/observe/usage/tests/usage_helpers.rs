@@ -18,8 +18,6 @@
 //! - TestUsageReporterSetStream: the stream flag is the client's option,
 //!   which nothing changes later; TestUsageReporterBuildRecordIncludesStreamTrue
 //!   covers it.
-//! - TestUsageReporterBuildAdditionalModelRecordSkipsZeroTokens: the Codex
-//!   image tool's records aren't ported.
 //! - TestUsageReporterPropagatesSessionHierarchy: open-ferry never derives
 //!   a session or its hierarchy (policy).
 //! - TestUsageReporterPropagatesBaseURL: records have no base URL.
@@ -1013,4 +1011,40 @@ fn explicit_trace_id_precedence_over_request_id() {
     let record: serde_json::Value = serde_json::from_str(&record.encode()).expect("JSON");
     assert_eq!(str_field(&record, "trace_id"), "explicit-trace-1");
     assert_eq!(str_field(&record, "request_id"), "log-id-1");
+}
+
+/// Ports TestUsageReporterBuildAdditionalModelRecordSkipsZeroTokens: the
+/// image generation tool's record is skipped when its counts are all zero,
+/// and made for any count that isn't.
+#[test]
+fn build_additional_model_record_skips_zero_tokens() {
+    for (image_gen, records) in [
+        (
+            r#"{"input_tokens":0,"output_tokens":0,"total_tokens":0}"#,
+            1,
+        ),
+        (r#"{"input_tokens":2}"#, 2),
+        (r#"{"input_tokens_details":{"cached_tokens":2}}"#, 2),
+    ] {
+        let harness = Harness::new();
+        let driver = ClientCall::new("gpt-5.4").tap(&harness);
+        driver.attempt_with(
+            AttemptKind::Execute,
+            "codex",
+            "gpt-5.4",
+            &Format::CODEX,
+            &auth("a", "b", "codex"),
+            &[],
+            "{}",
+        );
+        driver.chunk(&format!(
+            r#"data: {{"type":"response.completed","response":{{"usage":{{"total_tokens":1}},"tool_usage":{{"image_gen":{image_gen}}}}}}}"#
+        ));
+        driver.finish(Outcome::Completed);
+        let queued = harness.records();
+        assert_eq!(queued.len(), records, "{image_gen}: {queued:?}");
+        if let Some(record) = queued.get(1) {
+            assert_eq!(str_field(record, "model"), "gpt-image-2");
+        }
+    }
 }

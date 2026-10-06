@@ -8,6 +8,7 @@
 //! codex/usage.rs.
 
 mod accounting;
+mod codex_image_usage;
 mod echoed_secrets;
 mod error_events;
 mod manager;

@@ -45,11 +45,11 @@
 //! - The Redis protocol listener is not ported yet (P3 WP-F): until it is,
 //!   the usage queue is served by the management API only.
 //! - Records are also made, for the observer, while the queue is off: an
-//!   observer is open-ferry's own.
-//! - Not ported: session derivation and hierarchy, the
-//!   Antigravity and Codex image tool parsers, the credits
-//!   markers, and the usage plugins of the SDK's `usage.Manager` beyond
-//!   the queue.
+//!   observer is open-ferry's own. The observer gets the image generation
+//!   tool's records too.
+//! - Not ported: session derivation and hierarchy, the Antigravity
+//!   parsers, the credits markers, and the usage plugins of the SDK's
+//!   `usage.Manager` beyond the queue.
 
 mod accounting;
 mod error_events;
@@ -76,7 +76,7 @@ pub use accounting::{
 pub use observer::{ClientKey, EventCredential, OBSERVER_BUFFER, Observation, UsageEvent};
 pub use parse::{
     StreamUsageBuffer, merge_stream_usage_detail, parse_claude_stream_usage, parse_claude_usage,
-    parse_codex_usage, parse_gemini_stream_usage, parse_gemini_usage,
+    parse_codex_image_tool_usage, parse_codex_usage, parse_gemini_stream_usage, parse_gemini_usage,
     parse_interactions_stream_usage, parse_interactions_usage, parse_openai_stream_usage,
     parse_openai_usage,
 };

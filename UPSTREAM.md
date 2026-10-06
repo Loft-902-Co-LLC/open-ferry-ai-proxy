@@ -23,7 +23,6 @@ When we move the pin, we update this table, bring every ported file's header to 
 | 8348923a, 8fbf152b | All | The plugin host and the plugin executors' usage aren't ported |
 | 8ef43e4d | All | Upstream's README |
 | 6d57ac90, 5d890405, 678a9257 | All | Claude cloaking and its OAuth tool aliases, which this project doesn't do |
-| a3b77566 | All | The Codex executor doesn't report the image tool's usage, as the image tool isn't ported |
 | 5dbce4f3 | All | A prefilter in front of Claude diagnostic walks that this port doesn't make; it changes no result |
 | d4692663 | All | The race it fixes can't happen here: credentials are registered and updated from copy-on-write snapshots |
 | 52d5507d, 3be5fa44, 0fb50a18 | The management routes that write the config | Their saving is ported in the config writer (`config::save`); the routes are ported but answer 503 until the service hands them the writer (see [Config writes](#config-writes)) |
@@ -580,7 +579,8 @@ Deviations, each also noted in its module:
 - **The queue keeps at most 100,000 records**; past that the oldest are dropped, with a warning at most once a minute. Upstream's grows without bound within its retention.
 - **An answer is read as JSON only when it parses whole.** One cut short, nested more than 128 deep or holding a string that isn't UTF-8 gives no counts, no model and no first token, where gjson reads what it can. A key given twice reads as its last value, where gjson reads the first, and an object or array read as text, such as a service tier, is its compact JSON.
 - **Records keep the client's key and the credential's account in clear**, as upstream's do; only the management API serves them.
-- **Not ported:** Antigravity's and the Codex image tool's usage parsers, the session hierarchy, the credits markers, the SDK's usage plugins beyond the queue, Home mode's skipping of the error events, and the queue over RESP (below). Upstream's `503 core auth manager unavailable` can't happen here.
+- **The Codex image generation tool's record** (`publishCodexImageToolUsage`, a3b77566), made after a Codex HTTP call's own when its terminal event has `response.tool_usage.image_gen` counts that aren't all zero, names the model of the request's first `image_generation` tool as it was sent, after the payload rules; upstream reads the body before its payload finalizer. It is published when the call ends, right after the call's own record, where upstream publishes both at the event. Its execution ID is its own, a version 7 UUID.
+- **Not ported:** Antigravity's usage parsers, the session hierarchy, the credits markers, the SDK's usage plugins beyond the queue, Home mode's skipping of the error events, and the queue over RESP (below). Upstream's `503 core auth manager unavailable` can't happen here.
 
 ### Payload rules
 

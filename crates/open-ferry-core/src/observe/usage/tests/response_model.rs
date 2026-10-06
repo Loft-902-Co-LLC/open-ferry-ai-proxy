@@ -5,9 +5,6 @@
 //! Tests of the Codex served model, the substitution check and its
 //! throttled warning.
 //!
-//! Dropped: TestUsageReporterAdditionalModelRecordOmitsResponseModel, as
-//! the records of a Codex image tool's model aren't ported.
-//!
 //! Deviations from upstream: the reporter tests run the attempt through the
 //! usage tap, as a Codex stream; the concurrency test publishes from
 //! concurrent attempts with one credential, which share the throttle,
@@ -444,4 +441,33 @@ fn throttle_bounds_stored_entries() {
         assert!(throttle.allow(key), "first warning for key {index}");
     }
     assert!(throttle.len() <= WARN_MAX_ENTRIES, "{}", throttle.len());
+}
+
+/// Ports TestUsageReporterAdditionalModelRecordOmitsResponseModel: the
+/// image generation tool's record has the tool's model and no served model.
+#[test]
+fn additional_model_record_omits_response_model() {
+    let harness = Harness::new();
+    let driver = ClientCall::new("gpt-5.4-mini").stream().tap(&harness);
+    driver.attempt_with(
+        AttemptKind::Stream,
+        "codex",
+        "gpt-5.4-mini",
+        &crate::exec::Format::CODEX,
+        &Auth::default(),
+        &[],
+        r#"{"tools":[{"type":"image_generation","model":"gpt-image-1.5"}]}"#,
+    );
+    driver.chunk(
+        "data: {\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-5.4-mini\",\"usage\":{\"total_tokens\":12},\"tool_usage\":{\"image_gen\":{\"total_tokens\":5}}}}\n",
+    );
+    driver.finish(Outcome::Completed);
+
+    let records = harness.records();
+    assert_eq!(records.len(), 2, "{records:?}");
+    assert_eq!(str_field(&records[0], "response_model"), "gpt-5.4-mini");
+    assert_eq!(str_field(&records[1], "model"), "gpt-image-1.5");
+    // The served model is the text model's, never the tool's, so nothing
+    // reads a substitution into the tool's record.
+    assert!(records[1].get("response_model").is_none(), "{}", records[1]);
 }

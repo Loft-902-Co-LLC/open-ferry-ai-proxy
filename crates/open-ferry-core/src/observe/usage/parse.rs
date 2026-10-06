@@ -1,5 +1,6 @@
 // Ported from CLIProxyAPI internal/runtime/executor/helps/usage_helpers.go
-// (StreamUsageBuffer, ParseCodexUsage, ParseOpenAIUsage,
+// (StreamUsageBuffer, ParseCodexUsage, ParseCodexImageToolUsage,
+// ParseOpenAIUsage,
 // hasOpenAIStyleUsageTokenFields, hasOpenAIStyleUsageBucketFields,
 // parseOpenAIStyleUsageNode, ParseOpenAIStreamUsage, ParseClaudeUsage,
 // ParseClaudeStreamUsage, parseClaudeUsageNode,
@@ -23,10 +24,14 @@
 //! stream's counts are kept in a [`StreamUsageBuffer`], the latest winning,
 //! Claude's merged.
 //!
+//! Codex's image generation tool writes its own counts, OpenAI-style, in
+//! the terminal event's `response.tool_usage.image_gen`
+//! ([`parse_codex_image_tool_usage`]).
+//!
 //! Deviations from upstream:
 //! - JSON that doesn't parse whole has no counts (see [`super::json`]).
-//! - Antigravity's and the Codex image tool's counts, and the plugin
-//!   executors', aren't parsed: those aren't ported yet.
+//! - Antigravity's counts, and the plugin executors', aren't parsed: those
+//!   aren't ported yet.
 
 use super::accounting::{Detail, TokenBreakdown, non_negative_sum};
 use super::json::{self, Doc, Node};
@@ -211,6 +216,15 @@ fn parse_openai_style(doc: &Doc, path: &str, tier: String) -> Option<Detail> {
 pub fn parse_codex_usage(data: &[u8]) -> Option<Detail> {
     let tier = extract_response_service_tier(data);
     parse_openai_style(&Doc::parse(data), "response.usage", tier)
+}
+
+/// The image generation tool's counts in a Codex terminal event's
+/// `response.tool_usage.image_gen`; `None` when it has neither a total nor
+/// a bucket (upstream's `ParseCodexImageToolUsage`).
+pub fn parse_codex_image_tool_usage(data: &[u8]) -> Option<Detail> {
+    let doc = Doc::parse(data);
+    let usage = doc.get("response.tool_usage.image_gen");
+    has_openai_token_fields(usage).then(|| parse_openai_usage_node(usage))
 }
 
 /// The counts in an OpenAI-style answer, or nothing but its service tier

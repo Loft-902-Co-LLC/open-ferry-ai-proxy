@@ -1,13 +1,16 @@
 // Ported from CLIProxyAPI internal/runtime/executor/helps/usage_helpers.go
 // (NewUsageReporter, NewExecutorUsageReporter, publishWithOutcome,
-// EnsurePublished, publishAttemptRecord, buildRecordForModel,
+// EnsurePublished, publishAttemptRecord, PublishAdditionalModel,
+// buildAdditionalModelRecord, buildRecordForModel,
 // failFromErrors, latency, warnModelSubstitution, authIndexForLog,
 // resolveUsageSource, resolveUsageAuthType, StreamUsageBuffer.Publish,
 // StreamUsageBuffer.PublishFailure), the usage reporting of
 // internal/runtime/executor/claude_executor_execute.go,
 // claude_executor_stream.go, codex_executor_execute.go,
 // codex_executor_stream.go, codex_executor_terminal.go
-// (observeCodexTokenEvent), codex_websockets_executor.go,
+// (observeCodexTokenEvent), codex_executor_request.go
+// (publishCodexImageToolUsage, codexImageGenerationToolModel),
+// codex_websockets_executor.go,
 // xai_websockets_executor.go,
 // xai_executor_execute.go, xai_executor_stream.go,
 // gemini_executor.go (including executeInteractions and
@@ -56,6 +59,16 @@
 //! model pair in ten minutes. A Codex WebSocket's time to first token starts
 //! when its request is sent on the open connection ([`Tap::request_sent`]),
 //! not at the dial.
+//!
+//! A Codex call over HTTP, a stream or not, makes a second record when its
+//! terminal event has the image generation tool's counts
+//! (`response.tool_usage.image_gen`, upstream's
+//! `publishCodexImageToolUsage`): after the call's own record, one for the
+//! model of the request's first `image_generation` tool (`gpt-image-2`
+//! when it names none), with the same request, but its own execution ID
+//! and no response model, unless the tool's model is the one sent. It is
+//! skipped when its counts are all zero; its event alone still makes the
+//! call's record when the call's own counts are missing.
 //!
 //! An xAI answer is read as a Codex one, but as upstream's xAI executor
 //! reads it: the served model is named where an OpenAI-compatible provider
@@ -135,6 +148,12 @@
 //!   its cancellation error (`newClaudeOAuthCancellationError`) only for an
 //!   OAuth credential, and records another credential's read cut off by the
 //!   canceled context as the scanner's error.
+//! - The image generation tool's model is read from the request as it was
+//!   sent, after the payload rules; upstream reads the body before its
+//!   payload finalizer, so a rule that changes the tool's model changes
+//!   the record's here. The tool's record is published when the call ends,
+//!   right after the call's own, as long as that record is made from the
+//!   terminal event; upstream publishes both at the event.
 //! - A Codex WebSocket's time to first token starts when its request goes
 //!   out on the open connection, as upstream's `StartResponseTTFT` does, and
 //!   again when a send is tried on a new connection; the first start wins.
@@ -157,9 +176,9 @@ use super::accounting::{Detail, ensure_token_breakdown_for_provider};
 use super::json::{self, Doc};
 use super::observer::{ClientKey, EventCredential, UsageEvent};
 use super::parse::{
-    StreamUsageBuffer, parse_claude_usage, parse_codex_usage, parse_gemini_stream_usage,
-    parse_gemini_usage, parse_interactions_stream_usage, parse_interactions_usage,
-    parse_openai_usage,
+    StreamUsageBuffer, parse_claude_usage, parse_codex_image_tool_usage, parse_codex_usage,
+    parse_gemini_stream_usage, parse_gemini_usage, parse_interactions_stream_usage,
+    parse_interactions_usage, parse_openai_usage,
 };
 use super::record_json::Record;
 use super::response_model::{
@@ -191,6 +210,10 @@ const SESSION_HEADERS: [&str; 4] = [
 
 /// The longest session header taken (upstream's `NormalizeExplicitID`).
 const MAX_SESSION_ID_LENGTH: usize = 256;
+
+/// The image generation tool's model when the request's tool names none
+/// (upstream's `codexDefaultImageToolModel`).
+const DEFAULT_IMAGE_TOOL_MODEL: &str = "gpt-image-2";
 
 /// The service tier of a request that names none (upstream's
 /// `DefaultServiceTier`).
@@ -614,6 +637,24 @@ struct Held {
     detail: Option<Detail>,
     /// The latency at the event, for a stream.
     latency: Option<Duration>,
+    /// The image generation tool's counts, for a Codex call over HTTP whose
+    /// event has them.
+    image: Option<Detail>,
+}
+
+/// The model of the request's first `image_generation` tool, trimmed, or
+/// [`DEFAULT_IMAGE_TOOL_MODEL`] when that tool names none or there is none
+/// (upstream's `codexImageGenerationToolModel`).
+fn image_generation_tool_model(body: &[u8]) -> String {
+    let doc = Doc::parse(body);
+    let tool = doc
+        .get("tools")
+        .array()
+        .into_iter()
+        .find(|tool| tool.get("type").string() == "image_generation");
+    tool.map(|tool| tool.get("model").string().trim().to_owned())
+        .filter(|model| !model.is_empty())
+        .unwrap_or_else(|| DEFAULT_IMAGE_TOOL_MODEL.to_owned())
 }
 
 /// The executor call being read.
@@ -643,6 +684,11 @@ struct Call {
     /// `message_stop`): nothing after it counts. A Codex stream's first
     /// terminal event is held, and the rest don't replace it.
     ended: bool,
+    /// The request of a Codex call over HTTP, whose terminal event's image
+    /// generation tool counts are read; none for any other call.
+    image_tool_request: Option<bytes::Bytes>,
+    /// The image generation tool's counts the published record came with.
+    image: Option<Detail>,
 }
 
 impl Call {
@@ -675,6 +721,8 @@ impl Call {
             held: None,
             answered: false,
             ended: false,
+            image_tool_request: None,
+            image: None,
         }
     }
 
@@ -714,6 +762,12 @@ impl Call {
         self.event_stream = false;
         self.answered = false;
         self.ended = false;
+        // Only Codex's own executor reports the image generation tool, and
+        // not over its WebSocket (upstream's `publishCodexImageToolUsage`).
+        self.image_tool_request = (request.provider == "codex"
+            && matches!(self.mode, Mode::CodexExecute | Mode::CodexStream))
+        .then(|| request.body.clone());
+        self.image = None;
         // A Codex or xAI WebSocket's clock starts when its request is sent,
         // once connected (see `Self::request_sent`), not at the dial.
         if !matches!(self.mode, Mode::CodexWebsocket | Mode::XaiWebsocket) {
@@ -828,8 +882,16 @@ impl Call {
             self.held = Some(Held {
                 detail: parse_codex_usage(payload),
                 latency: None,
+                image: self.image_tool_usage(payload),
             });
         }
+    }
+
+    /// The image generation tool's counts in a terminal event, for a call
+    /// whose tool is reported.
+    fn image_tool_usage(&self, payload: &[u8]) -> Option<Detail> {
+        self.image_tool_request.as_ref()?;
+        parse_codex_image_tool_usage(payload)
     }
 
     /// Reads an event of a Codex stream or WebSocket (upstream's
@@ -852,6 +914,7 @@ impl Call {
             self.held = Some(Held {
                 detail: parse_codex_usage(payload),
                 latency: Some(now.saturating_duration_since(self.started)),
+                image: self.image_tool_usage(payload),
             });
         }
     }
@@ -937,7 +1000,15 @@ impl Call {
                 for line in lines_of(&body) {
                     self.line(line, now);
                 }
-                self.held.take().and_then(|held| held.detail)
+                // The tool's counts publish the call's record first, empty
+                // when the call's own are missing (upstream's
+                // `EnsurePublished` in `publishCodexImageToolUsage`).
+                let held = self.held.take()?;
+                let detail = held
+                    .detail
+                    .or_else(|| held.image.as_ref().map(|_| Detail::default()));
+                self.image = held.image;
+                detail
             }
             _ => None,
         }
@@ -1013,11 +1084,14 @@ impl Call {
             (Mode::XaiStream, _) => self.buffered().map(success),
             (Mode::XaiWebsocket, _) => self.buffered().map(success),
             (_, outcome) => match self.held.take() {
-                Some(held) => Some(Publication {
-                    detail: held.detail.unwrap_or_default(),
-                    failure: None,
-                    latency: held.latency.unwrap_or(latency),
-                }),
+                Some(held) => {
+                    self.image = held.image;
+                    Some(Publication {
+                        detail: held.detail.unwrap_or_default(),
+                        failure: None,
+                        latency: held.latency.unwrap_or(latency),
+                    })
+                }
                 None => (outcome == Outcome::Completed).then(|| success(Detail::default())),
             },
         }
@@ -1114,19 +1188,60 @@ impl UsageTap {
     }
 
     /// Publishes the record to the queue and the observer, and warns of a
-    /// substituted model (upstream's `publishAttemptRecord`).
+    /// substituted model (upstream's `publishAttemptRecord`), then the image
+    /// generation tool's record.
     fn publish(&self, call: &Call, publication: Publication) {
-        let queue = &self.inner.queue;
-        if queue.usage_statistics_enabled() {
+        let latency = publication.latency;
+        if self.inner.queue.usage_statistics_enabled() {
             let record = self.record(call, publication);
-            if self.inner.observer.present() {
-                self.inner.observer.send(self.event(call, &record));
-            }
-            if queue.enabled() {
-                queue.enqueue(record.encode().into());
-            }
+            self.emit(call, &record);
         }
         self.warn_model_substitution(call);
+        self.publish_image_tool(call, latency);
+    }
+
+    /// Sends `record`, the record of `call`, to the observer, if there is
+    /// one, and to the queue, if it is on.
+    fn emit(&self, call: &Call, record: &Record) {
+        if self.inner.observer.present() {
+            self.inner.observer.send(self.event(call, record));
+        }
+        if self.inner.queue.enabled() {
+            self.inner.queue.enqueue(record.encode().into());
+        }
+    }
+
+    /// Publishes the image generation tool's record, if the call's record
+    /// came with the tool's counts and they aren't all zero (upstream's
+    /// `PublishAdditionalModel` and `buildAdditionalModelRecord`).
+    fn publish_image_tool(&self, call: &Call, latency: Duration) {
+        let (Some(detail), Some(request)) = (&call.image, &call.image_tool_request) else {
+            return;
+        };
+        if !self.inner.queue.usage_statistics_enabled() {
+            return;
+        }
+        let detail =
+            ensure_token_breakdown_for_provider(detail.clone(), &call.provider, call.executor_type);
+        if !detail.has_tokens() {
+            return;
+        }
+        let model = image_generation_tool_model(request);
+        let mut record = self.record(
+            call,
+            Publication {
+                detail,
+                failure: None,
+                latency,
+            },
+        );
+        // The served model is the call's, never the tool's, unless the
+        // tool's model is the one sent.
+        if model != call.model {
+            record.response_model = String::new();
+        }
+        record.model = self.scrub(model, &call.secrets);
+        self.emit(call, &record);
     }
 
     /// The observer's event for `record`, the record of `call`, with the
