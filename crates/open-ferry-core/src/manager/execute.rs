@@ -19,6 +19,14 @@
 //! When a round fails, the error the caller sees is the last one an
 //! upstream gave, rather than the manager's own "no auth available".
 //!
+//! The manager doesn't translate: the executor reads the call's
+//! [`Options::source_format`](crate::exec::Options::source_format). So a call
+//! from the image or video endpoints (`openai-image`, `openai-video`) reaches
+//! the executor with its format, request path and payload as they came, a
+//! multipart form included, and its response comes back as the executor gave
+//! it. Upstream's `requestToFormat` keeps those formats as the client sent
+//! them for the request interceptors, which aren't ported.
+//!
 //! Deviations from upstream:
 //! - Every executor error, stream bootstrap error and empty stream counts as
 //!   an upstream attempt; upstream asks the executor whether it reached the

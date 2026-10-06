@@ -1,5 +1,6 @@
-// Ported from CLIProxyAPI getRequestDetailsWithOptions and
-// validateImageOnlyModel in sdk/api/handlers/handlers_routing.go,
+// Ported from CLIProxyAPI getRequestDetailsWithOptions,
+// validateImageOnlyModel, isOpenAIImageOnlyModel and routeModelBaseName in
+// sdk/api/handlers/handlers_routing.go,
 // responsesWebsocketResolvedModelName in
 // sdk/api/handlers/openai/openai_responses_websocket_session.go,
 // GetProviderName and ResolveAutoModel in internal/util/provider.go, and
@@ -15,8 +16,8 @@ use serde_json::json;
 
 use crate::errors::ErrorMessage;
 
-/// Models only the image endpoints serve, which upstream has and this port
-/// doesn't yet.
+/// Models only the image endpoints serve (`/v1/images/generations` and
+/// `/v1/images/edits`).
 const IMAGE_ONLY_MODELS: [&str; 8] = [
     "gpt-image-1.5",
     "gpt-image-2",
@@ -55,12 +56,17 @@ pub(crate) fn resolve_model(catalog: &dyn ModelCatalog, model: &str) -> String {
     }
 }
 
-/// Routes `model`: resolves `auto`, turns away image-only models, and finds
-/// the providers that serve it.
-pub(crate) fn route(catalog: &dyn ModelCatalog, model: &str) -> Result<Route, ErrorMessage> {
+/// Routes `model`: resolves `auto`, turns away image-only models unless
+/// `allow_image_model` (as only the image endpoints have it), and finds the
+/// providers that serve it.
+pub(crate) fn route(
+    catalog: &dyn ModelCatalog,
+    model: &str,
+    allow_image_model: bool,
+) -> Result<Route, ErrorMessage> {
     let resolved = resolve_model(catalog, model);
     let base_model = parse_suffix(&resolved).0.trim();
-    check_image_only(base_model)?;
+    validate_image_only(base_model, allow_image_model)?;
 
     let mut providers = provider_names(catalog, base_model);
     if providers.is_empty() && base_model != resolved {
@@ -94,20 +100,36 @@ pub(crate) fn parse_suffix(model: &str) -> (&str, Option<&str>) {
 
 /// Turns away models only the image endpoints serve.
 pub(crate) fn check_image_only(model: &str) -> Result<(), ErrorMessage> {
+    validate_image_only(model, false)
+}
+
+/// Turns away models only the image endpoints serve, unless
+/// `allow_image_model` (upstream's `validateImageOnlyModel`).
+pub(crate) fn validate_image_only(
+    model: &str,
+    allow_image_model: bool,
+) -> Result<(), ErrorMessage> {
     let mut base = parse_suffix(model).0.trim();
     if base.is_empty() {
         base = model.trim();
     }
-    let name = route_model_base_name(base);
-    if IMAGE_ONLY_MODELS.contains(&go::to_lower(name.trim()).as_str()) {
+    if is_image_only_model(base) && !allow_image_model {
         return Err(ErrorMessage::new(
             503,
             format!(
-                "model {name} is only supported on /v1/images/generations and /v1/images/edits"
+                "model {} is only supported on /v1/images/generations and /v1/images/edits",
+                route_model_base_name(base)
             ),
         ));
     }
     Ok(())
+}
+
+/// Whether only the image endpoints serve `model`, which may name a provider
+/// before a `/` (upstream's `isOpenAIImageOnlyModel`).
+pub(crate) fn is_image_only_model(model: &str) -> bool {
+    let name = route_model_base_name(model);
+    IMAGE_ONLY_MODELS.contains(&go::to_lower(name.trim()).as_str())
 }
 
 /// What follows the last `/` in a model name, unless the `/` ends it.
@@ -166,7 +188,7 @@ mod tests {
             .serve("lower-only", &["claude"])
             .serve("custom(8192)", &["openai-compat"])
             .first("gpt-5");
-        let route = |model| route(&catalog, model);
+        let route = |model| route(&catalog, model, false);
 
         assert_eq!(
             route("gpt-5(high)").unwrap(),
@@ -199,6 +221,82 @@ mod tests {
     #[test]
     fn auto_stays_when_nothing_is_available() {
         let catalog = FakeCatalog::new().serve("auto", &["x"]);
-        assert_eq!(route(&catalog, "auto").unwrap().model, "auto");
+        assert_eq!(route(&catalog, "auto", false).unwrap().model, "auto");
+    }
+
+    /// The image-only models, with and without a provider, as upstream's
+    /// image-only tests list them.
+    const IMAGE_ONLY: [&str; 15] = [
+        "gpt-image-1.5",
+        "gpt-image-2",
+        "codex/gpt-image-2",
+        "gpt-image-2.5-flare",
+        "codex/gpt-image-2.5-flare",
+        "gpt-image-2.5-sunburst",
+        "codex/gpt-image-2.5-sunburst",
+        "gpt-image-2.5",
+        "codex/gpt-image-2.5",
+        "grok-imagine-image",
+        "xai/grok-imagine-image",
+        "grok-imagine-image-quality",
+        "xai/grok-imagine-image-quality",
+        "grok-imagine-image-2.0",
+        "xai/grok-imagine-image-2.0",
+    ];
+
+    // Ports TestGetRequestDetails_ImageModelReturns503.
+    #[test]
+    fn image_only_models_get_a_503() {
+        let catalog = FakeCatalog::new();
+        for model in IMAGE_ONLY {
+            let err = route(&catalog, model, false).unwrap_err();
+            assert_eq!(err.status, 503, "{model}");
+            assert!(err.text.contains("/v1/images/generations"), "{model}");
+            assert!(err.text.contains("/v1/images/edits"), "{model}");
+        }
+    }
+
+    // Ports TestValidateImageOnlyModel_AllowsImageEndpoints.
+    #[test]
+    fn the_image_endpoints_allow_image_only_models() {
+        for model in IMAGE_ONLY {
+            assert!(validate_image_only(model, true).is_ok(), "{model}");
+            assert_eq!(validate_image_only(model, false).unwrap_err().status, 503);
+        }
+        // Not upstream's: with the models allowed, routing goes on to the
+        // providers.
+        let catalog = FakeCatalog::new().serve("gpt-image-2", &["codex"]);
+        assert_eq!(
+            route(&catalog, "gpt-image-2", true).unwrap().providers,
+            ["codex"]
+        );
+    }
+
+    // Ports TestIsOpenAIImageOnlyModel.
+    #[test]
+    fn knows_the_image_only_models() {
+        let cases = [
+            ("gpt-image-1.5", true),
+            ("gpt-image-2", true),
+            ("codex/gpt-image-1.5", true),
+            ("gpt-image-2.5-flare", true),
+            ("codex/gpt-image-2.5-flare", true),
+            ("gpt-image-2.5-sunburst", true),
+            ("codex/gpt-image-2.5-sunburst", true),
+            ("gpt-image-2.5", true),
+            ("codex/gpt-image-2.5", true),
+            ("grok-imagine-image", true),
+            ("xai/grok-imagine-image", true),
+            ("XAI/Grok-Imagine-Image-Quality", true),
+            ("grok-imagine-image-quality", true),
+            ("grok-imagine-image-2.0", true),
+            ("xai/grok-imagine-image-2.0", true),
+            ("grok-3", false),
+            ("gpt-5.2", false),
+            ("grok-imagine-video", false),
+        ];
+        for (model, want) in cases {
+            assert_eq!(is_image_only_model(model), want, "{model}");
+        }
     }
 }

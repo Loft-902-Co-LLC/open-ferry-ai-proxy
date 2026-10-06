@@ -62,6 +62,7 @@ mod cooldown_view;
 mod credential_policy;
 mod force_refresh;
 mod forced_provider;
+mod media_source_formats;
 mod meta_refresh;
 mod metadata_keys;
 mod metadata_merge;

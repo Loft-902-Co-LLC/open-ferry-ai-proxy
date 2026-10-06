@@ -1,6 +1,7 @@
-// Ported from CLIProxyAPI executeWithAuthManagerFormats and
-// executeCountWithAuthManager in sdk/api/handlers/handlers_execution.go,
-// executeStreamWithAuthManagerFormats in sdk/api/handlers/handlers_stream.go,
+// Ported from CLIProxyAPI executeWithAuthManagerFormats,
+// ExecuteImageWithAuthManager and executeCountWithAuthManager in
+// sdk/api/handlers/handlers_execution.go, executeStreamWithAuthManagerFormats
+// and ExecuteImageStreamWithAuthManager in sdk/api/handlers/handlers_stream.go,
 // enrichAuthSelectionError in sdk/api/handlers/handlers_errors.go, and
 // requestExecutionMetadata and GetAlt in sdk/api/handlers/handlers.go
 // (v8.0.15, MIT).
@@ -12,6 +13,10 @@
 //! `'static` and can outlive the handler that made them. Each call carries
 //! the request's observation: its context, and the taps the request log and
 //! the usage statistics give the call.
+//!
+//! Only a call made with [`Call::image`], as the image endpoints make them,
+//! may name a model that only those endpoints serve, such as `gpt-image-2`;
+//! [`Call::new`] turns such a model away with a 503.
 //!
 //! Deviations from upstream:
 //! - [`Call::new`] refuses a payload with 128 or more arrays and objects
@@ -168,8 +173,39 @@ impl Call {
         alt: &str,
         stream: bool,
     ) -> Result<Self, ErrorMessage> {
+        Self::build(state, client, format, model, payload, alt, stream, false)
+    }
+
+    /// Routes a call as [`Call::new`] does, but allows the models only the
+    /// image endpoints serve (upstream's `ExecuteImageWithAuthManager` and
+    /// `ExecuteImageStreamWithAuthManager`). `payload` may be a multipart
+    /// form, which is passed on as it is.
+    // The images handler is the caller, in a later commit.
+    #[allow(dead_code)]
+    pub(crate) fn image(
+        state: &AppState,
+        client: &ClientRequest,
+        format: Format,
+        model: &str,
+        payload: Bytes,
+        stream: bool,
+    ) -> Result<Self, ErrorMessage> {
+        Self::build(state, client, format, model, payload, "", stream, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        state: &AppState,
+        client: &ClientRequest,
+        format: Format,
+        model: &str,
+        payload: Bytes,
+        alt: &str,
+        stream: bool,
+        allow_image_model: bool,
+    ) -> Result<Self, ErrorMessage> {
         body::check_depth(&payload)?;
-        let mut route = routing::route(state.catalog(), model)?;
+        let mut route = routing::route(state.catalog(), model, allow_image_model)?;
         route.providers = entry_protocol::adjust_execution_providers(&format, route.providers);
         Ok(Self::routed(
             state, client, format, model, route, payload, alt, stream,
@@ -536,6 +572,96 @@ pub(crate) fn enrich(mut err: ExecError, providers: &[ProviderId], model: &str) 
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    use crate::config::ServerConfig;
+    use crate::testing::{FakeCatalog, FakeDispatcher, state};
+
+    // Ports TestExecuteImageWithAuthManager_AllowsImageOnlyModels. Upstream
+    // makes the calls with no credentials and checks the error isn't the
+    // image-only one; here the catalog serves the models, so the image call
+    // routes.
+    #[test]
+    fn only_image_calls_take_image_only_models() {
+        let models = [
+            "gpt-image-1.5",
+            "gpt-image-2",
+            "gpt-image-2.5-flare",
+            "gpt-image-2.5-sunburst",
+            "gpt-image-2.5",
+            "grok-imagine-image",
+            "grok-imagine-image-quality",
+            "xai/grok-imagine-image-quality",
+            "grok-imagine-image-2.0",
+            "xai/grok-imagine-image-2.0",
+        ];
+        let mut catalog = FakeCatalog::new();
+        for model in models {
+            catalog = catalog.serve(model, &["xai"]);
+        }
+        let state = state(ServerConfig::default(), catalog, &FakeDispatcher::new([]));
+        let client = ClientRequest::default();
+        for model in models {
+            let body = Bytes::from(format!(r#"{{"model":"{model}","prompt":"draw"}}"#));
+            for stream in [false, true] {
+                let call = Call::image(
+                    &state,
+                    &client,
+                    Format::OPENAI_IMAGE,
+                    model,
+                    body.clone(),
+                    stream,
+                )
+                .unwrap_or_else(|err| panic!("{model}: {}", err.text));
+                assert_eq!(call.providers, ["xai"]);
+                assert_eq!(call.options.source_format, Format::OPENAI_IMAGE);
+                assert_eq!(call.options.stream, stream);
+
+                let Err(err) = Call::new(
+                    &state,
+                    &client,
+                    Format::OPENAI_IMAGE,
+                    model,
+                    body.clone(),
+                    "",
+                    stream,
+                ) else {
+                    panic!("{model}: a call that isn't an image call routed");
+                };
+                assert_eq!(err.status, 503);
+                assert!(
+                    err.text
+                        .contains("only supported on /v1/images/generations")
+                );
+            }
+        }
+    }
+
+    // Not upstream's: a multipart image payload isn't JSON, so the depth
+    // check passes it, and the call carries it as it came.
+    #[test]
+    fn image_calls_carry_multipart_payloads() {
+        let catalog = FakeCatalog::new().serve("gpt-image-2", &["codex"]);
+        let state = state(ServerConfig::default(), catalog, &FakeDispatcher::new([]));
+        let client = ClientRequest {
+            path: "/v1/images/edits".to_owned(),
+            ..ClientRequest::default()
+        };
+        let form = Bytes::from_static(
+            b"--b\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\ngpt-image-2\r\n--b--\r\n",
+        );
+        let call = Call::image(
+            &state,
+            &client,
+            Format::OPENAI_IMAGE,
+            "gpt-image-2",
+            form.clone(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(call.request.payload, form);
+        assert_eq!(call.options.original_request, form);
+        assert_eq!(call.options.metadata.request_path, "/v1/images/edits");
+    }
 
     #[test]
     fn enriches_auth_selection_errors() {

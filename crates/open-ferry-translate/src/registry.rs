@@ -86,6 +86,13 @@ impl Format {
     pub const ANTIGRAVITY: Self = Self::from_static("antigravity");
     /// Gemini Interactions.
     pub const INTERACTIONS: Self = Self::from_static("interactions");
+    /// The OpenAI Images endpoints, `/v1/images/generations` and
+    /// `/v1/images/edits`. A request may be JSON or a multipart form, and no
+    /// translator takes it: the executors read it themselves.
+    pub const OPENAI_IMAGE: Self = Self::from_static("openai-image");
+    /// The OpenAI Videos endpoints. As with [`Format::OPENAI_IMAGE`], no
+    /// translator takes a request in it.
+    pub const OPENAI_VIDEO: Self = Self::from_static("openai-video");
 
     /// A format named by a string literal.
     pub const fn from_static(name: &'static str) -> Self {

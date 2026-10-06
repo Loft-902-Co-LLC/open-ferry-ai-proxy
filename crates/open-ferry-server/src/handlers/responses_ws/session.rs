@@ -99,7 +99,8 @@ impl Target {
         let mut providers: Vec<ProviderId> = Vec::new();
         // Image-only models are turned away here, where upstream reads their
         // providers anyway; nothing serves them over the WebSocket.
-        let routed = route(catalog, &resolved).map_or_else(|_| Vec::new(), |route| route.providers);
+        let routed =
+            route(catalog, &resolved, false).map_or_else(|_| Vec::new(), |route| route.providers);
         for provider in routed {
             let key = go::to_lower(provider.trim());
             if !key.is_empty() && !providers.contains(&key) {
