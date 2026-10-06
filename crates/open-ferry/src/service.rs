@@ -3128,7 +3128,7 @@ mod tests {
         /// The main server serves the OAuth callback pages to anyone, for
         /// `GET` only, even without a management key set, ahead of the
         /// proxy's client keys; the management API's callback route needs
-        /// a key set.
+        /// a key set. A page for no pending login says so, as a failure.
         #[tokio::test]
         async fn oauth_callback_pages_are_served_beside_the_proxy() {
             let dir = tempfile::tempdir().unwrap();
@@ -3138,21 +3138,19 @@ mod tests {
 ",
             );
             let (addr, _stop) = start(&service).await;
-            let page = concat!(
-                r#"<html><head><meta charset="utf-8"><title>Authentication successful</title>"#,
-                "<script>setTimeout(function(){window.close();},5000);</script></head>",
-                "<body><h1>Authentication successful!</h1><p>You can close this window.</p>",
-                "<p>This window will close automatically in 5 seconds.</p></body></html>",
-            );
+            let title = "<h1>No sign-in is waiting for this page</h1>";
 
             for path in ["/anthropic/callback", "/codex/callback"] {
                 let query = format!("{path}?state=unknown-state&code=c");
                 let answer = fetch(addr, "GET", &query, &[]).await;
-                assert_eq!((answer.status, answer.body.as_str()), (200, page), "{path}");
+                assert_eq!(answer.status, 400, "{path}: {}", answer.body);
+                assert!(answer.body.contains(title), "{path}: {}", answer.body);
                 assert_eq!(
                     answer.header("content-type"),
                     Some("text/html; charset=utf-8")
                 );
+                assert_eq!(answer.header("cache-control"), Some("no-store"));
+                assert_eq!(answer.header("referrer-policy"), Some("no-referrer"));
                 let answer = fetch(addr, "POST", path, &[]).await;
                 assert_eq!(
                     (answer.status, answer.body.as_str()),

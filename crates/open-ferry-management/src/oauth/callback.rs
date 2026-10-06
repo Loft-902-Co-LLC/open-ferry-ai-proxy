@@ -1,8 +1,7 @@
 // Ported from CLIProxyAPI internal/api/handlers/management/oauth_callback.go
 // (oauthCallbackRequest, PostOAuthCallback, GetOAuthCallback,
 // handleOAuthCallback, firstNonEmpty) and internal/api/server_routes.go
-// (oauthCallbackSuccessHTML, the /anthropic/callback and /codex/callback
-// handlers) (v8.0.15, MIT).
+// (the /anthropic/callback and /codex/callback handlers) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The routes that take a login's callback, which need no key: the
@@ -13,6 +12,24 @@
 //! Each hands the code, or the error the provider reported, to the login
 //! waiting on the pending session for the callback's `state`. A state that
 //! isn't 1 to 128 letters, digits, `-`, `_` and `.` is never looked up.
+//!
+//! A callback page answers with the sign-in page
+//! ([`open_ferry_providers::oauth::page`]), which says how the login ended
+//! and sends the user back to the dashboard:
+//! - Without a state, or with one no pending login of its provider has, it
+//!   says so. If that login has already ended, it says how instead, as for
+//!   a page loaded again, but not why a failed login failed.
+//! - With the provider's error, it says the provider didn't sign the user
+//!   in, naming the error only when RFC 6749 defines it.
+//! - With a code, it waits up to 30 seconds for the login to exchange it
+//!   and save the credential. Then it says the user is signed in, or that
+//!   the login failed and why (the session's status, without the code or
+//!   the PKCE verifier), or that it stopped, or that it is still finishing
+//!   and the dashboard shows the result. Only the callback whose code the
+//!   login took is told why the login failed.
+//!
+//! A page reporting a failure answers 400 Bad Request; one reporting a
+//! sign-in, or one still finishing, answers 200 OK.
 //!
 //! Deviations from upstream:
 //! - A callback is never written to a file, so `oauth-callback` never
@@ -26,17 +43,27 @@
 //!   failed","status":"error"}`. Upstream answers with the session's status,
 //!   which may quote the token endpoint's answer, to anyone, as this route
 //!   needs no key; the key-protected `get-auth-status` still answers it.
+//! - The callback pages answer with open-ferry's sign-in page, which says
+//!   how the login ended, once it has. Upstream's answer at once with
+//!   `oauthCallbackSuccessHTML`, whatever the callback held: a page saying
+//!   the login succeeded and that the window closes in 5 seconds. See
+//!   [`open_ferry_providers::oauth::page`] for how the pages differ.
+//! - A callback page reporting a failure answers 400; upstream's answer 200
+//!   whatever happened.
 
 use std::fmt;
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::{RawQuery, State};
-use axum::response::{IntoResponse, Response};
-use http::{HeaderValue, StatusCode, header};
+use axum::response::Response;
+use http::StatusCode;
+use open_ferry_core::observe::redact::{Policy, Secrets};
+use open_ferry_providers::oauth::page::{self as sign_in, Failure, Origin, Outcome};
 use open_ferry_translate::go::trim_space;
 use serde::de::MapAccess;
 
-use super::sessions::{Callback, is_valid_state, normalize_callback_provider};
+use super::sessions::{Callback, Ended, NotPending, is_valid_state, normalize_callback_provider};
 use super::{Provider, Redacted};
 use crate::bind::{self, GoStruct, set_string};
 use crate::go::{equal_fold, lossy};
@@ -44,12 +71,12 @@ use crate::json::{self, Json};
 use crate::query::Query;
 use crate::state::ManagementState;
 
-/// The page the main server's callback routes answer with
-/// (`oauthCallbackSuccessHTML`).
-const SUCCESS_PAGE: &str = "<html><head><meta charset=\"utf-8\"><title>Authentication \
-    successful</title><script>setTimeout(function(){window.close();},5000);</script></head>\
-    <body><h1>Authentication successful!</h1><p>You can close this window.</p><p>This window \
-    will close automatically in 5 seconds.</p></body></html>";
+/// How long a callback page waits for its login to exchange the code and
+/// save the credential before saying the login is still finishing. An
+/// exchange takes a second or two as a rule, but may take up to a minute;
+/// the dashboard shows the result either way. This is half the minute a
+/// reverse proxy in front of the server commonly waits for an answer.
+pub(super) const PAGE_WAIT: Duration = Duration::from_secs(30);
 
 /// What `oauth-callback` answers for a login that failed.
 const FLOW_FAILED: &str = "oauth flow failed";
@@ -207,7 +234,7 @@ pub(super) async fn anthropic_page(
     State(state): State<ManagementState>,
     RawQuery(query): RawQuery,
 ) -> Response {
-    page(&state, Provider::Claude, query.as_deref())
+    page(&state, Provider::Claude, query.as_deref()).await
 }
 
 /// `GET /codex/callback` on the main server.
@@ -215,40 +242,104 @@ pub(super) async fn codex_page(
     State(state): State<ManagementState>,
     RawQuery(query): RawQuery,
 ) -> Response {
-    page(&state, Provider::Codex, query.as_deref())
+    page(&state, Provider::Codex, query.as_deref()).await
 }
 
 /// Hands the callback in `query` to the pending `provider` login it names,
-/// if there is one, and answers with the success page whatever happened.
-fn page(state: &ManagementState, provider: Provider, query: Option<&str>) -> Response {
+/// if there is one, and answers with the sign-in page saying how the login
+/// ended.
+async fn page(state: &ManagementState, provider: Provider, query: Option<&str>) -> Response {
+    let outcome = page_outcome(state, provider, query).await;
+    sign_in::response(&provider.to_string(), Origin::Dashboard, &outcome)
+}
+
+/// What the callback page for `query` says: how the `provider` login it
+/// names ended, once it has, waiting up to [`PAGE_WAIT`] after handing it
+/// a code.
+async fn page_outcome(state: &ManagementState, provider: Provider, query: Option<&str>) -> Outcome {
     let query = Query::parse(query);
     let oauth_state = query.value("state");
-    if !oauth_state.is_empty() {
-        let oauth_state = lossy(oauth_state);
-        let error = match query.value("error") {
-            b"" => query.value("error_description"),
-            error => error,
-        };
-        // Upstream writes the callback under the state as given, where the
-        // login looks for it under the trimmed state: a state with spaces
-        // around it never reaches the login.
-        if is_valid_state(&oauth_state) && oauth_state.trim() == oauth_state {
-            let callback = Callback {
-                code: text(query.value("code")),
-                error: text(error),
-            };
-            let _ = state
-                .oauth_sessions()
-                .store()
-                .deliver(&oauth_state, provider.name(), callback);
-        }
+    if oauth_state.is_empty() {
+        return Outcome::Failed(Failure::new(
+            "This page isn't from a sign-in",
+            "Its address doesn't say which sign-in it belongs to, so open-ferry ignored it.",
+        ));
     }
-    let mut response = (StatusCode::OK, SUCCESS_PAGE).into_response();
-    response.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("text/html; charset=utf-8"),
-    );
-    response
+    let oauth_state = lossy(oauth_state);
+    // Upstream writes the callback under the state as given, where the
+    // login looks for it under the trimmed state: a state with spaces
+    // around it never reaches the login.
+    if !is_valid_state(&oauth_state) || oauth_state.trim() != oauth_state {
+        return Outcome::Failed(nothing_waiting());
+    }
+    let error = match query.value("error") {
+        b"" => query.value("error_description"),
+        error => error,
+    };
+    let callback = Callback {
+        code: text(query.value("code")),
+        error: text(error),
+    };
+    let (code, error) = (callback.code.clone(), callback.error.clone());
+    let sessions = state.oauth_sessions();
+    let store = sessions.store();
+    let delivered = match store.deliver(&oauth_state, provider.name(), callback) {
+        Ok(delivered) => delivered,
+        // The login may have ended: the page may have been loaded again.
+        Err(NotPending) => {
+            return match store.get(&oauth_state) {
+                Some(session) if equal_fold(&session.provider, provider.name()) => {
+                    if session.completed {
+                        Outcome::SignedIn
+                    } else if session.status.is_empty() {
+                        Outcome::Failed(nothing_waiting())
+                    } else {
+                        Outcome::Failed(already_failed())
+                    }
+                }
+                _ => Outcome::Failed(nothing_waiting()),
+            };
+        }
+    };
+    let name = provider.to_string();
+    let taken = delivered.taken;
+    if taken && !error.is_empty() {
+        return Outcome::Failed(Failure::provider_error(&name, &error));
+    }
+    match store
+        .ended(&oauth_state, delivered, sessions.page_wait())
+        .await
+    {
+        Some(Ended::Completed) => Outcome::SignedIn,
+        // The status is already without the code and the PKCE verifier as
+        // they were sent; this hides the code as JSON escapes it too.
+        Some(Ended::Failed(status)) if taken => {
+            let secrets: Secrets = [code.as_str()].into_iter().collect();
+            let reason = secrets.text(status, Policy::Client);
+            Outcome::Failed(Failure::unfinished(&name, &reason))
+        }
+        Some(Ended::Failed(_)) => Outcome::Failed(already_failed()),
+        Some(Ended::Dropped) => Outcome::Failed(Failure::stopped()),
+        None => Outcome::Finishing,
+    }
+}
+
+/// No pending login has the page's state.
+fn nothing_waiting() -> Failure {
+    Failure::new(
+        "No sign-in is waiting for this page",
+        "The sign-in may have expired or been cancelled, or a newer one may have replaced it, \
+         so open-ferry ignored this page.",
+    )
+}
+
+/// The page's login failed, and the page didn't bring the code it failed
+/// with.
+fn already_failed() -> Failure {
+    Failure::new(
+        "This sign-in has already failed",
+        "open-ferry couldn't finish it, so nothing was saved. The dashboard shows why.",
+    )
 }
 
 /// `{"error":message,"status":"error"}` with `status`.

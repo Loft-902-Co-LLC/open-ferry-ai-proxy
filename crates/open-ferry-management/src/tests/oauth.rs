@@ -59,7 +59,7 @@ use super::{
     request_from,
 };
 use crate::oauth::Provider;
-use crate::oauth::sessions::{Callback, MAX_SESSIONS, NotPending, Session, Store};
+use crate::oauth::sessions::{Callback, Ended, MAX_SESSIONS, NotPending, Session, Store};
 
 const STATUS: &str = "/v0/management/get-auth-status";
 const SESSION: &str = "/v0/management/oauth-session";
@@ -75,13 +75,13 @@ const SERVER_PORT: i64 = 28_765;
 /// What Anthropic's token endpoint answers in the tests.
 const CLAUDE_TOKENS: &str = r#"{"access_token":"access-claude","refresh_token":"refresh-claude","expires_in":3600,"account":{"uuid":"acct-1","email_address":"claude-user@example.test"},"organization":{"uuid":"org-1","name":"Org"}}"#;
 
-/// The page the main server's callback routes answer with.
-const SUCCESS_PAGE: &str = concat!(
-    r#"<html><head><meta charset="utf-8"><title>Authentication successful</title>"#,
-    "<script>setTimeout(function(){window.close();},5000);</script></head>",
-    "<body><h1>Authentication successful!</h1><p>You can close this window.</p>",
-    "<p>This window will close automatically in 5 seconds.</p></body></html>",
-);
+/// The titles of the sign-in pages the callback pages answer with.
+const NOT_FROM_A_SIGN_IN: &str = "This page isn't from a sign-in";
+const NOTHING_WAITING: &str = "No sign-in is waiting for this page";
+const ALREADY_FAILED: &str = "This sign-in has already failed";
+const UNFINISHED: &str = "The sign-in didn't finish";
+const STOPPED: &str = "The sign-in stopped";
+const FINISHING: &str = "The sign-in is still finishing";
 
 /// A store whose sessions last a minute, as upstream's tests make.
 fn store() -> Store {
@@ -291,17 +291,43 @@ async fn stopped(api: &Api, provider: Provider, addr: SocketAddr) {
     }
 }
 
-/// Checks `answer` is the main server's callback page.
-fn assert_page(answer: &Answer, what: &str) {
-    assert_eq!(
-        (answer.status, answer.body.as_str()),
-        (StatusCode::OK, SUCCESS_PAGE),
-        "{what}"
+/// The answer to `GET path` from anyone: a callback page's.
+async fn open_page(api: &Api, path: &str) -> Answer {
+    api.send(request_from(REMOTE, Method::GET, path, "")).await
+}
+
+/// Checks `answer` is the sign-in page titled `title`, with `status`, its
+/// headers, and the way back to the dashboard.
+fn assert_page(answer: &Answer, status: StatusCode, title: &str, what: &str) {
+    let body = &answer.body;
+    assert_eq!(answer.status, status, "{what}: {body}");
+    let title = title.replace('\'', "&#39;");
+    assert!(
+        body.contains(&format!("<h1>{title}</h1>")),
+        "{what}: {body}"
     );
+    let next = if status == StatusCode::OK {
+        "You can close this tab and go back to the dashboard"
+    } else {
+        "You can close this tab and start the sign-in again from the dashboard."
+    };
+    assert!(body.contains(next), "{what}: {body}");
+    assert!(!body.contains("<script"), "{what}: {body}");
     assert_eq!(
         answer.header("content-type"),
         Some("text/html; charset=utf-8"),
         "{what}"
+    );
+    assert_eq!(answer.header("cache-control"), Some("no-store"), "{what}");
+    assert_eq!(
+        answer.header("referrer-policy"),
+        Some("no-referrer"),
+        "{what}"
+    );
+    let policy = answer.header("content-security-policy").unwrap_or_default();
+    assert!(
+        policy.starts_with("default-src 'none'; style-src 'sha256-"),
+        "{what}: {policy}"
     );
 }
 
@@ -576,8 +602,10 @@ fn cancel_oauth_session_and_callback_reject_after_cancel() {
     assert!(store.cancel("callback-state"));
     assert!(!store.is_pending("callback-state", "anthropic"));
     assert_eq!(
-        store.deliver("callback-state", "anthropic", code("code")),
-        Err(NotPending)
+        store
+            .deliver("callback-state", "anthropic", code("code"))
+            .err(),
+        Some(NotPending)
     );
 }
 
@@ -887,20 +915,29 @@ async fn oauth_callback_checks_and_hands_over_the_callback() {
 }
 
 // Not upstream's: the main server's callback pages hand the callback to
-// their provider's pending login of the state named, if there is one, and
-// answer with upstream's page whatever happened, to anyone, even without a
-// key set.
+// their provider's pending login of the state named, if there is one, to
+// anyone, even without a key set, and answer with the sign-in page. A page
+// that hands over nothing says why, as a failure.
 #[tokio::test]
 async fn callback_pages_hand_over_the_callback() {
     let api = Api::with(Config::default(), None);
+    // No login runs for these sessions: a page that hands one a code says
+    // it is still finishing once it has waited.
+    api.state.oauth_sessions().overrides().page = Some(Duration::from_millis(50));
     let store = api.state.oauth_sessions().store();
     let mut claude = register(store, "claude-state", "anthropic");
     let mut codex = register(store, "codex-state", "codex");
-    let page = |path: &str| api.send(request_from(REMOTE, Method::GET, path, ""));
+    let page = |path: &'static str| open_page(&api, path);
 
     for path in [
         "/anthropic/callback",
         "/anthropic/callback?code=a",
+        "/codex/callback?state=&code=a",
+    ] {
+        let answer = page(path).await;
+        assert_page(&answer, StatusCode::BAD_REQUEST, NOT_FROM_A_SIGN_IN, path);
+    }
+    for path in [
         "/codex/callback?state=claude-state&code=a",
         "/anthropic/callback?state=codex-state&code=a",
         "/anthropic/callback?state=other-state&code=a",
@@ -908,17 +945,25 @@ async fn callback_pages_hand_over_the_callback() {
         "/anthropic/callback?state=%20claude-state&code=a",
         "/anthropic/callback?state=..&code=a",
     ] {
-        assert_page(&page(path).await, path);
+        let answer = page(path).await;
+        assert_page(&answer, StatusCode::BAD_REQUEST, NOTHING_WAITING, path);
     }
     assert!(claude.try_recv().is_err(), "a page handed over a callback");
     assert!(codex.try_recv().is_err(), "a page handed over a callback");
 
     let path = "/anthropic/callback?state=claude-state&code=%20the-code%23claude-state";
-    assert_page(&page(path).await, path);
+    assert_page(&page(path).await, StatusCode::OK, FINISHING, path);
     assert_eq!(claude.try_recv(), Ok(code("the-code#claude-state")));
 
     let path = "/codex/callback?state=codex-state&error=&error_description=access_denied";
-    assert_page(&page(path).await, path);
+    let answer = page(path).await;
+    let title = "Codex didn't sign you in";
+    assert_page(&answer, StatusCode::BAD_REQUEST, title, path);
+    assert!(
+        answer.body.contains("<code>access_denied</code>"),
+        "{}",
+        answer.body
+    );
     assert_eq!(
         codex.try_recv(),
         Ok(Callback {
@@ -932,6 +977,197 @@ async fn callback_pages_hand_over_the_callback() {
         .send(request_from(REMOTE, Method::POST, "/codex/callback", ""))
         .await;
     answer.assert(StatusCode::NOT_FOUND, "404 page not found");
+}
+
+// Not upstream's: a callback page that hands a login its code waits for
+// the login to end, and says how it did: signed in, or failed and why,
+// without the code. Loaded again, it says how the login ended, but not why
+// it failed; another callback's page isn't told why either.
+#[tokio::test]
+async fn callback_pages_say_how_the_login_ended() {
+    // Signed in to Codex.
+    let id_token = codex_id_token(Some("oauth-user@example.test"), "");
+    let upstream = Upstream::answering(codex_tokens(&id_token)).await;
+    let auth_dir = AuthDir::new();
+    let api = login_api(&auth_dir, &upstream.url);
+    let state = start_login(&api, CODEX_AUTH_URL).await;
+    let path = format!("/codex/callback?state={state}&code=the-code");
+    let answer = open_page(&api, &path).await;
+    assert_page(&answer, StatusCode::OK, "Signed in to Codex", &path);
+    assert!(
+        answer.body.contains("go back to the dashboard."),
+        "{}",
+        answer.body
+    );
+    saved_file(&auth_dir, "codex-");
+    let answer = open_page(&api, &path).await;
+    assert_page(&answer, StatusCode::OK, "Signed in to Codex", &path);
+    let path = format!("/anthropic/callback?state={state}&code=the-code");
+    let answer = open_page(&api, &path).await;
+    assert_page(&answer, StatusCode::BAD_REQUEST, NOTHING_WAITING, &path);
+
+    // Signed in to Claude, with the code as Anthropic's page shows it.
+    let upstream = Upstream::answering(claude_tokens()).await;
+    let api = login_api(&auth_dir, &upstream.url);
+    let state = start_login(&api, CLAUDE_AUTH_URL).await;
+    let path = format!("/anthropic/callback?state={state}&code=the-code%23{state}");
+    let answer = open_page(&api, &path).await;
+    assert_page(&answer, StatusCode::OK, "Signed in to Claude", &path);
+    saved_file(&auth_dir, "claude-");
+
+    // The token endpoint refuses the code, quoting it.
+    let refused = http_response(
+        "400 Bad Request",
+        &[],
+        br#"{"error":"invalid_grant","code":"the-code-0123456789"}"#,
+    );
+    let upstream = Upstream::answering(refused).await;
+    let api = login_api(&auth_dir, &upstream.url);
+    let state = start_login(&api, CODEX_AUTH_URL).await;
+    let path = format!("/codex/callback?state={state}&code=the-code-0123456789");
+    let answer = open_page(&api, &path).await;
+    assert_page(&answer, StatusCode::BAD_REQUEST, UNFINISHED, &path);
+    let body = &answer.body;
+    assert!(
+        body.contains("token exchange failed with status 400: {&quot;error&quot;"),
+        "{body}"
+    );
+    assert!(
+        body.contains("&quot;code&quot;:&quot;[redacted]&quot;"),
+        "{body}"
+    );
+    assert!(!body.contains("0123456789"), "{body}");
+    let answer = open_page(&api, &path).await;
+    assert_page(&answer, StatusCode::BAD_REQUEST, ALREADY_FAILED, &path);
+    assert!(!answer.body.contains("token exchange"), "{}", answer.body);
+
+    // A second callback, while the login exchanges the first one's code,
+    // waits too.
+    let stall = Stall::start().await;
+    let api = login_api(&auth_dir, &stall.url);
+    api.state.oauth_sessions().overrides().exchange = Some(Duration::from_millis(300));
+    let state = start_login(&api, CODEX_AUTH_URL).await;
+    let first = format!("/codex/callback?state={state}&code=first-code");
+    let second = format!("/codex/callback?state={state}&code=second-code");
+    let (first, second) = tokio::join!(open_page(&api, &first), async {
+        reaches(&stall.requests, 1, "requests").await;
+        open_page(&api, &second).await
+    });
+    assert_page(&first, StatusCode::BAD_REQUEST, UNFINISHED, "first");
+    let timed_out = "<code>Timeout exchanging authorization code for tokens</code>";
+    assert!(first.body.contains(timed_out), "{}", first.body);
+    assert_page(&second, StatusCode::BAD_REQUEST, ALREADY_FAILED, "second");
+    assert!(!second.body.contains("Timeout"), "{}", second.body);
+    ended(&api).await;
+    assert_eq!(files(&auth_dir).len(), 2);
+}
+
+// Not upstream's: a callback page whose login hasn't ended when it has
+// waited says the login is still finishing, and one whose login is
+// cancelled or shut down while it waits says it stopped, at once.
+#[tokio::test]
+async fn callback_pages_tell_of_logins_that_havent_ended() {
+    let stall = Stall::start().await;
+    let auth_dir = AuthDir::new();
+    let api = login_api(&auth_dir, &stall.url);
+    let store = api.state.oauth_sessions().store();
+
+    api.state.oauth_sessions().overrides().page = Some(Duration::from_millis(200));
+    let state = start_login(&api, CLAUDE_AUTH_URL).await;
+    let path = format!("/anthropic/callback?state={state}&code=the-code");
+    let started = Instant::now();
+    let answer = open_page(&api, &path).await;
+    assert!(started.elapsed() >= Duration::from_millis(200));
+    assert_page(&answer, StatusCode::OK, FINISHING, &path);
+    let next = "go back to the dashboard, which shows the result.";
+    assert!(answer.body.contains(next), "{}", answer.body);
+    assert!(store.is_pending(&state, "anthropic"));
+    assert!(store.cancel(&state));
+
+    // The pages wait as long as they would outside the tests.
+    api.state.oauth_sessions().overrides().page = None;
+    let state = start_login(&api, CODEX_AUTH_URL).await;
+    let path = format!("/codex/callback?state={state}&code=the-code");
+    let started = Instant::now();
+    let (answer, cancelled) = tokio::join!(open_page(&api, &path), async {
+        reaches(&stall.requests, 2, "requests").await;
+        store.cancel(&state)
+    });
+    assert!(cancelled);
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_page(&answer, StatusCode::BAD_REQUEST, STOPPED, &path);
+
+    let state = start_login(&api, CODEX_AUTH_URL).await;
+    let path = format!("/codex/callback?state={state}&code=the-code");
+    let started = Instant::now();
+    let (answer, ()) = tokio::join!(open_page(&api, &path), async {
+        reaches(&stall.requests, 3, "requests").await;
+        api.state.shutdown().await;
+    });
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_page(&answer, StatusCode::BAD_REQUEST, STOPPED, &path);
+    assert_eq!(files(&auth_dir), Vec::<String>::new());
+}
+
+// Not upstream's: a session tells whether its login took the callback it
+// was handed, and the callback's page learns how the login ended, if it
+// does in the time given.
+#[tokio::test]
+async fn delivered_callbacks_learn_how_their_login_ended() {
+    let store = store();
+    let wait = Duration::from_secs(5);
+
+    let mut callback = register(&store, "state", "codex");
+    let first = store.deliver("state", "codex", code("first")).unwrap();
+    let second = store.deliver("state", "codex", code("second")).unwrap();
+    assert!(first.taken);
+    assert!(!second.taken);
+    assert_eq!(callback.try_recv(), Ok(code("first")));
+    store.complete("state");
+    assert_eq!(
+        store.ended("state", first, wait).await,
+        Some(Ended::Completed)
+    );
+    assert_eq!(
+        store.ended("state", second, wait).await,
+        Some(Ended::Completed)
+    );
+
+    // A login that stopped waiting takes nothing.
+    drop(register(&store, "gone", "codex"));
+    assert!(!store.deliver("gone", "codex", code("c")).unwrap().taken);
+
+    let _callback = register(&store, "failing", "anthropic");
+    let delivered = store.deliver("failing", "anthropic", code("c")).unwrap();
+    let (ended, ()) = tokio::join!(store.ended("failing", delivered, wait), async {
+        tokio::task::yield_now().await;
+        store.set_error("failing", "why");
+    });
+    assert_eq!(ended, Some(Ended::Failed("why".into())));
+
+    let _callback = register(&store, "cancelled", "codex");
+    let delivered = store.deliver("cancelled", "codex", code("c")).unwrap();
+    let (ended, cancelled) = tokio::join!(store.ended("cancelled", delivered, wait), async {
+        tokio::task::yield_now().await;
+        store.cancel("cancelled")
+    });
+    assert!(cancelled);
+    assert_eq!(ended, Some(Ended::Dropped));
+
+    let _callback = register(&store, "replaced", "codex");
+    let delivered = store.deliver("replaced", "codex", code("c")).unwrap();
+    let _newer = register(&store, "replaced", "codex");
+    let ended = store.ended("replaced", delivered, wait).await;
+    assert_eq!(ended, Some(Ended::Dropped));
+
+    let _callback = register(&store, "pending", "codex");
+    let delivered = store.deliver("pending", "codex", code("c")).unwrap();
+    let started = Instant::now();
+    let ended = store
+        .ended("pending", delivered, Duration::from_millis(100))
+        .await;
+    assert_eq!(ended, None);
+    assert!(started.elapsed() >= Duration::from_millis(100));
 }
 
 // Not upstream's: a Claude code may come as `code#state`, as Anthropic's
@@ -1434,24 +1670,31 @@ async fn callback_errors_are_logged_without_what_they_carry() {
     let (logs, _guard) = Logs::capture();
     let api = Api::new();
     let api = &api;
-    let page = |path: String| async move {
-        let answer = api.send(request_from(REMOTE, Method::GET, &path, "")).await;
-        assert_page(&answer, &path);
+    let page = |path: String, title: &'static str| async move {
+        let answer = open_page(api, &path).await;
+        assert_page(&answer, StatusCode::BAD_REQUEST, title, &path);
+        assert!(!answer.body.contains("MARKER"), "{}", answer.body);
     };
 
     let state = start_login(api, CODEX_AUTH_URL).await;
-    page(format!(
-        "/codex/callback?state={state}&code=MARKER-code&error=access_denied\
-         &error_description=MARKER-description"
-    ))
+    page(
+        format!(
+            "/codex/callback?state={state}&code=MARKER-code&error=access_denied\
+             &error_description=MARKER-description"
+        ),
+        "Codex didn't sign you in",
+    )
     .await;
     assert_eq!(failure(api, &state).await, "Bad Request");
 
     let state = start_login(api, CLAUDE_AUTH_URL).await;
-    page(format!(
-        "/anthropic/callback?state={state}&code=MARKER-code\
-         &error_description=MARKER-description%20MARKER-code"
-    ))
+    page(
+        format!(
+            "/anthropic/callback?state={state}&code=MARKER-code\
+             &error_description=MARKER-description%20MARKER-code"
+        ),
+        "Claude didn't sign you in",
+    )
     .await;
     assert_eq!(failure(api, &state).await, "Bad request");
 

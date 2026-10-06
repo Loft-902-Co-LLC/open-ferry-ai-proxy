@@ -79,7 +79,7 @@ use open_ferry_core::auth::Auth;
 use open_ferry_core::config::Config;
 use open_ferry_providers::claude::oauth::{self as claude, ClaudeAuth};
 use open_ferry_providers::codex::oauth::{self as codex, CodexAuth};
-use open_ferry_providers::oauth::{Pkce, generate_state};
+use open_ferry_providers::oauth::{CALLBACK_ERRORS, Pkce, generate_state};
 use open_ferry_translate::go::{to_lower, trim_space};
 
 use super::Provider;
@@ -108,18 +108,6 @@ const SAVE_FAILED: &str = "Failed to save authentication tokens";
 
 /// What stands in a session's status for a secret.
 const REDACTED: &str = "[redacted]";
-
-/// The errors RFC 6749 (section 4.1.2.1) lets an authorization server send
-/// to the redirect URI: the only callback errors logged as they came.
-const CALLBACK_ERRORS: [&str; 7] = [
-    "invalid_request",
-    "unauthorized_client",
-    "access_denied",
-    "unsupported_response_type",
-    "invalid_scope",
-    "server_error",
-    "temporarily_unavailable",
-];
 
 /// `GET /v0/management/anthropic-auth-url` (`RequestAnthropicToken`).
 pub(super) async fn anthropic_auth_url(

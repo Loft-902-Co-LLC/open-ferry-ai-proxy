@@ -19,7 +19,9 @@
 //!
 //! A login learns that its session was dropped (cancelled, replaced or
 //! expired) through the session's [`Lifeline`], whatever it is doing; the
-//! callback channel tells it only while it waits for the callback.
+//! callback channel tells it only while it waits for the callback. A
+//! callback page that handed a session its callback can wait for the login
+//! to end with [`Store::ended`].
 //!
 //! Deviations from upstream:
 //! - A callback reaches the waiting login through a channel the session
@@ -93,9 +95,34 @@ pub(crate) struct Lifeline(watch::Receiver<()>);
 impl Lifeline {
     /// Waits until the session is dropped; at once if it already was.
     pub(crate) async fn cut(&mut self) {
-        // Nothing is ever sent: only the session's end wakes this.
+        // The session's channel also says when the login completes or
+        // fails, for the callback pages: only its end stops this.
         while self.0.changed().await.is_ok() {}
     }
+}
+
+/// A callback that [`Store::deliver`] handed to a pending session.
+#[derive(Debug)]
+pub(crate) struct Delivered {
+    /// Whether the login took this callback: false when it took an earlier
+    /// one, or had stopped waiting.
+    pub(crate) taken: bool,
+    /// The registration whose session it went to.
+    id: u64,
+    /// Wakes when the login completes or fails, or the session is dropped.
+    changes: watch::Receiver<()>,
+}
+
+/// How the login of a session ended, as [`Store::ended`] tells it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Ended {
+    /// It completed: the credential is saved.
+    Completed,
+    /// It failed, with this status.
+    Failed(String),
+    /// Its session was dropped first: cancelled, replaced or expired, or
+    /// the login stopped.
+    Dropped,
 }
 
 /// A session, as [`Store::get`] shows it.
@@ -143,8 +170,10 @@ struct Entry {
     /// Where the session's callback goes, until one has gone or the session
     /// stops being pending. Dropping it wakes the waiting login.
     callback: Option<oneshot::Sender<Callback>>,
-    /// Cuts the login's [`Lifeline`] when the session is dropped.
-    _lifeline: watch::Sender<()>,
+    /// Cuts the login's [`Lifeline`] when the session is dropped, and wakes
+    /// the callback pages waiting in [`Store::ended`] when the login
+    /// completes or fails too.
+    changes: watch::Sender<()>,
     /// The registration's ID.
     id: u64,
 }
@@ -212,7 +241,7 @@ impl Store {
             return None;
         }
         let (sender, callback) = oneshot::channel();
-        let (lifeline, login_end) = watch::channel(());
+        let (changes, login_end) = watch::channel(());
         let id = inner.next_id;
         inner.next_id = id.wrapping_add(1);
         let session = Session {
@@ -226,7 +255,7 @@ impl Store {
             Entry {
                 session,
                 callback: Some(sender),
-                _lifeline: lifeline,
+                changes,
                 id,
             },
         );
@@ -262,6 +291,7 @@ impl Store {
         message.clone_into(&mut entry.session.status);
         entry.session.expires_at = later(now, ttl);
         entry.callback = None;
+        entry.changes.send_replace(());
     }
 
     /// Marks the login completed, unless the session is unknown or already
@@ -285,6 +315,7 @@ impl Store {
         entry.session.completed = true;
         entry.session.expires_at = later(now, completed_ttl);
         entry.callback = None;
+        entry.changes.send_replace(());
     }
 
     /// The session for `state`, completed or not (`Get`, and
@@ -357,7 +388,7 @@ impl Store {
         state: &str,
         provider: &str,
         callback: Callback,
-    ) -> Result<(), NotPending> {
+    ) -> Result<Delivered, NotPending> {
         let state = state.trim();
         let mut inner = self.lock();
         inner.purge(Instant::now());
@@ -365,12 +396,60 @@ impl Store {
         if !pending_for(&entry.session, provider) {
             return Err(NotPending);
         }
-        if let Some(sender) = entry.callback.take() {
-            // A login that stopped waiting has already ended the session or
-            // left it to expire.
-            let _ = sender.send(callback);
+        // A login that stopped waiting has already ended the session or
+        // left it to expire.
+        let taken = entry
+            .callback
+            .take()
+            .is_some_and(|sender| sender.send(callback).is_ok());
+        Ok(Delivered {
+            taken,
+            id: entry.id,
+            changes: entry.changes.subscribe(),
+        })
+    }
+
+    /// Waits up to `limit` for the login whose session `delivered` went to,
+    /// under `state`, to end, and tells how it did; `None` if it hadn't
+    /// ended by then.
+    pub(crate) async fn ended(
+        &self,
+        state: &str,
+        mut delivered: Delivered,
+        limit: Duration,
+    ) -> Option<Ended> {
+        let state = state.trim();
+        let ended = async {
+            loop {
+                // The receiver was made under the lock, as the session was
+                // then: any change since has marked it changed.
+                if let Some(ended) = self.outcome(state, delivered.id) {
+                    return ended;
+                }
+                if delivered.changes.changed().await.is_err() {
+                    return self.outcome(state, delivered.id).unwrap_or(Ended::Dropped);
+                }
+            }
+        };
+        tokio::time::timeout(limit, ended).await.ok()
+    }
+
+    /// How the login of registration `id` for `state` ended, or `None`
+    /// while its session is pending.
+    fn outcome(&self, state: &str, id: u64) -> Option<Ended> {
+        let mut inner = self.lock();
+        inner.purge(Instant::now());
+        let Some(entry) = inner.sessions.get(state).filter(|entry| entry.id == id) else {
+            return Some(Ended::Dropped);
+        };
+        let session = &entry.session;
+        if session.completed {
+            Some(Ended::Completed)
+        } else if !session.status.is_empty() {
+            Some(Ended::Failed(session.status.clone()))
+        } else {
+            None
         }
-        Ok(())
     }
 }
 

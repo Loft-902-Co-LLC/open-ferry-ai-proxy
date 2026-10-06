@@ -17,7 +17,7 @@
 //!
 //! The main server also serves `GET /anthropic/callback` and
 //! `GET /codex/callback`, which need nothing: the page a callback
-//! forwarder sends the browser to.
+//! forwarder sends the browser to, which says how the login ended.
 //!
 //! The `flows` module starts and follows a login, the `callback` module
 //! takes its callback, the `sessions` module keeps the sessions and the
@@ -135,6 +135,8 @@ pub(crate) struct Overrides {
     pub(crate) wait: Option<Duration>,
     /// How long a login's code exchange may take.
     pub(crate) exchange: Option<Duration>,
+    /// How long a callback page waits for its login to end.
+    pub(crate) page: Option<Duration>,
 }
 
 #[cfg(test)]
@@ -145,6 +147,7 @@ impl Default for Overrides {
             ports: Some((0, 0)),
             wait: None,
             exchange: None,
+            page: None,
         }
     }
 }
@@ -256,6 +259,15 @@ impl Sessions {
             return exchange;
         }
         flows::EXCHANGE_TIMEOUT
+    }
+
+    /// How long a callback page waits for its login to end.
+    fn page_wait(&self) -> Duration {
+        #[cfg(test)]
+        if let Some(page) = self.overrides().page {
+            return page;
+        }
+        callback::PAGE_WAIT
     }
 }
 
