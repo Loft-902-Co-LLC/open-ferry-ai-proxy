@@ -99,8 +99,11 @@ const TO_CHAT_NON_STREAM_JSON: &[JsonAt] = &[(
 
 /// Where the translator to Interactions writes a value's JSON text
 /// compactly: an image URL, a tool's description or a text part that isn't
-/// a string.
+/// a string, and such a text part of a system or developer message, within
+/// the system instruction's text (upstream's `openAIChatContentText` reads
+/// it with gjson's `String`, which gives the client's JSON text).
 const TO_INTERACTIONS_REQUEST_JSON: &[JsonAt] = &[
+    ("$.system_instruction", JsonForm::InText),
     ("$.input[*].content[*].image_url", JsonForm::Whole),
     ("$.input[*].content[*].text", JsonForm::Whole),
     ("$.tools[*].description", JsonForm::Whole),
