@@ -1,13 +1,16 @@
 // Ported from CLIProxyAPI internal/api/handlers/management/handler.go
-// (Handler, NewHandler, SetConfig, SetTokenStore, SetPostAuthPersistHook)
-// and internal/api/server.go (NewServer's MANAGEMENT_PASSWORD lookup)
+// (Handler, NewHandler, SetConfig, SetTokenStore, SetPostAuthPersistHook,
+// SetLocalPassword), internal/api/server.go (NewServer's
+// MANAGEMENT_PASSWORD lookup and hasManagementSecret) and
+// internal/api/server_reload.go (UpdateClients' managementRoutesEnabled)
 // (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! What the management handlers share: the current config, the credential
 //! manager, the model registry, the `MANAGEMENT_PASSWORD` secret, the
-//! trusted proxies, the failed-attempt record and the HTTP clients for
-//! `api-call`; and, as the service sets them, the credential store, the
+//! local management password, the trusted proxies, the failed-attempt
+//! record and the HTTP clients for `api-call`; and, as the service sets
+//! them, the credential store, the
 //! [`CredentialSync`] that reaches the service, the config file's path,
 //! the OAuth login sessions, the credential lock, the [`Observability`]
 //! handles the log and usage routes read, and the [`ConfigWriter`] and
@@ -28,6 +31,7 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
 use axum::response::{IntoResponse, Response};
@@ -81,6 +85,11 @@ struct Parts {
     config_writer: Option<Arc<dyn ConfigWriter>>,
     config_reload: Option<Arc<dyn ConfigReload>>,
     observability: Observability,
+    /// The local management password, or empty.
+    local_password: Vec<u8>,
+    /// Whether the local management password turns the API on, as it does
+    /// until the first config reload.
+    local_enables: Arc<AtomicBool>,
     #[cfg(test)]
     latest_release_url: Option<String>,
 }
@@ -171,6 +180,21 @@ impl ManagementState {
         self
     }
 
+    /// Accepts `password` as a management key from 127.0.0.1 and ::1
+    /// (upstream's `SetLocalPassword`, which the command line's `-password`
+    /// and the TUI's standalone mode set). A password that isn't empty also
+    /// turns the API on, until the first config reload, as upstream's
+    /// server does; a request still needs a management key in the config or
+    /// `MANAGEMENT_PASSWORD`, without which it is refused with "remote
+    /// management key not set", as upstream's is.
+    #[must_use]
+    pub fn with_local_password(mut self, password: &str) -> Self {
+        let parts = Arc::make_mut(&mut self.parts);
+        parts.local_password = password.as_bytes().to_vec();
+        parts.local_enables = Arc::new(AtomicBool::new(!password.is_empty()));
+        self
+    }
+
     /// Asks a test's server for the latest release instead of GitHub.
     #[cfg(test)]
     #[must_use]
@@ -181,8 +205,10 @@ impl ManagementState {
 
     /// Applies a reloaded config (upstream's `SetConfig`). The management
     /// key, `allow-remote` and the proxies take effect on the next request;
-    /// `trusted-proxies` takes a restart, as upstream.
+    /// `trusted-proxies` takes a restart, as upstream. The local management
+    /// password no longer turns the API on.
     pub fn set_config(&self, config: Arc<Config>) {
+        self.parts.local_enables.store(false, Ordering::Relaxed);
         *self
             .inner
             .config
@@ -220,6 +246,11 @@ impl ManagementState {
         &self.inner.env_secret
     }
 
+    /// The local management password, or empty.
+    pub(crate) fn local_password(&self) -> &[u8] {
+        &self.parts.local_password
+    }
+
     pub(crate) fn trusted_proxies(&self) -> &TrustedProxies {
         &self.inner.trusted_proxies
     }
@@ -236,10 +267,13 @@ impl ManagementState {
     }
 
     /// Whether the management API serves requests: when the config has a
-    /// management key or `MANAGEMENT_PASSWORD` is set (upstream's
+    /// management key or `MANAGEMENT_PASSWORD` is set, or until the first
+    /// config reload when a local management password is (upstream's
     /// `managementRoutesEnabled`).
     pub fn available(&self) -> bool {
-        !self.env_secret().is_empty() || !self.config().remote_management.secret_key.is_empty()
+        !self.env_secret().is_empty()
+            || !self.config().remote_management.secret_key.is_empty()
+            || self.parts.local_enables.load(Ordering::Relaxed)
     }
 }
 

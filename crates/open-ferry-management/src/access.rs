@@ -17,6 +17,12 @@
 //! set `MANAGEMENT_PASSWORD` implies. Five failed attempts from one address
 //! ban it for thirty minutes.
 //!
+//! The local management password (`-password`, or the TUI's standalone
+//! mode's) is a key too, for 127.0.0.1 and ::1 only. As upstream, it turns
+//! the API on until the first config reload, but a request is refused
+//! with "remote management key not set" while the config has no key and
+//! `MANAGEMENT_PASSWORD` isn't set.
+//!
 //! `secret-key` may be a bcrypt hash or the key itself. Upstream hashes a
 //! plain key when it loads the config and writes the hash back to the
 //! file; this port doesn't write the config when it loads it, and compares
@@ -28,8 +34,7 @@
 //! `X-CPA-COMMIT` and `X-CPA-BUILD-DATE`.
 //!
 //! Deviations from upstream:
-//! - The local management password (`SetLocalPassword`), Home mode and
-//!   `X-CPA-SUPPORT-PLUGIN` (the plugin host) aren't ported.
+//! - Home mode and `X-CPA-SUPPORT-PLUGIN` (the plugin host) aren't ported.
 //! - `X-CPA-VERSION` is this crate's version. `X-CPA-COMMIT` and
 //!   `X-CPA-BUILD-DATE` come from `OPEN_FERRY_COMMIT` and
 //!   `OPEN_FERRY_BUILD_DATE` at build time, else `none` and `unknown` as in
@@ -289,6 +294,11 @@ pub(crate) async fn authenticate_key(
     }
     if provided.is_empty() {
         return fail("missing management key");
+    }
+    let local_password = state.local_password();
+    if local && !local_password.is_empty() && bool::from(provided.ct_eq(local_password)) {
+        state.attempts().reset(ip);
+        return Ok(());
     }
     if !env_secret.is_empty() && bool::from(provided.ct_eq(env_secret)) {
         state.attempts().reset(ip);

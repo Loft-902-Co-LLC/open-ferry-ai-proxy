@@ -110,6 +110,43 @@ async fn management_password_enables_the_api_and_remote_access() {
 }
 
 #[tokio::test]
+async fn the_local_password_is_for_local_clients() {
+    let local = |config: Config| {
+        Api::build(config, None, None, |state, _| {
+            state.with_local_password("local-pass")
+        })
+    };
+    let mut config = keyed_config();
+    config.remote_management.allow_remote = true;
+    let api = local(config);
+    for key in ["local-pass", KEY] {
+        let answer = list_from(&api, LOCAL, key).await;
+        assert_eq!(answer.status, StatusCode::OK, "{key}: {}", answer.body);
+    }
+    list_from(&api, REMOTE, "local-pass")
+        .await
+        .assert(StatusCode::UNAUTHORIZED, &error("invalid management key"));
+
+    // Without a management key the password turns the API on, but its
+    // requests are refused; after a reload the API is off.
+    let api = local(Config::default());
+    list_from(&api, LOCAL, "local-pass").await.assert(
+        StatusCode::FORBIDDEN,
+        &error("remote management key not set"),
+    );
+    api.state.set_config(Arc::new(Config::default()));
+    list_from(&api, LOCAL, "local-pass")
+        .await
+        .assert(StatusCode::NOT_FOUND, "");
+
+    // An empty password is none.
+    let api = Api::build(Config::default(), None, None, |state, _| {
+        state.with_local_password("")
+    });
+    api.get(LIST).await.assert(StatusCode::NOT_FOUND, "");
+}
+
+#[tokio::test]
 async fn remote_clients_need_allow_remote() {
     let api = Api::new();
     for peer in [REMOTE, "127.0.0.2:1", "[::2]:1", "[::ffff:127.0.0.2]:1"] {
