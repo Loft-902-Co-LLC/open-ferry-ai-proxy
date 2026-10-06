@@ -1,18 +1,17 @@
 //! The executor against a mock provider on 127.0.0.1, ported from upstream's
 //! `openai_compat_executor_compact_test.go`,
 //! `openai_compat_executor_max_tokens_test.go`,
-//! `openai_compat_executor_retry_test.go` (`TestOpenAICompatExecutorPropagatesRetryAfter`)
-//! and `openai_compat_executor_tool_results_test.go`, with checks of the
-//! request headers, credentials, refresh, token counts and entry lookup.
+//! `openai_compat_executor_retry_test.go` (`TestOpenAICompatExecutorPropagatesRetryAfter`),
+//! `openai_compat_executor_tool_results_test.go` and
+//! `openai_compat_executor_video_test.go`, with checks of the request
+//! headers, credentials, refresh, token counts and entry lookup.
 //!
 //! Dropped:
 //! - `openai_compat_executor_images_test.go`, the image tests in the compact
 //!   test file (`ImagesGenerationsPassthrough`, `ImagesGenerationsStreamsUpstream`,
 //!   `ImagesEditsMultipartRewritesModel`,
-//!   `RewriteOpenAICompatImagesMultipartPayloadPreservesStreamAndFileContentType`)
-//!   and `openai_compat_executor_video_test.go`: the image endpoints aren't
-//!   ported, and the video test checks how the Claude and OpenAI request
-//!   translators pass video, which isn't this executor's.
+//!   `RewriteOpenAICompatImagesMultipartPayloadPreservesStreamAndFileContentType`):
+//!   this executor doesn't serve the image endpoints.
 //! - `openai_compat_home_options_test.go`: the Home service isn't ported.
 //! - `openai_compat_executor_reasoning_test.go`: the `is-compat` flag isn't
 //!   passed to translators.
@@ -1752,5 +1751,79 @@ async fn the_taps_see_the_answer_as_it_came() {
         };
         assert!(!shown.contains(ECHOED_KEY), "{shown}");
         assert!(raw.seen().contains(ECHOED_KEY), "{}", raw.seen());
+    }
+}
+
+const VIDEO_ANSWER: &str = r#"{"id":"chatcmpl-video","object":"chat.completion","created":1,"model":"video-model","choices":[{"index":0,"message":{"role":"assistant","content":"blue, red, green"},"finish_reason":"stop"}]}"#;
+const VIDEO_STREAM: &str = "data: {\"id\":\"chatcmpl-video\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"video-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"blue, red, green\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-video\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"video-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+const CHAT_VIDEOS: &str = r#"{"model":"client-alias","messages":[{"role":"user","content":[{"type":"text","text":"Describe the videos."},{"type":"video_url","video_url":{"url":"https://example.com/clip.mp4?part=1&name=a%20b","processing":"agentic"}},{"type":"video_url","video_url":{"url":"data:video/mp4;base64,AAECAwQ="}}]}]}"#;
+const RESPONSES_VIDEOS: &str = r#"{"model":"client-alias","input":[{"role":"user","content":[{"type":"input_text","text":"Describe the videos."},{"type":"input_video","video_url":"https://example.com/clip.mp4?part=1&name=a%20b","processing":"agentic"},{"type":"input_video","video_url":"data:video/mp4;base64,AAECAwQ="}]}]}"#;
+
+// Ported from openai_compat_executor_video_test.go
+// (TestOpenAICompatExecutor_VideoInput).
+#[tokio::test]
+async fn video_input() {
+    for (format, payload) in [
+        (Format::OPENAI, CHAT_VIDEOS),
+        (Format::OPENAI_RESPONSE, RESPONSES_VIDEOS),
+    ] {
+        for stream in [false, true] {
+            let case = format!("{format:?}/stream={stream}");
+            let reply = if stream {
+                Reply::sse(VIDEO_STREAM)
+            } else {
+                Reply::json(VIDEO_ANSWER)
+            };
+            let mock = Mock::start(reply).await;
+            let auth = plain_auth(&mock.base_url());
+            let options = Options {
+                stream,
+                ..options(&format)
+            };
+            let shown = if stream {
+                let response = executor(Vec::new())
+                    .execute_stream(auth, request("video-model", payload), options)
+                    .await
+                    .unwrap();
+                let (chunks, error) = collect(response).await;
+                assert!(error.is_none(), "{case}: {error:?}");
+                chunks.concat()
+            } else {
+                let response = executor(Vec::new())
+                    .execute(auth, request("video-model", payload), options)
+                    .await
+                    .unwrap();
+                String::from_utf8_lossy(&response.payload).into_owned()
+            };
+            assert!(
+                shown.contains("blue, red, green"),
+                "{case}: the answer was lost: {shown}"
+            );
+
+            let seen = mock.last();
+            assert_eq!(seen.path, "/v1/chat/completions", "{case}");
+            let body = seen.json();
+            assert_eq!(body["model"], "video-model", "{case}");
+            let content = body["messages"][0]["content"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            assert_eq!(
+                content.len(),
+                3,
+                "{case}: want the text and two videos: {}",
+                seen.body
+            );
+            assert_eq!(content[0]["text"], "Describe the videos.", "{case}");
+            let urls = [
+                "https://example.com/clip.mp4?part=1&name=a%20b",
+                "data:video/mp4;base64,AAECAwQ=",
+            ];
+            for (part, url) in content[1..].iter().zip(urls) {
+                assert_eq!(part["type"], "video_url", "{case}: {part}");
+                assert_eq!(part["video_url"]["url"], url, "{case}: {part}");
+            }
+            assert_eq!(content[1]["video_url"]["processing"], "agentic", "{case}");
+        }
     }
 }
