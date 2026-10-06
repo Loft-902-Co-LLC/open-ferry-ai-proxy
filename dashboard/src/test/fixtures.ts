@@ -1,6 +1,7 @@
 // Answers of the dashboard API, as Contract 1 has them, for tests. Each
 // takes overrides so a test states only what it is about.
 
+import type { Cooldown, Credential, CredentialList } from "../api/credentials";
 import type {
   ClientSetup,
   LedgerState,
@@ -235,4 +236,55 @@ export function clientSetup(overrides: Partial<ClientSetup> = {}): ClientSetup {
     ],
     ...overrides,
   };
+}
+
+/** A Claude sign-in in use, as `GET auth-files` lists one. */
+export function credential(overrides: Partial<Credential> = {}): Credential {
+  const name = overrides.name ?? "claude-ada@example.com.json";
+  return {
+    id: name,
+    auth_index: "a1b2c3d4e5f60718",
+    name,
+    type: "claude",
+    provider: "claude",
+    label: "ada@example.com",
+    status: "active",
+    status_message: "",
+    disabled: false,
+    unavailable: false,
+    runtime_only: false,
+    source: "file",
+    size: 1840,
+    success: 1520,
+    failed: 12,
+    recent_requests: [
+      { time: "11:40-11:50", success: 30, failed: 1 },
+      { time: "11:50-12:00", success: 12, failed: 0 },
+    ],
+    supports_quota: false,
+    email: "ada@example.com",
+    account_type: "oauth",
+    account: "ada@example.com",
+    modtime: "2026-10-04T08:15:00.000Z",
+    last_refresh: "2026-10-05T11:02:00.000Z",
+    path: "/srv/open-ferry/auths/claude-ada@example.com.json",
+    cooldowns: [],
+    ...overrides,
+  };
+}
+
+/** A cooldown ending `seconds` after 2026-10-05T12:00:00Z. */
+export function cooldown(reason: string, seconds: number, overrides: Partial<Cooldown> = {}): Cooldown {
+  return {
+    scope: "credential",
+    reason,
+    retry_at: new Date(Date.parse("2026-10-05T12:00:00.000Z") + seconds * 1000).toISOString(),
+    remaining_seconds: seconds,
+    ...overrides,
+  };
+}
+
+/** `GET auth-files` with `files`. */
+export function credentialList(files: Credential[]): CredentialList {
+  return { files, observed_at: "2026-10-05T12:00:00.000Z" };
 }

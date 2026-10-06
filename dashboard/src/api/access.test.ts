@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { accessProblem, callProblem } from "./access";
+import { accessProblem, callProblem, isSettingsReadOnly } from "./access";
 import { ApiError } from "./client";
 import { signInProblem } from "./signIn";
 
@@ -81,6 +81,16 @@ describe("callProblem", () => {
       status: 418,
       message: "teapot",
     });
+  });
+
+  it("knows when the server can't change its settings", () => {
+    const noWriter = management(503, "config writer unavailable");
+    expect(callProblem(noWriter)).toEqual({ kind: "settings-read-only" });
+    expect(isSettingsReadOnly(noWriter)).toBe(true);
+    expect(isSettingsReadOnly(management(404, null))).toBe(true);
+    expect(isSettingsReadOnly(management(503, "server shutting down"))).toBe(false);
+    expect(isSettingsReadOnly(management(400, "invalid body"))).toBe(false);
+    expect(isSettingsReadOnly(new Error("x"))).toBe(false);
   });
 });
 

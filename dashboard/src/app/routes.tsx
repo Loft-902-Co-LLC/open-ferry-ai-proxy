@@ -19,6 +19,11 @@ const LedgerPage = lazy(() =>
 const LogsPage = lazy(() =>
   import("../pages/logs/LogsPage").then((module) => ({ default: module.LogsPage })),
 );
+const CredentialsPage = lazy(() =>
+  import("../pages/credentials/CredentialsPage").then((module) => ({
+    default: module.CredentialsPage,
+  })),
+);
 const LogViewerPage = lazy(() =>
   import("../pages/logs/LogViewerPage").then((module) => ({ default: module.LogViewerPage })),
 );
@@ -49,6 +54,7 @@ export const routes: RouteObject[] = [
         element: <AppShell />,
         children: [
           { index: true, element: <OverviewPage /> },
+          { path: "credentials", element: <CredentialsPage /> },
           { path: "usage", element: <UsagePage /> },
           { path: "usage/ledger", element: <LedgerPage /> },
           { path: "logs", element: <LogsPage /> },

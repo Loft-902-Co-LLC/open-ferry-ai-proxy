@@ -10,6 +10,8 @@ export interface MockRequest {
   url: URL;
   headers: Headers;
   body: string | null;
+  /** A multipart body, as the app built it. */
+  form: FormData | null;
   /** The body parsed as JSON. */
   json: () => unknown;
 }
@@ -62,6 +64,7 @@ export function mockApi(...initial: MockRoute[]): MockApi {
       url: new URL(raw, TEST_ORIGIN),
       headers: new Headers(init?.headers),
       body,
+      form: init?.body instanceof FormData ? init.body : null,
       json: () => (body === null ? undefined : (JSON.parse(body) as unknown)),
     };
     calls.push(request);

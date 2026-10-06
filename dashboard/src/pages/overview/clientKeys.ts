@@ -4,6 +4,8 @@
 
 import { EXAMPLE_API_KEYS } from "../../app/safeMode";
 
+export { maskKey } from "../../lib/mask";
+
 /** `GET /v0/management/api-keys`. */
 export interface ApiKeysAnswer {
   "api-keys": string[] | null;
@@ -25,10 +27,6 @@ export function usableKeys(keys: readonly string[]): string[] {
   return usable;
 }
 
-/** A key as the server masks one: its first three and last four characters. */
-export function maskKey(key: string): string {
-  return key.length <= 10 ? "•".repeat(Math.max(key.length, 4)) : `${key.slice(0, 3)}...${key.slice(-4)}`;
-}
 
 /** A new client key: "sk-" and 32 random bytes, base64url. */
 export function generateClientKey(): string {

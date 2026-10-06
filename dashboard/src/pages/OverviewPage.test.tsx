@@ -1,16 +1,22 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
+import { AUTH_FILES, KEY_LISTS, type Credential } from "../api/credentials";
 import { CLIENT_SETUP, type ClientSetup } from "../api/dashboard";
 import { API_KEYS } from "../api/management";
 import { EXAMPLE_API_KEYS } from "../app/safeMode";
-import { clientSetup } from "../test/fixtures";
+import { clientSetup, cooldown, credential, credentialList } from "../test/fixtures";
 import { mockApi, route, type MockApi } from "../test/mockApi";
 import { renderApp } from "../test/renderApp";
 
 const KEY = "sk-test-client-key-0001";
 const PYTHON = "The OpenAI SDK (Python) setup";
 const NEW_KEY = /^sk-[A-Za-z0-9_-]{43}$/;
+
+/** The key list routes, as GET answers them when they are empty. */
+const NO_PROVIDER_KEYS = Object.values(KEY_LISTS).map(({ list, path }) =>
+  route("GET", path, { json: { [list]: [] } }),
+);
 
 interface Server {
   api: MockApi;
@@ -23,9 +29,15 @@ interface Server {
  * A server with `keys` and `setup`, whose key list changes as PATCH and PUT
  * change it, and which leaves safe mode once no example key is left.
  */
-function server(keys: string[], setup: Partial<ClientSetup> = {}): Server {
+function server(
+  keys: string[],
+  setup: Partial<ClientSetup> = {},
+  credentials: Credential[] = [credential()],
+): Server {
   const state: Server = { api: mockApi(), keys: [...keys], setup: clientSetup(setup) };
   state.api.use(
+    route("GET", AUTH_FILES, { json: credentialList(credentials) }),
+    ...NO_PROVIDER_KEYS,
     route("GET", CLIENT_SETUP, () => ({
       json: {
         ...state.setup,
@@ -209,7 +221,76 @@ describe("making a client key", () => {
     expect(screen.getByLabelText(PYTHON)).toHaveTextContent(`api_key="<your client key>"`);
     expect(screen.getByText("No key")).toBeVisible();
     expect(screen.getByLabelText("Client key")).toBeDisabled();
-    expect(api.unhandled.map((call) => call.url.pathname)).toEqual([API_KEYS]);
+    expect(new Set(api.unhandled.map((call) => call.url.pathname))).toEqual(
+      new Set([API_KEYS, AUTH_FILES, ...Object.values(KEY_LISTS).map(({ path }) => path)]),
+    );
+    expect(screen.queryByRole("heading", { name: "Providers" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Connect a provider" })).toBeNull();
+  });
+});
+
+describe("the providers card", () => {
+  it("offers the ways to connect one on a first run", async () => {
+    const { api } = server([KEY], {}, []);
+    renderApp("/");
+    const card = await screen.findByRole("region", { name: "Connect a provider" });
+    expect(within(card).getByRole("link", { name: "Sign in with Claude" })).toHaveAttribute(
+      "href",
+      "/credentials?start=claude",
+    );
+    expect(within(card).getByRole("link", { name: "Sign in with Codex" })).toHaveAttribute(
+      "href",
+      "/credentials?start=codex",
+    );
+    expect(within(card).getByRole("link", { name: "Add a provider API key" })).toHaveAttribute(
+      "href",
+      "/credentials?start=key",
+    );
+    expect(within(card).getByRole("link", { name: "Upload a credential file" })).toHaveAttribute(
+      "href",
+      "/credentials",
+    );
+    expect(api.unhandled).toEqual([]);
+  });
+
+  it("counts provider keys as connected", async () => {
+    const { api } = server([KEY], {}, []);
+    api.use(
+      route("GET", KEY_LISTS.gemini.path, {
+        json: { "gemini-api-key": [{ "api-key": "AIzaSy-test-gemini-key-0001" }] },
+      }),
+    );
+    renderApp("/");
+    expect(
+      await screen.findByText("0 sign-ins and credential files, 1 provider API key."),
+    ).toBeVisible();
+    const card = screen.getByRole("region", { name: "Providers" });
+    expect(card).not.toHaveTextContent("AIzaSy");
+  });
+
+  it("tallies the credentials by health, and says when some need attention", async () => {
+    server([KEY], {}, [
+      credential(),
+      credential({ name: "codex-bob.json", provider: "codex", cooldowns: [cooldown("quota", 300)] }),
+      credential({ name: "claude-cy.json", status: "error", status_message: "unauthorized" }),
+      credential({ name: "claude-dee.json", disabled: true, status: "disabled" }),
+    ]);
+    renderApp("/");
+    expect(
+      await screen.findByText("4 sign-ins and credential files, 0 provider API keys."),
+    ).toBeVisible();
+    const card = screen.getByRole("region", { name: "Providers" });
+    const tally = within(card).getByRole("list", { name: "Credential health" });
+    expect(
+      within(tally)
+        .getAllByRole("listitem")
+        .map((item) => item.textContent),
+    ).toEqual(["1 ready", "1 resting", "1 failing", "1 off"]);
+    expect(card).toHaveTextContent("2 need attention");
+    expect(within(card).getByRole("link", { name: "Open Credentials" })).toHaveAttribute(
+      "href",
+      "/credentials",
+    );
   });
 });
 

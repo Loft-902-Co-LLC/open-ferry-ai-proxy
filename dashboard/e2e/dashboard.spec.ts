@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 
 import { CONTENT_SECURITY_POLICY, SECURITY_HEADERS } from "../build/securityHeaders";
-import { E2E_KEY, mockServer, type MockServer } from "./mockServer";
+import { E2E_KEY, mockServer, type MockOptions, type MockServer } from "./mockServer";
 import { APP_ORIGIN } from "./origin";
 
 /** Where to save a screenshot of each screen, when set. */
@@ -26,7 +26,7 @@ interface Watched {
 }
 
 /** Mocks the API on `page` and records everything that goes wrong on it. */
-async function watch(page: Page): Promise<Watched> {
+async function watch(page: Page, options: MockOptions = {}): Promise<Watched> {
   const watched: Omit<Watched, "server"> = { violations: [], consoleErrors: [], pageErrors: [] };
   // Bindings and init scripts come from the browser's debugging protocol,
   // so the page's policy doesn't stop them.
@@ -49,7 +49,7 @@ async function watch(page: Page): Promise<Watched> {
   page.on("pageerror", (error) => {
     watched.pageErrors.push(error.message);
   });
-  const server = await mockServer(page, APP_ORIGIN);
+  const server = await mockServer(page, APP_ORIGIN, options);
   return { ...watched, server };
 }
 
@@ -80,7 +80,7 @@ async function signIn(page: Page) {
 
 test("serves every page with the policy open-ferry sends", async ({ page }) => {
   await mockServer(page, APP_ORIGIN);
-  for (const path of ["./", "usage", "logs/main.log", "no-such-page"]) {
+  for (const path of ["./", "usage", "credentials", "logs/main.log", "no-such-page"]) {
     const response = await page.goto(path);
     expect(response?.status(), path).toBe(200);
     const headers = response?.headers() ?? {};
@@ -122,6 +122,45 @@ test("renders every screen under the policy", async ({ page }) => {
   await page.getByRole("tab", { name: "Codex CLI" }).click();
   await expect(page.getByLabel("The Codex CLI setup, step 1", { exact: true })).toContainText(`wire_api = "responses"`);
   await shot(page, "03-overview-codex");
+  await expect(page.getByRole("region", { name: "Providers" })).toContainText(
+    "3 sign-ins and credential files, 3 provider API keys.",
+  );
+
+  await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Credentials" }).click();
+  await expect(page.getByRole("heading", { name: "Credentials", level: 1 })).toBeVisible();
+  await expect(page.getByRole("article", { name: "codex-grace@example.com-pro.json" })).toContainText(
+    "Resting",
+  );
+  await expect(page.getByRole("article", { name: "claude-lin@example.com.json" })).toContainText("Failing");
+  await shot(page, "13-credentials");
+
+  await page
+    .getByRole("article", { name: "claude-ada@example.com.json" })
+    .getByRole("button", { name: "Check quota" })
+    .click();
+  const quota = page.getByRole("dialog", { name: "Quota of claude-ada@example.com.json" });
+  await expect(quota).toContainText("5 hours: 62% left");
+  await shot(page, "14-credentials-quota");
+  await quota.getByRole("button", { name: "Close" }).click();
+  await expect(quota).toBeHidden();
+
+  // The sign-in starts, and shows the provider's page as a link, which
+  // isn't followed here.
+  await page.getByRole("button", { name: "Sign in with Claude", exact: true }).click();
+  const signInDialog = page.getByRole("dialog", { name: "Sign in with Claude" });
+  await signInDialog.getByRole("button", { name: "Start", exact: true }).click();
+  await expect(signInDialog.getByRole("link", { name: /^Open Claude's sign-in page/ })).toBeFocused();
+  await expect(signInDialog.getByText("Waiting for you to sign in")).toBeVisible();
+  await shot(page, "15-credentials-sign-in");
+  await signInDialog.getByRole("button", { name: "Give up" }).click();
+  await expect(signInDialog).toBeHidden();
+
+  await page.getByRole("button", { name: "Add an API key" }).click();
+  const addKey = page.getByRole("dialog", { name: "Add a provider API key" });
+  await expect(addKey.getByLabel("API key", { exact: true })).toBeFocused();
+  await shot(page, "16-credentials-add-key");
+  await addKey.getByRole("button", { name: "Cancel" }).click();
+  await expect(addKey).toBeHidden();
 
   await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Usage" }).click();
   await expect(page.getByRole("heading", { name: "Usage", level: 1 })).toBeVisible();
@@ -184,5 +223,26 @@ test("renders the screens in dark mode under the policy too", async ({ page }) =
   await page.goto("usage");
   await expect(page.locator("svg.recharts-surface").first()).toBeVisible();
   await shot(page, "12-usage-dark");
+  await page.goto("credentials");
+  await expect(page.getByRole("article", { name: "claude-lin@example.com.json" })).toContainText("Failing");
+  await shot(page, "17-credentials-dark");
+  expectClean(watched);
+});
+
+test("shows a first run the ways to connect a provider", async ({ page }) => {
+  const watched = await watch(page, { credentials: false });
+  await signIn(page);
+  const connect = page.getByRole("region", { name: "Connect a provider" });
+  await expect(connect).toBeVisible();
+  await shot(page, "18-overview-first-run");
+  // Each opens its dialog on Credentials, which starts nothing by itself.
+  await connect.getByRole("link", { name: "Sign in with Codex" }).click();
+  const signInDialog = page.getByRole("dialog", { name: "Sign in with Codex" });
+  await expect(signInDialog.getByRole("button", { name: "Start", exact: true })).toBeFocused();
+  await signInDialog.getByRole("button", { name: "Cancel" }).click();
+  await expect(signInDialog).toBeHidden();
+  await expect(page.getByRole("region", { name: "Sign-ins and credential files" })).toContainText(
+    "None yet.",
+  );
   expectClean(watched);
 });

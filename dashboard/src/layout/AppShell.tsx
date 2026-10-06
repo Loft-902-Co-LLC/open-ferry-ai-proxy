@@ -10,6 +10,7 @@ import { useSession } from "../session/session";
 /** The pages in the main navigation, in order. */
 export const NAV_ITEMS: readonly { to: string; label: string }[] = [
   { to: "/", label: "Overview" },
+  { to: "/credentials", label: "Credentials" },
   { to: "/usage", label: "Usage" },
   { to: "/logs", label: "Logs" },
   { to: "/about", label: "About" },

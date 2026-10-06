@@ -6,9 +6,13 @@
 
 import type { Page, Route } from "@playwright/test";
 
+import type { Credential, ProviderKey } from "../src/api/credentials";
 import type { Bucket, LogEntry, Metrics, UsageRequest, UsageSeries } from "../src/api/dashboard";
 import {
   clientSetup,
+  cooldown,
+  credential,
+  credentialList,
   ledger,
   logEntry,
   logPiece,
@@ -193,6 +197,115 @@ function serverLines(now: number): string[] {
   ];
 }
 
+/** Requests in the last ten-minute windows, oldest first. */
+function recentRequests(now: number, load: number): Credential["recent_requests"] {
+  const window = 600_000;
+  const time = (start: number) => new Date(start).toISOString().slice(11, 16);
+  return Array.from({ length: 6 }, (_, index) => {
+    const start = Math.floor(now / window) * window - (5 - index) * window;
+    return {
+      time: `${time(start)}-${time(start + window)}`,
+      success: Math.round(load * (0.6 + 0.4 * Math.sin(index))),
+      failed: index === 3 ? 1 : 0,
+    };
+  });
+}
+
+/**
+ * The credentials: a Claude sign-in in use with one model resting, a Codex
+ * sign-in resting on its quota, and a Claude sign-in that has expired. (The
+ * provider API keys in config.yaml aren't listed here: upstream lists files
+ * and runtime-only credentials only.)
+ */
+function credentials(now: number): Credential[] {
+  const at = (seconds: number) => new Date(now + seconds * 1000).toISOString();
+  return [
+    credential({
+      supports_quota: true,
+      recent_requests: recentRequests(now, 40),
+      last_refresh: at(-3480),
+      cooldowns: [
+        cooldown("model_not_supported", 1500, {
+          scope: "model",
+          model_key: "claude-opus-4-1",
+          retry_at: at(1500),
+        }),
+      ],
+    }),
+    credential({
+      id: "codex-grace@example.com-pro.json",
+      name: "codex-grace@example.com-pro.json",
+      auth_index: "b7e1c94a0d2f3658",
+      type: "codex",
+      provider: "codex",
+      label: "grace@example.com",
+      email: "grace@example.com",
+      account: "grace@example.com",
+      success: 8211,
+      failed: 64,
+      recent_requests: recentRequests(now, 25),
+      supports_quota: true,
+      unavailable: true,
+      next_retry_after: at(2700),
+      last_refresh: at(-900),
+      id_token: { plan_type: "pro" },
+      path: "/srv/open-ferry/auths/codex-grace@example.com-pro.json",
+      cooldowns: [cooldown("credential_quota", 2700, { retry_at: at(2700), http_status: 429 })],
+    }),
+    credential({
+      id: "claude-lin@example.com.json",
+      name: "claude-lin@example.com.json",
+      auth_index: "4f1c0e6b9a2d7c35",
+      label: "lin@example.com",
+      email: "lin@example.com",
+      account: "lin@example.com",
+      status: "error",
+      status_message: "invalid_grant",
+      unavailable: true,
+      success: 310,
+      failed: 7,
+      recent_requests: [],
+      last_refresh: at(-9 * 86_400),
+      path: "/srv/open-ferry/auths/claude-lin@example.com.json",
+    }),
+  ];
+}
+
+// Placeholders shaped like provider keys; none is real.
+const CLAUDE_KEY = "sk-ant-api03-e2e-not-a-real-key-0000-Qw9x";
+const CODEX_KEY = "sk-proj-e2e-not-a-real-key-Zt4m";
+const GEMINI_KEY = "AIzaSy-e2e-not-a-real-key-7Qx";
+
+/** As the server lists them: with every field, empty or not. */
+const PROVIDER_KEYS: Record<string, ProviderKey[]> = {
+  "claude-api-key": [
+    { "api-key": CLAUDE_KEY, "base-url": "", "proxy-url": "", models: null, "auth-index": "9a8b7c6d5e4f3021" },
+  ],
+  "codex-api-key": [
+    {
+      "api-key": CODEX_KEY,
+      "base-url": "https://llm.example.com/v1",
+      "proxy-url": "",
+      prefix: "team",
+      models: null,
+      "auth-index": "1f2e3d4c5b6a7980",
+    },
+  ],
+  "gemini-api-key": [{ "api-key": GEMINI_KEY, "base-url": "", "auth-index": "5a6b7c8d9e0f1a2b" }],
+};
+
+/** What a Claude sign-in's start gives: the provider's page, never opened here. */
+const SIGN_IN = {
+  status: "ok",
+  url: "https://sign-in.example/oauth/authorize?client_id=e2e&state=e2e-state-0001",
+  state: "e2e-state-0001",
+};
+
+export interface MockOptions {
+  /** Whether the server has credentials and keys; else it's a first run. Default true. */
+  credentials?: boolean;
+}
+
 export interface MockServer {
   /** API calls the table doesn't answer, as "METHOD /path". */
   unhandled: string[];
@@ -206,8 +319,13 @@ export interface MockServer {
  * Answers the app's API calls on `page` and refuses everything that isn't
  * the app's own origin.
  */
-export async function mockServer(page: Page, appOrigin: string): Promise<MockServer> {
+export async function mockServer(
+  page: Page,
+  appOrigin: string,
+  options: MockOptions = {},
+): Promise<MockServer> {
   const now = Date.now();
+  const connected = options.credentials ?? true;
   const calls = recentCalls(now);
   const logs = recentLogs(calls).map((entry) => ({ ...entry, size: logFile(entry).length }));
   const server: MockServer = {
@@ -284,8 +402,33 @@ export async function mockServer(page: Page, appOrigin: string): Promise<MockSer
         return json(route, prices());
       case "GET /open-ferry/api/v1/request-logs":
         return json(route, logSearch(logs));
+      case "GET /v0/management/auth-files":
+        return json(route, credentialList(connected ? credentials(now) : []));
+      case "POST /v0/management/quota/fetch":
+        return json(route, {
+          subscription: { plan: "Max", tierName: "20x" },
+          groups: [
+            {
+              displayName: "Usage limits",
+              buckets: [
+                { window: "5 hours", remainingFraction: 0.62, resetTime: new Date(now + 2 * HOUR).toISOString() },
+                { window: "7 days", remainingFraction: 0.81, resetTime: new Date(now + 4 * DAY).toISOString() },
+              ],
+            },
+          ],
+        });
+      case "GET /v0/management/anthropic-auth-url":
+        return json(route, SIGN_IN);
+      case "GET /v0/management/get-auth-status":
+        return json(route, { status: "wait" });
+      case "DELETE /v0/management/oauth-session":
+        return json(route, { status: "ok" });
       default:
         break;
+    }
+    const list = path.slice("/v0/management/".length);
+    if (method === "GET" && Object.hasOwn(PROVIDER_KEYS, list)) {
+      return json(route, { [list]: connected ? PROVIDER_KEYS[list] : [] });
     }
     const logPrefix = "/open-ferry/api/v1/request-logs/";
     if (method === "GET" && path.startsWith(logPrefix)) {

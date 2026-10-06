@@ -20,11 +20,18 @@ export type AccessProblem =
 export type CallProblem =
   | AccessProblem
   | { kind: "ledger-unavailable" }
+  | { kind: "settings-read-only" }
   | { kind: "unsupported" }
   | { kind: "not-found" }
   | { kind: "invalid"; message: string | null }
   | { kind: "server-error"; status: number; message: string | null }
   | { kind: "unexpected"; status: number; message: string | null };
+
+/**
+ * What the management API answers (503) to a change of config.yaml while
+ * the server has nothing to save the file with.
+ */
+const SETTINGS_READ_ONLY = "config writer unavailable";
 
 const BAN_WAIT = /try again in (\S+?)\.?$/i;
 
@@ -81,6 +88,9 @@ function problemOf(error: ApiError): CallProblem {
   if (error.status === 503 && error.code === "ledger_unavailable") {
     return { kind: "ledger-unavailable" };
   }
+  if (error.status === 503 && error.code === SETTINGS_READ_ONLY) {
+    return { kind: "settings-read-only" };
+  }
   if (error.status === 404) {
     return error.code === null ? { kind: "unsupported" } : { kind: "not-found" };
   }
@@ -91,6 +101,18 @@ function problemOf(error: ApiError): CallProblem {
     return { kind: "server-error", status: error.status, message };
   }
   return { kind: "unexpected", status: error.status, message };
+}
+
+/**
+ * Whether `error` says the server can't change its settings: it doesn't
+ * serve the route, or it can't save config.yaml.
+ */
+export function isSettingsReadOnly(error: unknown): boolean {
+  if (!isApiError(error)) {
+    return false;
+  }
+  const kind = problemOf(error).kind;
+  return kind === "unsupported" || kind === "settings-read-only";
 }
 
 /** Sorts any failed call into a CallProblem. */

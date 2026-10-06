@@ -1,0 +1,328 @@
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { Power, PowerOff, RotateCcw, Trash2 } from "lucide-react";
+import { useId, useState } from "react";
+
+import { callProblem, type CallProblem } from "../../api/access";
+import {
+  AUTH_FILES,
+  AUTH_FILE_STATUS,
+  RESET_COOLDOWN,
+  type Cooldown,
+  type Credential,
+  type ResetAnswer,
+  type StatusAnswer,
+} from "../../api/credentials";
+import { useApiCall } from "../../api/hooks";
+import { Alert } from "../../components/Alert";
+import { Badge } from "../../components/Badge";
+import { Button } from "../../components/Button";
+import { ConfirmDialog } from "../../components/Dialog";
+import { ProblemNotice } from "../../components/ProblemNotice";
+import { SecretText } from "../../components/SecretText";
+import { Spinner } from "../../components/Spinner";
+import { formatInteger, formatSeconds, formatShortDateTime } from "../../lib/format";
+import { QuotaButton } from "./QuotaDialog";
+import {
+  canReset,
+  credentialCooldowns,
+  credentialHealth,
+  explainReason,
+  modelCooldowns,
+  providerName,
+  timeLeft,
+} from "./credentialStates";
+
+/** "Back in about 4 min, at Oct 5, 12:04." */
+function backIn(cooldown: Cooldown): string {
+  return `Back in ${timeLeft(cooldown.remaining_seconds)}, at ${formatShortDateTime(cooldown.retry_at)}.`;
+}
+
+/** The models resting, grouped by why, each group with what to do. */
+function ModelCooldowns({ cooldowns }: { cooldowns: Cooldown[] }) {
+  const groups = new Map<string, Cooldown[]>();
+  for (const cooldown of cooldowns) {
+    const group = groups.get(cooldown.reason) ?? [];
+    group.push(cooldown);
+    groups.set(cooldown.reason, group);
+  }
+  return (
+    <div className="space-y-2">
+      <h4 className="font-medium">Models resting</h4>
+      {[...groups].map(([reasonCode, group]) => {
+        const reason = explainReason(reasonCode);
+        return (
+          <div key={reasonCode} className="space-y-1 rounded-md bg-raised px-3 py-2">
+            <p className="font-medium">{reason.title}</p>
+            <p className="text-muted">
+              {reason.meaning} {reason.action}
+            </p>
+            <ul className="space-y-0.5">
+              {[...group]
+                .sort((a, b) => a.remaining_seconds - b.remaining_seconds)
+                .map((cooldown) => (
+                  <li key={cooldown.model_key ?? cooldown.retry_at}>
+                    <span className="font-mono text-[0.85em] break-all">
+                      {cooldown.model_key ?? "A model"}
+                    </span>
+                    : {backIn(cooldown)}
+                  </li>
+                ))}
+            </ul>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/** The account a credential is for: an email, or a key shown masked. */
+function Account({ credential }: { credential: Credential }) {
+  const account = credential.account ?? credential.email ?? "";
+  if (account === "") {
+    return null;
+  }
+  if (credential.account_type === "api_key") {
+    return (
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-muted">Key:</span>
+        <SecretText value={account} label={`the key of ${credential.name}`} />
+      </div>
+    );
+  }
+  return (
+    <p>
+      <span className="text-muted">Account:</span> <span className="break-all">{account}</span>
+    </p>
+  );
+}
+
+/** Its requests: in all, and in the recent windows the server keeps. */
+function Requests({ credential }: { credential: Credential }) {
+  const recent = credential.recent_requests ?? [];
+  const recentSuccess = recent.reduce((sum, bucket) => sum + bucket.success, 0);
+  const recentFailed = recent.reduce((sum, bucket) => sum + bucket.failed, 0);
+  return (
+    <dl className="grid gap-x-6 gap-y-0.5 sm:grid-cols-[max-content_1fr]">
+      <dt className="text-muted">Requests since the server started</dt>
+      <dd className="tabular-nums">
+        {formatInteger(credential.success)} succeeded, {formatInteger(credential.failed)} failed
+      </dd>
+      {recent.length > 0 && (
+        <>
+          <dt className="text-muted">In the last {formatSeconds(recent.length * 600)}</dt>
+          <dd className="tabular-nums">
+            {formatInteger(recentSuccess)} succeeded, {formatInteger(recentFailed)} failed
+          </dd>
+        </>
+      )}
+      {credential.id_token?.plan_type !== undefined && credential.id_token.plan_type !== "" && (
+        <>
+          <dt className="text-muted">Plan</dt>
+          <dd>{credential.id_token.plan_type}</dd>
+        </>
+      )}
+      {credential.last_refresh !== undefined && credential.last_refresh !== "" && (
+        <>
+          <dt className="text-muted">Token refreshed</dt>
+          <dd>{formatShortDateTime(credential.last_refresh)}</dd>
+        </>
+      )}
+    </dl>
+  );
+}
+
+type Notice = { tone: "ok"; text: string } | { tone: "problem"; problem: CallProblem };
+
+export interface CredentialItemProps {
+  credential: Credential;
+  /** Called once its file is deleted, before it leaves the list. */
+  onDeleted: (name: string) => void;
+}
+
+/** One credential: its health, why, what to do, and its actions. */
+export function CredentialItem({ credential, onDeleted }: CredentialItemProps) {
+  const titleId = useId();
+  const call = useApiCall();
+  const client = useQueryClient();
+  const [notice, setNotice] = useState<Notice | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const health = credentialHealth(credential);
+  const resting = credentialCooldowns(credential);
+  const models = modelCooldowns(credential);
+  const off = credential.disabled || credential.status === "disabled";
+
+  const refresh = () => client.invalidateQueries({ queryKey: [AUTH_FILES] });
+  const failed = (error: unknown) => {
+    setNotice({ tone: "problem", problem: callProblem(error) });
+  };
+
+  const toggle = useMutation({
+    mutationFn: (disabled: boolean) =>
+      call<StatusAnswer>(AUTH_FILE_STATUS, {
+        method: "PATCH",
+        json: { name: credential.name, auth_index: credential.auth_index, disabled },
+      }),
+    onSuccess: (answer) => {
+      setNotice({
+        tone: "ok",
+        text: answer.disabled ? "Turned off." : "Turned on: the server uses it again.",
+      });
+    },
+    onError: failed,
+    onSettled: refresh,
+  });
+
+  const reset = useMutation({
+    mutationFn: () =>
+      call<ResetAnswer>(RESET_COOLDOWN, {
+        method: "POST",
+        json: { auth_index: credential.auth_index },
+      }),
+    onSuccess: (answer) => {
+      const count = answer.models?.length ?? 0;
+      setNotice({
+        tone: "ok",
+        text:
+          count === 0
+            ? "Cooldown reset: the server tries it again with the next request."
+            : `Cooldown reset for it and ${formatInteger(count)} ${count === 1 ? "model" : "models"}: the server tries it again with the next request.`,
+      });
+    },
+    onError: failed,
+    onSettled: refresh,
+  });
+
+  const remove = useMutation({
+    mutationFn: () =>
+      call<unknown>(AUTH_FILES, { method: "DELETE", query: { name: credential.name } }),
+    onSuccess: () => {
+      setConfirmDelete(false);
+      onDeleted(credential.name);
+    },
+    onError: (error) => {
+      setConfirmDelete(false);
+      failed(error);
+    },
+    onSettled: refresh,
+  });
+
+  const busy = toggle.isPending || reset.isPending || remove.isPending;
+
+  return (
+    <article aria-labelledby={titleId} className="space-y-3 rounded-md border border-line p-4">
+      <header className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0 space-y-0.5">
+          <h3 id={titleId} className="font-semibold break-all">
+            {credential.name}
+          </h3>
+          <p className="text-muted">
+            {providerName(credential.provider)}
+            {credential.account_type === "api_key"
+              ? " API key"
+              : credential.account_type === "oauth"
+                ? " sign-in"
+                : ""}
+            {credential.source === "memory" || credential.runtime_only === true
+              ? ", kept in memory only"
+              : ""}
+            {credential.label !== undefined && credential.label !== "" && credential.label !== credential.name
+              ? ` · ${credential.label}`
+              : ""}
+          </p>
+        </div>
+        <Badge tone={health.tone}>{health.label}</Badge>
+      </header>
+
+      <div className="space-y-1">
+        <p>{health.summary}</p>
+        {resting[0] !== undefined && (
+          <p className="text-muted">
+            {explainReason(resting[0].reason).meaning} {backIn(resting[0])}
+          </p>
+        )}
+        {health.action !== null && (
+          <p>
+            <span className="font-medium">What to do:</span> {health.action}
+          </p>
+        )}
+      </div>
+
+      <Account credential={credential} />
+      {models.length > 0 && <ModelCooldowns cooldowns={models} />}
+      <Requests credential={credential} />
+
+      <div className="flex flex-wrap gap-2">
+        <Button
+          size="sm"
+          disabled={busy}
+          onClick={() => {
+            setNotice(null);
+            toggle.mutate(!off);
+          }}
+        >
+          {toggle.isPending ? (
+            <Spinner />
+          ) : off ? (
+            <Power aria-hidden="true" className="size-4" />
+          ) : (
+            <PowerOff aria-hidden="true" className="size-4" />
+          )}
+          {off ? "Turn on" : "Turn off"}
+        </Button>
+        {canReset(credential) && (
+          <Button
+            size="sm"
+            disabled={busy}
+            onClick={() => {
+              setNotice(null);
+              reset.mutate();
+            }}
+          >
+            {reset.isPending ? <Spinner /> : <RotateCcw aria-hidden="true" className="size-4" />}
+            Reset cooldown
+          </Button>
+        )}
+        {credential.supports_quota === true && <QuotaButton credential={credential} />}
+        {credential.source === "file" && (
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={busy}
+            onClick={() => {
+              setNotice(null);
+              setConfirmDelete(true);
+            }}
+          >
+            <Trash2 aria-hidden="true" className="size-4" />
+            Delete
+          </Button>
+        )}
+      </div>
+
+      {notice?.tone === "ok" && (
+        <Alert tone="ok" live>
+          <p>{notice.text}</p>
+        </Alert>
+      )}
+      {notice?.tone === "problem" && <ProblemNotice problem={notice.problem} live />}
+
+      <ConfirmDialog
+        open={confirmDelete}
+        title={`Delete ${credential.name}?`}
+        confirmLabel="Delete"
+        pending={remove.isPending}
+        onConfirm={() => {
+          remove.mutate();
+        }}
+        onCancel={() => {
+          setConfirmDelete(false);
+        }}
+      >
+        <p>
+          The server deletes its file and stops sending requests with it. To use the account again,
+          sign in again or upload the file.
+        </p>
+      </ConfirmDialog>
+    </article>
+  );
+}

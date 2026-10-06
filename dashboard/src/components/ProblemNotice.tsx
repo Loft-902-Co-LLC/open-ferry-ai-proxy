@@ -102,6 +102,17 @@ export function explainProblem(problem: CallProblem): Explanation {
           </p>
         ),
       };
+    case "settings-read-only":
+      return {
+        tone: "info",
+        title: "This server can't change settings yet",
+        body: (
+          <p>
+            It reads config.yaml but has no way to save it, so nothing was changed. Edit
+            config.yaml by hand: the server picks the change up when it reloads the file.
+          </p>
+        ),
+      };
     case "unsupported":
       return {
         tone: "info",
