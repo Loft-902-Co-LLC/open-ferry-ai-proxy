@@ -24,8 +24,10 @@
 //! are dropped. The `apply_patch` bridge then restores the client's custom
 //! `apply_patch` tool (see [`crate::apply_patch_responses`]).
 //!
-//! An image or video request (upstream's image and video handlers) is
-//! refused with a 400 before anything is sent.
+//! A call from the video endpoints goes to xAI's video API (see the
+//! `videos` module), as does the download of a finished video. An image
+//! request (upstream's image handlers) is refused with a 400 before
+//! anything is sent.
 //!
 //! Deviations from upstream:
 //! - Requests go through `reqwest` with rustls, one shared client per proxy;
@@ -50,8 +52,8 @@
 //!   the crate's `observe_send` module), and payload rules to
 //!   [`crate::payload`].
 //! - Only API keys: no xAI sign-in, refresh or Grok CLI chat proxy, so
-//!   refresh returns the credential as it is. Image and video generation
-//!   aren't ported. One executor serves HTTP and the WebSocket (see the
+//!   refresh returns the credential as it is. Image generation isn't
+//!   ported. One executor serves HTTP and the WebSocket (see the
 //!   `websocket` module); upstream wraps an HTTP and a WebSocket executor
 //!   in an `XAIAutoExecutor`.
 //! - Reasoning replay keeps a session's last completed turn in memory, as
@@ -72,7 +74,8 @@ use http::{HeaderMap, Method};
 use open_ferry_core::auth::Auth;
 use open_ferry_core::config::Config;
 use open_ferry_core::exec::{
-    ErrorKind, ExecError, Format, HttpCall, HttpReply, Options, Request, Response, StreamResponse,
+    Downloaded, ErrorKind, ExecError, Format, HttpCall, HttpReply, Options, Request, Response,
+    StreamResponse,
 };
 use open_ferry_core::executor::ProviderExecutor;
 use open_ferry_core::models::ModelCatalog;
@@ -308,6 +311,9 @@ impl XaiExecutor {
         request: &Request,
         options: &Options,
     ) -> Result<Response, ExecError> {
+        if videos::is_video_request(options) && options.alt != COMPACT_ALT {
+            return self.execute_videos(auth, request, options).await;
+        }
         if is_media_request(options) {
             return Err(media_refused());
         }
@@ -603,9 +609,18 @@ impl ProviderExecutor for XaiExecutor {
     ) -> BoxFuture<'_, Result<HttpReply, ExecError>> {
         async move { self.http_request_inner(&auth, call).await }.boxed()
     }
+
+    fn download(
+        &self,
+        auth: Option<Arc<Auth>>,
+        url: String,
+    ) -> BoxFuture<'_, Result<Downloaded, ExecError>> {
+        async move { self.download_inner(auth.as_deref(), &url).await }.boxed()
+    }
 }
 
 mod http_request;
+mod videos;
 
 #[cfg(test)]
 mod tests;

@@ -373,8 +373,10 @@ async fn the_conversation_is_the_clients_prompt_cache_key() {
     }
 }
 
-// Not upstream's (upstream's image and video handlers aren't ported): an
-// image or video request is refused with a 400 before anything is sent.
+// Not upstream's (upstream's image handlers aren't ported): an image
+// request is refused with a 400 before anything is sent, and so is a video
+// stream or compaction (a video call goes to xAI's video API; see the
+// `videos` module's tests).
 #[tokio::test]
 async fn image_and_video_requests_are_refused_unsent() {
     let mock = Mock::start(Reply::sse(COMPLETED)).await;
@@ -385,16 +387,18 @@ async fn image_and_video_requests_are_refused_unsent() {
                 alt: alt.into(),
                 ..options(format)
             };
-            let error = executor()
-                .execute(
-                    api_key_auth(&mock.url),
-                    request("grok-imagine-image", payload),
-                    options.clone(),
-                )
-                .await
-                .unwrap_err();
-            assert_eq!(error.http_status(), 400, "{error:?}");
-            assert_eq!(error.message, MEDIA_REFUSED);
+            if format == "openai-image" || !alt.is_empty() {
+                let error = executor()
+                    .execute(
+                        api_key_auth(&mock.url),
+                        request("grok-imagine-image", payload),
+                        options.clone(),
+                    )
+                    .await
+                    .unwrap_err();
+                assert_eq!(error.http_status(), 400, "{error:?}");
+                assert_eq!(error.message, MEDIA_REFUSED);
+            }
             let error = refused(
                 executor()
                     .execute_stream(

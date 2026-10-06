@@ -49,8 +49,10 @@
 //!   client's (see [`build_headers`]).
 //! - The request says `User-Agent: open-ferry/<version>` where Go's says
 //!   `Go-http-client/1.1`, and sends no `Connection: Keep-Alive`.
-//! - Image and video requests (`openai-image`, `openai-video`) are refused
-//!   with a 400 before anything is sent; the media endpoints aren't ported.
+//! - Image requests (`openai-image`) are refused with a 400 before
+//!   anything is sent; the image endpoints aren't ported. So are video
+//!   streams and compactions; any other video call (`openai-video`) goes to
+//!   xAI's video API (see the executor's `videos` module).
 //! - Image references are rewritten in place, keeping the body's key order;
 //!   upstream writes the whole body again with Go's sorted keys.
 //! - A payload that isn't a JSON object is translated as an empty object.
@@ -205,8 +207,8 @@ impl Finalizer {
     }
 }
 
-/// Whether the call is for upstream's image or video handler, which isn't
-/// ported.
+/// Whether the call is for upstream's image or video handler, whose calls
+/// are refused unless the executor sends them on (see the module docs).
 pub(crate) fn is_media_request(options: &Options) -> bool {
     MEDIA_SOURCES.contains(&options.source_format.as_str())
 }
