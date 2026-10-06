@@ -82,7 +82,7 @@ open-ferry signs in only with each provider's own OAuth flow, and doesn't pose a
 open-ferry serves the part of `/v0/management` (and its `/v8/management` names) that T3 Code's hub uses, and more. The routes, and how each differs, are in [The management API](../UPSTREAM.md#the-management-api). What you'll notice:
 
 - **The control panel is open-ferry's own dashboard.** `/management.html` sends the browser to `/dashboard/`, keeping its query. The dashboard is built into the binary, so no panel is downloaded and `remote-management.panel-github-repository` is ignored. `disable-control-panel` turns it off, as before, and a client the management API refuses for its address (another machine, without `allow-remote`) is refused the dashboard too, where CLIProxyAPI serves its panel to anyone. See [the dashboard](../UPSTREAM.md#added-in-open-ferry-the-dashboard).
-- **The config can't be changed through the API.** Every route that writes it answers an empty 404 and leaves the file as it is. Edit `config.yaml` instead; the change is picked up on its own. See [Not ported](../UPSTREAM.md#not-ported).
+- **The config can't be changed through the API yet.** Every route that writes it answers 503 `{"error":"config writer unavailable"}` and leaves the file as it is, until the config writer is in place. Edit `config.yaml` instead; the change is picked up on its own. See [Config writes](../UPSTREAM.md#config-writes).
 - **Also not ported:**
   - `quota/providers` and `quota/reset`;
   - the plugin routes;
