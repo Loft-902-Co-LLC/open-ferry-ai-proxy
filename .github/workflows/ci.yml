@@ -91,3 +91,14 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      # The browser the end-to-end tests drive, at the revision the locked
+      # @playwright/test expects. Headless shell only: no headed Chrome.
+      - name: Install Chromium for the end-to-end tests
+        run: npx playwright install --with-deps --only-shell chromium
+
+      # The build above under `vite preview`, with the headers open-ferry
+      # sends: every screen must render without a Content-Security-Policy
+      # violation. The API is mocked in the page; nothing leaves 127.0.0.1.
+      - name: End-to-end
+        run: npx playwright test

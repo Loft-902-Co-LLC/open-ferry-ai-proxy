@@ -1,6 +1,8 @@
 /target
 node_modules/
 /dashboard/dist
+/dashboard/test-results/
+/dashboard/playwright-report/
 
 # Local config and credentials: never commit these
 /config.yaml
