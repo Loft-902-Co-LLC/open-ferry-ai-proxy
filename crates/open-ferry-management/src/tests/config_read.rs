@@ -1437,6 +1437,36 @@ multimedia: {video-result-auth-cache-ttl: ' 2h '}
     }
 }
 
+/// Not upstream's: `gpt-image-2-base-model` is written after
+/// `disable-image-generation` and before `video-result-auth-cache-ttl`, as
+/// upstream's `SDKConfig` orders them, from either layout, and left out when
+/// empty, as upstream's `omitempty` string field is.
+#[tokio::test]
+async fn gpt_image_2_base_model_is_read() {
+    for (raw, model) in [
+        ("port: 1\n", ""),
+        ("port: 1\ngpt-image-2-base-model: ''\n", ""),
+        (
+            "port: 1\ngpt-image-2-base-model: gpt-5.5\n",
+            r#""gpt-image-2-base-model":"gpt-5.5","#,
+        ),
+        (
+            "server: {port: 1}\nmultimedia: {gpt-image-2-base-model: ' gpt-5.4 '}\n",
+            r#""gpt-image-2-base-model":" gpt-5.4 ","#,
+        ),
+    ] {
+        let answer = with_config(raw).get("/v0/management/config").await;
+        assert_eq!(answer.status, StatusCode::OK);
+        let part =
+            format!(r#""disable-image-generation":false,{model}"force-model-prefix":false,"#);
+        assert!(answer.body.contains(&part), "{raw}: {}", answer.body);
+    }
+    let raw = "port: 1\ngpt-image-2-base-model: gpt-5.5\nvideo-result-auth-cache-ttl: 45m\n";
+    let answer = with_config(raw).get("/v0/management/config").await;
+    let part = r#""gpt-image-2-base-model":"gpt-5.5","video-result-auth-cache-ttl":"45m","#;
+    assert!(answer.body.contains(part), "{}", answer.body);
+}
+
 /// The `payload` upstream writes when the file has none.
 const NO_PAYLOAD: &str =
     r#"{"default":null,"default-raw":null,"override":null,"override-raw":null,"filter":null}"#;

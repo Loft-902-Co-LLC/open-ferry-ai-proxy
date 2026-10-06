@@ -27,7 +27,7 @@
 //!   none of the Grok CLI's identity headers or user agent.
 //! - No session is made up: `x-grok-conv-id` and `prompt_cache_key` are the
 //!   client's own `prompt_cache_key` or absent.
-//! - Image and video generation are refused with a 400.
+//! - A streaming or compact image or video call is refused with a 400.
 
 mod compact;
 mod errors;

@@ -49,10 +49,10 @@
 //!   client's (see [`build_headers`]).
 //! - The request says `User-Agent: open-ferry/<version>` where Go's says
 //!   `Go-http-client/1.1`, and sends no `Connection: Keep-Alive`.
-//! - Image requests (`openai-image`) are refused with a 400 before
-//!   anything is sent; the image endpoints aren't ported. So are video
-//!   streams and compactions; any other video call (`openai-video`) goes to
-//!   xAI's video API (see the executor's `videos` module).
+//! - Image and video streams and compactions (`openai-image` and
+//!   `openai-video`) are refused with a 400 before anything is sent; any
+//!   other image call goes to xAI's Images API, and any other video call to
+//!   its video API (see the executor's `images` and `videos` modules).
 //! - Image references are rewritten in place, keeping the body's key order;
 //!   upstream writes the whole body again with Go's sorted keys.
 //! - A payload that isn't a JSON object is translated as an empty object.
@@ -99,7 +99,7 @@ pub(crate) const CLI_CHAT_PROXY_BASE_URL: &str = "https://cli-chat-proxy.grok.co
 /// The executor's provider.
 pub(crate) const PROVIDER: &str = "xai";
 
-/// What an image or video request is refused with.
+/// What an image or video stream or compaction is refused with.
 pub(crate) const MEDIA_REFUSED: &str = "image and video generation are not supported";
 
 /// The source formats of upstream's image and video handlers.
@@ -213,7 +213,8 @@ pub(crate) fn is_media_request(options: &Options) -> bool {
     MEDIA_SOURCES.contains(&options.source_format.as_str())
 }
 
-/// The 400 an image or video request gets, before anything is sent.
+/// The 400 an image or video stream or compaction gets, before anything
+/// is sent.
 pub(crate) fn media_refused() -> ExecError {
     StatusError::new(400, MEDIA_REFUSED).into()
 }

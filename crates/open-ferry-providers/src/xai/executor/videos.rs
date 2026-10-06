@@ -154,10 +154,23 @@ fn endpoint(base: &str, options: &Options, body: Bytes, sent: &Value) -> (Method
     }
 }
 
+/// The model of a media call: the body's `model`, trimmed, else the
+/// request's, trimmed.
+pub(super) fn payload_model(request: &Request) -> String {
+    let model = exact::from_slice(&request.payload)
+        .map(|payload| str_at(&payload, "model").trim().to_owned())
+        .unwrap_or_default();
+    if model.is_empty() {
+        request.model.trim().to_owned()
+    } else {
+        model
+    }
+}
+
 /// The body to send: `payload` with its image references rewritten and the
 /// payload rules applied, or as it came when neither changes it or it isn't
 /// a JSON object. Also the body as JSON, or `Null`, for the routing.
-fn shape_body(
+pub(super) fn shape_body(
     executor: &XaiExecutor,
     model: &str,
     request: &Request,
@@ -228,14 +241,7 @@ impl XaiExecutor {
         request: &Request,
         options: &Options,
     ) -> Result<Response, ExecError> {
-        let model = exact::from_slice(&request.payload)
-            .map(|payload| str_at(&payload, "model").trim().to_owned())
-            .unwrap_or_default();
-        let model = if model.is_empty() {
-            request.model.trim().to_owned()
-        } else {
-            model
-        };
+        let model = payload_model(request);
         let (body, sent) = shape_body(self, &model, request, options);
         let (method, url, body) = endpoint(base_url(auth), options, body, &sent);
         refuse_control_characters(&url)?;

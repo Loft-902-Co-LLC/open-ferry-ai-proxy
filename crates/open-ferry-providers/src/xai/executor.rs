@@ -2,7 +2,8 @@
 // (XAIExecutor, Identifier), xai_executor_execute.go (Execute,
 // executeCompact, executeCompactRequest, executeCompactionTriggerStream),
 // xai_executor_stream.go (ExecuteStream) and xai_executor_tokens.go
-// (CountTokens) (v8.0.15, MIT).
+// (CountTokens) (v8.0.15, MIT). The image calls are in the `images` module
+// and the video calls in the `videos` module.
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! [`XaiExecutor`], which calls Grok's Responses API with an API key.
@@ -24,9 +25,10 @@
 //! are dropped. The `apply_patch` bridge then restores the client's custom
 //! `apply_patch` tool (see [`crate::apply_patch_responses`]).
 //!
-//! A call from the video endpoints goes to xAI's video API (see the
-//! `videos` module), as does the download of a finished video. An image
-//! request (upstream's image handlers) is refused with a 400 before
+//! A call from the image endpoints goes to xAI's Images API (see the
+//! `images` module), and one from the video endpoints to xAI's video API
+//! (see the `videos` module), as does the download of a finished video. A
+//! streaming or compact image or video call is refused with a 400 before
 //! anything is sent.
 //!
 //! Deviations from upstream:
@@ -52,10 +54,9 @@
 //!   the crate's `observe_send` module), and payload rules to
 //!   [`crate::payload`].
 //! - Only API keys: no xAI sign-in, refresh or Grok CLI chat proxy, so
-//!   refresh returns the credential as it is. Image generation isn't
-//!   ported. One executor serves HTTP and the WebSocket (see the
-//!   `websocket` module); upstream wraps an HTTP and a WebSocket executor
-//!   in an `XAIAutoExecutor`.
+//!   refresh returns the credential as it is. One executor serves HTTP
+//!   and the WebSocket (see the `websocket` module); upstream wraps an
+//!   HTTP and a WebSocket executor in an `XAIAutoExecutor`.
 //! - Reasoning replay keeps a session's last completed turn in memory, as
 //!   upstream does without Home mode, and only for a client-named session
 //!   (see the `replay` module).
@@ -311,6 +312,11 @@ impl XaiExecutor {
         request: &Request,
         options: &Options,
     ) -> Result<Response, ExecError> {
+        if options.alt != COMPACT_ALT
+            && let Some(path) = images::endpoint(options)
+        {
+            return self.execute_images(auth, request, options, path).await;
+        }
         if videos::is_video_request(options) && options.alt != COMPACT_ALT {
             return self.execute_videos(auth, request, options).await;
         }
@@ -620,6 +626,7 @@ impl ProviderExecutor for XaiExecutor {
 }
 
 mod http_request;
+mod images;
 mod videos;
 
 #[cfg(test)]

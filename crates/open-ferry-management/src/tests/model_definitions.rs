@@ -1,7 +1,6 @@
 //! Tests of the routes of `crate::model_definitions`. Upstream has no tests
 //! of `GetStaticModelDefinitions`; the expected models are upstream's
-//! answers for the same channels, less the three image models its `xai`
-//! channel adds (see `StaticCatalog::xai_models`).
+//! answers for the same channels.
 
 use http::{Method, StatusCode};
 use open_ferry_core::registry::StaticCatalog;
@@ -138,9 +137,8 @@ async fn xai_and_meta_channels_list_their_models() {
             }
         }
     }
-    // Of the built-in models upstream adds to xAI's list, the video ones
-    // end it, written as upstream writes them, and the image ones are left
-    // out.
+    // The built-in models upstream adds to xAI's list end it, the image
+    // ones first, written as upstream writes them.
     let body = api
         .get("/v0/management/model-definitions/xai")
         .await
@@ -152,6 +150,9 @@ async fn xai_and_meta_channels_list_their_models() {
     assert_eq!(
         imagine,
         [
+            "grok-imagine-image",
+            "grok-imagine-image-quality",
+            "grok-imagine-image-2.0",
             "grok-imagine-video",
             "grok-imagine-video-1.5",
             "grok-imagine-video-1.5-preview"

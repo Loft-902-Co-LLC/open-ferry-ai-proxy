@@ -162,6 +162,10 @@ pub(super) fn config(config: &Config) -> Json {
             image_generation(config.disable_image_generation),
         )
         .omit_empty(
+            "gpt-image-2-base-model",
+            string(&config.gpt_image_2_base_model),
+        )
+        .omit_empty(
             "video-result-auth-cache-ttl",
             string(&config.video_result_auth_cache_ttl),
         )

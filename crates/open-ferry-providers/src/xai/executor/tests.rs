@@ -18,6 +18,7 @@ use crate::codex::request::CONTROL_CHARACTER;
 use crate::json::{exists, get};
 use crate::xai::request::MEDIA_REFUSED;
 
+mod images;
 mod replay;
 mod secrets;
 mod tools;
@@ -373,12 +374,13 @@ async fn the_conversation_is_the_clients_prompt_cache_key() {
     }
 }
 
-// Not upstream's (upstream's image handlers aren't ported): an image
-// request is refused with a 400 before anything is sent, and so is a video
-// stream or compaction (a video call goes to xAI's video API; see the
-// `videos` module's tests).
+// Not upstream's (upstream sends an image or video stream to the Responses
+// API and compacts a compaction, which no image or video handler asks for):
+// an image or video stream or compaction is refused with a 400 before
+// anything is sent (any other image or video call goes to xAI's API; see
+// the `images` tests and the `videos` module's).
 #[tokio::test]
-async fn image_and_video_requests_are_refused_unsent() {
+async fn image_and_video_streams_and_compactions_are_refused_unsent() {
     let mock = Mock::start(Reply::sse(COMPLETED)).await;
     let payload = r#"{"model":"grok-imagine-image","prompt":"a cat"}"#;
     for format in ["openai-image", "openai-video"] {
@@ -387,7 +389,7 @@ async fn image_and_video_requests_are_refused_unsent() {
                 alt: alt.into(),
                 ..options(format)
             };
-            if format == "openai-image" || !alt.is_empty() {
+            if !alt.is_empty() {
                 let error = executor()
                     .execute(
                         api_key_auth(&mock.url),

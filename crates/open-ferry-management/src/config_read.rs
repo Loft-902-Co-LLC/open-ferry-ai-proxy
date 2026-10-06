@@ -53,8 +53,7 @@
 //! - `GET /v0/management/config` writes only the sections open-ferry
 //!   types (see [`open_ferry_core::config`]). Left out: `models`,
 //!   `plugins`, `pprof`, `discovery`, `credential-concurrency`,
-//!   `credential-in-flight`,
-//!   `gpt-image-2-base-model`, the other
+//!   `credential-in-flight`, the other
 //!   providers' sections (`antigravity`, `antigravity-signature-*`, `devin`),
 //!   `codex.live-media-relay`, and the client impersonation settings
 //!   (`claude-code`, `claude-header-defaults`, `disable-claude-cloak-mode`,

@@ -75,7 +75,9 @@
 //! names it; a stream's time to first token is its first byte, and its
 //! counts are those of its last `response.completed` or
 //! `response.incomplete`, published when it ends, with none when it named
-//! none; a compaction, streamed or not, is read whole as OpenAI JSON.
+//! none; a compaction, streamed or not, is read whole as OpenAI JSON; an
+//! image call is read whole for the model it names alone, with no counts,
+//! as upstream's `executeImages` reads it (`ObserveResponseModel`).
 //! Each message on an xAI WebSocket is read as an event, as upstream's
 //! `XAIWebsocketsExecutor` reads it: its time to first token starts when
 //! its request is sent, as a Codex WebSocket's does, and ends at its first
@@ -318,6 +320,7 @@ enum Mode {
     CodexExecute,
     CodexStream,
     CodexWebsocket,
+    XaiImage,
     XaiStream,
     XaiWebsocket,
 }
@@ -342,6 +345,10 @@ impl Mode {
             }
             ("codex", AttemptKind::Execute) => Self::CodexExecute,
             ("codex", AttemptKind::Stream) => Self::CodexStream,
+            // A call to xAI's Images API names a model at most, no counts.
+            ("xai", AttemptKind::Execute) if format.as_str() == Format::OPENAI_IMAGE.as_str() => {
+                Self::XaiImage
+            }
             ("xai", AttemptKind::Execute)
                 if format.as_str() == Format::OPENAI_RESPONSE.as_str() =>
             {
@@ -378,6 +385,7 @@ impl Mode {
                 | Self::OpenAiExecute
                 | Self::CodexCompact
                 | Self::CodexExecute
+                | Self::XaiImage
         )
     }
 }
@@ -1003,6 +1011,10 @@ impl Call {
                 Some(parse_openai_usage(&body))
             }
             Mode::CodexCompact => Some(parse_openai_usage(&body)),
+            Mode::XaiImage => {
+                self.response_model.observe(&body, &self.provider);
+                Some(Detail::default())
+            }
             Mode::CodexExecute => {
                 let now = self.started;
                 for line in lines_of(&body) {

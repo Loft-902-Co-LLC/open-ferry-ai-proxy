@@ -20,8 +20,6 @@
 //!   `xai` (also `x-ai` and `grok`) and `meta` (also `muse`). Upstream also
 //!   knows `aistudio`, `kimi` (also `kimi-ai`, `kimi.ai` and `kimi.com`),
 //!   `antigravity` and `devin`, which are a 400 here.
-//! - `xai` lacks the three image models upstream adds to its list (see
-//!   [`StaticCatalog::xai_models`]).
 //! - A model's `supports_web_search` and `config` aren't written. No model
 //!   of these channels has the first; the second holds the client
 //!   headers upstream sends for a model, which open-ferry doesn't send.

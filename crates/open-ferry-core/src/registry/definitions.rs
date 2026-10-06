@@ -18,8 +18,6 @@
 //!   xAI and Meta channels yet. The others are decoded and checked as
 //!   upstream does, so a catalog upstream rejects is rejected here, and are
 //!   kept only for [`StaticCatalog::lookup`].
-//! - Of upstream's built-in xAI models (`WithXAIBuiltins`), only the three
-//!   video models are added; the three image models aren't.
 //! - [`StaticCatalog::lookup`] doesn't search upstream's built-in Devin
 //!   models, which no ported provider serves.
 //! - A model's `config.override_header` is checked, then dropped: it forces a
@@ -77,28 +75,51 @@ const CODEX_BUILTINS: [(&str, &str); 5] = [
 /// When the Codex image models came out: 2024-01-01.
 const CODEX_BUILTIN_CREATED: i64 = 1_704_067_200;
 
-/// The video models every xAI credential serves: ID, display name and
-/// description (upstream's `xaiBuiltinVideoModelInfo` and the like).
-const XAI_BUILTINS: [(&str, &str, &str); 3] = [
+/// The image and video models every xAI credential serves: ID, display
+/// name, description and when the model came out (upstream's
+/// `xaiBuiltinImageModelInfo` and the like).
+const XAI_BUILTINS: [(&str, &str, &str, i64); 6] = [
+    (
+        "grok-imagine-image",
+        "Grok Imagine Image",
+        "xAI Grok image generation model.",
+        XAI_2025,
+    ),
+    (
+        "grok-imagine-image-quality",
+        "Grok Imagine Image Quality",
+        "xAI Grok higher-fidelity image generation model.",
+        XAI_2025,
+    ),
+    (
+        "grok-imagine-image-2.0",
+        "Grok Imagine Image 2.0",
+        "xAI Grok image generation model.",
+        // 2026-08-07.
+        1_786_060_800,
+    ),
     (
         "grok-imagine-video",
         "Grok Imagine Video",
         "xAI Grok video generation model.",
+        XAI_2025,
     ),
     (
         "grok-imagine-video-1.5",
         "Grok Imagine Video 1.5",
         "xAI Grok video generation model.",
+        XAI_2025,
     ),
     (
         "grok-imagine-video-1.5-preview",
         "Grok Imagine Video 1.5 Preview",
         "Compatibility alias for the xAI Grok video generation model.",
+        XAI_2025,
     ),
 ];
 
-/// When the xAI video models came out: 2025-01-01.
-const XAI_BUILTIN_CREATED: i64 = 1_735_689_600;
+/// When most of the xAI built-in models came out: 2025-01-01.
+const XAI_2025: i64 = 1_735_689_600;
 
 /// Why a catalog didn't load.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -272,8 +293,8 @@ impl StaticCatalog {
         self.vertex.clone()
     }
 
-    /// The xAI models, with the video models every xAI credential serves
-    /// (upstream's `GetXAIModels`, without its built-in image models).
+    /// The xAI models, with the image and video models every xAI credential
+    /// serves (upstream's `GetXAIModels`).
     pub fn xai_models(&self) -> Vec<ModelInfo> {
         with_xai_builtins(self.xai.clone())
     }
@@ -337,9 +358,9 @@ pub fn with_codex_builtins(models: Vec<ModelInfo>) -> Vec<ModelInfo> {
     out
 }
 
-/// `models` without any model of the same ID as an xAI video model, ignoring
-/// case, nor any without an ID, followed by the xAI video models (upstream's
-/// `WithXAIBuiltins`, without its image models).
+/// `models` without any model of the same ID as an xAI image or video model,
+/// ignoring case, nor any without an ID, followed by the xAI image and video
+/// models (upstream's `WithXAIBuiltins`).
 pub fn with_xai_builtins(models: Vec<ModelInfo>) -> Vec<ModelInfo> {
     let builtin_ids: HashSet<String> = XAI_BUILTINS
         .iter()
@@ -355,10 +376,10 @@ pub fn with_xai_builtins(models: Vec<ModelInfo>) -> Vec<ModelInfo> {
     out.extend(
         XAI_BUILTINS
             .iter()
-            .map(|(id, display_name, description)| ModelInfo {
+            .map(|(id, display_name, description, created)| ModelInfo {
                 id: (*id).to_owned(),
                 object: "model".to_owned(),
-                created: XAI_BUILTIN_CREATED,
+                created: *created,
                 owned_by: "xai".to_owned(),
                 model_type: "xai".to_owned(),
                 display_name: (*display_name).to_owned(),

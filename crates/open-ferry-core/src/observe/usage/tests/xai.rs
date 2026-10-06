@@ -185,6 +185,49 @@ fn compaction_reads_openai_usage() {
     }
 }
 
+/// Not upstream's: an image call is read whole for the model its answer
+/// names, if any, and no counts, even ones it names, as upstream's
+/// `executeImages` reads it (`ObserveResponseModel` and `EnsurePublished`);
+/// a failed one is a failure.
+#[test]
+fn image_calls_name_their_model_and_no_counts() {
+    for (answer, model) in [
+        (
+            concat!(
+                r#"{"created":123,"model":"grok-imagine-image-0801","data":[{"b64_json":"AA=="}],"#,
+                r#""usage":{"input_tokens":5,"output_tokens":7,"total_tokens":12}}"#
+            ),
+            Some("grok-imagine-image-0801"),
+        ),
+        (
+            r#"{"created":123,"data":[{"b64_json":"AA=="}],"usage":{"cost_in_usd_ticks":250000}}"#,
+            None,
+        ),
+    ] {
+        let harness = Harness::new();
+        let driver = xai_call(&harness, AttemptKind::Execute, &Format::OPENAI_IMAGE);
+        let (head, tail) = answer.split_at(30);
+        driver.chunk(head);
+        driver.chunk(tail);
+        driver.finish(Outcome::Completed);
+        let record = harness.record();
+        assert_counts(&record, [0; 5]);
+        assert_eq!(
+            record.get("response_model").and_then(Value::as_str),
+            model,
+            "{record}"
+        );
+    }
+
+    let harness = Harness::new();
+    let driver = xai_call(&harness, AttemptKind::Execute, &Format::OPENAI_IMAGE);
+    driver.fail(&ExecError::upstream(429, r#"{"error":"rate limited"}"#));
+    let record = harness.record();
+    assert!(bool_at(&record, "/failed"), "{record}");
+    assert_eq!(str_field(&record, "executor_type"), "XAIExecutor");
+    assert_eq!(int_at(&record, "/fail/status_code"), 429);
+}
+
 /// An xAI WebSocket call: its request is announced, sent `dial_ms` later,
 /// and each of `messages` comes 10ms after the one before, the first
 /// `wait_ms` after the send.
