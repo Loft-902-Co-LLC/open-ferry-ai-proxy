@@ -59,9 +59,6 @@
 //!   only for the plugin host; plugins aren't ported. Usage records of a
 //!   WebSocket call are made from the call's own traffic, and are tested
 //!   in `open-ferry-core`'s `observe::usage`.
-//! - `TestCodexWebsocketsExecuteResponsesLiteDoesNotInjectImageGenerationTool`
-//!   keeps its Responses Lite checks; the image generation tool isn't
-//!   ported.
 //! - `TestCodexWebsockets_PingHandlerDoesNotBlockOnWriteMu`, the three
 //!   `TestCodexWebsockets_KeepalivePingDuringUpload_*` and
 //!   `TestCodexWebsockets_ChunkedWriteAllowsPongInterleaving`: the
@@ -88,7 +85,7 @@ use http::{HeaderMap, HeaderValue};
 use open_ferry_core::config::Config;
 use open_ferry_core::exec::{ExecError, Format, Request, Response, StreamResponse, TransportFault};
 use open_ferry_core::executor::{CLOSE_ALL_EXECUTION_SESSIONS, ProviderExecutor};
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use super::errors::{self, Failure};
@@ -408,10 +405,10 @@ async fn stream_responses_lite_turns_parallel_tool_calls_off() {
     );
 }
 
-// TestPayloadBarrierCodexImageFilter, on the WebSocket, without the image
-// generation tool, which isn't ported: a filter removes the `instructions`
-// and the `prompt_cache_key` the message gets after the translation, from a
-// call and a stream.
+// TestPayloadBarrierCodexImageFilter, on the WebSocket: a filter removes
+// the `image_generation` tool, the `instructions` and the
+// `prompt_cache_key` the message gets after the translation, from a call
+// and a stream.
 #[tokio::test]
 async fn payload_filter_applies_to_the_message() {
     let config = Config::parse(
@@ -457,6 +454,14 @@ payload:
             let sent = message(&server, 0);
             let filtered = model == "gpt-5.6-sol";
             let case = format!("{model} stream={stream}: {sent}");
+            let image = get(&sent, "tools")
+                .and_then(Value::as_array)
+                .is_some_and(|tools| {
+                    tools
+                        .iter()
+                        .any(|tool| str_at(tool, "type") == "image_generation")
+                });
+            assert_eq!(image, !filtered, "image tool presence: {case}");
             assert_eq!(!exists(&sent, "instructions"), filtered, "{case}");
             assert_eq!(!exists(&sent, "prompt_cache_key"), filtered, "{case}");
             assert_eq!(str_at(&sent, "type"), "response.create", "{case}");

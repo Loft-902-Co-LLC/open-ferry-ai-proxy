@@ -44,7 +44,7 @@
 //!   made, with no answer head, then of each message read (see the crate's
 //!   `observe_send` module). A send tried again on a new connection isn't
 //!   told again, and connection errors are only the call's; upstream
-//!   records each. The image generation tool isn't added.
+//!   records each.
 //! - Each message Codex sends has the secrets the call sent redacted before
 //!   it is read, if they are of eight bytes or more, as every client error
 //!   is (see `Policy::Client` in the crate's `redact` module), what a model

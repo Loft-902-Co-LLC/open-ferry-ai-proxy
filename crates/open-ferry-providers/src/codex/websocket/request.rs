@@ -16,7 +16,8 @@
 //! `stream` and drops only `prompt_cache_retention` and
 //! `safety_identifier`; a streaming one drops nothing; and
 //! `parallel_tool_calls` is only turned off for a Responses Lite request,
-//! never dropped. Once the prompt cache key is set, the input item IDs are
+//! never dropped. The image generation tool is added as for HTTP. Once the
+//! prompt cache key is set, the input item IDs are
 //! made acceptable and the config's payload rules apply last, so they see
 //! the body as it is sent; the message is that body with
 //! `"type":"response.create"` added, for a retry too.
@@ -42,7 +43,6 @@
 //!   native client's thread and window headers when it's off), the routing
 //!   hint and models.json `override_header` aren't ported.
 //! - No `Content-Type` or `Accept` is sent, as upstream sends none.
-//! - The image generation tool isn't added, as for HTTP.
 //! - The URL is read as a WHATWG URL when connecting, so its `.` and `..`
 //!   segments are resolved, percent-encoded ones such as `%2e%2e` included,
 //!   and a `\` reads as `/`. Gorilla sends `/a/%2e%2e/v1/responses` as
@@ -65,9 +65,9 @@ use crate::codex::input_ids::sanitize_input_item_ids;
 use crate::codex::reasoning::sanitize_reasoning;
 use crate::codex::request::{
     Context, Kind, RESPONSES_LITE_HEADER, base_model, client_prompt_cache_key, credentials,
-    endpoint, ensure_header, format_is, is_native, is_responses_lite, normalize_instructions,
-    parse_object, refuse_control_characters, set_bool_if_different, set_string_if_different,
-    uses_api_key,
+    endpoint, ensure_header, ensure_image_generation_tool, format_is, is_native, is_responses_lite,
+    normalize_instructions, parse_object, refuse_control_characters, set_bool_if_different,
+    set_string_if_different, uses_api_key,
 };
 use crate::codex::thinking;
 use crate::codex::tool_schema::normalize_tool_schemas;
@@ -154,6 +154,7 @@ pub(super) fn prepare(
         delete(&mut body, "safety_identifier");
     }
     normalize_instructions(&mut body, native);
+    ensure_image_generation_tool(&mut body, base, context, &options.headers);
     sanitize_reasoning(&mut body, compat::is_compat(context, request, options));
     // normalizeCodexWebsocketParallelToolCalls
     if is_responses_lite(&body, &options.headers) {

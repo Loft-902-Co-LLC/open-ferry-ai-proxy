@@ -16,8 +16,11 @@
 //! without its thinking suffix, `stream` forced, fields Codex refuses
 //! dropped, `instructions` filled in, reasoning items and tool schemas
 //! cleaned, `parallel_tool_calls` matched to the tools, and input item IDs
-//! made acceptable. A credential's compatibility models and Codex clients'
-//! multi-agent requests are handled as the `compat` module says. The
+//! made acceptable. While `disable-image-generation` is off, a call's tools
+//! gain the built-in `image_generation` tool
+//! ([`ensure_image_generation_tool`]). A credential's compatibility models
+//! and Codex clients' multi-agent requests are handled as the `compat`
+//! module says. The
 //! config's payload rules apply last, to the body as it is sent, a token
 //! count's included; the answer is translated against the body as it was
 //! before the prompt cache key, the item IDs and the rules.
@@ -42,11 +45,10 @@
 //! - The config's payload rules are left to [`crate::payload`], given the
 //!   request and its options; upstream translates the original request
 //!   alongside the payload for them.
-//! - The image generation tool isn't added.
 
 use http::header::{self, HeaderMap, HeaderName, HeaderValue};
 use open_ferry_core::auth::Auth;
-use open_ferry_core::config::Config;
+use open_ferry_core::config::{Config, DisableImageGeneration};
 use open_ferry_core::exec::{ErrorKind, ExecError, Format, Options, Request};
 use open_ferry_core::models::ModelCatalog;
 use open_ferry_translate::go::trim_space;
@@ -61,7 +63,7 @@ use super::reasoning::sanitize_reasoning;
 use super::thinking;
 use super::tool_schema::normalize_tool_schemas;
 use crate::custom_headers;
-use crate::json::{self, delete, eq_fold, exists, get, set, str_of};
+use crate::json::{self, delete, eq_fold, exists, get, get_mut, set, str_at, str_of};
 use crate::payload;
 use crate::thinking::Route;
 
@@ -70,6 +72,10 @@ pub(crate) const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex
 
 /// The header a native Codex client sends for a Responses Lite request.
 pub(crate) const RESPONSES_LITE_HEADER: &str = "x-openai-internal-codex-responses-lite";
+
+/// The built-in image generation tool added to a request's tools
+/// (`imageGenToolJSON`).
+const IMAGE_GENERATION_TOOL: &str = r#"{"type":"image_generation","output_format":"png"}"#;
 
 /// Fields Codex refuses, dropped from every request.
 const DROPPED_FIELDS: [&str; 4] = [
@@ -319,6 +325,82 @@ fn normalize_parallel_tool_calls_for_tools(body: &mut Value) {
     }
 }
 
+/// Whether the credential is a Codex one on the free plan
+/// (`isCodexFreePlanAuth`).
+fn is_free_plan(auth: Option<&Auth>) -> bool {
+    auth.is_some_and(|auth| {
+        eq_fold(auth.provider.trim(), "codex")
+            && eq_fold(
+                auth.attribute("plan_type").unwrap_or_default().trim(),
+                "free",
+            )
+    })
+}
+
+/// Whether `tool` is a client's own image generation function: Codex's
+/// `image_gen` namespace with an `imagegen` function, or that function
+/// flattened to `image_gen.imagegen` (`isImageGenerationFunctionTool`).
+fn is_image_generation_function_tool(tool: &Value) -> bool {
+    match str_at(tool, "type").as_str() {
+        "function" => str_at(tool, "name") == "image_gen.imagegen",
+        "namespace" => {
+            str_at(tool, "name") == "image_gen"
+                && matches!(get(tool, "tools"), Some(Value::Array(tools)) if tools.iter().any(|nested| {
+                    str_at(nested, "type") == "function" && str_at(nested, "name") == "imagegen"
+                }))
+        }
+        _ => false,
+    }
+}
+
+/// Adds the built-in `image_generation` tool to the request's tools, unless
+/// `disable-image-generation` is on in any mode, the request is a Responses
+/// Lite one, the model is a `spark` one, the credential is on the free plan,
+/// or the tools have an image generation tool already
+/// (`ensureImageGenerationTool`, and the config check around it).
+pub(crate) fn ensure_image_generation_tool(
+    body: &mut Value,
+    base_model: &str,
+    context: Context<'_>,
+    headers: &HeaderMap,
+) {
+    if context
+        .config
+        .is_some_and(|config| config.disable_image_generation != DisableImageGeneration::Off)
+    {
+        return;
+    }
+    add_image_generation_tool(body, base_model, context.auth, headers);
+}
+
+/// `ensureImageGenerationTool`.
+fn add_image_generation_tool(
+    body: &mut Value,
+    base_model: &str,
+    auth: Option<&Auth>,
+    headers: &HeaderMap,
+) {
+    if is_responses_lite(body, headers) || base_model.ends_with("spark") || is_free_plan(auth) {
+        return;
+    }
+    let Ok(tool) = serde_json::from_str::<Value>(IMAGE_GENERATION_TOOL) else {
+        return;
+    };
+    match get_mut(body, "tools") {
+        Some(Value::Array(tools)) => {
+            if !tools.iter().any(|tool| {
+                str_at(tool, "type") == "image_generation"
+                    || is_image_generation_function_tool(tool)
+            }) {
+                tools.push(tool);
+            }
+        }
+        _ => {
+            set(body, "tools", Value::Array(vec![tool]));
+        }
+    }
+}
+
 /// Translates and adjusts the payload for a call of `kind`.
 pub(crate) fn prepare_body(
     kind: Kind,
@@ -406,6 +488,9 @@ pub(crate) fn prepare_body(
         }
     }
     normalize_instructions(&mut body, native);
+    if matches!(kind, Kind::Execute | Kind::Stream) {
+        ensure_image_generation_tool(&mut body, base, context, &options.headers);
+    }
     if kind == Kind::CountTokens {
         apply_rules(&mut body);
         let translated = body.clone();
@@ -538,6 +623,9 @@ pub(crate) fn ensure_header(target: &mut HeaderMap, client: &HeaderMap, name: He
         Err(_) => false,
     }
 }
+
+#[cfg(test)]
+mod image_tool_tests;
 
 #[cfg(test)]
 mod tests {

@@ -337,10 +337,14 @@ async fn sends_own_identity_and_adjusted_body() {
         "safety_identifier",
         "stream_options",
         "prompt_cache_key",
-        "tools",
     ] {
         assert!(!exists(&body, field), "{field} in {body}");
     }
+    assert_eq!(
+        get(&body, "tools"),
+        Some(&json!([{"type": "image_generation", "output_format": "png"}])),
+        "the image generation tool is added"
+    );
 }
 
 #[tokio::test]
@@ -1711,6 +1715,117 @@ async fn native_requests_keep_codex_fidelity() {
     let body = seen.json();
     assert!(!exists(&body, "instructions"), "{body}");
     assert_eq!(get(&body, "parallel_tool_calls"), Some(&json!(false)));
+}
+
+/// A Codex credential on the pro plan, as upstream's Responses Lite tests
+/// use.
+fn pro_auth(base_url: &str) -> Arc<Auth> {
+    let mut auth = Arc::unwrap_or_clone(api_key_auth(base_url));
+    auth.attributes.insert("plan_type".into(), "pro".into());
+    Arc::new(auth)
+}
+
+// TestCodexExecutorExecuteResponsesLiteHeaderDoesNotInjectImageGenerationTool
+#[tokio::test]
+async fn responses_lite_execute_gets_no_image_tool() {
+    let mock = Mock::start(Reply::sse(COMPLETED_WITH_USAGE)).await;
+    let options = with_header(
+        options("openai-response"),
+        "X-OpenAI-Internal-Codex-Responses-Lite",
+        "true",
+    );
+    executor()
+        .execute(
+            pro_auth(&mock.url),
+            request("gpt-5.6-sol", r#"{"model":"gpt-5.6-sol","input":"hello"}"#),
+            options,
+        )
+        .await
+        .unwrap();
+    let body = mock.last().json();
+    assert!(!exists(&body, "tools"), "{body}");
+    assert_eq!(
+        get(&body, "parallel_tool_calls"),
+        Some(&json!(false)),
+        "{body}"
+    );
+}
+
+// TestCodexExecutorExecuteStreamResponsesLiteHeaderForcesParallelToolCallsFalse
+#[tokio::test]
+async fn responses_lite_stream_turns_parallel_tool_calls_off() {
+    let mock = Mock::start(Reply::sse(COMPLETED_WITH_USAGE)).await;
+    let options = with_header(
+        stream_options("openai-response"),
+        "X-OpenAI-Internal-Codex-Responses-Lite",
+        "true",
+    );
+    let response = executor()
+        .execute_stream(
+            pro_auth(&mock.url),
+            request(
+                "gpt-5.6-luna",
+                r#"{"model":"gpt-5.6-luna","input":"hello"}"#,
+            ),
+            options,
+        )
+        .await
+        .unwrap();
+    let (_, error) = collect(response).await;
+    assert!(error.is_none(), "{error:?}");
+    let body = mock.last().json();
+    assert_eq!(
+        get(&body, "parallel_tool_calls"),
+        Some(&json!(false)),
+        "{body}"
+    );
+}
+
+// Not upstream's: a stream and a call gain the image generation tool after
+// the client's own tools, and `disable-image-generation: chat` keeps it out.
+#[tokio::test]
+async fn calls_gain_the_image_tool_unless_disabled() {
+    let payload =
+        r#"{"model":"gpt-5.4","input":"hi","tools":[{"type":"function","name":"lookup"}]}"#;
+    for (setting, added) in [("false", true), ("chat", false)] {
+        let config =
+            Arc::new(Config::parse(format!("disable-image-generation: {setting}")).unwrap());
+        for stream in [false, true] {
+            let mock = Mock::start(Reply::sse(COMPLETED_WITH_USAGE)).await;
+            let executor = executor().with_config(Arc::clone(&config));
+            if stream {
+                let response = executor
+                    .execute_stream(
+                        pro_auth(&mock.url),
+                        request("gpt-5.4", payload),
+                        stream_options("openai-response"),
+                    )
+                    .await
+                    .unwrap();
+                let (_, error) = collect(response).await;
+                assert!(error.is_none(), "{error:?}");
+            } else {
+                executor
+                    .execute(
+                        pro_auth(&mock.url),
+                        request("gpt-5.4", payload),
+                        options("openai-response"),
+                    )
+                    .await
+                    .unwrap();
+            }
+            let body = mock.last().json();
+            let mut tools = vec![json!({"type": "function", "name": "lookup"})];
+            if added {
+                tools.push(json!({"type": "image_generation", "output_format": "png"}));
+            }
+            assert_eq!(
+                get(&body, "tools"),
+                Some(&Value::Array(tools)),
+                "{setting} stream={stream}"
+            );
+        }
+    }
 }
 
 // A Claude stream's message_start gets the request's estimated input

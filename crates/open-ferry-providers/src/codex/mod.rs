@@ -7,8 +7,10 @@
 //! The executor translates the client's request to Codex's Responses
 //! format, applies the thinking setting of a model suffix such as
 //! `gpt-5(high)` or of the request ([`thinking`]), adjusts it as upstream
-//! does, and translates Codex's server-sent events back, chunk by chunk
-//! when streaming and from the completed response otherwise.
+//! does, the built-in `image_generation` tool added while
+//! `disable-image-generation` is off, and translates Codex's server-sent
+//! events back, chunk by chunk when streaming and from the completed
+//! response otherwise.
 //! `responses/compact` calls go to Codex's compact endpoint. A client on the
 //! Responses WebSocket, with a credential that has `websockets` on, calls
 //! Codex over a WebSocket too (the `websocket` module). Token counts
@@ -28,14 +30,14 @@
 //!   and a `prompt_cache_key` the client itself sent pass through where
 //!   upstream passes them. If Codex then rejects a request, its error is
 //!   passed back as it is.
-//! - The config's `disable-image-generation` switch and its payload rules
-//!   are left to [`crate::payload`]. Compatibility models and Codex
+//! - The config's `disable-image-generation` switch, which takes the
+//!   image generation tool out again, and its payload rules are left to
+//!   [`crate::payload`]. Compatibility models and Codex
 //!   clients' multi-agent v2 and orphan delegation requests are handled in
 //!   the `compat` module.
 //!
 //! Deferred:
-//! - Image generation: the `image_generation` tool upstream adds, and the
-//!   OpenAI Images endpoints served through Codex.
+//! - The OpenAI Images endpoints served through Codex.
 
 pub(crate) mod claude_tokens;
 pub(crate) mod client;

@@ -7,9 +7,9 @@
 //! The `disable-image-generation` setting: whether the built-in
 //! `image_generation` tool is taken out of the requests sent upstream.
 //!
-//! The providers' payload module does the taking out. Nothing in this port
-//! adds the tool or generates images, so `false` and `passthrough` both
-//! leave a request as the client sent it.
+//! The providers' payload module does the taking out. While the setting is
+//! `false`, the Codex executor adds the tool to a call's tools;
+//! `passthrough` leaves a request's tools as the client sent them.
 //!
 //! Deviations from upstream:
 //! - A sequence or mapping fails the load with yaml.v3's type error

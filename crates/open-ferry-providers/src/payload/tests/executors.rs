@@ -437,10 +437,9 @@ async fn claude_conditions_observe_builtin_thinking_removal() {
     }
 }
 
-/// `TestPayloadBarrierCodexImageFilter`, over HTTP, without the image
-/// generation tool, which isn't ported: a filter removes the
-/// `instructions` and the `prompt_cache_key` the executor sets after the
-/// translation, from a call and a stream.
+/// `TestPayloadBarrierCodexImageFilter`, over HTTP: a filter removes the
+/// `image_generation` tool, the `instructions` and the `prompt_cache_key`
+/// the executor sets after the translation, from a call and a stream.
 #[tokio::test]
 async fn codex_barrier_filter() {
     let completed = "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_barrier\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"total_tokens\":0}}}\n\n";
@@ -475,6 +474,15 @@ payload:
             let body = mock.last();
             let filtered = model == "gpt-5.6-sol";
             let case = format!("{model} stream={stream}: {body}");
+            let image = body
+                .get("tools")
+                .and_then(Value::as_array)
+                .is_some_and(|tools| {
+                    tools.iter().any(|tool| {
+                        tool.get("type").and_then(Value::as_str) == Some("image_generation")
+                    })
+                });
+            assert_eq!(image, !filtered, "image tool presence: {case}");
             assert_eq!(body.get("instructions").is_none(), filtered, "{case}");
             assert_eq!(body.get("prompt_cache_key").is_none(), filtered, "{case}");
         }
