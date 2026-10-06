@@ -1,3 +1,4 @@
+import { lazy } from "react";
 import { Navigate, Outlet, useLocation, type RouteObject } from "react-router";
 
 import { AppShell } from "../layout/AppShell";
@@ -6,6 +7,15 @@ import { NotFoundPage } from "../pages/NotFoundPage";
 import { OverviewPage } from "../pages/OverviewPage";
 import { SignInPage } from "../pages/SignInPage";
 import { useSession } from "../session/session";
+
+// The heavier pages load when first visited: the chart library is most of
+// the app's code, and the sign-in page needs none of it.
+const UsagePage = lazy(() =>
+  import("../pages/usage/UsagePage").then((module) => ({ default: module.UsagePage })),
+);
+const LedgerPage = lazy(() =>
+  import("../pages/usage/LedgerPage").then((module) => ({ default: module.LedgerPage })),
+);
 
 /** Where a signed-out visit was headed, kept across the sign-in. */
 export interface ReturnTo {
@@ -33,6 +43,8 @@ export const routes: RouteObject[] = [
         element: <AppShell />,
         children: [
           { index: true, element: <OverviewPage /> },
+          { path: "usage", element: <UsagePage /> },
+          { path: "usage/ledger", element: <LedgerPage /> },
           { path: "about", element: <AboutPage /> },
           { path: "*", element: <NotFoundPage /> },
         ],

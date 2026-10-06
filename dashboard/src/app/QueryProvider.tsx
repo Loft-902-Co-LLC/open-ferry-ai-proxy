@@ -7,9 +7,15 @@ import { useEffect, useState, type ReactNode } from "react";
 import { isApiError } from "../api/client";
 import { useSession } from "../session/session";
 
-/** Retries only failures a retry may fix: no answer, or a server error. */
+/**
+ * Retries only failures a retry may fix: no answer, or a server error. A
+ * ledger that couldn't be opened stays so until the server restarts.
+ */
 function shouldRetry(failureCount: number, error: unknown): boolean {
   if (isApiError(error) && error.status >= 400 && error.status < 500) {
+    return false;
+  }
+  if (isApiError(error) && error.code === "ledger_unavailable") {
     return false;
   }
   return failureCount < 2;

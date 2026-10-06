@@ -62,6 +62,8 @@ export default defineConfig(({ command }) => {
       restoreMocks: true,
       unstubGlobals: true,
       css: false,
+      // Times show in the browser's zone; tests pin it.
+      env: { TZ: "UTC" },
     },
   };
 });

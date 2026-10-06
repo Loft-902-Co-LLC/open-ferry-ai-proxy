@@ -1,13 +1,16 @@
 import { LogOut } from "lucide-react";
+import { Suspense } from "react";
 import { Link, NavLink, Outlet } from "react-router";
 
 import { Brand } from "../components/Brand";
 import { Button } from "../components/Button";
+import { Loading } from "../components/QueryState";
 import { useSession } from "../session/session";
 
 /** The pages in the main navigation, in order. */
 export const NAV_ITEMS: readonly { to: string; label: string }[] = [
   { to: "/", label: "Overview" },
+  { to: "/usage", label: "Usage" },
   { to: "/about", label: "About" },
 ];
 
@@ -56,7 +59,9 @@ export function AppShell() {
         </div>
       </header>
       <main id="main" tabIndex={-1} className="mx-auto w-full max-w-7xl flex-1 px-4 py-6 focus:outline-none">
-        <Outlet />
+        <Suspense fallback={<Loading>Loading the page…</Loading>}>
+          <Outlet />
+        </Suspense>
       </main>
     </div>
   );
