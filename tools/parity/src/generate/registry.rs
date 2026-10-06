@@ -10,7 +10,10 @@
 //!
 //! Responses are the other generators' event streams and final events, sent
 //! through the registry for the pair they were made for or, sometimes, a pair
-//! with no translator.
+//! with no translator. Codex call arguments that start as a JSON object but
+//! aren't one are replaced with `{}` before they go to Gemini, or to
+//! Interactions in a final event, as upstream copies them into its output as
+//! they are, which makes it invalid JSON (see UPSTREAM.md).
 //!
 //! The Gemini Interactions families' requests and responses for their pairs
 //! (see `crate::interactions`) are treated the same way, after the others,
@@ -283,14 +286,16 @@ pub fn response_cases(seed: u64, count: usize) -> (Vec<Case>, Vec<Case>) {
                 last
             };
             // Upstream copies some broken tool arguments into its output as
-            // they are, whichever pair the events were made for; and the
-            // Gemini to Responses port fails on lines it can't read when
-            // `apply_patch` may be declared.
+            // they are, whichever pair the events were made for (for
+            // Interactions only in a whole response; its stream sends them
+            // as text); and the Gemini to Responses port fails on lines it
+            // can't read when `apply_patch` may be declared.
             let (stream, last) = match (from, to) {
                 ("codex", "gemini") => (
                     super::gemini::repair_codex_case(stream),
                     super::gemini::repair_codex_final(last),
                 ),
+                ("codex", "interactions") => (stream, super::gemini::repair_codex_final(last)),
                 ("claude", "gemini") => super::gemini::repair_claude_input(stream, last),
                 ("gemini", "openai-response") => {
                     super::gemini_responses::readable_with_patch(stream, last)
