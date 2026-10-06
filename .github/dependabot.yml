@@ -17,6 +17,11 @@ updates:
     groups:
       npm-minor-and-patch:
         update-types: [minor, patch]
+    ignore:
+      # Node's types follow the Node version in .nvmrc: a new major comes
+      # with a move to that Node version, by hand.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /
