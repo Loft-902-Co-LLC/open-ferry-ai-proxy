@@ -2,6 +2,7 @@
 
 How the maintainer makes a release. Pushing a tag runs [the release workflow](.github/workflows/release.yml), which does the following:
 - builds the web dashboard once, and each binary with it built in;
+- lists the licenses of the Rust crates built into each binary;
 - writes `SHA256SUMS`;
 - attests each archive's build provenance;
 - creates a **draft** release.
@@ -49,6 +50,7 @@ open-ferry follows [Semantic Versioning](https://semver.org/). Until 1.0.0, a mi
 
 7. **Review the draft.** When the workflow finishes, the draft is on the [Releases](https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases) page. Check that:
    - it has five archives and `SHA256SUMS`;
+   - an archive's `licenses/` holds `rust-third-party-licenses.txt` for its own target and `dashboard-third-party-licenses.txt`;
    - the notes are the changelog section;
    - an archive downloads and checks out as the README's [install section](README.md#install) says: its hash against `SHA256SUMS`, and its attestation with `gh attestation verify`;
    - the binary runs (`open-ferry -h`).
@@ -93,6 +95,10 @@ A run that failed may have made attestations already. They stay, but they only v
 - **Build information.** `OPEN_FERRY_COMMIT` and `OPEN_FERRY_BUILD_DATE` are set at build time. They are the management API's `X-CPA-COMMIT` and `X-CPA-BUILD-DATE` headers. A build without them says `none` and `unknown`.
 - **No cache.** Release builds start from scratch, so nothing a cache holds can get into a release.
 - **The dashboard.** The `dashboard` job builds the web app in `dashboard/` once, with the Node version in `dashboard/.nvmrc`, `npm ci --ignore-scripts` and `npm run build`, without an npm cache. Every build job downloads the result into `dashboard/dist` and builds with `OPEN_FERRY_REQUIRE_DASHBOARD=1`, so a binary can't ship without it. Each archive's `licenses/dashboard-third-party-licenses.txt` lists the npm packages built into the dashboard, with their licenses. The dashboard build fails if one of them isn't MIT, ISC, Apache-2.0 or BSD; replace the package, or settle its license, before releasing. To move to a newer Node, change `.nvmrc`; `engines.node` in `dashboard/package.json` is the oldest Node that builds it.
+- **The Rust crates' licenses.** The `rust-licenses` job runs [cargo-about](https://github.com/EmbarkStudios/cargo-about) 0.9.2, installed with `--locked`, through `.github/scripts/rust-licenses.py`, on the crates `cargo fetch --locked` downloads. For each target, it takes the crates in that target's build of `open-ferry`, build-time crates included, and writes their license texts with the crates each covers. It adds a crate's own license files where cargo-about gave a license's standard text instead, and every NOTICE file at the root of a crate. Each archive's `licenses/rust-third-party-licenses.txt` is the file for its target.
+  - The job fails if a crate's license isn't in `about.toml`'s accepted list: MIT, Apache-2.0, ISC, BSD-3-Clause, Unicode-3.0, Zlib and CC0-1.0, which is what the release targets' crates use today. CI runs the same job on every pull request, so a crate under another license fails there first. Widen the list only for a permissive license; otherwise replace the crate.
+  - To run it locally: `cargo install cargo-about --version 0.9.2 --locked --features cli`, `cargo fetch --locked`, then `python3 .github/scripts/rust-licenses.py <dir> [<target>...]`.
+  - A new release target needs adding to the script's `TARGETS` too; until it is, its build fails at packaging.
 - **Actions** are pinned to full commit SHAs, and Dependabot proposes updates.
 - **Attestations** need the repository to be public, or on GitHub Enterprise Cloud if it is private.
 - **Tag protection.** Consider a ruleset that lets only the maintainer create `v*` tags, since pushing one starts a release.

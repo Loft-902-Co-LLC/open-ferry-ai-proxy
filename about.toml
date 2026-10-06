@@ -1,0 +1,36 @@
+# cargo-about's settings for the licenses of the Rust crates built into
+# open-ferry. .github/scripts/rust-licenses.py runs it for each release
+# target, and CI runs that script on every pull request (see RELEASING.md).
+
+# The licenses a crate built into open-ferry may be under, in the order they
+# are chosen when a crate offers a choice. A crate whose license can't be met
+# from this list fails the generation. The list is what open-ferry's build
+# uses on the release targets:
+# - MIT: most crates;
+# - Apache-2.0: aws-lc-sys, dunce, ryu and sync_wrapper;
+# - ISC: aws-lc-rs and aws-lc-sys, rustls-webpki, untrusted, and inotify on
+#   Linux;
+# - BSD-3-Clause: aws-lc-sys, brotli's allocators, encoding_rs, matchit and
+#   subtle;
+# - Unicode-3.0: the ICU crates, their zerovec family, and unicode-ident;
+# - Zlib: foldhash;
+# - CC0-1.0: notify.
+# Widen it only for a permissive license, and say so in the pull request.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "ISC",
+    "BSD-3-Clause",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+]
+
+# Build scripts and procedural macros run at build time rather than ship in
+# the binary, but they are part of its build, so they are listed too.
+ignore-build-dependencies = false
+ignore-dev-dependencies = true
+ignore-transitive-dependencies = false
+
+# open-ferry's own crates are under the LICENSE at the root of each archive.
+private = { ignore = true }
