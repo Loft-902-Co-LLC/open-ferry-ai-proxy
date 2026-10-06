@@ -10,7 +10,9 @@
 //! [`Config::load`] reads a YAML file and [`Config::parse`] a payload. Both
 //! accept upstream's legacy layout and its v8 layout, or a mix of the two,
 //! fill in upstream's defaults and apply its checks and clean-ups. Unknown
-//! keys are ignored. The file is never written.
+//! keys are ignored. Loading never writes the file; [`save`] writes it back,
+//! with its comments and the settings this port doesn't type, when a
+//! management write asks for it.
 //!
 //! [`ConfigWatcher`] watches the config file and the auth directory and
 //! sends a [`WatchEvent`] when the config changes or an auth file is added,
@@ -58,8 +60,10 @@
 //! Upstream's `home` section has no YAML form and isn't read.
 //!
 //! Deviations from upstream:
-//! - Nothing is written back to the file (no bcrypt hashing of the
-//!   management key, no removal of overridden legacy fields).
+//! - Loading never writes the file back: upstream replaces a plaintext
+//!   management key with its bcrypt hash in the file, and removes legacy
+//!   fields that a v8 field overrides. Only [`save`] writes the file, on a
+//!   management write.
 //! - The ignored sections above aren't typed, so a value of the wrong type
 //!   inside them isn't an error.
 //! - The `models` sources aren't checked: a `catalog`, `codex-catalog` or
@@ -77,14 +81,13 @@ mod normalize;
 pub(crate) mod paths;
 mod payload;
 mod safe_mode;
+pub mod save;
 #[cfg(test)]
 mod testing;
 mod types;
 mod v8;
 mod watcher;
 mod yaml;
-// Used by the config writer, which builds on it.
-#[allow(dead_code)]
 pub(crate) mod yaml3;
 
 use std::fmt;

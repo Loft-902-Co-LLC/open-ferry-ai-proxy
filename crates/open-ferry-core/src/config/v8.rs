@@ -16,11 +16,12 @@
 //! groups drops the read-only `auth_index` a management read adds to them.
 //!
 //! Deviations from upstream:
-//! - [`V8_PATHS`] is a fixed table. Upstream builds it by reflecting over its
-//!   `Config` struct; the table here was generated from v8.0.11's and so also
-//!   moves sections this port ignores.
-//! - Comments aren't carried along; upstream keeps them for writing the file
-//!   back, which this port never does.
+//! - [`V8_PATHS`] is a fixed table, checked against v8.0.15. Upstream builds
+//!   it by reflecting over its `Config` struct; like upstream's, the table
+//!   also moves sections this port ignores.
+//! - Comments aren't carried along, as the loader only decodes the result.
+//!   The config writer ([`super::save`]) flattens a tree that keeps them,
+//!   as upstream does when it writes the file back.
 //! - The deprecated `codex.live-media-relay.allow-private-remote-ips` is still
 //!   converted and checked, though the section it converts into is ignored.
 

@@ -37,12 +37,13 @@
 //! the config's text, which holds secrets.
 //!
 //! Deviations from upstream:
-//! - The tables of v8 sections and the fields they hold are fixed tables
-//!   generated from v8.0.11, with v8.0.15's `models` section; upstream
-//!   builds them by reflecting over its `Config` struct.
+//! - The tables of v8 sections and the fields they hold are fixed tables,
+//!   checked against v8.0.15; upstream builds them by reflecting over its
+//!   `Config` struct.
 //! - Upstream comments out the sections it drops, and logs a warning for
-//!   each; they are dropped here without a trace, as the result is never
-//!   written.
+//!   each; they are dropped here without a trace, as a [`V8Document`] is
+//!   only shown, never written. The config writer ([`super::save`]) comments
+//!   them out and warns, as upstream does.
 //! - A value whose scalars aliases expanded to more than 64 MiB of text
 //!   fails to decode with `yaml: document contains excessive aliasing`;
 //!   upstream decodes it.
@@ -65,7 +66,7 @@ use super::{ConfigError, ConfigErrorKind};
 
 /// Legacy sections and their v8 paths, as `(legacy, v8)`, in upstream's
 /// field order (its `v8StructPaths`).
-const V8_STRUCT_PATHS: &[(&str, &str)] = &[
+pub(crate) const V8_STRUCT_PATHS: &[(&str, &str)] = &[
     ("claude-code", "upstream.claude"),
     ("streaming", "requests.streaming"),
     ("tls", "server.tls"),
@@ -97,7 +98,7 @@ const V8_STRUCT_PATHS: &[(&str, &str)] = &[
 ];
 
 /// The top-level keys of the v8 layout (upstream's `v8AllowedRoots`).
-const V8_ROOTS: &[&str] = &[
+pub(crate) const V8_ROOTS: &[&str] = &[
     "access",
     "api-keys",
     "client",
@@ -119,7 +120,7 @@ const V8_ROOTS: &[&str] = &[
 /// The keys each v8 section may hold, by the section's dotted path. A
 /// section that isn't listed, such as `api-keys`, keeps whatever it holds
 /// (the `children` table of upstream's `commentUnknownV8Sections`).
-const V8_CHILDREN: &[(&str, &[&str])] = &[
+pub(crate) const V8_CHILDREN: &[(&str, &[&str])] = &[
     ("access", &["api-keys"]),
     ("client", &["codex"]),
     (

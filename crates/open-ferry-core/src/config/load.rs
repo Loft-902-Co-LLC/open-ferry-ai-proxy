@@ -20,9 +20,10 @@
 //! an error, as upstream has it.
 //!
 //! Deviations from upstream:
-//! - Nothing is written back: upstream replaces a plaintext management key
-//!   with its bcrypt hash in the file and removes legacy fields that a v8
-//!   field overrides.
+//! - Loading never writes the file back: upstream replaces a plaintext
+//!   management key with its bcrypt hash in the file and removes legacy
+//!   fields that a v8 field overrides. Only the config writer
+//!   ([`super::save`]) writes the file, on a management write.
 //! - The text must be UTF-8 (a UTF-8 byte order mark is skipped); yaml.v3
 //!   also reads UTF-16.
 //! - Upstream's optional mode, which turns a missing or broken file into an
