@@ -1,0 +1,32 @@
+[package]
+name = "open-ferry-dashboard"
+description = "The dashboard app, its API and the usage ledger for open-ferry-ai-proxy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+axum = "0.8.9"
+base64 = "0.23.1"
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+futures-util = "0.3.34"
+http = "1.5.0"
+open-ferry-core.workspace = true
+open-ferry-management.workspace = true
+open-ferry-server.workspace = true
+rand = "0.10.3"
+rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json.workspace = true
+sha2 = "0.11.0"
+tokio = { version = "1.53.1", features = ["fs", "io-util", "rt", "sync", "time"] }
+tracing = "0.1.44"
+url = "2.5.8"
+
+[dev-dependencies]
+http-body-util = "0.1.5"
+tempfile = "3.27.0"
+tokio = { version = "1.53.1", features = ["full", "test-util"] }
+tower = { version = "0.5.3", features = ["util"] }

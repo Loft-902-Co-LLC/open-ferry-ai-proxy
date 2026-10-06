@@ -114,12 +114,6 @@ impl AppState {
         )
     }
 
-    /// Whether a client key is still a template value, so safe mode shuts
-    /// the proxy routes.
-    pub fn safe_mode(&self) -> bool {
-        self.settings().safe_mode
-    }
-
     /// The dispatcher, for a future that outlives the request.
     pub(crate) fn dispatcher_arc(&self) -> Arc<dyn Dispatcher> {
         Arc::clone(&self.inner.dispatcher)
