@@ -2,7 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { KeyRound, RotateCw } from "lucide-react";
 import { useEffect, useRef, useState, type Ref } from "react";
 
-import { callProblem } from "../../api/access";
+import { callProblem, isSettingsReadOnly } from "../../api/access";
 import { isUnsupportedRoute } from "../../api/client";
 import { CLIENT_SETUP, type ClientSetup } from "../../api/dashboard";
 import { useApiCall, useApiQuery } from "../../api/hooks";
@@ -203,10 +203,33 @@ export function ClientSetupCard({ focusKeys = false }: ClientSetupCardProps) {
       await refresh();
     },
   });
-  // Safe mode: the list without the examples, or a new key in their place.
+  // Safe mode: the examples out of the list and, given `key`, a new key in
+  // the first one's place. One entry at a time, against the list as the
+  // server has it just then, so a key added meanwhile stays. The new key goes
+  // in first, so the list is never left empty, which would let every client
+  // in. Then each example goes by its place, the last first so that the
+  // places of the others hold.
   const replaceExamples = useMutation({
-    mutationFn: (list: string[]) => call(API_KEYS, { method: "PUT", json: list }),
-    onSuccess: refresh,
+    mutationFn: async (key: string | null) => {
+      const list = [...((await call<ApiKeysAnswer>(API_KEYS))["api-keys"] ?? [])];
+      if (key !== null) {
+        // As with addKey: the first entry equal to `old` becomes `new`, or
+        // `new` is appended when none is.
+        const at = list.findIndex(isExampleKey);
+        await call(API_KEYS, { method: "PATCH", json: { old: list[at] ?? key, new: key } });
+        if (at < 0) {
+          list.push(key);
+        } else {
+          list[at] = key;
+        }
+      }
+      for (let index = list.length - 1; index >= 0; index--) {
+        if (isExampleKey(list[index] ?? "")) {
+          await call(API_KEYS, { method: "DELETE", query: { index: String(index) } });
+        }
+      }
+    },
+    onSettled: refresh,
   });
   // The server leaves safe mode when it reloads config.yaml, a little after
   // the keys are saved: look again until it has.
@@ -234,13 +257,13 @@ export function ClientSetupCard({ focusKeys = false }: ClientSetupCardProps) {
   };
   const replace = () => {
     if (usable.length > 0) {
-      replaceExamples.mutate(usable);
+      replaceExamples.mutate(null);
       return;
     }
     const key = made?.key ?? generateClientKey();
     setMade({ key, saved: false });
     setKeyIndex(0);
-    replaceExamples.mutate([key]);
+    replaceExamples.mutate(key);
   };
 
   const loaded = setup.data !== undefined;
@@ -338,10 +361,15 @@ export function ClientSetupCard({ focusKeys = false }: ClientSetupCardProps) {
           </Alert>
         )}
         {writeError !== null &&
-          (isUnsupportedRoute(writeError) && made !== null ? (
+          (isSettingsReadOnly(writeError) && made !== null ? (
             <AddByHand made={made.key} replacing={replaceExamples.isError} />
           ) : (
-            <ProblemNotice problem={callProblem(writeError)} live />
+            <ProblemNotice
+              problem={
+                isSettingsReadOnly(writeError) ? { kind: "settings-read-only" } : callProblem(writeError)
+              }
+              live
+            />
           ))}
         {keysUnsupported && (
           <Alert tone="info" title="This server can't list its client keys yet">

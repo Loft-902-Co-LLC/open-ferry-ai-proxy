@@ -13,6 +13,13 @@ export const LOGGING_TO_FILE = `${MANAGEMENT}/logging-to-file`;
 export const SERVER_LOGS = `${MANAGEMENT}/logs`;
 /** `{"api-keys": [...]}`: the client API keys. */
 export const API_KEYS = `${MANAGEMENT}/api-keys`;
+/** The config as JSON, with every setting under its config.yaml key. */
+export const CONFIG = `${MANAGEMENT}/config`;
+/**
+ * config.yaml as it is on disk. `PUT` with the new file as the body saves
+ * it, if the server can use it, and answers `{"ok": true, "changed": [...]}`.
+ */
+export const CONFIG_YAML = `${MANAGEMENT}/config.yaml`;
 
 /** An answer of `GET /logs`. */
 export interface ServerLogPage {

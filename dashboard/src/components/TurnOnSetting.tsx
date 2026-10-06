@@ -1,8 +1,7 @@
 import { useMutation, useQueryClient, type QueryKey } from "@tanstack/react-query";
 import { Power } from "lucide-react";
 
-import { callProblem } from "../api/access";
-import { isUnsupportedRoute } from "../api/client";
+import { callProblem, isSettingsReadOnly } from "../api/access";
 import { useApiCall } from "../api/hooks";
 import { Alert } from "./Alert";
 import { Button } from "./Button";
@@ -23,8 +22,8 @@ export interface TurnOnSettingProps {
 
 /**
  * A button that turns a boolean setting on through the management API. A
- * server without that route is told apart: the setting is then changed in
- * config.yaml.
+ * server that can't change it (without that route, or unable to save
+ * config.yaml) is told apart: the setting is then changed in config.yaml.
  */
 export function TurnOnSetting({ path, label, configKey, invalidate }: TurnOnSettingProps) {
   const call = useApiCall();
@@ -48,7 +47,7 @@ export function TurnOnSetting({ path, label, configKey, invalidate }: TurnOnSett
         {label}
       </Button>
       {turnOn.isError &&
-        (isUnsupportedRoute(turnOn.error) ? (
+        (isSettingsReadOnly(turnOn.error) ? (
           <Alert tone="info" live title="This server can't change settings yet">
             <p>
               Set <Code>{configKey}: true</Code> in config.yaml instead.

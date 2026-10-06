@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, type ReactNode } from "react";
 
+import { cn } from "../lib/cn";
 import { Button } from "./Button";
 import { Spinner } from "./Spinner";
 
@@ -11,6 +12,8 @@ export interface DialogProps {
   onClose: () => void;
   /** The buttons at the bottom. */
   footer?: ReactNode;
+  /** "lg" for wide content, such as a diff. */
+  size?: "md" | "lg";
 }
 
 /**
@@ -19,7 +22,7 @@ export interface DialogProps {
  * injected styles or scroll lock. Mark the control to focus first with
  * `data-autofocus`.
  */
-export function Dialog({ open, title, children, onClose, footer }: DialogProps) {
+export function Dialog({ open, title, children, onClose, footer, size = "md" }: DialogProps) {
   const ref = useRef<HTMLDialogElement>(null);
   const titleId = useId();
 
@@ -42,7 +45,10 @@ export function Dialog({ open, title, children, onClose, footer }: DialogProps) 
       ref={ref}
       aria-labelledby={titleId}
       onClose={onClose}
-      className="m-auto w-[min(32rem,calc(100vw-2rem))] rounded-lg border border-line bg-surface p-0 text-fg shadow-xl backdrop:bg-black/50"
+      className={cn(
+        "m-auto rounded-lg border border-line bg-surface p-0 text-fg shadow-xl backdrop:bg-black/50",
+        size === "lg" ? "w-[min(56rem,calc(100vw-2rem))]" : "w-[min(32rem,calc(100vw-2rem))]",
+      )}
     >
       {open && (
         <div className="space-y-4 px-5 py-4">

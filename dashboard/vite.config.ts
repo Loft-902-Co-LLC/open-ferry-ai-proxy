@@ -64,6 +64,9 @@ export default defineConfig(({ command }) => {
       css: false,
       // Times show in the browser's zone; tests pin it.
       env: { TZ: "UTC" },
+      // A test that fills in a form and saves it takes a few seconds on a busy
+      // machine; the default 5 seconds leaves too little room.
+      testTimeout: 15_000,
     },
   };
 });

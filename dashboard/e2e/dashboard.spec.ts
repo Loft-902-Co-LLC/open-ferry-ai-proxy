@@ -80,7 +80,7 @@ async function signIn(page: Page) {
 
 test("serves every page with the policy open-ferry sends", async ({ page }) => {
   await mockServer(page, APP_ORIGIN);
-  for (const path of ["./", "usage", "credentials", "logs/main.log", "no-such-page"]) {
+  for (const path of ["./", "usage", "credentials", "logs/main.log", "settings", "no-such-page"]) {
     const response = await page.goto(path);
     expect(response?.status(), path).toBe(200);
     const headers = response?.headers() ?? {};
@@ -226,6 +226,94 @@ test("renders the screens in dark mode under the policy too", async ({ page }) =
   await page.goto("credentials");
   await expect(page.getByRole("article", { name: "claude-lin@example.com.json" })).toContainText("Failing");
   await shot(page, "17-credentials-dark");
+  await page.goto("settings");
+  await expect(page.getByRole("textbox", { name: "Retries" })).toHaveValue("3");
+  await shot(page, "24-settings-dark");
+  await page.goto("settings?tab=file");
+  await page.getByRole("button", { name: "Show config.yaml" }).click();
+  await expect(page.getByRole("textbox", { name: "config.yaml" })).toContainText("remote-management:");
+  await shot(page, "25-settings-config-yaml-dark");
+  expectClean(watched);
+});
+
+test("changes settings, client keys and config.yaml under the policy", async ({ page }) => {
+  const watched = await watch(page);
+  await signIn(page);
+  await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Settings" }).click();
+  await expect(page.getByRole("heading", { name: "Settings", level: 1 })).toBeVisible();
+  const retries = page.getByRole("textbox", { name: "Retries" });
+  await expect(retries).toHaveValue("3");
+  await shot(page, "19-settings");
+
+  // Two settings, reviewed against the server, then saved one at a time.
+  await retries.fill("5");
+  await page.getByRole("checkbox", { name: "Debug logging" }).check();
+  await expect(page.getByText("2 unsaved changes.")).toBeVisible();
+  await page.getByRole("button", { name: "Review and save" }).click();
+  const review = page.getByRole("dialog", { name: "Review the changes" });
+  await expect(review.getByRole("row")).toHaveCount(3);
+  await expect(review.getByRole("button", { name: "Save 2 settings" })).toBeFocused();
+  await shot(page, "20-settings-review");
+  await review.getByRole("button", { name: "Save 2 settings" }).click();
+  await expect(page.getByText("Saved 2 settings. The server uses them from now on.")).toBeVisible();
+  await expect(page.getByText("No unsaved changes.")).toBeVisible();
+
+  // A client key, made here and added on its own.
+  await page.getByRole("button", { name: "Add a client key" }).click();
+  const addKey = page.getByRole("dialog", { name: "Add a client key" });
+  await expect(addKey.getByLabel("Client key", { exact: true })).toHaveAttribute("type", "password");
+  await shot(page, "21-settings-add-client-key");
+  await addKey.getByRole("button", { name: "Add the key" }).click();
+  await expect(page.getByText("Added the key: the proxy takes it from now on.")).toBeVisible();
+  await expect(page.getByRole("region", { name: "Client API keys" }).getByRole("listitem")).toHaveCount(3);
+
+  // config.yaml in the editor, which lives in a shadow root.
+  await page.getByRole("tab", { name: "config.yaml" }).click();
+  await page.getByRole("button", { name: "Show config.yaml" }).click();
+  const editor = page.getByRole("textbox", { name: "config.yaml" });
+  await expect(editor).toContainText("remote-management:");
+  expect(
+    await page.locator(".cm-editor").evaluate((element) => element.getRootNode() instanceof ShadowRoot),
+    "the editor is in a shadow root",
+  ).toBe(true);
+  await editor.click();
+  await page.keyboard.press("Control+End");
+  await page.keyboard.type("# Edited in the end-to-end test");
+  await expect(page.getByText("Unsaved changes.", { exact: true })).toBeVisible();
+  await shot(page, "22-settings-config-yaml");
+  await page.getByRole("button", { name: "Review changes" }).click();
+  const yamlReview = page.getByRole("dialog", { name: "Review the changes to config.yaml" });
+  await expect(yamlReview.getByRole("insertion")).toHaveText("Added: # Edited in the end-to-end test");
+  await shot(page, "23-settings-config-yaml-review");
+  await yamlReview.getByRole("button", { name: "Save config.yaml" }).click();
+  await expect(page.getByText("Saved config.yaml. The server uses it from now on.")).toBeVisible();
+
+  expect(watched.server.writes).toEqual([
+    'PATCH /v0/management/request-retry {"value":5}',
+    'PATCH /v0/management/debug {"value":true}',
+    "PATCH /v0/management/api-keys",
+    "PUT /v0/management/config.yaml",
+  ]);
+  expectClean(watched);
+});
+
+test("says when the server can't change settings yet", async ({ page }) => {
+  const watched = await watch(page, { writable: false });
+  await signIn(page);
+  await page.goto("settings");
+  await page.getByRole("checkbox", { name: "Debug logging" }).check();
+  await page.getByRole("button", { name: "Review and save" }).click();
+  const review = page.getByRole("dialog", { name: "Review the changes" });
+  await review.getByRole("button", { name: "Save 1 setting" }).click();
+  await expect(review.getByText("This server can't change settings yet")).toBeVisible();
+  await shot(page, "26-settings-read-only");
+  await review.getByRole("button", { name: "Close" }).click();
+  await expect(page.getByText("1 unsaved change.")).toBeVisible();
+  expect(watched.server.writes).toEqual(["PATCH /v0/management/debug"]);
+  // The browser reports the refused write itself; nothing else may fail.
+  watched.consoleErrors = watched.consoleErrors.filter(
+    (text) => !text.includes("the server responded with a status of 503"),
+  );
   expectClean(watched);
 });
 

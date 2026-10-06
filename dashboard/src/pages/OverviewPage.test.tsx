@@ -10,6 +10,7 @@ import { mockApi, route, type MockApi } from "../test/mockApi";
 import { renderApp } from "../test/renderApp";
 
 const KEY = "sk-test-client-key-0001";
+const OTHER_KEY = "sk-test-client-key-0002";
 const PYTHON = "The OpenAI SDK (Python) setup";
 const NEW_KEY = /^sk-[A-Za-z0-9_-]{43}$/;
 
@@ -26,8 +27,8 @@ interface Server {
 }
 
 /**
- * A server with `keys` and `setup`, whose key list changes as PATCH and PUT
- * change it, and which leaves safe mode once no example key is left.
+ * A server with `keys` and `setup`, whose key list changes as PATCH, DELETE
+ * and PUT change it, and which leaves safe mode once no example key is left.
  */
 function server(
   keys: string[],
@@ -53,6 +54,10 @@ function server(
       } else {
         state.keys[index] = body.new;
       }
+      return { json: { status: "ok" } };
+    }),
+    route("DELETE", API_KEYS, (request) => {
+      state.keys.splice(Number(request.url.searchParams.get("index")), 1);
       return { json: { status: "ok" } };
     }),
     route("PUT", API_KEYS, (request) => {
@@ -307,13 +312,21 @@ describe("safe mode", () => {
     await waitFor(() => {
       expect(screen.queryByText("The proxy is in safe mode")).not.toBeInTheDocument();
     });
-    const put = state.api.callsTo("PUT", API_KEYS);
-    expect(put).toHaveLength(1);
-    const list = put[0]?.json() as string[];
-    expect(list).toHaveLength(1);
-    expect(list[0]).toMatch(NEW_KEY);
+    // The new key takes the first example's place before any example goes,
+    // so the list is never empty; then the others go one at a time.
+    const patch = state.api.callsTo("PATCH", API_KEYS);
+    expect(patch).toHaveLength(1);
+    const body = patch[0]?.json() as { old: string; new: string };
+    expect(body.old).toBe("your-api-key-1");
+    expect(body.new).toMatch(NEW_KEY);
+    expect(state.api.callsTo("DELETE", API_KEYS).map((call) => call.url.search)).toEqual([
+      "?index=2",
+      "?index=1",
+    ]);
+    expect(state.keys).toEqual([body.new]);
+    expect(state.api.callsTo("PUT", API_KEYS)).toEqual([]);
     await waitFor(() => {
-      expect(screen.getByLabelText(PYTHON)).toHaveTextContent(`api_key="sk-...${(list[0] ?? "").slice(-4)}"`);
+      expect(screen.getByLabelText(PYTHON)).toHaveTextContent(`api_key="sk-...${body.new.slice(-4)}"`);
     });
   });
 
@@ -321,12 +334,18 @@ describe("safe mode", () => {
     const state = server(["your-api-key-1", KEY, "your-api-key-2"], { safe_mode: true });
     const { user } = renderApp("/");
     await screen.findByText("The proxy is in safe mode");
+    // A key added elsewhere after the page loaded stays.
+    state.keys.push(OTHER_KEY);
     await user.click(screen.getByRole("button", { name: "Remove the example keys" }));
     await waitFor(() => {
-      expect(state.api.callsTo("PUT", API_KEYS)).toHaveLength(1);
+      expect(state.keys).toEqual([KEY, OTHER_KEY]);
     });
-    expect(state.api.callsTo("PUT", API_KEYS)[0]?.json()).toEqual([KEY]);
+    expect(state.api.callsTo("DELETE", API_KEYS).map((call) => call.url.search)).toEqual([
+      "?index=2",
+      "?index=0",
+    ]);
     expect(state.api.callsTo("PATCH", API_KEYS)).toEqual([]);
+    expect(state.api.callsTo("PUT", API_KEYS)).toEqual([]);
   });
 
   it("says it's saved while the proxy has yet to reload its config", async () => {
@@ -343,13 +362,27 @@ describe("safe mode", () => {
 
   it("gives the key to put in by hand when the server can't change settings", async () => {
     const state = server([...EXAMPLE_API_KEYS], { safe_mode: true });
-    state.api.use(route("PUT", API_KEYS, { status: 404 }));
+    state.api.use(
+      route("PATCH", API_KEYS, { status: 503, json: { error: "config writer unavailable" } }),
+    );
     const { user } = renderApp("/");
     await screen.findByText("The proxy is in safe mode");
     await user.click(screen.getByRole("button", { name: "Replace the example keys with a new key" }));
     const notice = (await screen.findByText("This server can't change settings yet")).parentElement;
     expect(notice).toHaveTextContent("In config.yaml, replace the example keys under api-keys");
+    expect(state.api.callsTo("DELETE", API_KEYS)).toEqual([]);
     expect(state.keys).toEqual([...EXAMPLE_API_KEYS]);
+  });
+
+  it("says so when the server can't remove the examples", async () => {
+    const state = server(["your-api-key-1", KEY], { safe_mode: true });
+    state.api.use(route("DELETE", API_KEYS, { status: 404 }));
+    const { user } = renderApp("/");
+    await screen.findByText("The proxy is in safe mode");
+    await user.click(screen.getByRole("button", { name: "Remove the example keys" }));
+    const notice = (await screen.findByText("This server can't change settings yet")).parentElement;
+    expect(notice).toHaveTextContent("Edit config.yaml by hand");
+    expect(state.keys).toEqual(["your-api-key-1", KEY]);
   });
 
   it("takes the user to the key setup when sent from the safe-mode page", async () => {

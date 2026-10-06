@@ -252,6 +252,22 @@ describe("the Usage page", () => {
     expect(await screen.findByText("This server can't change settings yet")).toBeVisible();
   });
 
+  it("says so too when this server can't save config.yaml", async () => {
+    usageServer(
+      route("GET", USAGE_LEDGER, {
+        json: ledger({ usage_statistics_enabled: false, recording: false }),
+      }),
+      route("PUT", USAGE_STATISTICS_ENABLED, {
+        status: 503,
+        json: { error: "config writer unavailable" },
+      }),
+    );
+    const { user } = renderApp("/usage");
+    await user.click(await screen.findByRole("button", { name: "Start recording" }));
+    const notice = (await screen.findByText("This server can't change settings yet")).parentElement;
+    expect(notice).toHaveTextContent("Set usage-statistics-enabled: true in config.yaml instead.");
+  });
+
   it("says when nothing has been recorded yet", async () => {
     const api = usageServer(
       route("GET", USAGE_LEDGER, { json: ledger({ rows: 0, oldest: null, newest: null }) }),

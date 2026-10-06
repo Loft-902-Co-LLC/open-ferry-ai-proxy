@@ -294,6 +294,75 @@ const PROVIDER_KEYS: Record<string, ProviderKey[]> = {
   "gemini-api-key": [{ "api-key": GEMINI_KEY, "base-url": "", "auth-index": "5a6b7c8d9e0f1a2b" }],
 };
 
+/** The client keys the server starts with; placeholders. */
+const CLIENT_KEYS = ["sk-laptop-4c0b2f7a9e1d9f3k", "sk-ci-runner-8d2e61b0a7c3"];
+
+/** The settings as `GET /config` gives them. */
+function settingsConfig(): Record<string, unknown> {
+  return {
+    host: "127.0.0.1",
+    port: 18317,
+    debug: false,
+    "proxy-url": "",
+    "request-retry": 3,
+    "max-retry-credentials": 0,
+    "max-retry-interval": 30,
+    "force-model-prefix": false,
+    "logging-to-file": true,
+    "logs-max-total-size-mb": 512,
+    "request-log": false,
+    "error-logs-max-files": 10,
+    "usage-statistics-enabled": true,
+    routing: { strategy: "round-robin" },
+  };
+}
+
+/** A config.yaml shaped like a real one, with placeholder keys only. */
+const CONFIG_YAML = [
+  "# open-ferry's config, for the end-to-end tests. No key here is real.",
+  'host: "127.0.0.1"',
+  "port: 18317",
+  "",
+  "remote-management:",
+  "  allow-remote: false",
+  '  secret-key: "$2a$10$e2e.placeholder.not.a.real.hash"',
+  "",
+  "debug: false",
+  "logging-to-file: true",
+  "logs-max-total-size-mb: 512",
+  "request-log: false",
+  "usage-statistics-enabled: true",
+  'proxy-url: ""',
+  "request-retry: 3",
+  "max-retry-interval: 30",
+  "",
+  "routing:",
+  "  strategy: round-robin",
+  "",
+  "api-keys:",
+  ...CLIENT_KEYS.map((key) => `  - "${key}"`),
+  "",
+  "claude-api-key:",
+  `  - api-key: "${CLAUDE_KEY}"`,
+  "",
+].join("\n");
+
+/** The routes that change one setting each, by their path under the management API. */
+const SETTING_ROUTES = new Set([
+  "proxy-url",
+  "routing/strategy",
+  "request-retry",
+  "max-retry-credentials",
+  "max-retry-interval",
+  "force-model-prefix",
+  "debug",
+  "logging-to-file",
+  "logs-max-total-size-mb",
+  "request-log",
+  "error-logs-max-files",
+  "usage-statistics-enabled",
+]);
+
 /** What a Claude sign-in's start gives: the provider's page, never opened here. */
 const SIGN_IN = {
   status: "ok",
@@ -304,6 +373,8 @@ const SIGN_IN = {
 export interface MockOptions {
   /** Whether the server has credentials and keys; else it's a first run. Default true. */
   credentials?: boolean;
+  /** Whether it can save config.yaml; else every write answers 503. Default true. */
+  writable?: boolean;
 }
 
 export interface MockServer {
@@ -313,6 +384,8 @@ export interface MockServer {
   logBytes: (name: string) => Buffer | undefined;
   /** Requests to any origin but the app's, which were refused. */
   offOrigin: string[];
+  /** The settings writes it took, as "METHOD /path", with the body for a setting's route. */
+  writes: string[];
 }
 
 /**
@@ -326,11 +399,16 @@ export async function mockServer(
 ): Promise<MockServer> {
   const now = Date.now();
   const connected = options.credentials ?? true;
+  const writable = options.writable ?? true;
+  const config = settingsConfig();
+  const clientKeys = [...CLIENT_KEYS];
+  let configYaml = CONFIG_YAML;
   const calls = recentCalls(now);
   const logs = recentLogs(calls).map((entry) => ({ ...entry, size: logFile(entry).length }));
   const server: MockServer = {
     unhandled: [],
     offOrigin: [],
+    writes: [],
     logBytes: (name) => {
       const entry = logs.find((log) => log.name === name);
       return entry === undefined ? undefined : logFile(entry);
@@ -368,7 +446,16 @@ export async function mockServer(
       case "GET /v0/management/usage-statistics-enabled":
         return json(route, { "usage-statistics-enabled": true });
       case "GET /v0/management/api-keys":
-        return json(route, { "api-keys": ["sk-laptop-4c0b2f7a9e1d9f3k", "sk-ci-runner-8d2e61b0a7c3"] });
+        return json(route, { "api-keys": clientKeys });
+      case "GET /v0/management/config":
+        return json(route, { ...config, "api-keys": clientKeys });
+      case "GET /v0/management/config.yaml":
+        return route.fulfill({
+          status: 200,
+          contentType: "application/yaml; charset=utf-8",
+          headers: BUILD_HEADERS,
+          body: configYaml,
+        });
       case "GET /v0/management/logs":
         return json(route, serverLogPage(serverLines(now)));
       case "GET /open-ferry/api/v1/client-setup":
@@ -427,6 +514,47 @@ export async function mockServer(
         break;
     }
     const list = path.slice("/v0/management/".length);
+    const write = ["PUT", "PATCH", "DELETE"].includes(method);
+    const settingsWrite =
+      write && (SETTING_ROUTES.has(list) || list === "api-keys" || list === "config.yaml");
+    if (settingsWrite && !writable) {
+      server.writes.push(call);
+      return json(route, { error: "config writer unavailable" }, 503);
+    }
+    if (write && SETTING_ROUTES.has(list)) {
+      const body = request.postData() ?? "";
+      server.writes.push(`${call} ${body}`);
+      const { value } = JSON.parse(body) as { value: unknown };
+      if (list === "routing/strategy") {
+        config.routing = { strategy: value };
+      } else {
+        config[list] = value;
+      }
+      return json(route, { status: "ok" });
+    }
+    if (call === "PATCH /v0/management/api-keys") {
+      server.writes.push(call);
+      const body = JSON.parse(request.postData() ?? "{}") as { old?: string; new?: string };
+      if (body.old !== undefined && body.new !== undefined) {
+        const at = clientKeys.indexOf(body.old);
+        if (at < 0) {
+          clientKeys.push(body.new);
+        } else {
+          clientKeys[at] = body.new;
+        }
+      }
+      return json(route, { status: "ok" });
+    }
+    if (call === "DELETE /v0/management/api-keys") {
+      server.writes.push(`${call}${url.search}`);
+      clientKeys.splice(Number(url.searchParams.get("index")), 1);
+      return json(route, { status: "ok" });
+    }
+    if (call === "PUT /v0/management/config.yaml") {
+      server.writes.push(call);
+      configYaml = request.postData() ?? "";
+      return json(route, { ok: true, changed: ["config"] });
+    }
     if (method === "GET" && Object.hasOwn(PROVIDER_KEYS, list)) {
       return json(route, { [list]: connected ? PROVIDER_KEYS[list] : [] });
     }

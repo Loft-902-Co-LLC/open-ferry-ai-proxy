@@ -27,6 +27,9 @@ const CredentialsPage = lazy(() =>
 const LogViewerPage = lazy(() =>
   import("../pages/logs/LogViewerPage").then((module) => ({ default: module.LogViewerPage })),
 );
+const SettingsPage = lazy(() =>
+  import("../pages/settings/SettingsPage").then((module) => ({ default: module.SettingsPage })),
+);
 
 /** Where a signed-out visit was headed, kept across the sign-in. */
 export interface ReturnTo {
@@ -59,6 +62,7 @@ export const routes: RouteObject[] = [
           { path: "usage/ledger", element: <LedgerPage /> },
           { path: "logs", element: <LogsPage /> },
           { path: "logs/:name", element: <LogViewerPage /> },
+          { path: "settings", element: <SettingsPage /> },
           { path: "about", element: <AboutPage /> },
           { path: "*", element: <NotFoundPage /> },
         ],

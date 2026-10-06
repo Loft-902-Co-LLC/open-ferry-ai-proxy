@@ -13,6 +13,7 @@ export const NAV_ITEMS: readonly { to: string; label: string }[] = [
   { to: "/credentials", label: "Credentials" },
   { to: "/usage", label: "Usage" },
   { to: "/logs", label: "Logs" },
+  { to: "/settings", label: "Settings" },
   { to: "/about", label: "About" },
 ];
 
