@@ -22,7 +22,8 @@
 //! What is logged:
 //! - Not a `GET`, unless it is a Responses WebSocket upgrade, nor the
 //!   management API (`/v0/management`, `/v8/management`, `/management`),
-//!   nor an OAuth callback (a path ending `/callback`).
+//!   nor the dashboard's API (`/open-ferry/`), nor an OAuth callback (a
+//!   path ending `/callback`).
 //! - With `request-log` on, the client's body is read before the handler
 //!   runs, up to the server's body limit, and every answer is kept.
 //! - With it off, what the handler reads of the client's body is kept as it
@@ -37,7 +38,9 @@
 //! Deviations from upstream:
 //! - Upstream installs the middleware only without `commercial-mode`; the
 //!   layer is always installed and reads the setting for each request.
-//! - OAuth callbacks aren't logged.
+//! - OAuth callbacks aren't logged, nor is the dashboard's API, which is
+//!   open-ferry's own and, like the management API, holds the management
+//!   key.
 //! - With `request-log` off, a body of up to 1 MiB isn't read ahead of the
 //!   handler: every body is kept as the handler reads it.
 //! - With `request-log` on, the body read ahead is bounded by the server's
@@ -78,8 +81,13 @@ use crate::state::AppState;
 mod tests;
 
 /// The path prefixes of the management API, which is never logged
-/// (upstream's `shouldLogRequest`).
-const MANAGEMENT_PREFIXES: [&str; 3] = ["/v0/management", "/v8/management", "/management"];
+/// (upstream's `shouldLogRequest`), and of the dashboard's API.
+const MANAGEMENT_PREFIXES: [&str; 4] = [
+    "/v0/management",
+    "/v8/management",
+    "/management",
+    "/open-ferry/",
+];
 
 /// Captures a request and its answer for the request log, and sets the
 /// trace header.

@@ -156,7 +156,14 @@ async fn safe_mode_shuts_the_proxy_routes() {
     let (status, headers, body) = send(&app, authed(Method::GET, "/v1/models", "")).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(headers["x-cpa-safe-mode"], "example-api-key");
-    assert!(body.contains("unsafe_example_api_key"), "{body}");
+    let body: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        body,
+        json!({
+            "error": "unsafe_example_api_key",
+            "message": "Proxy API endpoints are disabled because api-keys contains template values. Open /management.html?safe-mode=configure, update api-keys in Management, then retry.",
+        })
+    );
     let (status, _, _) = send(&app, Request::get("/healthz").body(Body::empty()).unwrap()).await;
     assert_eq!(status, StatusCode::OK);
 }

@@ -165,8 +165,8 @@ fn panicked(panic: Box<dyn Any + Send + 'static>) -> Response {
 
 /// Shuts the proxy routes while a client key is still a template value
 /// (`exampleAPIKeySafeModeMiddleware`). Upstream also serves a warning page
-/// at `/`, and points to its management page; this port points to the
-/// config file.
+/// at `/` and `/management.html`; here `/management.html` is the
+/// dashboard's, which opens its API-key setup for `?safe-mode=configure`.
 async fn safe_mode(State(state): State<AppState>, request: Request, next: Next) -> Response {
     if !state.settings().safe_mode || !is_safe_mode_path(request.uri().path()) {
         return next.run(request).await;
@@ -174,7 +174,8 @@ async fn safe_mode(State(state): State<AppState>, request: Request, next: Next) 
     let body = json!({
         "error": "unsafe_example_api_key",
         "message": "Proxy API endpoints are disabled because api-keys contains template \
-                    values. Replace them in the config file, then retry.",
+                    values. Open /management.html?safe-mode=configure, update api-keys in \
+                    Management, then retry.",
     })
     .to_string();
     let mut headers = HeaderMap::new();

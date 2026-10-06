@@ -337,6 +337,19 @@ fn management_v8_requests_are_not_logged() {
     assert!(should_log_path("/v1/chat/completions"));
 }
 
+// Not upstream's: the dashboard's API, open-ferry's own, isn't logged
+// either.
+#[test]
+fn dashboard_api_requests_are_not_logged() {
+    for path in [
+        "/open-ferry/api/v1/usage/records",
+        "/open-ferry/api/v1/usage/prices",
+    ] {
+        assert!(!should_log_path(path), "{path}");
+    }
+    assert!(should_log_path("/open-ferry-like/v1/chat/completions"));
+}
+
 // Ports TestRequestLoggingMiddleware_PreservesFullUUIDForLoggerAndTruncatesFilename
 // and TestRequestLoggingMiddleware_StreamingPreservesFullUUIDForLogger.
 #[tokio::test]

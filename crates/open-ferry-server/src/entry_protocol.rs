@@ -301,4 +301,24 @@ mod tests {
         ];
         assert_eq!(got, want);
     }
+
+    // Not upstream's: `entry_providers`, which the dashboard's client setup
+    // lists each route's models with, adjusts as a call is routed and
+    // leaves image-only models out.
+    #[test]
+    fn entry_providers_route_as_calls_do() {
+        let both = || names(&["gemini-interactions", "gemini"]);
+        assert_eq!(
+            crate::entry_providers(&Format::OPENAI_RESPONSE, "gemini-3-pro", both()),
+            both()
+        );
+        assert_eq!(
+            crate::entry_providers(&Format::CODEX, "gemini-3-pro", both()),
+            names(&["gemini"])
+        );
+        assert_eq!(
+            crate::entry_providers(&Format::OPENAI, "gpt-image-2", names(&["codex"])),
+            names(&[])
+        );
+    }
 }
