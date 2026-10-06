@@ -15,6 +15,72 @@ A Rust port of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) with 
 
 **Pre-alpha.** This README describes what we're building, not all of what exists. `open-ferry` reads CLIProxyAPI's `config.yaml` and auth directory, signs in to Codex and Claude with their OAuth logins (`-codex-login`, `-codex-device-login`, `-claude-login`), and serves Chat Completions, legacy Completions, Claude Messages, and OpenAI Responses over HTTP and WebSocket, with upstream's routing, errors, streaming and keep-alives. It serves the Gemini API's `/v1beta/models` routes too (model lists, `generateContent`, `streamGenerateContent` and `countTokens`), and the model list Codex clients fetch, from upstream's Codex client catalog. It also calls the OpenAI-compatible upstreams of the config (`openai-compatibility`), any provider that speaks Chat Completions, with their API keys, headers, proxies and model aliases, and Gemini and Vertex AI, with the config's `gemini-api-key` and `vertex-api-key` entries and Vertex AI service accounts from the auth directory. Requests to Codex and to the OpenAI-compatible upstreams carry the thinking setting a model suffix such as `gpt-5.5(high)` or the client's request asks for, checked against the model's levels. Behind the server, upstream's credential manager picks an account per request, with its retries, cooldowns and model aliases, refreshes tokens in the background, and follows changes to the config and auth files. With the config's `codex.model-level-cooling`, a Codex usage limit cools only the model, and with `codex.stream-bootstrap-buffering`, a Codex stream that reports an overload before it starts fails over to another account. It also serves the part of CLIProxyAPI's `/v0/management` API that T3 Code's hub uses, with upstream's key checks and bans: `auth-files` (and `auth-files/models`), `api-call` and `reset-quota`, under their `/v8/management` names too, and more: the credential files and state, the OAuth logins, the config reads, `logs`, the usage queue and `quota/fetch`. The routes that write the config, and the plugin and other providers' ones, aren't ported ([UPSTREAM.md](UPSTREAM.md#not-ported)). Behind them, `request-log` and the error logs write each request's log to the log directory, `logging-to-file` writes `main.log`, `usage-statistics-enabled` queues a usage record for each call, the config's `payload` rules and `disable-image-generation` apply, and `save-cooldown-status` keeps cooldowns across restarts, all as upstream does (see [UPSTREAM.md](UPSTREAM.md#observability)). The translators between Codex and three client formats, Claude Messages, OpenAI Responses and OpenAI Chat Completions, are ported in both directions, as are those between Claude and the two OpenAI formats, along with upstream's checks of every provider's reasoning signatures. So are the translators for upstreams that only speak OpenAI Chat Completions, for Claude Messages and OpenAI Responses clients, the passthrough for Chat Completions clients, the translators from Gemini `generateContent` clients to Codex, Claude and Chat Completions upstreams, and the translators for Gemini, Claude Messages, Chat Completions and OpenAI Responses clients to Gemini upstreams. For Claude clients of Codex, which drop Codex's encrypted reasoning, it keeps each turn's reasoning and tool calls in memory by the session the client names and puts them back in that session's next request, as upstream does. With `client.codex.optimize-multi-agent-v2`, a Codex client's multi-agent v2 requests can go to other upstreams, with the models it may delegate to listed in `spawn_agent`, and with `codex.orphan-delegation-compatibility`, a Codex sub-agent's delegation outputs without their call become user messages; a `codex-api-key` model marked `is-compat` gets requests in Codex's plain Responses dialect. The translators are checked against upstream's ([UPSTREAM.md](UPSTREAM.md#checking-parity)).
 
+## Install
+
+Coming from CLIProxyAPI? Read the [migration guide](docs/migrating-from-cliproxyapi.md) first: it covers what carries over and what doesn't.
+
+No release has been published yet. Until the first one, [build from source](#build-from-source).
+
+### Download a release
+
+Each [release](https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases) has an archive for each platform:
+
+| Platform | Archive |
+|---|---|
+| Linux, x86-64 | `open-ferry-<version>-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux, arm64 | `open-ferry-<version>-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS, Intel | `open-ferry-<version>-x86_64-apple-darwin.tar.gz` |
+| macOS, Apple silicon | `open-ferry-<version>-aarch64-apple-darwin.tar.gz` |
+| Windows, x86-64 | `open-ferry-<version>-x86_64-pc-windows-msvc.zip` |
+
+- **Linux:** the binaries need glibc 2.39 or newer, as on Ubuntu 24.04, Debian 13, Fedora 40 and RHEL 10. On older systems, build from source.
+- **macOS:** the binaries need macOS 11 or newer.
+
+Each archive holds the `open-ferry` binary (`open-ferry.exe` on Windows), this README and the licenses. Put the binary on your `PATH`. Run it in the directory that holds your `config.yaml`, or point to the file with `-config`.
+
+The binaries aren't code-signed. If macOS refuses to open one you downloaded with a browser, verify it as below, then remove the quarantine flag with `xattr -d com.apple.quarantine open-ferry`.
+
+### Verify the download
+
+Each release has a `SHA256SUMS` file and a build provenance attestation for each archive, both made by the [release workflow](.github/workflows/release.yml). Check both before you run the binary.
+
+To check the checksum, download `SHA256SUMS` into the same directory as the archive, then run:
+
+```sh
+sha256sum --check --ignore-missing SHA256SUMS               # Linux
+shasum -a 256 --check --ignore-missing SHA256SUMS           # macOS
+```
+
+On Windows, in PowerShell, this prints `True` when the archive matches:
+
+```powershell
+$archive = "open-ferry-<version>-x86_64-pc-windows-msvc.zip"
+(Get-FileHash $archive).Hash -eq (Select-String -Path SHA256SUMS -SimpleMatch $archive).Line.Split(" ")[0]
+```
+
+To check the attestation, use the [GitHub CLI](https://cli.github.com/). It confirms that the archive was built by this repository's GitHub Actions, and from which commit:
+
+```sh
+gh attestation verify open-ferry-<version>-<target>.tar.gz --repo Loft-902-Co-LLC/open-ferry-ai-proxy
+```
+
+### Build from source
+
+You need the Rust toolchain ([rustup](https://rustup.rs/)) and a C compiler, because rustls's crypto library, aws-lc-rs, compiles C code:
+- on Linux, `gcc` or `clang`;
+- on macOS, the Xcode Command Line Tools;
+- on Windows, the Visual Studio Build Tools with the C++ workload.
+
+On some systems the build also asks for CMake. Then run:
+
+```sh
+git clone https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy.git
+cd open-ferry-ai-proxy
+cargo build --release --locked -p open-ferry
+```
+
+The binary is `target/release/open-ferry`. `rust-toolchain.toml` picks the toolchain.
+
 ## Roadmap
 
 [ROADMAP.md](ROADMAP.md) has the full plan.
