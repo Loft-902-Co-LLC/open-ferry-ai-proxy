@@ -19,16 +19,18 @@
 //!
 //! Deviations from upstream:
 //! - Upstream's tests write the config through these routes and read it
-//!   back. Only their reads are kept: each write answers with the empty 404
-//!   here and leaves the file as it was. So
+//!   back. Only their reads are kept here, over an API without a config
+//!   writer, where each write answers 503 and leaves the file as it was;
+//!   their writes are ported with the config writer. So
 //!   `TestConfigV8MigrationAndLegacyAPI`,
 //!   `TestConfigV8ClientMultiAgentMigration`,
 //!   `TestConfigV8HistoricalFieldPaths` and
 //!   `TestConfigV8HistoricalProviderSubtrees` read a file that already holds
 //!   what upstream's writes put there, and `TestConfigV8JSONTURNSecrets`
 //!   drops its `PUT` round trips.
-//! - `TestConfigV8APIKeysExposeAuthIndex_Issue6287` drops its cases 5, 6
-//!   and 10, which write the config back with the `auth_index` it read.
+//! - `TestConfigV8APIKeysExposeAuthIndex_Issue6287` leaves out its cases
+//!   5, 6 and 10, which write the config back with the `auth_index` it
+//!   read; they are ported with the config writer.
 //! - `TestManagementV8RoutesShareAccessControl` requests only this module's
 //!   routes (the credential list is checked in `server_management_v8`), and
 //!   drops its Home mode case: Home mode isn't ported.
@@ -41,15 +43,21 @@
 //!   `TestConfigV8DeleteLastField`, `TestConfigV8ReplaceEmptyGroup`,
 //!   `TestConfigV8EmptyExcludedModelsSurvivesSave`,
 //!   `TestConfigV8DeletePreservesDocumentPresence`), the rest of
-//!   config_v8_compatibility_test.go, config_v8_upstream_test.go and the
-//!   other config_*_test.go files test writes, and are dropped.
-//!   (config_basic_weight_test.go is ported in `crate::config_read`.)
+//!   config_v8_compatibility_test.go and config_v8_upstream_test.go test
+//!   the file written, and are ported with the config writer. The other
+//!   config_*_test.go files that test writes are ported in `config_keys`
+//!   (which lists those dropped) and `config_settings`, but for
+//!   config_apikey_disable_test.go, which is dropped.
+//!   (config_basic_weight_test.go is ported in `crate::config_read` and
+//!   `config_settings`.)
 //! - Upstream's tests of the `interactions-api-key`, `xai-api-key` and
 //!   `meta-api-key` lists (config_xai_key_test.go, config_meta_key_test.go,
 //!   and the Interactions, xAI and Meta cases of config_priority_test.go,
 //!   config_weight_test.go, config_lists_delete_keys_test.go and
-//!   config_apikey_disable_test.go) only `PATCH`, `PUT` or `DELETE` them,
-//!   and are dropped. The reads are checked by tests that aren't upstream's.
+//!   config_apikey_disable_test.go) only `PATCH`, `PUT` or `DELETE` them.
+//!   Those of config_apikey_disable_test.go are dropped, and the rest are
+//!   ported in `config_keys`. The reads are checked by tests that aren't
+//!   upstream's.
 
 use std::collections::HashSet;
 
@@ -209,20 +217,36 @@ async fn assert_unported(api: &Api, method: Method, path: &str) {
     );
 }
 
+/// Checks that `method` on `path`, a write, is refused by an API without a
+/// config writer. The writes themselves are tested with a writer in
+/// `config_write`.
+async fn assert_needs_writer(api: &Api, method: Method, path: &str) {
+    let answer = api.send(keyed(method.clone(), path, "{}")).await;
+    assert_eq!(
+        (answer.status, answer.body.as_str()),
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            r#"{"error":"config writer unavailable"}"#
+        ),
+        "{method} {path}"
+    );
+}
+
 /// Ported from upstream's config_v8_test.go
 /// (TestConfigV8MigrationAndLegacyAPI): a legacy file reads in the v8
-/// layout without being migrated, and the writes are refused.
+/// layout without being migrated, and without a writer the writes are
+/// refused.
 #[tokio::test]
 async fn config_v8_migration_and_legacy_api() {
     let (dir, api) = over_file(LEGACY);
     assert_v8(&api.get("/v8/management/config").await, LEGACY_V8);
     assert_unchanged(&dir, LEGACY);
-    assert_unported(&api, Method::PATCH, "/v8/management/config").await;
-    assert_unported(&api, Method::PUT, "/v0/management/request-retry").await;
-    assert_unported(&api, Method::PUT, "/v8/management/config.yaml").await;
+    assert_needs_writer(&api, Method::PATCH, "/v8/management/config").await;
+    assert_needs_writer(&api, Method::PUT, "/v0/management/request-retry").await;
+    assert_needs_writer(&api, Method::PUT, "/v8/management/config.yaml").await;
     for path in ["requests/proxy-url", "server/unknown-option"] {
         let path = format!("/v8/management/config/{path}");
-        assert_unported(&api, Method::PUT, &path).await;
+        assert_needs_writer(&api, Method::PUT, &path).await;
     }
     assert_unchanged(&dir, LEGACY);
 }
@@ -280,7 +304,7 @@ async fn config_v8_json_hides_turn_secrets() {
     assert_v8(&api.get("/v8/management/config").await, &whole);
     let path = "/v8/management/config/oauth/providers/codex/live-media-relay/ice-servers";
     assert_v8(&api.get(path).await, servers);
-    assert_unported(&api, Method::PUT, path).await;
+    assert_needs_writer(&api, Method::PUT, path).await;
     let answer = api.get("/v8/management/config.yaml").await;
     assert_eq!(answer.status, StatusCode::OK);
     assert!(
@@ -306,7 +330,7 @@ async fn config_v8_client_multi_agent_migration() {
         let canonical = "/v8/management/config/client/codex/optimize-multi-agent-v2";
         assert_v8(&api.get(canonical).await, "true");
         for method in [Method::PUT, Method::DELETE] {
-            assert_unported(&api, method, canonical).await;
+            assert_needs_writer(&api, method, canonical).await;
         }
         for old in ["providers/codex", "oauth/providers/codex", "codex"] {
             let path = format!("/v8/management/config/{old}/optimize-multi-agent-v2");
@@ -409,7 +433,7 @@ async fn check_historical_path(historical: &str, current: &str, value: &str) {
     }
     assert_v8(&api.get("/v8/management/config/server/port").await, "8317");
     let path = format!("/v8/management/config/{historical}");
-    assert_unported(&api, Method::PUT, &path).await;
+    assert_needs_writer(&api, Method::PUT, &path).await;
     assert_unchanged(&dir, &raw);
 }
 
@@ -433,7 +457,7 @@ async fn config_v8_historical_provider_subtrees() {
     );
     for method in [Method::PATCH, Method::PUT, Method::DELETE] {
         let path = "/v8/management/config/oauth/providers/codex";
-        assert_unported(&api, method, path).await;
+        assert_needs_writer(&api, method, path).await;
     }
     assert_unchanged(&dir, raw);
 }
@@ -613,16 +637,17 @@ async fn management_v8_config_routes_share_access_control() {
 
 /// Ported from upstream's server_management_v8_test.go
 /// (TestManagementV8IndependentContract), its config checks: the nested
-/// value reads, and the refused writes leave the file alone.
+/// value reads, and the writes, refused without a writer, leave the file
+/// alone.
 #[tokio::test]
 async fn management_v8_independent_contract_config() {
     let raw = "port: 8317\nrequest-retry: 3\ndebug: false\napi-keys: [client]\nremote-management: {secret-key: test-password}\n";
     let (dir, api) = over_file(raw);
     let path = "/v8/management/config/routing/retry/request-retry";
     assert_v8(&api.get(path).await, "3");
-    assert_unported(&api, Method::PATCH, "/v8/management/config").await;
-    assert_unported(&api, Method::PUT, path).await;
-    assert_unported(&api, Method::PUT, "/v0/management/request-retry").await;
+    assert_needs_writer(&api, Method::PATCH, "/v8/management/config").await;
+    assert_needs_writer(&api, Method::PUT, path).await;
+    assert_needs_writer(&api, Method::PUT, "/v0/management/request-retry").await;
     assert_unchanged(&dir, raw);
 }
 
@@ -646,7 +671,8 @@ async fn config_yaml_is_the_file() {
     answer.assert(StatusCode::NOT_FOUND, not_found);
     let answer = Api::new().get("/v0/management/config.yaml").await;
     answer.assert(StatusCode::NOT_FOUND, not_found);
-    for method in [Method::PUT, Method::PATCH, Method::DELETE] {
+    assert_needs_writer(&api, Method::PUT, "/v0/management/config.yaml").await;
+    for method in [Method::PATCH, Method::DELETE] {
         assert_unported(&api, method, "/v0/management/config.yaml").await;
     }
 }
@@ -836,7 +862,7 @@ async fn config_v8_reads_interactions_xai_and_meta_keys() {
         let answer = api.get(&format!("/v8/management/config/{path}")).await;
         answer.assert(StatusCode::NOT_FOUND, r#"{"error":"not_found"}"#);
     }
-    assert_unported(&api, Method::PUT, "/v8/management/config/api-keys/xai").await;
+    assert_needs_writer(&api, Method::PUT, "/v8/management/config/api-keys/xai").await;
     assert_unchanged(&dir, NEW_KEYS);
 
     let raw = concat!(
@@ -1438,8 +1464,14 @@ async fn settings_read_one_at_a_time() {
     ] {
         let answer = api.get(&format!("/v0/management/{path}")).await;
         answer.assert(StatusCode::OK, body);
-        for method in [Method::PUT, Method::PATCH, Method::DELETE] {
-            assert_unported(&api, method, &format!("/v0/management/{path}")).await;
+        let path = format!("/v0/management/{path}");
+        for method in [Method::PUT, Method::PATCH] {
+            assert_needs_writer(&api, method, &path).await;
+        }
+        if path.ends_with("/proxy-url") {
+            assert_needs_writer(&api, Method::DELETE, &path).await;
+        } else {
+            assert_unported(&api, Method::DELETE, &path).await;
         }
     }
     let api = with_config("port: 1\n");
@@ -1485,7 +1517,7 @@ async fn lists_are_written_as_upstream_writes_them() {
         let answer = api.get(&format!("/v0/management/{name}")).await;
         answer.assert(StatusCode::OK, &format!(r#"{{"{name}":{list}}}"#));
         for method in [Method::PUT, Method::PATCH, Method::DELETE] {
-            assert_unported(&api, method, &format!("/v0/management/{name}")).await;
+            assert_needs_writer(&api, method, &format!("/v0/management/{name}")).await;
         }
     }
     let api = with_config("port: 1\ngemini-api-key: []\n");
@@ -1619,7 +1651,7 @@ async fn interactions_xai_and_meta_lists_are_written() {
     let (dir, api) = over_file(NEW_KEYS);
     for (name, _) in lists {
         for method in [Method::PUT, Method::PATCH, Method::DELETE] {
-            assert_unported(&api, method, &format!("/v0/management/{name}")).await;
+            assert_needs_writer(&api, method, &format!("/v0/management/{name}")).await;
         }
     }
     assert_unchanged(&dir, NEW_KEYS);

@@ -9,17 +9,22 @@
 //! trusted proxies, the failed-attempt record and the HTTP clients for
 //! `api-call`; and, as the service sets them, the credential store, the
 //! [`CredentialSync`] that reaches the service, the config file's path,
-//! the OAuth login sessions, the credential lock and the [`Observability`]
-//! handles the log and usage routes read.
+//! the OAuth login sessions, the credential lock, the [`Observability`]
+//! handles the log and usage routes read, and the [`ConfigWriter`] and
+//! [`ConfigReload`] the routes that change the config use.
 //!
 //! A handler that writes credentials takes the store and the sync together
 //! with `credential_store`; without them, as in a state made only with
 //! [`ManagementState::new`], it answers 503
 //! `{"error":"credential store unavailable"}` and changes nothing.
 //!
+//! A handler that changes the config saves it with the writer, as the
+//! `config_write` module describes; without one it answers 503
+//! `{"error":"config writer unavailable"}` and changes nothing.
+//!
 //! Deviations from upstream:
-//! - The config file's path is only ever read: open-ferry never writes the
-//!   config.
+//! - The handlers read the config file at its path, and write it only
+//!   through the writer, which the service makes for that path.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -36,6 +41,7 @@ use open_ferry_translate::go::trim_space;
 
 use crate::access::Attempts;
 use crate::client_ip::TrustedProxies;
+use crate::config_write::{ConfigReload, ConfigWriter};
 use crate::credential_sync::CredentialSync;
 use crate::proxy::Clients;
 use crate::{json, oauth};
@@ -62,6 +68,8 @@ struct Inner {
     oauth_sessions: oauth::Sessions,
     /// Upstream's `authStatusMu`.
     credential_lock: tokio::sync::Mutex<()>,
+    /// Upstream's `mu`, as the handlers that change the config take it.
+    config_write_lock: tokio::sync::Mutex<()>,
 }
 
 /// What the builder methods set.
@@ -70,6 +78,8 @@ struct Parts {
     store: Option<Arc<FileStore>>,
     sync: Option<Arc<dyn CredentialSync>>,
     config_path: Option<PathBuf>,
+    config_writer: Option<Arc<dyn ConfigWriter>>,
+    config_reload: Option<Arc<dyn ConfigReload>>,
     observability: Observability,
     #[cfg(test)]
     latest_release_url: Option<String>,
@@ -102,6 +112,7 @@ impl ManagementState {
                 clients: Clients::default(),
                 oauth_sessions: oauth::Sessions::default(),
                 credential_lock: tokio::sync::Mutex::new(()),
+                config_write_lock: tokio::sync::Mutex::new(()),
             }),
             parts: Arc::default(),
         }
@@ -125,10 +136,29 @@ impl ManagementState {
     }
 
     /// The path of the config file the proxy was started with, which the
-    /// handlers read but never write (upstream's `configFilePath`).
+    /// handlers read (upstream's `configFilePath`). They write it only
+    /// through the [`ConfigWriter`].
     #[must_use]
     pub fn with_config_path(mut self, path: PathBuf) -> Self {
         Arc::make_mut(&mut self.parts).config_path = Some(path);
+        self
+    }
+
+    /// Saves the config file through `writer` when a route changes the
+    /// config. Give it the file at the path given to
+    /// [`with_config_path`](Self::with_config_path).
+    #[must_use]
+    pub fn with_config_writer(mut self, writer: Arc<dyn ConfigWriter>) -> Self {
+        Arc::make_mut(&mut self.parts).config_writer = Some(writer);
+        self
+    }
+
+    /// Has the running service load the config file again through
+    /// `reload` once a route has saved it (upstream's
+    /// `SetConfigReloadHook`).
+    #[must_use]
+    pub fn with_config_reload(mut self, reload: Arc<dyn ConfigReload>) -> Self {
+        Arc::make_mut(&mut self.parts).config_reload = Some(reload);
         self
     }
 
@@ -240,9 +270,27 @@ impl ManagementState {
         }
     }
 
-    /// The config file's path, if the service set it. Only ever read.
+    /// The config file's path, if the service set it. The handlers read
+    /// it; they write it only through the writer.
     pub(crate) fn config_path(&self) -> Option<&Path> {
         self.parts.config_path.as_deref()
+    }
+
+    /// The config writer, if the service set one.
+    pub(crate) fn config_writer(&self) -> Option<&Arc<dyn ConfigWriter>> {
+        self.parts.config_writer.as_ref()
+    }
+
+    /// The way to reload the running service's config, if it set one.
+    pub(crate) fn config_reload(&self) -> Option<&Arc<dyn ConfigReload>> {
+        self.parts.config_reload.as_ref()
+    }
+
+    /// The lock that orders the handlers changing the config, as upstream's
+    /// `mu` does: held from copying the config until the copy is saved and
+    /// in place. Take it with `.lock().await`.
+    pub(crate) fn config_write_lock(&self) -> &tokio::sync::Mutex<()> {
+        &self.inner.config_write_lock
     }
 
     /// The OAuth login sessions.

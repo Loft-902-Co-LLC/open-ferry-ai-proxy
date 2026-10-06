@@ -35,12 +35,12 @@ fn error(message: &str) -> String {
 async fn unported_paths_answer_an_empty_404() {
     let api = Api::new();
     for (method, path) in [
-        (Method::PUT, "/v0/management/usage-statistics-enabled"),
+        (Method::DELETE, "/v0/management/usage-statistics-enabled"),
         (Method::GET, "/v0/management/quota/providers"),
         (Method::GET, "/v0/management"),
         (Method::GET, "/v0/management/"),
         (Method::GET, "/v8/management"),
-        (Method::PUT, "/v0/management/config.yaml"),
+        (Method::PATCH, "/v0/management/config.yaml"),
         (Method::GET, "/v8/management/plugins"),
         (Method::GET, "/v0/management/xai-auth-url"),
         (Method::GET, "/v0/management/api-call"),

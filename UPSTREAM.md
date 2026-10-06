@@ -230,7 +230,7 @@ Deliberately not ported:
 
 `open-ferry-management` serves upstream's management routes in parts, each route under both of its names: its v0 path under `/v0/management` and its v8 path under `/v8/management`. Each module documents the routes it serves. Bodies, statuses and headers are written as gin and Go's `encoding/json` write them, and request bodies, query strings, URLs and client addresses are read as gin and Go read them. The tests check them against answers recorded from Go programs built with upstream's `go.mod` (gin v1.10.1, Go 1.26 language settings).
 
-The config is never written. Upstream's routes that change the config are not ported, and a route that upstream answers partly by writing the config refuses that part.
+The routes that change the config save it through the config writer the service gives the API, then have the service load it again (see [Config writes](#config-writes)). Nothing is written when the config is loaded.
 
 #### The foundation
 
@@ -248,7 +248,7 @@ What every part shares, and the deviations that apply to all of them:
 
 - **Paths match exactly.** While a key is set, gin redirects a ported path with a trailing slash (301 for `GET`, else 307) and matches a percent-encoded path decoded. Both get the empty 404 here, as they do on the server's other routes.
 
-- **The config is never written.** Upstream hashes a plain `secret-key` with bcrypt when it loads the config and writes the hash back. We compare a plain key as written, in constant time and in full; upstream's bcrypt reads only the first 72 bytes, and a longer plain key fails to load.
+- **Loading never writes the config.** Upstream hashes a plain `secret-key` with bcrypt when it loads the config and writes the hash back. We compare a plain key as written, in constant time and in full; upstream's bcrypt reads only the first 72 bytes, and a longer plain key fails to load.
 
 - **The failed-attempt record is bounded.** It holds at most 4096 addresses; when it's full, the address least recently active is forgotten, which ends any ban on it early. Idle entries are purged when the record is next written, at most hourly, rather than by an hourly timer. Upstream's record has no bound.
 
@@ -389,7 +389,7 @@ Deviations, each also noted in its module:
 | `GET /v0/management/latest-version` | `GET /v8/management/server/latest-version` |
 | `GET /v0/management/model-definitions/:channel` | `GET /v8/management/routing/model-definitions/:channel` |
 
-All take the management key. The v8 config reads show a setting at its historical path too, and on each API key under `api-keys` the `auth_index` of the credential it makes (the running credential's, or the one it would get), and keep the `models` section. The reads show the secrets the config holds as upstream shows them, to whoever has the key: client and provider API keys, proxy URLs with their passwords, and the whole file from `config.yaml`. The v8 JSON reads leave out the ICE servers' usernames and credentials, as upstream's do. Every write to the config answers the empty 404 and leaves the file as it is (see "Not ported").
+All take the management key. The v8 config reads show a setting at its historical path too, and on each API key under `api-keys` the `auth_index` of the credential it makes (the running credential's, or the one it would get), and keep the `models` section. The reads show the secrets the config holds as upstream shows them, to whoever has the key: client and provider API keys, proxy URLs with their passwords, and the whole file from `config.yaml`. The v8 JSON reads leave out the ICE servers' usernames and credentials, as upstream's do. The writes are in [Config writes](#config-writes).
 
 Deviations, each also noted in its module:
 
@@ -411,11 +411,42 @@ Deviations, each also noted in its module:
 
 - **`latest-version` asks for open-ferry's releases as `open-ferry/<version>`**, where upstream asks for CLIProxyAPI's as `CLIProxyAPI`. Without a proxy in `proxy-url` it goes direct, where upstream follows `HTTP_PROXY` and `HTTPS_PROXY`. Redirects aren't followed. The token comes from `GITHUB_TOKEN` or `github_token`, not `GITSTORE_GIT_TOKEN`. Errors are worded as Rust's HTTP client words them, and a release that doesn't decode gives a fixed message (or `EOF` for an empty body) where upstream gives Go's decoder's error. A release is answered as soon as its JSON value is complete, as upstream answers it, but one that comes in so many pieces that checking after each would parse more than 16 MiB is checked after that only where its brackets close; so a body that isn't JSON may be read on until it ends, the 16 MiB limit or the deadline, where Go's decoder stops at the first byte that can't be JSON.
 
+#### Config writes
+
+| Route | v8 route |
+|---|---|
+| `PUT`, `PATCH /v0/management/<setting>`: `debug`, `usage-statistics-enabled`, `logging-to-file`, `logs-max-total-size-mb`, `error-logs-max-files`, `request-log`, `ws-auth`, `request-retry`, `max-retry-credentials`, `max-retry-interval`, `force-model-prefix`, `routing/strategy`, `proxy-url`, `quota-exceeded/switch-project`, `quota-exceeded/switch-preview-model`; `DELETE proxy-url` | |
+| `PUT`, `PATCH`, `DELETE /v0/management/<list>`: `api-keys`, `gemini-api-key`, `interactions-api-key`, `claude-api-key`, `codex-api-key`, `xai-api-key`, `meta-api-key`, `openai-compatibility`, `vertex-api-key`, `oauth-excluded-models`, `oauth-model-alias`, `oauth-request-scoped-errors` | |
+| `PUT /v0/management/config.yaml` | |
+| | `PUT /v8/management/config.yaml` |
+| | `PUT`, `PATCH /v8/management/config` |
+| | `PUT`, `PATCH`, `DELETE /v8/management/config/*path` |
+
+All take the management key. Each change is made under one lock: the config is copied, the copy changed and saved by the config writer, and the saved copy becomes the config the handlers read. The service then loads the file again, so the change takes effect without waiting for the file watcher, and the handler answers once it has. A v0 write saves the file in the layout it has; a v8 write saves it in the v8 layout. The v8 writes hand their method, path and body to the writer, which reads the file in the v8 layout, makes the change, checks it and saves it. A save the writer refuses answers 500 `{"error":"failed to save config: ..."}`, or `write_failed` for `PUT config.yaml` and the v8 writes, and changes nothing.
+
+Deviations, each also noted in its module:
+
+- **No writer, no write.** Without a config writer, every route that changes the config answers 503 `{"error":"config writer unavailable"}` before it reads its body, and changes nothing. Upstream always has a path to save to.
+
+- **A failed save changes nothing.** Upstream changes its config before saving and keeps the change when the save fails, so later reads and saves show a change the file never got.
+
+- **The answer waits for the reload.** Upstream answers first and reloads in the background, except for a status change on a config API key. It also numbers its reloads and skips one older than a reload already applied; the reload here reads the file, which holds the latest save, so there is nothing to skip.
+
+- **`PUT config.yaml` has the service load the file at once**, where upstream leaves the change to the file watcher; the config the handlers read is the one the body loaded as, so there is no `reload_failed` answer. The body is checked by loading it in memory, where upstream writes a temporary file beside the config and answers 500 `write_failed` with the system's message when it can't. YAML errors are worded as open-ferry's loader words them, and a legacy `weight` that is a string or a boolean answers 422 `invalid_config`, where upstream answers 400 `invalid_yaml`. A plain management key in the body stays plain in the file, where upstream hashes it into the file when it next loads it. A file that can't be written answers `failed to write config` without the system's message.
+
+- **A v8 path that isn't UTF-8** answers 400 `invalid_path` to `PUT` and `PATCH`, and 404 `not_found` to `DELETE`, before the file is read. Upstream uses its bytes as a key.
+
+- **The client impersonation settings are skipped** wherever a request gives them, whatever their value: a Claude key's `cloak` and `fingerprint-profile`, and a Codex key's `disable-codex-cloaking`. Upstream checks them, and a Claude `PUT` keeps the cloak mode of the key it replaces.
+
+- **Maps iterate in key order** when a list is cleaned up: where two OAuth channels lower-case to the same name, the one that sorts last wins. Upstream's winner depends on Go's map order.
+
+- **Bodies are read as Go's decoder reads them into upstream's types, with three exceptions.** A key given more than once takes its last value, where Go merges a later object or list into the earlier one and a later `null` leaves a plain field as it was. Values nest at most 128 deep; Go allows 10000. A string holding an unpaired UTF-16 surrogate escape fails the read; Go reads U+FFFD.
+
+Tests: upstream's route tests of the key lists (`config_weight_test.go`, `config_priority_test.go`, `config_disable_cooling_test.go`, `config_codex_alpha_search_test.go`, `config_lists_delete_keys_test.go`, `config_meta_key_test.go`, `config_xai_key_test.go` and `TestPatchClaudeKeyPriority`) and `config_basic_weight_test.go` are ported, checking the config the writer is asked to save. Their checks of the file written, and the tests of the v8 writes in `config_v8_test.go`, `config_v8_compatibility_test.go` and `config_v8_upstream_test.go`, are ported with the config writer. The rest of `config_claude_key_test.go` and `config_codex_disable_cloaking_test.go` are dropped: they test client impersonation settings.
+
 #### Not ported
 
 Until the parts above port them, their routes answer the empty 404, and so does every other management route. This covers, under `/v0/management` and their v8 names under `/v8/management`:
-
-- writing the config: `PUT config.yaml`, v8's `PUT` and `PATCH config` and `config/*path`, and the `PUT`, `PATCH` and `DELETE` routes of each setting, key list and OAuth list;
 
 - the logins of other providers: `kimi-auth-url`, `kimi-ai-auth-url`, `xai-auth-url`, `meta-auth-url`, `antigravity-auth-url` and `devin-auth-url`. v8's `oauth/auth-url` answers 404 `{"error":"provider_not_found"}` for these providers and for plugins, as upstream answers a provider it doesn't know, and the main server's `/antigravity/callback`, `/devin/callback` and `/callback` answer the server's `404 page not found`;
 
@@ -436,7 +467,7 @@ What the parts share is in place:
 - **A context for each request.** The server's outermost layer gives every request a `RequestContext` (`open_ferry_core::observe`): a version 7 UUID as its ID, when it started, its method and route, the connection's address and the client's address resolved through `trusted-proxies`, `X-Forwarded-For`, the client's `User-Agent`, the client key once it is checked, and the credential the manager picks. The access line is logged from it.
 - **Taps on the upstream traffic.** Each call carries an `Observation`: the context, and the taps the request log and the usage statistics give for it, none while both are off. The Claude, Codex (HTTP and WebSocket), Gemini, Vertex AI, Meta and OpenAI-compatible executors and the Codex Alpha Search pass-through tell the taps each attempt's request once its credential's headers are set, the answer's head, and each body chunk or message as it is read. The manager tells them how each executor call ended, and hands the credential errors it records to an error-event hook. Without taps each step costs a branch, and a tap never holds up a send or a stream.
 - **The payload hook.** Each executor calls `open_ferry_providers::payload::apply` where upstream applies the config's payload rules, as the last change to a body it sends. It runs the Codex clients' integer pass, `disable-image-generation` and the rules (see [Payload rules](#payload-rules)).
-- **The settings.** `commercial-mode`, `logs-max-total-size-mb`, `error-logs-max-files`, `usage-statistics-enabled`, `redis-usage-queue-retention-seconds`, `save-cooldown-status`, `payload` and `disable-image-generation` are read with upstream's defaults and limits, shown by `GET config`, and handed to each part at start and on every reload. The config file is never written.
+- **The settings.** `commercial-mode`, `logs-max-total-size-mb`, `error-logs-max-files`, `usage-statistics-enabled`, `redis-usage-queue-retention-seconds`, `save-cooldown-status`, `payload` and `disable-image-generation` are read with upstream's defaults and limits, shown by `GET config`, and handed to each part at start and on every reload, including the one after a management write changes them (see [Config writes](#config-writes)).
 - **The log directory** is resolved as upstream resolves it: `WRITABLE_PATH` or `writable_path`, else beside the config.
 
 Deviations, each also noted in its module:
@@ -480,7 +511,7 @@ Ported:
 - **The log directory's size limit**: with `logs-max-total-size-mb` positive, its `*.log` and `*.log.gz` files are checked at once and then every minute, and the oldest deleted until they are under the limit, never the `main.log` being written.
 - **The access line** (`open-ferry-server`'s `access_log`): the status, the time taken, the client's address, the method and the path, key-like query values masked, at info, warn from 400 and error from 500; a health probe answered with a 2xx isn't logged. A request on the AI routes is handled in a span with its ID, so every line logged for it shows the ID, including those logged while its answer's stream is sent: the body is polled in the span again, and the manager's task that forwards a stream keeps it.
 - **`GET` and `DELETE logs`** (`open-ferry-management`'s `logs`), at `/v0/management/logs` and `/v8/management/observability/logs`, with the management key. `GET` reads `main.log` and its rotations oldest first: the last `limit` lines, the lines after `after`, or with `cursor` the complete lines written since an earlier answer, followed across rotations. `DELETE` empties `main.log` and removes its rotations.
-- **The reads of `usage-statistics-enabled`, `logs-max-total-size-mb` and `error-logs-max-files`** at `/v0/management/<name>`; v8 reads them through `config/*path`. Their `PUT` and `PATCH`, which write the config file, answer the empty 404.
+- **The reads of `usage-statistics-enabled`, `logs-max-total-size-mb` and `error-logs-max-files`** at `/v0/management/<name>`; v8 reads them through `config/*path`. Their `PUT` and `PATCH` save the config (see [Config writes](#config-writes)).
 - **The config changes logged on reload** (`open_ferry_core::config::diff`): the lines upstream logs after `config changes detected:`, for every setting open-ferry types. Secrets never show: keys are only said to change, key lists are counted, header values are left out, and a URL shows only its scheme and host. The `config-diff` parity suite compares the lines with upstream's over fixed and seeded random config pairs.
 
 Deviations, each also noted in its module:
@@ -656,6 +687,7 @@ The management API reads requests and writes answers as gin v1.10.1 and Go's sta
 
 - `client_ip` from gin's `ClientIP` and trusted proxy checks, with Go's `net.ParseIP`, `ParseCIDR` and `IP.String`: the address a request comes from, which decides whether it is local and which address a ban falls on.
 - `bind` from gin's `ShouldBindJSON` over Go's `encoding/json` decoder, `json` from gin's `c.JSON` over its encoder, and `query` from gin's `c.Query` over Go's `url.ParseQuery`. `json` writes a float64 with `open-ferry-translate`'s `go::json_float` (see [Other ported code](#other-ported-code)), which rounds halfway cases to even, as Rust's formatting doesn't.
+- `go_json` from Go's `encoding/json` decoder as it fills a struct, a slice, a map, a pointer and a `json.RawMessage` (with `foldName`'s case folding), and `fmt.Sscanf` with `%d`: how upstream's config handlers read their request bodies and the `index` query.
 - `go_url` from Go's `url.Parse` and `netip.ParseAddr`, and `go` from `strings.EqualFold` and `ToUpper`, `strconv.ParseBool` and `Atoi`, `utf8.DecodeRune`, `textproto.CanonicalMIMEHeaderKey` and `time.Duration.String`.
 - In `api_call`, what of Go's `net/http` client decides what is sent and answered: valid methods, the `Host` header and the request line, `Content-Length` and `Transfer-Encoding`, the body after a switch of protocols or a `CONNECT`, gzip, basic auth from the URL, and the redirect rules, including which headers a redirect keeps.
 - In `access`, how golang.org/x/crypto v0.54.0's `bcrypt` reads a hash, which ignores whatever follows its 60 characters (BSD-3-Clause, under the same license as Go, [licenses/Go-LICENSE](licenses/Go-LICENSE)).

@@ -19,8 +19,8 @@
 //!
 //! `secret-key` may be a bcrypt hash or the key itself. Upstream hashes a
 //! plain key when it loads the config and writes the hash back to the
-//! file; this port never writes the config, and compares a plain key as
-//! written instead. A hash is read as Go's bcrypt reads it: whatever
+//! file; this port doesn't write the config when it loads it, and compares
+//! a plain key as written instead. A hash is read as Go's bcrypt reads it: whatever
 //! follows its 60 characters, such as the line break a YAML block scalar
 //! leaves, is ignored.
 //!

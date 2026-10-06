@@ -12,8 +12,10 @@
 //!
 //! The routes that write credentials are tested over an [`AuthDir`]: a
 //! temporary auth directory, with the store the manager saves to, and a
-//! [`FakeSync`] standing in for the service. [`Multipart`] builds the
-//! bodies of uploads.
+//! [`FakeSync`] standing in for the service. The routes that write the
+//! config are tested with [`Api::writing`]: a [`FakeWriter`] records what
+//! they ask to write, and a [`FakeReload`] counts the reloads they ask
+//! for. [`Multipart`] builds the bodies of uploads.
 
 mod api_key_usage;
 mod api_tools;
@@ -24,7 +26,12 @@ mod auth_files_project_id;
 mod auth_files_quota;
 mod auth_files_recent_requests;
 mod auth_files_relogin_preserve;
+mod config_file_write;
+mod config_keys;
+mod config_lists;
 mod config_read;
+mod config_settings;
+mod config_write;
 mod credential_files;
 mod credential_state;
 mod handler;
@@ -45,7 +52,7 @@ use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use axum::Router;
@@ -65,7 +72,10 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 use tower::ServiceExt as _;
 
-use crate::{CredentialSync, ManagementState, SyncError, SyncFuture, router};
+use crate::{
+    ConfigReload, ConfigWriter, CredentialSync, ManagementState, ReloadFuture, SyncError,
+    SyncFuture, V8Edit, V8EditError, WriteError, router,
+};
 
 /// The management key the tests set.
 const KEY: &str = "test-secret";
@@ -82,6 +92,12 @@ struct Api {
     /// What stands in for the service; the state uses it only when made
     /// over an [`AuthDir`].
     sync: Arc<FakeSync>,
+    /// What saves the config; the state uses it only when made by
+    /// [`Api::with_writer`].
+    writer: Arc<FakeWriter>,
+    /// What reloads the service; the state uses it only when made by
+    /// [`Api::with_writer`].
+    reload: Arc<FakeReload>,
 }
 
 impl Api {
@@ -123,6 +139,27 @@ impl Api {
         })
     }
 
+    /// The API with `config`, saving it through the [`FakeWriter`] and
+    /// reloading through the [`FakeReload`] (see [`Api::with_writer`]).
+    fn writing(config: Config) -> Self {
+        Self::with(config, None).with_writer()
+    }
+
+    /// This API, saving the config through the [`FakeWriter`] and reloading
+    /// through the [`FakeReload`]. The writer watches the state's config
+    /// write lock.
+    fn with_writer(mut self) -> Self {
+        let state = self
+            .state
+            .clone()
+            .with_config_writer(Arc::clone(&self.writer) as _)
+            .with_config_reload(Arc::clone(&self.reload) as _);
+        self.writer.watch_lock(state.clone());
+        self.router = router(state.clone());
+        self.state = state;
+        self
+    }
+
     /// The API, its state made by `configure` from the plain state and the
     /// [`FakeSync`].
     fn build(
@@ -147,6 +184,8 @@ impl Api {
             registry,
             state,
             sync,
+            writer: Arc::new(FakeWriter::default()),
+            reload: Arc::new(FakeReload::default()),
         }
     }
 
@@ -175,6 +214,20 @@ impl Api {
     /// `POST path` with `body`, with the key.
     async fn post(&self, path: &str, body: &str) -> Answer {
         self.send(keyed(Method::POST, path, body)).await
+    }
+
+    /// `method path` with `body`, with the key.
+    async fn call(&self, method: Method, path: &str, body: &str) -> Answer {
+        self.send(keyed(method, path, body)).await
+    }
+
+    /// The config the handlers read, after checking that it is the one the
+    /// [`FakeWriter`] last saved.
+    fn saved(&self) -> Config {
+        let config = Config::clone(&self.state.config());
+        let saved = self.writer.last_saved();
+        assert!(saved == config, "{saved:#?}\n!=\n{config:#?}");
+        config
     }
 
     /// The credential list, given `query` (empty, or `?` and a query).
@@ -431,6 +484,150 @@ impl CredentialSync for FakeSync {
 
     fn file_removed(&self, path: PathBuf) -> SyncFuture<'_> {
         self.call(SyncCall::FileRemoved(path))
+    }
+}
+
+/// A write [`FakeWriter`] was asked for.
+#[derive(Clone, Debug, PartialEq)]
+enum Written {
+    /// [`ConfigWriter::save_preserving_comments`].
+    Saved {
+        config: Box<Config>,
+        migrate_v8: bool,
+    },
+    /// [`ConfigWriter::update_nested_scalar`].
+    Scalar(Vec<String>, String),
+    /// [`ConfigWriter::write_file`].
+    File(Vec<u8>),
+    /// [`ConfigWriter::edit_v8`].
+    V8(V8Edit),
+}
+
+/// A [`ConfigWriter`] that records what it is asked to write, saves
+/// nothing, and refuses every write while set to fail.
+#[derive(Default)]
+struct FakeWriter {
+    written: Mutex<Vec<Written>>,
+    /// The error every write gives, once set.
+    failure: Mutex<Option<String>>,
+    /// What [`ConfigWriter::edit_v8`] gives, once set; else the config
+    /// with the management key.
+    v8_result: Mutex<Option<Result<Config, V8EditError>>>,
+    /// The state whose config write lock each write checks, once watched.
+    watched: OnceLock<ManagementState>,
+    /// For each write made while watched: whether the lock was held.
+    lock_held: Mutex<Vec<bool>>,
+}
+
+impl FakeWriter {
+    /// The writes asked for so far.
+    fn written(&self) -> Vec<Written> {
+        self.written.lock().unwrap().clone()
+    }
+
+    /// The configs saved so far, with whether each was to migrate.
+    fn saved(&self) -> Vec<(Config, bool)> {
+        self.written()
+            .into_iter()
+            .filter_map(|written| match written {
+                Written::Saved { config, migrate_v8 } => Some((*config, migrate_v8)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The last config saved.
+    fn last_saved(&self) -> Config {
+        match self.saved().pop() {
+            Some((config, _)) => config,
+            None => panic!("nothing saved: {:?}", self.written()),
+        }
+    }
+
+    /// Refuses every later write with `message`.
+    fn fail(&self, message: &str) {
+        *self.failure.lock().unwrap() = Some(message.to_owned());
+    }
+
+    /// Has [`ConfigWriter::edit_v8`] give `result`.
+    fn set_v8_result(&self, result: Result<Config, V8EditError>) {
+        *self.v8_result.lock().unwrap() = Some(result);
+    }
+
+    /// Records, for each later write, whether the config write lock of
+    /// `state` was held. The state holds this writer, so the two are never
+    /// freed: watch only a test's own API.
+    fn watch_lock(&self, state: ManagementState) {
+        assert!(self.watched.set(state).is_ok(), "already watched");
+    }
+
+    /// For each write made while watched, whether the lock was held.
+    fn lock_held(&self) -> Vec<bool> {
+        self.lock_held.lock().unwrap().clone()
+    }
+
+    /// Records `written`, and gives the error set, if any.
+    fn record(&self, written: Written) -> Result<(), WriteError> {
+        if let Some(state) = self.watched.get() {
+            let held = state.config_write_lock().try_lock().is_err();
+            self.lock_held.lock().unwrap().push(held);
+        }
+        self.written.lock().unwrap().push(written);
+        match &*self.failure.lock().unwrap() {
+            Some(message) => Err(WriteError::new(message.clone())),
+            None => Ok(()),
+        }
+    }
+}
+
+impl ConfigWriter for FakeWriter {
+    fn save_preserving_comments(
+        &self,
+        config: &Config,
+        migrate_v8: bool,
+    ) -> Result<(), WriteError> {
+        self.record(Written::Saved {
+            config: Box::new(config.clone()),
+            migrate_v8,
+        })
+    }
+
+    fn update_nested_scalar(&self, keys: &[&str], value: &str) -> Result<(), WriteError> {
+        let keys = keys.iter().map(|key| (*key).to_owned()).collect();
+        self.record(Written::Scalar(keys, value.to_owned()))
+    }
+
+    fn write_file(&self, data: &[u8]) -> Result<(), WriteError> {
+        self.record(Written::File(data.to_vec()))
+    }
+
+    fn edit_v8(&self, edit: &V8Edit) -> Result<Config, V8EditError> {
+        self.record(Written::V8(edit.clone()))
+            .map_err(|error| V8EditError::WriteFailed(error.to_string()))?;
+        match self.v8_result.lock().unwrap().clone() {
+            Some(result) => result,
+            None => Ok(keyed_config()),
+        }
+    }
+}
+
+/// A [`ConfigReload`] that counts the reloads asked for.
+#[derive(Default)]
+struct FakeReload {
+    count: AtomicUsize,
+}
+
+impl FakeReload {
+    /// The reloads asked for so far.
+    fn count(&self) -> usize {
+        self.count.load(Ordering::SeqCst)
+    }
+}
+
+impl ConfigReload for FakeReload {
+    fn reload(&self) -> ReloadFuture<'_> {
+        self.count.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async {})
     }
 }
 

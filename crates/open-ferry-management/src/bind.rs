@@ -117,7 +117,7 @@ fn nests_too_deep(body: &[u8]) -> bool {
 
 /// The field a key names: an exact match, else the first field equal to it
 /// under Go's name folding.
-fn field_index(fields: &[&str], key: &str) -> Option<usize> {
+pub(crate) fn field_index(fields: &[&str], key: &str) -> Option<usize> {
     fields
         .iter()
         .position(|field| *field == key)

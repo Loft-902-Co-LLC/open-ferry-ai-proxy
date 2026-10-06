@@ -37,9 +37,10 @@
 //!   running credential's index, or the one it would get when the manager
 //!   doesn't hold it. Keys the loader drops show none.
 //!
-//! The config is only ever read: open-ferry never writes it, so its `PUT`,
-//! `PATCH` and `DELETE` routes stay unported, and answer with the empty
-//! 404.
+//! The routes that change the config are in [`crate::config_settings`],
+//! [`crate::config_lists`], [`crate::config_keys`] and
+//! [`crate::config_file_write`]. As upstream has no `PATCH` or `DELETE` on
+//! `config.yaml`, they answer with the empty 404.
 //!
 //! The reads show the secrets the config holds as upstream shows them, to
 //! whoever has the management key: the client API keys, the providers' API

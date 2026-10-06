@@ -46,10 +46,10 @@ async fn getters_answer_the_settings() {
     }
 }
 
-/// Not upstream's: the getters need the management key, and their writes,
-/// which would change the config file, answer with the empty 404.
+/// Not upstream's: the getters need the management key, and their writes
+/// are refused without a config writer.
 #[tokio::test]
-async fn getters_need_the_key_and_writes_are_unported() {
+async fn getters_need_the_key_and_writes_need_a_writer() {
     let api = Api::new();
     for name in [
         "usage-statistics-enabled",
@@ -67,7 +67,10 @@ async fn getters_need_the_key_and_writes_are_unported() {
                 .await;
             assert_eq!(
                 (answer.status, answer.body.as_str()),
-                (StatusCode::NOT_FOUND, ""),
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    r#"{"error":"config writer unavailable"}"#
+                ),
                 "{method} {path}"
             );
         }

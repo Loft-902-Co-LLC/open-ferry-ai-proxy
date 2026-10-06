@@ -14,9 +14,10 @@
 //! The v8 API reads them from the config, at
 //! `/v8/management/config/observability/...`.
 //!
-//! Deviations from upstream: their `PUT` and `PATCH`, which write the
-//! config, aren't ported, as open-ferry never writes it; they answer with
-//! the empty 404. A setting changes when the config file does.
+//! Their `PUT` and `PATCH`, which save the config, are served by
+//! [`crate::config_settings`].
+//!
+//! Deviations from upstream: none.
 
 use axum::extract::State;
 use axum::routing::{MethodRouter, get};

@@ -43,11 +43,18 @@ mod access;
 mod api_call;
 mod auth_files;
 mod bind;
+mod config_file_write;
+mod config_keys;
+mod config_lists;
 mod config_read;
+mod config_sanitize;
+mod config_settings;
+mod config_write;
 mod credential_files;
 mod credential_state;
 mod credential_sync;
 mod go;
+mod go_json;
 mod go_url;
 mod json;
 mod latest_version;
@@ -72,6 +79,9 @@ mod vertex_import;
 use open_ferry_core::observe::client_ip;
 
 pub use client_ip::TrustedProxies;
+pub use config_write::{
+    ConfigReload, ConfigWriter, ReloadFuture, V8Edit, V8EditError, V8Method, WriteError,
+};
 pub use credential_sync::{CredentialSync, SyncError, SyncFuture};
 pub use state::{ManagementState, management_password_from_env};
 
@@ -103,6 +113,10 @@ fn routes() -> Vec<Route> {
         credential_state::routes(),
         oauth::routes(),
         config_read::routes(),
+        config_settings::routes(),
+        config_lists::routes(),
+        config_keys::routes(),
+        config_file_write::routes(),
         model_definitions::routes(),
         latest_version::routes(),
         observability_settings::routes(),

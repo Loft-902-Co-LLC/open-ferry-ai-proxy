@@ -15,14 +15,15 @@
 //!   import checks, and checks that each ported route answers under both
 //!   names. Its OAuth checks are in `oauth`
 //!   (`management_v8_oauth_contract`), and its config reads and writes in
-//!   `config_read` (`management_v8_independent_contract_config`), the
-//!   writes answering 404 as this port never writes the config. Its route
+//!   `config_read` (`management_v8_independent_contract_config`), where the
+//!   writes are refused for want of a config writer; what the writes ask
+//!   the writer is checked in `config_file_write`. Its route
 //!   table check is dropped, the router having no list of routes to read,
 //!   as are its plugin routes (not ported). The Vertex import answers `file
 //!   required` only with a credential store, which upstream doesn't need,
 //!   so the import checks run with one.
 //! - `TestManagementV8PluginOperationMigratesConfiguration` is dropped: the
-//!   plugin routes aren't ported, and this port never writes the config.
+//!   plugin routes aren't ported.
 
 use http::{Method, StatusCode};
 
