@@ -9,7 +9,8 @@
 //! [`config`] loads the proxy's config file and watches it and the auth
 //! directory for changes. [`codex_models`] builds the model list Codex
 //! clients fetch. [`observe`] is what the request log and the usage
-//! statistics see of each request and its upstream calls.
+//! statistics see of each request and its upstream calls. [`multipart`]
+//! reads and writes the forms of the image and video endpoints.
 
 pub mod auth;
 pub mod codex_models;
@@ -18,5 +19,6 @@ pub mod exec;
 pub mod executor;
 pub mod manager;
 pub mod models;
+pub mod multipart;
 pub mod observe;
 pub mod registry;

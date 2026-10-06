@@ -2,7 +2,7 @@
 //!
 //! A few of these are public for the crates that build on this one.
 
-pub(crate) mod base64;
+pub mod base64;
 mod float;
 mod ftoa;
 mod printable;

@@ -13,32 +13,32 @@ use std::fmt;
 /// A base64 variant: the alphabet, whether output is padded with `=`, and
 /// whether non-zero trailing bits are rejected.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Encoding {
+pub struct Encoding {
     url_safe: bool,
     padded: bool,
     strict: bool,
 }
 
 /// `base64.StdEncoding`.
-pub(crate) const STD: Encoding = Encoding {
+pub const STD: Encoding = Encoding {
     url_safe: false,
     padded: true,
     strict: false,
 };
 /// `base64.RawStdEncoding`.
-pub(crate) const RAW_STD: Encoding = Encoding {
+pub const RAW_STD: Encoding = Encoding {
     url_safe: false,
     padded: false,
     strict: false,
 };
 /// `base64.URLEncoding`.
-pub(crate) const URL: Encoding = Encoding {
+pub const URL: Encoding = Encoding {
     url_safe: true,
     padded: true,
     strict: false,
 };
 /// `base64.RawURLEncoding`.
-pub(crate) const RAW_URL: Encoding = Encoding {
+pub const RAW_URL: Encoding = Encoding {
     url_safe: true,
     padded: false,
     strict: false,
@@ -46,7 +46,7 @@ pub(crate) const RAW_URL: Encoding = Encoding {
 
 /// Go's `base64.CorruptInputError`: the input byte offset where decoding failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct CorruptInputError(pub(crate) usize);
+pub struct CorruptInputError(pub(crate) usize);
 
 impl fmt::Display for CorruptInputError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -57,7 +57,7 @@ impl fmt::Display for CorruptInputError {
 impl Encoding {
     /// `Strict`: the same encoding, rejecting non-zero trailing bits. Newlines
     /// are still skipped.
-    pub(crate) const fn strict(self) -> Self {
+    pub const fn strict(self) -> Self {
         Self {
             strict: true,
             ..self
@@ -65,7 +65,7 @@ impl Encoding {
     }
 
     /// `DecodeString`.
-    pub(crate) fn decode(self, src: impl AsRef<[u8]>) -> Result<Vec<u8>, CorruptInputError> {
+    pub fn decode(self, src: impl AsRef<[u8]>) -> Result<Vec<u8>, CorruptInputError> {
         let src = src.as_ref();
         let mut out = Vec::with_capacity(src.len() / 4 * 3 + 3);
         let mut si = 0;

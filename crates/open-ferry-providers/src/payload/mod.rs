@@ -30,6 +30,11 @@
 //!    path winning;
 //! 5. applies the `filter` rules, removing paths.
 //!
+//! An image or video body, JSON or a `multipart/form-data` form, has the
+//! rules applied with [`apply_media`] instead, which shows the rules a form
+//! as a JSON object and writes the form again only if they change it (see
+//! the `media` module).
+//!
 //! A rule applies when one of its models matches the model sent upstream,
 //! or the model the client named with or without its thinking suffix, and
 //! the entry's protocol, client protocol, headers and conditions on the
@@ -84,6 +89,7 @@
 mod gjson;
 mod image;
 mod matchers;
+mod media;
 mod path;
 mod query;
 mod rules;
@@ -91,6 +97,7 @@ mod sjson;
 #[cfg(test)]
 mod tests;
 
+pub use media::{MediaError, MediaTarget, apply_media};
 pub use rules::Rules;
 
 use std::collections::{BTreeSet, HashSet};
