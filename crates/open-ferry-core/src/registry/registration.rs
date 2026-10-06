@@ -34,8 +34,8 @@
 //!   OpenAI-compatible credentials get models; a credential of any other
 //!   provider is unregistered. Plugin models and Antigravity capability
 //!   probing aren't ported.
-//! - xAI credentials don't get upstream's built-in image and video models
-//!   (`WithXAIBuiltins`): image and video generation aren't ported.
+//! - xAI credentials get upstream's built-in video models but not its
+//!   built-in image models (see [`StaticCatalog::xai_models`]).
 //! - Upstream caches the OpenAI-compatible entries' models while it
 //!   registers many credentials at once; they are built for each credential
 //!   here, which gives the same models.

@@ -18,8 +18,8 @@
 //!   xAI and Meta channels yet. The others are decoded and checked as
 //!   upstream does, so a catalog upstream rejects is rejected here, and are
 //!   kept only for [`StaticCatalog::lookup`].
-//! - The xAI models don't include upstream's built-in image and video models
-//!   (`WithXAIBuiltins`): image and video generation aren't ported.
+//! - Of upstream's built-in xAI models (`WithXAIBuiltins`), only the three
+//!   video models are added; the three image models aren't.
 //! - [`StaticCatalog::lookup`] doesn't search upstream's built-in Devin
 //!   models, which no ported provider serves.
 //! - A model's `config.override_header` is checked, then dropped: it forces a
@@ -76,6 +76,29 @@ const CODEX_BUILTINS: [(&str, &str); 5] = [
 
 /// When the Codex image models came out: 2024-01-01.
 const CODEX_BUILTIN_CREATED: i64 = 1_704_067_200;
+
+/// The video models every xAI credential serves: ID, display name and
+/// description (upstream's `xaiBuiltinVideoModelInfo` and the like).
+const XAI_BUILTINS: [(&str, &str, &str); 3] = [
+    (
+        "grok-imagine-video",
+        "Grok Imagine Video",
+        "xAI Grok video generation model.",
+    ),
+    (
+        "grok-imagine-video-1.5",
+        "Grok Imagine Video 1.5",
+        "xAI Grok video generation model.",
+    ),
+    (
+        "grok-imagine-video-1.5-preview",
+        "Grok Imagine Video 1.5 Preview",
+        "Compatibility alias for the xAI Grok video generation model.",
+    ),
+];
+
+/// When the xAI video models came out: 2025-01-01.
+const XAI_BUILTIN_CREATED: i64 = 1_735_689_600;
 
 /// Why a catalog didn't load.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -249,10 +272,10 @@ impl StaticCatalog {
         self.vertex.clone()
     }
 
-    /// The xAI models (upstream's `GetXAIModels`, without the built-in image
-    /// and video models).
+    /// The xAI models, with the video models every xAI credential serves
+    /// (upstream's `GetXAIModels`, without its built-in image models).
     pub fn xai_models(&self) -> Vec<ModelInfo> {
-        self.xai.clone()
+        with_xai_builtins(self.xai.clone())
     }
 
     /// The Meta models (upstream's `GetMetaModels`).
@@ -311,6 +334,39 @@ pub fn with_codex_builtins(models: Vec<ModelInfo>) -> Vec<ModelInfo> {
         version: (*id).to_owned(),
         ..ModelInfo::default()
     }));
+    out
+}
+
+/// `models` without any model of the same ID as an xAI video model, ignoring
+/// case, nor any without an ID, followed by the xAI video models (upstream's
+/// `WithXAIBuiltins`, without its image models).
+pub fn with_xai_builtins(models: Vec<ModelInfo>) -> Vec<ModelInfo> {
+    let builtin_ids: HashSet<String> = XAI_BUILTINS
+        .iter()
+        .map(|(id, ..)| go::to_lower(id))
+        .collect();
+    let mut out: Vec<ModelInfo> = models
+        .into_iter()
+        .filter(|model| {
+            let id = model.id.trim();
+            !id.is_empty() && !builtin_ids.contains(&go::to_lower(id))
+        })
+        .collect();
+    out.extend(
+        XAI_BUILTINS
+            .iter()
+            .map(|(id, display_name, description)| ModelInfo {
+                id: (*id).to_owned(),
+                object: "model".to_owned(),
+                created: XAI_BUILTIN_CREATED,
+                owned_by: "xai".to_owned(),
+                model_type: "xai".to_owned(),
+                display_name: (*display_name).to_owned(),
+                name: (*id).to_owned(),
+                description: (*description).to_owned(),
+                ..ModelInfo::default()
+            }),
+    );
     out
 }
 

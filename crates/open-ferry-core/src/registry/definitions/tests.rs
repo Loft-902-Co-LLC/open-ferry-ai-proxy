@@ -8,11 +8,10 @@
 //! as the checks aren't public, and
 //! `TestGetStaticModelDefinitionsByChannelSupportsGeminiInteractions` is
 //! part of `the_embedded_catalog_loads`. Dropped: the Gemini, Vertex, Kimi,
-//! Antigravity and Devin tests (those providers aren't ported), the xAI
-//! built-in tests (`TestWithXAIBuiltinsIncludesImage20` and
-//! `TestWithXAIBuiltinsIncludesVideo15GAAndPreviewAlias`: image and video
-//! generation aren't ported) and `TestModelOverrideHeadersFromEmbeddedModels`
-//! (left out by policy). The
+//! Antigravity and Devin tests (those providers aren't ported),
+//! `TestWithXAIBuiltinsIncludesImage20` (the xAI image models aren't added)
+//! and `TestModelOverrideHeadersFromEmbeddedModels` (left out by policy).
+//! The
 //! check that `support_configuration_update` stays out of a model's JSON has
 //! no counterpart: `ModelInfo` isn't serialized.
 
@@ -132,6 +131,61 @@ fn with_codex_builtins_replaces_models_of_the_same_id() {
 }
 
 #[test]
+fn with_xai_builtins_includes_video_15_ga_and_preview_alias() {
+    let models = with_xai_builtins(Vec::new());
+    for id in ["grok-imagine-video-1.5", "grok-imagine-video-1.5-preview"] {
+        assert!(models.iter().any(|model| model.id == id), "{id}");
+    }
+}
+
+// Not upstream's: the video models replace models of the same ID, in any
+// case, and drop models without one, as upstream's `upsertModelInfos` does,
+// and are written as upstream writes them.
+#[test]
+fn with_xai_builtins_replaces_models_of_the_same_id() {
+    let models = with_xai_builtins(vec![
+        ModelInfo {
+            id: "grok-4.5".to_owned(),
+            ..ModelInfo::default()
+        },
+        ModelInfo {
+            id: " GROK-Imagine-Video ".to_owned(),
+            display_name: "stale".to_owned(),
+            ..ModelInfo::default()
+        },
+        ModelInfo {
+            id: "  ".to_owned(),
+            ..ModelInfo::default()
+        },
+    ]);
+    let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        [
+            "grok-4.5",
+            "grok-imagine-video",
+            "grok-imagine-video-1.5",
+            "grok-imagine-video-1.5-preview"
+        ]
+    );
+    assert_eq!(
+        models[3],
+        ModelInfo {
+            id: "grok-imagine-video-1.5-preview".to_owned(),
+            object: "model".to_owned(),
+            created: 1_735_689_600,
+            owned_by: "xai".to_owned(),
+            model_type: "xai".to_owned(),
+            display_name: "Grok Imagine Video 1.5 Preview".to_owned(),
+            name: "grok-imagine-video-1.5-preview".to_owned(),
+            description: "Compatibility alias for the xAI Grok video generation model.".to_owned(),
+            ..ModelInfo::default()
+        }
+    );
+    assert_eq!(models[1].display_name, "Grok Imagine Video");
+}
+
+#[test]
 fn the_embedded_catalog_loads() {
     let text = embedded_catalog_json();
     let catalog = StaticCatalog::from_json(text, "embed").unwrap();
@@ -170,17 +224,26 @@ fn the_embedded_catalog_loads() {
     assert!(catalog.models_for_channel("aistudio").is_empty());
 }
 
-// Not upstream's: the xAI and Meta sections, the xAI one without upstream's
-// image and video built-ins.
+// Not upstream's: the xAI and Meta sections, the xAI one followed by
+// upstream's video built-ins but not its image ones.
 #[test]
 fn xai_and_meta_models_come_from_their_sections() {
     let catalog = StaticCatalog::embedded();
     let xai = catalog.xai_models();
     assert!(xai.iter().any(|model| model.id == "grok-4.5"));
-    assert!(
-        xai.iter()
-            .all(|model| model.owned_by == "xai" && !model.id.contains("imagine")),
-        "{xai:?}"
+    assert!(xai.iter().all(|model| model.owned_by == "xai"), "{xai:?}");
+    let imagine: Vec<&str> = xai
+        .iter()
+        .map(|model| model.id.as_str())
+        .filter(|id| id.contains("imagine"))
+        .collect();
+    assert_eq!(
+        imagine,
+        [
+            "grok-imagine-video",
+            "grok-imagine-video-1.5",
+            "grok-imagine-video-1.5-preview"
+        ]
     );
     let meta = catalog.meta_models();
     assert!(meta.iter().any(|model| model.id == "muse-spark-1.3"));
@@ -190,7 +253,8 @@ fn xai_and_meta_models_come_from_their_sections() {
         "test",
     )
     .unwrap();
-    assert_eq!(only.xai_models().len(), 1);
+    assert_eq!(only.xai_models().len(), 4);
+    assert_eq!(only.xai_models()[0].id, "grok-x");
     assert_eq!(only.meta_models()[0].id, "muse-x");
 }
 
