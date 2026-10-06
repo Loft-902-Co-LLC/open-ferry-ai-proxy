@@ -103,43 +103,45 @@ function stringField(body: unknown, name: string): string | null {
   return null;
 }
 
-/** Calls the API with `key`. Throws an ApiError for any status from 400 up. */
-export async function apiRequest<T = unknown>(
+function isAbort(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
+}
+
+/**
+ * Sends one request with `key`, as every call goes: no cookies, no cache,
+ * no redirects, no referrer. Throws an ApiError, with the answer's `error`
+ * and `message`, for any status from 400 up.
+ */
+async function send(
   key: string,
-  path: string,
-  request: ApiRequest = {},
-): Promise<ApiResponse<T>> {
-  const headers: Record<string, string> = {
-    Accept: "application/json",
-    Authorization: `Bearer ${key}`,
-  };
-  let body: BodyInit | undefined = request.body;
-  if (request.json !== undefined) {
-    headers["Content-Type"] = "application/json";
-    body = JSON.stringify(request.json);
-  } else if (request.contentType !== undefined) {
-    headers["Content-Type"] = request.contentType;
+  url: string,
+  accept: string,
+  init: Pick<RequestInit, "method" | "body" | "signal"> & { contentType?: string | undefined },
+): Promise<Response> {
+  const headers: Record<string, string> = { Accept: accept, Authorization: `Bearer ${key}` };
+  if (init.contentType !== undefined) {
+    headers["Content-Type"] = init.contentType;
   }
   let response: Response;
   try {
-    response = await globalThis.fetch(apiUrl(path, request.query), {
-      method: request.method ?? "GET",
+    response = await globalThis.fetch(url, {
+      method: init.method ?? "GET",
       headers,
-      body,
-      signal: request.signal,
+      body: init.body,
+      signal: init.signal,
       credentials: "omit",
       cache: "no-store",
       redirect: "error",
       referrerPolicy: "no-referrer",
     });
   } catch (error) {
-    if (error instanceof DOMException && error.name === "AbortError") {
+    if (isAbort(error)) {
       throw error;
     }
     throw new ApiError(0, null, null, null);
   }
-  const data = await readBody(response);
   if (response.status >= 400) {
+    const data = await readBody(response);
     throw new ApiError(
       response.status,
       stringField(data, "error"),
@@ -147,5 +149,118 @@ export async function apiRequest<T = unknown>(
       data,
     );
   }
+  return response;
+}
+
+/** Calls the API with `key`. Throws an ApiError for any status from 400 up. */
+export async function apiRequest<T = unknown>(
+  key: string,
+  path: string,
+  request: ApiRequest = {},
+): Promise<ApiResponse<T>> {
+  let body: BodyInit | undefined = request.body;
+  let contentType = request.contentType;
+  if (request.json !== undefined) {
+    contentType = "application/json";
+    body = JSON.stringify(request.json);
+  }
+  const response = await send(key, apiUrl(path, request.query), "application/json", {
+    method: request.method ?? "GET",
+    body,
+    signal: request.signal,
+    contentType,
+  });
+  const data = await readBody(response);
   return { status: response.status, headers: response.headers, data: data as T };
+}
+
+/** How far a download has got. */
+export interface DownloadProgress {
+  received: number;
+  /** The whole size, from Content-Length, when the server gave it. */
+  total: number | null;
+}
+
+/**
+ * A download that ended short of the size the server announced, as one
+ * does when the file gets shorter while it is sent. Nothing is saved.
+ */
+export class ShortDownloadError extends Error {
+  readonly received: number;
+  readonly expected: number | null;
+
+  constructor(received: number, expected: number | null) {
+    super(
+      expected === null
+        ? `the download broke off after ${String(received)} bytes`
+        : `the download ended after ${String(received)} of ${String(expected)} bytes`,
+    );
+    this.name = "ShortDownloadError";
+    this.received = received;
+    this.expected = expected;
+  }
+}
+
+export function isShortDownload(error: unknown): error is ShortDownloadError {
+  return error instanceof ShortDownloadError;
+}
+
+/** The size a response announces for its body, when it is the body's own. */
+function announcedSize(headers: Headers): number | null {
+  const length = headers.get("content-length");
+  // A compressed body's Content-Length counts the compressed bytes.
+  const encoding = headers.get("content-encoding") ?? "identity";
+  if (length === null || !/^\d+$/.test(length) || encoding.toLowerCase() !== "identity") {
+    return null;
+  }
+  return Number(length);
+}
+
+export interface DownloadRequest {
+  signal?: AbortSignal;
+  onProgress?: (progress: DownloadProgress) => void;
+}
+
+/**
+ * Downloads a file the API sends whole, such as a log, with `key`: the
+ * key goes in the Authorization header, never the URL. Errors are the
+ * API's usual JSON, thrown as ApiError. A body that breaks off, or ends
+ * short of its Content-Length, throws ShortDownloadError: a partial file
+ * is never handed back.
+ */
+export async function apiDownload(
+  key: string,
+  path: string,
+  { signal, onProgress }: DownloadRequest = {},
+): Promise<Blob> {
+  const response = await send(key, apiUrl(path), "application/octet-stream, application/json", {
+    signal,
+  });
+  const total = announcedSize(response.headers);
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  onProgress?.({ received, total });
+  if (response.body !== null) {
+    const reader = response.body.getReader();
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) {
+          break;
+        }
+        chunks.push(value);
+        received += value.byteLength;
+        onProgress?.({ received, total });
+      }
+    } catch (error) {
+      if (isAbort(error) || signal?.aborted === true) {
+        throw error;
+      }
+      throw new ShortDownloadError(received, total);
+    }
+  }
+  if (total !== null && received !== total) {
+    throw new ShortDownloadError(received, total);
+  }
+  return new Blob(chunks as BlobPart[], { type: "application/octet-stream" });
 }

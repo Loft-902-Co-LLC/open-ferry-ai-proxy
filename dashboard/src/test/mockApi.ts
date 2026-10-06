@@ -18,6 +18,8 @@ export interface MockReply {
   status?: number;
   json?: unknown;
   text?: string;
+  /** A body as it is, such as bytes or a stream, for downloads. */
+  body?: BodyInit;
   headers?: Record<string, string>;
 }
 
@@ -80,7 +82,7 @@ export function mockApi(...initial: MockRoute[]): MockApi {
       }
     }
     const status = reply.status ?? 200;
-    return new Response(status === 204 ? null : text, { status, headers });
+    return new Response(status === 204 ? null : (reply.body ?? text), { status, headers });
   });
   vi.stubGlobal("fetch", fetch);
 

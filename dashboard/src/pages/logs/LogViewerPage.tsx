@@ -1,12 +1,17 @@
 import { useInfiniteQuery, useMutation } from "@tanstack/react-query";
 import { ArrowLeft, Download, RotateCw } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router";
 
 import { callProblem } from "../../api/access";
-import { isApiError } from "../../api/client";
-import { requestLogPath, type LogEntry, type LogPiece } from "../../api/dashboard";
-import { useApiCall } from "../../api/hooks";
+import { isApiError, isShortDownload, type DownloadProgress } from "../../api/client";
+import {
+  requestLogDownloadPath,
+  requestLogPath,
+  type LogEntry,
+  type LogPiece,
+} from "../../api/dashboard";
+import { useApiCall, useApiDownload } from "../../api/hooks";
 import { Alert } from "../../components/Alert";
 import { Badge } from "../../components/Badge";
 import { Button, buttonClasses } from "../../components/Button";
@@ -21,52 +26,67 @@ import type { OpenedFrom } from "./RequestLogSearch";
 
 /** Bytes shown at a time: 1 MiB, as the button says. */
 const VIEW_PIECE = 1_048_576;
-/** Bytes read at a time to download: the most the route reads at once. */
-export const DOWNLOAD_PIECE = 4_194_304;
+/**
+ * How long a saved file's object URL is kept after the click. The browser
+ * holds the file from the click on, but some revoke a URL out from under a
+ * download that has only just started.
+ */
+export const REVOKE_AFTER_MS = 10_000;
 
 /** Whether `name` could be a log's name, so worth asking for. */
 export function isLogName(name: string): boolean {
   return name.endsWith(".log") && !/[/\\]/.test(name) && !name.includes("..");
 }
 
-type Call = ReturnType<typeof useApiCall>;
-
-/**
- * Reads a whole log in the route's largest pieces, as the dashboard API
- * serves it by its exact name. (The management API's download by request
- * ID picks the newest log with that ID, which may be another.)
- *
- * Interim: the pieces come back as text with bytes that aren't UTF-8
- * replaced, so this isn't byte-exact for logs that hold binary bodies. It
- * goes when the dashboard API's raw `request-logs/{name}/download` lands.
- */
-export async function readWholeLog(call: Call, name: string): Promise<string[]> {
-  const parts: string[] = [];
-  let offset: number | null = 0;
-  while (offset !== null) {
-    const piece: LogPiece = await call<LogPiece>(requestLogPath(name), {
-      query: { offset, length: DOWNLOAD_PIECE },
-    });
-    parts.push(piece.content);
-    // A piece that doesn't move on would repeat forever.
-    offset = piece.next_offset !== null && piece.next_offset > offset ? piece.next_offset : null;
-  }
-  return parts;
-}
-
-/** Hands `parts` to the browser as a file named `name`. */
-function saveText(parts: string[], name: string) {
-  const url = URL.createObjectURL(new Blob(parts, { type: "text/plain;charset=utf-8" }));
+/** Hands `blob` to the browser as a file named `name`, then lets the URL go. */
+export function saveBlob(blob: Blob, name: string) {
+  const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
   link.download = name;
   document.body.append(link);
   link.click();
   link.remove();
-  // The download has its own reference by now; give it a moment regardless.
   window.setTimeout(() => {
     URL.revokeObjectURL(url);
-  }, 10_000);
+  }, REVOKE_AFTER_MS);
+}
+
+/** A download in progress: how much of how much. */
+function DownloadStatus({ progress, size }: { progress: DownloadProgress | null; size: number }) {
+  const total = progress?.total ?? size;
+  const received = progress?.received ?? 0;
+  return (
+    <div className="flex flex-wrap items-center gap-3">
+      <p role="status">Downloading the log, {formatBytes(total)}.</p>
+      <progress
+        aria-label="Downloaded so far"
+        max={Math.max(total, 1)}
+        value={Math.min(received, total)}
+        className="h-2 w-48 accent-accent"
+      />
+      <span className="text-muted tabular-nums">
+        {formatBytes(received)} of {formatBytes(total)}
+      </span>
+    </div>
+  );
+}
+
+/** Why a download failed. Nothing was saved either way. */
+function DownloadProblem({ error }: { error: Error }) {
+  if (!isShortDownload(error)) {
+    return <ProblemNotice problem={callProblem(error)} live />;
+  }
+  return (
+    <Alert tone="danger" live title="The download stopped short">
+      <p>
+        {error.expected === null
+          ? `The connection broke off after ${formatBytes(error.received)}.`
+          : `The server sent ${formatBytes(error.received)} of ${formatBytes(error.expected)}; the log may have got shorter while it was sent.`}{" "}
+        Nothing was saved. Try again.
+      </p>
+    </Alert>
+  );
 }
 
 function LogFacts({ log }: { log: LogEntry }) {
@@ -166,9 +186,28 @@ function LogViewer({ name }: { name: string }) {
     getNextPageParam: (last) =>
       last.next_offset !== null && last.next_offset > last.offset ? last.next_offset : undefined,
   });
+  const fetchFile = useApiDownload();
+  const [progress, setProgress] = useState<DownloadProgress | null>(null);
+  // A download stops when the page goes: leaving it shouldn't save a file
+  // later.
+  const lifetime = useRef<AbortController | null>(null);
+  useEffect(() => {
+    const controller = new AbortController();
+    lifetime.current = controller;
+    return () => {
+      controller.abort();
+    };
+  }, []);
+  // The whole file, byte for byte, by its exact name, saved under the name
+  // it was listed by.
   const download = useMutation({
     mutationFn: async () => {
-      saveText(await readWholeLog(call, name), name);
+      setProgress(null);
+      const blob = await fetchFile(requestLogDownloadPath(name), {
+        signal: lifetime.current?.signal,
+        onProgress: setProgress,
+      });
+      saveBlob(blob, name);
     },
   });
 
@@ -225,9 +264,10 @@ function LogViewer({ name }: { name: string }) {
         }
       />
       <div className="space-y-4">
-        {download.isError && (
-          <ProblemNotice problem={callProblem(download.error)} live />
+        {download.isPending && log !== undefined && (
+          <DownloadStatus progress={progress} size={log.size} />
         )}
+        {download.isError && <DownloadProblem error={download.error} />}
         {pieces.isPending && <Loading>Reading the log…</Loading>}
         {log !== undefined && (
           <Card

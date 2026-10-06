@@ -1,24 +1,61 @@
 import { screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import { requestLogPath } from "../../api/dashboard";
+import { requestLogDownloadPath, requestLogPath } from "../../api/dashboard";
+import { formatBytes } from "../../lib/format";
 import { logEntry, logPiece } from "../../test/fixtures";
-import { mockApi, route } from "../../test/mockApi";
-import { renderApp } from "../../test/renderApp";
-import { DOWNLOAD_PIECE, isLogName } from "./LogViewerPage";
+import { mockApi, route, type MockReply } from "../../test/mockApi";
+import { TEST_KEY, renderApp } from "../../test/renderApp";
+import { REVOKE_AFTER_MS, isLogName, saveBlob } from "./LogViewerPage";
 
 const NAME = "v1-chat-completions-2026-10-05T115802-1234abcd.log";
 const PATH = requestLogPath(NAME);
+const DOWNLOAD = requestLogDownloadPath(NAME);
+
+/** The download route's answer: `bytes`, announced as `length` long. */
+function file(bytes: Uint8Array<ArrayBuffer>, length: number): MockReply {
+  return {
+    body: bytes,
+    headers: {
+      "content-type": "application/octet-stream",
+      // A name the app must not use: it saves under the listed one.
+      "content-disposition": 'attachment; filename="other.log"',
+      "content-length": String(length),
+    },
+  };
+}
+
+/** Object URLs, which jsdom lacks: records each blob and each revoke. */
+function stubObjectUrls() {
+  const saved: Blob[] = [];
+  const revoked: string[] = [];
+  vi.stubGlobal(
+    "URL",
+    Object.assign(
+      class extends URL {},
+      {
+        createObjectURL: (blob: Blob) => {
+          saved.push(blob);
+          return `blob:http://127.0.0.1:4173/${String(saved.length)}`;
+        },
+        revokeObjectURL: (url: string) => {
+          revoked.push(url);
+        },
+      },
+    ),
+  );
+  return { saved, revoked };
+}
 
 const head = "=== REQUEST INFO ===\nURL: /v1/chat/completions\n";
 const tail = "=== RESPONSE ===\nStatus: 200\n";
+const SIZE = head.length + tail.length;
 
 /** A log of `head` then `tail`, served in pieces split after `head`. */
 function twoPieces() {
-  const size = head.length + tail.length;
   return route("GET", PATH, (request) => {
     const offset = Number(request.url.searchParams.get("offset") ?? "0");
-    const log = logEntry({ size });
+    const log = logEntry({ size: SIZE });
     return offset === 0
       ? { json: logPiece(head, { log, next_offset: head.length }) }
       : { json: logPiece(tail, { log, offset, next_offset: null }) };
@@ -49,24 +86,11 @@ describe("a log's page", () => {
     expect(screen.queryByRole("button", { name: "Show the next 1 MiB" })).not.toBeInTheDocument();
   });
 
-  it("downloads the whole log by its exact name, in the largest pieces", async () => {
-    const api = mockApi(twoPieces());
-    // jsdom has no object URLs. These stay for the rest of this file, whose
-    // environment is its own; the page revokes its URL after a delay.
-    const saved: Blob[] = [];
-    Object.defineProperty(URL, "createObjectURL", {
-      configurable: true,
-      writable: true,
-      value: (blob: Blob) => {
-        saved.push(blob);
-        return "blob:http://127.0.0.1:4173/log";
-      },
-    });
-    Object.defineProperty(URL, "revokeObjectURL", {
-      configurable: true,
-      writable: true,
-      value: () => undefined,
-    });
+  it("downloads the log byte for byte, by its exact name", async () => {
+    // Bytes that aren't UTF-8, as an image upload's body is.
+    const bytes = new Uint8Array([0x3d, 0x0a, 0xff, 0x00, 0x89, 0x50, 0x4e, 0x47]);
+    const api = mockApi(twoPieces(), route("GET", DOWNLOAD, file(bytes, bytes.length)));
+    const { saved } = stubObjectUrls();
     const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
 
     const { user } = renderApp(`/logs/${NAME}`);
@@ -75,14 +99,69 @@ describe("a log's page", () => {
     await waitFor(() => {
       expect(click).toHaveBeenCalledTimes(1);
     });
-    const anchor = click.mock.contexts[0] as HTMLAnchorElement;
-    expect(anchor.download).toBe(NAME);
-    expect(await saved[0]?.text()).toBe(head + tail);
-    const reads = api.callsTo("GET", PATH).slice(1);
-    expect(reads.map((call) => call.url.searchParams.get("length"))).toEqual([
-      String(DOWNLOAD_PIECE),
-      String(DOWNLOAD_PIECE),
-    ]);
+    // Saved under the name it was listed by, not the header's.
+    expect((click.mock.contexts[0] as HTMLAnchorElement).download).toBe(NAME);
+    expect(saved).toHaveLength(1);
+    expect(new Uint8Array(await (saved.at(0) ?? new Blob()).arrayBuffer())).toEqual(bytes);
+    const [call] = api.callsTo("GET", DOWNLOAD);
+    expect(call?.headers.get("authorization")).toBe(`Bearer ${TEST_KEY}`);
+    expect(call?.url.search).toBe("");
+    expect(api.callsTo("GET", PATH)).toHaveLength(1);
+  });
+
+  it("shows the size while it downloads", async () => {
+    let finish: (reply: MockReply) => void = () => undefined;
+    const body = new Uint8Array(SIZE);
+    mockApi(
+      twoPieces(),
+      route("GET", DOWNLOAD, () => new Promise<MockReply>((resolve) => (finish = resolve))),
+    );
+    stubObjectUrls();
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+
+    const { user } = renderApp(`/logs/${NAME}`);
+    await screen.findByRole("heading", { name: "Request log", level: 1 });
+    await user.click(screen.getByRole("button", { name: "Download" }));
+    expect(await screen.findByText(`Downloading the log, ${formatBytes(SIZE)}.`)).toBeVisible();
+    expect(screen.getByRole("progressbar", { name: "Downloaded so far" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Downloading…" })).toBeDisabled();
+
+    finish(file(body, body.length));
+    await waitFor(() => {
+      expect(click).toHaveBeenCalledTimes(1);
+    });
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+  });
+
+  it("saves nothing when the download stops short", async () => {
+    const bytes = new Uint8Array([1, 2, 3]);
+    mockApi(twoPieces(), route("GET", DOWNLOAD, file(bytes, SIZE)));
+    const { saved } = stubObjectUrls();
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+
+    const { user } = renderApp(`/logs/${NAME}`);
+    await screen.findByRole("heading", { name: "Request log", level: 1 });
+    await user.click(screen.getByRole("button", { name: "Download" }));
+    expect(await screen.findByText("The download stopped short")).toBeVisible();
+    expect(screen.getByText(/^The server sent 3 B of /)).toHaveTextContent(
+      `The server sent 3 B of ${formatBytes(SIZE)}; the log may have got shorter while it was sent. Nothing was saved. Try again.`,
+    );
+    expect(click).not.toHaveBeenCalled();
+    expect(saved).toEqual([]);
+  });
+
+  it("explains a download the server refuses", async () => {
+    mockApi(
+      twoPieces(),
+      route("GET", DOWNLOAD, {
+        status: 400,
+        json: { error: "invalid_log_file", message: "the log has another hard link" },
+      }),
+    );
+    const { user } = renderApp(`/logs/${NAME}`);
+    await screen.findByRole("heading", { name: "Request log", level: 1 });
+    await user.click(screen.getByRole("button", { name: "Download" }));
+    expect(await screen.findByText("the log has another hard link")).toBeVisible();
   });
 
   it("names an error log as one", async () => {
@@ -132,5 +211,26 @@ describe("isLogName", () => {
     expect(isLogName("..\\main.log")).toBe(false);
     expect(isLogName("a/b.log")).toBe(false);
     expect(isLogName("..log")).toBe(false);
+  });
+});
+
+describe("saveBlob", () => {
+  it("saves under the name given, then lets the object URL go", () => {
+    vi.useFakeTimers();
+    try {
+      const { saved, revoked } = stubObjectUrls();
+      const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+      const blob = new Blob(["x"]);
+      saveBlob(blob, NAME);
+      expect(saved).toEqual([blob]);
+      const anchor = click.mock.contexts[0] as HTMLAnchorElement;
+      expect(anchor.download).toBe(NAME);
+      expect(anchor.isConnected).toBe(false);
+      expect(revoked).toEqual([]);
+      vi.advanceTimersByTime(REVOKE_AFTER_MS);
+      expect(revoked).toEqual(["blob:http://127.0.0.1:4173/1"]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

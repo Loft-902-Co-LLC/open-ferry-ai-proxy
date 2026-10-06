@@ -17,6 +17,11 @@ export function requestLogPath(name: string): string {
   return `${REQUEST_LOGS}/${encodeURIComponent(name)}`;
 }
 
+/** The path that sends one request log whole, byte for byte. */
+export function requestLogDownloadPath(name: string): string {
+  return `${requestLogPath(name)}/download`;
+}
+
 // ---------------------------------------------------------------- usage
 
 export type GroupBy = "model" | "provider" | "credential" | "client_key";
