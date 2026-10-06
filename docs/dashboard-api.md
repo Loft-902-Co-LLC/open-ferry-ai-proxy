@@ -432,9 +432,10 @@ What the app needs to write ready-made client configs, other than client keys, w
     {"id": "openai-responses", "protocol": "openai-responses", "method": "POST", "path": "/v1/responses", "base_path": "/v1", "models": ["claude-sonnet-4-5", "gpt-5.1-codex"]},
     {"id": "claude-messages", "protocol": "claude", "method": "POST", "path": "/v1/messages", "base_path": "", "models": ["claude-sonnet-4-5", "gpt-5.1-codex"]},
     {"id": "gemini-generate-content", "protocol": "gemini", "method": "POST", "path": "/v1beta/models/{model}:generateContent", "base_path": "", "models": ["claude-sonnet-4-5", "gpt-5.1-codex"]},
-    {"id": "codex-responses", "protocol": "codex", "method": "POST", "path": "/backend-api/codex/responses", "base_path": "/backend-api/codex", "models": ["gpt-5.1-codex"]}
+    {"id": "codex-responses", "protocol": "codex", "method": "POST", "path": "/backend-api/codex/responses", "base_path": "/backend-api/codex", "models": ["claude-sonnet-4-5", "gpt-5.1-codex"]}
   ],
   "models": [
+    {"id": "claude-sonnet-4-5", "display_name": "Claude Sonnet 4.5", "owned_by": "anthropic", "providers": ["claude"], "context_length": 200000, "max_output_tokens": 64000},
     {"id": "gpt-5.1-codex", "display_name": "GPT 5.1 Codex", "owned_by": "openai", "providers": ["codex"], "context_length": 400000, "max_output_tokens": 128000}
   ]
 }
@@ -443,7 +444,7 @@ What the app needs to write ready-made client configs, other than client keys, w
 - **`base_urls`** are the server's root as it sees itself, without a path; a client's base URL is one of them followed by its route's `base_path`. Those with `source` `listen` come from the config's `host`, `port` and `tls`: an empty `host`, `0.0.0.0` or `::` gives the loopback addresses and `localhost`, since the server can't know which of its other addresses a client reaches. The one with `source` `config` is `remote-management.base-url`, when set, without any credentials, query or fragment in it. The app also knows its own origin, which may be another (a proxy in front).
 - **`tls`** is the config's `tls.enable`.
 - **`safe_mode`** is `true` while `api-keys` holds CLIProxyAPI's example keys and the proxy routes refuse service; client configs won't work until they are changed.
-- **`routes`** are the proxy's entry points, each with the models a call to it can use right now: the models with a credential that can serve them, less those the route can't reach (a model only the Gemini Interactions provider serves isn't reachable on the Codex routes, for one, and image-only models on none of these). The proxy translates between formats, so most models are on most routes. `base_path` is what an SDK for that `protocol` takes after the root: the OpenAI SDK `/v1`, the Anthropic and Google Gen AI SDKs nothing.
+- **`routes`** are the proxy's entry points, each with the models a call to it can use right now: the models with a credential that can serve them, less those the route can't reach (the models only the image endpoints serve are on none of these), in `id` order. The proxy translates between formats, so today every other model is on every one of these routes; the lists are per route so that needn't stay true. `base_path` is what an SDK for that `protocol` takes after the root: the OpenAI SDK `/v1`, the Anthropic and Google Gen AI SDKs nothing.
 - **`models`** describes each model on any route, by `id`: `display_name` (else the `id`), `owned_by`, the `providers` serving it, in order of preference, and `context_length` and `max_output_tokens` (`null` when unknown).
 
 ---
@@ -456,8 +457,9 @@ Not routes the app calls, but what it can count on:
 - **Caching:** files under `/dashboard/assets/` are named by their content and get `Cache-Control: public, max-age=31536000, immutable`; `index.html` and every other file get `Cache-Control: no-cache`.
 - **`GET /management.html` redirects** (302) to `/dashboard/` with the same query. CLIProxyAPI's safe-mode message sends users to `/management.html?safe-mode=configure`, so the app opens its API-key setup when it is loaded with `safe-mode=configure`.
 - **Both answer an empty 404** while `remote-management.disable-control-panel` is set.
-- **A client the management API refuses for its address** (not local, while remote management isn't allowed, or banned) gets the same answer here. The app itself needs no key; its API calls do.
-- **Every answer from these paths and from the dashboard API carries:**
+- **A client the management API refuses for its address** (not local, while remote management isn't allowed, or banned) gets the same answer here: 403 with `{"error": "<upstream's text>"}`. The app itself needs no key; its API calls do.
+- **The app is served while no management key is set**, so it can say how to set one; its API calls then answer 404 `management_disabled`.
+- **Every answer from these paths and from the dashboard API carries** the headers below. (A CORS preflight, `OPTIONS`, is answered 204 by the server's CORS handling before it reaches these paths, as for every path.)
   - `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`
   - `X-Content-Type-Options: nosniff`
   - `Referrer-Policy: no-referrer`
