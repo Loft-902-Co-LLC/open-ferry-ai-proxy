@@ -511,6 +511,367 @@ mod tests {
         }
     }
 
+    fn bool_node(value: &str, line_comment: &str) -> Node {
+        Node {
+            kind: Kind::Scalar,
+            tag: "!!bool".to_owned(),
+            value: value.to_owned(),
+            line_comment: line_comment.to_owned(),
+            ..Node::default()
+        }
+    }
+
+    // Ports TestSaveConfigPreserveComments_OAuthSettings
+    // (oauth_settings_test.go).
+    #[test]
+    fn oauth_settings_save_keeps_comments() {
+        let dir = TempDir::new();
+        let file = dir.path().join("config.yaml");
+        fs::write(
+            &file,
+            "config-version: 8\noauth:\n  # Provider model settings\n  settings:\n    codex:\n      - name: \"gpt-6-sol\"\n        max-context-length: 524288\n",
+        )
+        .expect("seed");
+        let mut cfg = Config::load(&file).expect("load");
+        let setting = cfg
+            .oauth_settings
+            .get_mut("codex")
+            .and_then(|settings| settings.first_mut())
+            .expect("codex setting");
+        assert_eq!(setting.max_context_length, 524_288);
+        setting.max_context_length = 1_048_576;
+        save_preserving_comments(&file, &cfg, false).expect("save");
+        let text = fs::read_to_string(&file).expect("read");
+        assert!(text.contains("1048576"), "{text}");
+        assert!(text.contains("# Provider model settings"), "{text}");
+    }
+
+    // Ports TestClientCodexEnableApplyPatchSave (client_test.go), but for
+    // upstream's ValidateV8Config check, which isn't ported: the load check
+    // runs instead.
+    #[test]
+    fn client_codex_enable_apply_patch_save() {
+        let dir = TempDir::new();
+        let file = dir.path().join("config.yaml");
+        fs::write(&file, "config-version: 8\n").expect("seed");
+        let mut cfg = Config::default();
+        for enabled in [true, false] {
+            cfg.client.codex.enable_apply_patch = enabled;
+            save_preserving_comments(&file, &cfg, true).expect("save");
+            let loaded = Config::load(&file).expect("load");
+            assert_eq!(loaded.client.codex.enable_apply_patch, enabled);
+        }
+    }
+
+    // Ports TestClientCodexOptimizeMultiAgentV2Save
+    // (client_optimize_test.go), but for upstream's ValidateV8Config check,
+    // which isn't ported: the load check runs instead.
+    #[test]
+    fn client_codex_optimize_multi_agent_v2_save() {
+        for &(old, _) in loader_v8::V8_CLIENT_PATHS {
+            let mut root = Node {
+                kind: Kind::Mapping,
+                tag: MAP_TAG.to_owned(),
+                ..Node::default()
+            };
+            set_yaml_path(&mut root, old, &bool_node("true", "keep optimize comment"));
+            let (parent, last) = old.rsplit_once('.').expect("nested path");
+            let parent = yaml_path_mut(&mut root, parent).expect("parent");
+            let index = find_map_key_index(parent, last).expect("key");
+            parent.content[index].head_comment = "keep optimize heading".to_owned();
+            set_yaml_path(
+                &mut root,
+                "client.codex.enable-apply-patch",
+                &bool_node("true", ""),
+            );
+            let raw = marshal(&root).expect("marshal");
+            let dir = TempDir::new();
+            let file = dir.path().join("config.yaml");
+            fs::write(&file, &raw).expect("seed");
+            let mut cfg = Config::load(&file).expect("load");
+            for enabled in [true, false, true] {
+                cfg.client.codex.optimize_multi_agent_v2 = enabled;
+                save_preserving_comments(&file, &cfg, true).expect("save");
+                let data = fs::read_to_string(&file).expect("read");
+                let loaded = Config::load(&file).expect("reload");
+                assert_eq!(
+                    loaded.client.codex.optimize_multi_agent_v2, enabled,
+                    "{old}"
+                );
+                assert!(loaded.client.codex.enable_apply_patch, "{old}");
+                assert!(
+                    data.contains("keep optimize comment")
+                        && data.contains("keep optimize heading"),
+                    "{old} ({enabled}): {data}"
+                );
+            }
+        }
+    }
+
+    // Ports TestV8SaveCommentsObsoleteSections (config_v8_test.go), but for
+    // upstream's ValidateV8Config check, which isn't ported: the load check
+    // runs instead.
+    #[test]
+    fn v8_save_comments_obsolete_sections() {
+        let dir = TempDir::new();
+        let file = dir.path().join("config.yaml");
+        fs::write(
+            &file,
+            "auth: {old: true}\nampcode: {old: true}\namp-upstream-url: https://old.example\namp-upstream-api-key: old-secret\ngenerative-language-api-key: old-key\nhome: {enabled: true}\nproxy-url: old\n",
+        )
+        .expect("seed");
+        let cfg = Config::load(&file).expect("load");
+        save_preserving_comments(&file, &cfg, true).expect("save");
+        let saved = fs::read_to_string(&file).expect("read");
+        for key in [
+            "auth",
+            "ampcode",
+            "amp-upstream-url",
+            "amp-upstream-api-key",
+            "generative-language-api-key",
+            "home",
+        ] {
+            assert!(saved.contains(&format!("# {key}:")), "{key}: {saved}");
+        }
+        assert!(
+            saved.contains("# amp-upstream-api-key: old-secret"),
+            "{saved}"
+        );
+    }
+
+    // Ports TestV8MigrationCommentsUnknownLegacySections
+    // (config_v8_test.go), but for upstream's ValidateV8Config check and its
+    // Home mode setting, which aren't ported.
+    #[test]
+    fn v8_migration_comments_unknown_legacy_sections() {
+        let raw: &[u8] = b"home:\n  enabled: true\n  host: ignored.example\nenable-gemini-cli-endpoint: true\nforgotten-setting:\n  items: [first, second]\nproxy-url: old\n";
+        let (unchanged, changed) = normalize_config_layout(raw, false).expect("read-only");
+        assert!(!changed);
+        assert_eq!(unchanged, raw);
+        let (migrated, changed) = normalize_config_layout(raw, true).expect("migrate");
+        assert!(changed);
+        let migrated_root = root(&migrated);
+        for key in [
+            "home",
+            "enable-gemini-cli-endpoint",
+            "forgotten-setting",
+            "proxy-url",
+        ] {
+            assert!(yaml_path(&migrated_root, key).is_none(), "{key}");
+        }
+        let text = String::from_utf8_lossy(&migrated).into_owned();
+        for marker in [
+            "# home:",
+            "#     enabled: true",
+            "#     host: ignored.example",
+            "# enable-gemini-cli-endpoint: true",
+            "# forgotten-setting:",
+            "#     items: [first, second]",
+        ] {
+            assert!(text.contains(marker), "{marker}: {text}");
+        }
+        assert_eq!(Config::parse(&migrated).expect("parse").proxy_url, "old");
+        let (remigrated, _) = normalize_config_layout(&migrated, true).expect("remigrate");
+        let text = String::from_utf8_lossy(&remigrated);
+        assert_eq!(text.matches("# home:").count(), 1, "{text}");
+        assert_eq!(text.matches("# forgotten-setting:").count(), 1, "{text}");
+    }
+
+    // Ports TestV8MigrationCommentsUnknownNestedFields (config_v8_test.go),
+    // but for upstream's ValidateV8Config check, which isn't ported, and its
+    // checks of `session-affinity` and `disable-codex-cloaking`, which the
+    // config doesn't type.
+    #[test]
+    fn v8_migration_comments_unknown_nested_fields() {
+        let raw: &[u8] = b"server: {port: 8317}\nrouting: {strategy: fill-first, session-affinity: true}\noauth:\n  providers:\n    codex:\n      disable-codex-cloaking: true\n      retired-setting: {mode: old}\n";
+        let (unchanged, changed) = normalize_config_layout(raw, false).expect("read-only");
+        assert!(!changed);
+        assert_eq!(unchanged, raw);
+        let (migrated, _) = normalize_config_layout(raw, true).expect("migrate");
+        let text = String::from_utf8_lossy(&migrated).into_owned();
+        assert!(
+            yaml_path(&root(&migrated), "oauth.providers.codex.retired-setting").is_none(),
+            "{text}"
+        );
+        assert!(
+            text.contains("# oauth.providers.codex.retired-setting:"),
+            "{text}"
+        );
+        let cfg = Config::parse(&migrated).expect("parse");
+        assert_eq!(cfg.routing.strategy, "fill-first");
+        let (remigrated, _) = normalize_config_layout(&migrated, true).expect("remigrate");
+        let text = String::from_utf8_lossy(&remigrated);
+        assert_eq!(
+            text.matches("# oauth.providers.codex.retired-setting:")
+                .count(),
+            1,
+            "{text}"
+        );
+    }
+
+    // Ports TestV8MigrationPreservesEmptyLegacyContainers
+    // (config_v8_test.go), but for upstream's ValidateV8Config check, which
+    // isn't ported, and with the configs compared whole where upstream
+    // compares their legacy encodings.
+    #[test]
+    fn v8_migration_preserves_empty_legacy_containers() {
+        let sections = [
+            ("tls", "server.tls"),
+            ("remote-management", "management"),
+            ("pprof", "observability.pprof"),
+            ("discovery", "server.discovery"),
+            ("discovery.interfaces", "server.discovery.interfaces"),
+            ("credential-concurrency", "credentials.concurrency"),
+            ("credential-in-flight", "credentials.in-flight"),
+            ("streaming", "requests.streaming"),
+            ("payload", "requests.payload"),
+            ("codex", "oauth.providers.codex"),
+            (
+                "codex.live-media-relay",
+                "oauth.providers.codex.live-media-relay",
+            ),
+            (
+                "codex-header-defaults",
+                "oauth.providers.codex.header-defaults",
+            ),
+            ("claude", "upstream.claude"),
+            ("claude-code", "upstream.claude"),
+            ("claude-header-defaults", "upstream.claude.header-defaults"),
+            ("antigravity", "oauth.providers.antigravity"),
+            (
+                "antigravity.connection-pool",
+                "oauth.providers.antigravity.connection-pool",
+            ),
+            ("xai", "upstream.xai"),
+            ("devin", "oauth.providers.devin"),
+        ];
+        for (old, current) in sections {
+            for empty in ["{}", "null"] {
+                let name = format!("{old}/{empty}");
+                let mut doc = unmarshal(
+                    b"port: 8317\nplugins: {configs: {sample: {enabled: false, options: {}}}}\n",
+                )
+                .expect("yaml");
+                let mut value = root(empty.as_bytes());
+                value.line_comment = "Keep this empty block comment".to_owned();
+                set_yaml_path(doc.content.first_mut().expect("root"), old, &value);
+                let raw = marshal(&doc).expect("marshal");
+                let before = Config::parse(&raw).expect("parse");
+                let (unchanged, changed) = normalize_config_layout(&raw, false).expect("read-only");
+                assert!(!changed && unchanged == raw, "{name}");
+                let (migrated, _) = normalize_config_layout(&raw, true).expect("migrate");
+                let after = Config::parse(&migrated).expect("parse migrated");
+                assert!(before == after, "{name}: settings changed");
+                let migrated_root = root(&migrated);
+                assert!(yaml_path(&migrated_root, old).is_none(), "{name}");
+                let moved = yaml_path(&migrated_root, current).expect("moved");
+                assert!(
+                    moved.kind == Kind::Mapping && moved.content.is_empty(),
+                    "{name}"
+                );
+                let text = String::from_utf8_lossy(&migrated);
+                assert!(
+                    text.contains("Keep this empty block comment"),
+                    "{name}: {text}"
+                );
+            }
+        }
+    }
+
+    // Ports TestV8EmptyLegacyContainersKeepNewValues (config_v8_test.go),
+    // but for its checks of the Codex live media relay and
+    // `disable-codex-cloaking`, which the config doesn't type.
+    #[test]
+    fn v8_empty_legacy_containers_keep_new_values() {
+        let raw: &[u8] = b"port: 8317\ntls: null\ncodex: {disable-codex-cloaking: true, live-media-relay: {}}\nserver: {tls: {enable: true, cert: server.crt, key: server.key}}\noauth: {providers: {codex: {live-media-relay: {max-sessions: 12}}}}\n";
+        for migrate in [false, true] {
+            let (data, _) = normalize_config_layout(raw, migrate).expect("normalize");
+            let cfg = Config::parse(&data).expect("parse");
+            assert!(cfg.tls.enable, "{migrate}");
+            assert_eq!(cfg.tls.cert, "server.crt", "{migrate}");
+            assert_eq!(cfg.tls.key, "server.key", "{migrate}");
+            let data_root = root(&data);
+            assert!(yaml_path(&data_root, "tls").is_none(), "{migrate}");
+            assert!(
+                yaml_path(&data_root, "codex.live-media-relay").is_none(),
+                "{migrate}"
+            );
+            if !migrate {
+                assert!(
+                    yaml_path(&data_root, "codex.disable-codex-cloaking").is_some(),
+                    "a non-conflicting legacy sibling moved"
+                );
+            }
+            let text = String::from_utf8_lossy(&data);
+            assert!(text.contains("max-sessions: 12"), "{text}");
+        }
+    }
+
+    // Ports TestV8SaveLegacyAdapterAndManualFallback (config_v8_test.go).
+    #[test]
+    fn v8_save_legacy_adapter_and_manual_fallback() {
+        let dir = TempDir::new();
+        let file = dir.path().join("config.yaml");
+        fs::write(
+            &file,
+            "config-version: 8\nrouting: {retry: {request-retry: 1}}\noauth: {providers: {aistudio: {ws-auth: true}}}\n",
+        )
+        .expect("seed");
+        let mut cfg = Config::load(&file).expect("load");
+        cfg.request_retry = 0;
+        cfg.ws_auth = false;
+        save_preserving_comments(&file, &cfg, false).expect("save");
+        let reloaded = Config::load(&file).expect("reload");
+        assert_eq!(reloaded.request_retry, 0, "shadowed by stale v8 values");
+        assert!(!reloaded.ws_auth, "shadowed by stale v8 values");
+        fs::write(
+            &file,
+            "config-version: 8\nrequest-retry: 5\nws-auth: true\n",
+        )
+        .expect("seed");
+        let reloaded = Config::load(&file).expect("reload");
+        assert_eq!(reloaded.request_retry, 5, "manual legacy fallback");
+        assert!(reloaded.ws_auth, "manual legacy fallback");
+    }
+
+    // Ports TestAPIKeyWeightParsingAndZeroPersistence (weight_test.go).
+    #[test]
+    fn api_key_weight_zero_persists() {
+        let cfg = Config::parse(
+            "xai-api-key:\n  - api-key: key\n    base-url: https://api.x.ai/v1\n    weight: 0\n",
+        )
+        .expect("parse");
+        assert_eq!(cfg.xai_api_key.first().and_then(|key| key.weight), Some(0));
+        let dir = TempDir::new();
+        let file = dir.path().join("config.yaml");
+        fs::write(
+            &file,
+            "xai-api-key:\n  - api-key: key\n    base-url: https://api.x.ai/v1\n",
+        )
+        .expect("seed");
+        save_preserving_comments(&file, &cfg, false).expect("save");
+        let saved = fs::read_to_string(&file).expect("read");
+        assert!(saved.contains("weight: 0"), "{saved}");
+    }
+
+    // Ports TestSaveConfigPreserveComments_PrunesDefaultPluginsDir
+    // (plugin_config_test.go), but with no plugin settings in the config,
+    // which doesn't type them.
+    #[test]
+    fn save_adds_no_default_plugins_dir() {
+        let dir = TempDir::new();
+        let file = dir.path().join("config.yaml");
+        fs::write(&file, "debug: true\n").expect("seed");
+        let cfg = Config {
+            debug: true,
+            ..Config::default()
+        };
+        save_preserving_comments(&file, &cfg, false).expect("save");
+        let text = fs::read_to_string(&file).expect("read");
+        assert!(!text.contains("plugins:"), "{text}");
+        assert!(!text.contains("dir: plugins"), "{text}");
+    }
+
     // Not upstream's: a save keeps the sections the config doesn't type and
     // writes what it changes, with upstream's flow collections in block
     // style and the settings it adds (Go's answer, recorded).
