@@ -13,9 +13,9 @@ This document is the contract between the server and the app. A change to it is 
 
 The dashboard API checks exactly what the management API checks, with the same code:
 
-- **A management key must be set**, in the config's `remote-management.secret-key` or in `MANAGEMENT_PASSWORD`.
+- **A management key must be set**, in the config's `management.secret-key` or in `MANAGEMENT_PASSWORD`. (A config in the legacy layout has the `management` keys under `remote-management:`, which is still read.)
 - **The request carries the key**, as `Authorization: Bearer <key>` (what the app sends), a bare `Authorization: <key>`, or `X-Management-Key: <key>`.
-- **Clients other than 127.0.0.1 and ::1** also need `remote-management.allow-remote`, which a set `MANAGEMENT_PASSWORD` implies.
+- **Clients other than 127.0.0.1 and ::1** also need `management.allow-remote`, which a set `MANAGEMENT_PASSWORD` implies.
 - **The local management password** (the command line's `-password`, or the one the TUI's standalone mode sets) is a key as well, from 127.0.0.1 and ::1 only; from anywhere else it is a wrong key. It doesn't stand in for a management key: while none is set, the answer is still `management_disabled`.
 - **Five failed attempts from one address ban it for thirty minutes**, for the management API and the dashboard API alike: they share one record.
 
@@ -456,7 +456,7 @@ What the app needs to write ready-made client configs, other than client keys, w
 }
 ```
 
-- **`base_urls`** are the server's root as it sees itself, without a path; a client's base URL is one of them followed by its route's `base_path`. Those with `source` `listen` come from the config's `host`, `port` and `tls`: an empty `host`, `0.0.0.0` or `::` gives the loopback addresses and `localhost`, since the server can't know which of its other addresses a client reaches. The one with `source` `config` is `remote-management.base-url`, when set, without any credentials, query or fragment in it. The app also knows its own origin, which may be another (a proxy in front).
+- **`base_urls`** are the server's root as it sees itself, without a path; a client's base URL is one of them followed by its route's `base_path`. Those with `source` `listen` come from the config's `host`, `port` and `tls`: an empty `host`, `0.0.0.0` or `::` gives the loopback addresses and `localhost`, since the server can't know which of its other addresses a client reaches. The one with `source` `config` is `management.base-url`, when set, without any credentials, query or fragment in it. The app also knows its own origin, which may be another (a proxy in front).
 - **`tls`** is the config's `tls.enable`.
 - **`safe_mode`** is `true` while `api-keys` holds CLIProxyAPI's example keys and the proxy routes refuse service; client configs won't work until they are changed.
 - **`routes`** are the proxy's entry points, each with the models a call to it can use right now: the models with a credential that can serve them, less those the route can't reach (the models only the image endpoints serve are on none of these), in `id` order. The proxy translates between formats, so today every other model is on every one of these routes; the lists are per route so that needn't stay true. `base_path` is what an SDK for that `protocol` takes after the root: the OpenAI SDK `/v1`, the Anthropic and Google Gen AI SDKs nothing.
@@ -471,7 +471,7 @@ Not routes the app calls, but what it can count on:
 - **The app is at `/dashboard/`.** `/dashboard` redirects there. A path below it that isn't a file of the app answers `index.html`, for client-side routing, except below `/dashboard/assets/`, where a missing file is a 404.
 - **Caching:** files under `/dashboard/assets/` are named by their content and get `Cache-Control: public, max-age=31536000, immutable`; `index.html` and every other file get `Cache-Control: no-cache`.
 - **`GET /management.html` redirects** (302) to `/dashboard/` with the same query. CLIProxyAPI's safe-mode message sends users to `/management.html?safe-mode=configure`, so the app opens its API-key setup when it is loaded with `safe-mode=configure`.
-- **Both answer an empty 404** while `remote-management.disable-control-panel` is set.
+- **Both answer an empty 404** while `management.disable-control-panel` is set.
 - **A client the management API refuses for its address** (not local, while remote management isn't allowed, or banned) gets the same answer here: 403 with `{"error": "<upstream's text>"}`. The app itself needs no key; its API calls do.
 - **The app is served while no management key is set**, so it can say how to set one; its API calls then answer 404 `management_disabled`.
 - **Every answer from these paths and from the dashboard API carries** the headers below. (A CORS preflight, `OPTIONS`, is answered 204 by the server's CORS handling before it reaches these paths, as for every path.)

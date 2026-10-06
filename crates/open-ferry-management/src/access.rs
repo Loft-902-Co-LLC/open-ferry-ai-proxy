@@ -9,11 +9,11 @@
 //! Who may use the management API.
 //!
 //! The API answers only when a management key is set, in the config's
-//! `remote-management.secret-key` or in `MANAGEMENT_PASSWORD`; until then
+//! `management.secret-key` or in `MANAGEMENT_PASSWORD`; until then
 //! every management path is an empty 404, and a config reload turns it on
 //! or off. A request then needs the key, as `Authorization: Bearer <key>`,
 //! a bare `Authorization` value, or `X-Management-Key`. Clients other than
-//! 127.0.0.1 and ::1 also need `remote-management.allow-remote`, which a
+//! 127.0.0.1 and ::1 also need `management.allow-remote`, which a
 //! set `MANAGEMENT_PASSWORD` implies. Five failed attempts from one address
 //! ban it for thirty minutes.
 //!

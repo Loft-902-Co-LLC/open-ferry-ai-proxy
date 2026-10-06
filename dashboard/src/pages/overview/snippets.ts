@@ -109,7 +109,7 @@ export function addressOptions(origin: string, baseUrls: readonly BaseUrl[]): Ad
     if (options.some((option) => sameRoot(option.root, base.url))) {
       continue;
     }
-    const where = base.source === "config" ? "remote-management.base-url" : "the server's listen address";
+    const where = base.source === "config" ? "management.base-url" : "the server's listen address";
     options.push({ root: trimRoot(base.url), label: `${trimRoot(base.url)} (${where})` });
   }
   return options;

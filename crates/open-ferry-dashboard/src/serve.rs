@@ -13,7 +13,7 @@
 //! | `GET /management.html` | 302 to `/dashboard/`, with the same query |
 //!
 //! Each first answers an empty 404 while
-//! `remote-management.disable-control-panel` is set, as upstream's
+//! `management.disable-control-panel` is set, as upstream's
 //! `/management.html` does, then refuses an address as the management API
 //! does (see [`check_address`]). No key is asked for: the app asks for it,
 //! and its API calls carry it.

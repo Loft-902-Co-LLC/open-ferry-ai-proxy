@@ -104,7 +104,7 @@ export function SignInPage() {
               autoFocus
               hint={
                 <>
-                  The <Code>remote-management.secret-key</Code> in config.yaml, or the{" "}
+                  The <Code>management.secret-key</Code> in config.yaml, or the{" "}
                   <Code>MANAGEMENT_PASSWORD</Code> environment variable. On the computer the
                   server runs on, its local password works too: the one given with{" "}
                   <Code>-password</Code>, or the one the terminal UI&apos;s standalone mode sets.

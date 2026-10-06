@@ -15,7 +15,7 @@ open-ferry reads CLIProxyAPI's config and auth directory as they are, so for mos
 **What stays the same:**
 - **Both config layouts load:** the legacy one and the v8 one. Changes to the config or the auth directory are picked up without a restart, as before.
 - **The auth directory** is the config's `auth-dir`, by default `~/.cli-proxy-api`, with the same credential files.
-- **The management key** is still `remote-management.secret-key` or `MANAGEMENT_PASSWORD`.
+- **The management key** is still `management.secret-key` or `MANAGEMENT_PASSWORD`. A config in the legacy layout has the management settings under `remote-management:`, which is still read; where both blocks set a key, `management:` wins.
 - **A `.env` file** in the working directory is still loaded at start, and a variable already set in the environment still wins over it. On Windows it wins whatever the case of its name, and a file that starts with a UTF-8 byte order mark loads, where CLIProxyAPI refuses it.
 - **Log files** go to the same place: `logs` under `WRITABLE_PATH` if it's set, else the working directory's `logs` if that directory exists and can be written to, else `logs` in the auth directory.
 - **Safe mode** still holds: while `api-keys` lists the example keys from CLIProxyAPI's `config.example.yaml`, the proxy refuses service until you change them. open-ferry's own [`config.example.yaml`](../config.example.yaml), in each release archive, keeps those keys, so a config copied from it is refused too until you change them. There's no warning page at `/`, though: the proxy's routes answer 403 with CLIProxyAPI's message, whose link, `/management.html?safe-mode=configure`, opens the dashboard's API key setup.
@@ -50,7 +50,7 @@ The binary is `open-ferry` (`open-ferry.exe` on Windows), not `cli-proxy-api`, s
 | `-xai-login`, `-meta-login` | Not available: use an API key (see [below](#providers-and-sign-ins)) |
 | `-vertex-import`, `-vertex-import-prefix` | Not available: use the management API's `vertex/import` route, or a `vertex-api-key` entry in the config |
 | `-password` | As before: a management password for clients on the same machine (127.0.0.1 and ::1), and the `/keep-alive` endpoint that stops the server after 10 seconds without a call |
-| `-tui`, `-standalone`, `-management-base-url` | As before, except that the OAuth tab offers only Codex and Claude, and the config and keys tabs can't save changes yet. `-standalone` still needs `remote-management.secret-key` or `MANAGEMENT_PASSWORD` |
+| `-tui`, `-standalone`, `-management-base-url` | As before, except that the OAuth tab offers only Codex and Claude, and the config and keys tabs can't save changes yet. `-standalone` still needs `management.secret-key` or `MANAGEMENT_PASSWORD` |
 | `-home-jwt`, `-home-disable-cluster-discovery` | Not available: Home mode is on the roadmap for v4 |
 | `-discover`, `-discover-timeout`, `-discover-json`, `-discover-service-type` | Not available |
 
@@ -81,7 +81,7 @@ open-ferry signs in only with each provider's own OAuth flow, and doesn't pose a
 
 open-ferry serves the part of `/v0/management` (and its `/v8/management` names) that T3 Code's hub uses, and more. The routes, and how each differs, are in [The management API](../UPSTREAM.md#the-management-api). What you'll notice:
 
-- **The control panel is open-ferry's own dashboard.** `/management.html` sends the browser to `/dashboard/`, keeping its query. The dashboard is built into the binary, so no panel is downloaded and `remote-management.panel-github-repository` is ignored. `disable-control-panel` turns it off, as before, and a client the management API refuses for its address (another machine, without `allow-remote`) is refused the dashboard too, where CLIProxyAPI serves its panel to anyone. See [the dashboard](../UPSTREAM.md#added-in-open-ferry-the-dashboard).
+- **The control panel is open-ferry's own dashboard.** `/management.html` sends the browser to `/dashboard/`, keeping its query. The dashboard is built into the binary, so no panel is downloaded and `management.panel-github-repository` is ignored. `disable-control-panel` turns it off, as before, and a client the management API refuses for its address (another machine, without `allow-remote`) is refused the dashboard too, where CLIProxyAPI serves its panel to anyone. See [the dashboard](../UPSTREAM.md#added-in-open-ferry-the-dashboard).
 - **A config change through the API takes effect before the answer.** CLIProxyAPI answers first and reloads after; open-ferry saves the file, loads it again and then answers. A save keeps the file's comments and the settings open-ferry doesn't type, as CLIProxyAPI's does, replaces the file in one step and keeps the previous one as `config.yaml.bak`. A save that fails changes neither the file nor the running config, where CLIProxyAPI keeps the change in memory. Editing `config.yaml` by hand still works; the change is picked up on its own. See [Config writes](../UPSTREAM.md#config-writes).
 - **Also not ported:**
   - `quota/providers` and `quota/reset`;

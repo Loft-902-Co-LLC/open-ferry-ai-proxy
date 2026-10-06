@@ -6,7 +6,7 @@
 //!
 //! On its own it is a client of a server already running: the management
 //! API at `-management-base-url`, else at the config's
-//! `remote-management.base-url`, else on 127.0.0.1 at the config's port,
+//! `management.base-url`, else on 127.0.0.1 at the config's port,
 //! signed in with `-password` if given and otherwise with the key the user
 //! types.
 //!
@@ -152,7 +152,7 @@ fn open_url(url: &str) {
 }
 
 /// The management API the TUI uses on its own (`resolveManagementBaseURL`):
-/// `flag_url`, else the config's `remote-management.base-url`, else
+/// `flag_url`, else the config's `management.base-url`, else
 /// 127.0.0.1 at the config's port, or 8317 when that isn't positive; each
 /// URL trimmed.
 pub fn resolve_management_base_url(flag_url: &str, config: Option<&Config>) -> String {

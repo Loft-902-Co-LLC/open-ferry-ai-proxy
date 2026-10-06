@@ -109,7 +109,7 @@ describe("connecting a client", () => {
       "http://localhost:3000 (this page's address)",
       "http://127.0.0.1:8317 (the server's listen address)",
       "http://localhost:8317 (the server's listen address)",
-      "https://proxy.example.com (remote-management.base-url)",
+      "https://proxy.example.com (management.base-url)",
     ]);
     expect(screen.getByText("This address works only on the computer the proxy runs on.")).toBeVisible();
 

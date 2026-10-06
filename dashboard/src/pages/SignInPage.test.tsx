@@ -89,7 +89,7 @@ describe("sign in", () => {
     await submitKey(user, "right-key");
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("Remote management is off");
-    expect(alert).toHaveTextContent("remote-management.allow-remote: true");
+    expect(within(alert).getByText("management.allow-remote: true")).toBeVisible();
   });
 
   it("says how long a ban lasts", async () => {
@@ -111,7 +111,7 @@ describe("sign in", () => {
     const notice = await screen.findByText("Management is switched off on this server");
     const box = notice.closest("div[role]") ?? notice.parentElement;
     expect(box).not.toBeNull();
-    expect(within(box as HTMLElement).getByText("remote-management.secret-key")).toBeVisible();
+    expect(within(box as HTMLElement).getByText("management.secret-key")).toBeVisible();
     expect(within(box as HTMLElement).getByText("MANAGEMENT_PASSWORD")).toBeVisible();
     // A local password alone isn't a management key.
     expect(box).toHaveTextContent("doesn't turn management on by itself");

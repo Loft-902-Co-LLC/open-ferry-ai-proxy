@@ -63,7 +63,7 @@ describe("addressOptions", () => {
       { root: "https://ferry.example.org", label: "https://ferry.example.org (this page's address)" },
       { root: "http://127.0.0.1:8317", label: "http://127.0.0.1:8317 (the server's listen address)" },
       { root: "http://localhost:8317", label: "http://localhost:8317 (the server's listen address)" },
-      { root: "https://proxy.example.com", label: "https://proxy.example.com (remote-management.base-url)" },
+      { root: "https://proxy.example.com", label: "https://proxy.example.com (management.base-url)" },
     ]);
   });
 

@@ -169,7 +169,7 @@ async fn management_html_takes_only_get() {
     assert_eq!(answer.body, "404 page not found");
 }
 
-/// Not upstream's: while `remote-management.disable-control-panel` is set,
+/// Not upstream's: while `management.disable-control-panel` is set,
 /// the app and `/management.html` answer an empty 404, as upstream's
 /// `serveManagementControlPanel` does; the dashboard API still works.
 #[tokio::test]

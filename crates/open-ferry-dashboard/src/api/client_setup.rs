@@ -199,7 +199,7 @@ pub(crate) fn base_urls(config: &Config) -> Vec<BaseUrl> {
     urls
 }
 
-/// `remote-management.base-url` without credentials, query, fragment or a
+/// `management.base-url` without credentials, query, fragment or a
 /// trailing `/`, if it is an HTTP or HTTPS URL.
 fn configured_base_url(text: &str) -> Option<String> {
     let text = text.trim();

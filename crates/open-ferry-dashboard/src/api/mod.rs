@@ -120,7 +120,7 @@ fn refused(refusal: &Refusal) -> ApiError {
         Refusal::Unavailable | Refusal::KeyNotSet => ApiError::new(
             StatusCode::NOT_FOUND,
             "management_disabled",
-            "no management key is set; set remote-management.secret-key or MANAGEMENT_PASSWORD",
+            "no management key is set; set management.secret-key or MANAGEMENT_PASSWORD",
         ),
         Refusal::Banned(_) => ApiError::new(StatusCode::FORBIDDEN, "ip_banned", message),
         Refusal::RemoteDisabled => {

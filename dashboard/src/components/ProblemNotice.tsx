@@ -37,7 +37,7 @@ export function explainProblem(problem: CallProblem): Explanation {
         body: (
           <>
             <p>
-              Enter the value of <Code>remote-management.secret-key</Code> from config.yaml as you
+              Enter the value of <Code>management.secret-key</Code> from config.yaml as you
               wrote it, or of the <Code>MANAGEMENT_PASSWORD</Code> environment variable. If
               config.yaml now shows a hash starting with <Code>$2a$</Code>, the server hashed your
               key: enter the key itself, not the hash.
@@ -58,7 +58,7 @@ export function explainProblem(problem: CallProblem): Explanation {
           <p>
             This server takes management calls only from the computer it runs on. Open the
             dashboard on that computer, through <Code>127.0.0.1</Code> or <Code>localhost</Code>.
-            To manage it from elsewhere, set <Code>remote-management.allow-remote: true</Code> in
+            To manage it from elsewhere, set <Code>management.allow-remote: true</Code> in
             config.yaml; setting <Code>MANAGEMENT_PASSWORD</Code> allows it too.
           </p>
         ),
@@ -84,7 +84,7 @@ export function explainProblem(problem: CallProblem): Explanation {
         body: (
           <p>
             No management key is set, so the server answers no management calls and the dashboard
-            can't work. Set <Code>remote-management.secret-key</Code> in config.yaml, or start the
+            can't work. Set <Code>management.secret-key</Code> in config.yaml, or start the
             server with the <Code>MANAGEMENT_PASSWORD</Code> environment variable set, then try
             again. A local password, from <Code>-password</Code> or the terminal UI&apos;s
             standalone mode, doesn&apos;t turn management on by itself.

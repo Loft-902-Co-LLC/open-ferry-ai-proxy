@@ -114,9 +114,9 @@ async fn remote_clients_and_an_unset_key() {
             .send(call)
             .await
             .error(StatusCode::NOT_FOUND, "management_disabled");
-        assert!(
-            message.contains("remote-management.secret-key"),
-            "{message}"
+        assert_eq!(
+            message,
+            "no management key is set; set management.secret-key or MANAGEMENT_PASSWORD"
         );
     }
 }
