@@ -1,0 +1,302 @@
+name: Release
+
+# Pushing a tag vX.Y.Z builds open-ferry for each target, writes SHA256SUMS,
+# attests the archives' build provenance and creates a draft GitHub release
+# for the maintainer to review and publish.
+#
+# Running the workflow by hand (workflow_dispatch) is a dry run: it builds,
+# packages and checksums the same archives and keeps them as workflow
+# artifacts, but attests and publishes nothing.
+#
+# See RELEASING.md.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  meta:
+    name: Read the version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      commit: ${{ steps.meta.outputs.commit }}
+      build-date: ${{ steps.meta.outputs.build-date }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read the version, commit and build date
+        id: meta
+        env:
+          EVENT: ${{ github.event_name }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # The binary reports the workspace version, so the open-ferry crate
+          # must take it from the workspace.
+          if ! grep -qx 'version.workspace = true' crates/open-ferry/Cargo.toml; then
+            echo "::error::crates/open-ferry/Cargo.toml doesn't take its version from the workspace"
+            exit 1
+          fi
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          if ! [[ $version =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::The workspace version '$version' isn't MAJOR.MINOR.PATCH with an optional pre-release part"
+            exit 1
+          fi
+          if [ "$EVENT" = push ]; then
+            if [ "$TAG" != "v$version" ]; then
+              echo "::error::The tag $TAG doesn't match the workspace version $version: tag v$version, or bump the version first"
+              exit 1
+            fi
+            if ! awk -v heading="## [$version] - " 'index($0, heading) == 1 { found = 1 } END { exit !found }' CHANGELOG.md; then
+              echo "::error::CHANGELOG.md has no '## [$version] - YYYY-MM-DD' section"
+              exit 1
+            fi
+          else
+            echo "::notice::Dry run: building $version from $GITHUB_REF without publishing"
+          fi
+          prerelease=false
+          if [[ $version == *-* ]]; then prerelease=true; fi
+          {
+            echo "version=$version"
+            echo "commit=$(git rev-parse --short HEAD)"
+            # One build date for every target.
+            echo "build-date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: build (${{ matrix.target }})
+    needs: meta
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Each target builds natively on a runner of its own architecture:
+          # rustls uses aws-lc-rs, whose C code wants the target's toolchain.
+          # The Linux runner's glibc is the oldest the Linux binaries run on
+          # (2.39 on Ubuntu 24.04). Labels are pinned so that a move of
+          # ubuntu-latest or macos-latest doesn't change a release unseen.
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - target: aarch64-apple-darwin
+            runner: macos-15
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2025
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.meta.outputs.version }}
+      OPEN_FERRY_COMMIT: ${{ needs.meta.outputs.commit }}
+      OPEN_FERRY_BUILD_DATE: ${{ needs.meta.outputs.build-date }}
+      # Read only when building for macOS: the oldest macOS the binaries run
+      # on, for the Rust and the C code alike.
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+      # Link the C runtime statically, so Windows users don't need the Visual
+      # C++ Redistributable. Applies only to that target.
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+      # Keeps macOS tar from adding ._ files for extended attributes.
+      COPYFILE_DISABLE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No cache: a release is built from scratch, so nothing a cache holds
+      # can find its way into it.
+      - name: Install the toolchain from rust-toolchain.toml
+        run: rustup toolchain install --profile minimal
+
+      - name: Check that the runner builds natively
+        run: |
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          if [ "$host" != "$TARGET" ]; then
+            echo "::error::The runner's host is $host, not $TARGET"
+            exit 1
+          fi
+
+      - name: Build
+        run: cargo build --release --locked -p open-ferry --target "$TARGET"
+
+      - name: Report the glibc the binary needs
+        if: runner.os == 'Linux'
+        run: |
+          glibc=$(objdump -T "target/$TARGET/release/open-ferry" | { grep -o 'GLIBC_[0-9.]*' || true; } | sort -uV | tail -n 1)
+          echo "$TARGET needs ${glibc:-no versioned glibc symbols}"
+          echo "$TARGET needs ${glibc:-no versioned glibc symbols}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Package
+        id: package
+        run: |
+          name="open-ferry-$VERSION-$TARGET"
+          exe=open-ferry
+          if [ "$RUNNER_OS" = Windows ]; then exe=open-ferry.exe; fi
+          mkdir -p "dist/$name"
+          cp "target/$TARGET/release/$exe" LICENSE README.md "dist/$name/"
+          if [ "$RUNNER_OS" != Windows ]; then chmod 755 "dist/$name/$exe"; fi
+          cp -R licenses "dist/$name/"
+          if [ -f config.example.yaml ]; then cp config.example.yaml "dist/$name/"; fi
+          cd dist
+          if [ "$RUNNER_OS" = Windows ]; then
+            # Windows' own tar is bsdtar, which writes zip files; Git Bash's
+            # tar doesn't.
+            "$(cygpath "$SYSTEMROOT")/System32/tar.exe" -a -cf "$name.zip" "$name"
+            archive="$name.zip"
+          else
+            tar -czf "$name.tar.gz" "$name"
+            archive="$name.tar.gz"
+          fi
+          rm -rf "$name"
+          echo "archive=dist/$archive" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: open-ferry-${{ matrix.target }}
+          path: ${{ steps.package.outputs.archive }}
+          if-no-files-found: error
+
+  checksums:
+    name: Write SHA256SUMS
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: open-ferry-*
+          path: dist
+          merge-multiple: true
+
+      - name: Write SHA256SUMS
+        run: |
+          export LC_ALL=C
+          cd dist
+          shopt -s nullglob
+          archives=(open-ferry-*.tar.gz open-ferry-*.zip)
+          if [ "${#archives[@]}" -eq 0 ]; then
+            echo "::error::No archives were downloaded"
+            exit 1
+          fi
+          sha256sum -- "${archives[@]}" | sort -k 2 > SHA256SUMS
+          sha256sum --check --strict SHA256SUMS
+          cat SHA256SUMS >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: open-ferry-SHA256SUMS
+          path: dist/SHA256SUMS
+          if-no-files-found: error
+
+  publish:
+    name: Create the draft release
+    needs: [meta, checksums]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # The only job that may write: the release (contents), and the
+    # attestations, signed with the workflow's OIDC token (id-token).
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.meta.outputs.version }}
+      PRERELEASE: ${{ needs.meta.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: open-ferry-*
+          path: dist
+          merge-multiple: true
+
+      - name: Check the archives against SHA256SUMS
+        run: |
+          export LC_ALL=C
+          cd dist
+          sha256sum --check --strict SHA256SUMS
+          # A name may carry sha256sum's '*' binary-mode mark.
+          listed=$(awk '{ name = $2; sub(/^\*/, "", name); print name }' SHA256SUMS | sort)
+          present=$(ls | grep -vx SHA256SUMS | sort)
+          if [ "$listed" != "$present" ]; then
+            echo "::error::dist holds files SHA256SUMS doesn't list, or lacks some it does"
+            exit 1
+          fi
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/open-ferry-*.tar.gz
+            dist/open-ferry-*.zip
+
+      - name: Write the release notes from CHANGELOG.md
+        run: |
+          python3 - > "$RUNNER_TEMP/notes.md" <<'PY'
+          import os
+          import re
+          import sys
+
+          version = os.environ["VERSION"]
+          heading = f"## [{version}] - "
+          lines = open("CHANGELOG.md", encoding="utf-8").read().splitlines()
+          starts = [i for i, line in enumerate(lines) if line.startswith(heading)]
+          if not starts:
+              sys.exit(f"CHANGELOG.md has no section for {version}")
+          notes = []
+          for line in lines[starts[0] + 1:]:
+              # The section ends at the next version or the link definitions.
+              if line.startswith("## ") or re.match(r"\[[^\]]+\]: ", line):
+                  break
+              notes.append(line)
+          text = "\n".join(notes).strip()
+          if not text:
+              sys.exit(f"The CHANGELOG.md section for {version} is empty")
+          print(text)
+          print()
+          print("To check a download against SHA256SUMS and its build provenance, see "
+                "[Install](https://github.com/{}/blob/{}/README.md#install).".format(
+                    os.environ["GITHUB_REPOSITORY"], os.environ["TAG"]))
+          PY
+          cat "$RUNNER_TEMP/notes.md"
+
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          flags=()
+          if [ "$PRERELEASE" = true ]; then flags+=(--prerelease); fi
+          gh release create "$TAG" dist/* \
+            --draft \
+            --verify-tag \
+            --title "open-ferry $VERSION" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            "${flags[@]}"
