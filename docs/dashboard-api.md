@@ -16,6 +16,7 @@ The dashboard API checks exactly what the management API checks, with the same c
 - **A management key must be set**, in the config's `remote-management.secret-key` or in `MANAGEMENT_PASSWORD`.
 - **The request carries the key**, as `Authorization: Bearer <key>` (what the app sends), a bare `Authorization: <key>`, or `X-Management-Key: <key>`.
 - **Clients other than 127.0.0.1 and ::1** also need `remote-management.allow-remote`, which a set `MANAGEMENT_PASSWORD` implies.
+- **The local management password** (the command line's `-password`, or the one the TUI's standalone mode sets) is a key as well, from 127.0.0.1 and ::1 only; from anywhere else it is a wrong key. It doesn't stand in for a management key: while none is set, the answer is still `management_disabled`.
 - **Five failed attempts from one address ban it for thirty minutes**, for the management API and the dashboard API alike: they share one record.
 
 No cookies are used or set.
@@ -49,7 +50,7 @@ Every error is a status and a body:
 | 401 | `invalid_management_key` | The key is wrong. Counts as a failed attempt. |
 | 403 | `remote_management_disabled` | The client isn't local and remote management isn't allowed. |
 | 403 | `ip_banned` | Too many failed attempts from this address. The message says how long the ban lasts. |
-| 404 | `management_disabled` | No management key is set, so neither API serves anything. The management API answers an empty 404 then. |
+| 404 | `management_disabled` | No management key is set, so neither API serves anything. The management API answers an empty 404 then, or, while a local management password turns it on (until the first config reload), 403 `{"error": "remote management key not set"}`. |
 | 404 | `not_found` | No such route, or no such log. |
 | 405 | `method_not_allowed` | The route exists, the method doesn't. |
 | 413 | `body_too_large` | The body is over 64 KiB. |
