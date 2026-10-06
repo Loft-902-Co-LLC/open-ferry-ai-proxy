@@ -29,6 +29,8 @@ Nothing has been released yet. This is what is in place today, ported from CLIPr
 - **Request logs, `main.log`, usage records, payload rules and saved cooldowns**, as CLIProxyAPI has them.
 - **CLIProxyAPI's terminal UI** (`-tui`), as a client of a running server's management API (`-management-base-url`) or of one it starts (`-standalone`). Its OAuth tab offers Codex and Claude.
 - **`-password`**, a management password for clients on the same machine, with CLIProxyAPI's `/keep-alive` endpoint.
+- **A web dashboard** at `/dashboard/`, built into the binary, in place of CLIProxyAPI's downloaded control panel: `/management.html` sends the browser there. It signs in with the management key, and reads the management API and an API of its own under `/open-ferry/api/v1/` ([docs/dashboard-api.md](docs/dashboard-api.md)): usage, a search of the request logs, and client setup.
+- **A usage ledger**, `open-ferry-usage.sqlite3` in the log directory, which keeps the usage records for the dashboard while `usage-statistics-enabled` is on: 90 days by default, with no prompt or answer text and no client key in clear. Costs are estimated from prices you enter.
 - **Release binaries** for Linux (x86-64 and arm64), macOS (Intel and Apple silicon) and Windows (x86-64). Each release comes with `SHA256SUMS` and build provenance attestations.
 
 [Unreleased]: https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/commits/main

@@ -17,7 +17,7 @@ open-ferry reads CLIProxyAPI's config and auth directory as they are, so for mos
 - **The auth directory** is the config's `auth-dir`, by default `~/.cli-proxy-api`, with the same credential files.
 - **The management key** is still `remote-management.secret-key` or `MANAGEMENT_PASSWORD`.
 - **Log files** go to the same place: `WRITABLE_PATH` if set, else beside the config.
-- **Safe mode** still holds: while `api-keys` lists the example keys from CLIProxyAPI's `config.example.yaml`, the proxy refuses service until you change them.
+- **Safe mode** still holds: while `api-keys` lists the example keys from CLIProxyAPI's `config.example.yaml`, the proxy refuses service until you change them. There's no warning page at `/`, though: the proxy's routes answer 403 with CLIProxyAPI's message, whose link, `/management.html?safe-mode=configure`, opens the dashboard's API key setup.
 
 **What differs:**
 - **The config is never written.** CLIProxyAPI replaces a plain `secret-key` with its bcrypt hash in the file; open-ferry leaves the file alone and compares the plain key as written. A file that already holds a hash works too. See [the foundation](../UPSTREAM.md#the-foundation).
@@ -81,7 +81,7 @@ open-ferry signs in only with each provider's own OAuth flow, and doesn't pose a
 
 open-ferry serves the part of `/v0/management` (and its `/v8/management` names) that T3 Code's hub uses, and more. The routes, and how each differs, are in [The management API](../UPSTREAM.md#the-management-api). What you'll notice:
 
-- **There's no control panel.** `/management.html` isn't served, and no panel is downloaded. open-ferry's own dashboard is on the [roadmap](../ROADMAP.md) for v1.
+- **The control panel is open-ferry's own dashboard.** `/management.html` sends the browser to `/dashboard/`, keeping its query. The dashboard is built into the binary, so no panel is downloaded and `remote-management.panel-github-repository` is ignored. `disable-control-panel` turns it off, as before, and a client the management API refuses for its address (another machine, without `allow-remote`) is refused the dashboard too, where CLIProxyAPI serves its panel to anyone. See [the dashboard](../UPSTREAM.md#added-in-open-ferry-the-dashboard).
 - **The config can't be changed through the API.** Every route that writes it answers an empty 404 and leaves the file as it is. Edit `config.yaml` instead; the change is picked up on its own. See [Not ported](../UPSTREAM.md#not-ported).
 - **Also not ported:**
   - `quota/providers` and `quota/reset`;
@@ -120,3 +120,4 @@ These are the differences most likely to show in practice. The rest are in [Devi
 
 - **Request logs mask more:** cookies and management keys among others. A compressed body is decoded, or replaced by a one-line placeholder. OAuth callbacks aren't logged. See [Request logs](../UPSTREAM.md#request-logs).
 - **Usage records** keep their times in UTC (see above).
+- **The usage ledger**, `open-ferry-usage.sqlite3`, is made in the log directory at start, for the dashboard, so the directory appears even when nothing else is logged there. See [the dashboard](../UPSTREAM.md#added-in-open-ferry-the-dashboard).

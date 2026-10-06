@@ -101,6 +101,9 @@
 //!   updates the credentials that differ, so a change to a file that the
 //!   watcher has yet to report is applied then, rather than with the
 //!   report.
+//! - The dashboard's usage ledger is opened in the log directory at start,
+//!   which makes the directory whether or not anything else is logged
+//!   there; upstream makes it only to write a log.
 //! - The logs, the usage statistics and the cooldown state store take the
 //!   config through the `observability` hooks once the credentials are
 //!   loaded, at start as on a reload; P3 ports what is behind them. pprof,
