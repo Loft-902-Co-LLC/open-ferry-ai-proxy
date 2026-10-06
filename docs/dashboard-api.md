@@ -23,7 +23,7 @@ No cookies are used or set.
 ### Requests and responses
 
 - Bodies are JSON (`Content-Type: application/json`), at most 64 KiB. Unknown fields in a body are refused, so a typo doesn't go unnoticed.
-- Answers are JSON (`application/json; charset=utf-8`) with `Cache-Control: no-store`.
+- Answers are JSON (`application/json; charset=utf-8`) with `Cache-Control: no-store`, except a log download, which is the log's bytes (also `no-store`).
 - **Times** are RFC 3339. In answers they are UTC with milliseconds: `2026-10-05T12:34:56.789Z`. In queries any offset is taken: `2026-10-05T00:00:00Z`, `2026-10-05T02:00:00+02:00`.
 - **A time range** is `from` (inclusive) and `to` (exclusive). Without `to` it ends now; without `from` it starts 24 hours before `to`.
 - **Paging** uses an opaque `cursor`: pass the `next_cursor` of one page to get the next. `next_cursor` is `null` on the last page. A cursor is only good with the same filters.
@@ -44,7 +44,7 @@ Every error is a status and a body:
 | 400 | `invalid_request` | A query parameter or body field is missing, malformed or out of range. The message names it. |
 | 400 | `invalid_json` | The body isn't JSON, or isn't the expected object. |
 | 400 | `invalid_cursor` | The `cursor` isn't one this server gave. |
-| 400 | `invalid_log_file` | The log is a link, or not a plain file. |
+| 400 | `invalid_log_file` | The log is a symbolic link or other reparse point, isn't a plain file, or has another hard link. |
 | 401 | `missing_management_key` | No key was sent. |
 | 401 | `invalid_management_key` | The key is wrong. Counts as a failed attempt. |
 | 403 | `remote_management_disabled` | The client isn't local and remote management isn't allowed. |
@@ -403,12 +403,26 @@ Reads one log, in pieces.
 }
 ```
 
-- `content` is the bytes as text. A piece ends before a character it would cut, so it may be up to three bytes shorter than `length`; bytes that aren't UTF-8 are shown as U+FFFD.
+- `content` is the bytes as text. A piece ends before a character it would cut, so it may be up to three bytes shorter than `length`; bytes that aren't UTF-8 are shown as U+FFFD. For the exact bytes, download the log (below).
 - `next_offset` is where the next piece starts, `null` at the end of the file.
 - `name` must be a log's name as listed: no `/` or `\`, and named as a request or error log is. Other files of the log directory, such as `main.log`, aren't served (`not_found`).
 - A log that is a symbolic link or other reparse point, isn't a plain file, or has another hard link answers 400 `invalid_log_file`, as the management API's log routes do.
 
-To download a whole log, the management API's `GET /v0/management/request-log-by-id/{id}` (any log, by request ID) and `GET /v0/management/request-error-logs/{name}` (error logs) send it as a file.
+### `GET /open-ferry/api/v1/request-logs/{name}/download`
+
+Sends one log whole, byte for byte, as a file to save. Logs hold raw request and answer bodies, which may be binary, such as an image endpoint's multipart upload, so a download built from the pieces of `GET /request-logs/{name}` wouldn't be exact.
+
+- **`name` is checked as for `GET /request-logs/{name}`:** it must be a log's name as listed, with no `/` or `\`, else 404 `not_found`; a log that is a symbolic link or other reparse point, isn't a plain file, or has another hard link answers 400 `invalid_log_file`. Access is checked as for every route, and every error is the usual JSON.
+- **The answer is 200 with the file's bytes, exactly as on disk**, streamed: the server never holds the whole file in memory. Its headers:
+  - `Content-Type: application/octet-stream`
+  - `Content-Disposition: attachment; filename="<name>"`
+  - `Content-Length`, the file's size when it was opened
+  - `Cache-Control: no-store`
+  - the dashboard's security headers (see "Serving the app").
+- **The file is checked and read through one open handle**, so it can't be swapped for another file or a link between the check and the read. The first `Content-Length` bytes are sent; bytes added after the file was opened aren't. If the file gets shorter while it is sent, the connection is closed short of `Content-Length`, so the download fails rather than ending as a shorter file.
+- The request log never writes a name a quoted header can't hold. Another file in the log directory might have one: each character of it that isn't printable ASCII, and each `"`, is then `_` in `filename`, and the exact name is in `filename*` (RFC 6266).
+
+Scripts can also use the management API's `GET /v0/management/request-log-by-id/{id}` (any log, by request ID) and `GET /v0/management/request-error-logs/{name}` (error logs), which send a log as a file too.
 
 ---
 
@@ -428,11 +442,11 @@ What the app needs to write ready-made client configs, other than client keys, w
   "tls": false,
   "safe_mode": false,
   "routes": [
-    {"id": "openai-chat-completions", "protocol": "openai", "method": "POST", "path": "/v1/chat/completions", "base_path": "/v1", "models": ["claude-sonnet-4-5", "gpt-5.1-codex"]},
-    {"id": "openai-responses", "protocol": "openai-responses", "method": "POST", "path": "/v1/responses", "base_path": "/v1", "models": ["claude-sonnet-4-5", "gpt-5.1-codex"]},
     {"id": "claude-messages", "protocol": "claude", "method": "POST", "path": "/v1/messages", "base_path": "", "models": ["claude-sonnet-4-5", "gpt-5.1-codex"]},
+    {"id": "codex-responses", "protocol": "codex", "method": "POST", "path": "/backend-api/codex/responses", "base_path": "/backend-api/codex", "models": ["claude-sonnet-4-5", "gpt-5.1-codex"]},
     {"id": "gemini-generate-content", "protocol": "gemini", "method": "POST", "path": "/v1beta/models/{model}:generateContent", "base_path": "", "models": ["claude-sonnet-4-5", "gpt-5.1-codex"]},
-    {"id": "codex-responses", "protocol": "codex", "method": "POST", "path": "/backend-api/codex/responses", "base_path": "/backend-api/codex", "models": ["claude-sonnet-4-5", "gpt-5.1-codex"]}
+    {"id": "openai-chat-completions", "protocol": "openai", "method": "POST", "path": "/v1/chat/completions", "base_path": "/v1", "models": ["claude-sonnet-4-5", "gpt-5.1-codex"]},
+    {"id": "openai-responses", "protocol": "openai-responses", "method": "POST", "path": "/v1/responses", "base_path": "/v1", "models": ["claude-sonnet-4-5", "gpt-5.1-codex"]}
   ],
   "models": [
     {"id": "claude-sonnet-4-5", "display_name": "Claude Sonnet 4.5", "owned_by": "anthropic", "providers": ["claude"], "context_length": 200000, "max_output_tokens": 64000},
