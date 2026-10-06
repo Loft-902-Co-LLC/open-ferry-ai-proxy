@@ -2443,8 +2443,12 @@ fn is_generated_tool_id(text: &str) -> bool {
 
 /// Where the Responses → Gemini request translator writes JSON it read
 /// compactly while upstream copies the JSON's text (see
-/// [`Translator::embedded_json`]).
-const GEMINI_RESPONSES_REQUEST_JSON: &[JsonAt] = &[];
+/// [`Translator::embedded_json`]): a value read as text that isn't a string,
+/// such as a tool output that answers no call and is neither a string nor a
+/// list. The suite's own requests have none (see `Generator::raw_text`);
+/// other suites' requests the registry sends this way do.
+const GEMINI_RESPONSES_REQUEST_JSON: &[JsonAt] =
+    &[("$.contents[*].parts[*].text", JsonForm::Whole)];
 
 /// The same for the Gemini → Responses stream translator.
 const GEMINI_RESPONSES_STREAM_JSON: &[JsonAt] = &[];

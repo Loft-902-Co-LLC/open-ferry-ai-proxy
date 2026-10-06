@@ -339,6 +339,24 @@ pub fn requests() -> Vec<Case> {
                 ],
             ),
         ),
+        // An output that answers no call and is an object, written pretty:
+        // upstream copies its text into the user text, and the port writes
+        // it compactly.
+        Case::new(
+            "orphan-output-pretty-object",
+            "gemini-2.5-pro",
+            r#"{
+  "model": "gemini-2.5-pro",
+  "input": [
+    { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "Go." }] },
+    { "type": "function_call_output", "call_id": "call_9", "output": {
+        "result": 1.5,
+        "ok": true
+      }
+    }
+  ]
+}"#,
+        ),
         Case::new(
             "system-messages-mid-conversation",
             "gemini-2.5-pro",

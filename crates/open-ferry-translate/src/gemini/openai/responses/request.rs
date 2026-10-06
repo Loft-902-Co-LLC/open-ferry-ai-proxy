@@ -47,6 +47,10 @@
 //!   but aren't valid JSON go into `args.arguments` as text. Upstream copies
 //!   the text into the request as it is, which makes the request invalid
 //!   JSON.
+//! - A value read as text that isn't a string, such as a text part's `text`,
+//!   the `instructions` or a tool output that answers no call and is neither
+//!   a string nor a list, is written as compact JSON, where upstream copies
+//!   the client's JSON text, spacing and all.
 //! - Upstream drops a remote file's name from the URL when Go's `url.Parse`
 //!   rejects the URL. That check is ported for what can reach it, a URL
 //!   starting `http://`, `https://` or `gs://`, except that an IPv6 host in
