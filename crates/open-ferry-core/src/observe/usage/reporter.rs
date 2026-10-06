@@ -153,8 +153,9 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::Inner;
-use super::accounting::Detail;
+use super::accounting::{Detail, ensure_token_breakdown_for_provider};
 use super::json::{self, Doc};
+use super::observer::{ClientKey, EventCredential, UsageEvent};
 use super::parse::{
     StreamUsageBuffer, parse_claude_usage, parse_codex_usage, parse_gemini_stream_usage,
     parse_gemini_usage, parse_interactions_stream_usage, parse_interactions_usage,
@@ -371,6 +372,8 @@ fn executor_type(provider: &str, kind: Option<AttemptKind>) -> &'static str {
 struct Credential {
     id: String,
     index: String,
+    /// The credential's label, for the usage observer.
+    label: String,
     auth_type: &'static str,
     source: String,
     access_token_sha256: String,
@@ -381,6 +384,7 @@ impl Credential {
         Self {
             id: auth.id.clone(),
             index: auth.index.trim().to_owned(),
+            label: auth.label.trim().to_owned(),
             auth_type: auth.auth_kind().map_or("", |kind| kind.as_str()),
             source: usage_source(auth, client_key),
             access_token_sha256: access_token_sha256(auth),
@@ -1109,15 +1113,65 @@ impl UsageTap {
         }
     }
 
-    /// Publishes the record and warns of a substituted model (upstream's
-    /// `publishAttemptRecord`).
+    /// Publishes the record to the queue and the observer, and warns of a
+    /// substituted model (upstream's `publishAttemptRecord`).
     fn publish(&self, call: &Call, publication: Publication) {
         let queue = &self.inner.queue;
-        if queue.enabled() && queue.usage_statistics_enabled() {
+        if queue.usage_statistics_enabled() {
             let record = self.record(call, publication);
-            queue.enqueue(record.encode().into());
+            if self.inner.observer.present() {
+                self.inner.observer.send(self.event(call, &record));
+            }
+            if queue.enabled() {
+                queue.enqueue(record.encode().into());
+            }
         }
         self.warn_model_substitution(call);
+    }
+
+    /// The observer's event for `record`, the record of `call`, with the
+    /// blanks filled in as [`Record::encode`] fills them.
+    fn event(&self, call: &Call, record: &Record) -> UsageEvent {
+        fn or(value: &str, fallback: &str) -> String {
+            match value.trim() {
+                "" => fallback.to_owned(),
+                trimmed => trimmed.to_owned(),
+            }
+        }
+        let model = or(&record.model, "unknown");
+        let detail = ensure_token_breakdown_for_provider(
+            record.detail.clone(),
+            &record.provider,
+            &record.executor_type,
+        );
+        let status = match (record.failed, record.fail_status) {
+            (false, _) => 200,
+            (true, status) if status <= 0 => 500,
+            (true, status) => status,
+        };
+        let credential = &call.credential;
+        UsageEvent {
+            requested_at: record.requested_at.unwrap_or_else(Utc::now),
+            request_id: record.request_id.trim().to_owned(),
+            endpoint: record.endpoint.clone(),
+            provider: or(&record.provider, "unknown"),
+            alias: or(&record.alias, &model),
+            model,
+            credential: (!credential.id.is_empty()).then(|| EventCredential {
+                id: credential.id.clone(),
+                auth_index: credential.index.clone(),
+                label: credential.label.clone(),
+                auth_type: credential.auth_type.to_owned(),
+            }),
+            client_key: ClientKey::new(record.api_key.clone()),
+            stream: record.stream,
+            failed: record.failed,
+            status,
+            latency: record.latency,
+            ttft: (record.stream && !record.ttft.is_zero()).then_some(record.ttft),
+            tokens: detail.token_breakdown,
+            total_tokens: detail.total_tokens,
+        }
     }
 
     /// Warns that the answer named another model than the one sent, once

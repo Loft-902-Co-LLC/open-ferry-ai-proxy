@@ -12,6 +12,7 @@ mod echoed_secrets;
 mod error_events;
 mod manager;
 mod meta_usage;
+mod observer;
 mod plugin;
 mod queue;
 mod response_model;

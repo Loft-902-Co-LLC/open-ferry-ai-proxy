@@ -16,11 +16,14 @@
 //! for each executor call (see the reporter's module). The management API
 //! takes the records with [`Usage::pop_oldest`]; subscribers get them as
 //! they come with [`Usage::subscribe_usage`] and the error events with
-//! [`Usage::subscribe_errors`].
+//! [`Usage::subscribe_errors`]. The usage ledger observes every record
+//! with [`Usage::observe`], beside the queue and without taking any from
+//! it (see the observer's module).
 //!
 //! The queue is kept only while the management API serves requests, and
-//! records are made only while `usage-statistics-enabled` is on; both are
-//! read on every config load. A call to a token count makes no record.
+//! records are made only while `usage-statistics-enabled` is on, for the
+//! queue and the observer alike; both are read on every config load. A
+//! call to a token count makes no record.
 //!
 //! The parsers of upstream answers ([`parse_openai_usage`] and the rest),
 //! the token breakdown ([`ensure_token_breakdown_for_provider`]), the
@@ -41,6 +44,8 @@
 //!   module).
 //! - The Redis protocol listener is not ported yet (P3 WP-F): until it is,
 //!   the usage queue is served by the management API only.
+//! - Records are also made, for the observer, while the queue is off: an
+//!   observer is open-ferry's own.
 //! - Not ported: session derivation and hierarchy, the
 //!   Antigravity and Codex image tool parsers, the credits
 //!   markers, and the usage plugins of the SDK's `usage.Manager` beyond
@@ -49,6 +54,7 @@
 mod accounting;
 mod error_events;
 mod json;
+mod observer;
 mod parse;
 mod queue;
 mod record_json;
@@ -67,6 +73,7 @@ pub use accounting::{
     Detail, InputBreakdown, OutputBreakdown, Quality, TOKEN_ACCOUNTING_SCHEMA_VERSION,
     TokenBreakdown, ensure_token_breakdown_for_provider,
 };
+pub use observer::{ClientKey, EventCredential, OBSERVER_BUFFER, Observation, UsageEvent};
 pub use parse::{
     StreamUsageBuffer, merge_stream_usage_detail, parse_claude_stream_usage, parse_claude_usage,
     parse_codex_usage, parse_gemini_stream_usage, parse_gemini_usage,
@@ -100,6 +107,7 @@ struct Inner {
     queue: Queue,
     throttle: Throttle,
     clock: Clock,
+    observer: Arc<observer::Slot>,
 }
 
 /// The usage statistics. Cloning gives another handle to the same
@@ -151,13 +159,15 @@ impl Usage {
                 queue: Queue::new(Arc::clone(&clock)),
                 throttle: Throttle::new(Arc::clone(&clock)),
                 clock,
+                observer: Arc::default(),
             }),
         }
     }
 
     /// The tap that builds the usage records of a call made with `request`
     /// and `options` for the request of `context`, or `None` when none is
-    /// kept: the queue is off, records are off, or the call counts tokens.
+    /// kept: records are off, neither the queue nor an observer would take
+    /// them, or the call counts tokens.
     pub fn tap(
         &self,
         context: &Arc<RequestContext>,
@@ -165,7 +175,8 @@ impl Usage {
         options: &Options,
     ) -> Option<Arc<dyn Tap>> {
         let queue = &self.inner.queue;
-        if !queue.enabled() || !queue.usage_statistics_enabled() {
+        if !queue.usage_statistics_enabled() || (!queue.enabled() && !self.inner.observer.present())
+        {
             return None;
         }
         let path = &options.metadata.request_path;
@@ -211,6 +222,19 @@ impl Usage {
     /// dropped.
     pub fn subscribe_usage(&self) -> (mpsc::Receiver<Bytes>, Subscription) {
         self.inner.queue.subscribe_usage()
+    }
+
+    /// Observes every usage record as it is made, without taking it from the
+    /// queue, until the [`Observation`] is dropped; a later observation ends
+    /// this one. The receiver holds up to [`OBSERVER_BUFFER`] events; while
+    /// it is full, events are lost and counted ([`Observation::dropped`]).
+    pub fn observe(&self) -> (std::sync::mpsc::Receiver<UsageEvent>, Observation) {
+        self.inner.observer.observe()
+    }
+
+    /// Whether records are made: `usage-statistics-enabled` is on.
+    pub fn usage_statistics_enabled(&self) -> bool {
+        self.inner.queue.usage_statistics_enabled()
     }
 
     /// Subscribes to the error events of failed calls (upstream's
