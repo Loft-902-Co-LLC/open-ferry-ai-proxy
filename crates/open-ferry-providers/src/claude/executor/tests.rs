@@ -1332,16 +1332,19 @@ async fn openai_responses_stream_gets_usage_details() {
 
 // Not upstream's: an error quotes none of the secrets the request sent (the
 // credential headers after the custom ones, each cookie, the URL's
-// credentials), nor the password of a proxy that answers 407.
+// credentials), nor the password of a proxy that answers 407; and the
+// error log, with `request-log` off, has the answer's status and body,
+// scrubbed, for a call that isn't streamed and for a stream.
 #[tokio::test]
 async fn errors_hide_every_secret_sent() {
     for case in crate::secret_echo::cases(|base_url| (*gateway_auth(base_url)).clone()).await {
         for stream in [false, true] {
-            let options = Options {
+            let log = crate::secret_echo::ErrorLog::start();
+            let options = log.tapped(Options {
                 headers: case.headers.clone(),
                 stream,
                 ..options(Format::CLAUDE)
-            };
+            });
             let executor = ClaudeExecutor::new("direct");
             let auth = Arc::clone(&case.auth);
             let error = if stream {
@@ -1355,9 +1358,122 @@ async fn errors_hide_every_secret_sent() {
                     .await
                     .err()
             };
-            case.check(&error.expect("the call went through"));
+            case.check_logged(&error.expect("the call went through"), log);
         }
     }
+}
+
+/// The first `=== API RESPONSE n ===` block of the error log `log`.
+fn first_answer(log: &str) -> &str {
+    log.split_once("=== API RESPONSE 1 ===\n")
+        .and_then(|(_, rest)| rest.split("\n=== ").next())
+        .unwrap_or_else(|| panic!("no API RESPONSE block: {log}"))
+}
+
+// Not upstream's: with `request-log` off, the error log of a failed call
+// has the attempt's answer, as Anthropic's 429 to a sign-in didn't show:
+// the status, the headers and the body of an error status, for a call and
+// a stream, in Claude's format and translated for a Chat Completions
+// client. Upstream's executors record no answer with the request log off.
+#[tokio::test]
+async fn error_logs_have_an_error_status_answer() {
+    let refused =
+        r#"{"type":"error","error":{"type":"rate_limit_error","message":"rate limited"}}"#;
+    for (format, stream, payload) in [
+        (Format::CLAUDE, false, claude_payload()),
+        (Format::CLAUDE, true, claude_payload()),
+        (Format::OPENAI, false, openai_payload(false)),
+        (Format::OPENAI, true, openai_payload(true)),
+    ] {
+        let mock = Mock::start(Reply::error(429, refused).header("retry-after", "30")).await;
+        let log = crate::secret_echo::ErrorLog::start();
+        let options = log.tapped(if stream {
+            stream_options(format)
+        } else {
+            options(format)
+        });
+        let executor = mock.executor();
+        let error = if stream {
+            executor
+                .execute_stream(oauth_auth(), request(payload), options)
+                .await
+                .err()
+        } else {
+            executor
+                .execute(oauth_auth(), request(payload), options)
+                .await
+                .err()
+        };
+        let error = error.expect("the call failed");
+        assert_eq!(error.status, 429);
+        let log = log.failed(&error);
+        let answer = first_answer(&log);
+        assert!(answer.contains("\nStatus: 429\nHeaders:\n"), "{log}");
+        assert!(answer.contains("\nRetry-After: 30\n"), "{log}");
+        assert!(
+            answer.trim_end().ends_with(&format!("\nBody:\n{refused}")),
+            "{log}"
+        );
+        assert!(!log.contains(OAUTH_TOKEN), "{log}");
+        assert!(!log.contains("API RESPONSE 2"), "{log}");
+    }
+}
+
+// Not upstream's: with `request-log` off, the error log of a stream cut
+// off after its head has the answer's status and headers and the read
+// error, once, without the lines the stream sent; that of a send that
+// couldn't connect has the call's error.
+#[tokio::test]
+async fn error_logs_have_a_broken_attempts_error() {
+    let partial = SSE.split("event: message_delta").next().unwrap();
+    let mock = Mock::start(Reply::sse(partial).cut_off()).await;
+    let log = crate::secret_echo::ErrorLog::start();
+    let response = mock
+        .executor()
+        .execute_stream(
+            oauth_auth(),
+            request(claude_payload()),
+            log.tapped(stream_options(Format::CLAUDE)),
+        )
+        .await
+        .unwrap();
+    let error = collect(response)
+        .await
+        .into_iter()
+        .find_map(Result::err)
+        .expect("the stream failed");
+    let log = log.failed(&error);
+    let answer = first_answer(&log);
+    assert!(answer.contains("\nStatus: 200\nHeaders:\n"), "{log}");
+    assert!(
+        answer.contains("\nContent-Type: text/event-stream\n"),
+        "{log}"
+    );
+    assert_eq!(answer.matches("\nError: ").count(), 1, "{log}");
+    assert!(!answer.contains("message_start"), "{log}");
+
+    // Bound but never listening, so a connection is refused, and the port
+    // stays ours.
+    let closed = tokio::net::TcpSocket::new_v4().unwrap();
+    closed.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let url = format!("http://{}", closed.local_addr().unwrap());
+    let log = crate::secret_echo::ErrorLog::start();
+    let error = ClaudeExecutor::new("direct")
+        .with_base_url(url)
+        .execute(
+            oauth_auth(),
+            request(claude_payload()),
+            log.tapped(options(Format::CLAUDE)),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.status, 0);
+    let log = log.failed(&error);
+    assert!(log.contains("=== API REQUEST 1 ===\n"), "{log}");
+    let answer = first_answer(&log);
+    assert!(!answer.contains("Status:"), "{log}");
+    assert!(answer.contains(&format!("\nError: {error}\n")), "{log}");
+    assert!(!log.contains(OAUTH_TOKEN), "{log}");
 }
 
 /// The key, quoted where a model could echo it back.

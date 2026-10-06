@@ -22,7 +22,9 @@
 //! session's request is finished when the session ends ([`finish_later`]).
 //! In [`Mode::ErrorsOnly`], only a request with an actionable error
 //! ([`has_actionable_error`]) is written, as `error-*.log`, and the oldest
-//! of those are deleted beyond `error-logs-max-files`.
+//! of those are deleted beyond `error-logs-max-files`. Its attempts keep
+//! their requests, their answers' heads, the bodies of answers with an
+//! error status and their errors, but not a successful body.
 //!
 //! Nothing is written on the request's task: a finished request is handed
 //! to one writer thread through a bounded queue, which formats, scrubs and
@@ -53,6 +55,12 @@
 //! - With `request-log` off, the client's body is kept as the handler reads
 //!   it, whatever its size, where upstream reads a body of up to 1 MiB
 //!   ahead of the handler.
+//! - With `request-log` off, an error log has an `=== API RESPONSE n ===`
+//!   section for each attempt but an upstream WebSocket's: its answer's
+//!   status and headers, the body of an answer with an error status, and
+//!   the attempt's error. Upstream's executors record no answer with it
+//!   off, so its error log's `=== API RESPONSE ===` has only the error the
+//!   handler gave the client, which is this log's `=== RESPONSE ===`.
 //! - The downstream WebSocket timeline isn't kept: a Responses WebSocket
 //!   session's log has its upgrade request, the upstream attempts of all
 //!   its turns, and a `101` answer.
@@ -476,11 +484,6 @@ impl RequestState {
     /// or is finished.
     pub fn mode(&self) -> Option<Mode> {
         self.lock().as_ref().map(|capture| capture.mode)
-    }
-
-    /// Whether the request is logged whole.
-    pub(crate) fn is_full(&self) -> bool {
-        self.mode() == Some(Mode::Full)
     }
 
     /// Runs `f` on the capture while the request is logged.

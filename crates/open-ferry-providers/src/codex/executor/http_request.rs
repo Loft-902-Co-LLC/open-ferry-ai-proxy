@@ -394,7 +394,8 @@ mod tests {
     // Not upstream's: a failure's body, which the handler hands on, quotes
     // none of the secrets the request sent (the token, the credential
     // headers after the custom ones, each cookie, the URL's credentials),
-    // nor the password of a proxy that answers 407.
+    // nor the password of a proxy that answers 407; and the error log, with
+    // `request-log` off, has the answer's status and body, scrubbed.
     #[tokio::test]
     async fn a_failures_body_hides_every_secret_sent() {
         let api_key = |base_url: &str| {
@@ -405,8 +406,10 @@ mod tests {
         };
         for case in crate::secret_echo::cases(api_key).await {
             let base_url = case.auth.attribute("base_url").unwrap_or_default();
+            let log = crate::secret_echo::ErrorLog::start();
             let mut call = call(HttpTarget::Url(format!("{base_url}/alpha/search")), "{}");
             call.client_headers = case.headers.clone();
+            call.observation = Some(log.observation());
             let reply = CodexExecutor::new("direct")
                 .http_request_inner(&case.auth, call)
                 .await
@@ -415,6 +418,9 @@ mod tests {
             let body = String::from_utf8_lossy(&reply.body);
             assert!(!body.contains(TOKEN), "{body}");
             case.check_text(&body);
+            let log = log.answered(reply.status);
+            assert!(!log.contains(TOKEN), "{log}");
+            case.check_log(&log);
         }
     }
 

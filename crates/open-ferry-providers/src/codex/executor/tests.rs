@@ -2316,7 +2316,8 @@ async fn refresh_failure_is_reported_without_the_token() {
 // Not upstream's: an error quotes none of the secrets the request sent (the
 // credential headers after the custom ones, each cookie, the URL's
 // credentials), nor the password of a proxy that answers 407; for a call,
-// a stream and a compaction.
+// a stream and a compaction. The error log, with `request-log` off, has the
+// answer's status and body, scrubbed.
 #[tokio::test]
 async fn errors_hide_every_secret_sent() {
     let payload = r#"{"model":"gpt-5.5","input":"hello"}"#;
@@ -2326,10 +2327,11 @@ async fn errors_hide_every_secret_sent() {
             stream_options("openai-response"),
             compact_options("openai-response"),
         ] {
-            let options = Options {
+            let log = crate::secret_echo::ErrorLog::start();
+            let options = log.tapped(Options {
                 headers: case.headers.clone(),
                 ..options
-            };
+            });
             let auth = Arc::clone(&case.auth);
             let error = if options.stream {
                 executor()
@@ -2342,7 +2344,7 @@ async fn errors_hide_every_secret_sent() {
                     .await
                     .err()
             };
-            case.check(&error.expect("the call went through"));
+            case.check_logged(&error.expect("the call went through"), log);
         }
     }
 }

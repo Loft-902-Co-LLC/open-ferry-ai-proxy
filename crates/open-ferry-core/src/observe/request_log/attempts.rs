@@ -19,8 +19,10 @@
 //! instead, with the call's error; but an error the executor tells as the
 //! attempt's ([`Tap::attempt_error`]) goes to an API RESPONSE block, as
 //! upstream's executors record an empty `response.incomplete`. With it off,
-//! the tap keeps each upstream request for the error log of a request that
-//! fails.
+//! the tap keeps, for the error log of a request that fails, each upstream
+//! request, each answer's status and headers, the body of an answer with an
+//! error status, and each attempt's error; not the body of a successful
+//! answer, nor anything of an upstream WebSocket.
 //!
 //! Deviations from upstream:
 //! - The tap sees what the executors report (see [`Tap`]), where upstream's
@@ -37,6 +39,12 @@
 //!   and the bodies scrubbed of the attempt's secrets and those of the
 //!   answer's headers when written; upstream writes the URL, the bodies and
 //!   fewer masked headers as they are.
+//! - With the request log off, the answers' status and headers, the bodies
+//!   of those with an error status and the attempts' errors are kept, so an
+//!   error log has an `=== API RESPONSE n ===` block for each attempt;
+//!   upstream's executors record no answer with it off, and its error log
+//!   has only the error the handler gave the client, in an `=== API
+//!   RESPONSE ===` section, which the log's `=== RESPONSE ===` has here.
 //! - The bodies of the upstream requests are kept up to [`CAPTURE_LIMIT`]
 //!   bytes in all, the request log on or off, each one cut with upstream's
 //!   deferred-request marker; the answers and the WebSocket timeline up to
@@ -248,7 +256,6 @@ impl Attempt {
 #[derive(Default)]
 pub(crate) struct Attempts {
     list: Vec<Attempt>,
-    deferred: Vec<RequestRecord>,
     request_bytes: usize,
     responses: Budget,
     timeline: Vec<u8>,
@@ -275,18 +282,11 @@ impl Attempts {
     }
 
     /// A new attempt for `request` (upstream's `RecordAPIRequest` with the
-    /// request log on).
+    /// request log on, and its `deferAPIRequest` with it off).
     pub(crate) fn record_request(&mut self, request: &AttemptRequest<'_>) {
         let index = self.list.len() + 1;
         let record = self.record(index, request);
         self.list.push(Attempt::new(index, Some(record)));
-    }
-
-    /// Keeps `request` for an error log (upstream's `deferAPIRequest`).
-    pub(crate) fn defer_request(&mut self, request: &AttemptRequest<'_>) {
-        let index = self.deferred.len() + 1;
-        let record = self.record(index, request);
-        self.deferred.push(record);
     }
 
     /// The latest attempt of `list`, made when there is none (upstream's
@@ -474,15 +474,6 @@ impl Attempts {
         out
     }
 
-    /// The upstream requests kept for an error log.
-    pub(crate) fn deferred_requests(&self) -> Vec<u8> {
-        let mut out = Vec::new();
-        for record in &self.deferred {
-            record.render(&mut out);
-        }
-        out
-    }
-
     /// The upstream answers, each attempt's in turn, ending with a line
     /// break (upstream's `API_RESPONSE`).
     pub(crate) fn api_response(&self) -> Vec<u8> {
@@ -534,6 +525,23 @@ impl Call {
                 .status
                 .is_some_and(|status| (200..300).contains(&status))
     }
+
+    /// Whether the latest attempt is recorded in `mode`: every attempt with
+    /// the request log on, and with it off all but an upstream WebSocket's.
+    fn recorded(&self, mode: Mode) -> bool {
+        mode == Mode::Full || self.kind != Some(AttemptKind::Websocket)
+    }
+
+    /// Whether the body of the latest attempt's answer is recorded in
+    /// `mode`: every body with the request log on, and with it off that of
+    /// an answer with an error status.
+    fn body_recorded(&self, mode: Mode) -> bool {
+        mode == Mode::Full
+            || (self.recorded(mode)
+                && self
+                    .status
+                    .is_some_and(|status| !(200..300).contains(&status)))
+    }
 }
 
 /// The tap that records a request's upstream attempts in its log.
@@ -567,10 +575,8 @@ impl RequestLogTap {
             return;
         }
         self.with(|capture| {
-            if capture.mode == Mode::Full {
-                capture.attempts.append_chunk(&line);
-                capture.attempts.append_chunk(&body);
-            }
+            capture.attempts.append_chunk(&line);
+            capture.attempts.append_chunk(&body);
         });
     }
 }
@@ -586,9 +592,8 @@ impl Tap for RequestLogTap {
             capture.add_secrets(request.secrets);
             match (capture.mode, request.kind) {
                 (Mode::Full, AttemptKind::Websocket) => capture.attempts.ws_request(request),
-                (Mode::Full, _) => capture.attempts.record_request(request),
                 (Mode::ErrorsOnly, AttemptKind::Websocket) => {}
-                (Mode::ErrorsOnly, _) => capture.attempts.defer_request(request),
+                _ => capture.attempts.record_request(request),
             }
         });
     }
@@ -599,7 +604,7 @@ impl Tap for RequestLogTap {
         call.status = Some(status);
         self.with(|capture| {
             capture.add_header_secrets(headers);
-            if capture.mode == Mode::Full {
+            if call.recorded(capture.mode) {
                 capture.attempts.record_metadata(status, headers);
             }
         });
@@ -616,7 +621,10 @@ impl Tap for RequestLogTap {
             });
             return;
         }
-        if !self.context.request_log().is_full() {
+        let Some(mode) = self.context.request_log().mode() else {
+            return;
+        };
+        if !call.body_recorded(mode) {
             return;
         }
         if !call.by_line() {
@@ -653,9 +661,8 @@ impl Tap for RequestLogTap {
         let mut call = self.call();
         self.flush(&mut call);
         call.told = true;
-        drop(call);
         self.with(|capture| {
-            if capture.mode == Mode::Full {
+            if call.recorded(capture.mode) {
                 capture.attempts.record_error(message);
             }
         });
@@ -670,13 +677,11 @@ impl Tap for RequestLogTap {
         drop(call);
         let message = error.to_string();
         self.with(|capture| {
-            if capture.mode != Mode::Full {
-                return;
-            }
             match kind {
                 // An error upstream records as the attempt's
-                // (`RecordAPIResponseError`) isn't on the timeline.
-                Some(AttemptKind::Websocket) if told => {}
+                // (`RecordAPIResponseError`) isn't on the timeline, which
+                // is kept only with the request log on.
+                Some(AttemptKind::Websocket) if told || capture.mode != Mode::Full => {}
                 Some(AttemptKind::Websocket) => capture.attempts.ws_error(&message),
                 // A failure after the head was told through
                 // `attempt_error` where upstream records one.

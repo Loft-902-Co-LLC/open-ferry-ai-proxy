@@ -252,10 +252,12 @@ async fn logs_a_failed_response_without_the_token() {
 }
 
 // Not upstream's: with `request-log` off, the failed request's error log
-// is written for its status, without the attempt's answer or the
-// handler's error, as upstream records neither then.
+// has the attempt's answer, its status, headers and errors, but not its
+// body, which came with a 200; upstream's executors record no answer then.
+// The handler's error has no API ERROR RESPONSE section, as upstream
+// records it only with the request log on.
 #[tokio::test]
-async fn logs_only_the_status_with_the_request_log_off() {
+async fn logs_the_attempts_answer_without_a_successful_body_with_the_request_log_off() {
     let upstream = failing_upstream(cut_stream()).await;
     let harness = proxy(false, &upstream);
     let app = crate::router(harness.state.clone());
@@ -265,10 +267,27 @@ async fn logs_only_the_status_with_the_request_log_off() {
     assert!(name.starts_with("error-v1-responses-"), "{name}");
     assert!(log.contains("=== API REQUEST 1 ===\n"), "{log}");
     assert!(log.contains("=== RESPONSE ===\nStatus: 408\n"), "{log}");
+
+    let response = section(&log, "=== API RESPONSE 1 ===");
+    assert!(response.contains("\nStatus: 200\nHeaders:\n"), "{response}");
+    assert!(
+        response.contains("\nContent-Type: text/event-stream\n"),
+        "{response}"
+    );
+    assert!(
+        response.contains("\n\nError: error decoding response body"),
+        "{response}"
+    );
+    assert!(
+        response.ends_with(&format!("\n\nError: {INCOMPLETE}")),
+        "{response}"
+    );
+    assert_eq!(response.matches("Error: ").count(), 2, "{response}");
+    assert!(!response.contains("Body:"), "{response}");
     for absent in [
-        "=== API RESPONSE",
+        "response.created",
+        "=== API RESPONSE 2",
         "=== API ERROR RESPONSE",
-        "Error: ",
         TOKEN,
     ] {
         assert!(!log.contains(absent), "{absent}: {log}");

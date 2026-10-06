@@ -1356,6 +1356,8 @@ async fn the_taps_are_told_the_attempt() {
 // error gets none of it back to the client, not the credential headers
 // after the custom ones, nor a cookie, nor the URL's credentials, nor the
 // proxy's password; for a call and for a stream.
+// The error log, with `request-log` off, has the answer's status and
+// body, scrubbed.
 #[tokio::test]
 async fn errors_hide_every_secret_sent() {
     let payload = r#"{"model":"muse-spark-1.3","input":"hello"}"#;
@@ -1364,10 +1366,11 @@ async fn errors_hide_every_secret_sent() {
             options("openai-response"),
             stream_options("openai-response"),
         ] {
-            let options = Options {
+            let log = crate::secret_echo::ErrorLog::start();
+            let options = log.tapped(Options {
                 headers: case.headers.clone(),
                 ..options
-            };
+            });
             let auth = Arc::clone(&case.auth);
             let error = if options.stream {
                 executor()
@@ -1380,7 +1383,7 @@ async fn errors_hide_every_secret_sent() {
                     .await
                     .err()
             };
-            case.check(&error.expect("the call went through"));
+            case.check_logged(&error.expect("the call went through"), log);
         }
     }
 }

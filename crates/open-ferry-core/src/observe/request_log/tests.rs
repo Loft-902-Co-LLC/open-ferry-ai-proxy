@@ -199,7 +199,9 @@ fn writes_full_logs() {
 
 // Not upstream's: with `request-log` off, a request that went well leaves
 // no file, and one that failed leaves an error log with the upstream
-// request the attempt sent.
+// request the attempt sent and its answer: the status, the headers and the
+// error body, masked and scrubbed as with it on. Upstream's executors
+// record no answer with it off.
 #[test]
 fn writes_error_logs_only_on_errors() {
     let dir = tempfile::tempdir().unwrap();
@@ -234,9 +236,114 @@ fn writes_error_logs_only_on_errors() {
     let (name, log) = &files[0];
     assert!(name.starts_with("error-v1-chat-completions-"), "{name}");
     assert!(log.contains("=== API REQUEST 1 ===\n"), "{log}");
-    assert!(!log.contains("=== API RESPONSE"), "{log}");
+    assert!(
+        log.contains(
+            "Upstream URL: https://[redacted]@api.example.com/v1/responses?api_key=abcd...ijkl\n"
+        ),
+        "{log}"
+    );
+    assert!(log.contains("=== API RESPONSE 1 ===\nTimestamp: "), "{log}");
+    assert!(
+        log.contains(
+            "\n\nStatus: 500\nHeaders:\nContent-Type: application/json\n\nBody:\n{\"error\":1}\n"
+        ),
+        "{log}"
+    );
     assert!(log.contains("=== RESPONSE ===\nStatus: 502\n"), "{log}");
     assert!(!log.contains(SECRET), "{log}");
+}
+
+// Not upstream's: with `request-log` off, an error log has each attempt's
+// answer: a stream's error status and body, a failed send's error, and of
+// a stream that failed after its head, the status, the headers and the
+// error, but not the lines it sent. Nothing of an upstream WebSocket is
+// kept.
+#[test]
+fn error_logs_keep_every_attempts_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let logger = logger(dir.path(), false);
+    let context = context("/v1/messages");
+    assert_eq!(logger.start(&context), Some(Mode::ErrorsOnly));
+    let tap = logger.tap(&context).unwrap();
+    attempt(
+        &tap,
+        AttemptKind::Stream,
+        429,
+        b"{\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\"}}",
+    );
+
+    let send = |kind| {
+        let auth = Auth::default();
+        tap.attempt_request(&AttemptRequest {
+            kind,
+            method: &Method::POST,
+            url: "https://api.example.com/v1/messages",
+            headers: &HeaderMap::new(),
+            body: &Bytes::from_static(b"{}"),
+            provider: "claude",
+            model: "claude-x",
+            format: &Format::from("claude"),
+            auth: &auth,
+            secrets: &Secrets::new(),
+        });
+    };
+    send(AttemptKind::Execute);
+    tap.error(&ExecError::new(
+        crate::exec::ErrorKind::Upstream,
+        "connection refused",
+    ));
+    tap.finish(Outcome::Failed);
+
+    send(AttemptKind::Stream);
+    tap.response_head(200, &HeaderMap::new());
+    tap.chunk(&Bytes::from_static(b"data: {\"line\":1}\n\n"));
+    tap.attempt_error("stream read failed");
+    tap.error(&ExecError::new(
+        crate::exec::ErrorKind::Upstream,
+        "stream read failed",
+    ));
+    tap.finish(Outcome::Failed);
+
+    send(AttemptKind::Websocket);
+    tap.chunk(&Bytes::from_static(b"{\"type\":\"response.failed\"}"));
+    tap.error(&ExecError::new(
+        crate::exec::ErrorKind::Upstream,
+        "ws closed",
+    ));
+    tap.finish(Outcome::Failed);
+
+    finish(
+        &context,
+        downstream("/v1/messages", b"{}"),
+        answer(429, "application/json", b"{\"error\":\"rate limited\"}"),
+    );
+    logger.flush();
+
+    let files = files(dir.path());
+    assert_eq!(files.len(), 1, "{files:?}");
+    let log = &files[0].1;
+    assert!(log.contains("=== API REQUEST 3 ===\n"), "{log}");
+    assert!(!log.contains("=== API REQUEST 4 ==="), "{log}");
+    assert!(
+        log.contains(
+            "Status: 429\nHeaders:\nContent-Type: application/json\n\nBody:\n{\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\"}}\n"
+        ),
+        "{log}"
+    );
+    let second = log.split_once("=== API RESPONSE 2 ===\n").unwrap().1;
+    let second = second.split_once("\n\n").unwrap().1;
+    assert!(second.starts_with("Error: connection refused\n"), "{log}");
+    let third = log.split_once("=== API RESPONSE 3 ===\n").unwrap().1;
+    let third = third.split_once("\n\n").unwrap().1;
+    assert!(
+        third.starts_with("Status: 200\nHeaders:\n<none>\n\nError: stream read failed\n"),
+        "{log}"
+    );
+    assert!(!log.contains("\"line\":1"), "{log}");
+    assert!(!log.contains("API RESPONSE 4"), "{log}");
+    assert!(!log.contains("response.failed"), "{log}");
+    assert!(!log.contains("ws closed"), "{log}");
+    assert!(!log.contains("API WEBSOCKET"), "{log}");
 }
 
 // Not upstream's: a request the client left, or one with a client error
@@ -554,7 +661,7 @@ fn records_api_errors_and_finishes_later() {
 // Not upstream's: a failure after the answer's head is written where the
 // executor tells it, after the body read so far, and the call's error after
 // it isn't written again; a send that failed is written from the call's
-// error. Off, nothing is.
+// error. Off, the errors are written the same, without the stream's lines.
 #[test]
 fn records_each_attempt_error_once() {
     for request_log in [true, false] {
@@ -598,22 +705,26 @@ fn records_each_attempt_error_once() {
             .request_log()
             .with(|capture| response = capture.attempts.api_response());
         let response = String::from_utf8(response).unwrap();
+        let (first, second) = response.split_once("=== API RESPONSE 2 ===").unwrap();
+        assert!(
+            second.contains("\nError: connection refused\n"),
+            "{second:?}"
+        );
+        assert!(!second.contains("Status:"), "{second:?}");
         if !request_log {
-            assert_eq!(response, "");
+            // The successful stream's lines aren't kept.
+            assert!(
+                first.ends_with("\n\nStatus: 200\nHeaders:\n<none>\n\nError: unexpected EOF\n\n"),
+                "{first:?}"
+            );
             continue;
         }
-        let (first, second) = response.split_once("=== API RESPONSE 2 ===").unwrap();
         // Right after the body, as upstream writes it.
         assert!(
             first.contains("data: {\"b\"Error: unexpected EOF\n"),
             "{first:?}"
         );
         assert_eq!(first.matches("Error:").count(), 1, "{first:?}");
-        assert!(
-            second.contains("\nError: connection refused\n"),
-            "{second:?}"
-        );
-        assert!(!second.contains("Status:"), "{second:?}");
     }
 }
 

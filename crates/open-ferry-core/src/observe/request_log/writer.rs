@@ -199,10 +199,7 @@ pub(crate) fn render(entry: &Entry, now: DateTime<Local>) -> (String, Vec<u8>) {
         .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned());
     let streaming = entry.full && format::is_streaming(content_type.as_deref(), &body);
 
-    let mut api_request = entry.attempts.api_request();
-    if entry.forced && api_request.is_empty() {
-        api_request = entry.attempts.deferred_requests();
-    }
+    let api_request = entry.attempts.api_request();
     let api_response = entry.attempts.api_response();
     let response = answer.body.concat();
 

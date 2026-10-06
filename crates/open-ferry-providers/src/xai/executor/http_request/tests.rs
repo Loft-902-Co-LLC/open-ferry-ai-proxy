@@ -189,12 +189,18 @@ async fn a_url_with_a_control_character_is_refused_unsent() {
     );
 }
 
+// Not upstream's: a failure's body, which the handler hands on, quotes none
+// of the secrets the request sent, nor the password of a proxy that answers
+// 407; and the error log, with `request-log` off, has the answer's status
+// and body, scrubbed.
 #[tokio::test]
 async fn a_failure_body_hides_every_secret_sent() {
     for case in crate::secret_echo::cases(api_key).await {
         let base_url = case.auth.attribute("base_url").unwrap_or_default();
+        let log = crate::secret_echo::ErrorLog::start();
         let mut call = call(HttpTarget::Url(format!("{base_url}/files")));
         call.client_headers = case.headers.clone();
+        call.observation = Some(log.observation());
         let reply = XaiExecutor::new("direct")
             .http_request_inner(&case.auth, call)
             .await
@@ -203,6 +209,9 @@ async fn a_failure_body_hides_every_secret_sent() {
         let body = String::from_utf8_lossy(&reply.body);
         assert!(!body.contains(KEY), "{body}");
         case.check_text(&body);
+        let log = log.answered(reply.status);
+        assert!(!log.contains(KEY), "{log}");
+        case.check_log(&log);
     }
 }
 

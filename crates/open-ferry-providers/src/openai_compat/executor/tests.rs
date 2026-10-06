@@ -1592,18 +1592,21 @@ fn compat_config_lookup() {
 // Not upstream's: an error quotes none of the secrets the request sent (the
 // credential headers after the custom ones, each cookie, the URL's
 // credentials), nor the password of a proxy that answers 407.
+// The error log, with `request-log` off, has the answer's status and
+// body, scrubbed.
 #[tokio::test]
 async fn errors_hide_every_secret_sent() {
     for case in crate::secret_echo::cases(|base_url| (*plain_auth(base_url)).clone()).await {
         for stream in [false, true] {
-            let options = Options {
+            let log = crate::secret_echo::ErrorLog::start();
+            let options = log.tapped(Options {
                 headers: case.headers.clone(),
                 ..if stream {
                     stream_options(&Format::OPENAI)
                 } else {
                     options(&Format::OPENAI)
                 }
-            };
+            });
             let auth = Arc::clone(&case.auth);
             let error = if stream {
                 executor(Vec::new())
@@ -1616,7 +1619,7 @@ async fn errors_hide_every_secret_sent() {
                     .await
                     .err()
             };
-            case.check(&error.expect("the call went through"));
+            case.check_logged(&error.expect("the call went through"), log);
         }
     }
 }

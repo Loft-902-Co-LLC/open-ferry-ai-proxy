@@ -478,6 +478,8 @@ async fn image_and_video_streams_and_compactions_are_refused_unsent() {
 
 // Not upstream's: an upstream or proxy that echoes what it was sent in its
 // error gets none of the request's secrets back to the client.
+// The error log, with `request-log` off, has the answer's status and
+// body, scrubbed.
 #[tokio::test]
 async fn errors_hide_every_secret_sent() {
     let payload = r#"{"model":"grok-4.3","input":"hello"}"#;
@@ -487,10 +489,11 @@ async fn errors_hide_every_secret_sent() {
             stream_options("openai-response"),
             compact_options("openai-response"),
         ] {
-            let options = Options {
+            let log = crate::secret_echo::ErrorLog::start();
+            let options = log.tapped(Options {
                 headers: case.headers.clone(),
                 ..options
-            };
+            });
             let auth = Arc::clone(&case.auth);
             let error = if options.stream {
                 executor()
@@ -505,7 +508,7 @@ async fn errors_hide_every_secret_sent() {
             };
             let error = error.expect("the call went through");
             assert!(!error.message.contains(API_KEY), "{}", error.message);
-            case.check(&error);
+            case.check_logged(&error, log);
         }
     }
 }

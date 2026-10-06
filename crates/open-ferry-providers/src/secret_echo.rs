@@ -2,11 +2,14 @@
 //! share. An upstream or proxy that echoes what it was sent in its error
 //! must not get any of it back to the client: the credential headers after
 //! the custom ones, each cookie, the URL's credentials and the proxy's
-//! password. The mocks listen on ephemeral ports of 127.0.0.1. [`Logs`]
-//! captures what a test logs, for the tests that keep secrets out of logs.
+//! password. The mocks listen on ephemeral ports of 127.0.0.1. [`ErrorLog`]
+//! is the error log of such a call, which must have the answer with every
+//! secret scrubbed. [`Logs`] captures what a test logs, for the tests that
+//! keep secrets out of logs.
 
 use std::cell::RefCell;
 use std::fmt::{self, Write as _};
+use std::path::Path;
 use std::sync::{Arc, Mutex, Once, PoisonError};
 
 use axum::Router;
@@ -16,8 +19,10 @@ use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
 use http::{HeaderMap, HeaderValue, Method};
 use open_ferry_core::auth::Auth;
-use open_ferry_core::exec::ExecError;
-use open_ferry_core::observe::{Observation, RequestContext, Tap};
+use open_ferry_core::config::Config;
+use open_ferry_core::exec::{ExecError, Options};
+use open_ferry_core::observe::request_log::{self, Downstream, RequestBody, RequestLogger};
+use open_ferry_core::observe::{Observation, Outcome, RequestContext, Tap};
 use tracing::subscriber::Interest;
 
 use crate::codex::websocket::mock::{Answer, Server};
@@ -104,6 +109,8 @@ pub(crate) struct Case {
     pub(crate) headers: HeaderMap,
     /// The secrets the answer must echo, proving they were sent.
     sent: Vec<&'static str>,
+    /// The status the answer has.
+    status: u16,
     echo: Echo,
 }
 
@@ -112,6 +119,36 @@ impl Case {
     /// quotes no secret at all, only [`REDACTED`].
     pub(crate) fn check(&self, error: &ExecError) {
         self.check_text(&error.message);
+    }
+
+    /// [`Self::check`], and [`Self::check_log`] of the error log `log`
+    /// wrote of the call that failed with `error`.
+    pub(crate) fn check_logged(&self, error: &ExecError, log: ErrorLog) {
+        self.check(error);
+        self.check_log(&log.failed(error));
+    }
+
+    /// Asserts that the error log `text` has the answer: its status and its
+    /// body in the first `=== API RESPONSE ===` block, with every secret
+    /// scrubbed.
+    pub(crate) fn check_log(&self, text: &str) {
+        let block = text
+            .split_once("=== API RESPONSE 1 ===\n")
+            .and_then(|(_, rest)| rest.split("\n=== ").next())
+            .unwrap_or_else(|| panic!("no API RESPONSE block: {text}"));
+        assert!(
+            block.contains(&format!("\nStatus: {}\nHeaders:\n", self.status)),
+            "{block}"
+        );
+        let body = block
+            .split_once("\nBody:\n")
+            .unwrap_or_else(|| panic!("no body: {block}"))
+            .1;
+        assert!(body.contains("authentication_error"), "{body}");
+        for secret in secrets() {
+            assert!(!text.contains(&secret), "{secret} in {text}");
+        }
+        assert!(body.contains(REDACTED), "{body}");
     }
 
     /// [`Self::check`] for what the client gets as text.
@@ -202,15 +239,104 @@ pub(crate) async fn cases(auth: impl Fn(&str) -> Auth) -> [Case; 2] {
             auth: Arc::new(direct),
             headers: headers.clone(),
             sent: vec![FORWARDED_KEY, COOKIE],
+            status: 401,
             echo: upstream,
         },
         Case {
             auth: Arc::new(proxied),
             headers,
             sent: vec![PROXY_SECRET, FORWARDED_KEY],
+            status: 407,
             echo: proxy,
         },
     ]
+}
+
+/// The request log of one executor call, kept as the server keeps it with
+/// `request-log` off, in a temporary directory: the call's taps feed it,
+/// and a request that fails gets an error log.
+pub(crate) struct ErrorLog {
+    dir: tempfile::TempDir,
+    logger: RequestLogger,
+    context: Arc<RequestContext>,
+    observation: Arc<Observation>,
+}
+
+impl ErrorLog {
+    /// A request log, with `request-log` off, started for a new request.
+    pub(crate) fn start() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.request_log = false;
+        config.error_logs_max_files = 10;
+        let logger = RequestLogger::new(&config, dir.path(), Path::new(""));
+        let context = Arc::new(RequestContext::new(Method::POST, "/v1/test".into()));
+        assert!(logger.start(&context).is_some());
+        let tap = logger.tap(&context).unwrap();
+        let observation = Arc::new(Observation::new(Arc::clone(&context), vec![tap]));
+        Self {
+            dir,
+            logger,
+            context,
+            observation,
+        }
+    }
+
+    /// The observation of the call, which the log's tap sees.
+    pub(crate) fn observation(&self) -> Arc<Observation> {
+        Arc::clone(&self.observation)
+    }
+
+    /// `options`, with the call tapped by the log.
+    pub(crate) fn tapped(&self, options: Options) -> Options {
+        Options {
+            observation: Some(self.observation()),
+            ..options
+        }
+    }
+
+    /// Ends the call with `error`, as the manager's `CallReport` reports
+    /// a failure, and the request as the server's capture layer does with
+    /// the error's status, and gives the error log written.
+    pub(crate) fn failed(self, error: &ExecError) -> String {
+        self.observation.error(error);
+        let status = if error.status >= 400 {
+            error.status
+        } else {
+            500
+        };
+        self.end(Outcome::Failed, status)
+    }
+
+    /// Ends a call that gave its answer to the handler, which passed on
+    /// its error `status`, and gives the error log written.
+    pub(crate) fn answered(self, status: u16) -> String {
+        self.end(Outcome::Completed, status)
+    }
+
+    /// Ends the call with `outcome` and the request with `status`, and
+    /// gives the error log written.
+    fn end(self, outcome: Outcome, status: u16) -> String {
+        self.observation.finish(outcome);
+        request_log::finish(
+            &self.context,
+            Downstream {
+                url: Downstream::url("/v1/test", None),
+                secrets: Downstream::url_secrets("/v1/test", None),
+                method: "POST".to_owned(),
+                headers: HeaderMap::new(),
+                body: RequestBody::None,
+            },
+            request_log::Answer::new(status, HeaderMap::new()),
+        );
+        self.logger.flush();
+        let logs: Vec<_> = std::fs::read_dir(self.dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(logs.len(), 1, "{logs:?}");
+        std::fs::read_to_string(&logs[0]).unwrap()
+    }
 }
 
 /// The custom key header a WebSocket test's credential sets.

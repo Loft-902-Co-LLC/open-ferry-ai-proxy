@@ -58,7 +58,7 @@ fn record_api_request_clones_deferred_body_when_request_log_disabled() {
     let mut captured = Vec::new();
     context
         .request_log()
-        .with(|capture| captured = capture.attempts.deferred_requests());
+        .with(|capture| captured = capture.attempts.api_request());
     let captured = String::from_utf8(captured).unwrap();
     assert!(captured.contains("{\"model\":\"original\"}"), "{captured}");
     assert!(
