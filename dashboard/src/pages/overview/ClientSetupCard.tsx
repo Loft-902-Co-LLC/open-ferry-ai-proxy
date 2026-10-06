@@ -1,0 +1,464 @@
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { KeyRound, RotateCw } from "lucide-react";
+import { useEffect, useRef, useState, type Ref } from "react";
+
+import { callProblem } from "../../api/access";
+import { isUnsupportedRoute } from "../../api/client";
+import { CLIENT_SETUP, type ClientSetup } from "../../api/dashboard";
+import { useApiCall, useApiQuery } from "../../api/hooks";
+import { API_KEYS } from "../../api/management";
+import { Alert } from "../../components/Alert";
+import { Badge } from "../../components/Badge";
+import { Button } from "../../components/Button";
+import { Card } from "../../components/Card";
+import { Code } from "../../components/Code";
+import { CopyButton } from "../../components/CopyButton";
+import { ProblemNotice } from "../../components/ProblemNotice";
+import { Loading } from "../../components/QueryState";
+import { SelectField } from "../../components/SelectField";
+import { Spinner } from "../../components/Spinner";
+import { Tabs } from "../../components/Tabs";
+import {
+  generateClientKey,
+  isExampleKey,
+  maskKey,
+  usableKeys,
+  type ApiKeysAnswer,
+} from "./clientKeys";
+import {
+  SHELL_LABELS,
+  addressOptions,
+  buildSnippets,
+  isLoopback,
+  type SetupInput,
+  type Shell,
+  type Snippet,
+} from "./snippets";
+
+/** What the setups say while there is no key to put in them. */
+const KEY_PLACEHOLDER = "<your client key>";
+/** What they say while there is no model. */
+const MODEL_PLACEHOLDER = "<model>";
+/** How often to look whether safe mode has lifted, after the keys changed. */
+const SAFE_MODE_POLL_MS = 2000;
+
+function defaultShell(): Shell {
+  return navigator.userAgent.includes("Windows") ? "powershell" : "posix";
+}
+
+/** A key made here, and whether the server has it. */
+interface MadeKey {
+  key: string;
+  saved: boolean;
+}
+
+/** "Can't change settings yet": the key to add to config.yaml by hand. */
+function AddByHand({ made, replacing }: { made: string; replacing: boolean }) {
+  return (
+    <Alert tone="info" live title="This server can't change settings yet">
+      <p>
+        {replacing
+          ? "In config.yaml, replace the example keys under "
+          : "In config.yaml, add this key under "}
+        <Code>api-keys</Code>, and the server picks it up when it reloads the file. The setups
+        below already use it.
+      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <Code>{maskKey(made)}</Code>
+        <CopyButton text={made} label="Copy the new key" />
+      </div>
+    </Alert>
+  );
+}
+
+function SafeModeNotice({
+  examples,
+  replaceLabel,
+  pending,
+  waiting,
+  onReplace,
+  actionRef,
+}: {
+  examples: readonly string[];
+  replaceLabel: string;
+  pending: boolean;
+  waiting: boolean;
+  onReplace: () => void;
+  actionRef: Ref<HTMLButtonElement>;
+}) {
+  return (
+    <Alert tone="warn" title="The proxy is in safe mode">
+      <p>
+        Its client keys, <Code>api-keys</Code> in config.yaml, still include CLIProxyAPI&apos;s
+        examples
+        {examples.length > 0 && (
+          <>
+            {" "}
+            (
+            {examples.map((key, index) => (
+              <span key={key}>
+                {index > 0 && ", "}
+                <Code>{key}</Code>
+              </span>
+            ))}
+            )
+          </>
+        )}
+        , which anyone could guess. So it refuses every proxy request, and none of the setups
+        below work, until they are replaced.
+      </p>
+      {waiting ? (
+        <p role="status" className="flex items-center gap-2">
+          <Spinner /> Saved. The proxy leaves safe mode when it reloads config.yaml, in a few
+          seconds.
+        </p>
+      ) : (
+        <Button ref={actionRef} size="sm" variant="primary" disabled={pending} onClick={onReplace}>
+          {pending ? <Spinner /> : <KeyRound aria-hidden="true" className="size-4" />}
+          {replaceLabel}
+        </Button>
+      )}
+    </Alert>
+  );
+}
+
+function SnippetPanel({ shown, copied }: { shown: Snippet; copied: Snippet }) {
+  return (
+    <div className="space-y-4">
+      {shown.modelMissing && (
+        <Alert tone="warn">
+          <p>
+            The model you picked isn&apos;t on <Code>{shown.route.path}</Code> right now, so this
+            setup names <Code>{shown.model}</Code>.
+          </p>
+        </Alert>
+      )}
+      {shown.parts.map((part, index) => {
+        const copyText = copied.parts[index]?.code ?? part.code;
+        const step = shown.parts.length > 1 ? `, step ${String(index + 1)}` : "";
+        return (
+          <div key={part.caption} className="space-y-1.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="font-medium">{part.caption}</p>
+              <CopyButton text={copyText} label={`Copy the ${shown.label} setup${step}`} />
+            </div>
+            <pre
+              tabIndex={0}
+              aria-label={`The ${shown.label} setup${step}`}
+              className="overflow-x-auto rounded-md border border-line bg-raised p-3 font-mono text-xs leading-5"
+            >
+              {part.code}
+            </pre>
+          </div>
+        );
+      })}
+      <p className="text-muted">
+        As documented at{" "}
+        <a href={shown.source} target="_blank" rel="noreferrer">
+          {shown.source}
+        </a>
+        .
+      </p>
+    </div>
+  );
+}
+
+export interface ClientSetupCardProps {
+  /** Opened from CLIProxyAPI's safe-mode page: bring the key setup into view. */
+  focusKeys?: boolean;
+}
+
+/**
+ * Ready-made setups for clients of the proxy: the address to reach it at,
+ * a client key, a model, and a few lines for each common client.
+ */
+export function ClientSetupCard({ focusKeys = false }: ClientSetupCardProps) {
+  const call = useApiCall();
+  const client = useQueryClient();
+  const [address, setAddress] = useState<string | null>(null);
+  const [keyIndex, setKeyIndex] = useState(0);
+  const [made, setMade] = useState<MadeKey | null>(null);
+  const [model, setModel] = useState<string | null>(null);
+  const [shell, setShell] = useState<Shell>(defaultShell);
+  const [reveal, setReveal] = useState(false);
+  const [tab, setTab] = useState("openai-python");
+
+  const refresh = () =>
+    Promise.all([
+      client.invalidateQueries({ queryKey: [API_KEYS] }),
+      client.invalidateQueries({ queryKey: [CLIENT_SETUP] }),
+    ]);
+  // Adds one key, leaving the others: PATCH with an `old` the list hasn't
+  // appends `new`, so nothing changed meanwhile is overwritten.
+  const addKey = useMutation({
+    mutationFn: (key: string) =>
+      call(API_KEYS, { method: "PATCH", json: { old: key, new: key } }),
+    onSuccess: async (_, key) => {
+      setMade({ key, saved: true });
+      await refresh();
+    },
+  });
+  // Safe mode: the list without the examples, or a new key in their place.
+  const replaceExamples = useMutation({
+    mutationFn: (list: string[]) => call(API_KEYS, { method: "PUT", json: list }),
+    onSuccess: refresh,
+  });
+  // The server leaves safe mode when it reloads config.yaml, a little after
+  // the keys are saved: look again until it has.
+  const setup = useApiQuery<ClientSetup>(CLIENT_SETUP, undefined, {
+    refetchInterval: (query) =>
+      replaceExamples.isSuccess && query.state.data?.safe_mode === true ? SAFE_MODE_POLL_MS : false,
+  });
+  const keys = useApiQuery<ApiKeysAnswer>(API_KEYS);
+
+  const card = useRef<HTMLDivElement>(null);
+  const safeModeAction = useRef<HTMLButtonElement>(null);
+  const keySelect = useRef<HTMLSelectElement>(null);
+
+  const saved = keys.data?.["api-keys"] ?? [];
+  const examples = saved.filter(isExampleKey);
+  const usable = usableKeys(saved);
+  const choices = made !== null && !usable.includes(made.key) ? [...usable, made.key] : usable;
+  const chosenKey = choices[Math.min(keyIndex, choices.length - 1)] ?? null;
+
+  const makeKey = () => {
+    const key = generateClientKey();
+    setMade({ key, saved: false });
+    setKeyIndex(usable.length);
+    addKey.mutate(key);
+  };
+  const replace = () => {
+    if (usable.length > 0) {
+      replaceExamples.mutate(usable);
+      return;
+    }
+    const key = made?.key ?? generateClientKey();
+    setMade({ key, saved: false });
+    setKeyIndex(0);
+    replaceExamples.mutate([key]);
+  };
+
+  const loaded = setup.data !== undefined;
+  const safeMode = setup.data?.safe_mode === true;
+  // Opened from the safe-mode page: once the setup shows, take the user to it.
+  const focused = useRef(false);
+  useEffect(() => {
+    if (!focusKeys || !loaded || focused.current) {
+      return;
+    }
+    focused.current = true;
+    card.current?.scrollIntoView({ block: "start" });
+    (safeMode ? safeModeAction.current : keySelect.current)?.focus();
+  }, [focusKeys, loaded, safeMode]);
+
+  if (setup.isPending) {
+    return (
+      <Card title="Connect a client">
+        <Loading>Reading the proxy&apos;s setup…</Loading>
+      </Card>
+    );
+  }
+  if (setup.isError) {
+    return (
+      <Card title="Connect a client">
+        <ProblemNotice
+          problem={callProblem(setup.error)}
+          action={
+            <Button
+              size="sm"
+              onClick={() => {
+                void setup.refetch();
+              }}
+            >
+              <RotateCw aria-hidden="true" className="size-4" />
+              Try again
+            </Button>
+          }
+        />
+      </Card>
+    );
+  }
+
+  const setupData = setup.data;
+  const addresses = addressOptions(window.location.origin, setupData.base_urls);
+  const root = addresses.find((option) => option.root === address)?.root ?? addresses[0]?.root ?? "";
+  const models = setupData.models;
+  const defaultModel =
+    setupData.routes.find((route) => route.protocol === "openai")?.models[0] ??
+    models[0]?.id ??
+    MODEL_PLACEHOLDER;
+  const chosenModel = model !== null && models.some((info) => info.id === model) ? model : defaultModel;
+
+  const input: Omit<SetupInput, "key"> = { root, model: chosenModel, routes: setupData.routes, shell };
+  const shownKey = chosenKey === null ? KEY_PLACEHOLDER : reveal ? chosenKey : maskKey(chosenKey);
+  const shownSnippets = buildSnippets({ ...input, key: shownKey });
+  const copiedSnippets = buildSnippets({ ...input, key: chosenKey ?? KEY_PLACEHOLDER });
+  const selected = shownSnippets.find((snippet) => snippet.id === tab) ?? shownSnippets[0];
+  const copied = copiedSnippets.find((snippet) => snippet.id === selected?.id);
+
+  const keysUnsupported = keys.isError && isUnsupportedRoute(keys.error);
+  const writeError = addKey.error ?? replaceExamples.error;
+  const keyOptions =
+    choices.length === 0
+      ? [{ value: "0", label: keys.isPending ? "Loading…" : "No client keys yet" }]
+      : choices.map((key, index) => ({
+          value: String(index),
+          label:
+            made?.key === key && !made.saved && !usable.includes(key)
+              ? `${maskKey(key)} (made here, not saved)`
+              : maskKey(key),
+        }));
+
+  return (
+    <div ref={card} className="scroll-mt-4">
+      <Card
+        title="Connect a client"
+        description="Pick where clients reach the proxy, a client key and a model, then copy a setup."
+      >
+        {safeMode && (
+          <SafeModeNotice
+            examples={examples}
+            replaceLabel={
+              usable.length > 0 ? "Remove the example keys" : "Replace the example keys with a new key"
+            }
+            pending={replaceExamples.isPending}
+            waiting={replaceExamples.isSuccess}
+            onReplace={replace}
+            actionRef={safeModeAction}
+          />
+        )}
+        {focusKeys && !safeMode && (
+          <Alert tone="ok" title="The proxy isn't in safe mode">
+            <p>Its client keys are no longer the examples, so it serves proxy requests.</p>
+          </Alert>
+        )}
+        {writeError !== null &&
+          (isUnsupportedRoute(writeError) && made !== null ? (
+            <AddByHand made={made.key} replacing={replaceExamples.isError} />
+          ) : (
+            <ProblemNotice problem={callProblem(writeError)} live />
+          ))}
+        {keysUnsupported && (
+          <Alert tone="info" title="This server can't list its client keys yet">
+            <p>
+              The setups below show where the key goes. Make one here and add it to{" "}
+              <Code>api-keys</Code> in config.yaml, or use one already there.
+            </p>
+          </Alert>
+        )}
+        {keys.isError && !keysUnsupported && <ProblemNotice problem={callProblem(keys.error)} />}
+        {addKey.isSuccess && made?.saved === true && (
+          <Alert tone="ok" live>
+            <p>
+              Added a client key. The setups below use it; show it or copy it from them at any
+              time.
+            </p>
+          </Alert>
+        )}
+        {models.length === 0 && (
+          <Alert tone="info" title="No models yet">
+            <p>
+              The proxy has no credentials that can serve a model. Add a provider&apos;s API key
+              to config.yaml, or sign in to Claude or Codex, and its models show here.
+            </p>
+          </Alert>
+        )}
+
+        <div className="grid gap-4 sm:grid-cols-2">
+          <SelectField
+            label="Address"
+            value={root}
+            options={addresses.map((option) => ({ value: option.root, label: option.label }))}
+            onChange={(event) => {
+              setAddress(event.target.value);
+            }}
+            hint={
+              isLoopback(root)
+                ? "This address works only on the computer the proxy runs on."
+                : undefined
+            }
+          />
+          <div className="space-y-1.5">
+            <SelectField
+              ref={keySelect}
+              label="Client key"
+              value={String(Math.min(keyIndex, Math.max(choices.length - 1, 0)))}
+              options={keyOptions}
+              disabled={choices.length === 0}
+              onChange={(event) => {
+                setKeyIndex(Number(event.target.value));
+              }}
+            />
+            <Button size="sm" disabled={addKey.isPending} onClick={makeKey}>
+              {addKey.isPending ? <Spinner /> : <KeyRound aria-hidden="true" className="size-4" />}
+              Make a new key
+            </Button>
+          </div>
+          <SelectField
+            label="Model"
+            value={chosenModel}
+            disabled={models.length === 0}
+            options={
+              models.length === 0
+                ? [{ value: MODEL_PLACEHOLDER, label: "No models yet" }]
+                : models.map((info) => ({
+                    value: info.id,
+                    label:
+                      info.display_name === null || info.display_name === info.id
+                        ? info.id
+                        : `${info.display_name} (${info.id})`,
+                  }))
+            }
+            onChange={(event) => {
+              setModel(event.target.value);
+            }}
+          />
+          <SelectField
+            label="Shell"
+            value={shell}
+            options={(Object.keys(SHELL_LABELS) as Shell[]).map((value) => ({
+              value,
+              label: SHELL_LABELS[value],
+            }))}
+            onChange={(event) => {
+              setShell(event.target.value as Shell);
+            }}
+            hint="For the setups run in a terminal."
+          />
+        </div>
+        <label className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={reveal}
+            disabled={chosenKey === null}
+            onChange={(event) => {
+              setReveal(event.target.checked);
+            }}
+            className="size-4 accent-accent"
+          />
+          Show the key in the setups
+          <span className="text-muted">(Copy always copies it whole.)</span>
+        </label>
+
+        {selected === undefined || copied === undefined ? (
+          <p className="text-muted">The proxy lists none of the routes these setups call.</p>
+        ) : (
+          <Tabs
+            label="Client setups"
+            items={shownSnippets.map((snippet) => ({ id: snippet.id, label: snippet.label }))}
+            selected={selected.id}
+            onSelect={setTab}
+          >
+            <SnippetPanel shown={selected} copied={copied} />
+          </Tabs>
+        )}
+        {chosenKey === null && !keys.isPending && (
+          <p className="flex items-center gap-2 text-muted">
+            <Badge tone="warn">No key</Badge> The setups show where a client key goes. Make one
+            above.
+          </p>
+        )}
+      </Card>
+    </div>
+  );
+}

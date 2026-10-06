@@ -22,10 +22,10 @@ afterEach(() => {
 });
 
 /**
- * What jsdom lacks and the app uses: <dialog>'s modal methods and
- * ResizeObserver, which charts size themselves with. Stand-ins that do
- * what the tests need: a dialog opens and closes, firing "close"; a chart
- * gets a fixed size.
+ * What jsdom lacks and the app uses: <dialog>'s modal methods,
+ * scrollIntoView, and ResizeObserver, which charts size themselves with.
+ * Stand-ins that do what the tests need: a dialog opens and closes, firing
+ * "close"; scrolling does nothing; a chart gets a fixed size.
  */
 function installDomGaps() {
   const dialog = window.HTMLDialogElement.prototype as Partial<HTMLDialogElement>;
@@ -48,6 +48,12 @@ function installDomGaps() {
         this.dispatchEvent(new Event("close"));
       },
     });
+  }
+
+  const element = window.Element.prototype as Partial<Element>;
+  if (typeof element.scrollIntoView !== "function") {
+    // jsdom lays nothing out, so there is nowhere to scroll.
+    window.Element.prototype.scrollIntoView = () => undefined;
   }
 
   if (typeof window.ResizeObserver !== "function") {
