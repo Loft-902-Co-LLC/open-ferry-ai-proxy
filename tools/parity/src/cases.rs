@@ -11,6 +11,7 @@ pub mod claude_responses;
 pub mod codex_models;
 pub mod completions;
 pub mod config_diff;
+pub mod config_save;
 pub mod gemini;
 pub mod gemini_responses;
 pub mod multi_agent;

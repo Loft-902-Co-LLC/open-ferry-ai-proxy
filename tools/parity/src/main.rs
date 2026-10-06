@@ -7,6 +7,7 @@ mod cases;
 mod codex_models;
 mod compare;
 mod config_diff;
+mod config_save;
 mod generate;
 mod interactions;
 mod live;
@@ -518,6 +519,11 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
             Translator::ConfigDiff,
             cases::config_diff::details(),
             generate::config_diff::detail_cases(seed, random),
+        ),
+        (
+            Translator::ConfigSave,
+            cases::config_save::steps(&args.upstream),
+            generate::config_save::step_cases(seed, random),
         ),
     ];
     // The Gemini Interactions families' suites (see interactions/mod.rs).
