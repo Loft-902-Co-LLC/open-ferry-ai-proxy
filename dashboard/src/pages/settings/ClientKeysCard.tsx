@@ -176,7 +176,11 @@ function KeyItem({ value, last, writable, onReadOnly }: KeyItemProps) {
   const remove = useMutation({
     mutationFn: async () => {
       // Removed by its place in the list as it is now, so the key itself
-      // never goes in an address.
+      // never goes in an address (upstream's `?value=` would put it in the
+      // URL, and so in access logs). The cost is a race: a change to the
+      // list between this read and the DELETE can move the keys, and then
+      // the key now at that place goes instead. The list is read again
+      // afterwards, so the card shows what happened.
       const index = keysIn(await call<unknown>(API_KEYS)).indexOf(value);
       if (index < 0) {
         throw new KeyGoneError();

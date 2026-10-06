@@ -220,8 +220,8 @@ describe("the settings form", () => {
     const { user } = await openSettings();
     const retries = screen.getByRole("textbox", { name: "Retries" });
     await fill(user, retries, "two");
-    expect(await screen.findByText("Retries is a whole number from 0 to 1,000.")).toBeVisible();
-    expect(retries).toHaveAccessibleDescription(/Retries is a whole number from 0 to 1,000\./);
+    expect(await screen.findByText("Retries is a whole number, 0 or more.")).toBeVisible();
+    expect(retries).toHaveAccessibleDescription(/Retries is a whole number, 0 or more\./);
     await fill(user, screen.getByLabelText("Proxy for outbound requests"), "socks5://proxy.example:1080");
     expect(await screen.findByText(/can't use a SOCKS5 proxy yet/)).toBeVisible();
 
@@ -233,6 +233,96 @@ describe("the settings form", () => {
     expect(retries).toHaveValue("1");
     expect(screen.getByText("No unsaved changes.")).toBeVisible();
     expect(screen.queryByText(/whole number/)).not.toBeInTheDocument();
+  });
+
+  it("with request-retry: 5000 in the loaded config, editing Debug saves only debug", async () => {
+    const state = server({ "request-retry": 5000 });
+    const { user } = await openSettings();
+    const retries = screen.getByRole("textbox", { name: "Retries" });
+    expect(retries).toHaveValue("5000");
+    expect(retries).not.toHaveAttribute("aria-invalid");
+
+    await user.click(screen.getByRole("checkbox", { name: "Debug logging" }));
+    expect(screen.getByText("1 unsaved change.")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Review and save" }));
+    const dialog = await screen.findByRole("dialog", { name: "Review the changes" });
+    expect(within(dialog).getAllByRole("row")).toHaveLength(2);
+    await user.click(within(dialog).getByRole("button", { name: "Save 1 setting" }));
+    expect(await screen.findByText(/Saved 1 setting\./)).toBeVisible();
+    expect(patches(state.api)).toEqual([["debug", { value: true }]]);
+    expect(state.config["request-retry"]).toBe(5000);
+  });
+
+  it("a loaded socks5:// proxy shows the warning and still lets another setting save", async () => {
+    const state = server({ "proxy-url": "socks5://user:secret@proxy.example:1080" });
+    const { user } = await openSettings();
+    const proxy = screen.getByLabelText("Proxy for outbound requests");
+    const warning = "open-ferry can't use a SOCKS5 proxy yet. Use an HTTP or HTTPS proxy. Saving the other settings leaves it as it is.";
+    expect(screen.getByText(warning)).toBeVisible();
+    expect(proxy).toHaveAccessibleDescription(expect.stringContaining(warning));
+    expect(proxy).not.toHaveAttribute("aria-invalid");
+    // The warning names the problem, not the address.
+    expect(document.body).not.toHaveTextContent("user:secret");
+
+    await fill(user, screen.getByRole("textbox", { name: "Retries" }), "4");
+    expect(screen.getByText(warning)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Review and save" }));
+    const dialog = await screen.findByRole("dialog", { name: "Review the changes" });
+    await user.click(within(dialog).getByRole("button", { name: "Save 1 setting" }));
+    expect(await screen.findByText(/Saved 1 setting\./)).toBeVisible();
+    expect(patches(state.api)).toEqual([["request-retry", { value: 4 }]]);
+    expect(state.config["proxy-url"]).toBe("socks5://user:secret@proxy.example:1080");
+
+    // Edited, the proxy is checked as any edit is, and the warning gives way
+    // to the error; put back, it is a warning again.
+    await fill(user, proxy, "socks5://other.example:1080");
+    expect(await screen.findByText(/can't use a SOCKS5 proxy yet\. Use an HTTP or HTTPS proxy\.$/)).toBeVisible();
+    expect(proxy).toHaveAttribute("aria-invalid", "true");
+    expect(screen.queryByText(warning)).not.toBeInTheDocument();
+    await fill(user, proxy, "socks5://user:secret@proxy.example:1080");
+    expect(await screen.findByText(warning)).toBeVisible();
+    expect(proxy).not.toHaveAttribute("aria-invalid");
+  });
+
+  it("a loaded number past the largest the form holds exactly doesn't stop a save", async () => {
+    const state = server({ "logs-max-total-size-mb": 2 ** 60 });
+    const { user } = await openSettings();
+    expect(
+      screen.getByText(
+        "The log directory's limit can be at most 9,007,199,254,740,991. Saving the other settings leaves it as it is.",
+      ),
+    ).toBeVisible();
+    await user.click(screen.getByRole("checkbox", { name: "Request logs" }));
+    await user.click(screen.getByRole("button", { name: "Review and save" }));
+    const dialog = await screen.findByRole("dialog", { name: "Review the changes" });
+    await user.click(within(dialog).getByRole("button", { name: "Save 1 setting" }));
+    expect(await screen.findByText(/Saved 1 setting\./)).toBeVisible();
+    expect(patches(state.api)).toEqual([["request-log", { value: true }]]);
+  });
+
+  it("an edited number past MAX_SAFE_INTEGER is refused", async () => {
+    const state = server();
+    const { user } = await openSettings();
+    const retries = screen.getByRole("textbox", { name: "Retries" });
+    await fill(user, retries, "9007199254740992");
+    expect(await screen.findByText("Retries can be at most 9,007,199,254,740,991.")).toBeVisible();
+    expect(retries).toHaveAttribute("aria-invalid", "true");
+
+    await user.click(screen.getByRole("button", { name: "Review and save" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(state.api.callsTo("GET", CONFIG)).toHaveLength(1);
+    expect(patches(state.api)).toEqual([]);
+
+    // The largest is taken.
+    await fill(user, retries, "9007199254740991");
+    await waitFor(() => {
+      expect(screen.queryByText(/can be at most/)).not.toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("button", { name: "Review and save" }));
+    const dialog = await screen.findByRole("dialog", { name: "Review the changes" });
+    await user.click(within(dialog).getByRole("button", { name: "Save 1 setting" }));
+    expect(await screen.findByText(/Saved 1 setting\./)).toBeVisible();
+    expect(patches(state.api)).toEqual([["request-retry", { value: Number.MAX_SAFE_INTEGER }]]);
   });
 
   it("says there is nothing to save when the server already has the change", async () => {

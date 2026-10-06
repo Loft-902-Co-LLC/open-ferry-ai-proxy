@@ -1,8 +1,7 @@
-import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Save, Undo2 } from "lucide-react";
 import { useMemo, useState } from "react";
-import { useForm, useWatch, type FieldErrors } from "react-hook-form";
+import { useForm, useWatch, type FieldErrors, type Resolver } from "react-hook-form";
 
 import { callProblem, isSettingsReadOnly, type CallProblem } from "../../api/access";
 import { useApiCall } from "../../api/hooks";
@@ -27,31 +26,36 @@ import {
   describeSetting,
   formValueOf,
   formValuesOf,
+  isEdited,
+  loadedProblems,
+  readEdited,
   settingChanges,
   settingValuesOf,
-  settingsSchema,
   type SettingChange,
   type SettingId,
   type SettingValues,
   type SettingsInput,
 } from "./settingsModel";
 
-const NUMBER_FIELDS = new Set<SettingId>([
-  "requestRetry",
-  "maxRetryCredentials",
-  "maxRetryInterval",
-  "logsMaxTotalSizeMb",
-  "errorLogsMaxFiles",
-]);
-
-/** Whether the form's `input` for `id` differs from `value`, the server's. */
-function differs(id: SettingId, input: SettingsInput[SettingId] | undefined, value: unknown): boolean {
-  if (typeof input === "string") {
-    const text = input.trim();
-    return NUMBER_FIELDS.has(id) ? !/^\d+$/.test(text) || Number(text) !== value : text !== value;
+/**
+ * Checks the settings edited from the loaded ones (the form's context), and
+ * only those: a value in config.yaml the form wouldn't take, left alone,
+ * doesn't stop the others being saved. It shows as a warning instead.
+ */
+const checkEdited: Resolver<SettingsInput, SettingValues, SettingValues> = (input, loaded) => {
+  const read = readEdited(input, loaded);
+  if (read.values !== null) {
+    return { values: read.values, errors: {} };
   }
-  return input !== value;
-}
+  const errors: FieldErrors<SettingsInput> = {};
+  for (const id of SETTING_IDS) {
+    const message = read.problems[id];
+    if (message !== undefined) {
+      errors[id] = { type: "validate", message };
+    }
+  }
+  return { values: {}, errors };
+};
 
 /** A save that stopped at a setting the server refused. */
 class SaveStoppedError extends Error {
@@ -184,8 +188,9 @@ export function SettingsForm({ config }: SettingsFormProps) {
   const client = useQueryClient();
   const loaded = useMemo(() => settingValuesOf(config), [config]);
   const formValues = useMemo(() => formValuesOf(loaded), [loaded]);
-  const form = useForm<SettingsInput, unknown, SettingValues>({
-    resolver: zodResolver(settingsSchema),
+  const form = useForm<SettingsInput, SettingValues, SettingValues>({
+    resolver: checkEdited,
+    context: loaded,
     mode: "onChange",
     // The server's values, as they come in; a field being edited keeps
     // what the user typed.
@@ -193,7 +198,13 @@ export function SettingsForm({ config }: SettingsFormProps) {
     resetOptions: { keepDirtyValues: true },
   });
   const current = useWatch({ control: form.control });
-  const unsaved = SETTING_IDS.filter((id) => differs(id, current[id], loaded[id]));
+  const unsaved = SETTING_IDS.filter((id) => isEdited(current[id], loaded[id]));
+  const problems = useMemo(() => loadedProblems(loaded), [loaded]);
+  /** The problem with setting `id`'s loaded value, while it is left alone. */
+  const warning = (id: SettingId) =>
+    problems[id] === undefined || unsaved.includes(id)
+      ? undefined
+      : `${problems[id]} Saving the other settings leaves it as it is.`;
   const [changes, setChanges] = useState<SettingChange[] | null>(null);
   // The number of settings saved, or "nothing" when the server had them all.
   const [outcome, setOutcome] = useState<number | "nothing" | null>(null);
@@ -295,6 +306,7 @@ export function SettingsForm({ config }: SettingsFormProps) {
               </>
             }
             error={errors.proxyUrl?.message}
+            warning={warning("proxyUrl")}
             {...form.register("proxyUrl")}
           />
         </Card>
@@ -316,6 +328,7 @@ export function SettingsForm({ config }: SettingsFormProps) {
               inputMode="numeric"
               hint="More rounds of credentials to try after a request fails. 0 tries once."
               error={errors.requestRetry?.message}
+              warning={warning("requestRetry")}
               {...form.register("requestRetry")}
             />
             <TextField
@@ -323,6 +336,7 @@ export function SettingsForm({ config }: SettingsFormProps) {
               inputMode="numeric"
               hint="The most credentials tried in each round. 0 tries all of them."
               error={errors.maxRetryCredentials?.message}
+              warning={warning("maxRetryCredentials")}
               {...form.register("maxRetryCredentials")}
             />
             <TextField
@@ -330,6 +344,7 @@ export function SettingsForm({ config }: SettingsFormProps) {
               inputMode="numeric"
               hint="While every credential is resting, how long to wait for one. 0 doesn't wait."
               error={errors.maxRetryInterval?.message}
+              warning={warning("maxRetryInterval")}
               {...form.register("maxRetryInterval")}
             />
           </div>
@@ -367,6 +382,7 @@ export function SettingsForm({ config }: SettingsFormProps) {
               inputMode="numeric"
               hint="Past it, the oldest log files are deleted. 0 means no limit."
               error={errors.logsMaxTotalSizeMb?.message}
+              warning={warning("logsMaxTotalSizeMb")}
               {...form.register("logsMaxTotalSizeMb")}
             />
             <TextField
@@ -374,6 +390,7 @@ export function SettingsForm({ config }: SettingsFormProps) {
               inputMode="numeric"
               hint="The oldest go first. 0 keeps them all."
               error={errors.errorLogsMaxFiles?.message}
+              warning={warning("errorLogsMaxFiles")}
               {...form.register("errorLogsMaxFiles")}
             />
           </div>

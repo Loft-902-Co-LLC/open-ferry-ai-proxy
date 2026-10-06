@@ -14,6 +14,22 @@ export function wholeNumberField(label: string, min: number, max: number) {
     .pipe(z.number().int(range).min(min, range).max(max, range));
 }
 
+/**
+ * A whole number, 0 or more, from a text field: a count the server holds as
+ * a 64-bit integer. The cap is the largest whole number a number in the page
+ * holds exactly, so what is sent is what was typed.
+ */
+export function countField(label: string) {
+  const format = `${label} is a whole number, 0 or more.`;
+  const tooLarge = `${label} can be at most ${Number.MAX_SAFE_INTEGER.toLocaleString("en")}.`;
+  return z
+    .string()
+    .trim()
+    .regex(/^\d+$/, format)
+    .refine((text) => !/^\d+$/.test(text) || Number(text) <= Number.MAX_SAFE_INTEGER, tooLarge)
+    .transform(Number);
+}
+
 const DECIMAL = /^(\d+(\.\d*)?|\.\d+)$/;
 
 /** A number from `min` to `max`, decimals allowed, from a text field. */

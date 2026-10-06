@@ -3,7 +3,10 @@ import { describe, expect, it } from "vitest";
 import {
   describeSetting,
   formValuesOf,
+  isEdited,
+  loadedProblems,
   proxyUrlProblem,
+  readEdited,
   redactProxyUrl,
   settingChanges,
   settingValuesOf,
@@ -123,7 +126,68 @@ describe("settingsSchema", () => {
   it("says what is wrong with a number", () => {
     const parsed = settingsSchema.safeParse({ ...formValuesOf(DEFAULTS), requestRetry: "-1" });
     expect(parsed.success).toBe(false);
-    expect(parsed.error?.issues[0]?.message).toBe("Retries is a whole number from 0 to 1,000.");
+    expect(parsed.error?.issues).toHaveLength(1);
+    expect(parsed.error?.issues[0]?.message).toBe("Retries is a whole number, 0 or more.");
+  });
+
+  it("takes any count up to the largest whole number the page holds exactly", () => {
+    const largest = String(Number.MAX_SAFE_INTEGER);
+    const parsed = settingsSchema.safeParse({ ...formValuesOf(DEFAULTS), requestRetry: largest });
+    expect(parsed.success && parsed.data.requestRetry).toBe(Number.MAX_SAFE_INTEGER);
+    for (const tooLarge of ["9007199254740992", "1".padEnd(400, "0")]) {
+      const refused = settingsSchema.safeParse({ ...formValuesOf(DEFAULTS), requestRetry: tooLarge });
+      expect(refused.error?.issues.map((issue) => issue.message)).toEqual([
+        "Retries can be at most 9,007,199,254,740,991.",
+      ]);
+    }
+  });
+});
+
+describe("isEdited", () => {
+  it("compares the form's text with the server's value", () => {
+    expect(isEdited(" 5000 ", 5000)).toBe(false);
+    expect(isEdited("05000", 5000)).toBe(false);
+    expect(isEdited("5001", 5000)).toBe(true);
+    expect(isEdited("five", 5000)).toBe(true);
+    expect(isEdited("", 0)).toBe(true);
+    expect(isEdited(" direct ", "direct")).toBe(false);
+    expect(isEdited(true, false)).toBe(true);
+  });
+});
+
+describe("readEdited", () => {
+  const loaded: SettingValues = {
+    ...DEFAULTS,
+    proxyUrl: "socks5://proxy.example:1080",
+    requestRetry: 2 ** 60,
+  };
+
+  it("leaves the settings not edited as they were loaded, unchecked", () => {
+    expect(loadedProblems(loaded)).toEqual({
+      proxyUrl: "open-ferry can't use a SOCKS5 proxy yet. Use an HTTP or HTTPS proxy.",
+      requestRetry: "Retries can be at most 9,007,199,254,740,991.",
+    });
+    const read = readEdited({ ...formValuesOf(loaded), debug: true }, loaded);
+    expect(read.values).toEqual({ ...loaded, debug: true });
+    expect(settingChanges(loaded, read.values ?? loaded, loaded).map((change) => change.id)).toEqual([
+      "debug",
+    ]);
+  });
+
+  it("checks the settings edited", () => {
+    const read = readEdited(
+      { ...formValuesOf(loaded), proxyUrl: "socks5h://other.example:1080", maxRetryInterval: "soon" },
+      loaded,
+    );
+    expect(read.values).toBeNull();
+    expect(read.problems).toEqual({
+      proxyUrl: "open-ferry can't use a SOCKS5 proxy yet. Use an HTTP or HTTPS proxy.",
+      maxRetryInterval: "The longest wait is a whole number, 0 or more.",
+    });
+  });
+
+  it("checks every setting with nothing loaded to compare with", () => {
+    expect(readEdited(formValuesOf(loaded), undefined).problems).toEqual(loadedProblems(loaded));
   });
 });
 

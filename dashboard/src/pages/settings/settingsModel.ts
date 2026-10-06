@@ -7,7 +7,7 @@
 // round-robin.
 
 import { MANAGEMENT } from "../../api/management";
-import { wholeNumberField } from "../../lib/fields";
+import { countField } from "../../lib/fields";
 import { z } from "../../lib/zod";
 
 export const STRATEGIES = ["round-robin", "weighted-round-robin", "fill-first"] as const;
@@ -85,15 +85,16 @@ export const settingsSchema = z.object({
       }
     }),
   routingStrategy: z.enum(STRATEGIES),
-  requestRetry: wholeNumberField("Retries", 0, 1_000),
-  maxRetryCredentials: wholeNumberField("Credentials per round", 0, 10_000),
-  maxRetryInterval: wholeNumberField("The longest wait", 0, 86_400),
+  // The server holds these as 64-bit integers and sets no upper limit.
+  requestRetry: countField("Retries"),
+  maxRetryCredentials: countField("Credentials per round"),
+  maxRetryInterval: countField("The longest wait"),
   forceModelPrefix: z.boolean(),
   debug: z.boolean(),
   loggingToFile: z.boolean(),
-  logsMaxTotalSizeMb: wholeNumberField("The log directory's limit", 0, 10_000_000),
+  logsMaxTotalSizeMb: countField("The log directory's limit"),
   requestLog: z.boolean(),
-  errorLogsMaxFiles: wholeNumberField("The number of failed-request logs kept", 0, 1_000_000),
+  errorLogsMaxFiles: countField("The number of failed-request logs kept"),
   usageStatisticsEnabled: z.boolean(),
 });
 
@@ -209,6 +210,82 @@ export function formValuesOf(values: SettingValues): SettingsInput {
 /** One setting's value as the form holds it. */
 export function formValueOf(value: SettingValues[SettingId]): SettingsInput[SettingId] {
   return typeof value === "number" ? String(value) : value;
+}
+
+/**
+ * Whether `input`, the form's value for a setting, differs from `value`, the
+ * server's. Text that isn't a number, in a number's place, differs.
+ */
+export function isEdited(
+  input: SettingsInput[SettingId] | undefined,
+  value: SettingValues[SettingId],
+): boolean {
+  if (typeof input !== "string") {
+    return input !== value;
+  }
+  const text = input.trim();
+  if (typeof value !== "number") {
+    return text !== value;
+  }
+  return text !== String(value) && (!/^\d+$/.test(text) || Number(text) !== value);
+}
+
+function firstMessage(error: { issues: readonly { message: string }[] }): string {
+  return error.issues[0]?.message ?? "This value can't be saved.";
+}
+
+/** What is wrong with `input` as the value of setting `id`, or null. */
+export function settingProblem(id: SettingId, input: SettingsInput[SettingId] | undefined): string | null {
+  const result = settingsSchema.shape[id].safeParse(input);
+  return result.success ? null : firstMessage(result.error);
+}
+
+export type SettingProblems = Partial<Record<SettingId, string>>;
+
+/**
+ * What is wrong with the settings in `loaded`, as the form would show them:
+ * values in config.yaml the form wouldn't take if typed in, such as a SOCKS5
+ * proxy.
+ */
+export function loadedProblems(loaded: SettingValues): SettingProblems {
+  const problems: SettingProblems = {};
+  for (const id of SETTING_IDS) {
+    const problem = settingProblem(id, formValueOf(loaded[id]));
+    if (problem !== null) {
+      problems[id] = problem;
+    }
+  }
+  return problems;
+}
+
+/**
+ * The form's `input` as the server takes it, with only the settings edited
+ * from `loaded` checked. A setting left alone keeps its loaded value, and a
+ * save doesn't send it, so a value in config.yaml the form wouldn't take
+ * never stops the others being saved. Without `loaded`, every setting is
+ * checked.
+ */
+export function readEdited(
+  input: SettingsInput,
+  loaded: SettingValues | undefined,
+): { values: SettingValues; problems: null } | { values: null; problems: SettingProblems } {
+  const values: Partial<SettingValues> = {};
+  const problems: SettingProblems = {};
+  for (const id of SETTING_IDS) {
+    if (loaded !== undefined && !isEdited(input[id], loaded[id])) {
+      Object.assign(values, { [id]: loaded[id] });
+      continue;
+    }
+    const result = settingsSchema.shape[id].safeParse(input[id]);
+    if (result.success) {
+      Object.assign(values, { [id]: result.data });
+    } else {
+      problems[id] = firstMessage(result.error);
+    }
+  }
+  return Object.keys(problems).length > 0
+    ? { values: null, problems }
+    : { values: values as SettingValues, problems: null };
 }
 
 function plural(count: number, one: string, many: string): string {

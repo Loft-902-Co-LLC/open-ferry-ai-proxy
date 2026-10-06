@@ -208,7 +208,10 @@ export function ClientSetupCard({ focusKeys = false }: ClientSetupCardProps) {
   // server has it just then, so a key added meanwhile stays. The new key goes
   // in first, so the list is never left empty, which would let every client
   // in. Then each example goes by its place, the last first so that the
-  // places of the others hold.
+  // places of the others hold. Places keep the keys out of URLs, at the cost
+  // of a race: a change to the list from elsewhere meanwhile can move the
+  // entries, and then the entry now at a place goes instead. The card reads
+  // the list again afterwards.
   const replaceExamples = useMutation({
     mutationFn: async (key: string | null) => {
       const list = [...((await call<ApiKeysAnswer>(API_KEYS))["api-keys"] ?? [])];
