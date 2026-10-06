@@ -12,6 +12,7 @@ pub(crate) mod health;
 pub(crate) mod interactions;
 pub(crate) mod models;
 pub(crate) mod openai;
+pub(crate) mod openai_videos;
 pub(crate) mod responses;
 pub(crate) mod responses_ws;
 

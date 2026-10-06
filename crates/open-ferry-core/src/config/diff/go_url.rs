@@ -7,7 +7,8 @@
 // https://github.com/golang/go
 
 //! URLs as Go's `url.Parse` reads them, for the scheme and host a change
-//! line shows of a base or proxy URL.
+//! line shows of a base or proxy URL, and for the video handler's check of
+//! the URL a finished video is fetched from.
 //!
 //! Only the scheme, in lower case, and the host, `%`-escapes decoded, are
 //! kept; the rest is only checked, so a URL Go refuses is refused here too.
@@ -22,15 +23,15 @@
 
 /// What a change line shows of a parsed URL.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(super) struct GoUrl {
+pub struct GoUrl {
     /// The scheme, in lower case, or empty.
-    pub(super) scheme: String,
+    pub scheme: String,
     /// The host and port, decoded, or empty.
-    pub(super) host: Vec<u8>,
+    pub host: Vec<u8>,
 }
 
 /// Go's `url.Parse`, or `None` where it fails.
-pub(super) fn parse(raw: &[u8]) -> Option<GoUrl> {
+pub fn parse(raw: &[u8]) -> Option<GoUrl> {
     let (url, fragment) = cut(raw, b'#');
     let parsed = parse_url(url)?;
     unescape(fragment, Mode::Fragment)?;

@@ -23,7 +23,8 @@ use tower_http::catch_panic::CatchPanicLayer;
 use crate::auth::require_key;
 use crate::errors::{JSON_UTF8, error_response};
 use crate::handlers::{
-    alpha_search, claude, gemini, health, interactions, models, openai, responses, responses_ws,
+    alpha_search, claude, gemini, health, interactions, models, openai, openai_videos, responses,
+    responses_ws,
 };
 use crate::state::AppState;
 use crate::{access_log, request_context, request_log};
@@ -62,6 +63,7 @@ pub fn router_with(state: AppState, extra: Router) -> Router {
             .head(not_found)
             .post(gemini::action.layer(auth.clone()))
     };
+    let native_video_create = || post(openai_videos::native_create.layer(auth.clone()));
     Router::new()
         .route("/", get(health::root).head(not_found))
         .route("/healthz", get(health::healthz).head(health::healthz_head))
@@ -101,6 +103,43 @@ pub fn router_with(state: AppState, extra: Router) -> Router {
         .route(
             "/v1beta/interactions",
             post(interactions::interactions.layer(auth.clone())),
+        )
+        .route("/v1/videos", native_video_create())
+        // gin keeps a tree of routes for each method, so a `GET` of these
+        // is the retrieve of a video by that ID.
+        .route(
+            "/v1/videos/generations",
+            native_video_create()
+                .get(openai_videos::native_retrieve_generations.layer(auth.clone()))
+                .head(not_found),
+        )
+        .route(
+            "/v1/videos/edits",
+            native_video_create()
+                .get(openai_videos::native_retrieve_edits.layer(auth.clone()))
+                .head(not_found),
+        )
+        .route(
+            "/v1/videos/extensions",
+            native_video_create()
+                .get(openai_videos::native_retrieve_extensions.layer(auth.clone()))
+                .head(not_found),
+        )
+        .route(
+            "/v1/videos/{request_id}",
+            get(openai_videos::native_retrieve.layer(auth.clone())).head(not_found),
+        )
+        .route(
+            "/openai/v1/videos",
+            post(openai_videos::create.layer(auth.clone())),
+        )
+        .route(
+            "/openai/v1/videos/{video_id}",
+            get(openai_videos::retrieve.layer(auth.clone())).head(not_found),
+        )
+        .route(
+            "/openai/v1/videos/{video_id}/content",
+            get(openai_videos::content.layer(auth.clone())).head(not_found),
         )
         .method_not_allowed_fallback(not_found)
         .with_state(state.clone())

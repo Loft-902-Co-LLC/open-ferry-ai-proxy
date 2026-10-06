@@ -9,6 +9,7 @@ use open_ferry_core::observe::client_ip::TrustedProxies;
 
 use crate::auth::PrincipalTags;
 use crate::config::ServerConfig;
+use crate::handlers::openai_videos::VideoBindings;
 use crate::handlers::responses_ws::ServerToolCaches;
 
 /// The template keys that put the server in safe mode
@@ -34,6 +35,8 @@ struct Inner {
     /// The proxies whose forwarded-address headers are believed, read once
     /// at start.
     trusted_proxies: TrustedProxies,
+    /// Which credential made each video.
+    video_bindings: VideoBindings,
 }
 
 /// The config, with what is worked out from it.
@@ -81,6 +84,7 @@ impl AppState {
                 principal_tags: PrincipalTags::default(),
                 tool_caches: ServerToolCaches::default(),
                 trusted_proxies,
+                video_bindings: VideoBindings::default(),
             }),
             observability: Arc::default(),
         }
@@ -142,5 +146,10 @@ impl AppState {
     /// The proxies whose forwarded-address headers are believed.
     pub(crate) fn trusted_proxies(&self) -> &TrustedProxies {
         &self.inner.trusted_proxies
+    }
+
+    /// Which credential made each video. It outlives config reloads.
+    pub(crate) fn video_bindings(&self) -> &VideoBindings {
+        &self.inner.video_bindings
     }
 }

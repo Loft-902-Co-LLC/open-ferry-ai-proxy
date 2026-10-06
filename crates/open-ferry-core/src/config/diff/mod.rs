@@ -27,7 +27,7 @@
 //!   line is given. A payload value in a mapping with a key that isn't a
 //!   string is equal to any other such value.
 
-mod go_url;
+pub mod go_url;
 mod oauth;
 mod openai_compat;
 mod summary;

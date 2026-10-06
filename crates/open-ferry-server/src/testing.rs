@@ -12,7 +12,8 @@ use futures_util::stream::BoxStream;
 use futures_util::{FutureExt, Stream, StreamExt, stream};
 use http::HeaderMap;
 use open_ferry_core::exec::{
-    Dispatcher, ExecError, Options, ProviderId, Request, Response, StreamResponse, WebsocketSupport,
+    Dispatcher, Download, Downloaded, ExecError, Options, ProviderId, Request, Response,
+    StreamResponse, WebsocketSupport,
 };
 use open_ferry_core::models::{ModelCatalog, ModelInfo};
 
@@ -134,6 +135,10 @@ pub(crate) struct FakeDispatcher {
     closed: Mutex<Vec<String>>,
     /// Held by each stream this has given, until it is dropped.
     live: Arc<()>,
+    /// What each download gives, in order.
+    download_results: Mutex<VecDeque<Result<Downloaded, ExecError>>>,
+    /// The downloads asked for so far.
+    downloads: Mutex<Vec<Download>>,
 }
 
 impl FakeDispatcher {
@@ -178,6 +183,23 @@ impl FakeDispatcher {
                 chunk
             })
             .boxed()
+    }
+
+    /// Has the next [`Dispatcher::download`] that has nothing scripted
+    /// give `result`.
+    pub(crate) fn download_with(&self, result: Result<Downloaded, ExecError>) {
+        self.download_results
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push_back(result);
+    }
+
+    /// The downloads asked for so far.
+    pub(crate) fn downloads(&self) -> Vec<Download> {
+        self.downloads
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// The calls made so far.
@@ -303,6 +325,20 @@ impl Dispatcher for FakeDispatcher {
         support.map_or_else(WebsocketSupport::default, |support| {
             support(providers, model, auth_id)
         })
+    }
+
+    fn download(&self, download: Download) -> BoxFuture<'_, Result<Downloaded, ExecError>> {
+        self.downloads
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(download);
+        let result = self
+            .download_results
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pop_front()
+            .unwrap_or_else(|| panic!("no result left for download"));
+        async move { result }.boxed()
     }
 }
 
