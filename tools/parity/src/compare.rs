@@ -36,6 +36,9 @@ pub enum Deviation {
     /// isn't. Ours is replaced by the ID upstream derives from the text,
     /// where it is the one we should derive (see `translator.rs`).
     CompactCallIdSource,
+    /// Upstream wrote a config file its own `LoadConfig` refuses; we refuse
+    /// that write, with our loader's message about the same bytes.
+    UnloadableWrite,
 }
 
 impl Deviation {
@@ -50,6 +53,7 @@ impl Deviation {
             Self::SyntheticUserId => "made-up user ID left out",
             Self::UtcCreateTime => "createTime written in UTC",
             Self::CompactCallIdSource => "call ID derived from compact JSON",
+            Self::UnloadableWrite => "unloadable file refused, not written",
         }
     }
 }

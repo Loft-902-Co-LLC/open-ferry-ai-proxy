@@ -122,7 +122,8 @@ unknown-section:
 "#;
 
 /// [`LEGACY`] with values changed, lists grown and shrunk, and keys added
-/// and removed, but for its plugin configs: see [`LEGACY_PLUGINS`].
+/// and removed. (Its `plugins` are the file's on upstream's side: see
+/// `go/parity_config_save.go`.)
 const LEGACY_CHANGED: &str = r#"port: 8318
 auth-dir: "~/.cli-proxy-api"
 debug: true
@@ -165,17 +166,6 @@ openai-compatibility:
     models:
       - name: m2
         alias: a2
-"#;
-
-/// [`LEGACY`]'s plugin configs, for the configs saved over it: a config in
-/// memory always holds the file's, as it was loaded from the file, and
-/// open-ferry keeps the file's where upstream writes the config's.
-const LEGACY_PLUGINS: &str = r#"plugins:
-  enabled: false
-  configs:
-    example:
-      enabled: true
-      settings: {a: 1, b: [x, y]}
 "#;
 
 /// A v8 file with comments in every position, after upstream's
@@ -503,26 +493,40 @@ oauth:
       not-a-field: true
 "#;
 
+/// Plugin configs under quoted IDs out of order.
+const PLUGINS_UNSORTED: &str = r#"port: 8317
+plugins:
+  enabled: false
+  configs:
+    "gamma":
+      enabled: true
+    # the alpha plugin
+    alpha:
+      enabled: false
+"#;
+
+const PLUGINS_REWRITTEN: &str = "upstream writes the plugins section from the config it decoded; \
+     open-ferry, with no plugin host, keeps the file's";
+
 pub fn steps(upstream: &Path) -> Vec<Case> {
-    let legacy_changed = format!("{LEGACY_CHANGED}{LEGACY_PLUGINS}");
     let mut cases = vec![
         case("legacy-resave", LEGACY, vec![resave(false)]),
-        case("legacy-change", LEGACY, vec![save(&legacy_changed, false)]),
+        case("legacy-change", LEGACY, vec![save(LEGACY_CHANGED, false)]),
         case("legacy-migrate", LEGACY, vec![resave(true)]),
         case(
             "legacy-migrate-change",
             LEGACY,
-            vec![resave(true), save(&legacy_changed, false), resave(false)],
+            vec![resave(true), save(LEGACY_CHANGED, false), resave(false)],
         ),
         case(
             "legacy-change-migrate",
             LEGACY,
-            vec![save(&legacy_changed, true)],
+            vec![save(LEGACY_CHANGED, true)],
         ),
         case(
             "legacy-shrink-to-nothing",
             LEGACY,
-            vec![save(&format!("port: 8317\n{LEGACY_PLUGINS}"), false)],
+            vec![save("port: 8317\n", false)],
         ),
         case("v8-resave", V8, vec![resave(false), resave(false)]),
         case(
@@ -642,12 +646,13 @@ pub fn steps(upstream: &Path) -> Vec<Case> {
             LEGACY,
             vec![nested(&["new-section", "inner", "leaf"], "value")],
         ),
+        // Go writes a file its own LoadConfig refuses; open-ferry refuses
+        // the write (counted as equivalent).
         case(
             "nested-through-scalar",
             LEGACY,
             vec![nested(&["port", "inner"], "value")],
-        )
-        .known_difference("open-ferry refuses to write a config that doesn't load"),
+        ),
         case(
             "nested-alias",
             ANCHORS,
@@ -691,10 +696,9 @@ pub fn steps(upstream: &Path) -> Vec<Case> {
             vec![save(OAUTH_CHANGED, false), save(OAUTH, false)],
         ),
         // Emptying a map whose key has a line comment: Go writes `{}` on the
-        // next line at column 0, which its own LoadConfig refuses.
-        case("oauth-clear", OAUTH, vec![save("port: 8317\n", false)]).known_difference(
-            "upstream writes a file its own LoadConfig refuses; open-ferry refuses the write",
-        ),
+        // next line at column 0, which its own LoadConfig refuses; open-ferry
+        // refuses the write (counted as equivalent).
+        case("oauth-clear", OAUTH, vec![save("port: 8317\n", false)]),
         case(
             "oauth-clear-uncommented",
             &OAUTH.replace(
@@ -743,6 +747,20 @@ pub fn steps(upstream: &Path) -> Vec<Case> {
             vec![save(OAUTH_V8_CHANGED, false), save(OAUTH_V8, false)],
         ),
         case("oauth-write-v8", "", vec![write(OAUTH_V8)]),
+        // Upstream writes `plugins.dir` as its ResolvePluginsDir cleaned it.
+        case(
+            "plugins-dir-cleaned",
+            "port: 8317\nplugins:\n  enabled: false\n  dir: ./plugins/\n",
+            vec![resave(false)],
+        )
+        .known_difference(PLUGINS_REWRITTEN),
+        // Upstream writes the plugin IDs from a map: sorted and plain.
+        case(
+            "plugins-configs-rebuilt",
+            PLUGINS_UNSORTED,
+            vec![save("port: 8318\n", false)],
+        )
+        .known_difference(PLUGINS_REWRITTEN),
     ];
     if let Ok(example) = fs::read_to_string(upstream.join("config.example.yaml")) {
         let keys = uncomment_api_keys(&example);

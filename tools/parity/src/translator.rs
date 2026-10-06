@@ -1568,6 +1568,9 @@ impl Translator {
     /// different ID, [`Self::read`] turns ours into upstream's, and that is
     /// accounted for here.
     pub fn drop_deliberate_omissions(self, case: &Case, go: &mut Value) -> Option<Deviation> {
+        if self == Self::ConfigSave {
+            return config_save::drop_unloadable(go);
+        }
         if let Some(native) = self.native(case) {
             return native.drop_deliberate_omissions(case, go);
         }

@@ -250,13 +250,13 @@ pub fn detail_cases(seed: u64, count: usize) -> Vec<Case> {
 }
 
 /// The random source for one case's configs.
-struct Configs {
-    rng: Rng,
+pub(super) struct Configs {
+    pub(super) rng: Rng,
 }
 
 impl Configs {
     /// A config with each section set or not.
-    fn config(&mut self) -> Map<String, Value> {
+    pub(super) fn config(&mut self) -> Map<String, Value> {
         let mut config = Map::new();
         for section in SECTIONS {
             if self.rng.chance(35) {
@@ -270,7 +270,7 @@ impl Configs {
     }
 
     /// `old` unchanged, a fresh config, or `old` with a few changes.
-    fn changed(&mut self, old: &Map<String, Value>) -> Map<String, Value> {
+    pub(super) fn changed(&mut self, old: &Map<String, Value>) -> Map<String, Value> {
         match self.rng.below(10) {
             0 => return old.clone(),
             1 => return self.config(),
@@ -719,7 +719,7 @@ impl Configs {
 
 /// `config` as block YAML, every string double-quoted but the ones marked
 /// [`UNQUOTED`].
-fn yaml(config: &Map<String, Value>) -> String {
+pub(super) fn yaml(config: &Map<String, Value>) -> String {
     let mut out = String::new();
     write_mapping(&mut out, config, 0, None);
     out

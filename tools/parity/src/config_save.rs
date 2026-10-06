@@ -13,6 +13,7 @@ use open_ferry_core::config::save::{save_preserving_comments, update_nested_scal
 use serde_json::{Value, json};
 
 use crate::cases::Case;
+use crate::compare::Deviation;
 
 /// `config-save/steps`: `{"files": [...]}`, the file after each step, with
 /// `"error"` added when a step failed.
@@ -30,6 +31,27 @@ pub fn steps(case: &Case) -> Result<Value, String> {
         files.push(String::from_utf8_lossy(&data).into_owned());
     }
     Ok(json!({ "files": files }))
+}
+
+/// Upstream's output as ours would be where upstream wrote a file its own
+/// `LoadConfig` refuses (`"unloadable"`, see `go/parity_config_save.go`) and
+/// our loader refuses it too: open-ferry checks each file it would write
+/// with its loader, so it refuses that write, leaves the file as it was and
+/// runs no more steps. That file is dropped, and `"error"` is our loader's
+/// message about it, in `LoadConfig`'s wording: `Config::parse` has
+/// `ParseConfigBytes`'s, which differs only in the prefix of a syntax or
+/// decode error. Left alone when our loader reads the file.
+pub fn drop_unloadable(go: &mut Value) -> Option<Deviation> {
+    go.get("unloadable")?;
+    let mut files = go.get("files")?.as_array()?.clone();
+    let message = Config::parse(files.last()?.as_str()?).err()?.to_string();
+    let message = match message.strip_prefix("parse config payload: ") {
+        Some(rest) => format!("failed to parse config file: {rest}"),
+        None => message,
+    };
+    files.pop();
+    *go = json!({ "error": message, "files": files });
+    Some(Deviation::UnloadableWrite)
 }
 
 /// Runs one step on the file at `path`, and returns why it failed.
