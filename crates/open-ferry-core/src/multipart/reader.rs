@@ -25,11 +25,14 @@ use std::fmt;
 use std::ops::Range;
 
 use aho_corasick::AhoCorasick;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
 use open_ferry_translate::go::{equal_fold, quote_bytes};
 
 use super::header::{Header, is_value_byte, read_key};
 use super::media_type::{base_name, parse_media_type};
+use super::sniff::detect_content_type;
 use super::{ByteCount, Error, lossy, quoted_printable};
 
 /// The size of Go's `bufio.Reader` under a multipart reader
@@ -719,5 +722,20 @@ impl fmt::Debug for FileHeader {
             .field("header", &self.header)
             .field("data", &ByteCount(self.data.len()))
             .finish()
+    }
+}
+
+impl FileHeader {
+    /// The file as a data URL: its own `Content-Type`, trimmed, or else the
+    /// type its data looks like ([`detect_content_type`]), then its data in
+    /// standard base64 (CLIProxyAPI's `multipartFileToDataURL` and
+    /// `codexMultipartFileToDataURL`).
+    pub fn data_url(&self) -> String {
+        let media_type = self.header.get_str("Content-Type");
+        let media_type = match media_type.trim() {
+            "" => detect_content_type(&self.data),
+            media_type => media_type,
+        };
+        format!("data:{media_type};base64,{}", STANDARD.encode(&self.data))
     }
 }

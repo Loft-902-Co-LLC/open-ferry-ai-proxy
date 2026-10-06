@@ -227,3 +227,40 @@ fn the_tool_model_defaults_to_gpt_image_2() {
         assert_eq!(str_field(&records[1], "model"), "gpt-image-2", "{body}");
     }
 }
+
+// Not upstream's: a call to Codex's Image API (upstream's
+// `executeDirectOpenAIImage`) is read as an OpenAI answer, whole or as a
+// stream, and makes one record, for the model it was made for.
+#[test]
+fn image_api_answers_are_read_as_openai_answers() {
+    let usage = r#""usage":{"total_tokens":100,"input_tokens":50,"output_tokens":50}"#;
+    let whole = format!(r#"{{"created":1,"data":[{{"b64_json":"AA=="}}],{usage}}}"#);
+    let stream = format!(
+        "event: image_generation.partial_image\ndata: {{\"type\":\"image_generation.partial_image\",\"b64_json\":\"AA==\"}}\n\nevent: image_generation.completed\ndata: {{\"type\":\"image_generation.completed\",\"b64_json\":\"BB==\",{usage}}}\n\n"
+    );
+    for (kind, answer) in [(AttemptKind::Execute, whole), (AttemptKind::Stream, stream)] {
+        let harness = Harness::new();
+        let call = ClientCall::new("codex/gpt-image-2");
+        let call = if kind == AttemptKind::Execute {
+            call
+        } else {
+            call.stream()
+        };
+        let driver = call.tap(&harness);
+        driver.attempt_with(
+            kind,
+            "codex",
+            "gpt-image-2",
+            &Format::OPENAI_IMAGE,
+            &auth("a", "b", "codex"),
+            &[],
+            r#"{"model":"gpt-image-2","prompt":"x"}"#,
+        );
+        driver.chunk(&answer);
+        driver.finish(Outcome::Completed);
+        let records = harness.records();
+        assert_eq!(records.len(), 1, "{kind:?}: {records:?}");
+        assert_eq!(str_field(&records[0], "model"), "gpt-image-2", "{kind:?}");
+        assert_eq!(counts(&records[0])[..3], [50, 50, 100], "{kind:?}");
+    }
+}

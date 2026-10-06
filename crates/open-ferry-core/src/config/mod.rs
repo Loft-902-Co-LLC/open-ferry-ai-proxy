@@ -53,8 +53,7 @@
 //!   `routing.session-affinity-ttl` and `routing.session-affinity-subagents`.
 //! - Other providers: `antigravity`, `antigravity-signature-*`, `devin`.
 //! - Features not ported here: `plugins`, `pprof`, `discovery`, `models`
-//!   (the model catalog sources), `gpt-image-2-base-model`,
-//!   `codex.live-media-relay`.
+//!   (the model catalog sources) and `codex.live-media-relay`.
 //! - Deferred: `credential-concurrency` and `credential-in-flight`.
 //!
 //! Upstream's `home` section has no YAML form and isn't read.

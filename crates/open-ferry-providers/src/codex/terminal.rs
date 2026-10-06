@@ -703,6 +703,12 @@ impl OutputItems {
         self.by_index.len() + self.fallback.len()
     }
 
+    /// The items kept, those with an `output_index` first, in its order,
+    /// then the others in the order they came.
+    pub(crate) fn items(&self) -> impl Iterator<Item = &Value> {
+        self.by_index.values().chain(self.fallback.iter())
+    }
+
     /// Keeps the event's item (`collectCodexOutputItemDone`).
     pub(crate) fn collect(&mut self, event: &Value) {
         let Some(item) = get(event, "item").filter(|item| item.is_object() || item.is_array())
@@ -730,12 +736,7 @@ impl OutputItems {
         if self.len() == 0 {
             return false;
         }
-        let items: Vec<Value> = self
-            .by_index
-            .values()
-            .chain(self.fallback.iter())
-            .cloned()
-            .collect();
+        let items: Vec<Value> = self.items().cloned().collect();
         set(event, "response.output", Value::Array(items))
     }
 

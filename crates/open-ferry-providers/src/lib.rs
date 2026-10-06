@@ -8,7 +8,8 @@
 //! [`gemini`] calls Gemini with API keys, and Vertex AI with API keys or
 //! service accounts. [`meta`] calls Meta's API with API keys.
 //! [`payload`] applies the config's payload rules to the bodies the
-//! executors send.
+//! executors send. The `images` module holds what the executors that call
+//! an Image API (`/images/generations` and `/images/edits`) share.
 
 #[cfg(test)]
 mod apply_patch_bridge_tests;
@@ -22,6 +23,7 @@ pub mod credentials;
 mod custom_headers;
 pub mod gemini;
 mod go_json;
+mod images;
 mod json;
 pub mod meta;
 pub mod oauth;

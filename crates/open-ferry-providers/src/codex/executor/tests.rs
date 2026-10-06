@@ -21,6 +21,7 @@ use crate::codex::reasoning::tests::valid_signature;
 use crate::codex::request::CONTROL_CHARACTER;
 use crate::json::{exists, get};
 
+mod images;
 mod replay;
 
 /// One request the mock received.

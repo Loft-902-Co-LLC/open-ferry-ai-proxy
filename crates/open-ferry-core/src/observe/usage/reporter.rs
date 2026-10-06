@@ -327,6 +327,14 @@ impl Mode {
         match (provider, kind) {
             (_, AttemptKind::CountTokens | AttemptKind::Http) => Self::Ignored,
             ("codex", AttemptKind::Websocket) => Self::CodexWebsocket,
+            // A call to Codex's Image API answers as the OpenAI Images API
+            // does and names no model.
+            ("codex", AttemptKind::Execute) if format.as_str() == Format::OPENAI_IMAGE.as_str() => {
+                Self::CodexCompact
+            }
+            ("codex", AttemptKind::Stream) if format.as_str() == Format::OPENAI_IMAGE.as_str() => {
+                Self::OpenAiStream
+            }
             ("codex", AttemptKind::Execute)
                 if format.as_str() == Format::OPENAI_RESPONSE.as_str() =>
             {

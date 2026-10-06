@@ -19,8 +19,8 @@
 //! Deviations from upstream:
 //! - Only the settings open-ferry types have lines. The sections it reads
 //!   and ignores (pprof, cloaking and `claude-code`, fingerprints,
-//!   `gpt-image-2-base-model`, Antigravity, Devin, Codex live media relay
-//!   and `disable-codex-cloaking`) have none.
+//!   Antigravity, Devin, Codex live media relay and
+//!   `disable-codex-cloaking`) have none.
 //! - Go tells a list or map that is missing from one that is empty, and
 //!   reports `payload.default: []` against no `payload.default` as an
 //!   update (0 -> 0 rules); the typed config can't tell them apart, so no
@@ -79,6 +79,11 @@ pub fn build_change_details(old: &Config, new: &Config) -> Vec<String> {
         "disable-image-generation",
         old.disable_image_generation.as_str(),
         new.disable_image_generation.as_str(),
+    );
+    changes.trimmed(
+        "gpt-image-2-base-model",
+        &old.gpt_image_2_base_model,
+        &new.gpt_image_2_base_model,
     );
     changes.flag("request-log", old.request_log, new.request_log);
     changes.int(

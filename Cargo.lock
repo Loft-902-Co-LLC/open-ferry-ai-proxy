@@ -1796,7 +1796,6 @@ name = "open-ferry-server"
 version = "0.0.0"
 dependencies = [
  "axum",
- "base64 0.23.1",
  "bytes",
  "flate2",
  "futures-util",

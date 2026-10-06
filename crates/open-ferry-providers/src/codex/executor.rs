@@ -13,7 +13,8 @@
 //! non-streaming call reads the stream to its `response.completed` (or
 //! `response.incomplete`) event and translates that. `responses/compact`
 //! goes to `<base>/responses/compact`, as OpenAI Responses, and answers
-//! with JSON.
+//! with JSON. A call from the OpenAI Images endpoints goes to Codex's Image
+//! API or through the image generation tool (see the `images` module).
 //!
 //! The token is the `api_key` attribute, or else the OAuth access token,
 //! which [`refresh`](CodexExecutor::refresh) renews 24 hours before it
@@ -48,8 +49,6 @@
 //! - Usage reporting and request logging are left to the call's taps (see
 //!   the crate's `observe_send` module), and payload rules to
 //!   [`crate::payload`]. The Home-service refresh isn't ported.
-//! - Deferred: the image generation endpoints. See also the module docs of
-//!   [`super`].
 //! - One executor makes both HTTP and WebSocket calls; upstream wraps an
 //!   HTTP and a WebSocket executor in a `CodexAutoExecutor`.
 //! - Plain HTTP requests, which Codex Alpha Search sends, are in the
@@ -241,8 +240,20 @@ impl CodexExecutor {
         body: &Value,
         attempt: Attempt<'_>,
     ) -> Result<(reqwest::Response, Secrets), ExecError> {
+        self.send_bytes(auth, url, headers, Bytes::from(body.to_string()), attempt)
+            .await
+    }
+
+    /// [`Self::send`] for a body already written.
+    async fn send_bytes(
+        &self,
+        auth: &Auth,
+        url: &str,
+        headers: HeaderMap,
+        body: Bytes,
+        attempt: Attempt<'_>,
+    ) -> Result<(reqwest::Response, Secrets), ExecError> {
         refuse_control_characters(url)?;
-        let body = Bytes::from(body.to_string());
         let secrets = observe_send::secrets(url, &headers, &self.proxy_for(auth), auth);
         let tap = attempt.observation.map(|observation| {
             observe_send::announce(
@@ -340,6 +351,9 @@ impl CodexExecutor {
     ) -> Result<Response, ExecError> {
         if options.alt == COMPACT_ALT {
             return self.execute_compact(auth, request, options).await;
+        }
+        if images::is_image_request(options) {
+            return self.execute_image(auth, request, options).await;
         }
         let prepared = prepare_body(Kind::Execute, self.context(auth), request, options)?;
         let format = response_format(options);
@@ -447,6 +461,9 @@ impl CodexExecutor {
             return Err(
                 StatusError::new(400, "streaming not supported for /responses/compact").into(),
             );
+        }
+        if images::is_image_request(&options) {
+            return self.execute_image_stream(auth, &request, &options).await;
         }
         let prepared = prepare_body(Kind::Stream, self.context(auth), &request, &options)?;
         let format = response_format(&options);
@@ -670,6 +687,7 @@ impl ProviderExecutor for CodexExecutor {
 }
 
 mod http_request;
+mod images;
 
 #[cfg(test)]
 pub(crate) mod bootstrap_tests;

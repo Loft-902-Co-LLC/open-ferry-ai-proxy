@@ -18,7 +18,10 @@
 //! Codex's reasoning items, each turn's reasoning and tool calls are kept
 //! by the session the client named and put back in its next request (the
 //! `replay` module). Codex Alpha Search payloads go out untranslated, as
-//! the executor's plain HTTP requests.
+//! the executor's plain HTTP requests. Calls from the OpenAI Images
+//! endpoints (`/v1/images/generations` and `/v1/images/edits`) go to
+//! Codex's Image API for its image models, and otherwise through the image
+//! generation tool (the executor's `images` module).
 //!
 //! Deviations from upstream (each module lists its own):
 //! - Our requests don't pass for Codex's own client: there is no
@@ -35,9 +38,6 @@
 //!   [`crate::payload`]. Compatibility models and Codex
 //!   clients' multi-agent v2 and orphan delegation requests are handled in
 //!   the `compat` module.
-//!
-//! Deferred:
-//! - The OpenAI Images endpoints served through Codex.
 
 pub(crate) mod claude_tokens;
 pub(crate) mod client;

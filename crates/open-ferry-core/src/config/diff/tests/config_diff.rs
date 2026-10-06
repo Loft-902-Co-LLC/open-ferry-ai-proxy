@@ -941,6 +941,23 @@ fn disable_image_generation_modes() {
     assert!(build_change_details(&Config::default(), &parse("off")).is_empty());
 }
 
+// Not upstream's: `gpt-image-2-base-model` is compared and shown trimmed,
+// and reads the same from the legacy and the v8 layout.
+#[test]
+fn gpt_image_2_base_model_line() {
+    let model =
+        |model: &str| config_with(|config| config.gpt_image_2_base_model = model.to_owned());
+    assert_eq!(
+        build_change_details(&model(""), &model(" gpt-5.5 ")),
+        ["gpt-image-2-base-model:  -> gpt-5.5"]
+    );
+    assert!(build_change_details(&model("gpt-5.5"), &model(" gpt-5.5 ")).is_empty());
+    let legacy = Config::parse("gpt-image-2-base-model: gpt-5.5\n").unwrap();
+    let v8 = Config::parse("multimedia:\n  gpt-image-2-base-model: gpt-5.5\n").unwrap();
+    assert_eq!(legacy.gpt_image_2_base_model, "gpt-5.5");
+    assert_eq!(v8.gpt_image_2_base_model, "gpt-5.5");
+}
+
 // Not upstream's: the payload sections count their rules, and a rule's
 // params are compared as the map they are upstream, in any order.
 #[test]

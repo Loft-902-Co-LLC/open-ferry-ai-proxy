@@ -73,22 +73,20 @@ use std::time::Duration;
 use axum::body::{Body, BodyDataStream};
 use axum::extract::State;
 use axum::response::Response;
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD;
 use bytes::{Bytes, BytesMut};
 use futures_util::{StreamExt, stream};
 use http::{HeaderMap, HeaderValue, StatusCode, header};
 use open_ferry_core::config::DisableImageGeneration;
 use open_ferry_core::exec::Format;
 use open_ferry_core::multipart::{
-    FileHeader, Form, MAX_FORM_MEMORY, Reader, Writer, file_content_disposition, parse_media_type,
+    FileHeader, Form, MAX_FORM_MEMORY, Reader, Writer, file_content_disposition, lossy,
+    parse_media_type,
 };
 use open_ferry_core::registry::StaticCatalog;
 use open_ferry_core::registry::registration::OPENAI_IMAGE_MODEL_TYPE;
 use open_ferry_translate::go;
 use tokio::time::Interval;
 
-use super::gemini::sniff::detect_content_type;
 use super::responses::stream_error::{sanitize_error, stream_error_text};
 use crate::body;
 use crate::errors::{
@@ -249,7 +247,7 @@ async fn edits_from_form(state: &AppState, client: &ClientRequest, body: Body) -
 
     // A Codex image tool model's base is never an xAI one.
     if xai::is_model(&model) {
-        let images: Vec<String> = files.iter().map(data_url).collect();
+        let images: Vec<String> = files.iter().map(FileHeader::data_url).collect();
         let size = form_value(&form, "size");
         let aspect = xai::aspect_ratio(&form_value(&form, "aspect_ratio"), "");
         let options = xai::Options {
@@ -422,19 +420,6 @@ fn form_value(form: &Form, name: &str) -> String {
         .unwrap_or_default()
 }
 
-/// `bytes` as text, each byte that isn't part of a valid character read as
-/// U+FFFD, as Go's JSON encoder writes a string.
-fn lossy(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len());
-    for chunk in bytes.utf8_chunks() {
-        out.push_str(chunk.valid());
-        for _ in chunk.invalid() {
-            out.push(char::REPLACEMENT_CHARACTER);
-        }
-    }
-    out
-}
-
 /// `raw` as a whole number, or `fallback` (upstream's `parseIntField`).
 fn parse_int(raw: &str, fallback: i64) -> i64 {
     match raw.trim() {
@@ -450,17 +435,6 @@ fn parse_bool(raw: &str, fallback: bool) -> bool {
         "0" | "false" | "no" | "off" => false,
         _ => fallback,
     }
-}
-
-/// A file as a data URL: its own content type, or the one its data looks
-/// like (upstream's `multipartFileToDataURL`).
-fn data_url(file: &FileHeader) -> String {
-    let media_type = file.header.get_str("Content-Type");
-    let media_type = match media_type.trim() {
-        "" => detect_content_type(&file.data),
-        media_type => media_type,
-    };
-    format!("data:{media_type};base64,{}", STANDARD.encode(&file.data))
 }
 
 /// A JSON request as a Codex or `openai-compatibility` provider takes it,

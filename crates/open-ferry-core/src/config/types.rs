@@ -54,6 +54,10 @@ pub struct Config {
     /// requests sent upstream, and with `true`, whether the images endpoints
     /// are taken away.
     pub disable_image_generation: DisableImageGeneration,
+    /// The main model of a Codex image request that goes through the image
+    /// generation tool rather than the Image API. It must start with `gpt-`,
+    /// in any case; empty or anything else gives `gpt-5.4-mini`.
+    pub gpt_image_2_base_model: String,
     /// Requires explicit model prefixes to reach prefixed credentials.
     pub force_model_prefix: bool,
     /// How long a video's ID stays pinned to the credential that made it,
@@ -173,6 +177,7 @@ impl Default for Config {
             client: ClientConfig::default(),
             proxy_url: String::new(),
             disable_image_generation: DisableImageGeneration::Off,
+            gpt_image_2_base_model: String::new(),
             force_model_prefix: false,
             video_result_auth_cache_ttl: String::new(),
             request_log: false,
@@ -260,6 +265,7 @@ impl fmt::Debug for Config {
             .field("client", &self.client)
             .field("proxy_url", &Redacted(&self.proxy_url))
             .field("disable_image_generation", &self.disable_image_generation)
+            .field("gpt_image_2_base_model", &self.gpt_image_2_base_model)
             .field("force_model_prefix", &self.force_model_prefix)
             .field(
                 "video_result_auth_cache_ttl",

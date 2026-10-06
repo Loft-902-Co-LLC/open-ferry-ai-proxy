@@ -5,7 +5,10 @@
 // (go1.26, BSD-3-Clause, see licenses/Go-LICENSE), as CLIProxyAPI v8.0.15
 // (MIT) reads and writes the forms of its image and video endpoints
 // (sdk/api/handlers/openai/openai_images_handlers.go,
-// internal/runtime/executor/helps/payload_media.go).
+// internal/runtime/executor/helps/payload_media.go,
+// internal/runtime/executor/codex_openai_images.go,
+// internal/runtime/executor/openai_compat_executor.go). sniff.rs is from
+// Go's net/http/sniff.go (DetectContentType).
 // https://github.com/router-for-me/CLIProxyAPI
 // https://github.com/golang/go
 
@@ -19,6 +22,8 @@
 //! (Go's `ReadForm`). [`Writer`] writes a form, with a random boundary as
 //! Go's does. [`parse_media_type`] and [`format_media_type`] read and write
 //! a `Content-Type` or `Content-Disposition` value. Errors read as Go's.
+//! [`detect_content_type`] gives the type of a file sent without one, and
+//! [`FileHeader::data_url`] a file as a data URL.
 //!
 //! Nothing here logs, and the `Debug` of a part, a form or a file shows
 //! names and sizes only: a form holds prompts and images.
@@ -45,6 +50,7 @@ mod header;
 mod media_type;
 mod quoted_printable;
 mod reader;
+mod sniff;
 #[cfg(test)]
 mod tests;
 mod writer;
@@ -54,6 +60,7 @@ use std::fmt;
 pub use header::{Header, canonical_key};
 pub use media_type::{MediaType, ParseError, base_name, format_media_type, parse_media_type};
 pub use reader::{FileHeader, Form, Part, Reader};
+pub use sniff::detect_content_type;
 pub use writer::{Writer, escape_quotes, file_content_disposition};
 
 /// The memory limit upstream's handlers and executors read a form with
@@ -97,7 +104,7 @@ impl fmt::Debug for ByteCount {
 
 /// `bytes` as text, each byte that isn't part of a valid character read as
 /// U+FFFD, as Go's `range` over a string and its JSON encoder read them.
-pub(crate) fn lossy(bytes: &[u8]) -> String {
+pub fn lossy(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len());
     for chunk in bytes.utf8_chunks() {
         out.push_str(chunk.valid());
