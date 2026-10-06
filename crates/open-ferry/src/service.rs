@@ -54,6 +54,13 @@
 //! Credentials read from files or the config aren't saved back; the manager
 //! saves those it changes itself, as after a refresh.
 //!
+//! The dashboard (see [`open_ferry_dashboard`]) is served beside the
+//! management API: the app at `/dashboard/`, `/management.html` sending
+//! browsers there, and the dashboard API under `/open-ferry/api/v1/`. Its
+//! usage routes read the usage ledger, which is opened in the log directory
+//! at start and records the usage records from then on; at shutdown it
+//! writes what it was sent once the server has stopped.
+//!
 //! The command line's `-password` is a local management password (see
 //! [`Options`]): the management API accepts it from loopback clients, and
 //! the server serves the [keep-alive endpoint](crate::keep_alive), and
@@ -121,6 +128,7 @@ use open_ferry_core::config::{AuthFile, Config, ConfigWatcher, WatchEvent, next_
 use open_ferry_core::manager::{Manager, Settings};
 use open_ferry_core::observe::Observability;
 use open_ferry_core::registry::{ModelRegistry, RegistrationRules};
+use open_ferry_dashboard::Ledger;
 use open_ferry_management::{
     CredentialSync, ManagementState, SyncError, SyncFuture, management_password_from_env,
 };
@@ -148,6 +156,10 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 /// How many credential changes from the management API may wait for the
 /// service loop.
 const SYNC_QUEUE: usize = 32;
+
+/// How long shutdown waits for the usage ledger to write the records it
+/// was sent.
+const LEDGER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What the command line adds to the config.
 #[derive(Clone, Default)]
@@ -200,6 +212,7 @@ pub async fn run(
     service.load_file_auths();
     service.sync_config_auths();
     service.reconfigure_observability(None);
+    service.start_ledger();
     if let Err(error) = service.manager.start_auto_refresh(AUTO_REFRESH_INTERVAL) {
         tracing::warn!("failed to start core auth auto-refresh: {error}");
     } else {
@@ -276,6 +289,7 @@ pub async fn run(
             result = &mut server => {
                 service.manager.stop_auto_refresh();
                 service.management.shutdown().await;
+                stop_ledger(&service.ledger).await;
                 open_ferry_core::manager::cooldown_store::flush(&service.manager);
                 return exit_code(result);
             }
@@ -300,7 +314,8 @@ pub async fn run(
 type Server = tokio::task::JoinHandle<io::Result<()>>;
 
 /// Stops refresh, the management API's OAuth logins and the server, giving
-/// open requests up to [`SHUTDOWN_TIMEOUT`], then saves the cooldowns.
+/// open requests up to [`SHUTDOWN_TIMEOUT`], then the usage ledger, and
+/// saves the cooldowns.
 async fn shut_down(service: &Service, stop: &watch::Sender<bool>, mut server: Server) -> ExitCode {
     service.manager.stop_auto_refresh();
     service.management.shutdown().await;
@@ -313,8 +328,22 @@ async fn shut_down(service: &Service, stop: &watch::Sender<bool>, mut server: Se
             ExitCode::SUCCESS
         }
     };
+    stop_ledger(&service.ledger).await;
     open_ferry_core::manager::cooldown_store::flush(&service.manager);
     code
+}
+
+/// Stops `ledger` recording, giving it up to [`LEDGER_SHUTDOWN_TIMEOUT`] to
+/// write the records it was sent (see [`Ledger::shutdown`]).
+async fn stop_ledger(ledger: &Ledger) {
+    let ledger = ledger.clone();
+    let stopped = tokio::task::spawn_blocking(move || ledger.shutdown());
+    if tokio::time::timeout(LEDGER_SHUTDOWN_TIMEOUT, stopped)
+        .await
+        .is_err()
+    {
+        tracing::warn!("the usage ledger didn't finish writing within 10s");
+    }
 }
 
 fn exit_code(result: Result<io::Result<()>, tokio::task::JoinError>) -> ExitCode {
@@ -428,6 +457,9 @@ struct Service {
     /// The log directory, the request logger and the usage statistics the
     /// server and the management API share.
     observability: Observability,
+    /// The usage ledger the dashboard API reads; unavailable until
+    /// [`Service::start_ledger`].
+    ledger: Ledger,
     watcher: Option<ConfigWatcher>,
     /// The IDs of the credentials made from config API keys.
     config_auths: BTreeSet<String>,
@@ -487,6 +519,7 @@ impl Service {
             state,
             management,
             observability,
+            ledger: Ledger::unavailable("the usage ledger wasn't opened"),
             watcher: None,
             config_auths: BTreeSet::new(),
             file_auths: HashMap::new(),
@@ -510,17 +543,30 @@ impl Service {
         );
     }
 
-    /// The proxy's routes, with the management API's beside them.
+    /// Opens the usage ledger in the log directory, and records the usage
+    /// records into it from now on. It waits on the disk, so it is done
+    /// before the server serves; a ledger that can't be opened is
+    /// unavailable, and the server runs on without it.
+    fn start_ledger(&mut self) {
+        self.ledger = match &self.observability.log_dir {
+            Some(dir) => Ledger::start(dir, &self.observability.usage),
+            None => Ledger::unavailable("there is no log directory"),
+        };
+    }
+
+    /// The proxy's routes, with the management API's and the dashboard's
+    /// beside them.
     #[cfg(test)]
     fn app(&self) -> axum::Router {
         self.app_with(axum::Router::new())
     }
 
-    /// The proxy's routes, with the management API's and `extra` beside
-    /// them.
+    /// The proxy's routes, with the management API's, the dashboard's and
+    /// `extra` beside them.
     fn app_with(&self, extra: axum::Router) -> axum::Router {
         let management = open_ferry_management::router(self.management.clone());
-        router_with(self.state.clone(), management.merge(extra))
+        let dashboard = open_ferry_dashboard::router(self.management.clone(), self.ledger.clone());
+        router_with(self.state.clone(), management.merge(dashboard).merge(extra))
     }
 
     /// Registers the executors for the current config: Codex, Meta, Claude,
@@ -2695,6 +2741,54 @@ mod tests {
             assert_eq!(answer.status, 200, "{}", answer.body);
             assert_eq!(answer.body, r#"{"status":"ok"}"#);
             assert_eq!(answer.header("access-control-allow-origin"), Some("*"));
+        }
+
+        // Not upstream's: the dashboard's app, its `/management.html` and
+        // its API are served beside the management API, with the server's
+        // CORS headers and the management key; the ledger is opened in the
+        // log directory, and is read after shutdown.
+        #[tokio::test]
+        async fn the_dashboard_is_served_beside_management() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut service = service(dir.path(), KEYED);
+            let log_dir = service.observability.log_dir.clone().unwrap();
+            assert!(log_dir.starts_with(dir.path()), "{}", log_dir.display());
+            service.start_ledger();
+            let (addr, _stop) = start(&service).await;
+
+            let answer = fetch(addr, "GET", "/dashboard/", &[]).await;
+            assert_eq!(answer.status, 200, "{}", answer.body);
+            assert!(answer.header("content-security-policy").is_some());
+            assert_eq!(answer.header("access-control-allow-origin"), Some("*"));
+            let path = "/management.html?safe-mode=configure";
+            let answer = fetch(addr, "GET", path, &[]).await;
+            assert_eq!(answer.status, 302);
+            assert_eq!(
+                answer.header("location"),
+                Some("/dashboard/?safe-mode=configure")
+            );
+
+            let ledger = "/open-ferry/api/v1/usage/ledger";
+            let answer = fetch(addr, "GET", ledger, &[]).await;
+            assert_eq!(answer.status, 401, "{}", answer.body);
+            assert!(answer.body.contains("missing_management_key"));
+            let key = ("Authorization", "Bearer test-secret");
+            let read = || async {
+                let answer = fetch(addr, "GET", ledger, &[key]).await;
+                assert_eq!(answer.status, 200, "{}", answer.body);
+                serde_json::from_str::<serde_json::Value>(&answer.body).unwrap()
+            };
+            let state = read().await;
+            assert_eq!(state["available"], true, "{state}");
+            let file = log_dir.join(open_ferry_dashboard::LEDGER_FILE);
+            assert_eq!(state["file"], file.display().to_string());
+            assert!(file.is_file());
+
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let (stop, stopped) = watch::channel(false);
+            let server = tokio::spawn(serve(listener, None, service.app(), stopped));
+            let _ = shut_down(&service, &stop, server).await;
+            assert_eq!(read().await["available"], true);
         }
 
         #[tokio::test]

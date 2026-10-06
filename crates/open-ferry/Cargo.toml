@@ -15,6 +15,7 @@ path = "src/main.rs"
 axum = { version = "0.8.9", features = ["http2"] }
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 open-ferry-core.workspace = true
+open-ferry-dashboard.workspace = true
 open-ferry-management.workspace = true
 open-ferry-providers.workspace = true
 open-ferry-server.workspace = true

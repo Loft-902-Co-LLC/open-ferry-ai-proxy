@@ -1637,6 +1637,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "open-ferry-core",
+ "open-ferry-dashboard",
  "open-ferry-management",
  "open-ferry-providers",
  "open-ferry-server",
