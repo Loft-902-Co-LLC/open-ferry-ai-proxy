@@ -32,7 +32,7 @@ socket2 = "0.6.5"
 tiktoken-rs = "0.12.1"
 tokio = { version = "1.53.1", features = ["rt", "time", "sync", "macros", "net", "io-util"] }
 tokio-rustls = { version = "0.26.6", default-features = false }
-tokio-tungstenite = { version = "0.29.0", default-features = false, features = ["handshake"] }
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
 tracing = "0.1.44"
 url = "2.5.8"
 
