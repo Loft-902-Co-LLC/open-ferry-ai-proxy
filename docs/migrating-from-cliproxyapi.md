@@ -8,7 +8,7 @@ open-ferry reads CLIProxyAPI's config and auth directory as they are, so for mos
 2. **Stop CLIProxyAPI.** Don't run both against the same auth directory at once. Each refreshes tokens on its own, and a refresh token one of them has used may then be refused to the other.
 3. **Install open-ferry** as the [README](../README.md#install) says.
 4. **Start it** where you started CLIProxyAPI, so that it finds `config.yaml` in the working directory, or pass the file with `-config`. It listens on the config's `port`, as before.
-5. **Read on** if you use a sign-in other than Codex's or Claude's, a command-line flag other than the login ones, the management panel, a `.env` file, or storage other than local files.
+5. **Read on** if you use a sign-in other than Codex's or Claude's, a command-line flag other than the login ones, the management panel, or storage other than local files.
 
 ## Config and auth directory
 
@@ -16,6 +16,7 @@ open-ferry reads CLIProxyAPI's config and auth directory as they are, so for mos
 - **Both config layouts load:** the legacy one and the v8 one. Changes to the config or the auth directory are picked up without a restart, as before.
 - **The auth directory** is the config's `auth-dir`, by default `~/.cli-proxy-api`, with the same credential files.
 - **The management key** is still `remote-management.secret-key` or `MANAGEMENT_PASSWORD`.
+- **A `.env` file** in the working directory is still loaded at start, and a variable already set in the environment still wins over it. On Windows it wins whatever the case of its name, and a file that starts with a UTF-8 byte order mark loads, where CLIProxyAPI refuses it.
 - **Log files** go to the same place: `WRITABLE_PATH` if set, else beside the config.
 - **Safe mode** still holds: while `api-keys` lists the example keys from CLIProxyAPI's `config.example.yaml`, the proxy refuses service until you change them. open-ferry's own [`config.example.yaml`](../config.example.yaml), in each release archive, keeps those keys, so a config copied from it is refused too until you change them. There's no warning page at `/`, though: the proxy's routes answer 403 with CLIProxyAPI's message, whose link, `/management.html?safe-mode=configure`, opens the dashboard's API key setup.
 
@@ -31,7 +32,6 @@ open-ferry reads CLIProxyAPI's config and auth directory as they are, so for mos
 
   The full list is in the docs of `crates/open-ferry-core/src/config/mod.rs`. open-ferry's [`config.example.yaml`](../config.example.yaml) leaves these settings out.
 - **Credential files of providers open-ferry doesn't serve** are left alone in the auth directory, but nothing is served from them. CLIProxyAPI hands a credential of an unknown type to its OpenAI-compatible executor.
-- **No `.env` file.** A `.env` file in the working directory isn't loaded, so set its variables in the environment instead.
 - **No remote storage or cloud mode.** The config and credentials must be local files. The Postgres, git and object stores, the cloud deploy mode and Home mode aren't ported, so these variables are ignored:
   - `DEPLOY=cloud`;
   - `PGSTORE_*`, `GITSTORE_*` and `OBJECTSTORE_*`;
@@ -57,7 +57,7 @@ The binary is `open-ferry` (`open-ferry.exe` on Windows), not `cli-proxy-api`, s
 An unknown flag stops open-ferry with its usage and exit code 2, as CLIProxyAPI does.
 
 Exit codes differ in a few places:
-- A config that won't load, or an auth directory that can't be resolved, exits with 1; CLIProxyAPI logs it and exits with 0.
+- A working directory that can't be read, a config that won't load, or an auth directory that can't be resolved exits with 1; CLIProxyAPI logs it and exits with 0.
 - A failed sign-in exits with 1, and with 13 when its callback port is in use. CLIProxyAPI exits with 0 for the first.
 
 ## Providers and sign-ins

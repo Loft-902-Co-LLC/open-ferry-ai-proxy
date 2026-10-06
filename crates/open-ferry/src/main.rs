@@ -4,10 +4,11 @@
 //! The `open-ferry` command: serves the proxy, runs a login, or runs the
 //! terminal management UI.
 //!
-//! It loads the config (`-config`, or `config.yaml` in the working
-//! directory), sets the log level from it, resolves the auth directory, and
-//! then runs the login a flag asks for, else the TUI with `-tui` (see
-//! [`tui`]), or else serves. A server started with `-password` accepts it
+//! It loads the `.env` file in the working directory into the environment
+//! (see [`dotenv`]), then the config (`-config`, or `config.yaml` in the
+//! working directory), sets the log level from it, resolves the auth
+//! directory, and then runs the login a flag asks for, else the TUI with
+//! `-tui` (see [`tui`]), or else serves. A server started with `-password` accepts it
 //! as a local management password, and stops when its keep-alive endpoint
 //! isn't called (see [`keep_alive`]).
 //!
@@ -19,12 +20,12 @@
 //!   `-local-model` changes nothing but a log line: the built-in catalogs are
 //!   always the ones used. Its usage and log line say so, where upstream's
 //!   say an explicit catalog source still overrides the embedded catalogs.
-//! - A config that won't load, or an auth directory that won't resolve,
-//!   exits with 1; upstream logs it and exits with 0.
-//! - A `.env` file in the working directory isn't loaded; upstream loads it
-//!   into the environment before it reads the config.
+//! - A working directory that can't be read, a config that won't load, or
+//!   an auth directory that won't resolve exits with 1; upstream logs it and
+//!   exits with 0.
 
 mod browser;
+mod dotenv;
 mod file_log;
 mod flags;
 mod keep_alive;
@@ -35,7 +36,7 @@ mod service;
 mod tls;
 mod tui;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -62,13 +63,34 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // Upstream loads `.env` before it reads the config, so the variables it
+    // sets apply to everything after. This is before `logging::init`, which
+    // starts the first thread, and nothing is logged until then.
+    let working_dir = std::env::current_dir();
+    let dotenv = working_dir
+        .as_ref()
+        .ok()
+        .map(|dir| load_dotenv(&dir.join(".env")));
     let log_level = logging::init();
     let file_log = log_level.file_log().clone();
+    let working_dir = match working_dir {
+        Ok(dir) => dir,
+        Err(error) => {
+            tracing::error!("failed to get working directory: {error}");
+            file_log.flush(EXIT_FLUSH);
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Some(Err(error)) = dotenv
+        && !error.is_not_found()
+    {
+        tracing::warn!("failed to load .env file: {error}");
+    }
     let code = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
     {
-        Ok(runtime) => runtime.block_on(run(flags, log_level)),
+        Ok(runtime) => runtime.block_on(run(flags, log_level, working_dir)),
         Err(error) => {
             tracing::error!("failed to start the async runtime: {error}");
             ExitCode::FAILURE
@@ -79,15 +101,24 @@ fn main() -> ExitCode {
     code
 }
 
-async fn run(flags: Flags, log_level: logging::LogLevel) -> ExitCode {
+/// Sets the variables of the `.env` file at `path` that the environment
+/// doesn't have, as upstream's `godotenv.Load` does. A file that doesn't
+/// parse sets none. Nothing from the file is logged.
+fn load_dotenv(path: &Path) -> Result<(), dotenv::Error> {
+    let vars = dotenv::read(path)?;
+    for (key, value) in dotenv::missing(vars, dotenv::in_environment) {
+        // SAFETY: `main` calls this before it starts any thread (the log
+        // writer's, the runtime's), so nothing reads or writes the
+        // environment meanwhile. `missing` leaves out the names and values
+        // `set_var` panics on.
+        unsafe { std::env::set_var(&key, &value) };
+    }
+    Ok(())
+}
+
+async fn run(flags: Flags, log_level: logging::LogLevel, working_dir: PathBuf) -> ExitCode {
     let config_path = if flags.config.is_empty() {
-        match std::env::current_dir() {
-            Ok(dir) => dir.join("config.yaml"),
-            Err(error) => {
-                tracing::error!("failed to get working directory: {error}");
-                return ExitCode::FAILURE;
-            }
-        }
+        working_dir.join("config.yaml")
     } else {
         PathBuf::from(&flags.config)
     };
