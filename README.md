@@ -133,6 +133,7 @@ Throughout:
 | `crates/open-ferry-server` | HTTP and WebSocket handlers for `/v1/*` and the Gemini API's `/v1beta/*` |
 | `crates/open-ferry-management` | CLIProxyAPI-compatible `/v0/management` API |
 | `crates/open-ferry-dashboard` | The dashboard: serves the app, its API under `/open-ferry/api/v1/`, and the usage ledger |
+| `crates/open-ferry-tui` | The terminal management UI (`-tui`), a client of the management API |
 | `dashboard` | The dashboard app, in TypeScript and React, built with Vite into the binary |
 | `reference/cliproxyapi` | Upstream source, pinned as a git submodule. Used as the spec and for comparison tests; never compiled in |
 

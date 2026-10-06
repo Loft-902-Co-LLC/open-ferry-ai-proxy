@@ -10,24 +10,18 @@ Already in place:
 - The credential manager.
 - The management API subset T3 Code uses.
 - CLIProxyAPI's terminal UI (`open-ferry -tui`), as a client of the management API.
+- A web dashboard at `/dashboard/`, built into the binary in place of CLIProxyAPI's downloaded panel: usage, latency and estimated cost per request, model, credential and client key from a local SQLite ledger; a search of the request logs; and ready-made client setups.
+- Release basics: CI on Linux and Windows, a release workflow that builds binaries for Linux, macOS and Windows, a changelog, and a migration guide for CLIProxyAPI users.
 
 Still to come:
 
 - **Parity with the latest CLIProxyAPI release for every provider we support:** Codex, Claude, Gemini, Gemini Interactions, Vertex AI, Meta (API keys and access tokens), xAI (API keys) and any OpenAI-compatible upstream. We follow upstream's releases; the pin is at v8.0.15. What we do differently is listed in UPSTREAM.md.
 - **Image and video endpoints:** `/v1/images/generations`, `/v1/images/edits` and the `/v1/videos` routes, for the supported providers that offer them.
 - **Management writes:** the routes that change the config and credentials, which the dashboard and the TUI need. Each write is checked before it lands, is atomic, and keeps the previous file.
-- **A web dashboard** that is much easier to use than CLIProxyAPI's management center:
+- **The rest of the web dashboard**, which is to be much easier to use than CLIProxyAPI's management center:
   - **No YAML for the basics.** A first run gets you from nothing to a working client in a few steps: add a key or sign in, then copy a ready-made client setup.
   - **Each credential's state at a glance.** Health, cooldowns and quota, each with the reason and what to do about it.
-  - **Usage.** Tokens, latency and cost per request, model and credential, kept in a local SQLite ledger.
   - **Settings in forms.** Every setting is checked as you type, and a diff is shown before saving. The raw YAML is still there for those who want it.
-  - **Request logs.** Searchable, with secrets masked.
-  - **Ships inside the binary.** Nothing is downloaded at runtime; CLIProxyAPI downloads its panel from a GitHub release and keeps updating it in the background.
-- **Release basics:**
-  - CI on Linux and Windows;
-  - release binaries for Linux, macOS and Windows;
-  - a changelog;
-  - a migration guide for CLIProxyAPI users.
 
 ## v2: Realtime
 

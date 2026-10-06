@@ -1,6 +1,8 @@
-//! HMAC-SHA256 (RFC 2104), which keys the ledger's hash of a client key so
-//! that a stolen ledger can't be searched for known keys without the
-//! ledger's own secret.
+//! HMAC-SHA256 (RFC 2104), which keys the ledger's hash of a client key
+//! with a secret of the ledger's own, so that one ledger's IDs can't be
+//! matched against another's, or against a table of hashes made in
+//! advance. The secret is kept in the ledger, so whoever has the file can
+//! still check it for a key they already know.
 
 use sha2::{Digest, Sha256};
 
