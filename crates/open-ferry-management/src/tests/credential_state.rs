@@ -22,12 +22,10 @@
 //! - `TestRefreshAuthFiles_PreservesPathInList_Issue6119` is dropped: the
 //!   fix it checks is in the plugin host's refresh, which keeps the
 //!   attributes a plugin leaves out of its answer.
-//! - config_apikey_disable_test.go is dropped (`TestSetConfigAPIKeyExcludedAll`
-//!   and `TestToggleConfigAPIKeyExcludedAll_XAI`, `_Meta`, `_Codex`,
-//!   `_Vertex_NoBaseURL` and `_EmptyKeyWithBaseURL`): turning a credential
-//!   from a config API key off writes `excluded-models` into the config,
-//!   which is never written here. `status_refuses_config_api_key` checks
-//!   the refusal instead.
+//! - config_apikey_disable_test.go tests helpers, and is ported in
+//!   `crate::config_sanitize`; `status_toggles_config_api_key` and
+//!   `status_config_api_key_failures` turn a config API key off and on
+//!   through the route, checking the config saved.
 //! - `TestPatchAuthFileStatusHookErrorReturns500` stops the sync and expects
 //!   503 with the stopped service's error, where upstream's hook returns its
 //!   own error and the handler answers 500.
@@ -53,10 +51,11 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Utc};
 use http::{Method, StatusCode};
+use open_ferry_core::auth::synthesizer::StableIdGenerator;
 use open_ferry_core::auth::{
     Auth, AuthError, AuthStore as _, ModelState, QuotaState, Status, Timestamp,
 };
-use open_ferry_core::config::AuthFile;
+use open_ferry_core::config::{AuthFile, CodexKey, Config};
 use open_ferry_core::exec::{ErrorKind, ExecError, Options, Request, Response, StreamResponse};
 use open_ferry_core::executor::ProviderExecutor;
 use open_ferry_core::manager::Manager;
@@ -878,40 +877,109 @@ async fn refresh_all_and_specific() {
     );
 }
 
-// Not upstream's: a credential from a config API key is never turned on or
-// off, and the config file is never written.
-#[tokio::test]
-async fn status_refuses_config_api_key() {
-    let dir = AuthDir::new();
-    let api = Api::over(&dir);
-    let id = "codex:apikey:1";
+/// A config API key's credential: the first Codex key of [`config_key`].
+fn config_key_auth(api: &Api) -> String {
+    let parts = ["sk-test", "https://example.com/v1", "", "", ""];
+    let (id, _) = StableIdGenerator::new().next("codex:apikey", &parts);
     api.register(auth(
-        id,
+        &id,
         &[
             ("api_key", "sk-test"),
             ("base_url", "https://example.com/v1"),
             ("source", "config:codex[abc]"),
         ],
     ));
-    let before = current(&api, id);
+    id
+}
 
-    for path in [STATUS, "/v8/management/credentials/status"] {
-        for disabled in [true, false] {
+/// The config of `dir`, with a Codex key excluding `gpt-5`.
+fn config_key(dir: &AuthDir) -> Config {
+    let mut config = dir.config();
+    config.codex_api_key = vec![CodexKey {
+        api_key: "sk-test".into(),
+        base_url: "https://example.com/v1".into(),
+        excluded_models: vec!["gpt-5".into()],
+        ..CodexKey::default()
+    }];
+    config
+}
+
+// Not upstream's: turning a credential from a config API key off adds `*`
+// to the key's `excluded-models`, and on removes it, saved as any config
+// change is (in the v8 layout from the v8 route); the credential itself is
+// left for the reload to change, and the service isn't synced.
+#[tokio::test]
+async fn status_toggles_config_api_key() {
+    let dir = AuthDir::new();
+    let api = Api::over_with(&dir, config_key(&dir), None).with_writer();
+    let id = config_key_auth(&api);
+    let before = current(&api, &id);
+
+    for (path, migrate_v8) in [(STATUS, false), ("/v8/management/credentials/status", true)] {
+        for (disabled, excluded) in [(true, &["gpt-5", "*"][..]), (false, &["gpt-5"][..])] {
             let body = format!(r#"{{"name":"{id}","disabled":{disabled}}}"#);
-            patch(&api, path, &body).await.assert(
-                StatusCode::CONFLICT,
-                r#"{"error":"config API key credentials are managed in the config file, which is never written"}"#,
+            let want = format!(
+                r#"{{"disabled":{disabled},"excluded_pattern":"*","status":"ok","via":"config:excluded-models"}}"#
             );
+            patch(&api, path, &body).await.assert(StatusCode::OK, &want);
+            assert_eq!(api.saved().codex_api_key[0].excluded_models, excluded);
+            let saves = api.writer.saved();
+            assert_eq!(saves.last().map(|(_, migrate)| *migrate), Some(migrate_v8));
         }
     }
-    let after = current(&api, id);
+    assert_eq!(api.writer.saved().len(), 4);
+    assert!(api.writer.lock_held().iter().all(|&held| held));
+    assert_eq!(api.reload.count(), 4);
+
+    let after = current(&api, &id);
     assert!(!after.disabled);
     assert_eq!(after.status, before.status);
-    assert_eq!(after.status_message, before.status_message);
-    assert_eq!(after.metadata, before.metadata);
     assert_eq!(after.updated_at, before.updated_at);
     assert!(api.sync.calls().is_empty());
     assert!(!dir.config_path().exists());
+}
+
+// Not upstream's: a config API key the config no longer has, a save the
+// writer refuses, and no writer.
+#[tokio::test]
+async fn status_config_api_key_failures() {
+    let dir = AuthDir::new();
+    let api = Api::over_with(&dir, config_key(&dir), None).with_writer();
+    let id = config_key_auth(&api);
+    api.register(auth(
+        "codex:apikey:gone",
+        &[("api_key", "sk-gone"), ("source", "config:codex[abc]")],
+    ));
+    patch(
+        &api,
+        STATUS,
+        r#"{"name":"codex:apikey:gone","disabled":true}"#,
+    )
+    .await
+    .assert(
+        StatusCode::NOT_FOUND,
+        r#"{"error":"config api key entry not found"}"#,
+    );
+    assert!(api.writer.written().is_empty());
+
+    api.writer.fail("disk full");
+    let body = format!(r#"{{"name":"{id}","disabled":true}}"#);
+    patch(&api, STATUS, &body).await.assert(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        r#"{"error":"failed to save config: disk full"}"#,
+    );
+    assert_eq!(api.writer.saved().len(), 1);
+    assert!(*api.state.config() == config_key(&dir));
+    assert_eq!(api.reload.count(), 0);
+
+    let api = Api::over_with(&dir, config_key(&dir), None);
+    let id = config_key_auth(&api);
+    let body = format!(r#"{{"name":"{id}","disabled":true}}"#);
+    patch(&api, STATUS, &body).await.assert(
+        StatusCode::SERVICE_UNAVAILABLE,
+        r#"{"error":"config writer unavailable"}"#,
+    );
+    assert!(api.sync.calls().is_empty());
 }
 
 // Not upstream's: the v8 route, `auth_index` and the validation answers.

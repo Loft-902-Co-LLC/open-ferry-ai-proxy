@@ -9,8 +9,10 @@
 // (SanitizeVertexCompatKeys), internal/api/handlers/management/
 // config_lists.go (normalizeOpenAICompatibilityEntry, normalizeClaudeKey,
 // normalizeCodexKey, normalizeVertexCompatKey, sanitizedOAuthModelAlias,
-// sanitizedOAuthRequestScopedErrors) and config_basic.go
-// (normalizeRoutingStrategy) (v8.0.15, MIT).
+// sanitizedOAuthRequestScopedErrors), config_apikey_disable.go
+// (setConfigAPIKeyExcludedAll, toggleConfigAPIKeyExcludedAll) and
+// config_basic.go (normalizeRoutingStrategy), and the tests from
+// config_apikey_disable_test.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The clean-ups a management write applies to what it changes, as
@@ -28,12 +30,15 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use open_ferry_core::auth::synthesizer::format_sorted_headers;
+use open_ferry_core::auth::synthesizer::{StableIdGenerator, format_sorted_headers};
 use open_ferry_core::config::{
-    ClaudeKey, CodexKey, GeminiKey, OAuthModelAlias, OpenAiCompatibility, RequestScopedErrorRule,
-    VertexCompatKey,
+    ClaudeKey, CodexKey, Config, GeminiKey, OAuthModelAlias, OpenAiCompatibility,
+    RequestScopedErrorRule, VertexCompatKey,
 };
 use open_ferry_translate::go::{equal_fold, to_lower};
+
+/// The `excluded-models` entry that turns a config API key off.
+pub(crate) const DISABLE_PATTERN: &str = "*";
 
 /// The Meta base URL a key without one gets.
 pub(crate) const META_BASE_URL: &str = "https://api.meta.ai/v1";
@@ -362,10 +367,148 @@ pub(crate) fn normalize_routing_strategy(strategy: &str) -> Option<&'static str>
     }
 }
 
+/// Upstream's `setConfigAPIKeyExcludedAll`: `models` with
+/// [`DISABLE_PATTERN`] added when `disable`, else with it removed,
+/// normalized.
+fn set_excluded_all(models: &[String], disable: bool) -> Vec<String> {
+    if disable {
+        if models.iter().any(|model| model.trim() == DISABLE_PATTERN) {
+            return normalize_excluded_models(models);
+        }
+        let mut models = models.to_vec();
+        models.push(DISABLE_PATTERN.to_owned());
+        return normalize_excluded_models(&models);
+    }
+    let kept: Vec<String> = models
+        .iter()
+        .filter(|model| model.trim() != DISABLE_PATTERN)
+        .cloned()
+        .collect();
+    normalize_excluded_models(&kept)
+}
+
+/// Why a config API key couldn't be turned on or off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ToggleError {
+    /// The credential's ID is empty (upstream's `auth id is empty`).
+    EmptyId,
+    /// No key in the config has the credential's ID.
+    NotFound,
+}
+
+/// Upstream's `toggleConfigAPIKeyExcludedAll`: turns off (or back on) the
+/// config API key whose credential has `auth_id`, by adding
+/// [`DISABLE_PATTERN`] to its `excluded-models` (or removing it). The IDs
+/// are made as loading makes them, over the Gemini, Interactions, Claude,
+/// Codex, xAI, Meta and Vertex keys in turn.
+pub(crate) fn toggle_excluded_all(
+    config: &mut Config,
+    auth_id: &str,
+    disable: bool,
+) -> Result<(), ToggleError> {
+    let auth_id = auth_id.trim();
+    if auth_id.is_empty() {
+        return Err(ToggleError::EmptyId);
+    }
+    let mut ids = StableIdGenerator::new();
+    let mut is_target = |kind: &str,
+                         key: &str,
+                         base: &str,
+                         proxy: &str,
+                         prefix: &str,
+                         headers: &BTreeMap<String, String>| {
+        let (id, _) = ids.next(
+            kind,
+            &[
+                key.trim(),
+                base.trim(),
+                proxy.trim(),
+                prefix.trim(),
+                &format_sorted_headers(headers),
+            ],
+        );
+        id == auth_id
+    };
+    for (kind, keys) in [
+        ("gemini:apikey", &mut config.gemini_api_key),
+        (
+            "gemini-interactions:apikey",
+            &mut config.interactions_api_key,
+        ),
+    ] {
+        for entry in keys.iter_mut() {
+            if entry.api_key.trim().is_empty() && entry.base_url.trim().is_empty() {
+                continue;
+            }
+            let (key, base, proxy, prefix) = (
+                &entry.api_key,
+                &entry.base_url,
+                &entry.proxy_url,
+                &entry.prefix,
+            );
+            if is_target(kind, key, base, proxy, prefix, &entry.headers) {
+                entry.excluded_models = set_excluded_all(&entry.excluded_models, disable);
+                return Ok(());
+            }
+        }
+    }
+    for entry in &mut config.claude_api_key {
+        if entry.api_key.trim().is_empty() && entry.base_url.trim().is_empty() {
+            continue;
+        }
+        let (key, base, proxy, prefix) = (
+            &entry.api_key,
+            &entry.base_url,
+            &entry.proxy_url,
+            &entry.prefix,
+        );
+        if is_target("claude:apikey", key, base, proxy, prefix, &entry.headers) {
+            entry.excluded_models = set_excluded_all(&entry.excluded_models, disable);
+            return Ok(());
+        }
+    }
+    for (kind, keys) in [
+        ("codex:apikey", &mut config.codex_api_key),
+        ("xai:apikey", &mut config.xai_api_key),
+        ("meta:apikey", &mut config.meta_api_key),
+    ] {
+        for entry in keys.iter_mut() {
+            if entry.api_key.trim().is_empty() && entry.base_url.trim().is_empty() {
+                continue;
+            }
+            let (key, base, proxy, prefix) = (
+                &entry.api_key,
+                &entry.base_url,
+                &entry.proxy_url,
+                &entry.prefix,
+            );
+            if is_target(kind, key, base, proxy, prefix, &entry.headers) {
+                entry.excluded_models = set_excluded_all(&entry.excluded_models, disable);
+                return Ok(());
+            }
+        }
+    }
+    for entry in &mut config.vertex_api_key {
+        let (id, _) = ids.next(
+            "vertex:apikey",
+            &[
+                entry.api_key.trim(),
+                entry.base_url.trim(),
+                entry.proxy_url.trim(),
+            ],
+        );
+        if id == auth_id {
+            entry.excluded_models = set_excluded_all(&entry.excluded_models, disable);
+            return Ok(());
+        }
+    }
+    Err(ToggleError::NotFound)
+}
+
 #[cfg(test)]
 mod tests {
     use open_ferry_core::config::{
-        ClaudeModel, CodexModel, Config, OpenAiCompatibilityApiKey, VertexCompatModel,
+        ClaudeModel, CodexModel, OpenAiCompatibilityApiKey, VertexCompatModel,
     };
 
     use super::*;
@@ -649,5 +792,171 @@ oauth-request-scoped-errors:
         ] {
             assert_eq!(normalize_routing_strategy(raw), want, "{raw}");
         }
+    }
+
+    /// Ported from upstream's config_apikey_disable_test.go
+    /// (TestSetConfigAPIKeyExcludedAll), and the pattern given twice, with
+    /// space or in upper case.
+    #[test]
+    fn excluded_all_is_added_once_and_removed() {
+        assert_eq!(
+            set_excluded_all(&strings(&["gpt-5"]), true),
+            strings(&["gpt-5", "*"])
+        );
+        assert_eq!(
+            set_excluded_all(&strings(&["gpt-5", "*"]), false),
+            strings(&["gpt-5"])
+        );
+        assert_eq!(
+            set_excluded_all(&strings(&["A"]), true),
+            strings(&["a", "*"])
+        );
+        assert_eq!(
+            set_excluded_all(&strings(&[" * ", "b"]), true),
+            strings(&["*", "b"])
+        );
+        assert_eq!(
+            set_excluded_all(&strings(&[" * ", "B", "*"]), false),
+            strings(&["b"])
+        );
+        assert!(set_excluded_all(&[], false).is_empty());
+    }
+
+    /// The ID loading gives the first key of `kind` with `parts`.
+    fn id(kind: &str, parts: &[&str]) -> String {
+        StableIdGenerator::new().next(kind, parts).0
+    }
+
+    /// Ported from upstream's config_apikey_disable_test.go
+    /// (TestToggleConfigAPIKeyExcludedAll_XAI).
+    #[test]
+    fn toggle_config_api_key_excluded_all_xai() {
+        let mut config = Config::default();
+        config.xai_api_key = vec![CodexKey {
+            api_key: "xai-test".into(),
+            base_url: "https://api.x.ai/v1".into(),
+            ..CodexKey::default()
+        }];
+        let auth_id = id(
+            "xai:apikey",
+            &["xai-test", "https://api.x.ai/v1", "", "", ""],
+        );
+        assert_eq!(toggle_excluded_all(&mut config, &auth_id, true), Ok(()));
+        assert_eq!(config.xai_api_key[0].excluded_models, ["*"]);
+    }
+
+    /// Ported from upstream's config_apikey_disable_test.go
+    /// (TestToggleConfigAPIKeyExcludedAll_Meta).
+    #[test]
+    fn toggle_config_api_key_excluded_all_meta() {
+        let mut config = Config::default();
+        config.meta_api_key = vec![CodexKey {
+            api_key: "meta-test".into(),
+            base_url: "https://api.meta.ai/v1".into(),
+            ..CodexKey::default()
+        }];
+        let auth_id = id(
+            "meta:apikey",
+            &["meta-test", "https://api.meta.ai/v1", "", "", ""],
+        );
+        assert_eq!(toggle_excluded_all(&mut config, &auth_id, true), Ok(()));
+        assert_eq!(config.meta_api_key[0].excluded_models, ["*"]);
+    }
+
+    /// Ported from upstream's config_apikey_disable_test.go
+    /// (TestToggleConfigAPIKeyExcludedAll_Codex).
+    #[test]
+    fn toggle_config_api_key_excluded_all_codex() {
+        let mut config = Config::default();
+        config.codex_api_key = vec![CodexKey {
+            api_key: "sk-test".into(),
+            base_url: "https://example.com/v1".into(),
+            ..CodexKey::default()
+        }];
+        let auth_id = id(
+            "codex:apikey",
+            &["sk-test", "https://example.com/v1", "", "", ""],
+        );
+        assert_eq!(toggle_excluded_all(&mut config, &auth_id, true), Ok(()));
+        assert_eq!(config.codex_api_key[0].excluded_models, ["*"]);
+        assert_eq!(toggle_excluded_all(&mut config, &auth_id, false), Ok(()));
+        assert!(config.codex_api_key[0].excluded_models.is_empty());
+    }
+
+    /// Ported from upstream's config_apikey_disable_test.go
+    /// (TestToggleConfigAPIKeyExcludedAll_Vertex_NoBaseURL).
+    #[test]
+    fn toggle_config_api_key_excluded_all_vertex_no_base_url() {
+        let mut config = Config::default();
+        config.vertex_api_key = vec![VertexCompatKey {
+            api_key: "vertex-key-only".into(),
+            ..VertexCompatKey::default()
+        }];
+        let auth_id = id("vertex:apikey", &["vertex-key-only", "", ""]);
+        assert_eq!(toggle_excluded_all(&mut config, &auth_id, true), Ok(()));
+        assert_eq!(config.vertex_api_key[0].excluded_models, ["*"]);
+    }
+
+    /// Ported from upstream's config_apikey_disable_test.go
+    /// (TestToggleConfigAPIKeyExcludedAll_EmptyKeyWithBaseURL).
+    #[test]
+    fn toggle_config_api_key_excluded_all_empty_key_with_base_url() {
+        let mut config = Config::default();
+        config.claude_api_key = vec![ClaudeKey {
+            base_url: "https://custom-claude.example.com".into(),
+            ..ClaudeKey::default()
+        }];
+        config.gemini_api_key = vec![GeminiKey {
+            api_key: "   ".into(),
+            base_url: "https://custom-gemini.example.com".into(),
+            ..GeminiKey::default()
+        }];
+        let claude_id = id(
+            "claude:apikey",
+            &["", "https://custom-claude.example.com", "", "", ""],
+        );
+        let gemini_id = id(
+            "gemini:apikey",
+            &["", "https://custom-gemini.example.com", "", "", ""],
+        );
+        assert_eq!(toggle_excluded_all(&mut config, &claude_id, true), Ok(()));
+        assert_eq!(config.claude_api_key[0].excluded_models, ["*"]);
+        assert_eq!(toggle_excluded_all(&mut config, &gemini_id, true), Ok(()));
+        assert_eq!(config.gemini_api_key[0].excluded_models, ["*"]);
+    }
+
+    // Not upstream's: a later key alike in every part gets the next ID, as
+    // loading gives it; an ID no key has, or an empty one, is an error.
+    #[test]
+    fn toggle_config_api_key_finds_repeated_keys_and_refuses_others() {
+        let key = CodexKey {
+            api_key: "k".into(),
+            base_url: "https://c".into(),
+            ..CodexKey::default()
+        };
+        let mut config = Config::default();
+        config.codex_api_key = vec![key.clone(), key];
+        let mut ids = StableIdGenerator::new();
+        let parts = ["k", "https://c", "", "", ""];
+        let first = ids.next("codex:apikey", &parts).0;
+        let second = ids.next("codex:apikey", &parts).0;
+        assert_ne!(first, second);
+        assert_eq!(toggle_excluded_all(&mut config, &second, true), Ok(()));
+        assert!(config.codex_api_key[0].excluded_models.is_empty());
+        assert_eq!(config.codex_api_key[1].excluded_models, ["*"]);
+        assert_eq!(
+            toggle_excluded_all(&mut config, &format!(" {first} "), true),
+            Ok(())
+        );
+        assert_eq!(config.codex_api_key[0].excluded_models, ["*"]);
+
+        assert_eq!(
+            toggle_excluded_all(&mut config, "codex:apikey:none", true),
+            Err(ToggleError::NotFound)
+        );
+        assert_eq!(
+            toggle_excluded_all(&mut config, " ", true),
+            Err(ToggleError::EmptyId)
+        );
     }
 }

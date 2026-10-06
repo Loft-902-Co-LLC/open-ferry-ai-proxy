@@ -7,6 +7,8 @@
 // syncs it calls, authFileIntValue, authFileBoolValue),
 // auth_files_refresh.go (RefreshAuthFiles) and auth_files.go
 // (lookupAuthFile, matchesAuthFileLookup) (v8.0.15, MIT).
+// The config API key branch of PatchAuthFileStatus is ported with
+// config_apikey_disable.go (configAPIKeyDisablePattern).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A credential's state: turning it on and off, changing its settings and
@@ -15,7 +17,11 @@
 //! - `PATCH /v0/management/auth-files/status` (also
 //!   `/v8/management/credentials/status`) turns a credential on or off. The
 //!   body names it (`name`, an ID or file name, and `auth_index` to pick one
-//!   of several) and sets `disabled`.
+//!   of several) and sets `disabled`. A credential from a config API key is
+//!   turned off by adding `*` to the key's `excluded-models` in the config
+//!   (and back on by removing it), which is saved as
+//!   [`crate::config_write`] saves a change; the answer adds
+//!   `"via":"config:excluded-models"` and `"excluded_pattern":"*"`.
 //! - `PATCH /v0/management/auth-files/fields` (also
 //!   `/v8/management/credentials/fields`) sets fields of a credential's
 //!   metadata, a dotted name reaching into objects, and brings the settings
@@ -41,10 +47,9 @@
 //! and the change is gone when the config is next loaded.
 //!
 //! Deviations from upstream:
-//! - Turning a credential from a config API key on or off answers 409
-//!   `{"error":"config API key credentials are managed in the config file,
-//!   which is never written"}` and changes nothing. Upstream adds `*` to the
-//!   key's `excluded-models` in the config file and saves it.
+//! - Once it has turned a config API key on or off, upstream asks its token
+//!   store to delete the credential's ID, which names no file; that call is
+//!   left out.
 //! - Status and field changes answer 503 `{"error":"credential store
 //!   unavailable"}` when the API has no credential store or service to hand
 //!   the change to, and 503 when the service has stopped (the foundation's
@@ -106,14 +111,12 @@ pub(crate) use self::auth_json::auth_json;
 use crate::Route;
 use crate::auth_files::{auth_index, run_blocking};
 use crate::bind::{self, GoStruct, set_string};
+use crate::config_sanitize::{DISABLE_PATTERN, ToggleError, toggle_excluded_all};
+use crate::config_write;
 use crate::go::{atoi, equal_fold, lossy, parse_bool};
 use crate::json::{self, Json};
 use crate::query::Query;
 use crate::state::ManagementState;
-
-/// The answer to a status change on a credential from a config API key.
-const CONFIG_API_KEY_REFUSAL: &str =
-    "config API key credentials are managed in the config file, which is never written";
 
 /// The status message of a credential turned off here.
 const DISABLED_MESSAGE: &str = "disabled via management API";
@@ -125,8 +128,14 @@ const MAX_FILE_DEPTH: usize = 127;
 /// The routes this module serves.
 pub(crate) fn routes() -> Vec<Route> {
     vec![
-        Route::key("/v0/management/auth-files/status", patch(status)),
-        Route::key("/v8/management/credentials/status", patch(status)),
+        Route::key(
+            "/v0/management/auth-files/status",
+            patch(|state, body| status(state, body, false)),
+        ),
+        Route::key(
+            "/v8/management/credentials/status",
+            patch(|state, body| status(state, body, true)),
+        ),
         Route::key("/v0/management/auth-files/fields", patch(fields)),
         Route::key("/v8/management/credentials/fields", patch(fields)),
         Route::key("/v0/management/auth-files/refresh", post(refresh)),
@@ -228,8 +237,9 @@ fn apply_disabled_state(auth: &mut Auth, disabled: bool) {
 }
 
 /// `PATCH /v0/management/auth-files/status` (upstream's
-/// `PatchAuthFileStatus`).
-async fn status(State(state): State<ManagementState>, body: Body) -> Response {
+/// `PatchAuthFileStatus`). A config saved from the v8 route
+/// (`migrate_v8`) is saved in the v8 layout.
+async fn status(State(state): State<ManagementState>, body: Body, migrate_v8: bool) -> Response {
     let store = match state.credential_store() {
         Ok(store) => store,
         Err(unavailable) => return unavailable.into_response(),
@@ -254,7 +264,10 @@ async fn status(State(state): State<ManagementState>, body: Body) -> Response {
         return json::error(StatusCode::NOT_FOUND, "auth file not found");
     };
     if is_config_api_key(&target) {
-        return json::error(StatusCode::CONFLICT, CONFIG_API_KEY_REFUSAL);
+        let response = toggle_config_api_key(&state, &target.id, disabled, migrate_v8).await;
+        // Held until the service has loaded the change, as upstream holds it.
+        drop(guard);
+        return response;
     }
     let mut auth = Auth::clone(&target);
     apply_disabled_state(&mut auth, disabled);
@@ -285,6 +298,43 @@ async fn status(State(state): State<ManagementState>, body: Body) -> Response {
         &Json::map([
             ("status", Json::Str("ok".into())),
             ("disabled", Json::Bool(disabled)),
+        ]),
+    )
+}
+
+/// Turns the config API key whose credential has `id` off or on, saves the
+/// config and has the service load it (the config API key branch of
+/// upstream's `PatchAuthFileStatus`).
+async fn toggle_config_api_key(
+    state: &ManagementState,
+    id: &str,
+    disabled: bool,
+    migrate_v8: bool,
+) -> Response {
+    let id = id.to_owned();
+    let saved = config_write::save(state, migrate_v8, move |config| {
+        toggle_excluded_all(config, &id, disabled).map_err(|error| match error {
+            ToggleError::EmptyId => json::error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to update config api key: auth id is empty",
+            ),
+            ToggleError::NotFound => {
+                json::error(StatusCode::NOT_FOUND, "config api key entry not found")
+            }
+        })
+    })
+    .await;
+    if let Err(response) = saved {
+        return response;
+    }
+    config_write::reload(state).await;
+    json::response(
+        StatusCode::OK,
+        &Json::map([
+            ("status", Json::Str("ok".into())),
+            ("disabled", Json::Bool(disabled)),
+            ("via", Json::Str("config:excluded-models".into())),
+            ("excluded_pattern", Json::Str(DISABLE_PATTERN.into())),
         ]),
     )
 }

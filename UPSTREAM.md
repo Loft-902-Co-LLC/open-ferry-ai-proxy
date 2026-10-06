@@ -318,7 +318,7 @@ A status or field change is saved to the credential's file, then applied by the 
 
 Deviations, each also noted in its module:
 
-- **A credential from a config API key is never turned on or off.** `auth-files/status` answers 409 `{"error":"config API key credentials are managed in the config file, which is never written"}` and changes nothing; upstream adds `*` to the key's `excluded-models` and saves the config. As upstream, `auth-files/fields` on such a credential changes it in the running service only.
+- **Turning a config API key on or off doesn't touch the token store.** As upstream, `auth-files/status` on a credential from a config API key adds `*` to the key's `excluded-models` (or removes it), saves the config as [Config writes](#config-writes) describes, and answers with `"via":"config:excluded-models"`; a change through the v8 name saves the file in the v8 layout. Upstream then asks its token store to delete the credential's ID, which names no file; that call is left out. As upstream, `auth-files/fields` on such a credential changes it in the running service only.
 
 - **Status and field changes answer 503 when the service can't take them**, as the foundation's other writes do: `credential store unavailable` without a credential store, and the service's error once it has stopped. Upstream answers 500 when its hook fails.
 
@@ -422,7 +422,7 @@ Deviations, each also noted in its module:
 | | `PUT`, `PATCH /v8/management/config` |
 | | `PUT`, `PATCH`, `DELETE /v8/management/config/*path` |
 
-All take the management key. Each change is made under one lock: the config is copied, the copy changed and saved by the config writer, and the saved copy becomes the config the handlers read. The service then loads the file again, so the change takes effect without waiting for the file watcher, and the handler answers once it has. A v0 write saves the file in the layout it has; a v8 write saves it in the v8 layout. The v8 writes hand their method, path and body to the writer, which reads the file in the v8 layout, makes the change, checks it and saves it. A save the writer refuses answers 500 `{"error":"failed to save config: ..."}`, or `write_failed` for `PUT config.yaml` and the v8 writes, and changes nothing.
+All take the management key. Each change is made under one lock: the config is copied, the copy changed and saved by the config writer, and the saved copy becomes the config the handlers read. The service then loads the file again, so the change takes effect without waiting for the file watcher, and the handler answers once it has. A v0 write saves the file in the layout it has; a v8 write saves it in the v8 layout. The v8 writes hand their method, path and body to the writer, which reads the file in the v8 layout, makes the change, checks it and saves it. A save the writer refuses answers 500 `{"error":"failed to save config: ..."}`, or `write_failed` for `PUT config.yaml` and the v8 writes, and changes nothing. A credential from a config API key is turned on and off through the config too (see [Credential state](#credential-state)).
 
 Deviations, each also noted in its module:
 
@@ -442,7 +442,7 @@ Deviations, each also noted in its module:
 
 - **Bodies are read as Go's decoder reads them into upstream's types, with three exceptions.** A key given more than once takes its last value, where Go merges a later object or list into the earlier one and a later `null` leaves a plain field as it was. Values nest at most 128 deep; Go allows 10000. A string holding an unpaired UTF-16 surrogate escape fails the read; Go reads U+FFFD.
 
-Tests: upstream's route tests of the key lists (`config_weight_test.go`, `config_priority_test.go`, `config_disable_cooling_test.go`, `config_codex_alpha_search_test.go`, `config_lists_delete_keys_test.go`, `config_meta_key_test.go`, `config_xai_key_test.go` and `TestPatchClaudeKeyPriority`) and `config_basic_weight_test.go` are ported, checking the config the writer is asked to save. Their checks of the file written, and the tests of the v8 writes in `config_v8_test.go`, `config_v8_compatibility_test.go` and `config_v8_upstream_test.go`, are ported with the config writer. The rest of `config_claude_key_test.go` and `config_codex_disable_cloaking_test.go` are dropped: they test client impersonation settings.
+Tests: upstream's route tests of the key lists (`config_weight_test.go`, `config_priority_test.go`, `config_disable_cooling_test.go`, `config_codex_alpha_search_test.go`, `config_lists_delete_keys_test.go`, `config_meta_key_test.go`, `config_xai_key_test.go` and `TestPatchClaudeKeyPriority`), `config_basic_weight_test.go` and `config_apikey_disable_test.go` are ported, checking the config the writer is asked to save. Their checks of the file written, and the tests of the v8 writes in `config_v8_test.go`, `config_v8_compatibility_test.go` and `config_v8_upstream_test.go`, are ported with the config writer. The rest of `config_claude_key_test.go` and `config_codex_disable_cloaking_test.go` are dropped: they test client impersonation settings.
 
 #### Not ported
 

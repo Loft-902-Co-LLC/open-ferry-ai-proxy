@@ -46,18 +46,17 @@
 //!   config_v8_compatibility_test.go and config_v8_upstream_test.go test
 //!   the file written, and are ported with the config writer. The other
 //!   config_*_test.go files that test writes are ported in `config_keys`
-//!   (which lists those dropped) and `config_settings`, but for
-//!   config_apikey_disable_test.go, which is dropped.
+//!   (which lists those dropped), `config_settings` and
+//!   `crate::config_sanitize`.
 //!   (config_basic_weight_test.go is ported in `crate::config_read` and
 //!   `config_settings`.)
 //! - Upstream's tests of the `interactions-api-key`, `xai-api-key` and
 //!   `meta-api-key` lists (config_xai_key_test.go, config_meta_key_test.go,
 //!   and the Interactions, xAI and Meta cases of config_priority_test.go,
 //!   config_weight_test.go, config_lists_delete_keys_test.go and
-//!   config_apikey_disable_test.go) only `PATCH`, `PUT` or `DELETE` them.
-//!   Those of config_apikey_disable_test.go are dropped, and the rest are
-//!   ported in `config_keys`. The reads are checked by tests that aren't
-//!   upstream's.
+//!   config_apikey_disable_test.go) only `PATCH`, `PUT` or `DELETE` them,
+//!   and are ported in `config_keys` and `crate::config_sanitize`. The
+//!   reads are checked by tests that aren't upstream's.
 
 use std::collections::HashSet;
 
