@@ -48,6 +48,27 @@ cargo test --workspace --no-fail-fast
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace
 ```
 
+For a change to the dashboard app, CI also runs these in `dashboard/`, with the Node version in `dashboard/.nvmrc`:
+
+```sh
+npm ci --ignore-scripts
+npm run lint
+npm run typecheck
+npm test
+npm run build
+npx playwright test
+```
+
+`npx playwright test` runs the app under `vite preview` against a mocked API (install its browser once with `npx playwright install chromium`). A change to how the dashboard saves the config should also pass the real-save check, which CI doesn't run, as it needs a build of open-ferry with the app in it. Build the app, then a debug build of open-ferry, then run the check. It starts that binary on 127.0.0.1 over a config in a temporary directory, with dummy keys:
+
+```sh
+npm run build
+cargo build -p open-ferry --bin open-ferry
+OPEN_FERRY_BIN=../target/debug/open-ferry npm run e2e:real
+```
+
+On Windows, the binary is `../target/debug/open-ferry.exe`.
+
 ## Pull requests
 
 - **Keep each PR focused.** Explain what changed and why, and link the issue.

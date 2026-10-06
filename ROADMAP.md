@@ -12,16 +12,18 @@ Already in place:
 - The images endpoints (`/v1/images/generations` and `/v1/images/edits`), served by Codex, xAI and OpenAI-compatible upstreams.
 - The video endpoints (the `/v1/videos` and `/openai/v1/videos` routes), served by xAI.
 - CLIProxyAPI's terminal UI (`open-ferry -tui`), as a client of the management API.
-- A web dashboard at `/dashboard/`, built into the binary in place of CLIProxyAPI's downloaded panel: each credential's state at a glance (health, cooldowns and quota, with the reason and what to do about it), with sign-ins and uploads; usage, latency and estimated cost per request, model, credential and client key from a local SQLite ledger; a search of the request logs; and ready-made client setups.
+- Management writes: the routes that change the config and the credentials. A config write is checked before it lands, replaces the file in one step, keeps the previous one as `config.yaml.bak` and the file's comments, and takes effect before it is answered.
+- A web dashboard at `/dashboard/`, built into the binary in place of CLIProxyAPI's downloaded panel, and much easier to use than CLIProxyAPI's management center:
+  - each credential's state at a glance (health, cooldowns and quota, with the reason and what to do about it), with sign-ins and uploads;
+  - usage, latency and estimated cost per request, model, credential and client key from a local SQLite ledger;
+  - a search of the request logs;
+  - **no YAML for the basics:** a first run gets you from nothing to a working client in a few steps: replace the example client keys with a new one, add a provider key or sign in, then copy a ready-made client setup;
+  - **settings in forms:** every common setting is checked as you type and reviewed against the server before saving. The raw YAML is still there, with a diff before saving.
 - Release basics: CI on Linux and Windows, a release workflow that builds binaries for Linux, macOS and Windows, a changelog, and a migration guide for CLIProxyAPI users.
 
 Still to come:
 
 - **Parity with the latest CLIProxyAPI release for every provider we support:** Codex, Claude, Gemini, Gemini Interactions, Vertex AI, Meta (API keys and access tokens), xAI (API keys) and any OpenAI-compatible upstream. We follow upstream's releases; the pin is at v8.0.15. What we do differently is listed in UPSTREAM.md.
-- **Management writes:** the routes that change the config and credentials, which the dashboard and the TUI need. Each write is checked before it lands, is atomic, and keeps the previous file.
-- **The rest of the web dashboard**, which is to be much easier to use than CLIProxyAPI's management center:
-  - **No YAML for the basics.** A first run gets you from nothing to a working client in a few steps: add a key or sign in, then copy a ready-made client setup.
-  - **Settings in forms.** Every setting is checked as you type, and a diff is shown before saving. The raw YAML is still there for those who want it.
 
 ## v2: Realtime
 
