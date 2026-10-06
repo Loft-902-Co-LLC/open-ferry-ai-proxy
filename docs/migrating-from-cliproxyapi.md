@@ -74,7 +74,7 @@ open-ferry signs in only with each provider's own OAuth flow, and doesn't pose a
 | Antigravity, Devin | Not planned | None in open-ferry |
 | Claude "cloaking" and the Claude Code request profile | Not planned | Requests carry Claude's documented headers only |
 | Plugins | Not ported | Maybe in v3, after a survey ([roadmap](../ROADMAP.md#v3-plugins-if-they-are-worth-it)) |
-| Image and video endpoints | Video: as before, for xAI API keys (`/v1/videos` and its routes, `/openai/v1/videos`, a video and its `/content`); at most 10,000 videos are remembered with the key that made them. Images: not yet, on the roadmap for v1; xAI image calls answer 400 | |
+| Image and video endpoints | Video: as before, for xAI API keys (`/v1/videos` and its routes, `/openai/v1/videos`, a video and its `/content`); at most 10,000 videos are remembered with the key that made them. Images: as before, through Codex, xAI API keys and `openai-compatibility` providers (`/v1/images/generations` and `/v1/images/edits`); an edit's `multipart/form-data` form is read in memory and answers 413 past the body limit, where CLIProxyAPI writes a large one to temporary files | |
 | Realtime | Not yet: on the roadmap for v2 | |
 
 ## The management API
