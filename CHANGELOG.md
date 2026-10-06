@@ -17,6 +17,7 @@ Nothing has been released yet. This is what is in place today, ported from CLIPr
   - Claude Messages;
   - the Gemini API's `/v1beta/models` routes, and Gemini Interactions;
   - the model list Codex clients fetch.
+- **The video endpoints**, served by xAI's Grok Imagine Video for `xai-api-key` credentials: xAI's own `/v1/videos` routes, and OpenAI's `/openai/v1/videos` with a video's status and its content. Later calls about a video go to the key that made it, remembered in memory for `video-result-auth-cache-ttl` (three hours by default). The video is streamed to the client, never written to disk.
 - **The providers**: Codex, Claude, Gemini, Gemini Interactions, Vertex AI, Meta (API keys and access tokens), xAI (API keys) and any OpenAI-compatible upstream. Requests are translated between the client's format and the provider's.
 - **CLIProxyAPI's credential manager**: it picks an account for each request, retries on another, handles cooldowns and quota, applies model aliases, and refreshes tokens in the background.
 - **The management API subset T3 Code uses, and more**, under `/v0/management` and `/v8/management`:
