@@ -21,6 +21,10 @@
 //! DELETE; writes go on at the new end, as the file is opened to append)
 //! and delete it while it is open.
 //!
+//! While the TUI runs in standalone mode, standard output is muted: lines
+//! that would go there are dropped, and a tap sees every line, for the
+//! TUI's logs tab. The lines for `main.log` are still written.
+//!
 //! Deviations from upstream:
 //! - The rotated name's time is local, where lumberjack's is UTC: the logs
 //!   routes order rotated files by that time read as local, as upstream's
@@ -37,7 +41,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::thread::{self, JoinHandle};
@@ -73,6 +77,9 @@ enum Job {
     Hold(Receiver<()>),
 }
 
+/// What sees each line as it is logged, wherever it goes.
+pub(crate) type Tap = Arc<dyn Fn(&[u8]) + Send + Sync>;
+
 /// The output the log lines go to.
 #[derive(Debug)]
 pub(super) struct Output {
@@ -81,6 +88,19 @@ pub(super) struct Output {
     switching: Mutex<()>,
     /// The lines dropped and not yet reported, by either queue.
     dropped: Arc<AtomicU64>,
+    /// Whether lines for standard output are dropped.
+    muted: Arc<AtomicBool>,
+    tap: TapSlot,
+}
+
+/// The tap, if any.
+#[derive(Default)]
+struct TapSlot(RwLock<Option<Tap>>);
+
+impl std::fmt::Debug for TapSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TapSlot")
+    }
 }
 
 /// The writer threads.
@@ -117,7 +137,12 @@ impl Output {
     /// An output whose standard output is `console`.
     pub(super) fn with_console(console: Box<dyn Write + Send>) -> Self {
         let dropped = Arc::new(AtomicU64::new(0));
-        let console = Worker::spawn("log-stdout", Console(console), Arc::clone(&dropped), None)
+        let muted = Arc::new(AtomicBool::new(false));
+        let console = Console {
+            out: console,
+            muted: Arc::clone(&muted),
+        };
+        let console = Worker::spawn("log-stdout", console, Arc::clone(&dropped), None)
             .inspect_err(|error| {
                 let _ = writeln!(
                     io::stderr(),
@@ -132,14 +157,37 @@ impl Output {
             }),
             switching: Mutex::new(()),
             dropped,
+            muted,
+            tap: TapSlot::default(),
         }
     }
 
-    /// Writes `line` where lines go now.
+    /// Drops the lines for standard output while `muted`.
+    pub(super) fn mute_console(&self, muted: bool) {
+        self.muted.store(muted, Ordering::Relaxed);
+    }
+
+    /// Shows every line to `tap` as it is logged; `None` stops.
+    pub(super) fn set_tap(&self, tap: Option<Tap>) {
+        *self.tap.0.write().unwrap_or_else(PoisonError::into_inner) = tap;
+    }
+
+    /// Writes `line` where lines go now, after showing it to the tap.
     pub(super) fn write(&self, line: Vec<u8>) {
+        let tap = self
+            .tap
+            .0
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(tap) = tap {
+            tap(&line);
+        }
+        let muted = self.muted.load(Ordering::Relaxed);
         let state = self.state.read().unwrap_or_else(PoisonError::into_inner);
         let worker = match &state.file {
             Some(file) => Some(&file.worker),
+            None if muted => return,
             None => state.console.as_ref(),
         };
         let line = match worker {
@@ -157,7 +205,9 @@ impl Output {
             None => line,
         };
         drop(state);
-        let _ = io::stdout().lock().write_all(&line);
+        if !muted {
+            let _ = io::stdout().lock().write_all(&line);
+        }
     }
 
     /// Sends the lines to the file at `path`. A file already being written
@@ -304,16 +354,22 @@ trait Sink: Send + 'static {
 }
 
 /// Standard output, or what stands in for it in tests. A line that can't
-/// be written is lost, as upstream ignores the error.
-struct Console(Box<dyn Write + Send>);
+/// be written is lost, as upstream ignores the error; so is one, such as
+/// the count of dropped lines, written while the output is muted.
+struct Console {
+    out: Box<dyn Write + Send>,
+    muted: Arc<AtomicBool>,
+}
 
 impl Sink for Console {
     fn write_line(&mut self, line: &[u8]) {
-        let _ = self.0.write_all(line);
+        if !self.muted.load(Ordering::Relaxed) {
+            let _ = self.out.write_all(line);
+        }
     }
 
     fn flush_quietly(&mut self) {
-        let _ = self.0.flush();
+        let _ = self.out.flush();
     }
 }
 

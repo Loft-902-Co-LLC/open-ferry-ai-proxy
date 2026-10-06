@@ -1,10 +1,12 @@
-// Ported from CLIProxyAPI internal/browser/browser.go (v8.0.15, MIT).
+// Ported from CLIProxyAPI internal/browser/browser.go and
+// internal/tui/browser.go (openBrowser) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
-//! Opening a URL in the user's browser, for the OAuth logins.
+//! Opening a URL in the user's browser, for the OAuth logins and the TUI's
+//! OAuth tab. For the TUI it is what upstream's `openBrowser` runs.
 //!
 //! Deviations from upstream:
-//! - It runs the platform's own opener (`rundll32 url.dll,FileProtocolHandler`
+//! - For the logins, it runs the platform's own opener (`rundll32 url.dll,FileProtocolHandler`
 //!   on Windows, `open` on macOS, `xdg-open` elsewhere) and nothing else.
 //!   Upstream tries a list of fallbacks, and checks a browser is there by
 //!   opening `about:blank`.

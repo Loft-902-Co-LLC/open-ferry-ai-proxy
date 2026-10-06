@@ -8,16 +8,18 @@
 //! as `-name=value` or as the next argument, a boolean flag takes only
 //! `-name=value`, and parsing stops at the first argument that isn't a flag
 //! or after `--`. Later arguments are ignored, as upstream ignores them.
+//! The usage leaves out `-password`, as upstream's does.
 //!
 //! Deviations from upstream:
 //! - Only the flags of the ported features are defined: `-config`, the Codex
-//!   and Claude logins, `-no-browser`, `-oauth-callback-port` and
-//!   `-local-model`. Any other flag is an error, as an unknown flag is
-//!   upstream.
+//!   and Claude logins, `-no-browser`, `-oauth-callback-port`,
+//!   `-local-model`, `-password`, and the TUI's `-tui`, `-standalone` and
+//!   `-management-base-url`. Any other flag is an error, as an unknown flag
+//!   is upstream.
 //! - `-oauth-callback-port` takes a decimal number; Go also takes `0x`, `0o`
 //!   and `0b` prefixes and underscores.
 
-use std::fmt::Write as _;
+use std::fmt::{self, Write as _};
 
 /// What the command line asks for.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -38,6 +40,25 @@ pub struct Flags {
     pub oauth_callback_port: i64,
     /// Use only the built-in model catalog (`-local-model`).
     pub local_model: bool,
+    /// The local management password, or empty (`-password`).
+    pub password: Password,
+    /// Run the terminal management UI (`-tui`).
+    pub tui: bool,
+    /// Run the TUI with a server of its own (`-standalone`).
+    pub standalone: bool,
+    /// The management API the TUI uses, or empty for the config's
+    /// (`-management-base-url`).
+    pub management_base_url: String,
+}
+
+/// A password from the command line, which `Debug` doesn't show.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct Password(pub String);
+
+impl fmt::Debug for Password {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Password(..)")
+    }
 }
 
 /// Why the command line didn't parse.
@@ -62,7 +83,7 @@ struct Definition {
 }
 
 /// The flags, sorted by name as Go's usage lists them.
-const DEFINITIONS: [Definition; 7] = [
+const DEFINITIONS: [Definition; 11] = [
     Definition {
         name: "claude-login",
         usage: "Login to Claude using OAuth",
@@ -89,6 +110,11 @@ const DEFINITIONS: [Definition; 7] = [
         kind: Kind::Bool(|flags| &mut flags.local_model),
     },
     Definition {
+        name: "management-base-url",
+        usage: "Base URL of remote management API for TUI client mode (e.g. https://proxy.example.com)",
+        kind: Kind::String(|flags| &mut flags.management_base_url),
+    },
+    Definition {
         name: "no-browser",
         usage: "Don't open browser automatically for OAuth",
         kind: Kind::Bool(|flags| &mut flags.no_browser),
@@ -97,6 +123,21 @@ const DEFINITIONS: [Definition; 7] = [
         name: "oauth-callback-port",
         usage: "Override OAuth callback port (defaults to provider-specific port)",
         kind: Kind::Int(|flags| &mut flags.oauth_callback_port),
+    },
+    Definition {
+        name: "password",
+        usage: "",
+        kind: Kind::String(|flags| &mut flags.password.0),
+    },
+    Definition {
+        name: "standalone",
+        usage: "In TUI mode, start an embedded local server",
+        kind: Kind::Bool(|flags| &mut flags.standalone),
+    },
+    Definition {
+        name: "tui",
+        usage: "Start with terminal management UI",
+        kind: Kind::Bool(|flags| &mut flags.tui),
     },
 ];
 
@@ -182,6 +223,9 @@ fn parse_bool(value: &str) -> Option<bool> {
 pub fn usage(program: &str) -> String {
     let mut out = format!("Usage of {program}:\n");
     for definition in &DEFINITIONS {
+        if definition.name == "password" {
+            continue;
+        }
         let kind = match definition.kind {
             Kind::Bool(_) => "",
             Kind::String(_) => " string",
@@ -223,6 +267,25 @@ mod tests {
                 ..Flags::default()
             }
         );
+        let flags = parse_args(&[
+            "-tui",
+            "-standalone=true",
+            "-password",
+            "pw",
+            "--management-base-url=https://proxy.example.com",
+        ])
+        .unwrap();
+        assert_eq!(
+            flags,
+            Flags {
+                tui: true,
+                standalone: true,
+                password: Password("pw".into()),
+                management_base_url: "https://proxy.example.com".into(),
+                ..Flags::default()
+            }
+        );
+        assert_eq!(format!("{:?}", flags.password), "Password(..)");
         let flags = parse_args(&["--claude-login", "rest", "-codex-login"]).unwrap();
         assert!(flags.claude_login && !flags.codex_login);
         let flags = parse_args(&["--", "-codex-login"]).unwrap();
@@ -263,5 +326,13 @@ mod tests {
         assert!(usage.starts_with("Usage of open-ferry:\n  -claude-login\n    \tLogin to Claude"));
         assert!(usage.contains("\n  -config string\n    \tConfigure File Path\n"));
         assert!(usage.contains("\n  -oauth-callback-port int\n"));
+        assert!(
+            usage.contains(
+                "\n  -management-base-url string\n    \tBase URL of remote management API"
+            )
+        );
+        assert!(usage.contains("\n  -standalone\n    \tIn TUI mode,"));
+        assert!(usage.ends_with("\n  -tui\n    \tStart with terminal management UI\n"));
+        assert!(!usage.contains("password"));
     }
 }

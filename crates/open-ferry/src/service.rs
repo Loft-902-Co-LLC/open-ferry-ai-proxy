@@ -1,5 +1,6 @@
 // Ported from CLIProxyAPI sdk/cliproxy/service_lifecycle.go (Run and
-// Shutdown), service_auth.go (prepareCoreAuthForModelRegistration,
+// Shutdown), internal/cmd/run.go (StartService and StartServiceBackground,
+// with their local management password), service_auth.go (prepareCoreAuthForModelRegistration,
 // completeModelRegistrationForAuth and applyCoreAuthRemoval),
 // service_config.go (applyConfigRuntime and registerConfigAPIKeyAuths),
 // service_executors.go (registerAvailableExecutors,
@@ -52,6 +53,13 @@
 //!
 //! Credentials read from files or the config aren't saved back; the manager
 //! saves those it changes itself, as after a refresh.
+//!
+//! The command line's `-password` is a local management password (see
+//! [`Options`]): the management API accepts it from loopback clients, and
+//! the server serves the [keep-alive endpoint](crate::keep_alive), and
+//! stops when it isn't called. The TUI's standalone mode runs the service
+//! with a password of its own, without the endpoint and without printing
+//! to the terminal, until the TUI ends.
 //!
 //! Deviations from upstream:
 //! - Only the Codex, Meta, Claude, Gemini, Gemini Interactions, Vertex AI,
@@ -126,6 +134,7 @@ use open_ferry_server::{AppState, ServerConfig, router_with};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot, watch};
 
+use crate::keep_alive::{self, KeepAlive};
 use crate::logging::LogLevel;
 use crate::observability;
 use crate::tls::{self, TlsListener, TlsPeer};
@@ -140,12 +149,28 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 /// service loop.
 const SYNC_QUEUE: usize = 32;
 
-/// Serves until a shutdown signal, or until the server fails.
+/// What the command line adds to the config.
+#[derive(Clone, Default)]
+pub struct Options {
+    /// The local management password, or empty (`-password`).
+    pub local_password: String,
+    /// Whether, with a local management password, the server serves the
+    /// keep-alive endpoint and stops when it isn't called, as upstream's
+    /// `StartService` does and its `StartServiceBackground` doesn't.
+    pub keep_alive: bool,
+    /// Whether to print that the server started; not while the TUI has the
+    /// terminal.
+    pub announce: bool,
+}
+
+/// Serves until `stop` resolves, or until the server fails.
 pub async fn run(
     config: Config,
     config_path: PathBuf,
     auth_dir: PathBuf,
     log_level: LogLevel,
+    options: Options,
+    stop: impl Future<Output = ()>,
 ) -> ExitCode {
     if let Err(error) = ensure_auth_dir(&auth_dir) {
         tracing::error!(
@@ -167,6 +192,10 @@ pub async fn run(
         auth_dir,
         log_level,
     );
+    service.management = service
+        .management
+        .clone()
+        .with_local_password(&options.local_password);
     service.register_executors();
     service.load_file_auths();
     service.sync_config_auths();
@@ -195,12 +224,24 @@ pub async fn run(
     } else {
         None
     };
-    let (stop, stopped) = watch::channel(false);
-    let mut server = tokio::spawn(serve(listener, tls_config, service.app(), stopped));
-    println!(
-        "API server started successfully on: {}:{}",
-        config.host, config.port
-    );
+    let keep_alive = (options.keep_alive && !options.local_password.is_empty())
+        .then(|| KeepAlive::new(&options.local_password, keep_alive::TIMEOUT));
+    let extra = keep_alive
+        .as_ref()
+        .map_or_else(axum::Router::new, KeepAlive::router);
+    let (stop_server, stopped) = watch::channel(false);
+    let mut server = tokio::spawn(serve(
+        listener,
+        tls_config,
+        service.app_with(extra),
+        stopped,
+    ));
+    if options.announce {
+        println!(
+            "API server started successfully on: {}:{}",
+            config.host, config.port
+        );
+    }
 
     let mut events = match ConfigWatcher::start(&config_path, &config) {
         Ok((watcher, events)) => {
@@ -210,13 +251,21 @@ pub async fn run(
         Err(error) => {
             tracing::error!("failed to create watcher: {error}");
             service.close_sync();
-            shut_down(&service, &stop, server).await;
+            shut_down(&service, &stop_server, server).await;
             return ExitCode::FAILURE;
         }
     };
     tracing::info!("file watcher started for config and auth directory changes");
 
-    let shutdown = shutdown_signal();
+    let shutdown = async {
+        match &keep_alive {
+            Some(keep_alive) => tokio::select! {
+                () = stop => {}
+                () = keep_alive.idle() => {}
+            },
+            None => stop.await,
+        }
+    };
     tokio::pin!(shutdown);
     loop {
         tokio::select! {
@@ -245,7 +294,7 @@ pub async fn run(
         }
     }
     service.close_sync();
-    shut_down(&service, &stop, server).await
+    shut_down(&service, &stop_server, server).await
 }
 
 type Server = tokio::task::JoinHandle<io::Result<()>>;
@@ -462,9 +511,16 @@ impl Service {
     }
 
     /// The proxy's routes, with the management API's beside them.
+    #[cfg(test)]
     fn app(&self) -> axum::Router {
+        self.app_with(axum::Router::new())
+    }
+
+    /// The proxy's routes, with the management API's and `extra` beside
+    /// them.
+    fn app_with(&self, extra: axum::Router) -> axum::Router {
         let management = open_ferry_management::router(self.management.clone());
-        router_with(self.state.clone(), management)
+        router_with(self.state.clone(), management.merge(extra))
     }
 
     /// Registers the executors for the current config: Codex, Meta, Claude,
@@ -1072,7 +1128,7 @@ async fn serve(
 }
 
 /// Resolves on Ctrl-C, or on SIGTERM on Unix.
-async fn shutdown_signal() {
+pub async fn shutdown_signal() {
     let ctrl_c = async {
         if tokio::signal::ctrl_c().await.is_err() {
             std::future::pending::<()>().await;
@@ -2550,6 +2606,7 @@ mod tests {
 
         use super::super::{Service, serve, shut_down};
         use super::service;
+        use crate::keep_alive::{self, KeepAlive};
 
         const KEYED: &str = "remote-management:\n  secret-key: test-secret\n";
         const LIST: &str = "/v0/management/auth-files";
@@ -2615,6 +2672,29 @@ mod tests {
         fn config(dir: &Path, extra: &str) -> WatchEvent {
             let text = format!("auth-dir: '{}'\n{extra}", dir.display());
             WatchEvent::ConfigChanged(Arc::new(Config::parse(text).unwrap()))
+        }
+
+        // Not upstream's: the TUI's readiness check passes with the local
+        // management password the service was given, and the keep-alive
+        // endpoint is served with the other routes' CORS headers.
+        #[tokio::test]
+        async fn the_tui_signs_in_with_the_local_password() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut service = service(dir.path(), KEYED);
+            service.management = service.management.clone().with_local_password("local-pw");
+            let keep_alive = KeepAlive::new("local-pw", keep_alive::TIMEOUT);
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (_stop, stopped) = watch::channel(false);
+            let app = service.app_with(keep_alive.router());
+            tokio::spawn(serve(listener, None, app, stopped));
+
+            assert!(open_ferry_tui::wait_ready(addr.port(), "local-pw").await);
+            let password = ("X-Local-Password", "local-pw");
+            let answer = fetch(addr, "GET", "/keep-alive", &[password]).await;
+            assert_eq!(answer.status, 200, "{}", answer.body);
+            assert_eq!(answer.body, r#"{"status":"ok"}"#);
+            assert_eq!(answer.header("access-control-allow-origin"), Some("*"));
         }
 
         #[tokio::test]

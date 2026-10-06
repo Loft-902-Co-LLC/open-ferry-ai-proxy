@@ -1,15 +1,19 @@
 // Ported from CLIProxyAPI cmd/server/main.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
-//! The `open-ferry` command: serves the proxy, or runs a login.
+//! The `open-ferry` command: serves the proxy, runs a login, or runs the
+//! terminal management UI.
 //!
 //! It loads the config (`-config`, or `config.yaml` in the working
 //! directory), sets the log level from it, resolves the auth directory, and
-//! then runs the login a flag asks for or else serves.
+//! then runs the login a flag asks for, else the TUI with `-tui` (see
+//! [`tui`]), or else serves. A server started with `-password` accepts it
+//! as a local management password, and stops when its keep-alive endpoint
+//! isn't called (see [`keep_alive`]).
 //!
 //! Deviations from upstream:
-//! - The cloud-deploy, home, Postgres, object-store and git-store modes, the
-//!   TUI, plugins and the other providers' logins aren't ported.
+//! - The cloud-deploy, home, Postgres, object-store and git-store modes,
+//!   plugins and the other providers' logins aren't ported.
 //! - Remote model catalog updates and the catalog sources of the `models`
 //!   section (`catalog`, `codex-catalog`, `devin-catalog`) aren't ported, so
 //!   `-local-model` changes nothing but a log line: the built-in catalogs are
@@ -23,11 +27,13 @@
 mod browser;
 mod file_log;
 mod flags;
+mod keep_alive;
 mod logging;
 mod login;
 mod observability;
 mod service;
 mod tls;
+mod tui;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -118,10 +124,26 @@ async fn run(flags: Flags, log_level: logging::LogLevel) -> ExitCode {
         };
         return login::run(login, &config, &auth_dir, options).await;
     }
-    if flags.local_model {
+    if flags.local_model && (!flags.tui || flags.standalone) {
         tracing::info!(
             "Local model mode: using embedded model catalogs, remote model updates disabled"
         );
     }
-    service::run(config, config_path, auth_dir, log_level).await
+    if flags.tui {
+        return tui::run(flags, config, config_path, auth_dir, log_level).await;
+    }
+    let options = service::Options {
+        local_password: flags.password.0,
+        keep_alive: true,
+        announce: true,
+    };
+    service::run(
+        config,
+        config_path,
+        auth_dir,
+        log_level,
+        options,
+        service::shutdown_signal(),
+    )
+    .await
 }

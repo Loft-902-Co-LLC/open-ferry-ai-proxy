@@ -302,3 +302,50 @@ fn standard_output_never_blocks() {
     assert_eq!(lines.len() + dropped, total);
     assert_eq!(lines.first(), Some(&"line 0"));
 }
+
+/// Not upstream's: while standard output is muted, as while the TUI runs,
+/// its lines are dropped and `main.log`'s still written, and the tap sees
+/// every line, wherever it goes.
+#[test]
+fn muting_drops_standard_output_and_the_tap_sees_every_line() {
+    let written = Arc::new(Mutex::new(Vec::new()));
+    let file_log = FileLog {
+        output: Arc::new(Output::with_console(Box::new(Stalled {
+            go: None,
+            written: Arc::clone(&written),
+        }))),
+        cleaner: Arc::default(),
+    };
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let tap_seen = Arc::clone(&seen);
+    file_log.set_tap(Some(Arc::new(move |line: &[u8]| {
+        let line = String::from_utf8_lossy(line).trim_end().to_owned();
+        tap_seen.lock().unwrap().push(line);
+    })));
+    file_log.mute_console(true);
+    logged(&file_log, || tracing::info!("muted"));
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path().join("logs");
+    file_log.configure(&dir, true, 0);
+    logged(&file_log, || tracing::warn!("to the file"));
+    file_log.configure(&dir, false, 0);
+    file_log.mute_console(false);
+    file_log.set_tap(None);
+    logged(&file_log, || tracing::info!("heard"));
+
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert!(
+        seen[0].starts_with('[') && seen[0].ends_with("] muted"),
+        "{seen:?}"
+    );
+    assert!(
+        seen[1].contains("[warn") && seen[1].ends_with("] to the file"),
+        "{seen:?}"
+    );
+    let file = fs::read_to_string(dir.join(MAIN_LOG)).unwrap();
+    assert_eq!(file.trim_end(), seen[1]);
+    let text = String::from_utf8(written.lock().unwrap().clone()).unwrap();
+    assert_eq!(text.lines().count(), 1, "{text}");
+    assert!(text.trim_end().ends_with("] heard"), "{text}");
+}

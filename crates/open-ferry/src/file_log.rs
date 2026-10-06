@@ -49,6 +49,7 @@ mod tests;
 use cleaner::Cleaner;
 use format::FormatLayer;
 use writer::Output;
+pub(crate) use writer::Tap;
 
 /// The main log's file name in the log directory (upstream's
 /// `defaultLogFileName`).
@@ -96,6 +97,18 @@ impl FileLog {
     #[cfg(test)]
     pub(crate) fn file(&self) -> Option<std::path::PathBuf> {
         self.output.file()
+    }
+
+    /// Drops the lines for standard output while `muted`, as while the TUI
+    /// has the terminal; the lines for `main.log` are still written.
+    pub fn mute_console(&self, muted: bool) {
+        self.output.mute_console(muted);
+    }
+
+    /// Shows every line, as formatted, to `tap` as it is logged, whatever
+    /// the output; `None` stops.
+    pub fn set_tap(&self, tap: Option<Tap>) {
+        self.output.set_tap(tap);
     }
 
     /// Waits, until `timeout` has passed at most, for the lines logged so
