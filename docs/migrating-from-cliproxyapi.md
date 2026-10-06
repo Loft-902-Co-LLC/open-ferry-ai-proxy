@@ -49,8 +49,8 @@ The binary is `open-ferry` (`open-ferry.exe` on Windows), not `cli-proxy-api`, s
 | `-antigravity-login`, `-kimi-login`, `-kimi-ai-login`, `-devin-login` | Not available: those providers aren't supported (see [below](#providers-and-sign-ins)) |
 | `-xai-login`, `-meta-login` | Not available: use an API key (see [below](#providers-and-sign-ins)) |
 | `-vertex-import`, `-vertex-import-prefix` | Not available: use the management API's `vertex/import` route, or a `vertex-api-key` entry in the config |
-| `-password` | Not available: use `remote-management.secret-key` or `MANAGEMENT_PASSWORD` |
-| `-tui`, `-standalone`, `-management-base-url` | Not yet: a TUI is on the [roadmap](../ROADMAP.md) for v1 |
+| `-password` | As before: a management password for clients on the same machine (127.0.0.1 and ::1), and the `/keep-alive` endpoint that stops the server after 10 seconds without a call |
+| `-tui`, `-standalone`, `-management-base-url` | As before, except that the OAuth tab offers only Codex and Claude, and the config and keys tabs can't save changes yet. `-standalone` still needs `remote-management.secret-key` or `MANAGEMENT_PASSWORD` |
 | `-home-jwt`, `-home-disable-cluster-discovery` | Not available: Home mode is on the roadmap for v4 |
 | `-discover`, `-discover-timeout`, `-discover-json`, `-discover-service-type` | Not available |
 

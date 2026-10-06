@@ -9,6 +9,7 @@ Already in place:
 - The OpenAI, Claude and Gemini client APIs, over HTTP and WebSocket.
 - The credential manager.
 - The management API subset T3 Code uses.
+- CLIProxyAPI's terminal UI (`open-ferry -tui`), as a client of the management API.
 
 Still to come:
 
@@ -22,7 +23,6 @@ Still to come:
   - **Settings in forms.** Every setting is checked as you type, and a diff is shown before saving. The raw YAML is still there for those who want it.
   - **Request logs.** Searchable, with secrets masked.
   - **Ships inside the binary.** Nothing is downloaded at runtime; CLIProxyAPI downloads its panel from a GitHub release and keeps updating it in the background.
-- **A TUI** (`open-ferry tui`) for servers without a browser. It covers the dashboard's essentials: credentials and their state, sign-ins, usage and live logs.
 - **Release basics:**
   - CI on Linux and Windows;
   - release binaries for Linux, macOS and Windows;

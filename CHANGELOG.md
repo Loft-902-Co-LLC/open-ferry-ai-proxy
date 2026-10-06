@@ -27,6 +27,8 @@ Nothing has been released yet. This is what is in place today, ported from CLIPr
 
   The config can't be changed through it yet.
 - **Request logs, `main.log`, usage records, payload rules and saved cooldowns**, as CLIProxyAPI has them.
+- **CLIProxyAPI's terminal UI** (`-tui`), as a client of a running server's management API (`-management-base-url`) or of one it starts (`-standalone`). Its OAuth tab offers Codex and Claude.
+- **`-password`**, a management password for clients on the same machine, with CLIProxyAPI's `/keep-alive` endpoint.
 - **Release binaries** for Linux (x86-64 and arm64), macOS (Intel and Apple silicon) and Windows (x86-64). Each release comes with `SHA256SUMS` and build provenance attestations.
 
 [Unreleased]: https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/commits/main
