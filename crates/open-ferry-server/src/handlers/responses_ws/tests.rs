@@ -67,6 +67,8 @@ use crate::state::AppState;
 use crate::status::status_text;
 use crate::testing::{FakeCatalog, FakeDispatcher, Outcome};
 
+mod steering;
+
 /// `raw` as JSON.
 fn parse(raw: &[u8]) -> Value {
     serde_json::from_slice(raw)
@@ -1257,6 +1259,7 @@ async fn forward_items(
             suppress_error: &suppress,
             keepalive: None,
             context: None,
+            duplex: false,
         },
     )
     .await;
@@ -1389,6 +1392,7 @@ async fn forward_emits_periodic_pings() {
             suppress_error: &|_: &ErrorMessage| false,
             keepalive: Some(Duration::from_secs(10)),
             context: None,
+            duplex: false,
         },
     )
     .await;
@@ -1418,6 +1422,7 @@ async fn forward_ping_write_failure_aborts_session() {
             suppress_error: &|_: &ErrorMessage| false,
             keepalive: Some(Duration::from_millis(10)),
             context: None,
+            duplex: false,
         },
     )
     .await;

@@ -17,6 +17,14 @@
 //! do, rather than parsed with serde like the other handlers: the bytes a
 //! client sends go on as they came, keys in order and numbers as written.
 //!
+//! With `codex.response-steering` on (experimental), a task reads the socket
+//! all the time, and a Codex turn on its upstream WebSocket keeps that
+//! connection for the rest of the socket: the client's later messages,
+//! `response.steer` among them, go to it while a response runs, and the
+//! socket closes with it. Other turns go as they do with the setting off.
+//! As upstream, a Codex turn that falls back to HTTP closes the socket when
+//! its stream ends too.
+//!
 //! Deviations from upstream:
 //! - The handshake is checked as gorilla checks it, then by axum, which is
 //!   stricter: an `Upgrade` or `Sec-WebSocket-Version` header must equal its
@@ -33,15 +41,16 @@
 //!   model and credential alone.
 //! - `prepareCodexMultiAgentV2Tools` and `prepareCodexOrphanDelegation` are
 //!   left out, and `WithRequiredUpstreamWebsocket` isn't passed to calls.
-//! - Response steering (the duplex reader), subscriptions to upstream
-//!   disconnects, and the client's own WebSocket timeline in the request
-//!   log aren't ported; those events go to `tracing`. The log of a session
-//!   has the upgrade request, a `101` answer, the upstream attempts of
-//!   every turn with their WebSocket timelines, and each turn's
-//!   `API ERROR RESPONSE`.
+//! - Subscriptions to upstream disconnects and the client's own WebSocket
+//!   timeline in the request log aren't ported; those events go to
+//!   `tracing`. The log of a session has the upgrade request, a `101`
+//!   answer, the upstream attempts of every turn with their WebSocket
+//!   timelines, and each turn's `API ERROR RESPONSE`.
 //! - A client that goes away is noticed when a read, write or ping fails,
 //!   as with gorilla after the hijack; upstream also cancels the call with
-//!   the request's context.
+//!   the request's context. With response steering on, the reading task
+//!   notices it, and the turn under way ends at once, as upstream's socket
+//!   context does.
 //! - A message that isn't UTF-8 goes out with replacement characters, since
 //!   a text message must be UTF-8.
 //! - An error event's headers are sorted, one value each, where upstream's

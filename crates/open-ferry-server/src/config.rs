@@ -1,5 +1,6 @@
 // Modelled on the keys of CLIProxyAPI sdk/config's SDKConfig that the HTTP
-// handlers read (v8.0.15, MIT).
+// handlers read, as internal/api/server_options.go (effectiveSDKConfig) fills
+// them (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Settings for the HTTP layer.
@@ -35,6 +36,10 @@ pub struct ServerConfig {
     /// Whether a Codex sub-agent's orphan delegation outputs become user
     /// messages (`codex.orphan-delegation-compatibility`).
     pub codex_orphan_delegation: bool,
+    /// Whether a client's Responses WebSocket keeps one upstream Codex
+    /// WebSocket for the whole socket, so that frames sent while a response
+    /// runs steer it (`codex.response-steering`, experimental).
+    pub codex_response_steering: bool,
     /// The proxies whose forwarded-address headers are believed when a
     /// request's client address is worked out (`trusted-proxies`). They
     /// are read once, when the server starts, as upstream reads them.
@@ -57,6 +62,7 @@ impl Default for ServerConfig {
             body_limit: DEFAULT_BODY_LIMIT,
             codex_client: CodexClientConfig::default(),
             codex_orphan_delegation: false,
+            codex_response_steering: false,
             trusted_proxies: Vec::new(),
             disable_image_generation: DisableImageGeneration::Off,
             video_auth_ttl: Config::default().video_result_auth_cache_ttl_duration(),
@@ -98,6 +104,7 @@ impl From<&Config> for ServerConfig {
             body_limit: DEFAULT_BODY_LIMIT,
             codex_client: config.client.codex.clone(),
             codex_orphan_delegation: config.codex.orphan_delegation_compatibility,
+            codex_response_steering: config.codex.response_steering,
             trusted_proxies: config.trusted_proxies.clone(),
             disable_image_generation: config.disable_image_generation,
             video_auth_ttl: config.video_result_auth_cache_ttl_duration(),
@@ -184,6 +191,21 @@ mod tests {
         ] {
             let server = ServerConfig::from(&Config::parse(text).unwrap());
             assert_eq!(server.codex_orphan_delegation, want, "{text}");
+        }
+    }
+
+    // Added: the handlers read the provider-wide setting, as upstream's
+    // effectiveSDKConfig copies it (`CodexResponseSteering`).
+    #[test]
+    fn reads_the_response_steering_setting() {
+        for (text, want) in [
+            ("{}", false),
+            ("codex: {response-steering: true}", true),
+            ("upstream: {codex: {response-steering: true}}", true),
+            ("upstream: {codex: {response-steering: false}}", false),
+        ] {
+            let server = ServerConfig::from(&Config::parse(text).unwrap());
+            assert_eq!(server.codex_response_steering, want, "{text}");
         }
     }
 }

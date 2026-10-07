@@ -18,6 +18,11 @@
 //! A turn's events, from the call's stream to the client: each one as a
 //! message, with the completed response's output restored where the
 //! upstream left it out, and errors closing the socket.
+//!
+//! A Codex duplex stream (response steering) carries every response of the
+//! socket, so its end closes the socket rather than ending a turn, and an
+//! error event after a response has started goes to the client as any
+//! other event; the stream's own error still closes the socket.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::Duration;
@@ -64,6 +69,9 @@ pub(super) struct ForwardOptions<'a> {
     pub(super) keepalive: Option<Duration>,
     /// The session's request context, whose log gets the turn's errors.
     pub(super) context: Option<&'a RequestContext>,
+    /// Whether the call's credential holds a Codex duplex stream, which
+    /// ends with the socket (`duplexStream`).
+    pub(super) duplex: bool,
 }
 
 /// How a turn ended.
@@ -130,6 +138,7 @@ pub(super) async fn forward<S: Socket>(
     mut options: ForwardOptions<'_>,
 ) -> Forwarded {
     let mut completed = false;
+    let mut response_started = false;
     let mut completed_output = b"[]".to_vec();
     let mut completed_id = String::new();
     let mut outputs = OutputItems::default();
@@ -148,9 +157,16 @@ pub(super) async fn forward<S: Socket>(
                 }
                 continue;
             }
+            // The client is gone; the stream is dropped with the turn.
+            () = conn.gone() => return Forwarded::Closed,
             next = items.next() => next,
         };
         let chunk = match next {
+            None if options.duplex => {
+                // A duplex stream ends with its socket, not with a response.
+                conn.close_without_error();
+                return Forwarded::Closed;
+            }
             None if completed => {
                 return Forwarded::Completed {
                     output: completed_output,
@@ -185,6 +201,7 @@ pub(super) async fn forward<S: Socket>(
         for mut payload in payloads_from_chunk(&chunk) {
             let event_type = str_at(&payload, "type");
             if event_type == "response.created" {
+                response_started = true;
                 completed = false;
                 outputs = OutputItems::default();
                 pending.clear();
@@ -203,7 +220,10 @@ pub(super) async fn forward<S: Socket>(
             }
             record_pending_call_ids(&mut pending, &payload);
 
-            if event_type == EVENT_ERROR {
+            // On a duplex stream the executor closes the connection: an
+            // error event after a response has started is one the client
+            // can recover from.
+            if event_type == EVENT_ERROR && !(response_started && options.duplex) {
                 let error = error_message_from_payload(&payload);
                 tracing::debug!(status = error.status, error = %error.text, "responses websocket: error event");
                 request_log::record_api_error(options.context, &error);

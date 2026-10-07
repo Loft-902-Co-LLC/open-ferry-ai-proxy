@@ -15,6 +15,11 @@
 //! A turn goes over HTTP with the whole transcript, unless the credential
 //! the session is pinned to holds the conversation on its own upstream
 //! WebSocket, when the client's requests go on as they are.
+//!
+//! With response steering on, each call also gets the client's messages
+//! and a check that its credential is still enabled. A Codex turn on the
+//! upstream WebSocket then reads the messages itself and lasts as long as
+//! the socket.
 
 use std::collections::HashMap;
 use std::ops::ControlFlow;
@@ -23,7 +28,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use bytes::Bytes;
 use http::HeaderMap;
 use open_ferry_core::exec::{
-    Dispatcher, ExecError, Format, ProviderId, WebsocketAuth, WebsocketSupport,
+    AuthCheck, Dispatcher, ExecError, Format, ProviderId, WebsocketAuth, WebsocketSupport,
 };
 use open_ferry_core::models::ModelCatalog;
 use open_ferry_translate::go;
@@ -159,11 +164,18 @@ struct Session<S> {
 pub(super) async fn run<S: Socket>(state: AppState, client: ClientRequest, socket: S) {
     let dispatcher = state.dispatcher_arc();
     let key = session_key(&client.headers);
+    // With response steering on, the socket is read all the time, so a
+    // Codex call can take the client's messages while its stream runs.
+    let conn = if state.settings().config.codex_response_steering {
+        Conn::split(socket)
+    } else {
+        Conn::new(socket)
+    };
     let mut session = Session {
         state,
         client,
         dispatcher,
-        conn: Conn::new(socket),
+        conn,
         id: Uuid::now_v7().to_string(),
         key,
         last_request: Vec::new(),
@@ -356,6 +368,7 @@ impl<S: Socket> Session<S> {
             self.pinned.clone()
         };
         let selected: Arc<Mutex<Vec<String>>> = Arc::default();
+        let input = self.conn.input();
         let started = match Call::new(
             &self.state,
             &self.client,
@@ -366,6 +379,18 @@ impl<S: Socket> Session<S> {
             true,
         ) {
             Ok(mut call) => {
+                if let Some(input) = &input {
+                    // A credential that is gone or disabled sends no more
+                    // of the client's messages on its connection.
+                    let dispatcher = Arc::clone(&self.dispatcher);
+                    let check: AuthCheck = Arc::new(move |auth_id: &str| {
+                        dispatcher
+                            .websocket_support(&[], "", Some(auth_id))
+                            .auth
+                            .is_some_and(|auth| !auth.disabled)
+                    });
+                    call.options.websocket_input = Some(input.clone().with_auth_check(check));
+                }
                 let metadata = &mut call.options.metadata;
                 call.options.downstream_websocket = true;
                 metadata.execution_session_id = Some(self.id.clone());
@@ -390,10 +415,12 @@ impl<S: Socket> Session<S> {
         let mut selection_observed = false;
         let mut pinned_attempted = false;
         let mut preserve_output = false;
+        let mut duplex = false;
         let selected =
             std::mem::take(&mut *selected.lock().unwrap_or_else(PoisonError::into_inner));
         for auth_id in &selected {
             preserve_output = false;
+            duplex = false;
             let auth_id = auth_id.trim();
             if auth_id.is_empty() {
                 continue;
@@ -409,7 +436,11 @@ impl<S: Socket> Session<S> {
             } else {
                 Upstream::Http
             };
-            preserve_output = lite && auth.provider.trim().eq_ignore_ascii_case("codex");
+            let codex = auth.provider.trim().eq_ignore_ascii_case("codex");
+            preserve_output = lite && codex;
+            // Only a Codex credential on its upstream WebSocket steers; any
+            // other turn of the session ends as usual.
+            duplex = input.is_some() && attempted == Upstream::Websocket && codex;
         }
         if !selection_observed {
             attempted = Upstream::Http;
@@ -434,6 +465,7 @@ impl<S: Socket> Session<S> {
                 suppress_error: &suppress_error,
                 keepalive,
                 context: self.client.context.as_deref(),
+                duplex,
             },
         )
         .await;
