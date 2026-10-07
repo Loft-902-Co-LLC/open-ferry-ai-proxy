@@ -1714,6 +1714,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "open-ferry-fake-claude-cli"
+version = "0.0.0"
+dependencies = [
+ "bytes",
+ "chrono",
+ "futures-util",
+ "open-ferry-core",
+ "open-ferry-providers",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "open-ferry-management"
 version = "0.0.0"
 dependencies = [

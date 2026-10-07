@@ -1,0 +1,24 @@
+[package]
+name = "open-ferry-fake-claude-cli"
+description = "A stand-in for Claude Code, for open-ferry's claude-cli tests; it reaches nothing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "fake-claude"
+path = "src/main.rs"
+
+[dependencies]
+serde_json.workspace = true
+
+[dev-dependencies]
+bytes = "1.12.1"
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+futures-util = "0.3.34"
+open-ferry-core.workspace = true
+open-ferry-providers.workspace = true
+tempfile = "3.27.0"
+tokio = { version = "1.53.1", features = ["full"] }
