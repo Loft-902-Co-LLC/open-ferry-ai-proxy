@@ -8,30 +8,38 @@ open-ferry is a local proxy, a Rust port of [CLIProxyAPI](https://github.com/rou
 
 **With the first release**, the install scripts and the container image:
 
-- **Linux and macOS:** `install.sh`, a POSIX shell script. It downloads the latest release for the platform, checks it against the release's `SHA256SUMS` (and its attestation, when the GitHub CLI `gh` is installed), and installs `open-ferry` to `~/.local/bin/open-ferry`. Read it before running it:
+- **Linux and macOS:** `install.sh`, a POSIX shell script attached to each release. It downloads the release's archive for the platform (on Linux, the static musl build on Alpine and on systems with no glibc or one older than 2.31), refuses it unless it matches the release's `SHA256SUMS` and, when the GitHub CLI `gh` is installed, its build provenance attestation, and installs `~/.local/bin/open-ferry`. To read it before running it:
 
   ```sh
-  curl -fsSLO https://raw.githubusercontent.com/Loft-902-Co-LLC/open-ferry-ai-proxy/main/install.sh
+  curl -fsSLO https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases/latest/download/install.sh
   sh install.sh
   ```
 
-- **Windows:** `install.ps1`, for Windows PowerShell 5.1 and PowerShell 7. It installs `%LOCALAPPDATA%\Programs\open-ferry\open-ferry.exe`:
+  Or in one line: `curl -fsSL https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases/latest/download/install.sh | sh`.
+
+- **Windows:** `install.ps1`, for Windows PowerShell 5.1 and PowerShell 7, attached to each release too. It installs `%LOCALAPPDATA%\Programs\open-ferry\open-ferry.exe`. Windows PowerShell runs no script files by default, so run the downloaded one with `-ExecutionPolicy Bypass`:
 
   ```powershell
-  Invoke-WebRequest https://raw.githubusercontent.com/Loft-902-Co-LLC/open-ferry-ai-proxy/main/install.ps1 -OutFile install.ps1
-  .\install.ps1
+  irm https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases/latest/download/install.ps1 -OutFile install.ps1
+  powershell -ExecutionPolicy Bypass -File .\install.ps1
   ```
 
-  Neither script edits your `PATH` or shell profile unless asked to; each says how to add the directory when it isn't on the `PATH`. When there is no config at the default path below, each runs `open-ferry init`; when there is one, it leaves it alone.
+  Or in one line: `irm https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases/latest/download/install.ps1 | iex`.
 
-- **Container:** the image `ghcr.io/loft-902-co-llc/open-ferry` (tags: the version, and `latest`), for `linux/amd64` and `linux/arm64`. It keeps CLIProxyAPI's paths, so a Compose file for CLIProxyAPI switches by changing the image name: the config at `/CLIProxyAPI/config.yaml`, the auth directory at `/root/.cli-proxy-api`, logs in `/CLIProxyAPI/logs`, port 8317. In the container the server listens on every interface, as it must.
+  Neither script changes your `PATH` or shell profile; each says how to add the directory when it isn't on the `PATH`. When there is no config at the default path below, each runs `open-ferry init`, which prints the new keys once; when there is one, it leaves it alone. Each ends by printing the commands to start open-ferry, run it at login, open the dashboard and check the setup. Their options (`--version`, `--bin-dir`, `--config`, `--no-attestation`; `-Version`, `-InstallDir`, `-ConfigPath`, `-NoAttestation`) are in the [README](../README.md#install-script).
+
+- **Container:** the image `ghcr.io/loft-902-co-llc/open-ferry` (tags: the version, and `latest` unless it's a pre-release), for `linux/amd64` and `linux/arm64`. It keeps CLIProxyAPI's paths, so a Compose file for CLIProxyAPI switches by changing the image name: the config at `/CLIProxyAPI/config.yaml`, the auth directory at `/root/.cli-proxy-api`, logs in `/CLIProxyAPI/logs`, port 8317. In the container the server must listen on every interface, so write its config with `-host ""`, then start it:
 
   ```sh
+  docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/out" \
+    ghcr.io/loft-902-co-llc/open-ferry:latest open-ferry init -config /out/config.yaml -host ""
   docker run -d --name open-ferry -p 127.0.0.1:8317:8317 \
     -v "$PWD/config.yaml:/CLIProxyAPI/config.yaml" \
-    -v "$HOME/.cli-proxy-api:/root/.cli-proxy-api" \
+    -v "$PWD/auths:/root/.cli-proxy-api" \
     ghcr.io/loft-902-co-llc/open-ferry:latest
   ```
+
+  Requests from the host reach the container through Docker's gateway, not its loopback, so the dashboard and the management API answer them only with `management.allow-remote: true` in the config. The repository's [`docker-compose.yml`](../docker-compose.yml) runs the same container with Compose, and the [README](../README.md#run-it-in-a-container) says how to sign in from a container.
 
 **Until then**, build from source, with Rust and a C compiler ([README](../README.md#build-from-source)):
 
@@ -59,7 +67,7 @@ The server reads the config given with `-config`, else `config.yaml` in its work
 open-ferry init [-config PATH] [-host HOST] [-port N] [-force]
 ```
 
-Writes a new config, without `-config` at the default path above, from the template built into the binary, with a new client key, a new management key, and `host: 127.0.0.1` (unless `-host` is given). It refuses to replace an existing file unless `-force` is given, and then keeps the old one as `config.yaml.bak`. It prints the config's path, both keys, the dashboard's address and how to start the proxy.
+Writes a new config, without `-config` at the default path above, from the template built into the binary, with a new client key, a new management key, and `server.host` set to 127.0.0.1 (or what `-host` gives). It refuses to replace an existing file unless `-force` is given, and then keeps the old one as `config.yaml.bak`. It prints the config's path, both keys, the dashboard's address and how to start the proxy.
 
 The keys are printed once. Keep them out of logs, commits and transcripts: the client key is what clients send, and the management key opens the management API and the dashboard. Both are in the config file, as written.
 
