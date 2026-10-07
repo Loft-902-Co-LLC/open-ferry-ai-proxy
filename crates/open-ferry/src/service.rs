@@ -2,7 +2,10 @@
 // Shutdown), internal/cmd/run.go (StartService and StartServiceBackground,
 // with their local management password), service_auth.go (prepareCoreAuthForModelRegistration,
 // completeModelRegistrationForAuth and applyCoreAuthRemoval),
-// service_config.go (applyConfigRuntime and registerConfigAPIKeyAuths),
+// service_config.go (applyConfigRuntime, registerConfigAPIKeyAuths and the
+// catalog sources of commitConfig), service_plugins.go
+// (registerModelRefreshCallback), service_lifecycle.go
+// (startModelCatalogUpdaters),
 // service_executors.go (registerAvailableExecutors,
 // registerExecutorForAuth and registerOpenAICompatProviderExecutor),
 // builder.go (runtimeAuthSyncHook), the
@@ -34,6 +37,12 @@
 //!   file that is gone by the time it is applied unregisters its
 //!   credential, so a credential the management API deleted isn't brought
 //!   back by an event from before.
+//!
+//! The model catalogs are read from the files the config's `models`
+//! section names before the credentials are registered, and followed while
+//! the service runs (see [`CatalogRuntime`]): a reload that changes a
+//! source reads it, and when a catalog changes a provider's models, the
+//! models of that provider's enabled credentials are registered again.
 //!
 //! A credential the management API saves, changes or removes is applied
 //! by the same loop at once, as upstream's `runtimeAuthSyncHook` applies
@@ -120,7 +129,7 @@
 //!   the discovery advertiser, the WebSocket gateway, plugins and Home
 //!   aren't ported.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::io;
 use std::net::{Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -140,7 +149,7 @@ use open_ferry_core::auth::{Auth, FileStore, Status};
 use open_ferry_core::config::{AuthFile, Config, ConfigWatcher, WatchEvent, next_revision};
 use open_ferry_core::manager::{Manager, Settings};
 use open_ferry_core::observe::Observability;
-use open_ferry_core::registry::{ModelRegistry, RegistrationRules};
+use open_ferry_core::registry::{CatalogRuntime, ModelRegistry, RegistrationRules};
 use open_ferry_dashboard::Ledger;
 use open_ferry_management::{
     ConfigReload, CredentialSync, FileConfigWriter, ManagementState, ReloadFuture, SyncError,
@@ -153,6 +162,7 @@ use open_ferry_providers::meta::MetaExecutor;
 use open_ferry_providers::openai_compat::OpenAiCompatExecutor;
 use open_ferry_providers::xai::XaiExecutor;
 use open_ferry_server::{AppState, ServerConfig, router_with};
+use open_ferry_translate::go;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -227,6 +237,7 @@ pub async fn run(
         .clone()
         .with_local_password(&options.local_password);
     service.register_executors();
+    service.start_catalogs();
     service.load_file_auths();
     service.sync_config_auths();
     service.reconfigure_observability(None);
@@ -306,6 +317,7 @@ pub async fn run(
                 break;
             }
             result = &mut server => {
+                service.stop_catalogs();
                 service.manager.stop_auto_refresh();
                 service.management.shutdown().await;
                 stop_ledger(&service.ledger).await;
@@ -323,6 +335,7 @@ pub async fn run(
                 }
             },
             Some(request) = service.sync_requests.recv() => service.apply_sync(request),
+            Some(changed) = service.catalog_changes.recv() => service.refresh_catalog_models(&changed),
             Some(applied) = service.reload_requests.recv() => {
                 let watching = service.request_reload(applied, &config_path);
                 service.follow(watching, &mut events);
@@ -336,10 +349,11 @@ pub async fn run(
 
 type Server = tokio::task::JoinHandle<io::Result<()>>;
 
-/// Stops refresh, the management API's OAuth logins and the server, giving
-/// open requests up to [`SHUTDOWN_TIMEOUT`], then the usage ledger, and
-/// saves the cooldowns.
+/// Stops following the catalog files, refresh, the management API's OAuth
+/// logins and the server, giving open requests up to [`SHUTDOWN_TIMEOUT`],
+/// then the usage ledger, and saves the cooldowns.
 async fn shut_down(service: &Service, stop: &watch::Sender<bool>, mut server: Server) -> ExitCode {
+    service.stop_catalogs();
     service.manager.stop_auto_refresh();
     service.management.shutdown().await;
     let _ = stop.send(true);
@@ -523,6 +537,12 @@ struct Service {
     pending_reloads: VecDeque<(u64, oneshot::Sender<()>)>,
     /// The ticket of the last reload asked for.
     last_reload: u64,
+    /// Reads the model catalogs from their sources.
+    catalogs: CatalogRuntime,
+    /// Where the catalogs say which providers' models changed.
+    catalog_sender: mpsc::UnboundedSender<Vec<String>>,
+    /// The providers whose catalog models changed, waiting for the loop.
+    catalog_changes: mpsc::UnboundedReceiver<Vec<String>>,
 }
 
 impl Service {
@@ -550,6 +570,7 @@ impl Service {
         .with_observability(observability.clone());
         let (requests, sync_requests) = mpsc::channel(SYNC_QUEUE);
         let (reloads, reload_requests) = mpsc::channel(RELOAD_QUEUE);
+        let (catalog_sender, catalog_changes) = mpsc::unbounded_channel();
         let management = ManagementState::new(
             Arc::clone(&config),
             manager.clone(),
@@ -582,7 +603,69 @@ impl Service {
             reload_requests,
             pending_reloads: VecDeque::new(),
             last_reload: 0,
+            catalogs: CatalogRuntime::global().clone(),
+            catalog_sender,
+            catalog_changes,
         }
+    }
+
+    /// Reads the model catalogs from the sources the config names, and
+    /// follows them, telling the loop when a catalog changes a provider's
+    /// models (upstream's `startModelCatalogUpdaters` and
+    /// `registerModelRefreshCallback`).
+    fn start_catalogs(&self) {
+        let changes = self.catalog_sender.clone();
+        self.catalogs.set_listener(Some(Arc::new(move |providers| {
+            let _ = changes.send(providers);
+        })));
+        self.catalogs.start(&self.config.models);
+    }
+
+    /// Stops following the catalog sources.
+    fn stop_catalogs(&self) {
+        self.catalogs.stop();
+        self.catalogs.set_listener(None);
+    }
+
+    /// Registers again the models of each enabled credential of a provider
+    /// in `changed`, whose catalog models changed (the callback of
+    /// upstream's `registerModelRefreshCallback`).
+    fn refresh_catalog_models(&self, changed: &[String]) {
+        let mut providers = HashSet::new();
+        for provider in changed {
+            let name = go::to_lower(provider.trim());
+            if name.is_empty() {
+                continue;
+            }
+            if matches!(name.as_str(), "kimi" | "kimi-ai" | "kimi.ai" | "kimi.com") {
+                providers.extend(["kimi", "kimi-ai", "kimi.ai", "kimi.com"].map(str::to_owned));
+            }
+            providers.insert(name);
+        }
+        let affected: Vec<Arc<Auth>> = self
+            .manager
+            .list()
+            .into_iter()
+            .filter(|auth| {
+                !auth.id.is_empty()
+                    && !auth.disabled
+                    && providers.contains(&go::to_lower(auth.provider.trim()))
+            })
+            .collect();
+        if affected.is_empty() {
+            return;
+        }
+        let rules = self.rules();
+        let catalog = self.catalogs.general();
+        for auth in &affected {
+            self.registry.register_auth_with(auth, &rules, &catalog);
+            self.manager.reconcile_registry_model_states(&auth.id);
+        }
+        tracing::info!(
+            "re-registered models for {} auth(s) due to model catalog changes: [{}]",
+            affected.len(),
+            changed.join(" ")
+        );
     }
 
     /// Applies the config to the logs, the usage statistics and the
@@ -817,7 +900,8 @@ impl Service {
                 auth.generation,
                 existing.generation
             );
-            self.registry.register_auth(existing, rules);
+            self.registry
+                .register_auth_with(existing, rules, &self.catalogs.general());
             self.manager.reconcile_registry_model_states(&existing.id);
             return true;
         }
@@ -854,7 +938,8 @@ impl Service {
                 }
             }
         };
-        self.registry.register_auth(&auth, rules);
+        self.registry
+            .register_auth_with(&auth, rules, &self.catalogs.general());
         self.manager.reconcile_registry_model_states(&auth.id);
         true
     }
@@ -1109,6 +1194,8 @@ impl Service {
         self.manager.set_settings(Settings::from(&*config));
         self.state.set_config(ServerConfig::from(&*config));
         self.management.set_config(Arc::clone(&config));
+        // Before any credential is registered, so they get its models.
+        self.catalogs.update(&config.models);
         // What the executors do to Codex clients' requests before
         // translating them.
         let codex_clients_changed = previous.client.codex.optimize_multi_agent_v2
@@ -1173,8 +1260,9 @@ impl Service {
         self.prune_compat_executors();
         self.apply_config_to_file_auths();
         let rules = self.rules();
+        let catalog = self.catalogs.general();
         for auth in self.manager.list() {
-            self.registry.register_auth(&auth, &rules);
+            self.registry.register_auth_with(&auth, &rules, &catalog);
             self.manager.reconcile_registry_model_states(&auth.id);
         }
         self.reconfigure_observability(Some(&previous));
@@ -1394,6 +1482,88 @@ mod tests {
             format!(r#"{{"type":"codex","email":"a@example.com","access_token":"fake"{extra}}}"#);
         std::fs::write(&path, body).unwrap();
         path
+    }
+
+    /// A catalog file in `dir`: the built-in general catalog with the Claude
+    /// model `model` added.
+    fn catalog_file(dir: &Path, name: &str, model: &str) -> String {
+        let path = dir.join(name);
+        std::fs::write(&path, catalog_with(model)).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    /// The built-in general catalog with the Claude model `model` added.
+    fn catalog_with(model: &str) -> Vec<u8> {
+        let built_in = open_ferry_translate::models::embedded_catalog_json();
+        let mut root: serde_json::Value = serde_json::from_str(built_in).unwrap();
+        root["claude"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({ "id": model }));
+        serde_json::to_vec(&root).unwrap()
+    }
+
+    /// Whether any credential serves `model`.
+    fn serves(service: &Service, model: &str) -> bool {
+        service
+            .manager
+            .list()
+            .iter()
+            .any(|auth| model_ids(service, &auth.id).iter().any(|id| id == model))
+    }
+
+    /// Applies the catalog changes the service is told of until a
+    /// credential serves `model`.
+    async fn await_catalog_model(service: &mut Service, model: &str) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !serves(service, model) {
+            let changed = tokio::time::timeout_at(deadline, service.catalog_changes.recv())
+                .await
+                .unwrap_or_else(|_| panic!("no credential came to serve {model}"))
+                .unwrap();
+            service.refresh_catalog_models(&changed);
+        }
+    }
+
+    // Ported from sdk/cliproxy/service_catalogs_test.go
+    // (TestServiceCatalogStartupAndConfigReload), with the general catalog
+    // in place of Devin's, which isn't ported, and a Claude API key whose
+    // models come from it: the file the config names is read at start,
+    // before the credentials are registered; a reload naming another file
+    // reads that one; a change to the file is read and the credential's
+    // models registered again; and after a stop, a new start reads the same
+    // source again.
+    #[tokio::test]
+    async fn catalog_files_are_read_at_start_on_reload_and_when_they_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = "claude-api-key:\n  - api-key: dummy-claude-key\n";
+        let models = |path: &str| format!("models:\n  catalog: '{path}'\n{key}");
+        let first = catalog_file(dir.path(), "first.json", "claude-from-first-file");
+        let mut service = service(dir.path(), &models(&first));
+        service.catalogs = CatalogRuntime::new(
+            Arc::new(open_ferry_core::registry::CatalogStore::new()),
+            Duration::from_millis(10),
+        );
+        service.start_catalogs();
+        service.sync_config_auths();
+        assert!(serves(&service, "claude-from-first-file"));
+
+        let second = catalog_file(dir.path(), "second.json", "claude-from-second-file");
+        let config = format!("auth-dir: '{}'\n{}", dir.path().display(), models(&second));
+        let config = Arc::new(Config::parse(config).unwrap());
+        service.apply_config(config, &dir.path().join("config.yaml"));
+        assert!(serves(&service, "claude-from-second-file"));
+        assert!(!serves(&service, "claude-from-first-file"));
+
+        std::fs::write(&second, catalog_with("claude-from-the-changed-file")).unwrap();
+        await_catalog_model(&mut service, "claude-from-the-changed-file").await;
+        assert!(!serves(&service, "claude-from-second-file"));
+
+        service.stop_catalogs();
+        std::fs::write(&second, catalog_with("claude-after-a-restart")).unwrap();
+        service.start_catalogs();
+        await_catalog_model(&mut service, "claude-after-a-restart").await;
+        service.stop_catalogs();
     }
 
     #[tokio::test]

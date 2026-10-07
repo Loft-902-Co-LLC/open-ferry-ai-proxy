@@ -439,7 +439,17 @@ impl ModelRegistry {
     /// Registers the models `auth` serves under `rules`, or unregisters it if
     /// it is disabled or serves none (upstream's `registerModelsForAuth`).
     pub fn register_auth(&self, auth: &Auth, rules: &RegistrationRules) {
-        match auth_models(auth, rules) {
+        self.register_auth_with(auth, rules, &StaticCatalog::current());
+    }
+
+    /// [`ModelRegistry::register_auth`], with the models of `catalog`.
+    pub fn register_auth_with(
+        &self,
+        auth: &Auth,
+        rules: &RegistrationRules,
+        catalog: &StaticCatalog,
+    ) {
+        match auth_models_with(auth, rules, catalog) {
             AuthModels::Ignore => {}
             AuthModels::Unregister => self.unregister_client(&auth.id),
             AuthModels::Register { provider, models } => {

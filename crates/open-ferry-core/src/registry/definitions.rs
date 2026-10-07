@@ -9,7 +9,8 @@
 //! models each provider serves, and the image models every Codex plan adds.
 //!
 //! The catalog in use is [`StaticCatalog::current`]: the built-in one, or
-//! the last valid one published to [`super::CatalogStore`].
+//! the last valid one read from the file `models.catalog` names (see
+//! [`super::catalog_sources`]), published to [`super::CatalogStore`].
 //!
 //! The catalog lists Codex models by ChatGPT plan; [`CodexPlan`] picks one.
 //!

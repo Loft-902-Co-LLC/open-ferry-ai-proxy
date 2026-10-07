@@ -7,7 +7,9 @@
 //!
 //! Each source is empty, which keeps the built-in catalog, an absolute path
 //! to a local file, or an http(s) URL. [`CatalogSources::validate`] refuses
-//! anything else, and a config holding it doesn't load. A path is absolute
+//! anything else, and a config holding it doesn't load. The service reads
+//! the files and follows them, and fetches no URL (see
+//! [`crate::registry::catalog_sources`]). A path is absolute
 //! as Go's `filepath.IsAbs` has it on the same platform: on Windows it needs
 //! a drive or a share (`C:/models.json`), elsewhere a leading `/`.
 //!

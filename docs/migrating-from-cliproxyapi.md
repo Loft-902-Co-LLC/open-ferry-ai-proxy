@@ -22,7 +22,7 @@ open-ferry reads CLIProxyAPI's config and auth directory as they are, so for mos
 
 **What differs:**
 - **Loading the config never writes it.** CLIProxyAPI replaces a plain `secret-key` with its bcrypt hash in the file; open-ferry leaves the file alone and compares the plain key as written. A file that already holds a hash works too. The file is written only when you save a change through the management API or the dashboard. See [the foundation](../UPSTREAM.md#the-foundation).
-- **The `models` catalog sources are ignored** (`catalog`, `codex-catalog`, `devin-catalog`). The model catalogs built into the binary are always used, so `-local-model` changes nothing.
+- **The `models` catalog sources are files** (`catalog`, `codex-catalog`). An absolute path is read at start and again when the file changes; an empty source is the catalog built into the binary. No catalog is downloaded: a URL source logs a warning and the catalog in use stays, and `-local-model` changes nothing. `devin-catalog` is ignored.
 - **Settings for features open-ferry doesn't have are read and ignored**:
   - session affinity (`routing.session-affinity` and its options);
   - the per-credential limits `credential-concurrency` and `credential-in-flight`;
@@ -45,7 +45,7 @@ The binary is `open-ferry` (`open-ferry.exe` on Windows), not `cli-proxy-api`, s
 |---|---|
 | `-config`, `-no-browser`, `-oauth-callback-port` | As before |
 | `-codex-login`, `-codex-device-login`, `-claude-login` | As before |
-| `-local-model` | Accepted, but only logs a line: the built-in catalogs are always used |
+| `-local-model` | Accepted, but only logs a line: no catalog is downloaded, so the built-in catalogs are used unless `models` names a catalog file |
 | `-antigravity-login`, `-kimi-login`, `-kimi-ai-login`, `-devin-login` | Not available: those providers aren't supported (see [below](#providers-and-sign-ins)) |
 | `-xai-login`, `-meta-login` | Not available: use an API key (see [below](#providers-and-sign-ins)) |
 | `-vertex-import`, `-vertex-import-prefix` | Not available: use the management API's `vertex/import` route, or a `vertex-api-key` entry in the config |

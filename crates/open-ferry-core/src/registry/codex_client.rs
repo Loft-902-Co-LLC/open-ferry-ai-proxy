@@ -13,7 +13,8 @@
 //! models the catalog doesn't list.
 //!
 //! The catalog in use is [`CodexClientCatalog::current`]: the built-in one,
-//! or the last valid one published to [`super::CatalogStore`].
+//! or the last valid one read from the file `models.codex-catalog` names
+//! (see [`super::catalog_sources`]), published to [`super::CatalogStore`].
 //!
 //! The catalog is checked as upstream checks it before use: it needs a
 //! default template, unique slugs, and the fields Codex can't do without.

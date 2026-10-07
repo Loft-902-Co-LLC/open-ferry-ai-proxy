@@ -14,8 +14,9 @@
 //!
 //! The catalog in use is [`ModelCatalog::current`]: the built-in one, until
 //! open-ferry-core's `registry::CatalogStore` publishes another, made from
-//! its static catalog. Readers take it per request, so a new catalog applies
-//! from the next request on.
+//! the static catalog it read from the file `models.catalog` names, as
+//! upstream's translators read the catalog its updater loaded. Readers take
+//! it per request, so a new catalog applies from the next request on.
 //!
 //! Deviations from upstream:
 //! - Only the static catalog is searched, not the models of configured

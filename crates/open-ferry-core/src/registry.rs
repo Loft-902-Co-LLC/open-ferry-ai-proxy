@@ -14,7 +14,8 @@
 //! [`definitions`] holds the static model catalog, [`registration`] works
 //! out which models a credential serves, and [`codex_client`] holds the
 //! catalog Codex clients' model list is made from. [`CatalogStore`] holds
-//! the catalogs in use, which start as the built-in ones.
+//! the catalogs in use, which start as the built-in ones, and
+//! [`catalog_sources`] reads them from the files the config names.
 //!
 //! Deviations from upstream:
 //! - There is no global registry; callers share a [`ModelRegistry`].
@@ -38,6 +39,7 @@
 //!   policy.
 //! - A registration's `LastUpdated` time isn't kept; nothing reads it.
 
+pub mod catalog_sources;
 mod catalog_store;
 pub mod codex_client;
 pub mod definitions;
@@ -61,6 +63,7 @@ use crate::auth::equal_fold;
 use crate::exec::ProviderId;
 use crate::models::{ModelCatalog, ModelInfo};
 
+pub use catalog_sources::CatalogRuntime;
 pub use catalog_store::CatalogStore;
 pub use definitions::{CatalogError, CodexPlan, StaticCatalog};
 pub use registration::{

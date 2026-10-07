@@ -15,11 +15,12 @@
 //! Deviations from upstream:
 //! - The cloud-deploy, home, Postgres, object-store and git-store modes,
 //!   plugins and the other providers' logins aren't ported.
-//! - Remote model catalog updates and the catalog sources of the `models`
-//!   section (`catalog`, `codex-catalog`, `devin-catalog`) aren't ported, so
-//!   `-local-model` changes nothing but a log line: the built-in catalogs are
-//!   always the ones used. Its usage and log line say so, where upstream's
-//!   say an explicit catalog source still overrides the embedded catalogs.
+//! - No model catalog is downloaded: a catalog source of the `models`
+//!   section is a file, or empty for the built-in catalog, with or without
+//!   `-local-model` (see `open_ferry_core::registry::catalog_sources`). So
+//!   `-local-model` changes nothing but a log line. Its usage and log line
+//!   say so, where upstream's say that an explicit catalog source still
+//!   overrides the embedded catalogs.
 //! - A working directory that can't be read, a config that won't load, or
 //!   an auth directory that won't resolve exits with 1; upstream logs it and
 //!   exits with 0.
@@ -157,7 +158,7 @@ async fn run(flags: Flags, log_level: logging::LogLevel, working_dir: PathBuf) -
     }
     if flags.local_model && (!flags.tui || flags.standalone) {
         tracing::info!(
-            "Local model mode: using embedded model catalogs, remote model updates disabled"
+            "Local model mode: using embedded catalogs unless a catalog file is configured, as without it: no catalog is downloaded"
         );
     }
     if flags.tui {

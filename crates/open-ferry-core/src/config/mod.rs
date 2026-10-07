@@ -42,7 +42,8 @@
 //! `fingerprint-profile`), `openai-compatibility`, `vertex-api-key`,
 //! `oauth-excluded-models`, `oauth-model-alias`,
 //! `oauth-request-scoped-errors`, `oauth-settings`, `payload` and `models`
-//! (the model catalog sources, checked as upstream checks them), with
+//! (the model catalog sources, checked as upstream checks them, and read by
+//! [`crate::registry::catalog_sources`]), with
 //! their v8 spellings (the key lists as `api-keys.gemini`,
 //! `api-keys.vertex` and so on).
 //!

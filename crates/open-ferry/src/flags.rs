@@ -38,7 +38,8 @@ pub struct Flags {
     /// The port for the login's callback server, or 0 for the provider's
     /// (`-oauth-callback-port`).
     pub oauth_callback_port: i64,
-    /// Use only the built-in model catalog (`-local-model`).
+    /// Use the built-in model catalogs unless the config names a catalog
+    /// file (`-local-model`), as without it.
     pub local_model: bool,
     /// The local management password, or empty (`-password`).
     pub password: Password,
@@ -106,7 +107,7 @@ const DEFINITIONS: [Definition; 11] = [
     },
     Definition {
         name: "local-model",
-        usage: "Use the embedded model catalogs only (remote catalog updates and catalog sources aren't ported, so this is always so)",
+        usage: "Use embedded model catalogs unless models.catalog or models.codex-catalog names a file (no catalog is downloaded, so this is always so)",
         kind: Kind::Bool(|flags| &mut flags.local_model),
     },
     Definition {

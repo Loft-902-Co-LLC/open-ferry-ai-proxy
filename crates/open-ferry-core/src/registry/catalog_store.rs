@@ -32,7 +32,8 @@ use super::definitions::{CatalogError, StaticCatalog};
 use crate::multipart::lossy;
 
 /// The process's catalogs.
-static GLOBAL: LazyLock<CatalogStore> = LazyLock::new(|| CatalogStore::built_in(true));
+static GLOBAL: LazyLock<Arc<CatalogStore>> =
+    LazyLock::new(|| Arc::new(CatalogStore::built_in(true)));
 
 /// The general and Codex client model catalogs in use.
 pub struct CatalogStore {
@@ -60,6 +61,11 @@ impl CatalogStore {
     /// [`CodexClientCatalog::current`] and the translators read.
     pub fn global() -> &'static Self {
         &GLOBAL
+    }
+
+    /// The process's catalogs, shared.
+    pub(crate) fn global_shared() -> Arc<Self> {
+        Arc::clone(&GLOBAL)
     }
 
     /// Catalogs of their own, starting as the built-in ones. Publishing to
