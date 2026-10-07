@@ -44,6 +44,7 @@ mod service;
 mod tls;
 mod tui;
 
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -87,6 +88,18 @@ fn main() -> ExitCode {
         .as_ref()
         .ok()
         .map(|dir| load_dotenv(&dir.join(".env")));
+    serve(flags, working_dir, dotenv, service::shutdown_signal())
+}
+
+/// Logs in, runs the TUI or serves, as `flags` ask, a server until `stop`
+/// resolves. `working_dir` and `dotenv` are what was found, and loaded,
+/// before any thread started.
+fn serve(
+    flags: Flags,
+    working_dir: io::Result<PathBuf>,
+    dotenv: Option<Result<(), dotenv::Error>>,
+    stop: impl Future<Output = ()>,
+) -> ExitCode {
     let log_level = logging::init();
     let file_log = log_level.file_log().clone();
     let working_dir = match working_dir {
@@ -106,7 +119,7 @@ fn main() -> ExitCode {
         .enable_all()
         .build()
     {
-        Ok(runtime) => runtime.block_on(run(flags, log_level, working_dir)),
+        Ok(runtime) => runtime.block_on(run(flags, log_level, working_dir, stop)),
         Err(error) => {
             tracing::error!("failed to start the async runtime: {error}");
             ExitCode::FAILURE
@@ -132,7 +145,12 @@ fn load_dotenv(path: &Path) -> Result<(), dotenv::Error> {
     Ok(())
 }
 
-async fn run(flags: Flags, log_level: logging::LogLevel, working_dir: PathBuf) -> ExitCode {
+async fn run(
+    flags: Flags,
+    log_level: logging::LogLevel,
+    working_dir: PathBuf,
+    stop: impl Future<Output = ()>,
+) -> ExitCode {
     let config_path = if flags.config.is_empty() {
         working_dir.join("config.yaml")
     } else {
@@ -184,13 +202,5 @@ async fn run(flags: Flags, log_level: logging::LogLevel, working_dir: PathBuf) -
         keep_alive: true,
         announce: true,
     };
-    service::run(
-        config,
-        config_path,
-        auth_dir,
-        log_level,
-        options,
-        service::shutdown_signal(),
-    )
-    .await
+    service::run(config, config_path, auth_dir, log_level, options, stop).await
 }
