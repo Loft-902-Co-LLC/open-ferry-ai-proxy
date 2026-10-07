@@ -22,6 +22,7 @@ Already in place:
 - Each Claude and Codex credential's quota as the provider's last response gave it: the management API lists it, and the dashboard shows how much of each window is used, when it starts over, and which one stopped the account.
 - Codex's response steering on the Responses WebSocket (`upstream.codex.response-steering`, experimental and off by default, as upstream).
 - Session affinity (`routing.session-affinity`, off by default as upstream): a conversation stays on the credential that served it, so its prompt cache stays warm, and moves only when that credential can't serve. Session IDs are only routing keys: none is sent upstream, logged or saved.
+- `claude-cli`, not in CLIProxyAPI: every Claude model on your own Claude subscription, through your own installed Claude Code, which open-ferry runs for each request. Claude Code signs itself in; open-ferry never reads or stores its credentials. See [docs/claude-subscription.md](docs/claude-subscription.md).
 - Model catalogs from files: a catalog file the `models` section names is read at start and again when it changes, so a new model can be added without waiting for a release. Unlike upstream, open-ferry downloads no catalog. Without a file it uses the catalogs built into the binary, which we update by hand when providers release models.
 - Release basics: CI on Linux and Windows, a release workflow that builds binaries for Linux, macOS and Windows, a changelog, and a migration guide for CLIProxyAPI users.
 
