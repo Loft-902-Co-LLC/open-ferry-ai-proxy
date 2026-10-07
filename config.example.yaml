@@ -688,7 +688,7 @@ upstream:
 # claude-cli:
 #   - name: claude-max-1 # required and unique; seeds the credential ID
 #     command: "" # optional: path to claude; empty finds claude on PATH (claude.exe, or claude.cmd from npm, on Windows)
-#     config-dir: "" # optional: CLAUDE_CONFIG_DIR, the Claude Code account to use; empty is Claude Code's default
+#     config-dir: "" # optional: CLAUDE_CONFIG_DIR, the Claude Code account to use; empty uses open-ferry's own CLAUDE_CONFIG_DIR, else Claude Code's default
 #     system-prompt: replace # optional: replace (default) replaces Claude Code's system prompt; append adds to it
 #     max-concurrency: 2 # optional: requests run at once; more wait for a free slot
 #     timeout: 10m # optional: how long one request may run
