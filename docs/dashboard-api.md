@@ -3,7 +3,7 @@
 The dashboard is a web app built into the binary and served at `/dashboard/`. It uses two APIs on its own origin:
 
 - **The management API**, at `/v0/management/` (and `/v8/management/`), exactly as CLIProxyAPI has it: settings, credentials, client keys, sign-ins, logs.
-- **The dashboard API**, described here, at `/open-ferry/api/v1/`, for what CLIProxyAPI has no route for: usage from the usage ledger, request-log search, and client setup. The prefix is open-ferry's own, so the management namespace stays exactly upstream's.
+- **The dashboard API**, described here, at `/open-ferry/api/v1/`, for what CLIProxyAPI has no route for: usage from the usage ledger, request-log search, client setup, and whether a `claude-cli` entry is signed in. The prefix is open-ferry's own, so the management namespace stays exactly upstream's.
 
 This document is the contract between the server and the app. A change to it is announced, and the version in the prefix changes only for a change an existing app can't take.
 
@@ -51,11 +51,13 @@ Every error is a status and a body:
 | 403 | `remote_management_disabled` | The client isn't local and remote management isn't allowed. |
 | 403 | `ip_banned` | Too many failed attempts from this address. The message says how long the ban lasts. |
 | 404 | `management_disabled` | No management key is set, so neither API serves anything. The management API answers an empty 404 then, or, while a local management password turns it on (until the first config reload), 403 `{"error": "remote management key not set"}`. |
-| 404 | `not_found` | No such route, or no such log. |
+| 404 | `not_found` | No such route, no such log, or no such `claude-cli` entry. |
 | 405 | `method_not_allowed` | The route exists, the method doesn't. |
 | 413 | `body_too_large` | The body is over 64 KiB. |
 | 500 | `internal_error` | Something failed on the server; the message says what, without secrets. |
+| 502 | `claude_cli_failed` | A `claude-cli` entry's Claude Code couldn't be run, or its answer wasn't what was expected. |
 | 503 | `ledger_unavailable` | The usage ledger couldn't be opened. `GET /usage/ledger` says why. |
+| 504 | `claude_cli_timeout` | A `claude-cli` entry's Claude Code didn't answer within 30 seconds. |
 
 The management API's own errors keep upstream's shape, `{"error": "<text>"}`.
 
@@ -464,6 +466,24 @@ What the app needs to write ready-made client configs, other than client keys, w
   - **`created`** is when the model came out, in Unix seconds, as the model catalog has it; `null` when the catalog doesn't say, and for a model defined in the config (its `models` lists and `openai-compatibility`), whose registry entry has the time the config was loaded instead.
   - **`chat`** is `false` for a model that isn't a chat model, as far as its details tell: an image or video model (by the list Codex clients hide them by, or one configured with `image: true`), or one whose details list output other than text (Gemini's image models, Imagen) or no `generateContent` among its methods (the embedding models).
   - The app suggests a model from these: for each setup, of the chat models on its route, the latest `created` (a `null` counts as oldest, and of equal dates the first in `id` order wins). Claude Code is offered the newest of Anthropic's models, Codex the newest of OpenAI's, when the route has one; a model counts as theirs by `owned_by`, or by a name starting `claude` or `gpt` after any prefix.
+
+---
+
+## claude-cli
+
+### `GET /open-ferry/api/v1/claude-cli/auth-status?name=<entry>`
+
+Whether the Claude Code of the `claude-cli` entry `name` is signed in, and how. It runs the entry's `claude auth status --json` in the environment the entry's requests run in (its `config-dir` as `CLAUDE_CONFIG_DIR`), so it checks the account those requests use. See [docs/claude-subscription.md](claude-subscription.md).
+
+```json
+{"loggedIn": true, "authMethod": "claude.ai"}
+```
+
+- **`loggedIn`** is whether Claude Code is signed in. When it isn't, the answer is still a `200`, with `false`, even if Claude Code exits with an error.
+- **`authMethod`** is how, in Claude Code's own words; empty when it doesn't say.
+- **Nothing else is passed on.** Claude Code's answer also names the account's email, its organization and its config directory; they are neither returned nor logged.
+- `name` is required, and matched without regard to case or surrounding spaces, as entry names are unique. An entry that isn't in the config is `404 not_found`, and a disabled one is checked all the same.
+- Claude Code may take a few seconds. One that can't be run, or whose answer isn't the JSON expected, is `502 claude_cli_failed`; one that takes over 30 seconds is stopped, and the answer is `504 claude_cli_timeout`.
 
 ---
 

@@ -8,6 +8,7 @@
 //! panel route; the rest are open-ferry's own.
 
 mod api;
+mod claude_cli;
 mod client_setup;
 mod request_logs;
 mod serve;
@@ -175,6 +176,7 @@ impl Dash {
             management,
             ledger,
             assets,
+            claude_cli_root: logs.path().join("claude-cli"),
         };
         Self {
             router: router_from(state.clone()),

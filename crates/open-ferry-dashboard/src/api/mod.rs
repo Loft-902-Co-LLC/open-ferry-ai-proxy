@@ -1,6 +1,6 @@
 //! The dashboard API, under `/open-ferry/api/v1/`, as
 //! `docs/dashboard-api.md` describes it: usage from the ledger, the request
-//! logs, and client setup.
+//! logs, client setup, and whether a `claude-cli` entry is signed in.
 //!
 //! Every route checks access as the management API does, with its code
 //! ([`check_key`]): a key must be set, the request must carry it, from an
@@ -12,6 +12,7 @@
 //! Every answer is JSON with `Cache-Control: no-store`, but a log's
 //! download, which is the log's bytes, also not to be stored.
 
+mod claude_cli;
 mod client_setup;
 mod request_logs;
 mod usage;
@@ -93,6 +94,10 @@ pub(crate) fn routes(state: &DashboardState) -> Router<DashboardState> {
         .route(
             &format!("{PREFIX}/client-setup"),
             route(get(client_setup::client_setup)),
+        )
+        .route(
+            &format!("{PREFIX}/claude-cli/auth-status"),
+            route(get(claude_cli::auth_status_route)),
         );
     api.route("/open-ferry", any(not_found))
         .route("/open-ferry/", any(not_found))

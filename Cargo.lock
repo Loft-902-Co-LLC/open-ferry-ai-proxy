@@ -1699,6 +1699,7 @@ dependencies = [
  "http-body-util",
  "open-ferry-core",
  "open-ferry-management",
+ "open-ferry-providers",
  "open-ferry-server",
  "rand 0.10.3",
  "rusqlite",

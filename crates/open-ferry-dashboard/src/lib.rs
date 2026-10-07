@@ -36,6 +36,8 @@ mod serve;
 #[cfg(test)]
 mod tests;
 
+use std::path::PathBuf;
+
 use axum::Router;
 use axum::middleware;
 use axum::response::Response;
@@ -70,6 +72,7 @@ pub fn router(management: ManagementState, ledger: Ledger) -> Router {
         management,
         ledger,
         assets: Assets::embedded(),
+        claude_cli_root: open_ferry_providers::claude_cli::default_work_root(),
     })
 }
 
@@ -83,6 +86,9 @@ pub(crate) struct DashboardState {
     pub(crate) ledger: Ledger,
     /// The app's files.
     pub(crate) assets: Assets,
+    /// Where `claude-cli` entries keep their working directories, as the
+    /// executor does.
+    pub(crate) claude_cli_root: PathBuf,
 }
 
 /// The router for `state`.
