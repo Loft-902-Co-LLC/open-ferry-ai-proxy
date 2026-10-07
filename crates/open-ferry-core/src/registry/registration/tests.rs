@@ -2265,3 +2265,47 @@ fn rules_carry_openai_compatibility() {
         }]
     );
 }
+
+// Not upstream's: a claude-cli credential serves the catalog's Claude
+// models, or its entry's, less its entry's exclusions, under its prefix;
+// the OAuth exclusions don't apply, and the global registry's provider is
+// claude-cli.
+#[test]
+fn claude_cli_entries_use_their_entry() {
+    use crate::auth::synthesizer::{StableIdGenerator, SynthesisContext, synthesize_config_auths};
+    use chrono::TimeZone;
+
+    let config = Config::parse(
+        "oauth-excluded-models: {claude-cli: [claude-opus-*]}\nclaude-cli:\n  \
+         - name: catalog\n    excluded-models: ['claude-sonnet-*']\n  \
+         - name: listed\n    prefix: max\n    models: [{name: claude-opus-4-6, alias: opus}]\n",
+    )
+    .expect("config");
+    let rules = RegistrationRules::from(&config);
+    let ctx = SynthesisContext::new("", chrono::Utc.timestamp_opt(100, 0).unwrap());
+    let auths =
+        synthesize_config_auths(&config, &ctx, &mut StableIdGenerator::new()).expect("auths");
+    let [catalog, listed] = auths.as_slice() else {
+        panic!("{auths:?}");
+    };
+
+    let got = id_set(&registered(catalog, &rules));
+    assert!(got.contains("claude-opus-4-6"), "{got:?}");
+    assert!(got.contains("claude-haiku-4-5-20251001"), "{got:?}");
+    assert!(
+        !got.iter().any(|id| id.starts_with("claude-sonnet-")),
+        "{got:?}"
+    );
+    assert_eq!(
+        auth_models(catalog, &rules),
+        AuthModels::Register {
+            provider: "claude-cli".to_owned(),
+            models: registered(catalog, &rules),
+        }
+    );
+
+    assert_eq!(
+        id_set(&registered(listed, &rules)),
+        BTreeSet::from(["max/opus".to_owned(), "opus".to_owned()])
+    );
+}

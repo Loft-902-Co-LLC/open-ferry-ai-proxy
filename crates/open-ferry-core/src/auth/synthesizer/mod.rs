@@ -6,9 +6,9 @@
 
 //! Synthesizers: build [`Auth`] records from credential files
 //! ([`file`](mod@file)), from API keys in the config ([`api_key`]), from
-//! the config's OpenAI-compatible providers ([`openai_compat`]) and from its
-//! Vertex AI keys ([`vertex`]). [`synthesize_config_auths`] makes every
-//! config record.
+//! the config's OpenAI-compatible providers ([`openai_compat`]), from its
+//! Vertex AI keys ([`vertex`]) and from open-ferry's `claude-cli` entries
+//! ([`claude_cli`]). [`synthesize_config_auths`] makes every config record.
 //!
 //! Records from files and API keys get the same settings as attributes:
 //! excluded models (`excluded_models`, comma-joined and lowercased, and a
@@ -24,6 +24,7 @@
 //!   ported.
 
 pub mod api_key;
+pub mod claude_cli;
 pub mod file;
 pub mod openai_compat;
 pub mod vertex;
@@ -85,8 +86,9 @@ impl std::error::Error for SynthesisError {}
 /// Records for every API key and OpenAI-compatible provider in `config`
 /// (upstream's `ConfigSynthesizer.Synthesize`): the Gemini keys, then the
 /// interactions, Claude, Codex, xAI, Meta, OpenAI-compatible and Vertex
-/// ones. Every weight is checked first, in upstream's order; an invalid one
-/// fails the whole lot, naming the entry.
+/// ones, and last open-ferry's `claude-cli` entries. Every weight is checked
+/// first, in upstream's order and then `claude-cli`'s; an invalid one fails
+/// the whole lot, naming the entry.
 pub fn synthesize_config_auths(
     config: &Config,
     ctx: &SynthesisContext,
@@ -107,6 +109,7 @@ pub fn synthesize_config_auths(
     validate_api_key_weights(ApiKeyProvider::Xai, &xai)?;
     validate_api_key_weights(ApiKeyProvider::Meta, &meta)?;
     openai_compat::validate_openai_compat_weights(&config.openai_compatibility)?;
+    claude_cli::validate_claude_cli_weights(&config.claude_cli)?;
     let mut out = Vec::new();
     for (provider, entries) in [
         (ApiKeyProvider::Gemini, &gemini),
@@ -127,6 +130,11 @@ pub fn synthesize_config_auths(
     )?);
     out.extend(vertex::synthesize_vertex_auths(
         &config.vertex_api_key,
+        ctx,
+        ids,
+    )?);
+    out.extend(claude_cli::synthesize_claude_cli_auths(
+        &config.claude_cli,
         ctx,
         ids,
     )?);

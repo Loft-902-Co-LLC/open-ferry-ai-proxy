@@ -22,6 +22,10 @@
 //! models or, with `fork`, add names for them, settings set context windows,
 //! and a prefix namespaces them, as in `team-a/gpt-5`.
 //!
+//! A `claude-cli` credential (open-ferry's own) serves the catalog's Claude
+//! models, or the models its `claude-cli` entry lists, less the entry's
+//! excluded models.
+//!
 //! A credential of an OpenAI-compatible provider serves the models its
 //! `openai-compatibility` entry lists, under the provider's key (such as
 //! `openai-compatible-kimi`), with the prefix but no exclusions, aliases or
@@ -145,6 +149,8 @@ pub struct RegistrationRules {
     pub meta_keys: Vec<ApiKeyEntry>,
     /// The `openai-compatibility` entries.
     pub openai_compatibility: Vec<OpenAiCompatEntry>,
+    /// open-ferry's `claude-cli` entries, without keys or base URLs.
+    pub claude_cli: Vec<ApiKeyEntry>,
 }
 
 /// Another name for a model (upstream's `OAuthModelAlias`).
@@ -399,7 +405,29 @@ impl From<&Config> for RegistrationRules {
                     models: compat.models.iter().map(CompatModel::from).collect(),
                 })
                 .collect(),
+            claude_cli: config
+                .claude_cli
+                .iter()
+                .map(|entry| ApiKeyEntry {
+                    models: entry.models.iter().map(claude_model).collect(),
+                    excluded_models: entry.excluded_models.clone(),
+                    ..ApiKeyEntry::default()
+                })
+                .collect(),
         }
+    }
+}
+
+/// A configured Claude model.
+fn claude_model(model: &crate::config::ClaudeModel) -> ConfiguredModel {
+    ConfiguredModel {
+        name: model.name.clone(),
+        alias: model.alias.clone(),
+        display_name: model.display_name.clone(),
+        max_context_length: context_length(model.max_context_length),
+        is_compat: model.is_compat,
+        thinking: model.thinking.as_ref().map(thinking),
+        support_configuration_update: false,
     }
 }
 
@@ -535,6 +563,16 @@ fn auth_models_gated(
                 if kind == AUTH_KIND_API_KEY {
                     excluded.clone_from(&entry.excluded_models);
                 }
+            }
+            apply_excluded_models(models, &excluded)
+        }
+        "claude-cli" => {
+            let mut models = catalog.claude_models();
+            if let Some(entry) = config_entry_for_auth_index(auth, &rules.claude_cli) {
+                if !entry.models.is_empty() {
+                    models = build_config_models(&entry.models, "anthropic", "claude");
+                }
+                excluded.clone_from(&entry.excluded_models);
             }
             apply_excluded_models(models, &excluded)
         }
