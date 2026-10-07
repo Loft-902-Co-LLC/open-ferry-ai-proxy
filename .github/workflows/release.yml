@@ -176,6 +176,12 @@ jobs:
             runner: ubuntu-24.04
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
+          # The static Linux builds, for any Linux, Alpine's included, and
+          # for the container image.
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
           - target: x86_64-apple-darwin
             runner: macos-15-intel
           - target: aarch64-apple-darwin
@@ -189,7 +195,9 @@ jobs:
     # so each runner pulls its own architecture. The image has what aws-lc-rs
     # builds with (GCC 10.2; no CMake, Go or NASM needed on Linux) and
     # rustup, which installs the toolchain rust-toolchain.toml names, as on
-    # the other runners. The other targets build on the runner itself.
+    # the other runners. The musl targets build in the Rust Alpine image
+    # (RUST_ALPINE below), which their build step starts itself; the others
+    # build on the runner itself.
     container: ${{ endsWith(matrix.target, '-linux-gnu') && 'docker.io/library/rust:1-bullseye@sha256:4730e387a220a08a365c77da3096544dde214f9d796c16284d4be45438cad4a9' || null }}
     timeout-minutes: 90
     env:
@@ -207,6 +215,21 @@ jobs:
       # Link the C runtime statically, so Windows users don't need the Visual
       # C++ Redistributable. Applies only to that target.
       CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+      # Read only when building for musl: the official Rust image on Alpine,
+      # pinned by digest. The digest names a multi-platform index, so each
+      # runner pulls its own architecture. Its GCC and musl-dev build the C
+      # code of aws-lc-rs and SQLite for musl, natively. It runs in a step,
+      # not as the job's container, as GitHub runs no JavaScript action in
+      # an Alpine container on arm64.
+      RUST_ALPINE: docker.io/library/rust:1-alpine3.24@sha256:0cce0a5e0e8ba67b455257a3a02a1d99005f382748789d6464460028810f1627
+      # Static linking is the musl targets' default; it's set here too, so
+      # that a change of default can't make a dynamic binary. The static
+      # check below would fail one anyway.
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS: -C target-feature=+crt-static
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS: -C target-feature=+crt-static
+      # Where a static binary's -h runs: Alpine, which has no glibc. The
+      # digest names a multi-platform index.
+      ALPINE: docker.io/library/alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
       # Keeps macOS tar from adding ._ files for extended attributes.
       COPYFILE_DISABLE: "1"
       # A release must embed the dashboard: without dashboard/dist the build
@@ -230,9 +253,11 @@ jobs:
       # No cache: a release is built from scratch, so nothing a cache holds
       # can find its way into it.
       - name: Install the toolchain from rust-toolchain.toml
+        if: ${{ !endsWith(matrix.target, '-linux-musl') }}
         run: rustup toolchain install --profile minimal
 
       - name: Check that the runner builds natively
+        if: ${{ !endsWith(matrix.target, '-linux-musl') }}
         run: |
           host=$(rustc -vV | sed -n 's/^host: //p')
           if [ "$host" != "$TARGET" ]; then
@@ -241,10 +266,34 @@ jobs:
           fi
 
       - name: Build
+        if: ${{ !endsWith(matrix.target, '-linux-musl') }}
         run: cargo build --release --locked -p open-ferry --target "$TARGET"
 
+      # build-musl.sh installs the toolchain, checks that the build is
+      # native and builds, as the three steps above do.
+      - name: Build (static, in Alpine)
+        if: endsWith(matrix.target, '-linux-musl')
+        run: |
+          docker run --rm \
+            -e TARGET -e OPEN_FERRY_COMMIT -e OPEN_FERRY_BUILD_DATE \
+            -e OPEN_FERRY_REQUIRE_DASHBOARD -e CARGO_TERM_COLOR -e CARGO_INCREMENTAL \
+            -e CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS \
+            -e CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS \
+            -v "$GITHUB_WORKSPACE:/src" -w /src \
+            "$RUST_ALPINE" sh .github/scripts/build-musl.sh
+
+      # No program interpreter and no shared libraries; then -h on Alpine,
+      # which has no glibc.
+      - name: Check that the binary is static
+        if: endsWith(matrix.target, '-linux-musl')
+        run: |
+          sh .github/scripts/check-static.sh "target/$TARGET/release/open-ferry" | tee -a "$GITHUB_STEP_SUMMARY"
+          docker run --rm --network none \
+            -v "$GITHUB_WORKSPACE/target/$TARGET/release/open-ferry:/usr/local/bin/open-ferry:ro" \
+            "$ALPINE" open-ferry -h
+
       - name: Check the glibc the binary needs
-        if: runner.os == 'Linux'
+        if: endsWith(matrix.target, '-linux-gnu')
         run: |
           # The newest glibc symbol version the binary links against.
           glibc=$(objdump -T "target/$TARGET/release/open-ferry" | { grep -o 'GLIBC_[0-9][0-9.]*' || true; } | sed 's/^GLIBC_//' | sort -uV | tail -n 1)
