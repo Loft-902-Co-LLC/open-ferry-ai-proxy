@@ -1,7 +1,9 @@
 //! `open-ferry init` and `open-ferry check` as a user runs them: the
 //! binary, with configs in temporary directories, and ports on 127.0.0.1
 //! that nothing listens on. The keys `init` prints are checked for their
-//! shape, never printed.
+//! shape, never printed. `open-ferry service` is run only with `-h` and
+//! bad usage, which it answers before it looks at the system, so no test
+//! here installs, removes or asks after a service.
 
 use std::path::Path;
 use std::process::{Command, Output};
@@ -155,4 +157,38 @@ fn a_flag_first_reads_the_command_line_as_before() {
             .contains("Usage of ")
     );
     assert!(!dir.path().join("config.yaml").exists());
+}
+
+// Not upstream's: service shows its usage with -h, and exits with 2 for bad
+// usage before it looks at the system.
+#[test]
+fn service_shows_its_usage_and_refuses_bad_usage() {
+    let dir = tempfile::tempdir().unwrap();
+    for args in [&["service", "-h"][..], &["service", "status", "-h"]] {
+        let help = run(dir.path(), args);
+        assert_eq!(code(&help), Some(0), "{args:?}");
+        let err = String::from_utf8(help.stderr).unwrap();
+        assert!(
+            err.contains(" service install [-config PATH] [-system] [-dry-run]\n"),
+            "{err}"
+        );
+    }
+    for (args, message) in [
+        (
+            &["service"][..],
+            "service needs a command: install, uninstall or status",
+        ),
+        (&["service", "start"], "unknown service command: start"),
+        (
+            &["service", "status", "-dry-run"],
+            "flag provided but not defined: -dry-run",
+        ),
+        (&["service", "install", "now"], "unexpected argument: now"),
+    ] {
+        let bad = run(dir.path(), args);
+        assert_eq!(code(&bad), Some(2), "{args:?}");
+        let err = String::from_utf8(bad.stderr).unwrap();
+        assert!(err.starts_with(&format!("{message}\nUsage: ")), "{err}");
+        assert!(bad.stdout.is_empty());
+    }
 }

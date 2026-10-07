@@ -10,16 +10,16 @@
 //! or after `--`. Later arguments are ignored, as upstream ignores them.
 //! The usage leaves out `-password`, as upstream's does.
 //!
-//! A subcommand (`open-ferry init`, `open-ferry check`) is recognized only
-//! as the first argument; `main` sends the arguments after it to the
-//! subcommand, which reads its own flags with the same parser
-//! ([`parse_with`]) and has its own `-h`. Without one, or with a flag
-//! first, the command line is read as above.
+//! A subcommand (`open-ferry init`, `open-ferry check`, `open-ferry
+//! service`) is recognized only as the first argument; `main` sends the
+//! arguments after it to the subcommand, which reads its own flags with
+//! the same parser ([`parse_with`]) and has its own `-h`. Without one, or
+//! with a flag first, the command line is read as above.
 //!
 //! Deviations from upstream:
 //! - Upstream has no subcommands: it ignores a first argument that isn't a
-//!   flag, and serves. Here `init` and `check` as the first argument run
-//!   those subcommands.
+//!   flag, and serves. Here `init`, `check` and `service` as the first
+//!   argument run those subcommands.
 //! - Only the flags of the ported features are defined: `-config`, the Codex
 //!   and Claude logins, `-no-browser`, `-oauth-callback-port`,
 //!   `-local-model`, `-password`, and the TUI's `-tui`, `-standalone` and

@@ -12,9 +12,10 @@
 //! as a local management password, and stops when its keep-alive endpoint
 //! isn't called (see [`keep_alive`]).
 //!
-//! As the first argument, `init` writes a starting config (see [`init`])
-//! and `check` looks over a setup (see [`check`]); the arguments after it
-//! are theirs.
+//! As the first argument, `init` writes a starting config (see [`init`]),
+//! `check` looks over a setup (see [`check`]), and `service` installs,
+//! removes or shows open-ferry as a background service (see
+//! [`os_service`]); the arguments after it are theirs.
 //!
 //! Deviations from upstream:
 //! - The cloud-deploy, home, Postgres, object-store and git-store modes,
@@ -40,6 +41,7 @@ mod keep_alive;
 mod logging;
 mod login;
 mod observability;
+mod os_service;
 mod service;
 mod tls;
 mod tui;
@@ -66,6 +68,7 @@ fn main() -> ExitCode {
     match args.peek().map(String::as_str) {
         Some(init::NAME) => return init::main(&program, args.skip(1)),
         Some(check::NAME) => return check::main(&program, args.skip(1)),
+        Some(os_service::NAME) => return os_service::main(&program, args.skip(1)),
         _ => {}
     }
     let flags = match flags::parse(args) {
