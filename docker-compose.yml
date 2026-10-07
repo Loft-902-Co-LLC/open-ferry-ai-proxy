@@ -1,0 +1,69 @@
+# Ported from CLIProxyAPI docker-compose.yml (v8.0.15, MIT).
+# https://github.com/router-for-me/CLIProxyAPI
+#
+# Runs open-ferry's image with its config, auth directory and logs in this
+# directory, at upstream's paths. Before the first `docker compose up -d`,
+# write ./config.yaml with new keys (see "Run it in a container" in the
+# README):
+#
+#   docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/out" \
+#     ghcr.io/loft-902-co-llc/open-ferry:latest \
+#     open-ferry init -config /out/config.yaml -host ""
+#
+# It prints the client key and the management key once. Then, for the
+# dashboard, set management.allow-remote: true in config.yaml.
+# Keep server.host empty (-host ""): in the container the server must listen
+# on every interface, as Docker forwards the published port to the
+# container's own address. The port is published on the host's 127.0.0.1
+# only; to serve other machines, publish it on another address ("8317:8317"
+# is every interface).
+#
+# The dashboard and the management API see requests from the host as
+# coming from Docker's gateway, not the loopback, so they turn them away
+# (403) unless management.allow-remote is true. Every management request
+# still needs the management key.
+#
+# Sign-ins: the Codex and Claude logins' callback servers listen on the
+# container's own loopback, which no published port reaches, so their
+# ports (1455 and 54545) aren't published. To sign in, use the dashboard
+# and paste the address the browser lands on into its sign-in dialog, use
+# the device login (docker compose exec open-ferry open-ferry
+# -codex-device-login), or copy existing auth files into ./auths.
+#
+# Saving the config from the dashboard or the management API fails here
+# with "Resource busy": open-ferry saves by renaming a new file over the old
+# one, which a file mounted on its own can't take. To save from the
+# dashboard, mount a directory holding config.yaml instead and name the
+# file in the command:
+#
+#     command: ["open-ferry", "-config", "/CLIProxyAPI/config/config.yaml"]
+#     volumes:
+#       - ./config:/CLIProxyAPI/config
+#
+# Upgrade with `docker compose pull && docker compose up -d`. To pin a
+# version, set OPEN_FERRY_IMAGE=ghcr.io/loft-902-co-llc/open-ferry:0.1.0.
+#
+# Deviations from upstream:
+# - The image is open-ferry's, chosen with OPEN_FERRY_IMAGE rather than
+#   CLI_PROXY_IMAGE, and there's no build section or pull_policy: always.
+#   The image is built from release archives, not from this directory.
+# - Only port 8317 is published, and on 127.0.0.1 only. Upstream publishes
+#   8317 and the sign-in callback ports 8085, 1455, 54545, 51121 and 11451
+#   on every interface.
+# - There's no plugins volume (the plugin host isn't ported) and no DEPLOY
+#   variable (cloud deploy mode isn't ported).
+# - The service and container are named open-ferry.
+services:
+  open-ferry:
+    image: ${OPEN_FERRY_IMAGE:-ghcr.io/loft-902-co-llc/open-ferry:latest}
+    container_name: open-ferry
+    # The zone the logs' times are in; UTC when unset.
+    # environment:
+    #   TZ: Europe/London
+    ports:
+      - "127.0.0.1:8317:8317"
+    volumes:
+      - ${CLI_PROXY_CONFIG_PATH:-./config.yaml}:/CLIProxyAPI/config.yaml
+      - ${CLI_PROXY_AUTH_PATH:-./auths}:/root/.cli-proxy-api
+      - ${CLI_PROXY_LOG_PATH:-./logs}:/CLIProxyAPI/logs
+    restart: unless-stopped

@@ -465,3 +465,128 @@ jobs:
             --title "open-ferry $VERSION" \
             --notes-file "$RUNNER_TEMP/notes.md" \
             "${flags[@]}"
+
+  image:
+    name: Build the container image
+    needs: [meta, checksums, publish]
+    # On a tag, after the draft release; on a dry run, which has no release,
+    # after SHA256SUMS.
+    if: >-
+      !cancelled()
+      && needs.checksums.result == 'success'
+      && (needs.publish.result == 'success'
+      || (github.event_name != 'push' && needs.publish.result == 'skipped'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # The only job that may push a package: the image (packages), and its
+    # attestation, signed with the workflow's OIDC token (id-token).
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      PRERELEASE: ${{ needs.meta.outputs.prerelease }}
+      PUSH: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+      IMAGE: ghcr.io/loft-902-co-llc/open-ferry
+      # Read by build-image.sh.
+      SOURCE: https://github.com/${{ github.repository }}
+      REVISION: ${{ github.sha }}
+      CREATED: ${{ needs.meta.outputs.build-date }}
+      # BuildKit in a container of its own, pinned by digest, rather than
+      # the runner's Docker: it exports a multi-platform image.
+      BUILDKIT: docker.io/moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The image's build context: the two static archives and SHA256SUMS,
+      # which docker/Dockerfile checks them against again.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: open-ferry-*-linux-musl
+          path: image-context
+          merge-multiple: true
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: open-ferry-SHA256SUMS
+          path: image-context
+
+      - name: Check the archives against SHA256SUMS
+        working-directory: image-context
+        run: |
+          export LC_ALL=C
+          for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+            archive="open-ferry-$VERSION-$target.tar.gz"
+            line=$(awk -v want="$archive" '{ name = $2; sub(/^\*/, "", name); if (name == want) print }' SHA256SUMS)
+            if [ -z "$line" ]; then
+              echo "::error::SHA256SUMS doesn't list $archive"
+              exit 1
+            fi
+            printf '%s\n' "$line" | sha256sum --check --strict
+          done
+
+      - name: Set up BuildKit
+        run: docker buildx create --name open-ferry --driver docker-container --driver-opt "image=$BUILDKIT" --use --bootstrap
+
+      # build-image.sh sets the labels, the annotations and the timestamps
+      # (from the build date), so the three builds below make one image.
+      - name: Build the image for linux/amd64 and linux/arm64
+        run: sh .github/scripts/build-image.sh image-context linux/amd64,linux/arm64 --output "type=oci,dest=$RUNNER_TEMP/open-ferry-image.tar"
+
+      # The amd64 image, from the build above's cache, run as test-image.sh
+      # describes: nothing it starts reaches a provider.
+      - name: Test the linux/amd64 image
+        run: |
+          sh .github/scripts/build-image.sh image-context linux/amd64 --load --tag open-ferry:test
+          sh .github/scripts/test-image.sh open-ferry:test
+
+      # A dry run keeps the image as an OCI archive, for `docker load` or
+      # `skopeo`. The name mustn't match open-ferry-*.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: env.PUSH != 'true'
+        with:
+          name: container-image
+          path: ${{ runner.temp }}/open-ferry-image.tar
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Sign in to GHCR
+        if: env.PUSH == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      # The same image, from the cache, pushed as VERSION and, unless it's a
+      # pre-release, latest.
+      - name: Push the image
+        id: push
+        if: env.PUSH == 'true'
+        run: |
+          names=("$IMAGE:$VERSION")
+          if [ "$PRERELEASE" != true ]; then names+=("$IMAGE:latest"); fi
+          tags=()
+          for name in "${names[@]}"; do tags+=(--tag "$name"); done
+          sh .github/scripts/build-image.sh image-context linux/amd64,linux/arm64 \
+            --metadata-file "$RUNNER_TEMP/image-metadata.json" --push "${tags[@]}"
+          digest=$(jq -r '."containerimage.digest"' "$RUNNER_TEMP/image-metadata.json")
+          if ! [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::The push reported no image digest"
+            exit 1
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "Pushed $IMAGE@$digest as ${names[*]}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        if: env.PUSH == 'true'
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      - name: Sign out of GHCR
+        if: always() && env.PUSH == 'true'
+        run: docker logout ghcr.io
