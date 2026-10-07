@@ -93,6 +93,20 @@ impl Fixture {
         records
     }
 
+    /// The `count` runs' records, once each has ended. A call answers once
+    /// Claude Code has written its result, which may be before the process
+    /// writes its end.
+    pub async fn ended_records(&self, count: usize) -> Vec<Value> {
+        for _ in 0..200 {
+            let records = self.records();
+            if records.len() == count && records.iter().all(|r| r["end_ms"].is_u64()) {
+                return records;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("the runs didn't end: {:?}", self.records());
+    }
+
     /// The one run's record.
     pub fn record(&self) -> Value {
         let mut records = self.records();

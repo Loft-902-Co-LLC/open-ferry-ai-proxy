@@ -754,8 +754,7 @@ async fn runs_at_most_max_concurrency_at_once() {
         );
         a.unwrap();
         b.unwrap();
-        let records = fixture.records();
-        assert_eq!(records.len(), 2);
+        let records = fixture.ended_records(2).await;
         let first_end = records[0]["end_ms"].as_u64().unwrap();
         let second_start = records[1]["start_ms"].as_u64().unwrap();
         assert_eq!(
