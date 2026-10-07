@@ -32,7 +32,8 @@
 //! - No `Accept-Encoding` is sent, and the client's isn't forwarded: the
 //!   executor reads uncompressed bodies only.
 //! - `X-Claude-Code-Session-Id` is never set, and a custom header whose value
-//!   names `$CPA-SESSION-ID` is skipped, as there are no session IDs.
+//!   names `$CPA-SESSION-ID` is skipped: session IDs are local routing keys,
+//!   never sent upstream.
 //! - A custom header can't set `User-Agent`, `X-App`, `X-Stainless-*`, a
 //!   session ID or another client identity header; see
 //!   [`crate::custom_headers`].

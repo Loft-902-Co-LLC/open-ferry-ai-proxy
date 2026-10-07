@@ -21,10 +21,13 @@
 //! separate cancellation token, where upstream passes a context.
 //!
 //! Deviations from upstream:
-//! - The metadata upstream keeps in a map is a typed [`Metadata`], without the
-//!   session-affinity keys, which aren't ported. What the request log and
-//!   the usage statistics read of the request, upstream's context values
-//!   and usage keys, is the call's [`Options::observation`].
+//! - The metadata upstream keeps in a map is a typed [`Metadata`]. Of the
+//!   session-affinity keys it holds only the caller scope: the manager works
+//!   out a call's session from its headers and body as it picks, where
+//!   upstream writes the provider, model and derived session into the
+//!   metadata. What the request log and the usage statistics read of the
+//!   request, upstream's context values and usage keys, is the call's
+//!   [`Options::observation`].
 //! - Errors are one type, [`ExecError`], where upstream checks an error for
 //!   optional methods (`StatusCode`, `Headers`, `IsTerminalAuth` and so on).
 //!   An executor's error carries no code of its own (upstream's `Error.Code`),

@@ -29,8 +29,8 @@
 //!   client sent, or this project's own user agent. Upstream sets whatever
 //!   is configured, which lets a credential pass for another client or one
 //!   of its sessions.
-//! - A value that names `$CPA-SESSION-ID` is skipped, since session IDs
-//!   aren't derived.
+//! - A value that names `$CPA-SESSION-ID` is skipped: session IDs are local
+//!   routing keys, never sent upstream.
 //! - An attribute whose name or value isn't a valid HTTP header is skipped
 //!   with a warning; upstream's request would fail.
 

@@ -47,9 +47,10 @@
 //! - Records are also made, for the observer, while the queue is off: an
 //!   observer is open-ferry's own. The observer gets the image generation
 //!   tool's records too.
-//! - Not ported: session derivation and hierarchy, the Antigravity
-//!   parsers, the credits markers, and the usage plugins of the SDK's
-//!   `usage.Manager` beyond the queue.
+//! - Not ported: the derived session and the session hierarchy (a derived
+//!   session is only session affinity's routing key, see
+//!   [`crate::session`]), the Antigravity parsers, the credits markers, and
+//!   the usage plugins of the SDK's `usage.Manager` beyond the queue.
 
 mod accounting;
 mod error_events;

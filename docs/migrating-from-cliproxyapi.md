@@ -18,13 +18,13 @@ open-ferry reads CLIProxyAPI's config and auth directory as they are, so for mos
 - **The management key** is still `management.secret-key` or `MANAGEMENT_PASSWORD`. A config in the legacy layout has the management settings under `remote-management:`, which is still read; where both blocks set a key, `management:` wins.
 - **A `.env` file** in the working directory is still loaded at start, and a variable already set in the environment still wins over it. On Windows it wins whatever the case of its name, and a file that starts with a UTF-8 byte order mark loads, where CLIProxyAPI refuses it.
 - **Log files** go to the same place: `logs` under `WRITABLE_PATH` if it's set, else the working directory's `logs` if that directory exists and can be written to, else `logs` in the auth directory.
+- **Session affinity** (`routing.session-affinity`, `session-affinity-ttl` and `session-affinity-subagents`) works as before: a conversation stays on the credential that served it, and moves only when that one fails or isn't ready. The bindings are held in memory, hashed, and never logged; see [Session affinity](../UPSTREAM.md#session-affinity).
 - **Safe mode** still holds: while `api-keys` lists the example keys from CLIProxyAPI's `config.example.yaml`, the proxy refuses service until you change them. open-ferry's own [`config.example.yaml`](../config.example.yaml), in each release archive, keeps those keys, so a config copied from it is refused too until you change them. There's no warning page at `/`, though: the proxy's routes answer 403 with CLIProxyAPI's message, whose link, `/management.html?safe-mode=configure`, opens the dashboard's API key setup.
 
 **What differs:**
 - **Loading the config never writes it.** CLIProxyAPI replaces a plain `secret-key` with its bcrypt hash in the file; open-ferry leaves the file alone and compares the plain key as written. A file that already holds a hash works too. The file is written only when you save a change through the management API or the dashboard. See [the foundation](../UPSTREAM.md#the-foundation).
 - **The `models` catalog sources are files** (`catalog`, `codex-catalog`). An absolute path is read at start and again when the file changes; an empty source is the catalog built into the binary. No catalog is downloaded: a URL source logs a warning and the catalog in use stays, and `-local-model` changes nothing. `devin-catalog` is ignored.
 - **Settings for features open-ferry doesn't have are read and ignored**:
-  - session affinity (`routing.session-affinity` and its options);
   - the per-credential limits `credential-concurrency` and `credential-in-flight`;
   - plugins, pprof and LAN discovery;
   - the Antigravity and Devin sections;
@@ -112,7 +112,7 @@ These are the differences most likely to show in practice. The rest are in [Devi
 
 - **User agent.** OpenAI-compatible, Gemini and Vertex AI upstreams get `User-Agent: open-ferry/<version>`, unless the client sent its own.
 - **Custom headers.** A credential's custom `headers` can't set a header that says which client is calling, such as `User-Agent`, `X-App`, `X-Stainless-*`, `Originator` or a session ID. Such a header is dropped, with a warning naming it.
-- **Prompt caching.** No session ID or `prompt_cache_key` is made up for a request. One the client sends is still passed on, but if you relied on the keys CLIProxyAPI derives, you may see fewer prompt cache hits.
+- **Prompt caching.** No session ID or `prompt_cache_key` is made up for a request. One the client sends is still passed on, but if you relied on the keys CLIProxyAPI derives, you may see fewer prompt cache hits. Session affinity still derives a session for a request that names none, but only to pick its credential: it isn't sent upstream.
 - **Secrets are redacted.** A secret the request was sent with is replaced with `[redacted]` in provider errors and answers before they reach the client.
 - **Redirects.** Requests follow redirects only to the same origin.
 

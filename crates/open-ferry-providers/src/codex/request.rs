@@ -37,7 +37,8 @@
 //! - A `header:` attribute can't set `User-Agent`, `Originator`, a session,
 //!   conversation, thread or window ID (`Session_id`, `Conversation_id`,
 //!   `Thread-Id`, `X-Codex-Window-Id` and their variants) or another client
-//!   identity header, and one that names `$CPA-SESSION-ID` is skipped; see
+//!   identity header, and one that names `$CPA-SESSION-ID` is skipped
+//!   (session IDs are local routing keys, never sent upstream); see
 //!   [`crate::custom_headers`].
 //! - The config's `codex-header-defaults` user agent, models.json
 //!   `override_header`, cloaking and `Connection: Keep-Alive` aren't ported.
