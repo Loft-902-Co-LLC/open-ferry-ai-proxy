@@ -22,25 +22,26 @@ Already in place:
 - Each Claude and Codex credential's quota as the provider's last response gave it: the management API lists it, and the dashboard shows how much of each window is used, when it starts over, and which one stopped the account.
 - Codex's response steering on the Responses WebSocket (`upstream.codex.response-steering`, experimental and off by default, as upstream).
 - Session affinity (`routing.session-affinity`, off by default as upstream): a conversation stays on the credential that served it, so its prompt cache stays warm, and moves only when that credential can't serve. Session IDs are only routing keys: none is sent upstream, logged or saved.
-- `claude-cli`, not in CLIProxyAPI: every Claude model on your own Claude subscription, through your own installed Claude Code, which open-ferry runs for each request. Claude Code signs itself in; open-ferry never reads or stores its credentials. See [docs/claude-subscription.md](docs/claude-subscription.md).
+- `claude-cli`, not in CLIProxyAPI: every Claude model on your own Claude subscription, through your own installed Claude Code, which open-ferry runs for each request. Claude Code signs itself in; open-ferry never reads or stores its credentials. The dashboard shows each entry's state. See [docs/claude-subscription.md](docs/claude-subscription.md).
 - Model catalogs from files: a catalog file the `models` section names is read at start and again when it changes, so a new model can be added without waiting for a release. Unlike upstream, open-ferry downloads no catalog. Without a file it uses the catalogs built into the binary, which we update by hand when providers release models.
-- Release basics: CI on Linux and Windows, a release workflow that builds binaries for Linux, macOS and Windows, a changelog, and a migration guide for CLIProxyAPI users.
+- Release basics: CI on Linux and Windows, with the install scripts tested on macOS too; a release workflow that builds binaries for Linux (glibc, and static musl builds for Alpine and older systems), macOS and Windows, with `SHA256SUMS` and build provenance attestations; a changelog; and a migration guide for CLIProxyAPI users.
+- Ways to install besides building from source, which arrive with the first release:
+  - install scripts for Linux, macOS and Windows that check the download against the release's `SHA256SUMS` (and its build attestation, where `gh` is installed) and write a starting config with `open-ferry init`;
+  - a container image on GitHub's registry, for amd64 and arm64, that uses the same paths as CLIProxyAPI's image (`/CLIProxyAPI/config.yaml`, `/root/.cli-proxy-api` and `/CLIProxyAPI/logs`), so an existing Docker Compose file switches over by changing the image name.
+- Setting up from the command line ([docs/cli.md](docs/cli.md)):
+  - `open-ferry init` writes a starting config with new keys;
+  - `open-ferry check` looks over the config, the auth directory, the port, the dashboard and the clock before a start, says how to fix what it finds, and exits with a code a CI job or a service manager can act on;
+  - `open-ferry service install` and `uninstall` run the proxy at login or at boot, under systemd, launchd, or Windows' Task Scheduler or service manager.
+- Numbers to back the claims: the parity tool's results at the pin, in the README, and a benchmark against the pinned CLIProxyAPI build that anyone can rerun ([docs/benchmarks.md](docs/benchmarks.md)). Its first results are preliminary.
+- A setup page for coding agents ([docs/agents.md](docs/agents.md)), and an `llms.txt`.
 
 Still to come:
 
 - **Parity with the latest CLIProxyAPI release for every provider we support:** Codex, Claude, Gemini, Gemini Interactions, Vertex AI, Meta (API keys and access tokens), xAI (API keys) and any OpenAI-compatible upstream. We follow upstream's releases; the pin is at v8.0.15. What we do differently is listed in UPSTREAM.md.
 - **Routing by quota:** a strategy that picks by the quota the providers report (now recorded for Claude and Codex): the credential whose limit resets soonest, or the one with the most left, keeping a reserve on each. Upstream has no such strategy, so this would be open-ferry's own.
-- **Ways to install besides building from source,** starting with the first release:
-  - a container image on GitHub's registry, for amd64 and arm64, that uses the same paths as CLIProxyAPI's image (`/CLIProxyAPI/config.yaml`, `/root/.cli-proxy-api` and `/CLIProxyAPI/logs`), so an existing Docker Compose file switches over by changing the image name;
-  - install scripts for Linux, macOS and Windows that check the download against the release's `SHA256SUMS` (and its build attestation, where `gh` is installed), write a starting config with a new client key, and print the dashboard's address;
-  - a Homebrew tap;
-  - a static Linux build (musl) next to the glibc ones, for Alpine and older systems;
-  - `open-ferry service install` and `uninstall`, for systemd, launchd and Windows services.
-- **`open-ferry check`:** looks over the config, the auth directory, the port, the dashboard and the clock before a start, says how to fix what it finds, and exits with a code a CI job or a service manager can act on.
-- **Numbers to back the claims:**
-  - the parity tool's results at each pin, in the README;
-  - a benchmark against the pinned CLIProxyAPI build that anyone can rerun: requests per second, CPU per request, memory, start time and latency on a long conversation.
-- **A setup page for coding agents** (and an `llms.txt`): what an agent needs to install the proxy and point a client at it.
+- **The first release, 0.1.0,** after it has been tested in real use. The install scripts and the container image are first published with it.
+- **A Homebrew tap.**
+- **Benchmark results from a quiet machine,** in place of the preliminary ones.
 - **Being findable:** once the first release is out, ask to be listed with the related projects in CLIProxyAPI's README.
 
 ## After v1: smaller additions
