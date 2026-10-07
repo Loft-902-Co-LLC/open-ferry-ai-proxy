@@ -1,0 +1,18 @@
+[package]
+name = "open-ferry-bench"
+description = "Benchmarks open-ferry against CLIProxyAPI, each in front of the same fake upstream on loopback"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+axum = "0.8.9"
+bytes = "1.12.1"
+futures-util = "0.3.34"
+reqwest = { version = "0.13.5", default-features = false }
+serde_json.workspace = true
+# A process's CPU time and resident memory, on Linux, macOS and Windows alike.
+sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util"] }
