@@ -458,9 +458,16 @@ fn reads_each_connection_result() {
         ErrorKind::AddrNotAvailable,
         ErrorKind::NetworkUnreachable,
         ErrorKind::HostUnreachable,
+        ErrorKind::NetworkDown,
     ] {
         assert_eq!(probe(Some(Err(Error::from(kind)))), Probe::Free, "{kind:?}");
     }
+    // As the system gives it, such as for ::1 on a Linux started with IPv6
+    // off.
+    assert_eq!(
+        probe(Some(Err(Error::from_raw_os_error(EAFNOSUPPORT)))),
+        Probe::Free
+    );
     for kind in [
         ErrorKind::AddrInUse,
         ErrorKind::PermissionDenied,

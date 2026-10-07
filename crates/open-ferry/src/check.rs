@@ -672,9 +672,9 @@ fn probe(result: Option<io::Result<()>>) -> Probe {
         // Windows takes about two seconds to refuse a connection to a
         // closed loopback port, longer than the timeout.
         None => Probe::Free,
-        // Refused: nothing listens. Not available or unreachable: the
-        // machine has no such address, such as ::1 where IPv6 is off, so
-        // nothing can listen there.
+        // Refused: nothing listens. Not available, unreachable, down or an
+        // unsupported family: the machine has no such address, such as ::1
+        // where IPv6 is off, so nothing can listen there.
         Some(Err(error))
             if matches!(
                 error.kind(),
@@ -682,13 +682,25 @@ fn probe(result: Option<io::Result<()>>) -> Probe {
                     | io::ErrorKind::AddrNotAvailable
                     | io::ErrorKind::NetworkUnreachable
                     | io::ErrorKind::HostUnreachable
-            ) =>
+                    | io::ErrorKind::NetworkDown
+            ) || error.raw_os_error() == Some(EAFNOSUPPORT) =>
         {
             Probe::Free
         }
         Some(Err(error)) => Probe::Unknown(error.to_string()),
     }
 }
+
+/// The error for an address family the system doesn't have, as a Linux
+/// started with IPv6 off gives for ::1 (`WSAEAFNOSUPPORT` on Windows). No
+/// `io::ErrorKind` names it.
+const EAFNOSUPPORT: i32 = if cfg!(windows) {
+    10047
+} else if cfg!(any(target_os = "linux", target_os = "android")) {
+    97
+} else {
+    47
+};
 
 /// The dashboard app is built in, unless the config turns it off.
 fn check_dashboard(config: &Config, env: &Environment, findings: &mut Vec<Finding>) {
