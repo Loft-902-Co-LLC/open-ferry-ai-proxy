@@ -21,15 +21,17 @@
 //!   isn't a string, a time in a zone a day or more from UTC, or an
 //!   infinite or NaN float) is written as `null`; upstream's whole answer
 //!   fails.
+//! - open-ferry's `claude-cli` list follows `claude-api-key`, left out when
+//!   it is empty.
 
 use std::collections::BTreeMap;
 
 use open_ferry_core::config::{
-    AnyValue, ClaudeKey, ClaudeModel, CodexKey, CodexModel, Config, DisableImageGeneration,
-    GeminiKey, GeminiModel, OAuthModelAlias, OAuthModelSetting, OpenAiCompatibility,
-    OpenAiCompatibilityApiKey, OpenAiCompatibilityModel, PayloadConfig, PayloadFilterRule,
-    PayloadModelRule, PayloadRule, RequestScopedErrorRule, ThinkingSupport, VertexCompatKey,
-    VertexCompatModel,
+    AnyValue, ClaudeCli, ClaudeKey, ClaudeModel, CodexKey, CodexModel, Config,
+    DisableImageGeneration, GeminiKey, GeminiModel, OAuthModelAlias, OAuthModelSetting,
+    OpenAiCompatibility, OpenAiCompatibilityApiKey, OpenAiCompatibilityModel, PayloadConfig,
+    PayloadFilterRule, PayloadModelRule, PayloadRule, RequestScopedErrorRule, ThinkingSupport,
+    VertexCompatKey, VertexCompatModel,
 };
 use serde_json::Value;
 
@@ -342,6 +344,7 @@ pub(super) fn config(config: &Config) -> Json {
             "claude-api-key",
             slice(&config.claude_api_key, |key| claude_key(key, "")),
         )
+        .omit_empty("claude-cli", slice(&config.claude_cli, claude_cli))
         .with(
             "openai-compatibility",
             slice(&config.openai_compatibility, openai_compatibility),
@@ -675,6 +678,24 @@ fn claude_model(model: &ClaudeModel) -> Json {
         .omit_empty("force-mapping", Json::Bool(model.force_mapping))
         .omit_empty("is-compat", Json::Bool(model.is_compat))
         .omit_nil("thinking", model.thinking.as_ref().map(thinking))
+        .done()
+}
+
+/// A `claude-cli` entry (open-ferry's own); it holds no secrets.
+fn claude_cli(entry: &ClaudeCli) -> Json {
+    Fields::new()
+        .with("name", string(&entry.name))
+        .omit_empty("command", string(&entry.command))
+        .omit_empty("config-dir", string(&entry.config_dir))
+        .omit_empty("system-prompt", string(&entry.system_prompt))
+        .omit_empty("max-concurrency", Json::Int(entry.max_concurrency))
+        .omit_empty("timeout", string(&entry.timeout))
+        .omit_empty("prefix", string(&entry.prefix))
+        .omit_empty("models", slice(&entry.models, claude_model))
+        .omit_empty("excluded-models", strings(&entry.excluded_models))
+        .omit_empty("priority", Json::Int(entry.priority))
+        .omit_nil("weight", entry.weight.map(Json::Int))
+        .omit_empty("disabled", Json::Bool(entry.disabled))
         .done()
 }
 

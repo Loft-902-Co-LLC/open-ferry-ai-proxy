@@ -1552,11 +1552,12 @@ mod tests {
 
     /// The commented blocks of `ROOT_EXAMPLE` an operator would uncomment,
     /// each from the line starting with one of these to the next blank line.
-    const ROOT_EXAMPLE_BLOCKS: [&str; 10] = [
+    const ROOT_EXAMPLE_BLOCKS: [&str; 11] = [
         "  # base-url:",
         "  # streaming:",
         "  # payload:",
         "# api-keys:",
+        "# claude-cli:",
         "  # auth-auto-refresh-workers:",
         "  # model-alias:",
         "  # settings:",
@@ -1624,6 +1625,7 @@ mod tests {
         assert!(config.xai_api_key.is_empty() && config.meta_api_key.is_empty());
         assert!(config.interactions_api_key.is_empty());
         assert!(config.openai_compatibility.is_empty());
+        assert!(config.claude_cli.is_empty());
         assert!(config.oauth_model_alias.is_empty());
         assert_eq!(config.payload, PayloadConfig::default());
 
@@ -1639,6 +1641,9 @@ mod tests {
         assert_eq!(config.meta_api_key.len(), 1);
         assert_eq!(config.interactions_api_key.len(), 1);
         assert_eq!(config.openai_compatibility.len(), 1);
+        assert_eq!(config.claude_cli.len(), 2);
+        assert_eq!(config.claude_cli[0].max_concurrency(), 2);
+        assert_eq!(config.claude_cli[1].config_dir, "~/.claude-second");
         assert_eq!(
             config.remote_management.base_url,
             "https://proxy.example.com"

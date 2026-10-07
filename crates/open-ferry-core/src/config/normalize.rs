@@ -21,6 +21,9 @@
 //! - Steps for sections this port ignores (Antigravity, Devin, cloaking,
 //!   plugins, pprof, credential concurrency and in-flight, live media
 //!   relay) are left out.
+//! - open-ferry's own `claude-cli` list is cleaned up and checked here too
+//!   ([`sanitize_claude_cli`]): a bad entry fails the load, as a bad weight
+//!   does.
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
@@ -29,11 +32,13 @@ use std::path::PathBuf;
 
 use open_ferry_translate::go::to_lower;
 
+use super::duration::parse_go_duration;
 use super::paths::{self, Os};
 use super::payload::sanitize_payload_rules;
 use super::types::{
-    ClaudeKey, CodexKey, Config, DEFAULT_PANEL_GITHUB_REPOSITORY, GeminiKey, OAuthModelAlias,
-    OAuthModelSetting, OpenAiCompatibility, RequestScopedErrorRule, VertexCompatKey,
+    ClaudeCli, ClaudeCliSystemPrompt, ClaudeKey, CodexKey, Config, DEFAULT_PANEL_GITHUB_REPOSITORY,
+    GeminiKey, OAuthModelAlias, OAuthModelSetting, OpenAiCompatibility, RequestScopedErrorRule,
+    VertexCompatKey,
 };
 use super::v8::check_weight;
 use super::yaml::go_quote;
@@ -113,6 +118,8 @@ pub(crate) fn post_process(config: &mut Config) -> Result<(), ConfigError> {
     config.codex_header_defaults.beta_features =
         config.codex_header_defaults.beta_features.trim().to_owned();
     sanitize_claude_keys(&mut config.claude_api_key);
+    sanitize_claude_cli(&mut config.claude_cli);
+    validate_claude_cli(&config.claude_cli)?;
     sanitize_openai_compatibility(&mut config.openai_compatibility);
     config.oauth_excluded_models = normalize_oauth_excluded_models(&config.oauth_excluded_models);
     config.oauth_model_alias = sanitize_oauth_model_alias(&config.oauth_model_alias);
@@ -192,6 +199,10 @@ fn validate_weights(config: &Config) -> Result<(), ConfigError> {
     check_family_weights(
         "meta-api-key",
         config.meta_api_key.iter().map(|key| key.weight),
+    )?;
+    check_family_weights(
+        "claude-cli",
+        config.claude_cli.iter().map(|entry| entry.weight),
     )?;
     for (provider_index, compat) in config.openai_compatibility.iter().enumerate() {
         for (key_index, entry) in compat.api_key_entries.iter().enumerate() {
@@ -382,6 +393,56 @@ pub fn sanitize_claude_keys(keys: &mut [ClaudeKey]) {
         key.headers = normalize_headers(&key.headers);
         key.excluded_models = normalize_excluded_models(&key.excluded_models);
     }
+}
+
+/// Cleans up the `claude-cli` entries (not upstream's): the name, command,
+/// config directory and timeout trimmed, the system prompt mode in lower
+/// case, and the prefix and excluded models as for the API keys.
+pub fn sanitize_claude_cli(entries: &mut [ClaudeCli]) {
+    for entry in entries {
+        entry.name = entry.name.trim().to_owned();
+        entry.command = entry.command.trim().to_owned();
+        entry.config_dir = entry.config_dir.trim().to_owned();
+        entry.system_prompt = to_lower(entry.system_prompt.trim());
+        entry.timeout = entry.timeout.trim().to_owned();
+        entry.prefix = normalize_model_prefix(&entry.prefix);
+        entry.excluded_models = normalize_excluded_models(&entry.excluded_models);
+    }
+}
+
+/// Checks the cleaned-up `claude-cli` entries (not upstream's): each has a
+/// name that no other entry has (ignoring case), a known system prompt mode,
+/// a `max-concurrency` that isn't negative and a `timeout` that is empty or
+/// a positive Go duration. The error names the entry and the key, not the
+/// value.
+pub(crate) fn validate_claude_cli(entries: &[ClaudeCli]) -> Result<(), ConfigError> {
+    let mut names = HashSet::new();
+    for (index, entry) in entries.iter().enumerate() {
+        let invalid = |message: &str| {
+            ConfigError::new(
+                ConfigErrorKind::Invalid,
+                format!("claude-cli[{index}].{message}"),
+            )
+        };
+        if entry.name.is_empty() {
+            return Err(invalid("name: a name is required"));
+        }
+        if !names.insert(to_lower(&entry.name)) {
+            return Err(invalid("name: another claude-cli entry has this name"));
+        }
+        if ClaudeCliSystemPrompt::parse(&entry.system_prompt).is_none() {
+            return Err(invalid("system-prompt: must be replace or append"));
+        }
+        if entry.max_concurrency < 0 {
+            return Err(invalid("max-concurrency: must not be negative"));
+        }
+        if !entry.timeout.is_empty()
+            && !parse_go_duration(&entry.timeout).is_some_and(|nanos| nanos > 0)
+        {
+            return Err(invalid("timeout: must be a positive duration such as 10m"));
+        }
+    }
+    Ok(())
 }
 
 /// Upstream's `SanitizeOpenAICompatibility`: names, prefixes, base URLs and

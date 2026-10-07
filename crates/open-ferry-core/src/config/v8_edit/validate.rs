@@ -37,14 +37,16 @@ use super::super::yaml3::Kind as TreeKind;
 use super::super::{ConfigError, ConfigErrorKind};
 use super::schema::{CONFIG_LEGACY_CONFIG, Field, Type};
 
-/// The v8 root sections that don't hold a moved legacy setting.
-const EXTRA_ROOTS: [&str; 6] = [
+/// The v8 root sections that don't hold a moved legacy setting, with
+/// open-ferry's `claude-cli`.
+const EXTRA_ROOTS: [&str; 7] = [
     "models",
     "config-version",
     "api-keys",
     "plugins",
     "quota-exceeded",
     "client",
+    "claude-cli",
 ];
 
 fn invalid(message: impl Into<String>) -> ConfigError {

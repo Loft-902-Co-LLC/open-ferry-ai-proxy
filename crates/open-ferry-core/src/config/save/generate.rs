@@ -29,6 +29,9 @@
 //!   a timestamp whose zone is 24 hours or more from UTC, can't be written
 //!   (the loader keeps neither); saving fails with an error naming the
 //!   rule. Upstream writes them.
+//! - open-ferry's `claude-cli` list follows `claude-api-key`. It is always
+//!   listed, so emptying it empties the file's list, and the merge doesn't
+//!   add an empty one to a file without it.
 
 use std::collections::BTreeMap;
 
@@ -36,9 +39,10 @@ use super::super::image_generation::DisableImageGeneration;
 use super::super::layout::AnyValue;
 use super::super::payload::{PayloadConfig, PayloadFilterRule, PayloadModelRule, PayloadRule};
 use super::super::types::{
-    ClaudeKey, ClaudeModel, CodexKey, CodexModel, Config, GeminiKey, GeminiModel, OAuthModelAlias,
-    OAuthModelSetting, OpenAiCompatibility, OpenAiCompatibilityApiKey, OpenAiCompatibilityModel,
-    RequestScopedErrorRule, ThinkingSupport, VertexCompatKey, VertexCompatModel,
+    ClaudeCli, ClaudeKey, ClaudeModel, CodexKey, CodexModel, Config, GeminiKey, GeminiModel,
+    OAuthModelAlias, OAuthModelSetting, OpenAiCompatibility, OpenAiCompatibilityApiKey,
+    OpenAiCompatibilityModel, RequestScopedErrorRule, ThinkingSupport, VertexCompatKey,
+    VertexCompatModel,
 };
 use super::super::yaml3::encode::{Field, Value};
 use super::super::yaml3::{Node, TIMESTAMP_TAG};
@@ -346,6 +350,7 @@ pub(crate) fn legacy_config(cfg: &Config) -> Result<Value, Unwritable> {
                 .done(),
         )
         .put("claude-api-key", seq(&cfg.claude_api_key, claude_key))
+        .put("claude-cli", seq(&cfg.claude_cli, claude_cli))
         .put("claude-header-defaults", claude_header_defaults())
         .put("disable-claude-cloak-mode", Value::Bool(false))
         .put(
@@ -637,6 +642,24 @@ fn claude_key(k: &ClaudeKey) -> Value {
             "request-scoped-errors",
             seq(&k.request_scoped_errors, request_scoped_error),
         )
+        .done()
+}
+
+/// A `claude-cli` entry (open-ferry's own).
+fn claude_cli(c: &ClaudeCli) -> Value {
+    Fields::default()
+        .put("name", s(&c.name))
+        .omit_empty("command", s(&c.command))
+        .omit_empty("config-dir", s(&c.config_dir))
+        .omit_empty("system-prompt", s(&c.system_prompt))
+        .omit_empty("max-concurrency", Value::Int(c.max_concurrency))
+        .omit_empty("timeout", s(&c.timeout))
+        .omit_empty("prefix", s(&c.prefix))
+        .omit_empty("models", seq(&c.models, claude_model))
+        .omit_empty("excluded-models", strings(&c.excluded_models))
+        .omit_empty("priority", Value::Int(c.priority))
+        .pointer("weight", c.weight.map(Value::Int))
+        .omit_empty("disabled", Value::Bool(c.disabled))
         .done()
 }
 

@@ -49,6 +49,25 @@ static CONFIG_ANTIGRAVITY_CONNECTION_POOL_CONFIG: Type = Type {
     ],
 };
 
+/// open-ferry's `claude-cli` entries, which upstream doesn't have.
+static CONFIG_CLAUDE_CLI: Type = Type {
+    name: "config.ClaudeCLI",
+    fields: &[
+        ("command", Field::Leaf),
+        ("config-dir", Field::Leaf),
+        ("disabled", Field::Leaf),
+        ("excluded-models", Field::Leaf),
+        ("max-concurrency", Field::Leaf),
+        ("models", Field::List(&CONFIG_CLAUDE_MODEL)),
+        ("name", Field::Leaf),
+        ("prefix", Field::Leaf),
+        ("priority", Field::Leaf),
+        ("system-prompt", Field::Leaf),
+        ("timeout", Field::Leaf),
+        ("weight", Field::Leaf),
+    ],
+};
+
 static CONFIG_CLAUDE_CODE_CONFIG: Type = Type {
     name: "config.ClaudeCodeConfig",
     fields: &[("disable-cloaking-model-list", Field::Leaf)],
@@ -495,6 +514,7 @@ pub(super) static CONFIG_LEGACY_CONFIG: Type = Type {
         ("auth-dir", Field::Leaf),
         ("claude", Field::Struct(&CONFIG_CLAUDE_CONFIG)),
         ("claude-api-key", Field::List(&CONFIG_CLAUDE_KEY)),
+        ("claude-cli", Field::List(&CONFIG_CLAUDE_CLI)),
         ("claude-code", Field::Struct(&CONFIG_CLAUDE_CODE_CONFIG)),
         (
             "claude-header-defaults",

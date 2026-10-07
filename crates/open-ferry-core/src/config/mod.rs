@@ -48,6 +48,9 @@
 //! their v8 spellings (the key lists as `api-keys.gemini`,
 //! `api-keys.vertex` and so on).
 //!
+//! open-ferry adds `claude-cli` ([`ClaudeCli`]), a top-level list in both
+//! layouts that upstream doesn't have.
+//!
 //! Read and ignored, so they never fail a load except where upstream checks
 //! their layout or weights before decoding:
 //! - Client impersonation, which this project doesn't do:
@@ -70,6 +73,8 @@
 //!   inside them isn't an error.
 //! - Each submodule lists its own deviations.
 
+#[cfg(test)]
+mod claude_cli_tests;
 mod decode;
 pub mod diff;
 mod duration;
@@ -100,12 +105,12 @@ pub use model_catalogs::{CatalogSourceError, CatalogSources, is_url_source};
 pub use payload::{PayloadConfig, PayloadFilterRule, PayloadModelRule, PayloadRule};
 pub use safe_mode::example_api_key_warning_page;
 pub use types::{
-    ClaudeConfig, ClaudeKey, ClaudeModel, ClientConfig, CodexClientConfig, CodexConfig,
-    CodexHeaderDefaults, CodexKey, CodexModel, Config, DEFAULT_AUTH_DIR,
-    DEFAULT_PANEL_GITHUB_REPOSITORY, GeminiKey, GeminiModel, OAuthModelAlias, OAuthModelSetting,
-    OpenAiCompatibility, OpenAiCompatibilityApiKey, OpenAiCompatibilityModel, QuotaExceeded,
-    RemoteManagement, RequestScopedErrorRule, RoutingConfig, RoutingStrategy, StreamingConfig,
-    ThinkingSupport, TlsConfig, VertexCompatKey, VertexCompatModel, XaiConfig,
+    ClaudeCli, ClaudeCliSystemPrompt, ClaudeConfig, ClaudeKey, ClaudeModel, ClientConfig,
+    CodexClientConfig, CodexConfig, CodexHeaderDefaults, CodexKey, CodexModel, Config,
+    DEFAULT_AUTH_DIR, DEFAULT_PANEL_GITHUB_REPOSITORY, GeminiKey, GeminiModel, OAuthModelAlias,
+    OAuthModelSetting, OpenAiCompatibility, OpenAiCompatibilityApiKey, OpenAiCompatibilityModel,
+    QuotaExceeded, RemoteManagement, RequestScopedErrorRule, RoutingConfig, RoutingStrategy,
+    StreamingConfig, ThinkingSupport, TlsConfig, VertexCompatKey, VertexCompatModel, XaiConfig,
 };
 pub(crate) use types::{Redacted, RedactedUrl};
 pub use watcher::{AuthFile, ConfigWatcher, WatchError, WatchEvent, next_revision};
@@ -115,8 +120,8 @@ pub use watcher::{AuthFile, ConfigWatcher, WatchError, WatchEvent, next_revision
 pub mod sanitize {
     pub use super::normalize::{
         META_BASE_URL, normalize_excluded_models, normalize_headers, normalize_model_prefix,
-        normalize_oauth_excluded_models, sanitize_claude_keys, sanitize_codex_keys,
-        sanitize_gemini_keys, sanitize_meta_keys, sanitize_oauth_model_alias,
+        normalize_oauth_excluded_models, sanitize_claude_cli, sanitize_claude_keys,
+        sanitize_codex_keys, sanitize_gemini_keys, sanitize_meta_keys, sanitize_oauth_model_alias,
         sanitize_oauth_request_scoped_errors, sanitize_openai_compatibility, sanitize_vertex_keys,
         sanitize_xai_keys,
     };

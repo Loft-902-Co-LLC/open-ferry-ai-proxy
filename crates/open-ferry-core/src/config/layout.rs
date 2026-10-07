@@ -97,10 +97,12 @@ pub(crate) const V8_STRUCT_PATHS: &[(&str, &str)] = &[
     ("payload", "requests.payload"),
 ];
 
-/// The top-level keys of the v8 layout (upstream's `v8AllowedRoots`).
+/// The top-level keys of the v8 layout (upstream's `v8AllowedRoots`), with
+/// open-ferry's `claude-cli`, which stays at the top level in both layouts.
 pub(crate) const V8_ROOTS: &[&str] = &[
     "access",
     "api-keys",
+    "claude-cli",
     "client",
     "config-version",
     "credentials",

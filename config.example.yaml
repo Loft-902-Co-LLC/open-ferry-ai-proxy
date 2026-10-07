@@ -680,6 +680,30 @@ upstream:
 
 # END API KEY EXAMPLES
 
+# Claude models through your own installed Claude Code (claude-cli). open-ferry runs
+# "claude -p" for each request; Claude Code signs itself in and makes every request to
+# Anthropic, so open-ferry stores no token for it. Sign in first with "claude auth login"
+# (add CLAUDE_CONFIG_DIR=<dir> for another account). See docs/claude-subscription.md.
+# Uncomment and edit to use it; the list stays at the top level in both layouts.
+# claude-cli:
+#   - name: claude-max-1 # required and unique; seeds the credential ID
+#     command: "" # optional: path to claude; empty finds claude on PATH (claude.exe, or claude.cmd from npm, on Windows)
+#     config-dir: "" # optional: CLAUDE_CONFIG_DIR, the Claude Code account to use; empty is Claude Code's default
+#     system-prompt: replace # optional: replace (default) replaces Claude Code's system prompt; append adds to it
+#     max-concurrency: 2 # optional: requests run at once; more wait for a free slot
+#     timeout: 10m # optional: how long one request may run
+#     prefix: "max" # optional: require calls like "max/claude-sonnet-5-5" to target this entry
+#     priority: 0 # larger values take precedence when selecting credentials
+#     weight: 1 # optional: weighted-round-robin share; maximum 1,000,000
+#     disabled: false # optional: true takes the entry out of routing
+#     models: # optional: the models to serve; empty serves the built-in Claude models
+#       - name: "claude-sonnet-5-5"
+#         alias: "sonnet"
+#     excluded-models: # optional: models not to serve
+#       - "*haiku*"
+#   - name: claude-max-2
+#     config-dir: "~/.claude-second" # a second account, signed in with CLAUDE_CONFIG_DIR=~/.claude-second claude auth login
+
 # OAuth/file-backed credentials. Token material stays in the credential store.
 oauth:
   # Authentication directory (supports ~ for home directory)

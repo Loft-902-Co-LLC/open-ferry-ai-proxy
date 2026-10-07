@@ -21,6 +21,9 @@
 //!   and ignores (pprof, cloaking and `claude-code`, fingerprints,
 //!   Antigravity, Devin, Codex live media relay and
 //!   `disable-codex-cloaking`) have none.
+//! - open-ferry's `claude-cli` list, which upstream doesn't have, gets
+//!   lines in the style of the key lists: its count, or each entry's
+//!   changed settings as `claude-cli[0].timeout: 5m -> 10m`.
 //! - Go tells a list or map that is missing from one that is empty, and
 //!   reports `payload.default: []` against no `payload.default` as an
 //!   update (0 -> 0 rules); the typed config can't tell them apart, so no
@@ -429,6 +432,39 @@ pub fn build_change_details(old: &Config, new: &Config) -> Vec<String> {
                 &field("models"),
                 &summary::codex_models(&o.models),
                 &summary::codex_models(&n.models),
+            );
+            changes.excluded(
+                &field("excluded-models"),
+                &o.excluded_models,
+                &n.excluded_models,
+            );
+        }
+    }
+
+    // open-ferry's claude-cli entries (they hold no secrets).
+    if old.claude_cli.len() != new.claude_cli.len() {
+        changes.count("claude-cli", old.claude_cli.len(), new.claude_cli.len());
+    } else {
+        for (i, (o, n)) in old.claude_cli.iter().zip(&new.claude_cli).enumerate() {
+            let field = |name: &str| format!("claude-cli[{i}].{name}");
+            changes.text(&field("name"), &o.name, &n.name);
+            changes.text(&field("command"), &o.command, &n.command);
+            changes.text(&field("config-dir"), &o.config_dir, &n.config_dir);
+            changes.text(&field("system-prompt"), &o.system_prompt, &n.system_prompt);
+            changes.int(
+                &field("max-concurrency"),
+                o.max_concurrency,
+                n.max_concurrency,
+            );
+            changes.text(&field("timeout"), &o.timeout, &n.timeout);
+            changes.trimmed(&field("prefix"), &o.prefix, &n.prefix);
+            changes.int(&field("priority"), o.priority, n.priority);
+            changes.optional_int(&field("weight"), o.weight, n.weight);
+            changes.flag(&field("disabled"), o.disabled, n.disabled);
+            changes.summary(
+                &field("models"),
+                &summary::claude_models(&o.models),
+                &summary::claude_models(&n.models),
             );
             changes.excluded(
                 &field("excluded-models"),

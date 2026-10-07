@@ -787,6 +787,34 @@ meta-api-key:
 xai: {inject-x-search: true}
 "#;
 
+/// Not upstream's: open-ferry's `claude-cli` list is written after the
+/// Claude keys, with its defaults left out, and kept at the top level of the
+/// v8 read.
+#[tokio::test]
+async fn claude_cli_is_written() {
+    let raw = "claude-cli:\n  - name: max-1\n    config-dir: /srv/claude\n    timeout: 2m\n    weight: 3\n";
+    let answer = with_config(raw).get("/v0/management/config").await;
+    assert_eq!(answer.status, StatusCode::OK);
+    let part = concat!(
+        r#""claude-api-key":null,"claude-cli":[{"name":"max-1","#,
+        r#""config-dir":"/srv/claude","timeout":"2m","weight":3}],"#,
+        r#""openai-compatibility":null"#,
+    );
+    assert!(answer.body.contains(part), "{}", answer.body);
+    let answer = with_config("port: 8317\n")
+        .get("/v0/management/config")
+        .await;
+    assert!(!answer.body.contains("claude-cli"), "{}", answer.body);
+
+    let (dir, api) = over_file(raw);
+    let answer = api.get("/v8/management/config/claude-cli").await;
+    assert_v8(
+        &answer,
+        r#"[{"config-dir":"/srv/claude","name":"max-1","timeout":"2m","weight":3}]"#,
+    );
+    assert_unchanged(&dir, raw);
+}
+
 /// Not upstream's: the interactions, xAI and Meta keys and the xAI settings
 /// are written at upstream's positions, as the loader leaves them (an xAI
 /// key loses `alpha-search`, a Meta key gets its default base URL).

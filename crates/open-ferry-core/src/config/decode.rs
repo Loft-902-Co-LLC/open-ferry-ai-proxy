@@ -106,6 +106,7 @@ fn field_hint(owner: &str, key: &str) -> &'static str {
         ("config.legacyConfig", "api-keys" | "trusted-proxies") => "[]string",
         ("config.legacyConfig", "codex-api-key") => "[]config.CodexKey",
         ("config.legacyConfig", "claude-api-key") => "[]config.ClaudeKey",
+        ("config.legacyConfig", "claude-cli") => "[]config.ClaudeCLI",
         ("config.legacyConfig", "oauth-excluded-models") => "map[string][]string",
         ("config.legacyConfig", "oauth-model-alias") => "map[string][]config.OAuthModelAlias",
         ("config.legacyConfig", "oauth-request-scoped-errors") => {
@@ -113,7 +114,7 @@ fn field_hint(owner: &str, key: &str) -> &'static str {
         }
         ("config.legacyConfig", "oauth-settings") => "map[string][]config.OAuthModelSetting",
         ("config.CodexKey", "models") => "[]config.CodexModel",
-        ("config.ClaudeKey", "models") => "[]config.ClaudeModel",
+        ("config.ClaudeKey" | "config.ClaudeCLI", "models") => "[]config.ClaudeModel",
         (_, "headers") => "map[string]string",
         (_, "excluded-models") => "[]string",
         (_, "request-scoped-errors") => "[]config.RequestScopedErrorRule",

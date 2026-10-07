@@ -152,6 +152,9 @@ pub struct Config {
     pub claude: ClaudeConfig,
     /// Claude API keys.
     pub claude_api_key: Vec<ClaudeKey>,
+    /// Claude Code installations that serve Claude models (`claude-cli`,
+    /// not upstream's).
+    pub claude_cli: Vec<ClaudeCli>,
     /// OpenAI-compatible upstreams.
     pub openai_compatibility: Vec<OpenAiCompatibility>,
     /// Vertex AI API keys, for Vertex AI's express mode or a service that
@@ -222,6 +225,7 @@ impl Default for Config {
             codex_header_defaults: CodexHeaderDefaults::default(),
             claude: ClaudeConfig::default(),
             claude_api_key: Vec::new(),
+            claude_cli: Vec::new(),
             openai_compatibility: Vec::new(),
             vertex_api_key: Vec::new(),
             oauth_excluded_models: BTreeMap::new(),
@@ -323,6 +327,7 @@ impl fmt::Debug for Config {
             .field("codex_header_defaults", &self.codex_header_defaults)
             .field("claude", &self.claude)
             .field("claude_api_key", &self.claude_api_key)
+            .field("claude_cli", &self.claude_cli)
             .field("openai_compatibility", &self.openai_compatibility)
             .field("vertex_api_key", &self.vertex_api_key)
             .field("oauth_excluded_models", &self.oauth_excluded_models)
@@ -710,6 +715,113 @@ pub struct ClaudeModel {
     pub is_compat: bool,
     /// Reasoning support.
     pub thinking: Option<ThinkingSupport>,
+}
+
+/// A `claude-cli` entry: Claude models served by running the user's own
+/// installed Claude Code (`claude -p`) for each request. Not upstream's.
+///
+/// Anthropic's terms let only Claude Code itself use a Claude subscription
+/// sign-in, so open-ferry doesn't sign in or send requests for this
+/// provider: the `claude` it runs signs itself in, with the account of its
+/// config directory, and makes every request to Anthropic. open-ferry
+/// stores no credential for it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, rename = "config.ClaudeCLI", rename_all = "kebab-case")]
+pub struct ClaudeCli {
+    /// The entry's name, required and unique; it seeds the credential's ID
+    /// and labels it.
+    pub name: String,
+    /// The `claude` executable; empty means `claude` on `PATH`.
+    pub command: String,
+    /// Claude Code's config directory (`CLAUDE_CONFIG_DIR`), which holds
+    /// the account it signs in with; empty means Claude Code's default.
+    pub config_dir: String,
+    /// How the client's system prompt is given to Claude Code: `replace`
+    /// (the default) replaces Claude Code's own, `append` adds to it.
+    pub system_prompt: String,
+    /// How many requests run at once; a request waits for a free slot.
+    /// Zero means [`ClaudeCli::DEFAULT_MAX_CONCURRENCY`].
+    pub max_concurrency: i64,
+    /// How long a request may run, as a Go duration (`10m`); empty means
+    /// ten minutes.
+    pub timeout: String,
+    /// Namespaces this entry's models.
+    pub prefix: String,
+    /// Model names and their aliases; empty means the built-in Claude
+    /// models.
+    pub models: Vec<ClaudeModel>,
+    /// Models this entry doesn't serve; lower case.
+    pub excluded_models: Vec<String>,
+    /// Selection preference; higher wins.
+    pub priority: i64,
+    /// Share under weighted round robin, as for [`CodexKey::weight`].
+    pub weight: Option<i64>,
+    /// Takes the entry out of routing.
+    pub disabled: bool,
+}
+
+/// How a `claude-cli` entry gives Claude Code the client's system prompt.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ClaudeCliSystemPrompt {
+    /// `--system-prompt-file`: the client's prompt replaces Claude Code's.
+    #[default]
+    Replace,
+    /// `--append-system-prompt-file`: Claude Code keeps its own prompt and
+    /// the client's follows it.
+    Append,
+}
+
+impl ClaudeCliSystemPrompt {
+    /// The mode's config spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Replace => "replace",
+            Self::Append => "append",
+        }
+    }
+
+    /// The mode a config spelling names: empty means `replace`; case and
+    /// surrounding space are ignored.
+    pub fn parse(text: &str) -> Option<Self> {
+        match to_lower(text.trim()).as_str() {
+            "" | "replace" => Some(Self::Replace),
+            "append" => Some(Self::Append),
+            _ => None,
+        }
+    }
+}
+
+impl ClaudeCli {
+    /// How many requests an entry runs at once when `max-concurrency` is
+    /// unset.
+    pub const DEFAULT_MAX_CONCURRENCY: usize = 2;
+
+    /// How long a request may run when `timeout` is unset.
+    pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+    /// The system prompt mode; an unknown spelling, which loading rejects,
+    /// means `replace`.
+    pub fn system_prompt_mode(&self) -> ClaudeCliSystemPrompt {
+        ClaudeCliSystemPrompt::parse(&self.system_prompt).unwrap_or_default()
+    }
+
+    /// How many requests run at once: `max-concurrency` when positive,
+    /// else [`ClaudeCli::DEFAULT_MAX_CONCURRENCY`].
+    pub fn max_concurrency(&self) -> usize {
+        usize::try_from(self.max_concurrency)
+            .ok()
+            .filter(|limit| *limit > 0)
+            .unwrap_or(Self::DEFAULT_MAX_CONCURRENCY)
+    }
+
+    /// How long a request may run: `timeout` when it is a positive Go
+    /// duration, else [`ClaudeCli::DEFAULT_TIMEOUT`].
+    pub fn timeout(&self) -> Duration {
+        match parse_go_duration(self.timeout.trim()) {
+            Some(nanos) if nanos > 0 => Duration::from_nanos(nanos.unsigned_abs()),
+            _ => Self::DEFAULT_TIMEOUT,
+        }
+    }
 }
 
 /// A Gemini API key and its routing settings.

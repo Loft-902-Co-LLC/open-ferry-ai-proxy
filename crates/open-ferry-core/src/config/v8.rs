@@ -505,7 +505,8 @@ pub(crate) const SHARED_KEY_FIELDS: &[&str] = &[
     "request-scoped-errors",
 ];
 
-/// Legacy API-key lists whose entries carry a `weight`.
+/// Legacy API-key lists whose entries carry a `weight`, and open-ferry's
+/// `claude-cli` list, which upstream doesn't have.
 const WEIGHTED_FAMILIES: &[&str] = &[
     "gemini-api-key",
     "interactions-api-key",
@@ -514,6 +515,7 @@ const WEIGHTED_FAMILIES: &[&str] = &[
     "codex-api-key",
     "xai-api-key",
     "meta-api-key",
+    "claude-cli",
 ];
 
 /// A document in the legacy layout.
