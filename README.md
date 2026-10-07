@@ -36,7 +36,15 @@ Each [release](https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases) 
 - **Linux:** the binaries need glibc 2.31 or newer, as on Debian 11, Ubuntu 20.04, Fedora 32, RHEL 9 and Amazon Linux 2023, or later. On older systems, build from source.
 - **macOS:** the binaries need macOS 11 or newer.
 
-Each archive holds the `open-ferry` binary (`open-ferry.exe` on Windows), an example config, `config.example.yaml`, this README and the licenses. Put the binary on your `PATH`. Run it in the directory that holds your `config.yaml`, or point to the file with `-config`. For a new setup, copy `config.example.yaml` to `config.yaml` and replace its example `api-keys` with keys of your own: until you do, the proxy refuses service. Then add your upstream credentials, from the commented examples in the file or by signing in.
+Each archive holds the `open-ferry` binary (`open-ferry.exe` on Windows), an example config, `config.example.yaml`, this README and the licenses. Put the binary on your `PATH`. Run it in the directory that holds your `config.yaml`, or point to the file with `-config`. For a new setup, write a config with new keys, check it, and start the proxy with it:
+
+```sh
+open-ferry init
+open-ferry check -config <the path init printed>
+open-ferry -config <the path init printed>
+```
+
+`init` writes `config.example.yaml` with a new client key and management key, listening on 127.0.0.1 only, to `~/.config/open-ferry/config.yaml` (`%APPDATA%\open-ferry\config.yaml` on Windows), and prints the keys once. Then add your upstream credentials, from the commented examples in the file, by signing in, or in the dashboard. [docs/cli.md](docs/cli.md) has the details of `init` and `check`.
 
 The binaries aren't code-signed. If macOS refuses to open one you downloaded with a browser, verify it as below, then remove the quarantine flag with `xattr -d com.apple.quarantine open-ferry`.
 
