@@ -63,7 +63,7 @@ use http::{HeaderMap, HeaderName, HeaderValue};
 
 use super::support::*;
 use crate::auth::{Auth, AuthError, Status, Timestamp};
-use crate::exec::{Dispatcher, ExecError};
+use crate::exec::{Dispatcher, ErrorKind, ExecError};
 use crate::executor::ProviderExecutor;
 use crate::manager::affinity::{Affinity, Session};
 use crate::manager::models::{OAuthAliasTable, Resolver};
@@ -328,6 +328,82 @@ fn weighted_binding_rebinds_after_weight_becomes_zero() {
         "auth-b",
         "the rebound session should stay"
     );
+}
+
+// Not upstream's: the weighted affinity pick with zero-weight credentials
+// ready, as a Go probe of v8.0.15's `pickNext` gave, with a session and
+// without. Zero weights are left out of every tier before the pick, so a
+// lower tier's positive weight serves; with none ready there is no
+// candidate, unless every credential is cooling down.
+#[test]
+fn weighted_pick_with_ready_zero_weight_credentials() {
+    let model = "probe-model";
+    let auth = |id: &str, weight: &str, priority: &str| {
+        with_attr(weighted(id, weight), "priority", priority)
+    };
+    let cooling = |auth: Auth| {
+        let next = base_now() + TimeDelta::minutes(10);
+        let mut state = crate::auth::ModelState {
+            status: Status::Error,
+            unavailable: true,
+            next_retry_after: Some(next),
+            ..Default::default()
+        };
+        state.quota.exceeded = true;
+        state.quota.next_recover_at = Some(next);
+        let mut auth = auth;
+        auth.model_states.insert(model.to_owned(), state);
+        auth
+    };
+    let cases = [
+        (
+            "positive weights cooling down",
+            vec![
+                cooling(auth("p1", "1", "0")),
+                cooling(auth("p2", "1", "0")),
+                auth("z", "0", "0"),
+            ],
+            Err(ErrorKind::AuthNotFound),
+        ),
+        (
+            "zero weight alone in the higher tier",
+            vec![auth("p", "1", "0"), auth("z", "0", "10")],
+            Ok("p"),
+        ),
+        (
+            "every credential cooling down",
+            vec![cooling(auth("p1", "1", "0")), cooling(auth("z", "0", "0"))],
+            Err(ErrorKind::ModelCooldown),
+        ),
+        (
+            "zero weight the only ready one in the higher tier",
+            vec![
+                cooling(auth("p1", "1", "10")),
+                auth("z", "0", "10"),
+                auth("p2", "1", "0"),
+            ],
+            Ok("p2"),
+        ),
+    ];
+    for (name, auths, want) in cases {
+        let ids: Vec<String> = auths.iter().map(|a| a.id.clone()).collect();
+        let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+        for session in [None, Some(derived("zero-weight"))] {
+            let mut pool = Sticky::new(RoutingStrategy::Weighted);
+            for auth in auths.clone() {
+                pool.put(auth);
+            }
+            let got = pool.try_pick("gemini", model, session.as_ref(), &ids);
+            let label = format!("{name}, session {}", session.is_some());
+            match want {
+                Ok(id) => assert_eq!(got.ok().as_deref(), Some(id), "{label}"),
+                Err(kind) => {
+                    let err = got.expect_err(&label);
+                    assert_eq!(err.kind, kind, "{label}: {err}");
+                }
+            }
+        }
+    }
 }
 
 // TestSessionAffinitySelector_WeightedNewSessionsResetAfterWeightChange.

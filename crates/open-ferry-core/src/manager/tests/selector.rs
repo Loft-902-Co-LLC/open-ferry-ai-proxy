@@ -285,6 +285,88 @@ fn weighted_round_robin_selector_pick_distributes_and_skips_non_positive_weights
     }
 }
 
+// Not upstream's: a weighted pick with zero-weight credentials ready, as a
+// Go probe of v8.0.15's `pickNext` gave. The scheduler leaves them out
+// before it looks for a ready credential, so it reports the others'
+// cooldown or picks a lower tier. The legacy pick takes the highest ready
+// tier first, zero weights included, and then finds no candidate.
+#[test]
+fn weighted_pick_with_ready_zero_weight_credentials() {
+    let model = "test-model";
+    let auth = |id: &str, weight: &str, priority: &str| {
+        with_attr(weighted(id, weight), "priority", priority)
+    };
+    let cooling = |auth: Auth| {
+        let next = after(base_now(), Duration::from_secs(600));
+        with_state(
+            auth,
+            model,
+            ModelState {
+                status: Status::Error,
+                unavailable: true,
+                next_retry_after: Some(next),
+                quota: QuotaState {
+                    exceeded: true,
+                    next_recover_at: Some(next),
+                    ..QuotaState::default()
+                },
+                ..ModelState::default()
+            },
+        )
+    };
+    let cases = [
+        (
+            "positive weights cooling down",
+            vec![
+                cooling(auth("p1", "1", "0")),
+                cooling(auth("p2", "1", "0")),
+                auth("z", "0", "0"),
+            ],
+            Err(ErrorKind::ModelCooldown),
+            Err(ErrorKind::AuthNotFound),
+        ),
+        (
+            "zero weight alone in the higher tier",
+            vec![auth("p", "1", "0"), auth("z", "0", "10")],
+            Ok("p"),
+            Err(ErrorKind::AuthNotFound),
+        ),
+        (
+            "every credential cooling down",
+            vec![cooling(auth("p1", "1", "0")), cooling(auth("z", "0", "0"))],
+            Err(ErrorKind::ModelCooldown),
+            Err(ErrorKind::ModelCooldown),
+        ),
+        (
+            "zero weight the only ready one in the higher tier",
+            vec![
+                cooling(auth("p1", "1", "10")),
+                auth("z", "0", "10"),
+                auth("p2", "1", "0"),
+            ],
+            Ok("p2"),
+            Err(ErrorKind::AuthNotFound),
+        ),
+    ];
+    for (name, auths, scheduler, legacy) in cases {
+        for (path, want) in [(Path::Scheduler, scheduler), (Path::Legacy, legacy)] {
+            let mut pool = Pool::new(path, RoutingStrategy::Weighted, "gemini");
+            pool.set(auths.clone());
+            let got = pool.pick(model);
+            match want {
+                Ok(id) => assert_eq!(got.ok().as_deref(), Some(id), "{name}: {path:?}"),
+                Err(kind) => {
+                    let err = got.expect_err(name);
+                    assert_eq!(err.kind, kind, "{name}: {path:?}: {err}");
+                    if kind == ErrorKind::AuthNotFound {
+                        assert_eq!(err.message, "no auth candidates", "{name}: {path:?}");
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn weighted_round_robin_selector_pick_resets_credits_when_weights_change() {
     for path in PATHS {
