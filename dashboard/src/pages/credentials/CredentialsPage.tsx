@@ -4,6 +4,7 @@ import { useSearchParams } from "react-router";
 import { SIGN_IN_PROVIDERS, type SignInProvider } from "../../api/credentials";
 import { Button } from "../../components/Button";
 import { PageHeader } from "../../components/PageHeader";
+import { ClaudeCliEntries } from "./ClaudeCliEntries";
 import { CredentialList } from "./CredentialList";
 import { ProviderKeys } from "./ProviderKeys";
 import { SignInDialog } from "./SignInDialog";
@@ -18,7 +19,8 @@ function signInOf(start: string | null): SignInProvider | null {
 
 /**
  * The credentials the server sends requests with: its sign-ins and
- * credential files, and the provider API keys in config.yaml. `?start=`
+ * credential files, and from config.yaml its Claude Code accounts
+ * (`claude-cli`) and provider API keys. `?start=`
  * opens a sign-in (`claude`, `codex`) or the add-a-key dialog (`key`), so
  * other pages can link straight to them; opening one starts nothing.
  */
@@ -61,6 +63,7 @@ export function CredentialsPage() {
       />
       <div className="space-y-6">
         <CredentialList />
+        <ClaudeCliEntries />
         <ProviderKeys
           adding={start === "key"}
           onAdd={() => {

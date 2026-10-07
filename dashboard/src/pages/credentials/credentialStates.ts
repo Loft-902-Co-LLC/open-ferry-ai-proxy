@@ -17,6 +17,8 @@ export function providerName(provider: string): string {
     case "claude":
     case "anthropic":
       return "Claude";
+    case "claude-cli":
+      return "Claude Code";
     case "codex":
       return "Codex";
     case "gemini":

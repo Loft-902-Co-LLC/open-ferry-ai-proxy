@@ -254,6 +254,7 @@ describe("the small words", () => {
     expect(providerName("claude")).toBe("Claude");
     expect(providerName("anthropic")).toBe("Claude");
     expect(providerName("codex")).toBe("Codex");
+    expect(providerName("claude-cli")).toBe("Claude Code");
     expect(providerName("vertex")).toBe("Vertex AI");
     expect(providerName("")).toBe("Unknown provider");
     expect(providerName("openrouter")).toBe("openrouter");

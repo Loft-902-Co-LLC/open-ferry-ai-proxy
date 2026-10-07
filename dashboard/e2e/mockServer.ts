@@ -7,8 +7,17 @@
 import type { Page, Route } from "@playwright/test";
 
 import type { Credential, ProviderKey } from "../src/api/credentials";
-import type { Bucket, LogEntry, Metrics, UsageRequest, UsageSeries } from "../src/api/dashboard";
+import type {
+  Bucket,
+  ClaudeCliEntry,
+  LogEntry,
+  Metrics,
+  UsageRequest,
+  UsageSeries,
+} from "../src/api/dashboard";
 import {
+  claudeCliCredential,
+  claudeCliEntry,
   clientSetup,
   cooldown,
   credential,
@@ -271,6 +280,60 @@ function credentials(now: number): Credential[] {
   ];
 }
 
+/**
+ * The config's claude-cli entries: a Claude Code account in use, with a
+ * prefix, its own config directory and a quota reading, and one whose
+ * Claude Code isn't signed in, resting. The server's times are to the
+ * nanosecond.
+ */
+function claudeCliEntries(now: number): ClaudeCliEntry[] {
+  const at = (seconds: number) => new Date(now + seconds * 1000).toISOString().replace("Z", "123456Z");
+  const unix = (seconds: number) => String(Math.floor(now / 1000) + seconds);
+  return [
+    claudeCliEntry({
+      prefix: "max",
+      config_dir: "~/.claude-max-1",
+      credential: claudeCliCredential({
+        recent_requests: recentRequests(now, 18),
+        modtime: at(-30),
+        updated_at: at(-30),
+        quota: {
+          observed_at: at(-240),
+          signals: {
+            "anthropic-ratelimit-unified-5h-status": "allowed",
+            "anthropic-ratelimit-unified-5h-utilization": "0.31",
+            "anthropic-ratelimit-unified-5h-reset": unix(2 * 3600),
+            "anthropic-ratelimit-unified-7d-status": "allowed",
+            "anthropic-ratelimit-unified-7d-utilization": "0.58",
+            "anthropic-ratelimit-unified-7d-reset": unix(3 * 86_400),
+          },
+        },
+      }),
+    }),
+    claudeCliEntry({
+      name: "claude-max-2",
+      config_dir: "~/.claude-max-2",
+      credential: claudeCliCredential({
+        id: "claude-cli:9c1e7a42d0b3",
+        name: "claude-cli:9c1e7a42d0b3",
+        auth_index: "c05e2d71a8f4b693",
+        label: "claude-max-2",
+        status: "error",
+        status_message: "unauthorized",
+        unavailable: true,
+        next_retry_after: at(1200),
+        success: 57,
+        failed: 4,
+        recent_requests: [],
+        modtime: at(-600),
+        updated_at: at(-600),
+        cooldowns: [cooldown("unauthorized", 1200, { retry_at: at(1200), http_status: 401 })],
+      }),
+      last_error: { message: "Claude Code isn't signed in", http_status: 401 },
+    }),
+  ];
+}
+
 // Placeholders shaped like provider keys; none is real.
 const CLAUDE_KEY = "sk-ant-api03-e2e-not-a-real-key-0000-Qw9x";
 const CODEX_KEY = "sk-proj-e2e-not-a-real-key-Zt4m";
@@ -491,6 +554,18 @@ export async function mockServer(
         return json(route, logSearch(logs));
       case "GET /v0/management/auth-files":
         return json(route, credentialList(connected ? credentials(now) : []));
+      case "GET /open-ferry/api/v1/claude-cli/entries":
+        return json(route, { entries: connected ? claudeCliEntries(now) : [] });
+      case "GET /open-ferry/api/v1/claude-cli/auth-status": {
+        const name = url.searchParams.get("name");
+        if (!connected || (name !== "claude-max-1" && name !== "claude-max-2")) {
+          return json(route, { error: "not_found", message: "no such claude-cli entry" }, 404);
+        }
+        return json(route, {
+          loggedIn: name === "claude-max-1",
+          authMethod: name === "claude-max-1" ? "claude.ai" : "",
+        });
+      }
       case "POST /v0/management/quota/fetch":
         return json(route, {
           subscription: { plan: "Max", tierName: "20x" },

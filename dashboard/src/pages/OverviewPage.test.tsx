@@ -2,10 +2,17 @@ import { screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import { AUTH_FILES, KEY_LISTS, type Credential } from "../api/credentials";
-import { CLIENT_SETUP, type ClientSetup } from "../api/dashboard";
+import { CLAUDE_CLI_ENTRIES, CLIENT_SETUP, type ClientSetup } from "../api/dashboard";
 import { API_KEYS } from "../api/management";
 import { EXAMPLE_API_KEYS } from "../app/safeMode";
-import { clientSetup, cooldown, credential, credentialList } from "../test/fixtures";
+import {
+  claudeCliCredential,
+  claudeCliEntry,
+  clientSetup,
+  cooldown,
+  credential,
+  credentialList,
+} from "../test/fixtures";
 import { mockApi, route, type MockApi } from "../test/mockApi";
 import { renderApp } from "../test/renderApp";
 
@@ -39,6 +46,7 @@ function server(
   state.api.use(
     route("GET", AUTH_FILES, { json: credentialList(credentials) }),
     ...NO_PROVIDER_KEYS,
+    route("GET", CLAUDE_CLI_ENTRIES, { json: { entries: [] } }),
     route("GET", CLIENT_SETUP, () => ({
       json: {
         ...state.setup,
@@ -265,7 +273,12 @@ describe("making a client key", () => {
     expect(screen.getByText("No key")).toBeVisible();
     expect(screen.getByLabelText("Client key")).toBeDisabled();
     expect(new Set(api.unhandled.map((call) => call.url.pathname))).toEqual(
-      new Set([API_KEYS, AUTH_FILES, ...Object.values(KEY_LISTS).map(({ path }) => path)]),
+      new Set([
+        API_KEYS,
+        AUTH_FILES,
+        CLAUDE_CLI_ENTRIES,
+        ...Object.values(KEY_LISTS).map(({ path }) => path),
+      ]),
     );
     expect(screen.queryByRole("heading", { name: "Providers" })).toBeNull();
     expect(screen.queryByRole("heading", { name: "Connect a provider" })).toBeNull();
@@ -334,6 +347,42 @@ describe("the providers card", () => {
       "href",
       "/credentials",
     );
+  });
+
+  it("counts the config's Claude Code accounts, and tallies them too", async () => {
+    const { api } = server([KEY], {}, []);
+    api.use(
+      route("GET", CLAUDE_CLI_ENTRIES, {
+        json: {
+          entries: [
+            claudeCliEntry(),
+            claudeCliEntry({
+              name: "claude-max-2",
+              credential: claudeCliCredential({
+                unavailable: true,
+                cooldowns: [cooldown("unauthorized", 600, { http_status: 401 })],
+              }),
+            }),
+          ],
+        },
+      }),
+    );
+    renderApp("/");
+    expect(
+      await screen.findByText(
+        "0 sign-ins and credential files, 0 provider API keys, 2 Claude Code accounts.",
+      ),
+    ).toBeVisible();
+    const card = screen.getByRole("region", { name: "Providers" });
+    const tally = within(card).getByRole("list", { name: "Credential health" });
+    expect(
+      within(tally)
+        .getAllByRole("listitem")
+        .map((item) => item.textContent),
+    ).toEqual(["1 ready", "1 resting"]);
+    expect(card).toHaveTextContent("One needs attention");
+    expect(screen.queryByRole("region", { name: "Connect a provider" })).toBeNull();
+    expect(api.unhandled).toEqual([]);
   });
 });
 

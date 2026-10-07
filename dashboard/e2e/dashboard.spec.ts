@@ -123,7 +123,7 @@ test("renders every screen under the policy", async ({ page }) => {
   await expect(page.getByLabel("The Codex CLI setup, step 1", { exact: true })).toContainText(`wire_api = "responses"`);
   await shot(page, "03-overview-codex");
   await expect(page.getByRole("region", { name: "Providers" })).toContainText(
-    "3 sign-ins and credential files, 3 provider API keys.",
+    "3 sign-ins and credential files, 3 provider API keys, 2 Claude Code accounts.",
   );
 
   await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Credentials" }).click();
@@ -143,6 +143,17 @@ test("renders every screen under the policy", async ({ page }) => {
   await shot(page, "14-credentials-quota");
   await quota.getByRole("button", { name: "Close" }).click();
   await expect(quota).toBeHidden();
+
+  // The config's Claude Code accounts, checked only when asked.
+  const accounts = page.getByRole("region", { name: "Claude Code accounts" });
+  await expect(accounts.getByRole("article", { name: "claude-max-1" })).toContainText("31% used");
+  const signedOut = accounts.getByRole("article", { name: "claude-max-2" });
+  await expect(signedOut).toContainText("Resting");
+  await expect(signedOut).toContainText("Claude Code isn't signed in (HTTP 401)");
+  await signedOut.getByRole("button", { name: "Check sign-in" }).click();
+  await expect(signedOut.getByText("CLAUDE_CONFIG_DIR=~/.claude-max-2 claude auth login")).toBeVisible();
+  await accounts.scrollIntoViewIfNeeded();
+  await shot(page, "27-credentials-claude-code");
 
   // The sign-in starts, and shows the provider's page as a link, which
   // isn't followed here.

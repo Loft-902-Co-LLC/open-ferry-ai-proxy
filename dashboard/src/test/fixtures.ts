@@ -3,6 +3,7 @@
 
 import type { Cooldown, Credential, CredentialList } from "../api/credentials";
 import type {
+  ClaudeCliEntry,
   ClientSetup,
   LedgerState,
   LogEntry,
@@ -287,4 +288,53 @@ export function cooldown(reason: string, seconds: number, overrides: Partial<Coo
 /** `GET auth-files` with `files`. */
 export function credentialList(files: Credential[]): CredentialList {
   return { files, observed_at: "2026-10-05T12:00:00.000Z" };
+}
+
+/**
+ * The credential of the `claude-cli` entry `claude-max-1`, in use, as
+ * `GET claude-cli/entries` gives it: made from config.yaml, so kept in
+ * memory, with no file and no account.
+ */
+export function claudeCliCredential(overrides: Partial<Credential> = {}): Credential {
+  return {
+    id: "claude-cli:479b4a4c3660",
+    auth_index: "3734a62b508f0029",
+    name: "claude-cli:479b4a4c3660",
+    type: "claude-cli",
+    provider: "claude-cli",
+    label: "claude-max-1",
+    status: "active",
+    status_message: "",
+    disabled: false,
+    unavailable: false,
+    runtime_only: false,
+    source: "memory",
+    size: 0,
+    success: 214,
+    failed: 3,
+    recent_requests: [
+      { time: "11:40-11:50", success: 9, failed: 0 },
+      { time: "11:50-12:00", success: 4, failed: 1 },
+    ],
+    account_type: "api_key",
+    created_at: "2026-10-05T08:00:00.123456789Z",
+    modtime: "2026-10-05T11:59:30.5Z",
+    updated_at: "2026-10-05T11:59:30.5Z",
+    quota: { signals: {} },
+    cooldowns: [],
+    ...overrides,
+  };
+}
+
+/** The `claude-cli` entry `claude-max-1`, in use, as `GET claude-cli/entries` lists it. */
+export function claudeCliEntry(overrides: Partial<ClaudeCliEntry> = {}): ClaudeCliEntry {
+  return {
+    name: "claude-max-1",
+    prefix: "",
+    config_dir: "",
+    disabled: false,
+    credential: claudeCliCredential({ label: overrides.name ?? "claude-max-1" }),
+    last_error: null,
+    ...overrides,
+  };
 }

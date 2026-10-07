@@ -1,8 +1,10 @@
 // What the provider's last response said of a Claude or Codex account's
-// quota windows (`quota` in `GET auth-files`): how much of each is used,
-// when it starts over, and which one stops the account. The readings are
-// headers as the provider sent them, so each is checked, and only the
-// numbers and times read from them are shown, never the text itself.
+// quota windows (`quota` in `GET auth-files`, and in a `claude-cli`
+// entry's credential, for which Claude Code reports Claude's): how much
+// of each is used, when it starts over, and which one stops the account.
+// The readings are headers as the provider sent them, so each is checked,
+// and only the numbers and times read from them are shown, never the text
+// itself.
 
 import type { Credential } from "../../api/credentials";
 
@@ -54,7 +56,8 @@ export function quotaReadings(credential: Credential): QuotaReadings | null {
   const windows: QuotaWindow[] = [];
   let named: QuotaWindow | null = null;
   switch (credential.provider.trim().toLowerCase()) {
-    case "claude": {
+    case "claude":
+    case "claude-cli": {
       const claim = signals.get("anthropic-ratelimit-unified-representative-claim")?.toLowerCase();
       for (const { id, name, claim: windowClaim } of CLAUDE_WINDOWS) {
         const prefix = `anthropic-ratelimit-unified-${id}-`;

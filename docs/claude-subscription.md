@@ -60,6 +60,8 @@ claude-cli:
 
 At start, and when the list changes, open-ferry runs each entry's `claude --version` and logs a warning when it is older than 2.1.259 or can't be run. The dashboard API's [`claude-cli/auth-status`](dashboard-api.md#claude-cli) route tells you whether an entry's Claude Code is signed in.
 
+The dashboard's Credentials page shows each entry: its prefix and config directory, whether it is ready, cooling down and until when, or turned off, its last error, and its quota windows. Its **Check sign-in** button runs that check for one entry, and when Claude Code isn't signed in, says what to run.
+
 ## What to expect
 
 - **Claude Code is an agent, not the raw API.** Its own tools, MCP servers, slash commands and session files are off, and it answers in one turn. Still, its answers can differ from the API's for the same request, most of all in `append` mode.

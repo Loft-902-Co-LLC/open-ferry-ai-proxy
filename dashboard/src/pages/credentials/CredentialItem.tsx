@@ -39,12 +39,12 @@ import {
 import { quotaReadings, type QuotaReadings, type QuotaWindow } from "./quotaReadings";
 
 /** "Back in about 4 min, at Oct 5, 12:04." */
-function backIn(cooldown: Cooldown): string {
+export function backIn(cooldown: Cooldown): string {
   return `Back in ${timeLeft(cooldown.remaining_seconds)}, at ${formatShortDateTime(cooldown.retry_at)}.`;
 }
 
 /** The models resting, grouped by why, each group with what to do. */
-function ModelCooldowns({ cooldowns }: { cooldowns: Cooldown[] }) {
+export function ModelCooldowns({ cooldowns }: { cooldowns: Cooldown[] }) {
   const groups = new Map<string, Cooldown[]>();
   for (const cooldown of cooldowns) {
     const group = groups.get(cooldown.reason) ?? [];
@@ -95,7 +95,7 @@ function windowUse(window: QuotaWindow): string {
 }
 
 /** Each quota window, as the provider's last response gave it. */
-function QuotaWindows({ readings }: { readings: QuotaReadings }) {
+export function QuotaWindows({ readings }: { readings: QuotaReadings }) {
   return (
     <div className="space-y-1">
       <h4 className="font-medium">Quota</h4>
@@ -139,7 +139,7 @@ function Account({ credential }: { credential: Credential }) {
 }
 
 /** Its requests: in all, and in the recent windows the server keeps. */
-function Requests({ credential }: { credential: Credential }) {
+export function Requests({ credential }: { credential: Credential }) {
   const recent = credential.recent_requests ?? [];
   const recentSuccess = recent.reduce((sum, bucket) => sum + bucket.success, 0);
   const recentFailed = recent.reduce((sum, bucket) => sum + bucket.failed, 0);

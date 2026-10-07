@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { credential } from "../../test/fixtures";
+import { claudeCliCredential, credential } from "../../test/fixtures";
 import { limitUsedUp, quotaReadings } from "./quotaReadings";
 
 const OBSERVED = "2026-10-05T11:58:00.000Z";
@@ -53,6 +53,29 @@ describe("a credential's quota readings", () => {
       quotaReadings(claude({ "anthropic-ratelimit-unified-7d-utilization": "1.0" }))?.limiting ?? null;
     expect(full).toEqual({ name: "Weekly", used: 1, resetsAt: null, usedUp: true });
     expect(full === null ? null : limitUsedUp(full)).toBe("The weekly limit is used up");
+  });
+
+  it("read a claude-cli entry's windows as Claude's, at the time to the nanosecond", () => {
+    const readings = quotaReadings(
+      claudeCliCredential({
+        quota: {
+          observed_at: "2026-10-05T11:58:00.123456789Z",
+          signals: {
+            "Anthropic-Ratelimit-Unified-5h-Utilization": "1.0",
+            "Anthropic-Ratelimit-Unified-5h-Reset": "1791216000",
+            "Anthropic-Ratelimit-Unified-7d-Utilization": "0.4",
+          },
+        },
+      }),
+    );
+    expect(readings).toEqual({
+      observedAt: new Date("2026-10-05T11:58:00.123Z"),
+      windows: [
+        { name: "5-hour", used: 1, resetsAt: new Date(1791216000 * 1000), usedUp: true },
+        { name: "Weekly", used: 0.4, resetsAt: null, usedUp: false },
+      ],
+      limiting: { name: "5-hour", used: 1, resetsAt: new Date(1791216000 * 1000), usedUp: true },
+    });
   });
 
   it("read Codex's windows by their length, with resets after the response", () => {

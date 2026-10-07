@@ -17,7 +17,14 @@ import {
   type ProviderKey,
   type SignInStatus,
 } from "../../api/credentials";
-import { cooldown, credential, credentialList } from "../../test/fixtures";
+import { CLAUDE_CLI_AUTH_STATUS, CLAUDE_CLI_ENTRIES, type ClaudeCliEntry } from "../../api/dashboard";
+import {
+  claudeCliCredential,
+  claudeCliEntry,
+  cooldown,
+  credential,
+  credentialList,
+} from "../../test/fixtures";
 import { loadFirst } from "../../test/loadFirst";
 import { mockApi, route, type MockApi } from "../../test/mockApi";
 import { renderApp } from "../../test/renderApp";
@@ -32,21 +39,25 @@ interface Server {
   api: MockApi;
   files: Credential[];
   keys: Record<KeyProvider, ProviderKey[]>;
+  entries: ClaudeCliEntry[];
 }
 
 /**
- * A server holding `files` and provider `keys`, which change as the
- * management routes change them. `keys: null` serves no key lists, as a
- * server without those routes.
+ * A server holding `files`, provider `keys` and `claude-cli` `entries`,
+ * which change as the management routes change them. `keys: null` serves
+ * no key lists, and `entries: null` no entries, as a server without those
+ * routes.
  */
 function server(
   files: Credential[] = [credential()],
   keys: Partial<Record<KeyProvider, ProviderKey[]>> | null = {},
+  entries: ClaudeCliEntry[] | null = [],
 ): Server {
   const state: Server = {
     api: mockApi(),
     files: [...files],
     keys: { claude: [], codex: [], gemini: [], ...keys },
+    entries: [...(entries ?? [])],
   };
   state.api.use(
     route("GET", AUTH_FILES, () => ({ json: credentialList(state.files) })),
@@ -67,7 +78,10 @@ function server(
     }),
     route("POST", RESET_COOLDOWN, (request) => {
       const body = request.json() as { auth_index: string };
-      const file = state.files.find((candidate) => candidate.auth_index === body.auth_index);
+      const file = [
+        ...state.files,
+        ...state.entries.flatMap((entry) => (entry.credential === null ? [] : [entry.credential])),
+      ].find((candidate) => candidate.auth_index === body.auth_index);
       const models = (file?.cooldowns ?? []).flatMap((item) =>
         item.model_key === undefined ? [] : [item.model_key],
       );
@@ -78,6 +92,9 @@ function server(
       return { json: { status: "ok", auth_index: body.auth_index, models } };
     }),
   );
+  if (entries !== null) {
+    state.api.use(route("GET", CLAUDE_CLI_ENTRIES, () => ({ json: { entries: state.entries } })));
+  }
   if (keys !== null) {
     for (const provider of KEY_PROVIDERS) {
       const { list, path } = KEY_LISTS[provider];
@@ -579,6 +596,212 @@ describe("signing in with Claude or Codex", () => {
     const calls = state.api.callsTo("GET", SIGN_IN_START.claude);
     expect(calls).toHaveLength(2);
     expect(calls[1]?.url.searchParams.has("is_webui")).toBe(false);
+  });
+});
+
+describe("the Claude Code accounts", () => {
+  it("shows each claude-cli entry's state, cooldown, last error and quota, and checks nothing", async () => {
+    const { api } = server(
+      [],
+      {},
+      [
+        claudeCliEntry({
+          prefix: "max1",
+          config_dir: "~/.claude-second",
+          credential: claudeCliCredential({
+            status: "error",
+            status_message: "unauthorized",
+            unavailable: true,
+            next_retry_after: "2026-10-05T12:10:00.123456789Z",
+            cooldowns: [cooldown("unauthorized", 600, { http_status: 401 })],
+            quota: {
+              observed_at: "2026-10-05T11:58:00.5Z",
+              signals: {
+                "anthropic-ratelimit-unified-5h-utilization": "0.4",
+                "anthropic-ratelimit-unified-7d-utilization": "1",
+                "anthropic-ratelimit-unified-7d-status": "rejected",
+              },
+            },
+          }),
+          last_error: { message: "Not signed in to Claude Code", http_status: 401 },
+        }),
+        claudeCliEntry({ name: "claude-max-2" }),
+        claudeCliEntry({
+          name: "spare",
+          config_dir: "/srv/claude/spare",
+          disabled: true,
+          credential: null,
+        }),
+      ],
+    );
+    renderApp("/credentials");
+    const card = await screen.findByRole("region", { name: "Claude Code accounts" });
+    expect(card).toHaveTextContent("The claude-cli entries in config.yaml");
+
+    const first = within(card).getByRole("article", { name: "claude-max-1" });
+    expect(within(first).getByText("Resting")).toBeVisible();
+    expect(first).toHaveTextContent("Prefixmax1: calls to max1/<model> go to it");
+    expect(first).toHaveTextContent("Config directory~/.claude-second");
+    expect(first).toHaveTextContent("The provider refused the credential");
+    expect(first).toHaveTextContent("Back in about 10 min");
+    expect(first).toHaveTextContent(
+      "What to do: Check its sign-in. If Claude Code isn't signed in, sign it in again",
+    );
+    expect(within(first).getByRole("heading", { name: "Last error" })).toBeVisible();
+    expect(first).toHaveTextContent("Not signed in to Claude Code (HTTP 401)");
+    expect(within(first).getByRole("heading", { name: "Quota" })).toBeVisible();
+    expect(first).toHaveTextContent("5-hour40% used.");
+    expect(first).toHaveTextContent("WeeklyUsed up. This is the limit that stops it.");
+    expect(first).toHaveTextContent("214 succeeded, 3 failed");
+    expect(within(first).getByRole("button", { name: "Reset cooldown" })).toBeVisible();
+
+    const second = within(card).getByRole("article", { name: "claude-max-2" });
+    expect(within(second).getByText("Ready")).toBeVisible();
+    expect(second).toHaveTextContent("PrefixNone");
+    expect(second).toHaveTextContent(
+      "Config directoryNone: the server's CLAUDE_CONFIG_DIR, else Claude Code's default",
+    );
+    expect(within(second).queryByRole("heading", { name: "Last error" })).toBeNull();
+    expect(within(second).queryByRole("heading", { name: "Quota" })).toBeNull();
+    expect(within(second).queryByRole("button", { name: "Reset cooldown" })).toBeNull();
+
+    const spare = within(card).getByRole("article", { name: "spare" });
+    expect(within(spare).getByText("Off")).toBeVisible();
+    expect(spare).toHaveTextContent("Turned off in config.yaml: the server sends it no requests.");
+    expect(spare).toHaveTextContent("Config directory/srv/claude/spare");
+    expect(spare).not.toHaveTextContent("succeeded");
+    expect(within(spare).getByRole("button", { name: "Check sign-in" })).toBeVisible();
+
+    // A check runs Claude Code on the server, so nothing checks by itself.
+    expect(api.callsTo("GET", CLAUDE_CLI_AUTH_STATUS)).toEqual([]);
+    expect(api.unhandled).toEqual([]);
+  });
+
+  it("checks an entry's sign-in when asked, and says how it is signed in", async () => {
+    const state = server([], {}, [claudeCliEntry()]);
+    state.api.use(
+      route("GET", CLAUDE_CLI_AUTH_STATUS, { json: { loggedIn: true, authMethod: "claude.ai" } }),
+    );
+    const { user } = renderApp("/credentials");
+    const item = await screen.findByRole("article", { name: "claude-max-1" });
+    await user.click(within(item).getByRole("button", { name: "Check sign-in" }));
+    expect(await within(item).findByText("Signed in")).toBeVisible();
+    expect(item).toHaveTextContent("Claude Code is signed in. Sign-in method: claude.ai.");
+    const calls = state.api.callsTo("GET", CLAUDE_CLI_AUTH_STATUS);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url.searchParams.get("name")).toBe("claude-max-1");
+  });
+
+  it("says what to run when an entry isn't signed in, with its config directory", async () => {
+    const state = server([], {}, [
+      claudeCliEntry({ config_dir: "~/.claude-second" }),
+      claudeCliEntry({ name: "claude-max-2" }),
+    ]);
+    state.api.use(
+      route("GET", CLAUDE_CLI_AUTH_STATUS, { json: { loggedIn: false, authMethod: "" } }),
+    );
+    const { user } = renderApp("/credentials");
+    const first = await screen.findByRole("article", { name: "claude-max-1" });
+    await user.click(within(first).getByRole("button", { name: "Check sign-in" }));
+    expect(await within(first).findByText("Not signed in")).toBeVisible();
+    expect(first).toHaveTextContent("Claude Code isn't signed in");
+    expect(first).not.toHaveTextContent("Sign-in method");
+    expect(
+      within(first).getByText("CLAUDE_CONFIG_DIR=~/.claude-second claude auth login"),
+    ).toBeVisible();
+    expect(
+      within(first).getByRole("button", { name: "Copy the sign-in command of claude-max-1" }),
+    ).toBeVisible();
+
+    const second = screen.getByRole("article", { name: "claude-max-2" });
+    await user.click(within(second).getByRole("button", { name: "Check sign-in" }));
+    expect(await within(second).findByText("Not signed in")).toBeVisible();
+    expect(within(second).getByText("claude auth login")).toBeVisible();
+    expect(second).not.toHaveTextContent("CLAUDE_CONFIG_DIR=");
+    expect(
+      state.api
+        .callsTo("GET", CLAUDE_CLI_AUTH_STATUS)
+        .map((call) => call.url.searchParams.get("name")),
+    ).toEqual(["claude-max-1", "claude-max-2"]);
+  });
+
+  it("explains a check that Claude Code failed, or took too long for", async () => {
+    const state = server([], {}, [claudeCliEntry({ config_dir: "/srv/claude/max-1" })]);
+    let answer = {
+      status: 502,
+      json: { error: "claude_cli_failed", message: "claude-cli claude-max-1: could not run claude" },
+    };
+    state.api.use(route("GET", CLAUDE_CLI_AUTH_STATUS, () => answer));
+    const { user } = renderApp("/credentials");
+    const item = await screen.findByRole("article", { name: "claude-max-1" });
+    const check = within(item).getByRole("button", { name: "Check sign-in" });
+    await user.click(check);
+    expect(await within(item).findByText("Claude Code couldn't be checked")).toBeVisible();
+    expect(item).toHaveTextContent("claude-cli claude-max-1: could not run claude");
+
+    answer = {
+      status: 504,
+      json: { error: "claude_cli_timeout", message: "claude-cli claude-max-1: timed out" },
+    };
+    await user.click(check);
+    expect(await within(item).findByText("Claude Code took too long to answer")).toBeVisible();
+    expect(
+      within(item).getByText("CLAUDE_CONFIG_DIR=/srv/claude/max-1 claude auth status"),
+    ).toBeVisible();
+    expect(within(item).queryByText("Claude Code couldn't be checked")).toBeNull();
+  });
+
+  it("resets an entry's cooldown", async () => {
+    const state = server([], {}, [
+      claudeCliEntry({
+        credential: claudeCliCredential({ unavailable: true, cooldowns: [cooldown("quota", 120)] }),
+      }),
+    ]);
+    const { user } = renderApp("/credentials");
+    const item = await screen.findByRole("article", { name: "claude-max-1" });
+    expect(within(item).getByText("Resting")).toBeVisible();
+    await user.click(within(item).getByRole("button", { name: "Reset cooldown" }));
+    expect(
+      await within(item).findByText(
+        "Cooldown reset: the server tries it again with the next request.",
+      ),
+    ).toBeVisible();
+    expect(state.api.callsTo("POST", RESET_COOLDOWN)[0]?.json()).toEqual({
+      auth_index: "3734a62b508f0029",
+    });
+    expect(await within(item).findByText("Ready")).toBeVisible();
+    expect(state.api.callsTo("GET", CLAUDE_CLI_ENTRIES).length).toBeGreaterThan(1);
+  });
+
+  /** Renders the page from `api`, and expects no Claude Code accounts card. */
+  async function expectNoCard(api: MockApi) {
+    renderApp("/credentials");
+    expect(await screen.findByRole("region", { name: "Provider API keys" })).toBeVisible();
+    await waitFor(() => {
+      expect(api.callsTo("GET", CLAUDE_CLI_ENTRIES)).toHaveLength(1);
+    });
+    await screen.findByText(/^None yet\./);
+    expect(screen.queryByRole("region", { name: "Claude Code accounts" })).toBeNull();
+    expect(screen.queryByText("This server can't do that yet")).toBeNull();
+  }
+
+  it("shows no card for a server without entries", async () => {
+    await expectNoCard(server([], {}, []).api);
+  });
+
+  it("shows no card for a server that doesn't list entries", async () => {
+    await expectNoCard(server([], {}, null).api);
+  });
+
+  it("shows no card for an open-ferry older than the entries route", async () => {
+    const { api } = server([], {}, null);
+    api.use(
+      route("GET", CLAUDE_CLI_ENTRIES, {
+        status: 404,
+        json: { error: "not_found", message: "no such route" },
+      }),
+    );
+    await expectNoCard(api);
   });
 });
 

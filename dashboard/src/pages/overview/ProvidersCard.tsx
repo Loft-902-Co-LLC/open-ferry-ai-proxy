@@ -4,6 +4,7 @@ import { Link } from "react-router";
 import { callProblem } from "../../api/access";
 import { isUnsupportedRoute } from "../../api/client";
 import { AUTH_FILES, KEY_LISTS, keysOf, type CredentialList } from "../../api/credentials";
+import { CLAUDE_CLI_ENTRIES, type ClaudeCliEntries } from "../../api/dashboard";
 import { useApiQuery } from "../../api/hooks";
 import { Badge, type BadgeTone } from "../../components/Badge";
 import { buttonClasses } from "../../components/Button";
@@ -11,7 +12,8 @@ import { Card } from "../../components/Card";
 import { ProblemNotice } from "../../components/ProblemNotice";
 import { Loading } from "../../components/QueryState";
 import { formatInteger } from "../../lib/format";
-import { credentialHealth } from "../credentials/credentialStates";
+import { entriesUnserved, entryHealth } from "../credentials/claudeCli";
+import { credentialHealth, type Health } from "../credentials/credentialStates";
 
 function count(value: number, one: string, many: string): string {
   return `${formatInteger(value)} ${value === 1 ? one : many}`;
@@ -56,12 +58,15 @@ export function ProvidersCard() {
     { query: gemini, list: KEY_LISTS.gemini.list },
   ];
   const queries = [files, claude, codex, gemini];
+  // The config's claude-cli entries, which the credential list leaves out.
+  const accounts = useApiQuery<ClaudeCliEntries>(CLAUDE_CLI_ENTRIES);
+  const accountsUnserved = accounts.isError && entriesUnserved(accounts.error);
 
   // A server that serves none of it gets no card: there is nothing to do here.
-  if (queries.every((query) => isUnsupportedRoute(query.error))) {
+  if (queries.every((query) => isUnsupportedRoute(query.error)) && accountsUnserved) {
     return null;
   }
-  if (queries.some((query) => query.isPending)) {
+  if (queries.some((query) => query.isPending) || accounts.isPending) {
     return (
       <Card title="Providers">
         <Loading>Loading the credentials…</Loading>
@@ -74,7 +79,9 @@ export function ProvidersCard() {
       Open Credentials
     </Link>
   );
-  const failed = queries.find((query) => query.isError && !isUnsupportedRoute(query.error));
+  const failed =
+    queries.find((query) => query.isError && !isUnsupportedRoute(query.error)) ??
+    (accounts.isError && !accountsUnserved ? accounts : undefined);
   if (failed !== undefined) {
     return (
       <Card title="Providers" actions={openLink}>
@@ -88,8 +95,9 @@ export function ProvidersCard() {
     (sum, { query, list }) => sum + (query.isSuccess ? keysOf(query.data, list).length : 0),
     0,
   );
+  const entries = accounts.isSuccess ? accounts.data.entries : [];
 
-  if (credentials.length === 0 && keys === 0) {
+  if (credentials.length === 0 && keys === 0 && entries.length === 0) {
     return (
       <Card
         title="Connect a provider"
@@ -105,8 +113,11 @@ export function ProvidersCard() {
   }
 
   const tally = new Map<string, { tone: BadgeTone; count: number }>();
-  for (const credential of credentials) {
-    const { label, tone } = credentialHealth(credential);
+  const healths: Health[] = [
+    ...credentials.map((credential) => credentialHealth(credential)),
+    ...entries.map((entry) => entryHealth(entry)),
+  ];
+  for (const { label, tone } of healths) {
     const entry = tally.get(label) ?? { tone, count: 0 };
     entry.count += 1;
     tally.set(label, entry);
@@ -116,7 +127,7 @@ export function ProvidersCard() {
   return (
     <Card
       title="Providers"
-      description={`${count(credentials.length, "sign-in or credential file", "sign-ins and credential files")}, ${count(keys, "provider API key", "provider API keys")}.`}
+      description={`${count(credentials.length, "sign-in or credential file", "sign-ins and credential files")}, ${count(keys, "provider API key", "provider API keys")}${entries.length === 0 ? "" : `, ${count(entries.length, "Claude Code account", "Claude Code accounts")}`}.`}
       actions={openLink}
     >
       {tally.size > 0 && (

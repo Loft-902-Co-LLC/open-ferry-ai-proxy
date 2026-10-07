@@ -1,6 +1,8 @@
 // The dashboard API's shapes, as docs/dashboard-api.md (Contract 1) has
 // them, under /open-ferry/api/v1/.
 
+import type { Credential } from "./credentials";
+
 export const DASHBOARD_API = "/open-ferry/api/v1";
 
 export const USAGE_SUMMARY = `${DASHBOARD_API}/usage/summary`;
@@ -11,6 +13,10 @@ export const USAGE_RECORDS = `${DASHBOARD_API}/usage/records`;
 export const USAGE_PRICES = `${DASHBOARD_API}/usage/prices`;
 export const REQUEST_LOGS = `${DASHBOARD_API}/request-logs`;
 export const CLIENT_SETUP = `${DASHBOARD_API}/client-setup`;
+/** The config's `claude-cli` entries, with their credentials. */
+export const CLAUDE_CLI_ENTRIES = `${DASHBOARD_API}/claude-cli/entries`;
+/** `?name=`: whether an entry's Claude Code is signed in. Runs Claude Code. */
+export const CLAUDE_CLI_AUTH_STATUS = `${DASHBOARD_API}/claude-cli/auth-status`;
 
 /** The path of one request log, by its name as listed. */
 export function requestLogPath(name: string): string {
@@ -268,4 +274,40 @@ export interface ClientSetup {
   safe_mode: boolean;
   routes: ProxyRoute[];
   models: ModelInfo[];
+}
+
+// ------------------------------------------------------------ claude-cli
+
+/** A `claude-cli` entry's last failure. */
+export interface ClaudeCliError {
+  /** Claude Code's error, or open-ferry's when Claude Code gave none. */
+  message: string;
+  /** The status it was answered with; null when none. */
+  http_status: number | null;
+}
+
+/** One of the config's `claude-cli` entries, as `GET claude-cli/entries` lists it. */
+export interface ClaudeCliEntry {
+  name: string;
+  /** Empty when it has none. */
+  prefix: string;
+  /** As config.yaml has it, neither expanded nor resolved; empty for none. */
+  config_dir: string;
+  disabled: boolean;
+  /** Its credential, as `GET auth-files` lists one; null when it is disabled or not loaded yet. */
+  credential: Credential | null;
+  /** Its last failure, until a request succeeds. */
+  last_error: ClaudeCliError | null;
+}
+
+/** `GET claude-cli/entries`. */
+export interface ClaudeCliEntries {
+  entries: ClaudeCliEntry[];
+}
+
+/** `GET claude-cli/auth-status?name=`. */
+export interface ClaudeCliAuthStatus {
+  loggedIn: boolean;
+  /** How, in Claude Code's words; empty when it doesn't say. */
+  authMethod: string;
 }
