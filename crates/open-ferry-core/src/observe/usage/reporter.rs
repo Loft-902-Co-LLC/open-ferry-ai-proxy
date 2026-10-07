@@ -355,8 +355,9 @@ impl Mode {
             (_, AttemptKind::Websocket) => Self::Ignored,
             ("meta", AttemptKind::Execute) => Self::CodexExecute,
             ("meta", AttemptKind::Stream) => Self::CodexStream,
-            ("claude", AttemptKind::Execute) => Self::ClaudeExecute,
-            ("claude", AttemptKind::Stream) => Self::ClaudeStream,
+            // open-ferry's `claude-cli` answers in Claude's events.
+            ("claude" | "claude-cli", AttemptKind::Execute) => Self::ClaudeExecute,
+            ("claude" | "claude-cli", AttemptKind::Stream) => Self::ClaudeStream,
             ("gemini" | "vertex", AttemptKind::Execute) => Self::GeminiExecute,
             ("gemini" | "vertex", AttemptKind::Stream) => Self::GeminiStream,
             ("gemini-interactions", AttemptKind::Execute) => Self::InteractionsExecute,
@@ -389,6 +390,8 @@ fn executor_type(provider: &str, kind: Option<AttemptKind>) -> &'static str {
         "xai" if kind == Some(AttemptKind::Websocket) => "XAIWebsocketsExecutor",
         "codex" => "CodexExecutor",
         "claude" => "ClaudeExecutor",
+        // open-ferry's own; upstream has no such executor.
+        "claude-cli" => "ClaudeCliExecutor",
         "meta" => "MetaExecutor",
         "gemini" | "gemini-interactions" => "GeminiExecutor",
         "vertex" => "GeminiVertexExecutor",

@@ -62,7 +62,8 @@ pub(crate) fn extract_response_model_event(payload: &[u8], provider: &str) -> (S
     };
     match go::to_lower(provider.trim()).as_str() {
         "codex" => extract_codex_response_model_event(payload),
-        "claude" => extract_claude_response_model_event(data),
+        // open-ferry's `claude-cli` answers in Claude's events.
+        "claude" | "claude-cli" => extract_claude_response_model_event(data),
         "gemini" | "gemini-interactions" | "vertex" | "aistudio" | "antigravity" => {
             extract_gemini_response_model_event(data)
         }

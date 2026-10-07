@@ -195,7 +195,9 @@ pub struct Settings {
     /// API keys by provider: `claude`, `codex`, `xai`, `meta`, `gemini`,
     /// `gemini-interactions` and `vertex` (upstream's `claude-api-key` and
     /// the like). A credential made from one carries its index in the
-    /// `config_index` attribute.
+    /// `config_index` attribute. Not upstream's: `claude-cli` holds
+    /// open-ferry's `claude-cli` entries, every one in the config's order,
+    /// with no key or base URL; only their prefix and models are read.
     pub api_keys: BTreeMap<String, Vec<ApiKeyEntry>>,
     /// OpenAI-compatible providers (`openai-compatibility`).
     pub openai_compatibility: Vec<OpenAiCompat>,
@@ -312,6 +314,29 @@ impl From<&Config> for Settings {
         api_keys.insert("codex".to_owned(), codex(&config.codex_api_key));
         api_keys.insert("xai".to_owned(), codex(&config.xai_api_key));
         api_keys.insert("meta".to_owned(), codex(&config.meta_api_key));
+        api_keys.insert(
+            "claude-cli".to_owned(),
+            config
+                .claude_cli
+                .iter()
+                .map(|entry| ApiKeyEntry {
+                    api_key: String::new(),
+                    base_url: String::new(),
+                    prefix: entry.prefix.clone(),
+                    proxy_url: String::new(),
+                    models: entry
+                        .models
+                        .iter()
+                        .map(|model| ModelAlias {
+                            name: model.name.clone(),
+                            alias: model.alias.clone(),
+                            force_mapping: model.force_mapping,
+                        })
+                        .collect(),
+                    request_scoped_errors: Vec::new(),
+                })
+                .collect(),
+        );
         Self {
             request_retry: count(config.request_retry),
             max_retry_credentials: count(config.max_retry_credentials),

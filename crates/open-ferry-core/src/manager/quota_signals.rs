@@ -26,6 +26,9 @@
 //! Deviations from upstream:
 //! - Devin isn't one of the providers observed, as it isn't ported: a
 //!   `devin` result clears a snapshot, where upstream's leaves it.
+//! - open-ferry's `claude-cli` provider is observed as Claude is: its
+//!   executor writes what Claude Code reports of the account's windows as
+//!   Claude's unified headers.
 //! - A value's bytes that aren't UTF-8 are kept as U+FFFD, one for each
 //!   byte, as Go's JSON encoder writes them; their length is counted as
 //!   the bytes that came.
@@ -49,10 +52,13 @@ pub(crate) const MAX_QUOTA_SIGNAL_HEADERS: usize = 64;
 pub(crate) const MAX_QUOTA_SIGNAL_VALUE: usize = 512;
 
 /// Whether `provider`'s responses carry a quota snapshot this module reads:
-/// Claude's and Codex's, in any case and with spaces around (upstream's
-/// `ProviderSupportsQuotaObservation`).
+/// Claude's, `claude-cli`'s and Codex's, in any case and with spaces around
+/// (upstream's `ProviderSupportsQuotaObservation`).
 pub fn provider_supports_quota_observation(provider: &str) -> bool {
-    matches!(go_lower(provider.trim()).as_str(), "claude" | "codex")
+    matches!(
+        go_lower(provider.trim()).as_str(),
+        "claude" | "claude-cli" | "codex"
+    )
 }
 
 impl QuotaState {
@@ -223,10 +229,10 @@ fn is_quota_signal_header_for_provider(provider: &str, name: &str) -> bool {
     let provider = go_lower(provider.trim());
     let name = go_lower(name.trim());
     if name == "retry-after" {
-        return provider == "claude" || provider == "codex";
+        return provider == "claude" || provider == "claude-cli" || provider == "codex";
     }
     if name.starts_with("anthropic-ratelimit-unified-") {
-        return provider == "claude";
+        return provider == "claude" || provider == "claude-cli";
     }
     if name.starts_with("x-ratelimit-") {
         // Upstream keeps this for a future Codex rollout; Codex doesn't send

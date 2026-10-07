@@ -15,6 +15,8 @@
 //!   rebuilds it on every change.
 //! - Home's force-mapping and upstream-model attributes aren't read; Home
 //!   isn't ported.
+//! - open-ferry's `claude-cli` credentials take the aliases of the
+//!   `claude-cli` entry they came from, found by its `config_index`.
 
 use std::collections::{HashMap, HashSet};
 
@@ -693,6 +695,8 @@ impl Resolver<'_> {
                 resolve_api_key_config(self.settings.api_key_entries(&provider), auth)
                     .map_or(&[], |entry| entry.models.as_slice())
             }
+            CLAUDE_CLI => resolve_claude_cli_config(self.settings, auth)
+                .map_or(&[], |entry| entry.models.as_slice()),
             _ => {
                 let provider_key = attribute(auth, "provider_key");
                 let compat_name = attribute(auth, "compat_name");
@@ -760,6 +764,9 @@ impl Resolver<'_> {
                     .map(|entry| resolve_model_alias_from_config_models(requested, &entry.models))
                     .unwrap_or_default()
             }
+            CLAUDE_CLI => resolve_claude_cli_config(self.settings, auth)
+                .map(|entry| resolve_model_alias_from_config_models(requested, &entry.models))
+                .unwrap_or_default(),
             _ => {
                 let provider_key = attribute(auth, "provider_key");
                 let compat_name = attribute(auth, "compat_name");
@@ -912,6 +919,19 @@ pub(crate) fn resolve_api_key_config<'a>(
             .find(|entry| equal_fold(entry.api_key.trim(), &attr_key));
     }
     None
+}
+
+/// open-ferry's `claude-cli` provider, which upstream doesn't have.
+const CLAUDE_CLI: &str = "claude-cli";
+
+/// The `claude-cli` entry a config-made `claude-cli` credential came from,
+/// by its `config_index`: such an entry has no key or base URL to match it
+/// by.
+fn resolve_claude_cli_config<'a>(settings: &'a Settings, auth: &Auth) -> Option<&'a ApiKeyEntry> {
+    if auth_source_kind(auth) != SOURCE_CONFIG {
+        return None;
+    }
+    config_index(auth).and_then(|index| settings.api_key_entries(CLAUDE_CLI).get(index))
 }
 
 /// The credential's `config_index` attribute, when it is a valid index.
@@ -1096,6 +1116,48 @@ mod tests {
             resolver.state_model_for_execution(&claude, "team/short", "claude-real", false),
             "team/short"
         );
+    }
+
+    /// Not upstream's: a `claude-cli` credential takes the aliases of the
+    /// entry at its `config_index`, which has no key to match it by.
+    #[test]
+    fn claude_cli_aliases_follow_the_config_index() {
+        let config = crate::config::Config::parse(
+            "claude-cli:\n  - name: off\n    disabled: true\n    models: [{name: claude-a, alias: short}]\n  \
+             - name: max\n    prefix: max\n    models: [{name: claude-sonnet-5-5, alias: short}]\n",
+        )
+        .expect("load");
+        let settings = Settings::from(&config);
+        let table = OAuthAliasTable::default();
+        let resolver = Resolver {
+            settings: &settings,
+            oauth: &table,
+        };
+        let mut auth = Auth {
+            id: "claude-cli:1".into(),
+            provider: "claude-cli".into(),
+            prefix: "max".into(),
+            ..Auth::default()
+        };
+        auth.attributes.insert("auth_kind".into(), "apikey".into());
+        auth.attributes
+            .insert("source".into(), "config:claude-cli[1]".into());
+        auth.attributes.insert("config_index".into(), "1".into());
+        let (models, pooled, _) =
+            resolver.execution_model_candidates_with_alias(&auth, "max/short", |_, _| 0);
+        assert_eq!(models, vec!["claude-sonnet-5-5"]);
+        assert!(!pooled);
+        assert_eq!(
+            resolver.apply_api_key_model_alias(&auth, "short"),
+            "claude-sonnet-5-5"
+        );
+
+        // Without a config source, or past the list, nothing maps.
+        auth.attributes.insert("config_index".into(), "7".into());
+        assert_eq!(resolver.apply_api_key_model_alias(&auth, "short"), "short");
+        auth.attributes.insert("config_index".into(), "1".into());
+        auth.attributes.remove("source");
+        assert!(resolver.configured_model_alias_entries(&auth).is_empty());
     }
 
     #[test]

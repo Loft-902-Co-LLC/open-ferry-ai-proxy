@@ -20,6 +20,8 @@
 //!   on its own.
 //! - `quota_state_clone_copies_signals` is kept, though a Rust clone can't
 //!   share its map.
+//! - open-ferry's `claude-cli` provider is observed as Claude is, so it is
+//!   among the providers that are.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -688,12 +690,35 @@ fn provider_supports_quota_observation_for_claude_and_codex() {
             "{provider:?}"
         );
     }
-    for provider in ["codex", "claude", "CODEX", " Claude "] {
+    for provider in ["codex", "claude", "CODEX", " Claude ", "claude-cli"] {
         assert!(
             provider_supports_quota_observation(provider),
             "{provider:?}"
         );
     }
+}
+
+/// Not upstream's: a `claude-cli` response keeps Claude's unified headers
+/// and `Retry-After`, and nothing else.
+#[test]
+fn observe_response_headers_keeps_claude_signals_for_claude_cli() {
+    let kept = [
+        ("Anthropic-Ratelimit-Unified-5h-Utilization", "0.42"),
+        ("Anthropic-Ratelimit-Unified-5h-Reset", "1787296800"),
+        ("Anthropic-Ratelimit-Unified-7d-Utilization", "0.1"),
+        ("Anthropic-Ratelimit-Unified-Status", "allowed"),
+        ("Retry-After", "30"),
+    ];
+    let mut all = kept.to_vec();
+    all.push(("X-Codex-Plan-Type", "pro"));
+    all.push(("Anthropic-Workspace-Id", "not-a-signal"));
+    let mut quota = QuotaState::default();
+    assert!(quota.observe_response_headers_for_provider(
+        "claude-cli",
+        &text_headers(&all),
+        unix(1_787_279_282),
+    ));
+    assert_eq!(quota.signals, signals(&kept));
 }
 
 /// Upstream's `TestQuotaStateCloneCopiesSignals`.
