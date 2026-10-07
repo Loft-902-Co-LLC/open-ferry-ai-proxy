@@ -9,6 +9,7 @@
 //! - Upstream's tests share a global model registry; each test here has its
 //!   own [`FakeModels`].
 
+mod affinity;
 mod api_key_model_alias;
 mod auto_refresh_issue6199;
 mod auto_refresh_loop;

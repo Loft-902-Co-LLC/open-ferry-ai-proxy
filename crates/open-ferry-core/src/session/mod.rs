@@ -43,6 +43,7 @@ pub use identity::{
     MAX_SESSION_ID_LENGTH, caller_scope, claude_metadata_identities, derive_id, derived_session_id,
     has_explicit_session, normalize_explicit_id,
 };
+pub(crate) use info::{Roots, candidate};
 pub use info::{SessionInfo, bound_session_identity, extract_session_info};
 pub use payload::Payload;
 

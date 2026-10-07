@@ -86,6 +86,11 @@ impl Payload {
         }
     }
 
+    /// The body as gjson's `GetBytes` reads it: from its first `{` or `[`.
+    pub(crate) fn scan(&self) -> Node<'_> {
+        self.value.as_ref().map(Node::of).unwrap_or_default()
+    }
+
     /// The body as `json.Unmarshal` into a map reads it: an object, alone.
     pub(crate) fn object(&self) -> Option<&Map<String, Value>> {
         self.value.as_ref().filter(|_| self.whole)?.as_object()
@@ -108,10 +113,12 @@ mod tests {
     fn reads_as_gjson_and_encoding_json_read() {
         let payload = Payload::parse(b" \n{\"a\":{\"b\":\"x\"}} \r\n");
         assert_eq!(payload.root().get("a.b").string(), "x");
+        assert_eq!(payload.scan().get("a.b").string(), "x");
         assert!(payload.object().is_some());
 
         let prefixed = Payload::parse(b"data: {\"a\":1}");
         assert!(!prefixed.root().get("a").exists());
+        assert_eq!(prefixed.scan().get("a").int(), 1);
         assert!(prefixed.object().is_none());
 
         let trailing = Payload::parse(b"{\"a\":1} x");
@@ -126,6 +133,7 @@ mod tests {
         assert!(array.root().exists());
         assert!(array.object().is_none());
 
+        assert!(!Payload::parse(b"").scan().exists());
         assert!(!Payload::parse(b"{\"a\":").root().exists());
         assert!(!Payload::parse(b"\"a\"").root().exists());
 

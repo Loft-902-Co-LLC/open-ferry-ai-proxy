@@ -1,6 +1,7 @@
 // Ported from CLIProxyAPI internal/config/config.go and
 // internal/config/config_types.go (the fields the auth manager reads), and the
-// strategy names in sdk/cliproxy/service_config.go (v8.0.15, MIT).
+// strategy names, routingRuntimeState and normalizedRoutingRuntimeState in
+// sdk/cliproxy/service_config.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The settings the manager runs with, as a plain struct made from the
@@ -42,6 +43,38 @@ impl RoutingStrategy {
             "fill-first" | "fillfirst" | "ff" => Self::FillFirst,
             "weighted-round-robin" | "weightedroundrobin" | "wrr" => Self::Weighted,
             _ => Self::RoundRobin,
+        }
+    }
+}
+
+/// The routing settings whose change replaces the selector, normalized
+/// (upstream's `routingRuntimeState`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RoutingState {
+    pub(crate) strategy: RoutingStrategy,
+    pub(crate) session_affinity: bool,
+    /// The binding TTL: an hour for none, at least a second.
+    pub(crate) session_affinity_ttl: Duration,
+    /// Whether subagents may take their parent's credential: yes unless
+    /// session affinity is on and says no.
+    pub(crate) session_affinity_subagents: bool,
+}
+
+impl RoutingState {
+    /// The routing state `settings` give (upstream's
+    /// `normalizedRoutingRuntimeState`).
+    pub(crate) fn of(settings: &Settings) -> Self {
+        let ttl = settings.session_affinity_ttl;
+        Self {
+            strategy: settings.routing_strategy,
+            session_affinity: settings.session_affinity,
+            session_affinity_ttl: if ttl.is_zero() {
+                Duration::from_secs(60 * 60)
+            } else {
+                ttl.max(Duration::from_secs(1))
+            },
+            session_affinity_subagents: !settings.session_affinity
+                || settings.session_affinity_subagents.unwrap_or(true),
         }
     }
 }
@@ -139,6 +172,17 @@ pub struct Settings {
     pub transient_error_cooldown_seconds: i64,
     /// How the manager picks among ready credentials (`routing.strategy`).
     pub routing_strategy: RoutingStrategy,
+    /// Whether a conversation stays on the credential that served it
+    /// (`routing.session-affinity`).
+    pub session_affinity: bool,
+    /// How long a conversation's binding lives after its last use, or zero
+    /// for an hour; under a second counts as a second
+    /// (`routing.session-affinity-ttl`).
+    pub session_affinity_ttl: Duration,
+    /// Whether a subagent may take its parent's credential, or `None` for
+    /// yes; read only with session affinity on
+    /// (`routing.session-affinity-subagents`).
+    pub session_affinity_subagents: Option<bool>,
     /// How many credentials refresh at once, or 0 for 16
     /// (`auth-auto-refresh-workers`).
     pub refresh_workers: usize,
@@ -269,6 +313,9 @@ impl From<&Config> for Settings {
             disable_cooling: config.disable_cooling,
             transient_error_cooldown_seconds: config.transient_error_cooldown_seconds,
             routing_strategy: RoutingStrategy::parse(&config.routing.strategy),
+            session_affinity: false,
+            session_affinity_ttl: Duration::ZERO,
+            session_affinity_subagents: None,
             refresh_workers: count(config.auth_auto_refresh_workers),
             oauth_model_alias: config
                 .oauth_model_alias

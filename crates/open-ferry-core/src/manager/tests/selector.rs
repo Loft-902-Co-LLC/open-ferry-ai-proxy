@@ -28,10 +28,11 @@
 //!   the scheduler's cursor map to its fixed cap of 4096 keys, then checks
 //!   that one more key starts it over. The legacy round robin keeps one key
 //!   ("mixed:"), as upstream's legacy path does.
-//! - Dropped: the session-affinity tests (`ExtractSessionID*`,
+//! - The session affinity tests (`ExtractSessionID*`,
 //!   `ExtractExplicitSessionIDs_*`, `SessionAffinitySelector*`,
-//!   `SessionCache*`), by policy; and the `ManagerSetSelector*` tests, since
-//!   there are no pluggable selectors (the strategy is a setting).
+//!   `SessionCache*`) are in `affinity` and the affinity module's own tests.
+//!   Dropped: the `ManagerSetSelector*` tests, since there are no pluggable
+//!   selectors (the strategy is a setting).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;

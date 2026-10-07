@@ -1,7 +1,8 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/scheduler.go, selector.go (the
 // round-robin, fill-first and weighted selectors and the availability
-// checks), conductor_selection.go (pickNextMixed and its legacy path) and
-// the unavailable errors in errors.go (v8.0.15, MIT).
+// checks, across priorities too), conductor_selection.go (pickNextMixed and
+// its legacy path, and availableAuthsForSelector) and the unavailable
+// errors in errors.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Picking a credential for a call.
@@ -11,7 +12,9 @@
 //! by round robin, fill first or smooth weighted round robin. When a
 //! credential routes the model under another name (a prefix or an alias),
 //! the legacy path checks each credential against its own name for the
-//! model instead.
+//! model instead. With session affinity on, every pick takes the legacy
+//! path, and the affinity picks among the ready credentials of every
+//! priority (see `affinity`).
 //!
 //! Deviations from upstream:
 //! - The scheduler isn't a cache of the credentials' states. Each pick
@@ -24,15 +27,16 @@
 //! - Model states are checked in key order, where Go's map order is random.
 //! - The scheduler's cursor maps are capped at 4096 keys and cleared when
 //!   full; upstream's grow without bound.
-//! - Plugin schedulers, session affinity and required auth kinds aren't
-//!   ported. The only eligibility filter is the free-plan rule (see
-//!   `policy`); a credential policy has its own pick.
+//! - Plugin schedulers and required auth kinds aren't ported. The only
+//!   eligibility filter is the free-plan rule (see `policy`); a credential
+//!   policy has its own pick.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use super::Entry;
+use super::affinity::{Affinity, Session};
 use super::classify::{auth_error_text, has_unauthorized_auth_failure};
 use super::credential::{is_zero, priority, websockets_enabled, weight};
 use super::models::{Resolver, openai_compatible_provider_key};
@@ -1395,6 +1399,38 @@ impl<'a> Selection<'a> {
         providers: &[String],
         args: &PickArgs<'_>,
     ) -> Result<Picked, ExecError> {
+        let candidates = self.legacy_candidates(providers, args)?;
+        let available = self.available_auths_for_route_model(&candidates, "mixed", args.model)?;
+        let selected = self.pick_legacy(state, &available, "mixed", args.model, "")?;
+        self.picked(selected)
+    }
+
+    /// The legacy pick with session affinity on, which picks across every
+    /// priority for the call's `session` (upstream's `pickNextMixed`, which
+    /// takes the legacy path for the session affinity selector, and
+    /// `pickNextMixedLegacy`).
+    pub(crate) fn pick_next_mixed_sticky(
+        &self,
+        state: &mut SelectorState,
+        affinity: &mut Affinity,
+        providers: &[String],
+        args: &PickArgs<'_>,
+        session: Option<&Session>,
+    ) -> Result<Picked, ExecError> {
+        let candidates = self.legacy_candidates(providers, args)?;
+        let selected =
+            self.pick_sticky(state, affinity, &candidates, "mixed", args.model, session)?;
+        self.picked(selected)
+    }
+
+    /// The credentials the legacy pick chooses among: on one of the
+    /// `providers`, not tried, and serving the model under their own name
+    /// for it (upstream's candidate loop in `pickNextMixedLegacy`).
+    fn legacy_candidates(
+        &self,
+        providers: &[String],
+        args: &PickArgs<'_>,
+    ) -> Result<Vec<&'a Arc<Auth>>, ExecError> {
         let provider_set: HashSet<String> = providers
             .iter()
             .map(|p| canonical_scheduling_provider(p))
@@ -1413,7 +1449,7 @@ impl<'a> Selection<'a> {
                 model_key = base.trim();
             }
         }
-        let candidates: Vec<&Arc<Auth>> = self
+        let candidates: Vec<&'a Arc<Auth>> = self
             .auths
             .values()
             .map(|entry| &entry.auth)
@@ -1435,8 +1471,11 @@ impl<'a> Selection<'a> {
         if candidates.is_empty() {
             return Err(ExecError::auth_not_found());
         }
-        let available = self.available_auths_for_route_model(&candidates, "mixed", args.model)?;
-        let selected = self.pick_legacy(state, &available, "mixed", args.model)?;
+        Ok(candidates)
+    }
+
+    /// `selected` with its executor.
+    fn picked(&self, selected: &Arc<Auth>) -> Result<Picked, ExecError> {
         let provider = executor_key_from_auth(selected);
         let executor = lookup_executor(self.executors, &provider).ok_or_else(|| {
             ExecError::new(ErrorKind::ExecutorNotFound, "executor not registered")
@@ -1448,21 +1487,54 @@ impl<'a> Selection<'a> {
         })
     }
 
+    /// The session affinity pick among the `candidates`, in `scope` (the
+    /// provider or `mixed`) for `model`: the ready ones of every priority
+    /// go to the affinity, with the strategy's pick as its fallback
+    /// (upstream's `availableAuthsForSelector` for the session affinity
+    /// selector, and its `Pick`).
+    pub(super) fn pick_sticky<'c>(
+        &self,
+        state: &mut SelectorState,
+        affinity: &mut Affinity,
+        candidates: &[&'c Arc<Auth>],
+        scope: &str,
+        model: &str,
+        session: Option<&Session>,
+    ) -> Result<&'c Arc<Auth>, ExecError> {
+        let mut available =
+            self.available_auths_for_route_model_with(candidates, scope, model, true)?;
+        if self.strategy == RoutingStrategy::Weighted {
+            available.retain(|auth| weight(auth) > 0);
+            if available.is_empty() {
+                return Err(ExecError::new(
+                    ErrorKind::AuthNotFound,
+                    "no auth candidates",
+                ));
+            }
+        }
+        affinity.pick(scope, model, session, &available, self.now, |tier| {
+            self.pick_legacy(state, tier, scope, model, model)
+        })
+    }
+
     /// The built-in selector's pick among the `available` credentials, with
     /// its rotation kept under `scope`, the provider or `mixed` (upstream's
     /// `RoundRobinSelector`, `FillFirstSelector` and
     /// `WeightedRoundRobinSelector` as the legacy picks call them).
+    /// `selector_model` is the model the selector is given: none, except
+    /// as session affinity's fallback, where it is the route model.
     pub(super) fn pick_legacy<'c>(
         &self,
         state: &mut SelectorState,
         available: &[&'c Arc<Auth>],
         scope: &str,
         model: &str,
+        selector_model: &str,
     ) -> Result<&'c Arc<Auth>, ExecError> {
         let selected = match self.strategy {
             RoutingStrategy::FillFirst => available.first().copied(),
             RoutingStrategy::RoundRobin => {
-                let key = format!("{scope}:");
+                let key = format!("{scope}:{}", canonical_model_key(selector_model));
                 let ids: Vec<&str> = available.iter().map(|a| a.id.as_str()).collect();
                 let last = capped(&mut state.legacy_last_picked, &key);
                 let picked = available.get(successor_index(&ids, last)).copied();
@@ -1511,6 +1583,19 @@ impl<'a> Selection<'a> {
         provider: &str,
         route_model: &str,
     ) -> Result<Vec<&'c Arc<Auth>>, ExecError> {
+        self.available_auths_for_route_model_with(candidates, provider, route_model, false)
+    }
+
+    /// The ready candidates, by ID: of the highest priority, or of every
+    /// priority with `all_priorities`; or why there are none (upstream's
+    /// `availableAuthsForRouteModelWithPriorityMode`).
+    fn available_auths_for_route_model_with<'c>(
+        &self,
+        candidates: &[&'c Arc<Auth>],
+        provider: &str,
+        route_model: &str,
+        all_priorities: bool,
+    ) -> Result<Vec<&'c Arc<Auth>>, ExecError> {
         if candidates.is_empty() {
             return Err(ExecError::new(
                 ErrorKind::AuthNotFound,
@@ -1548,9 +1633,15 @@ impl<'a> Selection<'a> {
                 unauthorized += 1;
             }
         }
-        if let Some((_, mut best)) = by_priority.pop_last() {
-            best.sort_by(|a, b| a.id.cmp(&b.id));
-            return Ok(best);
+        let ready = if all_priorities {
+            let all: Vec<&'c Arc<Auth>> = by_priority.into_values().flatten().collect();
+            (!all.is_empty()).then_some(all)
+        } else {
+            by_priority.pop_last().map(|(_, best)| best)
+        };
+        if let Some(mut ready) = ready {
+            ready.sort_by(|a, b| a.id.cmp(&b.id));
+            return Ok(ready);
         }
         let mut errors = CandidateErrors::default();
         for candidate in candidates {

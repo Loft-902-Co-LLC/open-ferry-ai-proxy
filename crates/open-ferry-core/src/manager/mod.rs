@@ -21,9 +21,14 @@
 //! before they expire, and a call that fails with 401 refreshes once and
 //! tries again.
 //!
+//! With `routing.session-affinity` on, a conversation stays on the
+//! credential that served it while that one is ready, whatever its priority
+//! (see `affinity`).
+//!
 //! Deviations from upstream:
-//! - Session affinity, the plugin scheduler, the Home dispatcher, derived
-//!   session IDs and fingerprints aren't ported, by policy or scope.
+//! - The plugin scheduler, the Home dispatcher and fingerprints aren't
+//!   ported, by policy or scope. A derived session ID is only a local
+//!   routing key for session affinity, never sent or written anywhere.
 //! - Of upstream's eligibility filters, required auth kinds aren't ported.
 //!   A credential policy narrows its own pick (only Codex Alpha Search's),
 //!   and the free-plan rule every pick and retry decision; see `policy`.
@@ -57,6 +62,7 @@
 //!   interceptors, the round tripper, the Antigravity credits fallback and
 //!   API-key capability metadata.
 
+mod affinity;
 mod alpha_search;
 mod classify;
 pub mod clienterror;
@@ -113,9 +119,11 @@ use crate::exec::{
     Request, Response, StreamResponse, WebsocketSupport,
 };
 use crate::executor::ProviderExecutor;
+use affinity::Affinity;
 use models::OAuthAliasTable;
 use refresh::{RefreshJob, RefreshLoopHandle};
 use select::{CLOSE_ALL_EXECUTION_SESSIONS, SelectorState};
+use settings::RoutingState;
 
 /// The last (epoch, generation) saved for one credential.
 type PersistLock = Arc<Mutex<(u64, u64)>>;
@@ -142,6 +150,8 @@ pub(crate) struct State {
     pub(crate) epochs: HashMap<String, u64>,
     pub(crate) executors: HashMap<String, Arc<dyn ProviderExecutor>>,
     pub(crate) selector: SelectorState,
+    /// The session bindings, while session affinity is on.
+    pub(crate) affinity: Option<Affinity>,
     pub(crate) pool_offsets: HashMap<String, usize>,
     pub(crate) refresh_jobs: HashMap<String, RefreshJob>,
 }
@@ -256,6 +266,7 @@ impl Manager {
         clock: Clock,
     ) -> Self {
         let oauth = OAuthAliasTable::compile(&settings.oauth_model_alias);
+        let affinity = Affinity::for_settings(&settings);
         let state = State {
             settings: Arc::new(settings),
             oauth: Arc::new(oauth),
@@ -263,6 +274,7 @@ impl Manager {
             epochs: HashMap::new(),
             executors: HashMap::new(),
             selector: SelectorState::default(),
+            affinity,
             pool_offsets: HashMap::new(),
             refresh_jobs: HashMap::new(),
         };
@@ -323,19 +335,25 @@ impl Manager {
 
     /// Replaces the settings (upstream's `SetConfig`): clears the cooldowns
     /// of credentials that no longer cool down, recompiles the OAuth model
-    /// aliases, and resets the rotation when the routing strategy changed.
+    /// aliases, and resets the rotation and the session bindings when the
+    /// routing strategy or the session affinity settings changed.
     pub fn set_settings(&self, settings: Settings) {
         let now = self.now();
         {
             let mut state = self.lock();
-            let strategy_changed = state.settings.routing_strategy != settings.routing_strategy;
+            // Upstream builds a new selector when the routing state
+            // changes, which forgets its cursors and its bindings.
+            let routing_changed = RoutingState::of(&state.settings) != RoutingState::of(&settings);
+            if routing_changed {
+                state.affinity = Affinity::for_settings(&settings);
+            }
             state.oauth = Arc::new(OAuthAliasTable::compile(&settings.oauth_model_alias));
             state.settings = Arc::new(settings);
             let models = self.models();
             for id in lifecycle::clear_disabled_cooldown_states(&mut state, now) {
                 state.sync_scheduler(models, &id, now);
             }
-            if strategy_changed {
+            if routing_changed {
                 state.selector.reset_strategy();
             }
         }

@@ -32,8 +32,10 @@
 //!   an upstream attempt; upstream asks the executor whether it reached the
 //!   provider.
 //! - Home dispatch, request preparation, request interceptors, API-key
-//!   capability metadata, canonical session metadata and the Antigravity
-//!   credits fallback aren't ported.
+//!   capability metadata and the Antigravity credits fallback aren't
+//!   ported. Upstream's `Enrich` isn't either: with session affinity on,
+//!   each round works out the call's session for the picks and results
+//!   (see `affinity`), and writes nothing into the call's metadata.
 //! - There are no context checks: dropping the call's future or stream stops
 //!   it where it is, so the Claude OAuth cancellation checks aren't needed.
 //! - A stream always has a source, so upstream's "upstream stream has no
@@ -68,6 +70,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use tracing::Instrument as _;
 
+use super::affinity::Session;
 use super::classify::{
     CODE_FORCE_COOLDOWN, ErrView, is_count_tokens_endpoint_not_found_error,
     is_credential_scoped_error, is_request_invalid_error,
@@ -91,6 +94,7 @@ use crate::auth::Auth;
 use crate::exec::{ChunkStream, ErrorKind, ExecError, Options, Request, Response, StreamResponse};
 use crate::executor::ProviderExecutor;
 use crate::observe::{CallReport, SelectedAuth};
+use crate::session::Payload;
 
 /// The pool offset at which the counter starts again (upstream's
 /// `nextModelPoolOffset` wrap).
@@ -418,6 +422,15 @@ struct Attempt<'a> {
     provider: &'a str,
     route_model: &'a str,
     result_model: String,
+    /// The call's session, while session affinity is on.
+    session: Option<&'a Arc<Session>>,
+}
+
+impl Attempt<'_> {
+    /// The call's session, while session affinity is on.
+    fn session(&self) -> Option<&Session> {
+        self.session.map(Arc::as_ref)
+    }
 }
 
 /// A picked credential with the upstream models to try.
@@ -518,7 +531,9 @@ impl Manager {
 
     /// Picks the next credential and its upstream models, leaving out the
     /// models it is blocked for (upstream's `pickNextMixed` followed by
-    /// `preparedExecutionModelsWithAlias`).
+    /// `preparedExecutionModelsWithAlias`). With session affinity on, the
+    /// pick keeps `session` on its credential.
+    #[allow(clippy::too_many_arguments)]
     fn pick_prepared(
         &self,
         providers: &[String],
@@ -527,6 +542,7 @@ impl Manager {
         downstream_websocket: bool,
         eligibility: Eligibility,
         tried: &HashSet<String>,
+        session: Option<&Session>,
     ) -> Result<Prepared, ExecError> {
         let now = self.now();
         let mut guard = self.lock();
@@ -552,7 +568,16 @@ impl Manager {
             tried,
             eligibility,
         };
-        let picked = selection.pick_next_mixed(&mut state.selector, providers, &args)?;
+        let picked = match state.affinity.as_mut() {
+            Some(affinity) => selection.pick_next_mixed_sticky(
+                &mut state.selector,
+                affinity,
+                providers,
+                &args,
+                session,
+            )?,
+            None => selection.pick_next_mixed(&mut state.selector, providers, &args)?,
+        };
         let offsets = &mut state.pool_offsets;
         let (candidates, pooled, alias) = resolver.execution_model_candidates_with_alias(
             &picked.auth,
@@ -575,6 +600,32 @@ impl Manager {
             pooled,
             alias,
         })
+    }
+
+    /// The session a call binds under, while session affinity is on
+    /// (upstream's `Enrich` and `extractSessionIDs`): read from the client's
+    /// headers, its body as it arrived (else the request's) and its
+    /// WebSocket session.
+    fn call_session(&self, req: &Request, opts: &Options) -> Option<Arc<Session>> {
+        // Without affinity, no session is read.
+        self.lock().affinity.as_ref()?;
+        let body = if opts.original_request.is_empty() {
+            &req.payload
+        } else {
+            &opts.original_request
+        };
+        let payload = Payload::parse(body);
+        Session::of(
+            &opts.headers,
+            &payload,
+            opts.metadata
+                .execution_session_id
+                .as_deref()
+                .unwrap_or_default(),
+            opts.source_format.as_str(),
+            &opts.metadata.caller_scope,
+        )
+        .map(Arc::new)
     }
 
     /// Whether to start another round after `err`, and the wait first.
@@ -766,6 +817,7 @@ impl Manager {
             execution_model_for_auth_selection(&opts, &req.model);
         ensure_requested_model(&mut opts, &route_model);
         let pinned = pinned_auth_id(&opts);
+        let session = self.call_session(req, &opts);
         let mut tried =
             request_retry_round_exclusions(&self.lock().auths, round, retry.request_retry);
         let mut attempted: HashSet<String> = HashSet::new();
@@ -785,6 +837,7 @@ impl Manager {
                 opts.downstream_websocket,
                 Eligibility::for_request(&opts),
                 &tried,
+                session.as_deref(),
             ) {
                 Ok(prepared) => prepared,
                 Err(err) => {
@@ -820,6 +873,7 @@ impl Manager {
                         upstream_model,
                         pooled,
                     ),
+                    session: session.as_ref(),
                 };
                 let mut exec_req = req.clone();
                 exec_req.model = if restore_execution_model {
@@ -859,17 +913,21 @@ impl Manager {
                 }
                 let err = match outcome {
                     Ok(mut resp) => {
-                        self.mark_result(&CallResult {
-                            auth_id: auth.id.clone(),
-                            provider: provider.clone(),
-                            model: attempt.result_model,
-                            route_model: route_model.clone(),
-                            success: true,
-                            response_headers: resp.headers.clone(),
-                            // A token count says nothing of the quota.
-                            skip_quota_observation: kind == CallKind::CountTokens,
-                            ..CallResult::default()
-                        });
+                        let session = attempt.session.map(Arc::as_ref);
+                        self.mark_call_result(
+                            &CallResult {
+                                auth_id: auth.id.clone(),
+                                provider: provider.clone(),
+                                model: attempt.result_model,
+                                route_model: route_model.clone(),
+                                success: true,
+                                response_headers: resp.headers.clone(),
+                                // A token count says nothing of the quota.
+                                skip_quota_observation: kind == CallKind::CountTokens,
+                                ..CallResult::default()
+                            },
+                            session,
+                        );
                         let attempt_alias =
                             self.attempt_alias(&auth, &route_model, upstream_model, &alias);
                         rewrite_force_mapped_response(&mut resp, &attempt_alias);
@@ -890,7 +948,7 @@ impl Manager {
                         ) {
                             self.record_availability_neutral_result(&result);
                         } else {
-                            self.mark_result(&result);
+                            self.mark_call_result(&result, attempt.session());
                         }
                         result.credential_scope
                     }
@@ -909,7 +967,7 @@ impl Manager {
                             self.record_availability_neutral_result(&result);
                         } else {
                             result.credential_scope = is_credential_scoped_error(view);
-                            self.mark_result(&result);
+                            self.mark_call_result(&result, attempt.session());
                         }
                         result.credential_scope
                     }
@@ -970,6 +1028,7 @@ impl Manager {
             execution_model_for_auth_selection(&opts, &req.model);
         ensure_requested_model(&mut opts, &route_model);
         let pinned = pinned_auth_id(&opts);
+        let session = self.call_session(req, &opts);
         let mut tried =
             request_retry_round_exclusions(&self.lock().auths, round, retry.request_retry);
         let mut attempted: HashSet<String> = HashSet::new();
@@ -989,6 +1048,7 @@ impl Manager {
                 opts.downstream_websocket,
                 Eligibility::for_request(&opts),
                 &tried,
+                session.as_deref(),
             ) {
                 Ok(prepared) => prepared,
                 Err(err) => {
@@ -1018,6 +1078,7 @@ impl Manager {
                     &opts,
                     &route_model,
                     stream_execution_model,
+                    session.as_ref(),
                 )
                 .await
             {
@@ -1060,6 +1121,7 @@ impl Manager {
         opts: &Options,
         route_model: &str,
         execution_model: &str,
+        session: Option<&Arc<Session>>,
     ) -> Result<StreamResponse, Failure> {
         let executor = &prepared.executor;
         let mut auth = prepared.auth.clone();
@@ -1077,6 +1139,7 @@ impl Manager {
                     model,
                     prepared.pooled,
                 ),
+                session,
             };
             let mut exec_req = req.clone();
             exec_req.model = if execution_model.is_empty() {
@@ -1119,7 +1182,7 @@ impl Manager {
                     let settings = self.settings();
                     let action = match_request_scoped_error_action(&auth, &err, &settings);
                     let result = failure_result(&attempt, &auth, &err, action, true);
-                    self.mark_result(&result);
+                    self.mark_call_result(&result, attempt.session());
                     if action.is_some_and(ScopedAction::is_stop) {
                         return Err(Failure::stop(err));
                     }
@@ -1176,7 +1239,7 @@ impl Manager {
                     let action = match_request_scoped_error_action(&auth, &err, &settings);
                     let mut result = failure_result(&attempt, &auth, &err, action, true);
                     result.response_headers = stream_failure_headers(&headers, &err);
-                    self.mark_result(&result);
+                    self.mark_call_result(&result, attempt.session());
                     if let Some(action) = action {
                         if action.is_stop() {
                             return Err(Failure::stop(err));
@@ -1201,16 +1264,20 @@ impl Manager {
                 }
                 Bootstrap::Closed { saw_chunk: false } => {
                     let empty = ExecError::empty_stream();
-                    self.mark_result(&CallResult {
-                        auth_id: auth.id.clone(),
-                        provider: prepared.provider.clone(),
-                        model: attempt.result_model,
-                        route_model: route_model.to_owned(),
-                        success: false,
-                        error: Some(result_error_from_error(ErrView::Exec(&empty))),
-                        response_headers: headers.clone(),
-                        ..CallResult::default()
-                    });
+                    let session = attempt.session.map(Arc::as_ref);
+                    self.mark_call_result(
+                        &CallResult {
+                            auth_id: auth.id.clone(),
+                            provider: prepared.provider.clone(),
+                            model: attempt.result_model,
+                            route_model: route_model.to_owned(),
+                            success: false,
+                            error: Some(result_error_from_error(ErrView::Exec(&empty))),
+                            response_headers: headers.clone(),
+                            ..CallResult::default()
+                        },
+                        session,
+                    );
                     let current = Failure::bootstrap(empty.clone(), headers);
                     upstream = Some(current.clone());
                     if !is_last_model {
@@ -1274,6 +1341,7 @@ impl Manager {
             route_model: attempt.route_model.to_owned(),
             result_model: attempt.result_model.clone(),
             headers: headers.clone(),
+            session: attempt.session.cloned(),
             rewriter,
             failed: false,
             tx,
@@ -1311,15 +1379,18 @@ impl Manager {
                 return;
             }
             if !forwarder.failed && !forwarder.tx.is_closed() {
-                forwarder.manager.mark_result(&CallResult {
-                    auth_id: forwarder.auth.id.clone(),
-                    provider: forwarder.provider.clone(),
-                    model: forwarder.result_model.clone(),
-                    route_model: forwarder.route_model.clone(),
-                    success: true,
-                    response_headers: forwarder.headers.clone(),
-                    ..CallResult::default()
-                });
+                forwarder.manager.mark_call_result(
+                    &CallResult {
+                        auth_id: forwarder.auth.id.clone(),
+                        provider: forwarder.provider.clone(),
+                        model: forwarder.result_model.clone(),
+                        route_model: forwarder.route_model.clone(),
+                        success: true,
+                        response_headers: forwarder.headers.clone(),
+                        ..CallResult::default()
+                    },
+                    forwarder.session.as_deref(),
+                );
             }
         };
         tokio::spawn(forward.in_current_span());
@@ -1342,6 +1413,7 @@ struct Forwarder {
     result_model: String,
     /// The stream's response headers, for the quota snapshot.
     headers: HeaderMap,
+    session: Option<Arc<Session>>,
     rewriter: Option<StreamRewriter>,
     failed: bool,
     tx: mpsc::Sender<Result<Bytes, ExecError>>,
@@ -1361,10 +1433,11 @@ impl Forwarder {
                         provider: &self.provider,
                         route_model: &self.route_model,
                         result_model: self.result_model.clone(),
+                        session: self.session.as_ref(),
                     };
                     let mut result = failure_result(&attempt, &self.auth, &err, action, true);
                     result.response_headers = stream_failure_headers(&self.headers, &err);
-                    self.manager.mark_result(&result);
+                    self.manager.mark_call_result(&result, attempt.session());
                 }
                 return self.tx.send(Err(err)).await.is_ok();
             }

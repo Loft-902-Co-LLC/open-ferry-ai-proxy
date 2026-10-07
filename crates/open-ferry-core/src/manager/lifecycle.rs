@@ -1,8 +1,9 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_lifecycle.go
 // (RegisterExecutor, UnregisterExecutor, Register, Update,
-// UpdateRefreshedAuth, Remove, Load and persist), MarkResult,
-// recordAvailabilityNeutralResult, ResetQuota and clearDisabledCooldownStates
-// in sdk/cliproxy/auth/conductor_cooldown.go,
+// UpdateRefreshedAuth, Remove, invalidateSessionAffinity, Load and persist),
+// MarkResult, updateSessionAffinity, recordAvailabilityNeutralResult,
+// ResetQuota and clearDisabledCooldownStates in
+// sdk/cliproxy/auth/conductor_cooldown.go,
 // ReconcileRegistryModelStates in sdk/cliproxy/auth/conductor_selection.go,
 // and lockAuthMutation in sdk/cliproxy/auth/conductor_persistence.go
 // (v8.0.15, MIT).
@@ -63,6 +64,7 @@
 
 use std::sync::Arc;
 
+use super::affinity::Session;
 use super::classify::{ErrView, has_unauthorized_auth_failure, is_unauthorized_error};
 use super::cooldown::{
     CallResult, apply_result, clear_cooldown_state_for_auth, cooldown_disabled_for_auth,
@@ -438,6 +440,9 @@ impl Manager {
                 return;
             };
             state.pool_offsets.remove(id);
+            if let Some(affinity) = state.affinity.as_mut() {
+                affinity.invalidate_auth(id);
+            }
             state.sync_scheduler(self.models(), id, self.now());
             let slot = state.epochs.entry(id.to_owned()).or_insert(0);
             *slot = (*slot)
@@ -553,6 +558,26 @@ impl Manager {
     /// success, saves the credential, and publishes its models' availability
     /// (upstream's `MarkResult`).
     pub fn mark_result(&self, result: &CallResult) {
+        self.mark_call_result(result, None);
+    }
+
+    /// [`mark_result`](Self::mark_result) for a call of `session`, whose
+    /// bindings the outcome then updates, whether or not the credential is
+    /// still there (upstream's `MarkResult` and `updateSessionAffinity`).
+    pub(crate) fn mark_call_result(&self, result: &CallResult, session: Option<&Session>) {
+        self.record_result(result);
+        if let Some(session) = session
+            && !result.auth_id.is_empty()
+        {
+            let now = self.now();
+            if let Some(affinity) = self.lock().affinity.as_mut() {
+                affinity.on_result(session, result, "mixed", now);
+            }
+        }
+    }
+
+    /// The credential side of [`mark_result`](Self::mark_result).
+    fn record_result(&self, result: &CallResult) {
         if result.auth_id.is_empty() {
             return;
         }

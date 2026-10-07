@@ -162,6 +162,10 @@ pub struct Metadata {
     /// Leave out Codex credentials on the free plan (`disallow_free_auth`,
     /// which the images endpoints set for Codex calls).
     pub disallow_free_auth: bool,
+    /// The hashed namespace of the client's API key
+    /// ([`caller_scope`](crate::session::caller_scope)), which keeps
+    /// different callers' derived sessions apart (`caller_scope`).
+    pub caller_scope: String,
 }
 
 impl fmt::Debug for Metadata {
@@ -176,6 +180,7 @@ impl fmt::Debug for Metadata {
             .field("selected_auth", &self.selected_auth.is_some())
             .field("forced_provider", &self.forced_provider)
             .field("disallow_free_auth", &self.disallow_free_auth)
+            .field("caller_scope", &!self.caller_scope.is_empty())
             .finish()
     }
 }

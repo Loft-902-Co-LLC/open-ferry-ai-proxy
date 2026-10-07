@@ -143,7 +143,7 @@ impl Selection<'_> {
             return Err(ExecError::auth_not_found());
         }
         let available = self.available_auths_for_route_model(&candidates, provider, model)?;
-        let selected = self.pick_legacy(state, &available, provider, model)?;
+        let selected = self.pick_legacy(state, &available, provider, model, "")?;
         Ok(Picked {
             auth: Arc::clone(selected),
             executor,
