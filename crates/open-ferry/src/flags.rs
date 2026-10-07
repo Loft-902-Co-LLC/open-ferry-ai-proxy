@@ -10,7 +10,16 @@
 //! or after `--`. Later arguments are ignored, as upstream ignores them.
 //! The usage leaves out `-password`, as upstream's does.
 //!
+//! A subcommand (`open-ferry init`, `open-ferry check`) is recognized only
+//! as the first argument; `main` sends the arguments after it to the
+//! subcommand, which reads its own flags with the same parser
+//! ([`parse_with`]) and has its own `-h`. Without one, or with a flag
+//! first, the command line is read as above.
+//!
 //! Deviations from upstream:
+//! - Upstream has no subcommands: it ignores a first argument that isn't a
+//!   flag, and serves. Here `init` and `check` as the first argument run
+//!   those subcommands.
 //! - Only the flags of the ported features are defined: `-config`, the Codex
 //!   and Claude logins, `-no-browser`, `-oauth-callback-port`,
 //!   `-local-model`, `-password`, and the TUI's `-tui`, `-standalone` and
@@ -71,74 +80,83 @@ pub enum FlagError {
     Invalid(String),
 }
 
-enum Kind {
-    Bool(fn(&mut Flags) -> &mut bool),
-    String(fn(&mut Flags) -> &mut String),
-    Int(fn(&mut Flags) -> &mut i64),
+/// What a flag takes, and how its value is set.
+pub enum Kind<T> {
+    /// A boolean: `-name`, or `-name=value`.
+    Bool(fn(&mut T, bool)),
+    /// A string.
+    String(fn(&mut T, String)),
+    /// A decimal integer.
+    Int(fn(&mut T, i64)),
 }
 
-struct Definition {
-    name: &'static str,
-    usage: &'static str,
-    kind: Kind,
+/// One flag of a command: its name, its line in the usage, and what it
+/// takes.
+pub struct Definition<T> {
+    /// The name, without the leading `-`.
+    pub name: &'static str,
+    /// What the usage says of it.
+    pub usage: &'static str,
+    /// What it takes.
+    pub kind: Kind<T>,
 }
 
 /// The flags, sorted by name as Go's usage lists them.
-const DEFINITIONS: [Definition; 11] = [
+const DEFINITIONS: [Definition<Flags>; 11] = [
     Definition {
         name: "claude-login",
         usage: "Login to Claude using OAuth",
-        kind: Kind::Bool(|flags| &mut flags.claude_login),
+        kind: Kind::Bool(|flags, value| flags.claude_login = value),
     },
     Definition {
         name: "codex-device-login",
         usage: "Login to Codex using device code flow",
-        kind: Kind::Bool(|flags| &mut flags.codex_device_login),
+        kind: Kind::Bool(|flags, value| flags.codex_device_login = value),
     },
     Definition {
         name: "codex-login",
         usage: "Login to Codex using OAuth",
-        kind: Kind::Bool(|flags| &mut flags.codex_login),
+        kind: Kind::Bool(|flags, value| flags.codex_login = value),
     },
     Definition {
         name: "config",
         usage: "Configure File Path",
-        kind: Kind::String(|flags| &mut flags.config),
+        kind: Kind::String(|flags, value| flags.config = value),
     },
     Definition {
         name: "local-model",
         usage: "Use embedded model catalogs unless models.catalog or models.codex-catalog names a file (no catalog is downloaded, so this is always so)",
-        kind: Kind::Bool(|flags| &mut flags.local_model),
+        kind: Kind::Bool(|flags, value| flags.local_model = value),
     },
     Definition {
         name: "management-base-url",
         usage: "Base URL of remote management API for TUI client mode (e.g. https://proxy.example.com)",
-        kind: Kind::String(|flags| &mut flags.management_base_url),
+        kind: Kind::String(|flags, value| flags.management_base_url = value),
     },
     Definition {
         name: "no-browser",
         usage: "Don't open browser automatically for OAuth",
-        kind: Kind::Bool(|flags| &mut flags.no_browser),
+        kind: Kind::Bool(|flags, value| flags.no_browser = value),
     },
     Definition {
         name: "oauth-callback-port",
         usage: "Override OAuth callback port (defaults to provider-specific port)",
-        kind: Kind::Int(|flags| &mut flags.oauth_callback_port),
+        kind: Kind::Int(|flags, value| flags.oauth_callback_port = value),
     },
     Definition {
         name: "password",
         usage: "",
-        kind: Kind::String(|flags| &mut flags.password.0),
+        kind: Kind::String(|flags, value| flags.password.0 = value),
     },
     Definition {
         name: "standalone",
         usage: "In TUI mode, start an embedded local server",
-        kind: Kind::Bool(|flags| &mut flags.standalone),
+        kind: Kind::Bool(|flags, value| flags.standalone = value),
     },
     Definition {
         name: "tui",
         usage: "Start with terminal management UI",
-        kind: Kind::Bool(|flags| &mut flags.tui),
+        kind: Kind::Bool(|flags, value| flags.tui = value),
     },
 ];
 
@@ -147,11 +165,25 @@ pub fn parse<I>(args: I) -> Result<Flags, FlagError>
 where
     I: IntoIterator<Item = String>,
 {
-    let mut flags = Flags::default();
+    parse_with(&DEFINITIONS, args).map(|(flags, _)| flags)
+}
+
+/// Reads `args` as the flags of `definitions` define them, into a `T` that
+/// starts as its default, and returns it with the arguments after the
+/// flags: those from the first that isn't a flag, or after `--`.
+pub fn parse_with<T, I>(
+    definitions: &[Definition<T>],
+    args: I,
+) -> Result<(T, Vec<String>), FlagError>
+where
+    T: Default,
+    I: IntoIterator<Item = String>,
+{
+    let mut flags = T::default();
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         let Some(body) = arg.strip_prefix('-').filter(|body| !body.is_empty()) else {
-            break;
+            return Ok((flags, std::iter::once(arg).chain(args).collect()));
         };
         let body = match body.strip_prefix('-') {
             Some("") => break,
@@ -165,7 +197,7 @@ where
             Some((name, value)) => (name, Some(value)),
             None => (body, None),
         };
-        let Some(definition) = DEFINITIONS.iter().find(|d| d.name == name) else {
+        let Some(definition) = definitions.iter().find(|d| d.name == name) else {
             if matches!(name, "h" | "help") {
                 return Err(FlagError::Help);
             }
@@ -174,8 +206,8 @@ where
             )));
         };
         match definition.kind {
-            Kind::Bool(field) => {
-                *field(&mut flags) = match value {
+            Kind::Bool(set) => {
+                let value = match value {
                     None => true,
                     Some(value) => parse_bool(value).ok_or_else(|| {
                         FlagError::Invalid(format!(
@@ -183,19 +215,21 @@ where
                         ))
                     })?,
                 };
+                set(&mut flags, value);
             }
-            Kind::String(field) => *field(&mut flags) = value_of(name, value, &mut args)?,
-            Kind::Int(field) => {
+            Kind::String(set) => set(&mut flags, value_of(name, value, &mut args)?),
+            Kind::Int(set) => {
                 let value = value_of(name, value, &mut args)?;
-                *field(&mut flags) = value.parse().map_err(|_| {
+                let value = value.parse().map_err(|_| {
                     FlagError::Invalid(format!(
                         "invalid value {value:?} for flag -{name}: parse error"
                     ))
                 })?;
+                set(&mut flags, value);
             }
         }
     }
-    Ok(flags)
+    Ok((flags, args.collect()))
 }
 
 fn value_of(
@@ -223,8 +257,15 @@ fn parse_bool(value: &str) -> Option<bool> {
 /// The usage text, as Go's `flag.PrintDefaults` writes it.
 pub fn usage(program: &str) -> String {
     let mut out = format!("Usage of {program}:\n");
-    for definition in &DEFINITIONS {
-        if definition.name == "password" {
+    write_defaults(&mut out, &DEFINITIONS, &["password"]);
+    out
+}
+
+/// Writes a line for each of `definitions` but the `hidden` ones, as Go's
+/// `flag.PrintDefaults` writes it.
+pub fn write_defaults<T>(out: &mut String, definitions: &[Definition<T>], hidden: &[&str]) {
+    for definition in definitions {
+        if hidden.contains(&definition.name) {
             continue;
         }
         let kind = match definition.kind {
@@ -238,7 +279,6 @@ pub fn usage(program: &str) -> String {
             definition.name, definition.usage
         );
     }
-    out
 }
 
 #[cfg(test)]
@@ -335,5 +375,51 @@ mod tests {
         assert!(usage.contains("\n  -standalone\n    \tIn TUI mode,"));
         assert!(usage.ends_with("\n  -tui\n    \tStart with terminal management UI\n"));
         assert!(!usage.contains("password"));
+    }
+
+    // Not upstream's: a subcommand's flags, read with the same parser, and
+    // the arguments after them.
+    #[test]
+    fn reads_a_subcommands_flags_and_returns_the_rest() {
+        #[derive(Default)]
+        struct Sub {
+            force: bool,
+            name: String,
+        }
+        let definitions = [
+            Definition {
+                name: "force",
+                usage: "Replace it",
+                kind: Kind::Bool(|sub: &mut Sub, value| sub.force = value),
+            },
+            Definition {
+                name: "name",
+                usage: "The name",
+                kind: Kind::String(|sub: &mut Sub, value| sub.name = value),
+            },
+        ];
+        let read =
+            |args: &[&str]| parse_with(&definitions, args.iter().map(|arg| (*arg).to_owned()));
+        let (sub, rest) = read(&["-force", "-name", "x", "extra", "-force=false"]).unwrap();
+        assert!(sub.force);
+        assert_eq!(sub.name, "x");
+        assert_eq!(rest, ["extra", "-force=false"]);
+        let (sub, rest) = read(&["--", "-force"]).unwrap();
+        assert!(!sub.force);
+        assert_eq!(rest, ["-force"]);
+        let (_, rest) = read(&[]).unwrap();
+        assert!(rest.is_empty());
+        assert!(matches!(
+            read(&["-config", "x"]),
+            Err(FlagError::Invalid(_))
+        ));
+        assert!(matches!(read(&["-h"]), Err(FlagError::Help)));
+
+        let mut out = String::new();
+        write_defaults(&mut out, &definitions, &[]);
+        assert_eq!(
+            out,
+            "  -force\n    \tReplace it\n  -name string\n    \tThe name\n"
+        );
     }
 }

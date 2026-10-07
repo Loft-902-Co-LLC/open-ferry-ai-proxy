@@ -12,6 +12,10 @@
 //! as a local management password, and stops when its keep-alive endpoint
 //! isn't called (see [`keep_alive`]).
 //!
+//! As the first argument, `init` writes a starting config (see [`init`])
+//! and `check` looks over a setup (see [`check`]); the arguments after it
+//! are theirs.
+//!
 //! Deviations from upstream:
 //! - The cloud-deploy, home, Postgres, object-store and git-store modes,
 //!   plugins and the other providers' logins aren't ported.
@@ -26,9 +30,12 @@
 //!   exits with 0.
 
 mod browser;
+mod check;
 mod dotenv;
 mod file_log;
 mod flags;
+mod init;
+mod installed;
 mod keep_alive;
 mod logging;
 mod login;
@@ -50,8 +57,16 @@ use crate::login::Login;
 const EXIT_FLUSH: Duration = Duration::from_secs(1);
 
 fn main() -> ExitCode {
-    let mut args = std::env::args_os().map(|arg| arg.to_string_lossy().into_owned());
+    let mut args = std::env::args_os()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .peekable();
     let program = args.next().unwrap_or_else(|| "open-ferry".to_owned());
+    // A subcommand is recognized only as the first argument (see `flags`).
+    match args.peek().map(String::as_str) {
+        Some(init::NAME) => return init::main(&program, args.skip(1)),
+        Some(check::NAME) => return check::main(&program, args.skip(1)),
+        _ => {}
+    }
     let flags = match flags::parse(args) {
         Ok(flags) => flags,
         Err(FlagError::Help) => {
