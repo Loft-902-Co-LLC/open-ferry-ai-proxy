@@ -1,13 +1,14 @@
 # Releasing
 
 How the maintainer makes a release. Pushing a tag runs [the release workflow](.github/workflows/release.yml), which does the following:
-- builds the web dashboard once, and each binary with it built in;
+- builds the web dashboard once, and each binary with it built in, the static (musl) Linux ones in Alpine;
 - lists the licenses of the Rust crates built into each binary;
-- writes `SHA256SUMS`;
-- attests each archive's build provenance;
-- creates a **draft** release.
+- writes `SHA256SUMS`, of the archives and the install scripts, `install.sh` and `install.ps1`;
+- attests the build provenance of each archive and script;
+- creates a **draft** release;
+- then builds the container image from the static binaries, tests it, pushes it to GHCR and attests it.
 
-Nothing is public until the draft is reviewed and published by hand.
+Nothing but the container image is public until the draft is reviewed and published by hand. The image is pushed before the draft is published, and anyone can pull it from then on, once its package is public (see step 7 and the container image under [Notes](#notes)).
 
 ## Versions
 
@@ -49,27 +50,33 @@ open-ferry follows [Semantic Versioning](https://semver.org/). Until 1.0.0, a mi
    ```
 
 7. **Review the draft.** When the workflow finishes, the draft is on the [Releases](https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases) page. Check that:
-   - it has five archives and `SHA256SUMS`;
+   - it has seven archives, one for each target in the [runners](#notes) table, `install.sh`, `install.ps1` and `SHA256SUMS`, which lists the other nine;
    - an archive holds `config.example.yaml`, and its `licenses/` holds `rust-third-party-licenses.txt` for its own target and `dashboard-third-party-licenses.txt`;
    - the notes are the changelog section;
-   - an archive downloads and checks out as the README's [install section](README.md#install) says: its hash against `SHA256SUMS`, and its attestation with `gh attestation verify`;
-   - the binary runs (`open-ferry -h`).
+   - an archive downloads and checks out as the README's [install section](README.md#download-a-release) says: its hash against `SHA256SUMS`, and its attestation with `gh attestation verify`. So do the two scripts;
+   - the binary runs (`open-ferry -h`);
+   - the image is on GHCR, tagged `X.Y.Z` and, unless it's a pre-release, `latest`; it runs (`docker run --rm ghcr.io/loft-902-co-llc/open-ferry:X.Y.Z open-ferry -h`), and its attestation checks out: `gh attestation verify oci://ghcr.io/loft-902-co-llc/open-ferry:X.Y.Z --repo Loft-902-Co-LLC/open-ferry-ai-proxy`;
+   - after the first release only: the package `open-ferry` is public. A new GHCR package may start private; make it public in its settings (**Package settings**, **Change visibility**), or pulls fail for everyone else.
 
 8. **Publish** the draft. It then becomes the latest release, which the management API's `latest-version` route reports to the running proxies. A pre-release doesn't.
+
+9. **Try the install scripts.** They download from published releases only, so try them now, on Linux or macOS and on Windows, with the one-liners in the README's [install section](README.md#install-script).
 
 ## Dry run
 
 Run the **Release** workflow from the Actions tab (**Run workflow**), on `main` or any branch. It does the following:
 - builds every target;
 - packages the archives;
-- writes `SHA256SUMS`.
+- writes `SHA256SUMS`;
+- builds the container image for linux/amd64 and linux/arm64 and tests the amd64 one, as on a tag.
 
-It keeps them all as workflow artifacts, so they can be downloaded and tried. It doesn't check the tag or the changelog, attests nothing and publishes nothing. The archives are named after the version in `Cargo.toml`, whatever it is.
+It keeps them all as workflow artifacts, so they can be downloaded and tried; the image is `container-image`, an OCI archive of both platforms, for `docker load` or `skopeo`. It doesn't check the tag or the changelog, attests nothing, pushes no image and publishes nothing. The archives and the image are named after the version in `Cargo.toml`, whatever it is.
 
 ## When something fails
 
 - **Before the draft is created:** if the failure was a passing fault, such as a runner or network problem, re-run the failed jobs. Otherwise, fix it on `main`, then move the tag to the fixed commit. Delete the tag on GitHub and locally (`git push origin :refs/tags/vX.Y.Z`, `git tag -d vX.Y.Z`), and tag again.
 - **After the draft is created:** delete the draft before re-running, since a tag can have only one release. Until the release is published, the tag can still be moved as above.
+- **If only the image job failed,** re-run that job: the draft stays. A re-run after the tag moved pushes the new image under the same tags; delete the old one's version on the package's page on GitHub. If you abandon a release whose image was pushed, delete that version there too, and if it took `latest`, push the previous release's image as `latest` again (with `docker buildx imagetools create`).
 - **After publishing:** never move or reuse a published tag. Fix it in a new patch release.
 
 A run that failed may have made attestations already. They stay, but they only vouch for the exact files they name, so they do no harm.
@@ -82,6 +89,8 @@ A run that failed may have made attestations already. They stay, but they only v
   |---|---|
   | `x86_64-unknown-linux-gnu` | `ubuntu-24.04`, in the Debian 11 container |
   | `aarch64-unknown-linux-gnu` | `ubuntu-24.04-arm`, in the Debian 11 container |
+  | `x86_64-unknown-linux-musl` | `ubuntu-24.04`, in the Rust Alpine image |
+  | `aarch64-unknown-linux-musl` | `ubuntu-24.04-arm`, in the Rust Alpine image |
   | `x86_64-apple-darwin` | `macos-15-intel` |
   | `aarch64-apple-darwin` | `macos-15` |
   | `x86_64-pc-windows-msvc` | `windows-2025` |
@@ -89,7 +98,13 @@ A run that failed may have made attestations already. They stay, but they only v
   Each target builds natively on a runner of its own architecture. Move the labels on when GitHub deprecates an image (see the [runner images](https://github.com/actions/runner-images) announcements).
 - **glibc.** The Linux binaries need glibc 2.31 or newer, as on Debian 11 and Ubuntu 20.04. A binary needs the glibc of the system it was linked on, so the Linux targets don't build on the runner's Ubuntu but in a container of Debian 11 (bullseye): the official Rust image, `rust:1-bullseye`, pinned by digest in the workflow's `container`. The image brings GCC, which aws-lc-rs compiles its C code with, and rustup, which installs the toolchain `rust-toolchain.toml` names. Each build's summary shows the newest glibc symbol the binary uses, and the build fails if it is newer than `GLIBC_FLOOR` (2.31).
   - Debian 11's long-term support ended in August 2026. That matters little for an image that only builds, and the digest keeps it as it is, so keep the pin unless a build needs a newer C compiler.
-  - Moving to a newer image, such as Debian 12 (glibc 2.36), raises the floor. Change `GLIBC_FLOOR`, the README's install section and this paragraph with it, and mention it in the changelog.
+  - Moving to a newer image, such as Debian 12 (glibc 2.36), raises the floor. Change `GLIBC_FLOOR`, the README's install section and this paragraph with it, and `GLIBC_FLOOR` in `install.sh`, which picks the static build below it, and mention it in the changelog.
+- **The static Linux binaries.** The `-linux-musl` targets build in the official Rust image on Alpine, `rust:1-alpine3.24`, pinned by digest in the workflow (`RUST_ALPINE`). A step starts it with `docker run`, rather than making it the job's container, as GitHub runs no JavaScript action in an Alpine container on arm64. In it, `.github/scripts/build-musl.sh` installs the toolchain and builds natively: Alpine's GCC and musl-dev compile the C code of aws-lc-rs and SQLite, and `+crt-static` is set, though it's the default. Then `.github/scripts/check-static.sh` checks with `readelf` that the binary has no program interpreter and no shared libraries, and `open-ferry -h` runs in plain Alpine (`ALPINE`, pinned by digest), which has no glibc. Either failing fails the build. The binaries need no C library at all, so they run on any Linux of their architecture.
+- **The container image.** [`docker/Dockerfile`](docker/Dockerfile) builds it from the two static archives, each checked against `SHA256SUMS`, on Alpine 3.24, with the time zone database from Google's distroless static image; both are pinned by digest. No stage runs code for the target platform, so the arm64 image builds on the amd64 runner without emulation. The `image` job runs BuildKit in a container of its own (`BUILDKIT`, pinned by digest), builds both platforms with `.github/scripts/build-image.sh`, and tests the amd64 image with `.github/scripts/test-image.sh`: its paths, and a server that answers with a dummy credential and nothing it can reach outside. On a tag, it then pushes the image to `ghcr.io/loft-902-co-llc/open-ferry` as the version and, unless it's a pre-release, `latest`, and attests it, with the attestation pushed to the registry too. It's the only job with `packages: write`.
+  - It runs after the draft is created, so its push is the one thing public before you publish. Review the draft soon after.
+  - The image's timestamps are the run's build date (`SOURCE_DATE_EPOCH`), the one the binaries report, so the job's three builds (the archive, the test and the push) make one image, and so does a re-run of the image job alone.
+  - To move to a newer Alpine, change its digest in the Dockerfile (`ALPINE`), the release workflow (`ALPINE`) and the CI workflow's `install-scripts` job together. The Rust image (`RUST_ALPINE`) can move on its own.
+- **The install scripts.** `install.sh` and `install.ps1` are release assets, in `SHA256SUMS` and attested, downloaded by the README's one-liners from the latest release. CI tests them on Linux, macOS and Windows against fake releases served from 127.0.0.1, in `tests/install/`, and lints `install.sh` with ShellCheck. A new target needs adding to `install.sh`'s detection, or to `install.ps1` for Windows, and to the tests.
 - **macOS.** The binaries run on macOS 11 or newer, set by `MACOSX_DEPLOYMENT_TARGET`.
 - **Windows.** The binary links the C runtime statically, so it doesn't need the Visual C++ Redistributable.
 - **Build information.** `OPEN_FERRY_COMMIT` and `OPEN_FERRY_BUILD_DATE` are set at build time. They are the management API's `X-CPA-COMMIT` and `X-CPA-BUILD-DATE` headers. A build without them says `none` and `unknown`.

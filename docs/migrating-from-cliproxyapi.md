@@ -8,7 +8,27 @@ open-ferry reads CLIProxyAPI's config and auth directory as they are, so for mos
 2. **Stop CLIProxyAPI.** Don't run both against the same auth directory at once. Each refreshes tokens on its own, and a refresh token one of them has used may then be refused to the other.
 3. **Install open-ferry** as the [README](../README.md#install) says.
 4. **Start it** where you started CLIProxyAPI, so that it finds `config.yaml` in the working directory, or pass the file with `-config`. It listens on the config's `port`, as before.
-5. **Read on** if you use a sign-in other than Codex's or Claude's, a command-line flag other than the login ones, the management panel, or storage other than local files.
+5. **Read on** if you use a sign-in other than Codex's or Claude's, a command-line flag other than the login ones, the management panel, or storage other than local files. If you run CLIProxyAPI's image with Docker Compose, see [Docker Compose](#docker-compose) instead of steps 3 and 4.
+
+## Docker Compose
+
+open-ferry's image, `ghcr.io/loft-902-co-llc/open-ferry`, keeps the paths of CLIProxyAPI's: the config is `/CLIProxyAPI/config.yaml`, the auth directory `/root/.cli-proxy-api`, the logs `/CLIProxyAPI/logs`, and the port 8317. `/CLIProxyAPI/CLIProxyAPI` is a link to the binary, so a `command:` written for CLIProxyAPI's image still runs. To switch a Compose file written for CLIProxyAPI's image, such as its `docker-compose.yml`:
+
+1. **Change the image** to `ghcr.io/loft-902-co-llc/open-ferry:latest`, or to a version, such as `ghcr.io/loft-902-co-llc/open-ferry:0.1.0`. If the file takes the image from `CLI_PROXY_IMAGE`, set that variable to open-ferry's image instead.
+2. **Remove the `build:` section.** It builds CLIProxyAPI from a checkout; open-ferry's image is built from its release archives.
+3. **Remove the sign-in callback ports** (8085, 1455, 54545, 51121 and 11451). open-ferry's callback servers listen on the container's own loopback, which a published port doesn't reach. The README says [how to sign in](../README.md#run-it-in-a-container) instead.
+4. **Remove the plugins volume and `DEPLOY`.** Neither plugins nor the cloud deploy mode are ported.
+5. **If you save the config from the dashboard or the management API, mount its directory** rather than the file. CLIProxyAPI writes over the file in place; open-ferry writes a new file and renames it over the old one, which a file mounted on its own can't take, so the save fails with "Resource busy". Mount a directory that holds `config.yaml`, and name the file in the command:
+
+   ```yaml
+   command: ["open-ferry", "-config", "/CLIProxyAPI/config/config.yaml"]
+   volumes:
+     - ./config:/CLIProxyAPI/config
+   ```
+
+6. **Set `TZ`** if you want local times in the logs. CLIProxyAPI's image sets `Asia/Shanghai`; open-ferry's is in UTC.
+
+The auth directory and log mounts stay as they are, as do `CLI_PROXY_CONFIG_PATH`, `CLI_PROXY_AUTH_PATH` and `CLI_PROXY_LOG_PATH`, and the config's empty `server.host`, which a container needs. Consider publishing 8317 on the host's 127.0.0.1 only (`"127.0.0.1:8317:8317"`), unless other machines use the proxy. open-ferry's own [`docker-compose.yml`](../docker-compose.yml) is the result of these steps, with the port so published.
 
 ## Config and auth directory
 

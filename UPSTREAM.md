@@ -779,6 +779,17 @@ Where it differs from upstream:
 
 Tests: none are upstream's. The subcommands' tests use temporary directories and ports on 127.0.0.1 that nothing listens on, and check the keys' shape without printing them. `service`'s tests run every command and file change through a recording fake, so none reaches a real service manager, and check the definitions it writes against their text.
 
+## The container image and Compose file
+
+`docker/Dockerfile` and `docker-compose.yml` are ported from upstream's `Dockerfile` and `docker-compose.yml` (MIT). The image keeps upstream's paths, so a Compose file written for upstream's image switches by changing the image ([migration guide](docs/migrating-from-cliproxyapi.md#docker-compose)): the working directory `/CLIProxyAPI`, the config `/CLIProxyAPI/config.yaml`, the template `/CLIProxyAPI/config.example.yaml`, the auth directory `/root/.cli-proxy-api`, the logs `/CLIProxyAPI/logs` and the port 8317.
+
+Where they differ:
+
+- **The image is built from the release's static (musl) binaries, on Alpine**, pinned by digest, for linux/amd64 and linux/arm64. Upstream compiles the source in its image build and runs it on Debian. The binary is `/usr/local/bin/open-ferry`, and `/CLIProxyAPI/CLIProxyAPI` is a link to it, for commands written for upstream's image. The licenses are in `/usr/share/doc/open-ferry`, and the image has OCI labels.
+- **The time zone is UTC**, where upstream's image sets `TZ=Asia/Shanghai`. `TZ` still sets it; the zone database comes from Google's distroless static image, pinned by digest.
+- **The Compose file** takes the image from `OPEN_FERRY_IMAGE` rather than `CLI_PROXY_IMAGE`, and has no `build:` section, `pull_policy: always`, plugins volume or `DEPLOY`. It publishes only 8317, on 127.0.0.1; upstream publishes 8317 and the sign-in callback ports 8085, 1455, 54545, 51121 and 11451 on every interface, but open-ferry's callback servers listen on the container's loopback, which a published port doesn't reach.
+- **Saving the config needs its directory mounted.** The config writer renames a new file over the old one ([The config writer](#the-config-writer)), which a file bind-mounted on its own refuses ("Resource busy"). Upstream writes the file in place (`os.WriteFile`), so a save works with upstream's single-file mount.
+
 ## Other ported code
 
 Some of upstream's behaviour comes from the details of Go libraries, so the parts it relies on are ported too:

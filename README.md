@@ -19,7 +19,108 @@ A Rust port of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) with 
 
 Coming from CLIProxyAPI? Read the [migration guide](docs/migrating-from-cliproxyapi.md) first: it covers what carries over and what doesn't.
 
-No release has been published yet. Until the first one, [build from source](#build-from-source).
+No release has been published yet. Until the first one, [build from source](#build-from-source): the install scripts, the container image and the archives below all come from a release.
+
+### Install script
+
+On Linux or macOS:
+
+```sh
+curl -fsSL https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases/latest/download/install.sh | sh
+```
+
+On Windows, in PowerShell (Windows PowerShell 5.1 or PowerShell 7):
+
+```powershell
+irm https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases/latest/download/install.ps1 | iex
+```
+
+The script:
+
+- downloads the release's archive for your system, and refuses it unless it matches the release's `SHA256SUMS`. On Linux it picks the static (musl) build on Alpine, on systems without glibc and on those with a glibc older than 2.31, and the glibc build everywhere else;
+- if the [GitHub CLI](https://cli.github.com/) is installed, checks the archive's build provenance attestation with `gh attestation verify`, and refuses an archive that fails it. Without `gh`, it says that the attestation wasn't checked;
+- installs the binary as `~/.local/bin/open-ferry` (`%LOCALAPPDATA%\Programs\open-ferry\open-ferry.exe` on Windows), replacing an older one;
+- if there's no config where `open-ferry init` writes one by default ([below](#download-a-release)), runs `open-ferry init`, which prints the new keys once. A config that's already there is kept as it is;
+- prints how to start open-ferry with that config, run it at login with `open-ferry service install`, open the dashboard, and check the setup with `open-ferry check`.
+
+It changes no shell profile and no `PATH`. When the install directory isn't on your `PATH`, it says how to add it.
+
+To read the script before you run it, download it, read it, then run the file:
+
+```sh
+curl -fsSLO https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases/latest/download/install.sh
+less install.sh
+sh install.sh
+```
+
+```powershell
+irm https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases/latest/download/install.ps1 -OutFile install.ps1
+notepad install.ps1
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+Windows PowerShell runs no script files by default; `-ExecutionPolicy Bypass` lets it run this one, for that run only. Each release lists both scripts in its `SHA256SUMS` and has an attestation for each, so you can [check them](#verify-the-download) as you would an archive. Each release also has its own copy of the scripts, at `https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases/download/v<version>/install.sh` (and `install.ps1`).
+
+The scripts take options. Piped to `sh`, pass them after `sh -s --`; in PowerShell, make the script a script block and pass them after it:
+
+```sh
+curl -fsSL https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases/latest/download/install.sh | sh -s -- --version 0.1.0
+```
+
+```powershell
+& ([scriptblock]::Create((irm https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases/latest/download/install.ps1))) -Version 0.1.0
+```
+
+| `install.sh` | `install.ps1` | What it does |
+|---|---|---|
+| `--version VERSION` | `-Version VERSION` | Install this version rather than the latest release |
+| `--bin-dir DIR` | `-InstallDir DIR` | Install the binary in `DIR` |
+| `--config PATH` | `-ConfigPath PATH` | The config to keep, or to write when there's none |
+| `--target TARGET` | | Install the build for this target rather than this system's, such as `x86_64-unknown-linux-musl` |
+| `--no-attestation` | `-NoAttestation` | Don't check the attestation, even when `gh` is installed. The `SHA256SUMS` check still runs |
+
+To download from a mirror instead of GitHub, set `OPEN_FERRY_INSTALL_BASE_URL` to its address, in place of `https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases`. The mirror needs GitHub's layout: `<base>/download/v<version>/<file>` for each release, and `<base>/latest/download/<file>` for the latest. The top of each script lists the rest of its settings.
+
+### Run it in a container
+
+Each release has a container image for linux/amd64 and linux/arm64, `ghcr.io/loft-902-co-llc/open-ferry`, tagged with the version, such as `0.1.0`, and, unless the release is a pre-release, `latest`. It holds the release's static binary on Alpine, at the paths of CLIProxyAPI's image: the config is `/CLIProxyAPI/config.yaml`, the auth directory `/root/.cli-proxy-api`, the logs `/CLIProxyAPI/logs`, and the port 8317. The image has a build provenance attestation too:
+
+```sh
+gh attestation verify oci://ghcr.io/loft-902-co-llc/open-ferry:<version> --repo Loft-902-Co-LLC/open-ferry-ai-proxy
+```
+
+To run it with Docker Compose, put [`docker-compose.yml`](docker-compose.yml) in a new directory, and in that directory write a config with new keys:
+
+```sh
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/out" \
+  ghcr.io/loft-902-co-llc/open-ferry:latest open-ferry init -config /out/config.yaml -host ""
+```
+
+`init` prints the keys once; the command it prints to start the proxy is for inside the container, which Compose starts for you. `--user` makes the file yours rather than root's; leave it out with Docker Desktop on Windows. Then, for the dashboard, set `allow-remote: true` under `management:` in `config.yaml` (see below), and start it:
+
+```sh
+docker compose up -d
+```
+
+The dashboard is then at `http://127.0.0.1:8317/dashboard/`. Without Compose, the same container is:
+
+```sh
+docker run -d --name open-ferry --restart unless-stopped -p 127.0.0.1:8317:8317 \
+  -v "$PWD/config.yaml:/CLIProxyAPI/config.yaml" \
+  -v "$PWD/auths:/root/.cli-proxy-api" \
+  -v "$PWD/logs:/CLIProxyAPI/logs" \
+  ghcr.io/loft-902-co-llc/open-ferry:latest
+```
+
+What's different in a container:
+
+- **The host.** `-host ""` leaves the config's `server.host` empty, as the template has it, so open-ferry listens on every interface of the container. That's what a container needs: Docker forwards the published port to the container's own address, not to its loopback. The Compose file publishes the port on the host's 127.0.0.1 only; to serve other machines, publish it on another address.
+- **The dashboard.** Requests from the host reach the container through Docker's gateway, not its loopback, so the dashboard and the management API turn them away (403) unless `management.allow-remote` is `true`. Every management request still needs the management key.
+- **Signing in.** The Codex and Claude sign-ins wait for the browser on the container's own loopback, which no published port reaches. Sign in from the dashboard, and paste the address the browser lands on into its sign-in dialog; use the device login, `docker compose exec open-ferry open-ferry -codex-device-login`; or copy existing auth files into `./auths`.
+- **Saving the config.** With `config.yaml` mounted on its own, as above, saving it from the dashboard or the management API fails with "Resource busy": open-ferry saves by renaming a new file over the old one, which a file mounted on its own can't take. To save from the dashboard, mount a directory that holds `config.yaml` instead; `docker-compose.yml` shows how.
+- **The time zone** is UTC. For local times in the logs, set `TZ`, such as `TZ=Europe/London`.
+
+To upgrade, run `docker compose pull && docker compose up -d`. To pin a version, set `OPEN_FERRY_IMAGE=ghcr.io/loft-902-co-llc/open-ferry:<version>`. Coming from CLIProxyAPI's image? The [migration guide](docs/migrating-from-cliproxyapi.md#docker-compose) says what to change in its Compose file.
 
 ### Download a release
 
@@ -29,11 +130,13 @@ Each [release](https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases) 
 |---|---|
 | Linux, x86-64 | `open-ferry-<version>-x86_64-unknown-linux-gnu.tar.gz` |
 | Linux, arm64 | `open-ferry-<version>-aarch64-unknown-linux-gnu.tar.gz` |
+| Linux, x86-64, static | `open-ferry-<version>-x86_64-unknown-linux-musl.tar.gz` |
+| Linux, arm64, static | `open-ferry-<version>-aarch64-unknown-linux-musl.tar.gz` |
 | macOS, Intel | `open-ferry-<version>-x86_64-apple-darwin.tar.gz` |
 | macOS, Apple silicon | `open-ferry-<version>-aarch64-apple-darwin.tar.gz` |
 | Windows, x86-64 | `open-ferry-<version>-x86_64-pc-windows-msvc.zip` |
 
-- **Linux:** the binaries need glibc 2.31 or newer, as on Debian 11, Ubuntu 20.04, Fedora 32, RHEL 9 and Amazon Linux 2023, or later. On older systems, build from source.
+- **Linux:** the `linux-gnu` binaries need glibc 2.31 or newer, as on Debian 11, Ubuntu 20.04, Fedora 32, RHEL 9 and Amazon Linux 2023, or later. The static `linux-musl` binaries need no C library, so they run on Alpine and on older systems too.
 - **macOS:** the binaries need macOS 11 or newer.
 
 Each archive holds the `open-ferry` binary (`open-ferry.exe` on Windows), an example config, `config.example.yaml`, this README and the licenses. Put the binary on your `PATH`. Run it in the directory that holds your `config.yaml`, or point to the file with `-config`. For a new setup, write a config with new keys, check it, and start the proxy with it:
@@ -50,7 +153,7 @@ The binaries aren't code-signed. If macOS refuses to open one you downloaded wit
 
 ### Verify the download
 
-Each release has a `SHA256SUMS` file and a build provenance attestation for each archive, both made by the [release workflow](.github/workflows/release.yml). Check both before you run the binary.
+Each release has a `SHA256SUMS` file and a build provenance attestation for each archive and install script, both made by the [release workflow](.github/workflows/release.yml). Check both before you run the binary. The install scripts check both for you, the attestation when `gh` is installed.
 
 To check the checksum, download `SHA256SUMS` into the same directory as the archive, then run:
 
