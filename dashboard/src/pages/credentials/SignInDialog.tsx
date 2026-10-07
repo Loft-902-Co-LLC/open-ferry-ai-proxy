@@ -164,7 +164,10 @@ function Waiting({
     <div className="space-y-4">
       <ol className="list-decimal space-y-4 pl-5">
         <li className="space-y-2">
-          <p>Open {name}&apos;s sign-in page, and sign in there.</p>
+          <p>
+            Open {name}&apos;s sign-in page, and sign in there. Finish within five minutes of
+            starting: after that the server stops waiting, and you start again.
+          </p>
           <div className="flex flex-wrap items-center gap-2">
             <a
               ref={link}

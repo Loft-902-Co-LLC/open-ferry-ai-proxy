@@ -450,6 +450,7 @@ describe("signing in with Claude or Codex", () => {
     expect(link).toHaveAttribute("href", SIGN_IN_URL);
     expect(link).toHaveAttribute("target", "_blank");
     expect(link).toHaveAttribute("rel", "noopener noreferrer");
+    expect(dialog).toHaveTextContent("Finish within five minutes of starting");
     await waitFor(() => {
       expect(link).toHaveFocus();
     });
