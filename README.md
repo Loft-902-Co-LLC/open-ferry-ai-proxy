@@ -44,7 +44,7 @@ open-ferry check -config <the path init printed>
 open-ferry -config <the path init printed>
 ```
 
-`init` writes `config.example.yaml` with a new client key and management key, listening on 127.0.0.1 only, to `~/.config/open-ferry/config.yaml` (`%APPDATA%\open-ferry\config.yaml` on Windows), and prints the keys once. Then add your upstream credentials, from the commented examples in the file, by signing in, or in the dashboard. [docs/cli.md](docs/cli.md) has the details of `init` and `check`.
+`init` writes `config.example.yaml` with a new client key and management key, listening on 127.0.0.1 only, to `~/.config/open-ferry/config.yaml` (`%APPDATA%\open-ferry\config.yaml` on Windows), and prints the keys once. Then add your upstream credentials, from the commented examples in the file, by signing in, or in the dashboard. To run the proxy in the background, started when you log in, run `open-ferry service install`. [docs/cli.md](docs/cli.md) has the details of `init`, `check` and `service`.
 
 The binaries aren't code-signed. If macOS refuses to open one you downloaded with a browser, verify it as below, then remove the quarantine flag with `xattr -d com.apple.quarantine open-ferry`.
 
