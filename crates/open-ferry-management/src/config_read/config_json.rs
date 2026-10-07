@@ -1,6 +1,7 @@
 // Ported from CLIProxyAPI internal/config (config.go, sdk_config.go,
 // config_types.go and vertex_compat.go: the JSON layouts of `Config` and the
-// types it holds) and internal/api/handlers/management/config_auth_index.go
+// types it holds), internal/registry/catalog_config.go (CatalogSources) and
+// internal/api/handlers/management/config_auth_index.go
 // (the `*WithAuthIndex` types) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
@@ -137,7 +138,17 @@ pub(super) fn config(config: &Config) -> Json {
     let tls = &config.tls;
     let quota = &config.quota_exceeded;
     let codex = &config.codex;
+    let models = &config.models;
     Fields::new()
+        // registry.CatalogSources, with every field omitempty.
+        .with(
+            "models",
+            Fields::new()
+                .omit_empty("catalog", string(&models.catalog))
+                .omit_empty("codex-catalog", string(&models.codex_catalog))
+                .omit_empty("devin-catalog", string(&models.devin_catalog))
+                .done(),
+        )
         .with(
             "client",
             Fields::new()

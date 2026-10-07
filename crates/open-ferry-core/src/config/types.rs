@@ -33,6 +33,7 @@ use serde::Deserialize;
 
 use super::duration::parse_go_duration;
 use super::image_generation::DisableImageGeneration;
+use super::model_catalogs::CatalogSources;
 use super::payload::PayloadConfig;
 
 /// The auth directory used when `auth-dir` is unset.
@@ -46,6 +47,8 @@ pub const DEFAULT_PANEL_GITHUB_REPOSITORY: &str =
 #[derive(Clone, PartialEq, Deserialize)]
 #[serde(default, rename = "config.legacyConfig", rename_all = "kebab-case")]
 pub struct Config {
+    /// Where the model catalogs are read from.
+    pub models: CatalogSources,
     /// Client-facing compatibility behavior.
     pub client: ClientConfig,
     /// An optional proxy for outbound requests.
@@ -174,6 +177,7 @@ impl Default for Config {
     /// The values upstream sets before decoding.
     fn default() -> Self {
         Self {
+            models: CatalogSources::default(),
             client: ClientConfig::default(),
             proxy_url: String::new(),
             disable_image_generation: DisableImageGeneration::Off,
@@ -262,6 +266,7 @@ impl Config {
 impl fmt::Debug for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Config")
+            .field("models", &self.models)
             .field("client", &self.client)
             .field("proxy_url", &Redacted(&self.proxy_url))
             .field("disable_image_generation", &self.disable_image_generation)

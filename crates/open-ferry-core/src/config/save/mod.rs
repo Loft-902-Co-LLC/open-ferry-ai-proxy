@@ -903,6 +903,41 @@ mod tests {
         );
     }
 
+    // Ports TestModelCatalogConfigRoundTrip (model_catalogs_test.go): the
+    // `models` sources survive a save, with or without migrating to the v8
+    // layout, and clearing them saves them cleared.
+    #[test]
+    fn model_catalog_config_round_trip() {
+        for migrate in [false, true] {
+            let dir = TempDir::new();
+            let file = dir.path().join("config.yaml");
+            let catalog = dir.path().join("models.json");
+            let sources = crate::config::CatalogSources {
+                catalog: catalog.to_string_lossy().into_owned(),
+                codex_catalog: "https://example.com/codex.json".to_owned(),
+                devin_catalog: "http://localhost/devin.json".to_owned(),
+            };
+            // yaml.Marshal(map[string]any{"config-version": 8, "models": sources}).
+            let data = format!(
+                "config-version: 8\nmodels:\n    catalog: {:?}\n    codex-catalog: {}\n    devin-catalog: {}\n",
+                sources.catalog, sources.codex_catalog, sources.devin_catalog
+            );
+            assert_valid_v8(data.as_bytes());
+            fs::write(&file, &data).expect("seed");
+            let mut cfg = Config::load(&file).expect("load");
+            assert_eq!(cfg.models, sources, "migrate {migrate}");
+            save_preserving_comments(&file, &cfg, migrate).expect("save");
+            let saved = fs::read(&file).expect("read");
+            assert_valid_v8(&saved);
+            let reloaded = Config::load(&file).expect("reload");
+            assert_eq!(reloaded.models, sources, "migrate {migrate}");
+            cfg.models = crate::config::CatalogSources::default();
+            save_preserving_comments(&file, &cfg, migrate).expect("save cleared");
+            let cleared = Config::load(&file).expect("load cleared");
+            assert_eq!(cleared.models, crate::config::CatalogSources::default());
+        }
+    }
+
     // Not upstream's: a nested update sets the string and keeps the rest,
     // as Go's SaveConfigPreserveCommentsUpdateNestedScalar does (Go's
     // answer, recorded).

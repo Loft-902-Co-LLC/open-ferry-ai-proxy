@@ -1,24 +1,29 @@
 // Ported from CLIProxyAPI internal/config/config_v8.go (ValidateV8Config,
-// v8AllowedRoots) (v8.0.15, MIT), with the key checks of yaml.v3 v3.0.1's
-// strict decode (decode.go's mapping and mappingStruct with KnownFields).
+// v8AllowedRoots) and internal/registry/catalog_config.go
+// (CatalogSources.Validate) (v8.0.15, MIT), with the key checks of yaml.v3
+// v3.0.1's strict decode (decode.go's mapping and mappingStruct with
+// KnownFields).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Upstream's check that a file is a valid v8 config, which each v8 edit
 //! passes before it is written: the v8 layout without legacy fields,
 //! known sections and API-key providers only, and, moved into the legacy
-//! layout, no key that upstream's `legacyConfig` doesn't have.
+//! layout, no key that upstream's `legacyConfig` doesn't have, and
+//! `models` sources that are http(s) URLs or absolute paths.
 //!
 //! Deviations from upstream:
-//! - The `models` catalog sources aren't checked (upstream's
-//!   `CatalogSources.Validate`), as the loader doesn't check them.
 //! - The strict decode checks keys: repeated keys, keys a struct doesn't
 //!   have, and keys that aren't strings. It doesn't check the values'
-//!   types, which [`super::super::Config::parse`] checks first for the
-//!   settings it types; a value of the wrong type in a setting it doesn't
-//!   type passes.
+//!   types, apart from the `models` section's, which
+//!   [`super::super::Config::parse`] checks first for the settings it
+//!   types; a value of the wrong type in a setting it doesn't type passes.
 //! - The layout is checked first with the loader's checks, which upstream
 //!   makes in `flattenV8`, and their errors are the loader's.
 
+use serde::Deserialize;
+
+use super::super::decode::decode;
+use super::super::model_catalogs::CatalogSources;
 use super::super::save::{
     Node as TreeNode, check_layout, delete_yaml_path, expand_config_aliases, flatten_v8,
     legacy_path, marshal, unmarshal, v8_aliases, yaml_path,
@@ -101,7 +106,20 @@ pub fn validate_v8_config(data: &[u8]) -> Result<(), ConfigError> {
         }
     }
     let encoded = marshal(&flat).map_err(|error| invalid(error.to_string()))?;
-    strict_decode(&encoded).map_err(|error| invalid(error.message()))
+    let decoded = strict_decode(&encoded).map_err(|error| invalid(error.message()))?;
+    let models: ModelsOnly = decode(&decoded).map_err(|error| invalid(error.message()))?;
+    models
+        .models
+        .validate()
+        .map_err(|error| invalid(error.to_string()))
+}
+
+/// The `models` section of upstream's `legacyConfig`, which
+/// `ValidateV8Config` checks once the strict decode passes.
+#[derive(Default, Deserialize)]
+#[serde(default, rename = "config.legacyConfig")]
+struct ModelsOnly {
+    models: CatalogSources,
 }
 
 /// `v8AllowedRoots`: the sections a v8 file may have.
@@ -120,8 +138,8 @@ fn is_empty_mapping(node: &TreeNode) -> bool {
 }
 
 /// Decodes `encoded` into upstream's `legacyConfig` with `KnownFields`,
-/// checking its keys.
-fn strict_decode(encoded: &[u8]) -> Result<(), YamlError> {
+/// checking its keys, and gives the document's root.
+fn strict_decode(encoded: &[u8]) -> Result<Node, YamlError> {
     let text = std::str::from_utf8(encoded)
         .map_err(|_| YamlError::Syntax("yaml: input is not valid UTF-8".to_owned()))?;
     // A decoder at the end of its input returns io.EOF.
@@ -129,7 +147,7 @@ fn strict_decode(encoded: &[u8]) -> Result<(), YamlError> {
     let mut strict = Strict { errors: Vec::new() };
     strict.structure(&root, &CONFIG_LEGACY_CONFIG)?;
     if strict.errors.is_empty() {
-        Ok(())
+        Ok(root)
     } else {
         Err(YamlError::Type(strict.errors))
     }

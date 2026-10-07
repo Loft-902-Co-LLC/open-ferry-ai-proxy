@@ -57,7 +57,6 @@ use super::tree::{find_map_key_index, remove_map_key};
 /// upstream's defaults for those it writes at all; a path under one of
 /// these is untyped too.
 const UNTYPED: &[&[&str]] = &[
-    &["models"],
     &["claude-code"],
     &["gpt-image-2-base-model"],
     &["video-result-auth-cache-ttl"],

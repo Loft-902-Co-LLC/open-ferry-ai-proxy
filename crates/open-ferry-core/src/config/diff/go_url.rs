@@ -1,14 +1,17 @@
 // Ported from Go's net/url/url.go (Parse, parse, getScheme, parseAuthority,
 // parseHost, unescape, shouldEscape, validOptionalPort, validUserinfo,
-// stringContainsCTLByte) and net/netip/netip.go (ParseAddr) (go1.26,
-// BSD-3-Clause), as CLIProxyAPI internal/watcher/diff/config_diff.go
-// (formatURL) uses them (v8.0.15, MIT).
+// stringContainsCTLByte, URL.Hostname, splitHostPort) and
+// net/netip/netip.go (ParseAddr) (go1.26, BSD-3-Clause), as CLIProxyAPI
+// internal/watcher/diff/config_diff.go (formatURL) and
+// internal/registry/catalog_config.go (CatalogSources.Validate) use them
+// (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 // https://github.com/golang/go
 
 //! URLs as Go's `url.Parse` reads them, for the scheme and host a change
-//! line shows of a base or proxy URL, and for the video handler's check of
-//! the URL a finished video is fetched from.
+//! line shows of a base or proxy URL, for the video handler's check of
+//! the URL a finished video is fetched from, and for the check that a
+//! model catalog source is an http(s) URL.
 //!
 //! Only the scheme, in lower case, and the host, `%`-escapes decoded, are
 //! kept; the rest is only checked, so a URL Go refuses is refused here too.
@@ -21,13 +24,30 @@
 //!
 //! Deviations from upstream: none.
 
-/// What a change line shows of a parsed URL.
+/// What a change line shows of a parsed URL, and its host for the checks.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GoUrl {
     /// The scheme, in lower case, or empty.
     pub scheme: String,
     /// The host and port, decoded, or empty.
     pub host: Vec<u8>,
+}
+
+impl GoUrl {
+    /// The host without its port or IPv6 brackets (Go's `URL.Hostname`).
+    pub fn hostname(&self) -> &[u8] {
+        let mut host = self.host.as_slice();
+        if let Some(colon) = host.iter().rposition(|&b| b == b':') {
+            let (name, port) = host.split_at(colon);
+            if valid_optional_port(port) {
+                host = name;
+            }
+        }
+        match host {
+            [b'[', inner @ .., b']'] => inner,
+            _ => host,
+        }
+    }
 }
 
 /// Go's `url.Parse`, or `None` where it fails.
@@ -375,5 +395,26 @@ mod tests {
         }
         // Outside http and https, the port starts at the last colon.
         assert_eq!(host("socks5://h:x:1080").as_deref(), Some("h:x:1080"));
+    }
+
+    // Not upstream's: what Go 1.26's URL.Hostname gives.
+    #[test]
+    fn hostname_drops_the_port_and_brackets() {
+        let hostname = |raw: &str| {
+            parse(raw.as_bytes()).map(|url| String::from_utf8_lossy(url.hostname()).into_owned())
+        };
+        assert_eq!(
+            hostname("https://example.com:8443/x").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(
+            hostname("https://example.com:/x").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(hostname("http://[::1]:80/").as_deref(), Some("::1"));
+        assert_eq!(hostname("http://[::1]/").as_deref(), Some("::1"));
+        assert_eq!(hostname("https://:443/models").as_deref(), Some(""));
+        assert_eq!(hostname("https:///models").as_deref(), Some(""));
+        assert_eq!(hostname("socks5://h:x:1080").as_deref(), Some("h:x"));
     }
 }

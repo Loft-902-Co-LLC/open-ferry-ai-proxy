@@ -1,5 +1,6 @@
 // Ported in part from CLIProxyAPI internal/config/config_v8_test.go
 // (TestV8ExampleLoadsAndRoundTrips, TestV8ValidationRejectsLegacyWriteLayout),
+// model_catalogs_test.go (TestModelCatalogConfigValidation),
 // client_test.go (TestClientCodexEnableApplyPatch) and
 // client_optimize_test.go (TestClientCodexOptimizeMultiAgentV2,
 // TestClientCodexOptimizeMultiAgentV2Migration) (v8.0.15, MIT).
@@ -514,4 +515,38 @@ fn client_settings_validate_at_their_v8_path() {
             "{raw}: {got:?}"
         );
     }
+}
+
+// Ports the ValidateV8Config half of TestModelCatalogConfigValidation
+// (model_catalogs_test.go): a relative path or another scheme is refused
+// with upstream's message, and no sources, an empty source or an https
+// source pass. A source of the wrong type is refused too.
+#[test]
+fn model_catalog_sources_validate() {
+    for field in ["catalog", "codex-catalog", "devin-catalog"] {
+        for source in [
+            "relative.json",
+            "./models.json",
+            "~/models.json",
+            "ftp://example.com/models",
+            "file:///tmp/models.json",
+            "https:///models",
+        ] {
+            let raw = format!("models:\n  {field}: {source:?}\n");
+            let error = validate_v8_config(raw.as_bytes()).unwrap_err();
+            assert_eq!(error.kind(), crate::config::ConfigErrorKind::Invalid);
+            assert_eq!(
+                error.to_string(),
+                format!("models.{field} must be an http(s) URL or an absolute local path")
+            );
+        }
+    }
+    for raw in [
+        "models: {}",
+        "models: {catalog: ''}",
+        "models: {codex-catalog: 'https://example.com/models.json'}",
+    ] {
+        assert_valid(raw);
+    }
+    assert!(validate_v8_config(b"models: {catalog: [a]}\n").is_err());
 }

@@ -51,8 +51,8 @@
 //!
 //! Deviations from upstream:
 //! - `GET /v0/management/config` writes only the sections open-ferry
-//!   types (see [`open_ferry_core::config`]). Left out: `models`,
-//!   `plugins`, `pprof`, `discovery`, `credential-concurrency`,
+//!   types (see [`open_ferry_core::config`]). Left out: `plugins`,
+//!   `pprof`, `discovery`, `credential-concurrency`,
 //!   `credential-in-flight`, the other
 //!   providers' sections (`antigravity`, `antigravity-signature-*`, `devin`),
 //!   `codex.live-media-relay`, and the client impersonation settings

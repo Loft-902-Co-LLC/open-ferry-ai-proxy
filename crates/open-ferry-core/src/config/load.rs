@@ -1,7 +1,6 @@
 // Ported from CLIProxyAPI internal/config/config_load.go (LoadConfig),
 // parse.go (ParseConfigBytes), config_v8.go (Config.UnmarshalYAML) and
-// weight.go (validateCredentialWeightYAML) (v8.0.15, MIT), without the
-// `models` check Config.UnmarshalYAML makes.
+// weight.go (validateCredentialWeightYAML) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Loading a config file or parsing a config payload.
@@ -13,6 +12,8 @@
 //! - The text isn't YAML or a value has the wrong type: prefixed with
 //!   `failed to parse config file: ` ([`Config::load`]) or
 //!   `parse config payload: ` ([`Config::parse`]).
+//! - A `models` source that is neither an http(s) URL nor an absolute
+//!   path: prefixed as above, since upstream checks it while decoding.
 //! - Duplicate keys, a root that isn't a mapping, a bad v8 layout, weights
 //!   and trusted proxies: upstream's message alone.
 //!
@@ -108,6 +109,10 @@ fn from_bytes(data: &[u8], prefix: &str) -> Result<Config, ConfigError> {
         };
         ConfigError::new(kind, format!("{prefix}{}", error.message()))
     })?;
+    config
+        .models
+        .validate()
+        .map_err(|error| ConfigError::new(ConfigErrorKind::Invalid, format!("{prefix}{error}")))?;
     config.oauth_only_fields = flattened.oauth_only_fields;
     post_process(&mut config)?;
     Ok(config)
@@ -2396,12 +2401,15 @@ mod tests {
         );
     }
 
-    // Not upstream's: model_catalogs_test.go's TestModelCatalogConfigValidation
-    // (v8.0.15) has upstream refuse the first six sources. The catalog
-    // sources aren't ported, so `models` is read and ignored, and they load.
+    // Ported from internal/config/model_catalogs_test.go
+    // (TestModelCatalogConfigValidation): a config naming a relative path or
+    // another scheme doesn't load or parse, and one with no sources, an
+    // empty source or an https source does. The ValidateV8Config half is in
+    // v8_edit/validate.rs.
     #[test]
-    fn model_catalog_sources_are_ignored() {
-        let base = parse("port: 8317\n");
+    fn model_catalog_sources_are_checked() {
+        let dir = TempDir::new();
+        let path = dir.path().join("config.yaml");
         for field in ["catalog", "codex-catalog", "devin-catalog"] {
             for source in [
                 "relative.json",
@@ -2410,13 +2418,34 @@ mod tests {
                 "ftp://example.com/models",
                 "file:///tmp/models.json",
                 "https:///models",
-                "https://example.com/models.json",
-                "",
             ] {
-                let config = parse(&format!("port: 8317\nmodels:\n  {field}: '{source}'\n"));
-                assert_eq!(config, base, "{field}: {source}");
+                let text = format!("models:\n  {field}: {source:?}\n");
+                let want =
+                    format!("models.{field} must be an http(s) URL or an absolute local path");
+                let error = Config::parse(&text).unwrap_err();
+                assert_eq!(error.kind(), Invalid);
+                assert_eq!(error.to_string(), format!("{PARSE}{want}"));
+                std::fs::write(&path, &text).unwrap();
+                let error = Config::load(&path).unwrap_err();
+                assert_eq!(error.kind(), Invalid);
+                assert_eq!(error.to_string(), format!("{LOAD}{want}"));
+                // The v8 layout is checked the same way.
+                let v8 = format!("config-version: 8\n{text}");
+                assert_eq!(Config::parse(&v8).unwrap_err().kind(), Invalid);
             }
         }
-        assert_eq!(parse("port: 8317\nmodels: {}\n"), base);
+        for raw in [
+            "models: {}",
+            "models: {catalog: ''}",
+            "models: {codex-catalog: 'https://example.com/models.json'}",
+        ] {
+            parse(raw);
+        }
+        let config = parse("models: {codex-catalog: 'https://example.com/models.json'}\n");
+        assert_eq!(
+            config.models.codex_catalog,
+            "https://example.com/models.json"
+        );
+        assert_eq!(config.models.catalog, "");
     }
 }

@@ -82,6 +82,7 @@ const LEGACY_V8: &str = concat!(
 
 /// A config with something in each section open-ferry types.
 const RICH: &str = r#"port: 8317
+models: {codex-catalog: "https://example.com/codex.json", catalog: ""}
 proxy-url: socks5://127.0.0.1:1080
 force-model-prefix: true
 request-log: true
@@ -683,7 +684,8 @@ async fn config_is_written_as_upstream_writes_it() {
     let answer = with_config(RICH).get("/v0/management/config").await;
     let want = format!(
         concat!(
-            r#"{{"client":{{"codex":{{"optimize-multi-agent-v2":true,"enable-apply-patch":false}}}},"#,
+            r#"{{"models":{{"codex-catalog":"https://example.com/codex.json"}},"#,
+            r#""client":{{"codex":{{"optimize-multi-agent-v2":true,"enable-apply-patch":false}}}},"#,
             r#""proxy-url":"socks5://127.0.0.1:1080","disable-image-generation":false,"#,
             r#""force-model-prefix":true,"request-log":true,"#,
             r#""api-keys":["k1","k2"],"passthrough-headers":true,"#,
@@ -725,7 +727,7 @@ async fn config_is_written_as_upstream_writes_it() {
     answer.assert(StatusCode::OK, &want);
 
     let empty = concat!(
-        r#"{"client":{"codex":{"optimize-multi-agent-v2":false,"enable-apply-patch":false}},"#,
+        r#"{"models":{},"client":{"codex":{"optimize-multi-agent-v2":false,"enable-apply-patch":false}},"#,
         r#""proxy-url":"","disable-image-generation":false,"force-model-prefix":false,"#,
         r#""request-log":false,"api-keys":null,"#,
         r#""passthrough-headers":false,"streaming":{},"trusted-proxies":null,"#,

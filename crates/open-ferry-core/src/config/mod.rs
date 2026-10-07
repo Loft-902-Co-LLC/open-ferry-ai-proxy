@@ -41,7 +41,8 @@
 //! `xai-api-key`, `meta-api-key`, `claude-api-key` (minus `cloak` and
 //! `fingerprint-profile`), `openai-compatibility`, `vertex-api-key`,
 //! `oauth-excluded-models`, `oauth-model-alias`,
-//! `oauth-request-scoped-errors`, `oauth-settings` and `payload`, with
+//! `oauth-request-scoped-errors`, `oauth-settings`, `payload` and `models`
+//! (the model catalog sources, checked as upstream checks them), with
 //! their v8 spellings (the key lists as `api-keys.gemini`,
 //! `api-keys.vertex` and so on).
 //!
@@ -54,8 +55,8 @@
 //! - Session affinity: `routing.session-affinity`,
 //!   `routing.session-affinity-ttl` and `routing.session-affinity-subagents`.
 //! - Other providers: `antigravity`, `antigravity-signature-*`, `devin`.
-//! - Features not ported here: `plugins`, `pprof`, `discovery`, `models`
-//!   (the model catalog sources) and `codex.live-media-relay`.
+//! - Features not ported here: `plugins`, `pprof`, `discovery` and
+//!   `codex.live-media-relay`.
 //! - Deferred: `credential-concurrency` and `credential-in-flight`.
 //!
 //! Upstream's `home` section has no YAML form and isn't read.
@@ -67,9 +68,6 @@
 //!   the file, on a management write.
 //! - The ignored sections above aren't typed, so a value of the wrong type
 //!   inside them isn't an error.
-//! - The `models` sources aren't checked: a `catalog`, `codex-catalog` or
-//!   `devin-catalog` that is neither an http(s) URL nor an absolute path
-//!   loads here, where upstream refuses the config.
 //! - Each submodule lists its own deviations.
 
 mod decode;
@@ -78,6 +76,7 @@ mod duration;
 mod image_generation;
 mod layout;
 mod load;
+mod model_catalogs;
 mod normalize;
 pub(crate) mod paths;
 mod payload;
@@ -97,6 +96,7 @@ use std::fmt;
 pub(crate) use duration::parse_go_duration;
 pub use image_generation::DisableImageGeneration;
 pub use layout::{AnyValue, V8Document, YamlTime};
+pub use model_catalogs::{CatalogSourceError, CatalogSources, is_url_source};
 pub use payload::{PayloadConfig, PayloadFilterRule, PayloadModelRule, PayloadRule};
 pub use safe_mode::example_api_key_warning_page;
 pub use types::{

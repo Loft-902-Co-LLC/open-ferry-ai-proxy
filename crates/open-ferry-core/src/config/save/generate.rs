@@ -14,7 +14,7 @@
 //! nil maps as `{}`. The writer marshals that and reads it back into a tree
 //! to merge into the file, as upstream does.
 //!
-//! The sections this port doesn't type (`models`, `claude-code`, the
+//! The sections this port doesn't type (`claude-code`, the
 //! credential tuning sections, `plugins`, `pprof`, `discovery`,
 //! `antigravity`, `devin`, the Codex live relay, the impersonation header
 //! defaults) are written with the values upstream holds when the file
@@ -103,13 +103,13 @@ fn seq<T>(items: &[T], f: impl Fn(&T) -> Value) -> Value {
 pub(crate) fn legacy_config(cfg: &Config) -> Result<Value, Unwritable> {
     let codex = &cfg.codex;
     let fields = Fields::default()
-        // registry.CatalogSources (untyped here).
+        // registry.CatalogSources.
         .put(
             "models",
             Fields::default()
-                .put("catalog", s(""))
-                .put("codex-catalog", s(""))
-                .put("devin-catalog", s(""))
+                .put("catalog", s(&cfg.models.catalog))
+                .put("codex-catalog", s(&cfg.models.codex_catalog))
+                .put("devin-catalog", s(&cfg.models.devin_catalog))
                 .done(),
         )
         // The inlined SDKConfig.
