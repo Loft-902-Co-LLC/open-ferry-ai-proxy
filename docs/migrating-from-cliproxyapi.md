@@ -44,7 +44,7 @@ The binary is `open-ferry` (`open-ferry.exe` on Windows), not `cli-proxy-api`, s
 | Flag | In open-ferry |
 |---|---|
 | `-config`, `-no-browser`, `-oauth-callback-port` | As before |
-| `-codex-login`, `-codex-device-login`, `-claude-login` | As before |
+| `-codex-login`, `-codex-device-login`, `-claude-login` | As before. `-claude-login` goes against Anthropic's terms and, in our testing, gets only the Haiku models ([why](claude-subscription.md#the-claude-sign-in)) |
 | `-local-model` | Accepted, but only logs a line: no catalog is downloaded, so the built-in catalogs are used unless `models` names a catalog file |
 | `-antigravity-login`, `-kimi-login`, `-kimi-ai-login`, `-devin-login` | Not available: those providers aren't supported (see [below](#providers-and-sign-ins)) |
 | `-xai-login`, `-meta-login` | Not available: use an API key (see [below](#providers-and-sign-ins)) |
