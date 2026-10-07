@@ -2,11 +2,14 @@
 // words, and what to do about each. Every such text on the Credentials
 // page comes from here: the credential states (upstream's `Status`), the
 // cooldown reasons (`CooldownView.reason`), the status messages the
-// manager leaves on a failed credential, and why a sign-in failed.
+// manager leaves on a failed credential, and why a sign-in failed. For a
+// cooldown on a Claude or Codex account's quota, the window its last
+// response says is used up names it (see quotaReadings.ts).
 
 import type { Cooldown, CooldownReason, Credential, SignInProvider } from "../../api/credentials";
 import type { BadgeTone } from "../../components/Badge";
 import { formatSeconds } from "../../lib/format";
+import { limitUsedUp, quotaReadings } from "./quotaReadings";
 
 /** A provider's name as people know it. */
 export function providerName(provider: string): string {
@@ -122,6 +125,20 @@ export function explainReason(reason: string): ReasonText {
 }
 
 /**
+ * What a cooldown of `credential`'s means: its reason's words, with the
+ * title naming the window used up when the cooldown is for quota and the
+ * provider's last response says which window that is.
+ */
+export function explainCooldown(cooldown: Cooldown, credential: Credential): ReasonText {
+  const reason = explainReason(cooldown.reason);
+  if (cooldown.reason !== "credential_quota" && cooldown.reason !== "quota") {
+    return reason;
+  }
+  const limiting = quotaReadings(credential)?.limiting ?? null;
+  return limiting === null ? reason : { ...reason, title: limitUsedUp(limiting) };
+}
+
+/**
  * The reason a failed credential's status message names, as the server
  * writes it (upstream's `cooldownStatusReason`), or null when it is some
  * other text.
@@ -195,7 +212,7 @@ export function credentialHealth(credential: Credential): Health {
   }
   const resting = credentialCooldowns(credential)[0];
   if (resting !== undefined) {
-    const reason = explainReason(resting.reason);
+    const reason = explainCooldown(resting, credential);
     return { tone: "warn", label: "Resting", summary: reason.title, action: reason.action };
   }
   const message = credential.status_message?.trim() ?? "";

@@ -180,6 +180,52 @@ describe("the credential list", () => {
     expect(api.unhandled).toEqual([]);
   });
 
+  it("shows a Claude or Codex credential's quota windows, and which one stops it", async () => {
+    server([
+      credential({
+        quota: {
+          observed_at: "2026-10-05T11:58:00.000Z",
+          signals: {
+            "Anthropic-Ratelimit-Unified-5h-Utilization": "0.25",
+            "Anthropic-Ratelimit-Unified-7d-Utilization": "<b>0.5</b>",
+            "Anthropic-Ratelimit-Unified-7d-Status": "allowed",
+          },
+        },
+      }),
+      credential({
+        name: "codex-bob.json",
+        id: "codex-bob.json",
+        provider: "codex",
+        cooldowns: [cooldown("credential_quota", 300)],
+        quota: {
+          observed_at: "2026-10-05T11:58:00.000Z",
+          signals: {
+            "X-Codex-Primary-Used-Percent": "40",
+            "X-Codex-Primary-Window-Minutes": "300",
+            "X-Codex-Secondary-Used-Percent": "100",
+            "X-Codex-Secondary-Window-Minutes": "10080",
+          },
+        },
+      }),
+      credential({ name: "codex-new.json", id: "codex-new.json", provider: "codex", quota: { signals: {} } }),
+    ]);
+    renderApp("/credentials");
+    const ada = await screen.findByRole("article", { name: NAME });
+    expect(within(ada).getByRole("heading", { name: "Quota" })).toBeVisible();
+    expect(ada).toHaveTextContent("5-hour25% used.");
+    expect(ada).toHaveTextContent("WeeklyNo reading.");
+    expect(ada).not.toHaveTextContent("0.5");
+    expect(ada.querySelector("b")).toBeNull();
+
+    const bob = screen.getByRole("article", { name: "codex-bob.json" });
+    expect(bob).toHaveTextContent("The weekly limit is used up");
+    expect(bob).toHaveTextContent("5-hour40% used.");
+    expect(bob).toHaveTextContent("WeeklyUsed up. This is the limit that stops it.");
+
+    const fresh = screen.getByRole("article", { name: "codex-new.json" });
+    expect(within(fresh).queryByRole("heading", { name: "Quota" })).toBeNull();
+  });
+
   it("explains a failing credential in plain words", async () => {
     server([credential({ status: "error", status_message: "invalid_grant" })]);
     renderApp("/credentials");

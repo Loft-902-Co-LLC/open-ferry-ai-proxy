@@ -6,6 +6,7 @@ import {
   canReset,
   credentialCooldowns,
   credentialHealth,
+  explainCooldown,
   explainReason,
   explainSignInError,
   explainStartError,
@@ -126,6 +127,39 @@ describe("a credential's health", () => {
       ).summary,
     ).toBe("In use, with some models resting: see below.");
     expect(credentialHealth(credential({ status: "unknown" })).label).toBe("Unknown");
+  });
+
+  it("names the window used up when it rests for quota and the provider said which", () => {
+    const weekly = {
+      observed_at: "2026-10-05T11:58:00.000Z",
+      signals: {
+        "Anthropic-Ratelimit-Unified-5h-Utilization": "0.2",
+        "Anthropic-Ratelimit-Unified-7d-Status": "rejected",
+        "Anthropic-Ratelimit-Unified-Representative-Claim": "seven_day",
+      },
+    };
+    const resting = credential({ cooldowns: [cooldown("credential_quota", 3600)], quota: weekly });
+    expect(credentialHealth(resting)).toMatchObject({
+      label: "Resting",
+      summary: "The weekly limit is used up",
+      action: explainReason("credential_quota").action,
+    });
+    expect(explainCooldown(cooldown("quota", 60), resting)).toEqual({
+      ...explainReason("quota"),
+      title: "The weekly limit is used up",
+    });
+    // Another reason, no window used up, or no reading: the reason's own words.
+    expect(explainCooldown(cooldown("unauthorized", 60), resting)).toEqual(
+      explainReason("unauthorized"),
+    );
+    const allowed = { ...weekly, signals: { "Anthropic-Ratelimit-Unified-7d-Status": "allowed" } };
+    expect(
+      credentialHealth(credential({ cooldowns: [cooldown("credential_quota", 60)], quota: allowed }))
+        .summary,
+    ).toBe("The account's quota is used up");
+    expect(credentialHealth(credential({ cooldowns: [cooldown("credential_quota", 60)] })).summary).toBe(
+      "The account's quota is used up",
+    );
   });
 
   it("splits the cooldowns by scope, and knows when a reset would help", () => {

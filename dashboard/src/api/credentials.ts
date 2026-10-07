@@ -93,6 +93,21 @@ export interface Credential {
   priority?: number;
   note?: string;
   cooldowns?: Cooldown[] | null;
+  /**
+   * The quota headers of the last Claude or Codex response that had any;
+   * without `observed_at` for none, or for another provider.
+   */
+  quota?: QuotaObservation;
+  /** The same, by model. */
+  model_quotas?: Record<string, QuotaObservation>;
+}
+
+/** What a provider's response said of the account's quota. */
+export interface QuotaObservation {
+  /** When the response came. */
+  observed_at?: string;
+  /** Its quota headers, by name, as the provider sent them. */
+  signals?: Record<string, string>;
 }
 
 /** `GET auth-files`. */

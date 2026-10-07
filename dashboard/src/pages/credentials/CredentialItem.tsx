@@ -20,7 +20,12 @@ import { ConfirmDialog } from "../../components/Dialog";
 import { ProblemNotice } from "../../components/ProblemNotice";
 import { SecretText } from "../../components/SecretText";
 import { Spinner } from "../../components/Spinner";
-import { formatInteger, formatSeconds, formatShortDateTime } from "../../lib/format";
+import {
+  formatInteger,
+  formatPercent,
+  formatSeconds,
+  formatShortDateTime,
+} from "../../lib/format";
 import { QuotaButton } from "./QuotaDialog";
 import {
   canReset,
@@ -31,6 +36,7 @@ import {
   providerName,
   timeLeft,
 } from "./credentialStates";
+import { quotaReadings, type QuotaReadings, type QuotaWindow } from "./quotaReadings";
 
 /** "Back in about 4 min, at Oct 5, 12:04." */
 function backIn(cooldown: Cooldown): string {
@@ -71,6 +77,42 @@ function ModelCooldowns({ cooldowns }: { cooldowns: Cooldown[] }) {
           </div>
         );
       })}
+    </div>
+  );
+}
+
+/** "53% used, starts over Oct 9, 08:00." */
+function windowUse(window: QuotaWindow): string {
+  const use = window.usedUp
+    ? "Used up"
+    : window.used === null
+      ? ""
+      : `${formatPercent(window.used)} used`;
+  const reset =
+    window.resetsAt === null ? "" : `starts over ${formatShortDateTime(window.resetsAt.toISOString())}`;
+  const text = [use, reset].filter((part) => part !== "").join(", ");
+  return text === "" ? "No reading." : `${text.charAt(0).toUpperCase()}${text.slice(1)}.`;
+}
+
+/** Each quota window, as the provider's last response gave it. */
+function QuotaWindows({ readings }: { readings: QuotaReadings }) {
+  return (
+    <div className="space-y-1">
+      <h4 className="font-medium">Quota</h4>
+      <dl className="grid gap-x-6 gap-y-0.5 sm:grid-cols-[max-content_1fr]">
+        {readings.windows.map((window, index) => (
+          <div key={`${window.name}-${String(index)}`} className="contents">
+            <dt className="text-muted">{window.name}</dt>
+            <dd className="tabular-nums">
+              {windowUse(window)}
+              {window === readings.limiting && " This is the limit that stops it."}
+            </dd>
+          </div>
+        ))}
+      </dl>
+      <p className="text-muted">
+        As the provider said at {formatShortDateTime(readings.observedAt.toISOString())}.
+      </p>
     </div>
   );
 }
@@ -149,6 +191,7 @@ export function CredentialItem({ credential, onDeleted }: CredentialItemProps) {
   const health = credentialHealth(credential);
   const resting = credentialCooldowns(credential);
   const models = modelCooldowns(credential);
+  const readings = quotaReadings(credential);
   const off = credential.disabled || credential.status === "disabled";
 
   const refresh = () => client.invalidateQueries({ queryKey: [AUTH_FILES] });
@@ -248,6 +291,7 @@ export function CredentialItem({ credential, onDeleted }: CredentialItemProps) {
       </div>
 
       <Account credential={credential} />
+      {readings !== null && <QuotaWindows readings={readings} />}
       {models.length > 0 && <ModelCooldowns cooldowns={models} />}
       <Requests credential={credential} />
 
