@@ -17,9 +17,11 @@
 //! Serving the proxy.
 //!
 //! At start the credentials in the auth directory, the config's API keys
-//! (Gemini, Claude, Codex and Vertex AI) and its OpenAI-compatible
-//! providers' keys are registered with the credential manager, and each
-//! one's models with the model registry. Each
+//! (Gemini, Claude, Codex and Vertex AI), its OpenAI-compatible
+//! providers' keys and its `claude-cli` entries are registered with the
+//! credential manager, and each one's models with the model registry. The
+//! version of each `claude-cli` entry's Claude Code is checked in the
+//! background, at start and when a reload changes the entries. Each
 //! OpenAI-compatible provider gets an executor of its own, keyed by its
 //! provider key (`openai-compatible-<name>`), beside the baseline
 //! `openai-compatibility` one. Token refresh runs in the background every
@@ -156,6 +158,7 @@ use open_ferry_management::{
     SyncFuture, management_password_from_env,
 };
 use open_ferry_providers::claude::ClaudeExecutor;
+use open_ferry_providers::claude_cli::{self, ClaudeCliExecutor};
 use open_ferry_providers::codex::CodexExecutor;
 use open_ferry_providers::gemini::{GeminiExecutor, InteractionsExecutor, VertexExecutor};
 use open_ferry_providers::meta::MetaExecutor;
@@ -237,6 +240,7 @@ pub async fn run(
         .clone()
         .with_local_password(&options.local_password);
     service.register_executors();
+    claude_cli::warn_outdated(&config.claude_cli);
     service.start_catalogs();
     service.load_file_auths();
     service.sync_config_auths();
@@ -709,15 +713,15 @@ impl Service {
     }
 
     /// Registers the executors for the current config: Codex, Meta, Claude,
-    /// Gemini, Vertex AI, and the OpenAI-compatible ones (see
+    /// claude-cli, Gemini, Vertex AI, and the OpenAI-compatible ones (see
     /// [`Self::register_compat_executors`]).
     fn register_executors(&mut self) {
         self.register_native_executors();
         self.register_compat_executors();
     }
 
-    /// Registers the Codex, Meta, Claude, Gemini, Gemini Interactions, Vertex
-    /// AI and xAI executors for the current config.
+    /// Registers the Codex, Meta, Claude, claude-cli, Gemini, Gemini
+    /// Interactions, Vertex AI and xAI executors for the current config.
     fn register_native_executors(&self) {
         let proxy_url = self.config.proxy_url.clone();
         self.register_codex_executor();
@@ -727,6 +731,10 @@ impl Service {
                 .with_config(Arc::clone(&self.config))
                 .with_models(Arc::clone(&self.registry) as _)
                 .with_model_level_cooling(self.config.claude.model_level_cooling),
+        ));
+        // It sends nothing itself, so takes no proxy.
+        self.manager.register_executor(Arc::new(
+            ClaudeCliExecutor::new().with_config(Arc::clone(&self.config)),
         ));
         self.manager.register_executor(Arc::new(
             GeminiExecutor::new(proxy_url.clone())
@@ -1196,6 +1204,9 @@ impl Service {
         self.management.set_config(Arc::clone(&config));
         // Before any credential is registered, so they get its models.
         self.catalogs.update(&config.models);
+        if previous.claude_cli != config.claude_cli {
+            claude_cli::warn_outdated(&config.claude_cli);
+        }
         // What the executors do to Codex clients' requests before
         // translating them.
         let codex_clients_changed = previous.client.codex.optimize_multi_agent_v2
@@ -2396,8 +2407,9 @@ mod tests {
     /// Ports `TestRegisterAvailableExecutors` of CLIProxyAPI
     /// sdk/cliproxy/service_executor_registration_test.go (v8.0.15, MIT)
     /// for the executors ported: Codex, Meta, Claude, Gemini, Gemini
-    /// Interactions, Vertex AI, xAI and the baseline OpenAI-compatible one.
-    /// The plugin executor and the other providers' aren't ported.
+    /// Interactions, Vertex AI, xAI and the baseline OpenAI-compatible one,
+    /// with open-ferry's claude-cli. The plugin executor and the other
+    /// providers' aren't ported.
     #[tokio::test]
     async fn registers_the_available_executors() {
         let dir = tempfile::tempdir().unwrap();
@@ -2406,6 +2418,7 @@ mod tests {
             "codex",
             "meta",
             "claude",
+            "claude-cli",
             "gemini",
             "gemini-interactions",
             "vertex",
