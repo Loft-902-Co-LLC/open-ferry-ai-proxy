@@ -30,11 +30,12 @@
 # the device login (docker compose exec open-ferry open-ferry
 # -codex-device-login), or copy existing auth files into ./auths.
 #
-# Saving the config from the dashboard or the management API fails here
-# with "Resource busy": open-ferry saves by renaming a new file over the old
-# one, which a file mounted on its own can't take. To save from the
-# dashboard, mount a directory holding config.yaml instead and name the
-# file in the command:
+# A file mounted on its own can't be replaced in one step, so saving the
+# config from the dashboard or the management API writes over ./config.yaml
+# in place, as CLIProxyAPI does, and leaves the backup, config.yaml.bak,
+# inside the container. To have each save replace the file in one step and
+# keep the backup beside it, mount a directory holding config.yaml instead
+# and name the file in the command:
 #
 #     command: ["open-ferry", "-config", "/CLIProxyAPI/config/config.yaml"]
 #     volumes:

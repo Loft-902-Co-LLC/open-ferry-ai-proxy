@@ -7,10 +7,13 @@
 //! it to disk and renames it over the file. On Unix the new file and the
 //! backup get the file's permissions. A symbolic link at the path is
 //! refused, before anything is read and again before anything is written.
+//! A file that can't be renamed over, such as a file bind-mounted on its
+//! own into a container, is written in place instead, as upstream does.
 //!
 //! Deviations from upstream:
 //! - Upstream writes the file in place with no check and no backup, and
-//!   follows a symbolic link.
+//!   follows a symbolic link. The writer writes in place only when the
+//!   rename is refused.
 //! - A new file is created readable by its owner only (0600 on Unix),
 //!   where upstream's management `WriteConfig` creates it 0644.
 //! - I/O errors are worded `open <path>: <error>` with the platform's
@@ -120,10 +123,41 @@ fn replace(
     file.write_all(data)
         .and_then(|()| file.as_file().sync_all())
         .map_err(|error| io_error("write", target, error))?;
-    file.persist(target)
-        .map_err(|error| io_error("rename", target, error.error))?;
-    sync_dir(dir);
-    Ok(())
+    match file.persist(target) {
+        Ok(_) => {
+            sync_dir(dir);
+            Ok(())
+        }
+        // The temporary file is deleted as the error drops.
+        Err(error) if rename_refused(&error.error) => write_in_place(target, data),
+        Err(error) => Err(io_error("rename", target, error.error)),
+    }
+}
+
+/// Whether a rename over a file failed because the file can't be renamed
+/// over, though it can be written: Linux refuses with EBUSY, or EXDEV,
+/// when the file is a mount point of its own, as a container's config.yaml
+/// is when it's bind-mounted by itself.
+fn rename_refused(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::ResourceBusy | io::ErrorKind::CrossesDevices
+    )
+}
+
+/// Writes `data` over the file at `target`, as upstream's `os.WriteFile`
+/// does: the file keeps its identity and permissions, but a failure part of
+/// the way through can leave it partly written. The caller has kept a
+/// backup.
+fn write_in_place(target: &Path, data: &[u8]) -> Result<(), SaveError> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(target)
+        .map_err(|error| io_error("open", target, error))?;
+    file.write_all(data)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| io_error("write", target, error))
 }
 
 #[cfg(unix)]
@@ -242,5 +276,55 @@ mod tests {
         let dir = TempDir::new();
         let error = commit(dir.path(), b"port: 2\n").expect_err("refused");
         assert_eq!(error.kind(), SaveErrorKind::Io);
+    }
+
+    // Not upstream's: only a rename the file refuses falls back to a write
+    // in place; other failures are reported.
+    #[test]
+    fn only_a_refused_rename_writes_in_place() {
+        for kind in [io::ErrorKind::ResourceBusy, io::ErrorKind::CrossesDevices] {
+            assert!(rename_refused(&io::Error::from(kind)), "{kind:?}");
+        }
+        for kind in [
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::NotFound,
+            io::ErrorKind::ReadOnlyFilesystem,
+            io::ErrorKind::Other,
+        ] {
+            assert!(!rename_refused(&io::Error::from(kind)), "{kind:?}");
+        }
+    }
+
+    // Upstream's os.WriteFile: the write replaces the contents, shorter
+    // ones included, and leaves no other file.
+    #[test]
+    fn write_in_place_replaces_the_contents() {
+        let dir = TempDir::new();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, "port: 1\nhost: example\n").expect("seed");
+        write_in_place(&path, b"port: 2\n").expect("write");
+        assert_eq!(fs::read_to_string(&path).expect("read"), "port: 2\n");
+        assert_eq!(fs::read_dir(dir.path()).expect("list").count(), 1);
+    }
+
+    // Not upstream's: a write in place keeps the file, and so its mode, as a
+    // bind mount needs; it creates no file.
+    #[cfg(unix)]
+    #[test]
+    fn write_in_place_keeps_the_file() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = TempDir::new();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, "port: 1\n").expect("seed");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).expect("chmod");
+        let before = fs::metadata(&path).expect("stat");
+        write_in_place(&path, b"port: 2\n").expect("write");
+        let after = fs::metadata(&path).expect("stat");
+        assert_eq!((after.dev(), after.ino()), (before.dev(), before.ino()));
+        assert_eq!(after.permissions().mode() & 0o777, 0o640);
+        let missing = dir.path().join("missing.yaml");
+        let error = write_in_place(&missing, b"port: 2\n").expect_err("no file");
+        assert_eq!(error.kind(), SaveErrorKind::Io);
+        assert!(!missing.exists());
     }
 }

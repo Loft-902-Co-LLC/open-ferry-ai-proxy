@@ -18,7 +18,7 @@ open-ferry's image, `ghcr.io/loft-902-co-llc/open-ferry`, keeps the paths of CLI
 2. **Remove the `build:` section.** It builds CLIProxyAPI from a checkout; open-ferry's image is built from its release archives.
 3. **Remove the sign-in callback ports** (8085, 1455, 54545, 51121 and 11451). open-ferry's callback servers listen on the container's own loopback, which a published port doesn't reach. The README says [how to sign in](../README.md#run-it-in-a-container) instead.
 4. **Remove the plugins volume and `DEPLOY`.** Neither plugins nor the cloud deploy mode are ported.
-5. **If you save the config from the dashboard or the management API, mount its directory** rather than the file. CLIProxyAPI writes over the file in place; open-ferry writes a new file and renames it over the old one, which a file mounted on its own can't take, so the save fails with "Resource busy". Mount a directory that holds `config.yaml`, and name the file in the command:
+5. **Consider mounting the config's directory** rather than the file, if you save the config from the dashboard or the management API. With the file mounted on its own, open-ferry writes a save over it in place, as CLIProxyAPI does, and leaves the backup, `config.yaml.bak`, inside the container. With its directory mounted, each save replaces the file in one step and the backup is kept beside it. Mount a directory that holds `config.yaml`, and name the file in the command:
 
    ```yaml
    command: ["open-ferry", "-config", "/CLIProxyAPI/config/config.yaml"]
