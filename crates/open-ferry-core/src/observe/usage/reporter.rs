@@ -20,9 +20,8 @@
 // gate), sdk/cliproxy/auth/token_fingerprint.go (AccessTokenSHA256,
 // accessTokenForFingerprint), sdk/cliproxy/auth/conductor_execution.go
 // (requestedModelAliasFromOptions, generateFromOptions),
-// sdk/cliproxy/usage/manager.go (ServiceTierFromContext,
-// GenerateFromContext, GenerateEnabled) and
-// sdk/cliproxy/session/identity.go (NormalizeExplicitID) (v8.0.15, MIT).
+// and sdk/cliproxy/usage/manager.go (ServiceTierFromContext,
+// GenerateFromContext, GenerateEnabled) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The usage reporter: the [`Tap`] that turns each executor call of a
@@ -195,6 +194,7 @@ use crate::observe::redact::{Policy, Secrets};
 use crate::observe::{
     AttemptKind, AttemptRequest, Outcome, RequestContext, SelectedAuth, Tap, mask,
 };
+use crate::session::normalize_explicit_id;
 
 /// The most of an answer read whole that is kept to read its tokens; past
 /// it, the answer is recorded without them.
@@ -211,9 +211,6 @@ const SESSION_HEADERS: [&str; 4] = [
     "session_id",
     "x-session-id",
 ];
-
-/// The longest session header taken (upstream's `NormalizeExplicitID`).
-const MAX_SESSION_ID_LENGTH: usize = 256;
 
 /// The image generation tool's model when the request's tool names none
 /// (upstream's `codexDefaultImageToolModel`).
@@ -282,19 +279,6 @@ fn session_id(headers: &HeaderMap) -> String {
         .map(|value| normalize_explicit_id(&String::from_utf8_lossy(value.as_bytes())))
         .find(|id| !id.is_empty())
         .unwrap_or_default()
-}
-
-/// `raw` trimmed, or empty when it holds a control character or is longer
-/// than [`MAX_SESSION_ID_LENGTH`] bytes (upstream's `NormalizeExplicitID`).
-pub(crate) fn normalize_explicit_id(raw: &str) -> String {
-    if raw.chars().any(char::is_control) {
-        return String::new();
-    }
-    let trimmed = raw.trim();
-    if trimmed.len() > MAX_SESSION_ID_LENGTH {
-        return String::new();
-    }
-    trimmed.to_owned()
 }
 
 /// Whether `haystack` holds `needle`.

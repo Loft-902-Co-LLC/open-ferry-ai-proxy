@@ -53,7 +53,7 @@
 
 mod accounting;
 mod error_events;
-mod json;
+pub(crate) mod json;
 mod observer;
 mod parse;
 mod queue;

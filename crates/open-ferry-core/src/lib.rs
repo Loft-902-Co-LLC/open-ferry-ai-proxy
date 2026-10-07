@@ -22,3 +22,4 @@ pub mod models;
 pub mod multipart;
 pub mod observe;
 pub mod registry;
+pub mod session;
