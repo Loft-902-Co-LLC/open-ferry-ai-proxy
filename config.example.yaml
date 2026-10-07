@@ -6,7 +6,7 @@
 # Optional upstream credentials and request rules remain commented until configured.
 #
 # Only the settings open-ferry reads are listed here. CLIProxyAPI's others, such as the
-# model catalog sources, LAN discovery, session affinity, client cloaking, the Antigravity,
+# LAN discovery settings, session affinity, client cloaking, the Antigravity,
 # Devin, AI Studio and Kimi providers, pprof, plugins and Home mode, are left out; see
 # UPSTREAM.md for what isn't ported. A CLIProxyAPI config that has them still loads, and
 # open-ferry ignores them.
@@ -19,6 +19,17 @@
 # migrate a legacy file; a successful configuration write through /v8/management does.
 # The compatibility notes at the end show old spellings for existing deployments.
 config-version: 8
+
+# Model catalogs, each empty for the one built into open-ferry, or an absolute path to a
+# local file: catalog in the format of CLIProxyAPI's models.json, codex-catalog in that of
+# its codex_client_models.json. A file is read at start, when a reload names another, and
+# when it changes; one that can't be read or isn't valid is logged, and the last valid
+# catalog stays. No catalog is downloaded: a URL isn't fetched, and --local-model changes
+# nothing.
+# Example: catalog: "/etc/open-ferry/models.json" (on Windows, 'C:\open-ferry\models.json').
+models:
+  catalog: ""
+  codex-catalog: ""
 
 # Listener, TLS, and server operation.
 server:

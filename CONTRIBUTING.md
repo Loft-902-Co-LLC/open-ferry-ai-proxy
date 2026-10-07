@@ -69,6 +69,28 @@ OPEN_FERRY_BIN=../target/debug/open-ferry npm run e2e:real
 
 On Windows, the binary is `../target/debug/open-ferry.exe`.
 
+## Updating the model catalog
+
+open-ferry downloads no model catalog. The catalogs it builds in are files in this repository, changed by hand. (An operator can also name catalog files of their own in the config's `models` section; see [config.example.yaml](config.example.yaml).)
+
+- **Where they live:**
+  - the general catalog, read by the model registry and the translators: `crates/open-ferry-translate/models/models.json`;
+  - the Codex client catalog, the list a Codex client gets from `GET /v1/models?client_version=...`: `crates/open-ferry-core/models/codex_client_models.json`.
+
+  Both start as upstream's files at the pinned version, `internal/registry/models/models.json` and `internal/registry/models/codex_client_models.json`, copied unchanged.
+- **A model in `models.json`.** Each provider has a section, an array of models: `claude`, `gemini`, `vertex`, `aistudio`, `codex-free`, `codex-team`, `codex-plus`, `codex-pro`, `kimi`, `antigravity`, `xai`, `devin` and `meta`. Other sections are ignored. A model's fields are those of upstream's `ModelInfo`: `id`, `display_name`, `context_length`, `max_completion_tokens`, `thinking` (with `min`, `max`, `zero_allowed`, `dynamic_allowed` and `levels`) and so on; `decode_model` in `crates/open-ferry-core/src/registry/definitions.rs` reads them. The file is checked as upstream checks it. In every section but `devin`, no model may be `null` or have an empty `id`, and no `id` may appear twice in a section. A field of the wrong type fails too.
+- **A model in `codex_client_models.json`.** The file is `{"models": [...]}`. Each model needs:
+  - a `slug` no other model has;
+  - `display_name`, `description`, `base_instructions`, `minimal_client_version`, `visibility` and `default_reasoning_level`, strings that aren't empty;
+  - `context_window` and `max_context_window`, positive integers, the first no larger than the second;
+  - `priority`, an integer of 0 or more;
+  - `supported_reasoning_levels`, a list that isn't empty, of objects each with an `effort` of its own, one of them the `default_reasoning_level`.
+
+  The `gpt-5.5` entry must stay: it is the template for the models the catalog doesn't list.
+- **Tests.** Run the checks above. `cargo test -p open-ferry-core registry` and `cargo test -p open-ferry-translate models` cover the catalogs: `the_embedded_catalog_loads` and `the_translators_catalog_matches_the_built_in_one` read the general catalog, and `embedded_catalog_is_valid` the Codex one, whose models it counts. Update the tests that count or name a model you add, change or remove.
+- **Parity.** Run `tools/parity` (see [UPSTREAM.md](UPSTREAM.md#checking-parity)). Its Go side reads the catalogs built into the upstream checkout, so suites that read a model's entry can differ on a model you changed: the thinking and translator suites, the Codex client list (`codex_models`) and multi-agent v2. Every `different` case must be one your change explains; list them in the pull request.
+- **UPSTREAM.md.** Once a built-in catalog differs from upstream's file, UPSTREAM.md must say how: which models were added, changed or removed, and why. It now calls both copies unchanged.
+
 ## Pull requests
 
 - **Keep each PR focused.** Explain what changed and why, and link the issue.
