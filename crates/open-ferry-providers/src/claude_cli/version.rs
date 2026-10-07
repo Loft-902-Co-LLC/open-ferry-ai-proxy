@@ -69,14 +69,9 @@ pub async fn check_version(entry: &Entry) -> VersionCheck {
     }
 }
 
-/// Checks the Claude Code of each enabled entry in `entries` once, in the
-/// background, and logs its version, or a warning when it is missing, too
-/// old or unreadable. Entries that run the same command are checked once.
-/// Does nothing outside a Tokio runtime.
-pub fn warn_outdated(entries: &[ClaudeCli]) {
-    let Ok(handle) = tokio::runtime::Handle::try_current() else {
-        return;
-    };
+/// The enabled entries of `entries`, one for each command they run, with
+/// the names of the entries that run it, in command order.
+pub fn by_command(entries: &[ClaudeCli]) -> Vec<(Entry, Vec<String>)> {
     let mut commands: BTreeMap<String, (Entry, Vec<String>)> = BTreeMap::new();
     for entry in entries.iter().filter(|entry| !entry.disabled) {
         let entry = Entry::from_config(entry);
@@ -86,7 +81,30 @@ pub fn warn_outdated(entries: &[ClaudeCli]) {
             .1;
         names.push(entry.name);
     }
-    for (entry, names) in commands.into_values() {
+    commands.into_values().collect()
+}
+
+/// Checks the Claude Code of each enabled entry in `entries` with
+/// [`check_version`], once for each command (see [`by_command`]), and
+/// returns the names of the entries that run it with what it found.
+pub async fn check_versions(entries: &[ClaudeCli]) -> Vec<(Vec<String>, VersionCheck)> {
+    let mut out = Vec::new();
+    for (entry, names) in by_command(entries) {
+        let check = check_version(&entry).await;
+        out.push((names, check));
+    }
+    out
+}
+
+/// Checks the Claude Code of each enabled entry in `entries` once, in the
+/// background, and logs its version, or a warning when it is missing, too
+/// old or unreadable. Entries that run the same command are checked once.
+/// Does nothing outside a Tokio runtime.
+pub fn warn_outdated(entries: &[ClaudeCli]) {
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    for (entry, names) in by_command(entries) {
         handle.spawn(async move {
             let check = check_version(&entry).await;
             log_check(&names.join(", "), &check);
@@ -144,6 +162,39 @@ mod tests {
         assert!((2, 1, 291) >= MIN_VERSION);
         assert!((2, 1, 258) < MIN_VERSION);
         assert!((3, 0, 0) >= MIN_VERSION);
+    }
+
+    // Not upstream's: enabled entries grouped by the command they run.
+    #[test]
+    fn groups_enabled_entries_by_command() {
+        let entry = |name: &str, command: &str, disabled| ClaudeCli {
+            name: name.into(),
+            command: command.into(),
+            disabled,
+            ..ClaudeCli::default()
+        };
+        let groups = by_command(&[
+            entry("b", "/opt/claude", false),
+            entry("a", " /usr/bin/claude ", false),
+            entry("c", "/opt/claude", false),
+            entry("off", "/srv/claude", true),
+        ]);
+        let groups: Vec<(&str, Vec<&str>)> = groups
+            .iter()
+            .map(|(entry, names)| {
+                (
+                    entry.command.as_str(),
+                    names.iter().map(String::as_str).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            groups,
+            [
+                ("/opt/claude", vec!["b", "c"]),
+                ("/usr/bin/claude", vec!["a"])
+            ]
+        );
     }
 
     #[tokio::test]

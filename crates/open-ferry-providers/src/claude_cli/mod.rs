@@ -57,4 +57,6 @@ mod version;
 pub use executor::ClaudeCliExecutor;
 pub use settings::{Entry, default_work_root};
 pub use status::{AuthStatus, StatusError, auth_status};
-pub use version::{MIN_VERSION, VersionCheck, check_version, warn_outdated};
+pub use version::{
+    MIN_VERSION, VersionCheck, by_command, check_version, check_versions, warn_outdated,
+};

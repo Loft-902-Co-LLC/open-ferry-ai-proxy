@@ -94,6 +94,7 @@ mod tests;
 pub use classify::has_unauthorized_auth_failure;
 pub use cooldown::CallResult;
 pub use cooldown_view::{CooldownView, cooldown_snapshot_for_auth};
+pub use credential::last_refresh_timestamp;
 pub use error_events::ErrorEvents;
 pub use lifecycle::QuotaReset;
 pub use quota_signals::provider_supports_quota_observation;

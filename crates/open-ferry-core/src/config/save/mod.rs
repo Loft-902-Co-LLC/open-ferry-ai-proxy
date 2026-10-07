@@ -20,6 +20,8 @@
 //! - [`write_file`] writes a whole file, as the management API's
 //!   `WriteConfig` does: a file in the v8 layout is completed into it
 //!   first, and comment lines are moved to the start of their line.
+//! - [`write_as_is`] writes a whole file unchanged; it is this port's, for
+//!   `open-ferry init`.
 //!
 //! YAML is read and written with a port of gopkg.in/yaml.v3 (the
 //! crate-private `config::yaml3`), so the bytes written are upstream's.
@@ -200,6 +202,13 @@ pub fn write_file(path: &Path, bytes: &[u8]) -> Result<(), SaveError> {
     write::refuse_link(path)?;
     let out = render_write_file(bytes)?;
     write::commit(path, &out)
+}
+
+/// Writes `bytes` as the config file at `path` unchanged, with the checks,
+/// backup and atomic replacement every write here has. Not upstream's:
+/// `open-ferry init` writes the config it makes with it.
+pub fn write_as_is(path: &Path, bytes: &[u8]) -> Result<(), SaveError> {
+    write::commit(path, bytes)
 }
 
 /// The bytes [`write_file`] writes for `data`.

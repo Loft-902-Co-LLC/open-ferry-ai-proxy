@@ -276,7 +276,7 @@ const LAST_REFRESH_KEYS: [&str; 4] = [
 
 /// When the credential last refreshed, by its metadata or attributes
 /// (upstream's `authLastRefreshTimestamp`).
-pub(crate) fn last_refresh_timestamp(auth: &Auth) -> Option<Timestamp> {
+pub fn last_refresh_timestamp(auth: &Auth) -> Option<Timestamp> {
     for key in LAST_REFRESH_KEYS {
         if let Some(ts) = auth.metadata.get(key).and_then(parse_time_value) {
             return Some(ts);

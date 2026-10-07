@@ -55,6 +55,12 @@ pub const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'
      style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; \
      object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 
+/// Whether the app was built into this binary; without it `/dashboard/`
+/// serves a page that says so.
+pub fn app_built() -> bool {
+    Assets::embedded().built()
+}
+
 /// The headers every dashboard answer carries.
 const SECURITY_HEADERS: [(&str, &str); 4] = [
     ("content-security-policy", CONTENT_SECURITY_POLICY),

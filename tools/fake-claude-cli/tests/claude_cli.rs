@@ -13,7 +13,7 @@ use open_ferry_core::config::ClaudeCli;
 use open_ferry_core::exec::Format;
 use open_ferry_core::executor::ProviderExecutor as _;
 use open_ferry_providers::claude_cli::{
-    AuthStatus, Entry, VersionCheck, auth_status, check_version,
+    AuthStatus, Entry, VersionCheck, auth_status, check_version, check_versions,
 };
 use serde_json::{Value, json};
 
@@ -791,6 +791,45 @@ async fn checks_the_version_of_claude_code() {
         check_version(&missing).await,
         VersionCheck::Failed(_)
     ));
+}
+
+// Not upstream's: `open-ferry check` checks each command once, skipping
+// disabled entries.
+#[tokio::test]
+async fn checks_each_command_once() {
+    let fixture = Fixture::new(&json!({"version": "2.1.200 (Claude Code)"}));
+    let entries = [
+        ClaudeCli {
+            name: "one".into(),
+            ..fixture.entry()
+        },
+        ClaudeCli {
+            name: "two".into(),
+            ..fixture.entry()
+        },
+        ClaudeCli {
+            name: "gone".into(),
+            command: format!("{FAKE}-missing"),
+            ..fixture.entry()
+        },
+        ClaudeCli {
+            name: "off".into(),
+            command: format!("{FAKE}-off"),
+            disabled: true,
+            ..fixture.entry()
+        },
+    ];
+    let checks = check_versions(&entries).await;
+    assert_eq!(checks.len(), 2, "{checks:?}");
+    assert_eq!(
+        checks[0],
+        (
+            vec!["one".to_owned(), "two".to_owned()],
+            VersionCheck::Outdated("2.1.200".into())
+        )
+    );
+    assert_eq!(checks[1].0, ["gone"]);
+    assert!(matches!(checks[1].1, VersionCheck::Failed(_)));
 }
 
 #[tokio::test]
