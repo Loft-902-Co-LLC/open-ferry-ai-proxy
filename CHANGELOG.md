@@ -41,5 +41,6 @@ Nothing has been released yet. This is what is in place today, ported from CLIPr
 - **A container image**, `ghcr.io/loft-902-co-llc/open-ferry`, for linux/amd64 and linux/arm64, with CLIProxyAPI's image's paths, so that a Compose file switches by changing its image, and a `docker-compose.yml`. Its time zone is UTC, where CLIProxyAPI's is Asia/Shanghai, and the Compose file publishes only the proxy's port, on 127.0.0.1 ([migration guide](docs/migrating-from-cliproxyapi.md#docker-compose)).
 - **Parity results in the README**, written by `tools/parity` with its new `--summary` option: CLIProxyAPI's version, and each suite's cases and outcomes.
 - **A benchmark**, `tools/bench`, which runs open-ferry and CLIProxyAPI in front of the same fake upstream on loopback and measures start time, throughput, latency, CPU time and memory ([docs/benchmarks.md](docs/benchmarks.md)).
+- **A setup page for coding agents**, [docs/agents.md](docs/agents.md), and an [`llms.txt`](llms.txt) that points to it.
 
 [Unreleased]: https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/commits/main
