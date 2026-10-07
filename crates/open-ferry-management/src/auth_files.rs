@@ -4,7 +4,7 @@
 // matchesAuthFileLookup, GetAuthFileModels, buildAuthFileEntryLocked,
 // isPersistentAuthFailure, isModelStateBlocked,
 // reconcileAuthFileCooldownState, quotaObservationPayloadForProvider,
-// authWeightValue, authWebsocketsValue, authProjectID,
+// quotaObservationPayload, modelQuotaObservationPayload, authWeightValue, authWebsocketsValue, authProjectID,
 // extractCodexIDTokenClaims, authEmail, isRuntimeOnlyAuth) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
@@ -28,11 +28,17 @@
 //! An API-key credential's `account` is the key itself, as upstream shows
 //! it to the management client.
 //!
+//! `quota` is what the provider's last response with quota headers said of
+//! the credential: its `signals` by header name and when it came,
+//! `observed_at`; `model_quotas` has the same for each model whose last
+//! response carried any. Only Claude's and Codex's are shown. Neither holds
+//! the cooldown fields, so neither can be taken for the scheduler's state.
+//!
 //! Deviations from upstream:
-//! - The core doesn't record passive quota observations yet, so `quota` is
-//!   always `{"signals":{}}` and `model_quotas` never appears.
 //! - The plugin host isn't ported: `supports_quota` and `quota_provider`
 //!   come only from a `quota_probe` in the metadata.
+//! - Quota observations are shown only for Claude and Codex; upstream's
+//!   include Devin's, which isn't ported.
 //! - Without a credential manager upstream lists the auth directory from
 //!   disk; this port always has a manager.
 //! - Times are written in UTC; upstream writes some (file times, times read
@@ -52,9 +58,10 @@ use axum::routing::get;
 use chrono::Utc;
 use http::StatusCode;
 use open_ferry_core::auth::weight::{parse_weight_str, parse_weight_value};
-use open_ferry_core::auth::{Auth, ModelState, Status, Timestamp};
+use open_ferry_core::auth::{Auth, ModelState, QuotaState, Status, Timestamp};
 use open_ferry_core::manager::{
     CooldownView, Manager, cooldown_snapshot_for_auth, has_unauthorized_auth_failure,
+    provider_supports_quota_observation,
 };
 use open_ferry_providers::codex::jwt::parse_jwt_token;
 use open_ferry_translate::go::{to_lower, trim_space};
@@ -388,11 +395,11 @@ fn build_entry(auth: &Auth, now: Timestamp) -> Option<Entry> {
         })
         .collect();
     set("recent_requests", Json::Array(recent));
-    // No quota observations are recorded yet: see the module notes.
-    set(
-        "quota",
-        Json::map([("signals", Json::Map(BTreeMap::new()))]),
-    );
+    set("quota", quota_observation(&auth.provider, &auth.quota));
+    let model_quotas = model_quota_observations(&auth.provider, &auth.model_states);
+    if !model_quotas.is_empty() {
+        set("model_quotas", Json::Map(model_quotas));
+    }
     if let Some(probe) = auth.metadata.get("quota_probe").filter(|v| !v.is_null()) {
         set("supports_quota", Json::Bool(true));
         set("quota_probe", Json::Any(probe.clone()));
@@ -470,6 +477,45 @@ fn build_entry(auth: &Auth, now: Timestamp) -> Option<Entry> {
 
 fn time(time: Option<Timestamp>) -> Json {
     time.map_or(Json::Null, Json::Time)
+}
+
+/// A quota snapshot as the listing shows it: its `signals`, always, and
+/// `observed_at` when there is one; a provider that isn't observed shows
+/// an empty one (upstream's `quotaObservationPayloadForProvider` and
+/// `quotaObservationPayload`).
+pub(crate) fn quota_observation(provider: &str, quota: &QuotaState) -> Json {
+    let mut observed = BTreeMap::new();
+    if !provider_supports_quota_observation(provider) {
+        observed.insert("signals".to_owned(), Json::Map(BTreeMap::new()));
+        return Json::Map(observed);
+    }
+    if !is_zero(quota.observed_at) {
+        observed.insert("observed_at".to_owned(), time(quota.observed_at));
+    }
+    let signals = quota
+        .signals
+        .iter()
+        .map(|(name, value)| (name.clone(), Json::Str(value.clone())))
+        .collect();
+    observed.insert("signals".to_owned(), Json::Map(signals));
+    Json::Map(observed)
+}
+
+/// The snapshot of each model that has one, by model (upstream's
+/// `modelQuotaObservationPayload`); none for a provider that isn't
+/// observed.
+pub(crate) fn model_quota_observations(
+    provider: &str,
+    states: &BTreeMap<String, ModelState>,
+) -> BTreeMap<String, Json> {
+    if !provider_supports_quota_observation(provider) {
+        return BTreeMap::new();
+    }
+    states
+        .iter()
+        .filter(|(_, state)| !is_zero(state.quota.observed_at) || !state.quota.signals.is_empty())
+        .map(|(model, state)| (model.clone(), quota_observation(provider, &state.quota)))
+        .collect()
 }
 
 fn int(n: usize) -> i64 {

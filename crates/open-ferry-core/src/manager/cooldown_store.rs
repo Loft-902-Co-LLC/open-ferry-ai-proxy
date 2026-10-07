@@ -94,6 +94,7 @@ use super::cooldown::{
     update_aggregated_availability,
 };
 use super::credential::is_zero;
+use super::quota_signals::{apply_cooldown_fields, cooldown_fields_of, merge_quota_observation};
 use super::text::canonical_model_key;
 use super::{Entry, Manager, Settings, Shared, lock};
 use crate::auth::{Auth, ModelState, QuotaState, Status, Timestamp};
@@ -571,14 +572,12 @@ fn collect_records(settings: &Settings, auth: &Auth, now: Timestamp, out: &mut V
     }
 }
 
-/// The cooldown fields of `quota` (upstream's `cooldownFieldsOf`).
+/// The cooldown fields of `quota`, without its quota snapshot, which isn't
+/// saved (upstream's `cooldownFieldsOf`).
 fn cooldown_fields(quota: &QuotaState) -> QuotaState {
-    QuotaState {
-        exceeded: quota.exceeded,
-        reason: quota.reason.clone(),
-        next_recover_at: record::nonzero(quota.next_recover_at),
-        backoff_level: quota.backoff_level,
-    }
+    let mut fields = cooldown_fields_of(quota);
+    fields.next_recover_at = record::nonzero(fields.next_recover_at);
+    fields
 }
 
 /// The auth file that names `auth`'s `.cds` file: its `path` attribute, or
@@ -698,10 +697,9 @@ fn restore_record(
         auth.unavailable = true;
         auth.status = Status::Error;
         auth.next_retry_after = Some(next_retry_after);
-        auth.quota.exceeded = quota.exceeded;
-        auth.quota.reason = quota.reason;
-        auth.quota.next_recover_at = quota.next_recover_at;
-        auth.quota.backoff_level = quota.backoff_level;
+        apply_cooldown_fields(&mut auth.quota, quota.clone());
+        // A snapshot in the file replaces only an older one.
+        auth.quota = merge_quota_observation(std::mem::take(&mut auth.quota), &quota);
         auth.generation = auth.generation.saturating_add(1);
         auth.updated_at = Some(updated_at);
         if !reason.is_empty() {

@@ -6,10 +6,9 @@
 //! Cooldowns, and the state they leave, in the credential list.
 //!
 //! Deviations from upstream:
-//! - `TestListAuthFilesCooldownsSnapshot` checks that `quota` is
-//!   `{"signals":{}}` and that `model_quotas` is missing, as the core
-//!   records no quota observations, and that a listing leaves the stored
-//!   credentials alone by their pointers rather than by `reflect.DeepEqual`.
+//! - `TestListAuthFilesCooldownsSnapshot` checks that a listing leaves the
+//!   stored credentials alone by their pointers rather than by
+//!   `reflect.DeepEqual`.
 //! - `TestListAuthFilesCooldownsCredentialKindsAndFilters` drops its
 //!   plugin-virtual credential: the plugin host isn't ported.
 //! - `TestListAuthFilesCooldownsUnknown` is dropped: its cases, a disk
@@ -48,6 +47,16 @@ fn quota(reason: &str, next: Timestamp) -> QuotaState {
         reason: reason.into(),
         next_recover_at: Some(next),
         backoff_level: 0,
+        ..QuotaState::default()
+    }
+}
+
+/// `quota` with a snapshot taken at `at`.
+fn with_observation(quota: QuotaState, at: Timestamp) -> QuotaState {
+    QuotaState {
+        observed_at: Some(at),
+        signals: BTreeMap::from([("x-codex-primary-used-percent".into(), "90".into())]),
+        ..quota
     }
 }
 
@@ -105,17 +114,20 @@ async fn list_auth_files_cooldowns_snapshot() {
         auth.status = Status::Error;
         auth.unavailable = true;
         auth.next_retry_after = Some(next);
-        auth.quota = quota("quota", next);
+        auth.quota = with_observation(quota("quota", next), now);
         auth.model_states = models([
             (
                 "model-a",
                 ModelState {
                     unavailable: true,
                     next_retry_after: Some(next),
-                    quota: QuotaState {
-                        backoff_level: 6,
-                        ..quota("quota", next)
-                    },
+                    quota: with_observation(
+                        QuotaState {
+                            backoff_level: 6,
+                            ..quota("quota", next)
+                        },
+                        now,
+                    ),
                     last_error: error(429, "private upstream body"),
                     ..ModelState::default()
                 },
@@ -166,8 +178,15 @@ async fn list_auth_files_cooldowns_snapshot() {
             assert_eq!(time(&view["retry_at"]), next);
             assert_eq!(view.len(), 7, "{view:?}");
 
-            assert_eq!(file["quota"], json!({ "signals": {} }));
-            assert!(file.get("model_quotas").is_none());
+            for quota in [&file["quota"], &file["model_quotas"]["model-a"]] {
+                let quota = object(quota);
+                assert_eq!(quota.len(), 2, "quota observation changed: {quota:?}");
+                assert_eq!(
+                    quota["signals"],
+                    json!({ "x-codex-primary-used-percent": "90" })
+                );
+                assert_eq!(time(&quota["observed_at"]), now);
+            }
         }
     }
     let after_a = api.manager.get("a").unwrap();

@@ -368,6 +368,7 @@ async fn scheduler_mark_result_out_of_order_credential_scoped_failure_updates_al
         reason: "credential_quota".into(),
         next_recover_at: Some(h.now() + TimeDelta::hours(1)),
         backoff_level: 0,
+        ..Default::default()
     };
     h.manager
         .update(snapshot)

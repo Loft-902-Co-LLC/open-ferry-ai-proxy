@@ -118,6 +118,7 @@ async fn manager_reset_quota_clears_runtime_and_registry_state() {
         reason: "quota".into(),
         next_recover_at: Some(next),
         backoff_level: 2,
+        ..Default::default()
     };
     let mut auth = Auth {
         status: Status::Error,

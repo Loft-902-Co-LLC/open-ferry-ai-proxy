@@ -69,6 +69,7 @@ fn cooldown_snapshot_for_auth_scopes() {
             reason: "quota".into(),
             next_recover_at: Some(now + after),
             backoff_level: 6,
+            ..Default::default()
         },
         last_error: http_error(429),
         ..ModelState::default()
@@ -104,6 +105,7 @@ fn cooldown_snapshot_for_auth_scopes() {
                     reason: "credential_quota".into(),
                     next_recover_at: Some(now + TimeDelta::seconds(20)),
                     backoff_level: 9,
+                    ..Default::default()
                 },
                 model_states: states(vec![("a", model_state(TimeDelta::minutes(1)))]),
                 ..Auth::default()
@@ -322,6 +324,7 @@ fn cooldown_snapshot_for_auth_reasons() {
         reason: reason.into(),
         next_recover_at: recover.map(|d| now + d),
         backoff_level: level,
+        ..Default::default()
     };
     let message_error = |status: u16, message: &str| {
         Some(AuthError {
@@ -649,6 +652,7 @@ fn cooldown_snapshot_for_auth_longer_retry_reason_survives_quota_expiry() {
                     reason: "quota".into(),
                     next_recover_at: Some(now + TimeDelta::minutes(5)),
                     backoff_level: 6,
+                    ..Default::default()
                 },
                 ..ModelState::default()
             },

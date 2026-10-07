@@ -24,6 +24,7 @@ fn exhausted(next: chrono::DateTime<Utc>) -> QuotaState {
         reason: "quota".into(),
         next_recover_at: Some(next),
         backoff_level: 2,
+        ..QuotaState::default()
     }
 }
 

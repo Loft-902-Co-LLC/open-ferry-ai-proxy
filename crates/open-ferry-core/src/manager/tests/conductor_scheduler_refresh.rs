@@ -193,6 +193,7 @@ async fn manager_quota_cooldown_does_not_classify_as_terminal_auth() {
         reason: "credential_quota".into(),
         next_recover_at: Some(h.now() + TimeDelta::minutes(1)),
         backoff_level: 0,
+        ..Default::default()
     };
     h.add(cooling, &["model-cooldown"]);
 

@@ -30,6 +30,7 @@
 //! apply to.
 //! [`usage`] generates upstream answers and stream lines for usage
 //! parsing, and [`ttft`] stream events for the first-token classifiers.
+//! [`quota_signals`] generates responses' headers for the quota snapshot.
 
 pub mod chat;
 pub mod claude_chat;
@@ -47,6 +48,7 @@ pub mod openai_chat;
 pub mod openai_claude;
 pub mod openai_responses;
 pub mod payload;
+pub mod quota_signals;
 pub mod registry;
 pub mod response;
 pub mod responses;

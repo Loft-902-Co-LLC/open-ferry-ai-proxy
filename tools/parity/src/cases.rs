@@ -19,6 +19,7 @@ pub mod openai_chat;
 pub mod openai_claude;
 pub mod openai_responses;
 pub mod payload;
+pub mod quota_signals;
 pub mod registry;
 pub mod responses;
 pub mod signature;

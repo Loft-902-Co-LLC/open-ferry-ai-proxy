@@ -6,12 +6,15 @@
 //! Counts and recent requests in the credential list.
 //!
 //! Deviations from upstream:
-//! - `TestListAuthFiles_IncludesRecentRequestsBuckets` no longer sets or
-//!   checks quota observations, which the core doesn't record: `quota` is
-//!   checked to be `{"signals":{}}` and `model_quotas` to be missing. It
-//!   also records a call, and checks it is counted in the last bucket.
+//! - `TestListAuthFiles_IncludesRecentRequestsBuckets` also records a
+//!   call, and checks it is counted in the last bucket and leaves the quota
+//!   snapshots alone.
 
+use std::collections::BTreeMap;
+
+use chrono::{TimeZone as _, Utc};
 use http::StatusCode;
+use open_ferry_core::auth::{ModelState, QuotaState};
 use open_ferry_core::manager::CallResult;
 use serde_json::json;
 
@@ -22,6 +25,22 @@ async fn list_auth_files_includes_recent_requests_buckets() {
     let api = Api::new();
     let mut auth = runtime_auth("runtime-only-auth-1");
     auth.metadata.insert("type".into(), json!("codex"));
+    auth.quota = QuotaState {
+        observed_at: Some(Utc.with_ymd_and_hms(2026, 8, 22, 0, 0, 0).unwrap()),
+        signals: BTreeMap::from([("X-Codex-Primary-Used-Percent".into(), "58".into())]),
+        ..QuotaState::default()
+    };
+    auth.model_states = BTreeMap::from([(
+        "gpt-5".to_owned(),
+        ModelState {
+            quota: QuotaState {
+                observed_at: Some(Utc.with_ymd_and_hms(2026, 8, 22, 0, 1, 0).unwrap()),
+                signals: BTreeMap::from([("Retry-After".into(), "120".into())]),
+                ..QuotaState::default()
+            },
+            ..ModelState::default()
+        },
+    )]);
     api.register(auth);
     api.manager.mark_result(&CallResult {
         auth_id: "runtime-only-auth-1".into(),
@@ -41,8 +60,22 @@ async fn list_auth_files_includes_recent_requests_buckets() {
 
     assert_eq!(entry["success"], json!(1));
     assert_eq!(entry["failed"], json!(0));
-    assert_eq!(entry["quota"], json!({ "signals": {} }));
-    assert!(!entry.contains_key("model_quotas"));
+    assert_eq!(
+        entry["quota"],
+        json!({
+            "observed_at": "2026-08-22T00:00:00Z",
+            "signals": { "X-Codex-Primary-Used-Percent": "58" },
+        })
+    );
+    assert_eq!(
+        entry["model_quotas"],
+        json!({
+            "gpt-5": {
+                "observed_at": "2026-08-22T00:01:00Z",
+                "signals": { "Retry-After": "120" },
+            },
+        })
+    );
 
     let recent = entry["recent_requests"]
         .as_array()

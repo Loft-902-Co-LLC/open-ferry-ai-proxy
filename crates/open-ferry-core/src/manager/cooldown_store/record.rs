@@ -31,10 +31,10 @@
 //!   was given, often the local one.
 //! - A record with a time Go can't write (a year before 0 or after 9999)
 //!   is left out of the file; upstream's save fails.
-//! - A quota's `observed_at` is always the zero time and it has no
-//!   `signals`: the port doesn't keep them. Reading, `signals` is ignored,
-//!   and an `http_status` or `backoff_level` outside the port's range reads
-//!   as zero.
+//! - Reading, an `http_status` or `backoff_level` outside the port's range
+//!   reads as zero.
+
+use std::collections::BTreeMap;
 
 use serde_json::{Map, Value};
 
@@ -150,7 +150,9 @@ fn quota_node(quota: &QuotaState) -> Node {
     if quota.backoff_level != 0 {
         fields.push(("backoff_level", Node::Raw(quota.backoff_level.to_string())));
     }
-    // A struct, so `omitempty` keeps it.
+    // A record keeps no quota snapshot (upstream's `cooldownFieldsOf`), so
+    // `observed_at` is the zero time, which `omitempty` keeps as a struct,
+    // and there are no `signals`.
     fields.push(("observed_at", time(None)));
     Node::Object(fields)
 }
@@ -330,6 +332,7 @@ fn decode_quota(quota: &mut QuotaState, map: &Map<String, Value>) -> Result<(), 
         "next_recover_at",
         "backoff_level",
         "observed_at",
+        "signals",
     ];
     for (key, value) in map {
         match field(key, FIELDS) {
@@ -341,13 +344,36 @@ fn decode_quota(quota: &mut QuotaState, map: &Map<String, Value>) -> Result<(), 
                     quota.backoff_level = u32::try_from(level).unwrap_or(0);
                 }
             }
-            Some("observed_at") => {
-                timestamp(value, key)?;
-            }
+            Some("observed_at") => set_time(&mut quota.observed_at, value, key)?,
+            Some("signals") => decode_signals(&mut quota.signals, value, key)?,
             _ => {}
         }
     }
     Ok(())
+}
+
+/// A quota snapshot's headers, as Go decodes a `map[string]string`: `null`
+/// drops them, an object adds its entries to those a key in another case
+/// gave (a `null` value as an empty one), and anything else fails.
+fn decode_signals(
+    signals: &mut BTreeMap<String, String>,
+    value: &Value,
+    field: &str,
+) -> Result<(), String> {
+    match value {
+        Value::Null => {
+            signals.clear();
+            Ok(())
+        }
+        Value::Object(entries) => {
+            for (name, value) in entries {
+                let value = text(value, field)?.unwrap_or_default();
+                signals.insert(name.clone(), value);
+            }
+            Ok(())
+        }
+        other => Err(mismatch(other, field)),
+    }
 }
 
 fn decode_error(err: &mut AuthError, map: &Map<String, Value>) -> Result<(), String> {

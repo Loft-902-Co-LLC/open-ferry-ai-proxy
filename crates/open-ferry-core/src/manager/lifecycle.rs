@@ -58,8 +58,8 @@
 //!   cooldown, where upstream saves only when the records changed; the
 //!   store compares (see [`super::cooldown_store`]).
 //! - Not ported: hooks, the scheduler index, API-key model alias rebuilds,
-//!   plugin virtual credentials, the Meta key mint save inside the lock,
-//!   result policies and quota observation from response headers.
+//!   plugin virtual credentials, the Meta key mint save inside the lock
+//!   and result policies.
 
 use std::sync::Arc;
 

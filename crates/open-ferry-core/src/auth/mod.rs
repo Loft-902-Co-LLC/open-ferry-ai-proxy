@@ -121,6 +121,14 @@ pub struct QuotaState {
     pub next_recover_at: Option<Timestamp>,
     /// How many times in a row the cooldown has grown.
     pub backoff_level: u32,
+    /// When the provider's response behind [`signals`](Self::signals) came,
+    /// or `None` without a snapshot.
+    pub observed_at: Option<Timestamp>,
+    /// The quota headers of one provider response, by canonical name: a
+    /// snapshot of that response, not an accumulation across responses
+    /// (see the manager's `quota_signals`). Cooldown changes leave it
+    /// alone.
+    pub signals: BTreeMap<String, String>,
 }
 
 /// A credential's state for one model (upstream's `ModelState`).

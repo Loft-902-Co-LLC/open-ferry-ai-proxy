@@ -13,6 +13,7 @@ mod interactions;
 mod live;
 mod multi_agent;
 mod payload;
+mod quota_signals;
 mod raw_json;
 mod signature;
 mod translator;
@@ -524,6 +525,11 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
             Translator::ConfigSave,
             cases::config_save::steps(&args.upstream),
             generate::config_save::step_cases(seed, random),
+        ),
+        (
+            Translator::QuotaSignals,
+            cases::quota_signals::observations(),
+            generate::quota_signals::observe_cases(seed, random),
         ),
     ];
     // The Gemini Interactions families' suites (see interactions/mod.rs).

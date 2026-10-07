@@ -394,7 +394,23 @@ fn failure_result(
         error: Some(error),
         retry_after: retry_after_from_error(ErrView::Exec(err)),
         credential_scope: credential_scope && is_credential_scoped_error(ErrView::Exec(err)),
+        response_headers: err.headers.clone(),
+        ..CallResult::default()
     }
+}
+
+/// The headers of a stream that failed after it opened: the stream's, with
+/// those the error carries in their place, as upstream merges a Codex error
+/// event's headers into the response's.
+fn stream_failure_headers(stream: &HeaderMap, err: &ExecError) -> HeaderMap {
+    let mut headers = stream.clone();
+    for name in err.headers.keys() {
+        headers.remove(name);
+    }
+    for (name, value) in &err.headers {
+        headers.append(name.clone(), value.clone());
+    }
+    headers
 }
 
 /// What one model attempt records results under.
@@ -849,6 +865,9 @@ impl Manager {
                             model: attempt.result_model,
                             route_model: route_model.clone(),
                             success: true,
+                            response_headers: resp.headers.clone(),
+                            // A token count says nothing of the quota.
+                            skip_quota_observation: kind == CallKind::CountTokens,
                             ..CallResult::default()
                         });
                         let attempt_alias =
@@ -880,6 +899,7 @@ impl Manager {
                         // without suspending the model, which still serves
                         // messages.
                         let mut result = failure_result(&attempt, &auth, &err, action, false);
+                        result.skip_quota_observation = true;
                         if is_count_tokens_endpoint_not_found_error(view, &exec_req.model)
                             && result
                                 .error
@@ -1154,7 +1174,8 @@ impl Manager {
                 Bootstrap::Failed(err) => {
                     let settings = self.settings();
                     let action = match_request_scoped_error_action(&auth, &err, &settings);
-                    let result = failure_result(&attempt, &auth, &err, action, true);
+                    let mut result = failure_result(&attempt, &auth, &err, action, true);
+                    result.response_headers = stream_failure_headers(&headers, &err);
                     self.mark_result(&result);
                     if let Some(action) = action {
                         if action.is_stop() {
@@ -1180,8 +1201,6 @@ impl Manager {
                 }
                 Bootstrap::Closed { saw_chunk: false } => {
                     let empty = ExecError::empty_stream();
-                    let current = Failure::bootstrap(empty.clone(), headers);
-                    upstream = Some(current.clone());
                     self.mark_result(&CallResult {
                         auth_id: auth.id.clone(),
                         provider: prepared.provider.clone(),
@@ -1189,8 +1208,11 @@ impl Manager {
                         route_model: route_model.to_owned(),
                         success: false,
                         error: Some(result_error_from_error(ErrView::Exec(&empty))),
+                        response_headers: headers.clone(),
                         ..CallResult::default()
                     });
+                    let current = Failure::bootstrap(empty.clone(), headers);
+                    upstream = Some(current.clone());
                     if !is_last_model {
                         last = Some(Failure::upstream(empty));
                         continue;
@@ -1251,6 +1273,7 @@ impl Manager {
             provider: attempt.provider.to_owned(),
             route_model: attempt.route_model.to_owned(),
             result_model: attempt.result_model.clone(),
+            headers: headers.clone(),
             rewriter,
             failed: false,
             tx,
@@ -1294,6 +1317,7 @@ impl Manager {
                     model: forwarder.result_model.clone(),
                     route_model: forwarder.route_model.clone(),
                     success: true,
+                    response_headers: forwarder.headers.clone(),
                     ..CallResult::default()
                 });
             }
@@ -1316,6 +1340,8 @@ struct Forwarder {
     provider: String,
     route_model: String,
     result_model: String,
+    /// The stream's response headers, for the quota snapshot.
+    headers: HeaderMap,
     rewriter: Option<StreamRewriter>,
     failed: bool,
     tx: mpsc::Sender<Result<Bytes, ExecError>>,
@@ -1336,7 +1362,8 @@ impl Forwarder {
                         route_model: &self.route_model,
                         result_model: self.result_model.clone(),
                     };
-                    let result = failure_result(&attempt, &self.auth, &err, action, true);
+                    let mut result = failure_result(&attempt, &self.auth, &err, action, true);
+                    result.response_headers = stream_failure_headers(&self.headers, &err);
                     self.manager.mark_result(&result);
                 }
                 return self.tx.send(Err(err)).await.is_ok();

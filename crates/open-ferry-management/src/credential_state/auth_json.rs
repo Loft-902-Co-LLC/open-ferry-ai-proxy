@@ -12,8 +12,6 @@
 //! upstream's does: the route is behind the management key.
 //!
 //! Deviations from upstream:
-//! - The quota's `observed_at` is always Go's zero time, and its `signals`
-//!   never appear: the port doesn't track either.
 //! - A credential whose status isn't known writes `"unknown"`, where Go's
 //!   zero status writes `""`.
 
@@ -97,7 +95,15 @@ fn quota_json(quota: &QuotaState) -> Json {
     if quota.backoff_level != 0 {
         fields.push(("backoff_level", Json::Int(i64::from(quota.backoff_level))));
     }
-    fields.push(("observed_at", Json::Str(ZERO_TIME.to_owned())));
+    fields.push(("observed_at", time_json(quota.observed_at)));
+    if !quota.signals.is_empty() {
+        let signals = quota
+            .signals
+            .iter()
+            .map(|(name, value)| (name.clone(), Json::Str(value.clone())))
+            .collect();
+        fields.push(("signals", Json::Map(signals)));
+    }
     Json::Struct(fields)
 }
 

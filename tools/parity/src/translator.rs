@@ -89,6 +89,7 @@ use crate::config_save;
 use crate::interactions::{self, Stage};
 use crate::multi_agent;
 use crate::payload;
+use crate::quota_signals;
 use crate::raw_json::{self, Raw};
 use crate::signature;
 use crate::ttft;
@@ -280,6 +281,9 @@ pub enum Translator {
     /// A config file and writes to it → the file after each write (see
     /// `go/parity_config_save.go`).
     ConfigSave,
+    /// One response's headers and the quota snapshot before it → the
+    /// snapshot after it (see `go/parity_quota_signals.go`).
+    QuotaSignals,
 }
 
 impl Translator {
@@ -361,6 +365,7 @@ impl Translator {
             Self::Ttft => "ttft/token-event",
             Self::ConfigDiff => "config-diff/details",
             Self::ConfigSave => "config-save/steps",
+            Self::QuotaSignals => "quota-signals/observe",
         }
     }
 
@@ -441,6 +446,7 @@ impl Translator {
             Self::Ttft => "ttft",
             Self::ConfigDiff => "config-diff",
             Self::ConfigSave => "config-save",
+            Self::QuotaSignals => "quota-signals",
         }
     }
 
@@ -526,6 +532,7 @@ impl Translator {
             Self::Ttft => "First-token events",
             Self::ConfigDiff => "Config change details",
             Self::ConfigSave => "Config file writes",
+            Self::QuotaSignals => "Quota snapshots of response headers",
         }
     }
 
@@ -1205,6 +1212,7 @@ impl Translator {
             Self::Ttft => ttft::token_event(case),
             Self::ConfigDiff => config_diff::details(case),
             Self::ConfigSave => config_save::steps(case),
+            Self::QuotaSignals => quota_signals::observe(case),
         }
     }
 
@@ -1477,7 +1485,8 @@ impl Translator {
             | Self::Usage
             | Self::Ttft
             | Self::ConfigDiff
-            | Self::ConfigSave => &[],
+            | Self::ConfigSave
+            | Self::QuotaSignals => &[],
             Self::GeminiResponsesRequest => GEMINI_RESPONSES_REQUEST_JSON,
             Self::GeminiResponsesStream => GEMINI_RESPONSES_STREAM_JSON,
             Self::GeminiResponsesNonStream => GEMINI_RESPONSES_NON_STREAM_JSON,
@@ -1683,7 +1692,8 @@ impl Translator {
             | Self::Usage
             | Self::Ttft
             | Self::ConfigDiff
-            | Self::ConfigSave => return exact::from_str(&text).ok(),
+            | Self::ConfigSave
+            | Self::QuotaSignals => return exact::from_str(&text).ok(),
             Self::OpenAIGeminiRequest => {
                 let mut value: Value = exact::from_str(&text).ok()?;
                 replace_compact_call_ids(&mut value, case);

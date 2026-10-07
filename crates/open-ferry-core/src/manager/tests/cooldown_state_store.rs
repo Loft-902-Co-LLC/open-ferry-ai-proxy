@@ -272,6 +272,7 @@ fn file_cooldown_state_store_save_load_and_clean_stale() {
             reason: "quota".into(),
             next_recover_at: Some(next_retry),
             backoff_level: 1,
+            ..Default::default()
         },
         last_error: Some(AuthError {
             message: "rate limited".into(),
@@ -368,6 +369,7 @@ fn a_file_is_written_as_upstream_writes_it() {
                 reason: "quota".into(),
                 next_recover_at: Some(next),
                 backoff_level: 1,
+                ..Default::default()
             },
             last_error: Some(AuthError {
                 message: "rate limited <x>".into(),
@@ -469,6 +471,45 @@ fn files_are_read_as_go_reads_them() {
             err.starts_with("read cooldown state directory: parse cooldown state "),
             "{bad}: {err}"
         );
+    }
+}
+
+/// Not upstream's: a quota snapshot in a file is read as Go reads it (as
+/// upstream writes none, only a file from elsewhere has one): a `null`
+/// header as empty, a second key in another case adding to the first, a
+/// `null` map as none, and a value that isn't text failing the load.
+#[test]
+fn a_quota_snapshot_is_read_as_go_reads_it() {
+    let dir = temp_dir();
+    let store = FileStore::new(dir.path().to_path_buf());
+    std::fs::write(
+        dir.path().join("a.cds"),
+        r#"{"records":[{"auth_id":"a","quota":{"observed_at":"2026-06-01T00:00:00.5Z","signals":{"Retry-After":"30","X-Codex-Plan-Type":null},"Signals":{"X-Codex-Active-Limit":"spark"}}},{"auth_id":"b","quota":{"signals":{"Retry-After":"30"},"Signals":null}}]}"#,
+    )
+    .expect("write");
+    let loaded = store.load().expect("load");
+    assert_eq!(loaded.len(), 2);
+    assert_eq!(
+        loaded[0].quota.observed_at,
+        Some(at(0, 0, 0) + TimeDelta::milliseconds(500))
+    );
+    assert_eq!(
+        loaded[0].quota.signals,
+        std::collections::BTreeMap::from([
+            ("Retry-After".to_owned(), "30".to_owned()),
+            ("X-Codex-Active-Limit".to_owned(), "spark".to_owned()),
+            ("X-Codex-Plan-Type".to_owned(), String::new()),
+        ])
+    );
+    assert!(loaded[1].quota.signals.is_empty(), "{:?}", loaded[1].quota);
+
+    for bad in [
+        r#"{"records":[{"quota":{"signals":{"Retry-After":30}}}]}"#,
+        r#"{"records":[{"quota":{"signals":["Retry-After"]}}]}"#,
+        r#"{"records":[{"quota":{"observed_at":"soon"}}]}"#,
+    ] {
+        std::fs::write(dir.path().join("a.cds"), bad).expect("write");
+        assert!(store.load().is_err(), "{bad}");
     }
 }
 
@@ -1469,6 +1510,7 @@ async fn every_free_text_field_of_a_saved_record_is_scrubbed() {
         reason: "quota for k-1".into(),
         next_recover_at: Some(until),
         backoff_level: 1,
+        ..Default::default()
     };
     let mut first = auth("auth-1", "xai");
     first.status = Status::Active;

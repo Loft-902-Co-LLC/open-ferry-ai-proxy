@@ -141,6 +141,7 @@ async fn mark_result_quota_backoff_escalates_after_window_expiry() {
                 reason: "quota".into(),
                 next_recover_at: Some(expired),
                 backoff_level: 3,
+                ..Default::default()
             },
             ..ModelState::default()
         },

@@ -17,13 +17,15 @@
 //! Deviations from upstream:
 //! - Model states are walked in key order, where Go's map order is random.
 //! - The backoff level saturates where Go's shift would overflow.
-//! - Quota observation from response headers, the recent-request ring, the
-//!   success and failure counters, result policies and hooks aren't ported.
+//! - Result policies and hooks aren't ported.
+//! - The provider's response headers come in the [`CallResult`], where
+//!   upstream's `MarkResult` reads them from the request's context.
 
 use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
 
 use chrono::{DateTime, TimeDelta, Utc};
+use http::HeaderMap;
 
 use super::classify::{
     CODE_FORCE_COOLDOWN, has_unauthorized_auth_failure, is_cloudflare_challenge_result_error,
@@ -31,6 +33,7 @@ use super::classify::{
 };
 use super::credential::{disable_cooling_override, is_zero};
 use super::models::{Resolver, resolve_openai_compat_config};
+use super::quota_signals::{apply_cooldown_fields, merge_quota_observation};
 use super::select::ModelProjection;
 use super::settings::Settings;
 use super::text::{canonical_model_key, go_lower};
@@ -70,6 +73,13 @@ pub struct CallResult {
     pub retry_after: Option<Duration>,
     /// Whether the provider said the whole credential is out of quota.
     pub credential_scope: bool,
+    /// The headers of the provider's response, for the quota snapshot:
+    /// those of the last attempt, or of the stream the call read.
+    pub response_headers: HeaderMap,
+    /// Leaves the quota snapshot alone, as for a token count, whose
+    /// response says nothing of the credential's quota (upstream's
+    /// `SkipQuotaObservation`).
+    pub skip_quota_observation: bool,
 }
 
 /// `t` plus `d`, saturating at the latest time chrono can hold.
@@ -272,9 +282,13 @@ pub(crate) fn merge_model_state(target: &mut ModelState, source: &ModelState) {
                 .next_recover_at
                 .max(source.quota.next_recover_at),
             backoff_level: target.quota.backoff_level.max(source.quota.backoff_level),
+            ..QuotaState::default()
         },
         updated_at: target.updated_at.max(source.updated_at),
     };
+    // The newer snapshot wins whole, the preferred state's on a tie.
+    merged.quota = merge_quota_observation(merged.quota, &fallback.quota);
+    merged.quota = merge_quota_observation(merged.quota, &preferred.quota);
     if merged.status_message.is_empty() {
         merged.status_message = fallback.status_message.clone();
     }
@@ -299,7 +313,7 @@ pub(crate) fn reset_model_state(state: &mut ModelState, now: Timestamp) {
     state.status_message.clear();
     state.next_retry_after = None;
     state.last_error = None;
-    state.quota = QuotaState::default();
+    apply_cooldown_fields(&mut state.quota, QuotaState::default());
     state.updated_at = Some(now);
 }
 
@@ -395,7 +409,7 @@ pub(crate) fn update_aggregated_availability(auth: &mut Auth, now: Timestamp) {
     } else if auth.quota.exceeded && after(auth.quota.next_recover_at, now) {
         // An active credential-wide quota cooldown stays.
     } else {
-        auth.quota = QuotaState::default();
+        apply_cooldown_fields(&mut auth.quota, QuotaState::default());
     }
 }
 
@@ -403,7 +417,7 @@ pub(crate) fn update_aggregated_availability(auth: &mut Auth, now: Timestamp) {
 fn clear_aggregated_availability(auth: &mut Auth) {
     auth.unavailable = false;
     auth.next_retry_after = None;
-    auth.quota = QuotaState::default();
+    apply_cooldown_fields(&mut auth.quota, QuotaState::default());
 }
 
 /// Whether any model state still records a failure (upstream's
@@ -427,7 +441,7 @@ pub(crate) fn clear_auth_state_on_success(auth: &mut Auth, now: Timestamp) {
     auth.unavailable = false;
     auth.status = Status::Active;
     auth.status_message.clear();
-    auth.quota = QuotaState::default();
+    apply_cooldown_fields(&mut auth.quota, QuotaState::default());
     auth.last_error = None;
     auth.next_retry_after = None;
     auth.updated_at = Some(now);
@@ -449,7 +463,7 @@ pub(crate) fn clear_cooldown_state_for_auth(auth: &mut Auth, now: Timestamp) -> 
     {
         auth.unavailable = false;
         auth.next_retry_after = None;
-        auth.quota = QuotaState::default();
+        apply_cooldown_fields(&mut auth.quota, QuotaState::default());
         auth.updated_at = Some(now);
         changed = true;
     }
@@ -461,7 +475,7 @@ pub(crate) fn clear_cooldown_state_for_auth(auth: &mut Auth, now: Timestamp) -> 
         {
             state.unavailable = false;
             state.next_retry_after = None;
-            state.quota = QuotaState::default();
+            apply_cooldown_fields(&mut state.quota, QuotaState::default());
             state.updated_at = Some(now);
             changed = true;
         }
@@ -503,6 +517,27 @@ pub(crate) fn apply_result(
         auth.status = Status::Error;
         auth.next_refresh_after = None;
         auth.next_retry_after = None;
+    }
+    if !result.skip_quota_observation {
+        observe_quota(auth, result, model_key, now);
+    }
+}
+
+/// Takes the quota snapshot of the response behind `result` into the
+/// credential and into the state of the model it was for, when that state
+/// exists: a call doesn't make one only to keep a snapshot.
+fn observe_quota(auth: &mut Auth, result: &CallResult, model_key: &str, now: Timestamp) {
+    let headers = &result.response_headers;
+    auth.quota
+        .observe_response_headers_for_provider(&result.provider, headers, now);
+    let key = canonical_model_key(model_key);
+    if key.is_empty() {
+        return;
+    }
+    if let Some(state) = auth.model_states.get_mut(&key) {
+        state
+            .quota
+            .observe_response_headers_for_provider(&result.provider, headers, now);
     }
 }
 
@@ -601,12 +636,16 @@ fn apply_outcome(
         if auth.last_error.is_some() && !was_terminal_unauthorized {
             auth.status_message = "cloudflare challenge".into();
         }
-        state.quota = QuotaState {
-            exceeded: true,
-            reason: "cloudflare challenge".into(),
-            next_recover_at: next,
-            backoff_level: level,
-        };
+        apply_cooldown_fields(
+            &mut state.quota,
+            QuotaState {
+                exceeded: true,
+                reason: "cloudflare challenge".into(),
+                next_recover_at: next,
+                backoff_level: level,
+                ..QuotaState::default()
+            },
+        );
     } else if err.is_some_and(is_invalid_grant_result_error) {
         state.next_retry_after = (!disable_cooling).then(|| add(now, THIRTY_MINUTES));
     } else {
@@ -655,12 +694,16 @@ fn apply_outcome(
                     }
                 }
                 state.next_retry_after = next;
-                state.quota = QuotaState {
-                    exceeded: true,
-                    reason: "quota".into(),
-                    next_recover_at: next,
-                    backoff_level: level,
-                };
+                apply_cooldown_fields(
+                    &mut state.quota,
+                    QuotaState {
+                        exceeded: true,
+                        reason: "quota".into(),
+                        next_recover_at: next,
+                        backoff_level: level,
+                        ..QuotaState::default()
+                    },
+                );
                 if result.credential_scope && !disable_cooling {
                     for other in auth.model_states.values_mut() {
                         other.unavailable = true;
@@ -676,12 +719,16 @@ fn apply_outcome(
                             other_retry_after = other.next_retry_after;
                         }
                         other.next_retry_after = other_retry_after;
-                        other.quota = QuotaState {
-                            exceeded: true,
-                            reason: "credential_quota".into(),
-                            next_recover_at: other_quota_next,
-                            backoff_level: level,
-                        };
+                        apply_cooldown_fields(
+                            &mut other.quota,
+                            QuotaState {
+                                exceeded: true,
+                                reason: "credential_quota".into(),
+                                next_recover_at: other_quota_next,
+                                backoff_level: level,
+                                ..QuotaState::default()
+                            },
+                        );
                     }
                     if !was_terminal_unauthorized {
                         auth.unavailable = true;
@@ -689,12 +736,10 @@ fn apply_outcome(
                         if auth_credential_quota && auth.quota.next_recover_at > auth_next {
                             auth_next = auth.quota.next_recover_at;
                         }
-                        auth.quota = QuotaState {
-                            exceeded: true,
-                            reason: "credential_quota".into(),
-                            next_recover_at: auth_next,
-                            backoff_level: level,
-                        };
+                        auth.quota.exceeded = true;
+                        auth.quota.reason = "credential_quota".into();
+                        auth.quota.next_recover_at = auth_next;
+                        auth.quota.backoff_level = level;
                         auth.next_retry_after = auth_next;
                     }
                 }
@@ -763,12 +808,16 @@ pub(crate) fn apply_auth_failure_state(
         auth.status_message = "cloudflare challenge".into();
         let (next, level) =
             next_cloudflare_cooldown(auth.quota.backoff_level, disable_cooling, now);
-        auth.quota = QuotaState {
-            exceeded: true,
-            reason: "cloudflare challenge".into(),
-            next_recover_at: next,
-            backoff_level: level,
-        };
+        apply_cooldown_fields(
+            &mut auth.quota,
+            QuotaState {
+                exceeded: true,
+                reason: "cloudflare challenge".into(),
+                next_recover_at: next,
+                backoff_level: level,
+                ..QuotaState::default()
+            },
+        );
         auth.next_retry_after = next;
     } else if err.is_some_and(is_invalid_grant_result_error) {
         auth.status_message = "invalid_grant".into();

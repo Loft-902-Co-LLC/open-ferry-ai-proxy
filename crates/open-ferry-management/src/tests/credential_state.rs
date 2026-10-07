@@ -1417,6 +1417,7 @@ fn auth_json_matches_go() {
         reason: "quota".into(),
         next_recover_at: Some(at("2026-01-02T03:04:05.5Z")),
         backoff_level: 2,
+        ..QuotaState::default()
     };
     full.last_error = Some(AuthError {
         message: "unauthorized".into(),
@@ -1451,6 +1452,11 @@ fn auth_json_matches_go() {
                 reason: "rate".into(),
                 next_recover_at: Some(at("2026-01-02T00:00:00Z")),
                 backoff_level: 1,
+                observed_at: Some(at("2026-01-01T11:59:00.25Z")),
+                signals: [("X-Codex-Plan-Type", "<pro>"), ("Retry-After", "30")]
+                    .into_iter()
+                    .map(|(name, value)| (name.to_owned(), value.to_owned()))
+                    .collect(),
             },
             updated_at: Some(at("2026-01-01T12:00:00Z")),
         },
@@ -1483,7 +1489,9 @@ fn auth_json_matches_go() {
             r#""next_retry_after":"2026-01-02T00:00:00Z","#,
             r#""last_error":{"code":"rate_limit","message":"slow down","retryable":true,"http_status":429},"#,
             r#""quota":{"exceeded":true,"reason":"rate","next_recover_at":"2026-01-02T00:00:00Z","backoff_level":1,"#,
-            r#""observed_at":"0001-01-01T00:00:00Z"},"updated_at":"2026-01-01T12:00:00Z"},"#,
+            r#""observed_at":"2026-01-01T11:59:00.25Z","#,
+            r#""signals":{"Retry-After":"30","X-Codex-Plan-Type":"~u003cpro~u003e"}},"#,
+            r#""updated_at":"2026-01-01T12:00:00Z"},"#,
             r#""o3":{"status":"active","unavailable":false,"next_retry_after":"0001-01-01T00:00:00Z","#,
             r#""quota":{"exceeded":false,"next_recover_at":"0001-01-01T00:00:00Z","observed_at":"0001-01-01T00:00:00Z"},"#,
             r#""updated_at":"0001-01-01T00:00:00Z"}}},"ok":true}"#,

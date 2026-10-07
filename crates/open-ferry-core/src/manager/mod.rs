@@ -53,9 +53,9 @@
 //!   statistics set, where upstream's manager queues the event itself.
 //! - The cooldown state store saves on a background thread, debounced
 //!   (see [`cooldown_store`]).
-//! - Not ported: hooks, result policies, quota observation from headers,
-//!   request preparation and interceptors, the round tripper, the
-//!   Antigravity credits fallback and API-key capability metadata.
+//! - Not ported: hooks, result policies, request preparation and
+//!   interceptors, the round tripper, the Antigravity credits fallback and
+//!   API-key capability metadata.
 
 mod alpha_search;
 mod classify;
@@ -71,6 +71,7 @@ mod lifecycle;
 mod merge;
 mod models;
 mod policy;
+mod quota_signals;
 mod refresh;
 mod retry;
 mod rewrite;
@@ -89,6 +90,7 @@ pub use cooldown::CallResult;
 pub use cooldown_view::{CooldownView, cooldown_snapshot_for_auth};
 pub use error_events::ErrorEvents;
 pub use lifecycle::QuotaReset;
+pub use quota_signals::provider_supports_quota_observation;
 pub use refresh::ForceRefreshResult;
 pub use select::{ClientModels, ModelProjection};
 pub use settings::{
