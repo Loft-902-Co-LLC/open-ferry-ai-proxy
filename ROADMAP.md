@@ -21,13 +21,13 @@ Already in place:
   - **settings in forms:** every common setting is checked as you type and reviewed against the server before saving. The raw YAML is still there, with a diff before saving.
 - Each Claude and Codex credential's quota as the provider's last response gave it: the management API lists it, and the dashboard shows how much of each window is used, when it starts over, and which one stopped the account.
 - Codex's response steering on the Responses WebSocket (`upstream.codex.response-steering`, experimental and off by default, as upstream).
+- Session affinity (`routing.session-affinity`, off by default as upstream): a conversation stays on the credential that served it, so its prompt cache stays warm, and moves only when that credential can't serve. Session IDs are only routing keys: none is sent upstream, logged or saved.
 - Model catalogs from files: a catalog file the `models` section names is read at start and again when it changes, so a new model can be added without waiting for a release. Unlike upstream, open-ferry downloads no catalog. Without a file it uses the catalogs built into the binary, which we update by hand when providers release models.
 - Release basics: CI on Linux and Windows, a release workflow that builds binaries for Linux, macOS and Windows, a changelog, and a migration guide for CLIProxyAPI users.
 
 Still to come:
 
 - **Parity with the latest CLIProxyAPI release for every provider we support:** Codex, Claude, Gemini, Gemini Interactions, Vertex AI, Meta (API keys and access tokens), xAI (API keys) and any OpenAI-compatible upstream. We follow upstream's releases; the pin is at v8.0.15. What we do differently is listed in UPSTREAM.md.
-- **Session affinity** (`routing.session-affinity` and its options), whose settings are read but not yet acted on: it keeps a conversation on one credential so its prompt cache stays warm, and moves it only when that credential can't serve.
 - **Routing by quota:** a strategy that picks by the quota the providers report (now recorded for Claude and Codex): the credential whose limit resets soonest, or the one with the most left, keeping a reserve on each. Upstream has no such strategy, so this would be open-ferry's own.
 - **Ways to install besides building from source,** starting with the first release:
   - a container image on GitHub's registry, for amd64 and arm64, that uses the same paths as CLIProxyAPI's image (`/CLIProxyAPI/config.yaml`, `/root/.cli-proxy-api` and `/CLIProxyAPI/logs`), so an existing Docker Compose file switches over by changing the image name;
