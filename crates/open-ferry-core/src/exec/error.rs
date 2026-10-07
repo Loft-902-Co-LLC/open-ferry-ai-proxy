@@ -1,7 +1,9 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/errors.go, the modelCooldownError
 // in sdk/cliproxy/auth/selector.go, SafeResponseHeaders in
-// sdk/cliproxy/auth/home_concurrency.go and HTTPStatusFromError in
-// internal/clienterror/client_error.go (v8.0.15, MIT).
+// sdk/cliproxy/auth/home_concurrency.go, HTTPStatusFromError in
+// internal/clienterror/client_error.go and
+// sdk/cliproxy/executor/websocket.go (UpstreamWebsocketReplayRequiredError,
+// NewUpstreamWebsocketReplayRequiredError) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use std::fmt;
@@ -54,6 +56,10 @@ impl ErrorKind {
         matches!(self, Self::AuthNotFound | Self::AuthUnavailable)
     }
 }
+
+/// The body of [`ExecError::replay_required`]
+/// (`UpstreamWebsocketReplayRequiredError`).
+const REPLAY_REQUIRED_BODY: &str = r#"{"error":{"message":"upstream transport requires full HTTP replay","type":"server_error","code":"upstream_http_replay_required","status":426}}"#;
 
 /// How the Responses WebSocket closes after an error.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -157,6 +163,16 @@ impl ExecError {
     /// The client went away.
     pub fn canceled() -> Self {
         Self::new(ErrorKind::Canceled, "context canceled")
+    }
+
+    /// The request can't go on the upstream WebSocket it was sent for, so
+    /// the client must replay the turn over a new socket: a 426 that closes
+    /// the Responses WebSocket with 1012, and leaves the credential usable
+    /// (`NewUpstreamWebsocketReplayRequiredError`).
+    pub fn replay_required() -> Self {
+        let mut error = Self::upstream(426, REPLAY_REQUIRED_BODY).with_request_scoped();
+        error.ws_close = Some(WsClose::ReplayRequired);
+        error
     }
 
     /// Every credential for `model` is cooling down for `reset_in`. The

@@ -2201,6 +2201,7 @@ fn support_for(
             provider: provider.to_owned(),
             serves_model: true,
             websockets,
+            disabled: false,
         }),
     }
 }

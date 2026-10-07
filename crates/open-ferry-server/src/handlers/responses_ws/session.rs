@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use bytes::Bytes;
 use http::HeaderMap;
 use open_ferry_core::exec::{
-    Dispatcher, ExecError, Format, ProviderId, WebsocketAuth, WebsocketSupport, WsClose,
+    Dispatcher, ExecError, Format, ProviderId, WebsocketAuth, WebsocketSupport,
 };
 use open_ferry_core::models::ModelCatalog;
 use open_ferry_translate::go;
@@ -48,10 +48,6 @@ use crate::json::{self, Val, str_at};
 use crate::request_log;
 use crate::routing::{parse_suffix, resolve_model, route};
 use crate::state::AppState;
-
-/// The body of the error that has the client replay the turn over a new
-/// socket (upstream's `UpstreamWebsocketReplayRequiredError`).
-const REPLAY_REQUIRED_BODY: &str = r#"{"error":{"message":"upstream transport requires full HTTP replay","type":"server_error","code":"upstream_http_replay_required","status":426}}"#;
 
 /// The body of the 409 for a previous response the socket doesn't hold
 /// (`responsesWebsocketPreviousResponseNotFoundError`).
@@ -667,9 +663,7 @@ pub(super) fn is_lite_request(payload: &[u8], headers: &HeaderMap) -> bool {
 /// The error that closes the socket with 1012, so the client replays the
 /// turn (`responsesWebsocketHTTPReplayRequiredError`).
 pub(super) fn replay_required() -> ErrorMessage {
-    let mut error = ExecError::upstream(426, REPLAY_REQUIRED_BODY);
-    error.ws_close = Some(WsClose::ReplayRequired);
-    ErrorMessage::from_exec(error)
+    ErrorMessage::from_exec(ExecError::replay_required())
 }
 
 /// The 409 for a previous response the socket doesn't hold

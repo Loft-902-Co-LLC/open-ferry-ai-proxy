@@ -51,6 +51,7 @@ impl Manager {
                 provider,
                 serves_model,
                 websockets: websockets_enabled(auth),
+                disabled: auth.disabled || auth.status == Status::Disabled,
             })
         });
         WebsocketSupport {

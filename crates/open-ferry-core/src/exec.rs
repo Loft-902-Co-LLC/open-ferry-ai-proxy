@@ -38,10 +38,14 @@
 //!   through the auth manager itself.
 //! - A finished video is fetched with [`Dispatcher::download`], where
 //!   upstream's handler looks the credential up and fetches it itself.
+//! - The client's frames for response steering travel in
+//!   [`Options::websocket_input`], where upstream puts them in the call's
+//!   context (see [`WebsocketInput`]).
 
 mod download;
 mod error;
 mod http_call;
+mod websocket_input;
 
 use std::fmt;
 use std::sync::Arc;
@@ -57,6 +61,7 @@ pub use download::{Download, Downloaded};
 pub use error::{ErrorKind, ExecError, TransportFault, WsClose};
 pub use http_call::{AlphaSearch, HttpCall, HttpReply, HttpTarget};
 pub use open_ferry_translate::registry::Format;
+pub use websocket_input::{AuthCheck, InputFrame, WebsocketInput};
 
 /// A provider's identifier, such as `codex` or `claude`.
 pub type ProviderId = String;
@@ -96,6 +101,10 @@ pub struct Options {
     /// that see its upstream traffic. `None` for a call no client request
     /// made.
     pub observation: Option<Arc<Observation>>,
+    /// The client's further frames on a Responses WebSocket with response
+    /// steering on, which a Codex WebSocket stream reads while it runs
+    /// (upstream's `WithWebsocketInput`). `None` everywhere else.
+    pub websocket_input: Option<WebsocketInput>,
 }
 
 impl Options {
@@ -113,6 +122,7 @@ impl Options {
             downstream_websocket: false,
             metadata: Metadata::default(),
             observation: None,
+            websocket_input: None,
         }
     }
 
@@ -312,4 +322,7 @@ pub struct WebsocketAuth {
     /// Whether its `websockets` attribute is on
     /// (`websocketUpstreamSupportsIncrementalInput`).
     pub websockets: bool,
+    /// Whether it is disabled, by its flag or its status, so a call holding
+    /// its connection may send nothing more.
+    pub disabled: bool,
 }
