@@ -100,7 +100,7 @@ use crate::payload;
 use crate::redact::{Policy, Secrets};
 
 /// The `alt` of a `/responses/compact` call.
-const COMPACT_ALT: &str = "responses/compact";
+pub(crate) const COMPACT_ALT: &str = "responses/compact";
 /// How much of an error body is read.
 const MAX_ERROR_BODY: usize = 4 << 20;
 /// How many times a refresh is tried.
@@ -591,7 +591,7 @@ struct Prepared {
 
 /// The client's request in Claude's format, for `base_model`, with its
 /// thinking setting applied.
-fn translate_request(
+pub(crate) fn translate_request(
     config: Option<&Config>,
     request: &Request,
     options: &Options,
@@ -676,12 +676,12 @@ fn redact_answer(secrets: &Secrets, data: Vec<u8>) -> Vec<u8> {
     }
 }
 
-fn compact_error() -> ExecError {
+pub(crate) fn compact_error() -> ExecError {
     ExecError::upstream(501, "/responses/compact not supported")
 }
 
 /// The format to answer in (`ResponseFormatOrSource`).
-fn response_format(options: &Options) -> Format {
+pub(crate) fn response_format(options: &Options) -> Format {
     if options.response_format.as_str().is_empty() {
         options.source_format.clone()
     } else {
@@ -700,7 +700,7 @@ fn parse_object(raw: &[u8]) -> Value {
 
 /// The client's request, for response translators: the original request if
 /// the caller kept one, else the payload (`ApplyPatchOriginalRequest`).
-fn original_request(request: &Request, options: &Options) -> Value {
+pub(crate) fn original_request(request: &Request, options: &Options) -> Value {
     if options.original_request.is_empty() {
         parse_object(&request.payload)
     } else {

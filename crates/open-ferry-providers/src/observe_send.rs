@@ -137,6 +137,13 @@ impl BodyTap {
         response.extensions().get::<Self>().cloned()
     }
 
+    /// Tells the taps an answer came with `status` and `headers`, for an
+    /// attempt whose answer isn't an HTTP response, as `claude-cli`'s, which
+    /// comes from a process.
+    pub(crate) fn response_head(&self, status: u16, headers: &HeaderMap) {
+        self.0.response_head(status, headers);
+    }
+
     /// Tells the taps the request is about to go out on a connection that
     /// is up (see [`open_ferry_core::observe::Tap::request_sent`]).
     pub(crate) fn request_sent(&self) {

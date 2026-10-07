@@ -10,6 +10,9 @@
 //! [`payload`] applies the config's payload rules to the bodies the
 //! executors send. The `images` module holds what the executors that call
 //! an Image API (`/images/generations` and `/images/edits`) share.
+//! [`claude_cli`] serves Claude models by running the user's own installed
+//! Claude Code, which signs itself in; open-ferry sends nothing to
+//! Anthropic for it.
 
 #[cfg(test)]
 mod apply_patch_bridge_tests;
@@ -17,6 +20,7 @@ mod apply_patch_bridge_tests;
 mod apply_patch_integration_tests;
 pub mod apply_patch_responses;
 pub mod claude;
+pub mod claude_cli;
 mod claude_code_session;
 pub mod codex;
 pub mod credentials;

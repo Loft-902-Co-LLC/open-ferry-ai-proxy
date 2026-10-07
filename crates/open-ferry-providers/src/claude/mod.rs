@@ -34,14 +34,14 @@
 //!   Anthropic's API (a 501 for now).
 
 mod client;
-mod executor;
+pub(crate) mod executor;
 mod headers;
 pub mod oauth;
 pub(crate) mod ratelimit;
 mod request;
-mod stream;
+pub(crate) mod stream;
 mod thinking;
 pub mod token;
-mod usage;
+pub(crate) mod usage;
 
 pub use executor::ClaudeExecutor;
