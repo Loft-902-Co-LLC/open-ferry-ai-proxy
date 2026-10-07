@@ -31,6 +31,8 @@
 //! [`usage`] generates upstream answers and stream lines for usage
 //! parsing, and [`ttft`] stream events for the first-token classifiers.
 //! [`quota_signals`] generates responses' headers for the quota snapshot.
+//! [`session`] generates headers and bodies for session reading, and
+//! bodies for the identity derived when they name no session.
 
 pub mod chat;
 pub mod claude_chat;
@@ -52,6 +54,7 @@ pub mod quota_signals;
 pub mod registry;
 pub mod response;
 pub mod responses;
+pub mod session;
 pub mod signature;
 pub mod thinking;
 pub mod to_gemini;

@@ -22,6 +22,7 @@ pub mod payload;
 pub mod quota_signals;
 pub mod registry;
 pub mod responses;
+pub mod session;
 pub mod signature;
 pub mod thinking;
 pub mod to_gemini;

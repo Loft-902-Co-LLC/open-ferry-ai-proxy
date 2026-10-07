@@ -33,7 +33,8 @@
 //!   bytes that aren't UTF-8 read as U+FFFD; a body that doesn't parse, or
 //!   nests more than 128 deep, names no session.
 //! - The text of an object or array where a session ID was expected is its
-//!   compact JSON; gjson gives it as it was written.
+//!   compact JSON; gjson gives it as it was written, so one written over
+//!   several lines, which upstream refuses for its line feeds, is taken.
 
 mod identity;
 mod info;

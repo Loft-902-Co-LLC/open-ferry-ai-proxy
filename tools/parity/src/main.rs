@@ -15,6 +15,7 @@ mod multi_agent;
 mod payload;
 mod quota_signals;
 mod raw_json;
+mod session;
 mod signature;
 mod translator;
 mod ttft;
@@ -515,6 +516,16 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
             Translator::Ttft,
             cases::ttft::token_events(),
             generate::ttft::token_event_cases(seed, random),
+        ),
+        (
+            Translator::SessionInfo,
+            cases::session::infos(),
+            generate::session::info_cases(seed, random),
+        ),
+        (
+            Translator::SessionDerive,
+            cases::session::derives(),
+            generate::session::derive_cases(seed, random),
         ),
         (
             Translator::ConfigDiff,

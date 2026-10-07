@@ -91,6 +91,7 @@ use crate::multi_agent;
 use crate::payload;
 use crate::quota_signals;
 use crate::raw_json::{self, Raw};
+use crate::session;
 use crate::signature;
 use crate::ttft;
 use crate::usage;
@@ -275,6 +276,12 @@ pub enum Translator {
     /// An upstream's stream event → whether it carries the first token
     /// (see `go/helps/parity_ttft.go`).
     Ttft,
+    /// A request's headers and body → the session it names (see
+    /// `go/parity_session.go`).
+    SessionInfo,
+    /// A request body, its client format and caller scope → the session
+    /// identity derived for it (see `go/parity_session.go`).
+    SessionDerive,
     /// Two configs → the change details logged on reload (see
     /// `go/parity_config_diff.go`).
     ConfigDiff,
@@ -363,6 +370,8 @@ impl Translator {
             Self::Payload => "payload/apply",
             Self::Usage => "usage/parse",
             Self::Ttft => "ttft/token-event",
+            Self::SessionInfo => "session/info",
+            Self::SessionDerive => "session/derive",
             Self::ConfigDiff => "config-diff/details",
             Self::ConfigSave => "config-save/steps",
             Self::QuotaSignals => "quota-signals/observe",
@@ -444,6 +453,8 @@ impl Translator {
             Self::Payload => "payload",
             Self::Usage => "usage",
             Self::Ttft => "ttft",
+            Self::SessionInfo => "session-info",
+            Self::SessionDerive => "session-derive",
             Self::ConfigDiff => "config-diff",
             Self::ConfigSave => "config-save",
             Self::QuotaSignals => "quota-signals",
@@ -530,6 +541,8 @@ impl Translator {
             Self::Payload => "Payload rules applied",
             Self::Usage => "Usage parsed from upstream responses",
             Self::Ttft => "First-token events",
+            Self::SessionInfo => "Sessions requests name",
+            Self::SessionDerive => "Session identities derived",
             Self::ConfigDiff => "Config change details",
             Self::ConfigSave => "Config file writes",
             Self::QuotaSignals => "Quota snapshots of response headers",
@@ -1210,6 +1223,8 @@ impl Translator {
             Self::Payload => payload::apply(case),
             Self::Usage => usage::parse(case),
             Self::Ttft => ttft::token_event(case),
+            Self::SessionInfo => session::info(case),
+            Self::SessionDerive => session::derive(case),
             Self::ConfigDiff => config_diff::details(case),
             Self::ConfigSave => config_save::steps(case),
             Self::QuotaSignals => quota_signals::observe(case),
@@ -1484,6 +1499,8 @@ impl Translator {
             | Self::Payload
             | Self::Usage
             | Self::Ttft
+            | Self::SessionInfo
+            | Self::SessionDerive
             | Self::ConfigDiff
             | Self::ConfigSave
             | Self::QuotaSignals => &[],
@@ -1691,6 +1708,8 @@ impl Translator {
             | Self::Payload
             | Self::Usage
             | Self::Ttft
+            | Self::SessionInfo
+            | Self::SessionDerive
             | Self::ConfigDiff
             | Self::ConfigSave
             | Self::QuotaSignals => return exact::from_str(&text).ok(),
