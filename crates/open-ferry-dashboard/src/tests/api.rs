@@ -200,6 +200,7 @@ async fn unknown_routes_and_methods() {
             "/open-ferry/api/v1/request-logs/v1-2026-10-05T115802-1234abcd.log",
         ),
         (Method::PUT, "/open-ferry/api/v1/client-setup"),
+        (Method::DELETE, "/open-ferry/api/v1/claude-cli/entries"),
     ] {
         let answer = dash.send(request(LOCAL, method.clone(), path, "")).await;
         answer.error(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed");

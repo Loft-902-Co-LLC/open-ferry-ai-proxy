@@ -1,6 +1,7 @@
 //! The dashboard API, under `/open-ferry/api/v1/`, as
 //! `docs/dashboard-api.md` describes it: usage from the ledger, the request
-//! logs, client setup, and whether a `claude-cli` entry is signed in.
+//! logs, client setup, and the config's `claude-cli` entries, with their
+//! state and whether each is signed in.
 //!
 //! Every route checks access as the management API does, with its code
 //! ([`check_key`]): a key must be set, the request must carry it, from an
@@ -94,6 +95,10 @@ pub(crate) fn routes(state: &DashboardState) -> Router<DashboardState> {
         .route(
             &format!("{PREFIX}/client-setup"),
             route(get(client_setup::client_setup)),
+        )
+        .route(
+            &format!("{PREFIX}/claude-cli/entries"),
+            route(get(claude_cli::entries_route)),
         )
         .route(
             &format!("{PREFIX}/claude-cli/auth-status"),

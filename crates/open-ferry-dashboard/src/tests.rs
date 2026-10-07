@@ -131,6 +131,7 @@ pub(crate) struct Dash {
     router: Router,
     state: DashboardState,
     registry: Arc<ModelRegistry>,
+    manager: Manager,
     logs: tempfile::TempDir,
 }
 
@@ -161,12 +162,16 @@ impl Dash {
         let registry = Arc::new(ModelRegistry::new());
         let manager = Manager::new(Settings::default(), Arc::clone(&registry) as _, None);
         let usage = Usage::new(&config);
-        let management =
-            ManagementState::new(Arc::new(config), manager, Arc::clone(&registry), None)
-                .with_observability(Observability {
-                    log_dir: Some(logs.path().to_owned()),
-                    ..Observability::default()
-                });
+        let management = ManagementState::new(
+            Arc::new(config),
+            manager.clone(),
+            Arc::clone(&registry),
+            None,
+        )
+        .with_observability(Observability {
+            log_dir: Some(logs.path().to_owned()),
+            ..Observability::default()
+        });
         let ledger = if ledger {
             Ledger::idle_for_test(logs.path(), &usage)
         } else {
@@ -182,6 +187,7 @@ impl Dash {
             router: router_from(state.clone()),
             state,
             registry,
+            manager,
             logs,
         }
     }
@@ -194,6 +200,11 @@ impl Dash {
     /// The model registry.
     pub(crate) fn registry(&self) -> &ModelRegistry {
         &self.registry
+    }
+
+    /// The credential manager.
+    pub(crate) fn manager(&self) -> &Manager {
+        &self.manager
     }
 
     /// Writes `events` into the ledger.

@@ -3,7 +3,7 @@
 The dashboard is a web app built into the binary and served at `/dashboard/`. It uses two APIs on its own origin:
 
 - **The management API**, at `/v0/management/` (and `/v8/management/`), exactly as CLIProxyAPI has it: settings, credentials, client keys, sign-ins, logs.
-- **The dashboard API**, described here, at `/open-ferry/api/v1/`, for what CLIProxyAPI has no route for: usage from the usage ledger, request-log search, client setup, and whether a `claude-cli` entry is signed in. The prefix is open-ferry's own, so the management namespace stays exactly upstream's.
+- **The dashboard API**, described here, at `/open-ferry/api/v1/`, for what CLIProxyAPI has no route for: usage from the usage ledger, request-log search, client setup, and the config's `claude-cli` entries, with their state and whether each is signed in. The prefix is open-ferry's own, so the management namespace stays exactly upstream's.
 
 This document is the contract between the server and the app. A change to it is announced, and the version in the prefix changes only for a change an existing app can't take.
 
@@ -470,6 +470,49 @@ What the app needs to write ready-made client configs, other than client keys, w
 ---
 
 ## claude-cli
+
+### `GET /open-ferry/api/v1/claude-cli/entries`
+
+The config's `claude-cli` entries, in the config's order, each with the credential the server made of it and how that is doing. The management API's `auth-files` list leaves out credentials made from the config, as CLIProxyAPI's does, so this is where the app finds an entry's state, cooldowns and quota. It runs nothing and reads no file.
+
+```json
+{
+  "entries": [
+    {
+      "name": "claude-max-1",
+      "prefix": "max1",
+      "config_dir": "~/.claude-second",
+      "disabled": false,
+      "credential": {
+        "id": "claude-cli:479b4a4c3660",
+        "auth_index": "3734a62b508f0029",
+        "provider": "claude-cli",
+        "label": "claude-max-1",
+        "status": "error",
+        "status_message": "unauthorized",
+        "unavailable": true,
+        "next_retry_after": "2026-10-05T12:44:56.789012345Z",
+        "cooldowns": [
+          {"scope": "credential", "reason": "unauthorized", "retry_at": "2026-10-05T12:44:56.789012345Z", "remaining_seconds": 600, "http_status": 401}
+        ],
+        "quota": {
+          "observed_at": "2026-10-05T12:30:01.5Z",
+          "signals": {"Anthropic-Ratelimit-Unified-5h-Utilization": "0.4", "Anthropic-Ratelimit-Unified-5h-Reset": "1791212400"}
+        },
+        "success": 3,
+        "failed": 1
+      },
+      "last_error": {"message": "Not signed in to Claude Code", "http_status": 401}
+    },
+    {"name": "spare", "prefix": "", "config_dir": "", "disabled": true, "credential": null, "last_error": null}
+  ]
+}
+```
+
+- **`name`, `prefix` and `config_dir`** are the entry's, trimmed, as the config has them: `config_dir` is neither expanded nor resolved, and is empty for an entry without one, whose Claude Code uses the `CLAUDE_CONFIG_DIR` open-ferry runs with, else its own default. **`disabled`** is the entry's switch.
+- **`credential`** is the entry's credential as `GET /v0/management/auth-files` lists a credential file, with all its fields (the example shows some): its `status`, `status_message`, `unavailable`, `next_retry_after` and `cooldowns`, its counts and recent requests, and `quota`, the account's rate-limit windows from Claude Code's last report of them, named as Anthropic's `anthropic-ratelimit-unified-*` headers. Its times are as that route writes them, RFC 3339 in UTC to the nanosecond, not to the millisecond. Its `auth_index` is what `POST /v0/management/reset-quota` takes to reset its cooldowns. It is `null` for a disabled entry, which has no credential, and for an entry the server hasn't loaded yet.
+- **`last_error`** is the credential's last failure, until a request succeeds: its `message`, Claude Code's error (from an error in the form of Anthropic's error body, its `error.message`) or open-ferry's when Claude Code ended without an answer, and the `http_status` it was answered with, `null` when none. It is `null` when there is no failure, or no credential.
+- **Nothing else of the entry is passed on**: not its `command`, and nothing from its config directory, which the route doesn't read. Whether Claude Code is signed in is the next route's to say.
 
 ### `GET /open-ferry/api/v1/claude-cli/auth-status?name=<entry>`
 

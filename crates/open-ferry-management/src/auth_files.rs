@@ -34,6 +34,10 @@
 //! response carried any. Only Claude's and Codex's are shown. Neither holds
 //! the cooldown fields, so neither can be taken for the scheduler's state.
 //!
+//! [`credential_entry`], which upstream doesn't have, gives one
+//! credential's entry whatever its source, for the dashboard API to show
+//! the config's `claude-cli` entries, which the list hides.
+//!
 //! Deviations from upstream:
 //! - The plugin host isn't ported: `supports_quota` and `quota_provider`
 //!   come only from a `quota_probe` in the metadata.
@@ -51,6 +55,7 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::io;
+use std::sync::Arc;
 
 use axum::extract::{RawQuery, State};
 use axum::response::Response;
@@ -248,13 +253,36 @@ fn list_body(manager: &Manager, filter: &Filter, pagination: Pagination, now: Ti
 
 /// A credential's entry with its cooldowns, or `None` when it is hidden.
 fn listed_entry(auth: &Auth, now: Timestamp) -> Option<Json> {
-    let mut entry = build_entry(auth, now)?;
+    Some(with_cooldowns(build_entry(auth, now)?, auth, now))
+}
+
+/// The credential with ID `id`, and the entry the listing would show for
+/// it at `now`, cooldowns included; `None` when the manager holds none.
+///
+/// Not upstream's: the listing hides a credential made from the config,
+/// and the dashboard API shows a `claude-cli` entry's credential with
+/// this. It shows a credential whatever its source, but not one whose
+/// file is gone after it was disabled or removed. It reads the metadata of
+/// the credential's file, if it has one.
+pub fn credential_entry(
+    state: &ManagementState,
+    id: &str,
+    now: Timestamp,
+) -> Option<(Arc<Auth>, Value)> {
+    let auth = state.manager().get(id)?;
+    let entry = with_cooldowns(entry_fields(&auth, now)?, &auth, now);
+    let value = serde_json::from_str(&entry.encode()).ok()?;
+    Some((auth, value))
+}
+
+/// `entry` with the credential's cooldowns at `now`.
+fn with_cooldowns(mut entry: Entry, auth: &Auth, now: Timestamp) -> Json {
     let cooldowns = cooldown_snapshot_for_auth(auth, now)
         .iter()
         .map(cooldown_json)
         .collect();
     entry.insert("cooldowns".into(), Json::Array(cooldowns));
-    Some(Json::Map(entry))
+    Json::Map(entry)
 }
 
 /// A cooldown as upstream's `CooldownView` struct writes it.
@@ -353,15 +381,23 @@ fn is_listable(auth: &Auth) -> bool {
 /// A credential's entry, or `None` when it is hidden (upstream's
 /// `buildAuthFileEntryLocked`).
 fn build_entry(auth: &Auth, now: Timestamp) -> Option<Entry> {
-    let index = auth_index(auth);
     let runtime_only = is_runtime_only(auth);
     if runtime_only && is_disabled(auth) {
         return None;
     }
-    let path = attribute(auth, "path").trim();
-    if path.is_empty() && !runtime_only {
+    if attribute(auth, "path").trim().is_empty() && !runtime_only {
         return None;
     }
+    entry_fields(auth, now)
+}
+
+/// A credential's entry, whatever its source, or `None` when its file is
+/// gone after it was disabled or removed (the rest of upstream's
+/// `buildAuthFileEntryLocked`).
+fn entry_fields(auth: &Auth, now: Timestamp) -> Option<Entry> {
+    let index = auth_index(auth);
+    let runtime_only = is_runtime_only(auth);
+    let path = attribute(auth, "path").trim();
     let cooldown = reconcile_cooldown_state(auth, now);
     let provider = auth.provider.trim();
     let mut entry = Entry::new();

@@ -79,6 +79,7 @@ mod vertex_import;
 use open_ferry_core::observe::client_ip;
 
 pub use access::{Refusal, check_address, check_key, set_build_headers};
+pub use auth_files::credential_entry;
 pub use client_ip::TrustedProxies;
 pub use config_write::{
     ConfigReload, ConfigWriter, FileConfigWriter, ReloadFuture, V8Edit, V8EditError, V8Method,
