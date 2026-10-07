@@ -66,6 +66,7 @@ At start, and when the list changes, open-ferry runs each entry's `claude --vers
 - **No client tools yet.** A request with tools, a tool choice other than `none` or `auto`, or tool calls and results in its messages gets a 400.
 - **Earlier turns go as a transcript.** A conversation of several turns goes to Claude Code as one message holding all of it, not as separate turns. A new turn only adds to the transcript, so Claude Code's prompt cache still works.
 - **Sampling settings are ignored**: `temperature`, `top_p`, `top_k`, `stop_sequences` and metadata. `max_tokens`, the thinking budget and the effort are passed on.
+- **Thinking comes back without its text.** Claude Code doesn't pass on what the model thought, so a client that asks for thinking gets thinking blocks with their signatures and empty text. A client that doesn't ask gets none, even when the model thought.
 - **Each request starts a process.** Short requests took 2 to 4.5 seconds in our testing.
 - **Claude Code's own overhead counts toward your plan's limits.** Each request writes about 590 tokens of Claude Code's own to the prompt cache. Usage is reported as Claude Code gives it, with these tokens in it.
 - **Token counting isn't supported**: `/v1/messages/count_tokens` answers 501.
