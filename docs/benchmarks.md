@@ -22,6 +22,7 @@ Each is started with `-config <file> -local-model`, in a directory of its own ho
 
 - **Start time:** from starting the process to its first answer on `GET /v1/models`, polled every millisecond. The proxy is started once without measuring, which puts its binary in the OS's file cache, then five times measured; the report gives the median, fastest and slowest.
 - **Short requests:** a system prompt and a one-line question, as a Chat Completions request to the OpenAI-compatible provider and as a Claude Messages request to the Claude one, each streamed and not. Each number of clients (1, 16 and 64) sends them for 10 seconds, each client sending its next request as soon as it has read the whole answer to the last. The report gives requests answered per second and the latency to the end of the answer at the 50th, 90th and 99th percentiles. Every answer is checked for the fake upstream's text, and anything else is counted as an error.
+- **Upstream connections:** how many connections the proxy opened to the fake upstream over each load level. A proxy that keeps its connections open needs about one per client; one that closes them opens about one per request. Each closed connection holds a port of the machine for up to two minutes (TIME_WAIT on Windows; less elsewhere), and the ports for outgoing connections, 16,384 by default on Windows, are shared by every program on the machine. So a level stops early once the proxy has opened 4,000 connections within two minutes, and is marked so; its requests per second are over the time it ran. The next level waits until fewer than 2,000 were opened within two minutes.
 - **CPU time per request:** the proxy process's user and system CPU time, as the OS reports it, over each load level, divided by the requests answered. It includes whatever else the proxy did meanwhile.
 - **Memory:** the proxy's resident memory (the working set on Windows), sampled every 50 ms: the median over the two seconds after it starts, the median under the short-request load, and the peak over the whole run.
 - **Long conversation:** a coding agent's conversation of 120 turns: a 2 KB system prompt, two tools, and a tool call with a 2.4 KB result every fourth turn, about 300 KiB as either kind of request. Each kind, streamed and not, is sent 30 times, one after another, after two that aren't measured. The report gives the latency at the 50th and 90th percentiles, the slowest, and the median time to the answer's first bytes.
@@ -29,6 +30,8 @@ Each is started with `-config <file> -local-model`, in a directory of its own ho
 Each request goes to a provider of its own format, so this measures the proxies' handling of a request, not translation between formats. It doesn't measure real providers, TLS, OAuth credentials or WebSockets.
 
 **Fairness.** The load generator and the fake upstream run on the same machine as the proxy and share its CPUs; the two proxies never run at the same time. open-ferry is the workspace's release build (`cargo build --release -p open-ferry`). CLIProxyAPI is built from a checkout with the flags of its release builds, but without cgo, which only its plugin loader needs. Go's and Tokio's worker threads both default to the number of logical CPUs. With the default 20 ms delay, 64 clients can make at most 3,200 requests a second.
+
+**Connections to the upstream.** CLIProxyAPI sends these requests through Go's default HTTP transport, which keeps at most two idle connections per host. With more requests at once than that, it closes most connections after their answer and opens new ones, which shows in its upstream connections and CPU time, and can stop its levels early. Against a real provider, each new connection costs a TLS handshake too, which the fake upstream, on plain HTTP, doesn't measure.
 
 ## Running it
 
@@ -40,7 +43,7 @@ cargo build --release --locked -p open-ferry
 cargo run --release --locked -p open-ferry-bench -- --upstream ../CLIProxyAPI --go go1.26.4 --out docs/benchmarks.md
 ```
 
-It builds CLIProxyAPI into `target/bench` (changing nothing in the checkout), runs both proxies, prints the results, and with `--out` writes them in place of the results below. A run takes about six minutes. The options:
+It builds CLIProxyAPI into `target/bench` (changing nothing in the checkout), runs both proxies, prints the results, and with `--out` writes them in place of the results below. A run takes about six minutes, and longer when a level has to wait for ports to be freed. The options:
 
 | Option | Default | |
 |---|---|---|

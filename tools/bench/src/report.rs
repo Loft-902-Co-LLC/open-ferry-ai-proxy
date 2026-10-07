@@ -62,6 +62,9 @@ pub struct Settings {
     pub concurrency: Vec<usize>,
     pub starts: usize,
     pub long_requests: usize,
+    /// New upstream connections a proxy may open within
+    /// [`crate::fake::TIME_WAIT`] before a load level stops.
+    pub port_budget: usize,
     /// The long conversation's size in bytes and its number of messages, in
     /// the Chat Completions and the Claude Messages formats.
     pub long_chat: (usize, usize),
@@ -79,12 +82,14 @@ pub struct ProxyResult {
     pub long: Vec<(&'static str, Outcome)>,
 }
 
-/// Short requests from a number of clients at once: what they got, and the
-/// CPU time the proxy spent per request.
+/// Short requests from a number of clients at once: what they got, the CPU
+/// time the proxy spent per request, and the connections it opened to the
+/// fake upstream.
 pub struct ShortRow {
     pub clients: usize,
     pub outcome: Outcome,
     pub cpu: Option<Duration>,
+    pub connections: u64,
 }
 
 /// What the fake upstream saw over the whole run.
@@ -150,25 +155,37 @@ pub fn render(
         );
     }
 
-    out.push_str(
+    let _ = writeln!(
+        out,
         "\n#### Short requests\n\nA system prompt and a one-line question, sent again and \
          again by each number of clients at once. Latency is to the end of the answer; CPU is \
-         the proxy's own user and system time, divided by the requests it answered.\n",
+         the proxy's own user and system time, divided by the requests it answered. Upstream \
+         connections are the connections the proxy opened to the fake upstream. Each closed \
+         one holds a port of the machine for up to {}, so a level stops early once the proxy \
+         has opened {} within that time, and the next waits until enough are freed.",
+        duration_words(crate::fake::TIME_WAIT),
+        thousands(settings.port_budget as u64),
     );
     let kinds: Vec<&'static str> = proxies
         .first()
         .map(|proxy| proxy.short.iter().map(|(kind, _)| *kind).collect())
         .unwrap_or_default();
     let mut errors = Vec::new();
+    let mut stopped = Vec::new();
     for kind in kinds {
         let _ = writeln!(out, "\n{kind}:\n");
         out.push_str(
-            "| Clients | Proxy | Requests/s | p50 | p90 | p99 | CPU per request | Errors |\n\
-             |---:|---|---:|---:|---:|---:|---:|---:|\n",
+            "| Clients | Proxy | Requests/s | p50 | p90 | p99 | CPU per request | Errors | \
+             Upstream connections |\n|---:|---|---:|---:|---:|---:|---:|---:|---:|\n",
         );
         for &level in &settings.concurrency {
             for proxy in proxies {
-                let Some(ShortRow { outcome, cpu, .. }) = proxy
+                let Some(ShortRow {
+                    outcome,
+                    cpu,
+                    connections,
+                    ..
+                }) = proxy
                     .short
                     .iter()
                     .find(|(k, _)| *k == kind)
@@ -179,19 +196,35 @@ pub fn render(
                 let total = outcome.total;
                 let _ = writeln!(
                     out,
-                    "| {level} | {} | {} | {} | {} | {} | {} | {} |",
+                    "| {level} | {} | {}{} | {} | {} | {} | {} | {} | {} |",
                     proxy.name,
                     thousands(outcome.per_second().round() as u64),
+                    if outcome.stopped { "*" } else { "" },
                     maybe(total.map(|p| p.p50)),
                     maybe(total.map(|p| p.p90)),
                     maybe(total.map(|p| p.p99)),
                     maybe(*cpu),
                     thousands(outcome.errors as u64),
+                    thousands(*connections),
                 );
+                if outcome.stopped {
+                    stopped.push(format!(
+                        "{}, {kind}, {level} clients: after {}",
+                        proxy.name,
+                        duration(outcome.elapsed)
+                    ));
+                }
                 if let Some(error) = &outcome.first_error {
                     errors.push(format!("{}, {kind}, {level} clients: {error}", proxy.name));
                 }
             }
+        }
+    }
+
+    if !stopped.is_empty() {
+        out.push_str("\n\\* Stopped early, at the limit of upstream connections:\n\n");
+        for line in &stopped {
+            let _ = writeln!(out, "- {line}");
         }
     }
 
@@ -315,6 +348,16 @@ fn duration(d: Duration) -> String {
     }
 }
 
+/// A whole number of seconds or minutes, in words.
+fn duration_words(d: Duration) -> String {
+    let secs = d.as_secs();
+    match secs {
+        60 => "a minute".to_owned(),
+        s if s > 60 && s.is_multiple_of(60) => format!("{} minutes", s / 60),
+        s => format!("{s} seconds"),
+    }
+}
+
 fn times(n: usize) -> String {
     match n {
         1 => "once".to_owned(),
@@ -390,6 +433,9 @@ mod tests {
         assert_eq!(thousands(999), "999");
         assert_eq!(mib(3 * 1024 * 1024 / 2), "1.5 MiB");
         assert_eq!(kib(330_000), "323 KiB");
+        assert_eq!(duration_words(Duration::from_secs(120)), "2 minutes");
+        assert_eq!(duration_words(Duration::from_secs(60)), "a minute");
+        assert_eq!(duration_words(Duration::from_secs(30)), "30 seconds");
     }
 
     // Not upstream's: a report of one proxy, and writing it between markers.
@@ -401,6 +447,7 @@ mod tests {
             errors,
             first_error: (errors > 0).then(|| "HTTP 502 Bad Gateway: no".to_owned()),
             elapsed: Duration::from_secs(1),
+            stopped: errors > 0,
             total: p,
             first_byte: p,
         };
@@ -408,14 +455,26 @@ mod tests {
             name: "open-ferry",
             version: "abc1234".to_owned(),
             starts: vec![Duration::from_millis(30), Duration::from_millis(10)],
-            short: vec![(
-                "Chat",
-                vec![ShortRow {
-                    clients: 1,
-                    outcome: outcome(0),
-                    cpu: Some(Duration::from_micros(300)),
-                }],
-            )],
+            short: vec![
+                (
+                    "Chat",
+                    vec![ShortRow {
+                        clients: 1,
+                        outcome: outcome(0),
+                        cpu: Some(Duration::from_micros(300)),
+                        connections: 1,
+                    }],
+                ),
+                (
+                    "Claude",
+                    vec![ShortRow {
+                        clients: 1,
+                        outcome: outcome(1),
+                        cpu: None,
+                        connections: 4_000,
+                    }],
+                ),
+            ],
             memory: Memory {
                 idle: Some(10 << 20),
                 load: Some(20 << 20),
@@ -436,6 +495,7 @@ mod tests {
             concurrency: vec![1],
             starts: 2,
             long_requests: 3,
+            port_budget: 4000,
             long_chat: (300_000, 302),
             long_claude: (310_000, 241),
         };
@@ -451,8 +511,23 @@ mod tests {
         ));
         assert!(text.contains("| open-ferry | 30.0 ms | 10.0 ms | 30.0 ms |\n"));
         assert!(
-            text.contains("| 1 | open-ferry | 3 | 22.0 ms | 30.0 ms | 30.0 ms | 300 µs | 0 |\n")
+            text.contains(
+                "| 1 | open-ferry | 3 | 22.0 ms | 30.0 ms | 30.0 ms | 300 µs | 0 | 1 |\n"
+            )
         );
+        assert!(text.contains(
+            "for up to 2 minutes, so a level stops early once the proxy has opened 4,000"
+        ));
+        assert!(
+            text.contains(
+                "| 1 | open-ferry | 3* | 22.0 ms | 30.0 ms | 30.0 ms | - | 1 | 4,000 |\n"
+            )
+        );
+        assert!(text.contains(
+            "\\* Stopped early, at the limit of upstream connections:\n\n\
+             - open-ferry, Claude, 1 clients: after 1.00 s\n"
+        ));
+        assert!(text.contains("- open-ferry, Claude, 1 clients: HTTP 502 Bad Gateway: no\n"));
         assert!(text.contains("| open-ferry | 10.0 MiB | 20.0 MiB | 30.0 MiB |\n"));
         assert!(text.contains(
             "| Chat, streamed | open-ferry | 22.0 ms | 30.0 ms | 30.0 ms | 22.0 ms | 1 |\n"

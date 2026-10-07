@@ -17,7 +17,8 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use body::Format;
-use load::Request;
+use fake::Counts;
+use load::{Request, Stop};
 use proxy::{DeadPort, MemorySampler, Running, Setup, Stage, Target, Usage};
 use report::{FakeSeen, Machine, ProxyResult, Settings, ShortRow};
 
@@ -48,6 +49,12 @@ Options:
                          between its bench-results markers
   -h, --help             show this
 ";
+
+/// New connections to the fake upstream a proxy may open within
+/// [`fake::TIME_WAIT`]. Each closed one holds a port of the machine for that
+/// long: this is a quarter of Windows' default range of 16,384 ports for
+/// outgoing connections, which every program on the machine shares.
+const PORT_BUDGET: usize = 4_000;
 
 struct Args {
     upstream: Option<PathBuf>,
@@ -182,7 +189,7 @@ async fn run(args: Args) -> Result<(), Box<dyn Error>> {
     };
     let mut results = Vec::new();
     for target in &targets {
-        results.push(bench(target, &setup, &args).await?);
+        results.push(bench(target, &setup, &args, &fake.counts).await?);
     }
 
     let settings = Settings {
@@ -191,6 +198,7 @@ async fn run(args: Args) -> Result<(), Box<dyn Error>> {
         concurrency: args.concurrency.clone(),
         starts: args.starts,
         long_requests: args.long_requests,
+        port_budget: PORT_BUDGET,
         long_chat: (
             body::long(Format::Chat, proxy::OPENAI_MODEL, false).len(),
             body::long_messages(Format::Chat),
@@ -345,7 +353,25 @@ fn model(format: Format) -> &'static str {
     }
 }
 
-async fn bench(target: &Target, setup: &Setup, args: &Args) -> Result<ProxyResult, Box<dyn Error>> {
+/// Waits until fewer than half of [`PORT_BUDGET`] connections to the fake
+/// upstream were opened within [`fake::TIME_WAIT`], so that the next load
+/// level has room to run.
+async fn wait_for_ports(counts: &Counts) {
+    if counts.recent_connections() < PORT_BUDGET / 2 {
+        return;
+    }
+    eprintln!("Waiting for the ports of closed upstream connections to be freed...");
+    while counts.recent_connections() >= PORT_BUDGET / 2 {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+async fn bench(
+    target: &Target,
+    setup: &Setup,
+    args: &Args,
+    counts: &Arc<Counts>,
+) -> Result<ProxyResult, Box<dyn Error>> {
     let name = target.name;
     let run_name = name.to_ascii_lowercase();
 
@@ -393,12 +419,24 @@ async fn bench(target: &Target, setup: &Setup, args: &Args) -> Result<ProxyResul
         ));
         let mut rows = Vec::new();
         for &level in &args.concurrency {
+            wait_for_ports(counts).await;
+            // Stop before the proxy's closed upstream connections can take
+            // more of the machine's ports than the budget.
+            let stop: Stop = {
+                let counts = Arc::clone(counts);
+                Arc::new(move || counts.recent_connections() >= PORT_BUDGET)
+            };
+            let connections_before = counts.connections.load(Ordering::Relaxed);
             sampler.set(Stage::Load);
             let cpu_before = usage.cpu_ms();
             let outcome =
-                load::closed_loop(&client, Arc::clone(&request), level, args.duration).await;
+                load::closed_loop(&client, Arc::clone(&request), level, args.duration, stop).await;
             let cpu_after = usage.cpu_ms();
             sampler.set(Stage::Other);
+            let connections = counts
+                .connections
+                .load(Ordering::Relaxed)
+                .saturating_sub(connections_before);
             let cpu = match (cpu_before, cpu_after) {
                 (Some(before), Some(after)) if outcome.ok > 0 && after > before => Some(
                     Duration::from_micros(after.saturating_sub(before) * 1000 / outcome.ok as u64),
@@ -406,14 +444,21 @@ async fn bench(target: &Target, setup: &Setup, args: &Args) -> Result<ProxyResul
                 _ => None,
             };
             eprintln!(
-                "{name}: {kind}, {level} clients: {:.0}/s, {} errors",
+                "{name}: {kind}, {level} clients: {:.0}/s, {} errors, {connections} upstream \
+                 connections{}",
                 outcome.per_second(),
-                outcome.errors
+                outcome.errors,
+                if outcome.stopped {
+                    format!(", stopped after {:.1?}", outcome.elapsed)
+                } else {
+                    String::new()
+                },
             );
             rows.push(ShortRow {
                 clients: level,
                 outcome,
                 cpu,
+                connections,
             });
             // Let connections the level left behind close.
             tokio::time::sleep(Duration::from_millis(500)).await;

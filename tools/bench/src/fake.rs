@@ -2,13 +2,17 @@
 //! OpenAI-compatible provider (`POST /v1/chat/completions`) and like Claude
 //! (`POST /v1/messages`), streamed or not, after a fixed delay. Its answers
 //! start with [`MARKER`], so the load generator can tell an answer that came
-//! through from an error the proxy made up.
+//! through from an error the proxy made up. It also counts the connections
+//! a proxy opens to it: each one closed holds a port of the machine for a
+//! while, so a proxy that opens one per request can run the machine out of
+//! ports.
 
+use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
 use axum::Router;
@@ -17,6 +21,7 @@ use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
+use axum::serve::ListenerExt;
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
@@ -33,6 +38,11 @@ const WORDS: [&str; 15] = [
 /// kilobytes, which axum's default limit of 2 MiB would allow too.
 const BODY_LIMIT: usize = 16 * 1024 * 1024;
 
+/// How long the port of a closed connection can stay taken (in TIME_WAIT)
+/// with the OSes' defaults: 120 seconds on Windows, 60 on Linux and 30 on
+/// macOS.
+pub const TIME_WAIT: Duration = Duration::from_secs(120);
+
 /// What the fake upstream has seen.
 #[derive(Default)]
 pub struct Counts {
@@ -45,6 +55,10 @@ pub struct Counts {
     delays: AtomicU64,
     /// The last other path asked for, to say what went wrong.
     pub last_other: Mutex<Option<String>>,
+    /// Connections accepted.
+    pub connections: AtomicU64,
+    /// When each connection of the last [`TIME_WAIT`] was accepted.
+    recent: std::sync::Mutex<VecDeque<Instant>>,
 }
 
 impl Counts {
@@ -57,6 +71,30 @@ impl Counts {
     pub fn mean_delay(&self) -> Option<Duration> {
         let delays = self.delays.load(Ordering::Relaxed);
         (delays > 0).then(|| Duration::from_micros(self.delay_us.load(Ordering::Relaxed) / delays))
+    }
+
+    fn accepted(&self) {
+        self.connections.fetch_add(1, Ordering::Relaxed);
+        let now = Instant::now();
+        let mut recent = self.recent.lock().unwrap_or_else(PoisonError::into_inner);
+        forget_old(&mut recent, now);
+        recent.push_back(now);
+    }
+
+    /// Connections accepted within the last [`TIME_WAIT`].
+    pub fn recent_connections(&self) -> usize {
+        let mut recent = self.recent.lock().unwrap_or_else(PoisonError::into_inner);
+        forget_old(&mut recent, Instant::now());
+        recent.len()
+    }
+}
+
+fn forget_old(recent: &mut VecDeque<Instant>, now: Instant) {
+    while recent
+        .front()
+        .is_some_and(|at| now.saturating_duration_since(*at) >= TIME_WAIT)
+    {
+        recent.pop_front();
     }
 }
 
@@ -86,6 +124,10 @@ pub async fn start(delay: Duration) -> io::Result<FakeUpstream> {
         .fallback(other)
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
         .with_state(shared);
+    let listener = {
+        let counts = Arc::clone(&counts);
+        listener.tap_io(move |_| counts.accepted())
+    };
     tokio::spawn(async move {
         if let Err(err) = axum::serve(listener, app).await {
             eprintln!("fake upstream stopped: {err}");
@@ -378,5 +420,8 @@ mod tests {
             Some("/v1/models")
         );
         assert!(fake.counts.mean_delay().unwrap() >= Duration::from_millis(1));
+        // Each request came from a client of its own.
+        assert_eq!(fake.counts.connections.load(Ordering::Relaxed), 5);
+        assert_eq!(fake.counts.recent_connections(), 5);
     }
 }

@@ -2,6 +2,7 @@
 //! while, or one after another, with each answer's latency.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -59,6 +60,8 @@ pub struct Outcome {
     pub errors: usize,
     pub first_error: Option<String>,
     pub elapsed: Duration,
+    /// Whether the run stopped before its time was up.
+    pub stopped: bool,
     /// Time to the whole answer.
     pub total: Option<Percentiles>,
     /// Time to the answer's first body bytes.
@@ -113,6 +116,7 @@ impl Samples {
             errors: self.errors,
             first_error: self.first_error,
             elapsed,
+            stopped: false,
             total: Percentiles::of(self.total),
             first_byte: Percentiles::of(self.first_byte),
         }
@@ -177,23 +181,34 @@ pub async fn send(
     Ok((first_byte.unwrap_or(total), total))
 }
 
+/// Says when a run has to stop before its time is up.
+pub type Stop = Arc<dyn Fn() -> bool + Send + Sync>;
+
 /// `concurrency` clients each send `request` again and again until
-/// `duration` has passed, then finish the request they're on.
+/// `duration` has passed, or `stop` says so, then finish the request they're
+/// on.
 pub async fn closed_loop(
     client: &reqwest::Client,
     request: Arc<Request>,
     concurrency: usize,
     duration: Duration,
+    stop: Stop,
 ) -> Outcome {
     let started = Instant::now();
     let deadline = started + duration;
+    let stopped = Arc::new(AtomicBool::new(false));
     let mut tasks = Vec::with_capacity(concurrency);
     for _ in 0..concurrency {
         let client = client.clone();
         let request = Arc::clone(&request);
+        let (stop, stopped) = (Arc::clone(&stop), Arc::clone(&stopped));
         tasks.push(tokio::spawn(async move {
             let mut samples = Samples::default();
-            while Instant::now() < deadline {
+            while Instant::now() < deadline && !stopped.load(Ordering::Relaxed) {
+                if stop() {
+                    stopped.store(true, Ordering::Relaxed);
+                    break;
+                }
                 samples.record(send(&client, &request).await);
             }
             samples
@@ -206,7 +221,9 @@ pub async fn closed_loop(
             Err(err) => samples.record(Err(err.to_string())),
         }
     }
-    samples.outcome(started.elapsed())
+    let mut outcome = samples.outcome(started.elapsed());
+    outcome.stopped = stopped.load(Ordering::Relaxed);
+    outcome
 }
 
 /// Sends `request` `count` times, one after another.
@@ -255,11 +272,35 @@ mod tests {
             key: "k".into(),
             body: crate::body::short(Format::Chat, "m", true),
         });
-        let outcome =
-            closed_loop(&client, Arc::clone(&request), 2, Duration::from_millis(100)).await;
+        let never: Stop = Arc::new(|| false);
+        let outcome = closed_loop(
+            &client,
+            Arc::clone(&request),
+            2,
+            Duration::from_millis(100),
+            never,
+        )
+        .await;
         assert!(outcome.ok > 0);
         assert_eq!(outcome.errors, 0);
+        assert!(!outcome.stopped);
         assert!(outcome.per_second() > 0.0);
+
+        // A run told to stop stops early.
+        let counts = Arc::clone(&fake.counts);
+        let before = counts.answered();
+        let after_three: Stop = Arc::new(move || counts.answered() >= before + 3);
+        let outcome = closed_loop(
+            &client,
+            Arc::clone(&request),
+            2,
+            Duration::from_secs(30),
+            after_three,
+        )
+        .await;
+        assert!(outcome.stopped);
+        assert!((3..=4).contains(&outcome.ok));
+        assert!(outcome.elapsed < Duration::from_secs(30));
 
         let missing = Request {
             url: format!("http://{}/v1/other", fake.addr),
