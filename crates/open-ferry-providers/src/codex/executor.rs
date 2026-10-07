@@ -208,6 +208,25 @@ impl CodexExecutor {
             .is_some_and(|config| config.codex.model_level_cooling)
     }
 
+    /// Whether a streaming call over the WebSocket keeps its connection for
+    /// the client's later frames, when the client's socket hands them on
+    /// (`codex.response-steering`, experimental).
+    pub(super) fn response_steering(&self) -> bool {
+        self.config
+            .as_deref()
+            .is_some_and(|config| config.codex.response_steering)
+    }
+
+    /// The executor's config, for a stream that outlives the call.
+    pub(super) fn shared_config(&self) -> Option<Arc<Config>> {
+        self.config.clone()
+    }
+
+    /// The models the executor serves, for a stream that outlives the call.
+    pub(super) fn shared_models(&self) -> Option<Arc<dyn ModelCatalog>> {
+        self.models.clone()
+    }
+
     /// How long a stream's first lines may be held back, when
     /// `codex.stream-bootstrap-buffering` is on.
     pub(super) fn bootstrap(&self) -> Option<Bootstrap> {

@@ -27,6 +27,8 @@
 //! - [`dial`] connects, directly or through an HTTP proxy, and shakes hands;
 //! - [`session`] keeps sessions, their connection and its reader;
 //! - [`execute`] and [`stream`] make the calls;
+//! - [`duplex`] keeps a streaming call's connection for the client's socket
+//!   with `codex.response-steering` on;
 //! - [`errors`] reads failures as upstream's errors.
 //!
 //! Deviations from upstream (each module lists its own):
@@ -36,9 +38,8 @@
 //!   considered, where upstream's WebSocket executor hands it to HTTP; the
 //!   outcome is the same.
 //! - The execution lifecycle binding, `RequiredUpstreamWebsocket`,
-//!   `UpstreamDisconnectChan`, response steering (the duplex reader) and
-//!   `CloseCodexWebsocketSessionsForAuthID` aren't ported, as the server
-//!   uses none of them.
+//!   `UpstreamDisconnectChan` and `CloseCodexWebsocketSessionsForAuthID`
+//!   aren't ported, as the server uses none of them.
 //! - Usage reporting and request logging are left to the call's taps: they
 //!   are told of the `response.create` message before the connection is
 //!   made, with no answer head, then of each message read (see the crate's
@@ -56,6 +57,7 @@
 //!   short, from each field; upstream logs them as they are.
 
 pub(crate) mod dial;
+mod duplex;
 pub(crate) mod errors;
 mod execute;
 #[cfg(test)]

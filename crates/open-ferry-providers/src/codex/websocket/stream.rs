@@ -22,11 +22,15 @@
 //! The call ends (the next call of the session may go, and a call's own
 //! connection is closed) before its last chunk is handed on.
 //!
+//! With `codex.response-steering` on and the client's frames given in the
+//! call's options, the connection is handed to [`super::duplex`] once the
+//! request is sent, before any bootstrap buffering, and kept for the
+//! client's socket.
+//!
 //! Deviations from upstream:
 //! - Chunks are Codex's events, for a client on the Responses WebSocket;
 //!   upstream's SSE translation for other clients isn't ported, as only
 //!   those clients take this route.
-//! - The response steering duplex isn't ported.
 //! - Each message has the secrets the call sent redacted before it is read,
 //!   held back while the stream starts or not, if they are of eight bytes
 //!   or more, as every client error is (see `Policy::Client` in the crate's
@@ -46,6 +50,7 @@ use open_ferry_core::auth::Auth;
 use open_ferry_core::exec::{ChunkStream, ExecError, Options, Request, StreamResponse};
 use serde_json::Value;
 
+use super::duplex;
 use super::errors;
 use super::execute::{Call, Opened, open};
 use super::request::prepare;
@@ -79,14 +84,22 @@ pub(in crate::codex) async fn execute_stream(
         &request,
         &options,
     )?;
+    let call = match open(executor, auth, &mut prepared, &options).await? {
+        Opened::Ws(call) => call,
+        Opened::Fallback => return executor.execute_stream_inner(auth, request, options).await,
+    };
+    if executor.response_steering()
+        && let Some(input) = options.websocket_input.clone()
+    {
+        return Ok(duplex::start(
+            executor, auth, request, options, input, &prepared, call,
+        ));
+    }
     let Call {
         hold,
         headers,
         secrets,
-    } = match open(executor, auth, &mut prepared, &options).await? {
-        Opened::Ws(call) => call,
-        Opened::Fallback => return executor.execute_stream_inner(auth, request, options).await,
-    };
+    } = call;
     let mut state = State {
         hold,
         turn: prepared.turn,

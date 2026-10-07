@@ -32,7 +32,7 @@ use super::request::{Context, Kind};
 
 /// What [`prepare`] noted about a request, for the hooks that see its
 /// response.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct Turn {
     /// Whether the collaboration namespace was renamed for multi-agent v2,
     /// so that responses must name it back.

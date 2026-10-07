@@ -895,6 +895,11 @@ impl Hold {
         &self.conn
     }
 
+    /// The session the call holds.
+    pub(super) fn session(&self) -> &Arc<Session> {
+        &self.session
+    }
+
     /// The next read of the connection (`readCodexWebsocketMessage`).
     pub(crate) async fn recv(&mut self) -> Result<String, Failure> {
         loop {

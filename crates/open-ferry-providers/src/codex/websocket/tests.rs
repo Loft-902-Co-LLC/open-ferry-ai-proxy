@@ -9,8 +9,8 @@
 //! The Responses WebSocket upstream against a mock Codex on 127.0.0.1 (see
 //! [`super::mock`]), ported from upstream's WebSocket tests where they test
 //! what is ported. The calls are in this file, the sessions in
-//! [`sessions`], connecting in [`proxy`], and keeping the credential's
-//! secret out of failures in [`secrets`].
+//! [`sessions`], connecting in [`proxy`], keeping the credential's secret
+//! out of failures in [`secrets`], and response steering in [`duplex`].
 //!
 //! Upstream's tests call its WebSocket executor, which takes any client;
 //! here [`CodexExecutor`] only takes the WebSocket route for a client on the
@@ -69,9 +69,7 @@
 //!   `TestCodexWebsockets_SendErrorLogsSessionObject`: logging.
 //! - `TestCodexWebsocketsExecutorOptimizeMultiAgentV2`: the body rewrite
 //!   is the HTTP route's, tested in `codex/compat/tests.rs`.
-//! - `codex_websockets_routing_hint_test.go` (the routing hint is made up)
-//!   and the `codex_websockets_duplex_*_test.go` files (response steering
-//!   isn't ported).
+//! - `codex_websockets_routing_hint_test.go`: the routing hint is made up.
 //! - The xAI subtests: xAI shares the store tested here (see `crate::xai::websocket`).
 //! - `BenchmarkBuildCodexWebsocketRequestBodyLargePayload`: a benchmark.
 
@@ -100,6 +98,7 @@ use crate::codex::replay_cache::tests::valid_encrypted_content;
 use crate::codex::request::CONTROL_CHARACTER;
 use crate::json::{exists, get, str_at};
 
+mod duplex;
 mod observe;
 mod proxy;
 mod secrets;
