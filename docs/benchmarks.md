@@ -31,7 +31,7 @@ Each request goes to a provider of its own format, so this measures the proxies'
 
 **Fairness.** The load generator and the fake upstream run on the same machine as the proxy and share its CPUs; the two proxies never run at the same time. open-ferry is the workspace's release build (`cargo build --release -p open-ferry`). CLIProxyAPI is built from a checkout with the flags of its release builds, but without cgo, which only its plugin loader needs. Go's and Tokio's worker threads both default to the number of logical CPUs. With the default 20 ms delay, 64 clients can make at most 3,200 requests a second.
 
-**Connections to the upstream.** CLIProxyAPI sends these requests through Go's default HTTP transport, which keeps at most two idle connections per host. With more requests at once than that, it closes most connections after their answer and opens new ones, which shows in its upstream connections and CPU time, and can stop its levels early. Against a real provider, each new connection costs a TLS handshake too, which the fake upstream, on plain HTTP, doesn't measure.
+**Connections to the upstream.** CLIProxyAPI sends these requests through Go's default HTTP transport, which keeps at most two idle connections per host. With more requests at once than that, it closes many connections after their answer and opens new ones (in the run below, about one for every two to four requests), which shows in its upstream connections and CPU time, and can stop its levels early. Against a real provider, each new connection costs a TLS handshake too, which the fake upstream, on plain HTTP, doesn't measure.
 
 ## Running it
 
@@ -66,4 +66,101 @@ It builds CLIProxyAPI into `target/bench` (changing nothing in the checkout), ru
 Preliminary: see the warning above.
 
 <!-- bench-results:start -->
+<!-- Written by tools/bench's --out option. Don't edit it by hand: rerun the tool. -->
+Run on 2026-10-07 on Windows 11 Pro, AMD Ryzen 7 5700X 8-Core Processor with 16 logical CPUs and 96 GiB of memory. Before the run its CPUs were 30% busy.
+
+- open-ferry: release build of commit `9c9b3a5`
+- CLIProxyAPI: v8.0.15 (commit `a4acc9f752bd`), built with go1.26.4
+
+The fake upstream waited 20.0 ms before each answer. Each load level ran for 10.00 s. For the start time each proxy was started 5 times, after a start that wasn't measured. Each kind of long conversation request was sent 30 times, one after another.
+
+#### Start time
+
+From starting the process to its first answer on `GET /v1/models`.
+
+| Proxy | Median | Fastest | Slowest |
+|---|---:|---:|---:|
+| open-ferry | 62.7 ms | 61.5 ms | 72.9 ms |
+| CLIProxyAPI | 34.4 ms | 32.7 ms | 59.3 ms |
+
+#### Short requests
+
+A system prompt and a one-line question, sent again and again by each number of clients at once. Latency is to the end of the answer; CPU is the proxy's own user and system time, divided by the requests it answered. Upstream connections are the connections the proxy opened to the fake upstream. Each closed one holds a port of the machine for up to 2 minutes, so a level stops early once the proxy has opened 4,000 within that time, and the next waits until enough are freed.
+
+Chat Completions:
+
+| Clients | Proxy | Requests/s | p50 | p90 | p99 | CPU per request | Errors | Upstream connections |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| 1 | open-ferry | 47 | 21.1 ms | 21.4 ms | 21.6 ms | 792 µs | 0 | 0 |
+| 1 | CLIProxyAPI | 47 | 21.4 ms | 21.7 ms | 24.6 ms | 1.11 ms | 0 | 0 |
+| 16 | open-ferry | 743 | 21.5 ms | 22.0 ms | 22.5 ms | 675 µs | 0 | 15 |
+| 16 | CLIProxyAPI | 743 | 21.5 ms | 22.1 ms | 23.5 ms | 1.02 ms | 0 | 3,779 |
+| 64 | open-ferry | 2,982 | 21.4 ms | 22.0 ms | 23.0 ms | 525 µs | 0 | 48 |
+| 64 | CLIProxyAPI | 3,012* | 21.0 ms | 21.6 ms | 22.8 ms | 793 µs | 0 | 4,000 |
+
+Chat Completions, streamed:
+
+| Clients | Proxy | Requests/s | p50 | p90 | p99 | CPU per request | Errors | Upstream connections |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| 1 | open-ferry | 45 | 22.1 ms | 22.4 ms | 22.8 ms | 2.04 ms | 0 | 0 |
+| 1 | CLIProxyAPI | 45 | 22.0 ms | 22.3 ms | 24.9 ms | 2.18 ms | 0 | 1 |
+| 16 | open-ferry | 713 | 22.4 ms | 23.0 ms | 24.9 ms | 1.33 ms | 0 | 0 |
+| 16 | CLIProxyAPI | 537 | 22.1 ms | 34.2 ms | 265.9 ms | 1.93 ms | 0 | 1,494 |
+| 64 | open-ferry | 2,870 | 22.1 ms | 23.1 ms | 25.8 ms | 1.29 ms | 0 | 1 |
+| 64 | CLIProxyAPI | 564* | 45.9 ms | 286.0 ms | 910.0 ms | 1.96 ms | 0 | 2,509 |
+
+Claude Messages:
+
+| Clients | Proxy | Requests/s | p50 | p90 | p99 | CPU per request | Errors | Upstream connections |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| 1 | open-ferry | 47 | 21.4 ms | 21.6 ms | 22.8 ms | 1.10 ms | 0 | 0 |
+| 1 | CLIProxyAPI | 47 | 21.3 ms | 21.6 ms | 22.7 ms | 1.13 ms | 0 | 1 |
+| 16 | open-ferry | 740 | 21.6 ms | 22.1 ms | 22.6 ms | 626 µs | 0 | 15 |
+| 16 | CLIProxyAPI | 745 | 21.4 ms | 22.0 ms | 22.9 ms | 1.06 ms | 0 | 3,506 |
+| 64 | open-ferry | 2,953 | 21.5 ms | 22.2 ms | 25.1 ms | 517 µs | 0 | 48 |
+| 64 | CLIProxyAPI | 2,959* | 21.2 ms | 22.2 ms | 28.1 ms | 969 µs | 0 | 3,424 |
+
+Claude Messages, streamed:
+
+| Clients | Proxy | Requests/s | p50 | p90 | p99 | CPU per request | Errors | Upstream connections |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| 1 | open-ferry | 45 | 22.3 ms | 22.7 ms | 23.0 ms | 2.15 ms | 0 | 0 |
+| 1 | CLIProxyAPI | 45 | 22.0 ms | 22.2 ms | 22.6 ms | 1.99 ms | 0 | 1 |
+| 16 | open-ferry | 714 | 22.3 ms | 22.9 ms | 24.3 ms | 1.43 ms | 0 | 0 |
+| 16 | CLIProxyAPI | 726 | 21.9 ms | 22.7 ms | 24.1 ms | 2.08 ms | 0 | 2,706 |
+| 64 | open-ferry | 2,873 | 22.1 ms | 23.0 ms | 24.8 ms | 1.30 ms | 0 | 1 |
+| 64 | CLIProxyAPI | 1,427* | 33.2 ms | 82.7 ms | 161.3 ms | 1.85 ms | 0 | 3,389 |
+
+\* Stopped early, at the limit of upstream connections:
+
+- CLIProxyAPI, Chat Completions, 64 clients: after 4.90 s
+- CLIProxyAPI, Chat Completions, streamed, 64 clients: after 7.71 s
+- CLIProxyAPI, Claude Messages, 64 clients: after 3.65 s
+- CLIProxyAPI, Claude Messages, streamed, 64 clients: after 4.24 s
+
+#### Memory
+
+Resident memory (the working set on Windows), sampled every 50 ms.
+
+| Proxy | Idle after start | Under load (median) | Peak |
+|---|---:|---:|---:|
+| open-ferry | 21.8 MiB | 41.7 MiB | 47.5 MiB |
+| CLIProxyAPI | 35.7 MiB | 51.9 MiB | 89.7 MiB |
+
+#### Long conversation
+
+A coding agent's conversation: a system prompt, two tools, and 241 messages with a tool call every fourth turn; 300 KiB as a Chat Completions request (302 messages there), 303 KiB as a Claude Messages one.
+
+| Request | Proxy | p50 | p90 | Slowest | First bytes p50 | Errors |
+|---|---|---:|---:|---:|---:|---:|
+| Chat Completions | open-ferry | 27.8 ms | 28.7 ms | 29.0 ms | 27.8 ms | 0 |
+| Chat Completions | CLIProxyAPI | 52.7 ms | 66.9 ms | 82.7 ms | 52.7 ms | 0 |
+| Chat Completions, streamed | open-ferry | 27.9 ms | 29.7 ms | 53.8 ms | 27.2 ms | 0 |
+| Chat Completions, streamed | CLIProxyAPI | 51.2 ms | 67.4 ms | 82.3 ms | 50.1 ms | 0 |
+| Claude Messages | open-ferry | 27.5 ms | 28.8 ms | 29.9 ms | 27.5 ms | 0 |
+| Claude Messages | CLIProxyAPI | 43.9 ms | 47.6 ms | 49.6 ms | 43.9 ms | 0 |
+| Claude Messages, streamed | open-ferry | 27.5 ms | 28.8 ms | 42.8 ms | 26.5 ms | 0 |
+| Claude Messages, streamed | CLIProxyAPI | 44.0 ms | 48.1 ms | 69.2 ms | 43.3 ms | 0 |
+
+The fake upstream answered 213,772 requests, after 20.5 ms on average.
 <!-- bench-results:end -->
