@@ -201,6 +201,14 @@ pub struct Settings {
     pub openai_compatibility: Vec<OpenAiCompat>,
 }
 
+/// The binding TTL `text` gives: a positive Go duration, or zero (an hour)
+/// for anything else (upstream's `normalizedRoutingRuntimeState`).
+fn affinity_ttl(text: &str) -> Duration {
+    config::parse_go_duration(text.trim())
+        .and_then(|nanos| u64::try_from(nanos).ok())
+        .map_or(Duration::ZERO, Duration::from_nanos)
+}
+
 impl From<&Config> for Settings {
     /// The settings in `config`. Negative counts and intervals are 0, as
     /// upstream's `SetRetryConfig` makes them.
@@ -313,9 +321,9 @@ impl From<&Config> for Settings {
             disable_cooling: config.disable_cooling,
             transient_error_cooldown_seconds: config.transient_error_cooldown_seconds,
             routing_strategy: RoutingStrategy::parse(&config.routing.strategy),
-            session_affinity: false,
-            session_affinity_ttl: Duration::ZERO,
-            session_affinity_subagents: None,
+            session_affinity: config.routing.session_affinity,
+            session_affinity_ttl: affinity_ttl(&config.routing.session_affinity_ttl),
+            session_affinity_subagents: config.routing.session_affinity_subagents,
             refresh_workers: count(config.auth_auto_refresh_workers),
             oauth_model_alias: config
                 .oauth_model_alias
@@ -586,5 +594,82 @@ openai-compatibility:
             shown.contains(r#""https://gateway.example/v1?<redacted>""#),
             "{shown}"
         );
+    }
+
+    /// The routing state of a config whose `routing` section is `routing`.
+    fn routing(routing: &str) -> RoutingState {
+        let config = Config::parse(format!("routing: {routing}\n")).expect("config");
+        RoutingState::of(&Settings::from(&config))
+    }
+
+    // Ports TestServiceApplyConfigRuntimePreservesSelectorForUnchangedRouting
+    // and TestBuilderPreservesInitialSelectorForSameRouting
+    // (service_executionregistry_test.go): the manager keeps its bindings
+    // while the routing state is equal, as upstream keeps its selector.
+    #[test]
+    fn same_routing_written_differently_is_unchanged() {
+        let initial =
+            routing("{strategy: fill-first, session-affinity: true, session-affinity-ttl: 1h}");
+        assert_eq!(
+            routing(
+                r#"{strategy: " FILLFIRST ", session-affinity: true, session-affinity-ttl: 60m}"#
+            ),
+            initial
+        );
+        assert_ne!(
+            routing("{strategy: round-robin, session-affinity: true, session-affinity-ttl: 1h}"),
+            initial
+        );
+    }
+
+    // Ports TestServiceApplyConfigRuntimeSessionAffinitySubagentsChangeRecreatesSelector
+    // and TestServiceApplyConfigRuntimeSessionAffinityDisabledSubagentsChangeIsNoOp
+    // (service_executionregistry_test.go).
+    #[test]
+    fn subagent_setting_counts_only_with_session_affinity() {
+        assert_ne!(
+            routing(
+                "{session-affinity: true, session-affinity-ttl: 1h, session-affinity-subagents: true}"
+            ),
+            routing(
+                "{session-affinity: true, session-affinity-ttl: 1h, session-affinity-subagents: false}"
+            )
+        );
+        assert_eq!(
+            routing(
+                "{session-affinity: false, session-affinity-ttl: 1h, session-affinity-subagents: true}"
+            ),
+            routing(
+                "{session-affinity: false, session-affinity-ttl: 1h, session-affinity-subagents: false}"
+            )
+        );
+    }
+
+    // Not upstream's: the TTL as upstream's normalizedRoutingRuntimeState
+    // reads it.
+    #[test]
+    fn session_affinity_ttl() {
+        const HOUR: Duration = Duration::from_secs(60 * 60);
+        let cases = [
+            ("", HOUR),
+            (" 30m ", Duration::from_secs(30 * 60)),
+            ("2h30m", Duration::from_secs(150 * 60)),
+            ("500ms", Duration::from_secs(1)),
+            ("0s", HOUR),
+            ("-5m", HOUR),
+            ("30", HOUR),
+            ("soon", HOUR),
+        ];
+        for (ttl, want) in cases {
+            let state = routing(&format!(
+                r#"{{session-affinity: true, session-affinity-ttl: "{ttl}"}}"#
+            ));
+            assert!(state.session_affinity);
+            assert_eq!(state.session_affinity_ttl, want, "{ttl:?}");
+        }
+        let state = routing("{}");
+        assert!(!state.session_affinity);
+        assert_eq!(state.session_affinity_ttl, HOUR);
+        assert!(state.session_affinity_subagents);
     }
 }

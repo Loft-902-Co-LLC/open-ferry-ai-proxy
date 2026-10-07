@@ -41,9 +41,10 @@
 //!   "select" path through `pick_next_mixed_sticky`, as `SelectAuth` isn't
 //!   ported; its "lcp" mode isn't ported, and the alias's `Fork: true` is
 //!   dropped as in `conductor_alias_cooldown`.
-//! - `ManagerSessionAffinityPreservesBindingAcrossHigherPriorityRecovery`
-//!   runs its mixed provider case; the single provider pick is the
-//!   credential policy's (see `policy`).
+//! - `ManagerSessionAffinityPreservesBindingAcrossHigherPriorityRecovery`:
+//!   calls only pick from one provider through the credential policy's pick
+//!   (upstream's `pickNextLegacy`), so the single provider case picks for
+//!   Codex Alpha Search, among Codex sign-ins.
 //! - Not ported: `SessionAffinitySelectorNilFallbackNoPanic` (there is no
 //!   nil fallback), the LCP tests and
 //!   `SessionAffinitySelectorExplicitHarnessSessionOverridesLCP` (the LCP
@@ -66,6 +67,7 @@ use crate::exec::{Dispatcher, ExecError};
 use crate::executor::ProviderExecutor;
 use crate::manager::affinity::{Affinity, Session};
 use crate::manager::models::{OAuthAliasTable, Resolver};
+use crate::manager::policy::CredentialPolicy;
 use crate::manager::select::{PickArgs, Selection, SelectorState};
 use crate::manager::{CallResult, Entry, ModelAlias, RoutingStrategy, Settings};
 use crate::session::Payload;
@@ -80,7 +82,7 @@ fn base_now() -> Timestamp {
 }
 
 /// Headers holding each of `pairs`, in order.
-fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
+pub(super) fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
     let mut map = HeaderMap::new();
     for (name, value) in pairs {
         map.append(
@@ -98,7 +100,7 @@ fn try_session(pairs: &[(&str, &str)], body: &str) -> Option<Session> {
 }
 
 /// The session of a call with headers `pairs` and body `body`.
-fn session(pairs: &[(&str, &str)], body: &str) -> Session {
+pub(super) fn session(pairs: &[(&str, &str)], body: &str) -> Session {
     try_session(pairs, body).expect("a session")
 }
 
@@ -145,7 +147,7 @@ fn failed(auth: &str, model: &str) -> CallResult {
 }
 
 /// Credentials, the rotation state picks keep, and the bindings.
-struct Sticky {
+pub(super) struct Sticky {
     strategy: RoutingStrategy,
     auths: BTreeMap<String, Entry>,
     executors: HashMap<String, Arc<dyn ProviderExecutor>>,
@@ -179,7 +181,7 @@ impl Sticky {
     }
 
     /// A pool picking by `strategy` with credentials `ids`.
-    fn of(strategy: RoutingStrategy, ids: &[&str]) -> Self {
+    pub(super) fn of(strategy: RoutingStrategy, ids: &[&str]) -> Self {
         let mut pool = Self::new(strategy);
         for id in ids {
             pool.put(cred(id));
@@ -235,13 +237,19 @@ impl Sticky {
             .map(|auth| auth.id.clone())
     }
 
-    fn pick(&mut self, scope: &str, model: &str, session: &Session, ids: &[&str]) -> String {
+    pub(super) fn pick(
+        &mut self,
+        scope: &str,
+        model: &str,
+        session: &Session,
+        ids: &[&str],
+    ) -> String {
         self.try_pick(scope, model, Some(session), ids)
             .unwrap_or_else(|err| panic!("pick: {err}"))
     }
 
     /// Records `result` for `session` in `scope`.
-    fn on_result(&mut self, session: &Session, result: &CallResult, scope: &str) {
+    pub(super) fn on_result(&mut self, session: &Session, result: &CallResult, scope: &str) {
         self.affinity.on_result(session, result, scope, self.now);
     }
 
@@ -1312,7 +1320,7 @@ fn sticky_settings(ttl: Duration) -> Settings {
 }
 
 /// The credential the manager's binding `key` holds.
-fn bound(h: &Harness, key: &str) -> Option<String> {
+pub(super) fn bound(h: &Harness, key: &str) -> Option<String> {
     let now = h.now();
     h.manager
         .lock()
@@ -1445,29 +1453,53 @@ async fn manager_mixed_pool_failure_unbinds_the_mixed_scope() {
     assert_eq!(succeeding.calls().len(), 2);
 }
 
-// TestManagerSessionAffinityPreservesBindingAcrossHigherPriorityRecovery,
-// the mixed provider case.
+// TestManagerSessionAffinityPreservesBindingAcrossHigherPriorityRecovery.
 #[tokio::test(start_paused = true)]
 async fn manager_preserves_binding_across_higher_priority_recovery() {
-    const PROVIDER: &str = "affinity-priority-mixed";
+    // The mixed provider case.
+    priority_recovery("affinity-priority-mixed", |h, provider, model, session| {
+        pick_mixed(h, &providers(&[provider]), model, Some(session))
+    });
+    // The single provider case.
+    priority_recovery("codex", |h, provider, model, session| {
+        h.manager
+            .select_auth_with_credential_policy(
+                provider,
+                model,
+                CredentialPolicy::CodexAlphaSearchV1,
+                Some(session),
+            )
+            .map(|picked| picked.auth.id.clone())
+    });
+}
+
+/// The steps of `TestManagerSessionAffinityPreservesBindingAcrossHigherPriorityRecovery`
+/// with `pick` as the pick, among Codex sign-ins for `codex`.
+fn priority_recovery(
+    provider: &str,
+    pick: impl Fn(&Harness, &str, &str, &Session) -> Result<String, ExecError>,
+) {
     const MODEL: &str = "affinity-priority-model";
     let h = Harness::new(sticky_settings(HOUR));
-    h.executor(&FakeExecutor::new(PROVIDER));
-    let high = format!("{PROVIDER}-high");
-    let low = format!("{PROVIDER}-low");
+    h.executor(&FakeExecutor::new(provider));
+    let high = format!("{provider}-high");
+    let low = format!("{provider}-low");
     for (id, priority) in [(&high, "1"), (&low, "0")] {
-        let mut a = auth(id, PROVIDER);
+        let mut a = auth(id, provider);
+        if provider == "codex" {
+            a.metadata
+                .insert("access_token".into(), serde_json::json!("token"));
+        }
         a.status = Status::Active;
         a.attributes.insert("priority".into(), priority.into());
         h.add(a, &[MODEL]);
     }
-    let pool = providers(&[PROVIDER]);
     let stable = derived("stable-session");
-    let pick = |session: &Session| pick_mixed(&h, &pool, MODEL, Some(session)).expect("pick");
+    let pick = |session: &Session| pick(&h, provider, MODEL, session).expect("pick");
 
     assert_eq!(pick(&stable), high, "cold binding");
     h.manager
-        .mark_result(&rate_limited(&high, PROVIDER, MODEL, None));
+        .mark_result(&rate_limited(&high, provider, MODEL, None));
     assert_eq!(pick(&stable), low, "failover binding");
 
     expire_model_cooldown(&h, &high, MODEL);
@@ -1483,7 +1515,7 @@ async fn manager_preserves_binding_across_higher_priority_recovery() {
     );
 
     h.manager
-        .mark_result(&rate_limited(&low, PROVIDER, MODEL, None));
+        .mark_result(&rate_limited(&low, provider, MODEL, None));
     assert_eq!(
         pick(&stable),
         high,

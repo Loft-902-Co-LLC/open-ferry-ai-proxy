@@ -45,7 +45,12 @@ fn harness(settings: Settings) -> Harness {
 /// The credential Codex Alpha Search picks for `model`.
 fn pick(h: &Harness, model: &str) -> Result<String, ExecError> {
     h.manager
-        .select_auth_with_credential_policy("codex", model, CredentialPolicy::CodexAlphaSearchV1)
+        .select_auth_with_credential_policy(
+            "codex",
+            model,
+            CredentialPolicy::CodexAlphaSearchV1,
+            None,
+        )
         .map(|picked| picked.auth.id.clone())
 }
 

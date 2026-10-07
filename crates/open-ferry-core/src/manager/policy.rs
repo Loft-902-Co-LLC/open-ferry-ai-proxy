@@ -24,15 +24,16 @@
 //!   takes the strings and bytes `strconv.ParseBool` reads as true.
 //! - A policy is a type, not a name, so there is no invalid policy and no
 //!   `invalid_credential_policy` error.
-//! - The pick is the built-in strategies' only: custom selectors, the plugin
-//!   scheduler, session affinity, required auth kinds, Home dispatch and the
-//!   selection log aren't ported.
+//! - The pick is the built-in strategies', with session affinity when it
+//!   is on: custom selectors, the plugin scheduler, required auth kinds,
+//!   Home dispatch and the selection log aren't ported.
 //! - [`Manager::resolve_execution_model`] has no Home dispatcher model to
 //!   prefer.
 
 use std::sync::Arc;
 
 use super::Manager;
+use super::affinity::{Affinity, Session};
 use super::credential::attribute;
 use super::execute::next_model_pool_offset;
 use super::models::Resolver;
@@ -105,14 +106,17 @@ pub(crate) fn is_free_codex_auth(auth: &Auth) -> bool {
 
 impl Selection<'_> {
     /// Picks the next credential of `provider` for `model` that `policy`
-    /// allows (upstream's `pickNextLegacy` with the policy as its
-    /// eligibility filter).
+    /// allows, keeping `session` on its credential under the provider's
+    /// scope when `affinity` is on (upstream's `pickNextLegacy` with the
+    /// policy as its eligibility filter).
     pub(super) fn pick_next_with_policy(
         &self,
         state: &mut SelectorState,
+        affinity: Option<&mut Affinity>,
         provider: &str,
         model: &str,
         policy: CredentialPolicy,
+        session: Option<&Session>,
     ) -> Result<Picked, ExecError> {
         let Some(executor) = lookup_executor(self.executors, provider) else {
             return Err(ExecError::new(
@@ -142,8 +146,16 @@ impl Selection<'_> {
         if candidates.is_empty() {
             return Err(ExecError::auth_not_found());
         }
-        let available = self.available_auths_for_route_model(&candidates, provider, model)?;
-        let selected = self.pick_legacy(state, &available, provider, model, "")?;
+        let selected = match affinity {
+            Some(affinity) => {
+                self.pick_sticky(state, affinity, &candidates, provider, model, session)?
+            }
+            None => {
+                let available =
+                    self.available_auths_for_route_model(&candidates, provider, model)?;
+                self.pick_legacy(state, &available, provider, model, "")?
+            }
+        };
         Ok(Picked {
             auth: Arc::clone(selected),
             executor,
@@ -154,13 +166,15 @@ impl Selection<'_> {
 
 impl Manager {
     /// Picks a credential of `provider` for `model` that `policy` allows,
-    /// without calling it or recording anything about it (upstream's
+    /// binding `session` to it when session affinity is on, without
+    /// calling it or recording anything about it (upstream's
     /// `SelectAuthWithCredentialPolicy`).
     pub(crate) fn select_auth_with_credential_policy(
         &self,
         provider: &str,
         model: &str,
         policy: CredentialPolicy,
+        session: Option<&Session>,
     ) -> Result<Picked, ExecError> {
         let now = self.now();
         let mut guard = self.lock();
@@ -178,8 +192,14 @@ impl Manager {
             strategy: settings.routing_strategy,
             now,
         };
-        let picked =
-            selection.pick_next_with_policy(&mut state.selector, provider, model, policy)?;
+        let picked = selection.pick_next_with_policy(
+            &mut state.selector,
+            state.affinity.as_mut(),
+            provider,
+            model,
+            policy,
+            session,
+        )?;
         if !policy.allows(&picked.auth) {
             return Err(ExecError::new(
                 ErrorKind::AuthNotFound,

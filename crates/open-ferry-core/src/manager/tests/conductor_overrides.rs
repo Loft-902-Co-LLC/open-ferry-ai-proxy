@@ -19,10 +19,11 @@
 //! - Result hooks aren't ported. Where upstream captures the hook's result,
 //!   the tests check the credential and model state that result left
 //!   instead.
-//! - `DeepSeekInsufficientBalanceRotatesCredentialAndRebindsSession` runs
-//!   with the default selector: session affinity isn't ported (policy). It
-//!   still checks the rotation, the second call's credential and the
-//!   cooldown.
+//! - `DeepSeekInsufficientBalanceRotatesCredentialAndRebindsSession` turns
+//!   session affinity on through the settings, and names its session with
+//!   an `X-Session-Id` header where upstream sets a derived session in the
+//!   metadata (the manager derives its own). It also checks where the
+//!   session is bound.
 //! - `RecordResult_AvailabilityNeutralSkipsSchedulerUpdate`: there is no
 //!   scheduler index to compare snapshots of; the test checks that the
 //!   result changed no availability state and published no model
@@ -54,6 +55,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use serde_json::json;
 
+use super::affinity::{bound, headers};
 use super::support::*;
 use crate::auth::{AuthError, ModelState, QuotaState, Status, Timestamp};
 use crate::exec::{Dispatcher, ErrorKind, ExecError, Options};
@@ -1198,10 +1200,11 @@ async fn manager_request_scoped_error_stops_credential_fallback_without_suspendi
 
 #[tokio::test(start_paused = true)]
 async fn manager_deep_seek_insufficient_balance_rotates_credential_and_rebinds_session() {
-    // Upstream binds the call to a session through a session-affinity
-    // selector; session affinity isn't ported, so this runs with the default
-    // selector.
-    let h = Harness::new(retry_settings(2, 30 * SECOND, 0));
+    let h = Harness::new(Settings {
+        session_affinity: true,
+        session_affinity_ttl: HOUR,
+        ..retry_settings(2, 30 * SECOND, 0)
+    });
     let provider = "openai-compatibility";
     let model = "deepseek-v4-pro";
     let executor = fallback_executor(
@@ -1219,14 +1222,25 @@ async fn manager_deep_seek_insufficient_balance_rotates_credential_and_rebinds_s
     h.add(auth("aa-empty-balance", provider), &[model]);
     h.add(auth("bb-available-balance", provider), &[model]);
 
+    let opts = || {
+        let mut opts = options();
+        opts.headers = headers(&[("X-Session-Id", "deepseek-insufficient-balance")]);
+        opts
+    };
     let before = h.now();
-    let served = run(&h, Kind::Execute, &[provider], model, options())
+    let served = run(&h, Kind::Execute, &[provider], model, opts())
         .await
         .expect("fallback to the next credential");
     assert_eq!(served, "bb-available-balance");
-    let served = run(&h, Kind::Execute, &[provider], model, options())
+    let key = "mixed::header:deepseek-insufficient-balance::deepseek-v4-pro";
+    assert_eq!(
+        bound(&h, key).as_deref(),
+        Some("bb-available-balance"),
+        "the session moved"
+    );
+    let served = run(&h, Kind::Execute, &[provider], model, opts())
         .await
-        .expect("the second call to use the next credential");
+        .expect("the rebound session to use the next credential");
     assert_eq!(served, "bb-available-balance");
     assert_eq!(
         executor.ids(Kind::Execute),

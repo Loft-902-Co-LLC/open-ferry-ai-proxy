@@ -101,7 +101,7 @@ request-retry: 4
 max-retry-credentials: 2
 max-retry-interval: 30
 quota-exceeded: {switch-project: true, switch-preview-model: true, antigravity-credits: true}
-routing: {strategy: RR}
+routing: {strategy: RR, session-affinity: true, session-affinity-ttl: 30m, session-affinity-subagents: false}
 ws-auth: true
 gemini-api-key:
   - api-key: g1
@@ -700,7 +700,9 @@ async fn config_is_written_as_upstream_writes_it() {
             r#""auth-auto-refresh-workers":3,"request-retry":4,"max-retry-credentials":2,"#,
             r#""max-retry-interval":30,"quota-exceeded":{{"switch-project":true,"#,
             r#""switch-preview-model":true,"antigravity-credits":true}},"#,
-            r#""routing":{{"strategy":"RR"}},"ws-auth":true,"gemini-api-key":{gemini},"#,
+            r#""routing":{{"strategy":"RR","session-affinity":true,"#,
+            r#""session-affinity-ttl":"30m","session-affinity-subagents":false}},"#,
+            r#""ws-auth":true,"gemini-api-key":{gemini},"#,
             r#""interactions-api-key":null,"codex-api-key":{codex},"xai-api-key":null,"#,
             r#""meta-api-key":null,"xai":{{"inject-x-search":false}},"#,
             r#""codex":{{"stream-bootstrap-buffering":true,"#,

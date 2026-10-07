@@ -6,13 +6,12 @@
 //! caller-input error and a generic 404 are not `model_not_found`.
 //!
 //! Deviations from upstream:
-//! - `TestCodexStructuredModelNotFound_SessionAffinityReleased` is dropped:
-//!   session affinity is not ported.
-//! - `TestCodexTerminalEvent_EndToEndCooldownAndAffinity` keeps the
-//!   classification and cooldown assertions and drops the session-affinity
-//!   picks.
+//! - The session affinity picks go through the `affinity` tests' pool,
+//!   which picks as the manager does, where upstream calls its selector;
+//!   the provider scope is an argument.
 //! - Upstream's `statusBearingError` is `ExecError::upstream(status, body)`.
 
+use super::affinity::{Sticky, session};
 use super::support::*;
 
 use chrono::TimeDelta;
@@ -23,7 +22,7 @@ use crate::manager::classify::{
     CODE_REQUEST_SCOPED, ErrView, is_request_invalid_error, is_request_scoped_error,
     result_error_from_error, should_skip_credential_cooldown,
 };
-use crate::manager::{CallResult, Settings};
+use crate::manager::{CallResult, RoutingStrategy, Settings};
 
 const MODEL: &str = "gpt-5.5";
 const STRUCTURED_MODEL_NOT_FOUND: &str = r#"{"error":{"type":"invalid_request_error","code":"model_not_found","message":"The model gpt-5.5 does not exist or you do not have access to it."}}"#;
@@ -142,8 +141,47 @@ async fn codex_model_not_found_generic404_not_model_not_found() {
     );
 }
 
+/// A call's success on `auth_id`.
+fn success(auth_id: &str) -> CallResult {
+    CallResult {
+        auth_id: auth_id.into(),
+        provider: "codex".into(),
+        model: MODEL.into(),
+        success: true,
+        ..CallResult::default()
+    }
+}
+
+// TestCodexStructuredModelNotFound_SessionAffinityReleased.
+#[test]
+fn codex_structured_model_not_found_session_affinity_released() {
+    let mut pool = Sticky::of(RoutingStrategy::RoundRobin, &["auth-1", "auth-2"]);
+    let session = session(&[("X-Session-Id", "session-model-not-found-test")], "");
+
+    // The first pick binds the session to auth-1.
+    let picked = pool.pick("codex", MODEL, &session, &["auth-1", "auth-2"]);
+    assert_eq!(picked, "auth-1");
+    pool.on_result(&session, &success(&picked), "codex");
+
+    // A structured model_not_found failure.
+    let raw = ExecError::upstream(400, STRUCTURED_MODEL_NOT_FOUND);
+    let result_err = result_error_from_error(ErrView::Exec(&raw));
+    pool.on_result(&session, &failure(&picked, result_err), "codex");
+
+    // The binding is gone, so the next pick isn't auth-1.
+    let next = pool.pick("codex", MODEL, &session, &["auth-2", "auth-1"]);
+    assert_eq!(next, "auth-2", "affinity was not released");
+}
+
 #[tokio::test(start_paused = true)]
 async fn codex_terminal_event_end_to_end_cooldown_and_affinity() {
+    let ids = ["auth-e2e-1", "auth-e2e-2"];
+    let mut pool = Sticky::of(RoutingStrategy::RoundRobin, &ids);
+    let session = session(&[("X-Session-Id", "session-e2e-codex-model-not-found")], "");
+    let picked = pool.pick("codex", MODEL, &session, &ids);
+    assert_eq!(picked, "auth-e2e-1", "initial pick");
+    pool.on_result(&session, &success(&picked), "codex");
+
     let h = Harness::new(Settings::default());
     h.add(auth("auth-e2e-1", "codex"), &[]);
     h.add(auth("auth-e2e-2", "codex"), &[]);
@@ -155,7 +193,9 @@ async fn codex_terminal_event_end_to_end_cooldown_and_affinity() {
         "expected preserved model_not_found code, got {result_err:?}"
     );
 
-    h.manager.mark_result(&failure("auth-e2e-1", result_err));
+    let result = failure("auth-e2e-1", result_err);
+    pool.on_result(&session, &result, "codex");
+    h.manager.mark_result(&result);
 
     let updated = h.get("auth-e2e-1");
     let state = updated.model_states.get(MODEL);
@@ -169,6 +209,9 @@ async fn codex_terminal_event_end_to_end_cooldown_and_affinity() {
             .map(|e| e.code.as_str()),
         Some("model_not_found")
     );
+
+    let next = pool.pick("codex", MODEL, &session, &["auth-e2e-2", "auth-e2e-1"]);
+    assert_eq!(next, "auth-e2e-2", "affinity was not released");
 }
 
 #[tokio::test(start_paused = true)]

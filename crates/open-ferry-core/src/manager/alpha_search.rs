@@ -8,7 +8,13 @@
 //! fields search refuses (`prompt_cache_key` and `prompt_cache_retention`).
 //! Its `model`, read as Go's decoder reads it (see [`routing`]), is the
 //! route model for picking a credential the `codex_alpha_search_v1` policy
-//! allows (see [`super::policy`]). A ChatGPT
+//! allows (see [`super::policy`]). With session affinity on, the pick keeps
+//! a session on its Codex credential: the payload's `id` names the session
+//! as an `X-Session-ID` header would, in place of the client's, and
+//! otherwise the session is read from the client's headers and payload as
+//! for any call, without a derived one (the selection has no metadata). That
+//! header is only read for the pick; it isn't sent. Nothing records the
+//! search's outcome, so a failure doesn't move the session. A ChatGPT
 //! sign-in sends the payload to the Codex executor's base URL plus
 //! `/alpha/search`, which is
 //! `https://chatgpt.com/backend-api/codex/alpha/search`. An API key that
@@ -27,8 +33,6 @@
 //! - `Originator: codex_cli_rs` isn't sent, by policy: nothing makes the
 //!   request pass for Codex CLI's. A client that sends no `User-Agent` gets
 //!   the executor's `open-ferry/<version>`.
-//! - The payload's `id` doesn't become a session ID: session affinity
-//!   isn't ported.
 //! - The request log sees the call through the request's taps: the
 //!   executor reports the request, the answer's head and its body, and the
 //!   call's end is reported here, with a failed read as its error.
@@ -59,13 +63,15 @@ use open_ferry_translate::go::trim_space;
 use open_ferry_translate::json::exact;
 use serde_json::{Map, Value};
 
-use self::routing::payload_model;
+use self::routing::payload_routing;
 use super::Manager;
+use super::affinity::Session;
 use super::credential::attribute;
 use super::policy::CredentialPolicy;
 use crate::auth::{Auth, AuthKind};
 use crate::exec::{AlphaSearch, ErrorKind, ExecError, HttpCall, HttpReply, HttpTarget};
 use crate::observe::{CallReport, SelectedAuth};
+use crate::session::Payload;
 
 mod routing;
 
@@ -82,17 +88,43 @@ const CLIENT_HEADERS: [&str; 4] = ["version", "user-agent", "session_id", "x-cli
 const MISSING_BASE_URL: &str = "Codex Alpha Search API key base URL unavailable";
 
 impl Manager {
+    /// The session a search binds, when session affinity is on: the
+    /// payload's `id` as the client's `X-Session-ID`, else what the client's
+    /// `headers` and `body` name (upstream's selection headers and options).
+    /// An `id` that can't be a header value names no session, as upstream
+    /// reads none from it, and still replaces the client's header.
+    fn alpha_search_session(&self, headers: &HeaderMap, body: &[u8], id: &str) -> Option<Session> {
+        // Without affinity, no session is read.
+        self.lock().affinity.as_ref()?;
+        let mut headers = headers.clone();
+        if !id.is_empty() {
+            let name = HeaderName::from_static("x-session-id");
+            match HeaderValue::from_str(id) {
+                Ok(value) => {
+                    headers.insert(name, value);
+                }
+                Err(_) => {
+                    headers.remove(name);
+                }
+            }
+        }
+        Session::named(&headers, &Payload::parse(body))
+    }
+
     /// Sends a Codex Alpha Search call with a credential the policy allows.
     /// An error carries the status to answer with: the selection's, else
     /// 503, or the send's, else 502.
     pub(super) async fn alpha_search(&self, request: AlphaSearch) -> Result<HttpReply, ExecError> {
-        let route_model = payload_model(&request.body);
+        let routing = payload_routing(&request.body);
+        let route_model = routing.model;
+        let session = self.alpha_search_session(&request.headers, &request.body, &routing.id);
         let body = sanitize_body(request.body);
         let picked = self
             .select_auth_with_credential_policy(
                 "codex",
                 &route_model,
                 CredentialPolicy::CodexAlphaSearchV1,
+                session.as_ref(),
             )
             .map_err(|error| or_status(error, 503))?;
         let auth = picked.auth;

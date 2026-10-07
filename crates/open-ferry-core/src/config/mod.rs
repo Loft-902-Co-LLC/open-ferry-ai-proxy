@@ -33,7 +33,8 @@
 //! `save-cooldown-status`, `transient-error-cooldown-seconds`,
 //! `auth-auto-refresh-workers`,
 //! `request-retry`, `max-retry-credentials`, `max-retry-interval`,
-//! `quota-exceeded`, `routing.strategy`, `ws-auth`, `force-model-prefix`,
+//! `quota-exceeded`, `routing` (the strategy and session affinity),
+//! `ws-auth`, `force-model-prefix`,
 //! `video-result-auth-cache-ttl`, `client.codex`, `codex` (minus cloaking
 //! and the live media relay), `codex-header-defaults.beta-features`,
 //! `claude.model-level-cooling`,
@@ -53,8 +54,6 @@
 //!   `claude-header-defaults`, `codex-header-defaults.user-agent`,
 //!   `claude-code`, `disable-claude-cloak-mode`, `codex.disable-codex-cloaking`,
 //!   and per-key `cloak`, `fingerprint-profile` and `disable-codex-cloaking`.
-//! - Session affinity: `routing.session-affinity`,
-//!   `routing.session-affinity-ttl` and `routing.session-affinity-subagents`.
 //! - Other providers: `antigravity`, `antigravity-signature-*`, `devin`.
 //! - Features not ported here: `plugins`, `pprof`, `discovery` and
 //!   `codex.live-media-relay`.

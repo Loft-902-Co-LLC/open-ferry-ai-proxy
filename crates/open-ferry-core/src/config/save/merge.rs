@@ -74,8 +74,6 @@ const UNTYPED: &[&[&str]] = &[
     &["codex", "disable-codex-cloaking"],
     &["codex", "live-media-relay"],
     &["codex-header-defaults", "user-agent"],
-    &["routing", "session-affinity"],
-    &["routing", "session-affinity-ttl"],
     &["claude-api-key", "cloak"],
     &["claude-api-key", "fingerprint-profile"],
     &["claude-api-key", "experimental-cch-signing"],

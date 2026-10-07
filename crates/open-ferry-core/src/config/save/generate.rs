@@ -275,6 +275,15 @@ pub(crate) fn legacy_config(cfg: &Config) -> Result<Value, Unwritable> {
             "routing",
             Fields::default()
                 .omit_empty("strategy", s(&cfg.routing.strategy))
+                .omit_empty(
+                    "session-affinity",
+                    Value::Bool(cfg.routing.session_affinity),
+                )
+                .omit_empty("session-affinity-ttl", s(&cfg.routing.session_affinity_ttl))
+                .pointer(
+                    "session-affinity-subagents",
+                    cfg.routing.session_affinity_subagents.map(Value::Bool),
+                )
                 .done(),
         )
         .put("ws-auth", Value::Bool(cfg.ws_auth))

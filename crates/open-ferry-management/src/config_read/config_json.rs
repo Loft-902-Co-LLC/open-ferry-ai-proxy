@@ -260,6 +260,18 @@ pub(super) fn config(config: &Config) -> Json {
             "routing",
             Fields::new()
                 .omit_empty("strategy", string(&config.routing.strategy))
+                .omit_empty(
+                    "session-affinity",
+                    Json::Bool(config.routing.session_affinity),
+                )
+                .omit_empty(
+                    "session-affinity-ttl",
+                    string(&config.routing.session_affinity_ttl),
+                )
+                .omit_nil(
+                    "session-affinity-subagents",
+                    config.routing.session_affinity_subagents.map(Json::Bool),
+                )
                 .done(),
         )
         .with("ws-auth", Json::Bool(config.ws_auth))

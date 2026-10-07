@@ -3,8 +3,8 @@
 // sdk/api/handlers/handlers_execution.go, executeStreamWithAuthManagerFormats
 // and ExecuteImageStreamWithAuthManager in sdk/api/handlers/handlers_stream.go,
 // enrichAuthSelectionError in sdk/api/handlers/handlers_errors.go, and
-// requestExecutionMetadata and GetAlt in sdk/api/handlers/handlers.go
-// (v8.0.15, MIT).
+// requestExecutionMetadata, requestCallerScope and GetAlt in
+// sdk/api/handlers/handlers.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Calls to providers, as the handlers make them.
@@ -233,6 +233,12 @@ impl Call {
             requested_model: model.to_owned(),
             request_path: client.path.clone(),
             idempotency_key: client.idempotency_key.clone(),
+            caller_scope: client
+                .context
+                .as_ref()
+                .and_then(|context| context.client_key())
+                .map(open_ferry_core::session::caller_scope)
+                .unwrap_or_default(),
             ..Metadata::default()
         };
         let request = Request {
@@ -632,6 +638,46 @@ mod tests {
                 );
             }
         }
+    }
+
+    // Ports TestRequestExecutionMetadataIncludesHashedCallerScope
+    // (handlers_metadata_test.go): the call carries the hash of the client's
+    // key, never the key; a client without one has no caller scope.
+    #[test]
+    fn calls_carry_the_hashed_caller_scope() {
+        let catalog = FakeCatalog::new().serve("gpt-5", &["codex"]);
+        let state = state(ServerConfig::default(), catalog, &FakeDispatcher::new([]));
+        let context = Arc::new(RequestContext::new(
+            http::Method::POST,
+            "/v1/chat/completions".into(),
+        ));
+        context.set_client_key("downstream-secret");
+        let client = ClientRequest {
+            context: Some(context),
+            ..ClientRequest::default()
+        };
+        let body = Bytes::from_static(br#"{"model":"gpt-5"}"#);
+        let call = Call::new(
+            &state,
+            &client,
+            Format::OPENAI,
+            "gpt-5",
+            body.clone(),
+            "",
+            false,
+        )
+        .expect("a call");
+        let scope = &call.options.metadata.caller_scope;
+        assert_eq!(
+            *scope,
+            open_ferry_core::session::caller_scope("downstream-secret")
+        );
+        assert_ne!(scope, "downstream-secret");
+
+        let anonymous = ClientRequest::default();
+        let call = Call::new(&state, &anonymous, Format::OPENAI, "gpt-5", body, "", false)
+            .expect("a call");
+        assert_eq!(call.options.metadata.caller_scope, "");
     }
 
     // Not upstream's: a multipart image payload isn't JSON, so the depth

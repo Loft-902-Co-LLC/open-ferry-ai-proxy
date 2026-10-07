@@ -6,7 +6,8 @@
 // TestCodexAlphaSearchOptInAPIKeyStripsCredentialPrefix,
 // TestCodexAlphaSearchOptInAPIKeyResolvesModelAlias,
 // TestCodexAlphaSearchOptInAPIKeyWithoutBaseURLFailsClosed,
-// TestCodexAlphaSearchRecordsRequestLog) (v8.0.15, MIT).
+// TestCodexAlphaSearchRecordsRequestLog,
+// TestCodexAlphaSearchUsesRequestIDForSessionAffinity) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Codex Alpha Search through the whole router: the client key, the
@@ -24,6 +25,10 @@
 //!   where upstream reads the `API_REQUEST` and `API_RESPONSE` the handler
 //!   left in gin's context. The upstream URL is the mock's, and the log is
 //!   also checked for the credential's token and the client key.
+//! - UsesRequestIDForSessionAffinity turns session affinity on through the
+//!   settings, where upstream sets the selector, and makes a fourth search
+//!   for the first session, which round robin alone would send elsewhere.
+//!   It also checks the session ID isn't sent.
 //! - CredentialPolicy counts on the API key sorting first, so round robin
 //!   would pick it without the policy, where upstream sets a selector that
 //!   picks API keys first: custom selectors aren't ported.
@@ -36,8 +41,6 @@
 //!     model router isn't ported.
 //!   - TestCodexAlphaSearchPassesGinContextToAuthSelection: custom selectors
 //!     and gin's context aren't ported.
-//!   - TestCodexAlphaSearchUsesRequestIDForSessionAffinity: session affinity
-//!     isn't ported.
 //!   - TestAuditHomeCodexSearchBusyReturnsTrustedRetryAfter,
 //!     TestAuditHomeCodexSearchBodyCloseBeforeRelease and the four
 //!     TestHomeCodexAlphaSearch* tests: Home isn't ported.
@@ -587,6 +590,49 @@ async fn codex_alpha_search_routes_on_the_model_go_reads() {
             assert_eq!(body, r#"{"error":"auth_not_found: no auth available"}"#);
         }
         assert_eq!(mock.requests().len(), sent, "{payload}");
+    }
+}
+
+// Ports TestCodexAlphaSearchUsesRequestIDForSessionAffinity.
+#[tokio::test]
+async fn codex_alpha_search_uses_request_id_for_session_affinity() {
+    let mock = Mock::ok().await;
+    let ids = ["codex-auth-a", "codex-auth-b"];
+    let credentials = ids
+        .iter()
+        .map(|id| oauth(id, json!({"access_token": id})))
+        .collect();
+    let models: Vec<(&str, &str)> = ids.iter().map(|id| (*id, "gpt-5.6-luna")).collect();
+    let settings = Settings {
+        session_affinity: true,
+        ..Settings::default()
+    };
+    let app = proxy(settings, &mock.url, credentials, &models);
+
+    let payloads = [
+        r#"{"id":"session-a","model":"gpt-5.6-luna"}"#,
+        r#"{"id":"session-b","model":"gpt-5.6-luna"}"#,
+        r#"{"id":"session-a","model":"gpt-5.6-luna"}"#,
+        r#"{"id":"session-a","model":"gpt-5.6-luna"}"#,
+    ];
+    for payload in payloads {
+        let (status, _, body) = send(&app, search("/v1/alpha/search", payload, &[])).await;
+        assert_eq!(status, StatusCode::OK, "{payload}: {body}");
+    }
+
+    let requests = mock.requests();
+    let tokens: Vec<&str> = requests
+        .iter()
+        .map(|seen| seen.header("authorization").unwrap())
+        .collect();
+    assert_eq!(tokens.len(), 4);
+    assert_ne!(tokens[0], tokens[1], "different sessions, same credential");
+    assert_eq!(tokens[2], tokens[0], "the session moved");
+    assert_eq!(tokens[3], tokens[0], "the session moved");
+    for (seen, payload) in requests.iter().zip(payloads) {
+        // The ID only picks the credential: it isn't sent as a header.
+        assert_eq!(seen.header("x-session-id"), None);
+        assert_eq!(seen.body, payload);
     }
 }
 

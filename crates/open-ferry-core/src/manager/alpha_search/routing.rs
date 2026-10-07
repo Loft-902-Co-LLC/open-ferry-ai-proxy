@@ -6,16 +6,16 @@
 // https://github.com/router-for-me/CLIProxyAPI
 // https://github.com/golang/go
 
-//! A Codex Alpha Search payload's `model`, as Go's `json.Unmarshal` reads
-//! it into upstream's routing struct.
+//! A Codex Alpha Search payload's `id` and `model`, as Go's
+//! `json.Unmarshal` reads them into upstream's routing struct.
 //!
 //! Go reads nothing unless the whole payload is valid JSON, nested at most
 //! 10,000 deep, and reads only an object. It then goes through the
 //! top-level members in the order they are written, repeated keys included:
-//! a key that is `model` after Go's case folding (`Model` and `MODEL` count;
-//! no other letters fold to those of `model`) sets the model when its value
-//! is a string, while `null` or any other value leaves it as it was. So the
-//! last string wins. Strings are decoded as Go decodes them: a surrogate
+//! a key that is `id` or `model` after Go's case folding (`ID`, `Model` and
+//! `MODEL` count; no other letters fold to theirs) sets that field when its
+//! value is a string, while `null` or any other value leaves it as it was.
+//! So the last string wins. Strings are decoded as Go decodes them: a surrogate
 //! escape that isn't half of a pair, and each byte that isn't part of valid
 //! UTF-8, become U+FFFD.
 //!
@@ -31,16 +31,25 @@ use open_ferry_translate::go::{json_valid, simple_fold};
 /// What Go writes in place of what it can't decode.
 const REPLACEMENT: char = char::REPLACEMENT_CHARACTER;
 
-/// The payload's `model`, trimmed, or empty when it names none (see the
-/// module docs).
-pub(super) fn payload_model(raw: &[u8]) -> String {
-    let mut model = String::new();
+/// What upstream's routing struct reads from a payload, each trimmed as
+/// upstream trims it: empty when the payload names none.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct Routing {
+    /// The payload's `id`, the session it names.
+    pub(super) id: String,
+    /// The payload's `model`, the route model.
+    pub(super) model: String,
+}
+
+/// The payload's `id` and `model` (see the module docs).
+pub(super) fn payload_routing(raw: &[u8]) -> Routing {
+    let mut routing = Routing::default();
     if !json_valid(raw) {
-        return model;
+        return routing;
     }
     let mut i = skip_space(raw, 0);
     if raw.get(i) != Some(&b'{') {
-        return model;
+        return routing;
     }
     i = skip_space(raw, i + 1);
     while raw.get(i) == Some(&b'"') {
@@ -52,18 +61,28 @@ pub(super) fn payload_model(raw: &[u8]) -> String {
         // Past the colon.
         let start = skip_space(raw, skip_space(raw, key_end) + 1);
         let end = value_end(raw, start);
-        if raw.get(start) == Some(&b'"') && fold_name(&key) == "MODEL" {
-            model = unquote(
-                raw.get(start + 1..end.saturating_sub(1))
-                    .unwrap_or_default(),
-            );
+        if raw.get(start) == Some(&b'"') {
+            let field = match fold_name(&key).as_str() {
+                "ID" => Some(&mut routing.id),
+                "MODEL" => Some(&mut routing.model),
+                _ => None,
+            };
+            if let Some(field) = field {
+                *field = unquote(
+                    raw.get(start + 1..end.saturating_sub(1))
+                        .unwrap_or_default(),
+                );
+            }
         }
         i = skip_space(raw, end);
         if raw.get(i) == Some(&b',') {
             i = skip_space(raw, i + 1);
         }
     }
-    model.trim().to_owned()
+    Routing {
+        id: routing.id.trim().to_owned(),
+        model: routing.model.trim().to_owned(),
+    }
 }
 
 /// The first index from `i` that isn't JSON whitespace.
@@ -241,6 +260,10 @@ mod tests {
         payload_model(&json(text))
     }
 
+    fn payload_model(raw: &[u8]) -> String {
+        payload_routing(raw).model
+    }
+
     #[test]
     fn the_last_string_under_any_case_of_model_wins() {
         let cases = [
@@ -275,6 +298,32 @@ mod tests {
         ];
         for (payload, want) in cases {
             assert_eq!(model(payload), want, "{payload}");
+        }
+    }
+
+    #[test]
+    fn reads_the_id_as_it_reads_the_model() {
+        let cases = [
+            (r#"{"id":"a","model":"m"}"#, "a", "m"),
+            (r#"{"ID":"a"}"#, "a", ""),
+            (r#"{"Id":"a","iD":"b"}"#, "b", ""),
+            (r#"{"id":"a","id":null}"#, "a", ""),
+            (r#"{"id":"a","id":7}"#, "a", ""),
+            ("{\"\u{130}d\":\"a\"}", "", ""),
+            ("{\"\u{131}d\":\"a\"}", "", ""),
+            (r#"{"i~u0064":"a"}"#, "a", ""),
+            (r#"{"id":"  sess-1 ~t"}"#, "sess-1", ""),
+            (r#"{"id":"a~u0001b"}"#, "a\u{1}b", ""),
+            (r#"{"x":{"id":"a"}}"#, "", ""),
+            (r#"{"id":"a","model":"m""#, "", ""),
+            (r#"{"id":"a","model":"m","id":"b"}"#, "b", "m"),
+        ];
+        for (payload, id, model) in cases {
+            let want = Routing {
+                id: id.to_owned(),
+                model: model.to_owned(),
+            };
+            assert_eq!(payload_routing(&json(payload)), want, "{payload}");
         }
     }
 

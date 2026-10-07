@@ -687,8 +687,8 @@ mod tests {
     }
 
     // Ports TestV8MigrationCommentsUnknownNestedFields (config_v8_test.go),
-    // but for its checks of `session-affinity` and `disable-codex-cloaking`,
-    // which the config doesn't type.
+    // but for its check of `disable-codex-cloaking`, which the config
+    // doesn't type.
     #[test]
     fn v8_migration_comments_unknown_nested_fields() {
         let raw: &[u8] = b"server: {port: 8317}\nrouting: {strategy: fill-first, session-affinity: true}\noauth:\n  providers:\n    codex:\n      disable-codex-cloaking: true\n      retired-setting: {mode: old}\n";
@@ -708,6 +708,7 @@ mod tests {
         );
         let cfg = Config::parse(&migrated).expect("parse");
         assert_eq!(cfg.routing.strategy, "fill-first");
+        assert!(cfg.routing.session_affinity);
         let (remigrated, _) = normalize_config_layout(&migrated, true).expect("remigrate");
         let text = String::from_utf8_lossy(&remigrated);
         assert_eq!(

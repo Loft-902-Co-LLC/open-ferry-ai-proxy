@@ -75,6 +75,14 @@ impl Session {
         })
     }
 
+    /// The session of a call with `headers` and `payload` and no metadata:
+    /// the one the client named, else the message hash (upstream's
+    /// `extractSessionIDs` for a selection without metadata, as Codex Alpha
+    /// Search makes).
+    pub(crate) fn named(headers: &HeaderMap, payload: &Payload) -> Option<Self> {
+        Self::read(headers, payload, "", String::new)
+    }
+
     /// The session as upstream's selector reads it from a call whose
     /// metadata holds only the derived session `derived`, which may be empty
     /// (`extractSessionIDs`): the one the client named, else `derived`, else

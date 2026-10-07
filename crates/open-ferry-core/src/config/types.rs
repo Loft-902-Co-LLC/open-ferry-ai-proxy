@@ -470,6 +470,17 @@ pub struct QuotaExceeded {
 pub struct RoutingConfig {
     /// The strategy as written; see [`Config::routing_strategy`].
     pub strategy: String,
+    /// Keeps a session on the credential that served it (upstream's
+    /// `SessionAffinity`). A bound credential that becomes unavailable is
+    /// always failed over.
+    pub session_affinity: bool,
+    /// How long a binding lasts, as a Go duration (`30m`, `1h`, `2h30m`);
+    /// an hour when empty or not a positive duration.
+    pub session_affinity_ttl: String,
+    /// Whether a subagent takes its parent session's credential; when
+    /// false, subagents spread across the credentials. Unset is true, and
+    /// it does nothing without `session_affinity`.
+    pub session_affinity_subagents: Option<bool>,
 }
 
 /// Provider-wide xAI behavior.
