@@ -875,7 +875,7 @@ cargo run --release -p open-ferry-parity -- --upstream ../CLIProxyAPI
 
 `--go` picks the Go toolchain. To build upstream as its releases are built, use Go 1.26 (`go install golang.org/dl/go1.26.4@latest`, then `go1.26.4 download`) and pass `--go go1.26.4`.
 
-See [tools/parity/README.md](tools/parity/README.md).
+With `--summary README.md` it also rewrites the summary in the README's [Parity with CLIProxyAPI](README.md#parity-with-cliproxyapi) section. See [tools/parity/README.md](tools/parity/README.md).
 
 ## Deliberately not ported
 

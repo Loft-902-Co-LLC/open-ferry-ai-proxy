@@ -17,6 +17,7 @@ mod quota_signals;
 mod raw_json;
 mod session;
 mod signature;
+mod summary;
 mod translator;
 mod ttft;
 mod upstream;
@@ -48,7 +49,10 @@ options:
   --go <path>    Go binary (default: go on PATH)
   --live <url>   instead, send a few requests through a running CLIProxyAPI;
                  needs --model and the client API key in OPEN_FERRY_PARITY_API_KEY
-  --model <name> model for --live";
+  --model <name> model for --live
+  --summary <file>
+                 also write a Markdown summary of the results to <file>,
+                 replacing the part between its parity-summary markers";
 
 /// Failing cases written to disk; the rest are only counted.
 const MAX_FAILURE_FILES: usize = 200;
@@ -61,6 +65,7 @@ struct Args {
     go: PathBuf,
     live: Option<String>,
     model: Option<String>,
+    summary: Option<PathBuf>,
 }
 
 impl Args {
@@ -74,6 +79,7 @@ impl Args {
             go: "go".into(),
             live: None,
             model: None,
+            summary: None,
         };
         while let Some(flag) = args.next() {
             let mut value = || args.next().ok_or_else(|| format!("{flag} needs a value"));
@@ -85,6 +91,7 @@ impl Args {
                 "--go" => parsed.go = value()?.into(),
                 "--live" => parsed.live = Some(value()?),
                 "--model" => parsed.model = Some(value()?),
+                "--summary" => parsed.summary = Some(value()?.into()),
                 "-h" | "--help" => return Err(String::new()),
                 _ => return Err(format!("unknown argument {flag}")),
             }
@@ -554,6 +561,7 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
         upstream.commit
     );
     let mut all_match = true;
+    let mut results = Vec::with_capacity(suites.len());
     for (translator, mut cases, random) in suites {
         let hand_written = cases.len();
         let generated = random.len();
@@ -570,8 +578,41 @@ fn run(args: &Args) -> Result<bool, Box<dyn Error>> {
         );
         tally.print(args.show, &dir);
         all_match &= tally.different == 0;
+        results.push(summary::SuiteResult {
+            title: translator.title(),
+            cases: cases.len(),
+            hand_written,
+            identical: tally.identical,
+            equivalent: tally.equivalent,
+            known: tally.known.len(),
+            different: tally.different,
+        });
+    }
+    if let Some(path) = &args.summary {
+        let go_version = go_version(&args.go);
+        let run = summary::RunInfo {
+            version: &upstream.version,
+            commit: &upstream.commit,
+            go_version: &go_version,
+            random: args.random,
+            seed: args.seed,
+        };
+        summary::write(path, &summary::render(&run, &results))?;
+        println!();
+        println!("Summary written to {}", path.display());
     }
     Ok(all_match)
+}
+
+/// The Go toolchain's version, such as `go1.26.4`, for the summary.
+fn go_version(go: &Path) -> String {
+    std::process::Command::new(go)
+        .args(["env", "GOVERSION"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .unwrap_or_else(|| "an unknown Go version".into())
 }
 
 /// Runs `cases` through both sides of `translator`, writing failing cases to `dir`.

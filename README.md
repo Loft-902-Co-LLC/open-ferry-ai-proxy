@@ -210,6 +210,144 @@ open-ferry serves a web dashboard of its own at `/dashboard/` on the proxy's por
 
 It shows each credential's state, with the reason and what to do about it, and from there you can upload credential files, sign in to Claude or Codex, turn a credential off or on, reset its cooldown, check its quota, or delete it. Signing in to Claude goes against Anthropic's terms and puts the account at risk ([why](docs/claude-subscription.md#the-claude-sign-in)). Its Settings page has the common settings as a form, checked as you type and reviewed against the server before each save, along with the client API keys and `config.yaml` in an editor that shows a diff before saving. A save keeps the file's comments and the settings the page doesn't show, and takes effect at once. On a first run, the Overview replaces CLIProxyAPI's example client keys, which keep the proxy in safe mode, with a new key in one step, and its client setups use that key. Besides the management API, the dashboard reads an API of its own ([docs/dashboard-api.md](docs/dashboard-api.md)): usage and estimated cost per model, credential and client key, from a local SQLite ledger; a search of the request logs; and ready-made setups for common clients. The ledger is `open-ferry-usage.sqlite3` in the log directory. It records calls while `usage-statistics-enabled` is on, for 90 days by default, with no prompts or answers and client keys only masked, and estimates costs from the prices you enter.
 
+## Parity with CLIProxyAPI
+
+`tools/parity` checks open-ferry against the CLIProxyAPI release it ports. It builds small Go programs from a CLIProxyAPI checkout, sends the same input through upstream's code and through ours, and compares what comes out. Its suites cover every translator ported so far, requests and responses, streamed and not, and other code whose output has to match upstream's, such as the reasoning signature checks, the model registry and the config writer. Each suite runs hand-written cases and random ones made from a seed. A case is *identical* (the same JSON, key order and number text included), *equivalent* (it differs only by a deviation we document), *known* (a hand-written case marked as a known difference) or *different*, and a clean run has no different cases. The deviations, and what we leave out on purpose, are in [UPSTREAM.md](UPSTREAM.md#deliberately-not-ported); [tools/parity/README.md](tools/parity/README.md) describes each suite.
+
+<!-- parity-summary:start -->
+<!-- Written by tools/parity's --summary option. Don't edit it by hand: rerun the tool. -->
+Against CLIProxyAPI v8.0.15 (commit `a4acc9f752bd`), built with go1.26.4, with `--random 1000 --seed 13`: 6,424 hand-written and 110,650 random cases in all.
+
+| Suites | Cases | Identical | Equivalent | Known | Different |
+|---:|---:|---:|---:|---:|---:|
+| 108 | 117,074 | 106,120 | 10,852 | 102 | 0 |
+
+<details>
+<summary>Each suite</summary>
+
+| Suite | Cases | Identical | Equivalent | Known | Different |
+|---|---:|---:|---:|---:|---:|
+| Claude → Codex request | 1,016 | 463 | 551 | 2 | 0 |
+| Codex → Claude response, streaming | 1,012 | 974 | 38 | 0 | 0 |
+| Codex → Claude response, non-streaming | 1,009 | 1,009 | 0 | 0 | 0 |
+| Responses → Codex request | 1,034 | 1,032 | 0 | 2 | 0 |
+| Codex → Responses response, streaming | 1,013 | 1,012 | 0 | 1 | 0 |
+| Codex → Responses response, non-streaming | 1,013 | 1,013 | 0 | 0 | 0 |
+| Chat Completions → Codex request | 1,038 | 999 | 36 | 3 | 0 |
+| Codex → Chat Completions response, streaming | 1,024 | 991 | 32 | 1 | 0 |
+| Codex → Chat Completions response, non-streaming | 1,012 | 980 | 32 | 0 | 0 |
+| Claude → Codex request, compatibility mode | 1,016 | 463 | 551 | 2 | 0 |
+| Chat Completions → Claude request | 1,062 | 182 | 878 | 2 | 0 |
+| Chat Completions → Claude request, compatibility mode | 1,062 | 182 | 878 | 2 | 0 |
+| Claude → Chat Completions response, streaming | 1,009 | 1,009 | 0 | 0 | 0 |
+| Claude → Chat Completions response, non-streaming | 1,519 | 1,519 | 0 | 0 | 0 |
+| Responses → Claude request | 1,098 | 139 | 957 | 2 | 0 |
+| Responses → Claude request, compatibility mode | 1,098 | 139 | 957 | 2 | 0 |
+| Claude → Responses response, streaming | 1,018 | 1,010 | 8 | 0 | 0 |
+| Claude → Responses response, non-streaming | 1,527 | 1,515 | 12 | 0 | 0 |
+| Responses → Chat Completions request | 1,165 | 729 | 428 | 8 | 0 |
+| Chat Completions → Responses response, streaming | 1,078 | 1,074 | 4 | 0 | 0 |
+| Chat Completions → Responses response, non-streaming | 1,040 | 1,029 | 11 | 0 | 0 |
+| Claude → Chat Completions request | 1,058 | 564 | 490 | 4 | 0 |
+| Claude → Chat Completions request, compatibility mode | 1,058 | 564 | 490 | 4 | 0 |
+| Chat Completions → Claude response, streaming | 1,072 | 1,072 | 0 | 0 | 0 |
+| Chat Completions → Claude response, non-streaming | 1,033 | 1,033 | 0 | 0 | 0 |
+| Chat Completions passthrough request | 1,056 | 1,056 | 0 | 0 | 0 |
+| Chat Completions passthrough response, streaming | 1,051 | 1,051 | 0 | 0 | 0 |
+| Chat Completions passthrough response, non-streaming | 1,031 | 1,031 | 0 | 0 | 0 |
+| Gemini → Codex request | 1,018 | 712 | 306 | 0 | 0 |
+| Codex → Gemini response, streaming | 1,013 | 609 | 404 | 0 | 0 |
+| Codex → Gemini response, non-streaming | 1,012 | 660 | 352 | 0 | 0 |
+| Gemini → Claude request | 1,018 | 50 | 968 | 0 | 0 |
+| Claude → Gemini response, streaming | 1,009 | 1,009 | 0 | 0 | 0 |
+| Claude → Gemini response, non-streaming | 1,019 | 1,019 | 0 | 0 | 0 |
+| Gemini → Chat Completions request | 1,018 | 820 | 198 | 0 | 0 |
+| Chat Completions → Gemini response, streaming | 1,051 | 1,051 | 0 | 0 | 0 |
+| Chat Completions → Gemini response, non-streaming | 1,031 | 1,012 | 19 | 0 | 0 |
+| Signature checks and replay decisions | 1,057 | 970 | 86 | 1 | 0 |
+| Claude Messages signature sanitizers | 1,012 | 1,004 | 8 | 0 | 0 |
+| Gemini thought signature sanitizer and validators | 1,006 | 1,006 | 0 | 0 | 0 |
+| Translator registry, requests | 2,584 | 2,201 | 357 | 26 | 0 |
+| Translator registry, streaming responses | 2,470 | 2,431 | 36 | 3 | 0 |
+| Translator registry, non-streaming responses | 2,226 | 2,175 | 50 | 1 | 0 |
+| Translator registry, lookups and token counts | 1,108 | 1,108 | 0 | 0 | 0 |
+| Completions → Chat Completions request | 1,040 | 921 | 115 | 4 | 0 |
+| Chat Completions → Completions response | 1,035 | 945 | 86 | 4 | 0 |
+| Chat Completions → Completions stream chunks | 1,019 | 813 | 204 | 2 | 0 |
+| Gemini → Gemini request | 1,026 | 1,025 | 1 | 0 | 0 |
+| Gemini passthrough response, streaming | 1,023 | 1,023 | 0 | 0 | 0 |
+| Gemini passthrough response, non-streaming | 1,028 | 1,028 | 0 | 0 | 0 |
+| Claude → Gemini request | 1,039 | 990 | 48 | 1 | 0 |
+| Claude → Gemini request, compatibility mode | 1,039 | 990 | 48 | 1 | 0 |
+| Gemini → Claude response, streaming | 1,034 | 1,012 | 22 | 0 | 0 |
+| Gemini → Claude response, non-streaming | 1,028 | 1,028 | 0 | 0 | 0 |
+| Chat Completions → Gemini request | 1,059 | 1,011 | 47 | 1 | 0 |
+| Gemini → Chat Completions response, streaming | 1,030 | 1,005 | 25 | 0 | 0 |
+| Gemini → Chat Completions response, non-streaming | 1,027 | 959 | 68 | 0 | 0 |
+| Thinking settings for Codex and Responses | 1,031 | 1,030 | 0 | 1 | 0 |
+| Thinking settings for Chat Completions | 1,017 | 1,017 | 0 | 0 | 0 |
+| Responses → Gemini request | 1,037 | 1,036 | 1 | 0 | 0 |
+| Gemini → Responses response, streaming | 1,049 | 1,048 | 0 | 1 | 0 |
+| Gemini → Responses response, non-streaming | 1,025 | 1,024 | 0 | 1 | 0 |
+| Codex client model list | 1,016 | 1,016 | 0 | 0 | 0 |
+| Codex multi-agent v2 tools readied | 1,027 | 1,027 | 0 | 0 | 0 |
+| Codex multi-agent v2 request optimized | 1,015 | 1,015 | 0 | 0 | 0 |
+| Codex agent messages for other formats | 1,011 | 1,011 | 0 | 0 | 0 |
+| Codex orphan delegation outputs | 1,020 | 1,019 | 0 | 1 | 0 |
+| Codex multi-agent v2 namespace restored | 1,016 | 1,015 | 0 | 1 | 0 |
+| Payload rules applied | 1,197 | 1,196 | 0 | 1 | 0 |
+| Usage parsed from upstream responses | 1,112 | 1,112 | 0 | 0 | 0 |
+| First-token events | 1,177 | 1,177 | 0 | 0 | 0 |
+| Sessions requests name | 1,093 | 1,091 | 0 | 2 | 0 |
+| Session identities derived | 1,046 | 1,045 | 0 | 1 | 0 |
+| Config change details | 1,064 | 1,064 | 0 | 0 | 0 |
+| Config file writes | 1,088 | 1,073 | 13 | 2 | 0 |
+| Quota snapshots of response headers | 1,028 | 1,027 | 0 | 1 | 0 |
+| Claude → Interactions request | 1,035 | 994 | 41 | 0 | 0 |
+| Claude → Interactions request, compatibility mode | 1,035 | 997 | 38 | 0 | 0 |
+| Interactions → Claude response, streaming | 1,015 | 1,014 | 1 | 0 | 0 |
+| Interactions → Claude response, non-streaming | 1,030 | 1,030 | 0 | 0 | 0 |
+| Interactions → Claude request | 1,045 | 994 | 51 | 0 | 0 |
+| Claude → Interactions response, streaming | 1,010 | 1,010 | 0 | 0 | 0 |
+| Claude → Interactions response, non-streaming | 1,014 | 1,014 | 0 | 0 | 0 |
+| Chat Completions → Interactions request | 1,012 | 990 | 22 | 0 | 0 |
+| Interactions → Chat Completions response, streaming | 1,012 | 992 | 20 | 0 | 0 |
+| Interactions → Chat Completions response, non-streaming | 1,009 | 855 | 154 | 0 | 0 |
+| Interactions → Chat Completions request | 1,008 | 899 | 109 | 0 | 0 |
+| Chat Completions → Interactions response, streaming | 1,007 | 1,007 | 0 | 0 | 0 |
+| Chat Completions → Interactions response, non-streaming | 1,006 | 990 | 16 | 0 | 0 |
+| Responses → Interactions request | 1,026 | 1,011 | 10 | 5 | 0 |
+| Interactions → Responses request | 1,011 | 896 | 114 | 1 | 0 |
+| Interactions → Responses response, streaming | 1,013 | 1,013 | 0 | 0 | 0 |
+| Interactions → Responses response, non-streaming | 1,010 | 921 | 89 | 0 | 0 |
+| Interactions → Responses tool input error (FinalizeToolInput) | 1,013 | 1,013 | 0 | 0 | 0 |
+| Responses → Interactions response, streaming | 1,005 | 1,005 | 0 | 0 | 0 |
+| Responses → Interactions response, non-streaming | 1,004 | 1,004 | 0 | 0 | 0 |
+| Interactions → Codex request | 1,042 | 830 | 209 | 3 | 0 |
+| Codex → Interactions stream | 1,021 | 1,020 | 0 | 1 | 0 |
+| Codex → Interactions non-stream | 1,014 | 1,013 | 0 | 1 | 0 |
+| Interactions → Gemini request | 1,144 | 1,103 | 41 | 0 | 0 |
+| Gemini → Interactions response, streaming | 1,020 | 961 | 59 | 0 | 0 |
+| Gemini → Interactions response, non-streaming | 1,019 | 1,005 | 14 | 0 | 0 |
+| Gemini → Interactions request | 1,084 | 1,072 | 12 | 0 | 0 |
+| Interactions → Gemini response, streaming | 1,011 | 1,000 | 11 | 0 | 0 |
+| Interactions → Gemini response, non-streaming | 1,016 | 990 | 26 | 0 | 0 |
+| Interactions passthrough request | 1,006 | 1,006 | 0 | 0 | 0 |
+| Interactions passthrough response, streaming | 1,002 | 1,002 | 0 | 0 | 0 |
+| Interactions passthrough response, non-streaming | 1,005 | 1,005 | 0 | 0 | 0 |
+
+</details>
+<!-- parity-summary:end -->
+
+To rerun it and update the summary above, use Go 1.26 ([UPSTREAM.md](UPSTREAM.md#checking-parity) says how to get it) and a CLIProxyAPI checkout at the pinned tag beside this one:
+
+```sh
+git clone --branch v8.0.15 https://github.com/router-for-me/CLIProxyAPI ../CLIProxyAPI
+cargo run --release -p open-ferry-parity -- --upstream ../CLIProxyAPI --go go1.26.4 --random 1000 --seed 13 --summary README.md
+```
+
+Parity says nothing about speed: [docs/benchmarks.md](docs/benchmarks.md) compares the two proxies' start time, throughput, latency and memory.
+
 ## Roadmap
 
 [ROADMAP.md](ROADMAP.md) has the full plan.

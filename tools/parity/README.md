@@ -2,7 +2,7 @@
 
 Differential tests of open-ferry's translators against upstream [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI). The tool runs the same input through upstream's Go translators and through our Rust ports, then compares what they produce.
 
-One hundred and six suites are covered so far:
+One hundred and eight suites are covered so far:
 
 | Module | Translator | Input | Output |
 |---|---|---|---|
@@ -108,6 +108,7 @@ Options:
 | `--go <path>` | `go` | Go binary |
 | `--live <url>` | | Send a few requests through a running CLIProxyAPI instead (see below) |
 | `--model <name>` | | Model for `--live` |
+| `--summary <file>` | | Also write a Markdown summary of the results to `<file>`: the upstream version, each suite's cases and outcomes, and the totals. In an existing file it replaces the part between the `<!-- parity-summary:start -->` and `<!-- parity-summary:end -->` lines, as in the [README](../../README.md#parity-with-cliproxyapi) |
 
 The exit status is 0 when every case is identical, equivalent or a known difference (see below).
 
