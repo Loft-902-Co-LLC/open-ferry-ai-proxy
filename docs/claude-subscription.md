@@ -54,7 +54,7 @@ claude-cli:
 ```
 
 - **`command`**: the path to `claude`. Empty finds `claude` on `PATH`; on Windows, `claude.exe`, else the `claude.cmd` npm installs.
-- **`config-dir`**: the account's `CLAUDE_CONFIG_DIR`. Empty is Claude Code's default.
+- **`config-dir`**: the account's `CLAUDE_CONFIG_DIR`. Empty uses the `CLAUDE_CONFIG_DIR` open-ferry runs with, else Claude Code's default.
 - **`system-prompt`**: `replace`, the default, gives Claude Code the client's system prompt in place of its own. `append` keeps Claude Code's and adds the client's to it.
 - **`prefix`, `models`, `excluded-models`, `priority`, `weight` and `disabled`** mean what they mean for `claude-api-key`.
 

@@ -17,13 +17,16 @@ const TOKEN: &str = "test-token-not-real";
 
 /// The variables the test gives open-ferry that Claude Code mustn't get:
 /// ones that would point it elsewhere, change how it runs, or say it runs
-/// inside another Claude Code.
-const SCRUBBED: [&str; 6] = [
+/// inside another Claude Code or an Agent SDK host.
+const SCRUBBED: [&str; 9] = [
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_BASE_URL",
     "CLAUDECODE",
     "CLAUDE_CODE_ENTRYPOINT",
     "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_AGENT_SDK_VERSION",
+    "CLAUDE_EFFORT",
+    "CLAUDE_PID",
     "MAX_THINKING_TOKENS",
 ];
 
@@ -50,6 +53,9 @@ fn scrubs_the_environment_and_keeps_the_token_only_without_a_config_dir() {
         std::env::set_var("CLAUDECODE", "1");
         std::env::set_var("CLAUDE_CODE_ENTRYPOINT", "sdk-ts");
         std::env::set_var("CLAUDE_CODE_USE_BEDROCK", "1");
+        std::env::set_var("CLAUDE_AGENT_SDK_VERSION", "0.0.0-test");
+        std::env::set_var("CLAUDE_EFFORT", "max");
+        std::env::set_var("CLAUDE_PID", "1");
         std::env::set_var("MAX_THINKING_TOKENS", "31999");
         std::env::set_var("OPEN_FERRY_TEST_KEEP", "kept");
         std::env::set_var("CLAUDE_CONFIG_DIR", inherited.config_dir());

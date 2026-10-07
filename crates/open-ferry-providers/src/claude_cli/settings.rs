@@ -109,11 +109,11 @@ impl Entry {
     }
 
     /// Applies the entry's environment to `command`, which otherwise
-    /// inherits open-ferry's: removes every `ANTHROPIC_*`, `CLAUDECODE` and
-    /// `CLAUDE_CODE_*` variable and `MAX_THINKING_TOKENS`, keeping
-    /// `CLAUDE_CODE_OAUTH_TOKEN` only when the entry has no config
-    /// directory, and sets `CLAUDE_CONFIG_DIR` when it has one. Only the
-    /// variables' names are looked at, never their values.
+    /// inherits open-ferry's: removes every `ANTHROPIC_*` and `CLAUDE*`
+    /// variable and `MAX_THINKING_TOKENS`, keeping `CLAUDE_CODE_OAUTH_TOKEN`
+    /// and `CLAUDE_CONFIG_DIR` only when the entry has no config directory,
+    /// and sets `CLAUDE_CONFIG_DIR` when it has one. Only the variables'
+    /// names are looked at, never their values.
     pub(crate) fn apply_env(&self, command: &mut tokio::process::Command) {
         let config_dir = self.config_dir_path();
         for name in std::env::vars_os().map(|(name, _)| name) {
@@ -172,16 +172,14 @@ impl Entry {
 }
 
 /// Whether a variable named `name` is removed from Claude Code's
-/// environment; `keep_token` keeps `CLAUDE_CODE_OAUTH_TOKEN`.
-pub(crate) fn scrubbed(name: &OsStr, keep_token: bool) -> bool {
+/// environment; `keep_account` keeps `CLAUDE_CODE_OAUTH_TOKEN` and
+/// `CLAUDE_CONFIG_DIR`, which say whose account Claude Code uses.
+pub(crate) fn scrubbed(name: &OsStr, keep_account: bool) -> bool {
     let name = name.to_string_lossy().to_ascii_uppercase();
-    if name == "CLAUDE_CODE_OAUTH_TOKEN" {
-        return !keep_token;
+    if name == "CLAUDE_CODE_OAUTH_TOKEN" || name == "CLAUDE_CONFIG_DIR" {
+        return !keep_account;
     }
-    name.starts_with("ANTHROPIC_")
-        || name.starts_with("CLAUDE_CODE_")
-        || name == "CLAUDECODE"
-        || name == "MAX_THINKING_TOKENS"
+    name.starts_with("ANTHROPIC_") || name.starts_with("CLAUDE") || name == "MAX_THINKING_TOKENS"
 }
 
 /// The directory `claude-cli` entries keep their files in: under
@@ -373,25 +371,31 @@ mod tests {
 
     #[test]
     fn scrubs_by_name() {
-        for (name, keep_token, removed) in [
+        for (name, keep_account, removed) in [
             ("ANTHROPIC_API_KEY", true, true),
             ("anthropic_base_url", true, true),
             ("CLAUDECODE", true, true),
+            ("CLAUDECODE_X", true, true),
             ("CLAUDE_CODE_ENTRYPOINT", true, true),
             ("CLAUDE_CODE_USE_BEDROCK", true, true),
+            ("CLAUDE_AGENT_SDK_VERSION", true, true),
+            ("CLAUDE_EFFORT", true, true),
+            ("claude_pid", true, true),
             ("MAX_THINKING_TOKENS", true, true),
             ("CLAUDE_CODE_OAUTH_TOKEN", true, false),
             ("CLAUDE_CODE_OAUTH_TOKEN", false, true),
             ("claude_code_oauth_token", false, true),
             ("CLAUDE_CONFIG_DIR", true, false),
+            ("CLAUDE_CONFIG_DIR", false, true),
             ("PATH", false, false),
             ("HOME", false, false),
-            ("CLAUDECODE_X", false, false),
+            ("ANTHROPIC", false, false),
+            ("MY_CLAUDE_KEY", false, false),
         ] {
             assert_eq!(
-                scrubbed(&OsString::from(name), keep_token),
+                scrubbed(&OsString::from(name), keep_account),
                 removed,
-                "{name} {keep_token}"
+                "{name} {keep_account}"
             );
         }
     }

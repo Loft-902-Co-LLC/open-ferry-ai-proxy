@@ -27,9 +27,9 @@
 //!   tools, MCP servers, slash commands and session files off, one turn,
 //!   and the client's system prompt in a file beside that directory,
 //!   removed once the process ends. The environment loses every
-//!   `ANTHROPIC_*`, `CLAUDECODE`, `MAX_THINKING_TOKENS` and
-//!   `CLAUDE_CODE_*` variable, but `CLAUDE_CODE_OAUTH_TOKEN` for an
-//!   entry without a config directory; an entry's config directory is
+//!   `ANTHROPIC_*` and `CLAUDE*` variable and `MAX_THINKING_TOKENS`, but
+//!   `CLAUDE_CODE_OAUTH_TOKEN` and `CLAUDE_CONFIG_DIR` for an entry
+//!   without a config directory; an entry's config directory is
 //!   `CLAUDE_CONFIG_DIR`.
 //! - Gives Claude Code the request as one user message on standard input,
 //!   and closes it.
