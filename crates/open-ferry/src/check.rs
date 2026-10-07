@@ -611,28 +611,83 @@ async fn check_address(config: &Config, findings: &mut Vec<Finding>) {
     for address in addresses.iter().copied() {
         connects.spawn(async move {
             let connect = tokio::net::TcpStream::connect(address);
-            let connected = matches!(
-                tokio::time::timeout(CONNECT_TIMEOUT, connect).await,
-                Ok(Ok(_))
-            );
-            connected.then_some(address)
+            let result = tokio::time::timeout(CONNECT_TIMEOUT, connect)
+                .await
+                .ok()
+                .map(|connected| connected.map(drop));
+            (address, probe(result))
         });
     }
+    let mut unknown = Vec::new();
     while let Some(connected) = connects.join_next().await {
-        if let Ok(Some(address)) = connected {
-            findings.push(Finding::error(
-                CHECK,
-                format!("something already listens on {address}"),
-                "stop it (if it is this proxy, it is already running), or set server.port to a free port",
-            ));
-            return;
+        match connected {
+            Ok((address, Probe::Listening)) => {
+                findings.push(Finding::error(
+                    CHECK,
+                    format!("something already listens on {address}"),
+                    "stop it (if it is this proxy, it is already running), or set server.port to a free port",
+                ));
+                return;
+            }
+            Ok((address, Probe::Unknown(error))) => unknown.push(format!("{address}: {error}")),
+            Ok((_, Probe::Free)) | Err(_) => {}
         }
+    }
+    if !unknown.is_empty() {
+        unknown.sort();
+        findings.push(Finding::warning(
+            CHECK,
+            format!(
+                "couldn't tell whether something listens on {}",
+                unknown.join("; ")
+            ),
+            format!(
+                "run check again; if the proxy fails to start because the address is in use, free port {port} or set server.port"
+            ),
+        ));
+        return;
     }
     let shown: Vec<String> = addresses.iter().map(SocketAddr::to_string).collect();
     findings.push(Finding::ok(
         CHECK,
         format!("nothing listens on {}", shown.join(" or ")),
     ));
+}
+
+/// What a connection to a loopback address says of its port.
+#[derive(Debug, PartialEq)]
+enum Probe {
+    Listening,
+    Free,
+    /// The connection failed for another reason, such as the machine
+    /// running out of local ports, so it says nothing of the port.
+    Unknown(String),
+}
+
+/// Reads the result of connecting to a loopback address, `None` when the
+/// connection timed out.
+fn probe(result: Option<io::Result<()>>) -> Probe {
+    match result {
+        Some(Ok(())) => Probe::Listening,
+        // Windows takes about two seconds to refuse a connection to a
+        // closed loopback port, longer than the timeout.
+        None => Probe::Free,
+        // Refused: nothing listens. Not available or unreachable: the
+        // machine has no such address, such as ::1 where IPv6 is off, so
+        // nothing can listen there.
+        Some(Err(error))
+            if matches!(
+                error.kind(),
+                io::ErrorKind::ConnectionRefused
+                    | io::ErrorKind::AddrNotAvailable
+                    | io::ErrorKind::NetworkUnreachable
+                    | io::ErrorKind::HostUnreachable
+            ) =>
+        {
+            Probe::Free
+        }
+        Some(Err(error)) => Probe::Unknown(error.to_string()),
+    }
 }
 
 /// The dashboard app is built in, unless the config turns it off.

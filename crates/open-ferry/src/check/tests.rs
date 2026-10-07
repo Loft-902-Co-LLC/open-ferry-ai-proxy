@@ -445,6 +445,38 @@ async fn checks_every_interface_on_loopback() {
     );
 }
 
+// Not upstream's: only a refusal, a timeout or an address the machine
+// doesn't have means the port is free; another failure, such as running
+// out of local ports, says nothing of it.
+#[test]
+fn reads_each_connection_result() {
+    use std::io::{Error, ErrorKind};
+    assert_eq!(probe(Some(Ok(()))), Probe::Listening);
+    assert_eq!(probe(None), Probe::Free);
+    for kind in [
+        ErrorKind::ConnectionRefused,
+        ErrorKind::AddrNotAvailable,
+        ErrorKind::NetworkUnreachable,
+        ErrorKind::HostUnreachable,
+    ] {
+        assert_eq!(probe(Some(Err(Error::from(kind)))), Probe::Free, "{kind:?}");
+    }
+    for kind in [
+        ErrorKind::AddrInUse,
+        ErrorKind::PermissionDenied,
+        ErrorKind::Other,
+    ] {
+        assert!(
+            matches!(probe(Some(Err(Error::from(kind)))), Probe::Unknown(_)),
+            "{kind:?}"
+        );
+    }
+    assert_eq!(
+        probe(Some(Err(Error::new(ErrorKind::AddrInUse, "no ports left")))),
+        Probe::Unknown("no ports left".to_owned())
+    );
+}
+
 // Not upstream's: what each claude-cli version check becomes; a missing
 // Claude Code is an error. (`tools/fake-claude-cli` tests the checks
 // themselves against the fake Claude Code.)
