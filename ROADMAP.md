@@ -27,7 +27,7 @@ Still to come:
 - **The upstream features whose settings are read but not yet acted on:**
   - session affinity (`routing.session-affinity` and its options), which keeps a conversation on one credential so its prompt cache stays warm, and moves it only when that credential can't serve;
   - Codex's response steering on the Responses WebSocket (`upstream.codex.response-steering`, experimental and off by default upstream);
-  - the remote model catalogs: the `models` section's catalog sources, and the refresh every three hours that `-local-model` turns off.
+  - the model catalog sources in the `models` section, as files: a catalog file the config names is read at start and again when it changes, so a new model can be added without waiting for a release. Unlike upstream, open-ferry downloads no catalog. Without a file it uses the catalogs built into the binary, and we update those by hand when providers release models.
 - **Routing by quota:** a strategy that picks by the quota the providers report: the credential whose limit resets soonest, or the one with the most left, keeping a reserve on each. Upstream has no such strategy, so this would be open-ferry's own.
 - **Ways to install besides building from source,** starting with the first release:
   - a container image on GitHub's registry, for amd64 and arm64, that uses the same paths as CLIProxyAPI's image (`/CLIProxyAPI/config.yaml`, `/root/.cli-proxy-api` and `/CLIProxyAPI/logs`), so an existing Docker Compose file switches over by changing the image name;
