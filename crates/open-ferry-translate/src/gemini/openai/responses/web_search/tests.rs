@@ -596,14 +596,15 @@ fn model_supports_web_search_static_veto_takes_precedence() {
 
     // An explicit native capability decides, whatever supports_web_search
     // says.
-    for (id, capability) in catalog() {
-        let want = capability.native.unwrap_or(capability.supports);
+    for info in ModelCatalog::embedded().models() {
+        let want = info.native_web_search.unwrap_or(info.supports_web_search);
         assert_eq!(
-            model_supports_web_search(id),
+            model_supports_web_search(&info.id),
             want,
-            "model {id}: native_capabilities.web_search {:?}, supports_web_search {}",
-            capability.native,
-            capability.supports
+            "model {}: native_capabilities.web_search {:?}, supports_web_search {}",
+            info.id,
+            info.native_web_search,
+            info.supports_web_search
         );
     }
 }

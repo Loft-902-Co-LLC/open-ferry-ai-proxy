@@ -449,9 +449,10 @@ impl ModelRegistry {
     }
 }
 
-/// The models `auth` serves under `rules`, from the built-in catalog.
+/// The models `auth` serves under `rules`, from the static catalog in use
+/// ([`StaticCatalog::current`]).
 pub fn auth_models(auth: &Auth, rules: &RegistrationRules) -> AuthModels {
-    auth_models_with(auth, rules, StaticCatalog::embedded())
+    auth_models_with(auth, rules, &StaticCatalog::current())
 }
 
 /// The models `auth` serves under `rules`, from `catalog`.
@@ -1020,7 +1021,7 @@ fn resolve_thinking(name: &str, configured: Option<&ThinkingSupport>) -> Option<
         return Some(normalize_thinking(configured));
     }
     let base = parse_suffix(name.trim()).trim();
-    open_ferry_translate::models::ModelCatalog::embedded()
+    open_ferry_translate::models::ModelCatalog::current()
         .thinking(base)
         .cloned()
 }

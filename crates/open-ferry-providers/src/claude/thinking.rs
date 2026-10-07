@@ -6,7 +6,7 @@
 //! adaptive effort. [`crate::thinking`] reads and checks the setting.
 //!
 //! Deviations from upstream:
-//! - Models are looked up in the built-in catalog only. Models registered at
+//! - Models are looked up in the static catalog only. Models registered at
 //!   run time, and models configured for an API key (upstream's
 //!   `ResolvedModelInfo`), aren't seen; such a model is treated as unknown,
 //!   so its setting goes to Claude unchecked, as upstream does for unknown
@@ -62,9 +62,9 @@ pub(crate) fn apply_request(
     shared::apply_request::<Claude>(body, model, from, payload, original_request, lookup)
 }
 
-/// The built-in catalog's model `id`, taken to be a Claude model.
+/// The static catalog's model `id`, taken to be a Claude model.
 fn lookup(id: &str) -> Option<Model> {
-    ModelCatalog::embedded().lookup(id).map(|info| Model {
+    ModelCatalog::current().lookup(id).map(|info| Model {
         id: info.id.clone(),
         model_type: String::new(),
         thinking: info.thinking.clone(),

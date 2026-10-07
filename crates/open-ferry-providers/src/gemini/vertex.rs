@@ -114,7 +114,7 @@ impl VertexExecutor {
     }
 
     /// Looks up models in `models`, for their thinking support, before the
-    /// built-in catalog.
+    /// static catalog.
     pub fn with_models(mut self, models: Arc<dyn ModelCatalog>) -> Self {
         self.models = Some(models);
         self

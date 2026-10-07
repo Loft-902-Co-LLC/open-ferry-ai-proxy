@@ -13,11 +13,10 @@ use super::{non_empty, parse, to_vec};
 use crate::gemini::claude as gemini_claude;
 use crate::gemini::gemini as gemini_gemini;
 use crate::gemini::openai::chat_completions as gemini_chat;
+use crate::models::ModelCatalog;
 use crate::registry::{Format, Registry, ResponseTransform, StreamTranslator};
 
 pub(super) fn register(registry: &Registry) {
-    let models = registry.models;
-
     // internal/translator/gemini/gemini/init.go
     registry.register(
         Format::GEMINI,
@@ -40,8 +39,13 @@ pub(super) fn register(registry: &Registry) {
     registry.register(
         Format::CLAUDE,
         Format::GEMINI,
-        Some(Arc::new(move |model, body, stream| {
-            gemini_claude::convert_claude_request_to_gemini(model, &body, stream, models)
+        Some(Arc::new(|model, body, stream| {
+            gemini_claude::convert_claude_request_to_gemini(
+                model,
+                &body,
+                stream,
+                &ModelCatalog::current(),
+            )
         })),
         ResponseTransform {
             stream: Some(Arc::new(|context| {

@@ -181,6 +181,7 @@ fn apply_patch_field_modalities() {
         };
         let builder = Builder {
             catalog: &registry,
+            statics: StaticCatalog::embedded_shared(),
             providers_for_model: None,
             apply_patch: Some(&capability),
             optimize_multi_agent_v2: false,

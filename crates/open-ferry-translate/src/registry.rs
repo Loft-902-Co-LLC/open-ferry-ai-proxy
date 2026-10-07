@@ -50,8 +50,8 @@
 //! - Not ported: plugin hooks and the pipeline's middleware, which only
 //!   plugins use; the envelope's `ModelInfo`, which comes from configured
 //!   accounts; and `ConfigurationUpdatesChanged`, which only plugin hooks
-//!   set. Models are looked up in the static catalog
-//!   ([`ModelCatalog::embedded`]).
+//!   set. Models are looked up in the static catalog in use
+//!   ([`ModelCatalog::current`]), taken for each request.
 
 mod builtin;
 
@@ -235,7 +235,6 @@ struct Tables {
 /// Translators between pairs of formats.
 pub struct Registry {
     tables: RwLock<Tables>,
-    models: &'static ModelCatalog,
 }
 
 impl Default for Registry {
@@ -261,7 +260,6 @@ impl Registry {
     pub fn new() -> Self {
         Self {
             tables: RwLock::default(),
-            models: ModelCatalog::embedded(),
         }
     }
 
@@ -395,7 +393,8 @@ impl Registry {
         if let Some(transform) = transform {
             let summary = summary::extract_translated(&req.body, from.as_str(), to.as_str());
             req = transform(req);
-            summary::apply_for_model(&mut req.body, to.as_str(), &req.model, summary, self.models);
+            let models = ModelCatalog::current();
+            summary::apply_for_model(&mut req.body, to.as_str(), &req.model, summary, &models);
         } else if !req.model.is_empty() && str_of(req.body.get("model")) != req.model {
             set_path(&mut req.body, "model", Value::String(req.model.clone()));
         }

@@ -296,6 +296,7 @@ fn model_metadata_preserves_multi_agent_version_when_disabled() {
     let custom = model("custom-model");
     let builder = |optimize_multi_agent_v2| Builder {
         catalog: &registry,
+        statics: StaticCatalog::embedded_shared(),
         providers_for_model: None,
         apply_patch: None,
         optimize_multi_agent_v2,
@@ -913,6 +914,7 @@ fn cpa_capabilities_never_appear() {
     let registry = ModelRegistry::new();
     let builder = Builder {
         catalog: &registry,
+        statics: StaticCatalog::embedded_shared(),
         providers_for_model: None,
         apply_patch: None,
         optimize_multi_agent_v2: false,

@@ -50,6 +50,7 @@ mod tests;
 
 use std::cmp::Ordering;
 use std::fmt::Write as _;
+use std::sync::Arc;
 
 use open_ferry_translate::go;
 use serde_json::{Map, Value, json};
@@ -105,7 +106,8 @@ const DEFAULT_PRIORITY: i64 = 100;
 
 /// The Codex client model list for `models` (upstream's
 /// `BuildResponseForClientWithToolCapabilities`): `{"models": [...]}`, or
-/// `{"models": null}` if the built-in catalog didn't load.
+/// `{"models": null}` if no Codex client catalog is in use
+/// ([`CodexClientCatalog::current`]).
 ///
 /// `catalog` gives the models' registered details. `providers_for_model`,
 /// if given, narrows capabilities to the providers serving each model;
@@ -123,13 +125,14 @@ pub fn build_response(
 ) -> Value {
     let builder = Builder {
         catalog,
+        statics: StaticCatalog::current(),
         providers_for_model,
         apply_patch,
         optimize_multi_agent_v2,
         client_version,
     };
-    let models = CodexClientCatalog::embedded()
-        .map_or(Value::Null, |templates| builder.build(templates, models));
+    let models = CodexClientCatalog::current()
+        .map_or(Value::Null, |templates| builder.build(&templates, models));
     json!({ "models": models })
 }
 
@@ -145,6 +148,8 @@ pub fn marshal_compact(value: &Value) -> String {
 /// What each entry is built with.
 struct Builder<'a> {
     catalog: &'a dyn ModelCatalog,
+    /// The static catalog in use, taken once for the whole list.
+    statics: Arc<StaticCatalog>,
     providers_for_model: Option<ProvidersForModel<'a>>,
     apply_patch: Option<ApplyPatchCapability<'a>>,
     optimize_multi_agent_v2: bool,
@@ -234,7 +239,7 @@ impl Builder<'_> {
         let provider = go::to_lower(provider.trim());
         self.catalog
             .model_info(id, &provider)
-            .or_else(|| StaticCatalog::embedded().lookup(id))
+            .or_else(|| self.statics.lookup(id))
     }
 
     /// The providers of `id`, or of what follows its first `/` when it has

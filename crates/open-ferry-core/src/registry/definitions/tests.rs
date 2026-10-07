@@ -1,5 +1,5 @@
-// Ported from CLIProxyAPI internal/registry/model_definitions_test.go
-// (v8.0.15, MIT).
+// Ported from CLIProxyAPI internal/registry/model_definitions_test.go and
+// model_updater_test.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Tests for the static catalog.
@@ -448,4 +448,92 @@ fn decode_errors_name_the_value() {
         "remote: decode models catalog: claude[0].thinking.levels: want an array, found a string"
     );
     assert!(error("{").starts_with("remote: decode models catalog: "));
+}
+
+// Upstream's TestDetectChangedProviders_CodexConfigurationUpdate.
+#[test]
+fn detect_changed_providers_codex_configuration_update() {
+    let old = StaticCatalog::from_json(r#"{"codex-free":[{"id":"gpt-6-luna"}]}"#, "test").unwrap();
+    let new = StaticCatalog::from_json(
+        r#"{"codex-free":[{"id":"gpt-6-luna","support_configuration_update":true}]}"#,
+        "test",
+    )
+    .unwrap();
+    assert_eq!(old.changed_providers(&new), ["codex"]);
+}
+
+// Upstream's TestDetectChangedProviders_KimiAliases.
+#[test]
+fn detect_changed_providers_kimi_aliases() {
+    let old = StaticCatalog::from_json(r#"{"kimi":[{"id":"kimi-k2"}]}"#, "test").unwrap();
+    let new = StaticCatalog::from_json(r#"{"kimi":[{"id":"kimi-k2"},{"id":"kimi-k3"}]}"#, "test")
+        .unwrap();
+    let changed = old.changed_providers(&new);
+    for provider in ["kimi", "kimi-ai", "kimi.ai", "kimi.com"] {
+        assert!(
+            changed.iter().any(|seen| seen == provider),
+            "{provider}: {changed:?}"
+        );
+    }
+}
+
+// Not upstream's: each provider is named once, in upstream's order, and the
+// same catalog changes none.
+#[test]
+fn changed_providers_come_once_in_upstreams_order() {
+    let old = StaticCatalog::embedded();
+    assert!(old.changed_providers(old).is_empty());
+    let new = StaticCatalog::from_json(
+        r#"{"meta":[{"id":"m"}],"codex-pro":[{"id":"c"}],"codex-team":[{"id":"c"}],"gemini":[{"id":"g"}]}"#,
+        "test",
+    )
+    .unwrap();
+    let changed = StaticCatalog::default().changed_providers(&new);
+    assert_eq!(changed, ["gemini", "gemini-interactions", "codex", "meta"]);
+}
+
+// Not upstream's: a model's web search fields decode as upstream's
+// `ModelInfo` reads them, the last of a repeated key standing, and reach
+// the translators' catalog.
+#[test]
+fn web_search_fields_decode() {
+    let catalog = StaticCatalog::from_json(
+        r#"{"claude":[
+            {"id":"a","supports_web_search":true,"native_capabilities":{"web_search":false}},
+            {"id":"b","native_capabilities":null},
+            {"id":"c","native_capabilities":{"web_search":null,"WEB_SEARCH":true}},
+            {"id":"d","native_capabilities":{"web_search":true,"web_search":null}}
+        ]}"#,
+        "test",
+    )
+    .unwrap();
+    let fields = |id: &str| {
+        let model = catalog.lookup(id).unwrap();
+        (model.supports_web_search, model.native_web_search)
+    };
+    assert_eq!(fields("a"), (true, Some(false)));
+    assert_eq!(fields("b"), (false, None));
+    assert_eq!(fields("c"), (false, Some(true)));
+    assert_eq!(fields("d"), (false, None));
+    let translators = catalog.translator_catalog();
+    let a = translators.lookup("a").unwrap();
+    assert!(a.supports_web_search);
+    assert_eq!(a.native_web_search, Some(false));
+    assert!(
+        StaticCatalog::from_json(
+            r#"{"claude":[{"id":"x","native_capabilities":{"web_search":1}}]}"#,
+            "test"
+        )
+        .is_err()
+    );
+}
+
+// Not upstream's: the translators' catalog made from the built-in catalog
+// is the one the translators build in.
+#[test]
+fn the_translators_catalog_matches_the_built_in_one() {
+    assert_eq!(
+        StaticCatalog::embedded().translator_catalog(),
+        *open_ferry_translate::models::ModelCatalog::embedded()
+    );
 }

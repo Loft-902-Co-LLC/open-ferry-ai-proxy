@@ -14,6 +14,7 @@ use crate::codex::claude as codex_claude;
 use crate::codex::openai::{chat_completions as codex_chat, responses as codex_responses};
 use crate::json::raw;
 use crate::json::str_of;
+use crate::models::ModelCatalog;
 use crate::openai::{
     chat_completions as openai_chat, claude as openai_claude, responses as openai_responses,
 };
@@ -23,7 +24,6 @@ mod gemini_responses;
 mod interactions;
 
 pub(super) fn register(registry: &Registry) {
-    let models = registry.models;
     from_gemini::register(registry);
 
     // internal/translator/codex/claude/init.go
@@ -110,9 +110,12 @@ pub(super) fn register(registry: &Registry) {
     registry.register(
         Format::OPENAI,
         Format::CLAUDE,
-        Some(Arc::new(move |model, body, stream| {
+        Some(Arc::new(|model, body, stream| {
             claude_chat::convert_openai_chat_completions_request_to_claude(
-                model, &body, stream, models,
+                model,
+                &body,
+                stream,
+                &ModelCatalog::current(),
             )
         })),
         ResponseTransform {
@@ -136,9 +139,12 @@ pub(super) fn register(registry: &Registry) {
     registry.register(
         Format::OPENAI_RESPONSE,
         Format::CLAUDE,
-        Some(Arc::new(move |model, body, stream| {
+        Some(Arc::new(|model, body, stream| {
             claude_responses::convert_openai_responses_request_to_claude(
-                model, &body, stream, models,
+                model,
+                &body,
+                stream,
+                &ModelCatalog::current(),
             )
         })),
         ResponseTransform {

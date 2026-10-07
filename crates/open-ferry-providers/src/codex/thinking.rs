@@ -16,7 +16,7 @@
 //! left in it.
 //!
 //! A model is looked up as the executor's provider registered it, in the
-//! model registry the executor was given, else in the built-in catalog
+//! model registry the executor was given, else in the static catalog
 //! (upstream's `LookupModelInfo`).
 //!
 //! Deviations from upstream:
@@ -107,7 +107,7 @@ pub(crate) fn compatible_effort(config: &Config) -> Option<String> {
 /// that `model`'s suffix or the request asks for. `payload` and
 /// `original_request` are the client's request as the executor got it and
 /// as the client first sent it. Models are looked up as `provider`
-/// registered them in `models`, else in the built-in catalog.
+/// registered them in `models`, else in the static catalog.
 ///
 /// A setting the model can't take is a 400 error.
 pub(crate) fn apply_request(
@@ -123,7 +123,7 @@ pub(crate) fn apply_request(
 }
 
 /// `LookupModelInfo`: `model` as `provider` registered it in `models`, or
-/// as last registered at all, else as the built-in catalog has it.
+/// as last registered at all, else as the static catalog in use has it.
 pub(crate) fn lookup(
     models: Option<&dyn ModelCatalog>,
     model: &str,
@@ -136,7 +136,7 @@ pub(crate) fn lookup(
     let provider = json::lower_trim(provider);
     models
         .and_then(|models| models.model_info(model, &provider))
-        .or_else(|| StaticCatalog::embedded().lookup(model))
+        .or_else(|| StaticCatalog::current().lookup(model))
         .map(thinking_model)
 }
 

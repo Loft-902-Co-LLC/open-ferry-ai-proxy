@@ -375,7 +375,7 @@ fn is_compat_model(state: &AppState, model: &str) -> bool {
     state
         .catalog()
         .model_info(model, "")
-        .or_else(|| StaticCatalog::embedded().lookup(model))
+        .or_else(|| StaticCatalog::current().lookup(model))
         .is_some_and(|info| info.model_type == OPENAI_IMAGE_MODEL_TYPE)
 }
 

@@ -6,20 +6,23 @@
 // internal/registry/models/codex_client_models.json, unchanged.
 // https://github.com/router-for-me/CLIProxyAPI
 
-//! The Codex client model catalog: upstream's `codex_client_models.json`,
-//! built in. Each entry describes a model the way Codex clients expect it in
-//! their model list, and serves as the template for that model's entry (see
+//! The Codex client model catalog: upstream's `codex_client_models.json`.
+//! Each entry describes a model the way Codex clients expect it in their
+//! model list, and serves as the template for that model's entry (see
 //! [`crate::codex_models`]). The `gpt-5.5` entry is also the template for
 //! models the catalog doesn't list.
+//!
+//! The catalog in use is [`CodexClientCatalog::current`]: the built-in one,
+//! or the last valid one published to [`super::CatalogStore`].
 //!
 //! The catalog is checked as upstream checks it before use: it needs a
 //! default template, unique slugs, and the fields Codex can't do without.
 //!
 //! Deviations from upstream:
-//! - The catalog isn't refreshed from the network (upstream's
-//!   `codex_client_models_updater.go`); the built-in copy is used, so it has
-//!   no revisions. `cmd/fetch_codex_models`, which downloads it while posing
-//!   as the Codex CLI, isn't ported either.
+//! - A catalog is parsed once, when it is published, so it has no
+//!   revisions, which upstream's readers use to know when to parse it again.
+//!   `cmd/fetch_codex_models`, which downloads it while posing as the Codex
+//!   CLI, isn't ported.
 //! - Decode errors are worded differently from Go's.
 //! - If the built-in catalog doesn't load, there are no templates and the
 //!   model list is `null`, as upstream's is then; upstream also logs a
@@ -30,7 +33,7 @@ mod tests;
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::OnceLock;
+use std::sync::{Arc, LazyLock};
 
 use open_ferry_translate::go;
 use serde_json::{Map, Value};
@@ -56,6 +59,14 @@ impl fmt::Display for CodexCatalogError {
 
 impl std::error::Error for CodexCatalogError {}
 
+impl CodexCatalogError {
+    /// The error for a catalog read from `source`, worded as upstream's
+    /// `loadCodexClientModelsFromBytes` words it.
+    pub(crate) fn with_source(self, source: &str) -> Self {
+        Self(format!("{source}: {}", self.0))
+    }
+}
+
 /// The Codex client model catalog's entries, by slug.
 #[derive(Clone, Debug)]
 pub struct CodexClientCatalog {
@@ -63,13 +74,29 @@ pub struct CodexClientCatalog {
     default_template: Map<String, Value>,
 }
 
+/// The built-in catalog, or `None` if it doesn't load.
+static EMBEDDED: LazyLock<Option<Arc<CodexClientCatalog>>> = LazyLock::new(|| {
+    CodexClientCatalog::from_json(EMBEDDED_CATALOG)
+        .ok()
+        .map(Arc::new)
+});
+
 impl CodexClientCatalog {
     /// The built-in catalog, or `None` if it doesn't load.
     pub fn embedded() -> Option<&'static Self> {
-        static CATALOG: OnceLock<Option<CodexClientCatalog>> = OnceLock::new();
-        CATALOG
-            .get_or_init(|| Self::from_json(EMBEDDED_CATALOG).ok())
-            .as_ref()
+        EMBEDDED.as_deref()
+    }
+
+    /// The built-in catalog, shared, or `None` if it doesn't load.
+    pub(crate) fn embedded_shared() -> Option<Arc<Self>> {
+        EMBEDDED.clone()
+    }
+
+    /// The catalog in use: the built-in one, or the last valid one
+    /// published; `None` if the built-in one doesn't load and none was
+    /// published.
+    pub fn current() -> Option<Arc<Self>> {
+        super::CatalogStore::global().codex()
     }
 
     /// Reads a catalog in the format of upstream's
@@ -164,7 +191,10 @@ fn missing_default() -> CodexCatalogError {
 fn decode(data: &[u8]) -> Result<Vec<Option<Map<String, Value>>>, CodexCatalogError> {
     let decode_error =
         |detail: String| CodexCatalogError(format!("decode Codex client model catalog: {detail}"));
-    let root: Value = serde_json::from_slice(data).map_err(|err| decode_error(err.to_string()))?;
+    // Go's decoder reads each byte that isn't part of a UTF-8 character as
+    // U+FFFD inside a string, and rejects it elsewhere, as this does.
+    let root: Value = serde_json::from_str(&crate::multipart::lossy(data))
+        .map_err(|err| decode_error(err.to_string()))?;
     check_numbers(&root).map_err(decode_error)?;
     let fields = match &root {
         Value::Null => return Ok(Vec::new()),

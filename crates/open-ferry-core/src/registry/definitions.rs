@@ -1,28 +1,33 @@
 // Ported from CLIProxyAPI internal/registry/model_definitions.go and the
-// catalog loading and checks in internal/registry/model_updater.go
-// (v8.0.15, MIT).
+// catalog loading, checks and change detection in
+// internal/registry/model_updater.go (loadModelsFromBytes,
+// validateModelsCatalog, validateModelSection, detectChangedProviders,
+// modelSectionChanged) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
-//! The static model catalog: upstream's `models.json`, built in, which lists
-//! the models each provider serves, and the image models every Codex plan
-//! adds.
+//! The static model catalog: upstream's `models.json`, which lists the
+//! models each provider serves, and the image models every Codex plan adds.
+//!
+//! The catalog in use is [`StaticCatalog::current`]: the built-in one, or
+//! the last valid one published to [`super::CatalogStore`].
 //!
 //! The catalog lists Codex models by ChatGPT plan; [`CodexPlan`] picks one.
 //!
 //! Deviations from upstream:
-//! - The catalog isn't refreshed from the network (upstream's model updater
-//!   fetches a new `models.json` every three hours); the built-in copy is
-//!   used.
 //! - Only the Claude, Gemini, Vertex, Codex, xAI and Meta sections are
 //!   served, and [`StaticCatalog::models_for_channel`] has nothing for the
 //!   xAI and Meta channels yet. The others are decoded and checked as
 //!   upstream does, so a catalog upstream rejects is rejected here, and are
-//!   kept only for [`StaticCatalog::lookup`].
+//!   kept for [`StaticCatalog::lookup`] and to tell which providers changed.
 //! - [`StaticCatalog::lookup`] doesn't search upstream's built-in Devin
 //!   models, which no ported provider serves.
 //! - A model's `config.override_header` is checked, then dropped: it forces a
-//!   client's identity headers, which this project doesn't do. So are
-//!   `native_capabilities` and `supports_web_search`.
+//!   client's identity headers, which this project doesn't do.
+//! - [`StaticCatalog::changed_providers`] compares what is kept of each
+//!   model, so a change only to a model's `config.override_header`, or
+//!   between a negative limit and zero, changes no provider; upstream
+//!   compares the models' JSON. A `null` in the unchecked `devin` section
+//!   is dropped, so adding or removing one isn't a change.
 //! - Decode errors are worded differently from Go's.
 //! - Where a key repeats, exactly or in another case, the last one replaces
 //!   the earlier ones; Go's decoder merges repeated objects and lists.
@@ -34,10 +39,12 @@ mod tests;
 
 use std::collections::HashSet;
 use std::fmt;
-use std::sync::OnceLock;
+use std::sync::{Arc, LazyLock};
 
 use open_ferry_translate::go;
-use open_ferry_translate::models::embedded_catalog_json;
+use open_ferry_translate::models::{
+    ModelCatalog as TranslatorCatalog, ModelInfo as TranslatorModel, embedded_catalog_json,
+};
 use serde_json::{Map, Value};
 
 use super::json;
@@ -183,29 +190,46 @@ impl CodexPlan {
     }
 }
 
-/// The models of upstream's static catalog that this port serves.
+/// Upstream's static catalog: the models of each section of `models.json`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StaticCatalog {
     claude: Vec<ModelInfo>,
     gemini: Vec<ModelInfo>,
     vertex: Vec<ModelInfo>,
+    aistudio: Vec<ModelInfo>,
     codex_free: Vec<ModelInfo>,
     codex_team: Vec<ModelInfo>,
     codex_plus: Vec<ModelInfo>,
     codex_pro: Vec<ModelInfo>,
+    kimi: Vec<ModelInfo>,
+    antigravity: Vec<ModelInfo>,
     xai: Vec<ModelInfo>,
+    devin: Vec<ModelInfo>,
     meta: Vec<ModelInfo>,
-    /// Every section but the Codex Free, Team and Plus ones, in the order
-    /// upstream's `LookupStaticModelInfo` searches them.
-    lookup: Vec<ModelInfo>,
 }
+
+/// The built-in catalog; empty if it doesn't load.
+static EMBEDDED: LazyLock<Arc<StaticCatalog>> = LazyLock::new(|| {
+    Arc::new(StaticCatalog::from_json(embedded_catalog_json(), "embed").unwrap_or_default())
+});
 
 impl StaticCatalog {
     /// Upstream's `models.json`, as built in.
     pub fn embedded() -> &'static Self {
-        static CATALOG: OnceLock<StaticCatalog> = OnceLock::new();
-        CATALOG
-            .get_or_init(|| Self::from_json(embedded_catalog_json(), "embed").unwrap_or_default())
+        &EMBEDDED
+    }
+
+    /// The built-in catalog, shared.
+    pub(crate) fn embedded_shared() -> Arc<Self> {
+        Arc::clone(&EMBEDDED)
+    }
+
+    /// The catalog in use (upstream's `getModels`): the built-in one, or the
+    /// last valid one published. Take it once per task and
+    /// keep it: it is a whole catalog, which a later one replaces without
+    /// changing it.
+    pub fn current() -> Arc<Self> {
+        super::CatalogStore::global().general()
     }
 
     /// Reads a catalog in the format of upstream's `models.json`, and checks
@@ -238,34 +262,37 @@ impl StaticCatalog {
             devin,
             meta,
         ] = sections.map(|models| models.into_iter().flatten().collect::<Vec<_>>());
-        let lookup = [
-            &claude,
-            &gemini,
-            &vertex,
-            &aistudio,
-            &codex_pro,
-            &kimi,
-            &antigravity,
-            &xai,
-            &devin,
-            &meta,
-        ]
-        .into_iter()
-        .flatten()
-        .cloned()
-        .collect();
         Ok(Self {
             claude,
             gemini,
             vertex,
+            aistudio,
             codex_free,
             codex_team,
             codex_plus,
             codex_pro,
+            kimi,
+            antigravity,
             xai,
+            devin,
             meta,
-            lookup,
         })
+    }
+
+    /// The sections upstream's `LookupStaticModelInfo` searches before its
+    /// built-in Devin models, in its order. It searches `meta` after them.
+    fn searched(&self) -> [&[ModelInfo]; 9] {
+        [
+            &self.claude,
+            &self.gemini,
+            &self.vertex,
+            &self.aistudio,
+            &self.codex_pro,
+            &self.kimi,
+            &self.antigravity,
+            &self.xai,
+            &self.devin,
+        ]
     }
 
     /// The first model with ID `id`, searching every section the way
@@ -274,7 +301,64 @@ impl StaticCatalog {
         if id.is_empty() {
             return None;
         }
-        self.lookup.iter().find(|model| model.id == id).cloned()
+        self.searched()
+            .into_iter()
+            .chain([self.meta.as_slice()])
+            .flatten()
+            .find(|model| model.id == id)
+            .cloned()
+    }
+
+    /// What the translators need of this catalog: each model's thinking
+    /// settings, output limit and web search, as `LookupStaticModelInfo`
+    /// finds them.
+    pub fn translator_catalog(&self) -> TranslatorCatalog {
+        TranslatorCatalog::from_models(
+            self.searched().into_iter().flatten().map(translator_model),
+            self.meta.iter().map(translator_model),
+        )
+    }
+
+    /// Keeps `previous`'s Meta models if this catalog has none, as
+    /// upstream's `publishCatalogBytes` does.
+    pub(crate) fn keep_meta_of(&mut self, previous: &Self) {
+        if self.meta.is_empty() {
+            self.meta.clone_from(&previous.meta);
+        }
+    }
+
+    /// The providers whose models differ from this catalog's in `new`, each
+    /// named once, in upstream's order (upstream's `detectChangedProviders`).
+    /// Gemini's section is both `gemini`'s and `gemini-interactions`', the
+    /// four Codex plans' are `codex`'s, and Kimi's is `kimi`'s, `kimi-ai`'s,
+    /// `kimi.ai`'s and `kimi.com`'s.
+    pub fn changed_providers(&self, new: &Self) -> Vec<String> {
+        let sections: [(&str, &[ModelInfo], &[ModelInfo]); 17] = [
+            ("claude", &self.claude, &new.claude),
+            ("gemini", &self.gemini, &new.gemini),
+            ("gemini-interactions", &self.gemini, &new.gemini),
+            ("vertex", &self.vertex, &new.vertex),
+            ("aistudio", &self.aistudio, &new.aistudio),
+            ("codex", &self.codex_free, &new.codex_free),
+            ("codex", &self.codex_team, &new.codex_team),
+            ("codex", &self.codex_plus, &new.codex_plus),
+            ("codex", &self.codex_pro, &new.codex_pro),
+            ("kimi", &self.kimi, &new.kimi),
+            ("kimi-ai", &self.kimi, &new.kimi),
+            ("kimi.ai", &self.kimi, &new.kimi),
+            ("kimi.com", &self.kimi, &new.kimi),
+            ("antigravity", &self.antigravity, &new.antigravity),
+            ("xai", &self.xai, &new.xai),
+            ("devin", &self.devin, &new.devin),
+            ("meta", &self.meta, &new.meta),
+        ];
+        let mut changed: Vec<String> = Vec::new();
+        for (provider, old, new) in sections {
+            if old != new && !changed.iter().any(|seen| seen == provider) {
+                changed.push(provider.to_owned());
+            }
+        }
+        changed
     }
 
     /// The Claude models (upstream's `GetClaudeModels`).
@@ -327,6 +411,17 @@ impl StaticCatalog {
             "codex" => self.codex_models(CodexPlan::Pro),
             _ => Vec::new(),
         }
+    }
+}
+
+/// A model as the translators see it.
+fn translator_model(model: &ModelInfo) -> TranslatorModel {
+    TranslatorModel {
+        id: model.id.clone(),
+        thinking: model.thinking.clone(),
+        max_completion_tokens: i64::try_from(model.max_completion_tokens).unwrap_or(i64::MAX),
+        native_web_search: model.native_web_search,
+        supports_web_search: model.supports_web_search,
     }
 }
 
@@ -490,9 +585,13 @@ fn decode_model(path: &str, object: &Map<String, Value>) -> Result<ModelInfo, St
                 json::boolean(&path, value, &mut model.support_configuration_update)?;
             }
             "thinking" => model.thinking = decode_thinking(&path, value)?,
+            "supports_web_search" => {
+                json::boolean(&path, value, &mut model.supports_web_search)?;
+            }
+            "native_capabilities" => {
+                model.native_web_search = decode_native_capabilities(&path, value)?;
+            }
             // Checked, then dropped.
-            "supports_web_search" => json::boolean(&path, value, &mut false)?,
-            "native_capabilities" => check_native_capabilities(&path, value)?,
             "config" => check_config(&path, value)?,
             _ => {}
         }
@@ -530,17 +629,27 @@ fn decode_thinking(path: &str, value: &Value) -> Result<Option<ThinkingSupport>,
     Ok(Some(thinking))
 }
 
-/// Checks a model's `native_capabilities`, which isn't ported.
-fn check_native_capabilities(path: &str, value: &Value) -> Result<(), String> {
+/// A model's `native_capabilities.web_search`: `None` when either is
+/// missing or `null`, as Go leaves its pointers.
+fn decode_native_capabilities(path: &str, value: &Value) -> Result<Option<bool>, String> {
     let Some(object) = json::object(path, value)? else {
-        return Ok(());
+        return Ok(None);
     };
+    let mut web_search = None;
     for (key, value) in object {
-        if json::field(key, &["web_search"]).is_some() {
-            json::boolean(&format!("{path}.{key}"), value, &mut false)?;
+        if json::field(key, &["web_search"]).is_none() {
+            continue;
         }
+        web_search = match value {
+            Value::Null => None,
+            value => {
+                let mut flag = false;
+                json::boolean(&format!("{path}.{key}"), value, &mut flag)?;
+                Some(flag)
+            }
+        };
     }
-    Ok(())
+    Ok(web_search)
 }
 
 /// Checks a model's `config`, whose `override_header` is left out by policy.
@@ -564,10 +673,17 @@ fn check_config(path: &str, value: &Value) -> Result<(), String> {
 }
 
 /// Checks each section but `devin` for null models, empty IDs and repeated
-/// IDs (upstream's `validateModelsCatalog`). Empty sections pass.
+/// IDs (upstream's `validateModelsCatalog`). An empty section passes, with
+/// a warning.
 fn validate(sections: &Sections) -> Result<(), String> {
     for (name, models) in SECTIONS.iter().zip(sections) {
         if *name == UNCHECKED_SECTION {
+            continue;
+        }
+        if models.is_empty() {
+            tracing::warn!(
+                "models catalog: {name} section is empty, continuing without those model definitions"
+            );
             continue;
         }
         let mut seen = HashSet::with_capacity(models.len());

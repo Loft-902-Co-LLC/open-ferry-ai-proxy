@@ -52,7 +52,7 @@ const MAX_ARRAY_PADDING: usize = 1024;
 
 /// Converts a Gemini request body into a Claude Messages request body for
 /// `model_name`. `stream` is whether the client asked to stream. `models` says
-/// which thinking settings the model takes; pass [`ModelCatalog::embedded`]
+/// which thinking settings the model takes; pass [`ModelCatalog::current`]
 /// unless you have your own.
 pub fn convert_gemini_request_to_claude(
     model_name: &str,

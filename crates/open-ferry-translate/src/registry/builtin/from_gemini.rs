@@ -9,11 +9,10 @@ use serde_json::Value;
 use super::super::{Format, Registry, ResponseTransform, StreamTranslator};
 use crate::claude::gemini as claude_gemini;
 use crate::codex::gemini as codex_gemini;
+use crate::models::ModelCatalog;
 use crate::openai::gemini as openai_gemini;
 
 pub(super) fn register(registry: &Registry) {
-    let models = registry.models;
-
     // internal/translator/codex/gemini/init.go
     registry.register(
         Format::GEMINI,
@@ -47,8 +46,13 @@ pub(super) fn register(registry: &Registry) {
     registry.register(
         Format::GEMINI,
         Format::CLAUDE,
-        Some(Arc::new(move |model, body, stream| {
-            claude_gemini::convert_gemini_request_to_claude(model, &body, stream, models)
+        Some(Arc::new(|model, body, stream| {
+            claude_gemini::convert_gemini_request_to_claude(
+                model,
+                &body,
+                stream,
+                &ModelCatalog::current(),
+            )
         })),
         ResponseTransform {
             stream: Some(Arc::new(|context| {

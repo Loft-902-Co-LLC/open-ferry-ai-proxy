@@ -86,7 +86,7 @@ fn is_openrouter(provider: &str) -> bool {
 /// suffix or the request asks for. `payload` and `original_request` are the
 /// client's request as the executor got it and as the client first sent
 /// it. Models are looked up as `provider` registered them in `models`, else
-/// in the built-in catalog.
+/// in the static catalog.
 ///
 /// A setting the model can't take is a 400 error.
 pub(crate) fn apply_request(

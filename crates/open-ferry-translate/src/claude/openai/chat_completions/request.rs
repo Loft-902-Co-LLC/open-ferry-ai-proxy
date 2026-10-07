@@ -47,7 +47,7 @@ const DEFAULT_MAX_TOKENS: i64 = 32000;
 /// Converts a Chat Completions request body into a Claude Messages request
 /// body for `model_name`. `stream` is whether the client asked to stream.
 /// `models` says which thinking settings the model takes; pass
-/// [`ModelCatalog::embedded`] unless you have your own.
+/// [`ModelCatalog::current`] unless you have your own.
 pub fn convert_openai_chat_completions_request_to_claude(
     model_name: &str,
     request: &Value,

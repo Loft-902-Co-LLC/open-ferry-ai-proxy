@@ -90,7 +90,7 @@ const EMPTY_TOOL_RESULT: &str = "Tool result was empty.";
 /// Converts a Responses request body into a Claude Messages request body for
 /// `model_name`. `stream` is whether the client asked to stream. `models`
 /// says which thinking settings and output limit the model has; pass
-/// [`ModelCatalog::embedded`] unless you have your own.
+/// [`ModelCatalog::current`] unless you have your own.
 pub fn convert_openai_responses_request_to_claude(
     model_name: &str,
     request: &Value,

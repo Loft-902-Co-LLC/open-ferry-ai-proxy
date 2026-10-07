@@ -26,7 +26,7 @@
 //!
 //! Deviations from upstream:
 //! - The caller looks the model up (see each target); upstream asks its
-//!   model registry, falling back to the built-in catalog, or takes the
+//!   model registry, falling back to the static catalog, or takes the
 //!   model the credential manager resolved for an API key
 //!   (`ResolvedModelInfo`), which isn't ported, so the executors never
 //!   bind a model to a request. [`apply_with_model`] is upstream's
@@ -161,7 +161,7 @@ pub(crate) trait Target {
     /// says, for a request for `model` going to `provider` (upstream's
     /// provider key). Only a Chat Completions provider's name matters.
     fn apply_summary(body: &mut Value, model: &str, _provider: &str, summary: Summary) {
-        summary::apply_for_model(body, Self::NAME, model, summary, ModelCatalog::embedded());
+        summary::apply_for_model(body, Self::NAME, model, summary, &ModelCatalog::current());
     }
 }
 
@@ -299,7 +299,7 @@ fn translated_summary(
         &to,
         route.model,
         current,
-        ModelCatalog::embedded(),
+        &ModelCatalog::current(),
     );
     if summary::extract_explicit(&candidate, &to) != Summary::Unspecified {
         return Summary::Unspecified;

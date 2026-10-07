@@ -7,7 +7,8 @@
 
 //! `GET /v0/management/model-definitions/:channel` (also
 //! `/v8/management/routing/model-definitions/:channel`): the models a
-//! channel serves, from the static model catalog.
+//! channel serves, from the static model catalog in use
+//! ([`StaticCatalog::current`]).
 //!
 //! The channel is the path's, or the `channel` query parameter when the
 //! path's is blank. The answer is `{"channel":<channel>,"models":[...]}`
@@ -20,9 +21,8 @@
 //!   `xai` (also `x-ai` and `grok`) and `meta` (also `muse`). Upstream also
 //!   knows `aistudio`, `kimi` (also `kimi-ai`, `kimi.ai` and `kimi.com`),
 //!   `antigravity` and `devin`, which are a 400 here.
-//! - A model's `supports_web_search` and `config` aren't written. No model
-//!   of these channels has the first; the second holds the client
-//!   headers upstream sends for a model, which open-ferry doesn't send.
+//! - A model's `config` isn't written: it holds the client headers upstream
+//!   sends for a model, which open-ferry doesn't send.
 //! - A channel whose `%`-escapes don't decode to UTF-8 is named in the
 //!   answer as it was sent.
 
@@ -76,7 +76,7 @@ async fn definitions(
     if channel.is_empty() {
         return json::error(StatusCode::BAD_REQUEST, "channel is required");
     }
-    let models = channel_models(StaticCatalog::embedded(), &channel);
+    let models = channel_models(&StaticCatalog::current(), &channel);
     if models.is_empty() {
         return json::response(
             StatusCode::BAD_REQUEST,
@@ -137,6 +137,7 @@ fn model(model: &ModelInfo) -> Json {
             "supportedOutputModalities",
             strings(&model.supported_output_modalities),
         )
+        .omit_empty("supports_web_search", Json::Bool(model.supports_web_search))
         .omit_nil(
             "thinking",
             model.thinking.as_ref().map(|thinking| {

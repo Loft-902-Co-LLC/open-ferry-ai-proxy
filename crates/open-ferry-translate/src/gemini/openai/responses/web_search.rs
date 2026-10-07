@@ -23,8 +23,9 @@
 //!
 //! Deviations from upstream:
 //! - Whether a model supports web search comes from the static model
-//!   catalog. Upstream asks its global registry first, which knows the
-//!   models of configured accounts, and then the catalog; it also asks
+//!   catalog in use ([`ModelCatalog::current`]). Upstream asks its global
+//!   registry first, which knows the models of configured accounts, and
+//!   then the catalog; it also asks
 //!   whether an Antigravity account has probed the model for web search
 //!   (`AntigravityWebSearchModelFor`), which is never so here, since
 //!   Antigravity isn't ported.
@@ -34,90 +35,12 @@
 //!   ported: nothing calls them.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::OnceLock;
 
 use serde_json::{Map, Value};
 
 use super::{array_of, at};
 use crate::json::{int_of, object, path, str_of};
-use crate::models::embedded_catalog_json;
-
-/// The catalog sections upstream's `LookupStaticModelInfo` searches, in
-/// order. Its built-in Devin models, searched before `meta`, say nothing
-/// about web search, so they only hide a later `meta` entry of the same ID.
-const CATALOG_SECTIONS: [&str; 8] = [
-    "claude",
-    "gemini",
-    "vertex",
-    "aistudio",
-    "codex-pro",
-    "kimi",
-    "antigravity",
-    "xai",
-];
-
-/// IDs of upstream's built-in Devin models.
-const BUILTIN_DEVIN_MODELS: [&str; 12] = [
-    "devin/swe-1-6-slow",
-    "devin/swe-2",
-    "devin/claude-fable-5-1",
-    "devin/gpt-6-astra",
-    "devin/glm-5-2",
-    "devin/glm-5-3",
-    "devin/glm-5-3-flash",
-    "devin/gpt-5-6-sol",
-    "devin/gemini-3-8-flash",
-    "devin/grok-4-6",
-    "devin/deepseek-v4-flash",
-    "devin/deepseek-v4-1-flash",
-];
-
-/// What the catalog says about a model's web search.
-#[derive(Clone, Copy, Default)]
-struct WebSearchCapability {
-    /// `native_capabilities.web_search`, if given.
-    native: Option<bool>,
-    /// `supports_web_search`.
-    supports: bool,
-}
-
-/// Each catalog model's web search capability, by ID, as the first section
-/// to list it describes it.
-fn catalog() -> &'static HashMap<String, WebSearchCapability> {
-    static CATALOG: OnceLock<HashMap<String, WebSearchCapability>> = OnceLock::new();
-    CATALOG.get_or_init(|| {
-        let root: Value =
-            serde_json::from_str(embedded_catalog_json()).expect("the catalog is valid JSON");
-        let mut models = HashMap::new();
-        let section = |name: &str| -> Vec<(String, WebSearchCapability)> {
-            array_of(root.get(name))
-                .iter()
-                .filter_map(|model| {
-                    let id = model.get("id")?.as_str()?.to_owned();
-                    let capability = WebSearchCapability {
-                        native: path(model, "native_capabilities.web_search")
-                            .and_then(Value::as_bool),
-                        supports: model.get("supports_web_search").and_then(Value::as_bool)
-                            == Some(true),
-                    };
-                    Some((id, capability))
-                })
-                .collect()
-        };
-        let devin = BUILTIN_DEVIN_MODELS
-            .iter()
-            .map(|id| ((*id).to_owned(), WebSearchCapability::default()));
-        let all = CATALOG_SECTIONS
-            .into_iter()
-            .flat_map(section)
-            .chain(devin)
-            .chain(section("meta"));
-        for (id, capability) in all {
-            models.entry(id).or_insert(capability);
-        }
-        models
-    })
-}
+use crate::models::ModelCatalog;
 
 /// `registry.AntigravityWebSearchModelFor`: the model an Antigravity account
 /// found serves web search for `model`. Antigravity isn't ported, so there
@@ -130,13 +53,14 @@ fn antigravity_web_search_model_for(_model: &str) -> &'static str {
 /// explicit `false` in the catalog wins.
 pub(super) fn model_supports_web_search(model: &str) -> bool {
     let model = model.trim();
-    let Some(capability) = (!model.is_empty()).then(|| catalog().get(model)).flatten() else {
+    let catalog = ModelCatalog::current();
+    let Some(info) = (!model.is_empty()).then(|| catalog.lookup(model)).flatten() else {
         return !antigravity_web_search_model_for(model).is_empty();
     };
-    if let Some(native) = capability.native {
+    if let Some(native) = info.native_web_search {
         return native;
     }
-    !antigravity_web_search_model_for(model).is_empty() || capability.supports
+    !antigravity_web_search_model_for(model).is_empty() || info.supports_web_search
 }
 
 /// `isResponsesWebSearchToolType`.

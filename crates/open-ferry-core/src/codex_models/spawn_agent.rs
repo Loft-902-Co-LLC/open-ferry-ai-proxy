@@ -48,14 +48,11 @@ use crate::registry::codex_client::CodexClientCatalog;
 /// The models `spawn_agent` may pick, from `catalog`'s available models
 /// (`codexSpawnAgentModelsForRequest` without Home).
 pub fn spawn_agent_models(catalog: &dyn ModelCatalog) -> Vec<SpawnAgentModel> {
-    let Some(templates) = CodexClientCatalog::embedded() else {
+    let Some(templates) = CodexClientCatalog::current() else {
         return Vec::new();
     };
-    let lookup = |id: &str| {
-        catalog
-            .model_info(id, "")
-            .or_else(|| StaticCatalog::embedded().lookup(id))
-    };
+    let statics = StaticCatalog::current();
+    let lookup = |id: &str| catalog.model_info(id, "").or_else(|| statics.lookup(id));
     models_from_templates(
         &catalog.available_models(),
         |slug| templates.template(slug),

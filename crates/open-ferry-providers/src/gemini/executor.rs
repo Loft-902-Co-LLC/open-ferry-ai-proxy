@@ -71,7 +71,7 @@ impl GeminiExecutor {
     }
 
     /// Looks up models in `models`, for their thinking support and output
-    /// limit, before the built-in catalog.
+    /// limit, before the static catalog.
     pub fn with_models(mut self, models: Arc<dyn ModelCatalog>) -> Self {
         self.models = Some(models);
         self
@@ -279,7 +279,7 @@ fn model_url(auth: &Auth, model: &str, action: &str) -> String {
 /// `capGeminiMaxOutputTokens`: lowers a numeric
 /// `generationConfig.maxOutputTokens` above `model`'s output limit, or else
 /// its completion limit, to that limit. Models are looked up as the
-/// `gemini` provider registered them in `models`, else in the built-in
+/// `gemini` provider registered them in `models`, else in the static
 /// catalog; an unknown model, or one without limits, keeps what was asked.
 fn cap_max_output_tokens(body: &mut Value, model: &str, models: Option<&dyn ModelCatalog>) {
     let path = "generationConfig.maxOutputTokens";

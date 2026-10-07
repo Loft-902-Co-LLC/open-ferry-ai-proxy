@@ -7,7 +7,7 @@
 //! Codex's; see [`crate::codex::thinking`]).
 //!
 //! A model is looked up as provider `xai` registered it, in the model
-//! registry the executor was given, else in the built-in catalog.
+//! registry the executor was given, else in the static catalog.
 //!
 //! Deviations from upstream:
 //! - The model the credential manager resolved for an API key

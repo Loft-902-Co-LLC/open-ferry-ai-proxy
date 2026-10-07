@@ -66,6 +66,12 @@ pub struct ModelInfo {
     pub is_compat: bool,
     /// The model takes Codex's `configuration_update`. Internal.
     pub support_configuration_update: bool,
+    /// The catalog says the model has web search (upstream's
+    /// `SupportsWebSearch`).
+    pub supports_web_search: bool,
+    /// The catalog's `native_capabilities.web_search`, if it gives one.
+    /// Internal (upstream's `NativeCapabilities`).
+    pub native_web_search: Option<bool>,
 }
 
 /// The models the configured credentials serve (upstream's model registry).
