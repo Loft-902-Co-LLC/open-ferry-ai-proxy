@@ -489,7 +489,12 @@ pub struct CodexConfig {
     pub orphan_delegation_compatibility: bool,
     /// Scopes quota cooldowns to the requested model.
     pub model_level_cooling: bool,
-    /// Enables full-duplex Codex WebSockets.
+    /// Experimental full-duplex Codex Responses WebSocket steering: a
+    /// Responses WebSocket client's Codex turn on the upstream WebSocket
+    /// keeps that connection for the rest of the socket, so the client's
+    /// `response.steer` reaches a response while it runs. Keeps one
+    /// upstream account and model per socket; accepted input is never
+    /// replayed. Off by default.
     pub response_steering: bool,
 }
 

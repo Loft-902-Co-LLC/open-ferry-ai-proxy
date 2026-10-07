@@ -222,6 +222,9 @@ client:
 # Shared upstream behavior applies to OAuth and API-key credentials.
 upstream:
   codex:
+    # Experimental full-duplex Codex Responses WebSocket steering (default: false).
+    # Keeps one upstream account/model per socket; accepted input is never replayed.
+    response-steering: false
     # Hold back the frames that carry nothing the client has seen - the handshake (response.created,
     # response.in_progress, the websocket metadata frames), keepalive heartbeats, and the *.added
     # announcements of an item or part that is still empty - until the upstream emits its first
