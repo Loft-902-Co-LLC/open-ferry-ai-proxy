@@ -605,7 +605,10 @@ pub(crate) async fn setup(ctx: &Context, input: &SetupInput) -> Result<Outcome, 
                 .or_else(|| target.proxy_url.clone());
             (root, routes, models)
         }
-        _ => {
+        other => {
+            if let Reach::OtherConfig(failure) = other {
+                notes.push(failure.message.clone());
+            }
             notes.push(
                 "no server answered with its routes and models, so the model is a placeholder; with the server running, a model it serves is filled in".to_owned(),
             );

@@ -292,9 +292,12 @@ Like the proxy, they first load the `.env` file in the working directory, so a `
 - **While one runs and takes the key**, a change goes through its management API: the server checks it, saves it with its config writer and applies it at once, as it does one made in the dashboard. The server is the only writer then, so a change here and one in the dashboard don't lose each other.
 - **With no server**, with its management API off, or with no key to call it with, `config` and `keys` change the file with the same checks and the same writer. A server watching the file loads the change; one started later reads it. `credentials` needs the server, and says so with exit code 4 and how to start it.
 - **A server that refuses the key** stops the command, with nothing changed: each refusal counts towards the server's ban of an address after five failed attempts in thirty minutes.
+- **A server that runs another config**, such as one started from another file on the same port with the same key, is never changed or asked about. A server counts as running for the config only when the file it runs, as `GET /v0/management/config.yaml` gives it, holds the same bytes as the config here. Otherwise each command stops with `a server at ADDR runs another config` (`other_config`, exit code 1), nothing changed, and the hint to pass `--config` with the path of the config that server runs, or to give this config a port nothing else uses; `status` says `"management": "other_config"` and exits with 4.
 - `config get`, `show` and `diff`, and `keys list`, read the file, which is what the server runs once it has loaded it.
 
 Every write of the config keeps the file it replaces as `<config>.bak`, by these commands, the dashboard or the management API alike. Every change prints each setting it changed, with its old and new value masked, and that `open-ferry config undo` reverses it.
+
+A change is made only to the file it was worked out from. When the file changes after it was read, by another write or a hand edit, a change you were asked about at a terminal is refused (`config_changed`, exit code 1), nothing changed, so you can look again; any other is worked out again from the file as it is, with the same checks, and refused the same way if the file keeps changing.
 
 ### The management key
 
@@ -341,7 +344,7 @@ A secret is never taken as an argument: `config set` reads one from standard inp
 | Code | When |
 |---|---|
 | 0 | Done, or nothing needed changing. Also for `--help` |
-| 1 | It failed or was refused: the server or the writer refused the change (`invalid_value`), the key was refused (`unauthorized`), a credential or key wasn't found, the file couldn't be read or written. Nothing was changed unless the output says so |
+| 1 | It failed or was refused: the server or the writer refused the change (`invalid_value`), the key was refused (`unauthorized`), the server at the config's address runs another config (`other_config`), the file changed while the change was worked out (`config_changed`), a credential or key wasn't found, the file couldn't be read or written. Nothing was changed unless the output says so |
 | 2 | Bad usage (`usage`): an unknown command or flag, or an unknown setting (`unknown_path`, with the nearest known one), or a secret given as an argument (`secret_in_argument`) |
 | 3 | It needs `--yes` and didn't get it (`needs_confirmation`), or you answered no (`declined`). Nothing was changed |
 | 4 | It needs the server, which isn't running (`not_running`); `status` exits with 4 when no server runs |
@@ -381,7 +384,7 @@ Client keys: 1
 }
 ```
 
-`management` is `ok`, `no_key` (no key to call it with), `off` (the server has no management key) or `refused`; `key_source` is `config`, `MANAGEMENT_PASSWORD` or `key-file`. What it couldn't find out, such as today's calls when the usage ledger is off, is under `notes`. With no server, it prints `"running": false` and a `reason`, such as `nothing answers at http://127.0.0.1:8317`.
+`management` is `ok`, `no_key` (no key to call it with), `off` (the server has no management key), `refused`, or `other_config` (a server answers at the address, but runs another config, so `running` is `false`); `key_source` is `config`, `MANAGEMENT_PASSWORD` or `key-file`. What it couldn't find out, such as today's calls when the usage ledger is off, is under `notes`. With no server, it prints `"running": false` and a `reason`, such as `nothing answers at http://127.0.0.1:8317`.
 
 ### `open-ferry config`
 

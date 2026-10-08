@@ -12,11 +12,17 @@
 //! lose each other. Otherwise it is written to the file with the writer
 //! the server uses, which keeps the file it replaces as `<config>.bak`, as
 //! the server's writes do, so `config undo` reverses either.
+//!
+//! A change is made only to the file it was worked out from. When the
+//! file changed after it was read (another write, or a hand edit), a
+//! change a person was asked about at the terminal is refused, and says
+//! to run it again; any other is worked out again from the file as it is.
 
 use std::path::Path;
 
 use axum::http::Method;
-use open_ferry_core::config::v8_edit::{V8Edit, V8EditError, V8Method, edit_v8, preview_v8};
+use open_ferry_core::config::save::{self, SaveErrorKind};
+use open_ferry_core::config::v8_edit::{V8Edit, V8EditError, V8Method, preview_v8};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
@@ -199,20 +205,58 @@ pub(crate) fn read_config(path: &Path) -> Result<Vec<u8>, Failure> {
     })
 }
 
+/// How many times a change is worked out again when the file changes
+/// under it before it gives up.
+const WORK_OUT_TRIES: usize = 3;
+
 /// Works out `request`, asks for its confirmation if it needs one, makes
 /// it, and says what it changed.
+///
+/// It is made only to the file it was worked out from. When the file
+/// changed meanwhile, a change a person was shown and said yes to at the
+/// terminal is refused; any other is worked out again from the file as it
+/// is, with its checks and confirmation, a few times.
 pub(crate) async fn make(ctx: &Context, request: Request) -> Result<Changed, Failure> {
-    let data = read_config(&ctx.path)?;
-    let before = tree_of(&data)?;
-    let planned = preview_v8(&data, &request.edit.v8()).map_err(edit_failure)?;
+    let mut data = read_config(&ctx.path)?;
+    let mut shown = false;
+    for _ in 0..WORK_OUT_TRIES {
+        match attempt(ctx, &request, &data, &mut shown).await? {
+            Attempt::Done(changed) => return Ok(changed),
+            Attempt::Changed(_) if shown => return Err(config_changed()),
+            Attempt::Changed(now) => data = now,
+        }
+    }
+    Err(config_changed())
+}
+
+/// What one try at a change came to.
+enum Attempt {
+    /// It was made, or there was nothing to make.
+    Done(Changed),
+    /// The file changed after the change was worked out from it, and
+    /// nothing was changed: the file as it is now.
+    Changed(Vec<u8>),
+}
+
+/// Works out `request` from the config file's bytes `data` and makes it,
+/// unless the file no longer holds them. `shown` is set once a person was
+/// asked at the terminal.
+async fn attempt(
+    ctx: &Context,
+    request: &Request,
+    data: &[u8],
+    shown: &mut bool,
+) -> Result<Attempt, Failure> {
+    let before = tree_of(data)?;
+    let planned = preview_v8(data, &request.edit.v8()).map_err(edit_failure)?;
     let after = tree_of(&planned)?;
     let changes = diff(&before, &after);
     if changes.is_empty() {
-        return Ok(Changed::nothing(
+        return Ok(Attempt::Done(Changed::nothing(
             request.action,
-            request.path,
+            request.path.clone(),
             "Nothing to change: the config already holds that.".to_owned(),
-        ));
+        )));
     }
     let mut reasons = sensitive_reasons(&changes, &before, &after);
     if let Some(always) = request.always.clone() {
@@ -225,17 +269,34 @@ pub(crate) async fn make(ctx: &Context, request: Request) -> Result<Changed, Fai
             &reasons,
             json!({"changes": masked(&changes)}),
         )?;
+        *shown |= !ctx.yes;
     }
     let target = probe(ctx).await?;
+    if target.data != data {
+        return Ok(Attempt::Changed(target.data));
+    }
     let (via, note) = match &target.reach {
         Reach::Running(server) => {
-            call_server(server, &request).await?;
+            call_server(server, request).await?;
             ("server", None)
         }
-        Reach::Refused(failure) => return Err(failure.clone()),
+        Reach::Refused(failure) | Reach::OtherConfig(failure) => return Err(failure.clone()),
         other => {
-            let edit = request.edit.v8();
-            edit_v8(&ctx.path, &edit).map_err(edit_failure)?;
+            if let Err(error) = save::write_file_expecting(&ctx.path, &planned, data) {
+                return match error.kind() {
+                    SaveErrorKind::Stale => Ok(Attempt::Changed(read_config(&ctx.path)?)),
+                    SaveErrorKind::Io | SaveErrorKind::Symlink => Err(Failure::new(
+                        "failed",
+                        format!(
+                            "the config file couldn't be written, so nothing was changed: {error}"
+                        ),
+                    )),
+                    _ => Err(Failure::new(
+                        "failed",
+                        "the change can't be written as a config file, so nothing was changed",
+                    )),
+                };
+            }
             ("file", Some(file_note(other)))
         }
     };
@@ -250,9 +311,9 @@ pub(crate) async fn make(ctx: &Context, request: Request) -> Result<Changed, Fai
             "The server's write also put settings it was using at their defaults into the file; that doesn't change what it does.".to_owned()
         })
     });
-    Ok(Changed {
+    Ok(Attempt::Done(Changed {
         action: request.action,
-        path: request.path,
+        path: request.path.clone(),
         changed: !changes.is_empty(),
         via: Some(via),
         changes: masked(&changes),
@@ -268,7 +329,17 @@ pub(crate) async fn make(ctx: &Context, request: Request) -> Result<Changed, Fai
             }
         ),
         footer: None,
-    })
+    }))
+}
+
+/// The failure for a config file that changed after a change to it was
+/// worked out.
+pub(crate) fn config_changed() -> Failure {
+    Failure::new(
+        "config_changed",
+        "the config file changed after this change was worked out from it, so nothing was changed",
+    )
+    .hint("run it again to work it out from the file as it is now")
 }
 
 /// Why a change was written to the file, not made through a server.
@@ -279,7 +350,7 @@ pub(crate) fn file_note(reach: &Reach) -> String {
         ),
         Reach::NoKey => "A server is running, but there is no management key to call it with, so the file was changed; the server loads the change when it sees the file change.".to_owned(),
         Reach::ManagementOff => "A server is running with its management API off, so the file was changed; the server loads the change when it sees the file change.".to_owned(),
-        Reach::Running(_) | Reach::Refused(_) => String::new(),
+        Reach::Running(_) | Reach::Refused(_) | Reach::OtherConfig(_) => String::new(),
     }
 }
 

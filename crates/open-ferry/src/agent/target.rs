@@ -18,6 +18,10 @@
 //!   isn't tried, so the key is never sent off this machine. A server is
 //!   running when something accepts a connection there within a second;
 //!   it is reached when it answers `GET /v0/management/debug` with the key.
+//!   It is used only when it runs this config: the file it runs, as
+//!   `GET /v0/management/config.yaml` gives it, must hold the same bytes as
+//!   the config here. A server that runs another config (one on the same
+//!   port, from another file) is never changed or asked about.
 //!
 //! A server that refuses the key stops the command: each refusal counts
 //! towards the server's ban of five failed attempts in thirty minutes.
@@ -48,6 +52,13 @@ const KEY_FILE_LIMIT: usize = 4096;
 
 /// The route that tells whether the key is good.
 const PROBE: &str = "/v0/management/debug";
+
+/// The route that gives the config file the server runs, as it is.
+const CONFIG_ROUTE: &str = "/v0/management/config.yaml";
+
+/// How many times the server's config and this one are compared before
+/// they count as different: a write between the two reads changes one.
+const CONFIG_READS: usize = 3;
 
 /// The config file `flag` names, else `config.yaml` in `working_dir`,
 /// else `installed`, whichever exists first.
@@ -214,6 +225,9 @@ pub(crate) fn read_key_file(path: &Path) -> Result<String, Failure> {
 /// The config and the server running for it.
 #[derive(Debug)]
 pub(crate) struct Target {
+    /// The config file's bytes, as read: what the server runs, when it
+    /// was reached.
+    pub(crate) data: Vec<u8>,
     /// The config, or why it doesn't load.
     pub(crate) config: Result<Config, String>,
     /// The proxy's root URL, without a path, when the config sets a port.
@@ -238,6 +252,9 @@ pub(crate) enum Reach {
     Running(Server),
     /// A server answers, but refused the key, or answered something else.
     Refused(Failure),
+    /// A server answers and takes the key, but runs another config: the
+    /// failure that says so.
+    OtherConfig(Failure),
 }
 
 /// A server reached with the management key.
@@ -256,7 +273,7 @@ impl Target {
     pub(crate) fn server(&self) -> Result<&Server, Failure> {
         match &self.reach {
             Reach::Running(server) => Ok(server),
-            Reach::Refused(failure) => Err(failure.clone()),
+            Reach::Refused(failure) | Reach::OtherConfig(failure) => Err(failure.clone()),
             Reach::NotRunning(why) => Err(Failure::new(
                 "not_running",
                 format!("no open-ferry server is running for this config: {why}"),
@@ -295,6 +312,7 @@ pub(crate) async fn probe(ctx: &Context) -> Result<Target, Failure> {
     let config = Config::load_bytes(&data).map_err(|error| error.to_string());
     let Ok(loaded) = &config else {
         return Ok(Target {
+            data,
             config,
             proxy_url: None,
             management_url: None,
@@ -312,11 +330,22 @@ pub(crate) async fn probe(ctx: &Context) -> Result<Target, Failure> {
     let plain = V8Document::migrate(&data)
         .ok()
         .and_then(|document| document.plain_management_key());
+    let mut data = data;
     let reach = match management {
         None => Reach::NotRunning("the config sets no server.port".to_owned()),
-        Some((host, port)) => reach(ctx, &host, port, loaded.tls.enable, plain).await?,
+        Some((host, port)) => {
+            let found = reach(ctx, &host, port, loaded.tls.enable, plain).await?;
+            match found {
+                Reach::Running(server) => match runs_this_config(ctx, &server, &mut data).await? {
+                    None => Reach::Running(server),
+                    Some(other) => other,
+                },
+                other => other,
+            }
+        }
     };
     Ok(Target {
+        data,
         config,
         proxy_url,
         management_url,
@@ -364,6 +393,70 @@ async fn reach(
         ))),
     })
 }
+
+/// Whether `server` runs the config at `ctx.path`, whose bytes are
+/// `data`: `None` when the file it runs holds the same bytes, with `data`
+/// read again when this file changed while they were compared; else what
+/// it is instead.
+async fn runs_this_config(
+    ctx: &Context,
+    server: &Server,
+    data: &mut Vec<u8>,
+) -> Result<Option<Reach>, Failure> {
+    let url = server.remote.url();
+    for _ in 0..CONFIG_READS {
+        let reply = server.remote.send(Method::GET, CONFIG_ROUTE, None).await?;
+        match reply.status {
+            200 => {}
+            404 => {
+                return Ok(Some(Reach::OtherConfig(
+                    Failure::new(
+                        "other_config",
+                        format!(
+                            "a server at {url} takes this config's management key but runs no config file, so it isn't the one running {}; nothing was changed",
+                            ctx.path.display()
+                        ),
+                    )
+                    .hint(OTHER_CONFIG_HINT),
+                )));
+            }
+            status => {
+                return Ok(Some(Reach::Refused(answer_failure(status, &reply.body).hint(
+                    format!(
+                        "is it open-ferry that answers at {url}? Its management API answered {status} to {CONFIG_ROUTE}"
+                    ),
+                ))));
+            }
+        }
+        if reply.body == *data {
+            return Ok(None);
+        }
+        let again = std::fs::read(&ctx.path).map_err(|error| {
+            Failure::new(
+                "not_found",
+                format!("can't read {}: {error}", ctx.path.display()),
+            )
+        })?;
+        let same = reply.body == again;
+        *data = again;
+        if same {
+            return Ok(None);
+        }
+    }
+    Ok(Some(Reach::OtherConfig(
+        Failure::new(
+            "other_config",
+            format!(
+                "a server at {url} runs another config, not {}; nothing was changed",
+                ctx.path.display()
+            ),
+        )
+        .hint(OTHER_CONFIG_HINT),
+    )))
+}
+
+/// What to do about a server that runs another config.
+const OTHER_CONFIG_HINT: &str = "pass --config with the path of the config that server runs, or give this config a server.port (or management.separate-address) nothing else uses";
 
 /// The failure for a key the server refused.
 fn refused(key: &Key, body: &[u8]) -> Failure {

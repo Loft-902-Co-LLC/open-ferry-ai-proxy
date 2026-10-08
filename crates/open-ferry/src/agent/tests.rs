@@ -1150,6 +1150,126 @@ async fn settings_go_through_the_running_server() {
     assert_eq!(live.state.config().routing.strategy, "round-robin");
 }
 
+// Not upstream's: a server on the config's port that takes its key but
+// runs another config file is never changed or asked about: each command
+// says a server at that address runs another config, and nothing changes
+// in either file or in the server.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_server_running_another_config_is_left_alone() {
+    let live = live(Some(KEY), None).await;
+    let other = Setup::new(live.port, Some(KEY));
+    std::fs::write(
+        &other.path,
+        format!(
+            "{}routing:\n  strategy: \"fill-first\"\n",
+            config_text(live.port, Some(KEY), &other.auth_dir)
+        ),
+    )
+    .unwrap();
+    // A backup, so undo has something to put back.
+    other.file("config.yaml.bak", &live.setup.text());
+    let ours = other.text();
+    let theirs = live.setup.text();
+    let strategy = live.state.config().routing.strategy.clone();
+    let ctx = confirmed(&other.path, Caller::Cli);
+    let refused = |failure: &Failure| {
+        assert_eq!(failure.error, "other_config", "{failure:?}");
+        assert_eq!(failure.code, exit::FAILED);
+        assert!(failure.message.contains("runs another config"));
+        assert!(
+            failure
+                .message
+                .contains(&format!("127.0.0.1:{}", live.port))
+        );
+        assert!(failure.hint.as_deref().unwrap().contains("--config"));
+        assert!(!failure_shows(failure, KEY));
+    };
+
+    refused(&fails(&ctx, set("routing.strategy", "round-robin")).await);
+    refused(&fails(&ctx, unset("routing.strategy")).await);
+    refused(&fails(&ctx, Command::ConfigUndo).await);
+    refused(
+        &fails(
+            &ctx,
+            Command::KeysAdd(AddInput {
+                generate: true,
+                ..AddInput::default()
+            }),
+        )
+        .await,
+    );
+    refused(&fails(&ctx, Command::CredentialsList(CredentialsList::default())).await);
+
+    let status = ok(&ctx, Command::Status).await;
+    assert_eq!(status.code, exit::NOT_RUNNING);
+    assert_eq!(status.json["running"], json!(false));
+    assert_eq!(status.json["management"], json!("other_config"));
+    assert!(
+        status.json["reason"]
+            .as_str()
+            .unwrap()
+            .contains("runs another config")
+    );
+
+    assert_eq!(other.text(), ours);
+    assert_eq!(live.setup.text(), theirs);
+    assert_eq!(live.state.config().routing.strategy, strategy);
+    assert_eq!(live.state.config().api_keys, vec![CLIENT_KEY.to_owned()]);
+
+    // The config the server runs is still changed through it.
+    let changed = ok(
+        &cli(&live.setup.path),
+        set("routing.strategy", "fill-first"),
+    )
+    .await;
+    assert_eq!(changed.json["via"], json!("server"));
+    assert_eq!(other.text(), ours);
+}
+
+// Not upstream's: a change is made only to the file it was worked out
+// from. One a person said yes to at the terminal is refused when the file
+// changed while they were asked; one confirmed up front is worked out
+// again from the file as it is.
+#[tokio::test]
+async fn a_change_is_made_only_to_the_file_it_was_worked_out_from() {
+    let offline = offline(Some(KEY));
+    let path = offline.setup.path.clone();
+    let edited = format!(
+        "{}routing:\n  strategy: \"fill-first\"\n",
+        offline.setup.text()
+    );
+    let asked = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&asked);
+    let (target, text) = (path.clone(), edited.clone());
+    let ctx = Context {
+        ask: Some(Box::new(move |_question: &str| {
+            count.fetch_add(1, Ordering::SeqCst);
+            std::fs::write(&target, &text).unwrap();
+            true
+        })),
+        ..cli(&path)
+    };
+    let failure = fails(&ctx, set("server.host", "0.0.0.0")).await;
+    assert_eq!(failure.error, "config_changed");
+    assert_eq!(failure.code, exit::FAILED);
+    assert!(failure.hint.as_deref().unwrap().contains("run it again"));
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
+    assert_eq!(offline.setup.text(), edited);
+    assert!(!offline.setup.text().contains("0.0.0.0"));
+
+    // Confirmed up front, the change is worked out from the file as it is,
+    // and keeps the edit.
+    let changed = ok(
+        &confirmed(&path, Caller::Cli),
+        set("server.host", "0.0.0.0"),
+    )
+    .await;
+    assert_eq!(changed.json["via"], json!("file"));
+    let text = offline.setup.text();
+    assert!(text.contains("0.0.0.0"));
+    assert!(text.contains("fill-first"));
+}
+
 // Not upstream's: the management key is the config's plain one, else
 // MANAGEMENT_PASSWORD, else the key file; with none the change goes to the
 // file; a key the server refuses stops the change.
@@ -1378,8 +1498,11 @@ struct StateQuery {
 async fn login_server() -> (Offline, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
+    let setup = Setup::new(port, Some(KEY));
+    let config = setup.text();
     let app = Router::new()
         .route("/v0/management/debug", get_route(|| async { Json(json!({"debug": false})) }))
+        .route("/v0/management/config.yaml", get_route(move || async move { config }))
         .route(
             "/v0/management/codex-auth-url",
             get_route(|| async {
@@ -1404,7 +1527,7 @@ async fn login_server() -> (Offline, tokio::task::JoinHandle<()>) {
     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     (
         Offline {
-            setup: Setup::new(port, Some(KEY)),
+            setup,
             _socket: socket,
         },
         task,

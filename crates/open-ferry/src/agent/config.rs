@@ -449,7 +449,7 @@ pub(crate) async fn undo(ctx: &Context) -> Result<Outcome, Failure> {
                 status => return Err(answer_failure(status, &reply.body)),
             }
         }
-        Reach::Refused(failure) => return Err(failure.clone()),
+        Reach::Refused(failure) | Reach::OtherConfig(failure) => return Err(failure.clone()),
         other => {
             undo_in_file(ctx, &backup)?;
             note = Some(file_note(other));

@@ -40,6 +40,11 @@ impl Remote {
         }
     }
 
+    /// The root URL it calls.
+    pub(crate) fn url(&self) -> &str {
+        &self.url
+    }
+
     /// Sends `method path` with `body`, and gives back the answer, whatever
     /// its status; a failure when the server couldn't be reached.
     pub(crate) async fn send(
