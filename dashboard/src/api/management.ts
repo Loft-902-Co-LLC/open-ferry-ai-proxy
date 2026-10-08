@@ -20,6 +20,14 @@ export const CONFIG = `${MANAGEMENT}/config`;
  * it, if the server can use it, and answers `{"ok": true, "changed": [...]}`.
  */
 export const CONFIG_YAML = `${MANAGEMENT}/config.yaml`;
+/**
+ * The v8 config route: `GET <V8_CONFIG>` answers the whole of config.yaml
+ * as the v8 layout has it, and `GET <V8_CONFIG>/<path>` the value at the
+ * path (`management/separate-address`), or 404 `not_found` where the file
+ * has none. `PUT <V8_CONFIG>/<path>` with the bare value as the body sets
+ * it, and saves the file in the v8 layout.
+ */
+export const V8_CONFIG = "/v8/management/config";
 
 /** An answer of `GET /logs`. */
 export interface ServerLogPage {

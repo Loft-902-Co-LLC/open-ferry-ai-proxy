@@ -1,11 +1,15 @@
+import type { UseQueryResult } from "@tanstack/react-query";
 import { useCallback, useMemo, type ReactNode } from "react";
 import { useForm, useWatch, type FieldErrors, type Resolver } from "react-hook-form";
 
+import { Badge } from "../../components/Badge";
 import { Card } from "../../components/Card";
 import { CheckboxField } from "../../components/CheckboxField";
 import { Code } from "../../components/Code";
+import { QueryState } from "../../components/QueryState";
 import { SelectField } from "../../components/SelectField";
 import { TextField } from "../../components/TextField";
+import { remoteWarning } from "./managementAddress";
 import {
   SETTING_IDS,
   STRATEGIES,
@@ -16,18 +20,27 @@ import {
   loadedProblems,
   readEdited,
   settingValuesOf,
+  type ServerFacts,
   type SettingId,
   type SettingValues,
   type SettingsInput,
 } from "./settingsModel";
 
+/** What the form's checks need besides the values typed. */
+interface SettingsContext {
+  /** The settings as loaded, which the edits are against. */
+  loaded: SettingValues;
+  /** What the v8 config route said, once it has. */
+  facts: ServerFacts | undefined;
+}
+
 /**
- * Checks the settings edited from the loaded ones (the form's context), and
- * only those: a value in config.yaml the form wouldn't take, left alone,
+ * Checks the settings edited from the loaded ones (in the form's context),
+ * and only those: a value in config.yaml the form wouldn't take, left alone,
  * doesn't stop the others being saved. It shows as a warning instead.
  */
-const checkEdited: Resolver<SettingsInput, SettingValues, SettingValues> = (input, loaded) => {
-  const read = readEdited(input, loaded);
+const checkEdited: Resolver<SettingsInput, SettingsContext, SettingValues> = (input, context) => {
+  const read = readEdited(input, context?.loaded, context?.facts);
   if (read.values !== null) {
     return { values: read.values, errors: {} };
   }
@@ -42,16 +55,18 @@ const checkEdited: Resolver<SettingsInput, SettingValues, SettingValues> = (inpu
 };
 
 /**
- * The settings form's state, over `config`, an answer of `GET /config`: the
- * values as the server uses them, and which the user has edited. The tab
- * owns it, so one bar and one review cover the settings and client keys.
+ * The settings form's state, over `config`, an answer of `GET /config`, and
+ * `facts`, read through the v8 config route: the values as the server uses
+ * them, and which the user has edited. The tab owns it, so one bar and one
+ * review cover the settings and client keys.
  */
-export function useSettingsForm(config: unknown) {
-  const loaded = useMemo(() => settingValuesOf(config), [config]);
+export function useSettingsForm(config: unknown, facts: ServerFacts | undefined) {
+  const loaded = useMemo(() => settingValuesOf(config, facts), [config, facts]);
   const formValues = useMemo(() => formValuesOf(loaded), [loaded]);
-  const form = useForm<SettingsInput, SettingValues, SettingValues>({
+  const context = useMemo(() => ({ loaded, facts }), [loaded, facts]);
+  const form = useForm<SettingsInput, SettingsContext, SettingValues>({
     resolver: checkEdited,
-    context: loaded,
+    context,
     mode: "onChange",
     // The server's values, as they come in; a field being edited keeps
     // what the user typed.
@@ -60,7 +75,7 @@ export function useSettingsForm(config: unknown) {
   });
   const current = useWatch({ control: form.control });
   const unsaved = SETTING_IDS.filter((id) => isEdited(current[id], loaded[id]));
-  const problems = useMemo(() => loadedProblems(loaded), [loaded]);
+  const problems = useMemo(() => loadedProblems(loaded, facts), [loaded, facts]);
 
   /** Marks `id` saved as `value`, so the form no longer counts it unsaved. */
   const settle = useCallback(
@@ -88,6 +103,11 @@ function Hint({ children }: { children: ReactNode }) {
 export interface SettingsFormProps {
   id: string;
   settings: SettingsFormState;
+  /**
+   * What the v8 config route says of the management address, or null when
+   * the server has no such route: then the field isn't shown.
+   */
+  facts: UseQueryResult<ServerFacts> | null;
   /** Called when the form is submitted, as by Enter in a field: starts the review. */
   onSubmit: () => void;
 }
@@ -97,8 +117,9 @@ export interface SettingsFormProps {
  * only the settings changed here, each through its own route, after showing
  * what changes against the server's values as they are just then.
  */
-export function SettingsForm({ id, settings, onSubmit }: SettingsFormProps) {
+export function SettingsForm({ id, settings, facts, onSubmit }: SettingsFormProps) {
   const { form, unsaved, problems } = settings;
+  const address = useWatch({ control: form.control, name: "managementAddress" });
   /** The problem with setting `id`'s loaded value, while it is left alone. */
   const warning = (setting: SettingId) =>
     problems[setting] === undefined || unsaved.includes(setting)
@@ -295,10 +316,48 @@ export function SettingsForm({ id, settings, onSubmit }: SettingsFormProps) {
         />
       </Card>
 
+      {facts !== null && (
+        <Card title="Management" description="Where the dashboard and the management API are served.">
+          <QueryState query={facts} loading="Reading the management address…">
+            {({ allowRemote }) => (
+              <TextField
+                label={
+                  <>
+                    Management address <Badge className="ml-1">Takes a restart</Badge>
+                  </>
+                }
+                placeholder="127.0.0.1:8318"
+                autoComplete="off"
+                spellCheck={false}
+                autoCapitalize="none"
+                hint={
+                  <Hint>
+                    An address of their own for the dashboard and the management API, apart from
+                    the proxy: <Code>127.0.0.1:8318</Code> for this computer only, or{" "}
+                    <Code>:8318</Code> for every network interface. Write <Code>host:port</Code>,
+                    with an IPv6 address in brackets, such as <Code>[::1]:8318</Code>. The
+                    proxy&apos;s port then serves only the proxy. Leave it empty to keep them on the
+                    proxy&apos;s port.
+                  </Hint>
+                }
+                error={errors.managementAddress?.message}
+                warning={
+                  warning("managementAddress") ??
+                  (errors.managementAddress === undefined
+                    ? (remoteWarning(address, allowRemote) ?? undefined)
+                    : undefined)
+                }
+                {...form.register("managementAddress")}
+              />
+            )}
+          </QueryState>
+        </Card>
+      )}
+
       <p className="text-muted">
-        The other settings, such as the listener, TLS, management, streaming and the provider
-        lists, are in config.yaml: edit it on the config.yaml tab. Provider API keys are on the
-        Credentials page.
+        The other settings, such as the listener, TLS, the management key, streaming and the
+        provider lists, are in config.yaml: edit it on the config.yaml tab. Provider API keys are
+        on the Credentials page.
       </p>
     </form>
   );

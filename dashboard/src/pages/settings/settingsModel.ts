@@ -1,14 +1,20 @@
-// The settings the Settings form changes, each through its own management
-// route (`PATCH /v0/management/<setting>` with `{"value": ...}`), so a save
-// touches nothing else in config.yaml. Values are read from
-// `GET /v0/management/config` as the server uses them: the config module
-// (open-ferry-core's config::normalize) loads a negative log size as 0 and
-// a negative error-log count as 10, and takes an unknown routing strategy as
-// round-robin.
+// The settings the Settings form changes, each through a route of its own,
+// so a save sends nothing else: upstream's settings by `PATCH
+// /v0/management/<setting>` with `{"value": ...}`, and open-ferry's own
+// `management.separate-address`, which has no such route, by `PUT
+// /v8/management/config/<path>` with the bare value. Values
+// are read from `GET /v0/management/config` as the server uses them: the
+// config module (open-ferry-core's config::normalize) loads a negative log
+// size as 0 and a negative error-log count as 10, and takes an unknown
+// routing strategy as round-robin. That answer has no `management` or
+// `server` section, so the management address, and what checking it needs,
+// are read from the file through the v8 config route (see ServerFacts).
 
-import { MANAGEMENT } from "../../api/management";
+import type { ApiRequest } from "../../api/client";
+import { MANAGEMENT, V8_CONFIG } from "../../api/management";
 import { countField } from "../../lib/fields";
 import { z } from "../../lib/zod";
+import { managementAddressProblem, parseManagementAddress } from "./managementAddress";
 
 export const STRATEGIES = ["round-robin", "weighted-round-robin", "fill-first"] as const;
 export type Strategy = (typeof STRATEGIES)[number];
@@ -74,16 +80,21 @@ export function redactProxyUrl(value: string): string {
   return value.trim().replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/?#]*@/i, "$1•••@");
 }
 
-export const settingsSchema = z.object({
-  proxyUrl: z
+/** A text field checked by `problemOf`, which gives null for a good value. */
+function checkedText(problemOf: (value: string) => string | null) {
+  return z
     .string()
     .trim()
     .superRefine((value, context) => {
-      const problem = proxyUrlProblem(value);
+      const problem = problemOf(value);
       if (problem !== null) {
         context.addIssue({ code: "custom", message: problem });
       }
-    }),
+    });
+}
+
+export const settingsSchema = z.object({
+  proxyUrl: checkedText(proxyUrlProblem),
   routingStrategy: z.enum(STRATEGIES),
   // The server holds these as 64-bit integers and sets no upper limit.
   requestRetry: countField("Retries"),
@@ -96,6 +107,11 @@ export const settingsSchema = z.object({
   requestLog: z.boolean(),
   errorLogsMaxFiles: countField("The number of failed-request logs kept"),
   usageStatisticsEnabled: z.boolean(),
+  // Its port is checked against the proxy's too, which isn't a value here:
+  // see checkSetting.
+  managementAddress: checkedText((value) =>
+    value === "" ? null : parseManagementAddress(value).problem,
+  ),
 });
 
 /** The settings as the form holds them: numbers as the text typed. */
@@ -109,8 +125,12 @@ export interface SettingInfo {
   label: string;
   /** Its key in config.yaml. */
   configKey: string;
-  /** The management route that changes it. */
+  /**
+   * The route that changes it: a v0 route, which takes `{"value": ...}` by
+   * PATCH, or with `v8`, a v8 config path, which takes the bare value by PUT.
+   */
   path: string;
+  v8?: true;
 }
 
 export const SETTINGS: Record<SettingId, SettingInfo> = {
@@ -158,9 +178,48 @@ export const SETTINGS: Record<SettingId, SettingInfo> = {
     configKey: "usage-statistics-enabled",
     path: `${MANAGEMENT}/usage-statistics-enabled`,
   },
+  managementAddress: {
+    label: "Management address",
+    configKey: "management.separate-address",
+    path: `${V8_CONFIG}/management/separate-address`,
+    v8: true,
+  },
 };
 
 export const SETTING_IDS = Object.keys(SETTINGS) as SettingId[];
+
+/** The call that saves `value` as setting `id`. */
+export function saveCall<K extends SettingId>(
+  id: K,
+  value: SettingValues[K],
+): { path: string; request: ApiRequest } {
+  const { path, v8 } = SETTINGS[id];
+  return {
+    path,
+    request: v8 === true ? { method: "PUT", json: value } : { method: "PATCH", json: { value } },
+  };
+}
+
+/**
+ * What the Settings tab reads from config.yaml through the v8 config route,
+ * since `GET /config` doesn't give it: the management address, and what
+ * checking it needs.
+ */
+export interface ServerFacts {
+  /** `management.separate-address`, trimmed; empty when unset. */
+  separateAddress: string;
+  /** `management.allow-remote`. */
+  allowRemote: boolean;
+  /** `server.port`, the proxy's port; 0 when unset, as the server loads it. */
+  proxyPort: number;
+}
+
+/** Where each of ServerFacts is in config.yaml's v8 layout. */
+export const FACT_PATHS: Record<keyof ServerFacts, readonly string[]> = {
+  separateAddress: ["management", "separate-address"],
+  allowRemote: ["management", "allow-remote"],
+  proxyPort: ["server", "port"],
+};
 
 function fieldOf(object: unknown, key: string): unknown {
   return object !== null && typeof object === "object"
@@ -172,8 +231,41 @@ function wholeNumber(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? Math.trunc(value) : 0;
 }
 
-/** The settings in `config`, an answer of `GET /config`, as the server uses them. */
-export function settingValuesOf(config: unknown): SettingValues {
+/** ServerFacts from the values at FACT_PATHS, undefined where the file has none. */
+export function serverFactsOf(values: Partial<Record<keyof ServerFacts, unknown>>): ServerFacts {
+  return {
+    separateAddress:
+      typeof values.separateAddress === "string" ? values.separateAddress.trim() : "",
+    allowRemote: values.allowRemote === true,
+    proxyPort: wholeNumber(values.proxyPort),
+  };
+}
+
+/**
+ * ServerFacts, read with `call` from the whole of config.yaml in the v8
+ * layout, `GET /v8/management/config`. One read of the whole: the route
+ * answers a path the file has nothing at with 404 `not_found`, which a
+ * browser logs as an error, and a file without these keys is the usual
+ * case. Only the facts are kept, not the rest of the file.
+ */
+export async function readServerFacts(
+  call: (path: string, request?: ApiRequest) => Promise<unknown>,
+  signal?: AbortSignal,
+): Promise<ServerFacts> {
+  const file = await call(V8_CONFIG, { signal });
+  const facts = Object.keys(FACT_PATHS) as (keyof ServerFacts)[];
+  return serverFactsOf(
+    Object.fromEntries(
+      facts.map((fact) => [fact, FACT_PATHS[fact].reduce<unknown>(fieldOf, file)]),
+    ),
+  );
+}
+
+/**
+ * The settings in `config`, an answer of `GET /config`, as the server uses
+ * them, with the management address from `facts` (empty without).
+ */
+export function settingValuesOf(config: unknown, facts?: ServerFacts): SettingValues {
   const flag = (key: string) => fieldOf(config, key) === true;
   const count = (key: string) => Math.max(0, wholeNumber(fieldOf(config, key)));
   const proxy = fieldOf(config, "proxy-url");
@@ -192,6 +284,7 @@ export function settingValuesOf(config: unknown): SettingValues {
     requestLog: flag("request-log"),
     errorLogsMaxFiles: errorLogs < 0 ? 10 : errorLogs,
     usageStatisticsEnabled: flag("usage-statistics-enabled"),
+    managementAddress: facts?.separateAddress ?? "",
   };
 }
 
@@ -234,10 +327,37 @@ function firstMessage(error: { issues: readonly { message: string }[] }): string
   return error.issues[0]?.message ?? "This value can't be saved.";
 }
 
-/** What is wrong with `input` as the value of setting `id`, or null. */
-export function settingProblem(id: SettingId, input: SettingsInput[SettingId] | undefined): string | null {
+/**
+ * `input` as the value of setting `id`, or what is wrong with it. With
+ * `facts`, a management address on the proxy's port is wrong, as the server
+ * refuses it.
+ */
+function checkSetting<K extends SettingId>(
+  id: K,
+  input: SettingsInput[K] | undefined,
+  facts: ServerFacts | undefined,
+): { value: SettingValues[K]; problem: null } | { value: null; problem: string } {
   const result = settingsSchema.shape[id].safeParse(input);
-  return result.success ? null : firstMessage(result.error);
+  if (!result.success) {
+    return { value: null, problem: firstMessage(result.error) };
+  }
+  const value = result.data as SettingValues[K];
+  if (id === "managementAddress" && facts !== undefined && typeof value === "string") {
+    const problem = managementAddressProblem(value, facts.proxyPort);
+    if (problem !== null) {
+      return { value: null, problem };
+    }
+  }
+  return { value, problem: null };
+}
+
+/** What is wrong with `input` as the value of setting `id`, or null. */
+export function settingProblem(
+  id: SettingId,
+  input: SettingsInput[SettingId] | undefined,
+  facts?: ServerFacts,
+): string | null {
+  return checkSetting(id, input, facts).problem;
 }
 
 export type SettingProblems = Partial<Record<SettingId, string>>;
@@ -247,10 +367,10 @@ export type SettingProblems = Partial<Record<SettingId, string>>;
  * values in config.yaml the form wouldn't take if typed in, such as a SOCKS5
  * proxy.
  */
-export function loadedProblems(loaded: SettingValues): SettingProblems {
+export function loadedProblems(loaded: SettingValues, facts?: ServerFacts): SettingProblems {
   const problems: SettingProblems = {};
   for (const id of SETTING_IDS) {
-    const problem = settingProblem(id, formValueOf(loaded[id]));
+    const problem = settingProblem(id, formValueOf(loaded[id]), facts);
     if (problem !== null) {
       problems[id] = problem;
     }
@@ -268,6 +388,7 @@ export function loadedProblems(loaded: SettingValues): SettingProblems {
 export function readEdited(
   input: SettingsInput,
   loaded: SettingValues | undefined,
+  facts?: ServerFacts,
 ): { values: SettingValues; problems: null } | { values: null; problems: SettingProblems } {
   const values: Partial<SettingValues> = {};
   const problems: SettingProblems = {};
@@ -276,11 +397,11 @@ export function readEdited(
       Object.assign(values, { [id]: loaded[id] });
       continue;
     }
-    const result = settingsSchema.shape[id].safeParse(input[id]);
-    if (result.success) {
-      Object.assign(values, { [id]: result.data });
+    const checked = checkSetting(id, input[id], facts);
+    if (checked.problem === null) {
+      Object.assign(values, { [id]: checked.value });
     } else {
-      problems[id] = firstMessage(result.error);
+      problems[id] = checked.problem;
     }
   }
   return Object.keys(problems).length > 0
@@ -313,17 +434,22 @@ export function describeSetting<K extends SettingId>(id: K, value: SettingValues
         return value.toLocaleString("en");
     }
   }
-  if (id === "routingStrategy") {
-    return STRATEGY_LABELS[strategyOf(value)];
+  const text = value.trim();
+  switch (id) {
+    case "routingStrategy":
+      return STRATEGY_LABELS[strategyOf(text)];
+    case "managementAddress":
+      return text === "" ? "None: on the proxy's port" : text;
+    default:
+      break;
   }
-  const proxy = value.trim();
-  if (proxy === "") {
+  if (text === "") {
     return "The environment's proxy, if any";
   }
-  if (/^(direct|none)$/i.test(proxy)) {
+  if (/^(direct|none)$/i.test(text)) {
     return "No proxy";
   }
-  return redactProxyUrl(proxy);
+  return redactProxyUrl(text);
 }
 
 /** A setting a save changes. */

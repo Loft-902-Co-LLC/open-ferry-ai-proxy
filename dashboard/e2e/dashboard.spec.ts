@@ -352,6 +352,11 @@ test("sets clients up with the proxy's address at the management address", async
     "http://127.0.0.1:18317 (the server's listen address)",
   ]);
   await shot(page, "28-overview-management-address");
+  // Settings shows the address the page is at.
+  await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Settings" }).click();
+  await expect(page.getByRole("textbox", { name: /^Management address/ })).toHaveValue(
+    new URL(APP_ORIGIN).host,
+  );
   expectClean(watched);
 });
 

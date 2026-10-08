@@ -2,9 +2,10 @@ import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { readStoredKey } from "../../api/keyStorage";
-import { API_KEYS, CONFIG, CONFIG_YAML, MANAGEMENT } from "../../api/management";
+import { API_KEYS, CONFIG, CONFIG_YAML, MANAGEMENT, V8_CONFIG } from "../../api/management";
+import { v8Config } from "../../test/fixtures";
 import { loadFirst } from "../../test/loadFirst";
-import { mockApi, route, type MockApi } from "../../test/mockApi";
+import { mockApi, route, v8ConfigRoutes, type MockApi } from "../../test/mockApi";
 import { renderApp } from "../../test/renderApp";
 import type { YamlEditorProps } from "./YamlEditor";
 
@@ -30,9 +31,18 @@ const YAML = ["port: 8317", "debug: false", "request-retry: 1", ""].join(NL);
 interface Server {
   api: MockApi;
   config: Record<string, unknown>;
+  /** config.yaml in the v8 layout, as the v8 config route reads it. */
+  v8: Record<string, unknown>;
   keys: string[];
   yaml: string;
 }
+
+/** The v8 config paths the Settings tab reads or writes. */
+const V8_PATHS = [
+  "management/separate-address",
+  "management/allow-remote",
+  "server/port",
+];
 
 /** The setting each route changes, by its path under the management API. */
 const SETTING_ROUTES = [
@@ -50,10 +60,18 @@ const SETTING_ROUTES = [
   "usage-statistics-enabled",
 ];
 
-/** A server whose config changes as the management routes change it. */
-function server(config: Record<string, unknown> = {}, keys: string[] = [KEY_A, KEY_B]): Server {
+/**
+ * A server whose config changes as the management routes change it, with
+ * `file` the parts of config.yaml only the v8 config route reads.
+ */
+function server(
+  config: Record<string, unknown> = {},
+  keys: string[] = [KEY_A, KEY_B],
+  file: Parameters<typeof v8Config>[0] = {},
+): Server {
   const state: Server = {
     api: mockApi(),
+    v8: v8Config(file),
     config: {
       debug: false,
       "proxy-url": "",
@@ -74,6 +92,7 @@ function server(config: Record<string, unknown> = {}, keys: string[] = [KEY_A, K
   };
   state.api.use(
     route("GET", CONFIG, () => ({ json: { ...state.config, "api-keys": state.keys } })),
+    ...v8ConfigRoutes(state.v8, V8_PATHS),
     ...SETTING_ROUTES.map((setting) =>
       route("PATCH", `${MANAGEMENT}/${setting}`, (request) => {
         const { value } = request.json() as { value: unknown };
@@ -120,6 +139,18 @@ function patches(api: MockApi) {
   return api.calls
     .filter((call) => call.method === "PATCH" && call.url.pathname !== API_KEYS)
     .map((call) => [call.url.pathname.slice(MANAGEMENT.length + 1), call.json()]);
+}
+
+/** Each write through the v8 config route: its path, and the value sent. */
+function v8Puts(api: MockApi) {
+  return api.calls
+    .filter((call) => call.method === "PUT" && call.url.pathname.startsWith(`${V8_CONFIG}/`))
+    .map((call) => [call.url.pathname.slice(V8_CONFIG.length + 1), call.json()]);
+}
+
+/** How many times the tab read the management address. */
+function addressReads(api: MockApi) {
+  return api.callsTo("GET", V8_CONFIG).length;
 }
 
 /** Replaces what `field` holds with `text`, as pasted. */
@@ -436,6 +467,168 @@ describe("the settings form", () => {
     // The one saved is no longer unsaved; the other two still are.
     expect(screen.getByText("2 unsaved changes.")).toBeVisible();
     expect(screen.getByRole("textbox", { name: "Longest wait for a retry (seconds)" })).toHaveValue("60");
+  });
+});
+
+describe("the management address", () => {
+  const address = () => screen.getByRole("textbox", { name: /^Management address/ });
+
+  it("shows the address from config.yaml, which takes a restart", async () => {
+    const state = server({}, undefined, { separateAddress: "127.0.0.1:8318" });
+    await openSettings();
+    const card = screen.getByRole("region", { name: "Management" });
+    expect(address()).toHaveValue("127.0.0.1:8318");
+    expect(address()).toHaveAccessibleName("Management address Takes a restart");
+    expect(address()).toHaveAttribute("placeholder", "127.0.0.1:8318");
+    expect(card).not.toHaveTextContent(/refuse/);
+    expectNothingUnsaved();
+    expect(state.api.unhandled).toEqual([]);
+  });
+
+  it("checks it as it is typed in, against the proxy's port", async () => {
+    server({}, undefined, { port: 9000 });
+    const { user } = await openSettings();
+    expect(address()).toHaveValue("");
+    await fill(user, address(), "8318");
+    expect(
+      await screen.findByText(
+        "Add the host before the port, such as 127.0.0.1:8318, or write :8318 for every interface.",
+      ),
+    ).toBeVisible();
+    expect(address()).toHaveAttribute("aria-invalid", "true");
+    await fill(user, address(), "[::1]:9000");
+    expect(
+      await screen.findByText(
+        "Port 9000 is the proxy's own (server.port). Pick another: the management address needs a port of its own.",
+      ),
+    ).toBeVisible();
+    await fill(user, address(), "[::1]:9001");
+    await waitFor(() => {
+      expect(address()).not.toHaveAttribute("aria-invalid");
+    });
+    expect(screen.queryByText(/refuse/)).not.toBeInTheDocument();
+  });
+
+  it("warns when other computers could reach it while allow-remote is off", async () => {
+    server();
+    const { user } = await openSettings();
+    await fill(user, address(), ":8318");
+    const warning = await screen.findByText(
+      "The server will refuse clients on other computers at this address, as management.allow-remote is off. To manage it from them, turn that on in config.yaml, or start the server with MANAGEMENT_PASSWORD set.",
+    );
+    expect(warning).toBeVisible();
+    expect(address()).not.toHaveAttribute("aria-invalid");
+    await fill(user, address(), "mgmt.example:8318");
+    expect(
+      await screen.findByText(/^If other computers can reach mgmt\.example, the server will refuse them there/),
+    ).toBeVisible();
+    await fill(user, address(), "localhost:8318");
+    await waitFor(() => {
+      expect(screen.queryByText(/refuse/)).not.toBeInTheDocument();
+    });
+  });
+
+  it("doesn't warn with allow-remote on", async () => {
+    server({}, undefined, { separateAddress: "0.0.0.0:8318", allowRemote: true });
+    await openSettings();
+    expect(address()).toHaveValue("0.0.0.0:8318");
+    expect(screen.queryByText(/refuse/)).not.toBeInTheDocument();
+  });
+
+  it("saves it through the v8 config route, and says where the dashboard is after a restart", async () => {
+    const state = server();
+    const { user } = await openSettings();
+    expect(addressReads(state.api)).toBe(1);
+    await fill(user, address(), " 127.0.0.1:8318 ");
+    await user.click(screen.getByRole("checkbox", { name: "Debug logging" }));
+    await user.click(screen.getByRole("button", { name: "Review and save" }));
+    const dialog = await screen.findByRole("dialog", { name: "Review the changes" });
+    // The review reads the address and the proxy's port again.
+    expect(addressReads(state.api)).toBe(2);
+    expect(dialog).toHaveTextContent(
+      "the server uses it from then on, except the management address, which takes a restart.",
+    );
+    const rows = within(dialog).getAllByRole("row");
+    expect(rows[2]).toHaveTextContent(
+      "Management address management.separate-addressNone: on the proxy's port127.0.0.1:8318",
+    );
+    expect(within(dialog).getByText("The management address takes a restart")).toBeVisible();
+    expect(dialog).toHaveTextContent(
+      "The server reads the management address only when it starts, so this page works as it does now until the server restarts. Then the dashboard and the management API are at http://127.0.0.1:8318/dashboard/, not at this page's address, and the proxy's port no longer serves them.",
+    );
+
+    await user.click(within(dialog).getByRole("button", { name: "Save 2 settings" }));
+    expect(
+      await screen.findByText(
+        "Saved 2 settings. The server uses them from now on, and the management address after a restart.",
+      ),
+    ).toBeVisible();
+    expect(patches(state.api)).toEqual([["debug", { value: true }]]);
+    expect(v8Puts(state.api)).toEqual([["management/separate-address", "127.0.0.1:8318"]]);
+    expect(state.v8.management).toEqual({ "allow-remote": false, "separate-address": "127.0.0.1:8318" });
+    expectNothingUnsaved();
+    expect(address()).toHaveValue("127.0.0.1:8318");
+    expect(state.api.unhandled).toEqual([]);
+  });
+
+  it("says the dashboard goes back to the proxy's port when it is emptied", async () => {
+    const state = server({}, undefined, { separateAddress: ":8318" });
+    const { user } = await openSettings();
+    await user.clear(address());
+    await user.click(screen.getByRole("button", { name: "Review and save" }));
+    const dialog = await screen.findByRole("dialog", { name: "Review the changes" });
+    expect(within(dialog).getAllByRole("row")[1]).toHaveTextContent(/:8318None: on the proxy's port$/);
+    expect(dialog).toHaveTextContent(
+      "Then the dashboard and the management API are back on the proxy's port (8317), not at this page's address.",
+    );
+    await user.click(within(dialog).getByRole("button", { name: "Save 1 setting" }));
+    expect(
+      await screen.findByText("Saved 1 setting. The server uses it after a restart."),
+    ).toBeVisible();
+    expect(v8Puts(state.api)).toEqual([["management/separate-address", ""]]);
+  });
+
+  it("checks the port again in the review, against the server's port then", async () => {
+    const state = server();
+    const { user } = await openSettings();
+    await fill(user, address(), "127.0.0.1:8318");
+    // Meanwhile, the proxy moves to that port.
+    (state.v8.server as Record<string, unknown>).port = 8318;
+    await user.click(screen.getByRole("button", { name: "Review and save" }));
+    expect(await screen.findByText(/^Port 8318 is the proxy's own/)).toBeVisible();
+    expect(address()).toHaveAttribute("aria-invalid", "true");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(v8Puts(state.api)).toEqual([]);
+  });
+
+  it("says why it can't be read, and still lets the other settings save", async () => {
+    const state = server();
+    state.api.use(
+      route("GET", V8_CONFIG, {
+        status: 500,
+        json: { error: "read_failed", message: "failed to read config" },
+      }),
+    );
+    const { user } = await openSettings();
+    const card = screen.getByRole("region", { name: "Management" });
+    expect(await within(card).findByRole("button", { name: "Try again" })).toBeVisible();
+    expect(within(card).queryByRole("textbox")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("checkbox", { name: "Debug logging" }));
+    await user.click(screen.getByRole("button", { name: "Review and save" }));
+    const dialog = await screen.findByRole("dialog", { name: "Review the changes" });
+    await user.click(within(dialog).getByRole("button", { name: "Save 1 setting" }));
+    expect(await screen.findByText(/Saved 1 setting\./)).toBeVisible();
+    expect(patches(state.api)).toEqual([["debug", { value: true }]]);
+  });
+
+  it("isn't offered by a server without the v8 config route", async () => {
+    const state = server();
+    state.api.use(route("GET", V8_CONFIG, { status: 404 }));
+    await openSettings();
+    expect(screen.queryByRole("region", { name: "Management" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: /^Management address/ })).not.toBeInTheDocument();
+    expectNothingUnsaved();
   });
 });
 

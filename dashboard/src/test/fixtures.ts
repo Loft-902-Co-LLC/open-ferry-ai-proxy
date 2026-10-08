@@ -358,3 +358,25 @@ export function claudeCliEntry(overrides: Partial<ClaudeCliEntry> = {}): ClaudeC
     ...overrides,
   };
 }
+
+/**
+ * The parts of config.yaml the Settings tab reads through the v8 config
+ * route, in the v8 layout: the proxy on `port` (8317), `allowRemote` (off),
+ * and `separateAddress` as the management address, if given.
+ */
+export function v8Config({
+  separateAddress,
+  allowRemote = false,
+  port = 8317,
+}: { separateAddress?: string; allowRemote?: boolean; port?: number } = {}): Record<
+  string,
+  unknown
+> {
+  return {
+    server: { port },
+    management: {
+      "allow-remote": allowRemote,
+      ...(separateAddress === undefined ? {} : { "separate-address": separateAddress }),
+    },
+  };
+}

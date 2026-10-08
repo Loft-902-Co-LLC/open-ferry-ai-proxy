@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
+import { ApiError } from "../../api/client";
 import {
   describeSetting,
   formValuesOf,
@@ -7,11 +8,16 @@ import {
   loadedProblems,
   proxyUrlProblem,
   readEdited,
+  readServerFacts,
   redactProxyUrl,
+  saveCall,
+  serverFactsOf,
   settingChanges,
+  settingProblem,
   settingValuesOf,
   settingsSchema,
   strategyOf,
+  type ServerFacts,
   type SettingValues,
 } from "./settingsModel";
 
@@ -28,26 +34,32 @@ const DEFAULTS: SettingValues = {
   requestLog: false,
   errorLogsMaxFiles: 10,
   usageStatisticsEnabled: false,
+  managementAddress: "",
 };
 
+const FACTS: ServerFacts = { separateAddress: "127.0.0.1:8318", allowRemote: false, proxyPort: 8317 };
+
 describe("settingValuesOf", () => {
-  it("reads each setting from the config's JSON", () => {
+  it("reads each setting from the config's JSON, and the management address from the facts", () => {
     expect(
-      settingValuesOf({
-        "proxy-url": " http://proxy.example:3128 ",
-        routing: { strategy: "fill-first" },
-        "request-retry": 3,
-        "max-retry-credentials": 2,
-        "max-retry-interval": 30,
-        "force-model-prefix": true,
-        debug: true,
-        "logging-to-file": true,
-        "logs-max-total-size-mb": 512,
-        "request-log": true,
-        "error-logs-max-files": 0,
-        "usage-statistics-enabled": true,
-        "api-keys": ["sk-not-a-setting-here"],
-      }),
+      settingValuesOf(
+        {
+          "proxy-url": " http://proxy.example:3128 ",
+          routing: { strategy: "fill-first" },
+          "request-retry": 3,
+          "max-retry-credentials": 2,
+          "max-retry-interval": 30,
+          "force-model-prefix": true,
+          debug: true,
+          "logging-to-file": true,
+          "logs-max-total-size-mb": 512,
+          "request-log": true,
+          "error-logs-max-files": 0,
+          "usage-statistics-enabled": true,
+          "api-keys": ["sk-not-a-setting-here"],
+        },
+        FACTS,
+      ),
     ).toEqual({
       proxyUrl: "http://proxy.example:3128",
       routingStrategy: "fill-first",
@@ -61,6 +73,7 @@ describe("settingValuesOf", () => {
       requestLog: true,
       errorLogsMaxFiles: 0,
       usageStatisticsEnabled: true,
+      managementAddress: "127.0.0.1:8318",
     });
   });
 
@@ -189,6 +202,105 @@ describe("readEdited", () => {
   it("checks every setting with nothing loaded to compare with", () => {
     expect(readEdited(formValuesOf(loaded), undefined).problems).toEqual(loadedProblems(loaded));
   });
+
+  it("checks the management address as typed", () => {
+    const read = readEdited(
+      { ...formValuesOf(DEFAULTS), managementAddress: "http://127.0.0.1:8318" },
+      DEFAULTS,
+      FACTS,
+    );
+    expect(read.problems).toEqual({
+      managementAddress: "Leave out the scheme and any path: write host:port, such as 127.0.0.1:8318.",
+    });
+    const good = readEdited(
+      { ...formValuesOf(DEFAULTS), managementAddress: " :8318 " },
+      DEFAULTS,
+      FACTS,
+    );
+    expect(good.values).toEqual({ ...DEFAULTS, managementAddress: ":8318" });
+  });
+
+  it("refuses a management address on the proxy's port once it knows the port", () => {
+    const input = { ...formValuesOf(DEFAULTS), managementAddress: "localhost:8317" };
+    expect(readEdited(input, DEFAULTS, FACTS).problems).toEqual({
+      managementAddress:
+        "Port 8317 is the proxy's own (server.port). Pick another: the management address needs a port of its own.",
+    });
+    expect(readEdited(input, DEFAULTS).values?.managementAddress).toBe("localhost:8317");
+    expect(settingProblem("managementAddress", "localhost:8317", FACTS)).toMatch(/^Port 8317/);
+    // One in config.yaml already, left alone, is a warning.
+    const clash = { ...DEFAULTS, managementAddress: "127.0.0.1:8317" };
+    const problems = loadedProblems(clash, FACTS);
+    expect(Object.keys(problems)).toEqual(["managementAddress"]);
+    expect(problems.managementAddress).toMatch(/^Port 8317 is the proxy's own/);
+    expect(readEdited(formValuesOf(clash), clash, FACTS).values).toEqual(clash);
+  });
+});
+
+describe("saveCall", () => {
+  it("saves upstream's settings by PATCH with the value wrapped, and open-ferry's by a v8 PUT", () => {
+    expect(saveCall("requestRetry", 3)).toEqual({
+      path: "/v0/management/request-retry",
+      request: { method: "PATCH", json: { value: 3 } },
+    });
+    expect(saveCall("routingStrategy", "fill-first")).toEqual({
+      path: "/v0/management/routing/strategy",
+      request: { method: "PATCH", json: { value: "fill-first" } },
+    });
+    expect(saveCall("managementAddress", "127.0.0.1:8318")).toEqual({
+      path: "/v8/management/config/management/separate-address",
+      request: { method: "PUT", json: "127.0.0.1:8318" },
+    });
+  });
+});
+
+describe("serverFactsOf", () => {
+  it("reads what the v8 config route answered, with defaults for what it didn't", () => {
+    expect(
+      serverFactsOf({ separateAddress: " :8318 ", allowRemote: true, proxyPort: 9000 }),
+    ).toEqual({ separateAddress: ":8318", allowRemote: true, proxyPort: 9000 });
+    expect(serverFactsOf({})).toEqual({ separateAddress: "", allowRemote: false, proxyPort: 0 });
+    expect(serverFactsOf({ separateAddress: 8318, allowRemote: "true", proxyPort: "8317" })).toEqual(
+      { separateAddress: "", allowRemote: false, proxyPort: 0 },
+    );
+  });
+});
+
+describe("readServerFacts", () => {
+  it("reads them from the whole file in one call", async () => {
+    const call = vi.fn<(path: string) => Promise<unknown>>(() =>
+      Promise.resolve({
+        "config-version": 8,
+        server: { port: 8317, tls: { enable: false } },
+        management: { "allow-remote": true, "separate-address": " 127.0.0.1:8318 " },
+        "api-keys": { codex: ["sk-not-kept"] },
+      }),
+    );
+    await expect(readServerFacts(call)).resolves.toEqual({
+      separateAddress: "127.0.0.1:8318",
+      allowRemote: true,
+      proxyPort: 8317,
+    });
+    expect(call.mock.calls.map(([path]) => path)).toEqual(["/v8/management/config"]);
+  });
+
+  it("takes what the file doesn't have as unset", async () => {
+    await expect(readServerFacts(() => Promise.resolve({ "config-version": 8 }))).resolves.toEqual({
+      separateAddress: "",
+      allowRemote: false,
+      proxyPort: 0,
+    });
+    await expect(
+      readServerFacts(() => Promise.resolve({ management: "on", server: null })),
+    ).resolves.toEqual({ separateAddress: "", allowRemote: false, proxyPort: 0 });
+  });
+
+  it("fails on any other failure, such as a server without the route", async () => {
+    const unsupported = new ApiError(404, null, null, null);
+    await expect(readServerFacts(() => Promise.reject(unsupported))).rejects.toBe(unsupported);
+    const broken = new ApiError(500, "read_failed", null, null);
+    await expect(readServerFacts(() => Promise.reject(broken))).rejects.toBe(broken);
+  });
 });
 
 describe("describeSetting", () => {
@@ -205,6 +317,11 @@ describe("describeSetting", () => {
     expect(describeSetting("proxyUrl", "")).toBe("The environment's proxy, if any");
     expect(describeSetting("proxyUrl", "Direct")).toBe("No proxy");
     expect(describeSetting("proxyUrl", "http://a:b@proxy.example")).toBe("http://•••@proxy.example");
+  });
+
+  it("says what the management address means", () => {
+    expect(describeSetting("managementAddress", "")).toBe("None: on the proxy's port");
+    expect(describeSetting("managementAddress", "[::1]:8318")).toBe("[::1]:8318");
   });
 });
 

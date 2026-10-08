@@ -453,6 +453,35 @@ const SETTING_ROUTES = new Set([
   "usage-statistics-enabled",
 ]);
 
+/** The v8 config paths the Settings tab reads or writes, under `/v8/management/config/`. */
+const V8_PATHS = new Set([
+  "management/separate-address",
+  "management/allow-remote",
+  "server/port",
+]);
+
+/** The mapping at `keys` in `tree`, made on the way when `make`, else undefined where there is none. */
+function mappingAt(
+  tree: Record<string, unknown>,
+  keys: readonly string[],
+  make: boolean,
+): Record<string, unknown> | undefined {
+  let node = tree;
+  for (const key of keys) {
+    const next = node[key];
+    if (next !== null && typeof next === "object" && !Array.isArray(next)) {
+      node = next as Record<string, unknown>;
+    } else if (make) {
+      const made: Record<string, unknown> = {};
+      node[key] = made;
+      node = made;
+    } else {
+      return undefined;
+    }
+  }
+  return node;
+}
+
 /** What a Claude sign-in's start gives: the provider's page, never opened here. */
 const SIGN_IN = {
   status: "ok",
@@ -497,6 +526,15 @@ export async function mockServer(
   const writable = options.writable ?? true;
   const separate = options.separateManagement ?? false;
   const config = settingsConfig();
+  // config.yaml in the v8 layout, as the v8 config route reads it. The
+  // management address, when separate, is the page's own origin.
+  const v8File: Record<string, unknown> = {
+    server: { port: config.port },
+    management: {
+      "allow-remote": false,
+      ...(separate ? { "separate-address": new URL(appOrigin).host } : {}),
+    },
+  };
   const clientKeys = [...CLIENT_KEYS];
   let configYaml = CONFIG_YAML;
   const calls = recentCalls(now);
@@ -628,6 +666,31 @@ export async function mockServer(
         return json(route, { status: "ok" });
       default:
         break;
+    }
+    if (path === "/v8/management/config" && method === "GET") {
+      return json(route, { "config-version": 8, ...v8File });
+    }
+    const v8Prefix = "/v8/management/config/";
+    const v8Path = path.startsWith(v8Prefix) ? path.slice(v8Prefix.length) : "";
+    if (V8_PATHS.has(v8Path) && (method === "GET" || method === "PUT")) {
+      const keys = v8Path.split("/");
+      const last = keys.at(-1) ?? "";
+      if (method === "GET") {
+        const value = mappingAt(v8File, keys.slice(0, -1), false)?.[last];
+        return value === undefined
+          ? json(route, { error: "not_found" }, 404)
+          : json(route, value);
+      }
+      const body = request.postData() ?? "";
+      server.writes.push(`${call} ${body}`);
+      if (!writable) {
+        return json(route, { error: "config writer unavailable" }, 503);
+      }
+      const parent = mappingAt(v8File, keys.slice(0, -1), true);
+      if (parent !== undefined) {
+        parent[last] = JSON.parse(body) as unknown;
+      }
+      return json(route, { "config-version": 8, status: "ok" });
     }
     const list = path.slice("/v0/management/".length);
     const write = ["PUT", "PATCH", "DELETE"].includes(method);

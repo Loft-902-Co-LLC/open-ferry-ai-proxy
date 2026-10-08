@@ -1,4 +1,4 @@
-import { useMutation, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
 import {
   useEffect,
   useId,
@@ -11,9 +11,9 @@ import {
 import { callProblem, cantSaveConfig } from "../../api/access";
 import { isUnsupportedRoute } from "../../api/client";
 import { useApiCall, useApiQuery } from "../../api/hooks";
-import { API_KEYS, CONFIG } from "../../api/management";
+import { API_KEYS, CONFIG, V8_CONFIG } from "../../api/management";
 import { Alert } from "../../components/Alert";
-import { QueryState } from "../../components/QueryState";
+import { Loading, QueryState } from "../../components/QueryState";
 import type { ApiKeysAnswer } from "../overview/clientKeys";
 import { ClientKeysCard } from "./ClientKeysCard";
 import {
@@ -33,13 +33,28 @@ import {
   type Review,
 } from "./SaveReview";
 import { SettingsForm, useSettingsForm } from "./SettingsForm";
+import { managementAddressProblem, restartNotice } from "./managementAddress";
 import {
-  SETTINGS,
   SETTING_IDS,
+  readServerFacts,
+  saveCall,
   settingChanges,
   settingValuesOf,
+  type ServerFacts,
   type SettingValues,
 } from "./settingsModel";
+
+/** The query key of what the tab reads through the v8 config route. */
+const FACTS = [V8_CONFIG, "settings"] as const;
+
+/** Whether `config`, an answer of `GET /config`, has TLS on (`tls.enable`). */
+function tlsOn(config: unknown): boolean {
+  if (config === null || typeof config !== "object") {
+    return false;
+  }
+  const tls = (config as Record<string, unknown>).tls;
+  return tls !== null && typeof tls === "object" && (tls as Record<string, unknown>).enable === true;
+}
 
 /** What "Review and save" reads the server for. */
 interface ReviewRequest {
@@ -53,6 +68,7 @@ interface ReviewRequest {
 
 interface SettingsEditorProps {
   config: UseQueryResult;
+  facts: UseQueryResult<ServerFacts>;
   keys: UseQueryResult<ApiKeysAnswer>;
   keyChanges: KeyChange[];
   setKeyChanges: Dispatch<SetStateAction<KeyChange[]>>;
@@ -67,6 +83,7 @@ interface SettingsEditorProps {
  */
 function SettingsEditor({
   config,
+  facts,
   keys,
   keyChanges,
   setKeyChanges,
@@ -80,8 +97,13 @@ function SettingsEditor({
   const root = useRef<HTMLDivElement>(null);
   const bar = useRef<HTMLDivElement>(null);
   const settingsUnsupported = isUnsupportedRoute(config.error);
-  const settingsShown = config.data !== undefined && !settingsUnsupported;
-  const settings = useSettingsForm(settingsShown ? config.data : undefined);
+  // The form waits for the management address too, so it never counts it
+  // arriving as an edit. A server without the v8 config route has no field
+  // for it.
+  const factsUnsupported = isUnsupportedRoute(facts.error);
+  const factsRead = facts.dataUpdatedAt > 0 || facts.errorUpdatedAt > 0;
+  const settingsShown = config.data !== undefined && !settingsUnsupported && factsRead;
+  const settings = useSettingsForm(settingsShown ? config.data : undefined, facts.data);
   const savedKeys = keysIn(keys.data);
   const pendingKeys = keys.data === undefined ? [] : effectiveKeyChanges(savedKeys, keyChanges);
   const unsaved = (settingsShown ? settings.unsaved.length : 0) + pendingKeys.length;
@@ -136,10 +158,24 @@ function SettingsEditor({
   const read = useMutation({
     mutationFn: async ({ edited, base, keys: changes }: ReviewRequest) => {
       let fresh: SettingValues | null = null;
+      let restart: string | null = null;
+      let addressProblem: string | null = null;
       if (edited !== null) {
         const answer = await call<unknown>(CONFIG);
         client.setQueryData([CONFIG], answer);
-        fresh = settingValuesOf(answer);
+        let freshFacts = facts.data;
+        if (edited.managementAddress !== base.managementAddress) {
+          // The proxy's port may have moved since the page read it.
+          freshFacts = await readServerFacts(call);
+          client.setQueryData(FACTS, freshFacts);
+          addressProblem = managementAddressProblem(edited.managementAddress, freshFacts.proxyPort);
+          restart = restartNotice(edited.managementAddress, {
+            tls: tlsOn(answer),
+            proxyPort: freshFacts.proxyPort,
+            origin: window.location.origin,
+          });
+        }
+        fresh = settingValuesOf(answer, freshFacts);
       }
       let freshKeys: string[] | null = null;
       if (changes.length > 0) {
@@ -147,9 +183,18 @@ function SettingsEditor({
         client.setQueryData([API_KEYS], answer);
         freshKeys = keysIn(answer);
       }
-      return { edited, base, changes, fresh, freshKeys };
+      return { edited, base, changes, fresh, freshKeys, restart, addressProblem };
     },
-    onSuccess: ({ edited, base, changes, fresh, freshKeys }) => {
+    onSuccess: ({ edited, base, changes, fresh, freshKeys, restart, addressProblem }) => {
+      if (addressProblem !== null) {
+        // Shown at the field, as any problem with an edit is.
+        settings.form.setError(
+          "managementAddress",
+          { type: "validate", message: addressProblem },
+          { shouldFocus: true },
+        );
+        return;
+      }
       const found: PendingChange[] = [];
       let keysAfter: number | null = null;
       if (freshKeys !== null) {
@@ -159,6 +204,7 @@ function SettingsEditor({
         found.push(...keysFound.map((change): PendingChange => ({ kind: "key", change })));
         keysAfter = applyKeyChanges(freshKeys, keysFound).length;
       }
+      let restartFound: string | null = null;
       if (edited !== null && fresh !== null) {
         // An edit the server already has is no longer one.
         for (const id of SETTING_IDS) {
@@ -166,17 +212,17 @@ function SettingsEditor({
             settings.settle(id, fresh[id]);
           }
         }
-        found.push(
-          ...settingChanges(base, edited, fresh).map(
-            (change): PendingChange => ({ kind: "setting", change }),
-          ),
-        );
+        const settingsFound = settingChanges(base, edited, fresh);
+        found.push(...settingsFound.map((change): PendingChange => ({ kind: "setting", change })));
+        if (settingsFound.some((change) => change.id === "managementAddress")) {
+          restartFound = restart;
+        }
       }
       if (found.length === 0) {
         setOutcome("nothing");
         return;
       }
-      setReview({ changes: found, keysAfter });
+      setReview({ changes: found, keysAfter, restart: restartFound });
     },
   });
 
@@ -188,10 +234,8 @@ function SettingsEditor({
           if (pending.kind === "key") {
             await saveKeyChange(call, pending.change);
           } else {
-            await call<unknown>(SETTINGS[pending.change.id].path, {
-              method: "PATCH",
-              json: { value: pending.change.after },
-            });
+            const { path, request } = saveCall(pending.change.id, pending.change.after);
+            await call<unknown>(path, request);
           }
         } catch (reason) {
           throw new SaveStoppedError(saved, pending, reason);
@@ -206,6 +250,9 @@ function SettingsEditor({
       setOutcome({
         saved: saved.length,
         settingsOnly: saved.every((pending) => pending.kind === "setting"),
+        restart: saved.some(
+          (pending) => pending.kind === "setting" && pending.change.id === "managementAddress",
+        ),
       });
     },
     onError: (error) => {
@@ -261,11 +308,18 @@ function SettingsEditor({
             </p>
           </Alert>
         ) : settingsShown ? (
-          <SettingsForm id={formId} settings={settings} onSubmit={startReview} />
-        ) : (
+          <SettingsForm
+            id={formId}
+            settings={settings}
+            facts={factsUnsupported ? null : facts}
+            onSubmit={startReview}
+          />
+        ) : config.data === undefined ? (
           <QueryState query={config} loading="Reading the settings…">
             {() => null}
           </QueryState>
+        ) : (
+          <Loading>Reading the settings…</Loading>
         )}
       </div>
       <SaveBar
@@ -313,6 +367,11 @@ export interface SettingsTabProps {
  */
 export function SettingsTab({ onUnsavedChange }: SettingsTabProps) {
   const config = useApiQuery<unknown>(CONFIG);
+  const call = useApiCall();
+  const facts = useQuery({
+    queryKey: FACTS,
+    queryFn: ({ signal }) => readServerFacts(call, signal),
+  });
   const keys = useApiQuery<ApiKeysAnswer>(API_KEYS);
   // Kept here, so they outlast the editor starting afresh below.
   const [keyChanges, setKeyChanges] = useState<KeyChange[]>([]);
@@ -321,8 +380,13 @@ export function SettingsTab({ onUnsavedChange }: SettingsTabProps) {
     // The form starts once, with the settings loaded, so it never counts
     // the values arriving as edits.
     <SettingsEditor
-      key={config.data === undefined ? "loading" : "loaded"}
+      key={
+        config.data === undefined || (facts.dataUpdatedAt === 0 && facts.errorUpdatedAt === 0)
+          ? "loading"
+          : "loaded"
+      }
       config={config}
+      facts={facts}
       keys={keys}
       keyChanges={keyChanges}
       setKeyChanges={setKeyChanges}

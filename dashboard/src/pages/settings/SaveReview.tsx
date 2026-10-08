@@ -1,5 +1,5 @@
 import { CircleCheck, Info, Save, Undo2 } from "lucide-react";
-import { useLayoutEffect, type RefObject } from "react";
+import { Fragment, useLayoutEffect, type RefObject } from "react";
 
 import { callProblem, saveProblem } from "../../api/access";
 import { Alert } from "../../components/Alert";
@@ -17,6 +17,20 @@ import { SETTINGS, describeSetting, type SettingChange } from "./settingsModel";
 export type PendingChange =
   | { kind: "key"; change: KeyChange }
   | { kind: "setting"; change: SettingChange };
+
+/** A config key that can wrap after each dot, so a phone's narrow table fits it. */
+function wrappingKey(key: string) {
+  return key.split(".").map((part, index) => (
+    <Fragment key={index}>
+      {index > 0 && (
+        <>
+          .<wbr />
+        </>
+      )}
+      {part}
+    </Fragment>
+  ));
+}
 
 /** A change's name, as the review and its notices give it. */
 function changeName(pending: PendingChange): string {
@@ -50,6 +64,11 @@ export interface Review {
   changes: PendingChange[];
   /** How many client keys are left once saved, when keys change. */
   keysAfter: number | null;
+  /**
+   * What the review says of a change that takes a restart, the management
+   * address's: where the dashboard is then. Null without one.
+   */
+  restart: string | null;
 }
 
 /** Why a change wasn't saved. */
@@ -91,6 +110,8 @@ export function ReviewDialog({ review, pending, error, onSave, onClose }: Review
   const both = keys.length > 0 && settings.length > 0;
   const lastKey = review?.keysAfter === 0 && keys.some((change) => change.kind === "delete");
   const moved = settings.some((change) => change.movedOnServer);
+  const v8 = settings.some((change) => SETTINGS[change.id].v8 === true);
+  const restart = review?.restart ?? null;
   const stopped = error instanceof SaveStoppedError ? error : null;
   const total = changes.length;
   const notTried = stopped === null ? 0 : total - stopped.saved.length - 1;
@@ -118,9 +139,12 @@ export function ReviewDialog({ review, pending, error, onSave, onClose }: Review
         )
       }
     >
-      <p className="text-muted">
+      <p className="max-w-prose text-muted">
         Each change is saved to config.yaml on its own, in this order, and the server uses it from
-        then on. Nothing else in the file changes.
+        then on{restart === null ? "" : ", except the management address, which takes a restart"}.{" "}
+        {v8
+          ? "The management address goes through the server's v8 config route, which saves the whole file in the v8 layout: settings written in the older layout move to their v8 places, with the same values."
+          : "Nothing else in the file changes."}
       </p>
       {keys.length > 0 && (
         <div className="space-y-2">
@@ -169,7 +193,7 @@ export function ReviewDialog({ review, pending, error, onSave, onClose }: Review
                 <tr key={change.id}>
                   <Td>
                     <span className="font-medium">{SETTINGS[change.id].label}</span>{" "}
-                    <Code>{SETTINGS[change.id].configKey}</Code>
+                    <Code>{wrappingKey(SETTINGS[change.id].configKey)}</Code>
                     {change.movedOnServer && (
                       <>
                         {" "}
@@ -177,14 +201,19 @@ export function ReviewDialog({ review, pending, error, onSave, onClose }: Review
                       </>
                     )}
                   </Td>
-                  <Td className="break-all">{describeSetting(change.id, change.now)}</Td>
-                  <Td className="break-all font-medium">
+                  <Td className="min-w-24 wrap-anywhere">{describeSetting(change.id, change.now)}</Td>
+                  <Td className="min-w-24 font-medium wrap-anywhere">
                     {describeSetting(change.id, change.after)}
                   </Td>
                 </tr>
               ))}
             </tbody>
           </Table>
+          {restart !== null && (
+            <Alert tone="info" title="The management address takes a restart">
+              <p className="max-w-prose">{restart}</p>
+            </Alert>
+          )}
         </div>
       )}
       {error !== null && (
@@ -209,7 +238,25 @@ export function ReviewDialog({ review, pending, error, onSave, onClose }: Review
 }
 
 /** What the last "Review and save" did. */
-export type Outcome = { saved: number; settingsOnly: boolean } | "nothing" | null;
+export type Outcome =
+  | {
+      saved: number;
+      settingsOnly: boolean;
+      /** One saved was the management address, which takes a restart. */
+      restart: boolean;
+    }
+  | "nothing"
+  | null;
+
+/** What the bar says the server does with the changes `outcome` saved. */
+function whenUsed(outcome: { saved: number; restart: boolean }): string {
+  if (!outcome.restart) {
+    return `The server uses ${outcome.saved === 1 ? "it" : "them"} from now on.`;
+  }
+  return outcome.saved === 1
+    ? "The server uses it after a restart."
+    : "The server uses them from now on, and the management address after a restart.";
+}
 
 interface SaveBarProps {
   ref: RefObject<HTMLDivElement | null>;
@@ -278,8 +325,7 @@ export function SaveBar({
         <p role="status" className="flex items-start gap-2">
           <CircleCheck aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-ok" />
           <span>
-            Saved {countChanges(outcome.saved, outcome.settingsOnly)}. The server uses{" "}
-            {outcome.saved === 1 ? "it" : "them"} from now on.
+            Saved {countChanges(outcome.saved, outcome.settingsOnly)}. {whenUsed(outcome)}
           </span>
         </p>
       )}

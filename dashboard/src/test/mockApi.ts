@@ -5,6 +5,8 @@
 
 import { vi } from "vitest";
 
+import { V8_CONFIG } from "../api/management";
+
 export interface MockRequest {
   method: string;
   url: URL;
@@ -98,6 +100,63 @@ export function mockApi(...initial: MockRoute[]): MockApi {
     callsTo: (method, path) =>
       calls.filter((call) => call.method === method && call.url.pathname === path),
   };
+}
+
+/** The mapping at `keys` in `tree`, made as needed when `make` is set. */
+function mappingAt(
+  tree: Record<string, unknown>,
+  keys: readonly string[],
+  make: boolean,
+): Record<string, unknown> | undefined {
+  let node = tree;
+  for (const key of keys) {
+    const next = node[key];
+    if (next !== null && typeof next === "object" && !Array.isArray(next)) {
+      node = next as Record<string, unknown>;
+    } else if (make) {
+      const made: Record<string, unknown> = {};
+      node[key] = made;
+      node = made;
+    } else {
+      return undefined;
+    }
+  }
+  return node;
+}
+
+/**
+ * `GET <V8_CONFIG>`, and `GET` and `PUT <V8_CONFIG>/<path>` for each of
+ * `paths`, over `tree`, config.yaml in the v8 layout, as the server answers
+ * them: the whole GET gives the tree with its `config-version`; a path's
+ * GET gives the value at the path, or 404 `not_found` where there is none;
+ * a PUT sets it to the body, the bare JSON value, in place, so a mapping
+ * `tree` shares with another answer changes there too.
+ */
+export function v8ConfigRoutes(
+  tree: Record<string, unknown>,
+  paths: readonly string[],
+): MockRoute[] {
+  const whole = route("GET", V8_CONFIG, () => ({ json: { "config-version": 8, ...tree } }));
+  return [whole, ...paths.flatMap((path) => {
+    const keys = path.split("/");
+    const parents = keys.slice(0, -1);
+    const last = keys.at(-1) ?? "";
+    return [
+      route("GET", `${V8_CONFIG}/${path}`, () => {
+        const value = mappingAt(tree, parents, false)?.[last];
+        return value === undefined
+          ? { status: 404, json: { error: "not_found" } }
+          : { json: value };
+      }),
+      route("PUT", `${V8_CONFIG}/${path}`, (request) => {
+        const parent = mappingAt(tree, parents, true);
+        if (parent !== undefined) {
+          parent[last] = request.json();
+        }
+        return { json: { "config-version": 8, status: "ok" } };
+      }),
+    ];
+  })];
 }
 
 /** A fetch that fails as an unreachable server's does. */
