@@ -59,6 +59,29 @@ It doesn't measure real providers, TLS, OAuth credentials or WebSockets.
 
 ## Running it
 
+### On a fresh Ubuntu 24.04 machine
+
+`tools/bench/cloud/run-ubuntu.sh` does the whole run on a new Ubuntu 24.04 machine, such as a cloud VM with 8 dedicated vCPUs made for it and deleted after. Run it by hand, as root or as a user with sudo; CI never runs it. It:
+
+1. installs `build-essential`, `pkg-config`, `cmake`, `git`, `curl` and `ca-certificates` with apt, if they're missing;
+2. installs rustup, if it's missing, and the toolchain `rust-toolchain.toml` names;
+3. downloads Go 1.26.4 for Linux from go.dev, checks its SHA-256, and unpacks it into `<dir>/sdk`;
+4. fetches open-ferry at `--ref` (default `main`) into `<dir>/open-ferry` and CLIProxyAPI at `--tag` (default `v8.0.20`) into `<dir>/CLIProxyAPI`;
+5. builds open-ferry and the benchmark in release mode, and CLIProxyAPI with the benchmark's `--prepare`;
+6. waits until the 1-minute load average is at most `--max-load` (default 0.5), for up to `--wait` minutes (default 30);
+7. runs the benchmark with `--out docs/benchmarks.md` and `--machine-note`, and copies the updated `docs/benchmarks.md`, the results and a log of everything into `<dir>/results/<time>/`.
+
+`<dir>` is `~/ofp-bench` unless `--dir` says otherwise. Running it again is safe: it installs only what's missing, fetches the refs again, and builds only what changed. On the machine:
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/Loft-902-Co-LLC/open-ferry-ai-proxy/main/tools/bench/cloud/run-ubuntu.sh
+bash run-ubuntu.sh --note "Azure Standard_D8as_v5, eastus" --ref main --tag v8.0.20
+```
+
+Then copy `~/ofp-bench/results/<time>/` off the machine, such as with `scp -r`. Options after `--` go to the benchmark, such as `-- --duration 2 --starts 1 --long-requests 2` for a quick check that everything works. `bash run-ubuntu.sh --help` lists the script's options.
+
+### By hand
+
 You need Git, Go 1.26 ([UPSTREAM.md](../UPSTREAM.md#checking-parity) says how to get Go 1.26.4) and a CLIProxyAPI checkout at the pinned tag beside this one. On a quiet machine, plugged in, with nothing else running, from the root of this repository:
 
 ```sh
