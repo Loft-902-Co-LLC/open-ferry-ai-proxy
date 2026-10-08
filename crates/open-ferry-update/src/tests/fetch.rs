@@ -89,6 +89,28 @@ async fn a_redirect_to_plain_http_elsewhere_is_refused() {
     assert_eq!(server.paths(), ["/releases/a"]);
 }
 
+#[test]
+fn a_download_over_https_is_never_redirected_to_plain_http() {
+    let url = |text: &str| Url::parse(text).unwrap();
+    let https = url("https://github.com/o/r/releases/latest/download/SHA256SUMS");
+    let local = url("http://127.0.0.1:8080/releases/latest/download/SHA256SUMS");
+
+    let next = url("http://127.0.0.1:9/b");
+    let error = fetch::check_redirect(&next, std::slice::from_ref(&https)).unwrap_err();
+    assert!(error.contains("plain http, after https"), "{error}");
+    let after_both = [local, https];
+    assert!(fetch::check_redirect(&url("http://localhost/b"), &after_both).is_err());
+
+    // Over https, or plain http all the way on this machine, is fine.
+    let [local, https] = after_both;
+    let cdn = url("https://objects.example/b");
+    assert_eq!(fetch::check_redirect(&cdn, &[https]), Ok(()));
+    let local = [local];
+    assert_eq!(fetch::check_redirect(&cdn, &local), Ok(()));
+    let next = url("http://[::1]:8080/b");
+    assert_eq!(fetch::check_redirect(&next, &local), Ok(()));
+}
+
 #[tokio::test]
 async fn a_redirect_with_a_password_is_refused() {
     let server = ReleaseServer::start().await;
