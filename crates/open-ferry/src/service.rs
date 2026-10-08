@@ -1804,6 +1804,7 @@ self-update:
         );
         service.apply_config(
             Arc::new(Config::parse(config).unwrap()),
+            None,
             &dir.path().join("config.yaml"),
         );
 

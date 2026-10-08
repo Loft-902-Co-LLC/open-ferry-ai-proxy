@@ -302,6 +302,37 @@ async fn settings_change_the_file_with_no_server() {
     assert_eq!(setup.text(), before);
 }
 
+// Not upstream's: open-ferry's own updates are settings like the others:
+// `self-update.mode` and `check-every` are set and read with no
+// confirmation, and a mode other than off, notify or auto is refused with
+// the file kept.
+#[tokio::test]
+async fn self_update_settings_change_the_file() {
+    let offline = offline(Some(KEY));
+    let setup = &offline.setup;
+    let ctx = cli(&setup.path);
+
+    let changed = ok(&ctx, set("self-update.mode", "off")).await;
+    assert_eq!(
+        changed.json["changes"],
+        json!([{"path": "self-update.mode", "new": "off"}])
+    );
+    assert_eq!(
+        ok(&ctx, get("self-update.mode")).await.json["value"],
+        json!("off")
+    );
+    ok(&ctx, set("self-update.check-every", "12h")).await;
+    assert_eq!(
+        ok(&ctx, get("self-update.check-every")).await.json["value"],
+        json!("12h")
+    );
+
+    let before = setup.text();
+    let failure = fails(&ctx, set("self-update.mode", "sometimes")).await;
+    assert_eq!(failure.code, exit::FAILED);
+    assert_eq!(setup.text(), before);
+}
+
 // Not upstream's: an unknown setting is refused with the nearest known
 // one, for every command that takes a path, and nothing is changed.
 #[tokio::test]
