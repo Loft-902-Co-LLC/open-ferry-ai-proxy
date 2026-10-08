@@ -19,12 +19,17 @@ use serde_json::Value;
 
 const OPEN_FERRY: &str = env!("CARGO_BIN_EXE_open-ferry");
 
-/// Runs open-ferry with `args` in `dir`, which has no `.env`.
+/// Runs open-ferry with `args` in `dir`, which has no `.env`. Its data
+/// directory, where check looks for an install receipt, is `dir`'s `data`.
 fn run(dir: &Path, args: &[&str]) -> Output {
+    let data = dir.join("data");
     Command::new(OPEN_FERRY)
         .args(args)
         .current_dir(dir)
         .env_remove("MANAGEMENT_PASSWORD")
+        .env_remove("OPEN_FERRY_SELF_UPDATE")
+        .env("LOCALAPPDATA", &data)
+        .env("XDG_DATA_HOME", &data)
         .output()
         .unwrap()
 }
@@ -558,4 +563,59 @@ fn mcp_serves_on_stdio() {
     assert!(status.success());
     // Nothing else came on stdout.
     assert!(received.recv_timeout(Duration::from_secs(5)).is_err());
+}
+
+// Not upstream's: update shows its usage with -h, refuses bad usage, and
+// sets self-update.mode in a config; -version prints the version. None of
+// these looks for a release, so no test here makes an update request.
+#[test]
+fn update_shows_its_usage_and_sets_the_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let help = run(dir.path(), &["update", "-h"]);
+    assert_eq!(code(&help), Some(0));
+    let err = String::from_utf8(help.stderr).unwrap();
+    assert!(err.contains(" update [flags]\n"), "{err}");
+    assert!(
+        err.contains("Turn automatic updates off: open-ferry update -mode off\n"),
+        "{err}"
+    );
+
+    for (args, message) in [
+        (
+            &["update", "-check", "-rollback"][..],
+            "use only one of -check, -rollback and -mode",
+        ),
+        (
+            &["update", "-mode", "sometimes"],
+            "-mode is \"sometimes\"; use off, notify or auto",
+        ),
+        (&["update", "now"], "unexpected argument: now"),
+    ] {
+        let bad = run(dir.path(), args);
+        assert_eq!(code(&bad), Some(2), "{args:?}");
+        let err = String::from_utf8(bad.stderr).unwrap();
+        assert!(err.starts_with(&format!("{message}\nUsage: ")), "{err}");
+        assert!(bad.stdout.is_empty());
+    }
+
+    let version = run(dir.path(), &["-version"]);
+    assert_eq!(code(&version), Some(0));
+    assert_eq!(
+        String::from_utf8(version.stdout).unwrap(),
+        format!("open-ferry {}\n", env!("CARGO_PKG_VERSION"))
+    );
+
+    let path = dir.path().join("config.yaml");
+    std::fs::write(&path, "# Mine.\nport: 8317\n").unwrap();
+    let shown = path.display().to_string();
+    let set = run(dir.path(), &["update", "-mode", "off", "-config", &shown]);
+    assert_eq!(code(&set), Some(0));
+    let out = String::from_utf8(set.stdout).unwrap();
+    assert!(
+        out.contains(&format!("self-update.mode is off in {shown}.\n")),
+        "{out}"
+    );
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.starts_with("# Mine.\n"), "{text}");
+    assert!(text.contains("self-update:\n  mode: off\n"), "{text}");
 }

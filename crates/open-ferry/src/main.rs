@@ -13,11 +13,13 @@
 //! isn't called (see [`keep_alive`]).
 //!
 //! As the first argument, `init` writes a starting config (see [`init`]),
-//! `check` looks over a setup (see [`check`]), and `service` installs,
+//! `check` looks over a setup (see [`check`]), `service` installs,
 //! removes or shows open-ferry as a background service (see
-//! [`os_service`]); the arguments after it are theirs. `status`, `config`,
-//! `keys`, `credentials`, `clients` and `mcp` look at and change a setup,
-//! for people and agents (see [`agent`]).
+//! [`os_service`]), and `update` checks for, installs or rolls back a
+//! release, or sets whether updates are automatic (see [`update`]); the
+//! arguments after it are theirs. `status`, `config`, `keys`,
+//! `credentials`, `clients` and `mcp` look at and change a setup, for
+//! people and agents (see [`agent`]). `-version` prints the version.
 //!
 //! Deviations from upstream:
 //! - The cloud-deploy, home, Postgres, object-store and git-store modes,
@@ -48,6 +50,7 @@ mod os_service;
 mod service;
 mod tls;
 mod tui;
+mod update;
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -72,6 +75,7 @@ fn main() -> ExitCode {
         Some(init::NAME) => return init::main(&program, args.skip(1)),
         Some(check::NAME) => return check::main(&program, args.skip(1)),
         Some(os_service::NAME) => return os_service::main(&program, args.skip(1)),
+        Some(update::NAME) => return update::main(&program, args.skip(1)),
         Some(name) if agent::is_command(name) => return agent::main(&program, args),
         _ => {}
     }
@@ -87,6 +91,11 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if flags.version {
+        // What the updater checks a downloaded binary prints.
+        println!("open-ferry {}", open_ferry_update::CURRENT_VERSION);
+        return ExitCode::SUCCESS;
+    }
     // Upstream loads `.env` before it reads the config, so the variables it
     // sets apply to everything after. This is before `logging::init`, which
     // starts the first thread, and nothing is logged until then.
