@@ -83,6 +83,11 @@
 //! records the usage records from then on; at shutdown it writes what it
 //! was sent once the server has stopped.
 //!
+//! With open-ferry's `management.separate-address`, the management API,
+//! the dashboard and the dashboard API are served on that address alone,
+//! on a listener of their own, and the proxy's address answers their
+//! paths as while management is off (see [`management_listener`]).
+//!
 //! The command line's `-password` is a local management password (see
 //! [`Options`]): the management API accepts it from loopback clients, and
 //! the server serves the [keep-alive endpoint](crate::keep_alive), and
@@ -112,7 +117,8 @@
 //!   interface, as Go does; an IPv6 `host` is bracketed, where upstream's
 //!   address fails to parse.
 //! - Changing `host`, `port` or `tls` takes a restart, as upstream; a reload
-//!   logs that it was ignored.
+//!   logs that it was ignored. So does changing open-ferry's
+//!   `management.separate-address`.
 //! - The auth directory is made absolute, as the watcher's paths are, so a
 //!   credential file has the same `path` and ID whether it was found at
 //!   start or reported by the watcher. Upstream keeps a relative directory
@@ -175,6 +181,8 @@ use crate::keep_alive::{self, KeepAlive};
 use crate::logging::LogLevel;
 use crate::observability;
 use crate::tls::{self, TlsListener, TlsPeer};
+
+mod management_listener;
 
 /// How often background refresh looks for tokens to renew.
 const AUTO_REFRESH_INTERVAL: Duration = Duration::from_secs(15 * 60);
@@ -261,6 +269,13 @@ pub async fn run(
             return ExitCode::FAILURE;
         }
     };
+    let separate = match management_listener::bind_separate(&config) {
+        Ok(separate) => separate,
+        Err(error) => {
+            tracing::error!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
     let tls_config = if config.tls.enable {
         match tls::load(&config.tls.cert, &config.tls.key) {
             Ok(tls_config) => Some(tls_config),
@@ -278,17 +293,28 @@ pub async fn run(
         .as_ref()
         .map_or_else(axum::Router::new, KeepAlive::router);
     let (stop_server, stopped) = watch::channel(false);
-    let mut server = tokio::spawn(serve(
-        listener,
-        tls_config,
-        service.app_with(extra),
-        stopped,
-    ));
+    let management_address = separate
+        .as_ref()
+        .map(|separate| separate.address.to_string());
+    let mut server = match separate {
+        None => tokio::spawn(serve(
+            listener,
+            tls_config,
+            service.app_with(extra),
+            stopped,
+        )),
+        Some(separate) => {
+            management_listener::spawn(&service, listener, separate, tls_config, extra, stopped)
+        }
+    };
     if options.announce {
         println!(
             "API server started successfully on: {}:{}",
             config.host, config.port
         );
+        if let Some(address) = management_address {
+            println!("Management API and dashboard started on: {address}");
+        }
     }
 
     let mut events = match ConfigWatcher::start(&config_path, &config) {
@@ -1204,6 +1230,7 @@ impl Service {
         {
             tracing::warn!("host, port and tls changes take effect after a restart");
         }
+        management_listener::warn_on_change(&previous, &config);
         self.manager.set_settings(Settings::from(&*config));
         self.state.set_config(ServerConfig::from(&*config));
         self.management.set_config(Arc::clone(&config));
