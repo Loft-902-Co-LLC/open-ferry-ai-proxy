@@ -356,6 +356,7 @@ pub(crate) async fn set(ctx: &Context, input: SetInput) -> Result<Outcome, Failu
             what: format!("Setting {path}"),
             path: Some(path),
             always,
+            hidden: !input.value.is_inline(),
         },
     )
     .await?;
@@ -389,6 +390,7 @@ pub(crate) async fn unset(ctx: &Context, input: &UnsetInput) -> Result<Outcome, 
             what: format!("Unsetting {path}"),
             path: Some(path),
             always: Vec::new(),
+            hidden: false,
         },
     )
     .await?;
@@ -663,6 +665,7 @@ pub(crate) async fn replace(ctx: &Context, input: ReplaceInput) -> Result<Outcom
             what: "Replacing the whole config".to_owned(),
             path: None,
             always,
+            hidden: false,
         },
     )
     .await?;

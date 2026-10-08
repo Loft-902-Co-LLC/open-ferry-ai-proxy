@@ -80,6 +80,17 @@ pub(crate) fn client_keys(root: &Value) -> Vec<String> {
 /// Why `changes`, which make the config `before` into `after`, need a
 /// confirmation: one reason for each sensitive setting they touch.
 pub(crate) fn sensitive_reasons(changes: &[Change], before: &Value, after: &Value) -> Vec<String> {
+    sensitive_reasons_of(changes, before, after, false)
+}
+
+/// [`sensitive_reasons`]; with `hidden` when the values set were read from
+/// a file or standard input, so no reason names one.
+pub(crate) fn sensitive_reasons_of(
+    changes: &[Change],
+    before: &Value,
+    after: &Value,
+    hidden: bool,
+) -> Vec<String> {
     let mut reasons = Vec::new();
     let mut add = |reason: String| {
         if !reasons.contains(&reason) {
@@ -109,6 +120,8 @@ pub(crate) fn sensitive_reasons(changes: &[Change], before: &Value, after: &Valu
         if !is_loopback_host(host) {
             add(if host.trim().is_empty() {
                 "server.host would be unset, so the proxy listens on every interface, beyond this machine".to_owned()
+            } else if hidden {
+                "server.host would be a host that isn't loopback, so the proxy listens beyond this machine".to_owned()
             } else {
                 format!(
                     "server.host would be {host}, which isn't loopback, so the proxy listens beyond this machine"

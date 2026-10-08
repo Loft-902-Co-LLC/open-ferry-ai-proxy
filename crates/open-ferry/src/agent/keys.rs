@@ -256,6 +256,7 @@ pub(crate) async fn add(ctx: &Context, input: AddInput) -> Result<Outcome, Failu
                 .as_ref()
                 .map(|source| reads_a_file(ctx, source))
                 .unwrap_or_default(),
+            hidden: input.source.is_some(),
         },
         data,
     )
@@ -359,6 +360,7 @@ pub(crate) async fn remove(ctx: &Context, input: RemoveInput) -> Result<Outcome,
             always: vec![format!(
                 "it deletes client key {index} ({masked}), and a client using it is refused"
             )],
+            hidden: input.source.is_some(),
         },
         data,
     )
