@@ -17,11 +17,14 @@
 //!
 //! Without the confirmation, a command asks at a terminal; with no
 //! terminal to ask on, it changes nothing and says what it would change.
+//! Either is scrubbed of every secret known to the setup and of the
+//! configs the change goes from and to, before it is asked or returned.
 
 use std::net::IpAddr;
 
 use serde_json::{Value, json};
 
+use super::mask::{Scrub, collect_secrets, known_secrets};
 use super::values::{Change, get};
 use super::{Caller, Context, Failure};
 
@@ -152,15 +155,27 @@ pub(crate) fn is_loopback_host(host: &str) -> bool {
 /// Goes ahead with `what`, which needs a confirmation for `reasons`, when
 /// it has one: `--yes`, or a yes at the terminal. Else a failure that says
 /// what it would change, `would`, which holds its `changes`, masked.
+///
+/// What it asks, and the failure, are scrubbed of the secrets known to the
+/// setup ([`known_secrets`]) and of those in `trees`, the configs the
+/// change goes from and to, as JSON: masking misses a secret that shows
+/// where no key names it, as a key in a URL's path, and one only in the
+/// config a change would make is known nowhere else.
 pub(crate) fn confirm(
     ctx: &Context,
     what: &str,
     reasons: &[String],
     would: Value,
+    trees: &[&Value],
 ) -> Result<(), Failure> {
     if ctx.yes {
         return Ok(());
     }
+    let mut secrets = known_secrets(ctx);
+    for tree in trees {
+        collect_secrets(tree, &mut secrets);
+    }
+    let scrub = Scrub::new(&secrets, &[]);
     let why = if reasons.is_empty() {
         String::new()
     } else {
@@ -177,21 +192,21 @@ pub(crate) fn confirm(
             }
         }
         question.push_str("Go ahead? [y/N] ");
-        return if ask(&question) {
+        return if ask(&scrub.text(question)) {
             Ok(())
         } else {
             Err(Failure::new("declined", "Declined; nothing was changed."))
         };
     }
     let flag = ctx.confirm_flag();
-    let mut would = would;
+    let mut would = scrub.json(would);
     if let Value::Object(map) = &mut would {
-        map.insert("reasons".to_owned(), json!(reasons));
+        map.insert("reasons".to_owned(), scrub.json(json!(reasons)));
     }
     let hint = format!("to go ahead, {}", go_ahead(ctx, &would));
     Err(Failure::new(
         "needs_confirmation",
-        format!("{what} needs {flag}{why}. Nothing was changed."),
+        scrub.text(format!("{what} needs {flag}{why}. Nothing was changed.")),
     )
     .hint(hint)
     .would(would))

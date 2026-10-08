@@ -559,7 +559,13 @@ pub(crate) async fn undo(ctx: &Context) -> Result<Outcome, Failure> {
         return Err(changed_since(ctx, Some(would)));
     }
     if !reasons.is_empty() {
-        confirm(ctx, "Undoing the last change", &reasons, would)?;
+        confirm(
+            ctx,
+            "Undoing the last change",
+            &reasons,
+            would,
+            &[&before, &after],
+        )?;
     }
     let check = save::UndoCheck {
         config_sha256: Some(config_sha256),

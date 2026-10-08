@@ -510,6 +510,15 @@ pub(crate) struct Scrub {
 }
 
 impl Scrub {
+    /// Of the secrets in `trees`, configs as JSON.
+    pub(crate) fn of_trees(trees: &[&Value]) -> Self {
+        let mut secrets = Secrets::new();
+        for tree in trees {
+            collect_secrets(tree, &mut secrets);
+        }
+        Self { secrets }
+    }
+
     /// Of `secrets`, all but `reveal`.
     pub(crate) fn new(secrets: &Secrets, reveal: &[String]) -> Self {
         let reveal: Vec<&str> = reveal.iter().map(|secret| secret.trim()).collect();

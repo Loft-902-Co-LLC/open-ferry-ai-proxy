@@ -611,6 +611,7 @@ pub(crate) async fn remove(ctx: &Context, input: &TargetInput) -> Result<Outcome
         &format!("Removing the credential {}", found.name),
         &["it deletes the credential's file, which `config undo` doesn't bring back".to_owned()],
         json!({"credential": found.name, "auth_index": found.auth_index}),
+        &[],
     )?;
     server
         .remote
@@ -666,6 +667,7 @@ fn login_route(ctx: &Context, provider: &str) -> Result<(&'static str, &'static 
                 "Signing in to Claude",
                 &["Anthropic's terms don't allow a tool such as open-ferry to sign in to a Claude subscription and use its tokens (see docs/claude-subscription.md): such a sign-in gets only the Haiku models, and may put the account at risk; claude-cli, which runs your own Claude Code, is the way to use a subscription".to_owned()],
                 json!({}),
+                &[],
             )?;
             Ok(("/v0/management/anthropic-auth-url", "Claude"))
         }

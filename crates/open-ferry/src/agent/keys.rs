@@ -121,6 +121,7 @@ pub(crate) fn list(ctx: &Context, input: &ListInput) -> Result<Outcome, Failure>
             "Showing the client keys in full",
             &["it prints secrets".to_owned()],
             json!({}),
+            &[],
         )?;
     }
     let report = Keys {
