@@ -175,6 +175,7 @@ At a terminal such a command asks first. Without a terminal, as in an agent's sh
 
 - What the commands print never holds a secret they weren't asked to show: client keys, the management key, provider API keys, tokens, passwords in URLs, and email addresses are masked, as the dashboard masks them.
 - A secret is never taken as an argument: give it on standard input with `--from-stdin`, or in a file with `--from-file` (`from_file` for a tool). `config set management.secret-key <value>` is refused with exit code `2`.
+- A file is read only for a secret, never from the auth directory and never when it is a credential file, so a sign-in's tokens can't be copied into a setting (`unsafe_file`). A credential file's tokens are scrubbed from everything the commands print.
 - `keys add --generate` prints the new key once, since the user needs it to set up a client. A tool returns it only with `confirm: true`, as it then sits in the transcript; else it writes it to the new file `to_file` names, readable by the user alone on Linux and macOS, and gives the path.
 
 ### Examples

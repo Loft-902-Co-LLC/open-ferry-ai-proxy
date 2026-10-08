@@ -14,14 +14,16 @@
 //!   user and password become `***`, its query's secret parameters are
 //!   hidden, and email addresses are masked.
 //! - **Scrubbing**: before anything is printed, each secret of the config
-//!   (before and after the command), `MANAGEMENT_PASSWORD` and the key file
-//!   is replaced by `[redacted]` wherever it still appears, of eight
-//!   characters or more, but for the secrets the command was asked to show.
+//!   (before and after the command), `MANAGEMENT_PASSWORD`, the key file
+//!   and the credential files in the auth directory (their tokens, keys
+//!   and cookies) is replaced by `[redacted]` wherever it still appears, of
+//!   eight characters or more, but for the secrets the command was asked
+//!   to show.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use open_ferry_core::config::AnyValue;
 use open_ferry_core::config::save::backup_path;
+use open_ferry_core::config::{AnyValue, Config};
 use open_ferry_core::observe::mask::{
     is_credential_header, mask_emails, mask_header_value, mask_sensitive_query,
 };
@@ -51,6 +53,22 @@ const SECRET_NAME_PARTS: [&str; 12] = [
 
 /// The most of a file read for its secrets.
 const FILE_LIMIT: u64 = 16 * 1024 * 1024;
+
+/// The most of a credential file read for its secrets.
+const CREDENTIAL_LIMIT: u64 = 1024 * 1024;
+
+/// The most credential files read for their secrets.
+const CREDENTIAL_FILES: usize = 256;
+
+/// The fields of a credential file (a sign-in's tokens, a service account's
+/// key) that make a file one, at its top level or under `token`.
+const CREDENTIAL_FIELDS: [&str; 5] = [
+    "access_token",
+    "refresh_token",
+    "id_token",
+    "private_key",
+    "client_secret",
+];
 
 /// Whether a value under the key `name` is a secret.
 pub(crate) fn is_secret_name(name: &str) -> bool {
@@ -240,11 +258,17 @@ fn collect(value: &Value, place: Place<'_>, secrets: &mut Secrets) {
 
 /// The secrets of the YAML file at `path`, when it can be read.
 fn file_secrets(path: &Path, secrets: &mut Secrets) {
+    limited_file_secrets(path, FILE_LIMIT, secrets);
+}
+
+/// Adds the secrets of the YAML or JSON file at `path`, read up to `limit`
+/// bytes, to `secrets`.
+fn limited_file_secrets(path: &Path, limit: u64, secrets: &mut Secrets) {
     let Ok(file) = std::fs::File::open(path) else {
         return;
     };
     let mut data = Vec::new();
-    if std::io::Read::read_to_end(&mut std::io::Read::take(file, FILE_LIMIT), &mut data).is_err() {
+    if std::io::Read::read_to_end(&mut std::io::Read::take(file, limit), &mut data).is_err() {
         return;
     }
     let text = String::from_utf8_lossy(&data);
@@ -253,12 +277,85 @@ fn file_secrets(path: &Path, secrets: &mut Secrets) {
     }
 }
 
+/// The auth directories of the config at `ctx.path`, where its credential
+/// files are kept: the one it sets (or the default when it sets none or
+/// doesn't load), and a relative one both from the working directory and
+/// from the config's directory. In tests, only those under the temporary
+/// directory, so a test never looks at a real one.
+pub(crate) fn auth_dirs(ctx: &Context) -> Vec<PathBuf> {
+    let config = std::fs::read(&ctx.path)
+        .ok()
+        .and_then(|data| Config::load_bytes(&data).ok())
+        .unwrap_or_default();
+    let Ok(dir) = config.resolve_auth_dir() else {
+        return Vec::new();
+    };
+    let mut dirs = Vec::new();
+    if dir.is_absolute() {
+        dirs.push(dir);
+    } else {
+        if let Ok(cwd) = std::env::current_dir() {
+            dirs.push(cwd.join(&dir));
+        }
+        if let Some(parent) = ctx.path.parent() {
+            dirs.push(parent.join(&dir));
+        }
+    }
+    let temp = std::env::temp_dir();
+    dirs.retain(|dir| !cfg!(test) || dir.starts_with(&temp));
+    dirs
+}
+
+/// Whether `text` is a credential file's: a JSON object with a sign-in's
+/// tokens or a service account's key, at its top level or under `token`.
+pub(crate) fn looks_like_credential(text: &str) -> bool {
+    let Ok(Value::Object(map)) = serde_json::from_str::<Value>(text) else {
+        return false;
+    };
+    let holds = |map: &Map<String, Value>| {
+        CREDENTIAL_FIELDS
+            .iter()
+            .any(|field| map.get(*field).is_some_and(|value| !value.is_null()))
+    };
+    holds(&map)
+        || map
+            .get("token")
+            .and_then(Value::as_object)
+            .is_some_and(holds)
+}
+
+/// Adds the secrets of the credential files in `ctx`'s auth directories,
+/// up to [`CREDENTIAL_FILES`] of them, to `secrets`.
+fn credential_secrets(ctx: &Context, secrets: &mut Secrets) {
+    let mut read = 0;
+    for dir in auth_dirs(ctx) {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if read >= CREDENTIAL_FILES {
+                return;
+            }
+            let path = entry.path();
+            let json = path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("json"));
+            if json && entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                limited_file_secrets(&path, CREDENTIAL_LIMIT, secrets);
+                read += 1;
+            }
+        }
+    }
+}
+
 /// The secrets a command must not print unasked: those of the config and
-/// its backup, `MANAGEMENT_PASSWORD`, and the key file.
+/// its backup, `MANAGEMENT_PASSWORD`, the key file, and the credential
+/// files in the auth directory.
 pub(crate) fn known_secrets(ctx: &Context) -> Secrets {
     let mut secrets = Secrets::new();
     file_secrets(&ctx.path, &mut secrets);
     file_secrets(&backup_path(&ctx.path), &mut secrets);
+    credential_secrets(ctx, &mut secrets);
     if let Some(password) = &ctx.env.password {
         secrets.add(password);
     }

@@ -201,7 +201,7 @@ pub(crate) async fn add(ctx: &Context, input: AddInput) -> Result<Outcome, Failu
         (false, Some(source)) if source.is_inline() => {
             return Err(secret_in_argument(ctx, "a client key"));
         }
-        (false, Some(source)) => source.text()?.trim().to_owned(),
+        (false, Some(source)) => source.text(ctx)?.trim().to_owned(),
         _ => {
             return Err(Failure::usage(match ctx.caller {
                 Caller::Cli => "give one of --generate, --from-stdin and --from-file",
@@ -305,7 +305,7 @@ pub(crate) async fn remove(ctx: &Context, input: RemoveInput) -> Result<Outcome,
             return Err(secret_in_argument(ctx, "a client key"));
         }
         (None, Some(source)) => {
-            let key = source.text()?.trim().to_owned();
+            let key = source.text(ctx)?.trim().to_owned();
             keys.iter()
                 .position(|listed| *listed == key)
                 .ok_or_else(|| {

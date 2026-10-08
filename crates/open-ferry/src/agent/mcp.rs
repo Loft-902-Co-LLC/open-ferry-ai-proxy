@@ -59,7 +59,8 @@ replaces the whole config or touches a sensitive setting needs `confirm: true`: 
 nothing is changed and the result says what would be, so show that to the user and ask \
 before calling again with `confirm: true`. Every change can be reversed with `config_undo`. \
 No tool returns a secret already in the setup; never ask the user to paste one into the \
-conversation, but to put it in a file and give its path as `from_file`. \
+conversation, but to put it in a file and give its path as `from_file`; a file is read only \
+for a secret, never from the auth directory, and never a credential file. \
 The resource open-ferry://docs/agents.md has the details.";
 
 /// What makes a change of the settings need `confirm: true`, for the tool
@@ -120,7 +121,7 @@ const TOOLS: [Spec; 18] = [
         command: "config set",
         title: "Change a setting",
         description: concat!(
-            "Sets one setting of the config to `value` (any JSON), or to the YAML or JSON read from the file `from_file`. With a running server the change goes through it and applies at once; else it is written to the config file. A secret (an API key, a password) is refused as `value`: put it in a file and give `from_file`. ",
+            "Sets one setting of the config to `value` (any JSON). With a running server the change goes through it and applies at once; else it is written to the config file. A secret (an API key, a password, or a list that holds them) is refused as `value`: put it in a file and give `from_file`, which is only for a secret (a setting that holds none is refused from a file), and is never read from the auth directory or from a credential file. ",
             sensitive!(),
             " The result has each changed setting's old and new value, masked; `config_undo` reverses it."
         ),
@@ -337,7 +338,7 @@ fn path_property() -> Value {
 fn from_file_property(what: &str) -> Value {
     json!({
         "type": "string",
-        "description": format!("The path of a file that holds {what}. A secret must come this way, never in the call.")
+        "description": format!("The path of a file that holds {what}. A secret must come this way, never in the call. A file in the auth directory, or a credential file, is refused.")
     })
 }
 
@@ -363,7 +364,7 @@ fn set_properties() -> Value {
         "value": {
             "description": "The new value, as JSON: a string, number, boolean, list or object. Not a secret: give that with `from_file`."
         },
-        "from_file": from_file_property("the new value, as YAML or JSON"),
+        "from_file": from_file_property("the new value when it is a secret, as YAML or JSON, or as text with `string`"),
         "string": {
             "type": "boolean",
             "description": "Take the value as a string, as it is, rather than as YAML."

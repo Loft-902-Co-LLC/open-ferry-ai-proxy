@@ -712,6 +712,168 @@ async fn secrets_are_never_taken_inline() {
     );
 }
 
+/// A credential file's text, as a sign-in writes one, with the access
+/// token `token`.
+fn credential_text(token: &str) -> String {
+    json!({
+        "type": "codex",
+        "email": "someone@example.com",
+        "access_token": token,
+        "refresh_token": "refresh-token-value-0123456789abcdef",
+        "id_token": "id-token-value-0123456789abcdef"
+    })
+    .to_string()
+}
+
+// Not upstream's: a file is read only for a secret, never from the auth
+// directory and never when it is a credential file, so a sign-in's tokens
+// can't be copied into a setting that shows them; and a credential file's
+// tokens are scrubbed wherever they would show.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn files_are_read_only_for_secrets() {
+    const TOKEN: &str = "codex-access-token-abcdefghijklmnop";
+    let offline = offline(Some(KEY));
+    let setup = &offline.setup;
+    let before = setup.text();
+    let credential = setup.auth_dir.join("codex-someone@example.com-plus.json");
+    std::fs::write(&credential, credential_text(TOKEN)).unwrap();
+    let nearby = setup.file("codex-copy.json", &credential_text(TOKEN));
+    let nested = setup.file(
+        "gemini-copy.json",
+        &json!({"type": "gemini", "token": {"refresh_token": TOKEN}}).to_string(),
+    );
+    let in_auth = setup.auth_dir.join("plain.txt");
+    std::fs::write(&in_auth, "a-new-management-key-value\n").unwrap();
+    let plain = setup.file("repository.txt", "someone/panel\n");
+
+    for caller in [Caller::Cli, Caller::Mcp] {
+        let ctx = Context {
+            yes: true,
+            ..context(&setup.path, caller)
+        };
+        // Not for a setting that holds no secret, whatever the file.
+        for file in [&plain, &nearby] {
+            for string in [false, true] {
+                let failure = fails(
+                    &ctx,
+                    Command::ConfigSet(SetInput {
+                        path: "management.panel-github-repository".to_owned(),
+                        value: Source::File(file.clone()),
+                        string,
+                    }),
+                )
+                .await;
+                if file == &plain {
+                    assert_eq!(failure.error, "usage", "{failure:?}");
+                    assert_eq!(failure.code, exit::USAGE);
+                    assert!(failure.message.contains("doesn't hold a secret"));
+                } else {
+                    assert_eq!(failure.error, "unsafe_file", "{failure:?}");
+                }
+                assert!(!failure_shows(&failure, TOKEN));
+            }
+        }
+        // Not from the auth directory, nor a credential file anywhere, even
+        // for a secret.
+        for file in [&credential, &in_auth, &nearby, &nested] {
+            let failure = fails(
+                &ctx,
+                set_from("management.secret-key", Source::File(file.clone())),
+            )
+            .await;
+            assert_eq!(failure.error, "unsafe_file", "{failure:?}");
+            assert_eq!(failure.code, exit::FAILED);
+            assert!(
+                failure
+                    .hint
+                    .as_deref()
+                    .unwrap()
+                    .contains("a file of its own")
+            );
+            assert!(!failure_shows(&failure, TOKEN));
+            let failure = fails(
+                &ctx,
+                Command::KeysAdd(AddInput {
+                    source: Some(Source::File(file.clone())),
+                    ..AddInput::default()
+                }),
+            )
+            .await;
+            assert_eq!(failure.error, "unsafe_file");
+            let failure = fails(
+                &ctx,
+                Command::ConfigReplace(ReplaceInput {
+                    source: Source::File(file.clone()),
+                }),
+            )
+            .await;
+            assert_eq!(failure.error, "unsafe_file");
+        }
+        assert!(
+            fails(
+                &ctx,
+                set_from(
+                    "management.secret-key",
+                    Source::File(setup.auth_dir.join("missing.txt"))
+                )
+            )
+            .await
+            .message
+            .contains("can't read")
+        );
+        assert_eq!(setup.text(), before);
+    }
+
+    // Over MCP, `string` with `from_file` is refused for a setting that
+    // holds no secret, and a credential file is refused.
+    let server = Server::new(Ok(setup.path.clone()), Env::default(), None);
+    let mut session = server_session(server).await;
+    let result = session
+        .call(
+            "config_set",
+            json!({"path": "management.panel-github-repository", "from_file": plain, "string": true}),
+        )
+        .await;
+    assert_eq!(result["isError"], json!(true));
+    assert_eq!(result["structuredContent"]["error"], json!("usage"));
+    assert!(
+        result["structuredContent"]["hint"]
+            .as_str()
+            .unwrap()
+            .contains("`value`")
+    );
+    let result = session
+        .call(
+            "config_set",
+            json!({"path": "management.panel-github-repository", "from_file": credential, "string": true}),
+        )
+        .await;
+    assert_eq!(result["structuredContent"]["error"], json!("unsafe_file"));
+    assert!(!result.to_string().contains(TOKEN));
+    assert_eq!(setup.text(), before);
+
+    // A secret's own file is read, with `string` too.
+    let secret = setup.file("secret.txt", "a-new-management-key-value\n");
+    let result = session
+        .call(
+            "config_set",
+            json!({"path": "management.secret-key", "from_file": secret, "string": true, "confirm": true}),
+        )
+        .await;
+    assert_ne!(result["isError"], json!(true), "{result}");
+    assert!(!result.to_string().contains("a-new-management-key-value"));
+    assert!(setup.text().contains("a-new-management-key-value"));
+
+    // A credential file's token is scrubbed wherever it would show, even
+    // in a setting that doesn't name a secret.
+    let ctx = cli(&setup.path);
+    let changed = ok(&ctx, set("management.panel-github-repository", TOKEN)).await;
+    assert!(!shows(&changed, TOKEN), "{}", changed.text);
+    assert!(changed.text.contains("[redacted]"));
+    let got = ok(&ctx, get("management.panel-github-repository")).await;
+    assert!(!shows(&got, TOKEN));
+}
+
 // Not upstream's: secrets are masked in a command's text and JSON, and in
 // the tools' results and the config resource; MANAGEMENT_PASSWORD and the
 // key file are scrubbed wherever they would show.

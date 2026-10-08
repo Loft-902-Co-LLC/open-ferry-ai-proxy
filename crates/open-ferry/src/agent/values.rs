@@ -128,7 +128,7 @@ pub(crate) fn check_path(parts: &[String]) -> Result<(), Failure> {
                 format!("{path} is inside the list {prefix}, and lists are set whole"),
             )
             .hint(format!(
-                "read the list with `open-ferry config get {prefix}`, then set it whole with `open-ferry config set {prefix} --from-file <file>`"
+                "read the list with `config get {prefix}`, then set the whole list, changed, with `config set {prefix}`"
             )));
         }
     }

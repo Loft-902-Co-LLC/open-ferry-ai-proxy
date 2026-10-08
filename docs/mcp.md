@@ -86,6 +86,7 @@ The annotations are the protocol's hints: `readOnlyHint`, `destructiveHint` (giv
 
 - **`path`** is a setting's path in the v8 config, dotted (`routing.strategy`, `server.port`), as the commands take it. A list is set whole, not one item by its index.
 - **`value`** is any JSON. A secret is refused as `value`: it comes in a file, `from_file`.
+- **`from_file`** is only for a secret: `config_set` refuses a file's value for a setting that holds none (`usage`), so give that as `value`. A file in the auth directory, or a credential file (a sign-in's tokens or a service account's key), is never read (`unsafe_file`).
 - **`from_file`** and **`to_file`** are paths on the machine the server runs on; give full paths, as the server's working directory is the app's choice.
 - **`credential`** is a credential's `auth_index` from `credentials_list`, or its name.
 - **`credentials_login`** takes two calls: the first, with `provider` (`codex`, or `claude` with `confirm: true`), returns a `url` for the user to open and a `state`, with `"status": "wait"`. The second, with the same `provider` and the `state`, waits up to 50 seconds for the sign-in to finish: `"status": "ok"`, or a tool error with `"status": "wait"` while it is still going, when the call can be made again.
@@ -125,7 +126,7 @@ For example, `config_set` with `{"path": "routing.strategy", "value": "fill-firs
 
 ## Secrets
 
-- **No tool returns a secret already in the setup.** `keys_list` and `clients_setup` mask the client keys, and no tool reveals one: `open-ferry keys list --reveal --yes`, in a terminal, does. The management key, provider API keys, tokens and email addresses are masked wherever they appear, and every secret of the config is then replaced by `[redacted]` wherever it still shows.
+- **No tool returns a secret already in the setup.** `keys_list` and `clients_setup` mask the client keys, and no tool reveals one: `open-ferry keys list --reveal --yes`, in a terminal, does. The management key, provider API keys, tokens and email addresses are masked wherever they appear, and every secret of the config, and every token of the credential files in the auth directory, is then replaced by `[redacted]` wherever it still shows.
 - **A secret never comes in a call.** `config_set` refuses one as `value`, and `keys_add` and `keys_remove` take a key only from a file. The agent should ask the user to put a secret in a file and give its path, never to paste it into the conversation.
 - **`keys_add` with `generate: true`** writes the new key to the new file `to_file` names (one that doesn't exist yet; on Linux and macOS only the user can read it) and returns its path as `key_file`. With `confirm: true` and no `to_file`, it returns the key itself as `key`, once. With `from_file`, the key is in a file already, and only its masked form is returned.
 

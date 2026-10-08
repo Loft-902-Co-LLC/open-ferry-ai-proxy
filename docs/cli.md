@@ -335,16 +335,18 @@ With `--json`, the same is `{"error": "needs_confirmation", "message": ..., "hin
 
 ### Secrets in what they print
 
-Nothing they print holds a secret they weren't asked to show. Client keys, the management key, provider API keys, tokens and passwords are masked as the dashboard masks a client key (`sk-...mnop`: the last few characters, and the first three of a long one); a URL's user and password become `***`; email addresses are masked (`s***@e***.com`). Then every secret of the config, `MANAGEMENT_PASSWORD` and the key file is replaced by `[redacted]` wherever it still appears.
+Nothing they print holds a secret they weren't asked to show. Client keys, the management key, provider API keys, tokens and passwords are masked as the dashboard masks a client key (`sk-...mnop`: the last few characters, and the first three of a long one); a URL's user and password become `***`; email addresses are masked (`s***@e***.com`). Then every secret of the config, `MANAGEMENT_PASSWORD`, the key file and the credential files in the auth directory (their tokens and keys) is replaced by `[redacted]` wherever it still appears.
 
 A secret is never taken as an argument: `config set` reads one from standard input (`--from-stdin`) or a file (`--from-file`), and refuses one given inline with exit code 2. A value is a secret when its key names one (`secret-key`, `api-key`, `token`, `password` and the like), or when it holds one, as a provider's list of keys does.
+
+A file is read only for a secret, which is never shown: `config set` refuses a file's value for a setting that holds no secret, with exit code 2 (give that one as an argument). And no command reads a value from a file in the auth directory, or from a credential file anywhere (a JSON object with `access_token`, `refresh_token`, `id_token`, `private_key` or `client_secret`, at its top level or under `token`): it is refused (`unsafe_file`, exit code 1), so a sign-in's tokens are never copied into the config.
 
 ### Exit codes
 
 | Code | When |
 |---|---|
 | 0 | Done, or nothing needed changing. Also for `--help` |
-| 1 | It failed or was refused: the server or the writer refused the change (`invalid_value`), the key was refused (`unauthorized`), the server at the config's address runs another config (`other_config`), the file changed while the change was worked out (`config_changed`), an undo would lose a change made since the last backup and wasn't confirmed (`changed_since`), a credential or key wasn't found, the file couldn't be read or written. Nothing was changed unless the output says so |
+| 1 | It failed or was refused: the server or the writer refused the change (`invalid_value`), a file a value comes from is in the auth directory or is a credential file (`unsafe_file`), the key was refused (`unauthorized`), the server at the config's address runs another config (`other_config`), the file changed while the change was worked out (`config_changed`), an undo would lose a change made since the last backup and wasn't confirmed (`changed_since`), a credential or key wasn't found, the file couldn't be read or written. Nothing was changed unless the output says so |
 | 2 | Bad usage (`usage`): an unknown command or flag, or an unknown setting (`unknown_path`, with the nearest known one), or a secret given as an argument (`secret_in_argument`) |
 | 3 | It needs `--yes` and didn't get it (`needs_confirmation`), or you answered no (`declined`). Nothing was changed |
 | 4 | It needs the server, which isn't running (`not_running`); `status` exits with 4 when no server runs |
