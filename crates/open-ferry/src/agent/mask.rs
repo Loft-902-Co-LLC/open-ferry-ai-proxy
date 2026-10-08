@@ -17,9 +17,13 @@
 //! - **Scrubbing**: before anything is printed, each secret of the config
 //!   (before and after the command), `MANAGEMENT_PASSWORD`, the key file
 //!   and the credential files in the auth directory (their tokens, keys
-//!   and cookies) is replaced by `[redacted]` wherever it still appears, of
-//!   eight characters or more, but for the secrets the command was asked
-//!   to show.
+//!   and cookies) is replaced by `[redacted]` wherever it still appears,
+//!   but for the secrets the command was asked to show. One shorter than
+//!   eight characters is replaced only as a whole word, with no letter or
+//!   digit just before or after it, so it doesn't break up the words it
+//!   is part of (a weak key can still hide a word that matches it). Only
+//!   text is scrubbed: in JSON, its strings and keys, never a number, a
+//!   boolean or its shape, so it stays valid JSON.
 
 use std::path::{Path, PathBuf};
 
@@ -28,7 +32,7 @@ use open_ferry_core::config::{AnyValue, Config};
 use open_ferry_core::observe::mask::{
     is_credential_header, mask_emails, mask_header_value, mask_sensitive_query,
 };
-use open_ferry_core::observe::redact::{Policy, Secrets};
+use open_ferry_core::observe::redact::{Policy, REDACTED, Secrets};
 use open_ferry_dashboard::mask_client_key;
 use serde_json::{Map, Value};
 
@@ -524,35 +528,71 @@ pub(crate) fn known_secrets(ctx: &Context) -> Secrets {
     secrets
 }
 
+/// The shortest secret the scrub hides wherever it appears. A shorter one
+/// could be an ordinary word, or part of one, so it is hidden only as a
+/// whole word ([`hide_words`]).
+const WHOLE_WORD_BELOW: usize = 8;
+
 /// Replaces the secrets in what a command prints.
 pub(crate) struct Scrub {
     secrets: Secrets,
+    /// The forms of the secrets shorter than [`WHOLE_WORD_BELOW`], longest
+    /// first: each as it is, and escaped as in a JSON string where that
+    /// differs.
+    short: Vec<String>,
 }
 
 impl Scrub {
+    /// Of `secrets`.
+    fn of(secrets: Secrets) -> Self {
+        let mut short: Vec<String> = Vec::new();
+        for secret in secrets
+            .iter()
+            .filter(|secret| secret.len() < WHOLE_WORD_BELOW)
+        {
+            let escaped = serde_json::to_string(secret).unwrap_or_default();
+            let escaped = escaped
+                .strip_prefix('"')
+                .and_then(|rest| rest.strip_suffix('"'))
+                .unwrap_or(secret);
+            for form in [secret, escaped] {
+                if !short.iter().any(|kept| kept == form) {
+                    short.push(form.to_owned());
+                }
+            }
+        }
+        short.sort_by_key(|form| std::cmp::Reverse(form.len()));
+        Self { secrets, short }
+    }
+
     /// Of the secrets in `trees`, configs as JSON.
     pub(crate) fn of_trees(trees: &[&Value]) -> Self {
         let mut secrets = Secrets::new();
         for tree in trees {
             collect_secrets(tree, &mut secrets);
         }
-        Self { secrets }
+        Self::of(secrets)
     }
 
     /// Of `secrets`, all but `reveal`.
     pub(crate) fn new(secrets: &Secrets, reveal: &[String]) -> Self {
         let reveal: Vec<&str> = reveal.iter().map(|secret| secret.trim()).collect();
-        Self {
-            secrets: secrets
+        Self::of(
+            secrets
                 .iter()
                 .filter(|secret| !reveal.contains(secret))
                 .collect(),
-        }
+        )
     }
 
-    /// `text`, scrubbed.
+    /// `text`, scrubbed: each secret of eight bytes or more wherever it
+    /// appears, then each shorter one as a whole word.
     pub(crate) fn text(&self, text: String) -> String {
-        self.secrets.text(text, Policy::Client)
+        let text = self.secrets.text(text, Policy::Client);
+        match hide_words(&text, &self.short) {
+            Some(hidden) => hidden,
+            None => text,
+        }
     }
 
     /// Each string and key of `value`, scrubbed.
@@ -570,6 +610,42 @@ impl Scrub {
             other => other,
         }
     }
+}
+
+/// `text` with each copy of each of `forms`, longest first, that is a
+/// whole word replaced by [`REDACTED`]: one with no letter or digit just
+/// before or after it. `None` when it has none.
+fn hide_words(text: &str, forms: &[String]) -> Option<String> {
+    if forms.is_empty() {
+        return None;
+    }
+    let mut out: Option<String> = None;
+    let mut copied = 0;
+    let mut previous: Option<char> = None;
+    for (at, c) in text.char_indices() {
+        if at >= copied && previous.is_none_or(|before| !before.is_alphanumeric()) {
+            let rest = text.get(at..).unwrap_or_default();
+            let found = forms.iter().find(|form| {
+                rest.strip_prefix(form.as_str()).is_some_and(|after| {
+                    after
+                        .chars()
+                        .next()
+                        .is_none_or(|next| !next.is_alphanumeric())
+                })
+            });
+            if let Some(form) = found {
+                let out = out.get_or_insert_with(|| String::with_capacity(text.len()));
+                out.push_str(text.get(copied..at).unwrap_or_default());
+                out.push_str(REDACTED);
+                copied = at + form.len();
+            }
+        }
+        previous = Some(c);
+    }
+    out.map(|mut out| {
+        out.push_str(text.get(copied..).unwrap_or_default());
+        out
+    })
 }
 
 #[cfg(test)]
@@ -838,5 +914,64 @@ mod tests {
         let mut found = Secrets::new();
         collect_secrets(&json!({"secret-key": 98765432109_u64}), &mut found);
         assert_eq!(found.iter().collect::<Vec<_>>(), ["98765432109"]);
+    }
+
+    // Not upstream's: a secret shorter than eight characters, a string, a
+    // number or a boolean as its text, is scrubbed where it is a whole
+    // word, as in a URL's path or in free text, and its JSON-escaped form
+    // too; a word it is only part of is left as it is. In JSON only the
+    // strings and keys are scrubbed, so the numbers and booleans, and the
+    // shape, stay as they were. A secret the command was asked to show is
+    // left alone.
+    #[test]
+    fn scrubs_short_secrets_as_whole_words() {
+        let tree = json!({
+            "access": {"api-keys": ["k3y9", 4242, true, "a\"b"]},
+            "management": {"secret-key": "long-management-secret"},
+        });
+        let mut secrets = Secrets::new();
+        collect_secrets(&tree, &mut secrets);
+        let scrub = Scrub::new(&secrets, &[]);
+        for (text, scrubbed) in [
+            (
+                "https://api.example.com/v1/k3y9/4242/true/models?n=4242",
+                "https://api.example.com/v1/[redacted]/[redacted]/[redacted]/models?n=[redacted]",
+            ),
+            (
+                "k3y9 and 4242 and true, not k3y9s, xk3y9, 42424, k3y9_4242 or untrue",
+                "[redacted] and [redacted] and [redacted], not k3y9s, xk3y9, 42424, [redacted]_[redacted] or untrue",
+            ),
+            ("k3y9", "[redacted]"),
+            ("xlong-management-secretx", "x[redacted]x"),
+            ("{\"q\": \"a\\\"b\"}", "{\"q\": \"[redacted]\"}"),
+            ("a\"b", "[redacted]"),
+            ("nothing here", "nothing here"),
+            ("", ""),
+        ] {
+            assert_eq!(scrub.text(text.to_owned()), scrubbed, "{text}");
+        }
+        let out = scrub.json(json!({
+            "k3y9": [true, 4242, "true", "4242", false],
+            "url": "https://api.example.com/v1/k3y9/",
+            "port": 4242,
+            "on": true,
+        }));
+        assert_eq!(
+            out,
+            json!({
+                "[redacted]": [true, 4242, "[redacted]", "[redacted]", false],
+                "url": "https://api.example.com/v1/[redacted]/",
+                "port": 4242,
+                "on": true,
+            })
+        );
+        let printed = serde_json::to_string(&out).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&printed).unwrap(), out);
+
+        let shown = Scrub::new(&secrets, &["k3y9".to_owned()]);
+        assert_eq!(
+            shown.text("k3y9 and 4242".to_owned()),
+            "k3y9 and [redacted]"
+        );
     }
 }

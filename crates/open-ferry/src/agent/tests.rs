@@ -1713,6 +1713,111 @@ async fn the_question_is_scrubbed() {
     assert_eq!(setup.text(), before);
 }
 
+// Not upstream's: a secret shorter than eight characters, a string, a
+// number or a boolean, is scrubbed where it shows as a whole word, as in a
+// URL's path or in free text: from the question at the terminal, the JSON
+// on the command line and a tool's answer, which stay valid JSON with
+// their numbers and booleans as they were. A word it is only part of is
+// left as it is.
+#[tokio::test]
+async fn short_secrets_are_scrubbed_as_whole_words() {
+    let offline = offline(Some(KEY));
+    let setup = &offline.setup;
+    let provider = |path: &str, name: &str| {
+        format!(
+            "api-keys:\n  codex:\n    - name: \"{name}\"\n      base-url: \"https://api.example.com/v1/{path}/\"\n      keys:\n        - api-key: \"k3y9\"\n"
+        )
+    };
+    let base = setup.text().replace(
+        &format!("    - \"{CLIENT_KEY}\"\n"),
+        &format!("    - \"{CLIENT_KEY}\"\n    - 4242\n    - true\n"),
+    );
+    let words = "k3y9 and 4242 and true, not k3y9s, 42424 or untrue";
+    std::fs::write(
+        &setup.path,
+        format!("{base}{}", provider("k3y9/4242/true", "placeholder")),
+    )
+    .unwrap();
+    let before = setup.text();
+    let replacement = setup.file(
+        "replacement.yaml",
+        &format!("{base}{}", provider("true/k3y9/4242", words)),
+    );
+    let replace = || {
+        Command::ConfigReplace(ReplaceInput {
+            source: Source::File(replacement.clone()),
+        })
+    };
+    // What shows, the paths and the words as they were and as they would
+    // be, scrubbed.
+    let hidden = |text: &str| {
+        for shown in [
+            "/k3y9/", "/4242/", "/true/", "k3y9 and", "and 4242", "and true",
+        ] {
+            assert!(!text.contains(shown), "{shown}: {text}");
+        }
+    };
+    let check = |text: &str| {
+        hidden(text);
+        for kept in [
+            "/v1/[redacted]/[redacted]/[redacted]/",
+            "[redacted] and [redacted] and [redacted], not k3y9s, 42424 or untrue",
+        ] {
+            assert!(text.contains(kept), "{kept}: {text}");
+        }
+    };
+
+    let question = Arc::new(std::sync::Mutex::new(String::new()));
+    let seen = Arc::clone(&question);
+    let ctx = Context {
+        ask: Some(Box::new(move |text: &str| {
+            *seen.lock().unwrap() = text.to_owned();
+            false
+        })),
+        ..cli(&setup.path)
+    };
+    assert_eq!(fails(&ctx, replace()).await.error, "declined");
+    check(&question.lock().unwrap());
+
+    // The JSON on the command line, without a terminal.
+    let failure = fails(&cli(&setup.path), replace()).await;
+    assert_eq!(failure.error, "needs_confirmation");
+    let printed = serde_json::to_string(&failure).unwrap();
+    serde_json::from_str::<Value>(&printed).unwrap();
+    check(&printed);
+    let shown = ok(&cli(&setup.path), Command::ConfigShow).await;
+    let printed = shown.json.to_string();
+    assert_eq!(serde_json::from_str::<Value>(&printed).unwrap(), shown.json);
+    assert!(
+        printed.contains("/v1/[redacted]/[redacted]/[redacted]/"),
+        "{printed}"
+    );
+    assert!(!printed.contains("k3y9/"), "{printed}");
+    assert_eq!(
+        shown.json["settings"]["server"]["port"],
+        json!(offline_port(setup))
+    );
+
+    // A tool's answer.
+    let server = Server::new(Ok(setup.path.clone()), Env::default(), None);
+    let mut session = server_session(server).await;
+    let result = session
+        .call("config_replace", json!({"from_file": replacement}))
+        .await;
+    assert_eq!(
+        result["structuredContent"]["error"],
+        json!("needs_confirmation"),
+        "{result}"
+    );
+    check(&result["structuredContent"].to_string());
+    for content in result["content"].as_array().unwrap() {
+        if let Some(text) = content["text"].as_str() {
+            hidden(text);
+        }
+    }
+    assert_eq!(setup.text(), before);
+}
+
 // Not upstream's: a number or a boolean under a secret's key, which the
 // loader reads as a string key, is masked as a string is, by get, show and
 // the config resource, and isn't taken inline; a switch elsewhere shows.
