@@ -1,4 +1,4 @@
-# Setting up from the command line: `init`, `check` and `service`
+# The command line
 
 open-ferry takes CLIProxyAPI's flags ([migration guide](migrating-from-cliproxyapi.md#the-command-line)), and adds subcommands of its own:
 
