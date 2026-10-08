@@ -18,6 +18,7 @@ use super::clients::{CLIENTS, SetupInput, Shell};
 use super::config::{GetInput, ReplaceInput, SetInput, Source, UnsetInput};
 use super::credentials::{ListInput as CredentialsList, LoginInput, STATES, TargetInput};
 use super::keys::{AddInput, ListInput as KeysList, RemoveInput};
+use super::mask::is_secret_name;
 use super::target::{Env, KEY_HINT, config_path};
 use super::{Caller, Command, Context, Failure, exit, perform};
 
@@ -81,7 +82,28 @@ impl Args {
 /// Why the arguments can't be read.
 enum ArgsError {
     Usage(String),
-    Secret(String),
+    /// A flag that would carry a secret: the flag, as [`flag_name`] shows
+    /// it, and whether it is one for the management key.
+    Secret(String, bool),
+}
+
+/// The longest flag name shown back.
+const SHOWN_FLAG: usize = 32;
+
+/// How the flag `name` is shown back in a failure: `--name` when it is a
+/// short one of lowercase letters, digits and dashes, else `a flag`, so a
+/// value pasted where a flag goes is never repeated.
+fn flag_name(name: &str) -> String {
+    let plain = !name.is_empty()
+        && name.len() <= SHOWN_FLAG
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+    if plain {
+        format!("--{name}")
+    } else {
+        "a flag".to_owned()
+    }
 }
 
 /// Reads `args`, the arguments after the command.
@@ -111,8 +133,12 @@ fn parse_args(args: &[String]) -> Result<Args, ArgsError> {
             "h" | "?" => "help",
             other => other,
         };
+        let known = VALUE_FLAGS.contains(&name) || BOOL_FLAGS.contains(&name);
         if SECRET_FLAGS.contains(&name) {
-            return Err(ArgsError::Secret(format!("--{name}")));
+            return Err(ArgsError::Secret(flag_name(name), true));
+        }
+        if !known && is_secret_name(name) {
+            return Err(ArgsError::Secret(flag_name(name), false));
         }
         if VALUE_FLAGS.contains(&name) {
             let value = match inline {
@@ -129,7 +155,10 @@ fn parse_args(args: &[String]) -> Result<Args, ArgsError> {
             }
             parsed.flags.insert(name.to_owned(), None);
         } else {
-            return Err(ArgsError::Usage(format!("unknown flag: {arg}")));
+            return Err(ArgsError::Usage(format!(
+                "unknown flag: {}",
+                flag_name(name)
+            )));
         }
     }
     Ok(parsed)
@@ -192,13 +221,17 @@ pub(crate) fn main(program: &str, args: Vec<String>) -> ExitCode {
                 json,
             );
         }
-        Err(ArgsError::Secret(flag)) => {
+        Err(ArgsError::Secret(flag, management)) => {
             return fail(
                 &Failure::new(
                     "secret_in_argument",
-                    format!("{flag}: the management key is never taken from the command line, where it would be seen and kept in the shell's history"),
+                    format!("{flag}: a secret is never taken from the command line, where it would be seen and kept in the shell's history; nothing was run"),
                 )
-                .hint(KEY_HINT),
+                .hint(if management {
+                    KEY_HINT
+                } else {
+                    "give a secret with --from-stdin or --from-file; the management key comes from the config, MANAGEMENT_PASSWORD or --management-key-file"
+                }),
                 json,
             );
         }
@@ -611,21 +644,50 @@ mod tests {
         ));
     }
 
-    // Not upstream's: a flag that would carry the management key is
-    // refused, with or without its value.
+    // Not upstream's: a flag that would carry the management key, or whose
+    // name names a secret, is refused, with or without its value.
     #[test]
     fn refuses_key_flags() {
-        for flag in [
-            "--management-key=abc",
-            "--management-key",
-            "-password",
-            "--secret-key=x",
+        for (flag, management) in [
+            ("--management-key=abc", true),
+            ("--management-key", true),
+            ("-password", true),
+            ("--secret-key=x", true),
+            ("--token=tok-value-0123456789", false),
+            ("--access-token", false),
+            ("--client-secret=x", false),
+            ("--openai-api-key=sk-abc", false),
+            ("--cookie=session=abc", false),
         ] {
-            assert!(
-                matches!(parse_args(&args(&[flag])), Err(ArgsError::Secret(_))),
-                "{flag}"
-            );
+            match parse_args(&args(&[flag])) {
+                Err(ArgsError::Secret(shown, which)) => {
+                    assert_eq!(which, management, "{flag}");
+                    assert!(!shown.contains('='), "{flag}: {shown}");
+                    assert!(!shown.contains("abc") && !shown.contains("0123"));
+                }
+                _ => panic!("{flag} wasn't refused"),
+            }
         }
+        // The flags these commands take aren't secrets, though one names
+        // the key's file.
+        assert!(parse_args(&args(&["--management-key-file", "k"])).is_ok());
+    }
+
+    // Not upstream's: an unknown flag is named, never with its value, and
+    // a long or odd name isn't shown at all.
+    #[test]
+    fn unknown_flags_are_named_alone() {
+        let message = |flag: &str| match parse_args(&args(&[flag])) {
+            Err(ArgsError::Usage(message)) => message,
+            _ => panic!("{flag} wasn't refused"),
+        };
+        assert_eq!(message("--nope=value-0123"), "unknown flag: --nope");
+        assert_eq!(message("-key=sk-abc-0123"), "unknown flag: --key");
+        assert_eq!(
+            message("--sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"),
+            "unknown flag: a flag"
+        );
+        assert_eq!(message("--Bearer_ABC"), "unknown flag: a flag");
     }
 
     // Not upstream's: each command's arguments, and the flags that don't
