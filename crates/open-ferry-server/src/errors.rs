@@ -18,7 +18,7 @@ use open_ferry_translate::go;
 use serde_json::{Map, Value, json};
 
 use crate::headers::is_reserved_response_header;
-use crate::json::marshal_html;
+use crate::json::{compact, marshal_html};
 use crate::status::status_text;
 
 /// `Content-Type` for errors the handlers build themselves (gin's `c.JSON`).
@@ -111,8 +111,8 @@ impl ErrorMessage {
 }
 
 /// An OpenAI error body (upstream's `BuildErrorResponseBodyWithError`). A
-/// body that is already JSON is kept as it is, unless the credential was
-/// rejected for good.
+/// body that is already JSON is kept, compacted onto one line as a stream's
+/// `data:` line needs it, unless the credential was rejected for good.
 pub(crate) fn openai_body(status: u16, err_text: &str, terminal_auth: bool) -> String {
     let status = if status == 0 { 500 } else { status };
     let err_text = if err_text.trim().is_empty() {
@@ -144,7 +144,7 @@ pub(crate) fn openai_body(status: u16, err_text: &str, terminal_auth: bool) -> S
     }
 
     if !trimmed.is_empty() && go::json_valid(trimmed.as_bytes()) {
-        return trimmed.to_owned();
+        return compact(trimmed);
     }
 
     let (kind, code) = match status {
@@ -342,6 +342,30 @@ mod tests {
         assert_eq!(
             openai_body(418, " x ", false),
             r#"{"error":{"message":" x ","type":"invalid_request_error"}}"#
+        );
+    }
+
+    /// Ported from upstream's handlers_error_response_test.go
+    /// (TestBuildErrorResponseBody_CompactsPrettyPrintedJSON): a JSON body
+    /// is compacted onto one line, as a stream's `data:` line needs it.
+    #[test]
+    fn json_bodies_are_compacted() {
+        let pretty = "{\n  \"error\": {\n    \"code\": 500,\n    \"message\": \"Internal error encountered.\",\n    \"status\": \"INTERNAL\"\n  }\n}";
+        let body = openai_body(500, pretty, false);
+        assert!(!body.contains('\n'), "{body}");
+        assert_eq!(
+            body,
+            r#"{"error":{"code":500,"message":"Internal error encountered.","status":"INTERNAL"}}"#
+        );
+        // Not upstream's: white space in strings stays, escapes and all, and
+        // nothing is escaped that wasn't.
+        assert_eq!(
+            openai_body(
+                400,
+                "[ \"a b\\\" \\n\" ,\t{ \"<\" : \"\u{2028}\" } ]",
+                false
+            ),
+            "[\"a b\\\" \\n\",{\"<\":\"\u{2028}\"}]"
         );
     }
 

@@ -990,6 +990,31 @@ mod tests {
         assert_eq!(fs::read_to_string(&file).expect("read"), raw);
     }
 
+    // Ports TestGitHubTokenConfigRoundTrip (github_token_test.go); that the
+    // token stays out of the config JSON is checked by the management API's
+    // tests. Not upstream's: the legacy key, and `Debug` hiding the token.
+    #[test]
+    fn github_token_round_trips() {
+        let cfg = Config::parse("server:\n  github-token: test-github-secret\n").expect("parse");
+        assert_eq!(cfg.github_token, "test-github-secret");
+        let dir = TempDir::new();
+        let file = dir.path().join("config.yaml");
+        fs::write(&file, "server:\n  github-token: old\n").expect("seed");
+        save_preserving_comments(&file, &cfg, false).expect("save");
+        let data = fs::read(&file).expect("read");
+        assert_eq!(
+            scalar(&root(&data), "server.github-token"),
+            Some("test-github-secret")
+        );
+        let reloaded = Config::parse(&data).expect("reparse");
+        assert_eq!(reloaded.github_token, cfg.github_token);
+        assert_eq!(cfg.clone().github_token, cfg.github_token);
+        assert!(!format!("{cfg:?}").contains("test-github-secret"));
+
+        let legacy = Config::parse("github-token: legacy-token\n").expect("legacy");
+        assert_eq!(legacy.github_token, "legacy-token");
+    }
+
     // Not upstream's: a management write of a v8 file completes the v8
     // layout and moves comment lines to the start of their line, as
     // WriteConfig does.

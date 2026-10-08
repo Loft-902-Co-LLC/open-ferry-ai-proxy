@@ -23,7 +23,7 @@
 //! [`V8Document`] reads a config file into the v8 layout, as the v8
 //! management API shows it.
 //!
-//! Typed sections: `host`, `port`, `trusted-proxies`, `tls`,
+//! Typed sections: `host`, `port`, `github-token`, `trusted-proxies`, `tls`,
 //! `remote-management`, `auth-dir`, `api-keys`, `debug`, `commercial-mode`,
 //! `logging-to-file`, `logs-max-total-size-mb`, `error-logs-max-files`,
 //! `usage-statistics-enabled`, `redis-usage-queue-retention-seconds`,

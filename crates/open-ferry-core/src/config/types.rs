@@ -10,8 +10,8 @@
 //! `i64`, as Go's `int` is on 64-bit targets, and no range is enforced beyond
 //! what upstream enforces: a port of 65536 loads.
 //!
-//! `Debug` output leaves out secrets: API keys, the management key, header
-//! values and proxy URLs, which may carry credentials.
+//! `Debug` output leaves out secrets: API keys, the management key, the
+//! GitHub token, header values and proxy URLs, which may carry credentials.
 //!
 //! Deviations from upstream:
 //! - Only the sections listed in the [module docs](super) are typed. The rest
@@ -81,6 +81,10 @@ pub struct Config {
     pub host: String,
     /// The port to listen on.
     pub port: i64,
+    /// The token for requests to GitHub's API (upstream's `GitHubToken`),
+    /// used over the `GITHUB_TOKEN` environment variable when set. It is
+    /// never shown in the management API's config JSON or in logs.
+    pub github_token: String,
     /// IPs or CIDRs allowed to set forwarded client IP headers. Loading
     /// checks that each entry parses.
     pub trusted_proxies: Vec<String>,
@@ -194,6 +198,7 @@ impl Default for Config {
             nonstream_keepalive_interval: 0,
             host: String::new(),
             port: 0,
+            github_token: String::new(),
             trusted_proxies: Vec::new(),
             tls: TlsConfig::default(),
             remote_management: RemoteManagement::default(),
@@ -290,6 +295,7 @@ impl fmt::Debug for Config {
             )
             .field("host", &self.host)
             .field("port", &self.port)
+            .field("github_token", &Redacted(&self.github_token))
             .field("trusted_proxies", &self.trusted_proxies)
             .field("tls", &self.tls)
             .field("remote_management", &self.remote_management)

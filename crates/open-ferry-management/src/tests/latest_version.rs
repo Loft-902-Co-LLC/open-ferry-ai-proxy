@@ -68,6 +68,26 @@ async fn the_latest_version_is_the_release_tag() {
     answer.assert(StatusCode::OK, r#"{"latest-version":"only-name"}"#);
 }
 
+/// Ported in part from upstream's api/github_token_test.go
+/// (TestServerGitHubTokenReload): the config's `server.github-token`,
+/// trimmed, is sent as a bearer token.
+#[tokio::test]
+async fn the_configured_github_token_is_sent() {
+    let upstream = Upstream::answering(release(r#"{"tag_name":"v2"}"#)).await;
+    let url = format!("{}/repos/o/r/releases/latest", upstream.url);
+    let mut config = keyed_config();
+    config.github_token = " test-github-token ".to_owned();
+    let answer = asking(config, &url)
+        .get("/v0/management/latest-version")
+        .await;
+    answer.assert(StatusCode::OK, r#"{"latest-version":"v2"}"#);
+    let head = upstream.requests().concat().to_ascii_lowercase();
+    assert!(
+        head.contains("\r\nauthorization: bearer test-github-token\r\n"),
+        "{head}"
+    );
+}
+
 /// Not upstream's: the release is read as Go's `json.Decoder.Decode`
 /// reads it, so the answer comes as soon as its JSON value is complete,
 /// however long the server holds the connection, and whatever follows the

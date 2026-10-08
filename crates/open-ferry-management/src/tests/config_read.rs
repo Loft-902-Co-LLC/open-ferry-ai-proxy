@@ -1499,6 +1499,24 @@ async fn gpt_image_2_base_model_is_read() {
     assert!(answer.body.contains(part), "{}", answer.body);
 }
 
+/// Not upstream's test: the GitHub token is never in the config JSON
+/// (upstream's `json:"-"`), in either layout.
+#[tokio::test]
+async fn github_token_is_not_read() {
+    for raw in [
+        "port: 1\ngithub-token: test-github-secret\n",
+        "server: {port: 1, github-token: test-github-secret}\n",
+    ] {
+        let answer = with_config(raw).get("/v0/management/config").await;
+        assert_eq!(answer.status, StatusCode::OK);
+        assert!(
+            !answer.body.contains("github-token") && !answer.body.contains("test-github"),
+            "{raw}: {}",
+            answer.body
+        );
+    }
+}
+
 /// The `payload` upstream writes when the file has none.
 const NO_PAYLOAD: &str =
     r#"{"default":null,"default-raw":null,"override":null,"override-raw":null,"filter":null}"#;

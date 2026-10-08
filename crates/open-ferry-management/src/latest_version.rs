@@ -1,6 +1,7 @@
 // Ported from CLIProxyAPI internal/api/handlers/management/config_basic.go
-// (GetLatestVersion, setLatestReleaseRequestHeaders, releaseInfo) and
-// internal/util/github.go (ResolveGitHubToken) (v8.0.15, MIT).
+// (GetLatestVersion, setLatestReleaseRequestHeaders, releaseInfo),
+// internal/util/github.go (ResolveGitHubToken) and
+// internal/githubauth/token.go (ResolveToken) (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! `GET /v0/management/latest-version` (also
@@ -12,8 +13,9 @@
 //! exchange. The answer is `{"latest-version":<tag>}`, or the release's
 //! name when its tag is empty. The release is read as Go's
 //! `json.Decoder.Decode` reads it: the answer is given as soon as its JSON
-//! value is complete, and whatever follows is ignored. A token from
-//! `GITHUB_TOKEN` or `github_token` is sent as a bearer token. Failures are
+//! value is complete, and whatever follows is ignored. The config's
+//! `server.github-token`, else a token from `GITHUB_TOKEN` or
+//! `github_token`, is sent as a bearer token. Failures are
 //! answered with a 502 naming what went wrong: `request_failed`,
 //! `unexpected_status` (with the start of GitHub's answer), `decode_failed`
 //! or `invalid_response`.
@@ -107,7 +109,8 @@ async fn latest_version(State(state): State<ManagementState>) -> Response {
             );
         }
     };
-    let Some(headers) = release_headers(github_token().as_deref()) else {
+    let token = github_token(&state.config().github_token);
+    let Some(headers) = release_headers(token.as_deref()) else {
         return request_failed("invalid header field value for \"Authorization\"");
     };
     let route = match proxy::parse(&state.config().proxy_url) {
@@ -183,10 +186,15 @@ fn release_headers(token: Option<&str>) -> Option<HeaderMap> {
     Some(headers)
 }
 
-/// The GitHub token from the environment (upstream's
-/// `ResolveGitHubToken`). Tests never take one, so that none reaches a
-/// test's server.
-fn github_token() -> Option<String> {
+/// The GitHub token (upstream's `ResolveGitHubToken`): `configured`, the
+/// config's `server.github-token`, trimmed, else one from the environment.
+/// Tests never take one from the environment, so that none reaches a test's
+/// server.
+fn github_token(configured: &str) -> Option<String> {
+    let configured = configured.trim();
+    if !configured.is_empty() {
+        return Some(configured.to_owned());
+    }
     if cfg!(test) {
         return None;
     }
@@ -443,6 +451,19 @@ mod tests {
         assert_eq!(token_from(blank).as_deref(), Some("lower"));
         assert_eq!(token_from(|_| None), None);
         assert!(release_headers(Some("bad\rtoken")).is_none());
-        assert!(github_token().is_none());
+        assert!(github_token("").is_none());
+        assert!(github_token(" \t").is_none());
+    }
+
+    /// Ported from upstream's githubauth/token_test.go (TestGlobalToken)
+    /// and api/github_token_test.go: the config's token, trimmed, comes
+    /// first; a blank one leaves the environment's.
+    #[test]
+    fn the_configured_token_comes_first() {
+        assert_eq!(
+            github_token(" config-token ").as_deref(),
+            Some("config-token")
+        );
+        assert_eq!(github_token("replacement").as_deref(), Some("replacement"));
     }
 }

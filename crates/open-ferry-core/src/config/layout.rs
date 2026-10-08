@@ -327,6 +327,7 @@ pub(crate) const V8_CHILDREN: &[(&str, &[&str])] = &[
         &[
             "commercial-mode",
             "discovery",
+            "github-token",
             "host",
             "port",
             "tls",

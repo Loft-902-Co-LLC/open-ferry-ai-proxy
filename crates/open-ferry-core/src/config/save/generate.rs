@@ -172,6 +172,7 @@ pub(crate) fn legacy_config(cfg: &Config) -> Result<Value, Unwritable> {
         // Config proper.
         .put("host", s(&cfg.host))
         .put("port", Value::Int(cfg.port))
+        .put("github-token", s(&cfg.github_token))
         .put("trusted-proxies", strings(&cfg.trusted_proxies))
         .put(
             "tls",

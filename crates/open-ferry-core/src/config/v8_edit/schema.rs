@@ -542,6 +542,7 @@ pub(super) static CONFIG_LEGACY_CONFIG: Type = Type {
         ("error-logs-max-files", Field::Leaf),
         ("force-model-prefix", Field::Leaf),
         ("gemini-api-key", Field::List(&CONFIG_GEMINI_KEY)),
+        ("github-token", Field::Leaf),
         ("gpt-image-2-base-model", Field::Leaf),
         ("host", Field::Leaf),
         ("interactions-api-key", Field::List(&CONFIG_GEMINI_KEY)),

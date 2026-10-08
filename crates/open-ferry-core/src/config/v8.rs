@@ -74,6 +74,7 @@ pub(crate) const V8_PATHS: &[(&str, &str)] = &[
     ),
     ("host", "server.host"),
     ("port", "server.port"),
+    ("github-token", "server.github-token"),
     ("trusted-proxies", "server.trusted-proxies"),
     ("tls.enable", "server.tls.enable"),
     ("tls.cert", "server.tls.cert"),
@@ -828,7 +829,7 @@ mod tests {
 
     #[test]
     fn paths_table_matches_upstream_shape() {
-        assert_eq!(V8_PATHS.len(), 113);
+        assert_eq!(V8_PATHS.len(), 114);
         let olds: BTreeSet<&str> = V8_PATHS.iter().map(|(old, _)| *old).collect();
         assert_eq!(olds.len(), V8_PATHS.len());
         let scoped: Vec<&str> = oauth_scoped_paths().collect();

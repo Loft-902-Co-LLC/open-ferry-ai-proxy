@@ -612,6 +612,31 @@ pub(crate) fn marshal_html(value: &Value) -> String {
     String::from_utf8(out).unwrap_or_default()
 }
 
+/// Go's `json.Compact` of the valid JSON `text`: the white space between
+/// its tokens dropped, and nothing escaped.
+pub(crate) fn compact(text: &str) -> String {
+    let mut out = Vec::with_capacity(text.len());
+    let (mut in_string, mut escaped) = (false, false);
+    for &c in text.as_bytes() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == b'\\' {
+                escaped = true;
+            } else if c == b'"' {
+                in_string = false;
+            }
+        } else if matches!(c, b' ' | b'\t' | b'\n' | b'\r') {
+            continue;
+        } else if c == b'"' {
+            in_string = true;
+        }
+        out.push(c);
+    }
+    // Only ASCII bytes outside strings were dropped, so this is UTF-8.
+    String::from_utf8(out).unwrap_or_else(|_| text.to_owned())
+}
+
 /// Go's `appendCompact` with HTML escaping, for valid JSON.
 fn compact_into(out: &mut Vec<u8>, item: &[u8]) {
     let mut in_string = false;
