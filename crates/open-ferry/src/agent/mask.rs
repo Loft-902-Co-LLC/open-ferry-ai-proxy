@@ -6,10 +6,11 @@
 //!   `authorization`, `cookie`, `private-key` or `access-key`, or named
 //!   `username` or `credential`, as a TURN server's are; not
 //!   `max-retry-credentials` or `credentials.concurrency`, which are
-//!   counts), and a string under a list such a key holds, is shown as
-//!   the dashboard shows a client key: a few of its last characters, and
-//!   of a long one its first three (see
-//!   [`open_ferry_dashboard::mask_client_key`]). A header under `headers`
+//!   counts, nor `use-max-completion-tokens`, a switch), and a value under
+//!   a list such a key holds, is shown as the dashboard shows a client key:
+//!   a few of its last characters, and of a long one its first three (see
+//!   [`open_ferry_dashboard::mask_client_key`]). That goes for a number or
+//!   a boolean as for a string, as the loader reads one as a string key. A header under `headers`
 //!   is masked as the request log masks it. In any other string, a URL's
 //!   user and password become `***`, its query's secret parameters are
 //!   hidden, and email addresses are masked.
@@ -51,6 +52,10 @@ const SECRET_NAME_PARTS: [&str; 12] = [
     "private_key",
 ];
 
+/// The settings whose names hold a part of [`SECRET_NAME_PARTS`] but
+/// whose values are no secret: a switch.
+const NOT_SECRET_NAMES: [&str; 1] = ["use-max-completion-tokens"];
+
 /// The most of a file read for its secrets.
 const FILE_LIMIT: u64 = 16 * 1024 * 1024;
 
@@ -83,9 +88,22 @@ const CREDENTIAL_DEPTH: usize = 32;
 /// Whether a value under the key `name` is a secret.
 pub(crate) fn is_secret_name(name: &str) -> bool {
     let lower = name.trim().to_ascii_lowercase();
+    if NOT_SECRET_NAMES.contains(&lower.as_str()) {
+        return false;
+    }
     lower == "username"
         || lower == "credential"
         || SECRET_NAME_PARTS.iter().any(|part| lower.contains(part))
+}
+
+/// The text of a number or a boolean `value`, as the loader reads one
+/// where it takes a string; `None` for any other value.
+fn scalar_text(value: &Value) -> Option<String> {
+    match value {
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(flag) => Some(flag.to_string()),
+        _ => None,
+    }
 }
 
 /// Where a value sits: the key nearest above it, and whether that key's
@@ -149,10 +167,14 @@ fn mask_value(value: &Value, place: Place<'_>) -> Value {
             Value::Array(items.iter().map(|item| mask_value(item, place)).collect())
         }
         Value::String(text) => Value::String(mask_string(text, place)),
-        Value::Number(number) if place.key.is_some_and(is_secret_name) => {
-            Value::String(mask_client_key(&number.to_string()))
-        }
-        other => other.clone(),
+        // A number or a boolean is a string to the loader where it takes
+        // one, so a key can be `true` or `12345`.
+        other => match scalar_text(other) {
+            Some(text) if place.key.is_some_and(is_secret_name) => {
+                Value::String(mask_client_key(&text))
+            }
+            _ => other.clone(),
+        },
     }
 }
 
@@ -216,8 +238,8 @@ fn mask_url(text: &str) -> String {
 }
 
 /// Adds the secrets in `value` to `secrets`: each value whose key names
-/// a secret, each credential header, and the user and password of each
-/// URL.
+/// a secret (a number or a boolean too), each credential header, and the
+/// user and password of each URL.
 pub(crate) fn collect_secrets(value: &Value, secrets: &mut Secrets) {
     collect(
         value,
@@ -264,10 +286,12 @@ fn collect(value: &Value, place: Place<'_>, secrets: &mut Secrets) {
             _ if text.contains("://") => secrets.add_url(text),
             _ => {}
         },
-        Value::Number(number) if place.key.is_some_and(is_secret_name) => {
-            secrets.add(&number.to_string());
+        other => {
+            if let Some(text) = scalar_text(other).filter(|_| place.key.is_some_and(is_secret_name))
+            {
+                secrets.add(&text);
+            }
         }
-        _ => {}
     }
 }
 
@@ -575,6 +599,23 @@ mod tests {
             json!(2)
         );
         assert_eq!(counts["credentials"]["concurrency"], json!(3));
+        // A number or a boolean under a secret's key is masked, as the
+        // loader reads it as a string; a switch elsewhere shows.
+        let scalars = mask_tree(&json!({
+            "access": {"api-keys": [true, 1234567890123_u64, false]},
+            "management": {"secret-key": 98765432109_u64, "allow-remote": true},
+            "api-keys": {"openai-compatibility": [{"models": [{"use-max-completion-tokens": true}]}]},
+        }));
+        assert_eq!(
+            scalars["access"]["api-keys"],
+            json!(["...", "...23", "..."])
+        );
+        assert_eq!(scalars["management"]["secret-key"], json!("...09"));
+        assert_eq!(scalars["management"]["allow-remote"], json!(true));
+        assert_eq!(
+            scalars["api-keys"]["openai-compatibility"][0]["models"][0]["use-max-completion-tokens"],
+            json!(true)
+        );
         assert_eq!(masked["port"], json!(8317));
         assert!(!masked.to_string().contains(key));
         assert_eq!(
@@ -716,5 +757,25 @@ mod tests {
             &["routing".into(), "strategy".into()],
             &json!("x")
         ));
+        // A number or a boolean under a secret's key is one too, but not a
+        // switch whose name only looks like one.
+        for value in [json!([true]), json!([12345]), json!([false])] {
+            assert!(holds_secret(&["access".into(), "api-keys".into()], &value));
+        }
+        assert!(holds_secret(
+            &["management".into(), "secret-key".into()],
+            &json!(true)
+        ));
+        assert!(!holds_secret(
+            &["management".into(), "allow-remote".into()],
+            &json!(true)
+        ));
+        assert!(!holds_secret(
+            &["models".into(), "use-max-completion-tokens".into()],
+            &json!(true)
+        ));
+        let mut found = Secrets::new();
+        collect_secrets(&json!({"secret-key": 98765432109_u64}), &mut found);
+        assert_eq!(found.iter().collect::<Vec<_>>(), ["98765432109"]);
     }
 }
