@@ -526,6 +526,17 @@ pub(crate) async fn undo(ctx: &Context) -> Result<Outcome, Failure> {
             format!("can't read {}: {error}", backup.display()),
         )
     })?;
+    // Putting back the same bytes changes nothing: no server is called,
+    // and no file is written. (Through a server, a file left as it was
+    // would otherwise read as the server running another one.)
+    if saved == current {
+        let changed = Changed::nothing(
+            "undo",
+            None,
+            "Nothing to undo: the backup is the same as the config.".to_owned(),
+        );
+        return Ok(Outcome::of(&changed));
+    }
     let before = tree_of(&current)?;
     let after = tree_of(&saved)?;
     let changes = diff_trees(&before, &after);
@@ -604,7 +615,9 @@ pub(crate) async fn undo(ctx: &Context) -> Result<Outcome, Failure> {
     };
     let now_data = read_config(&ctx.path)?;
     // As for a change: the server undid the file it runs, a copy of this
-    // one, and this file didn't change.
+    // one, and this file didn't change. (The backup differs from this
+    // file, as an undo with nothing to put back has returned by now, so an
+    // unchanged file says so.)
     let copy = via == "server" && now_data == current;
     if copy {
         note = Some(copy_note(ctx));
