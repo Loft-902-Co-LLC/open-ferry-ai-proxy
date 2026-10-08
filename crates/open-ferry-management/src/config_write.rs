@@ -54,12 +54,16 @@
 //!   A change made to that config is saved only while the file still
 //!   holds them, which the writer checks under the file's lock: else it
 //!   answers 409 `{"error":"config_changed","message":"..."}`, writes
-//!   nothing, and has the config the handlers read catch up with the file,
-//!   so the change can be made again. Upstream saves its config over the
-//!   file whatever the file holds, so a change made there since, as by
-//!   `open-ferry config`, is undone. The v8 writes, `PUT config.yaml` and
-//!   the undo work from what the file holds under its lock, so they don't
-//!   check it.
+//!   nothing, and has the service load the file again, forced (see
+//!   [`ConfigReload::force_reload`]), so the change can be made again. The
+//!   config the handlers read is only ever one the service applied, or one
+//!   written here: when the file is empty or doesn't load, the service keeps
+//!   its config and so do the handlers, and each such save answers 409,
+//!   saying the file needs fixing, until it is. Upstream saves its config
+//!   over the file whatever the file holds, so a change made there since,
+//!   as by `open-ferry config`, is undone. The v8 writes, `PUT config.yaml`
+//!   and the undo work from what the file holds under its lock, so they
+//!   don't check it.
 
 use std::fmt;
 use std::future::Future;
@@ -85,11 +89,13 @@ use crate::state::ManagementState;
 const WRITER_UNAVAILABLE: &str = "config writer unavailable";
 
 /// What a save answers when the file changed since the config the handlers
-/// read was loaded or written, once that config has caught up.
+/// read was loaded or written, once the service has loaded it again.
 const CONFIG_CHANGED: &str = "the config file changed on disk since the server loaded it; it has been loaded again, so try again";
 
-/// What a save answers when the file changed since and doesn't load.
-const CHANGED_INVALID: &str = "the config file changed on disk since the server loaded it, and doesn't load; fix it, then try again";
+/// What a save answers when the file changed since, and the service didn't
+/// load it again: it is empty or doesn't load.
+const CANT_LOAD: &str =
+    "the config file changed on disk and can't be loaded: fix it, then try again";
 
 /// Saves the config file the proxy was started with. The service gives one
 /// to the management state with
@@ -134,16 +140,6 @@ pub trait ConfigWriter: Send + Sync {
     fn undo(&self, check: &UndoCheck) -> Result<(Config, Option<String>), UndoError> {
         let _ = check;
         Err(UndoError::NoBackup)
-    }
-
-    /// Loads the file as it is now: the config it holds, as the service
-    /// loads it after a change, and the SHA-256 of its contents, in
-    /// lowercase hex; `None` from a writer that keeps no file, which is
-    /// what this answers unless the writer says otherwise. Not upstream's:
-    /// a save that found the file changed has the handlers' config catch up
-    /// with it. Its error holds no secret from the config.
-    fn load(&self) -> Result<Option<(Config, String)>, WriteError> {
-        Ok(None)
     }
 }
 
@@ -288,16 +284,6 @@ impl ConfigWriter for FileConfigWriter {
                 _ => UndoError::Failed(error.to_string()),
             })
     }
-
-    fn load(&self) -> Result<Option<(Config, String)>, WriteError> {
-        // The loader's message may quote the file; say only what failed.
-        let (mut config, sha256) = Config::load_with_sha256(&self.path)
-            .map_err(|_| WriteError::new("the config file doesn't load"))?;
-        if let Ok(dir) = config.resolve_auth_dir() {
-            config.auth_dir = dir.to_string_lossy().into_owned();
-        }
-        Ok(Some((config, sha256)))
-    }
 }
 
 /// What a v8 route answers when [`ConfigWriter::edit_v8`] made no change
@@ -361,6 +347,17 @@ pub trait ConfigReload: Send + Sync {
     /// watcher reports a change (upstream's `ReloadConfigIfChanged`). A
     /// file that doesn't load is logged and left, as the watcher leaves it.
     fn reload(&self) -> ReloadFuture<'_>;
+
+    /// [`reload`](Self::reload), loading the file even when it holds what
+    /// the service loaded last (not upstream's). A save that found the file
+    /// changed has it reloaded so, as the file may hold again what the
+    /// service loaded before the handlers' last write, which a plain reload
+    /// would skip. An empty file is still skipped, and one that doesn't load
+    /// left; the service then keeps its config, and the handlers theirs.
+    /// Unless the service says otherwise, this is `reload`.
+    fn force_reload(&self) -> ReloadFuture<'_> {
+        self.reload()
+    }
 }
 
 /// `{"error":"config writer unavailable"}` with 503, when the state has no
@@ -395,13 +392,10 @@ pub(crate) async fn request_body(state: &ManagementState, body: Body) -> Result<
 
 /// `{"error":"config_changed","message":"..."}` with 409, what a save
 /// answers when the file changed since the config the handlers read was
-/// loaded or written; the message says whether the file `loads`.
-pub(crate) fn config_changed(loads: bool) -> Response {
-    let message = if loads {
-        CONFIG_CHANGED
-    } else {
-        CHANGED_INVALID
-    };
+/// loaded or written; the message says whether the service `loaded` it
+/// again, or it needs fixing first.
+pub(crate) fn config_changed(loaded: bool) -> Response {
+    let message = if loaded { CONFIG_CHANGED } else { CANT_LOAD };
     json::response(
         StatusCode::CONFLICT,
         &Json::map([
@@ -446,8 +440,8 @@ where
 /// (upstream's change and `persistLocked`), without reloading. On success
 /// the saved config is the one the handlers read. The file must still
 /// hold what that config was loaded from or last written as: else the
-/// answer is 409 `config_changed`, nothing is written, and the config the
-/// handlers read catches up with the file (not upstream's).
+/// answer is 409 `config_changed`, nothing is written, and the service
+/// loads the file again (not upstream's).
 pub(crate) async fn save<F>(
     state: &ManagementState,
     migrate_v8: bool,
@@ -461,13 +455,13 @@ where
     run_task(async move {
         let guard = state.config_write_lock().lock().await;
         let (current, expected) = state.loaded_config();
+        let stale = expected.clone();
         let mut config = Config::clone(&current);
         change(&mut config)?;
         let config = Arc::new(config);
         let saved = Arc::clone(&config);
-        let saver = Arc::clone(&writer);
         let written = run_blocking(move || {
-            saver.save_preserving_comments(&saved, migrate_v8, expected.as_deref())
+            writer.save_preserving_comments(&saved, migrate_v8, expected.as_deref())
         })
         .await;
         match written {
@@ -477,8 +471,8 @@ where
             }
             Err(error) if error.is_config_changed() => {
                 drop(guard);
-                let loads = catch_up(&state, writer).await;
-                Err(config_changed(loads))
+                let loaded = catch_up(&state, stale).await;
+                Err(config_changed(loaded))
             }
             Err(error) => Err(json::error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -489,26 +483,16 @@ where
     .await
 }
 
-/// Has the config the handlers read catch up with the file, after a save
-/// found that the file changed since that config was loaded or written:
-/// the service loads the file again, and when that leaves the handlers'
-/// config behind the file still, as when the service had loaded what the
-/// file holds before the handlers' last write, `writer` loads it here.
-/// Whether the file loads.
-async fn catch_up(state: &ManagementState, writer: Arc<dyn ConfigWriter>) -> bool {
-    reload(state).await;
-    let _guard = state.config_write_lock().lock().await;
-    match run_blocking(move || writer.load()).await {
-        Ok(Some((config, sha256))) => {
-            let (_, known) = state.loaded_config();
-            if known.as_deref() != Some(sha256.as_str()) {
-                state.set_loaded_config(Arc::new(config), Some(sha256));
-            }
-            true
-        }
-        Ok(None) => true,
-        Err(_) => false,
-    }
+/// Has the service load the config file again, forced, after a save found
+/// that the file changed since the config the handlers read was loaded or
+/// written as `stale`, the SHA-256 the save expected. That config changes
+/// only as the service applies what it loaded, never here, so it is always
+/// one the proxy runs. Whether it changed: it doesn't when the service
+/// skipped or refused the file, as one that is empty or doesn't load, nor
+/// without a service to reload.
+async fn catch_up(state: &ManagementState, stale: Option<String>) -> bool {
+    reload_with(state, true).await;
+    state.config_sha256() != stale
 }
 
 /// Puts the config file's backup in its place with the state's writer
@@ -536,8 +520,20 @@ pub async fn undo_config(state: &ManagementState, check: UndoCheck) -> Result<()
 
 /// Has the service load the config file again, if it gave a way to.
 pub(crate) async fn reload(state: &ManagementState) {
+    reload_with(state, false).await;
+}
+
+/// [`reload`], forced with `force` (see [`ConfigReload::force_reload`]).
+async fn reload_with(state: &ManagementState, force: bool) {
     if let Some(reload) = state.config_reload().cloned() {
-        run_task(async move { reload.reload().await }).await;
+        run_task(async move {
+            if force {
+                reload.force_reload().await;
+            } else {
+                reload.reload().await;
+            }
+        })
+        .await;
     }
 }
 

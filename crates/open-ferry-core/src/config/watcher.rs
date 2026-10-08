@@ -32,7 +32,11 @@
 //! finds nothing new. Its [`WatchEvent::ConfigChanged`], if any, comes
 //! before the [`WatchEvent::Reloaded`] that answers it, on the channel that
 //! carries every other event, so the consumer never applies a config read
-//! before one it already applied.
+//! before one it already applied. [`ConfigWatcher::force_reload_config`]
+//! reloads it the same way without the hash check, so contents loaded before
+//! are loaded again (not upstream's): the management API has it reloaded so
+//! after a save that found the file changed, which may since hold again
+//! what the watcher last loaded. An empty file is still skipped.
 //!
 //! Each auth event carries a revision from [`next_revision`], taken before
 //! the file was read or found gone. The service takes its revisions for the
@@ -301,7 +305,21 @@ impl ConfigWatcher {
     /// [`WatchEvent::ConfigInvalid`] it makes comes first. Nothing is sent
     /// once the watcher has stopped.
     pub fn reload_config(&self, ticket: u64) {
-        let _ = self.messages.send(Message::Reload(ticket));
+        let _ = self.messages.send(Message::Reload {
+            ticket,
+            force: false,
+        });
+    }
+
+    /// [`reload_config`](Self::reload_config), loading the file even when
+    /// its SHA-256 is that of the last config that loaded (not upstream's).
+    /// An empty file is still skipped, and one that doesn't load reported
+    /// with [`WatchEvent::ConfigInvalid`].
+    pub fn force_reload_config(&self, ticket: u64) {
+        let _ = self.messages.send(Message::Reload {
+            ticket,
+            force: true,
+        });
     }
 }
 
@@ -324,8 +342,12 @@ impl Drop for ConfigWatcher {
 /// What the watcher thread receives.
 enum Message {
     Fs(notify::Result<notify::Event>),
-    /// [`ConfigWatcher::reload_config`] with its ticket.
-    Reload(u64),
+    /// [`ConfigWatcher::reload_config`] with its ticket, or
+    /// [`ConfigWatcher::force_reload_config`] with `force`.
+    Reload {
+        ticket: u64,
+        force: bool,
+    },
     Stop,
 }
 
@@ -506,6 +528,12 @@ impl WatchState {
 
     /// Upstream's `reloadConfigIfChanged` and `reloadConfig`.
     fn reload_config_if_changed(&mut self) -> Option<WatchEvent> {
+        self.reload_config_file(false)
+    }
+
+    /// [`reload_config_if_changed`](Self::reload_config_if_changed), or with
+    /// `force` without its hash check (not upstream's).
+    fn reload_config_file(&mut self, force: bool) -> Option<WatchEvent> {
         let data = match fs::read(&self.config_path) {
             Ok(data) => data,
             Err(error) => {
@@ -518,7 +546,7 @@ impl WatchState {
             return None;
         }
         let hash = sha256(&data);
-        if self.last_config_hash == Some(hash) {
+        if !force && self.last_config_hash == Some(hash) {
             debug!("config file content unchanged (hash match), skipping reload");
             return None;
         }
@@ -703,10 +731,10 @@ fn run(
         };
         let event = match message {
             Message::Stop => return,
-            Message::Reload(ticket) => {
+            Message::Reload { ticket, force } => {
                 // A debounced reload still waiting finds the hash this one
                 // leaves, as upstream's timer does.
-                if let Some(event) = state.reload_config_if_changed()
+                if let Some(event) = state.reload_config_file(force)
                     && !send(events, stopped, event)
                 {
                     return;
@@ -905,6 +933,34 @@ mod tests {
             }
             other => panic!("expected a config change, got {other:?}"),
         }
+    }
+
+    // Not upstream's: a forced reload loads contents that loaded before,
+    // and still skips an empty file and reports one that doesn't load.
+    #[test]
+    fn a_forced_reload_loads_contents_seen_before() {
+        let fixture = Fixture::new();
+        let mut state = fixture.state();
+        fixture.write_config("port: 9292\n");
+        assert_eq!(config_of(state.reload_config_if_changed()).port, 9292);
+        assert_eq!(state.reload_config_if_changed(), None);
+        let data = fs::read(&fixture.config_path).unwrap();
+        match state.reload_config_file(true) {
+            Some(WatchEvent::ConfigChanged(config, sha256)) => {
+                assert_eq!(config.port, 9292);
+                assert_eq!(sha256, crate::config::save::sha256_hex(&data));
+            }
+            other => panic!("expected a config change, got {other:?}"),
+        }
+        assert_eq!(state.reload_config_if_changed(), None);
+
+        fs::write(&fixture.config_path, "").unwrap();
+        assert_eq!(state.reload_config_file(true), None);
+        fixture.write_config("port: [\n");
+        assert!(matches!(
+            state.reload_config_file(true),
+            Some(WatchEvent::ConfigInvalid(_))
+        ));
     }
 
     #[test]
@@ -1610,6 +1666,14 @@ mod tests {
         assert_eq!(next(&mut receiver).await, WatchEvent::Reloaded(8));
         let quiet = tokio::time::timeout(CONFIG_RELOAD_DEBOUNCE * 4, receiver.recv()).await;
         assert!(quiet.is_err(), "unexpected event: {quiet:?}");
+
+        // Not upstream's: forced, they load again.
+        watcher.force_reload_config(9);
+        match next(&mut receiver).await {
+            WatchEvent::ConfigChanged(config, _) => assert_eq!(config.port, 3),
+            other => panic!("expected a config change, got {other:?}"),
+        }
+        assert_eq!(next(&mut receiver).await, WatchEvent::Reloaded(9));
 
         // A change after it is followed as before.
         fixture.write_config("port: 4\n");

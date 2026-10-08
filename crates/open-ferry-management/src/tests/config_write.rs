@@ -21,6 +21,15 @@ const OK: &str = r#"{"status":"ok"}"#;
 /// handlers read was loaded or written.
 const CHANGED: &str = r#"{"error":"config_changed","message":"the config file changed on disk since the server loaded it; it has been loaded again, so try again"}"#;
 
+/// What a save answers when the file changed since, and the service didn't
+/// load it again.
+const CANT_LOAD: &str = r#"{"error":"config_changed","message":"the config file changed on disk and can't be loaded: fix it, then try again"}"#;
+
+/// The body of a `PUT /v0/management/debug` that sets `value`.
+fn debug(value: bool) -> String {
+    format!(r#"{{"value":{value}}}"#)
+}
+
 /// The config file's contents.
 fn read(dir: &AuthDir) -> Vec<u8> {
     std::fs::read(dir.config_path()).unwrap()
@@ -70,18 +79,75 @@ async fn a_save_never_writes_over_a_change_made_in_the_file() {
     assert_eq!(api.state.config_sha256(), Some(sha256_hex(&read(&dir))));
 }
 
+// Not upstream's: when the file changed on disk and the service can't
+// load it, as one emptied or that isn't a config, the service keeps its
+// config and so do the handlers, so both still have the client keys the
+// proxy takes: each save answers 409 saying the file needs fixing, and
+// writes nothing. Once the file is fixed, the service loads it, and the
+// save made again goes ahead.
+#[tokio::test]
+async fn a_file_that_cant_load_is_never_taken_up() {
+    let dir = AuthDir::new();
+    let api = Api::over_config_file(&dir, "api-keys:\n  - old-client-key\n");
+    let known = api.state.config_sha256();
+    let path = dir.config_path();
+    for broken in [&b""[..], b"port: [\n"] {
+        std::fs::write(&path, broken).unwrap();
+        for _ in 0..2 {
+            api.call(Method::PUT, "/v0/management/debug", &debug(true))
+                .await
+                .assert(StatusCode::CONFLICT, CANT_LOAD);
+            assert_eq!(read(&dir), broken);
+            assert_eq!(api.state.config().api_keys, ["old-client-key"]);
+            assert_eq!(api.state.config_sha256(), known);
+        }
+        api.get("/v0/management/api-keys")
+            .await
+            .assert(StatusCode::OK, r#"{"api-keys":["old-client-key"]}"#);
+    }
+
+    save::write_file(&path, b"api-keys:\n  - new-client-key\n").unwrap();
+    api.call(Method::PUT, "/v0/management/debug", &debug(true))
+        .await
+        .assert(StatusCode::CONFLICT, CHANGED);
+    assert_eq!(api.state.config().api_keys, ["new-client-key"]);
+    api.call(Method::PUT, "/v0/management/debug", &debug(true))
+        .await
+        .assert(StatusCode::OK, OK);
+    let config = Config::load(&path).unwrap();
+    assert_eq!(config.api_keys, ["new-client-key"]);
+    assert!(config.debug);
+}
+
+// Not upstream's: without a service to load the file again, a save that
+// finds it changed answers 409 and takes up nothing it holds.
+#[tokio::test]
+async fn without_a_service_a_changed_file_is_never_taken_up() {
+    let dir = AuthDir::new();
+    let api = Api::over_config_file_unreloaded(&dir, "api-keys: [old-client-key]\n");
+    let known = api.state.config_sha256();
+    save::write_file(&dir.config_path(), b"api-keys: [new-client-key]\n").unwrap();
+    let written = read(&dir);
+    for _ in 0..2 {
+        api.call(Method::PUT, "/v0/management/debug", &debug(true))
+            .await
+            .assert(StatusCode::CONFLICT, CANT_LOAD);
+    }
+    assert_eq!(read(&dir), written);
+    assert_eq!(api.state.config().api_keys, ["old-client-key"]);
+    assert_eq!(api.state.config_sha256(), known);
+}
+
 // Not upstream's: each write keeps the SHA-256 of what it wrote, the v8
 // writes, `PUT config.yaml` and the undo included, so the save after it
-// goes ahead without a reload. When the file changed since, and the
-// service's reload leaves the config the handlers read behind it, as when
-// the service had loaded what the file holds before the handlers' last
-// write, the save loads the file itself; a file that doesn't load is said
-// to, and nothing is written.
+// goes ahead without a reload. When the file changed since, the save has
+// the service load it again, forced, and when that leaves the config the
+// handlers read as it was, as when the service skipped the file, the save
+// answers 409 saying the file needs fixing, and takes up nothing itself.
 #[tokio::test]
-async fn a_save_catches_up_with_the_file_by_itself() {
+async fn each_write_keeps_the_sha256_of_what_it_wrote() {
     let dir = AuthDir::new();
     let api = Api::over_config_file(&dir, "port: 8317\n").reloading_nothing();
-    let debug = |value: bool| format!(r#"{{"value":{value}}}"#);
     let writes = [
         (Method::PUT, "/v0/management/debug", debug(true)),
         (Method::PUT, "/v0/management/debug", debug(false)),
@@ -118,27 +184,16 @@ async fn a_save_catches_up_with_the_file_by_itself() {
     save::write_file(&path, b"port: 8320\napi-keys: [new-client-key]\n").unwrap();
     let written = read(&dir);
     let reloads = api.reload.count();
-    api.call(Method::PUT, "/v0/management/debug", &debug(true))
-        .await
-        .assert(StatusCode::CONFLICT, CHANGED);
+    let (config, known) = (api.state.config(), api.state.config_sha256());
+    for _ in 0..2 {
+        api.call(Method::PUT, "/v0/management/debug", &debug(true))
+            .await
+            .assert(StatusCode::CONFLICT, CANT_LOAD);
+    }
     assert_eq!(read(&dir), written);
-    assert_eq!(api.reload.count(), reloads + 1);
-    assert_eq!(api.state.config().api_keys, ["new-client-key"]);
-    api.call(Method::PUT, "/v0/management/debug", &debug(true))
-        .await
-        .assert(StatusCode::OK, OK);
-    let config = Config::load(&path).unwrap();
-    assert_eq!((config.port, config.debug), (8320, true));
-    assert_eq!(config.api_keys, ["new-client-key"]);
-
-    std::fs::write(&path, "port: [\n").unwrap();
-    api.call(Method::PUT, "/v0/management/debug", &debug(false))
-        .await
-        .assert(
-            StatusCode::CONFLICT,
-            r#"{"error":"config_changed","message":"the config file changed on disk since the server loaded it, and doesn't load; fix it, then try again"}"#,
-        );
-    assert_eq!(read(&dir), b"port: [\n");
+    assert_eq!((api.reload.count(), api.reload.forced()), (reloads, 2));
+    assert!(*api.state.config() == *config);
+    assert_eq!(api.state.config_sha256(), known);
 }
 
 // Not upstream's: a change is saved under the lock, becomes the config the
