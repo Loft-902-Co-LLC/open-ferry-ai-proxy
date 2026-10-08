@@ -10,6 +10,7 @@ import {
   credentialCooldowns,
   credentialHealth,
   reasonOfMessage,
+  resetRetries,
   type Health,
 } from "./credentialStates";
 
@@ -61,10 +62,10 @@ export function entryHealth(entry: ClaudeCliEntry): Health {
   if (!signInFailed(entry.credential)) {
     return health;
   }
+  const then = resetRetries(health) ? "try it again now" : "stop it resting";
   return {
     ...health,
-    action:
-      "Check its sign-in. If Claude Code isn't signed in, sign it in again on the server's computer, then stop it resting.",
+    action: `Check its sign-in. If Claude Code isn't signed in, sign it in again on the server's computer, then ${then}.`,
   };
 }
 

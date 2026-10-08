@@ -277,6 +277,32 @@ export function canReset(credential: Credential): boolean {
   );
 }
 
+/**
+ * Whether resetting a credential in `health` tries a failing one again
+ * rather than ending a rest. The server clears the same state either way
+ * (upstream's `ResetQuota`): the wait ends, and the next request may use it.
+ */
+export function resetRetries(health: Health): boolean {
+  return health.triage === "failing";
+}
+
+/** What the button that resets a credential in `health` says. */
+export function resetLabel(health: Health): string {
+  return resetRetries(health) ? "Try again now" : "Stop resting";
+}
+
+/**
+ * What a reason says to do when a credential fails for it, where that
+ * differs from what to do when it rests for it: the button that resets a
+ * failing one tries it again (see resetLabel).
+ */
+const FAILING_ACTIONS: Partial<Record<CooldownReason, string>> = {
+  quota:
+    "Wait, or add another credential to share the load. Try it again now if you know the limit has lifted.",
+  payment_required: "Check the account's billing and plan with the provider, then try it again now.",
+  not_found: "Check the model's name and the credential's base URL, then try it again now.",
+};
+
 /** The credential's state, in words, with what to do about it. */
 export function credentialHealth(credential: Credential): Health {
   if (credential.disabled || credential.status === "disabled") {
@@ -309,7 +335,7 @@ export function credentialHealth(credential: Credential): Health {
           tone: "danger",
           label: "Failing",
           summary: reason.title,
-          action: reason.action,
+          action: FAILING_ACTIONS[known] ?? reason.action,
           triage: "failing",
         };
       }
@@ -317,7 +343,7 @@ export function credentialHealth(credential: Credential): Health {
         tone: "danger",
         label: "Failing",
         summary: message === "" ? "Its last request failed." : `Its last request failed: ${message}`,
-        action: "The server log says more. Stop it resting to try it again now.",
+        action: "The server log says more. Once it's fixed, try it again now.",
         triage: "failing",
       };
     }

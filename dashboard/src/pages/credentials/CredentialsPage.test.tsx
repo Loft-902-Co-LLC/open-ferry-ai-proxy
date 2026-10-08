@@ -93,6 +93,12 @@ function server(
       if (file !== undefined) {
         file.cooldowns = [];
         file.unavailable = false;
+        delete file.next_retry_after;
+        // As the server does, a failed one is back in use.
+        if (file.status === "error") {
+          file.status = "active";
+          file.status_message = "";
+        }
       }
       return { json: { status: "ok", auth_index: body.auth_index, models } };
     }),
@@ -411,6 +417,33 @@ describe("the credential list", () => {
     expect(await within(card).findByRole("button", { name: "1 ready" })).toBeVisible();
     expect(within(card).queryByRole("article", { name: "ada@example.com" })).toBeNull();
     expect(within(card).getByRole("status")).toHaveTextContent(said);
+  });
+
+  it("tries a failing credential again", async () => {
+    const state = server([
+      credential({
+        status: "error",
+        status_message: "payment_required",
+        unavailable: true,
+        next_retry_after: "2026-10-05T12:30:00Z",
+      }),
+    ]);
+    const { user } = renderApp("/credentials");
+    const card = await screen.findByRole("region", { name: CREDENTIALS });
+    const item = await within(card).findByRole("article", { name: "ada@example.com" });
+    expect(within(item).getByText("Failing")).toBeVisible();
+    expect(item).toHaveTextContent(
+      "What to do: Check the account's billing and plan with the provider, then try it again now.",
+    );
+    expect(within(item).queryByRole("button", { name: /^Stop resting/ })).toBeNull();
+    await user.click(within(item).getByRole("button", { name: "Try again now ada@example.com" }));
+    expect(await within(card).findByRole("status")).toHaveTextContent(
+      "ada@example.com is back in use: the server tries it again with the next request.",
+    );
+    expect(state.api.callsTo("POST", RESET_COOLDOWN)[0]?.json()).toEqual({
+      auth_index: "a1b2c3d4e5f60718",
+    });
+    expect(await within(card).findByRole("button", { name: "1 ready" })).toBeVisible();
   });
 
   it("deletes a credential file once confirmed", async () => {

@@ -34,9 +34,30 @@ import {
   explainReason,
   modelCooldowns,
   providerName,
+  resetLabel,
+  resetRetries,
   timeLeft,
 } from "./credentialStates";
 import { quotaReadings, type QuotaReadings, type QuotaWindow } from "./quotaReadings";
+
+/**
+ * What the server did when it reset `named` and `models` of its models:
+ * ended their rest, or, when `retried`, put a failing one back in use.
+ * Either way the next request may use them.
+ */
+export function resetNotice(named: ReactNode, models: number, retried: boolean): ReactNode {
+  const state = retried ? "back in use" : "no longer resting";
+  return models === 0 ? (
+    <>
+      {named} is {state}: the server tries it again with the next request.
+    </>
+  ) : (
+    <>
+      {named} and {formatInteger(models)} {models === 1 ? "model" : "models"} are {state}: the
+      server tries them again with the next request.
+    </>
+  );
+}
 
 /** "Back in about 4 min, at Oct 5, 12:04." */
 export function backIn(cooldown: Cooldown): string {
@@ -346,24 +367,16 @@ export function CredentialItem({
     onSettled: refresh,
   });
 
-  const reset = useMutation({
+  // Whether it was failing, so tried again, goes with the call: the list
+  // may have been read again by the time the answer comes.
+  const reset = useMutation<ResetAnswer, Error, boolean>({
     mutationFn: () =>
       call<ResetAnswer>(RESET_COOLDOWN, {
         method: "POST",
         json: { auth_index: credential.auth_index },
       }),
-    onSuccess: (answer) => {
-      const count = answer.models?.length ?? 0;
-      onDone(
-        count === 0 ? (
-          <>{named} is no longer resting: the server tries it again with the next request.</>
-        ) : (
-          <>
-            {named} and {formatInteger(count)} {count === 1 ? "model" : "models"} are no longer
-            resting: the server tries them again with the next request.
-          </>
-        ),
-      );
+    onSuccess: (answer, retried) => {
+      onDone(resetNotice(named, answer.models?.length ?? 0, retried));
     },
     onError: failed,
     onSettled: refresh,
@@ -451,11 +464,11 @@ export function CredentialItem({
               disabled={busy}
               onClick={() => {
                 setProblem(null);
-                reset.mutate();
+                reset.mutate(resetRetries(health));
               }}
             >
               {reset.isPending ? <Spinner /> : <RotateCcw aria-hidden="true" className="size-4" />}
-              Stop resting
+              {resetLabel(health)}
               {itemName}
             </Button>
           )}

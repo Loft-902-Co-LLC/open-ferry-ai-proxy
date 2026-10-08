@@ -7,6 +7,8 @@ import { credentialHealth } from "./credentialStates";
 
 const CHECK_SIGN_IN =
   "Check its sign-in. If Claude Code isn't signed in, sign it in again on the server's computer, then stop it resting.";
+const CHECK_SIGN_IN_FAILING =
+  "Check its sign-in. If Claude Code isn't signed in, sign it in again on the server's computer, then try it again now.";
 
 describe("a claude-cli entry's health", () => {
   it("is off when config.yaml turns it off, and not loaded without a credential", () => {
@@ -51,7 +53,7 @@ describe("a claude-cli entry's health", () => {
         credential: claudeCliCredential({ status: "error", status_message: "unauthorized" }),
       }),
     );
-    expect(failing).toMatchObject({ label: "Failing", action: CHECK_SIGN_IN });
+    expect(failing).toMatchObject({ label: "Failing", action: CHECK_SIGN_IN_FAILING });
 
     const resting = entryHealth(
       claudeCliEntry({

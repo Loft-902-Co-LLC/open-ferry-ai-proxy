@@ -21,16 +21,24 @@ import { Code } from "../../components/Code";
 import { CopyButton } from "../../components/CopyButton";
 import { ProblemNotice } from "../../components/ProblemNotice";
 import { Spinner } from "../../components/Spinner";
-import { formatInteger } from "../../lib/format";
 import { claudeCliAnchor } from "./anchors";
 import { claudeCommand, entriesUnserved, entryHealth } from "./claudeCli";
 import { pollWhileRead } from "./CredentialList";
-import { backIn, lastUsed, ModelCooldowns, QuotaWindows, Requests } from "./CredentialItem";
+import {
+  backIn,
+  lastUsed,
+  ModelCooldowns,
+  QuotaWindows,
+  Requests,
+  resetNotice,
+} from "./CredentialItem";
 import {
   canReset,
   credentialCooldowns,
   explainReason,
   modelCooldowns,
+  resetLabel,
+  resetRetries,
   secondsUntilBack,
 } from "./credentialStates";
 import { CheckedAt, PolledState } from "./PolledState";
@@ -147,22 +155,14 @@ function EntryItem({ entry, anchor, compact, targeted, onDone }: EntryItemProps)
   const readings = credential === null ? null : quotaReadings(credential);
   const error = entry.last_error;
 
+  // Whether it was failing, so tried again, goes with the call: the list
+  // may have been read again by the time the answer comes.
   const reset = useMutation({
-    mutationFn: (authIndex: string) =>
+    mutationFn: ({ authIndex }: { authIndex: string; retried: boolean }) =>
       call<ResetAnswer>(RESET_COOLDOWN, { method: "POST", json: { auth_index: authIndex } }),
-    onSuccess: (answer) => {
-      const count = answer.models?.length ?? 0;
+    onSuccess: (answer, { retried }) => {
       const named = <span className="font-medium break-all">{entry.name}</span>;
-      onDone(
-        count === 0 ? (
-          <>{named} is no longer resting: the server tries it again with the next request.</>
-        ) : (
-          <>
-            {named} and {formatInteger(count)} {count === 1 ? "model" : "models"} are no longer
-            resting: the server tries them again with the next request.
-          </>
-        ),
-      );
+      onDone(resetNotice(named, answer.models?.length ?? 0, retried));
     },
     onError: (failure) => {
       setProblem(callProblem(failure));
@@ -280,11 +280,14 @@ function EntryItem({ entry, anchor, compact, targeted, onDone }: EntryItemProps)
               disabled={reset.isPending}
               onClick={() => {
                 setProblem(null);
-                reset.mutate(credential.auth_index);
+                reset.mutate({
+                  authIndex: credential.auth_index,
+                  retried: resetRetries(health),
+                });
               }}
             >
               {reset.isPending ? <Spinner /> : <RotateCcw aria-hidden="true" className="size-4" />}
-              Stop resting
+              {resetLabel(health)}
               {itemName}
             </Button>
           )}
