@@ -8,8 +8,8 @@
 use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::Json;
@@ -1801,6 +1801,73 @@ async fn login_server() -> (Offline, tokio::task::JoinHandle<()>) {
         },
         task,
     )
+}
+
+#[derive(serde::Deserialize)]
+struct IndexQuery {
+    index: usize,
+}
+
+// Not upstream's: a key is removed through the server by its index, so the
+// list is read again after: when another write moved the keys between the
+// read and the delete, and the key removed isn't just the one confirmed,
+// it says so, with the keys gone masked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_key_removed_by_index_is_checked() {
+    const OTHER: &str = "sk-another-client-key-qrstuvwxyz0123";
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let setup = Setup::new(port, Some(KEY));
+    let config = setup.text();
+    let keys = Arc::new(Mutex::new(vec![CLIENT_KEY.to_owned(), OTHER.to_owned()]));
+    let (listed, deleting) = (Arc::clone(&keys), Arc::clone(&keys));
+    let app = Router::new()
+        .route(
+            "/v0/management/debug",
+            get_route(|| async { Json(json!({"debug": false})) }),
+        )
+        .route(
+            "/v0/management/config.yaml",
+            get_route(move || async move { config }),
+        )
+        .route(
+            "/v0/management/api-keys",
+            get_route(move || {
+                let keys = listed.lock().unwrap().clone();
+                async move { Json(json!({"api-keys": keys})) }
+            })
+            .delete(move |Query(query): Query<IndexQuery>| {
+                // Another client removes the first key just before this
+                // delete lands, so the index now names the next one.
+                let mut keys = deleting.lock().unwrap();
+                keys.remove(0);
+                if query.index < keys.len() {
+                    keys.remove(query.index);
+                }
+                async { Json(json!({"status": "ok"})) }
+            }),
+        );
+    let task = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let failure = fails(
+        &confirmed(&setup.path, Caller::Cli),
+        Command::KeysRemove(RemoveInput {
+            index: Some(0),
+            source: None,
+        }),
+    )
+    .await;
+    task.abort();
+    assert_eq!(failure.error, "key_list_changed", "{failure:?}");
+    assert_eq!(failure.code, exit::FAILED);
+    assert!(failure.message.contains("not just the one confirmed"));
+    assert!(failure.message.contains("0123"), "{}", failure.message);
+    assert!(failure.hint.as_deref().unwrap().contains("keys list"));
+    assert!(!failure_shows(&failure, OTHER));
+    assert!(!failure_shows(&failure, CLIENT_KEY));
+    assert!(keys.lock().unwrap().is_empty());
 }
 
 // Not upstream's: a sign-in gives the address to open and the state to
