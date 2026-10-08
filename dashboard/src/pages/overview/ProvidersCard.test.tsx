@@ -21,6 +21,7 @@ import {
   cooldown,
   credential,
   credentialList,
+  quotaCheck,
 } from "../../test/fixtures";
 import { mockApi, route, type MockApi } from "../../test/mockApi";
 import { TEST_KEY } from "../../test/renderApp";
@@ -260,6 +261,40 @@ describe("the providers card", () => {
     const card = await screen.findByRole("region", { name: HEALTH });
     expect(await within(card).findByText("Nothing needs attention: 1 ready, 1 off.")).toBeVisible();
     expect(within(card).queryByRole("list")).toBeNull();
+  });
+
+  it("says a capped quota rest ends in a check, not that the account is back then", async () => {
+    server([
+      credential({
+        name: "codex-bob.json",
+        id: "codex-bob.json",
+        provider: "codex",
+        account: "bob@example.com",
+        cooldowns: [cooldown("credential_quota", 3600)],
+        quota_checks: [quotaCheck("resting")],
+      }),
+      credential({
+        name: "claude-eve.json",
+        id: "claude-eve.json",
+        account: "eve@example.com",
+        // While its check is in flight, the rest runs to the provider's reset.
+        cooldowns: [cooldown("credential_quota", 4 * 86_400)],
+        quota_checks: [quotaCheck("checking")],
+      }),
+    ]);
+    renderCard();
+    const card = await screen.findByRole("region", { name: HEALTH });
+    const board = await within(card).findByRole("list", { name: "Accounts that need attention" });
+    const [bob, eve] = within(board).getAllByRole("listitem") as [HTMLElement, HTMLElement];
+    expect(within(bob).getByRole("link")).toHaveTextContent("bob@example.com");
+    expect(bob).toHaveTextContent(/Next quota check at \d\d:\d\d \(in about 1 h/);
+    expect(bob).not.toHaveTextContent("Back at");
+    expect(within(eve).getByRole("link")).toHaveTextContent("eve@example.com");
+    expect(eve).toHaveTextContent(
+      "A check is under way: one request is finding out whether the quota is back.",
+    );
+    expect(eve).not.toHaveTextContent("Back at");
+    expect(eve).not.toHaveTextContent("Next quota check");
   });
 
   it("works out once a minute when a resting account is back, without reading it out", async () => {

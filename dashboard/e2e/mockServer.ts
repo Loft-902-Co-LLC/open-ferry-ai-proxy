@@ -590,7 +590,11 @@ export async function mockServer(
       case "GET /open-ferry/api/v1/request-logs":
         return json(route, logSearch(logs));
       case "GET /v0/management/auth-files":
-        return json(route, credentialList(connected ? credentials(now) : []));
+        // Made by the server's clock, which the credentials' times count from.
+        return json(route, {
+          ...credentialList(connected ? credentials(now) : []),
+          observed_at: new Date(now).toISOString(),
+        });
       case "GET /open-ferry/api/v1/claude-cli/entries":
         return json(route, { entries: connected ? claudeCliEntries(now) : [] });
       case "GET /open-ferry/api/v1/claude-cli/auth-status": {

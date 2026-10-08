@@ -10,6 +10,7 @@ import {
   keysOf,
   type Credential,
   type CredentialList,
+  type QuotaCheck,
 } from "../../api/credentials";
 import { CLAUDE_CLI_ENTRIES, type ClaudeCliEntries, type ClaudeCliEntry } from "../../api/dashboard";
 import { useApiQuery } from "../../api/hooks";
@@ -27,10 +28,13 @@ import { pollWhileRead } from "../credentials/CredentialList";
 import { CheckedAt } from "../credentials/PolledState";
 import {
   compareHealth,
+  credentialCooldowns,
   credentialHealth,
   healthTally,
   needsAttention,
   providerName,
+  quotaCheckOf,
+  quotaCheckText,
   secondsUntilBack,
   signInName,
   timeLeft,
@@ -67,6 +71,14 @@ interface Account extends HealthOrder {
   provider: string;
   /** When its list was read, which `backIn` counts from. */
   readAt: number;
+  /** The capped quota rest its rest is, when `routing.quota.check-after` caps it. */
+  check: QuotaCheck | undefined;
+}
+
+/** The capped quota rest behind the rest `secondsUntilBack` counts down, if any. */
+function restCheck(credential: Credential | null): QuotaCheck | undefined {
+  const rest = credential === null ? undefined : credentialCooldowns(credential)[0];
+  return credential === null || rest === undefined ? undefined : quotaCheckOf(credential, rest);
 }
 
 function credentialAccount(credential: Credential, name: string, readAt: number): Account {
@@ -78,6 +90,7 @@ function credentialAccount(credential: Credential, name: string, readAt: number)
     health: credentialHealth(credential),
     backIn: secondsUntilBack(credential),
     readAt,
+    check: restCheck(credential),
   };
 }
 
@@ -90,19 +103,32 @@ function entryAccount(entry: ClaudeCliEntry, readAt: number): Account {
     health: entryHealth(entry),
     backIn: secondsUntilBack(entry.credential),
     readAt,
+    check: restCheck(entry.credential),
   };
 }
 
-/** "Back at 14:32 (in about 12 min)", as of `now`. */
+/**
+ * "Back at 14:32 (in about 12 min)", as of `now`. A capped quota rest ends
+ * in a check, which may find the quota still used up, so it says "Next
+ * quota check at" instead; while that check is due or under way, the rest
+ * runs to the provider's reset, so it says so rather than give that time.
+ */
 function backAt(account: Account, now: number): string | null {
-  if (account.health.triage !== "resting" || !Number.isFinite(account.backIn)) {
+  if (account.health.triage !== "resting") {
+    return null;
+  }
+  if (account.check !== undefined && account.check.state !== "resting") {
+    return quotaCheckText(account.check, account.readAt);
+  }
+  if (!Number.isFinite(account.backIn)) {
     return null;
   }
   const at = account.readAt + account.backIn * 1000;
   const left = Math.max(0, at - Math.max(now, account.readAt));
   const when =
     left < SAME_DAY_MS ? clockMinutes(at) : formatShortDateTime(new Date(at).toISOString());
-  return `Back at ${when} (in ${timeLeft(left / 1000)})`;
+  const lead = account.check === undefined ? "Back at" : "Next quota check at";
+  return `${lead} ${when} (in ${timeLeft(left / 1000)})`;
 }
 
 /** One failing or resting account, linking to it on Credentials. */
