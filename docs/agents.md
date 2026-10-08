@@ -141,7 +141,7 @@ Each command takes `--config PATH` (else `config.yaml` in the working directory,
 - **A server that runs another config**, one on the same port started from another file, is never changed: a server counts only when the file it runs holds the same bytes as this config. Commands stop with `other_config` and say to pass `--config` with the path of the config it runs.
 - A change is made only to the file it was worked out from: when the file changes meanwhile, one confirmed at a terminal is refused with `config_changed` (run it again), and any other is worked out again from the file as it is.
 - The report says which way it went (`"via": "server"` or `"file"`), lists each setting it changed with its old and new value, masked, and says that `open-ferry config undo` reverses it.
-- Every write of the config, by these commands, the dashboard or the management API, keeps the file it replaces as `<config>.bak`. `config undo` puts that back, and keeps what it replaces as the new `.bak`, so running it again redoes the change.
+- Every write of the config, by these commands, the dashboard or the management API, keeps the file it replaces as `<config>.bak`. `config undo` puts that back, and keeps what it replaces as the new `.bak`, so running it again redoes the change. When the config was changed since that write, as by a hand edit, an undo loses that change too, so it is refused with `changed_since` (exit code `1`, with what it would change) unless confirmed with `--yes` or `confirm: true`.
 - `credentials` commands need the running server; without one they exit with `4` and say how to start it. `status` exits with `4` too when nothing runs, after saying what the config holds.
 
 ### The management key

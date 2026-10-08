@@ -377,6 +377,83 @@ async fn undo_and_undo_of_undo() {
     );
 }
 
+/// A command-line context whose terminal, when asked, appends a comment to
+/// `file` and answers yes.
+fn asking_and_editing(path: &Path, file: &Path) -> Context {
+    let file = file.to_owned();
+    Context {
+        ask: Some(Box::new(move |_question: &str| {
+            let mut text = std::fs::read_to_string(&file).unwrap();
+            text.push_str("# changed while asked\n");
+            std::fs::write(&file, text).unwrap();
+            true
+        })),
+        ..cli(path)
+    }
+}
+
+// Not upstream's: an undo of a config changed since the last change that
+// kept a backup, as by a hand edit, loses that edit too, so it is refused
+// with changed_since unless confirmed; one whose backup changed after it
+// was asked about is refused with config_changed, and nothing changes.
+#[tokio::test]
+async fn undo_of_a_changed_config_needs_a_confirmation() {
+    let offline = offline(Some(KEY));
+    let setup = &offline.setup;
+    let path = setup.path.clone();
+    let backup = setup.dir.path().join("config.yaml.bak");
+    ok(&cli(&path), set("routing.strategy", "fill-first")).await;
+    let edited = setup.text().replace("fill-first", "round-robin");
+    std::fs::write(&path, &edited).unwrap();
+
+    let failure = fails(&cli(&path), Command::ConfigUndo).await;
+    assert_eq!(failure.error, "changed_since");
+    assert_eq!(failure.code, exit::FAILED);
+    assert!(failure.message.contains("as by a hand edit"));
+    assert!(failure.hint.as_deref().unwrap().contains("--yes"));
+    let would = failure.would.clone().unwrap();
+    assert_eq!(
+        would["changes"],
+        json!([{"path": "routing.strategy", "old": "round-robin"}])
+    );
+    assert!(
+        would["reasons"][0]
+            .as_str()
+            .unwrap()
+            .contains("undoing loses that change too")
+    );
+    assert_eq!(setup.text(), edited);
+    let tool = fails(&context(&path, Caller::Mcp), Command::ConfigUndo).await;
+    assert_eq!(tool.error, "changed_since");
+    assert!(tool.hint.as_deref().unwrap().contains("confirm: true"));
+
+    // A terminal is asked, and a no changes nothing.
+    let (ctx, asked) = asking(&path, false);
+    assert_eq!(fails(&ctx, Command::ConfigUndo).await.error, "declined");
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
+    assert_eq!(setup.text(), edited);
+
+    // A backup or file that changes while it is asked about is refused.
+    let saved = std::fs::read_to_string(&backup).unwrap();
+    let failure = fails(&asking_and_editing(&path, &backup), Command::ConfigUndo).await;
+    assert_eq!(failure.error, "config_changed");
+    assert_eq!(setup.text(), edited);
+    std::fs::write(&backup, &saved).unwrap();
+    let failure = fails(&asking_and_editing(&path, &path), Command::ConfigUndo).await;
+    assert_eq!(failure.error, "config_changed");
+    std::fs::write(&path, &edited).unwrap();
+
+    // Confirmed, it goes ahead, and the hand edit goes with the change.
+    let undone = ok(&confirmed(&path, Caller::Cli), Command::ConfigUndo).await;
+    assert_eq!(undone.json["via"], json!("file"));
+    assert!(!setup.text().contains("round-robin"));
+    assert!(!setup.text().contains("fill-first"));
+    // That undo was a recorded write, so undoing it needs no confirmation,
+    // and puts the edit back.
+    ok(&cli(&path), Command::ConfigUndo).await;
+    assert_eq!(setup.text(), edited);
+}
+
 // Not upstream's: each sensitive setting needs --yes; with no terminal it
 // changes nothing and says what it would change, masked; a terminal is
 // asked, and a no changes nothing.
@@ -1148,6 +1225,36 @@ async fn settings_go_through_the_running_server() {
     let replaced = ok(&confirmed(&live.setup.path, Caller::Cli), replace()).await;
     assert_eq!(replaced.json["via"], json!("server"));
     assert_eq!(live.state.config().routing.strategy, "round-robin");
+}
+
+// Not upstream's: through the server, an undo sends the SHA-256 of the
+// file and backup it worked out from: one of a hand-edited config is
+// refused with changed_since unless confirmed, and one whose backup changed
+// after it was asked about is refused by the server with config_changed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn undo_through_the_server_checks_what_it_saw() {
+    let live = live(Some(KEY), None).await;
+    let path = live.setup.path.clone();
+    let backup = live.setup.dir.path().join("config.yaml.bak");
+    let changed = ok(&cli(&path), set("routing.strategy", "fill-first")).await;
+    assert_eq!(changed.json["via"], json!("server"));
+    let edited = live.setup.text().replace("fill-first", "round-robin");
+    std::fs::write(&path, &edited).unwrap();
+
+    let failure = fails(&cli(&path), Command::ConfigUndo).await;
+    assert_eq!(failure.error, "changed_since");
+    assert_eq!(live.setup.text(), edited);
+
+    let saved = std::fs::read_to_string(&backup).unwrap();
+    let failure = fails(&asking_and_editing(&path, &backup), Command::ConfigUndo).await;
+    assert_eq!(failure.error, "config_changed", "{failure:?}");
+    assert_eq!(live.setup.text(), edited);
+    std::fs::write(&backup, &saved).unwrap();
+
+    let undone = ok(&confirmed(&path, Caller::Cli), Command::ConfigUndo).await;
+    assert_eq!(undone.json["via"], json!("server"));
+    assert!(!live.setup.text().contains("round-robin"));
+    assert_ne!(live.state.config().routing.strategy, "fill-first");
 }
 
 // Not upstream's: a server on the config's port that takes its key but

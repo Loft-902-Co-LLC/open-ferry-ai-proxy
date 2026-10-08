@@ -176,7 +176,7 @@ const TOOLS: [Spec; 18] = [
         command: "config undo",
         title: "Undo the last change",
         description: concat!(
-            "Reverses the last change to the config, by swapping the config and its backup; calling it again redoes the change. ",
+            "Reverses the last change to the config, by swapping the config and its backup; calling it again redoes the change. When the config was changed since the last backup, as by a hand edit, undoing loses that change too, so it fails with `changed_since` and lists what it would change unless `confirm: true`. ",
             sensitive!()
         ),
         read_only: false,

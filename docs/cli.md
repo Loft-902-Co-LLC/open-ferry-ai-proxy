@@ -344,7 +344,7 @@ A secret is never taken as an argument: `config set` reads one from standard inp
 | Code | When |
 |---|---|
 | 0 | Done, or nothing needed changing. Also for `--help` |
-| 1 | It failed or was refused: the server or the writer refused the change (`invalid_value`), the key was refused (`unauthorized`), the server at the config's address runs another config (`other_config`), the file changed while the change was worked out (`config_changed`), a credential or key wasn't found, the file couldn't be read or written. Nothing was changed unless the output says so |
+| 1 | It failed or was refused: the server or the writer refused the change (`invalid_value`), the key was refused (`unauthorized`), the server at the config's address runs another config (`other_config`), the file changed while the change was worked out (`config_changed`), an undo would lose a change made since the last backup and wasn't confirmed (`changed_since`), a credential or key wasn't found, the file couldn't be read or written. Nothing was changed unless the output says so |
 | 2 | Bad usage (`usage`): an unknown command or flag, or an unknown setting (`unknown_path`, with the nearest known one), or a secret given as an argument (`secret_in_argument`) |
 | 3 | It needs `--yes` and didn't get it (`needs_confirmation`), or you answered no (`declined`). Nothing was changed |
 | 4 | It needs the server, which isn't running (`not_running`); `status` exits with 4 when no server runs |
@@ -406,6 +406,8 @@ A path is the v8 config's, as the `/v8/management/config/` route and the dashboa
 - **`show`** prints the whole config, masked, as YAML (as JSON under `settings` with `--json`).
 - **`diff`** prints what the last change made: each setting that differs between `<config>.bak` and the config.
 - **`undo`** puts `<config>.bak` back, and keeps the config it replaces as the new `.bak`, so running it again redoes the change. With a server running, it goes through the dashboard API's `POST /open-ferry/api/v1/config/undo`, under the lock every management write takes. There is one backup, so it goes back one write.
+  - When the config was changed since the last write that kept a backup, as by a hand edit, undoing loses that change too: without `--yes` it changes nothing, exits with 1 (`changed_since`) and lists what it would change; at a terminal it asks.
+  - It puts back only the backup it showed, over the config it showed: their SHA-256 go with it, and when either changed after that, nothing is undone (`config_changed`, exit code 1).
 - **`replace`** replaces the whole config with the YAML read from standard input or a file, after the same checks. It always needs `--yes`.
 
 ```
