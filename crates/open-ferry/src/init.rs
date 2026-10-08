@@ -9,7 +9,7 @@
 //! - `server.port`: `-port`, or the template's;
 //! - `self-update`: uncommented, so the file says that open-ferry updates
 //!   itself (`mode: auto`) and, in the comment above it, how to turn that
-//!   off (`open-ferry update --mode off`).
+//!   off (`open-ferry update -mode off`).
 //!
 //! Each key is 32 bytes from the operating system's random generator: the
 //! client key as the dashboard's "new client key" makes one, `sk-` and the
@@ -573,7 +573,7 @@ mod tests {
         assert!(!config.has_example_api_keys());
         assert_eq!(config.self_update.mode, "auto");
         assert_eq!(config.self_update.check_every, "6h");
-        assert!(text.contains("open-ferry update --mode off"), "{text}");
+        assert!(text.contains("open-ferry update -mode off"), "{text}");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;

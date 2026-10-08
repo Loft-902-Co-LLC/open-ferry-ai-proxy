@@ -171,7 +171,7 @@ impl UpdateService {
                 settings.source
             ),
             mode => tracing::info!(
-                "automatic updates: {} (set by {}), checking every {}h; to turn them off, run `open-ferry update --mode off`",
+                "automatic updates: {} (set by {}), checking every {}h; to turn them off, run `open-ferry update -mode off`",
                 settings::describe(mode),
                 settings.source,
                 settings.check_every.as_secs() / 3600
