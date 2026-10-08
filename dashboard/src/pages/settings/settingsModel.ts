@@ -1,17 +1,19 @@
 // The settings the Settings form changes, each through a route of its own,
 // so a save sends nothing else: upstream's settings by `PATCH
 // /v0/management/<setting>` with `{"value": ...}`, and open-ferry's own,
-// `routing.quota.*` and `management.separate-address`, which have no such
-// route, by `PUT /v8/management/config/<path>` with the bare value. Values
-// are read from `GET /v0/management/config` as the server uses them: the
-// config module (open-ferry-core's config::normalize) loads a negative log
-// size as 0 and a negative error-log count as 10, and takes an unknown
-// routing strategy as round-robin. That answer has no `management` or
-// `server` section, so the management address, and what checking it needs,
-// are read from the file through the v8 config route (see ServerFacts).
+// `routing.quota.*`, `self-update.mode` and `management.separate-address`,
+// which have no such route, by `PUT /v8/management/config/<path>` with the
+// bare value. Values are read from `GET /v0/management/config` as the
+// server uses them: the config module (open-ferry-core's config::normalize)
+// loads a negative log size as 0 and a negative error-log count as 10, and
+// takes an unknown routing strategy as round-robin. That answer has no
+// `management` or `server` section, so the management address, and what
+// checking it needs, are read from the file through the v8 config route
+// (see ServerFacts).
 
 import type { ApiRequest } from "../../api/client";
 import { MANAGEMENT, V8_CONFIG } from "../../api/management";
+import { UPDATE_MODES, UPDATE_MODE_LABELS, updateModeOf } from "../../api/update";
 import { countField, wholeNumberField } from "../../lib/fields";
 import { parseGoDuration } from "../../lib/goDuration";
 import { z } from "../../lib/zod";
@@ -155,6 +157,7 @@ export const settingsSchema = z.object({
   requestLog: z.boolean(),
   errorLogsMaxFiles: countField("The number of failed-request logs kept"),
   usageStatisticsEnabled: z.boolean(),
+  selfUpdateMode: z.enum(UPDATE_MODES),
   // Its port is checked against the proxy's too, which isn't a value here:
   // see checkSetting.
   managementAddress: checkedText((value) =>
@@ -243,6 +246,12 @@ export const SETTINGS: Record<SettingId, SettingInfo> = {
     label: "Usage statistics",
     configKey: "usage-statistics-enabled",
     path: `${MANAGEMENT}/usage-statistics-enabled`,
+  },
+  selfUpdateMode: {
+    label: "Updates",
+    configKey: "self-update.mode",
+    path: `${V8_CONFIG}/self-update/mode`,
+    v8: true,
   },
   managementAddress: {
     label: "Management address",
@@ -340,6 +349,7 @@ export function settingValuesOf(config: unknown, facts?: ServerFacts): SettingVa
   const routing = fieldOf(config, "routing");
   const quota = fieldOf(routing, "quota");
   const checkAfter = fieldOf(quota, "check-after");
+  const selfUpdate = fieldOf(config, "self-update");
   return {
     proxyUrl: typeof proxy === "string" ? proxy.trim() : "",
     routingStrategy: strategyOf(fieldOf(routing, "strategy")),
@@ -356,6 +366,7 @@ export function settingValuesOf(config: unknown, facts?: ServerFacts): SettingVa
     requestLog: flag("request-log"),
     errorLogsMaxFiles: errorLogs < 0 ? 10 : errorLogs,
     usageStatisticsEnabled: flag("usage-statistics-enabled"),
+    selfUpdateMode: updateModeOf(fieldOf(selfUpdate, "mode")),
     managementAddress: facts?.separateAddress ?? "",
   };
 }
@@ -529,6 +540,8 @@ export function describeSetting<K extends SettingId>(id: K, value: SettingValues
       return PREFERENCE_LABELS[preferenceOf(text)];
     case "quotaCheckAfter":
       return describeCheckAfter(text);
+    case "selfUpdateMode":
+      return UPDATE_MODE_LABELS[updateModeOf(text)];
     case "managementAddress":
       return text === "" ? "None: on the proxy's port" : text;
     default:

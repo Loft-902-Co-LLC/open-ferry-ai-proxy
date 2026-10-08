@@ -4,6 +4,7 @@ import { Card } from "../components/Card";
 import { PageHeader } from "../components/PageHeader";
 import { ProblemNotice } from "../components/ProblemNotice";
 import { Spinner } from "../components/Spinner";
+import { UpdatesCard } from "./about/UpdatesCard";
 
 const LICENSES_URL = `${import.meta.env.BASE_URL}third-party-licenses.txt`;
 const REPO_URL = "https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy";
@@ -23,7 +24,7 @@ export function AboutPage() {
   const build = useServerBuild();
   return (
     <>
-      <PageHeader title="About" description="What this is, where it comes from, and its licenses." />
+      <PageHeader title="About" description="What this is, where it comes from, its licenses, and its updates." />
       <div className="grid gap-4 lg:grid-cols-2">
         <Card title="open-ferry">
           <p>
@@ -69,6 +70,7 @@ export function AboutPage() {
             </dl>
           )}
         </Card>
+        <UpdatesCard className="lg:col-span-2" />
       </div>
     </>
   );

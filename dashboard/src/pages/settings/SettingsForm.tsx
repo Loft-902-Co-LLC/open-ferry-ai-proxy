@@ -2,6 +2,8 @@ import type { UseQueryResult } from "@tanstack/react-query";
 import { useCallback, useMemo, type ReactNode } from "react";
 import { useForm, useWatch, type FieldErrors, type Resolver } from "react-hook-form";
 
+import { UPDATE_MODES, UPDATE_MODE_LABELS, type UpdateMode } from "../../api/update";
+import { useUpdateStatus } from "../../api/updateStatus";
 import { Badge } from "../../components/Badge";
 import { Card } from "../../components/Card";
 import { CheckboxField } from "../../components/CheckboxField";
@@ -97,6 +99,30 @@ export function useSettingsForm(config: unknown, facts: ServerFacts | undefined)
 
 export type SettingsFormState = ReturnType<typeof useSettingsForm>;
 
+/**
+ * What to know when `chosen`, the mode the form holds, goes further than
+ * `OPEN_FERRY_SELF_UPDATE` lets it: the server's update status says the
+ * environment set its mode (`inUse`), which it can only lower.
+ */
+function updateModeWarning(
+  chosen: UpdateMode | undefined,
+  inUse: { mode: UpdateMode; mode_source: string } | undefined,
+): ReactNode {
+  if (chosen === undefined || inUse?.mode_source !== "environment") {
+    return undefined;
+  }
+  if (UPDATE_MODES.indexOf(chosen) >= UPDATE_MODES.indexOf(inUse.mode)) {
+    return undefined;
+  }
+  return (
+    <>
+      Updates stay {UPDATE_MODE_LABELS[inUse.mode].toLowerCase()}:{" "}
+      <Code>OPEN_FERRY_SELF_UPDATE</Code> in the server&apos;s environment sets them so, and this
+      setting can&apos;t raise it. Remove it there and restart the server for this to apply.
+    </>
+  );
+}
+
 /** A hint's text, kept to a readable line length on a wide screen. */
 function Hint({ children }: { children: ReactNode }) {
   return <span className="block max-w-prose">{children}</span>;
@@ -123,6 +149,8 @@ export function SettingsForm({ id, settings, facts, onSubmit }: SettingsFormProp
   const { form, unsaved, problems } = settings;
   const strategy = useWatch({ control: form.control, name: "routingStrategy" });
   const address = useWatch({ control: form.control, name: "managementAddress" });
+  const updateMode = useWatch({ control: form.control, name: "selfUpdateMode" });
+  const updates = useUpdateStatus();
   /** The problem with setting `id`'s loaded value, while it is left alone. */
   const warning = (setting: SettingId) =>
     problems[setting] === undefined || unsaved.includes(setting)
@@ -376,6 +404,26 @@ export function SettingsForm({ id, settings, facts, onSubmit }: SettingsFormProp
             </Hint>
           }
           {...form.register("usageStatisticsEnabled")}
+        />
+      </Card>
+
+      <Card title="Updates" description="Whether open-ferry keeps itself up to date.">
+        <SelectField
+          label="open-ferry's own updates"
+          options={UPDATE_MODES.map((value) => ({ value, label: UPDATE_MODE_LABELS[value] }))}
+          hint={
+            <Hint>
+              On, the server looks for a new release of open-ferry every few hours, checks its
+              signature, and gets it ready for <Code>open-ferry update</Code> to install. Notify
+              only looks, and says in its log and on the About page when one is out, but downloads
+              nothing more. Off makes no update request at all. An install from a package manager
+              or the container image only ever says that a release is out. The About page shows
+              what updates last did.
+            </Hint>
+          }
+          warning={updateModeWarning(updateMode, updates.data)}
+          error={errors.selfUpdateMode?.message}
+          {...form.register("selfUpdateMode")}
         />
       </Card>
 

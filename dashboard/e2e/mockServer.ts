@@ -7,6 +7,7 @@
 import type { Page, Route } from "@playwright/test";
 
 import type { Credential, ProviderKey } from "../src/api/credentials";
+import { updateModeOf, type UpdateStatus } from "../src/api/update";
 import type {
   Bucket,
   ClaudeCliEntry,
@@ -32,6 +33,7 @@ import {
   requestsPage,
   serverLogPage,
   summary,
+  updateStatus,
   usageRequest,
 } from "../src/test/fixtures";
 
@@ -39,8 +41,10 @@ import {
 export const E2E_KEY = "e2e-management-key-0001";
 
 /** What open-ferry says about its build in every management answer. */
+const VERSION = "0.1.0-e2e";
+
 const BUILD_HEADERS = {
-  "x-cpa-version": "0.1.0-e2e",
+  "x-cpa-version": VERSION,
   "x-cpa-commit": "e2e0000",
   "x-cpa-build-date": "2026-10-05T00:00:00Z",
 };
@@ -170,7 +174,7 @@ const UPLOADED_IMAGE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x
 function logContent(entry: LogEntry): string {
   return [
     "=== REQUEST INFO ===",
-    `Version: 0.1.0-e2e`,
+    `Version: ${VERSION}`,
     `URL: ${entry.url ?? ""}`,
     `Method: ${entry.method ?? "POST"}`,
     `Timestamp: ${entry.time}`,
@@ -197,7 +201,7 @@ function serverLines(now: number): string[] {
   const at = (offset: number) =>
     new Date(now - offset * 1000).toISOString().replace("T", " ").replace(/\.\d+Z$/, "");
   return [
-    `[${at(300)}] [--------] [info ] [main.go:212] open-ferry 0.1.0-e2e listening on 127.0.0.1:18317`,
+    `[${at(300)}] [--------] [info ] [main.go:212] open-ferry ${VERSION} listening on 127.0.0.1:18317`,
     `[${at(240)}] [--------] [info ] [watcher.go:88] config.yaml loaded: 3 credentials, 2 client keys`,
     `[${at(180)}] [1234abcd] [info ] [handler.go:141] POST /v1/responses gpt-5.1-codex 200 4.2s`,
     `[${at(120)}] [2345bcde] [warn ] [conductor.go:301] codex: rate limited, retrying with the next credential`,
@@ -468,7 +472,15 @@ const V8_PATHS = new Set([
   "routing/quota/prefer",
   "routing/quota/reserve-percent",
   "routing/quota/check-after",
+  "self-update/mode",
 ]);
+
+/** How the update status says each mode. */
+const UPDATES_SAID: Record<UpdateStatus["mode"], UpdateStatus["updates"]> = {
+  auto: "on",
+  notify: "notify-only",
+  off: "off",
+};
 
 /** The mapping at `keys` in `tree`, made on the way when `make`, else undefined where there is none. */
 function mappingAt(
@@ -618,6 +630,24 @@ export async function mockServer(
             ],
           }),
         );
+      case "GET /open-ferry/api/v1/update": {
+        // As the config sets it: none is set until the Settings tab saves one.
+        const written = mappingAt(v8File, ["self-update"], false)?.mode;
+        const mode = updateModeOf(written);
+        return json(
+          route,
+          updateStatus({
+            mode,
+            mode_source: written === undefined ? "default" : "config",
+            updates: UPDATES_SAID[mode],
+            running_version: VERSION,
+            installed_version: VERSION,
+            latest_version: VERSION,
+            last_check: new Date(now - HOUR).toISOString(),
+            next_check: mode === "off" ? null : new Date(now + 5 * HOUR).toISOString(),
+          }),
+        );
+      }
       case "GET /open-ferry/api/v1/usage/ledger":
         return json(route, ledger({ newest: calls[0]?.time ?? null }));
       case "GET /open-ferry/api/v1/usage/summary": {
@@ -701,6 +731,10 @@ export async function mockServer(
       const parent = mappingAt(v8File, keys.slice(0, -1), true);
       if (parent !== undefined) {
         parent[last] = JSON.parse(body) as unknown;
+      }
+      // GET /config shows self-update once something in it is set.
+      if (keys[0] === "self-update") {
+        config["self-update"] = v8File["self-update"];
       }
       return json(route, { "config-version": 8, status: "ok" });
     }

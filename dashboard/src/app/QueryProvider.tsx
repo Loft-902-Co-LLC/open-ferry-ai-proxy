@@ -9,13 +9,17 @@ import { useSession } from "../session/session";
 
 /**
  * Retries only failures a retry may fix: no answer, or a server error. A
- * ledger that couldn't be opened stays so until the server restarts.
+ * ledger that couldn't be opened stays so until the server restarts, and a
+ * server that runs no update checks never will.
  */
 function shouldRetry(failureCount: number, error: unknown): boolean {
   if (isApiError(error) && error.status >= 400 && error.status < 500) {
     return false;
   }
-  if (isApiError(error) && error.code === "ledger_unavailable") {
+  if (
+    isApiError(error) &&
+    (error.code === "ledger_unavailable" || error.code === "updates_unavailable")
+  ) {
     return false;
   }
   return failureCount < 2;

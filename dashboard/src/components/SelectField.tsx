@@ -1,3 +1,4 @@
+import { TriangleAlert } from "lucide-react";
 import { useId, type ReactNode, type Ref, type SelectHTMLAttributes } from "react";
 
 import { cn } from "../lib/cn";
@@ -14,6 +15,8 @@ export interface SelectFieldProps extends Omit<SelectHTMLAttributes<HTMLSelectEl
   label: ReactNode;
   options: readonly SelectOption[];
   hint?: ReactNode;
+  /** Something to know about the value chosen, which doesn't stop a save. */
+  warning?: ReactNode;
   error?: string | undefined;
   /** Show the label beside the select, not above it. */
   inline?: boolean;
@@ -28,6 +31,7 @@ export function SelectField({
   label,
   options,
   hint,
+  warning,
   error,
   inline = false,
   className,
@@ -38,9 +42,14 @@ export function SelectField({
   const generatedId = useId();
   const selectId = id ?? generatedId;
   const hintId = `${selectId}-hint`;
+  const warningId = `${selectId}-warning`;
   const errorId = `${selectId}-error`;
   const describedBy =
-    [hint === undefined ? null : hintId, error === undefined ? null : errorId]
+    [
+      hint === undefined ? null : hintId,
+      warning === undefined ? null : warningId,
+      error === undefined ? null : errorId,
+    ]
       .filter((value) => value !== null)
       .join(" ") || undefined;
   return (
@@ -65,6 +74,12 @@ export function SelectField({
       {hint !== undefined && (
         <p id={hintId} className="max-w-prose text-muted">
           {hint}
+        </p>
+      )}
+      {warning !== undefined && (
+        <p id={warningId} className="flex max-w-prose items-start gap-1.5">
+          <TriangleAlert aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-warn" />
+          <span>{warning}</span>
         </p>
       )}
       {error !== undefined && (

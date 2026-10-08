@@ -223,7 +223,11 @@ test("renders every screen under the policy", async ({ page }) => {
 
   await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "About" }).click();
   await expect(page.getByRole("heading", { name: "About", level: 1 })).toBeVisible();
-  await expect(page.getByText("0.1.0-e2e")).toBeVisible();
+  const thisServer = page.getByRole("region", { name: "This server" });
+  await expect(thisServer.getByText("0.1.0-e2e")).toBeVisible();
+  const updates = page.getByRole("region", { name: "Updates" });
+  await expect(updates.getByText("by default")).toBeVisible();
+  await expect(updates.getByRole("button", { name: "Check now" })).toBeEnabled();
   await shot(page, "10-about");
 
   await page.goto("no-such-page");
