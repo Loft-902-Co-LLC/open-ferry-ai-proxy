@@ -6,7 +6,8 @@
 //!
 //! On its own it is a client of a server already running: the management
 //! API at `-management-base-url`, else at the config's
-//! `management.base-url`, else on 127.0.0.1 at the config's port,
+//! `management.base-url`, else at open-ferry's
+//! `management.separate-address`, else on 127.0.0.1 at the config's port,
 //! signed in with `-password` if given and otherwise with the key the user
 //! types.
 //!
@@ -16,7 +17,9 @@
 //! to the TUI's logs tab and not to standard output, and the server prints
 //! nothing. The TUI starts once the server answers a config request (see
 //! [`open_ferry_tui::wait_ready`]); if it never does, the server is stopped
-//! and the TUI doesn't start. When the TUI ends, the server stops.
+//! and the TUI doesn't start. When the TUI ends, the server stops. With
+//! `management.separate-address` set, the TUI uses the management
+//! address, as the management API is served only there.
 //!
 //! Errors are written to standard error, and the exit code is 0, as
 //! upstream's.
@@ -30,6 +33,9 @@
 //!   too, until a reload changes `logging-to-file`.
 //! - A config port that isn't a TCP port fails the readiness check at once,
 //!   where upstream asks 30 times.
+//! - With open-ferry's `management.separate-address`, the TUI's default
+//!   and standalone mode use that address, with `https` while `tls` is
+//!   on (see [`management_address_url`]). Upstream has no such setting.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -97,6 +103,7 @@ async fn standalone(
         flags.password.0
     };
     let port = u16::try_from(config.port).ok();
+    let management_url = management_address_url(&config);
     let (cancel, cancelled) = oneshot::channel::<()>();
     let options = service::Options {
         local_password: password.clone(),
@@ -114,12 +121,21 @@ async fn standalone(
         },
     ));
 
-    let ready = match port {
-        Some(port) => open_ferry_tui::wait_ready(port, &password).await,
-        None => false,
+    let ready = match (&management_url, port) {
+        (Some(url), _) => open_ferry_tui::wait_ready_at(url, &password).await,
+        (None, Some(port)) => open_ferry_tui::wait_ready(port, &password).await,
+        (None, None) => false,
     };
-    match port {
-        Some(port) if ready => {
+    match (management_url, port) {
+        (Some(url), _) if ready => {
+            let result =
+                open_ferry_tui::run_with_base_url(&url, &password, Some(hook), open_url).await;
+            restore();
+            if let Err(error) = result {
+                eprintln!("TUI error: {error}");
+            }
+        }
+        (None, Some(port)) if ready => {
             let result = open_ferry_tui::run(port, &password, Some(hook), open_url).await;
             restore();
             if let Err(error) = result {
@@ -152,7 +168,8 @@ fn open_url(url: &str) {
 }
 
 /// The management API the TUI uses on its own (`resolveManagementBaseURL`):
-/// `flag_url`, else the config's `management.base-url`, else
+/// `flag_url`, else the config's `management.base-url`, else its
+/// `management.separate-address` (see [`management_address_url`]), else
 /// 127.0.0.1 at the config's port, or 8317 when that isn't positive; each
 /// URL trimmed.
 pub fn resolve_management_base_url(flag_url: &str, config: Option<&Config>) -> String {
@@ -165,12 +182,23 @@ pub fn resolve_management_base_url(flag_url: &str, config: Option<&Config>) -> S
         if !base_url.is_empty() {
             return base_url.to_owned();
         }
+        if let Some(url) = management_address_url(config) {
+            return url;
+        }
     }
     let port = config
         .map(|config| config.port)
         .filter(|&port| port > 0)
         .unwrap_or(DEFAULT_PORT);
     format!("http://127.0.0.1:{port}")
+}
+
+/// The URL of `config`'s management address (`management.separate-address`),
+/// when it has one: on 127.0.0.1 when it is every interface, and with
+/// `https` while `tls` is on.
+fn management_address_url(config: &Config) -> Option<String> {
+    let address = config.remote_management.separate_address().ok()??;
+    Some(address.base_url(config.tls.enable))
 }
 
 #[cfg(test)]
@@ -225,6 +253,53 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    // Not upstream's: the management address is the default after
+    // management.base-url, with https while tls is on.
+    #[test]
+    fn defaults_to_the_management_address() {
+        let config = |address: &str, base_url: &str, tls: bool| {
+            let mut config = Config::default();
+            config.port = 9000;
+            config.remote_management.separate_address = address.to_owned();
+            config.remote_management.base_url = base_url.to_owned();
+            config.tls.enable = tls;
+            config
+        };
+        for (address, base_url, tls, want) in [
+            ("127.0.0.1:8318", "", false, "http://127.0.0.1:8318"),
+            ("[::1]:8318", "", false, "http://[::1]:8318"),
+            (":8318", "", false, "http://127.0.0.1:8318"),
+            ("0.0.0.0:8318", "", true, "https://127.0.0.1:8318"),
+            (
+                "admin.internal:8318",
+                "",
+                false,
+                "http://admin.internal:8318",
+            ),
+            (
+                "127.0.0.1:8318",
+                "https://cfg.example.com",
+                false,
+                "https://cfg.example.com",
+            ),
+            ("", "", false, "http://127.0.0.1:9000"),
+            // Not one the loader takes: the port, as upstream.
+            ("127.0.0.1", "", false, "http://127.0.0.1:9000"),
+        ] {
+            let config = config(address, base_url, tls);
+            assert_eq!(
+                resolve_management_base_url("", Some(&config)),
+                want,
+                "{address:?} {base_url:?} {tls}"
+            );
+        }
+        let config = config("127.0.0.1:8318", "", false);
+        assert_eq!(
+            resolve_management_base_url("http://flag.example.com", Some(&config)),
+            "http://flag.example.com"
+        );
     }
 
     // Not upstream's: the URLs are trimmed, and the made-up password is

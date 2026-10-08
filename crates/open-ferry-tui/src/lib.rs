@@ -13,6 +13,8 @@
 //! Deviations from upstream:
 //! - The run functions take what opens a URL in a browser, rather than
 //!   opening it themselves, and write to standard output only.
+//! - [`wait_ready_at`] checks a server at any base URL, for open-ferry's
+//!   `management.separate-address`; upstream checks a loopback port only.
 
 mod ansi;
 mod app;
@@ -88,11 +90,16 @@ pub async fn run(
 /// half as long again each time until a second apart, as upstream checks
 /// the embedded server before it runs the TUI.
 pub async fn wait_ready(port: u16, secret: &str) -> bool {
-    ready(port, secret, READY_TRIES).await
+    ready(&Client::local(i64::from(port), secret), READY_TRIES).await
 }
 
-async fn ready(port: u16, secret: &str, tries: usize) -> bool {
-    let client = Client::local(i64::from(port), secret);
+/// [`wait_ready`] for the server at `base_url`, read as
+/// [`run_with_base_url`] reads it.
+pub async fn wait_ready_at(base_url: &str, secret: &str) -> bool {
+    ready(&Client::new(base_url, secret), READY_TRIES).await
+}
+
+async fn ready(client: &Client, tries: usize) -> bool {
     let mut backoff = Duration::from_millis(100);
     for _ in 0..tries {
         if client.get_config().await.is_ok() {
@@ -120,7 +127,23 @@ mod tests {
         assert_eq!(requests, ["GET /v0/management/config auth=Bearer pw body="]);
 
         let failing = testing::Server::start(&[]).await;
-        assert!(!ready(failing.port(), "pw", 3).await);
+        let client = Client::local(i64::from(failing.port()), "pw");
+        assert!(!ready(&client, 3).await);
         assert_eq!(failing.take_requests().len(), 3);
+    }
+
+    // Not upstream's: the readiness check at a base URL, with or without
+    // its scheme.
+    #[tokio::test]
+    async fn waits_for_the_server_at_a_base_url() {
+        let server = testing::Server::start(&[("GET /v0/management/config", "{}")]).await;
+        let port = server.port();
+        for base_url in [
+            format!("http://127.0.0.1:{port}/"),
+            format!("127.0.0.1:{port}"),
+        ] {
+            assert!(wait_ready_at(&base_url, "pw").await, "{base_url}");
+        }
+        assert_eq!(server.take_requests().len(), 2);
     }
 }
