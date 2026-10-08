@@ -26,8 +26,8 @@ use serde_json::{Map, Value, json};
 
 use super::api::{Body, answer_failure};
 use super::change::{
-    Call, Changed, Content, Edit, Request, check_expected, config_changed, file_note, make, masked,
-    read_config,
+    Call, Changed, Content, Edit, Request, check_expected, config_changed, copy_note, file_note,
+    make, masked, read_config,
 };
 use super::guard::{READS_A_FILE, confirm, go_ahead, sensitive_reasons};
 use super::mask::{auth_dirs, credential_mark, holds_secret, is_secret_name, mask_at, mask_tree};
@@ -598,7 +598,14 @@ pub(crate) async fn undo(ctx: &Context) -> Result<Outcome, Failure> {
             "file"
         }
     };
-    let now = read_tree(&ctx.path)?;
+    let now_data = read_config(&ctx.path)?;
+    // As for a change: the server undid the file it runs, a copy of this
+    // one, and this file didn't change.
+    let copy = via == "server" && now_data == current;
+    if copy {
+        note = Some(copy_note(ctx));
+    }
+    let now = if copy { after } else { tree_of(&now_data)? };
     let changes = diff_trees(&before, &now);
     let changed = Changed {
         action: "undo",
