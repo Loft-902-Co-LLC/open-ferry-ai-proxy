@@ -20,5 +20,6 @@ Setting it up takes four steps, each in docs/agents.md: install it (the install 
 ## Optional
 
 - [Claude through your own Claude Code](https://raw.githubusercontent.com/Loft-902-Co-LLC/open-ferry-ai-proxy/main/docs/claude-subscription.md): the `claude-cli` entries, and why the Claude sign-in goes against Anthropic's terms
+- [Routing](https://raw.githubusercontent.com/Loft-902-Co-LLC/open-ferry-ai-proxy/main/docs/routing.md): how a credential is picked, open-ferry's `quota` strategy and its cap on long quota rests (`routing.quota`)
 - [Benchmarks](https://raw.githubusercontent.com/Loft-902-Co-LLC/open-ferry-ai-proxy/main/docs/benchmarks.md): open-ferry against CLIProxyAPI in front of the same fake upstream, and how to rerun it
 - [Changelog](https://raw.githubusercontent.com/Loft-902-Co-LLC/open-ferry-ai-proxy/main/CHANGELOG.md): what is in place today

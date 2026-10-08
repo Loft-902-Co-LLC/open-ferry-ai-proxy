@@ -45,8 +45,8 @@
 //! Deviations from upstream:
 //! - The whole strategy is open-ferry's own: CLIProxyAPI has no `quota`
 //!   strategy and runs one as round-robin, so there is no parity suite for
-//!   it. Tests use credentials with set readings and loopback mock
-//!   upstreams only.
+//!   it. Tests use credentials with set readings and fake executors, with
+//!   no upstream or socket at all.
 
 use std::cmp::Ordering;
 

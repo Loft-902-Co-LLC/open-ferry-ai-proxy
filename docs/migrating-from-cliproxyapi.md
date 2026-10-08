@@ -51,6 +51,7 @@ The auth directory and log mounts stay as they are, as do `CLI_PROXY_CONFIG_PATH
   - the client impersonation ("cloaking") settings.
 
   The full list is in the docs of `crates/open-ferry-core/src/config/mod.rs`. open-ferry's [`config.example.yaml`](../config.example.yaml) leaves these settings out.
+- **open-ferry's own routing settings**, `routing.strategy: quota` and the `routing.quota` section ([docs/routing.md](routing.md)), mean nothing to CLIProxyAPI: if you go back, it runs the `quota` strategy as round-robin, ignores the section, and comments it out when its management API writes a config in the v8 layout.
 - **Credential files of providers open-ferry doesn't serve** are left alone in the auth directory, but nothing is served from them. CLIProxyAPI hands a credential of an unknown type to its OpenAI-compatible executor.
 - **No remote storage or cloud mode.** The config and credentials must be local files. The Postgres, git and object stores, the cloud deploy mode and Home mode aren't ported, so these variables are ignored:
   - `DEPLOY=cloud`;

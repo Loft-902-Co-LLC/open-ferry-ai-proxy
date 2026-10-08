@@ -106,7 +106,9 @@ access:
 
 # Routing strategy for selecting credentials when multiple match.
 routing:
-  strategy: "round-robin" # round-robin (default), weighted-round-robin, fill-first
+  strategy: "round-robin" # round-robin (default), weighted-round-robin, fill-first, quota
+  # quota is open-ferry's own: it picks by the quota the providers report (see routing.quota
+  # below and docs/routing.md). CLIProxyAPI runs a strategy it doesn't know as round-robin.
   # weighted-round-robin uses each credential's integer weight (default 1, maximum 1,000,000).
   # Non-positive weights exclude the credential while this strategy is active.
   # For OAuth/file credentials, add a top-level numeric "weight" field to the auth JSON.
@@ -129,6 +131,23 @@ routing:
   # for maximum parallel concurrency.
   # Ignored when routing.session-affinity is false.
   session-affinity-subagents: true
+
+  # open-ferry's own section, not CLIProxyAPI's (see docs/routing.md). CLIProxyAPI's loader
+  # ignores it, and its management API's writes to a v8 config comment it out.
+  # quota:
+  #   # What the quota strategy prefers among the credentials with room left:
+  #   # soonest-reset (default), the one whose fullest quota window resets soonest, so
+  #   # allowance that would go unused is used first; or most-left, the one with the most left.
+  #   prefer: "soonest-reset"
+  #   # The share of each quota window the quota strategy keeps back, 0 to 100. A credential
+  #   # at or past 100 - reserve-percent in any window is passed over while another has room;
+  #   # when none has room, the one with the most left serves. Default: 0
+  #   reserve-percent: 10
+  #   # With any strategy: the longest a quota rest lasts. When a provider's quota resets
+  #   # later than this, one request is let through to check after it; each check the
+  #   # provider refuses doubles the wait, never past its reset. A Go duration such as "1h".
+  #   # Default: off ("" or 0), resting until the provider's reset as CLIProxyAPI does.
+  #   check-after: "1h"
 
   # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
   force-model-prefix: false
