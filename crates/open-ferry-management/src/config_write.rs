@@ -46,7 +46,8 @@
 //!   nothing to skip.
 //! - [`undo_config`] puts back the backup the last write kept, keeping the
 //!   file it replaces as the new backup, for the dashboard API's
-//!   `config/undo` route. Upstream has no undo.
+//!   `config/undo` route, with the checks an [`UndoCheck`] asks for.
+//!   Upstream has no undo.
 
 use std::fmt;
 use std::future::Future;
@@ -59,6 +60,7 @@ use axum::response::Response;
 use http::StatusCode;
 use open_ferry_core::config::Config;
 use open_ferry_core::config::save::SaveErrorKind;
+pub use open_ferry_core::config::save::UndoCheck;
 pub use open_ferry_core::config::v8_edit::{V8Edit, V8EditError, V8Method};
 use open_ferry_core::config::{save, v8_edit};
 
@@ -93,11 +95,13 @@ pub trait ConfigWriter: Send + Sync {
 
     /// Puts the backup the last write kept in place of the file, keeping
     /// the file it replaces as the new backup so the undo can itself be
-    /// undone, and returns the config the file now holds. Not upstream's:
-    /// the dashboard API's `config/undo` route uses it, through
+    /// undone, and returns the config the file now holds, after the checks
+    /// `check` asks for (see [`open_ferry_core::config::save::undo`]). Not
+    /// upstream's: the dashboard API's `config/undo` route uses it, through
     /// [`undo_config`]. A writer that keeps no backup has nothing to undo,
     /// which is what this answers unless the writer says otherwise.
-    fn undo(&self) -> Result<Config, UndoError> {
+    fn undo(&self, check: &UndoCheck) -> Result<Config, UndoError> {
+        let _ = check;
         Err(UndoError::NoBackup)
     }
 }
@@ -111,6 +115,13 @@ pub enum UndoError {
     Unavailable,
     /// There is no backup to put back.
     NoBackup,
+    /// The file was changed since the last write that kept a backup, as by
+    /// a hand edit, so the undo would lose that change too; it wasn't
+    /// forced.
+    ChangedSince,
+    /// The file or the backup isn't the one the caller expected: it
+    /// changed since the caller read it.
+    Stale,
     /// The backup couldn't be put back. The text says why, and holds no
     /// secret from the config.
     Failed(String),
@@ -121,6 +132,10 @@ impl fmt::Display for UndoError {
         match self {
             Self::Unavailable => f.write_str(WRITER_UNAVAILABLE),
             Self::NoBackup => f.write_str("there is no backup to undo to"),
+            Self::ChangedSince => {
+                f.write_str("the config file was changed since the last change that kept a backup")
+            }
+            Self::Stale => f.write_str("the config file or its backup changed since it was read"),
             Self::Failed(message) => f.write_str(message),
         }
     }
@@ -189,9 +204,11 @@ impl ConfigWriter for FileConfigWriter {
         v8_edit::edit_v8(&self.path, edit)
     }
 
-    fn undo(&self) -> Result<Config, UndoError> {
-        save::undo(&self.path).map_err(|error| match error.kind() {
+    fn undo(&self, check: &UndoCheck) -> Result<Config, UndoError> {
+        save::undo(&self.path, check).map_err(|error| match error.kind() {
             SaveErrorKind::NoBackup => UndoError::NoBackup,
+            SaveErrorKind::ChangedSince => UndoError::ChangedSince,
+            SaveErrorKind::Stale => UndoError::Stale,
             // The loader's message may quote the file; say only what failed.
             SaveErrorKind::Check => {
                 UndoError::Failed("the backup doesn't load as a config".to_owned())
@@ -363,7 +380,7 @@ where
 /// the config it holds the one the handlers read, and has the service load
 /// the file again. Not upstream's: the dashboard API's `config/undo` route
 /// calls it. On an error nothing was changed.
-pub async fn undo_config(state: &ManagementState) -> Result<(), UndoError> {
+pub async fn undo_config(state: &ManagementState, check: UndoCheck) -> Result<(), UndoError> {
     let writer = state
         .config_writer()
         .cloned()
@@ -372,7 +389,7 @@ pub async fn undo_config(state: &ManagementState) -> Result<(), UndoError> {
     run_task(async move {
         {
             let _guard = state.config_write_lock().lock().await;
-            let config = run_blocking(move || writer.undo()).await?;
+            let config = run_blocking(move || writer.undo(&check)).await?;
             state.set_config(Arc::new(config));
         }
         reload(&state).await;

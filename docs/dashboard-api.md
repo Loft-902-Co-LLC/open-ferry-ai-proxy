@@ -56,6 +56,8 @@ Every error is a status and a body:
 | 404 | `not_found` | No such route, no such log, or no such `claude-cli` entry. On the proxy's port while `management.separate-address` is set, every path answers it, whatever the method, as the dashboard API is served only at that address. |
 | 405 | `method_not_allowed` | The route exists, the method doesn't. |
 | 409 | `no_backup` | `POST /config/undo`: there is no backup of the config file to undo to. |
+| 409 | `changed_since` | `POST /config/undo`: the config file was changed since the last write that kept a backup (as by a hand edit), so the undo would lose that change too, and the body didn't send `force`. |
+| 409 | `config_changed` | `POST /config/undo`: the config file or its backup isn't the one the body's `config_sha256` or `backup_sha256` names. |
 | 413 | `body_too_large` | The body is over 64 KiB. |
 | 500 | `internal_error` | Something failed on the server; the message says what, without secrets. |
 | 502 | `claude_cli_failed` | A `claude-cli` entry's Claude Code couldn't be run, or its answer wasn't what was expected. |
@@ -538,14 +540,29 @@ Whether the Claude Code of the `claude-cli` entry `name` is signed in, and how. 
 
 ### `POST /open-ferry/api/v1/config/undo`
 
-Undoes the last change to the config file. Every write of the config file (by the management API, the dashboard or `open-ferry config`) keeps the file it replaces beside it as `<config>.bak`; this puts that backup back in place of the file, and keeps the file it replaces as the new backup, so a second undo redoes the change. It takes the lock every management write takes, so it never interleaves with one, and the server loads the file again before it answers. It takes no body.
+Undoes the last change to the config file. Every write of the config file (by the management API, the dashboard or `open-ferry config`) keeps the file it replaces beside it as `<config>.bak`, and records the SHA-256 of what it wrote in `<config>.sha256`; this puts that backup back in place of the file, and keeps the file it replaces as the new backup, so a second undo redoes the change. It takes the lock every management write takes, so it never interleaves with one, and the server loads the file again before it answers.
+
+The body is optional. A JSON object with any of these fields says what the caller saw, so the undo puts back only what the caller was shown:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `config_sha256` | string | The SHA-256, in hex, the config file must have. Otherwise the answer is `409 config_changed`. |
+| `backup_sha256` | string | The SHA-256, in hex, the backup must have. Otherwise the answer is `409 config_changed`. |
+| `force` | boolean | Go ahead though the file was changed since the last write (see below). Default `false`. |
+
+```json
+{"config_sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08", "backup_sha256": "60303ae22b998861bce3b28f33eec1be758a213c86c93c076dbe9f558c11c752", "force": false}
+```
 
 ```json
 {"status": "ok"}
 ```
 
+- **A file changed since the last write is kept unless forced.** When the file isn't what the last write recorded in `<config>.sha256` (it was edited by hand, or written by something that keeps no record, or the record is missing), undoing would lose that change too, so without `"force": true` the answer is `409 changed_since`. `config diff` (or the file itself) shows what the undo would put back.
+- An empty body is the same as `{}`. An unknown field, a field of the wrong type, or a SHA-256 that isn't 64 hex characters is `400 invalid_request`.
+
 - **One step only.** There is one backup, so undo goes back one write, and undo again goes forward again.
-- With no backup the answer is `409 no_backup`; a server that can't write its config file (one embedded without a config writer) answers `503 config_writer_unavailable`. Neither changes anything.
+- With no backup the answer is `409 no_backup`; a server that can't write its config file (one embedded without a config writer) answers `503 config_writer_unavailable`. No refused undo changes anything.
 - A backup that no longer loads as a config isn't put back: the answer is `500 internal_error`, and nothing changes.
 - `open-ferry config undo` calls this route while a server is running for the config (see [docs/cli.md](cli.md#open-ferry-config)).
 
