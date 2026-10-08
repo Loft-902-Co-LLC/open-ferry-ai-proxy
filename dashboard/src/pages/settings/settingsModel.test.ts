@@ -2,10 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 
 import { ApiError } from "../../api/client";
 import {
+  checkAfterProblem,
   describeSetting,
   formValuesOf,
   isEdited,
   loadedProblems,
+  preferenceOf,
   proxyUrlProblem,
   readEdited,
   readServerFacts,
@@ -24,6 +26,9 @@ import {
 const DEFAULTS: SettingValues = {
   proxyUrl: "",
   routingStrategy: "round-robin",
+  quotaPrefer: "soonest-reset",
+  quotaReservePercent: 0,
+  quotaCheckAfter: "",
   requestRetry: 0,
   maxRetryCredentials: 0,
   maxRetryInterval: 0,
@@ -45,7 +50,10 @@ describe("settingValuesOf", () => {
       settingValuesOf(
         {
           "proxy-url": " http://proxy.example:3128 ",
-          routing: { strategy: "fill-first" },
+          routing: {
+            strategy: "Quota",
+            quota: { prefer: " Most-Left ", "reserve-percent": 15, "check-after": " 1h30m " },
+          },
           "request-retry": 3,
           "max-retry-credentials": 2,
           "max-retry-interval": 30,
@@ -62,7 +70,10 @@ describe("settingValuesOf", () => {
       ),
     ).toEqual({
       proxyUrl: "http://proxy.example:3128",
-      routingStrategy: "fill-first",
+      routingStrategy: "quota",
+      quotaPrefer: "most-left",
+      quotaReservePercent: 15,
+      quotaCheckAfter: "1h30m",
       requestRetry: 3,
       maxRetryCredentials: 2,
       maxRetryInterval: 30,
@@ -75,6 +86,16 @@ describe("settingValuesOf", () => {
       usageStatisticsEnabled: true,
       managementAddress: "127.0.0.1:8318",
     });
+  });
+
+  it("reads the quota settings as the server loads them", () => {
+    const quota = (value: unknown) => settingValuesOf({ routing: { quota: value } });
+    expect(quota({ "reserve-percent": 150 }).quotaReservePercent).toBe(100);
+    expect(quota({ "reserve-percent": -5 }).quotaReservePercent).toBe(0);
+    expect(quota({ "reserve-percent": 12.9 }).quotaReservePercent).toBe(12);
+    expect(quota({ prefer: "least-used" }).quotaPrefer).toBe("soonest-reset");
+    expect(quota({ "check-after": 5 }).quotaCheckAfter).toBe("");
+    expect(quota("off")).toEqual(DEFAULTS);
   });
 
   it("reads what is missing or out of range as the server loads it", () => {
@@ -100,8 +121,38 @@ describe("strategyOf", () => {
     expect(strategyOf("ff")).toBe("fill-first");
     expect(strategyOf("FillFirst")).toBe("fill-first");
     expect(strategyOf("rr")).toBe("round-robin");
+    expect(strategyOf(" QUOTA ")).toBe("quota");
+    expect(strategyOf("by-quota")).toBe("round-robin");
     expect(strategyOf("")).toBe("round-robin");
     expect(strategyOf(undefined)).toBe("round-robin");
+  });
+});
+
+describe("preferenceOf", () => {
+  it("takes most-left in any case, and anything else as soonest-reset", () => {
+    expect(preferenceOf(" MOST-LEFT ")).toBe("most-left");
+    expect(preferenceOf("soonest-reset")).toBe("soonest-reset");
+    expect(preferenceOf("mostleft")).toBe("soonest-reset");
+    expect(preferenceOf(undefined)).toBe("soonest-reset");
+  });
+});
+
+describe("checkAfterProblem", () => {
+  it("takes empty for off, and a time the server reads", () => {
+    for (const value of ["", "  ", "1h", " 90m ", "1h30m", "1.5h", "0", "0s", "500ms"]) {
+      expect(checkAfterProblem(value), value).toBeNull();
+    }
+  });
+
+  it("says how to write a time the server can't read, or a negative one", () => {
+    for (const value of ["1d", "1 h", "soon", "60", "1H", "3000000h"]) {
+      expect(checkAfterProblem(value), value).toMatch(
+        /^The server can't read this as a time, and takes it as off\. Write a number and a unit/,
+      );
+    }
+    expect(checkAfterProblem("-1h")).toBe(
+      "A negative time is off. Leave it empty for off, or write a time such as 1h.",
+    );
   });
 });
 
@@ -203,21 +254,35 @@ describe("readEdited", () => {
     expect(readEdited(formValuesOf(loaded), undefined).problems).toEqual(loadedProblems(loaded));
   });
 
-  it("checks the management address as typed", () => {
+  it("checks the quota settings and the management address as typed", () => {
     const read = readEdited(
-      { ...formValuesOf(DEFAULTS), managementAddress: "http://127.0.0.1:8318" },
+      {
+        ...formValuesOf(DEFAULTS),
+        quotaReservePercent: "101",
+        quotaCheckAfter: "1 day",
+        managementAddress: "http://127.0.0.1:8318",
+      },
       DEFAULTS,
       FACTS,
     );
-    expect(read.problems).toEqual({
-      managementAddress: "Leave out the scheme and any path: write host:port, such as 127.0.0.1:8318.",
-    });
+    expect(Object.keys(read.problems ?? {})).toEqual([
+      "quotaReservePercent",
+      "quotaCheckAfter",
+      "managementAddress",
+    ]);
+    expect(read.problems?.quotaReservePercent).toBe(
+      "The share kept back is a whole number from 0 to 100.",
+    );
+    expect(read.problems?.quotaCheckAfter).toMatch(/^The server can't read this as a time/);
+    expect(read.problems?.managementAddress).toBe(
+      "Leave out the scheme and any path: write host:port, such as 127.0.0.1:8318.",
+    );
     const good = readEdited(
-      { ...formValuesOf(DEFAULTS), managementAddress: " :8318 " },
+      { ...formValuesOf(DEFAULTS), quotaReservePercent: " 10 ", managementAddress: " :8318 " },
       DEFAULTS,
       FACTS,
     );
-    expect(good.values).toEqual({ ...DEFAULTS, managementAddress: ":8318" });
+    expect(good.values).toEqual({ ...DEFAULTS, quotaReservePercent: 10, managementAddress: ":8318" });
   });
 
   it("refuses a management address on the proxy's port once it knows the port", () => {
@@ -243,9 +308,21 @@ describe("saveCall", () => {
       path: "/v0/management/request-retry",
       request: { method: "PATCH", json: { value: 3 } },
     });
-    expect(saveCall("routingStrategy", "fill-first")).toEqual({
+    expect(saveCall("routingStrategy", "quota")).toEqual({
       path: "/v0/management/routing/strategy",
-      request: { method: "PATCH", json: { value: "fill-first" } },
+      request: { method: "PATCH", json: { value: "quota" } },
+    });
+    expect(saveCall("quotaPrefer", "most-left")).toEqual({
+      path: "/v8/management/config/routing/quota/prefer",
+      request: { method: "PUT", json: "most-left" },
+    });
+    expect(saveCall("quotaReservePercent", 10)).toEqual({
+      path: "/v8/management/config/routing/quota/reserve-percent",
+      request: { method: "PUT", json: 10 },
+    });
+    expect(saveCall("quotaCheckAfter", "")).toEqual({
+      path: "/v8/management/config/routing/quota/check-after",
+      request: { method: "PUT", json: "" },
     });
     expect(saveCall("managementAddress", "127.0.0.1:8318")).toEqual({
       path: "/v8/management/config/management/separate-address",
@@ -319,7 +396,17 @@ describe("describeSetting", () => {
     expect(describeSetting("proxyUrl", "http://a:b@proxy.example")).toBe("http://•••@proxy.example");
   });
 
-  it("says what the management address means", () => {
+  it("says what the quota settings and the management address mean", () => {
+    expect(describeSetting("routingStrategy", "quota")).toBe("By quota");
+    expect(describeSetting("quotaPrefer", "most-left")).toBe("The most quota left");
+    expect(describeSetting("quotaPrefer", "soonest-reset")).toBe("The limit that resets soonest");
+    expect(describeSetting("quotaReservePercent", 0)).toBe("None");
+    expect(describeSetting("quotaReservePercent", 10)).toBe("10%");
+    expect(describeSetting("quotaCheckAfter", "")).toBe("Off");
+    expect(describeSetting("quotaCheckAfter", "1h30m")).toBe("1h30m");
+    expect(describeSetting("quotaCheckAfter", "0s")).toBe("Off (0s)");
+    expect(describeSetting("quotaCheckAfter", "-1h")).toBe("Off (-1h)");
+    expect(describeSetting("quotaCheckAfter", "1d")).toBe("Off (1d isn't a time)");
     expect(describeSetting("managementAddress", "")).toBe("None: on the proxy's port");
     expect(describeSetting("managementAddress", "[::1]:8318")).toBe("[::1]:8318");
   });

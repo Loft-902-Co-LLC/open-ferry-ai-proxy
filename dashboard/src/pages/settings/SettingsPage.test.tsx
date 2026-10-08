@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { readStoredKey } from "../../api/keyStorage";
 import { API_KEYS, CONFIG, CONFIG_YAML, MANAGEMENT, V8_CONFIG } from "../../api/management";
-import { v8Config } from "../../test/fixtures";
+import { quotaRouting, v8Config } from "../../test/fixtures";
 import { loadFirst } from "../../test/loadFirst";
 import { mockApi, route, v8ConfigRoutes, type MockApi } from "../../test/mockApi";
 import { renderApp } from "../../test/renderApp";
@@ -31,7 +31,7 @@ const YAML = ["port: 8317", "debug: false", "request-retry: 1", ""].join(NL);
 interface Server {
   api: MockApi;
   config: Record<string, unknown>;
-  /** config.yaml in the v8 layout, as the v8 config route reads it. */
+  /** config.yaml in the v8 layout, as the v8 config route reads it; its `routing` is the config's. */
   v8: Record<string, unknown>;
   keys: string[];
   yaml: string;
@@ -42,6 +42,9 @@ const V8_PATHS = [
   "management/separate-address",
   "management/allow-remote",
   "server/port",
+  "routing/quota/prefer",
+  "routing/quota/reserve-percent",
+  "routing/quota/check-after",
 ];
 
 /** The setting each route changes, by its path under the management API. */
@@ -90,6 +93,10 @@ function server(
     keys: [...keys],
     yaml: YAML,
   };
+  // One mapping, so a quota setting written through the v8 route shows in
+  // GET /config, and the strategy written through its route in the file.
+  const routing = state.config.routing as Record<string, unknown>;
+  state.v8.routing = routing;
   state.api.use(
     route("GET", CONFIG, () => ({ json: { ...state.config, "api-keys": state.keys } })),
     ...v8ConfigRoutes(state.v8, V8_PATHS),
@@ -97,7 +104,7 @@ function server(
       route("PATCH", `${MANAGEMENT}/${setting}`, (request) => {
         const { value } = request.json() as { value: unknown };
         if (setting === "routing/strategy") {
-          state.config.routing = { strategy: value };
+          routing.strategy = value;
         } else {
           state.config[setting] = value;
         }
@@ -467,6 +474,135 @@ describe("the settings form", () => {
     // The one saved is no longer unsaved; the other two still are.
     expect(screen.getByText("2 unsaved changes.")).toBeVisible();
     expect(screen.getByRole("textbox", { name: "Longest wait for a retry (seconds)" })).toHaveValue("60");
+  });
+});
+
+describe("routing by quota", () => {
+  const strategy = () => screen.getByRole("combobox", { name: "How credentials are picked" });
+
+  it("shows its settings only while it is picked, and puts them back when it isn't", async () => {
+    server({ routing: quotaRouting() });
+    const { user } = await openSettings();
+    expect(strategy()).toHaveValue("quota");
+    expect(screen.getByRole("option", { name: "By quota" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Prefer" })).toHaveValue("most-left");
+    expect(screen.getByRole("textbox", { name: "Kept back (%)" })).toHaveValue("10");
+    expect(screen.getByRole("textbox", { name: "Check quota rests after" })).toHaveValue("1h");
+
+    await user.selectOptions(screen.getByRole("combobox", { name: "Prefer" }), "soonest-reset");
+    await fill(user, screen.getByRole("textbox", { name: "Kept back (%)" }), "20");
+    expect(screen.getByText("2 unsaved changes.")).toBeVisible();
+
+    await user.selectOptions(strategy(), "round-robin");
+    expect(screen.queryByRole("combobox", { name: "Prefer" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "Kept back (%)" })).not.toBeInTheDocument();
+    // Its check after a quota rest works with any strategy.
+    expect(screen.getByRole("textbox", { name: "Check quota rests after" })).toBeVisible();
+    expect(screen.getByText("1 unsaved change.")).toBeVisible();
+
+    await user.selectOptions(strategy(), "quota");
+    expect(screen.getByRole("combobox", { name: "Prefer" })).toHaveValue("most-left");
+    expect(screen.getByRole("textbox", { name: "Kept back (%)" })).toHaveValue("10");
+    expectNothingUnsaved();
+  });
+
+  it("saves the strategy through its route and the quota settings through the v8 config route", async () => {
+    const state = server();
+    const { user } = await openSettings();
+    expect(screen.queryByRole("combobox", { name: "Prefer" })).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Check quota rests after" })).toHaveValue("");
+
+    await user.selectOptions(strategy(), "quota");
+    const prefer = screen.getByRole("combobox", { name: "Prefer" });
+    expect(prefer).toHaveValue("soonest-reset");
+    expect(screen.getByRole("textbox", { name: "Kept back (%)" })).toHaveValue("0");
+    await user.selectOptions(prefer, "most-left");
+    await fill(user, screen.getByRole("textbox", { name: "Kept back (%)" }), " 15 ");
+    await fill(user, screen.getByRole("textbox", { name: "Check quota rests after" }), "90m");
+    expect(screen.getByText("4 unsaved changes.")).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Review and save" }));
+    const dialog = await screen.findByRole("dialog", { name: "Review the changes" });
+    const rows = within(dialog).getAllByRole("row");
+    expect(rows.slice(1).map((row) => row.textContent)).toEqual([
+      "How credentials are picked routing.strategyRound robinBy quota",
+      "Quota preference routing.quota.preferThe limit that resets soonestThe most quota left",
+      "Quota kept back routing.quota.reserve-percentNone15%",
+      "Check quota rests after routing.quota.check-afterOff90m",
+    ]);
+    expect(dialog).toHaveTextContent(
+      "The quota settings and the management address go through the server's v8 config route, which saves the whole file in the v8 layout",
+    );
+    expect(dialog).not.toHaveTextContent("Nothing else in the file changes.");
+    expect(within(dialog).queryByText(/takes a restart/)).not.toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole("button", { name: "Save 4 settings" }));
+    expect(
+      await screen.findByText("Saved 4 settings. The server uses them from now on."),
+    ).toBeVisible();
+    expect(patches(state.api)).toEqual([["routing/strategy", { value: "quota" }]]);
+    expect(v8Puts(state.api)).toEqual([
+      ["routing/quota/prefer", "most-left"],
+      ["routing/quota/reserve-percent", 15],
+      ["routing/quota/check-after", "90m"],
+    ]);
+    expect(state.config.routing).toEqual({
+      strategy: "quota",
+      quota: { prefer: "most-left", "reserve-percent": 15, "check-after": "90m" },
+    });
+    expectNothingUnsaved();
+    expect(state.api.unhandled).toEqual([]);
+  });
+
+  it("checks a share kept back and a time as they are typed in", async () => {
+    const state = server({ routing: quotaRouting() });
+    const { user } = await openSettings();
+    const reserve = screen.getByRole("textbox", { name: "Kept back (%)" });
+    await fill(user, reserve, "101");
+    expect(await screen.findByText("The share kept back is a whole number from 0 to 100.")).toBeVisible();
+    expect(reserve).toHaveAttribute("aria-invalid", "true");
+    await fill(user, reserve, "10");
+
+    const checkAfter = screen.getByRole("textbox", { name: "Check quota rests after" });
+    await fill(user, checkAfter, "1 day");
+    const unread = await screen.findByText(/^The server can't read this as a time, and takes it as off\./);
+    expect(unread).toHaveTextContent("such as 1h, 90m or 1h30m (h, m, s, ms, us or ns; a day is 24h).");
+    expect(checkAfter).toHaveAttribute("aria-invalid", "true");
+    expect(checkAfter).toHaveAccessibleDescription(/can't read this as a time/);
+    await fill(user, checkAfter, "-1h");
+    expect(
+      await screen.findByText("A negative time is off. Leave it empty for off, or write a time such as 1h."),
+    ).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Review and save" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(state.api.callsTo("GET", CONFIG)).toHaveLength(1);
+
+    // Empty is off, and fine.
+    await fill(user, checkAfter, "");
+    await waitFor(() => {
+      expect(checkAfter).not.toHaveAttribute("aria-invalid");
+    });
+    await user.click(screen.getByRole("button", { name: "Review and save" }));
+    const dialog = await screen.findByRole("dialog", { name: "Review the changes" });
+    expect(within(dialog).getAllByRole("row")[1]).toHaveTextContent(/check-after.*1h.*Off$/);
+  });
+
+  it("warns of a time in config.yaml the server reads as off, and saves the rest", async () => {
+    const state = server({ routing: quotaRouting({ "check-after": "2 days" }) });
+    const { user } = await openSettings();
+    const checkAfter = screen.getByRole("textbox", { name: "Check quota rests after" });
+    expect(checkAfter).toHaveValue("2 days");
+    expect(checkAfter).not.toHaveAttribute("aria-invalid");
+    expect(checkAfter).toHaveAccessibleDescription(/takes it as off\..*Saving the other settings leaves it as it is\./);
+
+    await user.click(screen.getByRole("checkbox", { name: "Debug logging" }));
+    await user.click(screen.getByRole("button", { name: "Review and save" }));
+    const dialog = await screen.findByRole("dialog", { name: "Review the changes" });
+    expect(dialog).toHaveTextContent("Nothing else in the file changes.");
+    await user.click(within(dialog).getByRole("button", { name: "Save 1 setting" }));
+    expect(await screen.findByText(/Saved 1 setting\./)).toBeVisible();
+    expect(v8Puts(state.api)).toEqual([]);
   });
 });
 

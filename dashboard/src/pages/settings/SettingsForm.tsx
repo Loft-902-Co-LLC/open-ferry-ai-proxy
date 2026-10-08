@@ -11,6 +11,8 @@ import { SelectField } from "../../components/SelectField";
 import { TextField } from "../../components/TextField";
 import { remoteWarning } from "./managementAddress";
 import {
+  PREFERENCES,
+  PREFERENCE_LABELS,
   SETTING_IDS,
   STRATEGIES,
   STRATEGY_LABELS,
@@ -119,6 +121,7 @@ export interface SettingsFormProps {
  */
 export function SettingsForm({ id, settings, facts, onSubmit }: SettingsFormProps) {
   const { form, unsaved, problems } = settings;
+  const strategy = useWatch({ control: form.control, name: "routingStrategy" });
   const address = useWatch({ control: form.control, name: "managementAddress" });
   /** The problem with setting `id`'s loaded value, while it is left alone. */
   const warning = (setting: SettingId) =>
@@ -166,7 +169,7 @@ export function SettingsForm({ id, settings, facts, onSubmit }: SettingsFormProp
       >
         <SelectField
           label="How credentials are picked"
-          options={STRATEGIES.map((strategy) => ({ value: strategy, label: STRATEGY_LABELS[strategy] }))}
+          options={STRATEGIES.map((value) => ({ value, label: STRATEGY_LABELS[value] }))}
           hint={
             <Hint>
               When more than one credential can serve a model, this picks the one for each request,
@@ -174,11 +177,71 @@ export function SettingsForm({ id, settings, facts, onSubmit }: SettingsFormProp
               turns. Weighted round robin takes turns in proportion to each credential&apos;s{" "}
               <Code>weight</Code> (1 unless set; 0 leaves it out). Fill first keeps to the first
               credential, in order of their IDs, until it fails and rests or is turned off, then
-              moves to the next: choose it to use up one account before the next.
+              moves to the next: choose it to use up one account before the next. By quota goes
+              by the quota Claude and Codex last reported for each credential, and picks one with
+              room under its limits first. Credentials with no reading, such as API keys, count as
+              having all of their quota left.
             </Hint>
           }
           error={errors.routingStrategy?.message}
-          {...form.register("routingStrategy")}
+          {...form.register("routingStrategy", {
+            // Away from quota, its own settings go back to what the server has.
+            onChange: (event: { target: { value: string } }) => {
+              if (event.target.value !== "quota") {
+                form.resetField("quotaPrefer");
+                form.resetField("quotaReservePercent");
+              }
+            },
+          })}
+        />
+        {strategy === "quota" && (
+          <div className="grid gap-4 sm:grid-cols-2">
+            <SelectField
+              label="Prefer"
+              options={PREFERENCES.map((value) => ({ value, label: PREFERENCE_LABELS[value] }))}
+              hint={
+                <Hint>
+                  Which credential with room goes first. The limit that resets soonest uses quota
+                  that would go unused at its reset, and keeps credentials with no reading spare.
+                  The most quota left spreads the use, and tries a credential with no reading
+                  first, to read it. When none has room, the one with the most left serves.
+                </Hint>
+              }
+              error={errors.quotaPrefer?.message}
+              {...form.register("quotaPrefer")}
+            />
+            <TextField
+              label="Kept back (%)"
+              inputMode="numeric"
+              hint={
+                <Hint>
+                  The share of each limit to keep back, from 0 to 100. With 10, a credential that
+                  has used 90% of any limit waits while another has room. 0 keeps nothing back.
+                </Hint>
+              }
+              error={errors.quotaReservePercent?.message}
+              warning={warning("quotaReservePercent")}
+              {...form.register("quotaReservePercent")}
+            />
+          </div>
+        )}
+        <TextField
+          label="Check quota rests after"
+          autoComplete="off"
+          spellCheck={false}
+          autoCapitalize="none"
+          hint={
+            <Hint>
+              When a provider says a credential is out of quota, it rests until the
+              provider&apos;s reset, which can be days away. With a time here, such as{" "}
+              <Code>1h</Code> or <Code>90m</Code>, a longer rest lasts that long instead: then one
+              request checks whether the quota is back, and if it isn&apos;t, the wait doubles, up
+              to the reset. Leave it empty for off. It works with any way of picking credentials.
+            </Hint>
+          }
+          error={errors.quotaCheckAfter?.message}
+          warning={warning("quotaCheckAfter")}
+          {...form.register("quotaCheckAfter")}
         />
         <div className="grid gap-4 sm:grid-cols-3">
           <TextField

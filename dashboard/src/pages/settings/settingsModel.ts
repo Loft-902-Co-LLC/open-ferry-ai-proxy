@@ -1,8 +1,8 @@
 // The settings the Settings form changes, each through a route of its own,
 // so a save sends nothing else: upstream's settings by `PATCH
-// /v0/management/<setting>` with `{"value": ...}`, and open-ferry's own
-// `management.separate-address`, which has no such route, by `PUT
-// /v8/management/config/<path>` with the bare value. Values
+// /v0/management/<setting>` with `{"value": ...}`, and open-ferry's own,
+// `routing.quota.*` and `management.separate-address`, which have no such
+// route, by `PUT /v8/management/config/<path>` with the bare value. Values
 // are read from `GET /v0/management/config` as the server uses them: the
 // config module (open-ferry-core's config::normalize) loads a negative log
 // size as 0 and a negative error-log count as 10, and takes an unknown
@@ -12,17 +12,19 @@
 
 import type { ApiRequest } from "../../api/client";
 import { MANAGEMENT, V8_CONFIG } from "../../api/management";
-import { countField } from "../../lib/fields";
+import { countField, wholeNumberField } from "../../lib/fields";
+import { parseGoDuration } from "../../lib/goDuration";
 import { z } from "../../lib/zod";
 import { managementAddressProblem, parseManagementAddress } from "./managementAddress";
 
-export const STRATEGIES = ["round-robin", "weighted-round-robin", "fill-first"] as const;
+export const STRATEGIES = ["round-robin", "weighted-round-robin", "fill-first", "quota"] as const;
 export type Strategy = (typeof STRATEGIES)[number];
 
 export const STRATEGY_LABELS: Record<Strategy, string> = {
   "round-robin": "Round robin",
   "weighted-round-robin": "Weighted round robin",
   "fill-first": "Fill first",
+  quota: "By quota",
 };
 
 /**
@@ -40,9 +42,52 @@ export function strategyOf(written: unknown): Strategy {
     case "fillfirst":
     case "ff":
       return "fill-first";
+    case "quota":
+      return "quota";
     default:
       return "round-robin";
   }
+}
+
+/** What routing by quota prefers among the credentials with room (`routing.quota.prefer`). */
+export const PREFERENCES = ["soonest-reset", "most-left"] as const;
+export type Preference = (typeof PREFERENCES)[number];
+
+export const PREFERENCE_LABELS: Record<Preference, string> = {
+  "soonest-reset": "The limit that resets soonest",
+  "most-left": "The most quota left",
+};
+
+/**
+ * What routing by quota prefers for `written`, as `QuotaPrefs::of` reads it
+ * (open-ferry-core's manager::quota_rank): `most-left` in any case, with
+ * spaces around, else `soonest-reset`.
+ */
+export function preferenceOf(written: unknown): Preference {
+  return typeof written === "string" && written.trim().toLowerCase() === "most-left"
+    ? "most-left"
+    : "soonest-reset";
+}
+
+/**
+ * What is wrong with `text`, trimmed, as `routing.quota.check-after`, or
+ * null. The server takes empty, zero, a negative time and anything it can't
+ * read as a Go duration as off (open-ferry-core's manager::settings); the
+ * form takes empty for off, or a time the server reads, zero included.
+ */
+export function checkAfterProblem(text: string): string | null {
+  const value = text.trim();
+  if (value === "") {
+    return null;
+  }
+  const nanos = parseGoDuration(value);
+  if (nanos === null) {
+    return "The server can't read this as a time, and takes it as off. Write a number and a unit with no spaces, such as 1h, 90m or 1h30m (h, m, s, ms, us or ns; a day is 24h).";
+  }
+  if (nanos < 0n) {
+    return "A negative time is off. Leave it empty for off, or write a time such as 1h.";
+  }
+  return null;
 }
 
 /**
@@ -96,6 +141,9 @@ function checkedText(problemOf: (value: string) => string | null) {
 export const settingsSchema = z.object({
   proxyUrl: checkedText(proxyUrlProblem),
   routingStrategy: z.enum(STRATEGIES),
+  quotaPrefer: z.enum(PREFERENCES),
+  quotaReservePercent: wholeNumberField("The share kept back", 0, 100),
+  quotaCheckAfter: checkedText(checkAfterProblem),
   // The server holds these as 64-bit integers and sets no upper limit.
   requestRetry: countField("Retries"),
   maxRetryCredentials: countField("Credentials per round"),
@@ -139,6 +187,24 @@ export const SETTINGS: Record<SettingId, SettingInfo> = {
     label: "How credentials are picked",
     configKey: "routing.strategy",
     path: `${MANAGEMENT}/routing/strategy`,
+  },
+  quotaPrefer: {
+    label: "Quota preference",
+    configKey: "routing.quota.prefer",
+    path: `${V8_CONFIG}/routing/quota/prefer`,
+    v8: true,
+  },
+  quotaReservePercent: {
+    label: "Quota kept back",
+    configKey: "routing.quota.reserve-percent",
+    path: `${V8_CONFIG}/routing/quota/reserve-percent`,
+    v8: true,
+  },
+  quotaCheckAfter: {
+    label: "Check quota rests after",
+    configKey: "routing.quota.check-after",
+    path: `${V8_CONFIG}/routing/quota/check-after`,
+    v8: true,
   },
   requestRetry: { label: "Retries", configKey: "request-retry", path: `${MANAGEMENT}/request-retry` },
   maxRetryCredentials: {
@@ -271,9 +337,15 @@ export function settingValuesOf(config: unknown, facts?: ServerFacts): SettingVa
   const proxy = fieldOf(config, "proxy-url");
   const errorLogsField = fieldOf(config, "error-logs-max-files");
   const errorLogs = typeof errorLogsField === "number" ? wholeNumber(errorLogsField) : -1;
+  const routing = fieldOf(config, "routing");
+  const quota = fieldOf(routing, "quota");
+  const checkAfter = fieldOf(quota, "check-after");
   return {
     proxyUrl: typeof proxy === "string" ? proxy.trim() : "",
-    routingStrategy: strategyOf(fieldOf(fieldOf(config, "routing"), "strategy")),
+    routingStrategy: strategyOf(fieldOf(routing, "strategy")),
+    quotaPrefer: preferenceOf(fieldOf(quota, "prefer")),
+    quotaReservePercent: Math.min(100, Math.max(0, wholeNumber(fieldOf(quota, "reserve-percent")))),
+    quotaCheckAfter: typeof checkAfter === "string" ? checkAfter.trim() : "",
     requestRetry: count("request-retry"),
     maxRetryCredentials: count("max-retry-credentials"),
     maxRetryInterval: count("max-retry-interval"),
@@ -292,6 +364,7 @@ export function settingValuesOf(config: unknown, facts?: ServerFacts): SettingVa
 export function formValuesOf(values: SettingValues): SettingsInput {
   return {
     ...values,
+    quotaReservePercent: String(values.quotaReservePercent),
     requestRetry: String(values.requestRetry),
     maxRetryCredentials: String(values.maxRetryCredentials),
     maxRetryInterval: String(values.maxRetryInterval),
@@ -413,6 +486,18 @@ function plural(count: number, one: string, many: string): string {
   return `${count.toLocaleString("en")} ${count === 1 ? one : many}`;
 }
 
+/** A `routing.quota.check-after`, in words: the time, or off and why. */
+function describeCheckAfter(text: string): string {
+  if (text === "") {
+    return "Off";
+  }
+  const nanos = parseGoDuration(text);
+  if (nanos === null) {
+    return `Off (${text} isn't a time)`;
+  }
+  return nanos > 0n ? text : `Off (${text})`;
+}
+
 /** `value` of setting `id`, in words. */
 export function describeSetting<K extends SettingId>(id: K, value: SettingValues[K]): string {
   if (typeof value === "boolean") {
@@ -420,6 +505,8 @@ export function describeSetting<K extends SettingId>(id: K, value: SettingValues
   }
   if (typeof value === "number") {
     switch (id) {
+      case "quotaReservePercent":
+        return value === 0 ? "None" : `${String(value)}%`;
       case "requestRetry":
         return value === 0 ? "None" : plural(value, "retry", "retries");
       case "maxRetryCredentials":
@@ -438,6 +525,10 @@ export function describeSetting<K extends SettingId>(id: K, value: SettingValues
   switch (id) {
     case "routingStrategy":
       return STRATEGY_LABELS[strategyOf(text)];
+    case "quotaPrefer":
+      return PREFERENCE_LABELS[preferenceOf(text)];
+    case "quotaCheckAfter":
+      return describeCheckAfter(text);
     case "managementAddress":
       return text === "" ? "None: on the proxy's port" : text;
     default:

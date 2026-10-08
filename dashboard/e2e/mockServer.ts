@@ -403,7 +403,10 @@ function settingsConfig(): Record<string, unknown> {
     "request-log": false,
     "error-logs-max-files": 10,
     "usage-statistics-enabled": true,
-    routing: { strategy: "round-robin" },
+    routing: {
+      strategy: "quota",
+      quota: { prefer: "soonest-reset", "reserve-percent": 10, "check-after": "1h" },
+    },
   };
 }
 
@@ -427,7 +430,11 @@ const CONFIG_YAML = [
   "max-retry-interval: 30",
   "",
   "routing:",
-  "  strategy: round-robin",
+  "  strategy: quota",
+  "  quota:",
+  "    prefer: soonest-reset",
+  "    reserve-percent: 10",
+  "    check-after: 1h",
   "",
   "api-keys:",
   ...CLIENT_KEYS.map((key) => `  - "${key}"`),
@@ -458,6 +465,9 @@ const V8_PATHS = new Set([
   "management/separate-address",
   "management/allow-remote",
   "server/port",
+  "routing/quota/prefer",
+  "routing/quota/reserve-percent",
+  "routing/quota/check-after",
 ]);
 
 /** The mapping at `keys` in `tree`, made on the way when `make`, else undefined where there is none. */
@@ -526,7 +536,8 @@ export async function mockServer(
   const writable = options.writable ?? true;
   const separate = options.separateManagement ?? false;
   const config = settingsConfig();
-  // config.yaml in the v8 layout, as the v8 config route reads it. The
+  // config.yaml in the v8 layout, as the v8 config route reads it. Its
+  // routing is the config's, so a write through either shows in both. The
   // management address, when separate, is the page's own origin.
   const v8File: Record<string, unknown> = {
     server: { port: config.port },
@@ -534,6 +545,7 @@ export async function mockServer(
       "allow-remote": false,
       ...(separate ? { "separate-address": new URL(appOrigin).host } : {}),
     },
+    routing: config.routing,
   };
   const clientKeys = [...CLIENT_KEYS];
   let configYaml = CONFIG_YAML;
@@ -705,7 +717,7 @@ export async function mockServer(
       server.writes.push(`${call} ${body}`);
       const { value } = JSON.parse(body) as { value: unknown };
       if (list === "routing/strategy") {
-        config.routing = { strategy: value };
+        (config.routing as Record<string, unknown>).strategy = value;
       } else {
         config[list] = value;
       }

@@ -360,6 +360,18 @@ export function claudeCliEntry(overrides: Partial<ClaudeCliEntry> = {}): ClaudeC
 }
 
 /**
+ * `routing` as `GET /config` gives it with routing by quota: preferring the
+ * most quota left, keeping 10% back, and checking long quota rests after an
+ * hour, with `quota` over those.
+ */
+export function quotaRouting(quota: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    strategy: "quota",
+    quota: { prefer: "most-left", "reserve-percent": 10, "check-after": "1h", ...quota },
+  };
+}
+
+/**
  * The parts of config.yaml the Settings tab reads through the v8 config
  * route, in the v8 layout: the proxy on `port` (8317), `allowRemote` (off),
  * and `separateAddress` as the management address, if given.
