@@ -14,8 +14,10 @@ import {
 import { useApiCall, useApiDownload } from "../../api/hooks";
 import { Alert } from "../../components/Alert";
 import { Badge } from "../../components/Badge";
+import { BreakableText } from "../../components/BreakableText";
 import { Button, buttonClasses } from "../../components/Button";
 import { Card } from "../../components/Card";
+import { Checkbox } from "../../components/CheckboxField";
 import { PageHeader } from "../../components/PageHeader";
 import { ProblemNotice } from "../../components/ProblemNotice";
 import { Loading } from "../../components/QueryState";
@@ -97,8 +99,8 @@ function LogFacts({ log }: { log: LogEntry }) {
       log.url === null ? (
         <span className="text-muted">not found in the log</span>
       ) : (
-        <span className="font-mono break-all">
-          {log.method ?? ""} {log.url}
+        <span className="font-mono">
+          {log.method ?? ""} <BreakableText text={log.url} />
         </span>
       ),
     ],
@@ -108,7 +110,9 @@ function LogFacts({ log }: { log: LogEntry }) {
       log.model === null ? (
         <span className="text-muted">not found in the log</span>
       ) : (
-        <span className="font-mono">{log.model}</span>
+        <span className="font-mono">
+          <BreakableText text={log.model} kind="name" />
+        </span>
       ),
     ],
     ["Request ID", <span className="font-mono">{log.request_id}</span>],
@@ -217,7 +221,15 @@ function LogViewer({ name }: { name: string }) {
     }
     return (
       <>
-        <PageHeader title="Log" description={<span className="font-mono">{name}</span>} actions={<BackLink />} />
+        <PageHeader
+          title="Log"
+          description={
+            <span className="font-mono">
+              <BreakableText text={name} kind="name" />
+            </span>
+          }
+          actions={<BackLink />}
+        />
         <ProblemNotice
           problem={callProblem(pieces.error)}
           action={
@@ -246,7 +258,11 @@ function LogViewer({ name }: { name: string }) {
     <>
       <PageHeader
         title={log === undefined ? "Log" : log.kind === "error" ? "Error log" : "Request log"}
-        description={<span className="font-mono break-all">{name}</span>}
+        description={
+          <span className="font-mono">
+            <BreakableText text={name} kind="name" />
+          </span>
+        }
         actions={
           <>
             <BackLink />
@@ -290,24 +306,23 @@ function LogViewer({ name }: { name: string }) {
                 : `The first ${formatBytes(shownBytes)} of ${formatBytes(latest.log.size)}.`
             }
             actions={
-              <label className="flex h-8 items-center gap-2">
-                <input
-                  type="checkbox"
+              <label className="flex h-8 items-center gap-2 pointer-coarse:min-h-11">
+                <Checkbox
                   checked={wrap}
                   onChange={(event) => {
                     setWrap(event.target.checked);
                   }}
-                  className="size-4 accent-accent"
                 />
                 Wrap long lines
               </label>
             }
           >
             <pre
+              role="region"
               tabIndex={0}
               aria-label="The log's content"
               className={cn(
-                "max-h-[70vh] overflow-auto rounded-md border border-line bg-raised p-3 font-mono text-xs leading-5",
+                "max-h-[70vh] overflow-auto rounded-md border border-line bg-surface p-3 font-mono text-xs leading-5",
                 wrap ? "whitespace-pre-wrap break-all" : "whitespace-pre",
               )}
             >

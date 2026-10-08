@@ -259,6 +259,43 @@ describe("the server log", () => {
     expect(screen.getByText("1 of 2 lines contain “COOLING”.")).toBeVisible();
   });
 
+  it("says how many lines a filter keeps once the typing stops, not with each key", async () => {
+    mockApi(route("GET", SERVER_LOGS, { json: serverLogPage(lines) }));
+    const { user } = renderApp("/logs?tab=server");
+    await screen.findByRole("log", { name: "Server log lines" });
+    const status = screen.getByRole("status");
+    expect(status.textContent).toBe("");
+    const count = screen.getByText("2 lines.");
+    expect(count.closest("[role=status], [aria-live]")).toBeNull();
+
+    await user.type(screen.getByRole("textbox", { name: "Show lines containing" }), "COOLING");
+    await waitFor(() => {
+      expect(status).toHaveTextContent("1 of 2 lines contain “COOLING”.");
+    });
+    expect(count).toHaveTextContent("1 of 2 lines contain “COOLING”.");
+  });
+
+  it("says when the log was rotated while open", async () => {
+    mockApi(
+      route("GET", SERVER_LOGS, (request) =>
+        request.url.searchParams.get("cursor") === "cursor-1"
+          ? { json: serverLogPage(["fresh line"], { "cursor-reset": true }) }
+          : { json: serverLogPage(lines) },
+      ),
+    );
+    const { user } = renderApp("/logs?tab=server");
+    const log = await screen.findByRole("log", { name: "Server log lines" });
+    await user.click(screen.getByRole("checkbox", { name: "Follow" }));
+    await user.click(screen.getByRole("button", { name: "Read new lines" }));
+    await waitFor(() => {
+      expect(screen.getByRole("status")).toHaveTextContent(
+        "The log was rotated or cleared while open; it starts again below.",
+      );
+    });
+    expect(log).toHaveTextContent("fresh line");
+    expect(log).not.toHaveTextContent("API server started");
+  });
+
   it("says when the server doesn't log to a file, and turns that on", async () => {
     let toFile = false;
     const api = mockApi(

@@ -71,7 +71,7 @@ describe("a log's page", () => {
     expect(screen.getByText("Model").nextElementSibling).toHaveTextContent("gpt-5.1-codex");
     expect(screen.getByText("Request ID").nextElementSibling).toHaveTextContent("1234abcd");
 
-    const content = screen.getByLabelText("The log's content");
+    const content = screen.getByRole("region", { name: "The log's content" });
     expect(content).toHaveTextContent("URL: /v1/chat/completions");
     expect(content).not.toHaveTextContent("Status: 200");
     expect(api.callsTo("GET", PATH)[0]?.url.searchParams.get("length")).toBe("1048576");

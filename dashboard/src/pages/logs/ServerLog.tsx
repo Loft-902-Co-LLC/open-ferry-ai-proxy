@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { RotateCw } from "lucide-react";
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { callProblem } from "../../api/access";
 import { isApiError } from "../../api/client";
@@ -14,6 +14,7 @@ import {
 import { Alert } from "../../components/Alert";
 import { Button } from "../../components/Button";
 import { Card } from "../../components/Card";
+import { Checkbox } from "../../components/CheckboxField";
 import { Code } from "../../components/Code";
 import { ProblemNotice } from "../../components/ProblemNotice";
 import { Loading } from "../../components/QueryState";
@@ -30,6 +31,8 @@ const POLL_LINES = 1000;
 /** The most lines kept on screen. */
 export const KEEP_LINES = 2000;
 const POLL_MS = 3000;
+/** How long typing in the filter must pause before its outcome is announced. */
+export const FILTER_SETTLE_MS = 600;
 
 const SERVER_LOG_KEY = [SERVER_LOGS, "follow"] as const;
 
@@ -87,6 +90,26 @@ function lineTone(line: string): string | undefined {
   return undefined;
 }
 
+/** The lines a filter keeps: those containing it, in any case. */
+function matching(lines: string[], filter: string): string[] {
+  const needle = filter.trim().toLowerCase();
+  return needle === "" ? lines : lines.filter((line) => line.toLowerCase().includes(needle));
+}
+
+/** How many lines there are, and how many the filter keeps. */
+function countText(view: ServerLogView, filter: string): string {
+  const total = formatInteger(view.lines.length);
+  if (view.lines.length === 0) {
+    return "The log is empty.";
+  }
+  if (filter.trim() === "") {
+    const kept = view.trimmed ? `, the newest ${formatInteger(KEEP_LINES)} kept` : "";
+    return `${total} lines${kept}.`;
+  }
+  const shown = formatInteger(matching(view.lines, filter).length);
+  return `${shown} of ${total} lines contain “${filter.trim()}”.`;
+}
+
 /** How far from the bottom still counts as at it, in pixels. */
 const AT_BOTTOM = 24;
 
@@ -96,6 +119,10 @@ export function ServerLog() {
   const client = useQueryClient();
   const [follow, setFollow] = useState(true);
   const [filter, setFilter] = useState("");
+  const [filterUsed, setFilterUsed] = useState(false);
+  // What the filter found, said once typing settles. The count on screen
+  // changes with every read, so it isn't announced itself.
+  const [announcement, setAnnouncement] = useState("");
   const log = useQuery({
     queryKey: SERVER_LOG_KEY,
     queryFn: async ({ signal }) => {
@@ -120,6 +147,19 @@ export function ServerLog() {
       element.scrollTop = element.scrollHeight;
     }
   }, [lines]);
+
+  useEffect(() => {
+    if (!filterUsed) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      const latest = client.getQueryData<ServerLogView>(SERVER_LOG_KEY);
+      setAnnouncement(latest === undefined ? "" : countText(latest, filter));
+    }, FILTER_SETTLE_MS);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [client, filter, filterUsed]);
 
   if (log.isPending) {
     return <Loading>Reading the server&apos;s log…</Loading>;
@@ -161,9 +201,7 @@ export function ServerLog() {
   }
 
   const view = log.data;
-  const needle = filter.trim().toLowerCase();
-  const shown =
-    needle === "" ? view.lines : view.lines.filter((line) => line.toLowerCase().includes(needle));
+  const shown = matching(view.lines, filter);
 
   return (
     <Card
@@ -176,14 +214,12 @@ export function ServerLog() {
       }
       actions={
         <>
-          <label className="flex h-8 items-center gap-2">
-            <input
-              type="checkbox"
+          <label className="flex h-8 items-center gap-2 pointer-coarse:min-h-11">
+            <Checkbox
               checked={follow}
               onChange={(event) => {
                 setFollow(event.target.checked);
               }}
-              className="size-4 accent-accent"
             />
             Follow
           </label>
@@ -209,22 +245,24 @@ export function ServerLog() {
         value={filter}
         onChange={(event) => {
           setFilter(event.target.value);
+          setFilterUsed(true);
         }}
         className="max-w-md"
       />
       {log.isError && (
         <ProblemNotice problem={callProblem(log.error)} live className="text-sm" />
       )}
-      {view.restarted && (
-        <p className="text-muted">The log was rotated or cleared while open; it starts again below.</p>
-      )}
-      <p className="text-muted" role="status">
-        {view.lines.length === 0
-          ? "The log is empty."
-          : needle === ""
-            ? `${formatInteger(view.lines.length)} lines${view.trimmed ? `, the newest ${formatInteger(KEEP_LINES)} kept` : ""}.`
-            : `${formatInteger(shown.length)} of ${formatInteger(view.lines.length)} lines contain “${filter.trim()}”.`}
-      </p>
+      {/* Says what needs saying: the rotation notice as it appears, and the
+          filter's outcome. Out of the flow while it shows nothing. */}
+      <div role="status" className={cn(!view.restarted && "absolute")}>
+        {view.restarted && (
+          <p className="text-muted">
+            The log was rotated or cleared while open; it starts again below.
+          </p>
+        )}
+        <span className="sr-only">{announcement}</span>
+      </div>
+      <p className="text-muted">{countText(view, filter)}</p>
       {shown.length > 0 && (
         <pre
           ref={box}
@@ -237,7 +275,7 @@ export function ServerLog() {
             atBottom.current =
               element.scrollHeight - element.scrollTop - element.clientHeight <= AT_BOTTOM;
           }}
-          className="max-h-[60vh] overflow-auto rounded-md border border-line bg-raised p-3 font-mono text-xs leading-5"
+          className="max-h-[60vh] overflow-auto rounded-md border border-line bg-surface p-3 font-mono text-xs leading-5"
         >
           {shown.map((line, index) => (
             // Lines repeat and have no IDs; their place is their identity.
