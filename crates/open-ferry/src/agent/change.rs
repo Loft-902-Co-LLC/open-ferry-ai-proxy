@@ -415,9 +415,17 @@ async fn attempt(
             ("file", Some(file_note(other)))
         }
     };
-    let now = tree_of(&read_config(&ctx.path)?)?;
+    let now_data = read_config(&ctx.path)?;
+    // The server runs a file with this one's bytes but wrote another: this
+    // file is a copy of the one it runs, and only the server's changed.
+    let copy = via == "server" && now_data == data;
+    let now = if copy {
+        after.clone()
+    } else {
+        tree_of(&now_data)?
+    };
     let changes = diff(&before, &now);
-    let note = note.or_else(|| {
+    let note = note.or_else(|| copy.then(|| copy_note(ctx))).or_else(|| {
         let path = request.path.as_deref()?;
         let elsewhere = changes.iter().any(|change| {
             change.path != path && !change.path.starts_with(&format!("{path}."))
@@ -493,6 +501,17 @@ pub(crate) fn check_expected(ctx: &Context, data: &[u8]) -> Result<(), Failure> 
     .hint(format!(
         "{again} to see what it would change now, and the config_sha256 to give with the confirmation"
     )))
+}
+
+/// The note for a change made through a server that left this file as it
+/// was: the server runs another file that held the same bytes. The server
+/// doesn't say which file it runs, so this is known only once it has
+/// written.
+pub(crate) fn copy_note(ctx: &Context) -> String {
+    let path = ctx.path.display();
+    format!(
+        "The server at this config's address runs another file that held the same bytes as {path}: the change was made to that file, and {path} didn't change. Give --config the path of the file the server runs to work on it."
+    )
 }
 
 /// Why a change was written to the file, not made through a server.

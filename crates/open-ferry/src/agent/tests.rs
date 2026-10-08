@@ -2068,6 +2068,59 @@ async fn a_server_running_another_config_is_left_alone() {
     assert_eq!(other.text(), ours);
 }
 
+// Not upstream's: a server that runs another file holding the same bytes
+// as this config counts as running it, as the server doesn't say which
+// file it runs. A change then goes to the server's file, and the report
+// says this file didn't change; for an undo too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_change_through_a_copy_says_the_copy_is_unchanged() {
+    let live = live(Some(KEY), None).await;
+    let copy = Setup::new(live.port, Some(KEY));
+    std::fs::write(&copy.path, live.setup.text()).unwrap();
+    let ours = copy.text();
+    let changed = ok(&cli(&copy.path), set("routing.strategy", "fill-first")).await;
+    assert_eq!(changed.json["via"], json!("server"));
+    assert_eq!(changed.json["changed"], json!(true));
+    let note = changed.json["note"].as_str().unwrap();
+    assert!(note.contains("didn't change"), "{note}");
+    assert!(note.contains(&copy.path.display().to_string()), "{note}");
+    assert_eq!(
+        changed.json["changes"],
+        json!([{"path": "routing.strategy", "new": "fill-first"}])
+    );
+    assert!(changed.text.contains("didn't change"));
+    assert_eq!(copy.text(), ours);
+    assert!(live.setup.text().contains("fill-first"));
+    assert_eq!(live.state.config().routing.strategy, "fill-first");
+
+    // An undo from a copy of the server's file and its backup.
+    let backup = |setup: &Setup| setup.dir.path().join("config.yaml.bak");
+    std::fs::write(&copy.path, live.setup.text()).unwrap();
+    std::fs::copy(backup(&live.setup), backup(&copy)).unwrap();
+    let ours = copy.text();
+    let undone = ok(&confirmed(&copy.path, Caller::Cli), Command::ConfigUndo).await;
+    assert_eq!(undone.json["via"], json!("server"));
+    assert!(
+        undone.json["note"]
+            .as_str()
+            .unwrap()
+            .contains("didn't change"),
+        "{}",
+        undone.json
+    );
+    assert!(!undone.json["changes"].as_array().unwrap().is_empty());
+    assert_eq!(copy.text(), ours);
+    assert!(!live.setup.text().contains("fill-first"));
+
+    // The server's own file is still changed as itself, with no such note.
+    let changed = ok(
+        &cli(&live.setup.path),
+        set("routing.strategy", "fill-first"),
+    )
+    .await;
+    assert!(changed.json.get("note").is_none(), "{}", changed.json);
+}
+
 // Not upstream's: a change is made only to the file it was worked out
 // from. One a person said yes to at the terminal is refused when the file
 // changed while they were asked; one confirmed up front is worked out
