@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/api/server_management.go
 // (serveManagementControlPanel) and internal/api/server_routes.go (its
-// route) (v8.0.15, MIT).
+// route) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Serves the app at `/dashboard/`, and answers `/management.html`,

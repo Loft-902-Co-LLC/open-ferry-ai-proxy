@@ -5,12 +5,14 @@ What open-ferry is building next, in order. [UPSTREAM.md](UPSTREAM.md) says what
 ## v1: a complete proxy for one person or a small team
 
 Already in place:
+- **Parity with CLIProxyAPI v8.0.20, its latest release, for every provider we support:** Codex, Claude, Gemini, Gemini Interactions, Vertex AI, Meta (API keys and access tokens), xAI (API keys) and any OpenAI-compatible upstream. We follow upstream's releases; what we do differently is listed in UPSTREAM.md.
 - CLIProxyAPI's config and auth directory, read as they are.
 - The OpenAI, Claude and Gemini client APIs, over HTTP and WebSocket.
 - The credential manager.
 - The management API subset T3 Code uses.
 - The images endpoints (`/v1/images/generations` and `/v1/images/edits`), served by Codex, xAI and OpenAI-compatible upstreams.
 - The video endpoints (the `/v1/videos` and `/openai/v1/videos` routes), served by xAI.
+- The speech endpoints (`/v1/audio/speech` and `/v1/tts`), served by xAI.
 - CLIProxyAPI's terminal UI (`open-ferry -tui`), as a client of the management API.
 - Management writes: the routes that change the config and the credentials. A config write is checked before it lands, replaces the file in one step, keeps the previous one as `config.yaml.bak` and the file's comments, and takes effect before it is answered.
 - A web dashboard at `/dashboard/`, built into the binary in place of CLIProxyAPI's downloaded panel, and much easier to use than CLIProxyAPI's management center:
@@ -39,7 +41,6 @@ Already in place:
 
 Still to come:
 
-- **Parity with the latest CLIProxyAPI release for every provider we support:** Codex, Claude, Gemini, Gemini Interactions, Vertex AI, Meta (API keys and access tokens), xAI (API keys) and any OpenAI-compatible upstream. We follow upstream's releases; the pin is at v8.0.15. What we do differently is listed in UPSTREAM.md.
 - **Routing by quota:** a strategy that picks by the quota the providers report (now recorded for Claude and Codex): the credential whose limit resets soonest, or the one with the most left, keeping a reserve on each. Upstream has no such strategy, so this would be open-ferry's own.
 - **Switching from CLIProxyAPI in one step:** `open-ferry migrate` finds an existing CLIProxyAPI, its config and auth directory and what starts it (a service, a scheduled task, a launcher or a container), says what carries over and what doesn't, backs up the config and credentials, and moves the proxy to open-ferry on the same port with the same files, so clients change nothing. The install scripts offer it when they find CLIProxyAPI, and `open-ferry migrate --undo` switches back.
 - **The first release, 0.1.0,** after it has been tested in real use. The install scripts and the container image are first published with it.

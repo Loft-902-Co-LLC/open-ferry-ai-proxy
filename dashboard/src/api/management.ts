@@ -1,5 +1,5 @@
 // The parts of CLIProxyAPI's management API the screens use, with the
-// shapes upstream v8.0.15 answers with.
+// shapes upstream v8.0.20 answers with.
 
 export const MANAGEMENT = "/v0/management";
 

@@ -1,5 +1,5 @@
 // The credentials the proxy sends requests with, through CLIProxyAPI's
-// management API, with the shapes upstream v8.0.15 answers with:
+// management API, with the shapes upstream v8.0.20 answers with:
 // credential files and sign-ins (`auth-files`), the Claude and Codex
 // sign-ins (OAuth), and the provider API keys in config.yaml.
 
