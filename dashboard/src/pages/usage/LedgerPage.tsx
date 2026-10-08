@@ -1,7 +1,7 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Pencil, Save, Trash2 } from "lucide-react";
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState, type RefObject } from "react";
 import { useForm } from "react-hook-form";
 import { Link } from "react-router";
 
@@ -19,6 +19,7 @@ import {
 } from "../../api/dashboard";
 import { useApiCall, useApiQuery } from "../../api/hooks";
 import { Alert } from "../../components/Alert";
+import { BreakableText } from "../../components/BreakableText";
 import { Button } from "../../components/Button";
 import { Card } from "../../components/Card";
 import { Code } from "../../components/Code";
@@ -52,7 +53,9 @@ function LedgerFacts({ ledger }: { ledger: LedgerState }) {
       {facts.map(([label, value]) => (
         <div key={label} className="contents">
           <dt className="text-muted">{label}</dt>
-          <dd className={label === "File" ? "font-mono break-all" : "tabular-nums"}>{value}</dd>
+          <dd className={label === "File" ? "font-mono" : "tabular-nums"}>
+            {label === "File" ? <BreakableText text={value} /> : value}
+          </dd>
         </div>
       ))}
     </dl>
@@ -77,9 +80,44 @@ function settingsValues(ledger: LedgerState): SettingsInput {
   };
 }
 
+/** What saving a change deletes, when it lowers a limit below what is kept. */
+interface Loss {
+  /** How many calls go, when that can be worked out. */
+  calls: number | null;
+  /** Calls older than this many days go. */
+  olderThanDays: number | null;
+}
+
+function settingsLoss(change: LedgerSettings, ledger: LedgerState): Loss | null {
+  const calls =
+    change.max_rows !== undefined && ledger.rows !== null && change.max_rows < ledger.rows
+      ? ledger.rows - change.max_rows
+      : null;
+  const olderThanDays =
+    change.retention_days !== undefined &&
+    ledger.retention_days !== null &&
+    change.retention_days < ledger.retention_days
+      ? change.retention_days
+      : null;
+  return calls === null && olderThanDays === null ? null : { calls, olderThanDays };
+}
+
+/** The confirm button: what goes, as exactly as it is known. */
+function lossLabel(loss: Loss): string {
+  if (loss.olderThanDays === null && loss.calls !== null) {
+    return `Delete ${formatInteger(loss.calls)} calls`;
+  }
+  if (loss.calls === null && loss.olderThanDays !== null) {
+    return `Delete calls older than ${formatInteger(loss.olderThanDays)} days`;
+  }
+  return "Delete the oldest calls";
+}
+
 function LedgerSettingsForm({ ledger }: { ledger: LedgerState }) {
   const call = useApiCall();
   const client = useQueryClient();
+  // A change that deletes calls, waiting for a yes.
+  const [asking, setAsking] = useState<LedgerSettings | null>(null);
   const form = useForm<SettingsInput, unknown, z.output<typeof settingsSchema>>({
     resolver: zodResolver(settingsSchema),
     defaultValues: settingsValues(ledger),
@@ -88,6 +126,7 @@ function LedgerSettingsForm({ ledger }: { ledger: LedgerState }) {
     mutationFn: (change: LedgerSettings) =>
       call<LedgerState>(USAGE_LEDGER, { method: "PATCH", json: change }),
     onSuccess: (state) => {
+      setAsking(null);
       client.setQueryData([USAGE_LEDGER], state);
       form.reset(settingsValues(state));
       // The currency shows beside every cost.
@@ -111,11 +150,18 @@ function LedgerSettingsForm({ ledger }: { ledger: LedgerState }) {
     if (values.currency !== ledger.currency) {
       change.currency = values.currency;
     }
-    if (Object.keys(change).length > 0) {
-      save.mutate(change);
+    if (Object.keys(change).length === 0) {
+      return;
     }
+    if (settingsLoss(change, ledger) !== null) {
+      save.reset();
+      setAsking(change);
+      return;
+    }
+    save.mutate(change);
   });
   const errors = form.formState.errors;
+  const loss = asking === null ? null : settingsLoss(asking, ledger);
 
   return (
     <form noValidate onSubmit={(event) => void onSubmit(event)} className="space-y-4">
@@ -143,10 +189,10 @@ function LedgerSettingsForm({ ledger }: { ledger: LedgerState }) {
         />
       </div>
       <p className="text-muted">
-        These are kept in the ledger file, not in config.yaml. Lowering a limit deletes calls
-        within moments.
+        These are kept in the ledger file, not in config.yaml. A lower limit deletes calls within
+        moments of saving, so Save asks first.
       </p>
-      {save.isError && <ProblemNotice problem={callProblem(save.error)} live />}
+      {save.isError && asking === null && <ProblemNotice problem={callProblem(save.error)} live />}
       {save.isSuccess && !form.formState.isDirty && (
         <Alert tone="ok" live>
           <p>Saved.</p>
@@ -156,6 +202,39 @@ function LedgerSettingsForm({ ledger }: { ledger: LedgerState }) {
         {save.isPending ? <Spinner /> : <Save aria-hidden="true" className="size-4" />}
         Save
       </Button>
+      <ConfirmDialog
+        open={loss !== null}
+        title="Delete the oldest calls?"
+        confirmLabel={loss === null ? "" : lossLabel(loss)}
+        pending={save.isPending}
+        onConfirm={() => {
+          if (asking !== null) {
+            save.mutate(asking);
+          }
+        }}
+        onCancel={() => {
+          setAsking(null);
+        }}
+      >
+        {loss !== null && (
+          <>
+            {loss.calls !== null && (
+              <p>
+                Keeping at most {formatInteger(asking?.max_rows ?? 0)} calls deletes the oldest{" "}
+                {formatInteger(loss.calls)} of the {formatInteger(ledger.rows ?? 0)} recorded.
+              </p>
+            )}
+            {loss.olderThanDays !== null && (
+              <p>
+                Keeping calls for {formatInteger(loss.olderThanDays)} days deletes every call
+                older than that.
+              </p>
+            )}
+          </>
+        )}
+        <p>This can&apos;t be undone.</p>
+        {save.isError && <ProblemNotice problem={callProblem(save.error)} live />}
+      </ConfirmDialog>
     </form>
   );
 }
@@ -195,25 +274,46 @@ function invalidateCosts(client: ReturnType<typeof useQueryClient>) {
   });
 }
 
+/** What the price form holds, and where it came from. */
+interface Editing {
+  /** The values to edit: a price, or a model to price. */
+  values: PriceForm;
+  /** The model whose price is being changed, from its row's Change button. */
+  from: string | null;
+  /** Move the focus to the form: the change was asked for elsewhere. */
+  focus: boolean;
+}
+
+const NOT_EDITING: Editing = { values: EMPTY_PRICE, from: null, focus: false };
+
 function PriceEditor({
   prices,
   editing,
   onSaved,
+  onCancel,
 }: {
   prices: Prices;
-  /** The values to edit: a price, or a model to price. */
-  editing: PriceForm;
+  editing: Editing;
   onSaved: () => void;
+  /** Stops changing a price; the focus goes back to its row. */
+  onCancel: () => void;
 }) {
   const call = useApiCall();
   const client = useQueryClient();
   const listId = useId();
   const form = useForm<PriceForm, unknown, z.output<typeof priceSchema>>({
     resolver: zodResolver(priceSchema),
-    defaultValues: editing,
+    defaultValues: editing.values,
   });
+  // The model input itself: a reset unregisters the fields until the next render, so the
+  // form's own setFocus can't find it straight after one.
+  const modelInput = useRef<HTMLInputElement | null>(null);
+  const modelField = form.register("model");
   useEffect(() => {
-    form.reset(editing);
+    form.reset(editing.values);
+    if (editing.focus) {
+      modelInput.current?.focus();
+    }
   }, [editing, form]);
   const save = useMutation({
     mutationFn: (price: PriceInput) => call<Price>(USAGE_PRICES, { method: "PUT", json: price }),
@@ -244,7 +344,11 @@ function PriceEditor({
           autoCapitalize="none"
           className="sm:col-span-2 lg:col-span-1"
           error={errors.model?.message}
-          {...form.register("model")}
+          {...modelField}
+          ref={(element) => {
+            modelField.ref(element);
+            modelInput.current = element;
+          }}
         />
         <datalist id={listId}>
           {prices.unpriced_models.map((model) => (
@@ -291,14 +395,20 @@ function PriceEditor({
           {save.isPending ? <Spinner /> : <Save aria-hidden="true" className="size-4" />}
           Save price
         </Button>
-        {form.formState.isDirty && (
-          <Button
-            onClick={() => {
-              form.reset(EMPTY_PRICE);
-            }}
-          >
-            Clear
+        {editing.from !== null ? (
+          <Button onClick={onCancel}>
+            Cancel <span className="sr-only">changing the price of {editing.from}</span>
           </Button>
+        ) : (
+          form.formState.isDirty && (
+            <Button
+              onClick={() => {
+                form.reset(EMPTY_PRICE);
+              }}
+            >
+              Clear
+            </Button>
+          )
         )}
       </div>
     </form>
@@ -308,16 +418,24 @@ function PriceEditor({
 function PriceTable({
   prices,
   onEdit,
+  changeButtons,
 }: {
   prices: Prices;
   onEdit: (price: Price) => void;
+  /** Each row's Change button, by model, for the focus to come back to. */
+  changeButtons: RefObject<Map<string, HTMLButtonElement>>;
 }) {
   const call = useApiCall();
   const client = useQueryClient();
+  // The model whose price is to be deleted, waiting for a yes.
+  const [deleting, setDeleting] = useState<string | null>(null);
   const remove = useMutation({
     mutationFn: (model: string) =>
       call<{ deleted: boolean }>(USAGE_PRICES, { method: "DELETE", query: { model } }),
-    onSuccess: () => invalidateCosts(client),
+    onSuccess: async () => {
+      setDeleting(null);
+      await invalidateCosts(client);
+    },
   });
   const price = (value: number | null) => (value === null ? "as input" : String(value));
 
@@ -343,7 +461,9 @@ function PriceTable({
         <tbody>
           {prices.prices.map((entry) => (
             <tr key={entry.model}>
-              <Td className="font-mono">{entry.model}</Td>
+              <Td className="font-mono">
+                <BreakableText text={entry.model} kind="name" />
+              </Td>
               <Td className="text-right">{String(entry.input)}</Td>
               <Td className="text-right">{price(entry.cache_read)}</Td>
               <Td className="text-right">{price(entry.cache_write)}</Td>
@@ -353,39 +473,65 @@ function PriceTable({
                 <Button
                   size="sm"
                   variant="ghost"
-                  aria-label={`Change the price of ${entry.model}`}
+                  ref={(element) => {
+                    if (element === null) {
+                      changeButtons.current.delete(entry.model);
+                    } else {
+                      changeButtons.current.set(entry.model, element);
+                    }
+                  }}
                   onClick={() => {
                     onEdit(entry);
                   }}
                 >
                   <Pencil aria-hidden="true" className="size-4" />
-                  Change
+                  Change <span className="sr-only">the price of {entry.model}</span>
                 </Button>
                 <Button
                   size="sm"
                   variant="ghost"
-                  aria-label={`Remove the price of ${entry.model}`}
                   disabled={remove.isPending && remove.variables === entry.model}
                   onClick={() => {
-                    remove.mutate(entry.model);
+                    remove.reset();
+                    setDeleting(entry.model);
                   }}
                 >
                   <Trash2 aria-hidden="true" className="size-4" />
-                  Remove
+                  Delete <span className="sr-only">the price for {entry.model}</span>
                 </Button>
               </Td>
             </tr>
           ))}
         </tbody>
       </Table>
-      {remove.isError && <ProblemNotice problem={callProblem(remove.error)} live />}
+      {remove.isError && deleting === null && (
+        <ProblemNotice problem={callProblem(remove.error)} live />
+      )}
+      <ConfirmDialog
+        open={deleting !== null}
+        title={`Delete the price for ${deleting ?? ""}?`}
+        confirmLabel="Delete price"
+        pending={remove.isPending}
+        onConfirm={() => {
+          if (deleting !== null) {
+            remove.mutate(deleting);
+          }
+        }}
+        onCancel={() => {
+          setDeleting(null);
+        }}
+      >
+        <p>Its calls, past ones too, then show no cost until it has a price again.</p>
+        {remove.isError && <ProblemNotice problem={callProblem(remove.error)} live />}
+      </ConfirmDialog>
     </>
   );
 }
 
 function PricesCard() {
   const prices = useApiQuery<Prices>(USAGE_PRICES);
-  const [editing, setEditing] = useState<PriceForm>(EMPTY_PRICE);
+  const [editing, setEditing] = useState<Editing>(NOT_EDITING);
+  const changeButtons = useRef(new Map<string, HTMLButtonElement>());
   return (
     <Card
       title={<span id="prices">Prices</span>}
@@ -396,8 +542,9 @@ function PricesCard() {
           <>
             <PriceTable
               prices={data}
+              changeButtons={changeButtons}
               onEdit={(price) => {
-                setEditing(priceValues(price));
+                setEditing({ values: priceValues(price), from: price.model, focus: true });
               }}
             />
             {data.unpriced_models.length > 0 && (
@@ -410,7 +557,11 @@ function PricesCard() {
                         size="sm"
                         aria-label={`Set a price for ${model}`}
                         onClick={() => {
-                          setEditing({ ...EMPTY_PRICE, model });
+                          setEditing({
+                            values: { ...EMPTY_PRICE, model },
+                            from: null,
+                            focus: true,
+                          });
                         }}
                       >
                         <span className="font-mono">{model}</span>
@@ -424,7 +575,14 @@ function PricesCard() {
               prices={data}
               editing={editing}
               onSaved={() => {
-                setEditing(EMPTY_PRICE);
+                setEditing(NOT_EDITING);
+              }}
+              onCancel={() => {
+                const from = editing.from;
+                setEditing(NOT_EDITING);
+                if (from !== null) {
+                  changeButtons.current.get(from)?.focus();
+                }
               }}
             />
           </>
