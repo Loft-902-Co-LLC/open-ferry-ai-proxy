@@ -15,7 +15,9 @@
 //! As the first argument, `init` writes a starting config (see [`init`]),
 //! `check` looks over a setup (see [`check`]), and `service` installs,
 //! removes or shows open-ferry as a background service (see
-//! [`os_service`]); the arguments after it are theirs.
+//! [`os_service`]); the arguments after it are theirs. `status`, `config`,
+//! `keys`, `credentials`, `clients` and `mcp` look at and change a setup,
+//! for people and agents (see [`agent`]).
 //!
 //! Deviations from upstream:
 //! - The cloud-deploy, home, Postgres, object-store and git-store modes,
@@ -30,6 +32,7 @@
 //!   an auth directory that won't resolve exits with 1; upstream logs it and
 //!   exits with 0.
 
+mod agent;
 mod browser;
 mod check;
 mod dotenv;
@@ -69,6 +72,7 @@ fn main() -> ExitCode {
         Some(init::NAME) => return init::main(&program, args.skip(1)),
         Some(check::NAME) => return check::main(&program, args.skip(1)),
         Some(os_service::NAME) => return os_service::main(&program, args.skip(1)),
+        Some(name) if agent::is_command(name) => return agent::main(&program, args),
         _ => {}
     }
     let flags = match flags::parse(args) {
