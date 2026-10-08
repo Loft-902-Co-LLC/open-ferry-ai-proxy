@@ -1888,6 +1888,7 @@ async fn login_server() -> (Offline, tokio::task::JoinHandle<()>) {
             get_route(|Query(query): Query<StateQuery>| async move {
                 Json(match query.state.as_str() {
                     "state-one" => json!({"status": "ok"}),
+                    "state-going" => json!({"status": "wait"}),
                     "state-bad" => json!({"status": "error", "error": "refused for someone@example.com"}),
                     _ => json!({"status": "error", "error": "unknown state"}),
                 })
@@ -2005,6 +2006,25 @@ async fn login_gives_the_address_and_waits() {
 
     let done = ok(&context(path, Caller::Mcp), login(Some("state-one"))).await;
     assert_eq!(done.json["status"], json!("ok"));
+    // A sign-in still going when the wait ends says to wait again: for a
+    // tool, as a result, not an error; on the command line, with exit 1.
+    let going = ok(&context(path, Caller::Mcp), login(Some("state-going"))).await;
+    assert_eq!(going.json["status"], json!("wait"));
+    assert_eq!(going.code, exit::OK);
+    assert!(
+        going
+            .text
+            .contains("call credentials_login again with state \"state-going\""),
+        "{}",
+        going.text
+    );
+    let result = serde_json::to_value(tool_result(Ok(going))).unwrap();
+    assert_ne!(result["isError"], json!(true), "{result}");
+    assert_eq!(result["structuredContent"]["status"], json!("wait"));
+    let going = ok(&cli(path), login(Some("state-going"))).await;
+    assert_eq!(going.json["status"], json!("wait"));
+    assert_eq!(going.code, exit::FAILED);
+    assert!(going.text.contains("--state state-going"));
     let failure = fails(&context(path, Caller::Mcp), login(Some("state-bad"))).await;
     assert_eq!(failure.error, "login_failed");
     assert!(!failure.message.contains("someone@example.com"));

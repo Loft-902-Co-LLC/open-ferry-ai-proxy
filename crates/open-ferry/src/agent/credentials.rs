@@ -38,17 +38,34 @@ pub(crate) const STATES: [&str; 7] = [
     "unknown",
 ];
 
-/// How often a waiting sign-in is asked about, on the command line.
-const CLI_POLL: Duration = Duration::from_secs(2);
+/// How often a waiting sign-in is asked about, on the command line (much
+/// more often in tests).
+const CLI_POLL: Duration = if cfg!(test) {
+    Duration::from_millis(20)
+} else {
+    Duration::from_secs(2)
+};
 
 /// How long the command line waits for a sign-in: as long as the server
-/// keeps it.
-const CLI_WAIT: Duration = Duration::from_secs(5 * 60);
+/// keeps it (a moment in tests).
+const CLI_WAIT: Duration = if cfg!(test) {
+    Duration::from_millis(100)
+} else {
+    Duration::from_secs(5 * 60)
+};
 
 /// How often, and how long, a tool call waits for a sign-in it was given
-/// the state of.
-const MCP_POLL: Duration = Duration::from_secs(1);
-const MCP_WAIT: Duration = Duration::from_secs(50);
+/// the state of (a moment in tests).
+const MCP_POLL: Duration = if cfg!(test) {
+    Duration::from_millis(20)
+} else {
+    Duration::from_secs(1)
+};
+const MCP_WAIT: Duration = if cfg!(test) {
+    Duration::from_millis(100)
+} else {
+    Duration::from_secs(50)
+};
 
 /// `credentials list`'s input.
 #[derive(Clone, Debug, Default)]
@@ -720,7 +737,10 @@ pub(crate) async fn login(ctx: &Context, input: &LoginInput) -> Result<Outcome, 
     followed
 }
 
-/// Waits for the sign-in `state` to finish.
+/// Waits for the sign-in `state` to finish. A sign-in still going when the
+/// wait ends is a result saying to wait again: a tool's, not an error, as
+/// calling again is the next step; on the command line it exits with 1, as
+/// the sign-in didn't finish.
 async fn follow(
     ctx: &Context,
     server: &Server,
@@ -781,7 +801,10 @@ async fn follow(
                 error: None,
                 summary: format!("The sign-in hasn't finished yet; {again}."),
             })
-            .code(super::exit::FAILED));
+            .code(match ctx.caller {
+                Caller::Cli => super::exit::FAILED,
+                Caller::Mcp => super::exit::OK,
+            }));
         }
         tokio::time::sleep(poll).await;
     }
