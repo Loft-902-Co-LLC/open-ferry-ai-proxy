@@ -12,6 +12,12 @@
 //! [`commit_expecting`] writes only while the file still holds the bytes
 //! the caller read.
 //!
+//! Every write holds the file's [`WriteLock`], an exclusive OS lock on
+//! `<file name>.lock` beside it, from the read it checks (or works its
+//! change out from) to the record of what it wrote, so two writes, in this
+//! process or in two, never interleave: one waits for the other, a few
+//! seconds at most, then reads what the other wrote.
+//!
 //! After each write, the SHA-256 of what was written is kept beside the
 //! file as `<file name>.sha256`, in `sha256sum`'s format, so an undo can
 //! tell whether the file was changed by hand since (see [`super::undo`]).
@@ -22,7 +28,7 @@
 //! - Upstream writes the file in place with no check and no backup, and
 //!   follows a symbolic link. The writer writes in place only when the
 //!   rename is refused.
-//! - Upstream keeps no record of its writes.
+//! - Upstream keeps no record of its writes, and takes no file lock.
 //! - A new file is created readable by its owner only (0600 on Unix),
 //!   where upstream's management `WriteConfig` creates it 0644.
 //! - I/O errors are worded `open <path>: <error>` with the platform's
@@ -31,6 +37,7 @@
 use std::fs;
 use std::io::{self, Read as _, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use sha2::{Digest as _, Sha256};
 
@@ -39,6 +46,12 @@ use super::{SaveError, SaveErrorKind};
 
 /// The most of a record file read.
 const RECORD_LIMIT: u64 = 4096;
+
+/// How long a write waits for another to let go of the file's lock.
+pub(crate) const LOCK_WAIT: Duration = Duration::from_secs(5);
+
+/// How long a write waiting for the lock sleeps between tries.
+const LOCK_RETRY: Duration = Duration::from_millis(10);
 
 /// The file name of the backup of `path`: `<file name>.bak`.
 pub(crate) fn backup_path(path: &Path) -> PathBuf {
@@ -49,6 +62,12 @@ pub(crate) fn backup_path(path: &Path) -> PathBuf {
 /// name>.sha256`.
 pub(crate) fn record_path(path: &Path) -> PathBuf {
     with_suffix(path, ".sha256")
+}
+
+/// The file name of the lock file of `path`: `<file name>.lock` (see
+/// [`WriteLock`]).
+pub(crate) fn lock_path(path: &Path) -> PathBuf {
+    with_suffix(path, ".lock")
 }
 
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
@@ -73,6 +92,106 @@ pub(crate) fn recorded_sha256(path: &Path) -> Option<String> {
     file.take(RECORD_LIMIT).read_to_string(&mut text).ok()?;
     let hash = text.split_whitespace().next()?.to_ascii_lowercase();
     (hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(hash)
+}
+
+/// The lock every write of a config file holds, from the read its check
+/// (or its change) is made from to the record of what it wrote, so writes
+/// in this process and in others never interleave: one waits, then reads
+/// what the other wrote. It is an exclusive OS file lock (`flock` on Unix,
+/// `LockFileEx` on Windows) on `<file name>.lock` beside the file, not on
+/// the file, which a write replaces by a rename. It is let go when dropped,
+/// and the OS lets it go when the process ends, so a write that died
+/// holds nothing.
+///
+/// The lock file stays: removing it while another writer had it open would
+/// let that writer lock a file the next one doesn't open. It is empty, and
+/// on Unix created readable and writable by its owner only, so no other
+/// user can hold it. Where the file system can't lock files at all
+/// (`Unsupported`), a write goes ahead without the lock, as before there
+/// was one.
+#[derive(Debug)]
+pub(crate) struct WriteLock {
+    _file: fs::File,
+}
+
+impl WriteLock {
+    /// Locks the config file at `path`, waiting up to [`LOCK_WAIT`] for
+    /// another write to let go. A symbolic link or a directory at `path`
+    /// is refused first, so no lock file is made beside one.
+    pub(crate) fn acquire(path: &Path) -> Result<Self, SaveError> {
+        Self::acquire_within(path, LOCK_WAIT)
+    }
+
+    /// [`acquire`](Self::acquire), waiting up to `wait`.
+    fn acquire_within(path: &Path, wait: Duration) -> Result<Self, SaveError> {
+        refuse_link(path)?;
+        let target = lock_path(path);
+        refuse_link(&target)?;
+        let file = open_lock(&target).map_err(|error| io_error("open", &target, error))?;
+        let deadline = Instant::now() + wait;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(Self { _file: file }),
+                Err(fs::TryLockError::WouldBlock) => {}
+                Err(fs::TryLockError::Error(error))
+                    if error.kind() == io::ErrorKind::Unsupported =>
+                {
+                    return Ok(Self { _file: file });
+                }
+                Err(fs::TryLockError::Error(error)) => {
+                    return Err(io_error("lock", &target, error));
+                }
+            }
+            #[cfg(test)]
+            note_waiting(path);
+            if Instant::now() >= deadline {
+                return Err(SaveError::new(
+                    SaveErrorKind::Io,
+                    format!(
+                        "another write of {} still held its lock, {}, after {wait:?}; nothing was written",
+                        path.display(),
+                        target.display()
+                    ),
+                ));
+            }
+            std::thread::sleep(LOCK_RETRY);
+        }
+    }
+}
+
+/// Opens the lock file `target`, creating it empty when it isn't there.
+fn open_lock(target: &Path) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    options.open(target)
+}
+
+/// The config files a write waited for the lock of, for the tests.
+#[cfg(test)]
+static WAITED: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn note_waiting(path: &Path) {
+    if let Ok(mut waited) = WAITED.lock() {
+        waited.push(path.to_owned());
+    }
+}
+
+/// Whether a write of the config file at `path` waited for its lock since
+/// this was last asked.
+#[cfg(test)]
+pub(crate) fn waited(path: &Path) -> bool {
+    let Ok(mut waited) = WAITED.lock() else {
+        return false;
+    };
+    let before = waited.len();
+    waited.retain(|seen| seen != path);
+    waited.len() != before
 }
 
 /// The failure when the file no longer holds what the caller read.
@@ -145,13 +264,43 @@ pub(crate) fn commit(path: &Path, data: &[u8]) -> Result<(), SaveError> {
 /// [`commit`], made only when the file holds `expected`, if given: else a
 /// [`SaveErrorKind::Stale`] error, and nothing is written. The check is
 /// made with the read the backup is taken from, just before the file is
-/// replaced.
+/// replaced, under the file's [`WriteLock`].
 pub(crate) fn commit_expecting(
     path: &Path,
     data: &[u8],
     expected: Option<&[u8]>,
 ) -> Result<(), SaveError> {
+    check(data)?;
+    let lock = WriteLock::acquire(path)?;
+    write_locked(&lock, path, data, expected)
+}
+
+/// [`commit_expecting`] under `lock`, the caller's lock of `path`, taken
+/// before it read what it worked `data` out from.
+pub(crate) fn commit_locked(
+    lock: &WriteLock,
+    path: &Path,
+    data: &[u8],
+    expected: Option<&[u8]>,
+) -> Result<(), SaveError> {
+    check(data)?;
+    write_locked(lock, path, data, expected)
+}
+
+/// Fails when `data` doesn't load as a config.
+fn check(data: &[u8]) -> Result<(), SaveError> {
     load_bytes(data).map_err(|error| SaveError::new(SaveErrorKind::Check, error.to_string()))?;
+    Ok(())
+}
+
+/// The read, the check of `expected`, the backup, the replacement and the
+/// record of a write, which holds `_lock`.
+fn write_locked(
+    _lock: &WriteLock,
+    path: &Path,
+    data: &[u8],
+    expected: Option<&[u8]>,
+) -> Result<(), SaveError> {
     refuse_link(path)?;
     let dir = match path.parent() {
         Some(dir) if !dir.as_os_str().is_empty() => dir,
@@ -296,8 +445,100 @@ mod tests {
         names.sort();
         assert_eq!(
             names,
-            ["config.yaml", "config.yaml.bak", "config.yaml.sha256"]
+            [
+                "config.yaml",
+                "config.yaml.bak",
+                "config.yaml.lock",
+                "config.yaml.sha256"
+            ]
         );
+        // The lock file is left empty; the backup and the record are the
+        // config's.
+        assert_eq!(fs::read(lock_path(&path)).expect("lock file"), b"");
+        assert_eq!(recorded_sha256(&path), Some(sha256_hex(b"port: 3\n")));
+    }
+
+    // Not upstream's: a write waits while another holds the file's lock,
+    // and then reads the file as that one left it: one that expected the
+    // bytes from before is refused as stale, and writes nothing. (Two
+    // writers that both passed the check before either wrote would have
+    // let the later write over the earlier one.)
+    #[test]
+    fn a_write_waits_for_the_lock_then_sees_the_newer_file() {
+        let dir = TempDir::new();
+        let path = dir.path().join("config.yaml");
+        commit(&path, b"port: 1\n").expect("seed");
+        let held = WriteLock::acquire(&path).expect("lock");
+        let writer = {
+            let path = path.clone();
+            std::thread::spawn(move || commit_expecting(&path, b"port: 3\n", Some(b"port: 1\n")))
+        };
+        let start = Instant::now();
+        while !waited(&path) {
+            assert!(!writer.is_finished(), "the writer didn't wait");
+            assert!(start.elapsed() < LOCK_WAIT, "the writer never waited");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        // Another write, made while the first waits.
+        commit_locked(&held, &path, b"port: 2\n", Some(b"port: 1\n")).expect("the holder");
+        assert_eq!(fs::read_to_string(&path).expect("read"), "port: 2\n");
+        drop(held);
+        let error = writer
+            .join()
+            .expect("join")
+            .expect_err("the waiting write is stale");
+        assert_eq!(error.kind(), SaveErrorKind::Stale);
+        assert_eq!(fs::read_to_string(&path).expect("read"), "port: 2\n");
+        assert_eq!(
+            fs::read_to_string(backup_path(&path)).expect("backup"),
+            "port: 1\n"
+        );
+        assert_eq!(recorded_sha256(&path), Some(sha256_hex(b"port: 2\n")));
+    }
+
+    // Not upstream's: the wait for the lock is bounded, and says why it
+    // failed; the lock is free again once its holder lets go.
+    #[test]
+    fn the_wait_for_the_lock_is_bounded() {
+        let dir = TempDir::new();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, "port: 1\n").expect("seed");
+        let held = WriteLock::acquire(&path).expect("lock");
+        let start = Instant::now();
+        let wait = Duration::from_millis(100);
+        let error = WriteLock::acquire_within(&path, wait).expect_err("held");
+        assert!(start.elapsed() >= wait);
+        assert_eq!(error.kind(), SaveErrorKind::Io);
+        let message = error.to_string();
+        assert!(message.contains("another write of"), "{message}");
+        assert!(message.contains("config.yaml.lock"), "{message}");
+        assert!(message.ends_with("nothing was written"), "{message}");
+        assert_eq!(fs::read_to_string(&path).expect("read"), "port: 1\n");
+        drop(held);
+        WriteLock::acquire_within(&path, wait).expect("free");
+    }
+
+    // Not upstream's: no lock file is made beside a directory, and a
+    // symbolic link as the lock file is refused.
+    #[test]
+    fn the_lock_refuses_what_a_write_refuses() {
+        let dir = TempDir::new();
+        let inner = dir.path().join("inner");
+        fs::create_dir(&inner).expect("mkdir");
+        let error = WriteLock::acquire(&inner).expect_err("a directory");
+        assert_eq!(error.kind(), SaveErrorKind::Io);
+        assert!(!lock_path(&inner).exists());
+        #[cfg(unix)]
+        {
+            let path = dir.path().join("config.yaml");
+            fs::write(&path, "port: 1\n").expect("seed");
+            let other = dir.path().join("other");
+            std::os::unix::fs::symlink(&other, lock_path(&path)).expect("link");
+            let error = commit(&path, b"port: 2\n").expect_err("a link");
+            assert_eq!(error.kind(), SaveErrorKind::Symlink);
+            assert!(!other.exists());
+            assert_eq!(fs::read_to_string(&path).expect("read"), "port: 1\n");
+        }
     }
 
     // Not upstream's: each write records the SHA-256 of what it wrote, in

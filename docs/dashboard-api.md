@@ -540,7 +540,7 @@ Whether the Claude Code of the `claude-cli` entry `name` is signed in, and how. 
 
 ### `POST /open-ferry/api/v1/config/undo`
 
-Undoes the last change to the config file. Every write of the config file (by the management API, the dashboard or `open-ferry config`) keeps the file it replaces beside it as `<config>.bak`, and records the SHA-256 of what it wrote in `<config>.sha256`; this puts that backup back in place of the file, and keeps the file it replaces as the new backup, so a second undo redoes the change. It takes the lock every management write takes, so it never interleaves with one, and the server loads the file again before it answers.
+Undoes the last change to the config file. Every write of the config file (by the management API, the dashboard or `open-ferry config`) keeps the file it replaces beside it as `<config>.bak`, and records the SHA-256 of what it wrote in `<config>.sha256`; this puts that backup back in place of the file, and keeps the file it replaces as the new backup, so a second undo redoes the change. It takes the lock every management write takes, and the file's lock, `<config>.lock`, that every writer of the file takes (`open-ferry config` included), so it never interleaves with one, and the server loads the file again before it answers.
 
 The body is optional. A JSON object with any of these fields says what the caller saw, so the undo puts back only what the caller was shown:
 

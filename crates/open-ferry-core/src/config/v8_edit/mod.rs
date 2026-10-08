@@ -201,11 +201,14 @@ impl std::error::Error for V8EditError {}
 /// Makes `edit` to the config file at `path` in the v8 layout, checks the
 /// result and writes it, and returns the config the file now holds
 /// (upstream's `ConfigV8` for `PUT`, `PATCH` and `DELETE`, up to its
-/// `WriteConfig`).
+/// `WriteConfig`). The file's write lock is held from the read to the
+/// write, so another write never lands between them (not upstream's).
 pub fn edit_v8(path: &Path, edit: &V8Edit) -> Result<Config, V8EditError> {
+    let failed = |error: save::SaveError| V8EditError::WriteFailed(error.to_string());
+    let lock = save::WriteLock::acquire(path).map_err(failed)?;
     let data = std::fs::read(path).map_err(|_| V8EditError::ReadFailed)?;
     let (out, config) = render(&data, edit)?;
-    save::write_file(path, &out).map_err(|error| V8EditError::WriteFailed(error.to_string()))?;
+    save::write_file_locked(&lock, path, &out).map_err(failed)?;
     Ok(config)
 }
 
