@@ -11,6 +11,7 @@ import { useApiCall } from "../../api/hooks";
 import { REQUEST_LOG_SETTING } from "../../api/management";
 import { Alert } from "../../components/Alert";
 import { Badge } from "../../components/Badge";
+import { BreakableText } from "../../components/BreakableText";
 import { Button } from "../../components/Button";
 import { Card } from "../../components/Card";
 import { Code } from "../../components/Code";
@@ -133,11 +134,18 @@ function LogRow({ log }: { log: LogEntry }) {
           {log.kind === "error" ? "Error" : "Request"}
         </Badge>
       </Td>
-      <Td className="font-mono break-all">
-        {log.method ?? ""} {log.url ?? <span className="text-muted">unknown</span>}
+      <Td className="font-mono">
+        {log.method ?? ""}{" "}
+        {log.url === null ? (
+          <span className="text-muted">unknown</span>
+        ) : (
+          <BreakableText text={log.url} />
+        )}
       </Td>
       <Td>{log.status ?? "–"}</Td>
-      <Td className="font-mono">{log.model ?? "–"}</Td>
+      <Td className="font-mono">
+        {log.model === null ? "–" : <BreakableText text={log.model} kind="name" />}
+      </Td>
       <Td className="text-right whitespace-nowrap">{formatBytes(log.size)}</Td>
       <Td>
         <Link
