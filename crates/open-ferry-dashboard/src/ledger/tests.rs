@@ -11,7 +11,7 @@ use rusqlite::Connection;
 
 use super::schema::{self, Settings, client_key_secret, read_settings, write_settings};
 use super::writer::{client_key_id, insert, prune};
-use super::{LEDGER_FILE, Ledger};
+use super::{LEDGER_FILE, Ledger, LedgerError};
 use crate::tests::{event, ms, tokens};
 
 /// A day, in milliseconds.
@@ -153,6 +153,105 @@ fn recording_follows_the_statistics_setting() {
     let ledger = Ledger::start(off.path(), &usage(false));
     assert!(!ledger.recording());
     assert!(ledger.unavailable_reason().is_none());
+    ledger.shutdown();
+}
+
+/// Not upstream's: the file is opened on the writer's thread, so starting
+/// the ledger doesn't wait on the disk. The directory is made at once; the
+/// API's calls wait for the opening, and the records made meanwhile are
+/// written once it is done.
+#[tokio::test]
+async fn the_file_is_opened_in_the_background() {
+    let dir = tempfile::tempdir().unwrap();
+    let logs = dir.path().join("logs");
+    let ledger = Ledger::start(&logs, &usage(true));
+    assert!(logs.is_dir());
+    ledger.opened().await;
+    assert!(logs.join(LEDGER_FILE).is_file());
+    ledger.shutdown();
+
+    // An opening that waits for the test to let it go.
+    let (go, wait) = mpsc::channel::<()>();
+    let (sender, receiver) = mpsc::sync_channel(16);
+    let path = dir.path().join(LEDGER_FILE);
+    let ledger =
+        Ledger::open_in_background(path.clone(), &usage(true), receiver, None, move |path| {
+            wait.recv().unwrap();
+            Ok((schema::open(path)?, schema::connect(path)?))
+        });
+    sender
+        .send(event("2026-10-05T10:00:00Z", "codex", "gpt-5"))
+        .unwrap();
+    let count = tokio::spawn({
+        let ledger = ledger.clone();
+        async move {
+            ledger
+                .run(|connection| {
+                    connection.query_row("SELECT COUNT(*) FROM settings", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                })
+                .await
+        }
+    });
+    let opened = tokio::spawn({
+        let ledger = ledger.clone();
+        async move { ledger.opened().await }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!path.exists());
+    assert!(!count.is_finished());
+    assert!(!opened.is_finished());
+
+    go.send(()).unwrap();
+    opened.await.unwrap();
+    assert_eq!(count.await.unwrap().unwrap(), 4);
+    assert_eq!(ledger.unavailable_reason(), None);
+    assert!(ledger.recording());
+    drop(sender);
+    ledger.shutdown();
+    let connection = schema::connect(&path).unwrap();
+    assert_eq!(
+        column::<String>(&connection, "SELECT model FROM requests"),
+        ["gpt-5"]
+    );
+}
+
+/// Not upstream's: a ledger whose opening fails on the writer's thread is
+/// unavailable, saying why, and ends its observation; one whose opening
+/// panics is unavailable too, rather than leaving its callers waiting.
+#[tokio::test]
+async fn a_failed_opening_leaves_it_unavailable() {
+    let dir = tempfile::tempdir().unwrap();
+    let usage = usage(true);
+    let (receiver, observation) = usage.observe();
+    let ledger = Ledger::open_in_background(
+        dir.path().join(LEDGER_FILE),
+        &usage,
+        receiver,
+        Some(observation),
+        |_| Err("no disk".to_owned()),
+    );
+    let read = ledger.run(|_| Ok(())).await;
+    assert!(
+        matches!(&read, Err(LedgerError::Unavailable(reason)) if reason == "no disk"),
+        "{read:?}"
+    );
+    assert_eq!(ledger.unavailable_reason(), Some("no disk"));
+    assert!(!ledger.recording());
+    assert!(ledger.inner.observation.lock().unwrap().is_none());
+    ledger.shutdown();
+
+    let (_sender, receiver) = mpsc::sync_channel(1);
+    let ledger =
+        Ledger::open_in_background(dir.path().join(LEDGER_FILE), &usage, receiver, None, |_| {
+            panic!("the test's opening panics")
+        });
+    ledger.opened().await;
+    assert_eq!(
+        ledger.unavailable_reason(),
+        Some("opening the ledger stopped")
+    );
     ledger.shutdown();
 }
 

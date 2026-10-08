@@ -10,6 +10,15 @@
 //! request waits on the disk. When it falls behind, records are lost and
 //! counted, not queued without bound.
 //!
+//! **Opening.** [`Ledger::start`] makes the log directory and starts
+//! observing at once, but opens the file on the writer's thread, so the
+//! server needn't wait on the disk to start serving: making a new SQLite
+//! file and switching it to the write-ahead log takes tens of milliseconds
+//! on some machines. The records made meanwhile wait in the observation
+//! and are written once the file is open. Every call that reads the ledger
+//! waits for the opening to end, so it answers as if the ledger had been
+//! opened before the server started.
+//!
 //! **What a row holds.** A row is one upstream call (one attempt): when it
 //! started, the client request's ID and route, the provider, the model and
 //! the model asked for, the credential by its ID, index and label, the
@@ -41,7 +50,7 @@ mod writer;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Receiver;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::thread::JoinHandle;
 
 use open_ferry_core::observe::usage::{Observation, Usage, UsageEvent};
@@ -67,8 +76,9 @@ pub struct Ledger {
 struct Inner {
     /// The file.
     path: PathBuf,
-    /// The open ledger, or why it isn't.
-    store: Result<Store, String>,
+    /// The open ledger, or why it isn't: empty while [`Ledger::start`]'s
+    /// thread opens it. [`Ledger::store`] waits for it.
+    store: OnceLock<Result<Store, String>>,
     /// The observation the writer reads, until shutdown.
     observation: Mutex<Option<Observation>>,
     /// The writer thread, until shutdown.
@@ -108,28 +118,140 @@ impl Ledger {
     /// Opens or makes the ledger in `dir`, and records `usage`'s records
     /// into it until [`Ledger::shutdown`]. A ledger that can't be opened is
     /// unavailable, and says why; the server runs on without it.
+    ///
+    /// It makes `dir` and starts observing before it returns, and opens the
+    /// file on the writer's thread (see the module's docs).
     pub fn start(dir: &Path, usage: &Usage) -> Self {
         let path = dir.join(LEDGER_FILE);
-        let opened = schema::open(&path).and_then(|writer| {
-            let api = schema::connect(&path)?;
+        // As `schema::open` would, but before the server serves, as when
+        // the whole ledger was opened then: the directory is there for
+        // anything else that looks for it.
+        if let Err(error) = std::fs::create_dir_all(dir) {
+            let reason = format!("make the directory of {}: {error}", path.display());
+            tracing::warn!("usage ledger unavailable: {reason}");
+            return Self::failed(path, reason);
+        }
+        let (receiver, observation) = usage.observe();
+        Self::open_in_background(path, usage, receiver, Some(observation), |path| {
+            let writer = schema::open(path)?;
+            let api = schema::connect(path)?;
             Ok((writer, api))
-        });
-        let (writer, api) = match opened {
+        })
+    }
+
+    /// The ledger at `path`, which a thread of its own opens with `open`
+    /// (the writer's connection, then the API's) and then writes from
+    /// `receiver`, the receiver of `observation` if there is one.
+    fn open_in_background<F>(
+        path: PathBuf,
+        usage: &Usage,
+        receiver: Receiver<UsageEvent>,
+        observation: Option<Observation>,
+        open: F,
+    ) -> Self
+    where
+        F: FnOnce(&Path) -> Result<(Connection, Connection), String> + Send + 'static,
+    {
+        let ledger = Self {
+            inner: Arc::new(Inner {
+                path,
+                store: OnceLock::new(),
+                observation: Mutex::new(observation),
+                thread: Mutex::new(None),
+            }),
+        };
+        let spawned = std::thread::Builder::new()
+            .name("open-ferry-usage-ledger".to_owned())
+            .spawn({
+                let ledger = ledger.clone();
+                let usage = usage.clone();
+                move || ledger.open_and_write(open, usage, &receiver)
+            });
+        match spawned {
+            Ok(thread) => {
+                *ledger
+                    .inner
+                    .thread
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = Some(thread);
+            }
+            Err(error) => {
+                let reason = format!("start the ledger's writer: {error}");
+                tracing::warn!("usage ledger unavailable: {reason}");
+                ledger.fail(reason);
+            }
+        }
+        ledger
+    }
+
+    /// The writer's thread: opens the file with `open`, then writes what
+    /// `receiver` gets until the observation ends.
+    fn open_and_write<F>(self, open: F, usage: Usage, receiver: &Receiver<UsageEvent>)
+    where
+        F: FnOnce(&Path) -> Result<(Connection, Connection), String>,
+    {
+        /// Leaves the ledger unavailable if opening it panics, so that
+        /// nothing waits for it for ever.
+        struct Unopened<'a>(&'a Ledger);
+        impl Drop for Unopened<'_> {
+            fn drop(&mut self) {
+                self.0.fail("opening the ledger stopped".to_owned());
+            }
+        }
+
+        let unopened = Unopened(&self);
+        let (writer, api) = match open(&self.inner.path) {
             Ok(connections) => connections,
             Err(reason) => {
                 tracing::warn!("usage ledger unavailable: {reason}");
-                return Self::failed(path, reason);
+                self.fail(reason);
+                return;
             }
         };
-        let (receiver, observation) = usage.observe();
-        Self::running(
-            path,
-            usage.clone(),
-            writer,
-            api,
-            receiver,
-            Some(observation),
-        )
+        let shared = Arc::new(Shared::default());
+        let _ = self.inner.store.set(Ok(Store {
+            usage,
+            connection: Mutex::new(api),
+            shared: Arc::clone(&shared),
+        }));
+        drop(unopened);
+        // The writer stops when the observation ends, which dropping the
+        // last ledger does too: so this thread mustn't keep one.
+        drop(self);
+        writer::run(writer, receiver, &shared);
+    }
+
+    /// Makes the ledger unavailable for `reason`, and ends its observation,
+    /// unless it was opened or failed already.
+    fn fail(&self, reason: String) {
+        if self.inner.store.set(Err(reason)).is_ok() {
+            drop(
+                self.inner
+                    .observation
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .take(),
+            );
+        }
+    }
+
+    /// The open ledger, or why it isn't, once [`Ledger::start`]'s thread has
+    /// tried to open it: blocks until then.
+    fn store(&self) -> &Result<Store, String> {
+        self.inner.store.wait()
+    }
+
+    /// Waits, off the async threads, until the ledger has been opened or
+    /// has failed to be; after that, its calls don't block.
+    pub(crate) async fn opened(&self) {
+        if self.inner.store.get().is_some() {
+            return;
+        }
+        let ledger = self.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            ledger.store();
+        })
+        .await;
     }
 
     /// A ledger that isn't there, for `reason`, as before the server starts
@@ -143,7 +265,7 @@ impl Ledger {
         Self {
             inner: Arc::new(Inner {
                 path,
-                store: Err(reason),
+                store: OnceLock::from(Err(reason)),
                 observation: Mutex::new(None),
                 thread: Mutex::new(None),
             }),
@@ -152,6 +274,7 @@ impl Ledger {
 
     /// The ledger at `path` over its open connections, its writer thread
     /// reading `receiver`.
+    #[cfg(test)]
     fn running(
         path: PathBuf,
         usage: Usage,
@@ -178,11 +301,11 @@ impl Ledger {
         Self {
             inner: Arc::new(Inner {
                 path,
-                store: Ok(Store {
+                store: OnceLock::from(Ok(Store {
                     usage,
                     connection: Mutex::new(api),
                     shared,
-                }),
+                })),
                 observation: Mutex::new(observation),
                 thread: Mutex::new(Some(thread)),
             }),
@@ -213,7 +336,7 @@ impl Ledger {
     /// Writes `events` as the writer would, now.
     #[cfg(test)]
     pub(crate) fn insert_for_test(&self, events: &[UsageEvent]) {
-        let Ok(store) = &self.inner.store else {
+        let Ok(store) = self.store() else {
             panic!("the ledger isn't open");
         };
         let mut connection = store.connection.lock().unwrap();
@@ -222,7 +345,8 @@ impl Ledger {
     }
 
     /// Stops recording, and waits for the records already made to be
-    /// written. Blocks; the ledger's reads still work after.
+    /// written, and for the ledger to be opened first if it is being.
+    /// Blocks; the ledger's reads still work after.
     pub fn shutdown(&self) {
         drop(
             self.inner
@@ -244,10 +368,12 @@ impl Ledger {
         }
     }
 
+    // The calls below wait for the ledger to be opened, as `store` does;
+    // async callers await `opened` first.
+
     /// The file, when the ledger is open.
     pub(crate) fn file(&self) -> Option<&Path> {
-        self.inner
-            .store
+        self.store()
             .as_ref()
             .ok()
             .map(|_| self.inner.path.as_path())
@@ -255,14 +381,13 @@ impl Ledger {
 
     /// Why the ledger isn't open, if it isn't.
     pub(crate) fn unavailable_reason(&self) -> Option<&str> {
-        self.inner.store.as_ref().err().map(String::as_str)
+        self.store().as_ref().err().map(String::as_str)
     }
 
     /// Whether records are being written: the ledger is open and
     /// `usage-statistics-enabled` is on.
     pub(crate) fn recording(&self) -> bool {
-        self.inner
-            .store
+        self.store()
             .as_ref()
             .is_ok_and(|store| store.usage.usage_statistics_enabled())
     }
@@ -277,7 +402,7 @@ impl Ledger {
             .unwrap_or_else(PoisonError::into_inner)
             .as_ref()
             .map_or(0, Observation::dropped);
-        let failed = self.inner.store.as_ref().map_or(0, |store| {
+        let failed = self.store().as_ref().map_or(0, |store| {
             store.shared.write_failures.load(Ordering::Relaxed)
         });
         dropped.saturating_add(failed)
@@ -285,7 +410,7 @@ impl Ledger {
 
     /// Asks the writer to prune soon, after a setting changed.
     pub(crate) fn prune_soon(&self) {
-        if let Ok(store) = &self.inner.store {
+        if let Ok(store) = self.store() {
             store.shared.prune.store(true, Ordering::Relaxed);
         }
     }
@@ -299,17 +424,18 @@ impl Ledger {
         Some(size(path).saturating_add(size(Path::new(&wal))))
     }
 
-    /// Runs `work` on the API's connection, off the async threads.
+    /// Runs `work` on the API's connection, off the async threads, once
+    /// the ledger has been opened.
     pub(crate) async fn run<T, F>(&self, work: F) -> Result<T, LedgerError>
     where
         T: Send + 'static,
         F: FnOnce(&mut Connection) -> rusqlite::Result<T> + Send + 'static,
     {
-        if let Err(reason) = &self.inner.store {
+        if let Some(Err(reason)) = self.inner.store.get() {
             return Err(LedgerError::Unavailable(reason.clone()));
         }
         let ledger = self.clone();
-        let joined = tokio::task::spawn_blocking(move || match &ledger.inner.store {
+        let joined = tokio::task::spawn_blocking(move || match ledger.store() {
             Ok(store) => {
                 let mut connection = store
                     .connection
@@ -329,7 +455,7 @@ impl std::fmt::Debug for Ledger {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Ledger")
             .field("path", &self.inner.path)
-            .field("available", &self.inner.store.is_ok())
+            .field("available", &self.inner.store.get().map(Result::is_ok))
             .finish_non_exhaustive()
     }
 }

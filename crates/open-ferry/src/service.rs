@@ -79,8 +79,9 @@
 //! management API: the app at `/dashboard/`, `/management.html` sending
 //! browsers there, and the dashboard API under `/open-ferry/api/v1/`. Its
 //! usage routes read the usage ledger, which is opened in the log directory
-//! at start and records the usage records from then on; at shutdown it
-//! writes what it was sent once the server has stopped.
+//! at start, on a thread of its own while the server starts serving, and
+//! records the usage records from then on; at shutdown it writes what it
+//! was sent once the server has stopped.
 //!
 //! The command line's `-password` is a local management password (see
 //! [`Options`]): the management API accepts it from loopback clients, and
@@ -687,9 +688,12 @@ impl Service {
     }
 
     /// Opens the usage ledger in the log directory, and records the usage
-    /// records into it from now on. It waits on the disk, so it is done
-    /// before the server serves; a ledger that can't be opened is
-    /// unavailable, and the server runs on without it.
+    /// records into it from now on. It makes the directory and starts
+    /// observing the records before the server serves, but opens the file
+    /// on a thread of its own, so the server doesn't wait on the disk to
+    /// start; the dashboard's usage routes wait for it instead. A ledger
+    /// that can't be opened is unavailable, and the server runs on without
+    /// it.
     fn start_ledger(&mut self) {
         self.ledger = match &self.observability.log_dir {
             Some(dir) => Ledger::start(dir, &self.observability.usage),

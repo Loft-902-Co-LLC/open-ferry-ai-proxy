@@ -262,6 +262,8 @@ pub(super) async fn requests(
 /// The ledger's state, as `GET /usage/ledger` answers it.
 async fn ledger_state(state: &DashboardState) -> Result<Value, ApiError> {
     let ledger = &state.ledger;
+    // So that the calls below don't block.
+    ledger.opened().await;
     let usage_statistics_enabled = state.management.config().usage_statistics_enabled;
     if let Some(reason) = ledger.unavailable_reason() {
         return Ok(json!({
