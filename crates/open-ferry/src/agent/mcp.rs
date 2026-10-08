@@ -61,7 +61,9 @@ before calling again with `confirm: true`, and with that result's `config_sha256
 `expect_sha256`, so the change is made only to the config the user saw. Every change can be reversed with `config_undo`. \
 No tool returns a secret already in the setup; never ask the user to paste one into the \
 conversation, but to put it in a file and give its path as `from_file`; a file is read only \
-for a secret, never from the auth directory, and never a credential file. \
+for a secret, never from the auth directory, and never a credential file (one with a PEM \
+block, or with a sign-in's tokens or a key at any depth), and a call with `from_file` needs \
+`confirm: true`. \
 The resource open-ferry://docs/agents.md has the details.";
 
 /// What makes a change of the settings need `confirm: true`, for the tool
@@ -122,7 +124,7 @@ const TOOLS: [Spec; 18] = [
         command: "config set",
         title: "Change a setting",
         description: concat!(
-            "Sets one setting of the config to `value` (any JSON). With a running server the change goes through it and applies at once; else it is written to the config file. A secret (an API key, a password, or a list that holds them) is refused as `value`: put it in a file and give `from_file`, which is only for a secret (a setting that holds none is refused from a file), and is never read from the auth directory or from a credential file. ",
+            "Sets one setting of the config to `value` (any JSON). With a running server the change goes through it and applies at once; else it is written to the config file. A secret (an API key, a password, or a list that holds them) is refused as `value`: put it in a file and give `from_file`, which is only for a secret (a setting that holds none is refused from a file), needs `confirm: true` as it reads a file into the config, and is never read from the auth directory or from a credential file. ",
             sensitive!(),
             " The result has each changed setting's old and new value, masked; `config_undo` reverses it."
         ),
@@ -192,7 +194,7 @@ const TOOLS: [Spec; 18] = [
         name: "config_replace",
         command: "config replace",
         title: "Replace the whole config",
-        description: "Replaces the whole config with the YAML in the file `from_file`, after checking it. It always needs `confirm: true`; without it the result lists every setting it would change. `config_undo` reverses it.",
+        description: "Replaces the whole config with the YAML in the file `from_file`, after checking it. It always needs `confirm: true`, as it replaces the whole config and reads a file into it; without it the result lists every setting it would change. `config_undo` reverses it.",
         read_only: false,
         destructive: true,
         idempotent: true,
@@ -216,7 +218,7 @@ const TOOLS: [Spec; 18] = [
         name: "keys_add",
         command: "keys add",
         title: "Add a client key",
-        description: "Adds a client key to access.api-keys: with `generate: true` a new random key, else the key in the file `from_file`. A new key is written to the new file `to_file` (on Unix only the user can read it), or, with `confirm: true` and no `to_file`, returned once as `key`, which puts it in this conversation. Prefer `to_file`.",
+        description: "Adds a client key to access.api-keys: with `generate: true` a new random key, else the key in the file `from_file`, which needs `confirm: true` as it reads a file into the config. A new key is written to the new file `to_file` (on Unix only the user can read it), or, with `confirm: true` and no `to_file`, returned once as `key`, which puts it in this conversation. Prefer `to_file`.",
         read_only: false,
         destructive: false,
         idempotent: false,
@@ -346,7 +348,7 @@ fn path_property() -> Value {
 fn from_file_property(what: &str) -> Value {
     json!({
         "type": "string",
-        "description": format!("The path of a file that holds {what}. A secret must come this way, never in the call. A file in the auth directory, or a credential file, is refused.")
+        "description": format!("The path of a file that holds {what}. A secret must come this way, never in the call. A file in the auth directory, or a credential file (one with a PEM block, or with a sign-in's tokens or a key, such as `access_token`, `accessToken`, `tokens` or `private_key`, at any depth), is refused. A call with it needs `confirm: true`, as it reads a file into the config.")
     })
 }
 

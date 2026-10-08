@@ -61,14 +61,22 @@ const CREDENTIAL_LIMIT: u64 = 1024 * 1024;
 const CREDENTIAL_FILES: usize = 256;
 
 /// The fields of a credential file (a sign-in's tokens, a service account's
-/// key) that make a file one, at its top level or under `token`.
-const CREDENTIAL_FIELDS: [&str; 5] = [
-    "access_token",
-    "refresh_token",
-    "id_token",
-    "private_key",
-    "client_secret",
+/// key, a session) that make a file one, at any depth to
+/// [`CREDENTIAL_DEPTH`]: their names without case or separators, so
+/// `access_token`, `accessToken` and `access-token` alike.
+const CREDENTIAL_FIELDS: [&str; 7] = [
+    "accesstoken",
+    "refreshtoken",
+    "idtoken",
+    "privatekey",
+    "clientsecret",
+    "tokens",
+    "sessionkey",
 ];
+
+/// How deep in a file's mappings and lists a credential field is looked
+/// for.
+const CREDENTIAL_DEPTH: usize = 32;
 
 /// Whether a value under the key `name` is a secret.
 pub(crate) fn is_secret_name(name: &str) -> bool {
@@ -306,22 +314,73 @@ pub(crate) fn auth_dirs(ctx: &Context) -> Vec<PathBuf> {
     dirs
 }
 
-/// Whether `text` is a credential file's: a JSON object with a sign-in's
-/// tokens or a service account's key, at its top level or under `token`.
-pub(crate) fn looks_like_credential(text: &str) -> bool {
-    let Ok(Value::Object(map)) = serde_json::from_str::<Value>(text) else {
-        return false;
+/// What makes `text` a credential file's, when it is one: a PEM block, as
+/// a private key or a certificate is kept in; or, in JSON or YAML, a field
+/// of [`CREDENTIAL_FIELDS`] that is set, at any depth to
+/// [`CREDENTIAL_DEPTH`], named as the file names it. Never a value of the
+/// file.
+pub(crate) fn credential_mark(text: &str) -> Option<String> {
+    if has_pem_block(text) {
+        return Some("a PEM block, as a private key or a certificate is kept in".to_owned());
+    }
+    let value = match serde_json::from_str::<Value>(text) {
+        Ok(value) => value,
+        Err(_) => any_to_json(&AnyValue::parse_yaml(text).ok()?),
     };
-    let holds = |map: &Map<String, Value>| {
-        CREDENTIAL_FIELDS
+    credential_field(&value, 0)
+        .map(|name| format!("the field {name}, as a sign-in's tokens or a key are kept in"))
+}
+
+/// `name` without case or separators: `access_token`, `accessToken` and
+/// `access-token` are all `accesstoken`.
+fn bare_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| !matches!(c, '_' | '-' | '.' | ' '))
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// The name of the first field of [`CREDENTIAL_FIELDS`] set in `value`,
+/// which is `depth` levels down in a file, searching no deeper than
+/// [`CREDENTIAL_DEPTH`].
+fn credential_field(value: &Value, depth: usize) -> Option<String> {
+    if depth > CREDENTIAL_DEPTH {
+        return None;
+    }
+    match value {
+        Value::Object(map) => map
             .iter()
-            .any(|field| map.get(*field).is_some_and(|value| !value.is_null()))
-    };
-    holds(&map)
-        || map
-            .get("token")
-            .and_then(Value::as_object)
-            .is_some_and(holds)
+            .find(|(key, child)| {
+                !child.is_null() && CREDENTIAL_FIELDS.contains(&bare_name(key).as_str())
+            })
+            .map(|(key, _)| key.clone())
+            .or_else(|| {
+                map.values()
+                    .find_map(|child| credential_field(child, depth + 1))
+            }),
+        Value::Array(items) => items
+            .iter()
+            .find_map(|item| credential_field(item, depth + 1)),
+        _ => None,
+    }
+}
+
+/// Whether `text` holds a PEM block: `-----BEGIN `, a label of capitals,
+/// digits and spaces, and `-----`, as `-----BEGIN PRIVATE KEY-----`.
+fn has_pem_block(text: &str) -> bool {
+    const BEGIN: &str = "-----BEGIN ";
+    text.match_indices(BEGIN).any(|(at, _)| {
+        let rest = text.get(at + BEGIN.len()..).unwrap_or_default();
+        rest.find("-----").is_some_and(|end| {
+            end > 0
+                && end <= 64
+                && rest.get(..end).is_some_and(|label| {
+                    label.bytes().all(|byte| {
+                        byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b' '
+                    })
+                })
+        })
+    })
 }
 
 /// Adds the secrets of the credential files in `ctx`'s auth directories,
@@ -471,6 +530,69 @@ mod tests {
             mask_at(&["management".into(), "secret-key".into()], &json!("")),
             json!("")
         );
+    }
+
+    // Not upstream's: a credential file is told by a PEM block, or by a
+    // sign-in's or a key's field at any depth, whatever its case and
+    // separators; the mark names the field, never a value.
+    #[test]
+    fn finds_credential_files() {
+        let value = "placeholder-value-0123456789";
+        let pem = "-----BEGIN PRIVATE KEY-----\nplaceholder\n-----END PRIVATE KEY-----\n";
+        for (text, field) in [
+            // A sign-in's tokens at the top level, as a credential file has.
+            (json!({"type": "gemini", "access_token": value}).to_string(), "access_token"),
+            // Codex's auth.json: under `tokens`.
+            (json!({"OPENAI_API_KEY": null, "tokens": {"id_token": value}}).to_string(), "tokens"),
+            // Claude Code's: camelCase, under a mapping of its own.
+            (json!({"claudeAiOauth": {"accessToken": value, "expiresAt": 1}}).to_string(), "accessToken"),
+            (json!({"a": {"refreshToken": value}}).to_string(), "refreshToken"),
+            (json!({"a": {"idToken": value}}).to_string(), "idToken"),
+            (json!({"a": {"clientSecret": value}}).to_string(), "clientSecret"),
+            (json!({"a": {"session_key": value}}).to_string(), "session_key"),
+            (json!({"a": {"sessionKey": value}}).to_string(), "sessionKey"),
+            (json!({"a": {"Access-Token": value}}).to_string(), "Access-Token"),
+            // A service account, nested and in a list.
+            (json!({"accounts": [{"credentials": {"type": "service_account", "privateKey": value}}]}).to_string(), "privateKey"),
+            // Deep down.
+            (json!({"a": {"b": {"c": {"d": {"e": {"f": {"g": {"h": {"refresh_token": value}}}}}}}}}).to_string(), "refresh_token"),
+            // In YAML.
+            (format!("oauth:\n  refresh-token: {value}\n"), "refresh-token"),
+        ] {
+            let mark = credential_mark(&text).unwrap_or_else(|| panic!("not found: {text}"));
+            assert!(mark.contains(field), "{mark}");
+            assert!(!mark.contains(value), "{mark}");
+        }
+        // A PEM block, alone or in a JSON string.
+        for text in [
+            pem.to_owned(),
+            json!({"key": pem}).to_string(),
+            "-----BEGIN RSA PRIVATE KEY-----".to_owned(),
+            "-----BEGIN CERTIFICATE-----".to_owned(),
+        ] {
+            let mark = credential_mark(&text).unwrap();
+            assert!(mark.starts_with("a PEM block"), "{mark}");
+            assert!(!mark.contains("placeholder"));
+        }
+        // Not a secret's own file, a config, or a field that is unset.
+        for text in [
+            "sk-placeholder-key-0123456789\n".to_owned(),
+            json!({"api-key": value, "base-url": "https://api.example.com"}).to_string(),
+            json!([{"name": "example", "keys": [{"api-key": value}]}]).to_string(),
+            json!({"use-max-completion-tokens": true, "max-tokens": 4}).to_string(),
+            json!({"tokens": null, "access_token": null}).to_string(),
+            "config-version: 8\nserver:\n  port: 1\n".to_owned(),
+            "-----BEGIN lowercase-----".to_owned(),
+            "a ----- b".to_owned(),
+        ] {
+            assert_eq!(credential_mark(&text), None, "{text}");
+        }
+        // Deeper than it looks, it isn't found.
+        let mut deep = json!({"access_token": value});
+        for _ in 0..=CREDENTIAL_DEPTH {
+            deep = json!({"a": deep});
+        }
+        assert_eq!(credential_mark(&deep.to_string()), None);
     }
 
     // Not upstream's: the secrets found are what masking hides, and the

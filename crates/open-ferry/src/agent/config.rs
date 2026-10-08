@@ -10,8 +10,9 @@
 //! A file is read only for a secret, which is never shown: `config set`
 //! refuses a file's value for a setting that doesn't hold one. And a file
 //! is never read from the auth directory, nor when it is a credential file
-//! (a JSON object with a sign-in's tokens or a service account's key), so
-//! a sign-in's tokens can't be copied into the config.
+//! (one with a PEM block, or with a sign-in's or a key's field at any
+//! depth; see [`credential_mark`]), so a sign-in's tokens can't be copied
+//! into the config. A tool call that reads a file needs `confirm: true`.
 
 use std::fmt;
 use std::io::Read as _;
@@ -28,10 +29,8 @@ use super::change::{
     Call, Changed, Content, Edit, Request, check_expected, config_changed, file_note, make, masked,
     read_config,
 };
-use super::guard::{confirm, go_ahead, sensitive_reasons};
-use super::mask::{
-    auth_dirs, holds_secret, is_secret_name, looks_like_credential, mask_at, mask_tree,
-};
+use super::guard::{READS_A_FILE, confirm, go_ahead, sensitive_reasons};
+use super::mask::{auth_dirs, credential_mark, holds_secret, is_secret_name, mask_at, mask_tree};
 use super::target::{Reach, probe};
 use super::values::{
     check_path, diff as diff_trees, dotted, get as get_value, parse_value, read_tree,
@@ -92,8 +91,8 @@ impl Source {
 }
 
 /// The text of the file at `path` a value comes from. A file in the auth
-/// directory, or a credential file, is refused (`unsafe_file`): a value is
-/// never a copy of a sign-in's tokens.
+/// directory, or a credential file ([`credential_mark`]), is refused
+/// (`unsafe_file`): a value is never a copy of a sign-in's tokens or a key.
 pub(crate) fn read_value_file(ctx: &Context, path: &Path) -> Result<String, Failure> {
     let refused = |why: &str| {
         Failure::new(
@@ -120,10 +119,8 @@ pub(crate) fn read_value_file(ctx: &Context, path: &Path) -> Result<String, Fail
         }
     }
     let text = read_limited(&real, path)?;
-    if looks_like_credential(&text) {
-        return Err(refused(
-            "is a credential file: it holds a sign-in's tokens or a private key",
-        ));
+    if let Some(mark) = credential_mark(&text) {
+        return Err(refused(&format!("is a credential file: it holds {mark}")));
     }
     Ok(text)
 }
@@ -283,6 +280,16 @@ fn secret_hint(ctx: &Context) -> &'static str {
     }
 }
 
+/// Why a change from `source` needs a confirmation whatever it changes:
+/// over MCP, that it reads a file into the config.
+pub(crate) fn reads_a_file(ctx: &Context, source: &Source) -> Vec<String> {
+    if ctx.caller == Caller::Mcp && matches!(source, Source::File(_)) {
+        vec![READS_A_FILE.to_owned()]
+    } else {
+        Vec::new()
+    }
+}
+
 /// The failure for a secret given in the call.
 pub(crate) fn secret_in_argument(ctx: &Context, what: &str) -> Failure {
     Failure::new(
@@ -335,6 +342,7 @@ pub(crate) async fn set(ctx: &Context, input: SetInput) -> Result<Outcome, Failu
             Caller::Mcp => "give the value as `value`",
         }));
     }
+    let always = reads_a_file(ctx, &input.value);
     let changed = make(
         ctx,
         Request {
@@ -347,7 +355,7 @@ pub(crate) async fn set(ctx: &Context, input: SetInput) -> Result<Outcome, Failu
             action: "set",
             what: format!("Setting {path}"),
             path: Some(path),
-            always: None,
+            always,
         },
     )
     .await?;
@@ -380,7 +388,7 @@ pub(crate) async fn unset(ctx: &Context, input: &UnsetInput) -> Result<Outcome, 
             action: "unset",
             what: format!("Unsetting {path}"),
             path: Some(path),
-            always: None,
+            always: Vec::new(),
         },
     )
     .await?;
@@ -640,6 +648,8 @@ pub(crate) async fn replace(ctx: &Context, input: ReplaceInput) -> Result<Outcom
         .hint(secret_hint(ctx)));
     }
     let data = input.source.bytes(ctx)?;
+    let mut always = vec!["it replaces the whole config".to_owned()];
+    always.extend(reads_a_file(ctx, &input.source));
     let changed = make(
         ctx,
         Request {
@@ -652,7 +662,7 @@ pub(crate) async fn replace(ctx: &Context, input: ReplaceInput) -> Result<Outcom
             action: "replace",
             what: "Replacing the whole config".to_owned(),
             path: None,
-            always: Some("it replaces the whole config".to_owned()),
+            always,
         },
     )
     .await?;

@@ -150,8 +150,8 @@ pub(crate) struct Request {
     pub(crate) what: String,
     /// The setting it changes, dotted.
     pub(crate) path: Option<String>,
-    /// Why it needs a confirmation whatever it changes, if it does.
-    pub(crate) always: Option<String>,
+    /// Why it needs a confirmation whatever it changes: none, or more.
+    pub(crate) always: Vec<String>,
 }
 
 /// What a change did.
@@ -330,9 +330,7 @@ async fn attempt(
         )));
     }
     let mut reasons = sensitive_reasons(&changes, &before, &after);
-    if let Some(always) = request.always.clone() {
-        reasons.insert(0, always);
-    }
+    reasons.splice(0..0, request.always.iter().cloned());
     if !reasons.is_empty() {
         // The confirmation given, `--yes` or `confirm: true` included, was
         // for the change as first worked out, not for this one.

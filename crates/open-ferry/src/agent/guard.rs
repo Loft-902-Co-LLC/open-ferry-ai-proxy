@@ -53,6 +53,11 @@ pub(crate) const SENSITIVE_SETTINGS: [(&str, &str); 6] = [
     ),
 ];
 
+/// Why a tool call that reads a value or a config from a file
+/// (`from_file`) needs `confirm: true`: an agent could otherwise copy a
+/// file the user didn't mean into the config.
+pub(crate) const READS_A_FILE: &str = "it reads a file into the config";
+
 /// The client keys in the config tree `root`, counted as the server counts
 /// them: each trimmed, without empty or repeated ones.
 pub(crate) fn client_keys(root: &Value) -> Vec<String> {
