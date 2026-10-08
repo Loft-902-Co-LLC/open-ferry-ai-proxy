@@ -164,6 +164,49 @@ describe("connecting a client", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("uses the proxy's address, not this page's, at the management address", async () => {
+    const listen = clientSetup().base_urls.filter((base) => base.source === "listen");
+    server([KEY], { separate_management: true, base_urls: listen });
+    const { user } = renderApp("/");
+    const python = await setupCode();
+    expect(python).toHaveTextContent(`base_url="http://127.0.0.1:8317/v1"`);
+    expect(
+      screen.getByText(
+        "This page is at the management address, which serves no proxy routes, so the setups use the proxy's own address.",
+      ),
+    ).toBeVisible();
+
+    await openChoices(user);
+    expect(
+      within(screen.getByLabelText("Address"))
+        .getAllByRole("option")
+        .map((option) => option.textContent),
+    ).toEqual([
+      "http://127.0.0.1:8317 (the server's listen address)",
+      "http://localhost:8317 (the server's listen address)",
+    ]);
+  });
+
+  it("says what to set when the server lists no address of the proxy's", async () => {
+    server([KEY], { separate_management: true, base_urls: [] });
+    const { user } = renderApp("/");
+    expect(await screen.findByText("The server doesn't say where the proxy is")).toBeVisible();
+    expect(screen.getByText("server.host")).toBeVisible();
+    expect(screen.queryByRole("tablist", { name: "Client setups" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(PYTHON)).not.toBeInTheDocument();
+
+    await openChoices(user);
+    expect(screen.queryByLabelText("Address")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Model")).toBeVisible();
+  });
+
+  it("keeps this page's address first on the proxy's port", async () => {
+    server([KEY], { separate_management: false });
+    renderApp("/");
+    expect(await setupCode()).toHaveTextContent(`base_url="http://localhost:3000/v1"`);
+    expect(screen.queryByText(/This page is at the management address/)).not.toBeInTheDocument();
+  });
+
   it("writes the terminal setups for the shell picked", async () => {
     server([KEY]);
     const { user } = renderApp("/");

@@ -81,6 +81,18 @@ describe("addressOptions", () => {
       "https://proxy.example.com/ferry",
     ]);
   });
+
+  it("offers only the server's addresses when the page is at the management address", () => {
+    const listen = bases.filter((base) => base.source === "listen");
+    expect(addressOptions("http://127.0.0.1:8318", listen, true)).toEqual([
+      { root: "http://127.0.0.1:8317", label: "http://127.0.0.1:8317 (the server's listen address)" },
+      { root: "http://localhost:8317", label: "http://localhost:8317 (the server's listen address)" },
+    ]);
+  });
+
+  it("offers nothing at the management address when the server lists no address", () => {
+    expect(addressOptions("http://127.0.0.1:8318", [], true)).toEqual([]);
+  });
 });
 
 /** A model as the server describes it. */

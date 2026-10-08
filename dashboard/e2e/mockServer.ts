@@ -438,6 +438,11 @@ export interface MockOptions {
   credentials?: boolean;
   /** Whether it can save config.yaml; else every write answers 503. Default true. */
   writable?: boolean;
+  /**
+   * Whether the app is served at `management.separate-address`, apart from
+   * the proxy, so the page's origin serves no proxy routes. Default false.
+   */
+  separateManagement?: boolean;
 }
 
 export interface MockServer {
@@ -463,6 +468,7 @@ export async function mockServer(
   const now = Date.now();
   const connected = options.credentials ?? true;
   const writable = options.writable ?? true;
+  const separate = options.separateManagement ?? false;
   const config = settingsConfig();
   const clientKeys = [...CLIENT_KEYS];
   let configYaml = CONFIG_YAML;
@@ -522,12 +528,16 @@ export async function mockServer(
       case "GET /v0/management/logs":
         return json(route, serverLogPage(serverLines(now)));
       case "GET /open-ferry/api/v1/client-setup":
+        // At the management address, the server leaves management.base-url out.
         return json(
           route,
           clientSetup({
+            separate_management: separate,
             base_urls: [
               { url: "http://127.0.0.1:18317", source: "listen" },
-              { url: "https://ferry.example.com", source: "config" },
+              ...(separate
+                ? []
+                : [{ url: "https://ferry.example.com", source: "config" as const }]),
             ],
           }),
         );

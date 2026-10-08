@@ -338,6 +338,23 @@ test("says when the server can't save config.yaml", async ({ page }) => {
   expectClean(watched);
 });
 
+test("sets clients up with the proxy's address at the management address", async ({ page }) => {
+  const watched = await watch(page, { separateManagement: true });
+  await signIn(page);
+  await page.getByRole("button", { name: "Connect a client" }).click();
+  // The page's own origin is the management address, which serves no proxy routes.
+  await expect(page.getByLabel("The OpenAI SDK (Python) setup", { exact: true })).toContainText(
+    `base_url="http://127.0.0.1:18317/v1"`,
+  );
+  await expect(page.getByText("This page is at the management address")).toBeVisible();
+  await page.getByRole("button", { name: "Address, model and shell" }).click();
+  await expect(page.getByLabel("Address").locator("option")).toHaveText([
+    "http://127.0.0.1:18317 (the server's listen address)",
+  ]);
+  await shot(page, "28-overview-management-address");
+  expectClean(watched);
+});
+
 test("shows a first run the ways to connect a provider", async ({ page }) => {
   const watched = await watch(page, { credentials: false });
   await signIn(page);

@@ -388,7 +388,10 @@ export function ClientSetupCard({
   }
 
   const setupData = setup.data;
-  const addresses = addressOptions(window.location.origin, setupData.base_urls);
+  // At the management address, the page's own origin serves none of the
+  // proxy's routes, so the setups use the proxy's.
+  const separate = setupData.separate_management;
+  const addresses = addressOptions(window.location.origin, setupData.base_urls, separate);
   const root = addresses.find((option) => option.root === address)?.root ?? addresses[0]?.root ?? "";
   const models = setupData.models;
   // A model picked that the server no longer describes gives way to the
@@ -518,7 +521,22 @@ export function ClientSetupCard({
         </span>
       </label>
 
-      {selected === undefined || copied === undefined ? (
+      {separate && addresses.length > 0 && (
+        <p className="text-muted">
+          This page is at the management address, which serves no proxy routes, so the setups use
+          the proxy&apos;s own address.
+        </p>
+      )}
+      {addresses.length === 0 ? (
+        <Alert tone="warn" title="The server doesn't say where the proxy is">
+          <p>
+            This page is at the management address, which serves no proxy routes, and the server
+            lists no address of the proxy&apos;s own. Set the proxy&apos;s address,{" "}
+            <Code>server.host</Code> and <Code>server.port</Code> in config.yaml, then reload this
+            page for the setups.
+          </p>
+        </Alert>
+      ) : selected === undefined || copied === undefined ? (
         <p className="text-muted">The proxy lists none of the routes these setups call.</p>
       ) : (
         <Tabs
@@ -550,19 +568,21 @@ export function ClientSetupCard({
         </DisclosureButton>
         {choicesOpen && (
           <div id={choicesId} className="grid gap-4 sm:grid-cols-2">
-            <SelectField
-              label="Address"
-              value={root}
-              options={addresses.map((option) => ({ value: option.root, label: option.label }))}
-              onChange={(event) => {
-                setAddress(event.target.value);
-              }}
-              hint={
-                isLoopback(root)
-                  ? "This address works only on the computer the proxy runs on."
-                  : undefined
-              }
-            />
+            {addresses.length > 0 && (
+              <SelectField
+                label="Address"
+                value={root}
+                options={addresses.map((option) => ({ value: option.root, label: option.label }))}
+                onChange={(event) => {
+                  setAddress(event.target.value);
+                }}
+                hint={
+                  isLoopback(root)
+                    ? "This address works only on the computer the proxy runs on."
+                    : undefined
+                }
+              />
+            )}
             <SelectField
               label="Model"
               value={picked ?? SUGGESTED}

@@ -269,9 +269,15 @@ export interface ModelInfo {
 }
 
 export interface ClientSetup {
+  /** Where a client reaches the proxy; never the management address. */
   base_urls: BaseUrl[];
   tls: boolean;
   safe_mode: boolean;
+  /**
+   * The page is served at open-ferry's `management.separate-address`,
+   * which serves none of the proxy's routes.
+   */
+  separate_management: boolean;
   routes: ProxyRoute[];
   models: ModelInfo[];
 }

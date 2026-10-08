@@ -224,6 +224,7 @@ export function clientSetup(overrides: Partial<ClientSetup> = {}): ClientSetup {
     ],
     tls: false,
     safe_mode: false,
+    separate_management: false,
     routes: [
       { id: "claude-messages", protocol: "claude", method: "POST", path: "/v1/messages", base_path: "", models },
       { id: "codex-responses", protocol: "codex", method: "POST", path: "/backend-api/codex/responses", base_path: "/backend-api/codex", models },

@@ -102,12 +102,19 @@ function sameRoot(a: string, b: string): boolean {
 }
 
 /**
- * The addresses a client might reach the server at: this page's own origin
+ * The addresses a client might reach the proxy at: this page's own origin
  * first (it may be a proxy in front of the server), then the server's, each
- * once.
+ * once. When the page is at the management address (`separate`), which
+ * serves none of the proxy's routes, only the server's.
  */
-export function addressOptions(origin: string, baseUrls: readonly BaseUrl[]): AddressOption[] {
-  const options: AddressOption[] = [{ root: trimRoot(origin), label: `${origin} (this page's address)` }];
+export function addressOptions(
+  origin: string,
+  baseUrls: readonly BaseUrl[],
+  separate = false,
+): AddressOption[] {
+  const options: AddressOption[] = separate
+    ? []
+    : [{ root: trimRoot(origin), label: `${origin} (this page's address)` }];
   for (const base of baseUrls) {
     if (options.some((option) => sameRoot(option.root, base.url))) {
       continue;
