@@ -122,8 +122,10 @@ function SnippetPanel({ shown, copied }: { shown: Snippet; copied: Snippet }) {
               <p className="font-medium">{part.caption}</p>
               <CopyButton text={copyText} label={`Copy the ${shown.label} setup${step}`} />
             </div>
+            {/* A region, so its name is read: a bare <pre> has no role to carry one. */}
             <pre
               tabIndex={0}
+              role="region"
               aria-label={`The ${shown.label} setup${step}`}
               className="overflow-x-auto rounded-md border border-line bg-raised p-3 font-mono text-xs leading-5"
             >
@@ -134,7 +136,8 @@ function SnippetPanel({ shown, copied }: { shown: Snippet; copied: Snippet }) {
       })}
       <p className="text-muted">
         As documented at{" "}
-        <a href={shown.source} target="_blank" rel="noreferrer">
+        {/* Long addresses break anywhere, so they fit a phone. */}
+        <a href={shown.source} target="_blank" rel="noreferrer" className="wrap-anywhere">
           {shown.source}
         </a>
         .
@@ -335,7 +338,7 @@ export function ClientSetupCard({ focusKeys = false }: ClientSetupCardProps) {
           <SafeModeNotice
             examples={examples}
             replaceLabel={
-              usable.length > 0 ? "Remove the example keys" : "Replace the example keys with a new key"
+              usable.length > 0 ? "Delete the example keys" : "Replace the example keys with a new key"
             }
             pending={replaceExamples.isPending}
             waiting={replaceExamples.isSuccess}
@@ -437,7 +440,7 @@ export function ClientSetupCard({ focusKeys = false }: ClientSetupCardProps) {
             }}
             hint={
               picked === null && models.length > 0
-                ? "Each setup names the newest chat model the proxy serves it: Claude Code Anthropic's and Codex OpenAI's, where there is one."
+                ? "Each setup names the newest chat model the proxy serves. Claude Code gets the newest Claude model and Codex CLI the newest OpenAI model, if the proxy has one."
                 : undefined
             }
           />
@@ -454,7 +457,7 @@ export function ClientSetupCard({ focusKeys = false }: ClientSetupCardProps) {
             hint="For the setups run in a terminal."
           />
         </div>
-        <label className="flex items-center gap-2">
+        <label className="flex items-start gap-2">
           <input
             type="checkbox"
             checked={reveal}
@@ -462,10 +465,12 @@ export function ClientSetupCard({ focusKeys = false }: ClientSetupCardProps) {
             onChange={(event) => {
               setReveal(event.target.checked);
             }}
-            className="size-4 accent-accent"
+            className="mt-1 size-4 shrink-0 accent-accent"
           />
-          Show the key in the setups
-          <span className="text-muted">(Copy always copies it whole.)</span>
+          <span>
+            Show the key in the setups{" "}
+            <span className="text-muted">(Copy always copies it whole.)</span>
+          </span>
         </label>
 
         {selected === undefined || copied === undefined ? (

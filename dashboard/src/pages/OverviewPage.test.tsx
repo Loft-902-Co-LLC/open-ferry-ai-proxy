@@ -85,6 +85,8 @@ describe("connecting a client", () => {
     const { api } = server([KEY]);
     renderApp("/");
     const python = await setupCode();
+    // A region, so screen readers read its name.
+    expect(screen.getByRole("region", { name: PYTHON })).toBe(python);
     expect(python).toHaveTextContent(`base_url="http://localhost:3000/v1"`);
     expect(python).toHaveTextContent(`api_key="sk-...0001"`);
     // The newest model; Claude Code's is Anthropic's.
@@ -419,13 +421,13 @@ describe("safe mode", () => {
     });
   });
 
-  it("removes the examples, keeping the keys of the user's own", async () => {
+  it("deletes the examples, keeping the keys of the user's own", async () => {
     const state = server(["your-api-key-1", KEY, "your-api-key-2"], { safe_mode: true });
     const { user } = renderApp("/");
     await screen.findByText("The proxy is in safe mode");
     // A key added elsewhere after the page loaded stays.
     state.keys.push(OTHER_KEY);
-    await user.click(screen.getByRole("button", { name: "Remove the example keys" }));
+    await user.click(screen.getByRole("button", { name: "Delete the example keys" }));
     await waitFor(() => {
       expect(state.keys).toEqual([KEY, OTHER_KEY]);
     });
@@ -471,12 +473,12 @@ describe("safe mode", () => {
     expect(state.keys).toEqual([...EXAMPLE_API_KEYS]);
   });
 
-  it("says so when the server can't remove the examples", async () => {
+  it("says so when the server can't delete the examples", async () => {
     const state = server(["your-api-key-1", KEY], { safe_mode: true });
     state.api.use(route("DELETE", API_KEYS, { status: 404 }));
     const { user } = renderApp("/");
     await screen.findByText("The proxy is in safe mode");
-    await user.click(screen.getByRole("button", { name: "Remove the example keys" }));
+    await user.click(screen.getByRole("button", { name: "Delete the example keys" }));
     const notice = (await screen.findByText("This server can't save config.yaml")).parentElement;
     expect(notice).toHaveTextContent("nothing was changed");
     expect(state.keys).toEqual(["your-api-key-1", KEY]);
