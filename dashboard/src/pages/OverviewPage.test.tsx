@@ -12,10 +12,7 @@ import {
 import { API_KEYS, USAGE_STATISTICS_ENABLED } from "../api/management";
 import { EXAMPLE_API_KEYS } from "../app/safeMode";
 import {
-  claudeCliCredential,
-  claudeCliEntry,
   clientSetup,
-  cooldown,
   credential,
   credentialList,
   ledger,
@@ -327,109 +324,8 @@ describe("making a client key", () => {
         ...Object.values(KEY_LISTS).map(({ path }) => path),
       ]),
     );
-    expect(screen.queryByRole("heading", { name: "Providers" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Account health" })).toBeNull();
     expect(screen.queryByRole("heading", { name: "Connect a provider" })).toBeNull();
-  });
-});
-
-describe("the providers card", () => {
-  it("offers the ways to connect one on a first run", async () => {
-    const { api } = server([KEY], {}, []);
-    renderApp("/");
-    const card = await screen.findByRole("region", { name: "Connect a provider" });
-    expect(within(card).getByRole("link", { name: "Sign in with Claude" })).toHaveAttribute(
-      "href",
-      "/credentials?start=claude",
-    );
-    expect(within(card).getByRole("link", { name: "Sign in with ChatGPT" })).toHaveAttribute(
-      "href",
-      "/credentials?start=codex",
-    );
-    expect(within(card).getByRole("link", { name: "Add a provider API key" })).toHaveAttribute(
-      "href",
-      "/credentials?start=key",
-    );
-    expect(within(card).getByRole("link", { name: "Upload a credential file" })).toHaveAttribute(
-      "href",
-      "/credentials",
-    );
-    expect(api.unhandled).toEqual([]);
-  });
-
-  it("counts provider keys as connected", async () => {
-    const { api } = server([KEY], {}, []);
-    api.use(
-      route("GET", KEY_LISTS.gemini.path, {
-        json: { "gemini-api-key": [{ "api-key": "AIzaSy-test-gemini-key-0001" }] },
-      }),
-    );
-    renderApp("/");
-    expect(
-      await screen.findByText("0 sign-ins and credential files, 1 provider API key."),
-    ).toBeVisible();
-    const card = screen.getByRole("region", { name: "Providers" });
-    expect(card).not.toHaveTextContent("AIzaSy");
-  });
-
-  it("tallies the credentials by health, and says when some need attention", async () => {
-    server([KEY], {}, [
-      credential(),
-      credential({ name: "codex-bob.json", provider: "codex", cooldowns: [cooldown("quota", 300)] }),
-      credential({ name: "claude-cy.json", status: "error", status_message: "unauthorized" }),
-      credential({ name: "claude-dee.json", disabled: true, status: "disabled" }),
-    ]);
-    renderApp("/");
-    expect(
-      await screen.findByText("4 sign-ins and credential files, 0 provider API keys."),
-    ).toBeVisible();
-    const card = screen.getByRole("region", { name: "Providers" });
-    const tally = within(card).getByRole("list", { name: "Credential health" });
-    expect(
-      within(tally)
-        .getAllByRole("listitem")
-        .map((item) => item.textContent),
-    ).toEqual(["1 ready", "1 resting", "1 failing", "1 off"]);
-    expect(card).toHaveTextContent("2 need attention");
-    expect(within(card).getByRole("link", { name: "Open Credentials" })).toHaveAttribute(
-      "href",
-      "/credentials",
-    );
-  });
-
-  it("counts the config's Claude Code accounts, and tallies them too", async () => {
-    const { api } = server([KEY], {}, []);
-    api.use(
-      route("GET", CLAUDE_CLI_ENTRIES, {
-        json: {
-          entries: [
-            claudeCliEntry(),
-            claudeCliEntry({
-              name: "claude-max-2",
-              credential: claudeCliCredential({
-                unavailable: true,
-                cooldowns: [cooldown("unauthorized", 600, { http_status: 401 })],
-              }),
-            }),
-          ],
-        },
-      }),
-    );
-    renderApp("/");
-    expect(
-      await screen.findByText(
-        "0 sign-ins and credential files, 0 provider API keys, 2 Claude Code accounts.",
-      ),
-    ).toBeVisible();
-    const card = screen.getByRole("region", { name: "Providers" });
-    const tally = within(card).getByRole("list", { name: "Credential health" });
-    expect(
-      within(tally)
-        .getAllByRole("listitem")
-        .map((item) => item.textContent),
-    ).toEqual(["1 ready", "1 resting"]);
-    expect(card).toHaveTextContent("One needs attention");
-    expect(screen.queryByRole("region", { name: "Connect a provider" })).toBeNull();
-    expect(api.unhandled).toEqual([]);
   });
 });
 

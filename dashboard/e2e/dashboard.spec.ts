@@ -123,9 +123,12 @@ test("renders every screen under the policy", async ({ page }) => {
   await page.getByRole("tab", { name: "Codex CLI" }).click();
   await expect(page.getByLabel("The Codex CLI setup, step 1", { exact: true })).toContainText(`wire_api = "responses"`);
   await shot(page, "03-overview-codex");
-  await expect(page.getByRole("region", { name: "Providers" })).toContainText(
-    "3 sign-ins and credential files, 3 provider API keys, 2 Claude Code accounts.",
-  );
+  // The failing account, then the resting ones, soonest back first.
+  const health = page.getByRole("region", { name: "Account health" });
+  await expect(
+    health.getByRole("list", { name: "Accounts that need attention" }).getByRole("link"),
+  ).toHaveText(["lin@example.com", "claude-max-2", "grace@example.com"]);
+  await expect(health).toContainText("The rest: 2 ready. The server also has 3 provider API keys.");
 
   await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Credentials" }).click();
   await expect(page.getByRole("heading", { name: "Credentials", level: 1 })).toBeVisible();
