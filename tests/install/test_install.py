@@ -21,8 +21,9 @@ is compiled with the .NET Framework's csc. Elsewhere, install.ps1 is only
 checked to refuse to run, when pwsh is installed.
 
 Every install goes to a temporary directory the test passes, and HOME,
-XDG_CONFIG_HOME, LOCALAPPDATA, APPDATA and the temporary directory are
-redirected to temporary directories too.
+XDG_CONFIG_HOME, XDG_DATA_HOME, LOCALAPPDATA, APPDATA and the temporary
+directory are redirected to temporary directories too, so the install
+receipt is written in one.
 
 Environment:
   INSTALL_TEST_EXPECT_TARGET  also run install.sh with this system's own
@@ -46,6 +47,7 @@ import functools
 import hashlib
 import http.server
 import io
+import json
 import os
 import re
 import shutil
@@ -121,9 +123,9 @@ if WINDOWS and SH:
 FAKE_OPEN_FERRY_SH = r"""#!/bin/sh
 # name: @NAME@
 # A fake open-ferry for the install script tests. It records its arguments
-# in FAKE_OPEN_FERRY_LOG, as a line of tab-separated fields after its name,
-# and for `init -config PATH` writes a config, or fails if
-# FAKE_OPEN_FERRY_FAIL is set.
+# in FAKE_OPEN_FERRY_LOG, as a line of tab-separated fields after its name;
+# for `init -config PATH` writes a config, or fails if FAKE_OPEN_FERRY_FAIL
+# is set; and fails `update` if FAKE_OPEN_FERRY_UPDATE_FAIL is set.
 {
   printf '%s' '@NAME@'
   for arg in "$@"; do
@@ -131,6 +133,10 @@ FAKE_OPEN_FERRY_SH = r"""#!/bin/sh
   done
   printf '\n'
 } >> "$FAKE_OPEN_FERRY_LOG"
+if [ "${1:-}" = update ] && [ -n "${FAKE_OPEN_FERRY_UPDATE_FAIL:-}" ]; then
+  echo "fake open-ferry: update failed" >&2
+  exit 4
+fi
 if [ "${1:-}" = init ]; then
   if [ -n "${FAKE_OPEN_FERRY_FAIL:-}" ]; then
     echo "fake open-ferry: init failed" >&2
@@ -148,8 +154,8 @@ FAKE_OPEN_FERRY_CS = r"""
 // A fake open-ferry.exe for the install script tests. It records its
 // arguments in FAKE_OPEN_FERRY_LOG, as a line of tab-separated fields after
 // its name; for `init -config PATH` writes a config, or fails if
-// FAKE_OPEN_FERRY_FAIL is set; and for `sleep MS` sleeps, to stand for a
-// running open-ferry.
+// FAKE_OPEN_FERRY_FAIL is set; fails `update` if FAKE_OPEN_FERRY_UPDATE_FAIL
+// is set; and for `sleep MS` sleeps, to stand for a running open-ferry.
 using System;
 using System.IO;
 using System.Text;
@@ -175,6 +181,12 @@ public static class FakeOpenFerry
         {
             Thread.Sleep(Int32.Parse(args[1]));
             return 0;
+        }
+        if (args.Length >= 1 && args[0] == "update"
+            && !String.IsNullOrEmpty(Environment.GetEnvironmentVariable("FAKE_OPEN_FERRY_UPDATE_FAIL")))
+        {
+            Console.Error.WriteLine("fake open-ferry: update failed");
+            return 4;
         }
         if (args.Length >= 1 && args[0] == "init")
         {
@@ -316,6 +328,22 @@ def lines_of(output):
     return [line.rstrip() for line in output.splitlines()]
 
 
+RECEIPT_TIME = r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z"
+
+
+def read_receipt(path):
+    """The install receipt at path, which must be UTF-8 without a BOM, the
+    only thing in its directory, and have exactly the receipt's fields."""
+    with open(path, "rb") as f:
+        data = f.read()
+    assert not data.startswith(b"\xef\xbb\xbf"), "the receipt has a BOM"
+    receipt = json.loads(data.decode("utf-8"))
+    assert os.listdir(os.path.dirname(path)) == ["install-receipt.json"], os.listdir(os.path.dirname(path))
+    assert sorted(receipt) == ["binary", "format", "installed_at", "installer", "target", "version"], receipt
+    assert re.fullmatch(RECEIPT_TIME, receipt.pop("installed_at")), receipt
+    return receipt
+
+
 def sha256_file(path):
     with open(path, "rb") as f:
         return hashlib.sha256(f.read()).hexdigest()
@@ -326,6 +354,7 @@ def clean_env():
     to a real release, a real gh, a proxy or a real config."""
     dropped = {
         "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
         "PSMODULEPATH",
         "HTTP_PROXY",
         "HTTPS_PROXY",
@@ -621,6 +650,16 @@ class InstallShTests(Case):
         self.assertFalse(os.path.exists(self.bin_dir))
         self.assertFalse(os.path.exists(self.config))
         self.assertEqual(read_log(self.log), [])
+        self.assertFalse(os.path.exists(self.receipt()))
+
+    def receipt(self, data_home=None):
+        return os.path.join(data_home or os.path.join(self.home, ".local", "share"), "open-ferry", "install-receipt.json")
+
+    def assertReceipt(self, version, binary, data_home=None):
+        self.assertEqual(
+            read_receipt(self.receipt(data_home)),
+            {"format": 1, "installer": "install.sh", "version": version, "binary": binary, "target": GNU},
+        )
 
     def reset(self):
         for path in (self.bin_dir, os.path.dirname(os.path.dirname(self.config))):
@@ -657,7 +696,11 @@ class InstallShTests(Case):
             lines,
         )
         self.assertIn(f'  Check the setup:     "{binary}" check -config {config}', lines)
+        self.assertEqual(
+            lines[-1], f'open-ferry keeps itself up to date. To turn that off: "{binary}" update -mode off -config {config}'
+        )
         self.assertEqual(os.listdir(self.tmp), [], "the temporary directory is left behind")
+        self.assertReceipt(LATEST, binary)
 
     def test_installs_a_given_version(self):
         for flags in (["--version", OLDER], ["--version", "v" + OLDER], ["--version=" + OLDER]):
@@ -761,6 +804,7 @@ class InstallShTests(Case):
             "  Open the dashboard:  http://127.0.0.1:<port>/dashboard/, with your config's port (8317 by default)",
             lines,
         )
+        self.assertTrue(lines[-1].startswith("open-ferry keeps itself up to date, unless your config says otherwise."))
 
     def test_replaces_an_installed_binary(self):
         self.assertExit(self.run_sh("--target", GNU, "--version", OLDER, *self.install_args()), 0)
@@ -769,6 +813,92 @@ class InstallShTests(Case):
         self.assertExit(result, 0)
         self.assertInstalled(LATEST, GNU)
         self.assertIn(f"Keeping your config at {sh_path(self.config)}.", lines_of(result.output))
+        self.assertReceipt(LATEST, sh_path(self.bin_dir) + "/open-ferry")
+
+    def test_sets_the_update_mode(self):
+        config = sh_path(self.config)
+        off = f'To turn that off: "{sh_path(self.binary())}" update -mode off -config "{config}"'
+        on = f'Automatic updates are off. To turn them on: "{sh_path(self.binary())}" update -mode auto -config "{config}"'
+        cases = (
+            # options, OPEN_FERRY_INSTALL_SELF_UPDATE, the mode set, the last line
+            (["--no-auto-update"], None, "off", on),
+            ([], "off", "off", on),
+            ([], "notify", "notify", f"open-ferry says when a release is out, but doesn't install it. {off}"),
+            ([], "auto", "auto", f"open-ferry keeps itself up to date. {off}"),
+            (["--no-auto-update"], "auto", "off", on),
+            ([], "", None, f"open-ferry keeps itself up to date. {off}"),
+        )
+        for flags, variable, mode, last in cases:
+            with self.subTest(flags=flags, variable=variable):
+                self.reset()
+                result = self.run_sh(
+                    "--target", GNU, *self.install_args(*flags), OPEN_FERRY_INSTALL_SELF_UPDATE=variable
+                )
+                self.assertExit(result, 0)
+                name = self.assertInstalled(LATEST, GNU)
+                calls = [[name, "init", "-config", config]]
+                if mode:
+                    calls.append([name, "update", "-mode", mode, "-config", config])
+                self.assertEqual(read_log(self.log), calls)
+                self.assertEqual(lines_of(result.output)[-1], last)
+
+        # With a config kept, only the mode is set.
+        self.reset()
+        write_file(self.config, "mine: true\n", mode=0o600)
+        result = self.run_sh("--target", GNU, *self.install_args("--no-auto-update"))
+        self.assertExit(result, 0)
+        name = self.assertInstalled(LATEST, GNU)
+        self.assertEqual(read_log(self.log), [[name, "update", "-mode", "off", "-config", config]])
+
+    def test_refuses_a_bad_update_mode(self):
+        result = self.run_sh("--target", GNU, *self.install_args(), OPEN_FERRY_INSTALL_SELF_UPDATE="sometimes")
+        self.assertExit(result, 2)
+        self.assertIn('OPEN_FERRY_INSTALL_SELF_UPDATE is "sometimes": use off, notify or auto', result.output)
+        self.assertNothingInstalled()
+
+    def test_fails_when_setting_the_update_mode_fails(self):
+        result = self.run_sh("--target", GNU, *self.install_args("--no-auto-update"), FAKE_OPEN_FERRY_UPDATE_FAIL="1")
+        self.assertExit(result, 1)
+        self.assertIn("fake open-ferry: update failed", result.output)
+        self.assertIn(
+            f"open-ferry update couldn't set self-update.mode to off in {sh_path(self.config)}", result.output
+        )
+
+    def test_writes_the_receipt_under_xdg_data_home(self):
+        xdg = os.path.join(self.work, "xdg data")
+        binary = sh_path(self.bin_dir) + "/open-ferry"
+        result = self.run_sh("--target", GNU, *self.install_args(), XDG_DATA_HOME=sh_path(xdg))
+        self.assertExit(result, 0)
+        self.assertReceipt(LATEST, binary, data_home=xdg)
+        self.assertFalse(os.path.exists(self.receipt()))
+        # Not absolute, so not counted, as open-ferry doesn't.
+        result = self.run_sh("--target", GNU, "--version", OLDER, *self.install_args(), XDG_DATA_HOME="relative/xdg")
+        self.assertExit(result, 0)
+        self.assertReceipt(OLDER, binary)
+
+    def test_says_when_it_cannot_write_the_receipt(self):
+        # A file where the data directory goes.
+        blocker = os.path.join(self.home, ".local", "share", "open-ferry")
+        write_file(blocker, "not a directory\n", mode=0o644)
+        result = self.run_sh("--target", GNU, *self.install_args())
+        self.assertExit(result, 0)
+        self.assertInstalled(LATEST, GNU)
+        receipt = sh_path(self.home) + "/.local/share/open-ferry/install-receipt.json"
+        lines = lines_of(result.output)
+        self.assertIn(
+            f"Couldn't write the install receipt {receipt}, so open-ferry won't update itself;"
+            " it will say when a release is out.",
+            lines,
+        )
+        self.assertTrue(lines[-1].startswith("open-ferry says when a release is out. To turn that off: "), lines[-1])
+        self.assertEqual(read_text(blocker), "not a directory\n")
+
+    @unittest.skipIf(WINDOWS, "Windows paths can't hold a double quote")
+    def test_escapes_the_receipt(self):
+        self.bin_dir = os.path.join(self.work, 'bin "q" ' + chr(92) + " dir")
+        result = self.run_sh("--target", GNU, *self.install_args())
+        self.assertExit(result, 0)
+        self.assertReceipt(LATEST, self.bin_dir + "/open-ferry")
 
     def test_says_nothing_about_path_when_the_directory_is_on_it(self):
         result = self.run_sh("--target", GNU, *self.install_args(), path_first=[self.bin_dir])
@@ -883,6 +1013,7 @@ class InstallShTests(Case):
                 lines = lines_of(result.output)
                 self.assertIn(f'  Start it:            {sh_path(binary)} -config "{sh_path(config)}"', lines)
                 self.assertIn(f'  Or run it at login:  {sh_path(binary)} service install -config "{sh_path(config)}"', lines)
+                self.assertReceipt(LATEST, sh_path(binary))
 
 
 # --- install.ps1 -------------------------------------------------------------
@@ -966,6 +1097,16 @@ class InstallPs1Cases:
         self.assertFalse(os.path.exists(self.install_dir))
         self.assertFalse(os.path.exists(self.config))
         self.assertEqual(read_log(self.log), [])
+        self.assertFalse(os.path.exists(self.receipt()))
+
+    def receipt(self):
+        return os.path.join(self.local, "open-ferry", "install-receipt.json")
+
+    def assertReceipt(self, version, exe=None):
+        self.assertEqual(
+            read_receipt(self.receipt()),
+            {"format": 1, "installer": "install.ps1", "version": version, "binary": exe or self.exe, "target": WINDOWS_TARGET},
+        )
 
     def test_installs_the_latest_release(self):
         result = self.run_file(*self.install_args())
@@ -998,6 +1139,8 @@ class InstallPs1Cases:
             lines,
         )
         self.assertIn(f"  Check the setup:     {exe} check -config {config}", lines)
+        self.assertEqual(lines[-1], f"open-ferry keeps itself up to date. To turn that off: {exe} update -mode off -config {config}")
+        self.assertReceipt(LATEST)
 
     def test_installs_a_given_version(self):
         for version in (OLDER, "v" + OLDER):
@@ -1072,7 +1215,78 @@ class InstallPs1Cases:
         self.assertInstalled(LATEST)
         self.assertEqual(read_text(self.config), "mine: true\n")
         self.assertEqual(read_log(self.log), [], "open-ferry init ran")
-        self.assertIn(f"Keeping your config at {self.config}.", lines_of(result.output))
+        lines = lines_of(result.output)
+        self.assertIn(f"Keeping your config at {self.config}.", lines)
+        self.assertTrue(lines[-1].startswith("open-ferry keeps itself up to date, unless your config says otherwise."))
+
+    def test_sets_the_update_mode(self):
+        exe = "& " + ps_quote(self.exe)
+        config = ps_quote(self.config)
+        off = f"To turn that off: {exe} update -mode off -config {config}"
+        on = f"Automatic updates are off. To turn them on: {exe} update -mode auto -config {config}"
+        cases = (
+            # options, OPEN_FERRY_INSTALL_SELF_UPDATE, the mode set, the last line
+            (["-NoAutoUpdate"], None, "off", on),
+            ([], "off", "off", on),
+            ([], "notify", "notify", f"open-ferry says when a release is out, but doesn't install it. {off}"),
+            ([], "auto", "auto", f"open-ferry keeps itself up to date. {off}"),
+            (["-NoAutoUpdate"], "auto", "off", on),
+        )
+        for flags, variable, mode, last in cases:
+            with self.subTest(flags=flags, variable=variable):
+                shutil.rmtree(self.install_dir, ignore_errors=True)
+                shutil.rmtree(os.path.dirname(self.config), ignore_errors=True)
+                if os.path.exists(self.log):
+                    os.remove(self.log)
+                result = self.run_file(*self.install_args(*flags), OPEN_FERRY_INSTALL_SELF_UPDATE=variable)
+                self.assertExit(result, 0)
+                name = self.assertInstalled(LATEST)
+                self.assertEqual(
+                    read_log(self.log),
+                    [[name, "init", "-config", self.config], [name, "update", "-mode", mode, "-config", self.config]],
+                )
+                self.assertEqual(lines_of(result.output)[-1], last)
+
+        # The environment variable is the form for irm | iex; with a config
+        # kept, only the mode is set.
+        os.remove(self.log)
+        result = self.run_command(
+            f"irm {self.script_url()} | iex",
+            OPEN_FERRY_INSTALL_DIR=self.install_dir,
+            OPEN_FERRY_INSTALL_CONFIG=self.config,
+            OPEN_FERRY_INSTALL_SELF_UPDATE="off",
+        )
+        self.assertExit(result, 0)
+        name = self.assertInstalled(LATEST)
+        self.assertEqual(read_log(self.log), [[name, "update", "-mode", "off", "-config", self.config]])
+
+    def test_refuses_a_bad_update_mode(self):
+        result = self.run_file(*self.install_args(), OPEN_FERRY_INSTALL_SELF_UPDATE="sometimes")
+        self.assertExit(result, 1)
+        self.assertIn("OPEN_FERRY_INSTALL_SELF_UPDATE is 'sometimes': use off, notify or auto", result.output)
+        self.assertNothingInstalled()
+
+    def test_fails_when_setting_the_update_mode_fails(self):
+        result = self.run_file(*self.install_args("-NoAutoUpdate"), FAKE_OPEN_FERRY_UPDATE_FAIL="1")
+        self.assertExit(result, 1)
+        self.assertIn("fake open-ferry: update failed", result.output)
+        self.assertIn(f"open-ferry update couldn't set self-update.mode to off in {self.config}", result.output)
+
+    def test_says_when_it_cannot_write_the_receipt(self):
+        # A file where the data directory goes.
+        blocker = os.path.join(self.local, "open-ferry")
+        write_file(blocker, "not a directory\n", mode=0o644)
+        result = self.run_file(*self.install_args())
+        self.assertExit(result, 0)
+        self.assertInstalled(LATEST)
+        lines = lines_of(result.output)
+        self.assertIn(
+            "Couldn't write the install receipt in %LOCALAPPDATA%" + chr(92) + "open-ferry, so open-ferry won't"
+            " update itself; it will say when a release is out.",
+            lines,
+        )
+        self.assertTrue(lines[-1].startswith("open-ferry says when a release is out. To turn that off: "), lines[-1])
+        self.assertEqual(read_text(blocker), "not a directory\n")
 
     def test_replaces_a_running_open_ferry(self):
         self.assertExit(self.run_file("-Version", OLDER, *self.install_args()), 0)
@@ -1206,6 +1420,7 @@ class InstallPs1Cases:
                 lines = lines_of(result.output)
                 self.assertIn(f"  Start it:            & {ps_quote(exe)} -config {ps_quote(config)}", lines)
                 self.assertIn(f"  Or run it at login:  & {ps_quote(exe)} service install -config {ps_quote(config)}", lines)
+                self.assertReceipt(LATEST, exe)
 
 
 class WindowsPowerShellTests(InstallPs1Cases, Case):

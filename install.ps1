@@ -23,6 +23,8 @@
 #                      (default: %APPDATA%\open-ferry\config.yaml)
 #   -NoAttestation     don't check the build provenance attestation, even
 #                      when gh is installed; the SHA256SUMS check still runs
+#   -NoAutoUpdate      turn automatic updates off (self-update.mode: off in
+#                      the config); open-ferry update -mode auto turns them on
 #
 # Environment:
 #   OPEN_FERRY_INSTALL_DIR       the install directory, when -InstallDir
@@ -33,6 +35,11 @@
 #                                place of the GitHub repository's releases
 #                                URL (for a mirror, or a test server)
 #   OPEN_FERRY_INSTALL_GH        the GitHub CLI command (default: gh)
+#   OPEN_FERRY_INSTALL_SELF_UPDATE  off, notify or auto: set self-update.mode
+#                                in the config (-NoAutoUpdate is off)
+#
+# It writes install-receipt.json in %LOCALAPPDATA%\open-ferry, which lets
+# open-ferry update itself; see docs/updates.md for turning that off.
 #
 # See https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy#install
 
@@ -40,7 +47,8 @@ param(
     [string]$Version,
     [string]$InstallDir,
     [string]$ConfigPath,
-    [switch]$NoAttestation
+    [switch]$NoAttestation,
+    [switch]$NoAutoUpdate
 )
 
 # Everything runs in this function, which ends by returning or throwing,
@@ -51,7 +59,8 @@ function Install-OpenFerry {
         [string]$Version,
         [string]$InstallDir,
         [string]$ConfigPath,
-        [bool]$NoAttestation
+        [bool]$NoAttestation,
+        [bool]$NoAutoUpdate
     )
 
     $ErrorActionPreference = 'Stop'
@@ -80,6 +89,11 @@ function Install-OpenFerry {
 
     # --- Options -------------------------------------------------------------
 
+    $selfUpdate = $env:OPEN_FERRY_INSTALL_SELF_UPDATE
+    if ($NoAutoUpdate) { $selfUpdate = 'off' }
+    if ($selfUpdate -and $selfUpdate -cnotin 'off', 'notify', 'auto') {
+        throw "OPEN_FERRY_INSTALL_SELF_UPDATE is '$selfUpdate': use off, notify or auto"
+    }
     if (-not $InstallDir) { $InstallDir = $env:OPEN_FERRY_INSTALL_DIR }
     if (-not $InstallDir) {
         if (-not $env:LOCALAPPDATA) { throw 'LOCALAPPDATA is not set: pass -InstallDir' }
@@ -250,6 +264,26 @@ function Install-OpenFerry {
             }
         }
         Write-Host "Installed open-ferry $Version as $exe."
+
+        # The install receipt: open-ferry updates itself only when it names
+        # the binary that runs (see docs/updates.md).
+        $receiptOk = $false
+        if ($env:LOCALAPPDATA) {
+            $receipt = Join-Path $env:LOCALAPPDATA 'open-ferry\install-receipt.json'
+            try {
+                New-Item -ItemType Directory -Path (Split-Path $receipt) -Force | Out-Null
+                $json = [ordered]@{ format = 1; installer = 'install.ps1'; version = $Version; binary = $exe; target = $target
+                    installed_at = [DateTime]::UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture) } | ConvertTo-Json -Compress
+                [IO.File]::WriteAllText("$receipt.new", $json + "`n", (New-Object Text.UTF8Encoding $false))
+                Move-Item -LiteralPath "$receipt.new" -Destination $receipt -Force
+                $receiptOk = $true
+            } catch {
+                Remove-Item -LiteralPath "$receipt.new" -Force -ErrorAction SilentlyContinue
+            }
+        }
+        if (-not $receiptOk) {
+            Write-Host "Couldn't write the install receipt in %LOCALAPPDATA%\open-ferry, so open-ferry won't update itself; it will say when a release is out."
+        }
         if ($stillRunning) {
             Write-Host 'An older open-ferry.exe is still running: restart it to run this one.'
         }
@@ -268,6 +302,9 @@ function Install-OpenFerry {
             throw "open-ferry init couldn't write $ConfigPath"
         }
         Write-Host ''
+    }
+    if ($selfUpdate -and (Invoke-Native { & $exe update -mode $selfUpdate -config $ConfigPath }) -ne 0) {
+        throw "open-ferry update couldn't set self-update.mode to $selfUpdate in $ConfigPath"
     }
 
     # --- Next steps ----------------------------------------------------------
@@ -299,10 +336,23 @@ function Install-OpenFerry {
         Write-Host "  Open the dashboard:  http://127.0.0.1:<port>/dashboard/, with your config's port (8317 by default)"
     }
     Write-Host "  Check the setup:     $command check -config $quotedConfig"
+    Write-Host ''
+    $off = "To turn that off: $command update -mode off -config $quotedConfig"
+    if ($selfUpdate -eq 'off') {
+        Write-Host "Automatic updates are off. To turn them on: $command update -mode auto -config $quotedConfig"
+    } elseif ($selfUpdate -eq 'notify') {
+        Write-Host "open-ferry says when a release is out, but doesn't install it. $off"
+    } elseif (-not $receiptOk) {
+        Write-Host "open-ferry says when a release is out. $off"
+    } elseif ($selfUpdate -or $wroteConfig) {
+        Write-Host "open-ferry keeps itself up to date. $off"
+    } else {
+        Write-Host "open-ferry keeps itself up to date, unless your config says otherwise. $off"
+    }
 }
 
 try {
-    Install-OpenFerry -Version $Version -InstallDir $InstallDir -ConfigPath $ConfigPath -NoAttestation $NoAttestation.IsPresent
+    Install-OpenFerry -Version $Version -InstallDir $InstallDir -ConfigPath $ConfigPath -NoAttestation $NoAttestation.IsPresent -NoAutoUpdate $NoAutoUpdate.IsPresent
 } catch {
     Write-Host "install.ps1: error: $($_.Exception.Message)" -ForegroundColor Red
     # Run as a file, the script exits with 1. Run from irm, it only returns,
