@@ -38,7 +38,7 @@ use serde_json::{Map, Value, json};
 
 use super::api::{Body, path_segments};
 use super::guard::{confirm, sensitive_reasons_of};
-use super::mask::{mask_at, mask_whole};
+use super::mask::{FROM_A_FILE, mask_at};
 use super::target::{Reach, Server, probe};
 use super::values::{Change, diff, get, placed, tree_of};
 use super::{Caller, Context, Failure, Report};
@@ -153,7 +153,7 @@ pub(crate) struct Request {
     /// Why it needs a confirmation whatever it changes: none, or more.
     pub(crate) always: Vec<String>,
     /// Whether the value it sets was read from a file or standard input:
-    /// then it is masked whole wherever it shows ([`shown`]).
+    /// then it shows as [`FROM_A_FILE`] wherever it shows ([`shown`]).
     pub(crate) hidden: bool,
 }
 
@@ -252,8 +252,8 @@ pub(crate) fn masked(changes: &[Change]) -> Vec<Value> {
 /// `changes`, which make the config `before` into `after` for `request`,
 /// as reported: [`masked`]; but when `request` sets a value read from a
 /// file or standard input, the changes at, under or above its setting are
-/// one, its new value masked whole, so no part of the file shows, nor its
-/// keys.
+/// one, its new value [`FROM_A_FILE`], so no part of the file shows: not
+/// its keys, its shape or its length.
 fn shown(request: &Request, changes: &[Change], before: &Value, after: &Value) -> Vec<Value> {
     let Some(path) = request.path.as_deref().filter(|_| request.hidden) else {
         return masked(changes);
@@ -276,8 +276,8 @@ fn shown(request: &Request, changes: &[Change], before: &Value, after: &Value) -
             if let Some(old) = get(before, parts) {
                 entry.insert("old".to_owned(), mask_at(parts, old));
             }
-            if let Some(new) = get(after, parts) {
-                entry.insert("new".to_owned(), mask_whole(new));
+            if get(after, parts).is_some() {
+                entry.insert("new".to_owned(), Value::String(FROM_A_FILE.to_owned()));
             }
             out.push(Value::Object(entry));
         }
