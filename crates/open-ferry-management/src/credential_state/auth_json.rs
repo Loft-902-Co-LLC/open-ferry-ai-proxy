@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/types.go (Auth, QuotaState,
 // ModelState) and errors.go (Error), as encoding/json writes them from
-// their tags (v8.0.15, MIT).
+// their tags (v8.0.15, MIT), with v8.0.20's credential_version.
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A credential as upstream's management API writes one: the JSON of Go's
@@ -29,6 +29,9 @@ pub(crate) fn auth_json(auth: &Auth) -> Json {
     let mut fields: Vec<(&'static str, Json)> = vec![("id", Json::Str(auth.id.clone()))];
     if auth.registration_epoch != 0 {
         fields.push(("registration_epoch", Json::Uint(auth.registration_epoch)));
+    }
+    if auth.credential_version != 0 {
+        fields.push(("credential_version", Json::Uint(auth.credential_version)));
     }
     if auth.generation != 0 {
         fields.push(("generation", Json::Uint(auth.generation)));

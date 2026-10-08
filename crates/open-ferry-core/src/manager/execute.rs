@@ -399,6 +399,8 @@ fn failure_result(
         retry_after: retry_after_from_error(ErrView::Exec(err)),
         credential_scope: credential_scope && is_credential_scoped_error(ErrView::Exec(err)),
         response_headers: err.headers.clone(),
+        credential_version: auth.credential_version,
+        registration_epoch: auth.registration_epoch,
         ..CallResult::default()
     }
 }
@@ -924,6 +926,8 @@ impl Manager {
                                 response_headers: resp.headers.clone(),
                                 // A token count says nothing of the quota.
                                 skip_quota_observation: kind == CallKind::CountTokens,
+                                credential_version: auth.credential_version,
+                                registration_epoch: auth.registration_epoch,
                                 ..CallResult::default()
                             },
                             session,
@@ -1274,6 +1278,8 @@ impl Manager {
                             success: false,
                             error: Some(result_error_from_error(ErrView::Exec(&empty))),
                             response_headers: headers.clone(),
+                            credential_version: auth.credential_version,
+                            registration_epoch: auth.registration_epoch,
                             ..CallResult::default()
                         },
                         session,
@@ -1387,6 +1393,8 @@ impl Manager {
                         route_model: forwarder.route_model.clone(),
                         success: true,
                         response_headers: forwarder.headers.clone(),
+                        credential_version: forwarder.auth.credential_version,
+                        registration_epoch: forwarder.auth.registration_epoch,
                         ..CallResult::default()
                     },
                     forwarder.session.as_deref(),

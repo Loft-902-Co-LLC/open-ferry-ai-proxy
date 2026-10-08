@@ -27,9 +27,9 @@ use crate::exec::{Dispatcher, ErrorKind, ExecError};
 use crate::manager::credential::access_token;
 use crate::manager::{CallResult, RoutingStrategy, Settings, has_unauthorized_auth_failure, lock};
 
-const MODEL: &str = "gpt-5.5";
-const PRIMARY: &str = "aa-primary";
-const BACKUP: &str = "bb-backup";
+pub(super) const MODEL: &str = "gpt-5.5";
+pub(super) const PRIMARY: &str = "aa-primary";
+pub(super) const BACKUP: &str = "bb-backup";
 const INVALIDATED: &str =
     "Your authentication token has been invalidated. Please try signing in again.";
 /// The refresh failure upstream's tests use for a refused refresh token.
@@ -37,15 +37,15 @@ const INVALID_GRANT: &str = r#"token refresh failed with status 400: {"error": "
 
 /// The mutable state of upstream's `unauthorizedRefreshExecutor`.
 #[derive(Default)]
-struct Tokens {
-    invalid: HashSet<String>,
-    refresh_fail: bool,
-    refresh_err: Option<ExecError>,
-    refresh_tokens: HashMap<String, String>,
+pub(super) struct Tokens {
+    pub(super) invalid: HashSet<String>,
+    pub(super) refresh_fail: bool,
+    pub(super) refresh_err: Option<ExecError>,
+    pub(super) refresh_tokens: HashMap<String, String>,
 }
 
 /// A refresh failure without a status, as upstream's `errors.New`.
-fn plain_error(message: &str) -> ExecError {
+pub(super) fn plain_error(message: &str) -> ExecError {
     ExecError::new(ErrorKind::Upstream, message)
 }
 
@@ -102,7 +102,7 @@ fn unauthorized_refresh_executor(tokens: &Arc<Mutex<Tokens>>) -> Arc<FakeExecuto
 }
 
 /// Upstream's `newUnauthorizedRefreshFixture`.
-fn new_unauthorized_refresh_fixture(
+pub(super) fn new_unauthorized_refresh_fixture(
     refresh_fail: bool,
 ) -> (Harness, Arc<FakeExecutor>, Arc<Mutex<Tokens>>) {
     let tokens = Arc::new(Mutex::new(Tokens {

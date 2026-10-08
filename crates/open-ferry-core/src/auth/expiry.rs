@@ -13,6 +13,9 @@
 //! JWTs are decoded without checking their signature; the expiry is only a
 //! hint for when to refresh.
 //!
+//! An access token a provider refused (see [`Auth::rejected_access_token`])
+//! expired at the Unix epoch, whatever the metadata says.
+//!
 //! Deviations from upstream:
 //! - Go's zero time ("year 1") stands for a time of zero or less, as
 //!   upstream returns; times beyond what [`Timestamp`] holds are clamped to
@@ -44,6 +47,9 @@ impl Auth {
     /// else an expiry in the metadata.
     pub fn expiration_time(&self) -> Option<Timestamp> {
         let token = self.access_token();
+        if self.is_rejected_access_token(token) {
+            return Some(DateTime::<Utc>::UNIX_EPOCH);
+        }
         if !token.is_empty()
             && let Some(exp) = parse_jwt_exp(token)
         {
@@ -60,7 +66,15 @@ impl Auth {
         if token.is_empty() {
             return None;
         }
+        if self.is_rejected_access_token(token) {
+            return Some(DateTime::<Utc>::UNIX_EPOCH);
+        }
         parse_jwt_exp(token).or_else(|| self.expiration_time())
+    }
+
+    /// Whether `token` is the access token a provider refused.
+    fn is_rejected_access_token(&self, token: &str) -> bool {
+        !token.is_empty() && self.rejected_access_token == token
     }
 
     /// Whether the credential has an access token that is still good at
@@ -415,6 +429,33 @@ mod tests {
         let no_access = auth(json!({"id_token": future_jwt, "expired": future.to_rfc3339()}));
         assert!(!no_access.has_valid_access_token(Utc::now()));
         assert_eq!(no_access.access_token_expiration_time(), None);
+    }
+
+    // Upstream's ExpirationTime and AccessTokenExpirationTime with a
+    // RejectedAccessToken (v8.0.20).
+    #[test]
+    fn rejected_access_token_has_expired() {
+        let future = Utc::now() + TimeDelta::hours(1);
+        let mut rejected = auth(json!({"access_token": "opaque", "expired": future.to_rfc3339()}));
+        rejected.rejected_access_token = "opaque".into();
+        assert_eq!(
+            rejected.expiration_time(),
+            Some(DateTime::<Utc>::UNIX_EPOCH)
+        );
+        assert_eq!(
+            rejected.access_token_expiration_time(),
+            Some(DateTime::<Utc>::UNIX_EPOCH)
+        );
+        assert!(!rejected.has_valid_access_token(Utc::now()));
+
+        // A new token isn't the rejected one.
+        rejected
+            .metadata
+            .insert("access_token".into(), json!("replaced"));
+        assert!(rejected.has_valid_access_token(Utc::now()));
+        // Nor does an empty marker match a missing token.
+        let none = auth(json!({}));
+        assert_eq!(none.expiration_time(), None);
     }
 
     #[test]

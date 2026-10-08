@@ -13,9 +13,12 @@
 //! outcomes, and saving credentials to the store.
 //!
 //! Every change makes a new [`Auth`] snapshot and bumps the credential's
-//! generation; registering an ID again bumps its epoch. A save is skipped
-//! when a newer (epoch, generation) of the same credential was already
-//! saved, so saves never go backwards. [`Manager::register_unsaved`] and
+//! generation; registering an ID again bumps its epoch, and replacing its
+//! tokens or API key its credential version. A call's outcome from an
+//! earlier credential version or registration than the live one is
+//! dropped, so it can't cool down tokens it never ran with. A save is
+//! skipped when a newer (epoch, generation) of the same credential was
+//! already saved, so saves never go backwards. [`Manager::register_unsaved`] and
 //! [`Manager::update_unsaved`] change a credential without saving it, for
 //! one just read from its file or the config (upstream's `WithSkipPersist`).
 //!
@@ -68,8 +71,8 @@ use super::affinity::Session;
 use super::classify::{ErrView, has_unauthorized_auth_failure, is_unauthorized_error};
 use super::cooldown::{
     CallResult, apply_result, clear_cooldown_state_for_auth, cooldown_disabled_for_auth,
-    has_model_error, is_credential_quota_active, normalize_model_states, projections_for,
-    reconcile_model_states, reset_quota, update_aggregated_availability,
+    has_model_error, is_credential_quota_active, is_stale_result, normalize_model_states,
+    projections_for, reconcile_model_states, reset_quota, update_aggregated_availability,
 };
 use super::cooldown_store;
 use super::credential::{
@@ -241,13 +244,22 @@ impl Manager {
         let snapshot = {
             let mut guard = self.lock();
             let state = &mut *guard;
-            let existing_epoch = state
+            let existing = state
                 .auths
                 .get(&auth.id)
-                .map_or(0, |entry| entry.auth.registration_epoch);
+                .map(|entry| (entry.auth.registration_epoch, entry.auth.credential_version));
+            let existing_epoch = existing.map_or(0, |(epoch, _)| epoch);
             let slot = state.epochs.entry(auth.id.clone()).or_insert(0);
             *slot = (*slot).max(existing_epoch).saturating_add(1);
             auth.registration_epoch = *slot;
+            match existing {
+                Some((_, version)) => {
+                    auth.credential_version =
+                        auth.credential_version.max(version).saturating_add(1);
+                }
+                None if auth.credential_version == 0 => auth.credential_version = 1,
+                None => {}
+            }
             auth.generation = 1;
             let snapshot = Arc::new(auth);
             state.auths.insert(
@@ -322,6 +334,7 @@ impl Manager {
             .map_err(|err| ManagerError::InvalidWeight(format!("update auth: {err}")))?;
         let gate = self.mutation_gate();
         let now = self.now();
+        let is_refresh = matches!(mode, UpdateMode::Refresh { .. });
         let (snapshot, epoch, generation) = {
             let mut guard = self.lock();
             let state = &mut *guard;
@@ -344,6 +357,14 @@ impl Manager {
                             auth.id
                         )));
                     }
+                    // A refresh that started before the tokens or API key
+                    // were replaced mustn't put the old ones back: the
+                    // credential stays as it is.
+                    if existing_auth.credential_version != base.credential_version
+                        || credentials_changed(base, &existing_auth)
+                    {
+                        return Ok(Some((existing_auth, existing_generation)));
+                    }
                     auth = merge_refreshed_auth(base, &existing_auth, &auth, now);
                     normalize_credential_metadata(&mut auth.metadata);
                     // The merge starts from the live credential, so it
@@ -364,11 +385,21 @@ impl Manager {
             auth.failed = existing_auth.failed;
             auth.recent_requests = existing_auth.recent_requests.clone();
             let mut generation = existing_generation.saturating_add(1);
+            let existing_version = existing_auth.credential_version.max(1);
+            let changed = credentials_changed(&existing_auth, &auth);
+            auth.credential_version = if changed {
+                auth.credential_version
+                    .max(existing_version)
+                    .saturating_add(1)
+            } else {
+                existing_version
+            };
             if !is_disabled(&existing_auth) && !is_disabled(&auth) {
                 if auth.model_states.is_empty() && !existing_auth.model_states.is_empty() {
                     auth.model_states = existing_auth.model_states.clone();
                 }
-                if credentials_changed(&existing_auth, &auth) {
+                if changed || is_refresh {
+                    auth.rejected_access_token.clear();
                     let new_unauthorized = auth
                         .last_error
                         .as_ref()
@@ -380,6 +411,9 @@ impl Manager {
                         auth.status = Status::Active;
                     }
                     clear_unauthorized_model_states(&mut auth, now);
+                } else {
+                    auth.rejected_access_token
+                        .clone_from(&existing_auth.rejected_access_token);
                 }
                 if is_credential_quota_active(&existing_auth.quota, now) {
                     auth.unavailable = existing_auth.unavailable;
@@ -488,6 +522,15 @@ impl Manager {
             *slot = slot.saturating_add(1);
             auth.registration_epoch = *slot;
             auth.generation = 1;
+            if let Some(prev) = previous.get(&auth.id) {
+                auth.credential_version = auth.credential_version.max(prev.auth.credential_version);
+                if credentials_changed(&prev.auth, &auth) {
+                    auth.credential_version = auth.credential_version.saturating_add(1);
+                }
+            }
+            if auth.credential_version == 0 {
+                auth.credential_version = 1;
+            }
             state.auths.insert(
                 auth.id.clone(),
                 Entry {
@@ -564,8 +607,12 @@ impl Manager {
     /// [`mark_result`](Self::mark_result) for a call of `session`, whose
     /// bindings the outcome then updates, whether or not the credential is
     /// still there (upstream's `MarkResult` and `updateSessionAffinity`).
+    /// An outcome from an earlier credential version or registration (see
+    /// [`CallResult::credential_version`]) changes neither.
     pub(crate) fn mark_call_result(&self, result: &CallResult, session: Option<&Session>) {
-        self.record_result(result);
+        if !self.record_result(result) {
+            return;
+        }
         if let Some(session) = session
             && !result.auth_id.is_empty()
         {
@@ -576,10 +623,12 @@ impl Manager {
         }
     }
 
-    /// The credential side of [`mark_result`](Self::mark_result).
-    fn record_result(&self, result: &CallResult) {
+    /// The credential side of [`mark_result`](Self::mark_result). False
+    /// when the outcome is from an earlier credential version or
+    /// registration, and was dropped.
+    fn record_result(&self, result: &CallResult) -> bool {
         if result.auth_id.is_empty() {
-            return;
+            return true;
         }
         let gate = self.mutation_gate();
         let now = self.now();
@@ -588,8 +637,11 @@ impl Manager {
             let mut guard = self.lock();
             let state = &mut *guard;
             let Some(entry) = state.auths.get_mut(&result.auth_id) else {
-                return;
+                return true;
             };
+            if is_stale_result(result, &entry.auth) {
+                return false;
+            }
             if model_key.is_empty() && !result.route_model.trim().is_empty() {
                 let resolver = Resolver {
                     settings: &state.settings,
@@ -618,11 +670,13 @@ impl Manager {
         cooldown_store::changed(self);
         self.publish_projections(&snapshot, generation, now, true);
         self.publish_error_event(result, &snapshot);
+        true
     }
 
     /// Records an outcome that says nothing about the credential's health:
     /// it is counted and the generation moves, and the credential is saved
-    /// (upstream's `recordAvailabilityNeutralResult`).
+    /// (upstream's `recordAvailabilityNeutralResult`). One from an earlier
+    /// credential version or registration is dropped.
     pub(crate) fn record_availability_neutral_result(&self, result: &CallResult) {
         if result.auth_id.is_empty() {
             return;
@@ -634,6 +688,9 @@ impl Manager {
             let Some(entry) = state.auths.get_mut(&result.auth_id) else {
                 return;
             };
+            if is_stale_result(result, &entry.auth) {
+                return;
+            }
             let auth = Arc::make_mut(&mut entry.auth);
             count_result(auth, result, now);
             auth.updated_at = Some(now);

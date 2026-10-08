@@ -15,6 +15,12 @@
 //! minutes, or doubling from one minute up to thirty after `invalid_grant`.
 //! Dropping the last manager handle stops the loop, as stopping it does.
 //!
+//! An access token the provider refused with a 401, on a credential that
+//! doesn't say when it expires, counts as expired until a refresh works or
+//! the tokens change, so the credential stays out of rotation meanwhile. A
+//! canceled refresh is tried again a second later. A refresh doesn't put its
+//! tokens back over ones replaced while it ran.
+//!
 //! Deviations from upstream:
 //! - The executor's refresh lead replaces upstream's registry of leads per
 //!   provider; a credential whose executor isn't registered isn't
@@ -72,6 +78,8 @@ const INVALID_GRANT_BACKOFF_MAX: Duration = Duration::from_secs(30 * 60);
 /// The wait when a refresh succeeded but the credential still looks due, so
 /// the loop doesn't spin (upstream's `refreshIneffectiveBackoff`).
 const REFRESH_INEFFECTIVE_BACKOFF: Duration = Duration::from_secs(30);
+/// The wait after a refresh that was canceled before it finished.
+const REFRESH_CANCELED_RETRY: Duration = Duration::from_secs(1);
 /// The longest the loop sleeps at once, so it notices a clock jump after
 /// the machine sleeps (upstream's `maxRefreshTimerWait`).
 const MAX_REFRESH_TIMER_WAIT: Duration = Duration::from_secs(30);
@@ -340,9 +348,11 @@ pub(crate) fn invalid_grant_backoff(failures: u32) -> Duration {
 }
 
 /// Resets the model states whose last failure was a 401, and returns their
-/// models (upstream's `clearUnauthorizedModelStates`).
+/// models (upstream's `clearUnauthorizedModelStates`). A model still out of
+/// quota only loses the 401: its quota cooldown runs on.
 pub(crate) fn clear_unauthorized_model_states(auth: &mut Auth, now: Timestamp) -> Vec<String> {
     let mut resumed = Vec::new();
+    let mut changed = false;
     for (model, state) in &mut auth.model_states {
         let unauthorized = state.last_error.as_ref().is_some_and(|err| {
             err.http_status == 401
@@ -352,10 +362,22 @@ pub(crate) fn clear_unauthorized_model_states(auth: &mut Auth, now: Timestamp) -
         if !unauthorized {
             continue;
         }
+        changed = true;
+        if state.quota.exceeded
+            && (is_zero(state.quota.next_recover_at)
+                || state.quota.next_recover_at.is_some_and(|t| t > now))
+        {
+            state.last_error = None;
+            if go_lower(&state.status_message).contains("unauthorized") {
+                state.status_message.clone_from(&state.quota.reason);
+            }
+            state.updated_at = Some(now);
+            continue;
+        }
         reset_model_state(state, now);
         resumed.push(model.clone());
     }
-    if !resumed.is_empty() {
+    if changed {
         update_aggregated_availability(auth, now);
     }
     resumed
@@ -896,6 +918,9 @@ impl Manager {
         if id.is_empty() {
             return Err(ManagerError::Other("auth id is empty".into()));
         }
+        if !failed_token.is_empty() {
+            self.mark_rejected_access_token(id, failed_token);
+        }
         let id_lock = lock(&self.shared.refresh_locks)
             .entry(id.to_owned())
             .or_default()
@@ -939,6 +964,19 @@ impl Manager {
             Ok(updated) => updated,
             Err(err) if err.kind == ErrorKind::Canceled => {
                 tracing::debug!(auth_id = %id, "refresh canceled");
+                // Try again shortly, as the loop would have.
+                {
+                    let mut state = self.lock();
+                    if let Some(entry) = state.auths.get_mut(id) {
+                        let next = entry.auth.next_refresh_after;
+                        if is_zero(next) || next.is_some_and(|t| t < now) {
+                            Arc::make_mut(&mut entry.auth).next_refresh_after =
+                                Some(add(now, REFRESH_CANCELED_RETRY));
+                        }
+                        state.sync_scheduler(self.models(), id, now);
+                    }
+                }
+                self.queue_refresh_reschedule(id);
                 return Err(ManagerError::Refresh(err));
             }
             Err(err) => {
@@ -954,6 +992,7 @@ impl Manager {
         };
         updated.last_refreshed_at = Some(now);
         updated.next_refresh_after = None;
+        updated.rejected_access_token.clear();
         updated.last_error = None;
         updated.status_message.clear();
         updated.unavailable = false;
@@ -979,6 +1018,28 @@ impl Manager {
         };
         self.publish_projections(&saved, generation, now, true);
         Ok(saved)
+    }
+
+    /// Marks `failed_token` as refused by the provider while it is still the
+    /// credential's access token and carries no expiry of its own, so the
+    /// credential reads as expired, and isn't picked, until a refresh works
+    /// or its tokens change (upstream's `markRejectedAccessToken`).
+    pub(crate) fn mark_rejected_access_token(&self, id: &str, failed_token: &str) {
+        let now = self.now();
+        let mut state = self.lock();
+        let Some(entry) = state.auths.get_mut(id) else {
+            return;
+        };
+        if access_token(&entry.auth) != failed_token
+            || entry.auth.access_token_expiration_time().is_some()
+        {
+            return;
+        }
+        let auth = Arc::make_mut(&mut entry.auth);
+        auth.generation = auth.generation.saturating_add(1);
+        auth.updated_at = Some(now);
+        auth.rejected_access_token = failed_token.to_owned();
+        state.sync_scheduler(self.models(), id, now);
     }
 
     /// Records a failed refresh on the live credential and sets when to try
@@ -1061,7 +1122,7 @@ impl Manager {
                 auth.last_error = Some(terminal_unauthorized_error(err));
                 auth.status_message = TERMINAL_UNAUTHORIZED_MESSAGE.into();
                 AfterFailure::Unschedule
-            } else if !auth.has_valid_access_token(now) {
+            } else if !auth.has_valid_access_token(now) || access_token_rejected {
                 auth.unavailable = true;
                 auth.status = Status::Error;
                 if unauthorized {

@@ -1401,6 +1401,7 @@ fn auth_json_matches_go() {
         ],
     );
     full.registration_epoch = 3;
+    full.credential_version = 2;
     full.generation = 7;
     full.prefix = "team-a".into();
     full.label = "user@example.com".into();
@@ -1472,7 +1473,7 @@ fn auth_json_matches_go() {
     assert_eq!(
         answer(&full),
         escaped(concat!(
-            r#"{"auth":{"id":"codex-user.json","registration_epoch":3,"generation":7,"#,
+            r#"{"auth":{"id":"codex-user.json","registration_epoch":3,"credential_version":2,"generation":7,"#,
             r#""provider":"codex","prefix":"team-a","label":"user@example.com","#,
             r#""status":"error","status_message":"unauthorized","disabled":false,"unavailable":true,"#,
             r#""proxy_url":"http://proxy.local:8080","#,

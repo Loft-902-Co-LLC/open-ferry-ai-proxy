@@ -165,6 +165,12 @@ pub struct Auth {
     /// bumps it with each change it makes, token refreshes included
     /// (upstream's `Generation`). Zero on a record the manager didn't store.
     pub generation: u64,
+    /// Which version of the credential's tokens or API key this is: the
+    /// credential manager starts it at 1 and bumps it each time they are
+    /// replaced, by a refresh too, so the outcome of a call made with
+    /// replaced ones can be told apart (upstream's `CredentialVersion`).
+    /// Zero on a record the manager didn't store.
+    pub credential_version: u64,
     /// The provider, such as `codex` or `claude`.
     pub provider: String,
     /// Namespaces the credential's models, as in `team-a/gpt-5`, or empty.
@@ -212,6 +218,11 @@ pub struct Auth {
     pub failed: i64,
     /// Calls per 10-minute window, for the last twenty windows.
     pub recent_requests: RecentRequests,
+    /// The access token a provider refused with a 401, until a refresh
+    /// works or the tokens change: while it is still the access token and
+    /// has no expiry of its own, it counts as expired (upstream's
+    /// `RejectedAccessToken`). Never saved.
+    pub rejected_access_token: String,
 }
 
 impl Auth {
@@ -232,6 +243,7 @@ impl fmt::Debug for Auth {
             .field("id", &self.id)
             .field("registration_epoch", &self.registration_epoch)
             .field("generation", &self.generation)
+            .field("credential_version", &self.credential_version)
             .field("provider", &self.provider)
             .field("prefix", &self.prefix)
             .field("file_name", &self.file_name)

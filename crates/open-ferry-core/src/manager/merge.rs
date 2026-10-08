@@ -203,6 +203,9 @@ pub(crate) fn merge_refreshed_auth(
     now: Timestamp,
 ) -> Auth {
     let mut merged = merge_auth_content(base, current, updated);
+    merged
+        .rejected_access_token
+        .clone_from(&updated.rejected_access_token);
 
     if updated.last_refreshed_at.is_some() {
         merged.last_refreshed_at = updated.last_refreshed_at;

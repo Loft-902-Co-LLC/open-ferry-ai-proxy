@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_cooldown.go (MarkResult,
-// the model-state helpers, applyAuthFailureState, the quota helpers,
+// isStaleExecutionResult, the model-state helpers, applyAuthFailureState, the quota helpers,
 // clearCooldownStateForAuth and ResetQuota), clientModelProjectionForAuth in
 // sdk/cliproxy/auth/conductor_models.go, ReconcileRegistryModelStates in
 // sdk/cliproxy/auth/conductor_selection.go and applyCooldownFields in
@@ -80,6 +80,24 @@ pub struct CallResult {
     /// response says nothing of the credential's quota (upstream's
     /// `SkipQuotaObservation`).
     pub skip_quota_observation: bool,
+    /// The [`Auth::credential_version`] of the credential the call ran with,
+    /// or 0 when not known (upstream's `CredentialVersion`).
+    pub credential_version: u64,
+    /// The [`Auth::registration_epoch`] of the credential the call ran
+    /// with, or 0 when not known (upstream's `RegistrationEpoch`).
+    pub registration_epoch: u64,
+}
+
+/// Whether `result` came from tokens or an API key `current` no longer has,
+/// or from an earlier registration of its ID (upstream's
+/// `isStaleExecutionResult`). A result that doesn't say which version it
+/// ran with counts as stale once the credential's secrets were replaced.
+pub(crate) fn is_stale_result(result: &CallResult, current: &Auth) -> bool {
+    let stale_version = result.credential_version < current.credential_version
+        && (result.credential_version > 0 || current.credential_version > 1);
+    let stale_epoch =
+        result.registration_epoch > 0 && result.registration_epoch < current.registration_epoch;
+    stale_version || stale_epoch
 }
 
 /// `t` plus `d`, saturating at the latest time chrono can hold.
