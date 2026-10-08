@@ -1,15 +1,16 @@
 name: Release
 
 # Pushing a tag vX.Y.Z builds open-ferry for each target, writes SHA256SUMS
-# for the archives and the install scripts, attests their build provenance
-# and creates a draft GitHub release for the maintainer to review and
-# publish. It then builds the container image from the static Linux
+# for the archives and the install scripts, signs it with the release key
+# (SHA256SUMS.minisig) once the maintainer approves the release-signing
+# environment, attests their build provenance and creates a draft GitHub
+# release for the maintainer to review and publish. It then builds the container image from the static Linux
 # archives, for linux/amd64 and linux/arm64, pushes it to
 # ghcr.io/loft-902-co-llc/open-ferry and attests it.
 #
 # Running the workflow by hand (workflow_dispatch) is a dry run: it builds,
 # packages and checksums the same archives, builds and tests the image for
-# both platforms, and keeps them as workflow artifacts, but attests,
+# both platforms, and keeps them as workflow artifacts, but signs, attests,
 # publishes and pushes nothing.
 #
 # See RELEASING.md.
@@ -401,9 +402,108 @@ jobs:
           path: scripts
           if-no-files-found: error
 
+  # Signs SHA256SUMS with the release key, so that open-ferry can check a
+  # release before it updates itself. Only on a tag: the job runs in the
+  # release-signing environment, which waits for the maintainer's approval
+  # and holds the private key as the secret MINISIGN_SECRET_KEY. The key is
+  # in a file only during the signing step, readable by the runner's user
+  # alone, and deleted when the step ends; it is never printed or uploaded.
+  # The signature is then checked against release-keys.pub, the keys the
+  # binary trusts, so a secret that doesn't match them fails the release
+  # instead of shipping an update nobody can install.
+  sign:
+    name: Sign SHA256SUMS
+    needs: [meta, checksums]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: release-signing
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+    steps:
+      # For release-keys.pub.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: open-ferry-SHA256SUMS
+          path: dist
+
+      # Ubuntu's package of minisign, the reference implementation, by the
+      # author of the minisign-verify crate that open-ferry checks with.
+      - name: Install minisign
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends minisign
+          minisign -v
+
+      - name: Sign SHA256SUMS
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          if [ -z "$MINISIGN_SECRET_KEY" ]; then
+            echo "::error::The secret MINISIGN_SECRET_KEY isn't set in the GitHub environment release-signing, so SHA256SUMS can't be signed: add it there (see RELEASING.md)"
+            exit 1
+          fi
+          umask 077
+          key=$(mktemp "$RUNNER_TEMP/release-key.XXXXXXXX")
+          trap 'rm -f -- "$key"' EXIT
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > "$key"
+          unset MINISIGN_SECRET_KEY
+          # The trusted comment is signed too: open-ferry reads the version
+          # from it, so the signature can't pass for another release's. No
+          # password is read: stdin is empty, so a key that has one fails
+          # here instead of waiting.
+          minisign -S -s "$key" -m dist/SHA256SUMS -x dist/SHA256SUMS.minisig \
+            -t "open-ferry $VERSION SHA256SUMS" < /dev/null
+
+      - name: Check the signature against release-keys.pub
+        run: |
+          export LC_ALL=C
+          # One key per line; blank lines, comments and "untrusted comment:"
+          # lines are skipped, as the binary skips them.
+          mapfile -t keys < <(tr -d '\r' < release-keys.pub | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v -e '^$' -e '^#' -e '^untrusted comment:' || true)
+          if [ "${#keys[@]}" -eq 0 ]; then
+            echo "::error::release-keys.pub holds no key, so no build of open-ferry could check this signature: add the release key's public half (see RELEASING.md)"
+            exit 1
+          fi
+          if [ "${#keys[@]}" -gt 2 ]; then
+            echo "::error::release-keys.pub holds ${#keys[@]} keys; a build trusts at most 2"
+            exit 1
+          fi
+          # A prehashed signature starts "ED"; open-ferry refuses minisign's
+          # legacy kind, "Ed".
+          kind=$(sed -n 2p dist/SHA256SUMS.minisig | base64 -d 2>/dev/null | head -c 2 || true)
+          if [ "$kind" != ED ]; then
+            echo "::error::SHA256SUMS.minisig isn't a prehashed minisign signature, the only kind open-ferry accepts"
+            exit 1
+          fi
+          want="open-ferry $VERSION SHA256SUMS"
+          for public in "${keys[@]}"; do
+            if comment=$(minisign -V -H -Q -P "$public" -m dist/SHA256SUMS -x dist/SHA256SUMS.minisig 2>/dev/null); then
+              if [ "$comment" != "$want" ]; then
+                echo "::error::The signature's trusted comment is '$comment', not '$want'"
+                exit 1
+              fi
+              echo "SHA256SUMS is signed by the release key $public, with the trusted comment '$comment'." | tee -a "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+          done
+          echo "::error::SHA256SUMS.minisig doesn't check out with any key in release-keys.pub: the secret MINISIGN_SECRET_KEY in the environment release-signing isn't the private half of a key open-ferry trusts"
+          exit 1
+
+      # Named open-ferry-*, so the publish job collects it with the archives.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: open-ferry-SHA256SUMS-signature
+          path: dist/SHA256SUMS.minisig
+          if-no-files-found: error
+
   publish:
     name: Create the draft release
-    needs: [meta, checksums]
+    needs: [meta, checksums, sign]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -433,9 +533,13 @@ jobs:
           export LC_ALL=C
           cd dist
           sha256sum --check --strict SHA256SUMS
+          if [ ! -s SHA256SUMS.minisig ]; then
+            echo "::error::dist has no SHA256SUMS.minisig, the signature the sign job makes"
+            exit 1
+          fi
           # A name may carry sha256sum's '*' binary-mode mark.
           listed=$(awk '{ name = $2; sub(/^\*/, "", name); print name }' SHA256SUMS | sort)
-          present=$(ls | grep -vx SHA256SUMS | sort)
+          present=$(ls | grep -vxF -e SHA256SUMS -e SHA256SUMS.minisig | sort)
           if [ "$listed" != "$present" ]; then
             echo "::error::dist holds files SHA256SUMS doesn't list, or lacks some it does"
             exit 1

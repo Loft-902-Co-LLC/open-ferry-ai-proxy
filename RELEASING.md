@@ -4,6 +4,7 @@ How the maintainer makes a release. Pushing a tag runs [the release workflow](.g
 - builds the web dashboard once, and each binary with it built in, the static (musl) Linux ones in Alpine;
 - lists the licenses of the Rust crates built into each binary;
 - writes `SHA256SUMS`, of the archives and the install scripts, `install.sh` and `install.ps1`;
+- once you approve it, signs `SHA256SUMS` with the release key, as `SHA256SUMS.minisig`, and checks the signature against [`release-keys.pub`](release-keys.pub) (see [The release key](#the-release-key));
 - attests the build provenance of each archive and script;
 - creates a **draft** release;
 - then builds the container image from the static binaries, tests it, pushes it to GHCR and attests it.
@@ -49,8 +50,11 @@ open-ferry follows [Semantic Versioning](https://semver.org/). Until 1.0.0, a mi
    git push origin vX.Y.Z
    ```
 
+   When the archives are built, the **Sign SHA256SUMS** job waits for you. Open the run, choose **Review deployments**, tick `release-signing` and approve. Approve only a run of a tag you pushed.
+
 7. **Review the draft.** When the workflow finishes, the draft is on the [Releases](https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases) page. Check that:
-   - it has seven archives, one for each target in the [runners](#notes) table, `install.sh`, `install.ps1` and `SHA256SUMS`, which lists the other nine;
+   - it has seven archives, one for each target in the [runners](#notes) table, `install.sh`, `install.ps1`, `SHA256SUMS`, which lists those nine, and `SHA256SUMS.minisig`;
+   - the signature checks out with the key in `release-keys.pub`, and its trusted comment is `open-ferry X.Y.Z SHA256SUMS`: `minisign -Vm SHA256SUMS -P <key>`;
    - an archive holds `config.example.yaml`, and its `licenses/` holds `rust-third-party-licenses.txt` for its own target and `dashboard-third-party-licenses.txt`;
    - the notes are the changelog section;
    - an archive downloads and checks out as the README's [install section](README.md#download-a-release) says: its hash against `SHA256SUMS`, and its attestation with `gh attestation verify`. So do the two scripts;
@@ -70,10 +74,63 @@ Run the **Release** workflow from the Actions tab (**Run workflow**), on `main` 
 - writes `SHA256SUMS`;
 - builds the container image for linux/amd64 and linux/arm64 and tests the amd64 one, as on a tag.
 
-It keeps them all as workflow artifacts, so they can be downloaded and tried; the image is `container-image`, an OCI archive of both platforms, for `docker load` or `skopeo`. It doesn't check the tag or the changelog, attests nothing, pushes no image and publishes nothing. The archives and the image are named after the version in `Cargo.toml`, whatever it is.
+It keeps them all as workflow artifacts, so they can be downloaded and tried; the image is `container-image`, an OCI archive of both platforms, for `docker load` or `skopeo`. It doesn't check the tag or the changelog, signs nothing, attests nothing, pushes no image and publishes nothing. The archives and the image are named after the version in `Cargo.toml`, whatever it is.
+
+## The release key
+
+open-ferry checks a release's signature before it installs it as an update (see [docs/updates.md](docs/updates.md)). The private half of a [minisign](https://jedisct1.github.io/minisign/) Ed25519 key signs each release's `SHA256SUMS`; its public half is in [`release-keys.pub`](release-keys.pub), which the binary builds in and the release workflow checks the signature against. That file holds at most two keys, so that a key can be rotated. While it holds none, a build trusts no release key and never updates itself, and the sign job fails.
+
+### Making the key (once)
+
+On a machine you trust, with [minisign](https://jedisct1.github.io/minisign/) installed:
+
+```sh
+minisign -G -W -p open-ferry-release.pub -s open-ferry-release.key
+```
+
+`-W` leaves the private key without a password. GitHub keeps the secret encrypted and gives it only to the approved job, so a password would be a second secret kept beside it, and the job would have to type it in. Then:
+
+1. Put the private key straight into the secret, and into your password manager:
+
+   ```sh
+   gh secret set MINISIGN_SECRET_KEY --env release-signing --repo Loft-902-Co-LLC/open-ferry-ai-proxy < open-ferry-release.key
+   ```
+
+   Save the file's two lines as a secure note in your password manager. Then delete the file (`shred -u open-ferry-release.key`, or delete it and empty the bin). Don't commit it, mail it or paste it anywhere else.
+2. Add the public key to `release-keys.pub`: the second line of `open-ferry-release.pub`, the one starting `RW`. Keep the file's comments. Merge it like any change; builds from then on trust it.
+
+### The environment
+
+The secret lives in the GitHub environment `release-signing` (**Settings**, **Environments**), not in the repository's secrets, so only the sign job can read it, and only once it's approved:
+- **Required reviewers:** you. Leave **Prevent self-review** off if you are the only maintainer, or you can't approve your own release.
+- **Deployment branches and tags:** selected tags only, the pattern `v*`, so no branch, and no pull request, can use the key.
+- **Secret:** `MINISIGN_SECRET_KEY`, the whole private key file. No other secret.
+
+Each release's sign job waits until you approve it (step 6). A run you didn't start, or of a tag you didn't push, should be rejected.
+
+### Rotating the key
+
+A binary updates only to a release signed with a key it trusts, so trust the new key before you sign with it:
+
+1. Make a new key as above, but don't touch the secret yet. Keep the new private key in your password manager.
+2. Add the new public key to `release-keys.pub`, below the current one, and release. That release is still signed with the current key, so every install can update to it, and from then on trusts both.
+3. Once most installs have that release, replace the secret with the new private key (`gh secret set` again) and release. That release is signed with the new key.
+4. In a later release, take the old key out of `release-keys.pub`, and delete the old private key from your password manager.
+
+An install too old to trust the new key says that `SHA256SUMS` is signed with a key it doesn't trust, and installs nothing. It needs updating by hand, with the install script or a download.
+
+### If the private key leaks
+
+The updater downloads only from this repository's GitHub releases, over HTTPS, so a leaked key alone doesn't push an update to anyone: an attacker would also need to publish a release here. Still, act at once:
+
+1. Delete the secret from the `release-signing` environment, so no job can sign with it, and check the repository's releases, tags and recent workflow runs for any you didn't make. If the leak came through GitHub, rotate your GitHub credentials too.
+2. Make a new key, and put only its public half in `release-keys.pub`. Put the new private key in the secret.
+3. Release a new version, signed with the new key. Never sign anything with the leaked key again, not even to move installs on: anyone could sign the same way.
+4. Publish a security advisory (see [SECURITY.md](SECURITY.md)). Installs that trust only the leaked key can't update to the new release on their own; they say that `SHA256SUMS` is signed with a key they don't trust. Tell users to install the new release by hand, and to check its signature with the new key.
 
 ## When something fails
 
+- **If the sign job fails,** its error says why. The secret `MINISIGN_SECRET_KEY` may be missing from the `release-signing` environment, or not match a key in `release-keys.pub`, or be a key with a password (see [The release key](#the-release-key)). Fix that, then re-run the failed jobs; nothing was published.
 - **Before the draft is created:** if the failure was a passing fault, such as a runner or network problem, re-run the failed jobs. Otherwise, fix it on `main`, then move the tag to the fixed commit. Delete the tag on GitHub and locally (`git push origin :refs/tags/vX.Y.Z`, `git tag -d vX.Y.Z`), and tag again.
 - **After the draft is created:** delete the draft before re-running, since a tag can have only one release. Until the release is published, the tag can still be moved as above.
 - **If only the image job failed,** re-run that job: the draft stays. A re-run after the tag moved pushes the new image under the same tags; delete the old one's version on the package's page on GitHub. If you abandon a release whose image was pushed, delete that version there too, and if it took `latest`, push the previous release's image as `latest` again (with `docker buildx imagetools create`).
@@ -104,6 +161,7 @@ A run that failed may have made attestations already. They stay, but they only v
   - It runs after the draft is created, so its push is the one thing public before you publish. Review the draft soon after.
   - The image's timestamps are the run's build date (`SOURCE_DATE_EPOCH`), the one the binaries report, so the job's three builds (the archive, the test and the push) make one image, and so does a re-run of the image job alone.
   - To move to a newer Alpine, change its digest in the Dockerfile (`ALPINE`), the release workflow (`ALPINE`) and the CI workflow's `install-scripts` job together. The Rust image (`RUST_ALPINE`) can move on its own.
+- **Signing.** The sign job installs minisign from Ubuntu's package, rather than building a tool of our own: it is the reference implementation, by the author of `minisign-verify`, which open-ferry checks signatures with, and so there's no signing code here to get wrong. The job writes the key to a file only it can read, signs with `-t "open-ferry X.Y.Z SHA256SUMS"`, deletes the file when the step ends, and checks the signature with each key in `release-keys.pub` (with `-H`, as open-ferry accepts only prehashed signatures), and that its trusted comment names this release.
 - **The install scripts.** `install.sh` and `install.ps1` are release assets, in `SHA256SUMS` and attested, downloaded by the README's one-liners from the latest release. CI tests them on Linux, macOS and Windows against fake releases served from 127.0.0.1, in `tests/install/`, and lints `install.sh` with ShellCheck. A new target needs adding to `install.sh`'s detection, or to `install.ps1` for Windows, and to the tests.
 - **macOS.** The binaries run on macOS 11 or newer, set by `MACOSX_DEPLOYMENT_TARGET`.
 - **Windows.** The binary links the C runtime statically, so it doesn't need the Visual C++ Redistributable.

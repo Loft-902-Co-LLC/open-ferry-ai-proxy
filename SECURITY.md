@@ -19,6 +19,10 @@ We aim to acknowledge a report within a week. Once a fix is out, we publish the 
 
 open-ferry is pre-release. Fixes go to `main`, and to the latest release once releases begin.
 
+## Signed releases
+
+Each release's `SHA256SUMS` is signed with a [minisign](https://jedisct1.github.io/minisign/) key, as `SHA256SUMS.minisig`. Its trusted comment names the release, as in `open-ferry 0.1.0 SHA256SUMS`. The public key is in [`release-keys.pub`](release-keys.pub) and built into the binary, which checks the signature before it installs an update (see [docs/updates.md](docs/updates.md)); the private key never leaves a GitHub environment that the maintainer approves for each release. To check a download by hand, run `minisign -Vm SHA256SUMS -P <key>`, with `<key>` the key line from `release-keys.pub`, then check the archive against `SHA256SUMS` (`sha256sum --check --ignore-missing SHA256SUMS`). Report a signature that doesn't check out, or a key that differs from the one in this repository, as a vulnerability.
+
 ## Scope
 
 **In scope:**
