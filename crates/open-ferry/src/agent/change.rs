@@ -14,9 +14,12 @@
 //! the server's writes do, so `config undo` reverses either.
 //!
 //! A change is made only to the file it was worked out from. When the
-//! file changed after it was read (another write, or a hand edit), a
-//! change a person was asked about at the terminal is refused, and says
-//! to run it again; any other is worked out again from the file as it is.
+//! file changed after it was read (another write, or a hand edit), it is
+//! worked out again from the file as it is, a few times, but made only
+//! when it then needs no confirmation: a confirmation, `--yes` included,
+//! was given for the change as first worked out, so one that needs a
+//! confirmation once worked out again is refused, and says to run it
+//! again.
 
 use std::path::Path;
 
@@ -214,16 +217,14 @@ const WORK_OUT_TRIES: usize = 3;
 /// it, and says what it changed.
 ///
 /// It is made only to the file it was worked out from. When the file
-/// changed meanwhile, a change a person was shown and said yes to at the
-/// terminal is refused; any other is worked out again from the file as it
-/// is, with its checks and confirmation, a few times.
+/// changed meanwhile, it is worked out again from the file as it is, with
+/// its checks, a few times; but one that then needs a confirmation is
+/// refused, whatever confirmation the first was given.
 pub(crate) async fn make(ctx: &Context, request: Request) -> Result<Changed, Failure> {
     let mut data = read_config(&ctx.path)?;
-    let mut shown = false;
-    for _ in 0..WORK_OUT_TRIES {
-        match attempt(ctx, &request, &data, &mut shown).await? {
+    for tries in 0..WORK_OUT_TRIES {
+        match attempt(ctx, &request, &data, tries > 0).await? {
             Attempt::Done(changed) => return Ok(changed),
-            Attempt::Changed(_) if shown => return Err(config_changed()),
             Attempt::Changed(now) => data = now,
         }
     }
@@ -240,13 +241,14 @@ enum Attempt {
 }
 
 /// Works out `request` from the config file's bytes `data` and makes it,
-/// unless the file no longer holds them. `shown` is set once a person was
-/// asked at the terminal.
+/// unless the file no longer holds them. `again` when it was worked out
+/// before, from bytes the file no longer held: then it is made only when
+/// it needs no confirmation.
 async fn attempt(
     ctx: &Context,
     request: &Request,
     data: &[u8],
-    shown: &mut bool,
+    again: bool,
 ) -> Result<Attempt, Failure> {
     let before = tree_of(data)?;
     let planned = preview_v8(data, &request.edit.v8()).map_err(edit_failure)?;
@@ -264,13 +266,17 @@ async fn attempt(
         reasons.insert(0, always);
     }
     if !reasons.is_empty() {
+        // The confirmation given, `--yes` or `confirm: true` included, was
+        // for the change as first worked out, not for this one.
+        if again {
+            return Err(config_changed());
+        }
         confirm(
             ctx,
             &request.what,
             &reasons,
             json!({"changes": masked(&changes)}),
         )?;
-        *shown |= !ctx.yes;
     }
     let target = probe(ctx).await?;
     if target.data != data {
