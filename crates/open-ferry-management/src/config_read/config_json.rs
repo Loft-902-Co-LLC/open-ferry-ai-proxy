@@ -23,6 +23,8 @@
 //!   fails.
 //! - open-ferry's `claude-cli` list follows `claude-api-key`, left out when
 //!   it is empty.
+//! - open-ferry's `routing.quota` follows `session-affinity-subagents`,
+//!   left out when nothing in it is set.
 
 use std::collections::BTreeMap;
 
@@ -30,8 +32,8 @@ use open_ferry_core::config::{
     AnyValue, ClaudeCli, ClaudeKey, ClaudeModel, CodexKey, CodexModel, Config,
     DisableImageGeneration, GeminiKey, GeminiModel, OAuthModelAlias, OAuthModelSetting,
     OpenAiCompatibility, OpenAiCompatibilityApiKey, OpenAiCompatibilityModel, PayloadConfig,
-    PayloadFilterRule, PayloadModelRule, PayloadRule, RequestScopedErrorRule, ThinkingSupport,
-    VertexCompatKey, VertexCompatModel,
+    PayloadFilterRule, PayloadModelRule, PayloadRule, RequestScopedErrorRule, RoutingQuota,
+    ThinkingSupport, VertexCompatKey, VertexCompatModel,
 };
 use serde_json::Value;
 
@@ -274,6 +276,7 @@ pub(super) fn config(config: &Config) -> Json {
                     "session-affinity-subagents",
                     config.routing.session_affinity_subagents.map(Json::Bool),
                 )
+                .omit_nil("quota", routing_quota(&config.routing.quota))
                 .done(),
         )
         .with("ws-auth", Json::Bool(config.ws_auth))
@@ -679,6 +682,17 @@ fn claude_model(model: &ClaudeModel) -> Json {
         .omit_empty("is-compat", Json::Bool(model.is_compat))
         .omit_nil("thinking", model.thinking.as_ref().map(thinking))
         .done()
+}
+
+/// open-ferry's own `routing.quota`, left out when nothing in it is set.
+fn routing_quota(quota: &RoutingQuota) -> Option<Json> {
+    (*quota != RoutingQuota::default()).then(|| {
+        Fields::new()
+            .omit_empty("prefer", string(&quota.prefer))
+            .omit_empty("reserve-percent", Json::Int(quota.reserve_percent))
+            .omit_empty("check-after", string(&quota.check_after))
+            .done()
+    })
 }
 
 /// A `claude-cli` entry (open-ferry's own); it holds no secrets.

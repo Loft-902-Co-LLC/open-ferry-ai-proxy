@@ -45,6 +45,9 @@
 //!   the list's key), and `preserveV8Comments` then puts the file's comments
 //!   back on their keys, so upstream writes such a comment twice in a row.
 //!   It is written once here.
+//! - open-ferry's own `routing.quota` is trimmed to the generated keys as
+//!   the OAuth maps are ([`prune_routing_quota`]), so a setting cleared in
+//!   the config leaves the file instead of coming back on the next load.
 
 use super::super::types::DEFAULT_PANEL_GITHUB_REPOSITORY;
 use super::super::yaml3::{
@@ -516,6 +519,25 @@ pub(crate) fn prune_mapping_to_generated_keys(dst: &mut Node, src: &Node, key: &
         return;
     }
     prune_missing_map_keys(dst_value, src_value, &[key.to_owned()]);
+}
+
+/// Not upstream's: trims the file's `routing.quota`, open-ferry's own, to
+/// the keys the generated tree has, or drops it when the generated tree has
+/// none. Every key it holds is typed, so a key the generated tree lacks is
+/// one the config cleared.
+pub(crate) fn prune_routing_quota(dst: &mut Node, src: &Node) {
+    let Some(dst_routing) = find_map_key_index(dst, "routing")
+        .and_then(|index| dst.content.get_mut(index + 1))
+        .filter(|node| node.kind == Kind::Mapping)
+    else {
+        return;
+    };
+    match find_map_key_index(src, "routing").and_then(|index| src.content.get(index + 1)) {
+        Some(src_routing) if src_routing.kind == Kind::Mapping => {
+            prune_mapping_to_generated_keys(dst_routing, src_routing, "quota");
+        }
+        _ => remove_map_key(dst_routing, "quota"),
+    }
 }
 
 /// `pruneMissingMapKeys`: removes the keys of the mapping `dst` that `src`

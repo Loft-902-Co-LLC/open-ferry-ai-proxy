@@ -210,12 +210,13 @@ fn setting(name: &'static str, read: Read) -> MethodRouter<ManagementState> {
 
 /// A routing strategy's canonical name, or the setting trimmed when it
 /// names none (upstream's `normalizeRoutingStrategy` as `GetRoutingStrategy`
-/// uses it).
+/// uses it, with open-ferry's own `quota`).
 fn routing_strategy(raw: &str) -> String {
     match to_lower(raw.trim()).as_str() {
         "" | "round-robin" | "roundrobin" | "rr" => "round-robin".to_owned(),
         "weighted-round-robin" | "weightedroundrobin" | "wrr" => "weighted-round-robin".to_owned(),
         "fill-first" | "fillfirst" | "ff" => "fill-first".to_owned(),
+        "quota" => "quota".to_owned(),
         _ => raw.trim().to_owned(),
     }
 }
@@ -734,6 +735,8 @@ mod tests {
             ("RoundRobin", "round-robin"),
             ("FF", "fill-first"),
             ("fillfirst", "fill-first"),
+            // Not upstream's: open-ferry's own strategy.
+            ("QUOTA", "quota"),
             ("  Sticky  ", "Sticky"),
         ];
         for (raw, want) in cases {

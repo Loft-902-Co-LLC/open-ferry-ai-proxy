@@ -35,6 +35,8 @@
 //! - open-ferry's `remote-management.separate-address` follows `base-url`.
 //!   Like `secret-key`, an empty one isn't added to a file without it, and
 //!   clears the file's.
+//! - open-ferry's `routing.quota` follows `session-affinity-subagents`,
+//!   each of its fields left out when zero, and the section when all are.
 
 use std::collections::BTreeMap;
 
@@ -295,6 +297,18 @@ pub(crate) fn legacy_config(cfg: &Config) -> Result<Value, Unwritable> {
                 .pointer(
                     "session-affinity-subagents",
                     cfg.routing.session_affinity_subagents.map(Value::Bool),
+                )
+                // open-ferry's own.
+                .omit_empty(
+                    "quota",
+                    Fields::default()
+                        .omit_empty("prefer", s(&cfg.routing.quota.prefer))
+                        .omit_empty(
+                            "reserve-percent",
+                            Value::Int(cfg.routing.quota.reserve_percent),
+                        )
+                        .omit_empty("check-after", s(&cfg.routing.quota.check_after))
+                        .done(),
                 )
                 .done(),
         )

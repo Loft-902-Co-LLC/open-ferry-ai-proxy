@@ -138,6 +138,8 @@ async fn routing_strategy() {
         (r#""""#, "round-robin"),
         (r#""fill-first""#, "fill-first"),
         (r#""roundrobin""#, "round-robin"),
+        // open-ferry's own strategy.
+        (r#"" Quota ""#, "quota"),
     ] {
         set(&api, Method::PUT, "routing/strategy", value).await;
         assert_eq!(api.saved().routing.strategy, want, "{value}");
@@ -151,7 +153,7 @@ async fn routing_strategy() {
     .await
     .assert(StatusCode::BAD_REQUEST, r#"{"error":"invalid strategy"}"#);
     assert_eq!(api.writer.saved().len(), saves);
-    assert_eq!(api.state.config().routing.strategy, "round-robin");
+    assert_eq!(api.state.config().routing.strategy, "quota");
 }
 
 /// Ported from upstream's config_basic_weight_test.go

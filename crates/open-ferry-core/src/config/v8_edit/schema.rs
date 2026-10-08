@@ -449,10 +449,21 @@ static CONFIG_REQUEST_SCOPED_ERROR_RULE: Type = Type {
 static CONFIG_ROUTING_CONFIG: Type = Type {
     name: "config.RoutingConfig",
     fields: &[
+        ("quota", Field::Struct(&CONFIG_ROUTING_QUOTA)),
         ("session-affinity", Field::Leaf),
         ("session-affinity-subagents", Field::Leaf),
         ("session-affinity-ttl", Field::Leaf),
         ("strategy", Field::Leaf),
+    ],
+};
+
+/// open-ferry's `routing.quota`, which upstream doesn't have.
+static CONFIG_ROUTING_QUOTA: Type = Type {
+    name: "config.RoutingQuota",
+    fields: &[
+        ("check-after", Field::Leaf),
+        ("prefer", Field::Leaf),
+        ("reserve-percent", Field::Leaf),
     ],
 };
 

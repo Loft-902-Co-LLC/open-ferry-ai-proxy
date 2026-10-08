@@ -815,6 +815,39 @@ async fn claude_cli_is_written() {
     assert_unchanged(&dir, raw);
 }
 
+/// Not upstream's: open-ferry's `routing.quota` follows
+/// `session-affinity-subagents`, with its unset fields left out, and is
+/// left out when nothing in it is set.
+#[tokio::test]
+async fn routing_quota_is_written() {
+    let raw = "routing:
+  strategy: quota
+  quota:
+    reserve-percent: 10
+    check-after: 1h
+";
+    let answer = with_config(raw).get("/v0/management/config").await;
+    assert_eq!(answer.status, StatusCode::OK);
+    let part = concat!(
+        r#""routing":{"strategy":"quota","#,
+        r#""quota":{"reserve-percent":10,"check-after":"1h"}}"#,
+    );
+    assert!(answer.body.contains(part), "{}", answer.body);
+    let answer = with_config(
+        "routing:
+  strategy: quota
+",
+    )
+    .get("/v0/management/config")
+    .await;
+    assert!(!answer.body.contains(r#""quota":"#), "{}", answer.body);
+
+    let (dir, api) = over_file(raw);
+    let answer = api.get("/v8/management/config/routing/quota").await;
+    assert_v8(&answer, r#"{"check-after":"1h","reserve-percent":10}"#);
+    assert_unchanged(&dir, raw);
+}
+
 /// Not upstream's: the interactions, xAI and Meta keys and the xAI settings
 /// are written at upstream's positions, as the loader leaves them (an xAI
 /// key loses `alpha-search`, a Meta key gets its default base URL).

@@ -19,6 +19,8 @@
 //!   channels lower-case to the same name, the one that sorts last wins.
 //! - The clean-ups of settings this port ignores (Claude's `cloak` and
 //!   `fingerprint-profile`, Codex's `disable-codex-cloaking`) are left out.
+//! - The routing strategy may be open-ferry's own `quota`, which upstream
+//!   refuses as an invalid strategy.
 
 use std::collections::BTreeMap;
 
@@ -112,12 +114,14 @@ pub(crate) fn normalize_vertex_key(entry: &mut VertexCompatKey) {
 }
 
 /// Upstream's `normalizeRoutingStrategy`: a strategy's canonical name, or
-/// `None` for a name it doesn't know.
+/// `None` for a name it doesn't know. open-ferry's own `quota` is known
+/// too; upstream refuses it.
 pub(crate) fn normalize_routing_strategy(strategy: &str) -> Option<&'static str> {
     match to_lower(strategy.trim()).as_str() {
         "" | "round-robin" | "roundrobin" | "rr" => Some("round-robin"),
         "weighted-round-robin" | "weightedroundrobin" | "wrr" => Some("weighted-round-robin"),
         "fill-first" | "fillfirst" | "ff" => Some("fill-first"),
+        "quota" => Some("quota"),
         _ => None,
     }
 }
@@ -338,6 +342,7 @@ mod tests {
             (" RR ", Some("round-robin")),
             ("WeightedRoundRobin", Some("weighted-round-robin")),
             ("ff", Some("fill-first")),
+            (" Quota ", Some("quota")),
             ("random", None),
         ] {
             assert_eq!(normalize_routing_strategy(raw), want, "{raw}");

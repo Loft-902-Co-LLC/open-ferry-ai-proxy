@@ -283,6 +283,7 @@ pub(crate) fn render_preserving_comments(
     for key in OAUTH_MAPS {
         merge::prune_mapping_to_generated_keys(root, &generated, key);
     }
+    merge::prune_routing_quota(root, &generated);
     merge::merge_mapping_preserve(root, &generated, &mut Vec::new());
     v8::restore_v8_layout(root, &layout, data, cfg)?;
     if !migrating {

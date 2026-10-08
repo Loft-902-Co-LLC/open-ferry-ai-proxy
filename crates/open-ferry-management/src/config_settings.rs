@@ -21,9 +21,9 @@
 //!   `max-retry-interval`, `logs-max-total-size-mb` (a negative size is 0,
 //!   no limit) and `error-logs-max-files` (a negative count is 10).
 //! - Strings: `proxy-url`, stored as given, and `routing/strategy`, stored
-//!   by its canonical name (`round-robin`, `weighted-round-robin` or
-//!   `fill-first`, or one of their short names); another name answers 400
-//!   `invalid strategy`.
+//!   by its canonical name (`round-robin`, `weighted-round-robin`,
+//!   `fill-first` or open-ferry's own `quota`, or one of their short
+//!   names); another name answers 400 `invalid strategy`.
 //!
 //! `DELETE /v0/management/proxy-url` clears the proxy URL.
 //!
@@ -32,7 +32,8 @@
 //! config is saved.
 //!
 //! Deviations from upstream: those of [`crate::config_write`] and
-//! [`crate::go_json`].
+//! [`crate::go_json`], and `routing/strategy` takes open-ferry's own
+//! `quota`, which upstream answers with 400 `invalid strategy`.
 
 use axum::body::Body;
 use axum::extract::State;

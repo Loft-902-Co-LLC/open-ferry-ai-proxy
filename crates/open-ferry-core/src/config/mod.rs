@@ -33,7 +33,8 @@
 //! `save-cooldown-status`, `transient-error-cooldown-seconds`,
 //! `auth-auto-refresh-workers`,
 //! `request-retry`, `max-retry-credentials`, `max-retry-interval`,
-//! `quota-exceeded`, `routing` (the strategy and session affinity),
+//! `quota-exceeded`, `routing` (the strategy and session affinity, and
+//! open-ferry's own `routing.quota`),
 //! `ws-auth`, `force-model-prefix`,
 //! `video-result-auth-cache-ttl`, `client.codex`, `codex` (minus cloaking
 //! and the live media relay), `codex-header-defaults.beta-features`,
@@ -89,6 +90,8 @@ mod model_catalogs;
 mod normalize;
 pub(crate) mod paths;
 mod payload;
+#[cfg(test)]
+mod routing_quota_tests;
 mod safe_mode;
 pub mod save;
 #[cfg(test)]
@@ -114,8 +117,9 @@ pub use types::{
     CodexClientConfig, CodexConfig, CodexHeaderDefaults, CodexKey, CodexModel, Config,
     DEFAULT_AUTH_DIR, DEFAULT_PANEL_GITHUB_REPOSITORY, GeminiKey, GeminiModel, OAuthModelAlias,
     OAuthModelSetting, OpenAiCompatibility, OpenAiCompatibilityApiKey, OpenAiCompatibilityModel,
-    QuotaExceeded, RemoteManagement, RequestScopedErrorRule, RoutingConfig, RoutingStrategy,
-    StreamingConfig, ThinkingSupport, TlsConfig, VertexCompatKey, VertexCompatModel, XaiConfig,
+    QuotaExceeded, RemoteManagement, RequestScopedErrorRule, RoutingConfig, RoutingQuota,
+    RoutingStrategy, StreamingConfig, ThinkingSupport, TlsConfig, VertexCompatKey,
+    VertexCompatModel, XaiConfig,
 };
 pub(crate) use types::{Redacted, RedactedUrl};
 pub use watcher::{AuthFile, ConfigWatcher, WatchError, WatchEvent, next_revision};

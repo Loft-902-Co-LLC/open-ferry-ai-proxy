@@ -26,6 +26,8 @@
 //!   changed settings as `claude-cli[0].timeout: 5m -> 10m`.
 //! - open-ferry's `remote-management.separate-address`, which upstream
 //!   doesn't have, gets a line with both values.
+//! - open-ferry's `routing.quota` settings, which upstream doesn't have,
+//!   get a line each, as `routing.strategy` does.
 //! - Go tells a list or map that is missing from one that is empty, and
 //!   reports `payload.default: []` against no `payload.default` as an
 //!   update (0 -> 0 rules); the typed config can't tell them apart, so no
@@ -179,6 +181,18 @@ pub fn build_change_details(old: &Config, new: &Config) -> Vec<String> {
         "routing.strategy",
         &old.routing.strategy,
         &new.routing.strategy,
+    );
+    let (old_quota, new_quota) = (&old.routing.quota, &new.routing.quota);
+    changes.text("routing.quota.prefer", &old_quota.prefer, &new_quota.prefer);
+    changes.int(
+        "routing.quota.reserve-percent",
+        old_quota.reserve_percent,
+        new_quota.reserve_percent,
+    );
+    changes.text(
+        "routing.quota.check-after",
+        &old_quota.check_after,
+        &new_quota.check_after,
     );
     let (old_payload, new_payload) = (&old.payload, &new.payload);
     changes.payload("default", &old_payload.default, &new_payload.default);

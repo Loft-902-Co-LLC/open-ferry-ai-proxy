@@ -47,6 +47,8 @@
 //! - A value whose scalars aliases expanded to more than 64 MiB of text
 //!   fails to decode with `yaml: document contains excessive aliasing`;
 //!   upstream decodes it.
+//! - `routing.quota` is a known section here, open-ferry's own; upstream's
+//!   migration comments it out as unknown.
 
 mod auth_index;
 
@@ -122,7 +124,8 @@ pub(crate) const V8_ROOTS: &[&str] = &[
 
 /// The keys each v8 section may hold, by the section's dotted path. A
 /// section that isn't listed, such as `api-keys`, keeps whatever it holds
-/// (the `children` table of upstream's `commentUnknownV8Sections`).
+/// (the `children` table of upstream's `commentUnknownV8Sections`), with
+/// open-ferry's `routing.quota`.
 pub(crate) const V8_CHILDREN: &[(&str, &[&str])] = &[
     ("access", &["api-keys"]),
     ("client", &["codex"]),
@@ -302,6 +305,7 @@ pub(crate) const V8_CHILDREN: &[(&str, &[&str])] = &[
         &[
             "cooldown",
             "force-model-prefix",
+            "quota",
             "retry",
             "session-affinity",
             "session-affinity-subagents",
@@ -316,6 +320,12 @@ pub(crate) const V8_CHILDREN: &[(&str, &[&str])] = &[
             "save-cooldown-status",
             "transient-error-cooldown-seconds",
         ],
+    ),
+    // open-ferry's own section, which upstream's migration would comment
+    // out.
+    (
+        "routing.quota",
+        &["check-after", "prefer", "reserve-percent"],
     ),
     (
         "routing.retry",

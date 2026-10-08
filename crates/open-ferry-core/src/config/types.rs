@@ -257,6 +257,7 @@ impl Config {
                 RoutingStrategy::WeightedRoundRobin
             }
             "fill-first" | "fillfirst" | "ff" => RoutingStrategy::FillFirst,
+            "quota" => RoutingStrategy::Quota,
             _ => RoutingStrategy::RoundRobin,
         }
     }
@@ -360,6 +361,9 @@ pub enum RoutingStrategy {
     /// In turn, in proportion to each credential's weight
     /// (`weighted-round-robin`, `weightedroundrobin`, `wrr`).
     WeightedRoundRobin,
+    /// By the quota the providers report (`quota`): open-ferry's own, which
+    /// CLIProxyAPI runs as round-robin.
+    Quota,
 }
 
 impl RoutingStrategy {
@@ -369,6 +373,7 @@ impl RoutingStrategy {
             Self::RoundRobin => "round-robin",
             Self::FillFirst => "fill-first",
             Self::WeightedRoundRobin => "weighted-round-robin",
+            Self::Quota => "quota",
         }
     }
 }
@@ -500,6 +505,28 @@ pub struct RoutingConfig {
     /// false, subagents spread across the credentials. Unset is true, and
     /// it does nothing without `session_affinity`.
     pub session_affinity_subagents: Option<bool>,
+    /// Routing by quota and the cap on long quota rests: open-ferry's own,
+    /// which CLIProxyAPI ignores.
+    pub quota: RoutingQuota,
+}
+
+/// open-ferry's own quota settings (`routing.quota`), which CLIProxyAPI
+/// doesn't have.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, rename = "config.RoutingQuota", rename_all = "kebab-case")]
+pub struct RoutingQuota {
+    /// What the `quota` strategy prefers: `soonest-reset` (the default) or
+    /// `most-left`.
+    pub prefer: String,
+    /// The share of each quota window the `quota` strategy keeps back, in
+    /// percent: a credential at or past `100 - reserve-percent` in any
+    /// window is passed over while another has room. 0 to 100; 0 keeps
+    /// none.
+    pub reserve_percent: i64,
+    /// The longest a quota rest lasts before one request is let through to
+    /// check, as a Go duration (`1h`); empty, zero or not a duration rests
+    /// until the provider's reset, as upstream does.
+    pub check_after: String,
 }
 
 /// Provider-wide xAI behavior.
