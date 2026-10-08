@@ -31,7 +31,7 @@ use super::api::{Body, path_segments};
 use super::guard::{confirm, sensitive_reasons};
 use super::mask::mask_at;
 use super::target::{Reach, Server, probe};
-use super::values::{Change, diff, tree_of};
+use super::values::{Change, diff, placed, tree_of};
 use super::{Caller, Context, Failure, Report};
 
 /// What a change puts at a path, or the whole config.
@@ -499,7 +499,10 @@ pub(crate) fn edit_failure(error: V8EditError) -> Failure {
         V8EditError::ReadFailed => Failure::new("failed", "the config file can't be read"),
         V8EditError::StoredInvalid(message) => Failure::new(
             "invalid_config",
-            format!("the config file as it is doesn't read in the v8 layout: {message}"),
+            placed(
+                "the config file as it is doesn't read in the v8 layout",
+                &message,
+            ),
         ),
         V8EditError::CannotDeleteConfig => Failure::usage("the whole config can't be removed"),
         V8EditError::NotFound => Failure::new("not_found", "that setting isn't set"),
@@ -516,7 +519,7 @@ pub(crate) fn edit_failure(error: V8EditError) -> Failure {
         ),
         V8EditError::InvalidConfig(message) | V8EditError::Unprocessable(message) => Failure::new(
             "invalid_value",
-            format!("that would make the config invalid: {message}"),
+            placed("that would make the config invalid", &message),
         ),
         V8EditError::ReadOnlyField(field) => {
             Failure::new("read_only", format!("{field} can't be changed this way"))
@@ -525,6 +528,9 @@ pub(crate) fn edit_failure(error: V8EditError) -> Failure {
             "failed",
             format!("the config file couldn't be written: {message}"),
         ),
-        other => Failure::new("failed", other.to_string()),
+        other => Failure::new(
+            "failed",
+            placed("the config writer refused the change", &other.to_string()),
+        ),
     }
 }

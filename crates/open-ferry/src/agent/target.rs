@@ -36,6 +36,7 @@ use open_ferry_core::config::{Config, V8Document};
 use serde::Serialize;
 
 use super::api::{Remote, answer_failure};
+use super::values::load_error;
 use super::{Context, Failure};
 
 /// The environment variable that names a management key file.
@@ -228,7 +229,7 @@ pub(crate) struct Target {
     /// The config file's bytes, as read: what the server runs, when it
     /// was reached.
     pub(crate) data: Vec<u8>,
-    /// The config, or why it doesn't load.
+    /// The config, or why it doesn't load, as [`load_error`] says it.
     pub(crate) config: Result<Config, String>,
     /// The proxy's root URL, without a path, when the config sets a port.
     pub(crate) proxy_url: Option<String>,
@@ -309,7 +310,7 @@ pub(crate) async fn probe(ctx: &Context) -> Result<Target, Failure> {
             format!("can't read {}: {error}", ctx.path.display()),
         )
     })?;
-    let config = Config::load_bytes(&data).map_err(|error| error.to_string());
+    let config = Config::load_bytes(&data).map_err(|error| load_error(&error));
     let Ok(loaded) = &config else {
         return Ok(Target {
             data,
