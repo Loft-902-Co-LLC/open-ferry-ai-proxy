@@ -111,24 +111,10 @@ pub(crate) fn mask_at(parts: &[String], value: &Value) -> Value {
     mask_value(value, place_of(parts))
 }
 
-/// `value`, read from a file or standard input, masked whole, whatever
-/// its keys: each string and number as a client key is (an empty string
-/// stays empty), and each key as text that names no secret. Only `true`,
-/// `false` and `null` show.
-pub(crate) fn mask_whole(value: &Value) -> Value {
-    match value {
-        Value::Object(map) => Value::Object(
-            map.iter()
-                .map(|(key, child)| (mask_plain(key), mask_whole(child)))
-                .collect(),
-        ),
-        Value::Array(items) => Value::Array(items.iter().map(mask_whole).collect()),
-        Value::String(text) if text.is_empty() => Value::String(String::new()),
-        Value::String(text) => Value::String(mask_client_key(text)),
-        Value::Number(number) => Value::String(mask_client_key(&number.to_string())),
-        other => other.clone(),
-    }
-}
+/// What a value read from a file or standard input shows as, wherever a
+/// change shows it: one marker, whatever the value holds, so nothing of it
+/// shows, not its keys, its shape or its length.
+pub(crate) const FROM_A_FILE: &str = "[redacted]";
 
 /// The whole config `root`, masked.
 pub(crate) fn mask_tree(root: &Value) -> Value {
@@ -594,46 +580,6 @@ mod tests {
         assert_eq!(
             mask_at(&["management".into(), "secret-key".into()], &json!("")),
             json!("")
-        );
-    }
-
-    // Not upstream's: a value from a file is masked whole, whatever its
-    // keys name.
-    #[test]
-    fn masks_whole() {
-        let value = json!({
-            "name": "placeholder-provider-name",
-            "base-url": "https://user:pass@api.example.com/v1",
-            "priority": 1234567890,
-            "models": [{"alias": "placeholder-model-alias"}],
-            "someone@example.com": "",
-            "on": true,
-            "off": null
-        });
-        let masked = mask_whole(&value);
-        let text = masked.to_string();
-        for shown in [
-            "placeholder-provider-name",
-            "api.example.com",
-            "user:pass",
-            "1234567890",
-            "placeholder-model-alias",
-            "someone@example.com",
-        ] {
-            assert!(!text.contains(shown), "{text}");
-        }
-        assert_eq!(
-            masked["name"],
-            json!(mask_client_key("placeholder-provider-name"))
-        );
-        assert_eq!(masked["on"], json!(true));
-        assert_eq!(masked["off"], Value::Null);
-        assert!(
-            masked
-                .as_object()
-                .unwrap()
-                .values()
-                .any(|value| value == &json!(""))
         );
     }
 

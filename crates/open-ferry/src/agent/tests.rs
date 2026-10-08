@@ -1375,8 +1375,8 @@ async fn a_file_read_over_mcp_needs_a_confirmation() {
     assert_eq!(added.json["changed"], json!(true));
 }
 
-// Not upstream's: a value read from a file or standard input is masked
-// whole wherever a change shows it, not only its secret-named fields: in
+// Not upstream's: a value read from a file or standard input shows as one
+// marker wherever a change shows it, nothing of it, not even its keys: in
 // what it changed, at the terminal's question, and in what it would change.
 #[tokio::test]
 async fn values_from_a_file_are_masked_whole() {
@@ -1406,9 +1406,17 @@ async fn values_from_a_file_are_masked_whole() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|change| change["path"] == json!("api-keys.codex")),
+            .any(|change| change["path"] == json!("api-keys.codex")
+                && change["new"] == json!("[redacted]")),
         "{}",
         changed.json
+    );
+    assert!(
+        changed
+            .text
+            .contains("api-keys.codex: (not set) -> \"[redacted]\""),
+        "{}",
+        changed.text
     );
     assert!(setup.text().contains("placeholder-provider-name"));
 
@@ -1433,6 +1441,7 @@ async fn values_from_a_file_are_masked_whole() {
     assert_eq!(failure.error, "declined");
     let asked = question.lock().unwrap().clone();
     assert!(asked.contains("management"), "{asked}");
+    assert!(asked.contains("\"[redacted]\""), "{asked}");
     assert!(!shows_any(&asked), "{asked}");
     assert_eq!(setup.text(), before);
 
@@ -1449,6 +1458,7 @@ async fn values_from_a_file_are_masked_whole() {
     let changes = failure.would.as_ref().unwrap()["changes"].clone();
     assert_eq!(changes.as_array().unwrap().len(), 1, "{changes}");
     assert_eq!(changes[0]["path"], json!("management"));
+    assert_eq!(changes[0]["new"], json!("[redacted]"));
     let server = Server::new(Ok(setup.path.clone()), Env::default(), None);
     let mut session = server_session(server).await;
     let result = session
@@ -1462,6 +1472,33 @@ async fn values_from_a_file_are_masked_whole() {
         json!("needs_confirmation")
     );
     assert!(!shows_any(&result.to_string()), "{result}");
+    assert_eq!(setup.text(), before);
+
+    // A secret as a mapping's key, a header's name, and as a value: the
+    // value shows as one marker, with no keys, shape or length, in what it
+    // would change over MCP.
+    const HEADER: &str = "x-placeholder-secret-header-0123";
+    const HEADER_VALUE: &str = "placeholder-header-value-4567";
+    const API_KEY: &str = "sk-placeholder-api-key-89ab";
+    let headed = json!([{"name": "headed", "base-url": "https://api.example.com", "keys": [{"api-key": API_KEY, "headers": {HEADER: HEADER_VALUE}}]}]);
+    let headed_file = setup.file("headed.json", &headed.to_string());
+    let result = session
+        .call(
+            "config_set",
+            json!({"path": "api-keys.claude", "from_file": headed_file}),
+        )
+        .await;
+    let answer = &result["structuredContent"];
+    assert_eq!(answer["error"], json!("needs_confirmation"), "{answer}");
+    assert_eq!(
+        answer["would"]["changes"],
+        json!([{"path": "api-keys.claude", "new": "[redacted]"}]),
+        "{answer}"
+    );
+    let text = result.to_string();
+    for shown in [HEADER, HEADER_VALUE, API_KEY, "api.example.com", "headed"] {
+        assert!(!text.contains(shown), "{shown}: {text}");
+    }
     assert_eq!(setup.text(), before);
 }
 
