@@ -3,7 +3,7 @@
 The dashboard is a web app built into the binary and served at `/dashboard/`. It uses two APIs on its own origin:
 
 - **The management API**, at `/v0/management/` (and `/v8/management/`), exactly as CLIProxyAPI has it: settings, credentials, client keys, sign-ins, logs.
-- **The dashboard API**, described here, at `/open-ferry/api/v1/`, for what CLIProxyAPI has no route for: usage from the usage ledger, request-log search, client setup, and the config's `claude-cli` entries, with their state and whether each is signed in. The prefix is open-ferry's own, so the management namespace stays exactly upstream's.
+- **The dashboard API**, described here, at `/open-ferry/api/v1/`, for what CLIProxyAPI has no route for: usage from the usage ledger, request-log search, client setup, the config's `claude-cli` entries, with their state and whether each is signed in, and undoing the last config change. The prefix is open-ferry's own, so the management namespace stays exactly upstream's.
 
 By default all of these are served on the proxy's port, beside the proxy's routes. With open-ferry's `management.separate-address` set, such as `127.0.0.1:8318`, the app, the management API and the dashboard API are served at that address alone, so they still share one origin, and the proxy's port has none of them (see [Serving the app](#serving-the-app)).
 
@@ -55,9 +55,11 @@ Every error is a status and a body:
 | 404 | `management_disabled` | No management key is set, so neither API serves anything. The management API answers an empty 404 then, or, while a local management password turns it on (until the first config reload), 403 `{"error": "remote management key not set"}`. |
 | 404 | `not_found` | No such route, no such log, or no such `claude-cli` entry. On the proxy's port while `management.separate-address` is set, every path answers it, whatever the method, as the dashboard API is served only at that address. |
 | 405 | `method_not_allowed` | The route exists, the method doesn't. |
+| 409 | `no_backup` | `POST /config/undo`: there is no backup of the config file to undo to. |
 | 413 | `body_too_large` | The body is over 64 KiB. |
 | 500 | `internal_error` | Something failed on the server; the message says what, without secrets. |
 | 502 | `claude_cli_failed` | A `claude-cli` entry's Claude Code couldn't be run, or its answer wasn't what was expected. |
+| 503 | `config_writer_unavailable` | `POST /config/undo`: the server can't write its config file. |
 | 503 | `ledger_unavailable` | The usage ledger couldn't be opened. `GET /usage/ledger` says why. |
 | 504 | `claude_cli_timeout` | A `claude-cli` entry's Claude Code didn't answer within 30 seconds. |
 
@@ -531,6 +533,21 @@ Whether the Claude Code of the `claude-cli` entry `name` is signed in, and how. 
 - **Nothing else is passed on.** Claude Code's answer also names the account's email, its organization and its config directory; they are neither returned nor logged.
 - `name` is required, and matched without regard to case or surrounding spaces, as entry names are unique. An entry that isn't in the config is `404 not_found`, and a disabled one is checked all the same.
 - Claude Code may take a few seconds. One that can't be run, or whose answer isn't the JSON expected, is `502 claude_cli_failed`; one that takes over 30 seconds is stopped, and the answer is `504 claude_cli_timeout`.
+
+## Config
+
+### `POST /open-ferry/api/v1/config/undo`
+
+Undoes the last change to the config file. Every write of the config file (by the management API, the dashboard or `open-ferry config`) keeps the file it replaces beside it as `<config>.bak`; this puts that backup back in place of the file, and keeps the file it replaces as the new backup, so a second undo redoes the change. It takes the lock every management write takes, so it never interleaves with one, and the server loads the file again before it answers. It takes no body.
+
+```json
+{"status": "ok"}
+```
+
+- **One step only.** There is one backup, so undo goes back one write, and undo again goes forward again.
+- With no backup the answer is `409 no_backup`; a server that can't write its config file (one embedded without a config writer) answers `503 config_writer_unavailable`. Neither changes anything.
+- A backup that no longer loads as a config isn't put back: the answer is `500 internal_error`, and nothing changes.
+- `open-ferry config undo` calls this route while a server is running for the config (see [docs/cli.md](cli.md#open-ferry-config)).
 
 ---
 

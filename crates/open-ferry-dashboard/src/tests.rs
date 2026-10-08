@@ -10,6 +10,7 @@
 mod api;
 mod claude_cli;
 mod client_setup;
+mod config;
 mod listener;
 mod request_logs;
 mod serve;
