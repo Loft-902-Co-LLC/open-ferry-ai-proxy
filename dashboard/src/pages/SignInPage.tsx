@@ -104,10 +104,13 @@ export function SignInPage() {
               autoFocus
               hint={
                 <>
-                  The <Code>management.secret-key</Code> in config.yaml, or the{" "}
-                  <Code>MANAGEMENT_PASSWORD</Code> environment variable. On the computer the
-                  server runs on, its local password works too: the one given with{" "}
-                  <Code>-password</Code>, or the one the terminal UI&apos;s standalone mode sets.
+                  It&apos;s the <Code>secret-key</Code> under <Code>management:</Code> in the
+                  server&apos;s config.yaml, or the <Code>MANAGEMENT_PASSWORD</Code> environment
+                  variable if the server was started with one. <Code>open-ferry init</Code> prints
+                  the key when it writes the config. Don&apos;t have it? Look in config.yaml on the
+                  server&apos;s computer, or ask whoever runs the server. On that computer, its
+                  local password works too: the one given with <Code>-password</Code>, or the one
+                  the terminal UI&apos;s standalone mode sets.
                 </>
               }
               error={keyError}

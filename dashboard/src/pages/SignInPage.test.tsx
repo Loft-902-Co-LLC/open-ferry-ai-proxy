@@ -131,6 +131,15 @@ describe("sign in", () => {
     expect(field).toHaveAccessibleDescription(/its local password works too/);
   });
 
+  it("says where the key comes from, and what to do without it", async () => {
+    serverWithKey();
+    renderApp("/signin", { key: null });
+    const field = await screen.findByLabelText("Management key");
+    expect(field).toHaveAccessibleDescription(/secret-key under management: in the server.s config/);
+    expect(field).toHaveAccessibleDescription(/open-ferry init prints the key/);
+    expect(field).toHaveAccessibleDescription(/ask whoever runs the server/);
+  });
+
   it("explains a server that doesn't answer", async () => {
     mockUnreachable();
     const { user } = renderApp("/signin", { key: null });
