@@ -199,7 +199,8 @@ echo "== Waiting for a 1-minute load average of $max_load or less"
 deadline=$(($(date +%s) + wait_minutes * 60))
 while :; do
   load=$(cut -d' ' -f1 /proc/loadavg)
-  if awk -v load="$load" -v max="$max_load" 'BEGIN { exit !(load <= max) }'; then
+  # gawk, the awk of Azure's Ubuntu images, refuses `load` as a variable name.
+  if awk -v now="$load" -v max="$max_load" 'BEGIN { exit !(now <= max) }'; then
     echo "The load average is $load"
     break
   fi
