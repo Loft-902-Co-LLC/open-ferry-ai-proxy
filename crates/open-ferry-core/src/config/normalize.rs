@@ -26,6 +26,9 @@
 //!   does.
 //! - So is open-ferry's own `management.separate-address`
 //!   ([`super::management_address`]): a bad address fails the load.
+//! - And open-ferry's own `self-update` ([`clean_up_self_update`]): an
+//!   unknown mode or a `check-every` that isn't a positive duration fails
+//!   the load.
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
@@ -40,7 +43,7 @@ use super::payload::sanitize_payload_rules;
 use super::types::{
     ClaudeCli, ClaudeCliSystemPrompt, ClaudeKey, CodexKey, Config, DEFAULT_PANEL_GITHUB_REPOSITORY,
     GeminiKey, OAuthModelAlias, OAuthModelSetting, OpenAiCompatibility, RequestScopedErrorRule,
-    VertexCompatKey,
+    SelfUpdate, SelfUpdateMode, VertexCompatKey,
 };
 use super::v8::check_weight;
 use super::yaml::go_quote;
@@ -123,6 +126,7 @@ pub(crate) fn post_process(config: &mut Config) -> Result<(), ConfigError> {
     sanitize_claude_cli(&mut config.claude_cli);
     validate_claude_cli(&config.claude_cli)?;
     super::management_address::clean_up(config)?;
+    clean_up_self_update(&mut config.self_update)?;
     sanitize_openai_compatibility(&mut config.openai_compatibility);
     config.oauth_excluded_models = normalize_oauth_excluded_models(&config.oauth_excluded_models);
     config.oauth_model_alias = sanitize_oauth_model_alias(&config.oauth_model_alias);
@@ -444,6 +448,31 @@ pub(crate) fn validate_claude_cli(entries: &[ClaudeCli]) -> Result<(), ConfigErr
         {
             return Err(invalid("timeout: must be a positive duration such as 10m"));
         }
+    }
+    Ok(())
+}
+
+/// Cleans up and checks open-ferry's own `self-update` section (not
+/// upstream's): the mode trimmed and in lower case, and one of `auto`,
+/// `notify` or `off` (or empty, which is `auto`); `check-every` trimmed,
+/// and empty or a positive Go duration. A short interval is raised to the
+/// updater's minimum when it runs, not here.
+pub(crate) fn clean_up_self_update(section: &mut SelfUpdate) -> Result<(), ConfigError> {
+    section.mode = to_lower(section.mode.trim());
+    section.check_every = section.check_every.trim().to_owned();
+    if SelfUpdateMode::parse(&section.mode).is_none() {
+        return Err(ConfigError::new(
+            ConfigErrorKind::Invalid,
+            "self-update.mode: must be auto, notify or off",
+        ));
+    }
+    if !section.check_every.is_empty()
+        && !parse_go_duration(&section.check_every).is_some_and(|nanos| nanos > 0)
+    {
+        return Err(ConfigError::new(
+            ConfigErrorKind::Invalid,
+            "self-update.check-every: must be a positive duration such as 6h",
+        ));
     }
     Ok(())
 }

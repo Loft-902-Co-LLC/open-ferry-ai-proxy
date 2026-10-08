@@ -494,6 +494,7 @@ pub(crate) fn render_preserving_comments(
         merge::prune_mapping_to_generated_keys(root, &generated, key);
     }
     merge::prune_routing_quota(root, &generated);
+    merge::prune_mapping_to_generated_keys(root, &generated, "self-update");
     merge::merge_mapping_preserve(root, &generated, &mut Vec::new());
     v8::restore_v8_layout(root, &layout, data, cfg)?;
     if !migrating {

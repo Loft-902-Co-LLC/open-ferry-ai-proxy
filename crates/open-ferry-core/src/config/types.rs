@@ -174,6 +174,8 @@ pub struct Config {
     pub oauth_settings: BTreeMap<String, Vec<OAuthModelSetting>>,
     /// Rules that edit the payloads sent upstream.
     pub payload: PayloadConfig,
+    /// How open-ferry updates itself (`self-update`, not upstream's).
+    pub self_update: SelfUpdate,
     /// Legacy names of settings a v8 document placed under
     /// `oauth.providers`, which don't apply to API-key credentials.
     #[serde(skip)]
@@ -238,6 +240,7 @@ impl Default for Config {
             oauth_request_scoped_errors: BTreeMap::new(),
             oauth_settings: BTreeMap::new(),
             payload: PayloadConfig::default(),
+            self_update: SelfUpdate::default(),
             oauth_only_fields: BTreeSet::new(),
         }
     }
@@ -345,6 +348,7 @@ impl fmt::Debug for Config {
             )
             .field("oauth_settings", &self.oauth_settings)
             .field("payload", &self.payload)
+            .field("self_update", &self.self_update)
             .field("oauth_only_fields", &self.oauth_only_fields)
             .finish()
     }
@@ -861,6 +865,74 @@ impl ClaudeCli {
         match parse_go_duration(self.timeout.trim()) {
             Some(nanos) if nanos > 0 => Duration::from_nanos(nanos.unsigned_abs()),
             _ => Self::DEFAULT_TIMEOUT,
+        }
+    }
+}
+
+/// open-ferry's own `self-update` section, which CLIProxyAPI doesn't have:
+/// whether and how often open-ferry looks for a newer release of itself.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, rename = "config.SelfUpdate", rename_all = "kebab-case")]
+pub struct SelfUpdate {
+    /// `auto` (the default) gets a newer release ready, `notify` only says
+    /// one is out, and `off` makes no request at all.
+    pub mode: String,
+    /// How often to look, as a Go duration (`6h`); empty means
+    /// [`SelfUpdate::DEFAULT_CHECK_EVERY`].
+    pub check_every: String,
+}
+
+/// What `self-update.mode` asks for. The order is how much each does, so
+/// the lower of two modes is the more cautious.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SelfUpdateMode {
+    /// No request of any kind, nothing staged and nothing switched.
+    Off,
+    /// Looks for a newer release and says when there is one.
+    Notify,
+    /// Looks for a newer release and gets it ready for the next restart.
+    #[default]
+    Auto,
+}
+
+impl SelfUpdateMode {
+    /// The mode's config spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Notify => "notify",
+            Self::Auto => "auto",
+        }
+    }
+
+    /// The mode a spelling names: empty means `auto`; case and surrounding
+    /// space are ignored.
+    pub fn parse(text: &str) -> Option<Self> {
+        match to_lower(text.trim()).as_str() {
+            "" | "auto" => Some(Self::Auto),
+            "notify" => Some(Self::Notify),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+}
+
+impl SelfUpdate {
+    /// How often to look when `check-every` is empty.
+    pub const DEFAULT_CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
+
+    /// The mode; an unknown spelling, which loading rejects, means `off`.
+    pub fn mode(&self) -> SelfUpdateMode {
+        SelfUpdateMode::parse(&self.mode).unwrap_or(SelfUpdateMode::Off)
+    }
+
+    /// How often to look: `check-every` when it is a positive Go duration,
+    /// else [`SelfUpdate::DEFAULT_CHECK_EVERY`]. The updater raises a short
+    /// one to its minimum.
+    pub fn check_every(&self) -> Duration {
+        match parse_go_duration(self.check_every.trim()) {
+            Some(nanos) if nanos > 0 => Duration::from_nanos(nanos.unsigned_abs()),
+            _ => Self::DEFAULT_CHECK_EVERY,
         }
     }
 }

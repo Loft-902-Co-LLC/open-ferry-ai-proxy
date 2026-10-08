@@ -27,7 +27,8 @@
 //! - open-ferry's `remote-management.separate-address`, which upstream
 //!   doesn't have, gets a line with both values.
 //! - open-ferry's `routing.quota` settings, which upstream doesn't have,
-//!   get a line each, as `routing.strategy` does.
+//!   get a line each, as `routing.strategy` does, and so do its
+//!   `self-update` settings.
 //! - Go tells a list or map that is missing from one that is empty, and
 //!   reports `payload.default: []` against no `payload.default` as an
 //!   update (0 -> 0 rules); the typed config can't tell them apart, so no
@@ -456,6 +457,15 @@ pub fn build_change_details(old: &Config, new: &Config) -> Vec<String> {
             );
         }
     }
+
+    // open-ferry's self-update settings.
+    let (old_update, new_update) = (&old.self_update, &new.self_update);
+    changes.text("self-update.mode", &old_update.mode, &new_update.mode);
+    changes.text(
+        "self-update.check-every",
+        &old_update.check_every,
+        &new_update.check_every,
+    );
 
     // open-ferry's claude-cli entries (they hold no secrets).
     if old.claude_cli.len() != new.claude_cli.len() {

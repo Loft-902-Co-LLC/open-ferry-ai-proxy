@@ -889,6 +889,18 @@ observability:
     # Default: 60. Max: 3600.
     redis-usage-queue-retention-seconds: 60
 
+# Updates: open-ferry's own section; CLIProxyAPI has none like it (see docs/updates.md).
+# open-ferry looks for a newer signed release every check-every. auto (the default) gets it
+# ready for the next restart and never restarts open-ferry itself; notify only says one is
+# out; off makes no request of any kind. To turn automatic updates off, set mode: off here,
+# or run: open-ferry update --mode off
+# OPEN_FERRY_SELF_UPDATE=off (or notify) in the environment lowers the mode; it never raises it.
+# CLIProxyAPI's loader ignores this section, and its management API's writes to a v8 config
+# comment it out. It stays at the top level in both layouts; open-ferry init uncomments it.
+# self-update:
+#   mode: auto # auto, notify or off
+#   check-every: 6h # how often to look, a Go duration of at least 1h; default 6h
+
 # Legacy compatibility reference (comments only; not part of this v8 template).
 # Old files and /v0/management still work without a v8 write. Existing legacy-only
 # fields remain in their old locations until a successful v8 configuration write.

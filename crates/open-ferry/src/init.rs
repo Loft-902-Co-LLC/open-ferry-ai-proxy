@@ -6,7 +6,10 @@
 //! - `access.api-keys`: one new client key in place of the three examples;
 //! - `management.secret-key`: a new management key;
 //! - `server.host`: `127.0.0.1`, or `-host` (empty for every interface);
-//! - `server.port`: `-port`, or the template's.
+//! - `server.port`: `-port`, or the template's;
+//! - `self-update`: uncommented, so the file says that open-ferry updates
+//!   itself (`mode: auto`) and, in the comment above it, how to turn that
+//!   off (`open-ferry update --mode off`).
 //!
 //! Each key is 32 bytes from the operating system's random generator: the
 //! client key as the dashboard's "new client key" makes one, `sk-` and the
@@ -274,6 +277,7 @@ fn render(client_key: &str, management_key: &str, listen: &Listen) -> Result<Str
     let mut out = String::with_capacity(TEMPLATE.len() + 2 * KEY_BYTES);
     let mut section = "";
     let (mut host, mut port, mut secret, mut keys) = (0, 0, 0, 0);
+    let (mut updates, mut in_updates) = (0, false);
     let mut in_keys = false;
     for line in TEMPLATE.split_inclusive('\n') {
         let text = line.trim_end_matches(['\n', '\r']);
@@ -282,6 +286,23 @@ fn render(client_key: &str, management_key: &str, listen: &Listen) -> Result<Str
                 continue;
             }
             in_keys = false;
+        }
+        // The commented `self-update` block, uncommented.
+        if text == "# self-update:" {
+            updates += 1;
+            in_updates = true;
+            out.push_str(line.get(2..).unwrap_or_default());
+            continue;
+        }
+        if in_updates {
+            if let Some(rest) = line.strip_prefix("#   ") {
+                if rest.starts_with("mode: auto ") || rest.starts_with("check-every: 6h ") {
+                    updates += 1;
+                }
+                let _ = write!(out, "  {rest}");
+                continue;
+            }
+            in_updates = false;
         }
         if !text.is_empty() && !text.starts_with([' ', '#']) {
             section = text.strip_suffix(':').unwrap_or_default();
@@ -313,7 +334,7 @@ fn render(client_key: &str, management_key: &str, listen: &Listen) -> Result<Str
             _ => out.push_str(line),
         }
     }
-    if [host, port, secret, keys] != [1; 4] {
+    if [host, port, secret, keys, updates] != [1, 1, 1, 1, 3] {
         return Err(
             "the built-in config template doesn't have the lines init sets; this is a bug".into(),
         );
@@ -337,7 +358,8 @@ fn verify(
         && listen
             .port
             .is_none_or(|port| config.port == i64::from(port))
-        && !config.has_example_api_keys();
+        && !config.has_example_api_keys()
+        && config.self_update.mode == "auto";
     if !holds {
         return Err("the new config doesn't hold the values init set; this is a bug".into());
     }
@@ -534,7 +556,9 @@ mod tests {
                 "\n    - \"your-api-key-1\"\n    - \"your-api-key-2\"\n    - \"your-api-key-3\"\n",
                 &format!("\n    - \"{}\"\n", written.client_key),
                 1,
-            );
+            )
+            .replacen("\n# self-update:\n#   mode:", "\nself-update:\n  mode:", 1)
+            .replacen("\n#   check-every:", "\n  check-every:", 1);
         assert!(
             text == expected,
             "the config isn't the template with the new values"
@@ -547,6 +571,9 @@ mod tests {
         assert_eq!(config.port, 8317);
         assert_eq!(written.port, 8317);
         assert!(!config.has_example_api_keys());
+        assert_eq!(config.self_update.mode, "auto");
+        assert_eq!(config.self_update.check_every, "6h");
+        assert!(text.contains("open-ferry update --mode off"), "{text}");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;

@@ -25,6 +25,8 @@
 //!   it is empty.
 //! - open-ferry's `routing.quota` follows `session-affinity-subagents`,
 //!   left out when nothing in it is set.
+//! - open-ferry's `self-update` follows `claude-cli`, left out when nothing
+//!   in it is set.
 
 use std::collections::BTreeMap;
 
@@ -33,7 +35,7 @@ use open_ferry_core::config::{
     DisableImageGeneration, GeminiKey, GeminiModel, OAuthModelAlias, OAuthModelSetting,
     OpenAiCompatibility, OpenAiCompatibilityApiKey, OpenAiCompatibilityModel, PayloadConfig,
     PayloadFilterRule, PayloadModelRule, PayloadRule, RequestScopedErrorRule, RoutingQuota,
-    ThinkingSupport, VertexCompatKey, VertexCompatModel,
+    SelfUpdate, ThinkingSupport, VertexCompatKey, VertexCompatModel,
 };
 use serde_json::Value;
 
@@ -348,6 +350,7 @@ pub(super) fn config(config: &Config) -> Json {
             slice(&config.claude_api_key, |key| claude_key(key, "")),
         )
         .omit_empty("claude-cli", slice(&config.claude_cli, claude_cli))
+        .omit_nil("self-update", self_update(&config.self_update))
         .with(
             "openai-compatibility",
             slice(&config.openai_compatibility, openai_compatibility),
@@ -691,6 +694,16 @@ fn routing_quota(quota: &RoutingQuota) -> Option<Json> {
             .omit_empty("prefer", string(&quota.prefer))
             .omit_empty("reserve-percent", Json::Int(quota.reserve_percent))
             .omit_empty("check-after", string(&quota.check_after))
+            .done()
+    })
+}
+
+/// open-ferry's own `self-update` section, when anything in it is set.
+fn self_update(section: &SelfUpdate) -> Option<Json> {
+    (*section != SelfUpdate::default()).then(|| {
+        Fields::new()
+            .omit_empty("mode", string(&section.mode))
+            .omit_empty("check-every", string(&section.check_every))
             .done()
     })
 }

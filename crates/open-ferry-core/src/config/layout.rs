@@ -49,6 +49,8 @@
 //!   upstream decodes it.
 //! - `routing.quota` is a known section here, open-ferry's own; upstream's
 //!   migration comments it out as unknown.
+//! - So is the top-level `self-update`, open-ferry's own, which upstream's
+//!   migration comments out too.
 
 mod auth_index;
 
@@ -100,8 +102,9 @@ pub(crate) const V8_STRUCT_PATHS: &[(&str, &str)] = &[
 ];
 
 /// The top-level keys of the v8 layout (upstream's `v8AllowedRoots`), with
-/// open-ferry's `claude-cli`, which stays at the top level in both layouts.
-/// [`V8_CHILDREN`] has open-ferry's `management.separate-address` too.
+/// open-ferry's `claude-cli` and `self-update`, which stay at the top level
+/// in both layouts. [`V8_CHILDREN`] has open-ferry's
+/// `management.separate-address` too.
 pub(crate) const V8_ROOTS: &[&str] = &[
     "access",
     "api-keys",
@@ -118,6 +121,7 @@ pub(crate) const V8_ROOTS: &[&str] = &[
     "quota-exceeded",
     "requests",
     "routing",
+    "self-update",
     "server",
     "upstream",
 ];
@@ -125,7 +129,7 @@ pub(crate) const V8_ROOTS: &[&str] = &[
 /// The keys each v8 section may hold, by the section's dotted path. A
 /// section that isn't listed, such as `api-keys`, keeps whatever it holds
 /// (the `children` table of upstream's `commentUnknownV8Sections`), with
-/// open-ferry's `routing.quota`.
+/// open-ferry's `routing.quota` and `self-update`.
 pub(crate) const V8_CHILDREN: &[(&str, &[&str])] = &[
     ("access", &["api-keys"]),
     ("client", &["codex"]),
@@ -335,6 +339,9 @@ pub(crate) const V8_CHILDREN: &[(&str, &[&str])] = &[
             "request-retry",
         ],
     ),
+    // open-ferry's own section, which upstream's migration would comment
+    // out.
+    ("self-update", &["check-every", "mode"]),
     (
         "server",
         &[
