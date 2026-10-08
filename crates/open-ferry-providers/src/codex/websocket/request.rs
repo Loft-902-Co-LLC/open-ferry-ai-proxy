@@ -124,7 +124,7 @@ pub(super) fn prepare(
     let base = base_model(&request.model);
     let payload = parse_object(&request.payload);
     let native = is_native(&payload, options);
-    let mut body = compat::translate(
+    let mut body = compat::translate_checked(
         kind,
         context,
         request,
@@ -132,7 +132,7 @@ pub(super) fn prepare(
         &Format::CODEX,
         kind == Kind::Stream,
         payload.clone(),
-    );
+    )?;
     let to = Format::CODEX;
     let route = Route {
         model: &request.model,

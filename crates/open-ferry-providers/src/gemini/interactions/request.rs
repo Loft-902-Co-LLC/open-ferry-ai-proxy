@@ -3,7 +3,8 @@
 // translateGeminiInteractionsRequestBody, translateGeminiInteractionsRequestPair,
 // geminiInteractionsPayloadConfigSource, geminiInteractionsPayloadConfigInput,
 // geminiInteractionsSameByteSlice, applyGeminiInteractionsRevisionHeader,
-// applyGeminiInteractionsRequestHeaders) (v8.0.15, MIT).
+// applyGeminiInteractionsRequestHeaders) (v8.0.15, MIT), with v8.0.20's
+// translation errors.
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The body and headers of a native Interactions call, and its answer.
@@ -12,7 +13,9 @@
 //! client's original request differs from the payload the executor got:
 //! once for the body, and once as the baseline the payload rules' defaults
 //! are checked against. When they are the same bytes, it is translated once.
-//! An Interactions client's request is copied as it is.
+//! An Interactions client's request is copied as it is. Only the body's
+//! translation can refuse the request, for a content part Interactions
+//! can't receive: the baseline is never sent, so its refusal is ignored.
 //!
 //! Before the body goes, IDs the API rejects are removed from its `input`
 //! steps: a `function_call` keeps its `id` (taken from its `call_id` when it
@@ -36,7 +39,9 @@ use http::{HeaderMap, HeaderName, HeaderValue};
 use open_ferry_core::auth::Auth;
 use open_ferry_core::config::Config;
 use open_ferry_core::exec::{ExecError, Format, Options, Request, Response};
-use open_ferry_translate::registry::{Registry, ResponseContext};
+use open_ferry_translate::registry::{
+    Registry, RequestEnvelope, ResponseContext, UnsupportedPartError,
+};
 use serde_json::Value;
 
 use crate::codex::compat;
@@ -79,39 +84,46 @@ pub(super) fn interactions_url(auth: &Auth) -> String {
 }
 
 /// `translateGeminiInteractionsRequestBody`: `payload` from the client's
-/// format to Interactions for `model`, as a stream or not. An Interactions
-/// client's payload, or one of no format, is left as it is; a Codex
-/// client's is readied as `config` says first.
+/// format to Interactions for `model`, as a stream or not, and the content
+/// part the translation refused, if any. An Interactions client's payload,
+/// or one of no format, is left as it is; a Codex client's is readied as
+/// `config` says first.
 pub(super) fn translate_body(
     config: Option<&Config>,
     options: &Options,
     model: &str,
     mut payload: Value,
     stream: bool,
-) -> Value {
+) -> (Value, Option<UnsupportedPartError>) {
     let source = &options.source_format;
     if source.as_str().is_empty() || *source == Format::INTERACTIONS {
-        return payload;
+        return (payload, None);
     }
     compat::before_translation(config, options, &Format::INTERACTIONS, &mut payload);
-    Registry::global().translate_request(source, &Format::INTERACTIONS, model, payload, stream)
+    let translated = Registry::global().translate_request_envelope(
+        source,
+        &Format::INTERACTIONS,
+        RequestEnvelope::new(source, model, stream, payload),
+    );
+    (translated.body, translated.err)
 }
 
 /// `translateGeminiInteractionsRequestPair`: the baseline the payload rules'
 /// defaults check, the client's original request translated, and the body
-/// to send, the payload translated. When both are the same bytes they are
-/// translated once and the body is a copy; otherwise the payload is
-/// translated first.
+/// to send, the payload translated, and the part the body's translation
+/// refused. When both are the same bytes they are translated once, the body
+/// is a copy and the one translation's refusal is the body's; otherwise the
+/// payload is translated first, and the baseline's refusal is ignored.
 pub(super) fn translate_pair(
     config: Option<&Config>,
     request: &Request,
     options: &Options,
     model: &str,
     stream: bool,
-) -> (Value, Value) {
+) -> (Value, Value, Option<UnsupportedPartError>) {
     let source = payload_config_input(options, &request.payload);
     if same_bytes(&request.payload, source) {
-        let original = translate_body(
+        let (original, refusal) = translate_body(
             config,
             options,
             model,
@@ -119,17 +131,17 @@ pub(super) fn translate_pair(
             stream,
         );
         let working = original.clone();
-        return (original, working);
+        return (original, working, refusal);
     }
-    let working = translate_body(
+    let (working, refusal) = translate_body(
         config,
         options,
         model,
         parse_object(&request.payload),
         stream,
     );
-    let original = translate_body(config, options, model, parse_object(source), stream);
-    (original, working)
+    let (original, _) = translate_body(config, options, model, parse_object(source), stream);
+    (original, working, refusal)
 }
 
 /// `geminiInteractionsPayloadConfigInput`: the client's original request,

@@ -1,23 +1,22 @@
 // Ported from CLIProxyAPI
-// internal/runtime/executor/helps/response_model_test.go (v8.0.15, MIT).
+// internal/runtime/executor/helps/response_model_test.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Tests of the Codex served model, the substitution check and its
-//! throttled warning.
+//! warning.
 //!
 //! Deviations from upstream: the reporter tests run the attempt through the
-//! usage tap, as a Codex stream; the concurrency test publishes from
-//! concurrent attempts with one credential, which share the throttle,
-//! where upstream's observes concurrently on one reporter.
+//! usage tap, as a Codex stream; the concurrency test hands one call's
+//! chunks to its tap from concurrent threads and ends it once, where
+//! upstream's also publishes from each of its goroutines (only the first
+//! publishes).
 
 use std::sync::Barrier;
-use std::time::Duration;
 
 use super::super::response_model::{
-    MAX_RESPONSE_MODEL_LENGTH, Throttle, ThrottleKey, WARN_MAX_ENTRIES, WARN_WINDOW,
-    extract_codex_response_model_event, is_model_substituted,
+    MAX_RESPONSE_MODEL_LENGTH, extract_codex_response_model_event, is_model_substituted,
 };
-use super::support::{ClientCall, Harness, ManualClock, Warnings, auth, int_at, str_field};
+use super::support::{ClientCall, Harness, Warnings, auth, int_at, str_field};
 use crate::auth::Auth;
 use crate::observe::{AttemptKind, Outcome};
 
@@ -352,40 +351,39 @@ fn warns_once_under_concurrent_observations_and_publishes() {
     const WORKERS: usize = 32;
     let warnings = Warnings::capture();
     let harness = Harness::new();
-    let credential = substitution_auth();
+    let driver = ClientCall::new("gpt-6-astra").stream().tap(&harness);
+    driver.attempt(
+        AttemptKind::Stream,
+        "codex",
+        "gpt-6-astra",
+        &substitution_auth(),
+    );
     let start = Barrier::new(WORKERS);
     std::thread::scope(|scope| {
         for worker in 0..WORKERS {
-            let (harness, credential, start) = (&harness, &credential, &start);
-            let dispatch = warnings.dispatch().clone();
+            let (driver, start) = (&driver, &start);
             scope.spawn(move || {
-                tracing::dispatcher::with_default(&dispatch, || {
-                    let driver = ClientCall::new("gpt-6-astra").stream().tap(harness);
-                    driver.attempt(AttemptKind::Stream, "codex", "gpt-6-astra", credential);
-                    start.wait();
-                    driver.chunk(if worker % 2 == 0 {
-                        "data: {\"type\":\"response.created\",\"response\":{\"model\":\"gpt-5.6-luna\"}}\n"
-                    } else {
-                        "data: {\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-5.6-luna\",\"usage\":{\"total_tokens\":4}}}\n"
-                    });
-                    driver.finish(Outcome::Completed);
+                start.wait();
+                driver.chunk(if worker % 2 == 0 {
+                    r#"data: {"type":"response.created","response":{"model":"gpt-5.6-luna"}}
+"#
+                } else {
+                    r#"data: {"type":"response.completed","response":{"model":"gpt-5.6-luna","usage":{"total_tokens":4}}}
+"#
                 });
             });
         }
     });
+    driver.finish(Outcome::Completed);
     let records = harness.records();
-    assert_eq!(records.len(), WORKERS);
-    assert!(
-        records
-            .iter()
-            .all(|record| str_field(record, "response_model") == "gpt-5.6-luna")
-    );
+    assert_eq!(records.len(), 1);
+    assert_eq!(str_field(&records[0], "response_model"), "gpt-5.6-luna");
     assert_eq!(warnings.substitutions(), [SUBSTITUTION_WARNING]);
 }
 
-/// Ports TestUsageReporterThrottlesRepeatedSubstitutionWarnings.
+/// Ports TestUsageReporterEmitsWarningOnRepeatedSubstitutionsWithoutThrottle.
 #[test]
-fn throttles_repeated_substitution_warnings() {
+fn warns_on_every_repeated_substitution() {
     let warnings = Warnings::capture();
     let harness = Harness::new();
     let publish = |id: &str, index: &str| {
@@ -399,23 +397,15 @@ fn throttles_repeated_substitution_warnings() {
 
     publish("codex-auth-1", "auth-index-7");
     publish("codex-auth-1", "auth-index-7");
-    assert_eq!(warnings.substitutions().len(), 1, "inside the window");
+    assert_eq!(warnings.substitutions().len(), 2, "without a throttle");
 
     publish("codex-auth-2", "auth-index-8");
-    assert_eq!(warnings.substitutions().len(), 2, "a second credential");
-
-    harness.clock.advance(WARN_WINDOW - Duration::from_secs(1));
-    publish("codex-auth-1", "auth-index-7");
-    assert_eq!(warnings.substitutions().len(), 2, "before the window ended");
-
-    harness.clock.advance(Duration::from_secs(1));
-    publish("codex-auth-1", "auth-index-7");
-    assert_eq!(warnings.substitutions().len(), 3, "once the window ended");
+    assert_eq!(warnings.substitutions().len(), 3, "a second credential");
 }
 
-/// Ports TestUsageReporterThrottlesSubstitutionWarningsAcrossServedModelCase.
+/// Ports TestUsageReporterEmitsWarningAcrossServedModelCaseWithoutThrottle.
 #[test]
-fn throttles_substitution_warnings_across_served_model_case() {
+fn warns_across_served_model_case() {
     let warnings = Warnings::capture();
     let harness = Harness::new();
     let credential = auth("codex-auth-1", "auth-index-7", "codex");
@@ -424,23 +414,39 @@ fn throttles_substitution_warnings_across_served_model_case() {
             format!(r#"data: {{"type":"response.completed","response":{{"model":"{served}"}}}}"#);
         codex_attempt(&harness, "gpt-6-astra", &credential, &[&line]);
     }
-    assert_eq!(warnings.substitutions(), [SUBSTITUTION_WARNING]);
+    let warned = warnings.substitutions();
+    assert_eq!(warned.len(), 2, "{warned:?}");
+    assert_eq!(warned[0], SUBSTITUTION_WARNING);
 }
 
-/// Ports TestCodexModelSubstitutionThrottleBoundsStoredEntries.
+/// Not upstream's: a call that names no provider is warned of as
+/// `unknown`'s (v8.0.20's fallback, which was `codex`).
 #[test]
-fn throttle_bounds_stored_entries() {
-    let throttle = Throttle::new(ManualClock::new().clock());
-    for index in 0..WARN_MAX_ENTRIES + 16 {
-        let key = ThrottleKey {
-            provider: "codex".to_owned(),
-            auth_id: format!("codex-auth-{index}"),
-            requested: "gpt-6-astra".to_owned(),
-            served: "gpt-5.6-luna".to_owned(),
-        };
-        assert!(throttle.allow(key), "first warning for key {index}");
-    }
-    assert!(throttle.len() <= WARN_MAX_ENTRIES, "{}", throttle.len());
+fn warns_of_a_call_without_a_provider_as_unknown() {
+    let warnings = Warnings::capture();
+    let harness = Harness::new();
+    let driver = ClientCall::new("gpt-6-astra").stream().tap(&harness);
+    driver.attempt_with(
+        AttemptKind::Stream,
+        "  ",
+        "gpt-6-astra",
+        &crate::exec::Format::OPENAI,
+        &auth("compat-auth-1", "auth-index-7", ""),
+        &[],
+        "{}",
+    );
+    driver.chunk(
+        r#"data: {"id":"c1","object":"chat.completion.chunk","model":"gpt-5.6-luna","choices":[]}
+"#,
+    );
+    driver.finish(Outcome::Completed);
+    let warned = warnings.substitutions();
+    assert_eq!(warned.len(), 1, "{warned:?}");
+    assert!(
+        warned[0].starts_with("unknown executor: upstream served model"),
+        "{}",
+        warned[0]
+    );
 }
 
 /// Ports TestUsageReporterAdditionalModelRecordOmitsResponseModel: the

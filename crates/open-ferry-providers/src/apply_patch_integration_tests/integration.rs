@@ -4,7 +4,8 @@
 // TestApplyPatchHTTPGatewayErrorMatrix, TestApplyPatchSDKOriginalRequestFallback,
 // TestApplyPatchFailureStopsConsumptionAndNextAttemptIsFresh,
 // TestApplyPatchXAIWebsocketFailureMatrix,
-// TestApplyPatchInteractionsSourceFailureIsSealed) (v8.0.15, MIT).
+// TestApplyPatchInteractionsSourceFailureIsSealed) (v8.0.15, MIT), and
+// v8.0.20's TestApplyPatchFailurePreservesUpstreamUsage.
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! `apply_patch_integration_test.go`: an invalid or unfinished call to
@@ -120,6 +121,73 @@ async fn responses_invalid_terminal_usage() {
         }));
     }
     subtests(cases).await;
+}
+
+// v8.0.20's TestApplyPatchFailurePreservesUpstreamUsage: Meta and xAI
+// answered, so the failure's one record keeps the answer's counts, whether
+// the answer is a stream, a stream read whole, a plain reply or a
+// compaction.
+#[tokio::test]
+async fn failure_preserves_upstream_usage() {
+    let output = r#""output":[{"type":"function_call","id":"c","name":"apply_patch","arguments":"{}"}],"usage":{"input_tokens":5,"output_tokens":3}"#;
+    let completed = format!(r#"{{"type":"response.completed","response":{{{output}}}}}"#);
+    let sse_body = sse(&[CREATED.to_owned(), completed.clone()]);
+    let cases = [
+        (
+            "meta-direct",
+            Meta,
+            format!(r#"{{"object":"response",{output}}}"#),
+            false,
+            false,
+        ),
+        ("meta-direct-event", Meta, completed, false, false),
+        (
+            "xai-compact",
+            Xai,
+            format!(r#"{{"id":"r",{output}}}"#),
+            false,
+            true,
+        ),
+        ("meta-sse", Meta, sse_body.clone(), true, false),
+        ("xai-sse", Xai, sse_body.clone(), true, false),
+        ("meta-buffered-sse", Meta, sse_body.clone(), false, false),
+        ("xai-buffered-sse", Xai, sse_body, false, false),
+    ];
+    let mut tests = Vec::new();
+    for (name, provider, body, streams, compact) in cases {
+        tests.push(case(name.to_owned(), async move {
+            let reply = if streams {
+                Reply::sse(&body)
+            } else {
+                Reply::json(&body)
+            };
+            let mock = Mock::start(reply).await;
+            let executor = provider.executor();
+            let auth = Arc::new(provider.auth(&format!("task6-usage-{name}"), &mock.url));
+            let usage = Usage::new();
+            let request = request(provider.model(), PATCH_REQUEST);
+            let mut options = options_for(&request, streams);
+            if compact {
+                options.alt = "responses/compact".into();
+            }
+            usage.observe(&request, &mut options);
+            if streams {
+                let (chunks, error) = stream(&*executor, auth, request, options).await;
+                assert_failed_stream(&chunks, error);
+            } else {
+                assert_patch_failure(execute(&*executor, auth, request, options).await);
+            }
+            if compact {
+                assert_eq!(mock.last().path, "/responses/compact");
+            }
+            let records = usage.records();
+            assert_eq!(records.len(), 1, "usage records: {records:?}");
+            assert_eq!(records[0]["failed"], true, "{records:?}");
+            assert_eq!(records[0]["tokens"]["input_tokens"], 5, "{records:?}");
+            assert_eq!(records[0]["tokens"]["output_tokens"], 3, "{records:?}");
+        }));
+    }
+    subtests(tests).await;
 }
 
 // TestApplyPatchHTTPGatewayErrorMatrix: without the Antigravity, Devin and

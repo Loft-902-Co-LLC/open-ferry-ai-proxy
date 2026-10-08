@@ -100,7 +100,8 @@ pub fn is_item_not_persisted(message: &str) -> bool {
 
 /// Whether a failure with `status` and error text `text` is Claude's 404
 /// for a stale `previous_message_id` continuation, whose thread state is
-/// gone (`IsClaudeThreadNotFound`).
+/// gone (`IsClaudeThreadNotFound`): a JSON error of that type and message,
+/// or, from v8.0.20, a plain-text message that names both.
 pub fn is_claude_thread_not_found(status: u16, text: &str) -> bool {
     if status != 404 {
         return false;
@@ -110,7 +111,8 @@ pub fn is_claude_thread_not_found(status: u16, text: &str) -> bool {
         return false;
     }
     let Ok(root) = serde_json::from_str::<Value>(body) else {
-        return false;
+        let lower = go_lower(body);
+        return lower.contains("thread state") && lower.contains("previous_message_id");
     };
     let kind = str_of(get_path(&root, "error.type"));
     let message = go_lower(&str_of(get_path(&root, "error.message")));
@@ -190,6 +192,11 @@ mod tests {
         assert!(!is_request_fault(
             404,
             r#"{"error":{"type":"not_found_error","message":"Not Found"}}"#
+        ));
+        // v8.0.20's "Claude missing thread state plain text".
+        assert!(is_request_fault(
+            404,
+            "No thread state was found for the requested previous_message_id. Replay the full conversation with thread create to start a new Thread."
         ));
         // Claude missing thread on server error.
         assert!(!is_request_fault(

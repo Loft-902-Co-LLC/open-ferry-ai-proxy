@@ -244,7 +244,10 @@ impl MetaExecutor {
             Cow::Owned(redacted) => redacted,
             Cow::Borrowed(_) => data,
         };
-        let out = translate_completed(request, &mut prepared, &secrets, &data)?;
+        // Meta answered: a failure to read or translate the answer keeps
+        // its usage (v8.0.20's `upstreamUsage.PublishFailure`).
+        let out = translate_completed(request, &mut prepared, &secrets, &data)
+            .map_err(|error| ExecError::from(error).with_usage_kept())?;
         Ok(Response {
             payload: Bytes::from(finish_payload(&prepared.response_format, out)),
             headers: response_headers,

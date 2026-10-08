@@ -98,15 +98,16 @@ use crate::config::Config;
 use crate::exec::{Options, Request};
 use crate::manager::ErrorEvents;
 use queue::Queue;
-use response_model::{Clock, Throttle};
 
 #[cfg(test)]
 mod tests;
 
+/// The clock the usage statistics read.
+pub(crate) type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
+
 /// What the handles of one [`Usage`] share.
 struct Inner {
     queue: Queue,
-    throttle: Throttle,
     clock: Clock,
     observer: Arc<observer::Slot>,
 }
@@ -152,13 +153,11 @@ impl Usage {
         usage
     }
 
-    /// Statistics reading `clock` for the queue's retention, latencies and
-    /// the warnings' throttle.
+    /// Statistics reading `clock` for the queue's retention and latencies.
     pub(crate) fn with_clock(clock: Clock) -> Self {
         Self {
             inner: Arc::new(Inner {
                 queue: Queue::new(Arc::clone(&clock)),
-                throttle: Throttle::new(Arc::clone(&clock)),
                 clock,
                 observer: Arc::default(),
             }),

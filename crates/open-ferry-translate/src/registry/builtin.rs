@@ -404,6 +404,10 @@ impl StreamTranslator for OpenAIToResponses {
     fn tool_input_error(&self) -> Option<&(dyn Error + 'static)> {
         self.0.tool_input_error()
     }
+
+    fn can_finalize_response_stream(&self) -> bool {
+        self.0.can_finalize_response_stream()
+    }
 }
 
 fn non_empty(chunk: Vec<u8>) -> Vec<Vec<u8>> {

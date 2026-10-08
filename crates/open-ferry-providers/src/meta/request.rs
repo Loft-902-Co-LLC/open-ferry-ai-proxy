@@ -2,7 +2,8 @@
 // (metaCreds), meta_executor_execute.go (prepareResponsesRequest,
 // applyMetaAPIHeaders) and meta_test.go (TestMetaExecutor_MetaCredsResolution,
 // TestMetaExecutor_PreservesPreviousResponseID, and the
-// ClientIdHeader_Issue6117 tests, inverted) (v8.0.15, MIT).
+// ClientIdHeader_Issue6117 tests, inverted) (v8.0.15, MIT), with v8.0.20's
+// translation errors.
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! What a Meta call is made of: the credential's token and base URL, the
@@ -46,7 +47,7 @@ use open_ferry_core::exec::{ErrorKind, ExecError, Format, Options, Request};
 use open_ferry_core::models::ModelCatalog;
 use open_ferry_core::observe::redact::REDACTED;
 use open_ferry_translate::codex_client::{header_value, tool_integers};
-use open_ferry_translate::registry::Registry;
+use open_ferry_translate::registry::{Registry, RequestEnvelope, UnsupportedPartError};
 use serde_json::Value;
 
 use super::tools::sanitize_web_search_tools;
@@ -248,22 +249,23 @@ pub(super) struct Prepared {
 /// Translates the client's payload to the Responses format Meta takes
 /// (`TranslateRequestWithAPIKeyModelCompatibility`, without compatibility
 /// models): a Codex client's tools get integer parameter types and a
-/// Responses request is readied as for any provider but Codex.
+/// Responses request is readied as for any provider but Codex. Gives the
+/// content part the translation refused too, if any.
 fn translate(
     config: Option<&Config>,
     options: &Options,
     base: &str,
     mut payload: Value,
     stream: bool,
-) -> Value {
+) -> (Value, Option<UnsupportedPartError>) {
     compat::before_translation(config, options, &Format::CODEX, &mut payload);
-    Registry::global().translate_request(
-        &options.source_format,
+    let source = &options.source_format;
+    let translated = Registry::global().translate_request_envelope(
+        source,
         &Format::CODEX,
-        base,
-        payload,
-        stream,
-    )
+        RequestEnvelope::new(source, base, stream, payload),
+    );
+    (translated.body, translated.err)
 }
 
 /// Translates and adjusts the payload of a call, which asks for a stream if
@@ -282,14 +284,18 @@ pub(super) fn prepare(
         options.original_request.clone()
     };
     let original = parse_object(&original_bytes);
-    let original_translated = translate(config, options, base, original.clone(), stream);
-    let mut body = translate(
+    // Only the body is sent, so only its translation can refuse the request.
+    let (original_translated, _) = translate(config, options, base, original.clone(), stream);
+    let (mut body, refusal) = translate(
         config,
         options,
         base,
         parse_object(&request.payload),
         stream,
     );
+    if let Some(refusal) = refusal {
+        return Err(refusal.into());
+    }
 
     let to = Format::CODEX;
     let route = Route {

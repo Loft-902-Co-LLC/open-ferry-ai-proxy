@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/runtime/executor/openai_compat_executor.go
 // (the stream reader of ExecuteStream), helps/apply_patch.go
 // (EndApplyPatchStream) and helps/claude_input_tokens.go
-// (TranslateStreamWithClaudeInputTokens) (v8.0.15, MIT).
+// (TranslateStreamWithClaudeInputTokens) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! An OpenAI-compatible provider's SSE stream, read a frame at a time and
@@ -17,7 +17,9 @@
 //!
 //! A stream that closes without `[DONE]` is finished as if it had sent one,
 //! except for an OpenAI Responses client, which needs a terminal event and
-//! gets a 502 instead.
+//! gets a 502 instead, unless the translator has seen how the turn ended (a
+//! `finish_reason`); then that turn is completed. A stream whose read fails
+//! is never completed.
 //!
 //! Deviations from upstream:
 //! - Dropping the stream stops reading, where upstream watches its context.
@@ -309,6 +311,17 @@ impl State {
             // Upstream's `EndApplyPatchStream` doesn't record it.
             self.stop(StatusError::new(502, APPLY_PATCH_ERROR_MESSAGE).into());
             return;
+        }
+        if error.is_none()
+            && !self.seen_done
+            && self.setup.response_format == Format::OPENAI_RESPONSE
+            && self.setup.translator.can_finalize_response_stream()
+        {
+            // The provider said how the turn ended and closed cleanly without
+            // [DONE]: finish it as if it had sent one.
+            let before = self.pending.len();
+            self.send(b"data: [DONE]").await;
+            self.seen_done = self.pending.len() > before;
         }
         if let Some(error) = error {
             tracing::debug!("openai compat executor: stream read failed: {error}");

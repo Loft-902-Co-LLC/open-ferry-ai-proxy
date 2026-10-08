@@ -1,11 +1,14 @@
 // Ported from CLIProxyAPI internal/runtime/executor/openai_responses_signature.go
-// (v8.0.15, MIT).
+// (v8.0.15, MIT), with v8.0.20's compat replay of an unknown-format
+// encrypted_content.
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Cleans the `reasoning` items of a Responses `input` before it goes to
 //! Codex: cleartext `content` moves into an empty `summary` (Codex allows no
 //! reasoning content), an `encrypted_content` that isn't a valid GPT
-//! reasoning signature is dropped, and with `store` off, a reasoning item's
+//! reasoning signature is dropped (in compatibility mode, unless it is of a
+//! format no known provider uses, which the third-party model replays), and
+//! with `store` off, a reasoning item's
 //! `id` goes when it has no usable `encrypted_content`, since Codex would
 //! look the ID up and fail.
 //!
@@ -14,7 +17,9 @@
 //!   instead of splicing raw JSON; the edited items are written by
 //!   `serde_json`.
 
-use open_ferry_translate::signature::inspect_gpt_reasoning_signature;
+use open_ferry_translate::signature::{
+    Provider, detect_signature_provider, inspect_gpt_reasoning_signature,
+};
 use serde_json::{Map, Value, json};
 
 use crate::json::{bool_of, get, str_at, str_of};
@@ -76,8 +81,14 @@ fn sanitize_item(
         Value::String(raw) if raw.as_str() != raw.trim() => {
             Some("encrypted_content has leading or trailing whitespace".to_owned())
         }
+        // In compatibility mode a third-party Responses model (such as
+        // Muse) expects its own encrypted content of an unknown format back;
+        // an empty one and a known provider's still go.
         Value::String(raw) => inspect_gpt_reasoning_signature(raw)
             .err()
+            .filter(|_| {
+                !is_compat || raw.is_empty() || detect_signature_provider(raw) != Provider::Unknown
+            })
             .map(|error| error.to_string()),
         Value::Null => Some("encrypted_content is null".to_owned()),
         other => Some(format!(
@@ -279,6 +290,29 @@ pub(crate) mod tests {
         );
         assert_eq!(get(&body, "input.0.summary"), Some(&json!([])));
         assert!(get(&body, "input.0.encrypted_content").is_none(), "{body}");
+    }
+
+    // v8.0.20's
+    // TestSanitizeOpenAIResponsesReasoningEncryptedContentWithCompat_PreservesUnknownFormatEncryptedContent.
+    #[test]
+    fn compat_preserves_unknown_format_encrypted_content() {
+        const UNKNOWN: &str = "opaque-encrypted-reasoning-token-xyz";
+        let claude = crate::gemini::testing::CLAUDE_SIGNATURE;
+        let raw = format!(
+            r#"{{"store":false,"input":[{{"type":"reasoning","summary":[],"content":null,"encrypted_content":"{UNKNOWN}"}},{{"type":"reasoning","summary":[],"content":null,"encrypted_content":""}},{{"type":"reasoning","summary":[],"content":null,"encrypted_content":"{claude}"}}]}}"#
+        );
+        let mut body: Value = serde_json::from_str(&raw).unwrap();
+        sanitize_reasoning(&mut body, true);
+        assert_eq!(
+            str_at(&body, "input.0.encrypted_content"),
+            UNKNOWN,
+            "{body}"
+        );
+        assert!(get(&body, "input.1.encrypted_content").is_none(), "{body}");
+        assert!(get(&body, "input.2.encrypted_content").is_none(), "{body}");
+
+        let got = sanitize(&raw);
+        assert!(get(&got, "input.0.encrypted_content").is_none(), "{got}");
     }
 
     #[test]

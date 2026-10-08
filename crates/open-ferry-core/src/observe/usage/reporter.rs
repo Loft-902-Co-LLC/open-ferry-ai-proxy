@@ -55,8 +55,9 @@
 //! (upstream's `StreamUsageBuffer.PublishFailure`). Each record keeps the
 //! time to first token (see [`super::ttft`]), the latest answer's headers
 //! with credentials masked, and the model the answer named. When that model
-//! is not the one asked for, a warning is logged, once per credential and
-//! model pair in ten minutes. A Codex WebSocket's time to first token starts
+//! is not the one asked for, a warning is logged, each time, naming the
+//! provider (`unknown` when the call names none). A Codex WebSocket's time
+//! to first token starts
 //! when its request is sent on the open connection ([`Tap::request_sent`]),
 //! not at the dial.
 //!
@@ -127,15 +128,22 @@
 //!   each however short, as a failure's body is: the served model is
 //!   whatever the upstream said, and may echo a token it was sent, while the
 //!   record is served to the management API and written to disk and the
-//!   warning goes to main.log. The substituted-model check and the warning's
-//!   throttle still read the models as they are. Upstream records and logs
-//!   both as they are.
+//!   warning goes to main.log. The substituted-model check still reads the
+//!   models as they are. Upstream records and logs both as they are.
 //! - Meta's calls are read as Codex's, an Execute as the Codex Execute and a
 //!   Stream as the Codex stream, and recorded as `MetaExecutor`'s. The tap
 //!   keeps the counts of the first terminal event of either (a stream's
 //!   `response.done` too, as for Codex), where upstream's Meta executor
 //!   takes the latest `response.completed` or `response.incomplete` of a
 //!   stream and the one its translation found in an Execute's.
+//! - A failure whose error keeps the answer's usage
+//!   ([`ExecError::keeps_usage`], set by the Meta and xAI executors when an
+//!   answer's `apply_patch` call can't be carried over) keeps the counts
+//!   the tap read of the whole answer, or of the stream as far as it was
+//!   read. Upstream's executors keep what they had observed when the bridge
+//!   failed, so where the bridge fails at an event before the terminal one
+//!   of an answer read whole, upstream's record has no counts and this one
+//!   has the terminal event's.
 //! - A stream's reading stops at its terminal line, not at the blank line
 //!   after it: an OpenAI-compatible stream at the `[DONE]` line, where
 //!   upstream's scanner leaves its loop at the next line, and Claude's at
@@ -151,6 +159,12 @@
 //!   its cancellation error (`newClaudeOAuthCancellationError`) only for an
 //!   OAuth credential, and records another credential's read cut off by the
 //!   canceled context as the scanner's error.
+//! - A Gemini or Vertex AI stream dropped once it was answered is a
+//!   success, with the counts it had read. Upstream's is too when the client
+//!   went away after the terminal chunk reached it (v8.0.20) or while the
+//!   executor waited to hand a chunk on, but a failure when the cancel cut
+//!   off a read before the terminal chunk; a dropped stream here can't tell
+//!   those apart.
 //! - The image generation tool's model is read from the request as it was
 //!   sent, after the payload rules; upstream reads the body before its
 //!   payload finalizer, so a rule that changes the tool's model changes
@@ -184,9 +198,7 @@ use super::parse::{
     parse_interactions_usage, parse_openai_usage,
 };
 use super::record_json::Record;
-use super::response_model::{
-    ResponseModel, ThrottleKey, is_model_substituted, normalize_model_name,
-};
+use super::response_model::{ResponseModel, is_model_substituted};
 use super::ttft::{Ttft, is_responses_token_event};
 use crate::auth::Auth;
 use crate::exec::{ExecError, Format, Options, Request};
@@ -616,6 +628,8 @@ fn is_done(line: &[u8]) -> bool {
 struct Failure {
     status: i64,
     body: String,
+    /// Whether the answer's counts still count ([`ExecError::keeps_usage`]).
+    keeps_usage: bool,
 }
 
 impl Failure {
@@ -623,6 +637,7 @@ impl Failure {
         Self {
             status: i64::from(error.http_status()),
             body: error.to_string().trim().to_owned(),
+            keeps_usage: error.keeps_usage,
         }
     }
 
@@ -630,6 +645,7 @@ impl Failure {
         Self {
             status: CANCELED_STATUS,
             body: CANCELED_MESSAGE.to_owned(),
+            keeps_usage: false,
         }
     }
 }
@@ -972,6 +988,57 @@ impl Call {
         Some(detail)
     }
 
+    /// The counts a failure whose error keeps them publishes: those of the
+    /// answer read whole, or those the stream had read; none when it read
+    /// none.
+    fn kept_usage(&mut self) -> Detail {
+        let detail = match self.mode {
+            Mode::CodexStream | Mode::CodexWebsocket => {
+                self.held.take().and_then(|held| held.detail)
+            }
+            mode if mode.reads_whole() => {
+                let detail = self.whole_answer();
+                // A failed call has no image generation tool record.
+                self.image = None;
+                detail
+            }
+            _ => self.buffered(),
+        };
+        detail.unwrap_or_default()
+    }
+
+    /// The counts of Meta's answer that isn't a stream: a JSON
+    /// `response.completed` or `response.incomplete` event, or a Responses
+    /// object, read as the completed event it stands for (upstream's
+    /// `metaAsCompletedEvent`), with no counts when it names none
+    /// (`EnsurePublished`). None for anything else, and for another
+    /// provider's.
+    fn plain_completed_usage(&mut self, body: &[u8]) -> Option<Detail> {
+        if self.provider != "meta" {
+            return None;
+        }
+        let trimmed = json::trim_space(body);
+        if !json::valid(trimmed) {
+            return None;
+        }
+        let doc = Doc::parse(trimmed);
+        let kind = doc.get("type").string();
+        let event = if kind == "response.completed" || kind == "response.incomplete" {
+            trimmed.to_vec()
+        } else if doc.get("object").string() == "response" || doc.get("output").exists() {
+            [
+                br#"{"type":"response.completed","response":"#.as_slice(),
+                trimmed,
+                b"}",
+            ]
+            .concat()
+        } else {
+            return None;
+        };
+        self.response_model.observe(&event, &self.provider);
+        Some(parse_codex_usage(&event).unwrap_or_default())
+    }
+
     /// The counts of an answer read whole; none when it is not recorded.
     fn whole_answer(&mut self) -> Option<Detail> {
         let body = std::mem::take(&mut self.body);
@@ -1014,10 +1081,12 @@ impl Call {
                 for line in lines_of(&body) {
                     self.line(line, now);
                 }
+                let Some(held) = self.held.take() else {
+                    return self.plain_completed_usage(&body);
+                };
                 // The tool's counts publish the call's record first, empty
                 // when the call's own are missing (upstream's
                 // `EnsurePublished` in `publishCodexImageToolUsage`).
-                let held = self.held.take()?;
                 let detail = held
                     .detail
                     .or_else(|| held.image.as_ref().map(|_| Detail::default()));
@@ -1059,6 +1128,12 @@ impl Call {
             // canceled send returns, and a canceled read is a failure too.
             (_, Outcome::Canceled) if !self.answered => {
                 Some(failure(Detail::default(), Failure::canceled()))
+            }
+            // The answer came and counts, though the call failed (v8.0.20's
+            // `PublishFailure` with the usage observed).
+            (_, Outcome::Failed) if error.keeps_usage => {
+                let detail = self.kept_usage();
+                Some(failure(detail, error))
             }
             (mode, Outcome::Failed) if mode.reads_whole() => {
                 Some(failure(Detail::default(), error))
@@ -1311,19 +1386,10 @@ impl UsageTap {
         if served.is_empty() || !is_model_substituted(&call.model, served) {
             return;
         }
-        let provider = match call.provider.as_str() {
-            "" => "codex",
+        let provider = match call.provider.trim() {
+            "" => "unknown",
             provider => provider,
         };
-        let allowed = self.inner.throttle.allow(ThrottleKey {
-            provider: provider.to_owned(),
-            auth_id: call.credential.id.clone(),
-            requested: normalize_model_name(&call.model),
-            served: normalize_model_name(served),
-        });
-        if !allowed {
-            return;
-        }
         let index = match call.credential.index.as_str() {
             "" => "nil",
             index => index,

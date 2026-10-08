@@ -275,6 +275,34 @@ fn a_canceled_claude_stream_is_a_failure_that_keeps_its_usage() {
     assert_eq!(int_at(&record, "/tokens/output_tokens"), 15);
 }
 
+/// Upstream's `TestGeminiVertexStream_ClientDisconnectAfterTerminalEventIsNotFailed`
+/// (v8.0.20), for the tap: a Vertex AI stream whose client goes away after
+/// the chunk with the finish reason is complete, with its counts. The API
+/// key and service account rows are one here, as the tap reads both alike.
+#[test]
+fn a_vertex_stream_canceled_after_its_terminal_chunk_is_not_failed() {
+    for finish in ["STOP", "MAX_TOKENS"] {
+        let harness = Harness::new();
+        let driver = ClientCall::new("gemini-3.7-flash").stream().tap(&harness);
+        driver.attempt(
+            AttemptKind::Stream,
+            "vertex",
+            "gemini-3.7-flash",
+            &auth("vertex-1", "0", "vertex"),
+        );
+        driver.head(200, &[("content-type", "text/event-stream")]);
+        driver.chunk(&format!(
+            "data: {{\"candidates\":[{{\"content\":{{\"parts\":[{{\"text\":\"hello\"}}]}},\"finishReason\":\"{finish}\"}}],\"usageMetadata\":{{\"promptTokenCount\":10,\"candidatesTokenCount\":5,\"totalTokenCount\":15}},\"modelVersion\":\"gemini-3.7-flash\",\"responseId\":\"vertex-terminal-disconnect\"}}\n\n"
+        ));
+        driver.finish(Outcome::Canceled);
+        let record = harness.record();
+        assert!(!bool_at(&record, "/failed"), "{finish}: {record}");
+        assert_eq!(int_at(&record, "/tokens/input_tokens"), 10, "{finish}");
+        assert_eq!(int_at(&record, "/tokens/output_tokens"), 5, "{finish}");
+        assert_eq!(int_at(&record, "/tokens/total_tokens"), 15, "{finish}");
+    }
+}
+
 /// Not upstream's: a Claude stream whose reader goes away, with the
 /// manager's report around the executor's stream as it makes it, publishes
 /// the same failure, with the counts read.

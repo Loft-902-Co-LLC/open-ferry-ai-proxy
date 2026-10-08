@@ -417,7 +417,7 @@ pub(crate) fn prepare_body(
         Kind::Stream => (Format::CODEX, true),
         Kind::Execute | Kind::CountTokens => (Format::CODEX, false),
     };
-    let mut body = compat::translate(
+    let mut body = compat::translate_checked(
         kind,
         context,
         request,
@@ -425,7 +425,7 @@ pub(crate) fn prepare_body(
         &to,
         stream,
         payload.clone(),
-    );
+    )?;
     let route = Route {
         model: &request.model,
         from: options.source_format.as_str(),

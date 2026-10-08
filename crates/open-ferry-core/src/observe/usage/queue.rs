@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use tokio::sync::mpsc;
 
-use super::response_model::Clock;
+use super::Clock;
 
 /// How long records are kept unless configured (upstream's
 /// `defaultRetentionSeconds`).

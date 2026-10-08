@@ -70,6 +70,8 @@ struct Reply {
     headers: Vec<(&'static str, &'static str)>,
     /// The body, written in these parts.
     parts: Vec<String>,
+    /// Whether the body breaks off after its parts, so that reading it fails.
+    broken: bool,
 }
 
 impl Reply {
@@ -83,6 +85,15 @@ impl Reply {
             status: 200,
             headers: vec![("content-type", "text/event-stream")],
             parts: parts.iter().map(|part| (*part).to_owned()).collect(),
+            broken: false,
+        }
+    }
+
+    /// An event stream written in `parts`, whose connection then breaks.
+    fn broken(parts: &[&str]) -> Self {
+        Self {
+            broken: true,
+            ..Self::chunked(parts)
         }
     }
 
@@ -133,12 +144,20 @@ impl Mock {
                     .into_iter()
                     .map(|part| Ok::<_, io::Error>(Bytes::from(part)))
                     .collect();
+                // The break comes once the parts are on their way.
+                let tail =
+                    futures_util::stream::iter(reply.broken.then_some(())).then(|()| async {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        Err(io::Error::other("the connection broke"))
+                    });
                 let mut response = axum::response::Response::builder().status(reply.status);
                 for (name, value) in reply.headers {
                     response = response.header(name, value);
                 }
                 response
-                    .body(Body::from_stream(futures_util::stream::iter(parts)))
+                    .body(Body::from_stream(
+                        futures_util::stream::iter(parts).chain(tail),
+                    ))
                     .unwrap()
             }
         });
@@ -624,12 +643,18 @@ async fn openai_stream(body: &str, model: &str) -> (Vec<String>, Option<ExecErro
 
 /// Streams `body` from the mock to an OpenAI Responses client.
 async fn responses_stream(body: &str) -> (Vec<String>, Option<ExecError>) {
-    let mock = Mock::start(Reply::sse(body)).await;
+    responses_reply(Reply::sse(body), RESPONSES_REQUEST).await
+}
+
+/// Streams `reply` from the mock to an OpenAI Responses client that sent
+/// `payload`.
+async fn responses_reply(reply: Reply, payload: &str) -> (Vec<String>, Option<ExecError>) {
+    let mock = Mock::start(reply).await;
     let response = executor(Vec::new())
         .execute_stream(
             plain_auth(&mock.base_url()),
-            request("deepseek-v4-flash", RESPONSES_REQUEST),
-            responses_stream_options(RESPONSES_REQUEST),
+            request("deepseek-v4-flash", payload),
+            responses_stream_options(payload),
         )
         .await
         .unwrap();
@@ -671,6 +696,79 @@ async fn responses_stream_fails_on_eof_without_done() {
     let error = error.expect("clean EOF without [DONE] did not produce a terminal stream error");
     assert_eq!(error.status, 502, "{error:?}");
     assert!(error.message.contains("closed before [DONE]"), "{error:?}");
+}
+
+const EOF_CONTENT: &str = r#"data: {"id":"chatcmpl-eof","object":"chat.completion.chunk","created":1773896263,"model":"test","choices":[{"index":0,"delta":{"role":"assistant","content":"done"},"finish_reason":null}]}"#;
+const EOF_FINISH: &str = r#"data: {"id":"chatcmpl-eof","object":"chat.completion.chunk","created":1773896263,"model":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#;
+const EOF_REQUEST: &str = r#"{"model":"test","input":[{"role":"user","content":[{"type":"input_text","text":"hello"}]}],"stream":true}"#;
+
+// Upstream's `issue6381_responses_eof_test.go`: its
+// `ResponsesEOFBeforeFinishReasonFailsStream` is
+// `responses_stream_fails_on_eof_without_done` above.
+
+#[tokio::test]
+async fn responses_stream_completes_on_eof_after_finish_reason() {
+    let usage = r#"data: {"id":"chatcmpl-eof","object":"chat.completion.chunk","created":1773896263,"model":"test","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}"#;
+    let body = format!("{EOF_CONTENT}\n\n{EOF_FINISH}\n\n{usage}\n\n");
+    let (chunks, error) = responses_reply(Reply::sse(&body), EOF_REQUEST).await;
+    assert!(
+        error.is_none(),
+        "unexpected stream error after a completed finish_reason: {error:?}"
+    );
+    let streamed = chunks.concat();
+    assert_eq!(
+        streamed.matches(r#""type":"response.completed""#).count(),
+        1,
+        "{streamed:?}"
+    );
+    assert!(
+        streamed.contains(r#""input_tokens":3"#) && streamed.contains(r#""output_tokens":1"#),
+        "late usage was not preserved in response.completed: {streamed:?}"
+    );
+}
+
+#[tokio::test]
+async fn responses_stream_completes_on_eof_after_apply_patch_finish_reason() {
+    use crate::apply_patch_bridge_tests::{PATCH_REQUEST, frames};
+
+    let (first, last) = frames("chat", "apply_patch");
+    let last = last.replacen("\ndata: [DONE]\n\n", "\n\n", 1);
+    let (chunks, error) =
+        responses_reply(Reply::sse(&format!("{first}{last}")), PATCH_REQUEST).await;
+    assert!(
+        error.is_none(),
+        "unexpected apply_patch stream error after a completed finish_reason: {error:?}"
+    );
+    let streamed = chunks.concat();
+    assert_eq!(
+        streamed.matches(r#""type":"response.completed""#).count(),
+        1,
+        "{streamed:?}"
+    );
+    assert!(
+        !streamed.contains(r#""type":"response.failed""#),
+        "{streamed:?}"
+    );
+}
+
+#[tokio::test]
+async fn responses_stream_read_error_is_not_completed() {
+    let content = format!("{EOF_CONTENT}\n\n");
+    let finish = format!("{EOF_FINISH}\n\n");
+    let (chunks, error) = responses_reply(Reply::broken(&[&content, &finish]), EOF_REQUEST).await;
+    let streamed = chunks.concat();
+    assert!(
+        streamed.contains(r#""type":"response.output_text.delta""#),
+        "the stream did not deliver its valid content frame: {streamed:?}"
+    );
+    assert!(
+        error.is_some(),
+        "a read error was treated as a successful stream: {streamed:?}"
+    );
+    assert!(
+        !streamed.contains(r#""type":"response.completed""#),
+        "{streamed:?}"
+    );
 }
 
 #[tokio::test]

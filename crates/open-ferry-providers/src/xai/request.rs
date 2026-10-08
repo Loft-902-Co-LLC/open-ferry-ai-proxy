@@ -3,7 +3,7 @@
 // applyXAIDefaultHeaders, applyXAICustomHeaders, xaiExecutionSessionID,
 // normalizeXAIImageRefs, preserveXAIResponsesOutputControls) and the
 // image/video routing of xai_executor_execute.go and xai_executor_media.go
-// (v8.0.15, MIT).
+// (v8.0.15, MIT), with v8.0.20's translation errors.
 // https://github.com/router-for-me/CLIProxyAPI
 //
 // Also ported from CLIProxyAPI internal/runtime/executor/helps/payload_finalizer.go
@@ -69,7 +69,7 @@ use open_ferry_core::config::Config;
 use open_ferry_core::exec::{ErrorKind, ExecError, Format, Options, Request};
 use open_ferry_translate::codex_client::{header_value, multi_agent_v2};
 use open_ferry_translate::json::exact;
-use open_ferry_translate::registry::Registry;
+use open_ferry_translate::registry::{Registry, RequestEnvelope, UnsupportedPartError};
 use serde_json::Value;
 
 use super::reasoning;
@@ -264,7 +264,8 @@ pub(crate) fn client_session_id(payload: &[u8]) -> String {
 
 /// Translates the client's payload to `to` as upstream does for an executor
 /// that isn't Codex's (`TranslateRequestWithAPIKeyModelCompatibilityForExecutor`
-/// without a compatibility model).
+/// without a compatibility model), and the content part the translation
+/// refused, if any.
 fn translate(
     config: Option<&Config>,
     options: &Options,
@@ -272,9 +273,15 @@ fn translate(
     model: &str,
     mut payload: Value,
     stream: bool,
-) -> Value {
+) -> (Value, Option<UnsupportedPartError>) {
     compat::before_translation(config, options, to, &mut payload);
-    Registry::global().translate_request(&options.source_format, to, model, payload, stream)
+    let source = &options.source_format;
+    let translated = Registry::global().translate_request_envelope(
+        source,
+        to,
+        RequestEnvelope::new(source, model, stream, payload),
+    );
+    (translated.body, translated.err)
 }
 
 /// Keeps the client's output limit and sampling settings, which the
@@ -317,10 +324,15 @@ pub(crate) fn prepare(
         options.original_request.clone()
     };
     let original = parse_object(&original_payload);
-    let mut original_translated = translate(config, options, &to, &base, original.clone(), stream);
+    let (mut original_translated, _) =
+        translate(config, options, &to, &base, original.clone(), stream);
     preserve_output_controls(&mut original_translated, &original, from);
     let payload = parse_object(&request.payload);
-    let mut body = translate(config, options, &to, &base, payload.clone(), stream);
+    // Only the body is sent, so only its translation can refuse the request.
+    let (mut body, refusal) = translate(config, options, &to, &base, payload.clone(), stream);
+    if let Some(refusal) = refusal {
+        return Err(refusal.into());
+    }
     preserve_output_controls(&mut body, &payload, from);
 
     thinking::apply_request(

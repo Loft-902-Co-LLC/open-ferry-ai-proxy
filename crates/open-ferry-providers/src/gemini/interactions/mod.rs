@@ -156,7 +156,10 @@ impl InteractionsExecutor {
     ) -> Result<Value, ExecError> {
         let config = self.config.as_deref();
         let base = base_model(&request.model);
-        let (original, mut body) = translate_pair(config, request, options, base, stream);
+        let (original, mut body, refusal) = translate_pair(config, request, options, base, stream);
+        if let Some(refusal) = refusal {
+            return Err(refusal.into());
+        }
         if json::exists(&body, "model") && !base.is_empty() {
             set_string_if_different(&mut body, "model", base);
         }

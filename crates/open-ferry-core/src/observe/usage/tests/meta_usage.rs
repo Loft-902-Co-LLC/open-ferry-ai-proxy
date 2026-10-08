@@ -8,6 +8,7 @@
 //! for a Stream, so these tests run both through it.
 
 use super::support::{ClientCall, Harness, auth, int_at, str_field};
+use crate::exec::ExecError;
 use crate::observe::{AttemptKind, Outcome};
 
 const CREATED: &str =
@@ -71,4 +72,78 @@ fn an_incomplete_event_counts_too() {
         assert_eq!(int_at(&record, "/tokens/output_tokens"), 4, "{kind:?}");
         assert_eq!(int_at(&record, "/tokens/total_tokens"), 9, "{kind:?}");
     }
+}
+
+/// Runs a Meta Execute whose answer is `body` through the usage tap, ending
+/// as `end` says, and returns its one record.
+fn meta_execute(body: &str, end: Option<&ExecError>) -> serde_json::Value {
+    let harness = Harness::new();
+    let driver = ClientCall::new("muse-spark").tap(&harness);
+    driver.attempt(
+        AttemptKind::Execute,
+        "meta",
+        "muse-spark",
+        &auth("meta-1", "0", "meta"),
+    );
+    driver.head(200, &[("content-type", "application/json")]);
+    driver.chunk(body);
+    match end {
+        Some(error) => driver.fail(error),
+        None => driver.finish(Outcome::Completed),
+    }
+    harness.record()
+}
+
+// Upstream's `metaAsCompletedEvent`: a reply that isn't a stream, a
+// Responses object or a completed event, is counted as the completed event
+// it stands for, or with no counts when it names none (`EnsurePublished`).
+#[test]
+fn a_plain_reply_is_counted_as_its_completed_event() {
+    let object = r#"{"object":"response","model":"muse-spark","output":[],"usage":{"input_tokens":11,"output_tokens":7}}"#;
+    let event = r#"{"type":"response.completed","response":{"model":"muse-spark","usage":{"input_tokens":11,"output_tokens":7}}}"#;
+    for body in [object, event] {
+        let record = meta_execute(body, None);
+        assert_eq!(int_at(&record, "/tokens/input_tokens"), 11, "{body}");
+        assert_eq!(int_at(&record, "/tokens/output_tokens"), 7, "{body}");
+        assert_eq!(str_field(&record, "response_model"), "muse-spark", "{body}");
+    }
+    let record = meta_execute(r#"{"output":[]}"#, None);
+    assert_eq!(int_at(&record, "/tokens/input_tokens"), 0);
+    assert_eq!(record.get("failed").and_then(|v| v.as_bool()), Some(false));
+}
+
+// v8.0.20's `upstreamUsage.PublishFailure`: an error that keeps the answer's
+// usage makes a failure with its counts; any other error, one without.
+#[test]
+fn a_failure_keeps_the_counts_only_when_its_error_does() {
+    let stream = [CREATED, DELTA, COMPLETED].join("\n\n") + "\n\n";
+    let plain =
+        r#"{"object":"response","output":[],"usage":{"input_tokens":11,"output_tokens":7}}"#;
+    let kept = ExecError::upstream(502, "patch").with_usage_kept();
+    let dropped = ExecError::upstream(502, "patch");
+    for body in [stream.as_str(), plain] {
+        let record = meta_execute(body, Some(&kept));
+        assert_eq!(record.get("failed").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(int_at(&record, "/tokens/input_tokens"), 11, "{body}");
+        assert_eq!(int_at(&record, "/tokens/output_tokens"), 7, "{body}");
+        let record = meta_execute(body, Some(&dropped));
+        assert_eq!(record.get("failed").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(int_at(&record, "/tokens/input_tokens"), 0, "{body}");
+    }
+    // A stream keeps what it had read.
+    let harness = Harness::new();
+    let driver = ClientCall::new("muse-spark").stream().tap(&harness);
+    driver.attempt(
+        AttemptKind::Stream,
+        "meta",
+        "muse-spark",
+        &auth("meta-1", "0", "meta"),
+    );
+    driver.head(200, &[("content-type", "text/event-stream")]);
+    driver.chunk(&stream);
+    driver.fail(&kept);
+    let record = harness.record();
+    assert_eq!(record.get("failed").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(int_at(&record, "/tokens/input_tokens"), 11);
+    assert_eq!(int_at(&record, "/tokens/output_tokens"), 7);
 }

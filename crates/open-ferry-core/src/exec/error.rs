@@ -3,13 +3,15 @@
 // sdk/cliproxy/auth/home_concurrency.go, HTTPStatusFromError in
 // internal/clienterror/client_error.go and
 // sdk/cliproxy/executor/websocket.go (UpstreamWebsocketReplayRequiredError,
-// NewUpstreamWebsocketReplayRequiredError) (v8.0.15, MIT).
+// NewUpstreamWebsocketReplayRequiredError) (v8.0.15, MIT), with v8.0.20's
+// UnsupportedPartError conversion and an error that keeps the answer's usage.
 // https://github.com/router-for-me/CLIProxyAPI
 
 use std::fmt;
 use std::time::Duration;
 
 use http::{HeaderMap, HeaderValue, header};
+use open_ferry_translate::registry::UnsupportedPartError;
 use serde_json::{Map, Value, json};
 
 /// What failed, as far as the HTTP layer needs to know.
@@ -114,6 +116,11 @@ pub struct ExecError {
     /// Whether the failure is this request's only, so the credential stays
     /// usable (upstream's `IsRequestScoped`).
     pub request_scoped: bool,
+    /// Whether the provider answered and the answer's usage counts though
+    /// the call failed, as when its `apply_patch` call couldn't be carried
+    /// over: the failure's usage record keeps the counts the answer gave
+    /// (upstream's `StreamUsageBuffer.PublishFailure` with what it observed).
+    pub keeps_usage: bool,
 }
 
 impl ExecError {
@@ -131,6 +138,7 @@ impl ExecError {
             ws_close: None,
             credential_scoped: false,
             request_scoped: false,
+            keeps_usage: false,
         }
     }
 
@@ -265,6 +273,12 @@ impl ExecError {
         self
     }
 
+    /// Marks the failure as one whose answer's usage counts.
+    pub fn with_usage_kept(mut self) -> Self {
+        self.keeps_usage = true;
+        self
+    }
+
     /// The HTTP status to answer with, or 0 when the error has none
     /// (upstream's `HTTPStatusFromError`).
     pub fn http_status(&self) -> u16 {
@@ -308,6 +322,16 @@ impl fmt::Display for ExecError {
 }
 
 impl std::error::Error for ExecError {}
+
+impl From<UnsupportedPartError> for ExecError {
+    /// A request a translator refused, for a content part the provider
+    /// can't receive: a 400 naming the part, which leaves the credential
+    /// usable (upstream's `UnsupportedPartError`, which executors return
+    /// before calling the provider).
+    fn from(error: UnsupportedPartError) -> Self {
+        Self::upstream(error.status_code(), error.to_string()).with_request_scoped()
+    }
+}
 
 /// Whole seconds, rounded up.
 fn ceil_seconds(duration: Duration) -> u64 {
@@ -361,6 +385,20 @@ mod tests {
             ExecError::empty_stream().to_string(),
             "empty_stream: upstream stream closed before first payload"
         );
+    }
+
+    /// `TestExecutionErrorMessage_UnsupportedPartKeepsNameAnd400`, at the
+    /// executor's error: a refused part keeps its name and answers 400,
+    /// and the credential stays usable.
+    #[test]
+    fn unsupported_part_keeps_its_name_and_400() {
+        let error = ExecError::from(UnsupportedPartError::new("container_upload"));
+        assert_eq!(error.http_status(), 400);
+        assert_eq!(
+            error.to_string(),
+            "unsupported content part: container_upload"
+        );
+        assert!(error.request_scoped && !error.credential_scoped);
     }
 
     #[test]

@@ -204,6 +204,14 @@ pub trait StreamTranslator: Send {
     fn tool_input_error(&self) -> Option<&(dyn Error + 'static)> {
         None
     }
+
+    /// Whether the provider's stream has said how the turn ended, so that a
+    /// clean end without `[DONE]` can still be completed for an OpenAI
+    /// Responses client by translating `data: [DONE]` (upstream's
+    /// `CanFinalizeResponseStream`). By default it can't.
+    fn can_finalize_response_stream(&self) -> bool {
+        false
+    }
 }
 
 /// Makes a [`StreamTranslator`] for one response.
@@ -556,6 +564,14 @@ impl ResponseStream {
     /// See [`StreamTranslator::tool_input_error`].
     pub fn tool_input_error(&self) -> Option<&(dyn Error + 'static)> {
         self.native.as_ref()?.tool_input_error()
+    }
+
+    /// See [`StreamTranslator::can_finalize_response_stream`]. A stream
+    /// passed on as it is can't be finalized.
+    pub fn can_finalize_response_stream(&self) -> bool {
+        self.native
+            .as_ref()
+            .is_some_and(|native| native.can_finalize_response_stream())
     }
 }
 

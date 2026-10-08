@@ -1,4 +1,5 @@
-// Ported from CLIProxyAPI internal/runtime/executor/gemini_interactions_translate_test.go (v8.0.15, MIT).
+// Ported from CLIProxyAPI internal/runtime/executor/gemini_interactions_translate_test.go
+// and v8.0.20's helps/request_pair_error_test.go (v8.0.15, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! How the body and the payload rules' baseline are translated.
@@ -51,9 +52,10 @@ fn the_same_bytes_are_translated_alike() {
         let payload = Bytes::from_static(payload.as_bytes());
         for stream in [false, true] {
             let options = Options::new(format.clone());
-            let (base, work) =
+            let (base, work, refusal) =
                 translate_pair(None, &request(model, &payload), &options, model, stream);
-            let want = translate_body(None, &options, model, parse(&payload), stream);
+            assert_eq!(refusal, None);
+            let want = translate_body(None, &options, model, parse(&payload), stream).0;
             assert_eq!(base, want, "{format:?} stream={stream}");
             assert_eq!(work, want, "{format:?} stream={stream}");
             assert!(want.get("input").is_some(), "{want}");
@@ -103,17 +105,23 @@ fn the_same_bytes_are_translated_once() {
     for stream in [false, true] {
         let once = vec![(model.to_owned(), stream)];
         let mut options = Options::new(from.clone());
-        let (base, work) = translate_pair(None, &request(model, &payload), &options, model, stream);
+        let (base, work, refusal) =
+            translate_pair(None, &request(model, &payload), &options, model, stream);
+        assert_eq!(refusal, None);
         assert_eq!(take(), once, "no original, stream={stream}");
         assert_eq!((&base, &work), (&want, &want));
 
         options.original_request = payload.clone();
-        let (base, work) = translate_pair(None, &request(model, &payload), &options, model, stream);
+        let (base, work, refusal) =
+            translate_pair(None, &request(model, &payload), &options, model, stream);
+        assert_eq!(refusal, None);
         assert_eq!(take(), once, "the same bytes, stream={stream}");
         assert_eq!((&base, &work), (&want, &want));
 
         options.original_request = Bytes::copy_from_slice(&payload);
-        let (base, work) = translate_pair(None, &request(model, &payload), &options, model, stream);
+        let (base, work, refusal) =
+            translate_pair(None, &request(model, &payload), &options, model, stream);
+        assert_eq!(refusal, None);
         assert_eq!(take().len(), 2, "equal bytes elsewhere, stream={stream}");
         assert_eq!((&base, &work), (&want, &want));
     }
@@ -136,14 +144,16 @@ fn distinct_inputs_are_translated_apart() {
             original_request: original.clone(),
             ..Options::new(Format::OPENAI)
         };
-        let (base, work) = translate_pair(None, &request(model, &payload), &options, model, true);
+        let (base, work, refusal) =
+            translate_pair(None, &request(model, &payload), &options, model, true);
+        assert_eq!(refusal, None);
         assert_eq!(
             work,
-            translate_body(None, &options, model, parse(&payload), true)
+            translate_body(None, &options, model, parse(&payload), true).0
         );
         assert_eq!(
             base,
-            translate_body(None, &options, model, parse(&original), true)
+            translate_body(None, &options, model, parse(&original), true).0
         );
     }
 }
@@ -156,15 +166,60 @@ fn an_interactions_request_is_copied() {
     let original = Bytes::from_static(br#"{"model":"gemini-3.1-flash-lite","input":"original"}"#);
     for format in [Format::new(""), Format::INTERACTIONS] {
         let mut options = Options::new(format.clone());
-        let (base, work) = translate_pair(None, &request(model, &payload), &options, model, false);
+        let (base, work, refusal) =
+            translate_pair(None, &request(model, &payload), &options, model, false);
+        assert_eq!(refusal, None);
         assert_eq!(base, parse(&payload), "{format:?}");
         assert_eq!(work, parse(&payload), "{format:?}");
 
         options.original_request = original.clone();
-        let (base, work) = translate_pair(None, &request(model, &payload), &options, model, true);
+        let (base, work, refusal) =
+            translate_pair(None, &request(model, &payload), &options, model, true);
+        assert_eq!(refusal, None);
         assert_eq!(work, parse(&payload), "{format:?}");
         assert_eq!(base, parse(&original), "{format:?}");
     }
+}
+
+/// Ports v8.0.20's TestPairTranslationReportsOnlyTheWorkingError for the
+/// Interactions pair: only the body is sent, so only its translation's
+/// refusal counts; a refusal of the one translation that serves both does.
+#[test]
+fn only_the_body_translation_can_refuse() {
+    let model = "gemini-3.1-flash-lite";
+    let file = Bytes::from_static(
+        br#"{"model":"m","max_tokens":8,"messages":[{"role":"user","content":[{"type":"container_upload","file_id":"file-1"}]}]}"#,
+    );
+    let text = Bytes::from_static(
+        br#"{"model":"m","max_tokens":8,"messages":[{"role":"user","content":[{"type":"text","text":"keep me"}]}]}"#,
+    );
+    let pair = |original: &Bytes, payload: &Bytes| {
+        let options = Options {
+            original_request: original.clone(),
+            ..Options::new(Format::CLAUDE)
+        };
+        translate_pair(None, &request(model, payload), &options, model, false)
+    };
+    let refused = |refusal: Option<UnsupportedPartError>, label: &str| {
+        let refusal = refusal.unwrap_or_else(|| panic!("{label}: accepted"));
+        assert_eq!(refusal.part_type, "container_upload", "{label}");
+        assert_eq!(
+            refusal.to_string(),
+            "unsupported content part: container_upload"
+        );
+    };
+
+    let (_, work, refusal) = pair(&file, &text);
+    assert_eq!(refusal, None, "a refused baseline rejected the body");
+    assert!(work.to_string().contains("keep me"), "{work}");
+    let (_, _, refusal) = pair(&text, &file);
+    refused(refusal, "the body refused");
+    let (_, _, refusal) = pair(&file, &file);
+    refused(refusal, "the same bytes refused");
+    let (_, _, refusal) = pair(&Bytes::new(), &file);
+    refused(refusal, "no original, the body refused");
+    let (_, _, refusal) = pair(&text, &text);
+    assert_eq!(refusal, None);
 }
 
 // Not upstream's: the revision is the one the headers already carry, else

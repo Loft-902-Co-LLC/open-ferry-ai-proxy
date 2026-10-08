@@ -10,7 +10,8 @@
 // (RewriteCodexOrphanDelegationInputForConfig,
 // TranslateRequestEnvelopeWithCodexMultiAgentV2), and
 // sdk/cliproxy/auth/api_key_model_capabilities.go (CodexAPIKeyModelIsCompat)
-// with conductor_models.go (resolveAPIKeyConfig) (v8.0.15, MIT).
+// with conductor_models.go (resolveAPIKeyConfig) (v8.0.15, MIT), with
+// v8.0.20's translation errors.
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Codex clients' requests, and compatibility models, around translation.
@@ -67,7 +68,7 @@ use open_ferry_translate::codex_client::{
 };
 use open_ferry_translate::go;
 use open_ferry_translate::models::ModelCatalog as Catalog;
-use open_ferry_translate::registry::Registry;
+use open_ferry_translate::registry::{Registry, RequestEnvelope, UnsupportedPartError};
 use open_ferry_translate::thinking::summary;
 use serde_json::Value;
 
@@ -413,7 +414,9 @@ fn api_key_model_is_compat(config: &Config, auth: &Auth, model: &str) -> bool {
 /// A Claude request to a compatibility model goes through the
 /// compatibility translator. A token count of a Responses request also has
 /// its orphan delegation outputs rewritten first, as upstream's counting
-/// path does.
+/// path does. A refusal is ignored: this is for the payload rules'
+/// baseline, which is never sent; the body to send comes from
+/// [`translate_checked`].
 pub(crate) fn translate(
     kind: Kind,
     context: Context<'_>,
@@ -421,8 +424,39 @@ pub(crate) fn translate(
     options: &Options,
     to: &Format,
     stream: bool,
-    mut payload: Value,
+    payload: Value,
 ) -> Value {
+    translate_envelope(kind, context, request, options, to, stream, payload).0
+}
+
+/// [`translate`] for the body to send: the content part the translation
+/// refused, either translator's, when there is one, so the request is never
+/// sent (v8.0.20's `TranslateRequestReturningError`).
+pub(crate) fn translate_checked(
+    kind: Kind,
+    context: Context<'_>,
+    request: &Request,
+    options: &Options,
+    to: &Format,
+    stream: bool,
+    payload: Value,
+) -> Result<Value, UnsupportedPartError> {
+    match translate_envelope(kind, context, request, options, to, stream, payload) {
+        (_, Some(refusal)) => Err(refusal),
+        (body, None) => Ok(body),
+    }
+}
+
+/// [`translate`]'s body and refusal.
+fn translate_envelope(
+    kind: Kind,
+    context: Context<'_>,
+    request: &Request,
+    options: &Options,
+    to: &Format,
+    stream: bool,
+    mut payload: Value,
+) -> (Value, Option<UnsupportedPartError>) {
     let base = base_model(&request.model);
     let source = &options.source_format;
     if kind == Kind::CountTokens
@@ -435,11 +469,16 @@ pub(crate) fn translate(
     }
     if *source == Format::CLAUDE && *to == Format::CODEX && is_compat(context, request, options) {
         let summary = summary::extract_translated(&payload, source.as_str(), to.as_str());
-        let (mut body, _) = convert_claude_request_to_codex_with_compat(base, &payload);
+        let (mut body, refusal) = convert_claude_request_to_codex_with_compat(base, &payload);
         summary::apply_for_model(&mut body, to.as_str(), base, summary, &Catalog::current());
-        return body;
+        return (body, refusal);
     }
-    Registry::global().translate_request(source, to, base, payload, stream)
+    let translated = Registry::global().translate_request_envelope(
+        source,
+        to,
+        RequestEnvelope::new(source, base, stream, payload),
+    );
+    (translated.body, translated.err)
 }
 
 /// Turns orphan delegation outputs into user messages when the client says

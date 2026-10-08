@@ -38,6 +38,8 @@ mod redirect;
 #[cfg(test)]
 mod secret_echo;
 mod thinking;
+#[cfg(test)]
+mod unsupported_part_tests;
 pub mod xai;
 
 pub use custom_headers::is_identity_header;

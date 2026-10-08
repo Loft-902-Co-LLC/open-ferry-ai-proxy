@@ -83,8 +83,10 @@ pub(super) fn translate(response: reqwest::Response, setup: Setup) -> ChunkStrea
 }
 
 /// The error for a stream whose `apply_patch` call couldn't be carried over.
+/// It keeps the usage the stream read (v8.0.20's
+/// `StopApplyPatchStreamWithUsage`).
 fn apply_patch_failure() -> ExecError {
-    StatusError::new(502, APPLY_PATCH_ERROR_MESSAGE).into()
+    ExecError::from(StatusError::new(502, APPLY_PATCH_ERROR_MESSAGE)).with_usage_kept()
 }
 
 impl State {

@@ -1,14 +1,19 @@
 // Ported from CLIProxyAPI internal/runtime/executor/claude_executor.go,
 // claude_executor_request.go and claude_executor_cloaking.go (the cache-control
-// helpers), helps/claude_upstream.go, helps/claude_diagnostics.go
+// helpers, with isExplicitPromptCacheMode and stripPromptCacheOptions),
+// helps/claude_upstream.go, helps/claude_diagnostics.go
 // (ClaudePayloadHas1hTTL) and sdk/cliproxy/auth/classification.go
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A credential's key and base URL, and the changes a Messages body needs
 //! before it goes to Claude: `max_tokens`, thinking that a forced tool choice
 //! rules out, sampling settings Claude rejects, cache breakpoints, body
 //! `betas`, replayed thinking signatures and empty web-search domain lists.
+//!
+//! A request whose `prompt_cache_options.mode` is `explicit` keeps only the
+//! breakpoints the client placed, with their TTLs as written, and
+//! `prompt_cache_options` itself never reaches Claude.
 //!
 //! Deviations from upstream:
 //! - Upstream recognises a native Claude Code client by its headers and
@@ -571,6 +576,31 @@ pub(crate) fn normalize_cache_control_ttl(body: &mut Value) {
     }
 }
 
+/// `isExplicitPromptCacheMode`: whether the client's request as it came
+/// (`original`), the request the executor got (`payload`) or the translated
+/// `body` sets `prompt_cache_options.mode` to `explicit`, in any case and
+/// trimmed. The client then places every breakpoint itself.
+pub(crate) fn is_explicit_prompt_cache_mode(original: &[u8], payload: &[u8], body: &Value) -> bool {
+    let explicit = |value: &Value| {
+        json::get(value, "prompt_cache_options.mode")
+            .and_then(Value::as_str)
+            .is_some_and(|mode| mode.trim().eq_ignore_ascii_case("explicit"))
+    };
+    let explicit_bytes = |bytes: &[u8]| {
+        !bytes.is_empty()
+            && serde_json::from_slice::<Value>(bytes).is_ok_and(|value| explicit(&value))
+    };
+    explicit_bytes(original) || explicit_bytes(payload) || explicit(body)
+}
+
+/// `stripPromptCacheOptions`: `prompt_cache_options` is for the proxy, not
+/// for Claude.
+pub(crate) fn strip_prompt_cache_options(body: &mut Value) {
+    if let Value::Object(object) = body {
+        object.shift_remove("prompt_cache_options");
+    }
+}
+
 /// `ClaudePayloadHas1hTTL`: whether any breakpoint asks for the one-hour
 /// cache, which needs the extended cache TTL beta.
 pub(crate) fn payload_has_1h_ttl(body: &Value) -> bool {
@@ -890,6 +920,35 @@ mod tests {
     }
 
     // TestNormalizeCacheControlTTL and TestClaudePayloadHas1hTTL.
+    #[test]
+    fn recognises_explicit_prompt_cache_mode() {
+        let explicit = json!({"prompt_cache_options": {"mode": "explicit"}});
+        let bytes = explicit.to_string();
+        let none = json!({});
+        // Any of the three can say so.
+        assert!(is_explicit_prompt_cache_mode(bytes.as_bytes(), b"", &none));
+        assert!(is_explicit_prompt_cache_mode(b"", bytes.as_bytes(), &none));
+        assert!(is_explicit_prompt_cache_mode(b"", b"", &explicit));
+        // Trimmed, in any case.
+        let shouted = json!({"prompt_cache_options": {"mode": "  EXPLICIT "}});
+        assert!(is_explicit_prompt_cache_mode(b"", b"", &shouted));
+        for body in [
+            json!({}),
+            json!({"prompt_cache_options": {"mode": "implicit"}}),
+            json!({"prompt_cache_options": {}}),
+            json!({"prompt_cache_options": "explicit"}),
+            json!({"prompt_cache_options": {"mode": true}}),
+        ] {
+            assert!(!is_explicit_prompt_cache_mode(b"", b"", &body), "{body}");
+        }
+        // A body that isn't JSON says nothing.
+        assert!(!is_explicit_prompt_cache_mode(b"not json", b"{", &none));
+
+        let mut body = json!({"prompt_cache_options": {"mode": "explicit"}, "model": "m"});
+        strip_prompt_cache_options(&mut body);
+        assert_eq!(body, json!({"model": "m"}));
+    }
+
     #[test]
     fn orders_cache_ttls() {
         let mut body = json!({

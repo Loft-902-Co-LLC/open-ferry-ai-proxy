@@ -241,13 +241,13 @@ impl OpenAiCompatExecutor {
         let payload = parse_object(&request.payload);
         let mut prepared = payload.clone();
         compat::before_translation(Some(&self.config), options, &to, &mut prepared);
-        let mut body = Registry::global().translate_request(
+        let mut body = Registry::global().translate_request_checked(
             &options.source_format,
             &to,
             base,
             prepared,
             translate_stream,
-        );
+        )?;
         self.apply_thinking(&mut body, request, options, &to)?;
 
         let compat = self.compat_config(auth);
@@ -510,13 +510,13 @@ impl OpenAiCompatExecutor {
         let model = base_model(&request.model).to_owned();
         let mut payload = parse_object(&request.payload);
         compat::before_translation(Some(&self.config), options, &Format::OPENAI, &mut payload);
-        let mut body = Registry::global().translate_request(
+        let mut body = Registry::global().translate_request_checked(
             &options.source_format,
             &Format::OPENAI,
             &model,
             payload,
             false,
-        );
+        )?;
         self.apply_thinking(&mut body, request, options, &Format::OPENAI)?;
         {
             let target = payload::Target {

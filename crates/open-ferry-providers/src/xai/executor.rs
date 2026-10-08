@@ -269,7 +269,7 @@ impl XaiExecutor {
             .apply_patch
             .bridge
             .transform_non_stream(&data)
-            .map_err(|_| StatusError::new(502, APPLY_PATCH_ERROR_MESSAGE))?;
+            .map_err(|_| apply_patch_failure())?;
         let out = translate_completed(&prepared, request, converted)?;
         Ok(Response {
             payload: Bytes::from(out),
@@ -393,7 +393,7 @@ impl XaiExecutor {
             };
             let (events, error) = prepared.apply_patch.transform(&data);
             if error.is_some() {
-                return Err(StatusError::new(502, APPLY_PATCH_ERROR_MESSAGE).into());
+                return Err(apply_patch_failure());
             }
             for event in events {
                 let parsed: Value = serde_json::from_slice(&event).unwrap_or(Value::Null);
@@ -418,7 +418,7 @@ impl XaiExecutor {
             }
         }
         if prepared.apply_patch.finish().is_err() {
-            return Err(StatusError::new(502, APPLY_PATCH_ERROR_MESSAGE).into());
+            return Err(apply_patch_failure());
         }
         Err(StatusError::new(408, DISCONNECTED_MESSAGE).into())
     }
@@ -537,9 +537,16 @@ impl XaiExecutor {
     }
 }
 
+/// The error for an answer whose `apply_patch` call couldn't be carried
+/// over. xAI answered, so it keeps the answer's usage (v8.0.20's
+/// `upstreamUsage.PublishFailure`).
+fn apply_patch_failure() -> ExecError {
+    ExecError::from(StatusError::new(502, APPLY_PATCH_ERROR_MESSAGE)).with_usage_kept()
+}
+
 /// Translates xAI's terminal response to the client's format, filling in
 /// the usage details an OpenAI Responses client expects. A translation that
-/// fails is a 502.
+/// fails is a 502 that keeps the answer's usage.
 fn translate_completed(
     prepared: &Prepared,
     request: &Request,
@@ -553,7 +560,7 @@ fn translate_completed(
     let out = Registry::global()
         .translate_non_stream(&prepared.to, &prepared.response_format, &context, completed)
         .filter(|out| !out.is_empty())
-        .ok_or_else(|| StatusError::new(502, APPLY_PATCH_ERROR_MESSAGE))?;
+        .ok_or_else(apply_patch_failure)?;
     Ok(if prepared.response_format == Format::OPENAI_RESPONSE {
         ensure_responses_usage_details(out)
     } else {

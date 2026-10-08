@@ -9,8 +9,8 @@ use bytes::Bytes;
 use http::{HeaderMap, HeaderName, HeaderValue, Method};
 use serde_json::Value;
 
+use super::super::Clock;
 use super::super::Usage;
-use super::super::response_model::Clock;
 use crate::auth::Auth;
 use crate::exec::{ExecError, Format, Options, Request};
 use crate::observe::{AttemptKind, AttemptRequest, Outcome, RequestContext, Tap};
@@ -258,11 +258,9 @@ pub(super) fn bool_at(record: &Value, pointer: &str) -> bool {
         .unwrap_or_else(|| panic!("no boolean {pointer:?} in {record}"))
 }
 
-/// The warnings logged on this thread while it lives, and on any thread
-/// given its [`Warnings::dispatch`].
+/// The warnings logged on this thread while it lives.
 pub(super) struct Warnings {
     lines: Arc<Mutex<Vec<String>>>,
-    dispatch: tracing::Dispatch,
     _guard: tracing::dispatcher::DefaultGuard,
 }
 
@@ -273,14 +271,8 @@ impl Warnings {
         let guard = tracing::dispatcher::set_default(&dispatch);
         Self {
             lines,
-            dispatch,
             _guard: guard,
         }
-    }
-
-    /// What another thread must set to have its warnings captured too.
-    pub(super) fn dispatch(&self) -> &tracing::Dispatch {
-        &self.dispatch
     }
 
     /// Every warning logged so far.

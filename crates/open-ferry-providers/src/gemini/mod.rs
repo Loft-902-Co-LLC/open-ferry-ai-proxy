@@ -132,6 +132,8 @@ fn reject_compact(options: &Options) -> Result<(), ExecError> {
 /// suffix, as a stream or not, with its thinking setting applied and the
 /// image aspect ratio fixed. Models are looked up as `provider` registered
 /// them in `models`; a Codex client's request is readied as `config` says.
+/// A translation that refused a content part Gemini can't receive gives a
+/// 400 instead, so the request is never sent.
 fn translate_request(
     config: Option<&Config>,
     request: &Request,
@@ -144,8 +146,13 @@ fn translate_request(
     let from = &options.source_format;
     let mut payload = parse_object(&request.payload);
     compat::before_translation(config, options, &Format::GEMINI, &mut payload);
-    let mut body =
-        Registry::global().translate_request(from, &Format::GEMINI, base, payload, stream);
+    let mut body = Registry::global().translate_request_checked(
+        from,
+        &Format::GEMINI,
+        base,
+        payload,
+        stream,
+    )?;
     thinking::apply_request(
         &mut body,
         &request.model,

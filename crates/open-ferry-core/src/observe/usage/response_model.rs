@@ -4,9 +4,9 @@
 // isInteractionsTerminal, extractCodexResponseModelEvent,
 // codexResponseModelEventKind, normalizeModelName, stripModelProviderPrefix,
 // IsModelSubstituted, isDatedModelAlias, isModelDateSuffix,
-// isModelNumericVersionSuffix, isModelDigits,
-// codexModelSubstitutionThrottle) and stream_response_model_observer.go
-// (StreamResponseModelObserver) (v8.0.15, MIT).
+// isModelNumericVersionSuffix, isModelDigits) and
+// stream_response_model_observer.go (StreamResponseModelObserver)
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The model an upstream says it served, read from its answer, and whether
@@ -17,22 +17,15 @@
 //! Gemini in `modelVersion`, and the OpenAI-compatible protocols in
 //! `model`. The first name read is kept, and reading stops at the event
 //! that ends the answer. When the served model isn't the one asked for, or
-//! a dated snapshot of it, the usage reporter warns, at most once per
-//! credential and model pair in ten minutes ([`Throttle`]).
+//! a dated snapshot of it, the usage reporter warns, each time (v8.0.20
+//! dropped the warning's throttle).
 //!
 //! Deviations from upstream:
 //! - JSON that doesn't parse whole names no model and ends nothing, so a
 //!   Claude `message_stop` cut short isn't the end; gjson reads what it can
 //!   (see [`super::json`]).
-//! - The throttle belongs to the [`super::Usage`], where upstream keeps one
-//!   for the process.
 //! - [`StreamResponseModelObserver`] keeps the model it reads itself, where
 //!   upstream's writes it into a usage reporter.
-
-use std::collections::HashMap;
-use std::fmt;
-use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, Instant};
 
 use open_ferry_translate::go;
 use open_ferry_translate::thinking::base_model_name;
@@ -43,14 +36,6 @@ use super::parse::json_payload;
 /// The longest served model name kept; a longer one, which no known model
 /// has, isn't trusted (upstream's `maxResponseModelLength`).
 pub(crate) const MAX_RESPONSE_MODEL_LENGTH: usize = 128;
-
-/// How long one credential and model pair stays quiet after a warning
-/// (upstream's `modelSubstitutionWarnWindow`).
-pub(crate) const WARN_WINDOW: Duration = Duration::from_secs(10 * 60);
-
-/// How many pairs the throttle remembers (upstream's
-/// `modelSubstitutionWarnMaxEntries`).
-pub(crate) const WARN_MAX_ENTRIES: usize = 1024;
 
 /// The model `payload` (a JSON frame or an SSE line) says was served, empty
 /// when it names none, and whether its event ends the answer, read as
@@ -354,80 +339,6 @@ impl ResponseModel {
     /// Whether reading has ended (upstream's `IsResponseModelFinal`).
     pub(crate) fn is_final(&self) -> bool {
         self.done
-    }
-}
-
-/// What the throttle tells warnings apart by.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct ThrottleKey {
-    pub(crate) provider: String,
-    pub(crate) auth_id: String,
-    pub(crate) requested: String,
-    pub(crate) served: String,
-}
-
-/// The clock the throttle reads.
-pub(crate) type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
-
-/// When each credential and model pair last warned of a substitution
-/// (upstream's `codexModelSubstitutionThrottle`).
-pub(crate) struct Throttle {
-    clock: Clock,
-    last_warn: Mutex<HashMap<ThrottleKey, Instant>>,
-}
-
-impl Throttle {
-    /// A throttle reading `clock`.
-    pub(crate) fn new(clock: Clock) -> Self {
-        Self {
-            clock,
-            last_warn: Mutex::new(HashMap::new()),
-        }
-    }
-
-    /// Whether `key` may warn now, writing down that it did. Past the
-    /// bound, pairs quiet for the window are forgotten, and all of them
-    /// when that isn't enough.
-    pub(crate) fn allow(&self, key: ThrottleKey) -> bool {
-        let mut last_warn = self
-            .last_warn
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let now = (self.clock)();
-        if let Some(last) = last_warn.get(&key)
-            && now.saturating_duration_since(*last) < WARN_WINDOW
-        {
-            return false;
-        }
-        if last_warn.len() >= WARN_MAX_ENTRIES {
-            last_warn.retain(|_, at| now.saturating_duration_since(*at) < WARN_WINDOW);
-            if last_warn.len() >= WARN_MAX_ENTRIES {
-                last_warn.clear();
-            }
-        }
-        last_warn.insert(key, now);
-        true
-    }
-
-    /// How many pairs it remembers.
-    #[cfg(test)]
-    pub(crate) fn len(&self) -> usize {
-        self.last_warn
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .len()
-    }
-}
-
-impl Default for Throttle {
-    fn default() -> Self {
-        Self::new(Arc::new(Instant::now))
-    }
-}
-
-impl fmt::Debug for Throttle {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Throttle").finish_non_exhaustive()
     }
 }
 

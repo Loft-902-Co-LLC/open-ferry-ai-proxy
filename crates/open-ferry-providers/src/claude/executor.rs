@@ -86,8 +86,9 @@ use super::request::{
     DEFAULT_BASE_URL, FAST_MODE_BETA, MAX_CACHE_BREAKPOINTS, TOKEN_COUNTING_BETA,
     count_cache_controls, credentials, disable_thinking_if_tool_choice_forced,
     enforce_cache_control_limit, ensure_cache_control, ensure_model_max_tokens,
-    extract_and_remove_betas, is_anthropic_url, normalize_cache_control_ttl, normalize_sampling,
-    sanitize_for_upstream, uses_bearer,
+    extract_and_remove_betas, is_anthropic_url, is_explicit_prompt_cache_mode,
+    normalize_cache_control_ttl, normalize_sampling, sanitize_for_upstream,
+    strip_prompt_cache_options, uses_bearer,
 };
 use super::stream::{self, MAX_LINE, StreamSetup, apply_patch_error};
 use super::thinking;
@@ -200,11 +201,17 @@ impl ClaudeExecutor {
         ensure_model_max_tokens(&mut body, base_model, self.models.as_deref());
         disable_thinking_if_tool_choice_forced(&mut body);
         normalize_sampling(&mut body);
-        if count_cache_controls(&body) == 0 {
+        // A client in the explicit cache mode places its breakpoints itself.
+        let explicit =
+            is_explicit_prompt_cache_mode(&options.original_request, &request.payload, &body);
+        if !explicit && count_cache_controls(&body) == 0 {
             ensure_cache_control(&mut body);
         }
         enforce_cache_control_limit(&mut body, MAX_CACHE_BREAKPOINTS);
-        normalize_cache_control_ttl(&mut body);
+        strip_prompt_cache_options(&mut body);
+        if !explicit {
+            normalize_cache_control_ttl(&mut body);
+        }
         if set_stream && body.get("stream") != Some(&Value::Bool(upstream_stream)) {
             json::set(&mut body, "stream", Value::Bool(upstream_stream));
         }
@@ -214,6 +221,8 @@ impl ClaudeExecutor {
         // diagnostics path, for its cloaking, which isn't ported.
         self.apply_payload_rules(request, options, base_model, upstream_stream, &mut body);
         let extra_betas = extract_and_remove_betas(&mut body);
+        // Nor does one that a payload rule writes reach Claude.
+        strip_prompt_cache_options(&mut body);
         Ok(Prepared {
             upstream: body,
             translation,
@@ -463,29 +472,37 @@ impl ClaudeExecutor {
         options: &Options,
     ) -> Result<Response, ExecError> {
         let target = self.target(auth);
+        let base_model = thinking::parse_suffix(&request.model).0;
+        // A streaming translation keeps tool calls, except from Claude.
+        let translate_stream = options.source_format != Format::CLAUDE;
+        let config = self.config.as_deref();
+        // As upstream, a refused part fails the count before the choice of
+        // how to count it.
+        let mut body = translate_request(config, request, options, base_model, translate_stream)?;
         if target.key.trim().is_empty() || !target.first_party {
             return Err(ExecError::upstream(
                 501,
                 "claude executor: counting tokens for this credential needs a local estimate, which isn't supported",
             ));
         }
-        let base_model = thinking::parse_suffix(&request.model).0;
         let url = format!("{}/v1/messages/count_tokens?beta=true", target.base_url);
         let format = response_format(options);
-        // A streaming translation keeps tool calls, except from Claude.
-        let translate_stream = options.source_format != Format::CLAUDE;
-        let config = self.config.as_deref();
-        let mut body = translate_request(config, request, options, base_model, translate_stream)?;
+        let explicit =
+            is_explicit_prompt_cache_mode(&options.original_request, &request.payload, &body);
         enforce_cache_control_limit(&mut body, MAX_CACHE_BREAKPOINTS);
-        normalize_cache_control_ttl(&mut body);
+        if !explicit {
+            normalize_cache_control_ttl(&mut body);
+        }
         let mut extra_betas = extract_and_remove_betas(&mut body);
         extra_betas.push(TOKEN_COUNTING_BETA.to_owned());
         sanitize_for_upstream(&mut body, base_model);
+        strip_prompt_cache_options(&mut body);
         // Anthropic's count_tokens rejects these.
         for field in ["metadata", "context_management", "diagnostics"] {
             json::delete(&mut body, field);
         }
         self.apply_payload_rules(request, options, base_model, translate_stream, &mut body);
+        strip_prompt_cache_options(&mut body);
         let headers = headers::build(&Inputs {
             key: &target.key,
             bearer: target.bearer,
@@ -590,7 +607,8 @@ struct Prepared {
 }
 
 /// The client's request in Claude's format, for `base_model`, with its
-/// thinking setting applied.
+/// thinking setting applied; a 400 instead when the translation refused a
+/// content part Claude can't receive, so the request is never sent.
 pub(crate) fn translate_request(
     config: Option<&Config>,
     request: &Request,
@@ -601,8 +619,13 @@ pub(crate) fn translate_request(
     let from = &options.source_format;
     let mut payload = parse_object(&request.payload);
     compat::before_translation(config, options, &Format::CLAUDE, &mut payload);
-    let mut body =
-        Registry::global().translate_request(from, &Format::CLAUDE, base_model, payload, stream);
+    let mut body = Registry::global().translate_request_checked(
+        from,
+        &Format::CLAUDE,
+        base_model,
+        payload,
+        stream,
+    )?;
     if json::str_at(&body, "model") != base_model {
         json::set(&mut body, "model", Value::String(base_model.to_owned()));
     }

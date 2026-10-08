@@ -474,6 +474,18 @@ mod tests {
         assert_eq!(error_code(&body), "thread_not_found", "{body}");
     }
 
+    // v8.0.20's TestClaudeErrorMarksPlainTextMissingThreadForClientReplay.
+    // Its TestClaudeErrorMarksStructuredExecutorMissingThreadForClientReplay
+    // is the case above: an error whose text is the structured body.
+    #[test]
+    fn claude_errors_mark_a_plain_text_missing_thread_for_replay() {
+        let text = "No thread state was found for the requested previous_message_id. Replay the full conversation with thread create to start a new Thread.";
+        let body = claude_error_json(&ErrorMessage::from_exec(ExecError::upstream(404, text)));
+        assert_eq!(error_code(&body), "thread_not_found", "{body}");
+        let body = claude_error_json(&ErrorMessage::new(404, "thread gone"));
+        assert!(!body.contains("details"), "{body}");
+    }
+
     // TestWriteClaudeDirectErrorMarksMissingThreadForClientReplay.
     #[tokio::test]
     async fn claude_error_responses_mark_a_missing_thread_for_replay() {

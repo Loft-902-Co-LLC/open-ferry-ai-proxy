@@ -146,9 +146,10 @@ pub(crate) fn translate(response: reqwest::Response, setup: StreamSetup) -> Chun
     .boxed()
 }
 
-/// The error a bridge or translation failure ends the stream with.
+/// The error a bridge or translation failure ends the stream with. It keeps
+/// the usage the stream read (v8.0.20's `StopApplyPatchStreamWithUsage`).
 fn apply_patch_failure() -> ExecError {
-    StatusError::new(502, APPLY_PATCH_ERROR_MESSAGE).into()
+    ExecError::from(StatusError::new(502, APPLY_PATCH_ERROR_MESSAGE)).with_usage_kept()
 }
 
 impl State {

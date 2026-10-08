@@ -1602,3 +1602,235 @@ async fn the_taps_see_the_answer_as_it_came() {
         assert!(raw.seen().contains(API_KEY), "{}", raw.seen());
     }
 }
+
+/// Options for a `format` client whose request, as it came, is `payload`.
+fn options_with_original(format: Format, payload: &Value) -> Options {
+    Options {
+        original_request: Bytes::from(payload.to_string()),
+        ..options(format)
+    }
+}
+
+/// The body an OpenAI client's request reaches Claude with.
+async fn sent_for_openai(payload: Value, stream: bool) -> Value {
+    let mock = Mock::start(Reply::sse(SSE)).await;
+    let options = Options {
+        stream,
+        ..options_with_original(Format::OPENAI, &payload)
+    };
+    let executor = mock.executor();
+    if stream {
+        let response = executor
+            .execute_stream(api_key_auth(), request(payload), options)
+            .await
+            .unwrap();
+        assert!(collect(response).await.iter().all(Result::is_ok));
+    } else {
+        executor
+            .execute(api_key_auth(), request(payload), options)
+            .await
+            .unwrap();
+    }
+    mock.last().json()
+}
+
+fn explicit(mut payload: Value) -> Value {
+    payload["prompt_cache_options"] = json!({"mode": "explicit"});
+    payload
+}
+
+// Upstream's TestClaudeExecutor_PromptCacheOptionsMode_Explicit_SuppressesAutoCacheControl
+// and its _Stream_ twin: no breakpoint is placed for a client in the
+// explicit cache mode, and `prompt_cache_options` isn't sent on.
+#[tokio::test]
+async fn explicit_cache_mode_places_no_breakpoints() {
+    let payload = explicit(json!({"messages": [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "Hello"}
+    ]}));
+    for stream in [false, true] {
+        let sent = sent_for_openai(payload.clone(), stream).await;
+        assert_eq!(count_cache_controls(&sent), 0, "{sent}");
+        assert!(sent.get("prompt_cache_options").is_none(), "{sent}");
+    }
+}
+
+// Upstream's TestClaudeExecutor_PromptCacheOptionsMode_Explicit_PreservesClientBreakpoints.
+#[tokio::test]
+async fn explicit_cache_mode_keeps_the_clients_breakpoints() {
+    let sent = sent_for_openai(
+        explicit(json!({"messages": [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": [
+                {"type": "text", "text": "Cached part", "cache_control": {"type": "ephemeral"}}
+            ]},
+            {"role": "user", "content": "Uncached part"}
+        ]})),
+        false,
+    )
+    .await;
+    assert_eq!(count_cache_controls(&sent), 1, "{sent}");
+    assert!(
+        json::exists(&sent, "messages.0.content.0.cache_control"),
+        "{sent}"
+    );
+    assert!(!json::exists(&sent, "system.0.cache_control"), "{sent}");
+    assert!(
+        !json::exists(&sent, "messages.1.content.0.cache_control"),
+        "{sent}"
+    );
+}
+
+// Upstream's TestClaudeExecutor_PromptCacheOptionsMode_ImplicitOrMissing_PreservesAutoCacheControl.
+#[tokio::test]
+async fn other_cache_modes_get_breakpoints() {
+    let messages = json!([
+        {"role": "system", "content": "You are helpful."},
+        {"role": "user", "content": "Hello"}
+    ]);
+    for payload in [
+        json!({"messages": messages}),
+        json!({"prompt_cache_options": {"mode": "implicit"}, "messages": messages}),
+    ] {
+        let sent = sent_for_openai(payload, false).await;
+        assert!(json::exists(&sent, "system.0.cache_control"), "{sent}");
+        assert!(
+            json::exists(&sent, "messages.0.content.0.cache_control"),
+            "{sent}"
+        );
+    }
+}
+
+fn openai_tool(name: &str) -> Value {
+    json!({"type": "function", "function": {"name": name, "description": name, "parameters": {"type": "object"}}})
+}
+
+// Upstream's TestClaudeExecutor_PromptCacheOptionsMode_Explicit_ToolsFallbackSuppressed
+// and _Explicit_ClientToolBreakpointPreserved.
+#[tokio::test]
+async fn explicit_cache_mode_leaves_tools_as_the_client_marked_them() {
+    let sent = sent_for_openai(
+        explicit(json!({
+            "tools": [openai_tool("tool1"), openai_tool("tool2")],
+            "messages": [{"role": "user", "content": "Hello without system"}]
+        })),
+        false,
+    )
+    .await;
+    assert_eq!(count_cache_controls(&sent), 0, "{sent}");
+
+    let mut marked = openai_tool("tool1");
+    marked["cache_control"] = json!({"type": "ephemeral"});
+    let sent = sent_for_openai(
+        explicit(json!({
+            "tools": [marked, openai_tool("tool2")],
+            "messages": [{"role": "user", "content": "Hello"}]
+        })),
+        false,
+    )
+    .await;
+    assert_eq!(count_cache_controls(&sent), 1, "{sent}");
+    assert!(json::exists(&sent, "tools.0.cache_control"), "{sent}");
+    assert!(!json::exists(&sent, "tools.1.cache_control"), "{sent}");
+    assert!(
+        !json::exists(&sent, "messages.0.content.0.cache_control"),
+        "{sent}"
+    );
+}
+
+// Upstream's TestClaudeExecutor_PromptCacheOptionsMode_Explicit_ProbePreservesClient1hTTL,
+// and, not upstream's, a one-hour TTL after a five-minute breakpoint (the
+// two turns are merged into one), which is kept only in the explicit mode.
+#[tokio::test]
+async fn explicit_cache_mode_keeps_ttls_as_written() {
+    let hour = |text: &str| json!({"type": "text", "text": text, "cache_control": {"type": "ephemeral", "ttl": "1h"}});
+    let sent = sent_for_openai(
+        explicit(json!({"messages": [{"role": "user", "content": [hour("Hi")]}]})),
+        false,
+    )
+    .await;
+    assert_eq!(
+        json::str_at(&sent, "messages.0.content.0.cache_control.ttl"),
+        "1h",
+        "{sent}"
+    );
+
+    let short_then_long = json!({"messages": [
+        {"role": "user", "content": [
+            {"type": "text", "text": "short", "cache_control": {"type": "ephemeral"}}
+        ]},
+        {"role": "user", "content": [hour("long")]}
+    ]});
+    let sent = sent_for_openai(explicit(short_then_long.clone()), false).await;
+    assert_eq!(
+        json::str_at(&sent, "messages.0.content.1.cache_control.ttl"),
+        "1h",
+        "{sent}"
+    );
+    let sent = sent_for_openai(short_then_long, false).await;
+    assert!(
+        !json::exists(&sent, "messages.0.content.1.cache_control.ttl"),
+        "{sent}"
+    );
+}
+
+// Upstream's TestClaudeExecutor_CountTokens_StripsPromptCacheOptions and
+// TestClaudeExecutor_CountTokensUpstream_StripsPromptCacheOptions_EvenWithPayloadRule,
+// and, not upstream's, a call when a rule writes them.
+#[tokio::test]
+async fn prompt_cache_options_are_never_sent() {
+    async fn count(executor: ClaudeExecutor, payload: Value) {
+        let options = options_with_original(Format::OPENAI, &payload);
+        let response = executor
+            .count_tokens(api_key_auth(), request(payload), options)
+            .await
+            .unwrap();
+        assert!(!response.payload.is_empty());
+    }
+    let plain = json!({"messages": [{"role": "user", "content": "How many tokens?"}]});
+
+    let mock = Mock::start(Reply::json(r#"{"input_tokens":15}"#)).await;
+    count(mock.executor(), explicit(plain.clone())).await;
+    let sent = mock.last().json();
+    assert!(sent.get("prompt_cache_options").is_none(), "{sent}");
+
+    let rules = Arc::new(
+        Config::parse(
+            r"
+payload:
+  override:
+    - models:
+        - name: claude-sonnet-4-5
+      params:
+        prompt_cache_options.mode: explicit
+        top_k: 7
+",
+        )
+        .unwrap(),
+    );
+    let mock = Mock::start(Reply::json(r#"{"input_tokens":15}"#)).await;
+    count(
+        mock.executor().with_config(Arc::clone(&rules)),
+        plain.clone(),
+    )
+    .await;
+    let sent = mock.last().json();
+    assert!(sent.get("prompt_cache_options").is_none(), "{sent}");
+    // The rule did apply.
+    assert_eq!(sent["top_k"], 7, "{sent}");
+
+    let mock = Mock::start(Reply::sse(SSE)).await;
+    mock.executor()
+        .with_config(rules)
+        .execute(
+            api_key_auth(),
+            request(plain.clone()),
+            options_with_original(Format::OPENAI, &plain),
+        )
+        .await
+        .unwrap();
+    let sent = mock.last().json();
+    assert!(sent.get("prompt_cache_options").is_none(), "{sent}");
+    // The rule did apply.
+    assert_eq!(sent["top_k"], 7, "{sent}");
+}
