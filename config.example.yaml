@@ -79,8 +79,21 @@ management:
   disable-control-panel: false
 
   # Base URL of the remote management API for the terminal UI (open-ferry -tui).
-  # Defaults to http://127.0.0.1:<port> if not set. Can also be set with -management-base-url.
+  # Defaults to separate-address's URL when that is set, else http://127.0.0.1:<port>.
+  # Can also be set with -management-base-url.
   # base-url: "https://proxy.example.com"
+
+  # open-ferry's own setting; CLIProxyAPI has none like it. An address, host:port, on which
+  # the management API (/v0/management, /v8/management), the dashboard (/dashboard/,
+  # /management.html) and the dashboard API (/open-ferry/api/) are served alone. server.port
+  # then answers those paths as it does while the management API is disabled, and this
+  # address answers the proxy's routes with 404. Empty (the default) serves them all on
+  # server.port. The port must not be server.port. ":8318" is every interface, so other
+  # machines can connect, but they are refused unless allow-remote is true. Both addresses
+  # use server.tls. A change takes a restart. CLIProxyAPI ignores this key, serving its
+  # management API on its port, and a save through its management API of a file in the
+  # v8 layout turns the key into a comment.
+  # separate-address: "127.0.0.1:8318"
 
 # Client authentication for the proxy API. These are not upstream provider keys.
 access:

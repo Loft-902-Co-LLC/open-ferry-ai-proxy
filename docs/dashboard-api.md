@@ -5,6 +5,8 @@ The dashboard is a web app built into the binary and served at `/dashboard/`. It
 - **The management API**, at `/v0/management/` (and `/v8/management/`), exactly as CLIProxyAPI has it: settings, credentials, client keys, sign-ins, logs.
 - **The dashboard API**, described here, at `/open-ferry/api/v1/`, for what CLIProxyAPI has no route for: usage from the usage ledger, request-log search, client setup, and the config's `claude-cli` entries, with their state and whether each is signed in. The prefix is open-ferry's own, so the management namespace stays exactly upstream's.
 
+By default all of these are served on the proxy's port, beside the proxy's routes. With open-ferry's `management.separate-address` set, such as `127.0.0.1:8318`, the app, the management API and the dashboard API are served at that address alone, so they still share one origin, and the proxy's port has none of them (see [Serving the app](#serving-the-app)).
+
 This document is the contract between the server and the app. A change to it is announced, and the version in the prefix changes only for a change an existing app can't take.
 
 ## Common rules
@@ -50,7 +52,7 @@ Every error is a status and a body:
 | 401 | `invalid_management_key` | The key is wrong. Counts as a failed attempt. |
 | 403 | `remote_management_disabled` | The client isn't local and remote management isn't allowed. |
 | 403 | `ip_banned` | Too many failed attempts from this address. The message says how long the ban lasts. |
-| 404 | `management_disabled` | No management key is set, so neither API serves anything. The management API answers an empty 404 then, or, while a local management password turns it on (until the first config reload), 403 `{"error": "remote management key not set"}`. |
+| 404 | `management_disabled` | No management key is set, so neither API serves anything. The management API answers an empty 404 then, or, while a local management password turns it on (until the first config reload), 403 `{"error": "remote management key not set"}`. Also the answer on the proxy's port while `management.separate-address` is set, as the dashboard API is served only there. |
 | 404 | `not_found` | No such route, no such log, or no such `claude-cli` entry. |
 | 405 | `method_not_allowed` | The route exists, the method doesn't. |
 | 413 | `body_too_large` | The body is over 64 KiB. |
@@ -444,6 +446,7 @@ What the app needs to write ready-made client configs, other than client keys, w
   ],
   "tls": false,
   "safe_mode": false,
+  "separate_management": false,
   "routes": [
     {"id": "claude-messages", "protocol": "claude", "method": "POST", "path": "/v1/messages", "base_path": "", "models": ["claude-sonnet-4-5", "gpt-5.1-codex"]},
     {"id": "codex-responses", "protocol": "codex", "method": "POST", "path": "/backend-api/codex/responses", "base_path": "/backend-api/codex", "models": ["claude-sonnet-4-5", "gpt-5.1-codex"]},
@@ -458,9 +461,10 @@ What the app needs to write ready-made client configs, other than client keys, w
 }
 ```
 
-- **`base_urls`** are the server's root as it sees itself, without a path; a client's base URL is one of them followed by its route's `base_path`. Those with `source` `listen` come from the config's `host`, `port` and `tls`: an empty `host`, `0.0.0.0` or `::` gives the loopback addresses and `localhost`, since the server can't know which of its other addresses a client reaches. The one with `source` `config` is `management.base-url`, when set, without any credentials, query or fragment in it. The app also knows its own origin, which may be another (a proxy in front).
+- **`base_urls`** are the server's root as it sees itself, without a path; a client's base URL is one of them followed by its route's `base_path`. Those with `source` `listen` come from the config's `host`, `port` and `tls`: an empty `host`, `0.0.0.0` or `::` gives the loopback addresses and `localhost`, since the server can't know which of its other addresses a client reaches. The one with `source` `config` is `management.base-url`, when set, without any credentials, query or fragment in it, and only while `separate_management` is `false`: otherwise it is the management address's URL, which doesn't serve the proxy. The app also knows its own origin, which may be another (a proxy in front).
 - **`tls`** is the config's `tls.enable`.
 - **`safe_mode`** is `true` while `api-keys` holds CLIProxyAPI's example keys and the proxy routes refuse service; client configs won't work until they are changed.
+- **`separate_management`** is `true` while the app is served at `management.separate-address`, apart from the proxy. The app's own origin is then the management address, which answers the proxy's routes with 404, so it isn't a base URL for a client: only `base_urls` are.
 - **`routes`** are the proxy's entry points, each with the models a call to it can use right now: the models with a credential that can serve them, less those the route can't reach (the models only the image endpoints serve are on none of these), in `id` order. The proxy translates between formats, so today every other model is on every one of these routes; the lists are per route so that needn't stay true. `base_path` is what an SDK for that `protocol` takes after the root: the OpenAI SDK `/v1`, the Anthropic and Google Gen AI SDKs nothing.
 - **`models`** describes each model on any route, by `id`: `display_name` (else the `id`), `owned_by`, the `providers` serving it, in order of preference, `created`, `chat`, and `context_length` and `max_output_tokens` (`null` when unknown).
   - **`created`** is when the model came out, in Unix seconds, as the model catalog has it; `null` when the catalog doesn't say, and for a model defined in the config (its `models` lists and `openai-compatibility`), whose registry entry has the time the config was loaded instead.
@@ -546,3 +550,7 @@ Not routes the app calls, but what it can count on:
   - `Referrer-Policy: no-referrer`
   - `X-Frame-Options: DENY`
 - **A binary built without the app** (no `dashboard/dist` at build time) serves a short page at `/dashboard/` saying so and how to build it. The dashboard API works either way.
+- **With `management.separate-address` set** (open-ferry's own setting), the app, `/management.html`, the dashboard API and the management API are served at that address and nowhere else, with the access rules above unchanged. A change to it takes a restart.
+  - **The proxy's port** answers their paths as it does while the management API is off: `/dashboard/` and below, `/dashboard` and `/management.html` an empty 404, the dashboard API's routes 404 `management_disabled`, and every path under `/v0/management/` and `/v8/management/` an empty 404. Everything else there is as before, the sign-in callback pages (`/anthropic/callback`, `/codex/callback`) among it: the management API's callback forwarders send the browser to them on the proxy's port.
+  - **The management address** answers every other path, the proxy's routes, `/` and `/healthz` among them, with a 404, `404 page not found` in plain text. The link in safe mode's message, `/management.html?safe-mode=configure`, is then at the management address, not on the proxy's port that gives the message.
+  - Both use `server.tls`, the same certificate and key.

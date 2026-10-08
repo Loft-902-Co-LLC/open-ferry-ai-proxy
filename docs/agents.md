@@ -173,6 +173,7 @@ The Anthropic and Google Gen AI SDKs take the address without a path. The proxy 
 
   Which routes are ported is in [UPSTREAM.md](../UPSTREAM.md).
 - **The dashboard** is at `http://127.0.0.1:8317/dashboard/`; sign in with the management key. Its own API, for usage, request-log search and client setups, is at `/open-ferry/api/v1/` and described in [docs/dashboard-api.md](dashboard-api.md).
+- **A management address of its own.** When the config sets `management.separate-address`, such as `127.0.0.1:8318`, the management API, the dashboard and its API are served at that address alone, not on the proxy's port, which answers their paths with 404; use that address in the URLs above. `open-ferry check` shows it on its `management address` line.
 
 ## More
 

@@ -23,6 +23,15 @@
 # (403) unless management.allow-remote is true. Every management request
 # still needs the management key.
 #
+# To serve the management API and the dashboard on a port of their own,
+# off the proxy's port, set management.separate-address: ":8318" in
+# config.yaml (every interface of the container, as server.host), keep
+# management.allow-remote: true, publish 8318 on the host's 127.0.0.1 only
+# (the commented line under ports), and restart the container. The proxy's
+# port then has no management or dashboard route, so it alone can be
+# published on another address; the dashboard is at
+# http://127.0.0.1:8318/dashboard/.
+#
 # Sign-ins: the Codex and Claude logins' callback servers listen on the
 # container's own loopback, which no published port reaches, so their
 # ports (1455 and 54545) aren't published. To sign in, use the dashboard
@@ -63,6 +72,8 @@ services:
     #   TZ: Europe/London
     ports:
       - "127.0.0.1:8317:8317"
+      # With management.separate-address: ":8318", the management port:
+      # - "127.0.0.1:8318:8318"
     volumes:
       - ${CLI_PROXY_CONFIG_PATH:-./config.yaml}:/CLIProxyAPI/config.yaml
       - ${CLI_PROXY_AUTH_PATH:-./auths}:/root/.cli-proxy-api
