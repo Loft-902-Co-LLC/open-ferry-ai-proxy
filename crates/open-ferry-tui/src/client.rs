@@ -36,6 +36,11 @@
 //! - A loopback base URL is never reached through a proxy from the
 //!   environment, as Go's `ProxyFromEnvironment` never proxies one; other
 //!   base URLs use the environment's proxy as reqwest reads it.
+//! - A redirect isn't followed: the 3xx answer is what a request gets, so
+//!   the key goes only to the base URL. Go's client follows up to ten.
+//! - When the HTTP client can't be made (Go's can't fail), every request
+//!   fails, saying why, rather than going out on a client without the
+//!   timeout, the proxy rule and the redirect rule.
 
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -61,7 +66,9 @@ pub(crate) type Object = Map<String, Value>;
 pub struct Client {
     base_url: String,
     secret: Mutex<Secret>,
-    http: reqwest::Client,
+    /// The HTTP client, or why it couldn't be made, which every request
+    /// then fails with.
+    http: Result<reqwest::Client, String>,
 }
 
 /// An answer [`Client::send`] got.
@@ -106,11 +113,15 @@ impl Client {
             }
             base = base.trim_end_matches('/').to_owned();
         }
-        let mut builder = reqwest::Client::builder().timeout(TIMEOUT);
+        let mut builder = reqwest::Client::builder()
+            .timeout(TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none());
         if is_loopback(&base) {
             builder = builder.no_proxy();
         }
-        let http = builder.build().unwrap_or_default();
+        let http = builder
+            .build()
+            .map_err(|e| format!("the HTTP client couldn't be made: {e}"));
         Arc::new(Self {
             base_url: base,
             secret: Mutex::new(Secret(secret.trim().to_owned())),
@@ -159,9 +170,10 @@ impl Client {
         path: &str,
         body: Option<(&str, Vec<u8>)>,
     ) -> Result<Reply, String> {
+        let http = self.http.as_ref().map_err(Clone::clone)?;
         let url = format!("{}{path}", self.base_url);
         let op = go_op(&method);
-        let mut req = self.http.request(method, &url);
+        let mut req = http.request(method, &url);
         let secret = self.secret();
         if !secret.is_empty() {
             req = req.bearer_auth(secret);
@@ -657,6 +669,59 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].path, "/v0/management/config");
         assert_eq!(requests[0].auth, "Bearer remote-secret-key");
+    }
+
+    // Not upstream's: a redirect isn't followed, so the key never goes on
+    // to the address it names; the 3xx is the answer.
+    #[tokio::test]
+    async fn redirects_are_not_followed() {
+        let elsewhere = Server::start(&[("GET /v0/management/config", r#"{"status":"ok"}"#)]).await;
+        let target = format!("{}/v0/management/config", elsewhere.url());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/v0/management/config",
+            axum::routing::get(move || {
+                let target = target.clone();
+                async move {
+                    (
+                        axum::http::StatusCode::TEMPORARY_REDIRECT,
+                        [(axum::http::header::LOCATION, target)],
+                    )
+                }
+            }),
+        );
+        let task = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let client = Client::new(&format!("http://{address}"), "redirect-secret-key");
+        let reply = client
+            .send(Method::GET, "/v0/management/config", None)
+            .await
+            .unwrap();
+        assert_eq!(reply.status, 307);
+        assert!(client.get_config().await.is_err());
+        task.abort();
+        assert!(elsewhere.requests().is_empty());
+    }
+
+    // Not upstream's: a client whose HTTP client couldn't be made fails
+    // every request, saying why, and sends nothing.
+    #[tokio::test]
+    async fn an_unmade_http_client_fails_each_request() {
+        let server = Server::start(&[("GET /v0/management/config", r#"{"status":"ok"}"#)]).await;
+        let client = Client {
+            base_url: server.url(),
+            secret: Mutex::new(Secret("k".to_owned())),
+            http: Err("the HTTP client couldn't be made: no TLS".to_owned()),
+        };
+        let error = client
+            .send(Method::GET, "/v0/management/config", None)
+            .await
+            .unwrap_err();
+        assert_eq!(error, "the HTTP client couldn't be made: no TLS");
+        assert!(client.get_config().await.is_err());
+        assert!(server.requests().is_empty());
     }
 
     // Not upstream's: requests carry upstream's methods, paths, query
