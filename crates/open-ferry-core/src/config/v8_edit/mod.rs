@@ -52,6 +52,7 @@
 //!   (see the `config::yaml` module).
 //! - Those of [`validate_v8_config`].
 
+mod known;
 mod schema;
 mod validate;
 
@@ -60,6 +61,7 @@ use std::path::Path;
 
 use open_ferry_translate::go::json_valid;
 
+pub use known::{KnownKind, KnownPath, is_known_v8_path, known_v8_paths};
 pub use validate::validate_v8_config;
 
 use super::AnyValue;

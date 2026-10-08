@@ -125,7 +125,7 @@ struct ModelsOnly {
 }
 
 /// `v8AllowedRoots`: the sections a v8 file may have.
-fn allowed_root(key: &str) -> bool {
+pub(super) fn allowed_root(key: &str) -> bool {
     EXTRA_ROOTS.contains(&key)
         || V8_PATHS.iter().any(|&(_, current)| {
             current
