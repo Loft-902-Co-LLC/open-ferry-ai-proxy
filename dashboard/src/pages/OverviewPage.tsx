@@ -5,12 +5,13 @@ import { PageHeader } from "../components/PageHeader";
 import { Loading } from "../components/QueryState";
 import { ClientSetupCard } from "./overview/ClientSetupCard";
 import { useOverviewLayout } from "./overview/overviewLayout";
-import { ProvidersCard } from "./overview/ProvidersCard";
+import { ProvidersCard, useAsksForProvider } from "./overview/ProvidersCard";
 import { TodayCard } from "./overview/TodayCard";
 
 /**
- * The first page. A proxy nothing uses yet gets its setup, first and open.
- * Once a client has connected, the page leads with how the proxy is doing:
+ * The first page. A proxy nothing uses yet gets its setup, first and open;
+ * until it has a provider, the client setup waits closed below, as the step
+ * after. Once a client has connected, the page leads with how the proxy is doing:
  * today's calls, then the accounts, with the client setup closed below.
  * Safe mode always gets the setup, and so does a link from CLIProxyAPI's
  * safe-mode page, which opens it whatever the layout.
@@ -19,6 +20,7 @@ export function OverviewPage() {
   const location = useLocation();
   const focusKeys = asksForSafeModeSetup(location.search);
   const layout = useOverviewLayout();
+  const asksForProvider = useAsksForProvider();
 
   let description;
   let content;
@@ -38,7 +40,7 @@ export function OverviewPage() {
     content = (
       <>
         <ProvidersCard />
-        <ClientSetupCard focusKeys={focusKeys} />
+        <ClientSetupCard focusKeys={focusKeys} next={asksForProvider} />
       </>
     );
   }

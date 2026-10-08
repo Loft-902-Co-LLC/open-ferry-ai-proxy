@@ -189,6 +189,7 @@ function DisclosureButton({
 const TITLE = "Connect a client";
 const DESCRIPTION =
   "Ready-made setups for common clients, with the proxy's address and a client key filled in.";
+const NEXT_DESCRIPTION = `The next step, once a provider is connected. ${DESCRIPTION}`;
 
 export interface ClientSetupCardProps {
   /** Opened from CLIProxyAPI's safe-mode page: bring the key setup into view. */
@@ -198,6 +199,11 @@ export interface ClientSetupCardProps {
    * itself for `focusKeys`, and stays open in safe mode.
    */
   collapsible?: boolean;
+  /**
+   * The step after connecting a provider, which the server has none of yet:
+   * start closed, as for `collapsible`, and say it comes next.
+   */
+  next?: boolean;
 }
 
 /**
@@ -205,7 +211,11 @@ export interface ClientSetupCardProps {
  * client key, a tab per client, and its setup to copy. The address, model
  * and shell are already chosen, and wait behind their own disclosure.
  */
-export function ClientSetupCard({ focusKeys = false, collapsible = false }: ClientSetupCardProps) {
+export function ClientSetupCard({
+  focusKeys = false,
+  collapsible = false,
+  next = false,
+}: ClientSetupCardProps) {
   const call = useApiCall();
   const client = useQueryClient();
   const [address, setAddress] = useState<string | null>(null);
@@ -312,7 +322,7 @@ export function ClientSetupCard({ focusKeys = false, collapsible = false }: Clie
   const safeMode = setup.data?.safe_mode === true;
   // Safe mode, and the news that it has lifted, stay in view: there's
   // nothing to close while the proxy refuses every request.
-  const collapsed = collapsible && !safeMode && !replaceExamples.isSuccess;
+  const collapsed = (collapsible || next) && !safeMode && !replaceExamples.isSuccess;
   const open = !collapsed || opened;
   // Opened from the safe-mode page: once the setup shows, take the user to it.
   const focused = useRef(false);
@@ -343,7 +353,7 @@ export function ClientSetupCard({ focusKeys = false, collapsible = false }: Clie
             TITLE
           )
         }
-        description={DESCRIPTION}
+        description={next && !safeMode ? NEXT_DESCRIPTION : DESCRIPTION}
         className={open ? undefined : "[&>header]:border-b-0"}
       >
         {open ? (

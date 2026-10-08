@@ -169,12 +169,8 @@ function ConnectLinks({ upload }: { upload: ReactNode }) {
   );
 }
 
-/**
- * How the server's accounts are doing: on a first run, the ways to connect
- * one; after that, the failing and resting ones, each linking to it on
- * Credentials, and a word on the rest.
- */
-export function ProvidersCard() {
+/** The lists of accounts and keys the card reads, and what they come to. */
+function useAccountLists() {
   const files = useApiQuery<CredentialList>(AUTH_FILES, undefined, {
     refetchInterval: pollWhileRead,
   });
@@ -192,14 +188,67 @@ export function ProvidersCard() {
     refetchInterval: pollWhileRead,
   });
   const accountsUnserved = accounts.isError && entriesUnserved(accounts.error);
+  // A list read before keeps showing while a later read fails.
+  const failed =
+    queries.find(
+      (query) => query.isError && query.data === undefined && !isUnsupportedRoute(query.error),
+    ) ??
+    (accounts.isError && accounts.data === undefined && !accountsUnserved ? accounts : undefined);
+  return {
+    files,
+    accounts,
+    /** The server serves none of the lists. */
+    unserved: queries.every((query) => isUnsupportedRoute(query.error)) && accountsUnserved,
+    pending: queries.some((query) => query.isPending) || accounts.isPending,
+    failed,
+    credentials: files.data?.files ?? [],
+    keys: keyQueries.reduce(
+      (sum, { query, list }) =>
+        sum + (query.data === undefined ? 0 : keysOf(query.data, list).length),
+      0,
+    ),
+    entries: accounts.data?.entries ?? [],
+  };
+}
+
+type AccountLists = ReturnType<typeof useAccountLists>;
+
+/** The server answered, and has no account or key to send requests with yet. */
+function asksForProvider(lists: AccountLists): boolean {
+  return (
+    !lists.unserved &&
+    !lists.pending &&
+    lists.failed === undefined &&
+    lists.credentials.length === 0 &&
+    lists.keys === 0 &&
+    lists.entries.length === 0
+  );
+}
+
+/**
+ * Whether the card is asking for a provider to be connected, as on a first
+ * run, from the lists it reads. It changes as soon as one is.
+ */
+export function useAsksForProvider(): boolean {
+  return asksForProvider(useAccountLists());
+}
+
+/**
+ * How the server's accounts are doing: on a first run, the ways to connect
+ * one; after that, the failing and resting ones, each linking to it on
+ * Credentials, and a word on the rest.
+ */
+export function ProvidersCard() {
+  const lists = useAccountLists();
+  const { files, accounts, failed, credentials, keys, entries } = lists;
   const upload = useUpload({ size: "md" });
   const clock = useMinuteClock();
 
   // A server that serves none of it gets no card: there is nothing to do here.
-  if (queries.every((query) => isUnsupportedRoute(query.error)) && accountsUnserved) {
+  if (lists.unserved) {
     return null;
   }
-  if (queries.some((query) => query.isPending) || accounts.isPending) {
+  if (lists.pending) {
     return (
       <Card title="Account health">
         <Loading>Loading the credentials…</Loading>
@@ -212,12 +261,6 @@ export function ProvidersCard() {
       Open Credentials
     </Link>
   );
-  // A list read before keeps showing while a later read fails.
-  const failed =
-    queries.find(
-      (query) => query.isError && query.data === undefined && !isUnsupportedRoute(query.error),
-    ) ??
-    (accounts.isError && accounts.data === undefined && !accountsUnserved ? accounts : undefined);
   if (failed !== undefined) {
     return (
       <Card title="Account health" actions={openLink}>
@@ -239,15 +282,7 @@ export function ProvidersCard() {
     );
   }
 
-  const credentials = files.data?.files ?? [];
-  const keys = keyQueries.reduce(
-    (sum, { query, list }) =>
-      sum + (query.data === undefined ? 0 : keysOf(query.data, list).length),
-    0,
-  );
-  const entries = accounts.data?.entries ?? [];
-
-  if (credentials.length === 0 && keys === 0 && entries.length === 0) {
+  if (asksForProvider(lists)) {
     return (
       <Card
         title="Connect a provider"

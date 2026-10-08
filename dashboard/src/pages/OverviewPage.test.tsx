@@ -464,8 +464,52 @@ describe("the page's layout", () => {
     const { api } = server([KEY], {}, []);
     api.use(route("GET", USAGE_LEDGER, { json: SOME_CALLS }));
     renderApp("/");
-    await setupCode();
-    expect(cardTitles()).not.toContain("Today");
+    expect(await screen.findByRole("heading", { name: "Connect a provider" })).toBeVisible();
+    expect(cardTitles()).toEqual(["Connect a provider", "Connect a client"]);
+  });
+
+  it("keeps the client setup closed as the next step until a provider is connected", async () => {
+    const { api } = server([KEY], {}, []);
+    const files: Credential[] = [];
+    api.use(
+      route("GET", AUTH_FILES, () => ({ json: credentialList(files) })),
+      route("POST", AUTH_FILES, () => {
+        files.push(credential());
+        return { json: { status: "ok" } };
+      }),
+    );
+    const { user } = renderApp("/");
+    const toggle = await screen.findByRole("button", { name: "Connect a client", expanded: false });
+    const card = screen.getByRole("region", { name: "Connect a client" });
+    expect(card).toHaveTextContent("The next step, once a provider is connected.");
+    expect(screen.queryByLabelText(PYTHON)).toBeNull();
+
+    // It can be opened before, all the same.
+    await user.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(await setupCode()).toBeVisible();
+    await user.click(toggle);
+    expect(screen.queryByLabelText(PYTHON)).toBeNull();
+
+    // A provider connected here opens it, as the step that's next.
+    const connect = screen.getByRole("region", { name: "Connect a provider" });
+    const file = new File(['{"type":"claude"}'], "claude-new.json", { type: "application/json" });
+    await user.upload(within(connect).getByLabelText("Upload credential files"), file);
+    expect(await setupCode()).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Connect a client" })).toBeNull();
+    expect(card).not.toHaveTextContent("The next step");
+    expect(screen.getByRole("region", { name: "Account health" })).toBeVisible();
+  });
+
+  it("keeps the client setup open on a first run in safe mode", async () => {
+    server([...EXAMPLE_API_KEYS], { safe_mode: true }, []);
+    renderApp("/");
+    expect(await screen.findByText("The proxy is in safe mode")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Connect a provider" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Connect a client" })).toBeNull();
+    expect(screen.getByRole("region", { name: "Connect a client" })).not.toHaveTextContent(
+      "The next step",
+    );
   });
 
   it("leads with today's calls once a client has called, the setup closed", async () => {
