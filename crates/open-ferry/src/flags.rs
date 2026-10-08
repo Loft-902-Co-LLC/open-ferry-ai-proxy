@@ -11,15 +11,16 @@
 //! The usage leaves out `-password`, as upstream's does.
 //!
 //! A subcommand (`open-ferry init`, `open-ferry check`, `open-ferry
-//! service`) is recognized only as the first argument; `main` sends the
+//! service`, `open-ferry update`) is recognized only as the first argument; `main` sends the
 //! arguments after it to the subcommand, which reads its own flags with
 //! the same parser ([`parse_with`]) and has its own `-h`. Without one, or
 //! with a flag first, the command line is read as above.
 //!
 //! Deviations from upstream:
 //! - Upstream has no subcommands: it ignores a first argument that isn't a
-//!   flag, and serves. Here `init`, `check` and `service` as the first
-//!   argument run those subcommands.
+//!   flag, and serves. Here `init`, `check`, `service` and `update` as the
+//!   first argument run those subcommands.
+//! - `-version` prints the version and exits; upstream has no such flag.
 //! - Only the flags of the ported features are defined: `-config`, the Codex
 //!   and Claude logins, `-no-browser`, `-oauth-callback-port`,
 //!   `-local-model`, `-password`, and the TUI's `-tui`, `-standalone` and
@@ -59,6 +60,8 @@ pub struct Flags {
     /// The management API the TUI uses, or empty for the config's
     /// (`-management-base-url`).
     pub management_base_url: String,
+    /// Print the version and exit (`-version`). Not upstream's.
+    pub version: bool,
 }
 
 /// A password from the command line, which `Debug` doesn't show.
@@ -102,7 +105,7 @@ pub struct Definition<T> {
 }
 
 /// The flags, sorted by name as Go's usage lists them.
-const DEFINITIONS: [Definition<Flags>; 11] = [
+const DEFINITIONS: [Definition<Flags>; 12] = [
     Definition {
         name: "claude-login",
         usage: "Login to Claude using OAuth",
@@ -157,6 +160,11 @@ const DEFINITIONS: [Definition<Flags>; 11] = [
         name: "tui",
         usage: "Start with terminal management UI",
         kind: Kind::Bool(|flags, value| flags.tui = value),
+    },
+    Definition {
+        name: "version",
+        usage: "Print the version and exit",
+        kind: Kind::Bool(|flags, value| flags.version = value),
     },
 ];
 
@@ -373,7 +381,8 @@ mod tests {
             )
         );
         assert!(usage.contains("\n  -standalone\n    \tIn TUI mode,"));
-        assert!(usage.ends_with("\n  -tui\n    \tStart with terminal management UI\n"));
+        assert!(usage.contains("\n  -tui\n    \tStart with terminal management UI\n"));
+        assert!(usage.ends_with("\n  -version\n    \tPrint the version and exit\n"));
         assert!(!usage.contains("password"));
     }
 
