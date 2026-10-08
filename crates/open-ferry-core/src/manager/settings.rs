@@ -13,11 +13,16 @@
 //!   provider.
 //! - Values are taken as given: trimming and dropping invalid rules
 //!   (upstream's config sanitizing) is the config layer's job.
+//! - open-ferry's own `quota` strategy, with its preferences
+//!   (`routing.quota`), is a strategy upstream doesn't have; it runs a
+//!   `quota` strategy as round-robin. A change of the preferences alone
+//!   keeps the selector's cursors and bindings, since each pick reads them.
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 
+use super::quota_rank::QuotaPrefs;
 use super::text::go_lower;
 use crate::config::{self, Config, Redacted, RedactedUrl};
 
@@ -32,17 +37,29 @@ pub enum RoutingStrategy {
     /// Take turns in proportion to each credential's weight
     /// (`weighted-round-robin`).
     Weighted,
+    /// Pick by the quota the providers report (`quota`, with
+    /// `routing.quota`): open-ferry's own (see `quota_rank`).
+    Quota(QuotaPrefs),
 }
 
 impl RoutingStrategy {
     /// The strategy a config value names: `fill-first`, `fillfirst` or `ff`;
-    /// `weighted-round-robin`, `weightedroundrobin` or `wrr`; anything else
-    /// is round-robin.
+    /// `weighted-round-robin`, `weightedroundrobin` or `wrr`; `quota`, with
+    /// the default preferences; anything else is round-robin.
     pub fn parse(name: &str) -> Self {
         match go_lower(name.trim()).as_str() {
             "fill-first" | "fillfirst" | "ff" => Self::FillFirst,
             "weighted-round-robin" | "weightedroundrobin" | "wrr" => Self::Weighted,
+            "quota" => Self::Quota(QuotaPrefs::default()),
             _ => Self::RoundRobin,
+        }
+    }
+
+    /// The strategy `routing` sets, with its `quota` preferences.
+    pub fn of(routing: &config::RoutingConfig) -> Self {
+        match Self::parse(&routing.strategy) {
+            Self::Quota(_) => Self::Quota(QuotaPrefs::of(&routing.quota)),
+            other => other,
         }
     }
 }
@@ -66,7 +83,11 @@ impl RoutingState {
     pub(crate) fn of(settings: &Settings) -> Self {
         let ttl = settings.session_affinity_ttl;
         Self {
-            strategy: settings.routing_strategy,
+            strategy: match settings.routing_strategy {
+                // Read on each pick, so a change keeps the selector.
+                RoutingStrategy::Quota(_) => RoutingStrategy::Quota(QuotaPrefs::default()),
+                other => other,
+            },
             session_affinity: settings.session_affinity,
             session_affinity_ttl: if ttl.is_zero() {
                 Duration::from_secs(60 * 60)
@@ -345,7 +366,7 @@ impl From<&Config> for Settings {
             ),
             disable_cooling: config.disable_cooling,
             transient_error_cooldown_seconds: config.transient_error_cooldown_seconds,
-            routing_strategy: RoutingStrategy::parse(&config.routing.strategy),
+            routing_strategy: RoutingStrategy::of(&config.routing),
             session_affinity: config.routing.session_affinity,
             session_affinity_ttl: affinity_ttl(&config.routing.session_affinity_ttl),
             session_affinity_subagents: config.routing.session_affinity_subagents,
@@ -428,6 +449,59 @@ mod tests {
         assert_eq!(
             RoutingStrategy::parse("random"),
             RoutingStrategy::RoundRobin
+        );
+    }
+
+    // Not upstream's: open-ferry's `quota` strategy takes its preferences
+    // from `routing.quota`, and a change of them alone keeps the selector.
+    #[test]
+    fn quota_strategy_takes_its_preferences() {
+        use super::super::quota_rank::QuotaPreference;
+        let quota = |prefer, reserve_percent| {
+            RoutingStrategy::Quota(QuotaPrefs {
+                prefer,
+                reserve_percent,
+            })
+        };
+        assert_eq!(
+            RoutingStrategy::parse(" Quota "),
+            quota(QuotaPreference::SoonestReset, 0)
+        );
+        let strategy = |routing: &str| {
+            let config = Config::parse(format!(
+                "routing: {routing}
+"
+            ))
+            .expect("config");
+            Settings::from(&config).routing_strategy
+        };
+        for (routing, want) in [
+            (
+                "{strategy: quota, quota: {prefer: ' Most-Left ', reserve-percent: 10}}",
+                quota(QuotaPreference::MostLeft, 10),
+            ),
+            (
+                "{strategy: quota, quota: {prefer: soonest-reset, reserve-percent: 150}}",
+                quota(QuotaPreference::SoonestReset, 100),
+            ),
+            (
+                "{strategy: quota, quota: {prefer: other, reserve-percent: -5}}",
+                quota(QuotaPreference::SoonestReset, 0),
+            ),
+            (
+                "{strategy: fill-first, quota: {prefer: most-left}}",
+                RoutingStrategy::FillFirst,
+            ),
+        ] {
+            assert_eq!(strategy(routing), want, "{routing}");
+        }
+        assert_eq!(
+            routing("{strategy: quota}"),
+            routing("{strategy: quota, quota: {prefer: most-left, reserve-percent: 10}}")
+        );
+        assert_ne!(
+            routing("{strategy: quota}"),
+            routing("{strategy: round-robin}")
         );
     }
 

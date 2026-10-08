@@ -30,6 +30,10 @@
 //! - Plugin schedulers and required auth kinds aren't ported. The only
 //!   eligibility filter is the free-plan rule (see `policy`); a credential
 //!   policy has its own pick.
+//! - open-ferry's own `quota` strategy orders the ready credentials of the
+//!   priority by their quota readings (see `quota_rank`), on the scheduler
+//!   and the legacy path alike; across providers it ranks them all
+//!   together, taking turns by ID among those that rank the same.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -41,6 +45,7 @@ use super::classify::{auth_error_text, has_unauthorized_auth_failure};
 use super::credential::{is_zero, priority, websockets_enabled, weight};
 use super::models::{Resolver, openai_compatible_provider_key};
 use super::policy::Eligibility;
+use super::quota_rank;
 use super::settings::RoutingStrategy;
 use super::summary::extract_upstream_error_summary;
 use super::text::{canonical_model_key, equal_fold, go_lower, parse_suffix};
@@ -720,6 +725,8 @@ pub(crate) struct SelectorState {
     mixed_weighted: HashMap<String, SmoothWeighted>,
     legacy_last_picked: HashMap<String, String>,
     legacy_weighted: HashMap<String, SmoothWeighted>,
+    /// open-ferry's: the `quota` strategy's turns across providers.
+    mixed_last_picked: HashMap<String, String>,
 }
 
 impl SelectorState {
@@ -730,6 +737,7 @@ impl SelectorState {
         self.mixed_weighted.clear();
         self.legacy_last_picked.clear();
         self.legacy_weighted.clear();
+        self.mixed_last_picked.clear();
     }
 
     /// Forgets what upstream's scheduler rebuild forgets: the per-shard and
@@ -738,6 +746,7 @@ impl SelectorState {
         self.shards.clear();
         self.mixed_cursors.clear();
         self.mixed_weighted.clear();
+        self.mixed_last_picked.clear();
     }
 
     fn shard(&mut self, provider: &str, model_key: &str) -> &mut ShardCursors {
@@ -905,6 +914,7 @@ fn pick_ready_at_priority<'s, 'a>(
     priority: i64,
     strategy: RoutingStrategy,
     predicate: &dyn Fn(&Sched<'_>) -> bool,
+    now: Timestamp,
 ) -> Option<&'s Sched<'a>> {
     let (flat, ws) = pick_view(shard, prefer_ws, priority, predicate);
     if flat.is_empty() {
@@ -937,6 +947,13 @@ fn pick_ready_at_priority<'s, 'a>(
             }
             None
         }
+        RoutingStrategy::Quota(prefs) => quota_rank::pick(
+            flat.into_iter().filter(|e| predicate(e)).collect(),
+            |e| e.auth,
+            prefs,
+            now,
+            &mut cursor.last_picked,
+        ),
     }
 }
 
@@ -1149,6 +1166,7 @@ impl<'a> Selection<'a> {
                 priority,
                 self.strategy,
                 &predicate,
+                self.now,
             )
         {
             return Ok(picked.auth.clone());
@@ -1199,6 +1217,7 @@ impl<'a> Selection<'a> {
                     priority,
                     self.strategy,
                     &predicate,
+                    self.now,
                 )
             {
                 return Ok((picked.auth.clone(), provider_key));
@@ -1244,6 +1263,7 @@ impl<'a> Selection<'a> {
                         best,
                         self.strategy,
                         &predicate,
+                        self.now,
                     ) {
                         return Ok((picked.auth.clone(), provider.clone()));
                     }
@@ -1313,6 +1333,7 @@ impl<'a> Selection<'a> {
                         best,
                         RoutingStrategy::RoundRobin,
                         &predicate,
+                        self.now,
                     ) else {
                         continue;
                     };
@@ -1320,6 +1341,20 @@ impl<'a> Selection<'a> {
                     return Ok((picked.auth.clone(), provider.clone()));
                 }
                 Err(unavailable())
+            }
+            RoutingStrategy::Quota(prefs) => {
+                let cursor_key = format!("{}:{model_key}", normalized.join(","));
+                let mut entries: Vec<&Sched<'a>> = shards
+                    .iter()
+                    .flat_map(|shard| view(shard, best, false))
+                    .filter(|e| predicate(e))
+                    .collect();
+                entries.sort_by(|a, b| a.auth.id.cmp(&b.auth.id));
+                let last = capped(&mut state.mixed_last_picked, &cursor_key);
+                match quota_rank::pick(entries, |e| e.auth, prefs, self.now, last) {
+                    Some(entry) => Ok((entry.auth.clone(), entry.provider.clone())),
+                    None => Err(unavailable()),
+                }
             }
         }
     }
@@ -1570,6 +1605,11 @@ impl<'a> Selection<'a> {
                         ));
                     }
                 }
+            }
+            RoutingStrategy::Quota(prefs) => {
+                let key = format!("{scope}:{}", canonical_model_key(selector_model));
+                let last = capped(&mut state.legacy_last_picked, &key);
+                quota_rank::pick(available.to_vec(), |a| a, prefs, self.now, last)
             }
         };
         selected.ok_or_else(|| ExecError::new(ErrorKind::AuthNotFound, "selector returned no auth"))
