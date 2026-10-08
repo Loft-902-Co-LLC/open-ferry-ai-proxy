@@ -1,6 +1,8 @@
 # open-ferry for coding agents
 
-What an agent needs to install open-ferry, set it up, and point a client at it. Every command here is one open-ferry or its install scripts define. Where something arrives with the first release, it says so.
+What an agent needs to install open-ferry, set it up, change its setup, and point a client at it. Every command here is one open-ferry or its install scripts define. Where something arrives with the first release, it says so.
+
+**To look at a setup or change it, use open-ferry's own commands (`open-ferry status`, `config`, `keys`, `credentials` and `clients`) or its MCP server (`open-ferry mcp`)**, not hand edits of the YAML or curl with the management key: they check each change, keep secrets out of what they print and out of the command line, and ask for a yes before anything risky. See [Look at it and change it](#look-at-it-and-change-it-the-commands-and-the-mcp-server).
 
 open-ferry is a local proxy, a Rust port of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI). On one port (8317 by default) it serves OpenAI Chat Completions and Responses, Claude Messages and the Gemini API, and passes each request on to an account or API key from its config: Codex and Claude sign-ins, your own Claude Code (`claude-cli`), Gemini, Vertex AI, xAI, and any OpenAI-compatible upstream. It is pre-alpha; no release has been published yet.
 
@@ -103,19 +105,132 @@ open-ferry service uninstall
 
 Add `-dry-run` to `install` or `uninstall` to print what they would do and change nothing.
 
+## Look at it and change it: the commands and the MCP server
+
+To look at a setup and change it, use these commands, or the MCP server that serves the same actions as tools, rather than editing the YAML or calling the management API with curl. They check each change as the management API does, mask every secret in what they print, and need an explicit yes before anything risky.
+
+| Command | MCP tool | What it does |
+|---|---|---|
+| `open-ferry status` | `status` | Whether a server runs for the config: its version, addresses, credentials by state and today's calls |
+| `open-ferry config get <path>` | `config_get` | One setting, masked; or that it isn't set, and its default |
+| `open-ferry config set <path> <value>` | `config_set` | Sets a setting to a YAML or JSON value |
+| `open-ferry config unset <path>` | `config_unset` | Removes a setting, so its default applies |
+| `open-ferry config show` | `config_show` | The whole config, masked |
+| `open-ferry config diff` | `config_diff` | What the last change made |
+| `open-ferry config undo` | `config_undo` | Reverses the last change; run it again to redo it |
+| `open-ferry config replace --from-file <file>` | `config_replace` | Replaces the whole config |
+| `open-ferry keys list` | `keys_list` | The client keys, masked |
+| `open-ferry keys add --generate` | `keys_add` | Adds a new client key, and shows it once |
+| `open-ferry keys remove <index>` | `keys_remove` | Removes a client key |
+| `open-ferry credentials list` | `credentials_list` | The running server's credentials and their state |
+| `open-ferry credentials enable <credential>`, `disable` | `credentials_enable`, `credentials_disable` | Turns a credential on or off |
+| `open-ferry credentials reset-quota <credential>` | `credentials_reset_quota` | Clears its cooldowns and quota state |
+| `open-ferry credentials remove <credential>` | `credentials_remove` | Deletes its file |
+| `open-ferry credentials login codex` | `credentials_login` | Starts a sign-in, and waits for it |
+| `open-ferry clients setup <client>` | `clients_setup` | Prints a client's setup; writes nothing |
+
+Each command takes `--config PATH` (else `config.yaml` in the working directory, else the installed config above) and `--json`, which prints one JSON object: the same one its tool returns. [docs/cli.md](cli.md#looking-at-and-changing-a-setup) has every flag, with examples; [docs/mcp.md](mcp.md) has the tools, and how to add the server to Claude Code, Codex, T3 Code or Cursor.
+
+- **Run them with `--json`, and read the exit code:** `0` done; `1` failed; `2` bad usage (an unknown command, flag or setting, or a secret given as an argument); `3` needs `--yes`, or was declined; `4` the server isn't running. A failure's JSON has `error` (a code such as `needs_confirmation` or `unknown_path`), `message` and, when there is one, `hint`.
+- **Paths** are the v8 config's, dotted: `routing.strategy`, `server.port`, `routing.quota.prefer`, `access.api-keys`. An unknown one is refused with the nearest known name. A list is set whole, not one item at a time.
+
+### Where a change goes
+
+- **While a server runs for the config**, and the command has its management key, a change goes through the server's management API. The server checks it, writes it with its config writer (the old file kept, comments kept) and applies it at once, as it does a change made in the dashboard. The server is then the only writer, so the commands and the dashboard don't lose each other's changes.
+- **Otherwise** the change is written to the file, with the same checks and the same writer. A running server loads it when it sees the file change; one started later reads it.
+- The report says which way it went (`"via": "server"` or `"file"`), lists each setting it changed with its old and new value, masked, and says that `open-ferry config undo` reverses it.
+- Every write of the config, by these commands, the dashboard or the management API, keeps the file it replaces as `<config>.bak`. `config undo` puts that back, and keeps what it replaces as the new `.bak`, so running it again redoes the change.
+- `credentials` commands need the running server; without one they exit with `4` and say how to start it. `status` exits with `4` too when nothing runs, after saying what the config holds.
+
+### The management key
+
+A command that calls the server looks for the management key in this order:
+
+1. the config's `management.secret-key`, when it is stored plain (not as the bcrypt hash a server makes of it);
+2. `MANAGEMENT_PASSWORD`, from the environment or a `.env` file in the working directory;
+3. the file `--management-key-file` or `OPEN_FERRY_MANAGEMENT_KEY_FILE` names.
+
+It is never taken from the command line, where process lists, shell history and agent transcripts would keep it: a `--management-key` flag is refused. With no key, settings commands change the file, and the commands that need the server say there is no key.
+
+### What needs a yes
+
+These change nothing without `--yes` (`confirm: true` for a tool):
+
+- deleting a credential (`credentials remove`) or a client key (`keys remove`);
+- showing a secret in full (`keys list --reveal`, `clients setup --reveal`); a tool never shows an existing secret;
+- replacing the whole config (`config replace`);
+- a Claude sign-in (`credentials login claude`), which goes against Anthropic's terms ([why](claude-subscription.md#the-claude-sign-in));
+- a change to a **sensitive setting**, by `config set`, `unset`, `replace` or `undo`:
+  - `management.allow-remote`, `management.secret-key` and `management.separate-address`, which decide who can reach the management API;
+  - `server.host` set to anything but `localhost` or a loopback address, or unset, which opens the proxy to other machines;
+  - anything under `server.tls`, which decides how clients connect;
+  - removing the last client key in `access.api-keys`.
+
+At a terminal such a command asks first. Without a terminal, as in an agent's shell, it changes nothing, exits with `3`, and its answer says what it would change (`would.changes`, masked) and why (`would.reasons`). Show that to the user, and run it again with `--yes` only when they agree.
+
+### Secrets
+
+- What the commands print never holds a secret they weren't asked to show: client keys, the management key, provider API keys, tokens, passwords in URLs, and email addresses are masked, as the dashboard masks them.
+- A secret is never taken as an argument: give it on standard input with `--from-stdin`, or in a file with `--from-file` (`from_file` for a tool). `config set management.secret-key <value>` is refused with exit code `2`.
+- `keys add --generate` prints the new key once, since the user needs it to set up a client. A tool returns it only with `confirm: true`, as it then sits in the transcript; else it writes it to the new file `to_file` names, readable by the user alone on Linux and macOS, and gives the path.
+
+### Examples
+
+```sh
+open-ferry status --json
+open-ferry config get routing.strategy
+open-ferry config set routing.strategy fill-first
+open-ferry config undo
+open-ferry config set server.host 0.0.0.0     # exit code 3: needs --yes
+open-ferry config set management.secret-key --from-file new-key.txt --yes
+open-ferry keys add --generate
+open-ferry credentials list --json
+open-ferry credentials disable 870dd779bc223fa9
+open-ferry clients setup codex
+```
+
+`config set` prints:
+
+```
+Setting routing.strategy: done, through the running server.
+  routing.strategy: (not set) -> "fill-first"
+Undo it with `open-ferry config undo`.
+```
+
+and with `--json`:
+
+```json
+{
+  "action": "set",
+  "path": "routing.strategy",
+  "changed": true,
+  "via": "server",
+  "changes": [{"path": "routing.strategy", "new": "fill-first"}],
+  "undo": "Undo it with `open-ferry config undo`."
+}
+```
+
 ## Give it credentials
 
 A fresh config has no upstream credentials, so every model request fails until it has one. Either:
 
-- **Sign in to Codex** (a ChatGPT account): `open-ferry -config PATH -codex-login`, or `-codex-device-login` on a machine without a browser.
+- **Sign in to Codex** (a ChatGPT account): with the server running, `open-ferry credentials login codex` prints an address for the user to open in a browser and waits for the sign-in to finish (`--no-wait` returns at once with a `state`; `--state <state>` waits for it later). The `credentials_login` tool does the same in two calls. Without a running server, `open-ferry -config PATH -codex-login`, or `-codex-device-login` on a machine without a browser.
 - **Use Claude through your own Claude Code**, with a `claude-cli` entry in the config ([docs/claude-subscription.md](claude-subscription.md)). There is a `-claude-login` too, but signing in that way goes against Anthropic's terms ([why](claude-subscription.md#the-claude-sign-in)).
-- **Add API keys** to the config's `api-keys` section: `gemini`, `interactions`, `vertex`, `codex`, `claude`, `xai`, `meta`, or an `openai-compatibility` provider (any upstream that speaks Chat Completions). The template, [`config.example.yaml`](../config.example.yaml), has a commented example of each: uncomment the `api-keys` line and the providers you want. A config in CLIProxyAPI's legacy layout names them `gemini-api-key`, `claude-api-key` and so on, which is still read.
+- **Add API keys** to the config's `api-keys` section: `gemini`, `interactions`, `vertex`, `codex`, `claude`, `xai`, `meta`, or an `openai-compatibility` provider (any upstream that speaks Chat Completions). The template, [`config.example.yaml`](../config.example.yaml), has a commented example of each. An API key is a secret, so it goes in a file, never on the command line: write the provider's list, as the config holds it, to a file only the user can read, then `open-ferry config set api-keys.gemini --from-file gemini.yaml`. The list replaces the one in the config, so it must hold any entries the config has already. For example:
 
-The dashboard (below) can sign in and upload credential files too. The server picks up changes to the config and the auth directory without a restart.
+  ```yaml
+  - name: gemini
+    keys:
+      - api-key: "<the key>"
+  ```
+
+  A config in CLIProxyAPI's legacy layout names them `gemini-api-key`, `claude-api-key` and so on, which is still read.
+
+The dashboard (below) can sign in and upload credential files too. The server picks up changes to the config and the auth directory without a restart. `open-ferry credentials list` then shows each credential and its state.
 
 ## Point a client at it
 
-Each client needs the proxy's address, `http://127.0.0.1:8317` with the config's host and port, and a client key from the config's `access.api-keys` (the one `init` printed). The dashboard's Overview page, at `/dashboard/`, writes these setups with your address, key and a model filled in. To see which models the proxy can serve now:
+Each client needs the proxy's address, `http://127.0.0.1:8317` with the config's host and port, and a client key from the config's `access.api-keys` (the one `init` printed). `open-ferry clients setup <client>` prints the setup for `openai-python`, `openai-node`, `codex`, `claude-code` or `curl`, with the address and a model the server serves filled in, and the key masked; it writes no other program's config. The dashboard's Overview page, at `/dashboard/`, writes the same setups. To see which models the proxy can serve now:
 
 ```sh
 curl -H "Authorization: Bearer $OPEN_FERRY_API_KEY" http://127.0.0.1:8317/v1/models
@@ -165,6 +280,8 @@ The Anthropic and Google Gen AI SDKs take the address without a path. The proxy 
 
 ## The management API and the dashboard
 
+The commands above call the management API for you. To call it yourself, as a fallback:
+
 - **The management API** is CLIProxyAPI's, at `/v0/management/` (and `/v8/management/`) on the proxy's port: credentials and their state, sign-ins, the config and the client keys, logs, usage and quota. Send the management key, the config's `management.secret-key`, as `Authorization: Bearer <key>`. It answers only on the same machine unless `management.allow-remote` is on, and is off while no management key is set. Five failed attempts from one address ban it for thirty minutes. For example:
 
   ```sh
@@ -178,5 +295,7 @@ The Anthropic and Google Gen AI SDKs take the address without a path. The proxy 
 ## More
 
 - [README](../README.md): what open-ferry does, and building it.
+- [docs/cli.md](cli.md): every command and flag.
+- [docs/mcp.md](mcp.md): the MCP server's tools, and adding it to an agent's app.
 - [Migrating from CLIProxyAPI](migrating-from-cliproxyapi.md): what carries over and what doesn't.
 - [UPSTREAM.md](../UPSTREAM.md): what was ported from CLIProxyAPI, and every deliberate difference.

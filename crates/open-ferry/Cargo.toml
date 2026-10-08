@@ -23,8 +23,10 @@ open-ferry-server.workspace = true
 open-ferry-translate.workspace = true
 open-ferry-tui.workspace = true
 rand = "0.10.3"
+rmcp = { version = "3.5.1", default-features = false, features = ["server", "transport-io"] }
 rustls = { version = "0.23.45", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 same-file = "1.0.6"
+serde = { version = "1.0.229", features = ["derive"] }
 serde_json.workspace = true
 socket2 = "0.6.5"
 subtle = "2.6.1"
