@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 use super::change::{
     Call, Content, Edit, Request, check_expected, key_text, make_from, read_config,
 };
-use super::config::{Source, secret_in_argument};
+use super::config::{Source, reads_a_file, secret_in_argument};
 use super::guard::confirm;
 use super::values::{get, read_tree, tree_of};
 use super::{Caller, Context, Failure, Outcome, Report};
@@ -251,7 +251,11 @@ pub(crate) async fn add(ctx: &Context, input: AddInput) -> Result<Outcome, Failu
             action: "add_key",
             what: "Adding a client key".to_owned(),
             path: Some("access.api-keys".to_owned()),
-            always: None,
+            always: input
+                .source
+                .as_ref()
+                .map(|source| reads_a_file(ctx, source))
+                .unwrap_or_default(),
         },
         data,
     )
@@ -352,9 +356,9 @@ pub(crate) async fn remove(ctx: &Context, input: RemoveInput) -> Result<Outcome,
             action: "remove_key",
             what: format!("Removing client key {index} ({masked})"),
             path: Some("access.api-keys".to_owned()),
-            always: Some(format!(
+            always: vec![format!(
                 "it deletes client key {index} ({masked}), and a client using it is refused"
-            )),
+            )],
         },
         data,
     )

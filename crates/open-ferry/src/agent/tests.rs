@@ -1225,6 +1225,138 @@ async fn files_are_read_only_for_secrets() {
     assert!(!shows(&got, TOKEN));
 }
 
+// Not upstream's: a credential file is refused whatever its shape: a
+// sign-in's or a key's field at any depth, in any case and with any
+// separators, or a PEM block; the refusal names the field, never a value.
+#[tokio::test]
+async fn credential_files_are_refused_in_any_shape() {
+    const VALUE: &str = "placeholder-credential-value-0123456789";
+    let offline = offline(Some(KEY));
+    let setup = &offline.setup;
+    let before = setup.text();
+    for (name, text, mark) in [
+        (
+            "claude.json",
+            json!({"claudeAiOauth": {"accessToken": VALUE, "refreshToken": VALUE}}).to_string(),
+            "the field accessToken",
+        ),
+        (
+            "auth.json",
+            json!({"OPENAI_API_KEY": null, "tokens": {"id_token": VALUE}}).to_string(),
+            "the field tokens",
+        ),
+        (
+            "service-account.json",
+            json!({"project": {"keys": [{"private_key": VALUE}]}}).to_string(),
+            "the field private_key",
+        ),
+        (
+            "session.json",
+            json!({"sessionKey": VALUE}).to_string(),
+            "the field sessionKey",
+        ),
+        (
+            "oauth.yaml",
+            format!("client:\n  client-secret: {VALUE}\n"),
+            "the field client-secret",
+        ),
+        (
+            "key.pem",
+            format!("-----BEGIN PRIVATE KEY-----\n{VALUE}\n-----END PRIVATE KEY-----\n"),
+            "a PEM block",
+        ),
+    ] {
+        let file = setup.file(name, &text);
+        for caller in [Caller::Cli, Caller::Mcp] {
+            let ctx = confirmed(&setup.path, caller);
+            let failure = fails(
+                &ctx,
+                set_from("management.secret-key", Source::File(file.clone())),
+            )
+            .await;
+            assert_eq!(failure.error, "unsafe_file", "{failure:?}");
+            assert!(failure.message.contains(mark), "{failure:?}");
+            assert!(!failure_shows(&failure, VALUE), "{failure:?}");
+        }
+    }
+    assert_eq!(setup.text(), before);
+}
+
+// Not upstream's: over MCP, a call that reads a file into the config needs
+// confirm: true, with that reason, even when what it changes needs none; on
+// the command line, naming the file is the user's own doing.
+#[tokio::test]
+async fn a_file_read_over_mcp_needs_a_confirmation() {
+    let offline = offline(Some(KEY));
+    let setup = &offline.setup;
+    let provider = json!([{"name": "example", "base-url": "https://api.example.com", "keys": [{"api-key": "sk-provider-secret-value-1234"}]}]);
+    let provider_file = setup.file("provider.json", &provider.to_string());
+    let key_file = setup.file("client-key.txt", "sk-another-client-key-123456\n");
+    let whole = setup.file(
+        "whole.yaml",
+        &format!("{}routing:\n  strategy: fill-first\n", setup.text()),
+    );
+    let before = setup.text();
+    let server = Server::new(Ok(setup.path.clone()), Env::default(), None);
+    let mut session = server_session(server).await;
+    for (tool, call) in [
+        (
+            "config_set",
+            json!({"path": "api-keys.codex", "from_file": provider_file}),
+        ),
+        ("keys_add", json!({"from_file": key_file})),
+        ("config_replace", json!({"from_file": whole})),
+    ] {
+        let result = session.call(tool, call).await;
+        let answer = &result["structuredContent"];
+        assert_eq!(
+            answer["error"],
+            json!("needs_confirmation"),
+            "{tool}: {answer}"
+        );
+        assert!(
+            answer["would"]["reasons"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("it reads a file into the config")),
+            "{tool}: {answer}"
+        );
+        assert!(!result.to_string().contains("sk-provider-secret-value-1234"));
+        assert!(!result.to_string().contains("sk-another-client-key-123456"));
+        assert_eq!(setup.text(), before);
+    }
+
+    // With it, they are made.
+    for (tool, call) in [
+        (
+            "config_set",
+            json!({"path": "api-keys.codex", "from_file": provider_file, "confirm": true}),
+        ),
+        ("keys_add", json!({"from_file": key_file, "confirm": true})),
+    ] {
+        let result = session.call(tool, call).await;
+        assert_eq!(
+            result["structuredContent"]["changed"],
+            json!(true),
+            "{tool}: {result}"
+        );
+    }
+    assert!(setup.text().contains("sk-provider-secret-value-1234"));
+    assert!(setup.text().contains("sk-another-client-key-123456"));
+
+    // On the command line, a file needs no confirmation of its own.
+    let other = setup.file("other-key.txt", "sk-third-client-key-1234567\n");
+    let added = ok(
+        &cli(&setup.path),
+        Command::KeysAdd(AddInput {
+            source: Some(Source::File(other)),
+            ..AddInput::default()
+        }),
+    )
+    .await;
+    assert_eq!(added.json["changed"], json!(true));
+}
+
 // Not upstream's: secrets are masked in a command's text and JSON, and in
 // the tools' results and the config resource; MANAGEMENT_PASSWORD and the
 // key file are scrubbed wherever they would show.

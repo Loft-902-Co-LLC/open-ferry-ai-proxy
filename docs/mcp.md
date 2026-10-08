@@ -86,7 +86,7 @@ The annotations are the protocol's hints: `readOnlyHint`, `destructiveHint` (giv
 
 - **`path`** is a setting's path in the v8 config, dotted (`routing.strategy`, `server.port`), as the commands take it. A list is set whole, not one item by its index.
 - **`value`** is any JSON. A secret is refused as `value`: it comes in a file, `from_file`.
-- **`from_file`** is only for a secret: `config_set` refuses a file's value for a setting that holds none (`usage`), so give that as `value`. A file in the auth directory, or a credential file (a sign-in's tokens or a service account's key), is never read (`unsafe_file`).
+- **`from_file`** is only for a secret: `config_set` refuses a file's value for a setting that holds none (`usage`), so give that as `value`. A file in the auth directory, or a credential file, is never read (`unsafe_file`): one with a PEM block (`-----BEGIN ...-----`), or, in JSON or YAML, any of the fields `access_token`, `refresh_token`, `id_token`, `private_key`, `client_secret`, `tokens` and `session_key` with a value, at any depth, in any case and with or without `_`, `-` or `.` (`accessToken` and `access-token` too). A call with `from_file` needs `confirm: true` (see below).
 - **`from_file`** and **`to_file`** are paths on the machine the server runs on; give full paths, as the server's working directory is the app's choice.
 - **`credential`** is a credential's `auth_index` from `credentials_list`, or its name.
 - **`expect_sha256`** is the `config_sha256` a result that needed `confirm: true` gave: send it with `confirm: true` (see [What needs `confirm: true`](#what-needs-confirm-true)).
@@ -102,6 +102,7 @@ Without it, these change nothing, and the result is a tool error with `"error": 
 
 - `credentials_remove` and `keys_remove`: they delete;
 - `config_replace`: it replaces the whole config;
+- `config_set`, `config_replace` and `keys_add` with `from_file`: it reads a file into the config (`keys_remove` needs it anyway);
 - `credentials_login` for `claude`: that sign-in goes against Anthropic's terms ([why](claude-subscription.md#the-claude-sign-in));
 - `keys_add` with `generate: true` and no `to_file`: the new key is returned, so it sits in the transcript;
 - `config_set`, `config_unset`, `config_replace`, `config_undo` and `keys_remove`, when they change a sensitive setting:
