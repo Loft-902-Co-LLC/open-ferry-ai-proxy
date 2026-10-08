@@ -25,6 +25,7 @@ import {
   cooldown,
   credential,
   credentialList,
+  quotaCheck,
 } from "../../test/fixtures";
 import { loadFirst } from "../../test/loadFirst";
 import { mockApi, route, type MockApi } from "../../test/mockApi";
@@ -274,6 +275,52 @@ describe("the credential list", () => {
     expect(key).not.toHaveTextContent("sk-test-provider-key-0001");
     expect(within(key).queryByRole("button", { name: /^Delete/ })).toBeNull();
     expect(api.unhandled).toEqual([]);
+  });
+
+  it("says when the server next checks a capped quota rest, and which model it covers", async () => {
+    server([
+      credential({
+        name: "codex-bob.json",
+        id: "codex-bob.json",
+        provider: "codex",
+        account: "bob@example.com",
+        label: "bob@example.com",
+        // While it waits for its check, the rest ends at the check.
+        cooldowns: [
+          cooldown("credential_quota", 3600, { retry_at: "2026-10-05T13:00:00.123456789Z" }),
+          cooldown("quota", 330_000, {
+            scope: "model",
+            model_key: "gpt-5.1-codex",
+            retry_at: "2026-10-09T08:00:00Z",
+          }),
+          cooldown("quota", 300, { scope: "model", model_key: "gpt-5.1-mini" }),
+        ],
+        quota_checks: [
+          quotaCheck("resting"),
+          quotaCheck("checking", { scope: "model", model_key: "gpt-5.1-codex" }),
+          quotaCheck("due", { scope: "model", model_key: "gpt-5.1" }),
+        ],
+      }),
+    ]);
+    renderApp("/credentials");
+    const card = await screen.findByRole("region", { name: CREDENTIALS });
+    const bob = await within(card).findByRole("article", { name: "bob@example.com" });
+    expect(bob).toHaveTextContent(
+      "until the allowance comes back. Next check in about 1 h, at Oct 5, 13:00, rather than at the provider's reset, Oct 9, 08:00.",
+    );
+    expect(bob).not.toHaveTextContent("Back in about 1 h");
+    expect(bob).toHaveTextContent(
+      "gpt-5.1-codex: A check is under way: one request is finding out whether the quota is back.",
+    );
+    // A rest the cap doesn't hold still says when it ends.
+    expect(bob).toHaveTextContent("gpt-5.1-mini: Back in about 5 min");
+    // A due check has no rest left to show it beside.
+    expect(bob).toHaveTextContent(
+      "gpt-5.1: A check is due: the next request finds out whether the quota is back.",
+    );
+    // Nothing counts down out loud.
+    expect(within(bob).getByText(/Next check in/).closest("[role], [aria-live]")).toBeNull();
+    expect(within(bob).getByText(/A check is due/).closest("[role], [aria-live]")).toBeNull();
   });
 
   it("says so in one line when nothing needs attention", async () => {
@@ -1011,6 +1058,29 @@ describe("the Claude Code accounts", () => {
     // A check runs Claude Code on the server, so nothing checks by itself.
     expect(api.callsTo("GET", CLAUDE_CLI_AUTH_STATUS)).toEqual([]);
     expect(api.unhandled).toEqual([]);
+  });
+
+  it("says when a capped quota rest of an entry's is being checked", async () => {
+    server(
+      [],
+      {},
+      [
+        claudeCliEntry({
+          credential: claudeCliCredential({
+            unavailable: true,
+            cooldowns: [cooldown("credential_quota", 330_000, { retry_at: "2026-10-09T08:00:00Z" })],
+            quota_checks: [quotaCheck("checking")],
+          }),
+        }),
+      ],
+    );
+    renderApp("/credentials");
+    const card = await screen.findByRole("region", { name: CLAUDE_CLI });
+    const entry = await within(card).findByRole("article", { name: "claude-max-1" });
+    expect(entry).toHaveTextContent(
+      "until the allowance comes back. A check is under way: one request is finding out whether the quota is back.",
+    );
+    expect(entry).not.toHaveTextContent("Back in");
   });
 
   it("checks an entry's sign-in when asked, and says how it is signed in", async () => {

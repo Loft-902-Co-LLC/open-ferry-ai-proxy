@@ -24,17 +24,10 @@ import { Spinner } from "../../components/Spinner";
 import { claudeCliAnchor } from "./anchors";
 import { claudeCommand, entriesUnserved, entryHealth } from "./claudeCli";
 import { pollWhileRead } from "./CredentialList";
-import {
-  backIn,
-  ModelCooldowns,
-  QuotaWindows,
-  Requests,
-  resetNotice,
-} from "./CredentialItem";
+import { ModelCooldowns, QuotaWindows, Requests, RestText, resetNotice } from "./CredentialItem";
 import {
   canReset,
   credentialCooldowns,
-  explainReason,
   lastUsed,
   modelCooldowns,
   resetLabel,
@@ -136,12 +129,14 @@ interface EntryItemProps {
   compact: boolean;
   /** The address points at it: its details show. */
   targeted: boolean;
+  /** When the list was read, in milliseconds since the epoch: what its times count from. */
+  readAt: number;
   /** Called with what an action did, for the list to say. */
   onDone: (notice: ReactNode) => void;
 }
 
 /** One entry: its state, why, what to do, and its actions. */
-function EntryItem({ entry, anchor, compact, targeted, onDone }: EntryItemProps) {
+function EntryItem({ entry, anchor, compact, targeted, readAt, onDone }: EntryItemProps) {
   const titleId = useId();
   const detailsId = useId();
   const call = useApiCall();
@@ -235,10 +230,8 @@ function EntryItem({ entry, anchor, compact, targeted, onDone }: EntryItemProps)
 
         <div className="space-y-1">
           <p>{health.summary}</p>
-          {resting[0] !== undefined && (
-            <p className="text-muted">
-              {explainReason(resting[0].reason).meaning} {backIn(resting[0])}
-            </p>
+          {credential !== null && (
+            <RestText credential={credential} resting={resting[0]} readAt={readAt} />
           )}
           {health.action !== null && (
             <p>
@@ -259,7 +252,9 @@ function EntryItem({ entry, anchor, compact, targeted, onDone }: EntryItemProps)
           </div>
         )}
         {readings !== null && <QuotaWindows readings={readings} />}
-        {models.length > 0 && <ModelCooldowns cooldowns={models} />}
+        {credential !== null && models.length > 0 && (
+          <ModelCooldowns credential={credential} readAt={readAt} />
+        )}
         {credential !== null && <Requests credential={credential} />}
 
         <div className="flex flex-wrap gap-2">
@@ -359,6 +354,7 @@ export function ClaudeCliEntries() {
                 anchor={entry.anchor}
                 compact={view.compact}
                 targeted={view.targeted}
+                readAt={query.dataUpdatedAt}
                 onDone={setNotice}
               />
             )}

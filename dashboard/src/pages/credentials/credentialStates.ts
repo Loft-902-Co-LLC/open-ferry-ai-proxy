@@ -6,9 +6,15 @@
 // cooldown on a Claude or Codex account's quota, the window its last
 // response says is used up names it (see quotaReadings.ts).
 
-import type { Cooldown, CooldownReason, Credential, SignInProvider } from "../../api/credentials";
+import type {
+  Cooldown,
+  CooldownReason,
+  Credential,
+  QuotaCheck,
+  SignInProvider,
+} from "../../api/credentials";
 import type { BadgeTone } from "../../components/Badge";
-import { formatInteger, formatSeconds } from "../../lib/format";
+import { formatInteger, formatSeconds, formatShortDateTime } from "../../lib/format";
 import { limitUsedUp, quotaReadings } from "./quotaReadings";
 
 /** A provider's name as people know it. */
@@ -266,6 +272,53 @@ export function credentialCooldowns(credential: Credential): Cooldown[] {
 /** The cooldowns on single models. */
 export function modelCooldowns(credential: Credential): Cooldown[] {
   return (credential.cooldowns ?? []).filter((cooldown) => cooldown.scope === "model");
+}
+
+// -------------------------------------------------------- quota checks
+
+/** Whether `check` caps `cooldown`: they are the same rest, of the credential or of one model. */
+export function capsCooldown(check: QuotaCheck, cooldown: Cooldown): boolean {
+  return (
+    check.scope === cooldown.scope &&
+    (check.scope === "credential" || check.model_key === cooldown.model_key)
+  );
+}
+
+/** The capped quota rest behind `cooldown`, when `routing.quota.check-after` caps it. */
+export function quotaCheckOf(credential: Credential, cooldown: Cooldown): QuotaCheck | undefined {
+  return (credential.quota_checks ?? []).find((check) => capsCooldown(check, cooldown));
+}
+
+/**
+ * The capped quota rests none of the credential's cooldowns shows: one
+ * whose check is due has no time left to rest.
+ */
+export function unlistedQuotaChecks(credential: Credential): QuotaCheck[] {
+  const cooldowns = credential.cooldowns ?? [];
+  return (credential.quota_checks ?? []).filter(
+    (check) => !cooldowns.some((cooldown) => capsCooldown(check, cooldown)),
+  );
+}
+
+/**
+ * When the server next checks a capped quota rest, as of `readAt`, when
+ * the list was made (milliseconds since the epoch): "Next check in about
+ * 50 min, at Oct 5, 12:50, rather than at the provider's reset, Oct 9, 08:00."
+ */
+export function quotaCheckText(check: QuotaCheck, readAt: number): string {
+  switch (check.state) {
+    case "due":
+      return "A check is due: the next request finds out whether the quota is back.";
+    case "checking":
+      return "A check is under way: one request is finding out whether the quota is back.";
+    default: {
+      const seconds = (Date.parse(check.next_check_at) - readAt) / 1000;
+      const when = Number.isFinite(seconds)
+        ? `in ${timeLeft(seconds)}, at ${formatShortDateTime(check.next_check_at)}`
+        : `at ${formatShortDateTime(check.next_check_at)}`;
+      return `Next check ${when}, rather than at the provider's reset, ${formatShortDateTime(check.provider_reset_at)}.`;
+    }
+  }
 }
 
 /** Whether resetting would change anything: something is resting it. */

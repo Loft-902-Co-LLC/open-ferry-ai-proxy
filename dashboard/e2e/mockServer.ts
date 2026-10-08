@@ -28,6 +28,7 @@ import {
   logSearch,
   metrics,
   prices,
+  quotaCheck,
   requestsPage,
   serverLogPage,
   summary,
@@ -221,13 +222,16 @@ function recentRequests(now: number, load: number): Credential["recent_requests"
 }
 
 /**
- * The credentials: a Claude sign-in in use with one model resting, a Codex
- * sign-in resting on its quota, and a Claude sign-in that has expired. (The
- * provider API keys in config.yaml aren't listed here: upstream lists files
- * and runtime-only credentials only.)
+ * The credentials: a Claude sign-in in use with three models resting, one
+ * of them on its quota while a check finds out whether it is back, and a
+ * fourth model's check due; a Codex sign-in resting on its quota until its
+ * next check; and a Claude sign-in that has expired. (The provider API keys
+ * in config.yaml aren't listed here: upstream lists files and runtime-only
+ * credentials only.)
  */
 function credentials(now: number): Credential[] {
   const at = (seconds: number) => new Date(now + seconds * 1000).toISOString();
+  const reset = at(4 * 86_400);
   return [
     credential({
       supports_quota: true,
@@ -238,6 +242,28 @@ function credentials(now: number): Credential[] {
           scope: "model",
           model_key: "claude-opus-4-1",
           retry_at: at(1500),
+        }),
+        // While its check is in flight, the rest shows the provider's reset.
+        cooldown("quota", 4 * 86_400, {
+          scope: "model",
+          model_key: "claude-sonnet-4-5",
+          retry_at: reset,
+          http_status: 429,
+        }),
+      ],
+      quota_checks: [
+        quotaCheck("checking", {
+          scope: "model",
+          model_key: "claude-sonnet-4-5",
+          next_check_at: at(-30),
+          provider_reset_at: reset,
+        }),
+        quotaCheck("due", {
+          scope: "model",
+          model_key: "claude-haiku-4-5",
+          next_check_at: at(-120),
+          provider_reset_at: reset,
+          wait_seconds: 7200,
         }),
       ],
     }),
@@ -260,6 +286,7 @@ function credentials(now: number): Credential[] {
       id_token: { plan_type: "pro" },
       path: "/srv/open-ferry/auths/codex-grace@example.com-pro.json",
       cooldowns: [cooldown("credential_quota", 2700, { retry_at: at(2700), http_status: 429 })],
+      quota_checks: [quotaCheck("resting", { next_check_at: at(2700), provider_reset_at: reset })],
     }),
     credential({
       id: "claude-lin@example.com.json",

@@ -48,6 +48,28 @@ export interface Cooldown {
 }
 
 /**
+ * A quota rest open-ferry's `routing.quota.check-after` caps: instead of
+ * resting until the provider's reset, the credential (or one model on it)
+ * is checked with one request at `next_check_at`, and a success ends the
+ * rest. Listed only while the cap holds a rest.
+ */
+export interface QuotaCheck {
+  scope: "credential" | "model";
+  /** The model, for a model's rest: the key its cooldown has. */
+  model_key?: string;
+  /**
+   * `resting` until `next_check_at`, `due` from then until a request
+   * checks, and `checking` while that request is in flight.
+   */
+  state: "resting" | "due" | "checking" | (string & {});
+  next_check_at: string;
+  /** The reset the provider gave. */
+  provider_reset_at: string;
+  /** The current wait, which the next quota answer doubles. */
+  wait_seconds: number;
+}
+
+/**
  * Requests in one ten-minute window. `time` names it by the server's clock,
  * in the server's time zone ("15:00-15:10"), so the dashboard goes by the
  * window's place in the list instead (see `lastUsed`).
@@ -97,6 +119,8 @@ export interface Credential {
   priority?: number;
   note?: string;
   cooldowns?: Cooldown[] | null;
+  /** Its capped quota rests, open-ferry's own; absent when it has none. */
+  quota_checks?: QuotaCheck[];
   /**
    * The quota headers of the last Claude or Codex response that had any;
    * without `observed_at` for none, or for another provider.

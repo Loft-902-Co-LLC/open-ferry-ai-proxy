@@ -35,9 +35,12 @@ import {
   lastUsed,
   modelCooldowns,
   providerName,
+  quotaCheckOf,
+  quotaCheckText,
   resetLabel,
   resetRetries,
   timeLeft,
+  unlistedQuotaChecks,
 } from "./credentialStates";
 import { quotaReadings, type QuotaReadings, type QuotaWindow } from "./quotaReadings";
 
@@ -63,6 +66,54 @@ export function resetNotice(named: ReactNode, models: number, retried: boolean):
 /** "Back in about 4 min, at Oct 5, 12:04." */
 export function backIn(cooldown: Cooldown): string {
   return `Back in ${timeLeft(cooldown.remaining_seconds)}, at ${formatShortDateTime(cooldown.retry_at)}.`;
+}
+
+/**
+ * When `credential`'s `cooldown` ends, or, when the cap on quota rests
+ * holds it, when the server next checks it, as of `readAt`, when the list
+ * was made.
+ */
+export function restEnd(cooldown: Cooldown, credential: Credential, readAt: number): string {
+  const check = quotaCheckOf(credential, cooldown);
+  return check === undefined ? backIn(cooldown) : quotaCheckText(check, readAt);
+}
+
+/**
+ * Why `resting`, the rest of the whole credential if it has one, and when
+ * it ends; then the capped quota rests no cooldown shows, such as one whose
+ * check is due, each with the model it covers.
+ */
+export function RestText({
+  credential,
+  resting,
+  readAt,
+}: {
+  credential: Credential;
+  resting: Cooldown | undefined;
+  readAt: number;
+}) {
+  return (
+    <>
+      {resting !== undefined && (
+        <p className="text-muted">
+          {explainReason(resting.reason).meaning} {restEnd(resting, credential, readAt)}
+        </p>
+      )}
+      {unlistedQuotaChecks(credential).map((check) => (
+        <p key={`${check.scope}-${check.model_key ?? ""}`} className="text-muted">
+          {check.scope === "model" && (
+            <>
+              <span className="font-mono text-[0.85em] break-all">
+                {check.model_key ?? "A model"}
+              </span>
+              :{" "}
+            </>
+          )}
+          {quotaCheckText(check, readAt)}
+        </p>
+      ))}
+    </>
+  );
 }
 
 /**
@@ -118,10 +169,13 @@ export function planOf(credential: Credential): string | null {
   return plan === "" ? null : `${plan.charAt(0).toUpperCase()}${plan.slice(1)} plan`;
 }
 
-/** The models resting, grouped by why, each group with what to do. */
-export function ModelCooldowns({ cooldowns }: { cooldowns: Cooldown[] }) {
+/**
+ * `credential`'s models resting, grouped by why, each group with what to
+ * do, and each model with when its rest ends or is checked, as of `readAt`.
+ */
+export function ModelCooldowns({ credential, readAt }: { credential: Credential; readAt: number }) {
   const groups = new Map<string, Cooldown[]>();
-  for (const cooldown of cooldowns) {
+  for (const cooldown of modelCooldowns(credential)) {
     const group = groups.get(cooldown.reason) ?? [];
     group.push(cooldown);
     groups.set(cooldown.reason, group);
@@ -146,7 +200,7 @@ export function ModelCooldowns({ cooldowns }: { cooldowns: Cooldown[] }) {
                       <span className="font-mono text-[0.85em] break-all">
                         {cooldown.model_key ?? "A model"}
                       </span>
-                      : {backIn(cooldown)}
+                      : {restEnd(cooldown, credential, readAt)}
                     </li>
                   ))}
               </ul>
@@ -273,17 +327,16 @@ function Facts({ credential, name }: { credential: Credential; name: string }) {
 }
 
 /** What the credential's health says, with why and what to do. */
-function HealthText({ credential }: { credential: Credential }) {
+function HealthText({ credential, readAt }: { credential: Credential; readAt: number }) {
   const health = credentialHealth(credential);
-  const resting = credentialCooldowns(credential)[0];
   return (
     <div className="space-y-1">
       <p>{health.summary}</p>
-      {resting !== undefined && (
-        <p className="text-muted">
-          {explainReason(resting.reason).meaning} {backIn(resting)}
-        </p>
-      )}
+      <RestText
+        credential={credential}
+        resting={credentialCooldowns(credential)[0]}
+        readAt={readAt}
+      />
       {health.action !== null && (
         <p>
           <span className="font-medium">What to do:</span> {health.action}
@@ -303,6 +356,8 @@ export interface CredentialItemProps {
   compact: boolean;
   /** The address points at it: its details show. */
   targeted: boolean;
+  /** When its list was made, in milliseconds since the epoch: what its times count from. */
+  readAt: number;
   /**
    * Called with what an action did, for the list to say: the credential
    * may move in the list when its health changes, or leave it.
@@ -317,6 +372,7 @@ export function CredentialItem({
   anchor,
   compact,
   targeted,
+  readAt,
   onDone,
 }: CredentialItemProps) {
   const titleId = useId();
@@ -422,10 +478,10 @@ export function CredentialItem({
       </header>
 
       <div id={detailsId} hidden={compact && !open} className="space-y-3">
-        <HealthText credential={credential} />
+        <HealthText credential={credential} readAt={readAt} />
         <Account credential={credential} name={name} />
         {readings !== null && <QuotaWindows readings={readings} />}
-        {models.length > 0 && <ModelCooldowns cooldowns={models} />}
+        {models.length > 0 && <ModelCooldowns credential={credential} readAt={readAt} />}
         <Requests credential={credential} />
 
         <div className="flex flex-wrap gap-2">

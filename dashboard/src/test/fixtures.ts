@@ -1,7 +1,7 @@
 // Answers of the dashboard API, as Contract 1 has them, for tests. Each
 // takes overrides so a test states only what it is about.
 
-import type { Cooldown, Credential, CredentialList } from "../api/credentials";
+import type { Cooldown, Credential, CredentialList, QuotaCheck } from "../api/credentials";
 import type {
   ClaudeCliEntry,
   ClientSetup,
@@ -282,6 +282,25 @@ export function cooldown(reason: string, seconds: number, overrides: Partial<Coo
     reason,
     retry_at: new Date(Date.parse("2026-10-05T12:00:00.000Z") + seconds * 1000).toISOString(),
     remaining_seconds: seconds,
+    ...overrides,
+  };
+}
+
+/**
+ * A quota rest `routing.quota.check-after` caps, in `state`: of the whole
+ * credential, checked at 13:00 on 2026-10-05, an hour after the lists are
+ * read, rather than at the provider's reset four days on.
+ */
+export function quotaCheck(
+  state: QuotaCheck["state"],
+  overrides: Partial<QuotaCheck> = {},
+): QuotaCheck {
+  return {
+    scope: "credential",
+    state,
+    next_check_at: "2026-10-05T13:00:00.123456789Z",
+    provider_reset_at: "2026-10-09T08:00:00Z",
+    wait_seconds: 3600,
     ...overrides,
   };
 }

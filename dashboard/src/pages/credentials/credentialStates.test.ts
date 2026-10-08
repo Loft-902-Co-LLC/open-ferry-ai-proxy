@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { CooldownReason } from "../../api/credentials";
-import { cooldown, credential } from "../../test/fixtures";
+import { cooldown, credential, quotaCheck } from "../../test/fixtures";
 import {
   canReset,
   compareHealth,
@@ -17,10 +17,13 @@ import {
   needsAttention,
   pastedAddressProblem,
   providerName,
+  quotaCheckOf,
+  quotaCheckText,
   reasonOfMessage,
   secondsUntilBack,
   signInName,
   timeLeft,
+  unlistedQuotaChecks,
   type HealthOrder,
 } from "./credentialStates";
 
@@ -187,6 +190,49 @@ describe("a credential's health", () => {
     expect(canReset(credential({ cooldowns: null }))).toBe(false);
     expect(canReset(credential({ unavailable: true }))).toBe(true);
     expect(canReset(credential({ next_retry_after: "2026-10-05T12:30:00Z" }))).toBe(true);
+  });
+});
+
+describe("the capped quota rests", () => {
+  const READ_AT = Date.parse("2026-10-05T12:00:00.000Z");
+  const model = (key: string) => ({ scope: "model" as const, model_key: key });
+
+  it("says when the next check is, and that it comes before the provider's reset", () => {
+    expect(quotaCheckText(quotaCheck("resting"), READ_AT)).toBe(
+      "Next check in about 1 h, at Oct 5, 13:00, rather than at the provider's reset, Oct 9, 08:00.",
+    );
+    expect(quotaCheckText(quotaCheck("resting"), Date.parse("2026-10-05T12:59:30.000Z"))).toBe(
+      "Next check in less than a minute, at Oct 5, 13:00, rather than at the provider's reset, Oct 9, 08:00.",
+    );
+    expect(quotaCheckText(quotaCheck("resting"), Number.NaN)).toBe(
+      "Next check at Oct 5, 13:00, rather than at the provider's reset, Oct 9, 08:00.",
+    );
+  });
+
+  it("says when a check is due, or under way", () => {
+    expect(quotaCheckText(quotaCheck("due"), READ_AT)).toBe(
+      "A check is due: the next request finds out whether the quota is back.",
+    );
+    expect(quotaCheckText(quotaCheck("checking"), READ_AT)).toBe(
+      "A check is under way: one request is finding out whether the quota is back.",
+    );
+  });
+
+  it("matches each check to the rest it caps, by scope and model", () => {
+    const whole = cooldown("credential_quota", 3600);
+    const codex = cooldown("quota", 600, model("gpt-5.1-codex"));
+    const mini = cooldown("quota", 600, model("gpt-5.1-mini"));
+    const checks = [
+      quotaCheck("resting"),
+      quotaCheck("checking", model("gpt-5.1-codex")),
+      quotaCheck("due", model("gpt-5.1")),
+    ];
+    const capped = credential({ cooldowns: [whole, codex, mini], quota_checks: checks });
+    expect(quotaCheckOf(capped, whole)).toBe(checks[0]);
+    expect(quotaCheckOf(capped, codex)).toBe(checks[1]);
+    expect(quotaCheckOf(capped, mini)).toBeUndefined();
+    expect(unlistedQuotaChecks(capped)).toEqual([checks[2]]);
+    expect(unlistedQuotaChecks(credential({ cooldowns: [whole] }))).toEqual([]);
   });
 });
 

@@ -40,6 +40,15 @@ function entryOf(credential: Credential, name: string): Entry {
 }
 
 /**
+ * When the server made `list`, by its own clock, else when the answer came
+ * (`fetched`), in milliseconds since the epoch.
+ */
+function readAt(list: List, fetched: number): number {
+  const observed = Date.parse(list.observed_at ?? "");
+  return Number.isNaN(observed) ? fetched : observed;
+}
+
+/**
  * The credential files and sign-ins the server has: the failing and
  * resting ones first, in full, the rest folded away.
  */
@@ -89,6 +98,7 @@ export function CredentialList() {
                   anchor={entry.anchor}
                   compact={view.compact}
                   targeted={view.targeted}
+                  readAt={readAt(data, list.dataUpdatedAt)}
                   onDone={setNotice}
                 />
               )}
