@@ -467,6 +467,12 @@ static CONFIG_ROUTING_QUOTA: Type = Type {
     ],
 };
 
+/// open-ferry's `self-update`, which upstream doesn't have.
+static CONFIG_SELF_UPDATE: Type = Type {
+    name: "config.SelfUpdate",
+    fields: &[("check-every", Field::Leaf), ("mode", Field::Leaf)],
+};
+
 static CONFIG_STREAMING_CONFIG: Type = Type {
     name: "config.StreamingConfig",
     fields: &[
@@ -600,6 +606,7 @@ pub(super) static CONFIG_LEGACY_CONFIG: Type = Type {
         ("request-retry", Field::Leaf),
         ("routing", Field::Struct(&CONFIG_ROUTING_CONFIG)),
         ("save-cooldown-status", Field::Leaf),
+        ("self-update", Field::Struct(&CONFIG_SELF_UPDATE)),
         ("streaming", Field::Struct(&CONFIG_STREAMING_CONFIG)),
         ("tls", Field::Struct(&CONFIG_TLS_CONFIG)),
         ("transient-error-cooldown-seconds", Field::Leaf),

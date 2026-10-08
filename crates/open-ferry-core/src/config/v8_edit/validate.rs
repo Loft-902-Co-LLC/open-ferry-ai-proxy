@@ -38,8 +38,8 @@ use super::super::{ConfigError, ConfigErrorKind};
 use super::schema::{CONFIG_LEGACY_CONFIG, Field, Type};
 
 /// The v8 root sections that don't hold a moved legacy setting, with
-/// open-ferry's `claude-cli`.
-const EXTRA_ROOTS: [&str; 7] = [
+/// open-ferry's `claude-cli` and `self-update`.
+const EXTRA_ROOTS: [&str; 8] = [
     "models",
     "config-version",
     "api-keys",
@@ -47,6 +47,7 @@ const EXTRA_ROOTS: [&str; 7] = [
     "quota-exceeded",
     "client",
     "claude-cli",
+    "self-update",
 ];
 
 fn invalid(message: impl Into<String>) -> ConfigError {

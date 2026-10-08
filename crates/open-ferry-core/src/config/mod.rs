@@ -53,7 +53,8 @@
 //! layouts that upstream doesn't have, and `management.separate-address`
 //! (`remote-management.separate-address` in the legacy layout), an address
 //! of their own for the management API and the dashboard
-//! ([`ManagementAddress`]).
+//! ([`ManagementAddress`]), and `self-update` ([`SelfUpdate`]), a top-level
+//! section in both layouts that sets how open-ferry updates itself.
 //!
 //! Read and ignored, so they never fail a load except where upstream checks
 //! their layout or weights before decoding:
@@ -95,6 +96,8 @@ mod routing_quota_tests;
 mod safe_mode;
 pub mod save;
 #[cfg(test)]
+mod self_update_tests;
+#[cfg(test)]
 mod testing;
 mod types;
 mod v8;
@@ -118,8 +121,8 @@ pub use types::{
     DEFAULT_AUTH_DIR, DEFAULT_PANEL_GITHUB_REPOSITORY, GeminiKey, GeminiModel, OAuthModelAlias,
     OAuthModelSetting, OpenAiCompatibility, OpenAiCompatibilityApiKey, OpenAiCompatibilityModel,
     QuotaExceeded, RemoteManagement, RequestScopedErrorRule, RoutingConfig, RoutingQuota,
-    RoutingStrategy, StreamingConfig, ThinkingSupport, TlsConfig, VertexCompatKey,
-    VertexCompatModel, XaiConfig,
+    RoutingStrategy, SelfUpdate, SelfUpdateMode, StreamingConfig, ThinkingSupport, TlsConfig,
+    VertexCompatKey, VertexCompatModel, XaiConfig,
 };
 pub(crate) use types::{Redacted, RedactedUrl};
 pub use watcher::{AuthFile, ConfigWatcher, WatchError, WatchEvent, next_revision};

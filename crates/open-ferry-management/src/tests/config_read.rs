@@ -848,6 +848,31 @@ async fn routing_quota_is_written() {
     assert_unchanged(&dir, raw);
 }
 
+/// Not upstream's: open-ferry's `self-update` follows `claude-cli`, with
+/// its unset fields left out, and is left out when nothing in it is set.
+#[tokio::test]
+async fn self_update_is_written() {
+    let raw = "self-update:\n  mode: \"off\"\n  check-every: 12h\n";
+    let answer = with_config(raw).get("/v0/management/config").await;
+    assert_eq!(answer.status, StatusCode::OK);
+    let part = concat!(
+        r#""claude-api-key":null,"self-update":{"mode":"off","check-every":"12h"},"#,
+        r#""openai-compatibility":null"#,
+    );
+    assert!(answer.body.contains(part), "{}", answer.body);
+    let answer = with_config("port: 8317\n")
+        .get("/v0/management/config")
+        .await;
+    assert!(!answer.body.contains("self-update"), "{}", answer.body);
+
+    let (dir, api) = over_file(raw);
+    let answer = api.get("/v8/management/config/self-update").await;
+    assert_v8(&answer, r#"{"check-every":"12h","mode":"off"}"#);
+    let answer = api.get("/v8/management/config/self-update/mode").await;
+    assert_v8(&answer, r#""off""#);
+    assert_unchanged(&dir, raw);
+}
+
 /// Not upstream's: the interactions, xAI and Meta keys and the xAI settings
 /// are written at upstream's positions, as the loader leaves them (an xAI
 /// key loses `alpha-search`, a Meta key gets its default base URL).

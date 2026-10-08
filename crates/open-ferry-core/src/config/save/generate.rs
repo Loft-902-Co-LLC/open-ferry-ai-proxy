@@ -37,6 +37,7 @@
 //!   clears the file's.
 //! - open-ferry's `routing.quota` follows `session-affinity-subagents`,
 //!   each of its fields left out when zero, and the section when all are.
+//! - open-ferry's `self-update` follows `claude-cli` the same way.
 
 use std::collections::BTreeMap;
 
@@ -373,6 +374,14 @@ pub(crate) fn legacy_config(cfg: &Config) -> Result<Value, Unwritable> {
         )
         .put("claude-api-key", seq(&cfg.claude_api_key, claude_key))
         .put("claude-cli", seq(&cfg.claude_cli, claude_cli))
+        // open-ferry's own.
+        .omit_empty(
+            "self-update",
+            Fields::default()
+                .omit_empty("mode", s(&cfg.self_update.mode))
+                .omit_empty("check-every", s(&cfg.self_update.check_every))
+                .done(),
+        )
         .put("claude-header-defaults", claude_header_defaults())
         .put("disable-claude-cloak-mode", Value::Bool(false))
         .put(

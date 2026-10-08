@@ -49,14 +49,15 @@ const PRIVATE_IP_ALIAS: &str = "codex.live-media-relay.allow-private-remote-ips"
 const PRIVATE_IP_CANONICAL: &str = "codex.live-media-relay.disable-private-remote-ips";
 
 /// The v8 roots shared with the legacy layout, which alone don't make a
-/// document v8. open-ferry's `claude-cli` is one.
-const SHARED_ROOTS: [&str; 6] = [
+/// document v8. open-ferry's `claude-cli` and `self-update` are two.
+const SHARED_ROOTS: [&str; 7] = [
     "api-keys",
     "plugins",
     "quota-exceeded",
     "routing",
     "client",
     "claude-cli",
+    "self-update",
 ];
 
 fn invalid(message: impl Into<String>) -> SaveError {

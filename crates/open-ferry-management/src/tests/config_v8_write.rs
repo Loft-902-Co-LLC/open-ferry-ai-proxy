@@ -1843,3 +1843,45 @@ async fn undo_refuses_a_file_changed_since() {
     assert_eq!(read(&dir), raw);
     assert_eq!(loaded(&api, &dir).port, 8318);
 }
+
+/// Not upstream's: the dashboard's switch for open-ferry's own updates sets
+/// `self-update.mode` through the v8 route, in a legacy file (which the
+/// write moves to the v8 layout, as any v8 write does) and in a v8 one,
+/// and an unknown mode is refused without writing.
+#[tokio::test]
+async fn self_update_mode_is_set() {
+    let path = at("self-update/mode");
+    for raw in [
+        "port: 8317\n",
+        "config-version: 8\nserver:\n  port: 8317\nself-update:\n  check-every: 12h\n",
+    ] {
+        let (dir, api) = over(raw);
+        let answer = request(&api, Method::PUT, &path, r#""off""#, StatusCode::OK).await;
+        assert_eq!(answer, V8_OK);
+        let data = assert_v8_file(&dir);
+        assert!(
+            !data.contains("# self-update"),
+            "kept, not commented out:\n{data}"
+        );
+        let config = loaded(&api, &dir);
+        assert_eq!(config.self_update.mode, "off", "{data}");
+        assert_eq!(
+            config.self_update.mode(),
+            open_ferry_core::config::SelfUpdateMode::Off
+        );
+
+        request(&api, Method::PUT, &path, r#""notify""#, StatusCode::OK).await;
+        assert_eq!(loaded(&api, &dir).self_update.mode, "notify");
+
+        let before = read(&dir);
+        request(
+            &api,
+            Method::PUT,
+            &path,
+            r#""sometimes""#,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        )
+        .await;
+        assert_eq!(read(&dir), before, "a refused mode changed the file");
+    }
+}

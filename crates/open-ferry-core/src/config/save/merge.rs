@@ -48,6 +48,7 @@
 //! - open-ferry's own `routing.quota` is trimmed to the generated keys as
 //!   the OAuth maps are ([`prune_routing_quota`]), so a setting cleared in
 //!   the config leaves the file instead of coming back on the next load.
+//!   So is the top-level `self-update`, open-ferry's own too.
 
 use super::super::types::DEFAULT_PANEL_GITHUB_REPOSITORY;
 use super::super::yaml3::{

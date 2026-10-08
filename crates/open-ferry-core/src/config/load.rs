@@ -1565,7 +1565,7 @@ mod tests {
 
     /// The commented blocks of `ROOT_EXAMPLE` an operator would uncomment,
     /// each from the line starting with one of these to the next blank line.
-    const ROOT_EXAMPLE_BLOCKS: [&str; 11] = [
+    const ROOT_EXAMPLE_BLOCKS: [&str; 12] = [
         "  # base-url:",
         "  # streaming:",
         "  # payload:",
@@ -1577,6 +1577,7 @@ mod tests {
         "  # excluded-models:",
         "  # request-scoped-errors:",
         "  # gpt-image-2-base-model:",
+        "# self-update:",
     ];
 
     /// `ROOT_EXAMPLE` with its commented blocks uncommented.
@@ -1641,6 +1642,7 @@ mod tests {
         assert!(config.claude_cli.is_empty());
         assert!(config.oauth_model_alias.is_empty());
         assert_eq!(config.payload, PayloadConfig::default());
+        assert_eq!(config.self_update, super::super::SelfUpdate::default());
 
         let text = uncommented_root_example();
         let (config, warnings) = logged(|| parse(&text));
@@ -1657,6 +1659,8 @@ mod tests {
         assert_eq!(config.claude_cli.len(), 2);
         assert_eq!(config.claude_cli[0].max_concurrency(), 2);
         assert_eq!(config.claude_cli[1].config_dir, "~/.claude-second");
+        assert_eq!(config.self_update.mode, "auto");
+        assert_eq!(config.self_update.check_every, "6h");
         assert_eq!(
             config.remote_management.base_url,
             "https://proxy.example.com"
