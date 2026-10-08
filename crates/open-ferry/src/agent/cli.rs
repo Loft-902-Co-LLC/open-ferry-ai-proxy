@@ -26,8 +26,9 @@ use super::{Caller, Command, Context, Failure, exit, perform};
 const STDIN_LIMIT: u64 = 1024 * 1024;
 
 /// The flags that take a value.
-const VALUE_FLAGS: [&str; 9] = [
+const VALUE_FLAGS: [&str; 10] = [
     "config",
+    "expect-sha256",
     "management-key-file",
     "from-file",
     "to-file",
@@ -196,6 +197,8 @@ pub(crate) fn usage(program: &str) -> String {
          \x20 --management-key-file <file>    a file holding the management key\n\
          \x20 --json                          print JSON\n\
          \x20 --yes, -y                       go ahead with a change that needs a confirmation\n\
+         \x20 --expect-sha256 <hash>          with a change: make it only if the config's SHA-256 is\n\
+         \x20                                 <hash>, the config_sha256 the change gave when it needed --yes\n\
          \n\
          The management key: {KEY_HINT}.\n\
          \n\
@@ -275,6 +278,14 @@ pub(crate) fn main(program: &str, args: Vec<String>) -> ExitCode {
         Ok(built) => built,
         Err(failure) => return fail(&failure, json),
     };
+    let expect_sha256 = match parsed
+        .value("expect-sha256")
+        .map(|text| super::change::parse_sha256(&text, "--expect-sha256"))
+        .transpose()
+    {
+        Ok(expected) => expected,
+        Err(failure) => return fail(&failure, json),
+    };
     let from_stdin = parsed.has("from-stdin");
     let ask: Option<super::Ask> =
         (!from_stdin && std::io::stdin().is_terminal() && std::io::stderr().is_terminal())
@@ -284,6 +295,7 @@ pub(crate) fn main(program: &str, args: Vec<String>) -> ExitCode {
         env,
         key_file,
         yes: parsed.has("yes"),
+        expect_sha256,
         ask,
         say: Some(Box::new(|text: &str| {
             eprint!("{text}");
@@ -424,7 +436,10 @@ fn build(command: &str, parsed: &Args) -> Result<Command, Failure> {
             Ok(Command::ConfigGet(GetInput { path }))
         }
         ("config", Some("set")) => {
-            allowed(parsed, &["from-stdin", "from-file", "string"])?;
+            allowed(
+                parsed,
+                &["from-stdin", "from-file", "string", "expect-sha256"],
+            )?;
             let mut words = parsed.positionals.clone().into_iter();
             let path = words.next().ok_or_else(|| {
                 Failure::usage("config set takes a setting's path, then its value")
@@ -447,13 +462,18 @@ fn build(command: &str, parsed: &Args) -> Result<Command, Failure> {
             }))
         }
         ("config", Some("unset")) => {
-            allowed(parsed, &[])?;
+            allowed(parsed, &["expect-sha256"])?;
             let [path] = <[String; 1]>::try_from(positionals(parsed, 1, "a setting's path")?)
                 .map_err(|_| Failure::usage("this command takes a setting's path"))?;
             Ok(Command::ConfigUnset(UnsetInput { path }))
         }
         ("config", Some(name @ ("show" | "diff" | "undo"))) => {
-            allowed(parsed, &[])?;
+            let extra: &[&str] = if name == "undo" {
+                &["expect-sha256"]
+            } else {
+                &[]
+            };
+            allowed(parsed, extra)?;
             positionals(parsed, 0, "no arguments")?;
             Ok(match name {
                 "show" => Command::ConfigShow,
@@ -462,7 +482,7 @@ fn build(command: &str, parsed: &Args) -> Result<Command, Failure> {
             })
         }
         ("config", Some("replace")) => {
-            allowed(parsed, &["from-stdin", "from-file"])?;
+            allowed(parsed, &["from-stdin", "from-file", "expect-sha256"])?;
             positionals(
                 parsed,
                 0,
@@ -481,7 +501,16 @@ fn build(command: &str, parsed: &Args) -> Result<Command, Failure> {
             }))
         }
         ("keys", Some("add")) => {
-            allowed(parsed, &["generate", "from-stdin", "from-file", "to-file"])?;
+            allowed(
+                parsed,
+                &[
+                    "generate",
+                    "from-stdin",
+                    "from-file",
+                    "to-file",
+                    "expect-sha256",
+                ],
+            )?;
             let argument = parsed.positionals.first().cloned();
             if parsed.positionals.len() > 1 {
                 return Err(Failure::usage("keys add takes no arguments"));
@@ -493,7 +522,7 @@ fn build(command: &str, parsed: &Args) -> Result<Command, Failure> {
             }))
         }
         ("keys", Some("remove")) => {
-            allowed(parsed, &["from-stdin", "from-file"])?;
+            allowed(parsed, &["from-stdin", "from-file", "expect-sha256"])?;
             if parsed.positionals.len() > 1 {
                 return Err(Failure::usage("keys remove takes one index"));
             }

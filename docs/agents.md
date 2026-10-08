@@ -169,7 +169,7 @@ These change nothing without `--yes` (`confirm: true` for a tool):
   - anything under `server.trusted-proxies`, which decides whose forwarded addresses are believed, and so which clients count as local;
   - removing the last client key in `access.api-keys`. Blank and repeated keys don't count, as the server ignores them, so `[""]` counts as no key.
 
-At a terminal such a command asks first. Without a terminal, as in an agent's shell, it changes nothing, exits with `3`, and its answer says what it would change (`would.changes`, masked) and why (`would.reasons`). Show that to the user, and run it again with `--yes` only when they agree.
+At a terminal such a command asks first. Without a terminal, as in an agent's shell, it changes nothing, exits with `3`, and its answer says what it would change (`would.changes`, masked), why (`would.reasons`) and the SHA-256 of the config file it was worked out from (`would.config_sha256`). Show that to the user, and run it again with `--yes` only when they agree, with `--expect-sha256` and that hash (`expect_sha256` for a tool): the change is then made only if the config is still the one shown, and is otherwise refused with `config_changed`, nothing changed.
 
 ### Secrets
 
