@@ -65,7 +65,7 @@ Every error is a status and a body:
 | 503 | `ledger_unavailable` | The usage ledger couldn't be opened. `GET /usage/ledger` says why. |
 | 504 | `claude_cli_timeout` | A `claude-cli` entry's Claude Code didn't answer within 30 seconds. |
 
-The management API's own errors keep upstream's shape, `{"error": "<text>"}`, but for one of open-ferry's: a save through `/v0/management` (a setting, a list, or a config API key's status) made after the config file changed on disk since the server loaded it, as by `open-ferry config` or a hand edit, answers 409 `{"error": "config_changed", "message": "..."}` and writes nothing. The server loads the file again, so the same save made again keeps that change.
+The management API's own errors keep upstream's shape, `{"error": "<text>"}`, but for one of open-ferry's: a save through `/v0/management` (a setting, a list, or a config API key's status) made after the config file changed on disk since the server loaded it, as by `open-ferry config` or a hand edit, answers 409 `{"error": "config_changed", "message": "..."}` and writes nothing. The server loads the file again, so the same save made again keeps that change. A file it can't load, such as an empty one or one with a YAML error, is left out, so the server and the management API keep the config they had, and each such save answers 409, its message saying to fix the file, until it is fixed.
 
 ---
 

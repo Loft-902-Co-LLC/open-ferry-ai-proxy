@@ -69,6 +69,7 @@ use http_body_util::BodyExt as _;
 use open_ferry_core::auth::synthesizer::SynthesisContext;
 use open_ferry_core::auth::synthesizer::file::synthesize_auth_file;
 use open_ferry_core::auth::{Auth, AuthStore, FileStore, Status, Timestamp};
+use open_ferry_core::config::save::sha256_hex;
 use open_ferry_core::config::{AuthFile, Config};
 use open_ferry_core::manager::{Manager, Settings};
 use open_ferry_core::registry::ModelRegistry;
@@ -157,16 +158,11 @@ impl Api {
     /// store, the [`FakeSync`] and the config path; saving the file with a
     /// [`FileConfigWriter`] and reloading it with a [`FileReload`].
     fn over_config_file(dir: &AuthDir, raw: &str) -> Self {
-        let path = dir.config_path();
-        std::fs::write(&path, raw).unwrap();
-        let (config, sha256) = Config::load_with_sha256(&path).unwrap();
-        let mut api = Self::over_with(dir, config, Some(KEY));
-        let reload = Arc::new(FileReload::new(path.clone()));
+        let mut api = Self::over_config_file_unreloaded(dir, raw);
+        let reload = Arc::new(FileReload::new(dir.config_path()));
         let state = api
             .state
             .clone()
-            .with_config_sha256(sha256)
-            .with_config_writer(Arc::new(FileConfigWriter::new(path)))
             .with_config_reload(Arc::clone(&reload) as _);
         reload.watch(state.clone());
         api.router = router(state.clone());
@@ -174,8 +170,26 @@ impl Api {
         api
     }
 
+    /// [`Api::over_config_file`] with nothing to reload the file, as a
+    /// state made without a service.
+    fn over_config_file_unreloaded(dir: &AuthDir, raw: &str) -> Self {
+        let path = dir.config_path();
+        std::fs::write(&path, raw).unwrap();
+        let (config, sha256) = Config::load_with_sha256(&path).unwrap();
+        let mut api = Self::over_with(dir, config, Some(KEY));
+        let state = api
+            .state
+            .clone()
+            .with_config_sha256(sha256)
+            .with_config_writer(Arc::new(FileConfigWriter::new(path)));
+        api.router = router(state.clone());
+        api.state = state;
+        api
+    }
+
     /// This API, reloading through the [`FakeReload`], which loads nothing,
-    /// as a service whose file watcher had loaded the file already.
+    /// as a service whose file watcher had loaded the file already, or
+    /// skipped it.
     fn reloading_nothing(mut self) -> Self {
         let state = self
             .state
@@ -648,16 +662,23 @@ impl ConfigWriter for FakeWriter {
     }
 }
 
-/// A [`ConfigReload`] that counts the reloads asked for.
+/// A [`ConfigReload`] that counts the reloads asked for, and loads
+/// nothing.
 #[derive(Default)]
 struct FakeReload {
     count: AtomicUsize,
+    forced: AtomicUsize,
 }
 
 impl FakeReload {
-    /// The reloads asked for so far.
+    /// The reloads asked for so far, not forced.
     fn count(&self) -> usize {
         self.count.load(Ordering::SeqCst)
+    }
+
+    /// The forced reloads asked for so far.
+    fn forced(&self) -> usize {
+        self.forced.load(Ordering::SeqCst)
     }
 }
 
@@ -666,11 +687,18 @@ impl ConfigReload for FakeReload {
         self.count.fetch_add(1, Ordering::SeqCst);
         Box::pin(async {})
     }
+
+    fn force_reload(&self) -> ReloadFuture<'_> {
+        self.forced.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async {})
+    }
 }
 
 /// A [`ConfigReload`] that loads the config file again and gives the state
-/// the config it holds, as the service does. A file that doesn't load fails
-/// the test: every write is checked to load first.
+/// the config it holds and the SHA-256 of what it loaded from, as the
+/// service applies one. As the service's watcher does, it skips an empty
+/// file and leaves one that doesn't load, and the state keeps its config.
+/// It loads the file whether forced or not, as a forced reload does.
 struct FileReload {
     path: PathBuf,
     /// The state given the config, once watched.
@@ -695,9 +723,15 @@ impl FileReload {
 impl ConfigReload for FileReload {
     fn reload(&self) -> ReloadFuture<'_> {
         Box::pin(async {
-            let (config, sha256) = Config::load_with_sha256(&self.path).unwrap();
+            let data = std::fs::read(&self.path).unwrap();
+            if data.is_empty() {
+                return;
+            }
+            let Ok(config) = Config::load_bytes(&data) else {
+                return;
+            };
             if let Some(state) = self.state.get() {
-                state.set_loaded_config(Arc::new(config), Some(sha256));
+                state.set_loaded_config(Arc::new(config), Some(sha256_hex(&data)));
             }
         })
     }
