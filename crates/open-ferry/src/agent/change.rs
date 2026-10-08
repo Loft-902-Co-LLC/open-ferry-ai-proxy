@@ -37,10 +37,10 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 use super::api::{Body, path_segments};
-use super::guard::{confirm, sensitive_reasons};
-use super::mask::mask_at;
+use super::guard::{confirm, sensitive_reasons_of};
+use super::mask::{mask_at, mask_whole};
 use super::target::{Reach, Server, probe};
-use super::values::{Change, diff, placed, tree_of};
+use super::values::{Change, diff, get, placed, tree_of};
 use super::{Caller, Context, Failure, Report};
 
 /// What a change puts at a path, or the whole config.
@@ -152,6 +152,9 @@ pub(crate) struct Request {
     pub(crate) path: Option<String>,
     /// Why it needs a confirmation whatever it changes: none, or more.
     pub(crate) always: Vec<String>,
+    /// Whether the value it sets was read from a file or standard input:
+    /// then it is masked whole wherever it shows ([`shown`]).
+    pub(crate) hidden: bool,
 }
 
 /// What a change did.
@@ -246,6 +249,42 @@ pub(crate) fn masked(changes: &[Change]) -> Vec<Value> {
         .collect()
 }
 
+/// `changes`, which make the config `before` into `after` for `request`,
+/// as reported: [`masked`]; but when `request` sets a value read from a
+/// file or standard input, the changes at, under or above its setting are
+/// one, its new value masked whole, so no part of the file shows, nor its
+/// keys.
+fn shown(request: &Request, changes: &[Change], before: &Value, after: &Value) -> Vec<Value> {
+    let Some(path) = request.path.as_deref().filter(|_| request.hidden) else {
+        return masked(changes);
+    };
+    let parts = &request.edit.parts;
+    let touches = |change: &Change| {
+        change.path == path
+            || change.path.starts_with(&format!("{path}."))
+            || path.starts_with(&format!("{}.", change.path))
+    };
+    let mut out = Vec::new();
+    let mut whole = false;
+    for change in changes {
+        if !touches(change) {
+            out.extend(masked(std::slice::from_ref(change)));
+        } else if !whole {
+            whole = true;
+            let mut entry = Map::new();
+            entry.insert("path".to_owned(), Value::String(path.to_owned()));
+            if let Some(old) = get(before, parts) {
+                entry.insert("old".to_owned(), mask_at(parts, old));
+            }
+            if let Some(new) = get(after, parts) {
+                entry.insert("new".to_owned(), mask_whole(new));
+            }
+            out.push(Value::Object(entry));
+        }
+    }
+    out
+}
+
 /// How `ctx`'s caller reverses a change.
 pub(crate) fn undo_hint(ctx: &Context) -> String {
     match ctx.caller {
@@ -329,7 +368,7 @@ async fn attempt(
             "Nothing to change: the config already holds that.".to_owned(),
         )));
     }
-    let mut reasons = sensitive_reasons(&changes, &before, &after);
+    let mut reasons = sensitive_reasons_of(&changes, &before, &after, request.hidden);
     reasons.splice(0..0, request.always.iter().cloned());
     if !reasons.is_empty() {
         // The confirmation given, `--yes` or `confirm: true` included, was
@@ -341,7 +380,10 @@ async fn attempt(
             ctx,
             &request.what,
             &reasons,
-            json!({"changes": masked(&changes), "config_sha256": save::sha256_hex(data)}),
+            json!({
+                "changes": shown(request, &changes, &before, &after),
+                "config_sha256": save::sha256_hex(data),
+            }),
         )?;
     }
     let target = probe(ctx).await?;
@@ -389,7 +431,7 @@ async fn attempt(
         path: request.path.clone(),
         changed: !changes.is_empty(),
         via: Some(via),
-        changes: masked(&changes),
+        changes: shown(request, &changes, &before, &now),
         note,
         undo: Some(undo_hint(ctx)),
         extra: Map::new(),

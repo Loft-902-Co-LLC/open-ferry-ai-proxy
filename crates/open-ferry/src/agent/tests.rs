@@ -1357,6 +1357,96 @@ async fn a_file_read_over_mcp_needs_a_confirmation() {
     assert_eq!(added.json["changed"], json!(true));
 }
 
+// Not upstream's: a value read from a file or standard input is masked
+// whole wherever a change shows it, not only its secret-named fields: in
+// what it changed, at the terminal's question, and in what it would change.
+#[tokio::test]
+async fn values_from_a_file_are_masked_whole() {
+    const SHOWN: [&str; 5] = [
+        "placeholder-provider-name",
+        "api.example.com",
+        "sk-provider-secret-value-1234",
+        "placeholder-panel",
+        "placeholder-management-key-123",
+    ];
+    let shows_any = |text: &str| SHOWN.iter().any(|shown| text.contains(shown));
+    let offline = offline(Some(KEY));
+    let setup = &offline.setup;
+    let provider = json!([{"name": "placeholder-provider-name", "base-url": "https://api.example.com", "keys": [{"api-key": "sk-provider-secret-value-1234"}]}]);
+    let provider_file = setup.file("provider.json", &provider.to_string());
+
+    // What it changed.
+    let changed = ok(
+        &cli(&setup.path),
+        set_from("api-keys.codex", Source::File(provider_file)),
+    )
+    .await;
+    assert!(!shows_any(&changed.text), "{}", changed.text);
+    assert!(!shows_any(&changed.json.to_string()), "{}", changed.json);
+    assert!(
+        changed.json["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|change| change["path"] == json!("api-keys.codex")),
+        "{}",
+        changed.json
+    );
+    assert!(setup.text().contains("placeholder-provider-name"));
+
+    // The question at the terminal, for a mapping from standard input
+    // with one field that names a secret.
+    let management = json!({"allow-remote": false, "secret-key": "placeholder-management-key-123", "panel-github-repository": "someone/placeholder-panel"}).to_string();
+    let before = setup.text();
+    let question = Arc::new(std::sync::Mutex::new(String::new()));
+    let seen = Arc::clone(&question);
+    let ctx = Context {
+        ask: Some(Box::new(move |text: &str| {
+            *seen.lock().unwrap() = text.to_owned();
+            false
+        })),
+        ..cli(&setup.path)
+    };
+    let failure = fails(
+        &ctx,
+        set_from("management", Source::Stdin(management.clone())),
+    )
+    .await;
+    assert_eq!(failure.error, "declined");
+    let asked = question.lock().unwrap().clone();
+    assert!(asked.contains("management"), "{asked}");
+    assert!(!shows_any(&asked), "{asked}");
+    assert_eq!(setup.text(), before);
+
+    // What it would change, without a terminal and over MCP.
+    let file = setup.file("management.json", &management);
+    let failure = fails(
+        &cli(&setup.path),
+        set_from("management", Source::File(file.clone())),
+    )
+    .await;
+    assert_eq!(failure.error, "needs_confirmation");
+    assert!(!failure_shows(&failure, "placeholder-panel"), "{failure:?}");
+    assert!(!failure_shows(&failure, "placeholder-management-key-123"));
+    let changes = failure.would.as_ref().unwrap()["changes"].clone();
+    assert_eq!(changes.as_array().unwrap().len(), 1, "{changes}");
+    assert_eq!(changes[0]["path"], json!("management"));
+    let server = Server::new(Ok(setup.path.clone()), Env::default(), None);
+    let mut session = server_session(server).await;
+    let result = session
+        .call(
+            "config_set",
+            json!({"path": "management", "from_file": file}),
+        )
+        .await;
+    assert_eq!(
+        result["structuredContent"]["error"],
+        json!("needs_confirmation")
+    );
+    assert!(!shows_any(&result.to_string()), "{result}");
+    assert_eq!(setup.text(), before);
+}
+
 // Not upstream's: secrets are masked in a command's text and JSON, and in
 // the tools' results and the config resource; MANAGEMENT_PASSWORD and the
 // key file are scrubbed wherever they would show.
