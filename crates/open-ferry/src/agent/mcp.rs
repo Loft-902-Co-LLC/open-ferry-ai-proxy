@@ -57,7 +57,8 @@ Start with `status`. Settings are paths in the v8 config, as `routing.strategy`;
 `config_get` says whether one is set and its default. A change that deletes, reveals, \
 replaces the whole config or touches a sensitive setting needs `confirm: true`: without it \
 nothing is changed and the result says what would be, so show that to the user and ask \
-before calling again with `confirm: true`. Every change can be reversed with `config_undo`. \
+before calling again with `confirm: true`, and with that result's `config_sha256` as \
+`expect_sha256`, so the change is made only to the config the user saw. Every change can be reversed with `config_undo`. \
 No tool returns a secret already in the setup; never ask the user to paste one into the \
 conversation, but to put it in a file and give its path as `from_file`; a file is read only \
 for a secret, never from the auth directory, and never a credential file. \
@@ -328,6 +329,13 @@ fn confirm_property() -> Value {
     })
 }
 
+fn expect_sha256_property() -> Value {
+    json!({
+        "type": "string",
+        "description": "The `config_sha256` a result that needed `confirm: true` gave: send it with `confirm: true`, so the change is made only if the config is still the one that result was worked out from. Else it fails with `config_changed`, and nothing is changed."
+    })
+}
+
 fn path_property() -> Value {
     json!({
         "type": "string",
@@ -347,7 +355,7 @@ fn no_properties() -> Value {
 }
 
 fn confirm_properties() -> Value {
-    json!({ "confirm": confirm_property() })
+    json!({ "confirm": confirm_property(), "expect_sha256": expect_sha256_property() })
 }
 
 fn path_properties() -> Value {
@@ -355,7 +363,11 @@ fn path_properties() -> Value {
 }
 
 fn path_confirm_properties() -> Value {
-    json!({ "path": path_property(), "confirm": confirm_property() })
+    json!({
+        "path": path_property(),
+        "confirm": confirm_property(),
+        "expect_sha256": expect_sha256_property(),
+    })
 }
 
 fn set_properties() -> Value {
@@ -370,6 +382,7 @@ fn set_properties() -> Value {
             "description": "Take the value as a string, as it is, rather than as YAML."
         },
         "confirm": confirm_property(),
+        "expect_sha256": expect_sha256_property(),
     })
 }
 
@@ -377,6 +390,7 @@ fn replace_properties() -> Value {
     json!({
         "from_file": from_file_property("the new config, as YAML"),
         "confirm": confirm_property(),
+        "expect_sha256": expect_sha256_property(),
     })
 }
 
@@ -392,6 +406,7 @@ fn add_properties() -> Value {
             "description": "With `generate`: the path of a new file to write the key to, instead of returning it. The file mustn't exist."
         },
         "confirm": confirm_property(),
+        "expect_sha256": expect_sha256_property(),
     })
 }
 
@@ -404,6 +419,7 @@ fn remove_properties() -> Value {
         },
         "from_file": from_file_property("the key to remove"),
         "confirm": confirm_property(),
+        "expect_sha256": expect_sha256_property(),
     })
 }
 
@@ -685,13 +701,15 @@ impl Server {
         }
     }
 
-    /// The context of a tool call, confirmed with `yes`.
-    fn context(&self, yes: bool) -> Result<Context, Failure> {
+    /// The context of a tool call, confirmed with `yes`, for the config
+    /// whose SHA-256 is `expect_sha256` when it is given.
+    fn context(&self, yes: bool, expect_sha256: Option<String>) -> Result<Context, Failure> {
         Ok(Context {
             path: self.path.clone()?,
             env: self.env.clone(),
             key_file: self.key_file.clone(),
             yes,
+            expect_sha256,
             ask: None,
             say: None,
             caller: Caller::Mcp,
@@ -710,14 +728,18 @@ impl Server {
         })?;
         let args = Arguments::new(spec, arguments)?;
         let yes = args.flag("confirm")?;
+        let expect_sha256 = args
+            .string("expect_sha256")?
+            .map(|text| super::change::parse_sha256(&text, "expect_sha256"))
+            .transpose()?;
         let command = command(spec, &args)?;
-        let ctx = self.context(yes)?;
+        let ctx = self.context(yes, expect_sha256)?;
         perform(&ctx, command).await
     }
 
     /// The config, masked, as YAML.
     async fn masked_config(&self) -> Result<String, Failure> {
-        let ctx = self.context(false)?;
+        let ctx = self.context(false, None)?;
         perform(&ctx, Command::ConfigShow)
             .await
             .map(|outcome| outcome.text)

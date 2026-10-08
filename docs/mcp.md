@@ -65,15 +65,15 @@ T3 Code runs agents such as Codex and Claude Code, and a thread's agent loads th
 |---|---|---|---|
 | `status` | `status` | none | read-only, idempotent |
 | `config_get` | `config get` | `path` | read-only, idempotent |
-| `config_set` | `config set` | `path`; `value` or `from_file`; `string`, `confirm` | destructive, idempotent |
-| `config_unset` | `config unset` | `path`; `confirm` | destructive, idempotent |
+| `config_set` | `config set` | `path`; `value` or `from_file`; `string`, `confirm`, `expect_sha256` | destructive, idempotent |
+| `config_unset` | `config unset` | `path`; `confirm`, `expect_sha256` | destructive, idempotent |
 | `config_show` | `config show` | none | read-only, idempotent |
 | `config_diff` | `config diff` | none | read-only, idempotent |
-| `config_undo` | `config undo` | `confirm` | destructive; refused with `changed_since` without `confirm` when the config was changed since the last backup, as by a hand edit |
-| `config_replace` | `config replace` | `from_file`; `confirm` | destructive, idempotent |
+| `config_undo` | `config undo` | `confirm`, `expect_sha256` | destructive; refused with `changed_since` without `confirm` when the config was changed since the last backup, as by a hand edit |
+| `config_replace` | `config replace` | `from_file`; `confirm`, `expect_sha256` | destructive, idempotent |
 | `keys_list` | `keys list` | none | read-only, idempotent |
-| `keys_add` | `keys add` | `generate` or `from_file`; `to_file`, `confirm` | not destructive |
-| `keys_remove` | `keys remove` | `index` or `from_file`; `confirm` | destructive |
+| `keys_add` | `keys add` | `generate` or `from_file`; `to_file`, `confirm`, `expect_sha256` | not destructive |
+| `keys_remove` | `keys remove` | `index` or `from_file`; `confirm`, `expect_sha256` | destructive |
 | `credentials_list` | `credentials list` | `state`, `provider` | read-only, idempotent |
 | `credentials_enable` | `credentials enable` | `credential` | not destructive, idempotent |
 | `credentials_disable` | `credentials disable` | `credential` | destructive, idempotent |
@@ -89,13 +89,16 @@ The annotations are the protocol's hints: `readOnlyHint`, `destructiveHint` (giv
 - **`from_file`** is only for a secret: `config_set` refuses a file's value for a setting that holds none (`usage`), so give that as `value`. A file in the auth directory, or a credential file (a sign-in's tokens or a service account's key), is never read (`unsafe_file`).
 - **`from_file`** and **`to_file`** are paths on the machine the server runs on; give full paths, as the server's working directory is the app's choice.
 - **`credential`** is a credential's `auth_index` from `credentials_list`, or its name.
+- **`expect_sha256`** is the `config_sha256` a result that needed `confirm: true` gave: send it with `confirm: true` (see [What needs `confirm: true`](#what-needs-confirm-true)).
 - **`credentials_login`** takes two calls: the first, with `provider` (`codex`, or `claude` with `confirm: true`), returns a `url` for the user to open and a `state`, with `"status": "wait"`. The second, with the same `provider` and the `state`, waits up to 50 seconds for the sign-in to finish: `"status": "ok"`, or `"status": "wait"` while it is still going: not a tool error, but a result saying to call again with the same `state`.
 
 Each call reads the config and looks for the server afresh, so a server started or stopped while the app runs is followed. With a server running for the config, a change goes through its management API; without one, the settings tools change the file, and the credentials tools say the server isn't running (`not_running`) and how to start it. A server on the config's address that runs another config file is never changed: the tools fail with `other_config`. A change is made only to the file it was worked out from, worked out again when the file changes meanwhile, and then made only if it needs no confirmation: `confirm: true` was given for the change as first worked out, so one that needs a confirmation once worked out again fails with `config_changed`. [docs/cli.md](cli.md#how-they-reach-the-server) has the details.
 
 ## What needs `confirm: true`
 
-Without it, these change nothing, and the result is a tool error with `"error": "needs_confirmation"`, what they would change (`would.changes`, masked) and why (`would.reasons`). An agent should show that to the user and call again with `confirm: true` only when they agree.
+Without it, these change nothing, and the result is a tool error with `"error": "needs_confirmation"`, what they would change (`would.changes`, masked), why (`would.reasons`) and, for a change to the config, the SHA-256 of the config file it was worked out from (`would.config_sha256`). An agent should show that to the user and call again with `confirm: true` only when they agree.
+
+**Send `expect_sha256` with `confirm: true`**, set to that `config_sha256`. The change is then made only to the config the user was shown: when the file changed since, by another write or a hand edit, the call fails with `config_changed`, nothing is changed, and the change isn't worked out again. Call again without `confirm` to see what it would change now, and show the user that. Without `expect_sha256`, `confirm: true` goes ahead with the change as worked out from the file at the second call, which can differ from what the user agreed to. The tools that take it are `config_set`, `config_unset`, `config_undo`, `config_replace`, `keys_add` and `keys_remove`.
 
 - `credentials_remove` and `keys_remove`: they delete;
 - `config_replace`: it replaces the whole config;

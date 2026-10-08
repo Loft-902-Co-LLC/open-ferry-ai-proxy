@@ -118,6 +118,10 @@ pub(crate) struct Context {
     pub(crate) key_file: Option<PathBuf>,
     /// `--yes`, or `confirm: true`.
     pub(crate) yes: bool,
+    /// `--expect-sha256`, or `expect_sha256`: the SHA-256 the config file
+    /// must have for a change to be made, as the `config_sha256` a result
+    /// that needed a confirmation gave, in lowercase hex.
+    pub(crate) expect_sha256: Option<String>,
     /// How to ask for a confirmation, when there is a terminal to ask on.
     pub(crate) ask: Option<Ask>,
     /// How to tell how a command is getting on, while it runs.

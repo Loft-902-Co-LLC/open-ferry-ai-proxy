@@ -329,10 +329,12 @@ At a terminal, such a command asks, and goes ahead on `y`. When standard input o
 Setting server.host needs --yes: server.host would be 0.0.0.0, which isn't loopback, so the proxy listens beyond this machine. Nothing was changed.
 It would change:
   server.host: "127.0.0.1" -> "0.0.0.0"
-to go ahead, run it again with --yes
+to go ahead, run it again with --yes --expect-sha256 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
 ```
 
-With `--json`, the same is `{"error": "needs_confirmation", "message": ..., "hint": ..., "would": {"changes": [{"path": "server.host", "old": "127.0.0.1", "new": "0.0.0.0"}], "reasons": [...]}}`.
+With `--json`, the same is `{"error": "needs_confirmation", "message": ..., "hint": ..., "would": {"changes": [{"path": "server.host", "old": "127.0.0.1", "new": "0.0.0.0"}], "reasons": [...], "config_sha256": "9f86d081..."}}`.
+
+`config_sha256` is the SHA-256 of the config file the change was worked out from. Give it back with `--expect-sha256 HASH`, which `config set`, `unset`, `undo` and `replace` and `keys add` and `remove` take, and the change is made only to that file: when the file changed since, by another write or a hand edit, the command is refused (`config_changed`, exit code 1), nothing changed, and the change isn't worked out again, so you can look at it again (run it without `--yes` for what it would change now, and its new `config_sha256`). Without `--expect-sha256`, `--yes` goes ahead with the change as worked out from the file when it runs, which can differ from the one you looked at. A script or an agent that shows someone what a change would do, then runs it with `--yes`, should always give it.
 
 ### Secrets in what they print
 

@@ -124,6 +124,7 @@ fn context(path: &Path, caller: Caller) -> Context {
         env: Env::default(),
         key_file: None,
         yes: false,
+        expect_sha256: None,
         ask: None,
         say: None,
         caller,
@@ -2078,6 +2079,135 @@ async fn keys_are_worked_out_from_the_file_as_it_is() {
     task.abort();
     assert_eq!(failure.error, "exists", "{failure:?}");
     assert_eq!(read(), config(&[CLIENT_KEY, new]));
+}
+
+// Not upstream's: a change that needs a confirmation gives the SHA-256 of
+// the config it was worked out from; given back with the confirmation, the
+// change is made only to that config, and refused once it has changed.
+#[tokio::test]
+async fn a_confirmation_holds_for_the_config_it_was_shown() {
+    let offline = offline(Some(KEY));
+    let setup = &offline.setup;
+    let sha256 = |text: &str| open_ferry_core::config::save::sha256_hex(text.as_bytes());
+    let allow = |more: Value| {
+        let mut call = json!({"path": "management.allow-remote", "value": true});
+        if let (Some(call), Some(more)) = (call.as_object_mut(), more.as_object()) {
+            call.extend(more.clone());
+        }
+        call
+    };
+
+    // Over MCP: the hash comes with what it would change, and in the hint.
+    let server = Server::new(Ok(setup.path.clone()), Env::default(), None);
+    let mut session = server_session(server).await;
+    let shown = setup.text();
+    let result = session.call("config_set", allow(json!({}))).await;
+    let answer = &result["structuredContent"];
+    assert_eq!(answer["error"], json!("needs_confirmation"), "{answer}");
+    let given = answer["would"]["config_sha256"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(given, sha256(&shown));
+    assert!(
+        answer["hint"].as_str().unwrap().contains(&given),
+        "{answer}"
+    );
+    let result = session.call("keys_add", json!({"generate": true})).await;
+    assert_eq!(
+        result["structuredContent"]["would"]["config_sha256"],
+        json!(given)
+    );
+
+    // The config changes before the confirmation: refused, and not worked
+    // out again from the config as it is.
+    let edited = format!("{shown}routing:\n  strategy: fill-first\n");
+    std::fs::write(&setup.path, &edited).unwrap();
+    let result = session
+        .call(
+            "config_set",
+            allow(json!({"confirm": true, "expect_sha256": given})),
+        )
+        .await;
+    let answer = &result["structuredContent"];
+    assert_eq!(answer["error"], json!("config_changed"), "{answer}");
+    assert!(answer["hint"].as_str().unwrap().contains("without confirm"));
+    assert_eq!(setup.text(), edited);
+    let result = session
+        .call(
+            "config_set",
+            allow(json!({"confirm": true, "expect_sha256": "not-a-hash"})),
+        )
+        .await;
+    assert_eq!(result["structuredContent"]["error"], json!("usage"));
+    assert_eq!(setup.text(), edited);
+
+    // With the hash of the config as it is, in either case, it is made.
+    let result = session
+        .call(
+            "config_set",
+            allow(json!({"confirm": true, "expect_sha256": sha256(&edited).to_uppercase()})),
+        )
+        .await;
+    assert_eq!(
+        result["structuredContent"]["changed"],
+        json!(true),
+        "{result}"
+    );
+    let got = ok(&cli(&setup.path), get("management.allow-remote")).await;
+    assert_eq!(got.json["value"], json!(true));
+
+    // On the command line, for each change that can need a confirmation:
+    // a stale hash is refused, whatever --yes says, and nothing changes.
+    let before = setup.text();
+    let failure = fails(&cli(&setup.path), set("management.allow-remote", "false")).await;
+    assert_eq!(failure.error, "needs_confirmation");
+    let would = failure.would.clone().unwrap();
+    assert_eq!(would["config_sha256"], json!(sha256(&before)));
+    assert!(
+        failure
+            .hint
+            .as_deref()
+            .unwrap()
+            .contains(&format!("--yes --expect-sha256 {}", sha256(&before)))
+    );
+    let stale = Context {
+        yes: true,
+        expect_sha256: Some(sha256(&shown)),
+        ..cli(&setup.path)
+    };
+    let whole = setup.file("whole.yaml", &before);
+    for command in [
+        set("server.host", "0.0.0.0"),
+        unset("routing"),
+        Command::ConfigUndo,
+        Command::ConfigReplace(ReplaceInput {
+            source: Source::File(whole),
+        }),
+        Command::KeysAdd(AddInput {
+            generate: true,
+            ..AddInput::default()
+        }),
+        Command::KeysRemove(RemoveInput {
+            index: Some(0),
+            ..RemoveInput::default()
+        }),
+    ] {
+        let failure = fails(&stale, command).await;
+        assert_eq!(failure.error, "config_changed", "{failure:?}");
+        assert_eq!(failure.code, exit::FAILED);
+        assert!(failure.hint.as_deref().unwrap().contains("without --yes"));
+    }
+    assert_eq!(setup.text(), before);
+
+    // A matching one goes through.
+    let matching = Context {
+        expect_sha256: Some(sha256(&before)),
+        ..stale
+    };
+    let undone = ok(&matching, Command::ConfigUndo).await;
+    assert_eq!(undone.json["changed"], json!(true));
+    assert_eq!(setup.text(), edited);
 }
 
 // Not upstream's: the management key is the config's plain one, else

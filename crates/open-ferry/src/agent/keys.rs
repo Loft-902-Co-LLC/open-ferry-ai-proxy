@@ -10,12 +10,15 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
+use open_ferry_core::config::save;
 use open_ferry_core::config::v8_edit::V8Method;
 use open_ferry_dashboard::mask_client_key;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use super::change::{Call, Content, Edit, Request, key_text, make_from, read_config};
+use super::change::{
+    Call, Content, Edit, Request, check_expected, key_text, make_from, read_config,
+};
 use super::config::{Source, secret_in_argument};
 use super::guard::confirm;
 use super::values::{get, read_tree, tree_of};
@@ -212,18 +215,21 @@ pub(crate) async fn add(ctx: &Context, input: AddInput) -> Result<Outcome, Failu
             "only a key made here is written to a file; this one is in a file already",
         ));
     }
-    let show = input.generate && input.to_file.is_none();
-    if show && ctx.caller == Caller::Mcp && !ctx.yes {
-        return Err(Failure::new(
-            "needs_confirmation",
-            "keys_add returns a new key only with confirm: true, as the key then sits in the transcript; nothing was changed",
-        )
-        .hint("call it again with confirm: true, or with to_file naming a new file to write the key to"));
-    }
     // The change is worked out from these bytes, and the list from the
     // file as it is each time it is worked out, so a key added or removed
     // since isn't undone.
     let data = read_config(&ctx.path)?;
+    check_expected(ctx, &data)?;
+    let show = input.generate && input.to_file.is_none();
+    if show && ctx.caller == Caller::Mcp && !ctx.yes {
+        let sha256 = save::sha256_hex(&data);
+        return Err(Failure::new(
+            "needs_confirmation",
+            "keys_add returns a new key only with confirm: true, as the key then sits in the transcript; nothing was changed",
+        )
+        .hint(format!("call it again with confirm: true and expect_sha256: \"{sha256}\", or with to_file naming a new file to write the key to"))
+        .would(json!({"config_sha256": sha256})));
+    }
     if keys_of(&tree_of(&data)?).contains(&key) {
         return Err(Failure::new(
             "exists",
@@ -295,6 +301,7 @@ pub(crate) async fn remove(ctx: &Context, input: RemoveInput) -> Result<Outcome,
     // As for `add`: the key is found in these bytes, and removed by its
     // value from the list the file holds each time it is worked out.
     let data = read_config(&ctx.path)?;
+    check_expected(ctx, &data)?;
     let keys = keys_of(&tree_of(&data)?);
     let index = match (input.index, &input.source) {
         (Some(index), None) => {

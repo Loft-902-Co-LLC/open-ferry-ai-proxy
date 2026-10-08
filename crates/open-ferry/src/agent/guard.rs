@@ -23,7 +23,7 @@ use std::net::IpAddr;
 use serde_json::{Value, json};
 
 use super::values::{Change, get};
-use super::{Context, Failure};
+use super::{Caller, Context, Failure};
 
 /// The settings a change to which needs a confirmation, each with why.
 /// `server.host` needs one only when unset or not loopback, and its reason
@@ -170,12 +170,32 @@ pub(crate) fn confirm(
     if let Value::Object(map) = &mut would {
         map.insert("reasons".to_owned(), json!(reasons));
     }
+    let hint = format!("to go ahead, {}", go_ahead(ctx, &would));
     Err(Failure::new(
         "needs_confirmation",
         format!("{what} needs {flag}{why}. Nothing was changed."),
     )
-    .hint(format!("to go ahead, run it again with {flag}"))
+    .hint(hint)
     .would(would))
+}
+
+/// How to go ahead with a change that needs a confirmation: run it again
+/// with it, and with the SHA-256 of the config file it was worked out
+/// from when `would` has one, so it is made only to that file.
+pub(crate) fn go_ahead(ctx: &Context, would: &Value) -> String {
+    let flag = ctx.confirm_flag();
+    match (
+        ctx.caller,
+        would.get("config_sha256").and_then(Value::as_str),
+    ) {
+        (Caller::Cli, Some(sha256)) => {
+            format!("run it again with {flag} --expect-sha256 {sha256}")
+        }
+        (Caller::Mcp, Some(sha256)) => {
+            format!("run it again with {flag} and expect_sha256: \"{sha256}\"")
+        }
+        (_, None) => format!("run it again with {flag}"),
+    }
 }
 
 #[cfg(test)]

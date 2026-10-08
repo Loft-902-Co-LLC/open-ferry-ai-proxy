@@ -25,9 +25,10 @@ use serde_json::{Map, Value, json};
 
 use super::api::{Body, answer_failure};
 use super::change::{
-    Call, Changed, Content, Edit, Request, config_changed, file_note, make, masked, read_config,
+    Call, Changed, Content, Edit, Request, check_expected, config_changed, file_note, make, masked,
+    read_config,
 };
-use super::guard::{confirm, sensitive_reasons};
+use super::guard::{confirm, go_ahead, sensitive_reasons};
 use super::mask::{
     auth_dirs, holds_secret, is_secret_name, looks_like_credential, mask_at, mask_tree,
 };
@@ -476,13 +477,13 @@ const CHANGED_SINCE: &str = "the config was changed since the last change that k
 /// The failure for an undo of a config changed since its last recorded
 /// write, unconfirmed.
 fn changed_since(ctx: &Context, would: Option<Value>) -> Failure {
-    let flag = ctx.confirm_flag();
     let failure = Failure::new(
         "changed_since",
         format!("{CHANGED_SINCE}, so nothing was undone"),
     )
     .hint(format!(
-        "look at what it would change, then run it again with {flag} to undo anyway"
+        "look at what it would change, then {} to undo anyway",
+        go_ahead(ctx, would.as_ref().unwrap_or(&Value::Null))
     ));
     match would {
         Some(would) => failure.would(would),
@@ -504,6 +505,7 @@ pub(crate) async fn undo(ctx: &Context) -> Result<Outcome, Failure> {
         return Err(no_backup(&backup));
     }
     let current = read_config(&ctx.path)?;
+    check_expected(ctx, &current)?;
     let saved = std::fs::read(&backup).map_err(|error| {
         Failure::new(
             "failed",
@@ -520,7 +522,7 @@ pub(crate) async fn undo(ctx: &Context) -> Result<Outcome, Failure> {
     if edited {
         reasons.insert(0, CHANGED_SINCE.to_owned());
     }
-    let would = json!({"changes": masked(&changes)});
+    let would = json!({"changes": masked(&changes), "config_sha256": config_sha256});
     if edited && !ctx.yes && ctx.ask.is_none() {
         let mut would = would;
         if let Value::Object(map) = &mut would {

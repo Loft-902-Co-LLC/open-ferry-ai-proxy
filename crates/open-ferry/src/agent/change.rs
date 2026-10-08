@@ -20,6 +20,12 @@
 //! was given for the change as first worked out, so one that needs a
 //! confirmation once worked out again is refused, and says to run it
 //! again.
+//!
+//! A change that needs a confirmation says the SHA-256 of the file it was
+//! worked out from (`config_sha256`). Given back with the confirmation
+//! (`--expect-sha256`, `expect_sha256`), the change is made only to that
+//! file: one that changed since is refused with `config_changed`, and not
+//! worked out again.
 
 use std::path::Path;
 
@@ -310,6 +316,7 @@ async fn attempt(
     data: &[u8],
     again: bool,
 ) -> Result<Attempt, Failure> {
+    check_expected(ctx, data)?;
     let before = tree_of(data)?;
     let edit = request.edit.v8(&before)?;
     let planned = preview_v8(data, &edit).map_err(edit_failure)?;
@@ -336,7 +343,7 @@ async fn attempt(
             ctx,
             &request.what,
             &reasons,
-            json!({"changes": masked(&changes)}),
+            json!({"changes": masked(&changes), "config_sha256": save::sha256_hex(data)}),
         )?;
     }
     let target = probe(ctx).await?;
@@ -408,6 +415,44 @@ pub(crate) fn config_changed() -> Failure {
         "the config file changed after this change was worked out from it, so nothing was changed",
     )
     .hint("run it again to work it out from the file as it is now")
+}
+
+/// The SHA-256 `text` gives, as `name` takes one: 64 hex digits, in
+/// lowercase.
+pub(crate) fn parse_sha256(text: &str, name: &str) -> Result<String, Failure> {
+    let text = text.trim();
+    if text.len() == 64 && text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Ok(text.to_ascii_lowercase())
+    } else {
+        Err(Failure::usage(format!(
+            "{name} takes the config_sha256 a result gave: 64 hex digits"
+        )))
+    }
+}
+
+/// Nothing, unless the config file's bytes `data` aren't the ones the
+/// caller expects (`--expect-sha256`, `expect_sha256`): then the failure
+/// that says the file changed since it was shown.
+pub(crate) fn check_expected(ctx: &Context, data: &[u8]) -> Result<(), Failure> {
+    let Some(expected) = &ctx.expect_sha256 else {
+        return Ok(());
+    };
+    if *expected == save::sha256_hex(data) {
+        return Ok(());
+    }
+    let (flag, again) = match ctx.caller {
+        Caller::Cli => ("--expect-sha256", "run it again without --yes"),
+        Caller::Mcp => ("expect_sha256", "call it again without confirm"),
+    };
+    Err(Failure::new(
+        "config_changed",
+        format!(
+            "the config file changed since the SHA-256 {flag} gives was read from it, so nothing was changed"
+        ),
+    )
+    .hint(format!(
+        "{again} to see what it would change now, and the config_sha256 to give with the confirmation"
+    )))
 }
 
 /// Why a change was written to the file, not made through a server.
