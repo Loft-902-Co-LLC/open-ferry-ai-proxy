@@ -23,8 +23,8 @@ use tower_http::catch_panic::CatchPanicLayer;
 use crate::auth::require_key;
 use crate::errors::{JSON_UTF8, error_response};
 use crate::handlers::{
-    alpha_search, claude, gemini, health, images, interactions, models, openai, openai_videos,
-    responses, responses_ws,
+    alpha_search, claude, gemini, health, images, interactions, models, openai, openai_speech,
+    openai_videos, responses, responses_ws,
 };
 use crate::state::AppState;
 use crate::{access_log, request_context, request_log};
@@ -87,6 +87,11 @@ pub fn router_with(state: AppState, extra: Router) -> Router {
             post(images::generations.layer(auth.clone())),
         )
         .route("/v1/images/edits", post(images::edits.layer(auth.clone())))
+        .route(
+            "/v1/audio/speech",
+            post(openai_speech::speech.layer(auth.clone())),
+        )
+        .route("/v1/tts", post(openai_speech::speech.layer(auth.clone())))
         .route("/v1/messages", post(claude::messages.layer(auth.clone())))
         .route(
             "/v1/messages/count_tokens",

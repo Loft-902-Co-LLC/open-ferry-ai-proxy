@@ -13,7 +13,7 @@
 // codex_websockets_executor.go,
 // xai_websockets_executor.go,
 // xai_executor_execute.go, xai_executor_stream.go, xai_executor_media.go
-// (executeImages, executeVideos),
+// (executeImages, executeVideos), xai_executor_speech.go (executeSpeech),
 // gemini_executor.go (including executeInteractions and
 // executeInteractionsStream), gemini_vertex_executor.go and
 // openai_compat_executor.go, internal/redisqueue/plugin.go (HandleUsage's
@@ -79,7 +79,10 @@
 //! none; a compaction, streamed or not, is read whole as OpenAI JSON; an
 //! image or video call is read whole for the model it names alone, with no
 //! counts, as upstream's `executeImages` and `executeVideos` read it
-//! (`ObserveResponseModel`).
+//! (`ObserveResponseModel`); a speech call's answer, audio, isn't read: its
+//! record names no response model and no counts, as upstream's
+//! `executeSpeech` publishes it, and its time to first token is its first
+//! byte.
 //! Each message on an xAI WebSocket is read as an event, as upstream's
 //! `XAIWebsocketsExecutor` reads it: its time to first token starts when
 //! its request is sent, as a Codex WebSocket's does, and ends at its first
@@ -320,6 +323,8 @@ enum Mode {
     CodexWebsocket,
     /// A call to xAI's Images or video API.
     XaiMedia,
+    /// A call to xAI's text-to-speech API, whose answer, audio, isn't read.
+    XaiSpeech,
     XaiStream,
     XaiWebsocket,
 }
@@ -344,6 +349,10 @@ impl Mode {
             }
             ("codex", AttemptKind::Execute) => Self::CodexExecute,
             ("codex", AttemptKind::Stream) => Self::CodexStream,
+            // A call to xAI's text-to-speech API answers with audio.
+            ("xai", AttemptKind::Execute) if format.as_str() == Format::OPENAI_SPEECH.as_str() => {
+                Self::XaiSpeech
+            }
             // A call to xAI's Images or video API names a model at most, no
             // counts.
             ("xai", AttemptKind::Execute)
@@ -390,6 +399,7 @@ impl Mode {
                 | Self::CodexCompact
                 | Self::CodexExecute
                 | Self::XaiMedia
+                | Self::XaiSpeech
         )
     }
 }
@@ -820,6 +830,8 @@ impl Call {
         }
         match self.mode {
             Mode::Ignored => {}
+            // The audio is neither held nor read.
+            Mode::XaiSpeech => self.ttft.mark_first_response_byte(now),
             mode if mode.reads_whole() => {
                 self.ttft.mark_first_response_byte(now);
                 if self.body_overflow {
@@ -1076,6 +1088,7 @@ impl Call {
                 self.response_model.observe(&body, &self.provider);
                 Some(Detail::default())
             }
+            Mode::XaiSpeech => Some(Detail::default()),
             Mode::CodexExecute => {
                 let now = self.started;
                 for line in lines_of(&body) {

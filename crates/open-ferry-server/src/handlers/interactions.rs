@@ -226,12 +226,14 @@ fn new_call(
 }
 
 /// Where an `agent` call goes: to `gemini-interactions` alone, with the
-/// trimmed name as its model, unless the name is an image-only model
+/// trimmed name as its model, unless the name is an image-only or
+/// speech-only model
 /// (upstream's `providersForExecution` with a forced provider). The entry
 /// adjustment leaves a lone `gemini-interactions` as it is, so isn't made.
 fn forced_route(model: &str) -> Result<Route, ErrorMessage> {
     let model = model.trim();
     routing::check_image_only(model)?;
+    routing::check_speech_only(model)?;
     Ok(Route {
         providers: vec![GEMINI_INTERACTIONS.to_owned()],
         model: model.to_owned(),

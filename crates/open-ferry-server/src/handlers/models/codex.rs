@@ -73,7 +73,7 @@ pub(super) fn response(state: &AppState, client_version: &str) -> String {
 /// routes to takes the freeform `apply_patch` tool (upstream's
 /// `SupportsApplyPatchModel`).
 fn supports_apply_patch(catalog: &dyn ModelCatalog, model: &str) -> bool {
-    routing::route(catalog, model, false)
+    routing::route(catalog, model, false, false)
         .is_ok_and(|route| supports_apply_patch_for_providers(&route.providers))
 }
 

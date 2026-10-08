@@ -52,7 +52,10 @@
 //! - Image and video streams and compactions (`openai-image` and
 //!   `openai-video`) are refused with a 400 before anything is sent; any
 //!   other image call goes to xAI's Images API, and any other video call to
-//!   its video API (see the executor's `images` and `videos` modules).
+//!   its video API (see the executor's `images` and `videos` modules). So
+//!   are speech compactions (`openai-speech`); a speech stream gets
+//!   upstream's 400, and any other speech call goes to xAI's text-to-speech
+//!   API (see the executor's `speech` module).
 //! - Image references are rewritten in place, keeping the body's key order;
 //!   upstream writes the whole body again with Go's sorted keys.
 //! - A payload that isn't a JSON object is translated as an empty object.
@@ -99,11 +102,12 @@ pub(crate) const CLI_CHAT_PROXY_BASE_URL: &str = "https://cli-chat-proxy.grok.co
 /// The executor's provider.
 pub(crate) const PROVIDER: &str = "xai";
 
-/// What an image or video stream or compaction is refused with.
+/// What an image or video stream or compaction, or a speech compaction, is
+/// refused with.
 pub(crate) const MEDIA_REFUSED: &str = "image and video generation are not supported";
 
-/// The source formats of upstream's image and video handlers.
-const MEDIA_SOURCES: [&str; 2] = ["openai-image", "openai-video"];
+/// The source formats of upstream's image, video and speech handlers.
+const MEDIA_SOURCES: [&str; 3] = ["openai-image", "openai-video", "openai-speech"];
 
 /// The header that names the conversation for xAI's prompt cache.
 pub(crate) const CONV_ID_HEADER: &str = "x-grok-conv-id";
@@ -207,14 +211,15 @@ impl Finalizer {
     }
 }
 
-/// Whether the call is for upstream's image or video handler, whose calls
-/// are refused unless the executor sends them on (see the module docs).
+/// Whether the call is for upstream's image, video or speech handler, whose
+/// calls are refused unless the executor sends them on (see the module
+/// docs).
 pub(crate) fn is_media_request(options: &Options) -> bool {
     MEDIA_SOURCES.contains(&options.source_format.as_str())
 }
 
-/// The 400 an image or video stream or compaction gets, before anything
-/// is sent.
+/// The 400 an image or video stream or compaction, or a speech compaction,
+/// gets, before anything is sent.
 pub(crate) fn media_refused() -> ExecError {
     StatusError::new(400, MEDIA_REFUSED).into()
 }

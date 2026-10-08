@@ -1034,6 +1034,28 @@ fn image_and_video_models_are_hidden() {
     assert_eq!(entries["gpt-image-2-mini"]["visibility"], "list");
 }
 
+// Ported from TestCodexClientHidesSpeechModels; not upstream's: the
+// entries' visibility.
+#[test]
+fn speech_models_are_hidden() {
+    for id in ["grok-tts", "grok-voice-tts-1.0", "xai/grok-tts"] {
+        assert!(is_image_or_video_model(id), "{id}");
+    }
+    assert!(!is_image_or_video_model("grok-4"));
+    let entries = by_slug(build_plain(
+        &[
+            model("grok-tts"),
+            model("xai/grok-voice-tts-1.0"),
+            model("grok-4"),
+        ],
+        false,
+        "",
+    ));
+    assert_eq!(entries["grok-tts"]["visibility"], "hide");
+    assert_eq!(entries["xai/grok-voice-tts-1.0"]["visibility"], "hide");
+    assert_eq!(entries["grok-4"]["visibility"], "list");
+}
+
 #[test]
 fn synthesized_entries_get_compact_instructions_and_null_options() {
     let entries = build_plain(&[named("custom-model", "  Custom  ")], false, "");

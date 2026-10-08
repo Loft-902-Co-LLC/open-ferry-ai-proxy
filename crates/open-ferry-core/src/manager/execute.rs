@@ -21,11 +21,12 @@
 //!
 //! The manager doesn't translate: the executor reads the call's
 //! [`Options::source_format`](crate::exec::Options::source_format). So a call
-//! from the image or video endpoints (`openai-image`, `openai-video`) reaches
-//! the executor with its format, request path and payload as they came, a
-//! multipart form included, and its response comes back as the executor gave
-//! it. Upstream's `requestToFormat` keeps those formats as the client sent
-//! them for the request interceptors, which aren't ported.
+//! from the image, video or speech endpoints (`openai-image`,
+//! `openai-video`, `openai-speech`) reaches the executor with its format,
+//! request path and payload as they came, a multipart form included, and its
+//! response comes back as the executor gave it. Upstream's `requestToFormat`
+//! keeps those formats as the client sent them for the request interceptors,
+//! which aren't ported.
 //!
 //! Deviations from upstream:
 //! - Every executor error, stream bootstrap error and empty stream counts as

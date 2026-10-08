@@ -138,7 +138,8 @@ async fn xai_and_meta_channels_list_their_models() {
         }
     }
     // The built-in models upstream adds to xAI's list end it, the image
-    // ones first, written as upstream writes them.
+    // ones first, then the video and the speech ones, written as upstream
+    // writes them.
     let body = api
         .get("/v0/management/model-definitions/xai")
         .await
@@ -165,10 +166,10 @@ async fn xai_and_meta_channels_list_their_models() {
     assert_eq!(
         last.as_deref(),
         Some(concat!(
-            r#"{"id":"grok-imagine-video-1.5-preview","object":"model","created":1735689600,"#,
-            r#""owned_by":"xai","type":"xai","display_name":"Grok Imagine Video 1.5 Preview","#,
-            r#""name":"grok-imagine-video-1.5-preview","#,
-            r#""description":"Compatibility alias for the xAI Grok video generation model."}"#,
+            r#"{"id":"grok-voice-tts-1.0","object":"model","created":1773619200,"#,
+            r#""owned_by":"xai","type":"xai","display_name":"Grok Voice TTS 1.0","#,
+            r#""name":"grok-voice-tts-1.0","#,
+            r#""description":"xAI Grok unary text-to-speech model."}"#,
         ))
     );
 }

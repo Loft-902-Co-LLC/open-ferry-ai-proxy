@@ -304,7 +304,8 @@ mod tests {
 
     // Not upstream's: `entry_providers`, which the dashboard's client setup
     // lists each route's models with, adjusts as a call is routed and
-    // leaves image-only models out.
+    // leaves image-only models out, and speech-only ones outside the speech
+    // endpoints' format.
     #[test]
     fn entry_providers_route_as_calls_do() {
         let both = || names(&["gemini-interactions", "gemini"]);
@@ -319,6 +320,14 @@ mod tests {
         assert_eq!(
             crate::entry_providers(&Format::OPENAI, "gpt-image-2", names(&["codex"])),
             names(&[])
+        );
+        assert_eq!(
+            crate::entry_providers(&Format::OPENAI, "grok-tts", names(&["xai"])),
+            names(&[])
+        );
+        assert_eq!(
+            crate::entry_providers(&Format::OPENAI_SPEECH, "grok-tts", names(&["xai"])),
+            names(&["xai"])
         );
     }
 }

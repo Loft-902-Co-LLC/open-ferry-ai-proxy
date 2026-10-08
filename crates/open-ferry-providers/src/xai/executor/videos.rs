@@ -179,12 +179,27 @@ pub(super) fn shape_body(
     request: &Request,
     options: &Options,
 ) -> (Bytes, Value) {
+    shape(executor, model, request, options, normalize_image_refs)
+}
+
+/// The body to send: `payload` changed by `rewrite`, then the payload rules
+/// for `model`, protocol `openai`, applied, their defaults checked against
+/// the payload as it came (upstream's `NewPayloadFinalizer` with protocol
+/// `openai`); or as it came when neither changes it or it isn't a JSON
+/// object. Also the body as JSON, or `Null`.
+pub(super) fn shape(
+    executor: &XaiExecutor,
+    model: &str,
+    request: &Request,
+    options: &Options,
+    rewrite: fn(&mut Value),
+) -> (Bytes, Value) {
     let original = match exact::from_slice(&request.payload) {
         Ok(original @ Value::Object(_)) => original,
         _ => return (request.payload.clone(), Value::Null),
     };
     let mut body = original.clone();
-    normalize_image_refs(&mut body);
+    rewrite(&mut body);
     let target = payload::Target {
         executor: PROVIDER,
         protocol: &Format::OPENAI,

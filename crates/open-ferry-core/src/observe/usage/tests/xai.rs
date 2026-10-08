@@ -234,6 +234,31 @@ fn media_call_names_its_model_and_no_counts(format: &Format) {
     assert_eq!(int_at(&record, "/fail/status_code"), 429);
 }
 
+/// Not upstream's test: a speech call's answer, audio, isn't read, so its
+/// record names no response model and no counts, even when the answer
+/// looks like JSON that names them, as upstream's `executeSpeech`
+/// publishes it (`EnsurePublished`); a failed one is a failure.
+#[test]
+fn speech_calls_name_no_response_model_and_no_counts() {
+    let harness = Harness::new();
+    let driver = xai_call(&harness, AttemptKind::Execute, &Format::OPENAI_SPEECH);
+    driver.chunk(r#"{"model":"grok-tts-0801","#);
+    driver.chunk(r#""usage":{"input_tokens":5,"output_tokens":7,"total_tokens":12}}"#);
+    driver.finish(Outcome::Completed);
+    let record = harness.record();
+    assert_counts(&record, [0; 5]);
+    assert_eq!(record.get("response_model"), None, "{record}");
+    assert!(!bool_at(&record, "/failed"), "{record}");
+
+    let harness = Harness::new();
+    let driver = xai_call(&harness, AttemptKind::Execute, &Format::OPENAI_SPEECH);
+    driver.fail(&ExecError::upstream(429, r#"{"error":"rate limited"}"#));
+    let record = harness.record();
+    assert!(bool_at(&record, "/failed"), "{record}");
+    assert_eq!(str_field(&record, "executor_type"), "XAIExecutor");
+    assert_eq!(int_at(&record, "/fail/status_code"), 429);
+}
+
 /// An xAI WebSocket call: its request is announced, sent `dial_ms` later,
 /// and each of `messages` comes 10ms after the one before, the first
 /// `wait_ms` after the send.

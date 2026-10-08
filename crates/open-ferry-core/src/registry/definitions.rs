@@ -83,10 +83,10 @@ const CODEX_BUILTINS: [(&str, &str); 5] = [
 /// When the Codex image models came out: 2024-01-01.
 const CODEX_BUILTIN_CREATED: i64 = 1_704_067_200;
 
-/// The image and video models every xAI credential serves: ID, display
-/// name, description and when the model came out (upstream's
+/// The image, video and speech models every xAI credential serves: ID,
+/// display name, description and when the model came out (upstream's
 /// `xaiBuiltinImageModelInfo` and the like).
-const XAI_BUILTINS: [(&str, &str, &str, i64); 6] = [
+const XAI_BUILTINS: [(&str, &str, &str, i64); 8] = [
     (
         "grok-imagine-image",
         "Grok Imagine Image",
@@ -124,10 +124,25 @@ const XAI_BUILTINS: [(&str, &str, &str, i64); 6] = [
         "Compatibility alias for the xAI Grok video generation model.",
         XAI_2025,
     ),
+    (
+        "grok-tts",
+        "Grok TTS",
+        "xAI Grok unary text-to-speech model.",
+        XAI_SPEECH,
+    ),
+    (
+        "grok-voice-tts-1.0",
+        "Grok Voice TTS 1.0",
+        "xAI Grok unary text-to-speech model.",
+        XAI_SPEECH,
+    ),
 ];
 
 /// When most of the xAI built-in models came out: 2025-01-01.
 const XAI_2025: i64 = 1_735_689_600;
+
+/// When the xAI speech models came out: 2026-03-16.
+const XAI_SPEECH: i64 = 1_773_619_200;
 
 /// Why a catalog didn't load.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -378,7 +393,8 @@ impl StaticCatalog {
         self.vertex.clone()
     }
 
-    /// The xAI models, with the image and video models every xAI credential
+    /// The xAI models, with the image, video and speech models every xAI
+    /// credential
     /// serves (upstream's `GetXAIModels`).
     pub fn xai_models(&self) -> Vec<ModelInfo> {
         with_xai_builtins(self.xai.clone())
@@ -454,9 +470,9 @@ pub fn with_codex_builtins(models: Vec<ModelInfo>) -> Vec<ModelInfo> {
     out
 }
 
-/// `models` without any model of the same ID as an xAI image or video model,
-/// ignoring case, nor any without an ID, followed by the xAI image and video
-/// models (upstream's `WithXAIBuiltins`).
+/// `models` without any model of the same ID as an xAI image, video or
+/// speech model, ignoring case, nor any without an ID, followed by the xAI
+/// image, video and speech models (upstream's `WithXAIBuiltins`).
 pub fn with_xai_builtins(models: Vec<ModelInfo>) -> Vec<ModelInfo> {
     let builtin_ids: HashSet<String> = XAI_BUILTINS
         .iter()

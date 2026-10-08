@@ -82,8 +82,8 @@ use super::*;
 use crate::config::ServerConfig;
 use crate::testing::FakeDispatcher;
 
-/// The image and video models the Codex list hides.
-const HIDDEN_MODELS: [&str; 10] = [
+/// The image, video and speech models the Codex list hides.
+const HIDDEN_MODELS: [&str; 12] = [
     "grok-imagine-image-quality",
     "gpt-image-2",
     "gpt-image-2.5-flare",
@@ -94,6 +94,8 @@ const HIDDEN_MODELS: [&str; 10] = [
     "grok-imagine-video",
     "grok-imagine-video-1.5",
     "grok-imagine-video-1.5-preview",
+    "grok-tts",
+    "grok-voice-tts-1.0",
 ];
 
 /// The client versions the apply_patch tests ask as.

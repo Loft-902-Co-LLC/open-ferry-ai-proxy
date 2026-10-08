@@ -2,8 +2,9 @@
 // (XAIExecutor, Identifier), xai_executor_execute.go (Execute,
 // executeCompact, executeCompactRequest, executeCompactionTriggerStream),
 // xai_executor_stream.go (ExecuteStream) and xai_executor_tokens.go
-// (CountTokens) (v8.0.15, MIT). The image calls are in the `images` module
-// and the video calls in the `videos` module.
+// (CountTokens) (v8.0.15, MIT). The image calls are in the `images` module,
+// the video calls in the `videos` module and the speech calls in the
+// `speech` module.
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! [`XaiExecutor`], which calls Grok's Responses API with an API key.
@@ -26,10 +27,12 @@
 //! `apply_patch` tool (see [`crate::apply_patch_responses`]).
 //!
 //! A call from the image endpoints goes to xAI's Images API (see the
-//! `images` module), and one from the video endpoints to xAI's video API
-//! (see the `videos` module), as does the download of a finished video. A
-//! streaming or compact image or video call is refused with a 400 before
-//! anything is sent.
+//! `images` module), one from the video endpoints to xAI's video API (see
+//! the `videos` module), as does the download of a finished video, and one
+//! from the speech endpoints to xAI's text-to-speech API (see the `speech`
+//! module). A streaming or compact image or video call, and a compact
+//! speech call, is refused with a 400 before anything is sent; a streaming
+//! speech call gets upstream's 400.
 //!
 //! Deviations from upstream:
 //! - Requests go through `reqwest` with rustls, one shared client per proxy;
@@ -320,6 +323,9 @@ impl XaiExecutor {
         if videos::is_video_request(options) && options.alt != COMPACT_ALT {
             return self.execute_videos(auth, request, options).await;
         }
+        if speech::is_speech_request(options) && options.alt != COMPACT_ALT {
+            return self.execute_speech(auth, request, options).await;
+        }
         if is_media_request(options) {
             return Err(media_refused());
         }
@@ -429,6 +435,9 @@ impl XaiExecutor {
         request: Request,
         options: Options,
     ) -> Result<StreamResponse, ExecError> {
+        if speech::is_speech_request(&options) && options.alt != COMPACT_ALT {
+            return Err(StatusError::new(400, "streaming not supported for /audio/speech").into());
+        }
         if is_media_request(&options) {
             return Err(media_refused());
         }
@@ -634,6 +643,7 @@ impl ProviderExecutor for XaiExecutor {
 
 mod http_request;
 mod images;
+mod speech;
 mod videos;
 
 #[cfg(test)]

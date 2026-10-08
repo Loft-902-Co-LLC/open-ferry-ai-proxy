@@ -99,6 +99,10 @@ impl Format {
     /// The OpenAI Videos endpoints. As with [`Format::OPENAI_IMAGE`], no
     /// translator takes a request in it.
     pub const OPENAI_VIDEO: Self = Self::from_static("openai-video");
+    /// The speech endpoints, `/v1/audio/speech` and `/v1/tts`, whose handler
+    /// builds xAI's text-to-speech body itself. As with
+    /// [`Format::OPENAI_IMAGE`], no translator takes a request in it.
+    pub const OPENAI_SPEECH: Self = Self::from_static("openai-speech");
 
     /// A format named by a string literal.
     pub const fn from_static(name: &'static str) -> Self {

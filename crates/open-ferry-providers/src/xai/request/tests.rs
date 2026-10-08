@@ -832,12 +832,14 @@ fn session_is_the_clients_prompt_cache_key_only() {
     }
 }
 
-// Not upstream's: the image and video handlers' formats are refused.
+// Not upstream's: the image, video and speech handlers' formats are
+// refused.
 #[test]
 fn media_requests_are_recognised() {
     for (format, media) in [
         ("openai-image", true),
         ("openai-video", true),
+        ("openai-speech", true),
         ("openai-response", false),
         ("openai", false),
     ] {

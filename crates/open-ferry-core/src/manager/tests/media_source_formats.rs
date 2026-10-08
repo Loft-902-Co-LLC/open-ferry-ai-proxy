@@ -1,14 +1,16 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_execution.go
-// (requestToFormat's openai-image and openai-video case) (v8.0.15, MIT).
+// (requestToFormat's openai-image, openai-video and openai-speech case) and
+// conductor_speech_format_test.go (TestRequestToFormatKeepsMediaSources)
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
-//! Calls from the image and video endpoints go through the manager with
-//! their source format, request path, payload and response untouched.
+//! Calls from the image, video and speech endpoints go through the manager
+//! with their source format, request path, payload and response untouched.
 //!
 //! Deviations from upstream:
-//! - Upstream has no test of this; it keeps the two formats for its request
-//!   interceptors, which aren't ported. These tests check what the image and
-//!   video executors rely on instead.
+//! - Upstream's test checks `requestToFormat`, which keeps the three formats
+//!   for its request interceptors, which aren't ported. These tests check
+//!   what the image, video and speech executors rely on instead.
 
 use bytes::Bytes;
 
@@ -19,8 +21,8 @@ use crate::manager::Settings;
 /// A multipart form with a text field and a small binary file.
 const FORM: &[u8] = b"--b\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\ndraw\r\n--b\r\nContent-Disposition: form-data; name=\"image\"; filename=\"a.png\"\r\nContent-Type: image/png\r\n\r\n\x00\xff\r\n\r\n--b--\r\n";
 
-/// Options for a call from `path` in `format`, as the image and video
-/// handlers make them.
+/// Options for a call from `path` in `format`, as the image, video and
+/// speech handlers make them.
 fn media(format: Format, path: &str, stream: bool) -> Options {
     let mut opts = Options::new(format);
     opts.stream = stream;
@@ -40,12 +42,14 @@ fn form_request(model: &str) -> Request {
     }
 }
 
-// Not upstream's: a non-streaming call in either format.
+// TestRequestToFormatKeepsMediaSources: a non-streaming call in each
+// format reaches the executor in it.
 #[tokio::test(start_paused = true)]
 async fn media_calls_reach_the_executor_untouched() {
     let cases = [
         (Format::OPENAI_IMAGE, "/v1/images/edits", "gpt-image-2"),
         (Format::OPENAI_VIDEO, "/v1/videos", "grok-imagine-video"),
+        (Format::OPENAI_SPEECH, "/v1/audio/speech", "grok-tts"),
     ];
     for (format, path, model) in cases {
         let h = Harness::new(Settings::default());

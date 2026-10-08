@@ -16,7 +16,10 @@
 //!
 //! Only a call made with [`Call::image`], as the image endpoints make them,
 //! may name a model that only those endpoints serve, such as `gpt-image-2`;
-//! [`Call::new`] turns such a model away with a 503.
+//! [`Call::new`] turns such a model away with a 503. Likewise, only a call
+//! in the `openai-speech` format, as the speech endpoints make them, may
+//! name a model only they serve (`grok-tts` and `grok-voice-tts-1.0`); any
+//! other call naming one gets a 400.
 //!
 //! Deviations from upstream:
 //! - [`Call::new`] refuses a payload with 128 or more arrays and objects
@@ -203,7 +206,13 @@ impl Call {
         allow_image_model: bool,
     ) -> Result<Self, ErrorMessage> {
         body::check_depth(&payload)?;
-        let mut route = routing::route(state.catalog(), model, allow_image_model)?;
+        let allow_speech_model = format == Format::OPENAI_SPEECH;
+        let mut route = routing::route(
+            state.catalog(),
+            model,
+            allow_image_model,
+            allow_speech_model,
+        )?;
         route.providers = entry_protocol::adjust_execution_providers(&format, route.providers);
         Ok(Self::routed(
             state, client, format, model, route, payload, alt, stream,
@@ -636,6 +645,85 @@ mod tests {
                     err.text
                         .contains("only supported on /v1/images/generations")
                 );
+            }
+        }
+    }
+
+    // Ports TestExecuteWithAuthManager_RejectsSpeechOnlyModelOnNonSpeechProtocols,
+    // TestExecuteWithAuthManager_AllowsSpeechOnlyModelOnSpeechProtocol and
+    // TestSpeechOnlyModelRejectedWhenOnlyExitProtocolIsSpeech
+    // (handlers_speech_only_test.go): only a call in the speech endpoints'
+    // format may name a speech-only model; any other, image calls too, gets
+    // a 400 naming the speech endpoints, before anything is sent.
+    #[test]
+    fn only_speech_calls_take_speech_only_models() {
+        let models = [
+            "grok-tts",
+            "xai/grok-tts",
+            "XAI/Grok-TTS",
+            "grok-tts(auto)",
+            "grok-voice-tts-1.0",
+            "xai/grok-voice-tts-1.0",
+        ];
+        let mut catalog = FakeCatalog::new();
+        for model in models {
+            catalog = catalog.serve(model, &["xai"]);
+        }
+        let state = state(ServerConfig::default(), catalog, &FakeDispatcher::new([]));
+        let client = ClientRequest::default();
+        let formats = [
+            Format::OPENAI,
+            Format::OPENAI_RESPONSE,
+            Format::CLAUDE,
+            Format::GEMINI,
+            Format::OPENAI_IMAGE,
+            Format::OPENAI_VIDEO,
+        ];
+        for model in models {
+            let speech = Bytes::from_static(br#"{"text":"hello","voice_id":"eve"}"#);
+            let call = Call::new(
+                &state,
+                &client,
+                Format::OPENAI_SPEECH,
+                model,
+                speech,
+                "",
+                false,
+            )
+            .unwrap_or_else(|err| panic!("{model}: {}", err.text));
+            assert_eq!(call.providers, ["xai"]);
+            assert_eq!(call.options.source_format, Format::OPENAI_SPEECH);
+
+            let chat = Bytes::from(format!(
+                r#"{{"model":"{model}","messages":[{{"role":"user","content":"hi"}}]}}"#
+            ));
+            for format in &formats {
+                for stream in [false, true] {
+                    let calls = [
+                        Call::new(
+                            &state,
+                            &client,
+                            format.clone(),
+                            model,
+                            chat.clone(),
+                            "",
+                            stream,
+                        ),
+                        Call::image(&state, &client, format.clone(), model, chat.clone(), stream),
+                    ];
+                    for call in calls {
+                        let Err(err) = call else {
+                            panic!("{model} in {}: a speech-only model routed", format.as_str());
+                        };
+                        assert_eq!(err.status, 400, "{model} in {}", format.as_str());
+                        assert!(
+                            err.text.contains("/v1/audio/speech"),
+                            "{model} in {}: {}",
+                            format.as_str(),
+                            err.text
+                        );
+                    }
+                }
             }
         }
     }

@@ -146,6 +146,28 @@ fn with_xai_builtins_includes_video_15_ga_and_preview_alias() {
     }
 }
 
+// Ported from TestWithXAIBuiltinsIncludesSpeechModels; not upstream's: the
+// display names, descriptions and dates.
+#[test]
+fn with_xai_builtins_includes_speech_models() {
+    let models = with_xai_builtins(Vec::new());
+    for (id, display_name) in [
+        ("grok-tts", "Grok TTS"),
+        ("grok-voice-tts-1.0", "Grok Voice TTS 1.0"),
+    ] {
+        let model = models
+            .iter()
+            .find(|model| model.id == id)
+            .unwrap_or_else(|| panic!("{id}"));
+        assert_eq!(model.owned_by, "xai", "{id}");
+        assert_eq!(model.model_type, "xai", "{id}");
+        assert_eq!(model.display_name, display_name);
+        assert_eq!(model.name, id);
+        assert_eq!(model.description, "xAI Grok unary text-to-speech model.");
+        assert_eq!(model.created, 1_773_619_200, "{id}");
+    }
+}
+
 // Not upstream's: the image and video models replace models of the same
 // ID, in any case, and drop models without one, as upstream's
 // `upsertModelInfos` does, and are written as upstream writes them.
@@ -181,7 +203,9 @@ fn with_xai_builtins_replaces_models_of_the_same_id() {
             "grok-imagine-image-2.0",
             "grok-imagine-video",
             "grok-imagine-video-1.5",
-            "grok-imagine-video-1.5-preview"
+            "grok-imagine-video-1.5-preview",
+            "grok-tts",
+            "grok-voice-tts-1.0"
         ]
     );
     assert_eq!(
@@ -287,7 +311,7 @@ fn xai_and_meta_models_come_from_their_sections() {
         "test",
     )
     .unwrap();
-    assert_eq!(only.xai_models().len(), 7);
+    assert_eq!(only.xai_models().len(), 9);
     assert_eq!(only.xai_models()[0].id, "grok-x");
     assert_eq!(only.meta_models()[0].id, "muse-x");
 }

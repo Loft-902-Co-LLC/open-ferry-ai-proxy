@@ -183,7 +183,7 @@ impl<'a> Val<'a> {
     }
 
     /// The number, as Go's `ParseFloat` reads it.
-    fn num(&self) -> f64 {
+    pub(crate) fn num(&self) -> f64 {
         std::str::from_utf8(self.raw)
             .ok()
             .and_then(|text| text.parse().ok())
@@ -367,7 +367,7 @@ fn parse_int(text: &[u8]) -> Option<i64> {
 
 /// Go's `int64(f)` on amd64, which gives the lowest `int64` for a float out
 /// of range.
-fn go_int64(f: f64) -> i64 {
+pub(crate) fn go_int64(f: f64) -> i64 {
     if f.is_nan() || !(-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&f) {
         i64::MIN
     } else {

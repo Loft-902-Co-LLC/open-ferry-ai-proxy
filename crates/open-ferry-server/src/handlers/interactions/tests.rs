@@ -346,6 +346,22 @@ async fn an_image_only_agent_is_turned_away() {
     assert!(dispatcher.calls().is_empty());
 }
 
+// Ports the forced-provider case of
+// TestHandlerProvidersForExecutionRejectsSpeechOnlyModelOnProviderRoute
+// (handlers_speech_only_test.go): an agent named as a speech-only model is
+// turned away with a 400, before any call.
+#[tokio::test]
+async fn a_speech_only_agent_is_turned_away() {
+    let (app, dispatcher) = app(vec![]);
+    let (status, _, body) = send(&app, post(PATH, r#"{"agent":"xai/grok-tts"}"#)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        body.contains("only supported on /v1/audio/speech"),
+        "{body}"
+    );
+    assert!(dispatcher.calls().is_empty());
+}
+
 // Not upstream's: a model is routed as on the other routes, with
 // `gemini-interactions` first, and a resource name made bare.
 #[tokio::test]

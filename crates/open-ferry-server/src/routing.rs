@@ -1,5 +1,6 @@
 // Ported from CLIProxyAPI getRequestDetailsWithOptions,
-// validateImageOnlyModel, isOpenAIImageOnlyModel and routeModelBaseName in
+// validateImageOnlyModel, isOpenAIImageOnlyModel, validateSpeechOnlyModel,
+// isXAISpeechOnlyModel and routeModelBaseName in
 // sdk/api/handlers/handlers_routing.go,
 // responsesWebsocketResolvedModelName in
 // sdk/api/handlers/openai/openai_responses_websocket_session.go,
@@ -29,6 +30,10 @@ const IMAGE_ONLY_MODELS: [&str; 8] = [
     "grok-imagine-image-2.0",
 ];
 
+/// Models only the speech endpoints serve (`/v1/audio/speech` and
+/// `/v1/tts`).
+const SPEECH_ONLY_MODELS: [&str; 2] = ["grok-tts", "grok-voice-tts-1.0"];
+
 /// Where a call goes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Route {
@@ -57,16 +62,19 @@ pub(crate) fn resolve_model(catalog: &dyn ModelCatalog, model: &str) -> String {
 }
 
 /// Routes `model`: resolves `auto`, turns away image-only models unless
-/// `allow_image_model` (as only the image endpoints have it), and finds the
-/// providers that serve it.
+/// `allow_image_model` (as only the image endpoints have it) and
+/// speech-only models unless `allow_speech_model` (as only the speech
+/// endpoints have it), and finds the providers that serve it.
 pub(crate) fn route(
     catalog: &dyn ModelCatalog,
     model: &str,
     allow_image_model: bool,
+    allow_speech_model: bool,
 ) -> Result<Route, ErrorMessage> {
     let resolved = resolve_model(catalog, model);
     let base_model = parse_suffix(&resolved).0.trim();
     validate_image_only(base_model, allow_image_model)?;
+    validate_speech_only(base_model, allow_speech_model)?;
 
     let mut providers = provider_names(catalog, base_model);
     if providers.is_empty() && base_model != resolved {
@@ -132,6 +140,40 @@ pub(crate) fn is_image_only_model(model: &str) -> bool {
     IMAGE_ONLY_MODELS.contains(&go::to_lower(name.trim()).as_str())
 }
 
+/// Turns away models only the speech endpoints serve.
+pub(crate) fn check_speech_only(model: &str) -> Result<(), ErrorMessage> {
+    validate_speech_only(model, false)
+}
+
+/// Turns away models only the speech endpoints serve with a 400, unless
+/// `allow_speech_model` (upstream's `validateSpeechOnlyModel`).
+pub(crate) fn validate_speech_only(
+    model: &str,
+    allow_speech_model: bool,
+) -> Result<(), ErrorMessage> {
+    let mut base = parse_suffix(model).0.trim();
+    if base.is_empty() {
+        base = model.trim();
+    }
+    if is_speech_only_model(base) && !allow_speech_model {
+        return Err(ErrorMessage::new(
+            400,
+            format!(
+                "model {} is only supported on /v1/audio/speech and /v1/tts",
+                route_model_base_name(base)
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Whether only the speech endpoints serve `model`, which may name a
+/// provider before a `/` (upstream's `isXAISpeechOnlyModel`).
+pub(crate) fn is_speech_only_model(model: &str) -> bool {
+    let name = route_model_base_name(model);
+    SPEECH_ONLY_MODELS.contains(&go::to_lower(name.trim()).as_str())
+}
+
 /// What follows the last `/` in a model name, unless the `/` ends it.
 fn route_model_base_name(model: &str) -> &str {
     let model = model.trim();
@@ -188,7 +230,7 @@ mod tests {
             .serve("lower-only", &["claude"])
             .serve("custom(8192)", &["openai-compat"])
             .first("gpt-5");
-        let route = |model| route(&catalog, model, false);
+        let route = |model| route(&catalog, model, false, false);
 
         assert_eq!(
             route("gpt-5(high)").unwrap(),
@@ -221,7 +263,7 @@ mod tests {
     #[test]
     fn auto_stays_when_nothing_is_available() {
         let catalog = FakeCatalog::new().serve("auto", &["x"]);
-        assert_eq!(route(&catalog, "auto", false).unwrap().model, "auto");
+        assert_eq!(route(&catalog, "auto", false, false).unwrap().model, "auto");
     }
 
     /// The image-only models, with and without a provider, as upstream's
@@ -249,7 +291,7 @@ mod tests {
     fn image_only_models_get_a_503() {
         let catalog = FakeCatalog::new();
         for model in IMAGE_ONLY {
-            let err = route(&catalog, model, false).unwrap_err();
+            let err = route(&catalog, model, false, false).unwrap_err();
             assert_eq!(err.status, 503, "{model}");
             assert!(err.text.contains("/v1/images/generations"), "{model}");
             assert!(err.text.contains("/v1/images/edits"), "{model}");
@@ -267,7 +309,9 @@ mod tests {
         // providers.
         let catalog = FakeCatalog::new().serve("gpt-image-2", &["codex"]);
         assert_eq!(
-            route(&catalog, "gpt-image-2", true).unwrap().providers,
+            route(&catalog, "gpt-image-2", true, false)
+                .unwrap()
+                .providers,
             ["codex"]
         );
     }
@@ -297,6 +341,63 @@ mod tests {
         ];
         for (model, want) in cases {
             assert_eq!(is_image_only_model(model), want, "{model}");
+        }
+    }
+
+    /// Upstream's `speechOnlyModels` (handlers_speech_only_test.go).
+    const SPEECH_ONLY: [&str; 6] = [
+        "grok-tts",
+        "xai/grok-tts",
+        "XAI/Grok-TTS",
+        "grok-tts(auto)",
+        "grok-voice-tts-1.0",
+        "xai/grok-voice-tts-1.0",
+    ];
+
+    // Ports TestGetRequestDetails_SpeechOnlyModelReturns400 and the
+    // forced-provider case of
+    // TestHandlerProvidersForExecutionRejectsSpeechOnlyModelOnProviderRoute.
+    #[test]
+    fn speech_only_models_get_a_400() {
+        let mut catalog = FakeCatalog::new();
+        for model in SPEECH_ONLY {
+            catalog = catalog.serve(model, &["xai"]);
+        }
+        for model in SPEECH_ONLY {
+            let err = route(&catalog, model, false, false).unwrap_err();
+            assert_eq!(err.status, 400, "{model}");
+            assert!(err.text.contains("/v1/audio/speech"), "{model}");
+            assert!(err.text.contains("/v1/tts"), "{model}");
+            assert_eq!(check_speech_only(model).unwrap_err().status, 400);
+            // Not upstream's: with the models allowed, routing goes on to
+            // the providers.
+            assert!(validate_speech_only(model, true).is_ok(), "{model}");
+            assert_eq!(
+                route(&catalog, model, false, true).unwrap().providers,
+                ["xai"],
+                "{model}"
+            );
+        }
+        // Not upstream's: the message names the model as the client wrote
+        // it, without its provider.
+        assert_eq!(
+            check_speech_only("XAI/Grok-TTS").unwrap_err().text,
+            "model Grok-TTS is only supported on /v1/audio/speech and /v1/tts"
+        );
+    }
+
+    // Ports TestSpeechOnlyModelsKeepImageAndVideoBehavior: the speech-only
+    // models aren't image-only, and the video models aren't speech-only.
+    #[test]
+    fn speech_only_models_keep_image_and_video_behavior() {
+        for model in SPEECH_ONLY {
+            assert!(!is_image_only_model(model), "{model}");
+            // As upstream's, the check reads the name without its suffix.
+            assert!(is_speech_only_model(parse_suffix(model).0), "{model}");
+        }
+        assert!(validate_image_only("grok-imagine-video", false).is_ok());
+        for model in ["grok-imagine-video", "grok-3", "gpt-image-2", "tts-1"] {
+            assert!(!is_speech_only_model(model), "{model}");
         }
     }
 }

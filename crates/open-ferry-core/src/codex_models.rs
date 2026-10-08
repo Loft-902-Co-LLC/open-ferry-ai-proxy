@@ -19,7 +19,7 @@
 //!   service tiers, upgrade and availability notices;
 //! - reasoning levels the client is too old for (`max` and `ultra` before
 //!   0.144.0) are dropped;
-//! - image and video models are hidden;
+//! - image, video and speech models are hidden;
 //! - models without a template of their own come after the catalog's, in
 //!   order of display name;
 //! - `apply_patch_tool_type` is `freeform` only for a model that takes text
@@ -85,9 +85,9 @@ const LEGACY_REASONING_LEVELS: [&str; 6] = ["none", "minimal", "low", "medium", 
 /// The client version that brought the `max` and `ultra` reasoning levels.
 const EXTENDED_REASONING_VERSION: &str = "0.144.0";
 
-/// Image and video models, which Codex clients don't list
+/// Image, video and speech models, which Codex clients don't list
 /// (`isCodexClientImageOrVideoModel`).
-const IMAGE_AND_VIDEO_MODELS: [&str; 11] = [
+const IMAGE_AND_VIDEO_MODELS: [&str; 13] = [
     "grok-imagine-image-quality",
     "gpt-image-1.5",
     "gpt-image-2",
@@ -99,6 +99,8 @@ const IMAGE_AND_VIDEO_MODELS: [&str; 11] = [
     "grok-imagine-video",
     "grok-imagine-video-1.5",
     "grok-imagine-video-1.5-preview",
+    "grok-tts",
+    "grok-voice-tts-1.0",
 ];
 
 /// The priority of an entry without one (`codexClientModelPriority`).
@@ -481,8 +483,8 @@ impl Builder<'_> {
         }
     }
 
-    /// Sets `apply_patch_tool_type` for a text model that isn't an image or
-    /// video model: `freeform` when the capability says so, or, without a
+    /// Sets `apply_patch_tool_type` for a text model that isn't an image,
+    /// video or speech model: `freeform` when the capability says so, or, without a
     /// capability, when the entry still declares `freeform` from its
     /// template; else `null` (`applyCodexClientApplyPatchCapability`). Hidden
     /// text models keep the tool; entries that don't take text don't get it.
@@ -639,15 +641,16 @@ fn use_compact_instructions(entry: &mut Map<String, Value>) {
     );
 }
 
-/// Hides image and video models (`applyCodexClientVisibilityOverride`).
+/// Hides image, video and speech models
+/// (`applyCodexClientVisibilityOverride`).
 fn apply_visibility_override(entry: &mut Map<String, Value>, id: &str) {
     if is_image_or_video_model(id) {
         entry.insert("visibility".into(), "hide".into());
     }
 }
 
-/// Whether `id`, or what follows its first `/`, is an image or video model
-/// (`isCodexClientImageOrVideoModel`). The dashboard's client setup uses it
+/// Whether `id`, or what follows its first `/`, is an image, video or
+/// speech model (`isCodexClientImageOrVideoModel`). The dashboard's client setup uses it
 /// too, to tell chat models from others.
 pub fn is_image_or_video_model(id: &str) -> bool {
     let mut target = id.trim();
