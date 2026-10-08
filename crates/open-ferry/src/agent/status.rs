@@ -165,6 +165,12 @@ pub(crate) async fn status(ctx: &Context) -> Result<Outcome, Failure> {
             report.management = Some("refused");
             report.notes.push(failure.message.clone());
         }
+        Reach::OtherConfig(failure) => {
+            report.running = false;
+            report.management = Some("other_config");
+            report.reason = Some(failure.message.clone());
+            report.notes.extend(failure.hint.clone());
+        }
         Reach::Running(server) => {
             report.management = Some("ok");
             report.version = server.version.clone();
