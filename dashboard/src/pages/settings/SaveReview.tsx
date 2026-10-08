@@ -1,5 +1,5 @@
 import { CircleCheck, Info, Save, Undo2 } from "lucide-react";
-import type { Ref } from "react";
+import { useLayoutEffect, type RefObject } from "react";
 
 import { callProblem, saveProblem } from "../../api/access";
 import { Alert } from "../../components/Alert";
@@ -212,7 +212,7 @@ export function ReviewDialog({ review, pending, error, onSave, onClose }: Review
 export type Outcome = { saved: number; settingsOnly: boolean } | "nothing" | null;
 
 interface SaveBarProps {
-  ref?: Ref<HTMLDivElement>;
+  ref: RefObject<HTMLDivElement | null>;
   /** The changes waiting on the tab: settings edited, and client keys added or deleted. */
   unsaved: number;
   outcome: Outcome;
@@ -228,7 +228,15 @@ interface SaveBarProps {
   onReview: () => void;
 }
 
-/** The bar at the foot of the Settings tab: what is unsaved, and the one way to save it. */
+/** Room left between a field and the bar, in pixels, when the bar comes up over it. */
+const CLEARANCE = 16;
+
+/**
+ * The bar at the foot of the Settings tab: what is unsaved, and the one way
+ * to save it. It shows once there is something to save, or to say about the
+ * last save; with nothing, only its status line stays, for screen readers,
+ * so the first change is announced.
+ */
 export function SaveBar({
   ref,
   unsaved,
@@ -239,10 +247,31 @@ export function SaveBar({
   onDiscard,
   onReview,
 }: SaveBarProps) {
+  const active = unsaved > 0 || reviewing;
+  const shown = active || outcome !== null || reviewError !== null;
+
+  // The bar comes up with the first change, over the foot of the window: when
+  // it covers the field being changed, the page moves up to show it again.
+  useLayoutEffect(() => {
+    const bar = ref.current;
+    const focused = document.activeElement;
+    if (!shown || bar === null || !(focused instanceof HTMLElement) || bar.contains(focused)) {
+      return;
+    }
+    const covered = focused.getBoundingClientRect().bottom - bar.getBoundingClientRect().top;
+    if (covered > 0) {
+      window.scrollBy({ top: covered + CLEARANCE });
+    }
+  }, [ref, shown]);
+
   return (
     <div
       ref={ref}
-      className="sticky bottom-0 z-10 -mx-1 space-y-3 rounded-t-lg border border-line bg-surface px-4 py-3 shadow-lg"
+      className={
+        shown
+          ? "sticky bottom-0 z-10 space-y-3 rounded-t-lg border border-line bg-surface px-4 py-3 shadow-lg"
+          : undefined
+      }
     >
       {/* A line, not a box: the bar is a box already. */}
       {outcome !== null && outcome !== "nothing" && (
@@ -261,28 +290,30 @@ export function SaveBar({
         </p>
       )}
       {reviewError !== null && <ProblemNotice problem={callProblem(reviewError)} live />}
-      <div className="flex flex-wrap items-center justify-between gap-3">
+      <div className={active ? "flex flex-wrap items-center justify-between gap-3" : "sr-only"}>
         <p role="status" className="font-medium">
           {unsaved === 0
             ? "No unsaved changes."
             : `${plural(unsaved, "unsaved change", "unsaved changes")}.`}
         </p>
-        <div className="flex flex-wrap gap-2">
-          <Button disabled={unsaved === 0 || reviewing} onClick={onDiscard}>
-            <Undo2 aria-hidden="true" className="size-4" />
-            Discard
-          </Button>
-          <Button
-            type={formId === undefined ? "button" : "submit"}
-            form={formId}
-            variant="primary"
-            disabled={unsaved === 0 || reviewing}
-            onClick={formId === undefined ? onReview : undefined}
-          >
-            {reviewing ? <Spinner /> : <Save aria-hidden="true" className="size-4" />}
-            Review and save
-          </Button>
-        </div>
+        {active && (
+          <div className="flex flex-wrap gap-2">
+            <Button disabled={reviewing} onClick={onDiscard}>
+              <Undo2 aria-hidden="true" className="size-4" />
+              Discard
+            </Button>
+            <Button
+              type={formId === undefined ? "button" : "submit"}
+              form={formId}
+              variant="primary"
+              disabled={reviewing}
+              onClick={formId === undefined ? onReview : undefined}
+            >
+              {reviewing ? <Spinner /> : <Save aria-hidden="true" className="size-4" />}
+              Review and save
+            </Button>
+          </div>
+        )}
       </div>
     </div>
   );

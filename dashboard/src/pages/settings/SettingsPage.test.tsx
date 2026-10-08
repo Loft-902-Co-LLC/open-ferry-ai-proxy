@@ -135,6 +135,16 @@ async function openSettings() {
   return view;
 }
 
+/**
+ * Checks that nothing on the Settings tab is unsaved: the save bar is down
+ * to its status line, for screen readers, with no buttons.
+ */
+function expectNothingUnsaved() {
+  expect(screen.getByText("No unsaved changes.")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Review and save" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Discard" })).not.toBeInTheDocument();
+}
+
 loadFirst(() => import("./SettingsPage"));
 
 describe("the settings form", () => {
@@ -156,9 +166,32 @@ describe("the settings form", () => {
     expect(screen.getByRole("textbox", { name: "Failed-request logs kept" })).toHaveValue("10");
     expect(screen.getByRole("checkbox", { name: "Log to files" })).toBeChecked();
     expect(screen.getByRole("checkbox", { name: "Debug logging" })).not.toBeChecked();
-    expect(screen.getByText("No unsaved changes.")).toBeVisible();
-    expect(screen.getByRole("button", { name: "Review and save" })).toBeDisabled();
+    expectNothingUnsaved();
     expect(api.unhandled).toEqual([]);
+  });
+
+  it("brings the save bar up with the first change, clear of the field changed", async () => {
+    server();
+    const { user } = await openSettings();
+    expectNothingUnsaved();
+    const debug = screen.getByRole("checkbox", { name: "Debug logging" });
+    // Laid out as at the foot of the window, where the bar comes up over it.
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      const top = this === debug ? 680 : this.classList.contains("sticky") ? 650 : 0;
+      return { top, bottom: top + 20, left: 0, right: 0, width: 0, height: 20 } as DOMRect;
+    });
+    const scrollBy = vi.spyOn(window, "scrollBy").mockImplementation(() => undefined);
+
+    await user.click(debug);
+    expect(screen.getByText("1 unsaved change.")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Review and save" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Discard" })).toBeEnabled();
+    expect(scrollBy).toHaveBeenCalledExactlyOnceWith({ top: 66 });
+
+    await user.click(debug);
+    expectNothingUnsaved();
   });
 
   it("saves only what changed, each through its own route, after a review against the server", async () => {
@@ -190,7 +223,7 @@ describe("the settings form", () => {
       ["debug", { value: true }],
     ]);
     expect(state.api.callsTo("PUT", CONFIG_YAML)).toEqual([]);
-    expect(screen.getByText("No unsaved changes.")).toBeVisible();
+    expectNothingUnsaved();
     // A setting left alone shows the server's new value.
     await waitFor(() => {
       expect(screen.getByRole("checkbox", { name: "Request logs" })).toBeChecked();
@@ -235,7 +268,7 @@ describe("the settings form", () => {
 
     await user.click(screen.getByRole("button", { name: "Discard" }));
     expect(retries).toHaveValue("1");
-    expect(screen.getByText("No unsaved changes.")).toBeVisible();
+    expectNothingUnsaved();
     expect(screen.queryByText(/whole number/)).not.toBeInTheDocument();
   });
 
@@ -337,7 +370,7 @@ describe("the settings form", () => {
     await user.click(screen.getByRole("button", { name: "Review and save" }));
     expect(await screen.findByText("Nothing to save: the server already has these values.")).toBeVisible();
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    expect(screen.getByText("No unsaved changes.")).toBeVisible();
+    expectNothingUnsaved();
     expect(patches(state.api)).toEqual([]);
   });
 
@@ -480,7 +513,7 @@ describe("the client keys", () => {
       expect(within(card).getAllByRole("listitem")).toHaveLength(4);
     });
     expect(card).not.toHaveTextContent("Not saved yet");
-    expect(screen.getByText("No unsaved changes.")).toBeVisible();
+    expectNothingUnsaved();
   });
 
   it("refuses an example key and one already listed", async () => {
@@ -554,8 +587,7 @@ describe("the client keys", () => {
     );
     expect(within(card).getAllByRole("listitem")).toHaveLength(2);
     expect(within(card).getByRole("button", { name: "Add a client key" })).toHaveFocus();
-    expect(screen.getByText("No unsaved changes.")).toBeVisible();
-    expect(screen.getByRole("button", { name: "Review and save" })).toBeDisabled();
+    expectNothingUnsaved();
     expect(keyWrites(state.api)).toEqual([]);
   });
 
@@ -570,7 +602,7 @@ describe("the client keys", () => {
     await user.click(screen.getByRole("checkbox", { name: "Debug logging" }));
     expect(screen.getByText("3 unsaved changes.")).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Discard" }));
-    expect(screen.getByText("No unsaved changes.")).toBeVisible();
+    expectNothingUnsaved();
     expect(within(card).getAllByRole("listitem")).toHaveLength(2);
     expect(card).not.toHaveTextContent(/Not saved yet|Will be deleted/);
     expect(screen.getByRole("checkbox", { name: "Debug logging" })).not.toBeChecked();
@@ -659,7 +691,7 @@ describe("the client keys", () => {
     expect(await within(review).findByText("That key is already in the list")).toBeVisible();
     await user.click(within(review).getByRole("button", { name: "Close" }));
     await waitFor(() => {
-      expect(screen.getByText("No unsaved changes.")).toBeVisible();
+      expectNothingUnsaved();
     });
 
     await user.click(
@@ -694,7 +726,7 @@ describe("the client keys", () => {
     await user.click(
       within(card).getByRole("button", { name: `Undo adding the client key ${masked(made)}` }),
     );
-    expect(screen.getByText("No unsaved changes.")).toBeVisible();
+    expectNothingUnsaved();
     expect(state.keys).toEqual([KEY_A, KEY_B]);
   });
 });
