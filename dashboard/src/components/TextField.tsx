@@ -3,8 +3,10 @@ import { useId, useState, type InputHTMLAttributes, type ReactNode, type Ref } f
 
 import { cn } from "../lib/cn";
 
+/** A text input's classes, for an input or textarea outside this field. Its
+ * border is `border-control`, which keeps the 3:1 a control's edge needs. */
 export const inputClasses =
-  "h-9 w-full min-w-0 rounded-md border border-line bg-surface px-3 text-fg placeholder:text-muted " +
+  "h-9 w-full min-w-0 rounded-md border border-control bg-surface px-3 text-fg placeholder:text-muted " +
   "aria-invalid:border-danger disabled:opacity-60";
 
 export interface TextFieldProps extends Omit<InputHTMLAttributes<HTMLInputElement>, "children"> {

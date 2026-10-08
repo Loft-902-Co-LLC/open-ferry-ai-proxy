@@ -46,7 +46,7 @@ export function Dialog({ open, title, children, onClose, footer, size = "md" }: 
       aria-labelledby={titleId}
       onClose={onClose}
       className={cn(
-        "m-auto rounded-lg border border-line bg-surface p-0 text-fg shadow-xl backdrop:bg-black/50",
+        "m-auto rounded-lg border border-line bg-surface p-0 text-fg shadow-xl backdrop:bg-backdrop",
         size === "lg" ? "w-[min(56rem,calc(100vw-2rem))]" : "w-[min(32rem,calc(100vw-2rem))]",
       )}
     >

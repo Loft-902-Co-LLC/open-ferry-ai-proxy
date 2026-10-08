@@ -3,7 +3,7 @@ import { useId, type ReactNode, type Ref, type SelectHTMLAttributes } from "reac
 import { cn } from "../lib/cn";
 
 export const selectClasses =
-  "h-9 min-w-0 rounded-md border border-line bg-surface pr-8 pl-2.5 text-fg aria-invalid:border-danger disabled:opacity-60";
+  "h-9 min-w-0 rounded-md border border-control bg-surface pr-8 pl-2.5 text-fg aria-invalid:border-danger disabled:opacity-60";
 
 export interface SelectOption {
   value: string;
