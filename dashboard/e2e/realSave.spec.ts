@@ -364,27 +364,36 @@ test("saves every setting through its own route", async () => {
   await expect(form.usage).not.toBeChecked();
 });
 
-test("adds and removes a client key on the Settings page", async () => {
+test("adds and deletes a client key on the Settings page", async () => {
   const page = the();
   await page.goto(`${APP}settings`);
   const card = page.getByRole("region", { name: "Client API keys" });
   await expect(card.getByRole("listitem")).toHaveCount(2);
   await page.getByRole("button", { name: "Add a client key" }).click();
   const add = page.getByRole("dialog", { name: "Add a client key" });
-  await add.getByRole("button", { name: "Add the key" }).click();
-  await expect(page.getByText("Added the key: the proxy takes it from now on.")).toBeVisible();
+  await add.getByRole("button", { name: "Add to the list" }).click();
+  // The new key waits for the review, like a setting's edit.
+  await expect(card.getByText("Not saved yet")).toBeVisible();
+  expect(await clientKeys()).toHaveLength(2);
+  await page.getByRole("button", { name: "Review and save" }).click();
+  const review = page.getByRole("dialog", { name: "Review the changes" });
+  await review.getByRole("button", { name: "Save 1 change" }).click();
+  await expect(page.getByText("Saved 1 change. The server uses it from now on.")).toBeVisible();
+  await expect(card.getByText("Not saved yet")).toHaveCount(0);
   await expect(card.getByRole("listitem")).toHaveCount(3);
   const keys = await clientKeys();
   expect(keys).toHaveLength(3);
   const added = keys[2] ?? "-";
   expectFile(added, "the key added on the Settings page");
 
-  await card.getByRole("button", { name: /^Remove / }).last().click();
-  const confirm = page.getByRole("dialog", { name: "Remove this client key?" });
-  await confirm.getByRole("button", { name: "Remove" }).click();
+  await card.getByRole("button", { name: /^Delete / }).last().click();
+  await expect(card.getByText("Will be deleted")).toBeVisible();
+  expect(await clientKeys()).toHaveLength(3);
+  await page.getByRole("button", { name: "Review and save" }).click();
+  await review.getByRole("button", { name: "Save 1 change" }).click();
   await expect(card.getByRole("listitem")).toHaveCount(2);
   expect(await clientKeys()).toHaveLength(2);
-  expectFile(added, "the removed key", false);
+  expectFile(added, "the deleted key", false);
   expectCommentsKept();
 });
 

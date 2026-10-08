@@ -370,6 +370,8 @@ describe("the settings form", () => {
     await user.click(within(dialog).getByRole("button", { name: "Close" }));
     expect(screen.getByText("1 unsaved change.")).toBeVisible();
     expect(screen.getByRole("checkbox", { name: "Debug logging" })).toBeChecked();
+    // The client keys are in config.yaml too.
+    expect(screen.getByText("Client keys can't be changed here")).toBeVisible();
   });
 
   it("says which settings were saved when the server refuses one", async () => {
@@ -403,24 +405,70 @@ describe("the settings form", () => {
   });
 });
 
+/** Adds a new key through the dialog, and gives back the key it made. */
+async function addKey(user: ReturnType<typeof renderApp>["user"]) {
+  await user.click(screen.getByRole("button", { name: "Add a client key" }));
+  const dialog = await screen.findByRole("dialog", { name: "Add a client key" });
+  const made = within(dialog).getByLabelText<HTMLInputElement>("Client key").value;
+  await user.click(within(dialog).getByRole("button", { name: "Add to the list" }));
+  await waitFor(() => {
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+  return made;
+}
+
+/** The key as the screens show it, masked. */
+function masked(key: string) {
+  return `sk-...${key.slice(-4)}`;
+}
+
+/** What each write to the client keys did, in order. */
+function keyWrites(api: MockApi) {
+  return api.calls
+    .filter((call) => call.url.pathname === API_KEYS && call.method !== "GET")
+    .map((call) => (call.method === "DELETE" ? `DELETE${call.url.search}` : call.method));
+}
+
 describe("the client keys", () => {
-  it("lists them masked, and adds one by itself, leaving the others alone", async () => {
+  it("lists them masked; a new key waits, copyable, for the review", async () => {
     const state = server();
     const { user } = await openSettings();
     const card = screen.getByRole("region", { name: "Client API keys" });
     expect(card).not.toHaveTextContent(KEY_A);
+    expect(card).not.toHaveTextContent(/take effect at once/);
     expect(within(card).getAllByRole("listitem")).toHaveLength(2);
 
     await user.click(within(card).getByRole("button", { name: "Add a client key" }));
     const dialog = await screen.findByRole("dialog", { name: "Add a client key" });
     const field = within(dialog).getByLabelText("Client key");
     expect(field).toHaveAttribute("type", "password");
+    expect(dialog).toHaveTextContent(/It works only once you save the changes/);
     const made = (field as HTMLInputElement).value;
     expect(made).toMatch(/^sk-[\w-]{43}$/);
+    await user.click(within(dialog).getByRole("button", { name: "Add to the list" }));
+
+    const rows = within(card).getAllByRole("listitem");
+    expect(rows).toHaveLength(3);
+    expect(rows[2]).toHaveTextContent("Not saved yet");
+    expect(rows[2]).not.toHaveTextContent(made);
+    expect(
+      within(card).getByRole("button", { name: `Copy the client key ${masked(made)}` }),
+    ).toBeVisible();
+    expect(screen.getByText("1 unsaved change.")).toBeVisible();
+    expect(state.api.callsTo("PATCH", API_KEYS)).toEqual([]);
 
     state.keys.push("sk-added-elsewhere-0003");
-    await user.click(within(dialog).getByRole("button", { name: "Add the key" }));
-    expect(await within(card).findByText("Added the key: the proxy takes it from now on.")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Review and save" }));
+    const review = await screen.findByRole("dialog", { name: "Review the changes" });
+    const list = within(review).getByRole("list", { name: "The client key changes" });
+    expect(within(list).getAllByRole("listitem").map((item) => item.textContent)).toEqual([
+      `Add client key ${masked(made)}`,
+    ]);
+    expect(review).not.toHaveTextContent(made);
+    expect(within(review).queryByRole("table")).not.toBeInTheDocument();
+    await user.click(within(review).getByRole("button", { name: "Save 1 change" }));
+
+    expect(await screen.findByText(/Saved 1 change\. The server uses it/)).toBeVisible();
     expect(state.api.callsTo("PATCH", API_KEYS).map((call) => call.json())).toEqual([
       { old: made, new: made },
     ]);
@@ -430,66 +478,223 @@ describe("the client keys", () => {
     await waitFor(() => {
       expect(within(card).getAllByRole("listitem")).toHaveLength(4);
     });
+    expect(card).not.toHaveTextContent("Not saved yet");
+    expect(screen.getByText("No unsaved changes.")).toBeVisible();
   });
 
   it("refuses an example key and one already listed", async () => {
     const state = server();
     const { user } = await openSettings();
+    const made = await addKey(user);
     await user.click(screen.getByRole("button", { name: "Add a client key" }));
     const dialog = await screen.findByRole("dialog", { name: "Add a client key" });
     const field = within(dialog).getByLabelText("Client key");
     await fill(user, field, "your-api-key-1");
-    await user.click(within(dialog).getByRole("button", { name: "Add the key" }));
+    await user.click(within(dialog).getByRole("button", { name: "Add to the list" }));
     expect(await within(dialog).findByText(/one of CLIProxyAPI's examples/)).toBeVisible();
-    await fill(user, field, KEY_B);
-    await user.click(within(dialog).getByRole("button", { name: "Add the key" }));
-    expect(await within(dialog).findByText("That key is already in the list")).toBeVisible();
+    for (const key of [KEY_B, made]) {
+      await fill(user, field, key);
+      await user.click(within(dialog).getByRole("button", { name: "Add to the list" }));
+      expect(await within(dialog).findByText("That key is already in the list.")).toBeVisible();
+    }
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(screen.getByText("1 unsaved change.")).toBeVisible();
     expect(state.api.callsTo("PATCH", API_KEYS)).toEqual([]);
   });
 
-  it("removes a key by its place in the list as it is now", async () => {
+  it("deletes a key on saving, by its place in the list as it is then", async () => {
     const state = server();
     const { user } = await openSettings();
     const card = screen.getByRole("region", { name: "Client API keys" });
-    const remove = within(card).getByRole("button", { name: /^Remove the client key .*0002$/ });
-    // Another key arrives ahead of it before the removal.
+    await user.click(
+      within(card).getByRole("button", { name: `Delete the client key ${masked(KEY_B)}` }),
+    );
+    expect(within(card).getAllByRole("listitem")[1]).toHaveTextContent("Will be deleted");
+    expect(
+      within(card).getByRole("button", { name: `Undo deleting the client key ${masked(KEY_B)}` }),
+    ).toHaveFocus();
+    expect(screen.getByText("1 unsaved change.")).toBeVisible();
+    expect(state.api.callsTo("DELETE", API_KEYS)).toEqual([]);
+
+    // Another key arrives ahead of it before the save.
     state.keys.unshift("sk-added-elsewhere-0003");
-    await user.click(remove);
-    const confirm = await screen.findByRole("dialog", { name: "Remove this client key?" });
-    expect(within(confirm).queryByText("This is the last client key")).not.toBeInTheDocument();
-    await user.click(within(confirm).getByRole("button", { name: "Remove" }));
+    await user.click(screen.getByRole("button", { name: "Review and save" }));
+    const review = await screen.findByRole("dialog", { name: "Review the changes" });
+    const list = within(review).getByRole("list", { name: "The client key changes" });
+    expect(list).toHaveTextContent(`Delete client key ${masked(KEY_B)}`);
+    expect(within(review).queryByText("This deletes the last client key")).not.toBeInTheDocument();
+    await user.click(within(review).getByRole("button", { name: "Save 1 change" }));
     await waitFor(() => {
       expect(state.keys).toEqual(["sk-added-elsewhere-0003", KEY_A]);
     });
     expect(state.api.callsTo("DELETE", API_KEYS)[0]?.url.search).toBe("?index=2");
   });
 
-  it("warns before removing the last key, as the proxy then lets anyone in", async () => {
+  it("undoes an added or deleted key before it is saved", async () => {
+    const state = server();
+    const { user } = await openSettings();
+    const card = screen.getByRole("region", { name: "Client API keys" });
+    const made = await addKey(user);
+    await user.click(
+      within(card).getByRole("button", { name: `Delete the client key ${masked(KEY_A)}` }),
+    );
+    expect(screen.getByText("2 unsaved changes.")).toBeVisible();
+
+    const undoDelete = within(card).getByRole("button", {
+      name: `Undo deleting the client key ${masked(KEY_A)}`,
+    });
+    await user.click(undoDelete);
+    expect(card).not.toHaveTextContent("Will be deleted");
+    expect(undoDelete).toHaveAccessibleName(`Delete the client key ${masked(KEY_A)}`);
+    expect(undoDelete).toHaveFocus();
+
+    await user.click(
+      within(card).getByRole("button", { name: `Undo adding the client key ${masked(made)}` }),
+    );
+    expect(within(card).getAllByRole("listitem")).toHaveLength(2);
+    expect(within(card).getByRole("button", { name: "Add a client key" })).toHaveFocus();
+    expect(screen.getByText("No unsaved changes.")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Review and save" })).toBeDisabled();
+    expect(keyWrites(state.api)).toEqual([]);
+  });
+
+  it("discards key changes with the settings", async () => {
+    const state = server();
+    const { user } = await openSettings();
+    const card = screen.getByRole("region", { name: "Client API keys" });
+    await addKey(user);
+    await user.click(
+      within(card).getByRole("button", { name: `Delete the client key ${masked(KEY_A)}` }),
+    );
+    await user.click(screen.getByRole("checkbox", { name: "Debug logging" }));
+    expect(screen.getByText("3 unsaved changes.")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Discard" }));
+    expect(screen.getByText("No unsaved changes.")).toBeVisible();
+    expect(within(card).getAllByRole("listitem")).toHaveLength(2);
+    expect(card).not.toHaveTextContent(/Not saved yet|Will be deleted/);
+    expect(screen.getByRole("checkbox", { name: "Debug logging" })).not.toBeChecked();
+    expect(keyWrites(state.api)).toEqual([]);
+  });
+
+  it("warns in the review when saving leaves no client key, as the proxy then lets anyone in", async () => {
     const state = server({}, [KEY_A]);
     const { user } = await openSettings();
-    await user.click(screen.getByRole("button", { name: /^Remove the client key/ }));
-    const confirm = await screen.findByRole("dialog", { name: "Remove this client key?" });
-    expect(within(confirm).getByText("This is the last client key")).toBeVisible();
-    await user.click(within(confirm).getByRole("button", { name: "Remove" }));
     const card = screen.getByRole("region", { name: "Client API keys" });
+    await user.click(within(card).getByRole("button", { name: /^Delete the client key/ }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Review and save" }));
+    const review = await screen.findByRole("dialog", { name: "Review the changes" });
+    expect(within(review).getByText("This deletes the last client key")).toBeVisible();
+    await user.click(within(review).getByRole("button", { name: "Save 1 change" }));
     expect(await within(card).findByText("No client keys")).toBeVisible();
     expect(state.keys).toEqual([]);
+  });
+
+  it("adds new keys before deleting old ones, so the list is never empty on the way", async () => {
+    const state = server({}, [KEY_A]);
+    const { user } = await openSettings();
+    const card = screen.getByRole("region", { name: "Client API keys" });
+    await user.click(within(card).getByRole("button", { name: /^Delete the client key/ }));
+    const made = await addKey(user);
+    await user.click(screen.getByRole("button", { name: "Review and save" }));
+    const review = await screen.findByRole("dialog", { name: "Review the changes" });
+    const list = within(review).getByRole("list", { name: "The client key changes" });
+    expect(within(list).getAllByRole("listitem").map((item) => item.textContent)).toEqual([
+      `Add client key ${masked(made)}`,
+      `Delete client key ${masked(KEY_A)}`,
+    ]);
+    expect(within(review).queryByText("This deletes the last client key")).not.toBeInTheDocument();
+    await user.click(within(review).getByRole("button", { name: "Save 2 changes" }));
+    expect(await screen.findByText(/Saved 2 changes\. The server uses them/)).toBeVisible();
+    expect(keyWrites(state.api)).toEqual(["PATCH", "DELETE?index=0"]);
+    expect(state.keys).toEqual([made]);
+  });
+
+  it("says which changes were saved when the server refuses one", async () => {
+    const state = server();
+    state.api.use(
+      route("PATCH", `${MANAGEMENT}/debug`, { status: 400, json: { error: "invalid body" } }),
+    );
+    const { user } = await openSettings();
+    const card = screen.getByRole("region", { name: "Client API keys" });
+    const made = await addKey(user);
+    await user.click(
+      within(card).getByRole("button", { name: `Delete the client key ${masked(KEY_B)}` }),
+    );
+    await user.click(screen.getByRole("checkbox", { name: "Debug logging" }));
+    await user.click(screen.getByRole("checkbox", { name: "Request logs" }));
+    expect(screen.getByText("4 unsaved changes.")).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Review and save" }));
+    const review = await screen.findByRole("dialog", { name: "Review the changes" });
+    expect(within(review).getByRole("heading", { name: "Client keys" })).toBeVisible();
+    expect(within(review).getByRole("heading", { name: "Settings" })).toBeVisible();
+    expect(within(review).getAllByRole("row")).toHaveLength(3);
+    await user.click(within(review).getByRole("button", { name: "Save 4 changes" }));
+    const partial = await within(review).findByText(/Saved 2 of 4/);
+    expect(partial).toHaveTextContent(
+      "Saved 2 of 4. “Debug logging” wasn't saved, nor the 1 change after it.",
+    );
+    expect(within(review).getByText("invalid body")).toBeVisible();
+    expect(state.keys).toEqual([KEY_A, made]);
+    expect(patches(state.api)).toEqual([["debug", { value: true }]]);
+
+    await user.click(within(review).getByRole("button", { name: "Close" }));
+    // The keys saved are no longer unsaved; the two settings still are.
+    expect(screen.getByText("2 unsaved changes.")).toBeVisible();
+    expect(card).not.toHaveTextContent(/Not saved yet|Will be deleted/);
+    expect(screen.getByRole("checkbox", { name: "Debug logging" })).toBeChecked();
+  });
+
+  it("says when a key was added or deleted elsewhere after the review", async () => {
+    const state = server();
+    const { user } = await openSettings();
+    const card = screen.getByRole("region", { name: "Client API keys" });
+    const made = await addKey(user);
+    await user.click(screen.getByRole("button", { name: "Review and save" }));
+    let review = await screen.findByRole("dialog", { name: "Review the changes" });
+    state.keys.push(made);
+    await user.click(within(review).getByRole("button", { name: "Save 1 change" }));
+    expect(await within(review).findByText("That key is already in the list")).toBeVisible();
+    await user.click(within(review).getByRole("button", { name: "Close" }));
+    await waitFor(() => {
+      expect(screen.getByText("No unsaved changes.")).toBeVisible();
+    });
+
+    await user.click(
+      within(card).getByRole("button", { name: `Delete the client key ${masked(KEY_B)}` }),
+    );
+    await user.click(screen.getByRole("button", { name: "Review and save" }));
+    review = await screen.findByRole("dialog", { name: "Review the changes" });
+    state.keys.splice(state.keys.indexOf(KEY_B), 1);
+    await user.click(within(review).getByRole("button", { name: "Save 1 change" }));
+    expect(await within(review).findByText("That key was already deleted")).toBeVisible();
+    expect(keyWrites(state.api)).toEqual([]);
   });
 
   it("says when this server can't save the client keys, and stops offering changes", async () => {
     const state = server();
     state.api.use(route("PATCH", API_KEYS, WRITER_UNAVAILABLE));
     const { user } = await openSettings();
-    await user.click(screen.getByRole("button", { name: "Add a client key" }));
-    const dialog = await screen.findByRole("dialog", { name: "Add a client key" });
-    await user.click(within(dialog).getByRole("button", { name: "Add the key" }));
-    expect(await within(dialog).findByText("This server can't save config.yaml")).toBeVisible();
-    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
     const card = screen.getByRole("region", { name: "Client API keys" });
+    const made = await addKey(user);
+    await user.click(screen.getByRole("button", { name: "Review and save" }));
+    const review = await screen.findByRole("dialog", { name: "Review the changes" });
+    await user.click(within(review).getByRole("button", { name: "Save 1 change" }));
+    expect(await within(review).findByText("This server can't save config.yaml")).toBeVisible();
+    await user.click(within(review).getByRole("button", { name: "Close" }));
+
     expect(within(card).getByText("Client keys can't be changed here")).toBeVisible();
     expect(within(card).getByText(/no way to save config\.yaml from here/)).toBeVisible();
-    expect(within(card).queryByRole("button", { name: /^Remove/ })).not.toBeInTheDocument();
+    expect(within(card).queryByRole("button", { name: /^Delete/ })).not.toBeInTheDocument();
     expect(within(card).queryByRole("button", { name: "Add a client key" })).not.toBeInTheDocument();
+    // The key not saved stays, so it can be undone.
+    expect(screen.getByText("1 unsaved change.")).toBeVisible();
+    await user.click(
+      within(card).getByRole("button", { name: `Undo adding the client key ${masked(made)}` }),
+    );
+    expect(screen.getByText("No unsaved changes.")).toBeVisible();
+    expect(state.keys).toEqual([KEY_A, KEY_B]);
   });
 });
 

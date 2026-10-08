@@ -1,52 +1,22 @@
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Plus, Trash2 } from "lucide-react";
-import { useId, useState } from "react";
+import type { UseQueryResult } from "@tanstack/react-query";
+import { Plus, Trash2, Undo2 } from "lucide-react";
+import { useId, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 
-import { cantSaveConfig, saveProblem } from "../../api/access";
 import { isUnsupportedRoute } from "../../api/client";
-import { useApiCall, useApiQuery } from "../../api/hooks";
-import { API_KEYS } from "../../api/management";
 import { Alert } from "../../components/Alert";
 import { Badge } from "../../components/Badge";
 import { Button } from "../../components/Button";
 import { Card } from "../../components/Card";
 import { Code } from "../../components/Code";
-import { ConfirmDialog, Dialog } from "../../components/Dialog";
-import { ProblemNotice } from "../../components/ProblemNotice";
+import { Dialog } from "../../components/Dialog";
 import { QueryState } from "../../components/QueryState";
 import { SecretText } from "../../components/SecretText";
-import { Spinner } from "../../components/Spinner";
 import { TextField } from "../../components/TextField";
 import { z } from "../../lib/zod";
-import {
-  generateClientKey,
-  isExampleKey,
-  maskKey,
-  type ApiKeysAnswer,
-} from "../overview/clientKeys";
-
-/** A key already in the list. */
-class DuplicateKeyError extends Error {
-  constructor() {
-    super("duplicate key");
-    this.name = "DuplicateKeyError";
-  }
-}
-
-/** A key no longer in the list when it came to removing it. */
-class KeyGoneError extends Error {
-  constructor() {
-    super("key gone");
-    this.name = "KeyGoneError";
-  }
-}
-
-function keysIn(answer: unknown): string[] {
-  const list = (answer as Partial<ApiKeysAnswer> | null)?.["api-keys"];
-  return Array.isArray(list) ? list.filter((key): key is string => typeof key === "string") : [];
-}
+import { generateClientKey, isExampleKey, type ApiKeysAnswer } from "../overview/clientKeys";
+import { keyName, keyRows, keysIn, withoutChange, type KeyChange, type KeyRow } from "./keyChanges";
 
 const addSchema = z.object({
   key: z
@@ -62,20 +32,16 @@ const addSchema = z.object({
 
 type AddForm = z.infer<typeof addSchema>;
 
-/** Adds a client key to `api-keys` in config.yaml. */
-function AddKeyDialog({
-  open,
-  onClose,
-  onAdded,
-  onReadOnly,
-}: {
+interface AddKeyDialogProps {
   open: boolean;
+  /** The keys in the list now, saved or not, which the new one may not repeat. */
+  listed: readonly string[];
   onClose: () => void;
-  onAdded: () => void;
-  onReadOnly: () => void;
-}) {
-  const call = useApiCall();
-  const client = useQueryClient();
+  onAdd: (key: string) => void;
+}
+
+/** Adds a client key to the list, to be saved with the other changes. */
+function AddKeyDialog({ open, listed, onClose, onAdd }: AddKeyDialogProps) {
   const formId = useId();
   // A new random key each time the dialog opens (it is mounted afresh);
   // the user may paste another.
@@ -83,27 +49,6 @@ function AddKeyDialog({
   const form = useForm<AddForm>({
     resolver: zodResolver(addSchema),
     defaultValues: { key: initialKey },
-  });
-  const add = useMutation({
-    mutationFn: async ({ key }: AddForm) => {
-      // The list as it is now, so a key added elsewhere isn't missed.
-      if (keysIn(await call<unknown>(API_KEYS)).includes(key)) {
-        throw new DuplicateKeyError();
-      }
-      // Upstream's patchStringList replaces the first entry equal to `old`
-      // and appends `new` when there is none, so this adds the key and
-      // leaves the others alone. The key goes in the body, never the URL.
-      await call<unknown>(API_KEYS, { method: "PATCH", json: { old: key, new: key } });
-    },
-    onSuccess: () => {
-      onAdded();
-    },
-    onError: (error) => {
-      if (cantSaveConfig(error)) {
-        onReadOnly();
-      }
-    },
-    onSettled: () => client.invalidateQueries({ queryKey: [API_KEYS] }),
   });
 
   return (
@@ -114,9 +59,9 @@ function AddKeyDialog({
       footer={
         <>
           <Button onClick={onClose}>Cancel</Button>
-          <Button type="submit" form={formId} variant="primary" disabled={add.isPending}>
-            {add.isPending ? <Spinner /> : <Plus aria-hidden="true" className="size-4" />}
-            Add the key
+          <Button type="submit" form={formId} variant="primary">
+            <Plus aria-hidden="true" className="size-4" />
+            Add to the list
           </Button>
         </>
       }
@@ -126,8 +71,12 @@ function AddKeyDialog({
         noValidate
         className="space-y-4"
         onSubmit={(event) => {
-          void form.handleSubmit((values) => {
-            add.mutate(values);
+          void form.handleSubmit(({ key }) => {
+            if (listed.includes(key)) {
+              form.setError("key", { message: "That key is already in the list." });
+              return;
+            }
+            onAdd(key);
           })(event);
         }}
       >
@@ -136,163 +85,95 @@ function AddKeyDialog({
           data-autofocus
           secret
           revealLabel="Show the key"
-          hint="A new random key is filled in; paste your own instead if you like. Clients send it as their API key. Copy it from the list once it is added."
+          hint="A new random key is filled in; paste your own instead if you like. Clients send it as their API key. It works only once you save the changes; until then the list shows it as not saved yet, and you can copy it from there."
           error={form.formState.errors.key?.message}
           {...form.register("key")}
         />
-        {add.isError &&
-          (add.error instanceof DuplicateKeyError ? (
-            <Alert tone="warn" live title="That key is already in the list">
-              <p>The server already takes this key.</p>
-            </Alert>
-          ) : (
-            <ProblemNotice
-              problem={
-                saveProblem(add.error)
-              }
-              live
-            />
-          ))}
       </form>
     </Dialog>
   );
 }
 
 interface KeyItemProps {
-  value: string;
-  /** Whether it is the only key, so removing it opens the proxy to anyone. */
-  last: boolean;
+  row: KeyRow;
+  /** Whether a saved key may be marked for deletion. */
   writable: boolean;
-  onReadOnly: () => void;
+  onDelete: () => void;
+  onUndo: () => void;
 }
 
-/** One client key, with a button to remove it. */
-function KeyItem({ value, last, writable, onReadOnly }: KeyItemProps) {
-  const call = useApiCall();
-  const client = useQueryClient();
-  const [confirm, setConfirm] = useState(false);
-  const example = isExampleKey(value);
-  const name = example ? `the example key ${value}` : `the client key ${maskKey(value)}`;
-  const remove = useMutation({
-    mutationFn: async () => {
-      // Removed by its place in the list as it is now, so the key itself
-      // never goes in an address (upstream's `?value=` would put it in the
-      // URL, and so in access logs). The cost is a race: a change to the
-      // list between this read and the DELETE can move the keys, and then
-      // the key now at that place goes instead. The list is read again
-      // afterwards, so the card shows what happened.
-      const index = keysIn(await call<unknown>(API_KEYS)).indexOf(value);
-      if (index < 0) {
-        throw new KeyGoneError();
-      }
-      await call<unknown>(API_KEYS, { method: "DELETE", query: { index } });
-    },
-    onError: (error) => {
-      if (cantSaveConfig(error)) {
-        onReadOnly();
-      }
-    },
-    onSettled: () => {
-      setConfirm(false);
-      return client.invalidateQueries({ queryKey: [API_KEYS] });
-    },
-  });
-
+/** One client key: saved, new, or to be deleted, with what can be done to it. */
+function KeyItem({ row, writable, onDelete, onUndo }: KeyItemProps) {
+  const name = keyName(row.key);
+  const saved = row.state === "saved";
   return (
-    <li className="space-y-2 rounded-md border border-line px-3 py-2">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className="inline-flex flex-wrap items-center gap-2">
-          {example ? (
-            <>
-              <Code>{value}</Code>
-              <Badge tone="warn">Example</Badge>
-            </>
-          ) : (
-            <SecretText value={value} label={name} />
-          )}
-        </span>
-        {writable && (
-          <Button
-            size="sm"
-            variant="ghost"
-            aria-label={`Remove ${name}`}
-            onClick={() => {
-              remove.reset();
-              setConfirm(true);
-            }}
-          >
-            <Trash2 aria-hidden="true" className="size-4" />
-            Remove
-          </Button>
-        )}
-      </div>
-      {remove.isError &&
-        (remove.error instanceof KeyGoneError ? (
-          <Alert tone="info" live>
-            <p>That key was already removed.</p>
-          </Alert>
+    // The button stays at the end of the first line; a badge wraps under the key.
+    <li className="flex items-start justify-between gap-2 py-2">
+      <span className="flex min-w-0 flex-wrap items-center gap-2">
+        {isExampleKey(row.key) ? (
+          <>
+            <Code>{row.key}</Code>
+            <Badge tone="warn">Example</Badge>
+          </>
         ) : (
-          <ProblemNotice
-            problem={
-              saveProblem(remove.error)
-            }
-            live
-          />
-        ))}
-      <ConfirmDialog
-        open={confirm}
-        title="Remove this client key?"
-        confirmLabel="Remove"
-        pending={remove.isPending}
-        onConfirm={() => {
-          remove.mutate();
-        }}
-        onCancel={() => {
-          setConfirm(false);
-        }}
-      >
-        <p>
-          Clients that send <Code>{example ? value : maskKey(value)}</Code> are refused from now
-          on.
-        </p>
-        {last && (
-          <Alert tone="warn" title="This is the last client key">
-            <p>
-              With none, the proxy takes requests from anyone who can reach it, with no key at
-              all.
-            </p>
-          </Alert>
+          <SecretText value={row.key} label={name} />
         )}
-      </ConfirmDialog>
+        {row.state === "added" && <Badge tone="info">Not saved yet</Badge>}
+        {row.state === "deleted" && <Badge tone="danger">Will be deleted</Badge>}
+      </span>
+      {/* One button that turns from Delete to Undo and back, so focus stays on it. */}
+      {(!saved || writable) && (
+        <Button size="sm" variant="ghost" className="shrink-0" onClick={saved ? onDelete : onUndo}>
+          {saved ? (
+            <Trash2 aria-hidden="true" className="size-4" />
+          ) : (
+            <Undo2 aria-hidden="true" className="size-4" />
+          )}
+          {saved ? "Delete" : "Undo"}{" "}
+          <span className="sr-only">
+            {saved ? name : row.state === "added" ? `adding ${name}` : `deleting ${name}`}
+          </span>
+        </Button>
+      )}
     </li>
   );
 }
 
-/** The keys clients of the proxy authenticate with: `api-keys` in config.yaml. */
-export function ClientKeysCard() {
-  const keys = useApiQuery<ApiKeysAnswer>(API_KEYS);
+export interface ClientKeysCardProps {
+  /** `GET /api-keys`. */
+  keys: UseQueryResult<ApiKeysAnswer>;
+  /** Keys added and deleted here, not saved yet. */
+  changes: readonly KeyChange[];
+  onChanges: (changes: KeyChange[]) => void;
+  /** Set once a save answers that the server can't save config.yaml. */
+  readOnly: boolean;
+}
+
+/**
+ * The keys clients of the proxy authenticate with: `api-keys` in config.yaml.
+ * Adding or deleting one is a change like a setting's edit: it waits for
+ * "Review and save".
+ */
+export function ClientKeysCard({ keys, changes, onChanges, readOnly }: ClientKeysCardProps) {
   const [adding, setAdding] = useState(false);
   // Counts the times the add dialog opened, to mount it afresh each time.
   const [addRound, setAddRound] = useState(0);
-  const [added, setAdded] = useState(false);
-  // Set once a change answers that the server can't save config.yaml.
-  const [readOnly, setReadOnly] = useState(false);
+  const addButton = useRef<HTMLButtonElement>(null);
   const unsupported = isUnsupportedRoute(keys.error);
-  const writable = !unsupported && !readOnly && keys.isSuccess;
-  const markReadOnly = () => {
-    setReadOnly(true);
-  };
+  const loaded = keys.data !== undefined;
+  const writable = !unsupported && !readOnly && loaded;
+  const rows = keyRows(keysIn(keys.data), changes);
 
   return (
     <Card
       title="Client API keys"
-      description="The keys clients of the proxy send, kept in config.yaml as api-keys. Changes take effect at once."
+      description="The keys clients send to use the proxy, kept in config.yaml as api-keys."
       actions={
         !writable ? undefined : (
           <Button
+            ref={addButton}
             size="sm"
             onClick={() => {
-              setAdded(false);
               setAddRound((round) => round + 1);
               setAdding(true);
             }}
@@ -303,63 +184,63 @@ export function ClientKeysCard() {
         )
       }
     >
-      {added && (
-        <Alert tone="ok" live>
-          <p>Added the key: the proxy takes it from now on.</p>
-        </Alert>
-      )}
       {(unsupported || readOnly) && (
         <Alert tone="info" title="Client keys can't be changed here">
           <p>
             {unsupported
               ? "This server doesn't serve its client keys to the dashboard. "
               : "This server has no way to save config.yaml from here. "}
-            Add and remove them under <Code>api-keys</Code> in config.yaml itself, and the server
+            Add and delete them under <Code>api-keys</Code> in config.yaml itself, and the server
             picks them up when it reloads the file.
           </p>
         </Alert>
       )}
-      {!unsupported && (
-        <QueryState query={keys} loading="Loading the client keys…">
-          {(answer) => {
-            const list = keysIn(answer);
-            if (list.length === 0) {
-              return (
-                <Alert tone="warn" title="No client keys">
-                  <p>
-                    The proxy takes requests from anyone who can reach it, with no key at all. Add
-                    a key to require one.
-                  </p>
-                </Alert>
-              );
-            }
-            return (
-              <ul className="space-y-2">
-                {list.map((value, index) => (
-                  <KeyItem
-                    key={`${value}-${String(index)}`}
-                    value={value}
-                    last={list.length === 1}
-                    writable={writable}
-                    onReadOnly={markReadOnly}
-                  />
-                ))}
-              </ul>
-            );
-          }}
-        </QueryState>
-      )}
+      {!unsupported &&
+        (!loaded ? (
+          <QueryState query={keys} loading="Loading the client keys…">
+            {() => null}
+          </QueryState>
+        ) : rows.length === 0 ? (
+          <Alert tone="warn" title="No client keys">
+            <p>
+              The proxy takes requests from anyone who can reach it, with no key at all. Add a key
+              to require one.
+            </p>
+          </Alert>
+        ) : (
+          <ul className="-my-2 divide-y divide-line">
+            {rows.map((row, index) => (
+              <KeyItem
+                key={`${row.state === "added" ? "new" : "saved"}-${row.key}-${String(index)}`}
+                row={row}
+                writable={writable}
+                onDelete={() => {
+                  onChanges([...changes, { kind: "delete", key: row.key }]);
+                }}
+                onUndo={() => {
+                  if (row.state === "added") {
+                    onChanges(withoutChange(changes, "add", row.key));
+                    // Its row goes, and its button with it.
+                    addButton.current?.focus();
+                  } else {
+                    onChanges(withoutChange(changes, "delete", row.key));
+                  }
+                }}
+              />
+            ))}
+          </ul>
+        ))}
       <AddKeyDialog
         key={addRound}
-        open={adding && !unsupported}
+        open={adding && writable}
+        listed={rows.map((row) => row.key)}
         onClose={() => {
           setAdding(false);
         }}
-        onAdded={() => {
-          setAdded(true);
+        onAdd={(key) => {
+          onChanges([...changes, { kind: "add", key }]);
           setAdding(false);
         }}
-        onReadOnly={markReadOnly}
       />
     </Card>
   );

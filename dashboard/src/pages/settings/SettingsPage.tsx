@@ -1,41 +1,14 @@
 import { useSearchParams } from "react-router";
 
-import { isUnsupportedRoute } from "../../api/client";
-import { useApiQuery } from "../../api/hooks";
-import { CONFIG } from "../../api/management";
-import { Alert } from "../../components/Alert";
 import { PageHeader } from "../../components/PageHeader";
-import { QueryState } from "../../components/QueryState";
 import { Tabs } from "../../components/Tabs";
-import { ClientKeysCard } from "./ClientKeysCard";
 import { ConfigFileEditor } from "./ConfigFileEditor";
-import { SettingsForm } from "./SettingsForm";
+import { SettingsTab } from "./SettingsTab";
 
 const TABS = [
   { id: "settings", label: "Settings" },
   { id: "file", label: "config.yaml" },
 ] as const;
-
-function SettingsTab() {
-  const config = useApiQuery<unknown>(CONFIG);
-  return (
-    <div className="space-y-4">
-      <ClientKeysCard />
-      {isUnsupportedRoute(config.error) ? (
-        <Alert tone="info" title="Settings can't be changed here">
-          <p>
-            This server doesn&apos;t serve its settings to the dashboard. Change them in config.yaml
-            itself: the server picks the change up when it reloads the file.
-          </p>
-        </Alert>
-      ) : (
-        <QueryState query={config} loading="Reading the settings…">
-          {(answer) => <SettingsForm config={answer} />}
-        </QueryState>
-      )}
-    </div>
-  );
-}
 
 /** The server's settings: the common ones as a form, and config.yaml itself. */
 export function SettingsPage() {
@@ -45,7 +18,7 @@ export function SettingsPage() {
     <>
       <PageHeader
         title="Settings"
-        description="How the server works, saved in its config.yaml. Changes take effect when saved."
+        description="How the server works, kept in its config.yaml. Changes wait until you review and save them."
       />
       <Tabs
         label="Settings"

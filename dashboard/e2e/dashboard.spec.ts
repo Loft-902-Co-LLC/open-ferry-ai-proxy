@@ -271,14 +271,16 @@ test("changes settings, client keys and config.yaml under the policy", async ({ 
   await expect(page.getByText("Saved 2 settings. The server uses them from now on.")).toBeVisible();
   await expect(page.getByText("No unsaved changes.")).toBeVisible();
 
-  // A client key, made here and added on its own.
+  // A client key, made here; it waits for the review like a setting.
   await page.getByRole("button", { name: "Add a client key" }).click();
   const addKey = page.getByRole("dialog", { name: "Add a client key" });
   await expect(addKey.getByLabel("Client key", { exact: true })).toHaveAttribute("type", "password");
   await shot(page, "21-settings-add-client-key");
-  await addKey.getByRole("button", { name: "Add the key" }).click();
-  await expect(page.getByText("Added the key: the proxy takes it from now on.")).toBeVisible();
+  await addKey.getByRole("button", { name: "Add to the list" }).click();
   await expect(page.getByRole("region", { name: "Client API keys" }).getByRole("listitem")).toHaveCount(3);
+  await page.getByRole("button", { name: "Review and save" }).click();
+  await review.getByRole("button", { name: "Save 1 change" }).click();
+  await expect(page.getByText("Saved 1 change. The server uses it from now on.")).toBeVisible();
 
   // config.yaml in the editor, which lives in a shadow root.
   await page.getByRole("tab", { name: "config.yaml" }).click();
