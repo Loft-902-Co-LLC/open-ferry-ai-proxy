@@ -54,9 +54,13 @@ import {
 const SUMMARY_GROUPS = 50;
 const CHART_GROUPS = 5;
 
+/**
+ * One of the totals. Two to a row until the wide layout puts them all in
+ * one; an odd one out at the end takes its row's width, not half of it.
+ */
 function Stat({ label, value, detail }: { label: string; value: ReactNode; detail?: ReactNode }) {
   return (
-    <div className="rounded-lg border border-line bg-surface px-4 py-3">
+    <div className="rounded-lg border border-line bg-surface px-4 py-3 max-lg:odd:last:col-span-2">
       <dt className="text-muted">{label}</dt>
       <dd className="text-xl font-semibold tabular-nums">{value}</dd>
       {detail !== undefined && <dd className="text-xs text-muted">{detail}</dd>}
