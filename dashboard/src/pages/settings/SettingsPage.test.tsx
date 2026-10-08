@@ -3,7 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import { readStoredKey } from "../../api/keyStorage";
 import { API_KEYS, CONFIG, CONFIG_YAML, MANAGEMENT, V8_CONFIG } from "../../api/management";
-import { quotaRouting, v8Config } from "../../test/fixtures";
+import { UPDATE, type UpdateStatus } from "../../api/update";
+import { quotaRouting, updateStatus, v8Config } from "../../test/fixtures";
 import { loadFirst } from "../../test/loadFirst";
 import { mockApi, route, v8ConfigRoutes, type MockApi } from "../../test/mockApi";
 import { renderApp } from "../../test/renderApp";
@@ -35,6 +36,8 @@ interface Server {
   v8: Record<string, unknown>;
   keys: string[];
   yaml: string;
+  /** What `GET /update` answers. */
+  update: UpdateStatus;
 }
 
 /** The v8 config paths the Settings tab reads or writes. */
@@ -45,6 +48,7 @@ const V8_PATHS = [
   "routing/quota/prefer",
   "routing/quota/reserve-percent",
   "routing/quota/check-after",
+  "self-update/mode",
 ];
 
 /** The setting each route changes, by its path under the management API. */
@@ -92,11 +96,15 @@ function server(
     },
     keys: [...keys],
     yaml: YAML,
+    update: updateStatus(),
   };
   // One mapping, so a quota setting written through the v8 route shows in
   // GET /config, and the strategy written through its route in the file.
   const routing = state.config.routing as Record<string, unknown>;
   state.v8.routing = routing;
+  // So for self-update, which GET /config has once anything in it is set.
+  state.config["self-update"] ??= {};
+  state.v8["self-update"] = state.config["self-update"];
   state.api.use(
     route("GET", CONFIG, () => ({ json: { ...state.config, "api-keys": state.keys } })),
     ...v8ConfigRoutes(state.v8, V8_PATHS),
@@ -112,6 +120,7 @@ function server(
       }),
     ),
     route("GET", API_KEYS, () => ({ json: { "api-keys": state.keys } })),
+    route("GET", UPDATE, () => ({ json: state.update })),
     route("PATCH", API_KEYS, (request) => {
       const body = request.json() as { old?: string; new?: string };
       if (body.old !== undefined && body.new !== undefined) {
@@ -531,7 +540,7 @@ describe("routing by quota", () => {
       "Check quota rests after routing.quota.check-afterOff90m",
     ]);
     expect(dialog).toHaveTextContent(
-      "The quota settings and the management address go through the server's v8 config route, which saves the whole file in the v8 layout",
+      "The quota settings, updates and the management address go through the server's v8 config route, which saves the whole file in the v8 layout",
     );
     expect(dialog).not.toHaveTextContent("Nothing else in the file changes.");
     expect(within(dialog).queryByText(/takes a restart/)).not.toBeInTheDocument();
@@ -603,6 +612,61 @@ describe("routing by quota", () => {
     await user.click(within(dialog).getByRole("button", { name: "Save 1 setting" }));
     expect(await screen.findByText(/Saved 1 setting\./)).toBeVisible();
     expect(v8Puts(state.api)).toEqual([]);
+  });
+});
+
+describe("updates", () => {
+  const mode = () => screen.getByRole("combobox", { name: "open-ferry's own updates" });
+
+  it("turns them off through the v8 config route", async () => {
+    const state = server({ "self-update": { mode: "auto", "check-every": "12h" } });
+    const { user } = await openSettings();
+    expect(mode()).toHaveValue("auto");
+    expect(screen.getByRole("option", { name: "Notify only" })).toBeInTheDocument();
+
+    await user.selectOptions(mode(), "off");
+    await user.click(screen.getByRole("button", { name: "Review and save" }));
+    const dialog = await screen.findByRole("dialog", { name: "Review the changes" });
+    const rows = within(dialog).getAllByRole("row");
+    expect(rows.slice(1).map((row) => row.textContent)).toEqual(["Updates self-update.modeOnOff"]);
+    expect(dialog).toHaveTextContent("go through the server's v8 config route");
+
+    await user.click(within(dialog).getByRole("button", { name: "Save 1 setting" }));
+    expect(await screen.findByText(/Saved 1 setting\./)).toBeVisible();
+    expect(v8Puts(state.api)).toEqual([["self-update/mode", "off"]]);
+    expect(patches(state.api)).toEqual([]);
+    expect(state.config["self-update"]).toEqual({ mode: "off", "check-every": "12h" });
+    expect(mode()).toHaveValue("off");
+    expectNothingUnsaved();
+    expect(state.api.unhandled).toEqual([]);
+  });
+
+  it("warns when the server's environment holds them lower than the mode chosen", async () => {
+    const state = server();
+    state.update = updateStatus({ mode: "notify", mode_source: "environment", updates: "notify-only" });
+    const { user } = await openSettings();
+    expect(mode()).toHaveValue("auto");
+    await waitFor(() => {
+      expect(mode()).toHaveAccessibleDescription(
+        /Updates stay notify only: OPEN_FERRY_SELF_UPDATE in the server's environment sets them so/,
+      );
+    });
+    await user.selectOptions(mode(), "notify");
+    expect(mode()).not.toHaveAccessibleDescription(/Updates stay/);
+    await user.selectOptions(mode(), "off");
+    expect(mode()).not.toHaveAccessibleDescription(/Updates stay/);
+  });
+
+  it("doesn't warn when the config set the mode", async () => {
+    const state = server({ "self-update": { mode: "notify" } });
+    state.update = updateStatus({ mode: "notify", updates: "notify-only" });
+    const { user } = await openSettings();
+    expect(mode()).toHaveValue("notify");
+    await user.selectOptions(mode(), "auto");
+    await waitFor(() => {
+      expect(state.api.callsTo("GET", UPDATE)).not.toEqual([]);
+    });
+    expect(mode()).not.toHaveAccessibleDescription(/Updates stay/);
   });
 });
 

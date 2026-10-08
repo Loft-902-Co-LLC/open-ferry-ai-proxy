@@ -143,7 +143,7 @@ export function ReviewDialog({ review, pending, error, onSave, onClose }: Review
         Each change is saved to config.yaml on its own, in this order, and the server uses it from
         then on{restart === null ? "" : ", except the management address, which takes a restart"}.{" "}
         {v8
-          ? "The quota settings and the management address go through the server's v8 config route, which saves the whole file in the v8 layout: settings written in the older layout move to their v8 places, with the same values."
+          ? "The quota settings, updates and the management address go through the server's v8 config route, which saves the whole file in the v8 layout: settings written in the older layout move to their v8 places, with the same values."
           : "Nothing else in the file changes."}
       </p>
       {keys.length > 0 && (

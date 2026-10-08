@@ -34,6 +34,7 @@ Each of these turns automatic updates off. Only you turn them back on.
 
   Every install ends with a line saying whether open-ferry keeps itself up to date, and the command that turns it off.
 - **`open-ferry init`** writes `self-update` into a new config, with `mode: auto` and a comment saying how to turn it off, so the setting is there to change.
+- **The dashboard.** Its Settings page has an Updates setting, On, Notify only or Off, which it saves with the others after a review. When `OPEN_FERRY_SELF_UPDATE` holds updates lower than the mode you choose, the page says so: the environment wins until you remove it there and restart the server.
 - **The management API.** `PUT /v8/management/config/self-update/mode` with the management key and the body `"off"` (or `"notify"` or `"auto"`), a JSON string. The server follows it at once ([docs/dashboard-api.md](dashboard-api.md#updates)).
 
 With updates off, open-ferry makes no update request of any kind, and stages and installs nothing. A check that is running when you turn them off stops where it is. A release staged before stays unused. `open-ferry update` still works when you run it, and says that automatic updates are off. `open-ferry update -check`, `open-ferry check` and the [status route](dashboard-api.md#get-open-ferryapiv1update) say whether updates are on, notify-only or off, and what set that: the default, the config or the environment.
@@ -170,6 +171,7 @@ minisign prints `Signature and comment signature verified` and the trusted comme
 - **The server's log** says at start whether updates are on, notify-only or off, what set that and how often it looks; once for each new release; and, at warn, when a check fails. A failed check never stops the server.
 - **`open-ferry update -check`** checks now and says what it found, and changes nothing; `-json` prints it as one JSON object.
 - **`open-ferry check`** has a `self-update` finding: the mode and what set it, how often it looks, and whether this install updates itself. It makes no request.
+- **The dashboard's About page** shows the status: the mode and what set it, the versions, the last and next check and what the last one found, and what to do next, such as a restart or `open-ferry update`. It has a Check now while updates aren't off.
 - **The dashboard API** has the status, `GET /open-ferry/api/v1/update`, and a check now, `POST /open-ferry/api/v1/update/check` ([docs/dashboard-api.md](dashboard-api.md#updates)).
 
 ## CLIProxyAPI

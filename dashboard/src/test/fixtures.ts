@@ -17,6 +17,7 @@ import type {
   UsageSummary,
 } from "../api/dashboard";
 import type { ServerLogPage } from "../api/management";
+import type { UpdateStatus } from "../api/update";
 
 export function metrics(overrides: Partial<Metrics> = {}): Metrics {
   return {
@@ -390,5 +391,39 @@ export function v8Config({
       "allow-remote": allowRemote,
       ...(separateAddress === undefined ? {} : { "separate-address": separateAddress }),
     },
+  };
+}
+
+/**
+ * `GET /update` on an install that updates itself, with updates on from
+ * config.yaml and 0.1.0 up to date.
+ */
+export function updateStatus(overrides: Partial<UpdateStatus> = {}): UpdateStatus {
+  return {
+    mode: "auto",
+    mode_source: "config",
+    updates: "on",
+    check_every_seconds: 21_600,
+    running_version: "0.1.0",
+    installed_version: "0.1.0",
+    restart_needed: false,
+    target: "x86_64-unknown-linux-gnu",
+    latest_version: "0.1.0",
+    update_available: false,
+    staged_version: null,
+    previous_version: null,
+    failed_versions: [],
+    rolled_back_version: null,
+    last_check: "2026-10-08T09:12:44Z",
+    last_result: "up-to-date",
+    last_error: null,
+    next_check: "2026-10-08T15:20:02Z",
+    checking: false,
+    can_update_itself: true,
+    why_not: null,
+    why_not_code: null,
+    trusts_release_key: true,
+    notes: [],
+    ...overrides,
   };
 }

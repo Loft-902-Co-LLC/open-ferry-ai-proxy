@@ -39,6 +39,7 @@ const DEFAULTS: SettingValues = {
   requestLog: false,
   errorLogsMaxFiles: 10,
   usageStatisticsEnabled: false,
+  selfUpdateMode: "auto",
   managementAddress: "",
 };
 
@@ -64,6 +65,7 @@ describe("settingValuesOf", () => {
           "request-log": true,
           "error-logs-max-files": 0,
           "usage-statistics-enabled": true,
+          "self-update": { mode: " Notify ", "check-every": "12h" },
           "api-keys": ["sk-not-a-setting-here"],
         },
         FACTS,
@@ -84,8 +86,18 @@ describe("settingValuesOf", () => {
       requestLog: true,
       errorLogsMaxFiles: 0,
       usageStatisticsEnabled: true,
+      selfUpdateMode: "notify",
       managementAddress: "127.0.0.1:8318",
     });
+  });
+
+  it("reads the updates mode as the server loads it", () => {
+    const mode = (value: unknown) => settingValuesOf({ "self-update": value }).selfUpdateMode;
+    expect(mode({ mode: "OFF" })).toBe("off");
+    expect(mode({ mode: "auto" })).toBe("auto");
+    expect(mode({ mode: "" })).toBe("auto");
+    expect(mode({ "check-every": "12h" })).toBe("auto");
+    expect(mode(undefined)).toBe("auto");
   });
 
   it("reads the quota settings as the server loads them", () => {
@@ -328,6 +340,10 @@ describe("saveCall", () => {
       path: "/v8/management/config/management/separate-address",
       request: { method: "PUT", json: "127.0.0.1:8318" },
     });
+    expect(saveCall("selfUpdateMode", "off")).toEqual({
+      path: "/v8/management/config/self-update/mode",
+      request: { method: "PUT", json: "off" },
+    });
   });
 });
 
@@ -409,6 +425,12 @@ describe("describeSetting", () => {
     expect(describeSetting("quotaCheckAfter", "1d")).toBe("Off (1d isn't a time)");
     expect(describeSetting("managementAddress", "")).toBe("None: on the proxy's port");
     expect(describeSetting("managementAddress", "[::1]:8318")).toBe("[::1]:8318");
+  });
+
+  it("says what each updates mode is", () => {
+    expect(describeSetting("selfUpdateMode", "auto")).toBe("On");
+    expect(describeSetting("selfUpdateMode", "notify")).toBe("Notify only");
+    expect(describeSetting("selfUpdateMode", "off")).toBe("Off");
   });
 });
 
