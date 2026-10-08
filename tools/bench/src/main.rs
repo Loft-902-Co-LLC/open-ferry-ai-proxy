@@ -702,9 +702,11 @@ async fn bench(
         let outcome = load::sequential(&client, &request, args.long_requests).await;
         let upstream = Percentiles::of(counts.take_served());
         eprintln!(
-            "{name}: long {}: {:?} p50, {}, {} errors",
+            "{name}: long {}: {} p50, {}, {} errors",
             kind.name,
-            outcome.total.map(|p| p.p50),
+            outcome
+                .total
+                .map_or_else(|| "?".to_owned(), |p| format!("{:.2?}", p.p50)),
             adds(&outcome, upstream),
             outcome.errors
         );
