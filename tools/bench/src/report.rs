@@ -46,7 +46,7 @@ impl Machine {
             .map(|cpu| cpu.brand().trim().to_owned())
             .unwrap_or_default();
         Self {
-            os: System::long_os_version().unwrap_or_else(|| "an unknown OS".to_owned()),
+            os: os_name(System::long_os_version()),
             kernel: System::kernel_long_version(),
             cpu: if cpu.is_empty() {
                 "an unknown CPU".to_owned()
@@ -59,6 +59,21 @@ impl Machine {
             note,
         }
     }
+}
+
+/// The OS as sysinfo names it, but a Linux distribution's name without the
+/// "Linux (…)" sysinfo puts around it, as the report gives the kernel next.
+fn os_name(long: Option<String>) -> String {
+    let Some(long) = long else {
+        return "an unknown OS".to_owned();
+    };
+    if let Some(distribution) = long
+        .strip_prefix("Linux (")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        return distribution.to_owned();
+    }
+    long
 }
 
 /// What the run was asked to do, and with what.
@@ -544,6 +559,19 @@ fn civil(days: i64) -> (i64, i64, i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Not upstream's: the OS's name as the report gives it, before the
+    // kernel; sysinfo's names as it gives them on Linux, Windows and macOS.
+    #[test]
+    fn names_the_os() {
+        let os = |long: &str| os_name(Some(long.to_owned()));
+        assert_eq!(os("Linux (Ubuntu 24.04)"), "Ubuntu 24.04");
+        assert_eq!(os("Linux (Debian GNU/Linux 12)"), "Debian GNU/Linux 12");
+        assert_eq!(os("Windows 11 Pro"), "Windows 11 Pro");
+        assert_eq!(os("macOS 15.0 Sequoia"), "macOS 15.0 Sequoia");
+        assert_eq!(os("Linux"), "Linux");
+        assert_eq!(os_name(None), "an unknown OS");
+    }
 
     // Not upstream's: dates, durations and counts as the report shows them.
     #[test]
