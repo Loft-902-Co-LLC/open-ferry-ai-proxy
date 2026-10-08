@@ -209,6 +209,13 @@ pub fn edit_v8(path: &Path, edit: &V8Edit) -> Result<Config, V8EditError> {
     Ok(config)
 }
 
+/// The bytes [`edit_v8`] would write for the config file `data`, with the
+/// same checks, written nowhere. Not upstream's: `open-ferry config` shows
+/// what a change would make before it makes it.
+pub fn preview_v8(data: &[u8], edit: &V8Edit) -> Result<Vec<u8>, V8EditError> {
+    render(data, edit).map(|(data, _)| data)
+}
+
 /// The bytes [`edit_v8`] writes for the file `data`, and the config they
 /// load as.
 pub(crate) fn render(data: &[u8], edit: &V8Edit) -> Result<(Vec<u8>, Config), V8EditError> {

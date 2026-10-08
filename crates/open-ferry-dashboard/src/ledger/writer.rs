@@ -173,8 +173,10 @@ pub(crate) fn client_key_id(secret: &[u8], key: &str) -> String {
 /// A client key as the ledger shows it: of a key of 32 characters or more,
 /// its first three and last four; of 16 or more, its last four; of 8 or
 /// more, its last two; of a shorter one, nothing. At most a quarter of a
-/// key is shown, and never more than seven characters.
-pub(crate) fn mask_client_key(key: &str) -> String {
+/// key is shown, and never more than seven characters. `open-ferry`'s
+/// agent commands show client keys so too, so a key reads the same there
+/// as in the dashboard's usage.
+pub fn mask_client_key(key: &str) -> String {
     let chars: Vec<char> = key.chars().collect();
     let count = chars.len();
     let tail = |n: usize| -> String { chars.iter().skip(count.saturating_sub(n)).collect() };

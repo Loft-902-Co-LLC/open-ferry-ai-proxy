@@ -12,7 +12,8 @@
 // https://github.com/router-for-me/CLIProxyAPI
 // https://github.com/golang/go
 
-//! The management API client the tabs share.
+//! The management API client the tabs share, and `open-ferry`'s agent
+//! commands use (see [`Client::send`]).
 //!
 //! It calls `/v0/management` on the server's base URL with the management
 //! key as a bearer token, and decodes responses as upstream decodes them
@@ -53,12 +54,26 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 /// A JSON object, as Go decodes one into `map[string]any`.
 pub(crate) type Object = Map<String, Value>;
 
-/// The management API client (upstream's `Client`).
+/// The management API client (upstream's `Client`). Outside the TUI,
+/// `open-ferry`'s agent commands use it too, through [`Client::new`] and
+/// [`Client::send`].
 #[derive(Debug)]
-pub(crate) struct Client {
+pub struct Client {
     base_url: String,
     secret: Mutex<Secret>,
     http: reqwest::Client,
+}
+
+/// An answer [`Client::send`] got.
+#[derive(Debug)]
+pub struct Reply {
+    /// The status code.
+    pub status: u16,
+    /// The `X-CPA-VERSION` header, which the server sets on the answers of
+    /// an authenticated management request, cleaned of control characters.
+    pub version: Option<String>,
+    /// The body, at most 32 MiB.
+    pub body: Vec<u8>,
 }
 
 /// The management key, kept out of `Debug` output.
@@ -80,7 +95,7 @@ impl Client {
     /// `NewClientWithBaseURL`: a client for `base_url`, with `http://`
     /// added when it has no scheme and trailing slashes taken off; an empty
     /// one is `http://127.0.0.1:8317`.
-    pub(crate) fn new(base_url: &str, secret: &str) -> Arc<Self> {
+    pub fn new(base_url: &str, secret: &str) -> Arc<Self> {
         let mut base = base_url.trim().to_owned();
         if base.is_empty() {
             base = "http://127.0.0.1:8317".to_owned();
@@ -129,6 +144,21 @@ impl Client {
         path: &str,
         body: Option<String>,
     ) -> Result<(Vec<u8>, u16), String> {
+        let body = body.map(|body| ("application/json", body.into_bytes()));
+        let reply = self.send(method, path, body).await?;
+        Ok((reply.body, reply.status))
+    }
+
+    /// Sends `method path`, with `body` and its content type if given, and
+    /// the key, and returns the answer whatever its status. Not upstream's:
+    /// `open-ferry`'s agent commands call the management and dashboard APIs
+    /// with it.
+    pub async fn send(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<(&str, Vec<u8>)>,
+    ) -> Result<Reply, String> {
         let url = format!("{}{path}", self.base_url);
         let op = go_op(&method);
         let mut req = self.http.request(method, &url);
@@ -136,9 +166,9 @@ impl Client {
         if !secret.is_empty() {
             req = req.bearer_auth(secret);
         }
-        if let Some(body) = body {
+        if let Some((content_type, body)) = body {
             req = req
-                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .header(reqwest::header::CONTENT_TYPE, content_type)
                 .body(body);
         }
         let resp = req
@@ -146,6 +176,11 @@ impl Client {
             .await
             .map_err(|e| transport_error(op, &url, &e))?;
         let status = resp.status().as_u16();
+        let version = resp
+            .headers()
+            .get("X-CPA-VERSION")
+            .and_then(|value| value.to_str().ok())
+            .map(clean);
         let mut data = Vec::new();
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
@@ -155,7 +190,11 @@ impl Client {
             }
             data.extend_from_slice(&chunk);
         }
-        Ok((data, status))
+        Ok(Reply {
+            status,
+            version,
+            body: data,
+        })
     }
 
     /// `get`, `put` and `patch`: the body, or an error naming the status
