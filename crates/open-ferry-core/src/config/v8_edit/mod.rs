@@ -204,12 +204,19 @@ impl std::error::Error for V8EditError {}
 /// `WriteConfig`). The file's write lock is held from the read to the
 /// write, so another write never lands between them (not upstream's).
 pub fn edit_v8(path: &Path, edit: &V8Edit) -> Result<Config, V8EditError> {
+    edit_v8_with_sha256(path, edit).map(|(config, _)| config)
+}
+
+/// [`edit_v8`], returning with the config the file now holds the SHA-256
+/// of what it wrote, in lowercase hex. Not upstream's: the management API
+/// keeps it, to check that the file still holds it before it next saves.
+pub fn edit_v8_with_sha256(path: &Path, edit: &V8Edit) -> Result<(Config, String), V8EditError> {
     let failed = |error: save::SaveError| V8EditError::WriteFailed(error.to_string());
     let lock = save::WriteLock::acquire(path).map_err(failed)?;
     let data = std::fs::read(path).map_err(|_| V8EditError::ReadFailed)?;
     let (out, config) = render(&data, edit)?;
-    save::write_file_locked(&lock, path, &out).map_err(failed)?;
-    Ok(config)
+    let sha256 = save::write_file_locked(&lock, path, &out).map_err(failed)?;
+    Ok((config, sha256))
 }
 
 /// The bytes [`edit_v8`] would write for the config file `data`, with the

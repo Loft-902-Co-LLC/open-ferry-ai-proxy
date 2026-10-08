@@ -204,10 +204,42 @@ pub fn save_preserving_comments(
     cfg: &Config,
     migrate_v8: bool,
 ) -> Result<(), SaveError> {
+    save_preserving_comments_expecting(path, cfg, migrate_v8, None).map(|_| ())
+}
+
+/// [`save_preserving_comments`], made only while the file at `path` has
+/// the SHA-256 `expected_sha256` (in hex), when one is given: the one of
+/// the contents the caller loaded `cfg` from, or last wrote. Else a
+/// [`SaveErrorKind::Stale`] error, and nothing is written, since `cfg`
+/// doesn't hold what changed in the file since, and writing it would undo
+/// that. The check is made under the file's lock, with the read the write
+/// starts from. Returns the SHA-256 of what it wrote, in lowercase hex.
+/// Not upstream's: the management API saves with it, so it never writes
+/// over a change made in the file since the server loaded it, as by
+/// `open-ferry config`.
+pub fn save_preserving_comments_expecting(
+    path: &Path,
+    cfg: &Config,
+    migrate_v8: bool,
+    expected_sha256: Option<&str>,
+) -> Result<String, SaveError> {
     let lock = WriteLock::acquire(path)?;
     let data = write::read(path)?;
+    if let Some(expected) = expected_sha256
+        && !expected.trim().eq_ignore_ascii_case(&sha256_hex(&data))
+    {
+        return Err(SaveError::new(
+            SaveErrorKind::Stale,
+            format!(
+                "{} changed since it was loaded; nothing was written",
+                path.display()
+            ),
+        ));
+    }
     let out = render_preserving_comments(&data, cfg, migrate_v8)?;
-    write::commit_locked(&lock, path, &out, None)
+    let expected = expected_sha256.map(|_| data.as_slice());
+    write::commit_locked(&lock, path, &out, expected)?;
+    Ok(sha256_hex(&out))
 }
 
 /// Sets the string at the path of mapping `keys` in the config file at
@@ -225,9 +257,17 @@ pub fn update_nested_scalar(path: &Path, keys: &[&str], value: &str) -> Result<(
 /// (`NormalizeConfigLayout`), and comment lines are moved to the start of
 /// their line.
 pub fn write_file(path: &Path, bytes: &[u8]) -> Result<(), SaveError> {
+    write_file_with_sha256(path, bytes).map(|_| ())
+}
+
+/// [`write_file`], returning the SHA-256 of what it wrote, in lowercase
+/// hex. Not upstream's: the management API keeps it, to check that the
+/// file still holds it before it next saves.
+pub fn write_file_with_sha256(path: &Path, bytes: &[u8]) -> Result<String, SaveError> {
     write::refuse_link(path)?;
     let out = render_write_file(bytes)?;
-    write::commit(path, &out)
+    write::commit(path, &out)?;
+    Ok(sha256_hex(&out))
 }
 
 /// [`write_file`], made only while the file at `path` holds `expected`,
@@ -242,14 +282,16 @@ pub fn write_file_expecting(path: &Path, bytes: &[u8], expected: &[u8]) -> Resul
 }
 
 /// [`write_file`] under `lock`, the caller's lock of the file at `path`,
-/// taken before it read what it worked `bytes` out from.
+/// taken before it read what it worked `bytes` out from. Returns the
+/// SHA-256 of what it wrote, in lowercase hex.
 pub(crate) fn write_file_locked(
     lock: &WriteLock,
     path: &Path,
     bytes: &[u8],
-) -> Result<(), SaveError> {
+) -> Result<String, SaveError> {
     let out = render_write_file(bytes)?;
-    write::commit_locked(lock, path, &out, None)
+    write::commit_locked(lock, path, &out, None)?;
+    Ok(sha256_hex(&out))
 }
 
 /// Writes `bytes` as the config file at `path` unchanged, with the checks,
@@ -315,6 +357,13 @@ pub struct UndoCheck {
 ///   after a hand edit, unless `check.force`: the backup is from before
 ///   that write, so putting it back would lose the edit too.
 pub fn undo(path: &Path, check: &UndoCheck) -> Result<Config, SaveError> {
+    undo_with_sha256(path, check).map(|(config, _)| config)
+}
+
+/// [`undo`], returning with the config the file now holds the SHA-256 of
+/// what it wrote, in lowercase hex. Not upstream's: the management API
+/// keeps it, to check that the file still holds it before it next saves.
+pub fn undo_with_sha256(path: &Path, check: &UndoCheck) -> Result<(Config, String), SaveError> {
     let lock = WriteLock::acquire(path)?;
     let backup = write::backup_path(path);
     let data = match write::read(&backup) {
@@ -353,8 +402,9 @@ pub fn undo(path: &Path, check: &UndoCheck) -> Result<Config, SaveError> {
         ));
     }
     write::commit_locked(&lock, path, &data, Some(&current))?;
-    Config::load_bytes(&data)
-        .map_err(|error| SaveError::new(SaveErrorKind::Check, error.to_string()))
+    let config = Config::load_bytes(&data)
+        .map_err(|error| SaveError::new(SaveErrorKind::Check, error.to_string()))?;
+    Ok((config, sha256_hex(&data)))
 }
 
 /// The settings a config that sets nothing holds, as the loader gives
@@ -1454,6 +1504,56 @@ mod tests {
         let error = write_file_expecting(&path, b"port: 3\n", b"port: 1\n").unwrap_err();
         assert_eq!(error.kind(), SaveErrorKind::Stale);
         assert_eq!(fs::read(&path).unwrap(), b"port: 2\n");
+    }
+
+    // Not upstream's: a save that expects the SHA-256 of the contents its
+    // config was loaded from writes nothing when the file holds others,
+    // since its config doesn't hold what changed there; else it writes and
+    // returns the SHA-256 of what it wrote, as the other writes that
+    // return one do, and the loader does of what it loaded.
+    #[test]
+    fn a_save_expecting_a_sha256_refuses_a_changed_file() {
+        use crate::config::v8_edit::{V8Edit, V8Method, edit_v8_with_sha256};
+        let dir = TempDir::new();
+        let path = dir.join("config.yaml");
+        fs::write(&path, "port: 1\n").unwrap();
+        let (config, loaded) = Config::load_with_sha256(&path).unwrap();
+        assert_eq!(loaded, sha256_hex(b"port: 1\n"));
+        fs::write(&path, "port: 2\napi-keys: [kept-key]\n").unwrap();
+        let error =
+            save_preserving_comments_expecting(&path, &config, false, Some(&loaded)).unwrap_err();
+        assert_eq!(error.kind(), SaveErrorKind::Stale, "{error}");
+        assert_eq!(fs::read(&path).unwrap(), b"port: 2\napi-keys: [kept-key]\n");
+
+        let (mut config, loaded) = Config::load_with_sha256(&path).unwrap();
+        config.debug = true;
+        let upper = loaded.to_ascii_uppercase();
+        let wrote =
+            save_preserving_comments_expecting(&path, &config, false, Some(&upper)).unwrap();
+        let data = fs::read(&path).unwrap();
+        assert_eq!(wrote, sha256_hex(&data));
+        let saved = Config::load_bytes(&data).unwrap();
+        assert!(saved.debug);
+        assert_eq!(saved.api_keys, ["kept-key"]);
+        // Without a SHA-256 to expect, it writes whatever the file holds.
+        fs::write(&path, "port: 3\n").unwrap();
+        let wrote = save_preserving_comments_expecting(&path, &config, false, None).unwrap();
+        assert_eq!(wrote, sha256_hex(&fs::read(&path).unwrap()));
+
+        let wrote = write_file_with_sha256(&path, b"port: 4\n").unwrap();
+        assert_eq!(wrote, sha256_hex(&fs::read(&path).unwrap()));
+        let (config, wrote) = undo_with_sha256(&path, &UndoCheck::default()).unwrap();
+        assert!(config.debug);
+        assert_eq!(wrote, sha256_hex(&fs::read(&path).unwrap()));
+        let edit = V8Edit {
+            method: V8Method::Put,
+            path: vec!["server".to_owned(), "port".to_owned()],
+            body: b"5".to_vec(),
+            yaml: false,
+        };
+        let (config, wrote) = edit_v8_with_sha256(&path, &edit).unwrap();
+        assert_eq!(config.port, 5);
+        assert_eq!(wrote, sha256_hex(&fs::read(&path).unwrap()));
     }
 
     // Not upstream's: the defaults are an empty config's settings, in the

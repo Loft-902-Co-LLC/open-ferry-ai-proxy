@@ -163,8 +163,8 @@ async fn run(
     } else {
         PathBuf::from(&flags.config)
     };
-    let config = match Config::load(&config_path) {
-        Ok(config) => config,
+    let (config, config_sha256) = match Config::load_with_sha256(&config_path) {
+        Ok(loaded) => loaded,
         Err(error) => {
             tracing::error!("failed to load config: {error}");
             return ExitCode::FAILURE;
@@ -202,12 +202,21 @@ async fn run(
         );
     }
     if flags.tui {
-        return tui::run(flags, config, config_path, auth_dir, log_level).await;
+        return tui::run(
+            flags,
+            config,
+            config_sha256,
+            config_path,
+            auth_dir,
+            log_level,
+        )
+        .await;
     }
     let options = service::Options {
         local_password: flags.password.0,
         keep_alive: true,
         announce: true,
+        config_sha256: Some(config_sha256),
     };
     service::run(config, config_path, auth_dir, log_level, options, stop).await
 }

@@ -2166,7 +2166,8 @@ async fn live(key: Option<&str>, password: Option<&str>) -> Live {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let setup = Setup::new(port, key);
-    let config = Arc::new(Config::load(&setup.path).unwrap());
+    let (config, config_sha256) = Config::load_with_sha256(&setup.path).unwrap();
+    let config = Arc::new(config);
     let registry = Arc::new(ModelRegistry::new());
     let store = Arc::new(FileStore::new(&setup.auth_dir));
     let manager = Manager::new(
@@ -2185,6 +2186,7 @@ async fn live(key: Option<&str>, password: Option<&str>) -> Live {
     )
     .with_store(store)
     .with_sync(sync)
+    .with_config_sha256(config_sha256)
     .with_config_writer(Arc::new(FileConfigWriter::new(setup.path.clone())))
     .with_config_path(setup.path.clone());
     let app = open_ferry_management::router(state.clone()).merge(open_ferry_dashboard::router(

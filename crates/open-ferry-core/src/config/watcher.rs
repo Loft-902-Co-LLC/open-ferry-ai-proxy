@@ -135,9 +135,11 @@ pub fn next_revision() -> u64 {
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum WatchEvent {
-    /// The config file changed and loaded. Its `auth_dir` is resolved
-    /// (`~` expanded, cleaned), as upstream stores it after a reload.
-    ConfigChanged(Arc<Config>),
+    /// The config file changed and loaded: the config, with its
+    /// `auth_dir` resolved (`~` expanded, cleaned), as upstream stores it
+    /// after a reload, and the SHA-256 of the contents it loaded from, in
+    /// lowercase hex (not upstream's).
+    ConfigChanged(Arc<Config>, String),
     /// The config file changed but didn't load. Keep the current config.
     ConfigInvalid(ConfigError),
     /// An auth file appeared, or was there at start. Load it.
@@ -528,7 +530,8 @@ impl WatchState {
                     Err(error) => error!(%error, "failed to resolve auth directory from config"),
                 }
                 self.last_config_hash = Some(hash);
-                Some(WatchEvent::ConfigChanged(Arc::new(config)))
+                let sha256 = super::save::sha256_hex(&data);
+                Some(WatchEvent::ConfigChanged(Arc::new(config), sha256))
             }
             Err(error) => {
                 error!(%error, "failed to reload config");
@@ -869,7 +872,7 @@ mod tests {
 
     fn config_of(event: Option<WatchEvent>) -> Arc<Config> {
         match event {
-            Some(WatchEvent::ConfigChanged(config)) => config,
+            Some(WatchEvent::ConfigChanged(config, _)) => config,
             other => panic!("expected a config change, got {other:?}"),
         }
     }
@@ -885,6 +888,23 @@ mod tests {
         let config = config_of(state.reload_config_if_changed());
         assert_eq!(config.port, 9090);
         assert!(config.remote_management.allow_remote);
+    }
+
+    // Not upstream's: the event carries the SHA-256 of the contents the
+    // config loaded from, in lowercase hex.
+    #[test]
+    fn a_config_change_carries_the_sha256_of_what_loaded() {
+        let fixture = Fixture::new();
+        let mut state = fixture.state();
+        fixture.write_config("port: 9191\n");
+        let data = fs::read(&fixture.config_path).unwrap();
+        match state.reload_config_if_changed() {
+            Some(WatchEvent::ConfigChanged(config, sha256)) => {
+                assert_eq!(config.port, 9191);
+                assert_eq!(sha256, crate::config::save::sha256_hex(&data));
+            }
+            other => panic!("expected a config change, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1560,7 +1580,7 @@ mod tests {
             WatchEvent::AuthAdded(file, _) => ("added", path_key(&file.path)),
             WatchEvent::AuthChanged(file, _) => ("changed", path_key(&file.path)),
             WatchEvent::AuthRemoved(path, _) => ("removed", path_key(path)),
-            WatchEvent::ConfigChanged(_) => ("config", String::new()),
+            WatchEvent::ConfigChanged(..) => ("config", String::new()),
             WatchEvent::ConfigInvalid(_) => ("invalid", String::new()),
             WatchEvent::Reloaded(ticket) => ("reloaded", ticket.to_string()),
         }
@@ -1580,7 +1600,7 @@ mod tests {
         fixture.write_config("port: 3\n");
         watcher.reload_config(7);
         match next(&mut receiver).await {
-            WatchEvent::ConfigChanged(config) => assert_eq!(config.port, 3),
+            WatchEvent::ConfigChanged(config, _) => assert_eq!(config.port, 3),
             other => panic!("expected a config change, got {other:?}"),
         }
         assert_eq!(next(&mut receiver).await, WatchEvent::Reloaded(7));
@@ -1594,7 +1614,7 @@ mod tests {
         // A change after it is followed as before.
         fixture.write_config("port: 4\n");
         match next(&mut receiver).await {
-            WatchEvent::ConfigChanged(config) => assert_eq!(config.port, 4),
+            WatchEvent::ConfigChanged(config, _) => assert_eq!(config.port, 4),
             other => panic!("expected a config change, got {other:?}"),
         }
         drop(watcher);
@@ -1625,7 +1645,7 @@ mod tests {
         fs::write(&temporary, body).expect("write temporary config");
         fs::rename(&temporary, &fixture.config_path).expect("replace config");
         match next(&mut receiver).await {
-            WatchEvent::ConfigChanged(config) => assert_eq!(config.port, 2),
+            WatchEvent::ConfigChanged(config, _) => assert_eq!(config.port, 2),
             other => panic!("expected a config change, got {other:?}"),
         }
 

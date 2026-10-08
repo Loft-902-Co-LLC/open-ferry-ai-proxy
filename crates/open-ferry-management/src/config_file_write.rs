@@ -210,7 +210,7 @@ async fn edit(state: &ManagementState, edit: V8Edit) -> Response {
         {
             let _guard = state.config_write_lock().lock().await;
             match run_blocking(move || writer.edit_v8(&edit)).await {
-                Ok(config) => state.set_config(Arc::new(config)),
+                Ok((config, sha256)) => state.set_loaded_config(Arc::new(config), sha256),
                 Err(error) => return config_write::v8_error_response(&error),
             }
         }
@@ -243,10 +243,7 @@ async fn put_config_yaml(State(state): State<ManagementState>, body: Body) -> Re
     config_write::run_task(async move {
         {
             let _guard = state.config_write_lock().lock().await;
-            if run_blocking(move || writer.write_file(&body))
-                .await
-                .is_err()
-            {
+            let Ok(sha256) = run_blocking(move || writer.write_file(&body)).await else {
                 return json::response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     &Json::map([
@@ -254,8 +251,8 @@ async fn put_config_yaml(State(state): State<ManagementState>, body: Body) -> Re
                         ("message", Json::Str("failed to write config".into())),
                     ]),
                 );
-            }
-            state.set_config(Arc::new(config));
+            };
+            state.set_loaded_config(Arc::new(config), sha256);
         }
         config_write::reload(&state).await;
         json::response(

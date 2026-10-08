@@ -214,6 +214,13 @@ pub struct Options {
     /// Whether to print that the server started; not while the TUI has the
     /// terminal.
     pub announce: bool,
+    /// The SHA-256 of the config file's contents the config was loaded
+    /// from, in lowercase hex, as [`Config::load_with_sha256`] gives it:
+    /// the management API saves the config only while the file still holds
+    /// them, or what it last wrote, so it never writes over a change made
+    /// there since. Without it, nothing is checked until the config is
+    /// loaded again or written.
+    pub config_sha256: Option<String>,
 }
 
 /// Serves until `stop` resolves, or until the server fails.
@@ -249,6 +256,9 @@ pub async fn run(
         .management
         .clone()
         .with_local_password(&options.local_password);
+    if let Some(sha256) = &options.config_sha256 {
+        service.management = service.management.clone().with_config_sha256(sha256);
+    }
     service.register_executors();
     claude_cli::warn_outdated(&config.claude_cli);
     service.start_catalogs();
@@ -1017,7 +1027,9 @@ impl Service {
     /// Applies a watcher event.
     fn handle(&mut self, event: WatchEvent, config_path: &Path) -> Watching {
         match event {
-            WatchEvent::ConfigChanged(config) => return self.apply_config(config, config_path),
+            WatchEvent::ConfigChanged(config, sha256) => {
+                return self.apply_config(config, Some(sha256), config_path);
+            }
             WatchEvent::ConfigInvalid(error) => {
                 tracing::error!("failed to reload config: {error}; keeping the current one");
             }
@@ -1067,7 +1079,7 @@ impl Service {
             return Watching::Same;
         }
         let watching = match load_config(config_path) {
-            Ok(config) => self.apply_config(Arc::new(config), config_path),
+            Ok((config, sha256)) => self.apply_config(Arc::new(config), Some(sha256), config_path),
             Err(error) => {
                 tracing::error!("failed to reload config: {error}; keeping the current one");
                 Watching::Same
@@ -1220,8 +1232,15 @@ impl Service {
     }
 
     /// Applies a reloaded config (upstream's `applyConfigRuntime`, with the
-    /// watcher's credential diff).
-    fn apply_config(&mut self, config: Arc<Config>, config_path: &Path) -> Watching {
+    /// watcher's credential diff), loaded from contents with the SHA-256
+    /// `sha256`, which the management API saves it over only while the file
+    /// holds them.
+    fn apply_config(
+        &mut self,
+        config: Arc<Config>,
+        sha256: Option<String>,
+        config_path: &Path,
+    ) -> Watching {
         let previous = std::mem::replace(&mut self.config, config);
         let config = Arc::clone(&self.config);
         self.log_level.set_debug(config.debug);
@@ -1233,7 +1252,8 @@ impl Service {
         management_listener::warn_on_change(&previous, &config);
         self.manager.set_settings(Settings::from(&*config));
         self.state.set_config(ServerConfig::from(&*config));
-        self.management.set_config(Arc::clone(&config));
+        self.management
+            .set_loaded_config(Arc::clone(&config), sha256);
         // Before any credential is registered, so they get its models.
         self.catalogs.update(&config.models);
         if previous.claude_cli != config.claude_cli {
@@ -1337,14 +1357,15 @@ fn compat_provider(auth: &Auth) -> Option<String> {
 }
 
 /// The config file at `path`, loaded as the watcher loads it after a
-/// change: with its `auth-dir` resolved.
-fn load_config(path: &Path) -> Result<Config, open_ferry_core::config::ConfigError> {
-    let mut config = Config::load(path)?;
+/// change: with its `auth-dir` resolved, and the SHA-256 of the contents it
+/// loaded from.
+fn load_config(path: &Path) -> Result<(Config, String), open_ferry_core::config::ConfigError> {
+    let (mut config, sha256) = Config::load_with_sha256(path)?;
     match config.resolve_auth_dir() {
         Ok(dir) => config.auth_dir = dir.to_string_lossy().into_owned(),
         Err(error) => tracing::error!("failed to resolve auth directory from config: {error}"),
     }
-    Ok(config)
+    Ok((config, sha256))
 }
 
 /// `dir` made absolute against the current directory and cleaned, as the
@@ -1505,6 +1526,12 @@ mod tests {
         service
     }
 
+    /// The watcher's report that the config file changed and loaded as
+    /// `config`, from contents these tests don't keep.
+    fn config_changed(config: Arc<Config>) -> WatchEvent {
+        WatchEvent::ConfigChanged(config, String::new())
+    }
+
     // Not upstream's: a client's connection has Nagle's algorithm off, as
     // Go's net package has it on every connection upstream's server accepts.
     #[tokio::test]
@@ -1618,7 +1645,7 @@ mod tests {
         let second = catalog_file(dir.path(), "second.json", "claude-from-second-file");
         let config = format!("auth-dir: '{}'\n{}", dir.path().display(), models(&second));
         let config = Arc::new(Config::parse(config).unwrap());
-        service.apply_config(config, &dir.path().join("config.yaml"));
+        service.apply_config(config, None, &dir.path().join("config.yaml"));
         assert!(serves(&service, "claude-from-second-file"));
         assert!(!serves(&service, "claude-from-first-file"));
 
@@ -1888,7 +1915,7 @@ mod tests {
         service.follow(watching, &mut events);
         let changed = next_watched(&mut events).await;
         assert!(
-            matches!(changed, WatchEvent::ConfigChanged(_)),
+            matches!(changed, WatchEvent::ConfigChanged(..)),
             "{changed:?}"
         );
         let watching = service.handle(changed, &config_path);
@@ -2243,7 +2270,7 @@ mod tests {
         let same = Arc::new(Config::parse(std::fs::read_to_string(&config_path).unwrap()).unwrap());
         service.watcher = Some(watcher);
         assert!(matches!(
-            service.handle(WatchEvent::ConfigChanged(same), &config_path),
+            service.handle(config_changed(same), &config_path),
             Watching::Same
         ));
     }
@@ -2264,14 +2291,14 @@ mod tests {
         // An unchanged reload keeps the credential.
         let same = Config::parse(format!("auth-dir: '{}'\n{keys}", dir.path().display())).unwrap();
         assert!(matches!(
-            service.handle(WatchEvent::ConfigChanged(Arc::new(same)), Path::new("")),
+            service.handle(config_changed(Arc::new(same)), Path::new("")),
             Watching::Same
         ));
         assert!(service.manager.get(&id).is_some());
 
         // A reload without the key removes it.
         let none = Config::parse(format!("auth-dir: '{}'\n", dir.path().display())).unwrap();
-        service.handle(WatchEvent::ConfigChanged(Arc::new(none)), Path::new(""));
+        service.handle(config_changed(Arc::new(none)), Path::new(""));
         assert!(service.manager.get(&id).is_none());
         assert!(service.registry.models_for_client(&id).is_empty());
         assert!(service.config_auths.is_empty());
@@ -2284,7 +2311,7 @@ mod tests {
     /// Reloads `service` with a config over `dir` holding `extra`.
     fn reload(service: &mut Service, dir: &Path, extra: &str) {
         let config = Config::parse(format!("auth-dir: '{}'\n{extra}", dir.display())).unwrap();
-        service.handle(WatchEvent::ConfigChanged(Arc::new(config)), Path::new(""));
+        service.handle(config_changed(Arc::new(config)), Path::new(""));
     }
 
     /// The models a Codex file credential with no exclusions serves.
@@ -2423,7 +2450,7 @@ mod tests {
 
         // A reload without them removes both.
         let none = Config::parse(format!("auth-dir: '{}'\n", dir.path().display())).unwrap();
-        service.handle(WatchEvent::ConfigChanged(Arc::new(none)), Path::new(""));
+        service.handle(config_changed(Arc::new(none)), Path::new(""));
         for auth in &auths {
             assert!(service.manager.get(&auth.id).is_none());
             assert!(model_ids(&service, &auth.id).is_empty());
@@ -2555,7 +2582,7 @@ mod tests {
         let reload = |service: &mut Service, extra: &str| {
             let text = format!("auth-dir: '{}'\n{extra}", dir.path().display());
             let config = Arc::new(Config::parse(text).unwrap());
-            service.handle(WatchEvent::ConfigChanged(config), Path::new(""))
+            service.handle(config_changed(config), Path::new(""))
         };
         let alpha = |model: &str, alias: &str| {
             compat_entry("alpha", "https://alpha.example.test/v1", model, alias)
@@ -2635,7 +2662,7 @@ mod tests {
         let text = format!("auth-dir: '{}'\n{entries}", dir.path().display());
         let mut invalid = Config::parse(text).unwrap();
         invalid.openai_compatibility[1].api_key_entries[0].weight = Some(MAX_WEIGHT + 1);
-        service.handle(WatchEvent::ConfigChanged(Arc::new(invalid)), Path::new(""));
+        service.handle(config_changed(Arc::new(invalid)), Path::new(""));
         assert_eq!(service.manager.list().len(), 1);
         assert!(service.manager.get(&beta_auth.id).is_some());
         assert!(
@@ -2756,7 +2783,10 @@ mod tests {
                 config("up-2", "a2")
             );
             let reloaded = Arc::new(Config::parse(text).unwrap());
-            service.handle(WatchEvent::ConfigChanged(reloaded), Path::new(""));
+            service.handle(
+                WatchEvent::ConfigChanged(reloaded, String::new()),
+                Path::new(""),
+            );
             let (status, body) = send(addr, "POST", "/v1/chat/completions", &chat("a2")).await;
             assert_eq!((status, body.as_str()), (200, ANSWER));
             let (status, body) = send(addr, "POST", "/v1/chat/completions", &chat("a1")).await;
@@ -3206,7 +3236,7 @@ mod tests {
         /// The config in `dir` with `extra`, as the watcher reports it.
         fn config(dir: &Path, extra: &str) -> WatchEvent {
             let text = format!("auth-dir: '{}'\n{extra}", dir.display());
-            WatchEvent::ConfigChanged(Arc::new(Config::parse(text).unwrap()))
+            WatchEvent::ConfigChanged(Arc::new(Config::parse(text).unwrap()), String::new())
         }
 
         // Not upstream's: the TUI's readiness check passes with the local
@@ -3516,7 +3546,8 @@ mod tests {
         // the config writer and the reload. A change is saved to the file,
         // keeping its comments, and applied before the answer is sent, so
         // the proxy takes a client key the change added at once; changes
-        // made to the file by hand are still followed after it.
+        // made to the file by hand are still followed after it, and a save
+        // never writes over one the service hasn't loaded yet.
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn management_saves_are_applied_before_the_answer() {
             let dir = tempfile::tempdir().unwrap();
@@ -3533,14 +3564,17 @@ mod tests {
                 auth_dir.display()
             );
             std::fs::write(&path, format!("{head}api-keys: ['client-key']\n")).unwrap();
-            let config = Config::load(&path).unwrap();
+            let (config, config_sha256) = Config::load_with_sha256(&path).unwrap();
             let (stop, stopped) = oneshot::channel::<()>();
             let served = tokio::spawn(run(
                 config,
                 path.clone(),
                 auth_dir,
                 LogLevel::detached(),
-                Options::default(),
+                Options {
+                    config_sha256: Some(config_sha256),
+                    ..Options::default()
+                },
                 async move {
                     let _ = stopped.await;
                 },
@@ -3587,6 +3621,35 @@ mod tests {
             std::fs::write(&path, format!("{head}api-keys: ['hand-key']\n")).unwrap();
             wait_models(addr, "hand-key", 200).await;
             wait_models(addr, "added-key", 401).await;
+
+            // Made before the service loads a change made in the file, a
+            // save answers 409 and writes nothing, and the service loads the
+            // file; made again, it keeps the change. The watcher may load
+            // the file first, and then the save goes ahead at once.
+            let changed = format!("{head}api-keys: ['hand-key', 'new-key']\n");
+            open_ferry_core::config::save::write_file(&path, changed.as_bytes()).unwrap();
+            let debug = r#"{"value":true}"#;
+            let mut runs = 0;
+            let answer = loop {
+                runs += 1;
+                let answer = send(addr, "PUT", "/v0/management/debug", &[key], debug).await;
+                if answer.status != 409 || runs == 5 {
+                    break answer;
+                }
+                assert!(
+                    answer.body.starts_with(r#"{"error":"config_changed","#),
+                    "{}",
+                    answer.body
+                );
+            };
+            assert_eq!(
+                (answer.status, answer.body.as_str()),
+                (200, r#"{"status":"ok"}"#)
+            );
+            let saved = Config::load(&path).unwrap();
+            assert_eq!(saved.api_keys, ["hand-key", "new-key"]);
+            assert!(saved.debug);
+            wait_models(addr, "new-key", 200).await;
 
             stop.send(()).unwrap();
             let code = tokio::time::timeout(Duration::from_secs(60), served)
