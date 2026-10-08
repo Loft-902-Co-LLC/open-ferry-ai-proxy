@@ -95,7 +95,7 @@ open-ferry downloads no model catalog. The catalogs it builds in are files in th
 
 - **Keep each PR focused.** Explain what changed and why, and link the issue.
 - **Merging:**
-  - only the maintainer merges;
-  - `main` takes squash or rebase merges after review and green CI;
-  - force pushes are blocked.
+  - only the maintainer merges, after review and green CI;
+  - a PR lands through the merge queue, which rebases it onto `main`, runs CI again on the result and merges it only if that passes;
+  - nobody pushes to `main` directly, and force pushes are blocked.
 - **License.** By contributing, you agree that your contribution is licensed under the [MIT License](LICENSE).
