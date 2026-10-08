@@ -47,7 +47,11 @@ export interface Cooldown {
   http_status?: number;
 }
 
-/** Requests in one ten-minute window, "15:04-15:14". */
+/**
+ * Requests in one ten-minute window. `time` names it by the server's clock,
+ * in the server's time zone ("15:00-15:10"), so the dashboard goes by the
+ * window's place in the list instead (see `lastUsed`).
+ */
 export interface RecentRequests {
   time: string;
   success: number;

@@ -32,6 +32,7 @@ import {
   credentialCooldowns,
   credentialHealth,
   explainReason,
+  lastUsed,
   modelCooldowns,
   providerName,
   resetLabel,
@@ -109,18 +110,6 @@ export function credentialNames(credentials: readonly Credential[]): string[] {
       ? `${name} (${credential.name})`
       : full,
   );
-}
-
-/** The ten minutes it was last used in, of those the server keeps: "11:50–12:00". */
-export function lastUsed(credential: Credential): string | null {
-  const recent = credential.recent_requests ?? [];
-  for (let index = recent.length - 1; index >= 0; index -= 1) {
-    const bucket = recent[index];
-    if (bucket !== undefined && bucket.success + bucket.failed > 0) {
-      return bucket.time.replace("-", "–");
-    }
-  }
-  return null;
 }
 
 /** The plan its sign-in says it has, as "Pro plan", or null. */
@@ -262,7 +251,7 @@ export function Requests({ credential }: { credential: Credential }) {
   );
 }
 
-/** "Claude sign-in · Pro plan · Last used 11:50–12:00". */
+/** "Claude sign-in · Pro plan · Last used about 30 min ago". */
 function Facts({ credential, name }: { credential: Credential; name: string }) {
   const kind =
     credential.account_type === "api_key"

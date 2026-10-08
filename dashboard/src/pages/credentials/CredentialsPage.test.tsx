@@ -189,6 +189,13 @@ describe("the credential list", () => {
         account: "bob@example.com",
         label: "bob@example.com",
         id_token: { plan_type: "plus" },
+        // Named by a server clock in another time zone: the place counts.
+        recent_requests: [
+          { time: "07:20-07:30", success: 0, failed: 2 },
+          { time: "07:30-07:40", success: 0, failed: 0 },
+          { time: "07:40-07:50", success: 0, failed: 0 },
+          { time: "07:50-08:00", success: 0, failed: 0 },
+        ],
         cooldowns: [
           cooldown("credential_quota", 300),
           cooldown("quota", 45, { scope: "model", model_key: "gpt-5.1-codex" }),
@@ -216,7 +223,7 @@ describe("the credential list", () => {
     const card = await screen.findByRole("region", { name: CREDENTIALS });
     const bob = await within(card).findByRole("article", { name: "bob@example.com" });
     expect(within(bob).getByText("Resting")).toBeVisible();
-    expect(bob).toHaveTextContent("Codex sign-in · Plus plan · Last used 11:50–12:00");
+    expect(bob).toHaveTextContent("Codex sign-in · Plus plan · Last used about 30 min ago");
     expect(bob).toHaveTextContent("The account's quota is used up");
     expect(bob).toHaveTextContent("Back in about 5 min");
     expect(bob).toHaveTextContent("What to do: Wait until then");
@@ -245,7 +252,7 @@ describe("the credential list", () => {
 
     const ada = within(card).getByRole("article", { name: "ada@example.com" });
     expect(within(ada).getByText("Ready")).toBeVisible();
-    expect(ada).toHaveTextContent("Claude sign-in · Last used 11:50–12:00");
+    expect(ada).toHaveTextContent("Claude sign-in · Last used in the last 10 min");
     expect(within(ada).queryByRole("button", { name: "Delete ada@example.com" })).toBeNull();
     const details = within(ada).getByRole("button", { name: "Details ada@example.com" });
     expect(details).toHaveAttribute("aria-expanded", "false");
@@ -960,6 +967,7 @@ describe("the Claude Code accounts", () => {
 
     const first = await within(card).findByRole("article", { name: "claude-max-1" });
     expect(within(first).getByText("Resting")).toBeVisible();
+    expect(first).toHaveTextContent("Claude Code, run by the server · Last used in the last 10 min");
     expect(first).toHaveTextContent("Prefixmax1: calls to max1/<model> go to it");
     expect(first).toHaveTextContent("Config directory~/.claude-second");
     expect(first).toHaveTextContent("The provider refused the credential");
@@ -991,6 +999,7 @@ describe("the Claude Code accounts", () => {
     expect(spare).toHaveTextContent("Turned off in config.yaml: the server sends it no requests.");
     expect(spare).toHaveTextContent("Config directory/srv/claude/spare");
     expect(spare).not.toHaveTextContent("succeeded");
+    expect(spare).not.toHaveTextContent("Last used");
     expect(within(spare).getByRole("button", { name: "Check sign-in spare" })).toBeVisible();
     // Off sorts before ready.
     expect(

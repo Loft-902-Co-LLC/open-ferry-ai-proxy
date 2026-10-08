@@ -26,7 +26,6 @@ import { claudeCommand, entriesUnserved, entryHealth } from "./claudeCli";
 import { pollWhileRead } from "./CredentialList";
 import {
   backIn,
-  lastUsed,
   ModelCooldowns,
   QuotaWindows,
   Requests,
@@ -36,6 +35,7 @@ import {
   canReset,
   credentialCooldowns,
   explainReason,
+  lastUsed,
   modelCooldowns,
   resetLabel,
   resetRetries,

@@ -564,11 +564,42 @@ export function pastedAddressProblem(pasted: string, state: string): string | nu
   return null;
 }
 
-/** How long a cooldown has left, roughly: "about 4 min", "less than a minute". */
+/**
+ * How long, roughly: "about 4 min", "less than a minute". How long a
+ * cooldown has left, or how long ago a credential was last used.
+ */
 export function timeLeft(seconds: number): string {
   if (seconds < 60) {
     return "less than a minute";
   }
   const minutes = Math.round(seconds / 60);
   return `about ${formatSeconds(minutes * 60)}`;
+}
+
+/** How long one of the server's recent-request windows lasts, in seconds. */
+const RECENT_WINDOW_SECONDS = 600;
+
+/**
+ * When a credential was last used, of the windows the server keeps, as of
+ * when the list was read: "in the last 10 min", "about 30 min ago", or null
+ * when it wasn't used in any of them.
+ *
+ * The server lists its 10-minute windows up to the one it read the list in,
+ * oldest first, and names each by its clock ("15:00-15:10"), in its own time
+ * zone. So a window's place says how long ago it was, and its name may not:
+ * the last one is the current window, the one before it ended up to 10
+ * minutes ago, and so on.
+ */
+export function lastUsed(credential: Credential): string | null {
+  const recent = credential.recent_requests ?? [];
+  for (let index = recent.length - 1; index >= 0; index -= 1) {
+    const bucket = recent[index];
+    if (bucket !== undefined && bucket.success + bucket.failed > 0) {
+      const back = recent.length - 1 - index;
+      return back === 0
+        ? `in the last ${formatSeconds(RECENT_WINDOW_SECONDS)}`
+        : `${timeLeft(back * RECENT_WINDOW_SECONDS)} ago`;
+    }
+  }
+  return null;
 }

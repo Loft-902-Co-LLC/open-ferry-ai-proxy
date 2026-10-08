@@ -12,6 +12,7 @@ import {
   explainSignInError,
   explainStartError,
   healthTally,
+  lastUsed,
   modelCooldowns,
   needsAttention,
   pastedAddressProblem,
@@ -345,5 +346,30 @@ describe("the small words", () => {
     expect(timeLeft(89)).toBe("about 1 min");
     expect(timeLeft(300)).toBe("about 5 min");
     expect(timeLeft(7290)).toBe("about 2 h 2 min");
+  });
+
+  it("say when a credential was last used by its window's place, not the server's clock", () => {
+    // Twenty windows, oldest first, the last the one the list was read in,
+    // named in the server's time zone, which may not be the browser's.
+    const used = (counts: Record<number, [number, number]>) =>
+      lastUsed(
+        credential({
+          recent_requests: Array.from({ length: 20 }, (_, index) => {
+            const [success, failed] = counts[index] ?? [0, 0];
+            const start = 3 * 60 + 10 * index;
+            const clock = (minutes: number) =>
+              `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+            return { time: `${clock(start)}-${clock(start + 10)}`, success, failed };
+          }),
+        }),
+      );
+    expect(used({ 19: [1, 0] })).toBe("in the last 10 min");
+    expect(used({ 2: [5, 0], 18: [0, 1] })).toBe("about 10 min ago");
+    expect(used({ 16: [3, 0] })).toBe("about 30 min ago");
+    expect(used({ 6: [1, 1] })).toBe("about 2 h 10 min ago");
+    expect(used({ 0: [1, 0] })).toBe("about 3 h 10 min ago");
+    expect(used({})).toBeNull();
+    expect(lastUsed(credential({ recent_requests: [] }))).toBeNull();
+    expect(lastUsed(credential({ recent_requests: undefined }))).toBeNull();
   });
 });
