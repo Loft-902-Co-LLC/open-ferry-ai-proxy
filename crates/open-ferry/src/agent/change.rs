@@ -23,6 +23,7 @@ use std::path::Path;
 use axum::http::Method;
 use open_ferry_core::config::save::{self, SaveErrorKind};
 use open_ferry_core::config::v8_edit::{V8Edit, V8EditError, V8Method, preview_v8};
+use open_ferry_dashboard::mask_client_key;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
@@ -397,19 +398,19 @@ async fn call_server(server: &Server, request: &Request) -> Result<(), Failure> 
                 .await?;
         }
         Call::RemoveKey(key) => {
-            let listed = remote
-                .json(Method::GET, "/v0/management/api-keys", None)
-                .await?;
-            let index = listed
-                .get("api-keys")
-                .and_then(Value::as_array)
-                .and_then(|keys| keys.iter().position(|listed| listed.as_str() == Some(key)))
+            let before = server_keys(remote).await?;
+            let index = before
+                .iter()
+                .position(|listed| listed.as_str() == Some(key))
                 .ok_or_else(|| {
                     Failure::new(
                         "not_found",
                         "the running server doesn't have that client key",
                     )
                 })?;
+            // By its index, as upstream's route takes it: `?value=` would
+            // put the key in the URL. The list is read again after, as
+            // another write between the two can move the key.
             remote
                 .json(
                     Method::DELETE,
@@ -417,9 +418,79 @@ async fn call_server(server: &Server, request: &Request) -> Result<(), Failure> 
                     None,
                 )
                 .await?;
+            let after = server_keys(remote).await.map_err(|failure| {
+                Failure::new(
+                    "key_list_changed",
+                    format!(
+                        "a client key was removed by its place in the server's list, but the list couldn't be read again to check it was this one: {}",
+                        failure.message
+                    ),
+                )
+                .hint(KEY_LIST_HINT)
+            })?;
+            let gone = removed(&before, &after);
+            if gone.len() != 1 || gone.first().and_then(Value::as_str) != Some(key.as_str()) {
+                return Err(key_list_changed(&gone));
+            }
         }
     }
     Ok(())
+}
+
+/// What to do when a key removed through the server may not be the one
+/// confirmed.
+const KEY_LIST_HINT: &str = "look at the keys with `keys list`; `config undo` puts back the list as it was before that write";
+
+/// The running server's client keys, as `GET /v0/management/api-keys`
+/// lists them.
+async fn server_keys(remote: &super::api::Remote) -> Result<Vec<Value>, Failure> {
+    let listed = remote
+        .json(Method::GET, "/v0/management/api-keys", None)
+        .await?;
+    Ok(listed
+        .get("api-keys")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default())
+}
+
+/// The keys of `before` that aren't in `after`, each as often as it is
+/// missing.
+fn removed(before: &[Value], after: &[Value]) -> Vec<Value> {
+    let mut left: Vec<&Value> = after.iter().collect();
+    before
+        .iter()
+        .filter(|key| match left.iter().position(|other| other == key) {
+            Some(found) => {
+                left.swap_remove(found);
+                false
+            }
+            None => true,
+        })
+        .cloned()
+        .collect()
+}
+
+/// The failure for a removal by index that didn't remove just the key
+/// confirmed, as when another write moved the keys meanwhile: `gone`, the
+/// keys missing now, masked.
+fn key_list_changed(gone: &[Value]) -> Failure {
+    let message = if gone.is_empty() {
+        "the server's client keys changed while this key was being removed, and it is still listed, so another key may have been removed in its place".to_owned()
+    } else {
+        let masked: Vec<String> = gone
+            .iter()
+            .map(|key| match key.as_str() {
+                Some(key) => mask_client_key(key),
+                None => "(not a string)".to_owned(),
+            })
+            .collect();
+        format!(
+            "the server's client keys changed while this key was being removed: the keys gone from its list now are {}, not just the one confirmed",
+            masked.join(", ")
+        )
+    };
+    Failure::new("key_list_changed", message).hint(KEY_LIST_HINT)
 }
 
 /// The failure for a change the config writer refused.
