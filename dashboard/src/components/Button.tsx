@@ -6,7 +6,9 @@ export type ButtonVariant = "primary" | "secondary" | "ghost" | "danger";
 export type ButtonSize = "sm" | "md";
 
 const VARIANTS: Record<ButtonVariant, string> = {
-  primary: "border-transparent bg-accent-strong text-accent-fg hover:bg-accent-strong/90",
+  // Darker on hover, not lighter: white on the lighter blue is under 4.5:1.
+  primary:
+    "border-transparent bg-accent-strong text-accent-fg hover:bg-[color-mix(in_oklab,var(--color-accent-strong),black_12%)]",
   secondary: "border-line bg-surface text-fg hover:bg-raised",
   ghost: "border-transparent text-fg hover:bg-raised",
   danger: "border-transparent bg-danger-strong text-danger-fg hover:bg-danger-strong/90",
