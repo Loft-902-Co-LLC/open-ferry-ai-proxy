@@ -20,23 +20,13 @@ import { ProblemNotice } from "../../components/ProblemNotice";
 import { Loading } from "../../components/QueryState";
 import { TurnOnSetting } from "../../components/TurnOnSetting";
 import { formatCost, formatInteger, formatPercent, formatShortDateTime } from "../../lib/format";
-import { useMinuteClock } from "../../lib/timeRange";
+import { TODAY, startOfDay, useMinuteClock } from "../../lib/timeRange";
 
 /** How often today's numbers are read again, while the tab is in front. */
 export const TODAY_REFRESH_MS = 60_000;
 
-/**
- * The Usage page with only the failed calls listed. Its ranges count back
- * from now, with none from midnight, so the link names the one it opens.
- */
-export const FAILED_CALLS_LINK = "/usage?range=24h&failed=true";
-
-/** The midnight that starts the day `at` (ms) is in, in the browser's time zone. */
-export function startOfDay(at: number): string {
-  const day = new Date(at);
-  day.setHours(0, 0, 0, 0);
-  return day.toISOString();
-}
+/** The Usage page over the same day as the card, with only the failed calls listed. */
+export const FAILED_CALLS_LINK = `/usage?range=${TODAY.id}&failed=true`;
 
 function TryAgain({ onClick }: { onClick: () => void }) {
   return (
@@ -94,7 +84,7 @@ function Numbers({
         {totals.errors > 0 && (
           <>
             {" "}
-            <Link to={FAILED_CALLS_LINK}>See failed calls from the last 24 hours</Link>
+            <Link to={FAILED_CALLS_LINK}>See today&apos;s failed calls</Link>
           </>
         )}
       </dd>

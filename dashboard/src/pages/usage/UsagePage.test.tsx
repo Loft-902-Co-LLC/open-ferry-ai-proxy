@@ -9,6 +9,7 @@ import {
   USAGE_SUMMARY,
 } from "../../api/dashboard";
 import { USAGE_STATISTICS_ENABLED } from "../../api/management";
+import { startOfDay } from "../../lib/timeRange";
 import {
   ledger,
   logEntry,
@@ -209,6 +210,28 @@ describe("the Usage page", () => {
     const from = Date.parse(query.get("from") ?? "");
     const to = Date.parse(query.get("to") ?? "");
     expect(to - from).toBe(7 * 86_400_000);
+  });
+
+  it("shows today from midnight, as the Overview's link asks", async () => {
+    const api = usageServer();
+    const { user, router } = renderApp("/usage?range=today&failed=true");
+    const range = await screen.findByRole("combobox", { name: "Range" });
+    expect(range).toHaveValue("today");
+    expect(within(range).getByRole("option", { selected: true })).toHaveTextContent("Today");
+    expect(await screen.findByRole("checkbox", { name: "Failed only" })).toBeChecked();
+    await waitFor(() => {
+      expect(params(api, USAGE_REQUESTS).get("failed")).toBe("true");
+    });
+    for (const path of [USAGE_SUMMARY, USAGE_SERIES, USAGE_REQUESTS]) {
+      const query = params(api, path);
+      const to = Date.parse(query.get("to") ?? "");
+      expect(query.get("from")).toBe(startOfDay(to - 1));
+    }
+
+    await user.selectOptions(range, "Last 7 days");
+    expect(router.state.location.search).toContain("range=7d");
+    await user.selectOptions(range, "Today");
+    expect(router.state.location.search).toBe("?range=today&failed=true");
   });
 
   it("explains a ledger that couldn't be opened, and asks nothing else", async () => {

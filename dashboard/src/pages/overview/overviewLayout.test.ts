@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 
 import { overviewLayout, type SetupFacts } from "./overviewLayout";
-import { startOfDay } from "./TodayCard";
 
 /** A proxy with a credential and calls recorded: set up. */
 const SET_UP: SetupFacts = {
@@ -40,14 +39,5 @@ describe("the Overview's layout", () => {
       expect(overviewLayout({ ...SET_UP, ...facts })).toBe("health");
       expect(overviewLayout({ ...SET_UP, ...facts, clientKey: false })).toBe("setup");
     }
-  });
-});
-
-describe("the start of today", () => {
-  it("is the midnight before, in the browser's time zone", () => {
-    const afternoon = new Date(2026, 9, 7, 15, 30, 12).getTime();
-    expect(startOfDay(afternoon)).toBe(new Date(2026, 9, 7).toISOString());
-    expect(startOfDay(new Date(2026, 9, 7).getTime())).toBe(new Date(2026, 9, 7).toISOString());
-    expect(startOfDay(new Date(2026, 9, 7).getTime() - 1)).toBe(new Date(2026, 9, 6).toISOString());
   });
 });

@@ -11,6 +11,7 @@ import {
 } from "../api/dashboard";
 import { API_KEYS, USAGE_STATISTICS_ENABLED } from "../api/management";
 import { EXAMPLE_API_KEYS } from "../app/safeMode";
+import { startOfDay } from "../lib/timeRange";
 import {
   clientSetup,
   credential,
@@ -22,7 +23,6 @@ import {
 } from "../test/fixtures";
 import { mockApi, route, type MockApi } from "../test/mockApi";
 import { renderApp } from "../test/renderApp";
-import { FAILED_CALLS_LINK, startOfDay } from "./overview/TodayCard";
 
 const KEY = "sk-test-client-key-0001";
 const OTHER_KEY = "sk-test-client-key-0002";
@@ -581,12 +581,12 @@ describe("today's calls", () => {
         .map((definition) => definition.textContent),
     ).toEqual([
       "1,520",
-      "12 (0.8% of requests) See failed calls from the last 24 hours",
+      "12 (0.8% of requests) See today's failed calls",
       "4.18 USD, an estimate from the prices you set",
     ]);
     expect(
-      within(today).getByRole("link", { name: "See failed calls from the last 24 hours" }),
-    ).toHaveAttribute("href", FAILED_CALLS_LINK);
+      within(today).getByRole("link", { name: "See today's failed calls" }),
+    ).toHaveAttribute("href", "/usage?range=today&failed=true");
     expect(within(today).getByRole("link", { name: "Open Usage" })).toHaveAttribute(
       "href",
       "/usage",
@@ -608,7 +608,7 @@ describe("today's calls", () => {
       "4.18 USD, an estimate from the prices you set; 3 calls have no price",
     );
     expect(
-      within(today).queryByRole("link", { name: "See failed calls from the last 24 hours" }),
+      within(today).queryByRole("link", { name: "See today's failed calls" }),
     ).toBeNull();
   });
 

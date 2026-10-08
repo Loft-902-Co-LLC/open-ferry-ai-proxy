@@ -1,21 +1,46 @@
-// Time ranges as the screens offer them: the last hour, day, week...
+// Time ranges as the screens offer them: the last hour, today, the last day,
+// week...
 
 import { useEffect, useState } from "react";
 
 export interface RangePreset {
   id: string;
   label: string;
-  seconds: number;
+  /** Where the range starts (ms), given where it ends. */
+  start: (end: number) => number;
 }
 
-const LAST_DAY: RangePreset = { id: "24h", label: "Last 24 hours", seconds: 86_400 };
+/** The midnight that starts the day `at` (ms) is in, in the browser's time zone. */
+export function startOfDay(at: number): string {
+  const day = new Date(at);
+  day.setHours(0, 0, 0, 0);
+  return day.toISOString();
+}
+
+/** The range of the last `seconds`. */
+function last(id: string, label: string, seconds: number): RangePreset {
+  return { id, label, start: (end) => end - seconds * 1000 };
+}
+
+const LAST_DAY = last("24h", "Last 24 hours", 86_400);
+
+/**
+ * From midnight in the browser's time zone, as the Overview's Today card
+ * counts. A range ends after its last moment, so it is the day before that.
+ */
+export const TODAY: RangePreset = {
+  id: "today",
+  label: "Today",
+  start: (end) => Date.parse(startOfDay(end - 1)),
+};
 
 export const RANGE_PRESETS: readonly RangePreset[] = [
-  { id: "1h", label: "Last hour", seconds: 3600 },
+  last("1h", "Last hour", 3600),
+  TODAY,
   LAST_DAY,
-  { id: "7d", label: "Last 7 days", seconds: 7 * 86_400 },
-  { id: "30d", label: "Last 30 days", seconds: 30 * 86_400 },
-  { id: "90d", label: "Last 90 days", seconds: 90 * 86_400 },
+  last("7d", "Last 7 days", 7 * 86_400),
+  last("30d", "Last 30 days", 30 * 86_400),
+  last("90d", "Last 90 days", 90 * 86_400),
 ];
 
 export const DEFAULT_RANGE = LAST_DAY.id;
@@ -28,7 +53,7 @@ export function presetById(id: string): RangePreset {
 /** The range `preset` ending at `end` (ms), as RFC 3339 `from` and `to`. */
 export function rangeEndingAt(preset: RangePreset, end: number): { from: string; to: string } {
   return {
-    from: new Date(end - preset.seconds * 1000).toISOString(),
+    from: new Date(preset.start(end)).toISOString(),
     to: new Date(end).toISOString(),
   };
 }
