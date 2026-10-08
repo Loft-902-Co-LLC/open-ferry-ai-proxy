@@ -41,9 +41,10 @@ Still to come:
 
 - **Parity with the latest CLIProxyAPI release for every provider we support:** Codex, Claude, Gemini, Gemini Interactions, Vertex AI, Meta (API keys and access tokens), xAI (API keys) and any OpenAI-compatible upstream. We follow upstream's releases; the pin is at v8.0.15. What we do differently is listed in UPSTREAM.md.
 - **Routing by quota:** a strategy that picks by the quota the providers report (now recorded for Claude and Codex): the credential whose limit resets soonest, or the one with the most left, keeping a reserve on each. Upstream has no such strategy, so this would be open-ferry's own.
+- **Switching from CLIProxyAPI in one step:** `open-ferry migrate` finds an existing CLIProxyAPI, its config and auth directory and what starts it (a service, a scheduled task, a launcher or a container), says what carries over and what doesn't, backs up the config and credentials, and moves the proxy to open-ferry on the same port with the same files, so clients change nothing. The install scripts offer it when they find CLIProxyAPI, and `open-ferry migrate --undo` switches back.
 - **The first release, 0.1.0,** after it has been tested in real use. The install scripts and the container image are first published with it.
 - **A Homebrew tap.**
-- **Benchmark results from a quiet machine,** in place of the preliminary ones.
+- **Benchmark results to quote,** in place of the preliminary ones: a run against the pinned CLIProxyAPI release on a cloud machine anyone can rent, which also measures requests translated between the API formats.
 - **Being findable:** once the first release is out, ask to be listed with the related projects in CLIProxyAPI's README.
 
 ## After v1: smaller additions
