@@ -298,7 +298,7 @@ Like the proxy, they first load the `.env` file in the working directory, so a `
 
 Every write of the config keeps the file it replaces as `<config>.bak`, by these commands, the dashboard or the management API alike. Every change prints each setting it changed, with its old and new value masked, and that `open-ferry config undo` reverses it.
 
-A change is made only to the file it was worked out from. When the file changes after it was read, by another write or a hand edit, a change you were asked about at a terminal is refused (`config_changed`, exit code 1), nothing changed, so you can look again; any other is worked out again from the file as it is, with the same checks, and refused the same way if the file keeps changing.
+A change is made only to the file it was worked out from. When the file changes after it was read, by another write or a hand edit, the change is worked out again from the file as it is, with the same checks, and made only if it then needs no confirmation: a yes at the terminal, or `--yes`, was given for the change as first worked out, so one that needs a confirmation once worked out again is refused (`config_changed`, exit code 1), nothing changed, so you can look again. It is refused the same way if the file keeps changing.
 
 ### The management key
 

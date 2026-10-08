@@ -1889,6 +1889,104 @@ async fn a_change_is_made_only_to_the_file_it_was_worked_out_from() {
     assert!(text.contains("fill-first"));
 }
 
+/// Serves a management API that is off, as a server with no key answers
+/// it, on `listener`, and writes `text` to the config at `path` each time
+/// it is probed, as another write landing then would.
+fn edit_on_probe(
+    listener: TcpListener,
+    path: PathBuf,
+    text: Arc<Mutex<String>>,
+) -> tokio::task::JoinHandle<()> {
+    let app = Router::new().route(
+        "/v0/management/debug",
+        get_route(move || {
+            let written = text.lock().unwrap().clone();
+            std::fs::write(&path, written).unwrap();
+            async { axum::http::StatusCode::NOT_FOUND }
+        }),
+    );
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    })
+}
+
+// Not upstream's: a change worked out again, after the file changed under
+// it, is made only when it needs no confirmation then: `--yes` was given
+// for the change as first worked out, not for the one worked out again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_change_worked_out_again_gets_no_confirmation() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.yaml");
+    let bare = format!(
+        "config-version: 8\nserver:\n  host: \"127.0.0.1\"\n  port: {port}\nmanagement:\n  secret-key: \"{KEY}\"\n"
+    );
+    let keyed = format!("{bare}access:\n  api-keys:\n    - \"{CLIENT_KEY}\"\n");
+    let written = Arc::new(Mutex::new(keyed.clone()));
+    let task = edit_on_probe(listener, path.clone(), Arc::clone(&written));
+    let ctx = confirmed(&path, Caller::Cli);
+    let read = || std::fs::read_to_string(&path).unwrap();
+
+    // Replacing the whole config, which has no client key, as the new one
+    // hasn't: a key lands while the server is probed, so the replacement
+    // would now remove the last one, which --yes wasn't given for.
+    std::fs::write(&path, &bare).unwrap();
+    let replacement = dir.path().join("replacement.yaml");
+    std::fs::write(
+        &replacement,
+        format!("{bare}routing:\n  strategy: \"fill-first\"\n"),
+    )
+    .unwrap();
+    let failure = fails(
+        &ctx,
+        Command::ConfigReplace(ReplaceInput {
+            source: Source::File(replacement),
+        }),
+    )
+    .await;
+    assert_eq!(failure.error, "config_changed", "{failure:?}");
+    assert_eq!(failure.code, exit::FAILED);
+    assert!(failure.hint.as_deref().unwrap().contains("run it again"));
+    assert_eq!(read(), keyed);
+
+    // A mapping set whole, which needed no confirmation as first worked
+    // out: the remote management is turned off meanwhile, and the mapping
+    // would turn it back on.
+    let remote = |allow: bool| {
+        format!(
+            "config-version: 8\nserver:\n  host: \"127.0.0.1\"\n  port: {port}\nmanagement:\n  secret-key: \"{KEY}\"\n  allow-remote: {allow}\n"
+        )
+    };
+    std::fs::write(&path, remote(true)).unwrap();
+    *written.lock().unwrap() = remote(false);
+    let value = dir.path().join("management.json");
+    std::fs::write(
+        &value,
+        json!({
+            "secret-key": KEY,
+            "allow-remote": true,
+            "panel-github-repository": "https://github.com/example/panel"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let failure = fails(&ctx, set_from("management", Source::File(value))).await;
+    assert_eq!(failure.error, "config_changed", "{failure:?}");
+    assert_eq!(read(), remote(false));
+
+    // One that needs no confirmation once worked out again is made, from
+    // the file as it is.
+    std::fs::write(&path, &bare).unwrap();
+    *written.lock().unwrap() = keyed.clone();
+    let changed = ok(&cli(&path), set("routing.strategy", "fill-first")).await;
+    task.abort();
+    assert_eq!(changed.json["via"], json!("file"));
+    let text = read();
+    assert!(text.contains(CLIENT_KEY), "{text}");
+    assert!(text.contains("fill-first"), "{text}");
+}
+
 // Not upstream's: the management key is the config's plain one, else
 // MANAGEMENT_PASSWORD, else the key file; with none the change goes to the
 // file; a key the server refuses stops the change.
