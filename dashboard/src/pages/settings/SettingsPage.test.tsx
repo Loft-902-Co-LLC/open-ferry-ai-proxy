@@ -260,7 +260,7 @@ describe("the settings form", () => {
     const state = server({ "proxy-url": "socks5://user:secret@proxy.example:1080" });
     const { user } = await openSettings();
     const proxy = screen.getByLabelText("Proxy for outbound requests");
-    const warning = "open-ferry can't use a SOCKS5 proxy yet. Use an HTTP or HTTPS proxy. Saving the other settings leaves it as it is.";
+    const warning = "The server can't use a SOCKS5 proxy yet. Use an HTTP or HTTPS proxy. Saving the other settings leaves it as it is.";
     expect(screen.getByText(warning)).toBeVisible();
     expect(proxy).toHaveAccessibleDescription(expect.stringContaining(warning));
     expect(proxy).not.toHaveAttribute("aria-invalid");

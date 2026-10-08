@@ -164,7 +164,7 @@ describe("readEdited", () => {
 
   it("leaves the settings not edited as they were loaded, unchecked", () => {
     expect(loadedProblems(loaded)).toEqual({
-      proxyUrl: "open-ferry can't use a SOCKS5 proxy yet. Use an HTTP or HTTPS proxy.",
+      proxyUrl: "The server can't use a SOCKS5 proxy yet. Use an HTTP or HTTPS proxy.",
       requestRetry: "Retries can be at most 9,007,199,254,740,991.",
     });
     const read = readEdited({ ...formValuesOf(loaded), debug: true }, loaded);
@@ -181,7 +181,7 @@ describe("readEdited", () => {
     );
     expect(read.values).toBeNull();
     expect(read.problems).toEqual({
-      proxyUrl: "open-ferry can't use a SOCKS5 proxy yet. Use an HTTP or HTTPS proxy.",
+      proxyUrl: "The server can't use a SOCKS5 proxy yet. Use an HTTP or HTTPS proxy.",
       maxRetryInterval: "The longest wait is a whole number, 0 or more.",
     });
   });

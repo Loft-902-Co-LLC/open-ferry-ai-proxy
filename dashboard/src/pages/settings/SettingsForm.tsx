@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Save, Undo2 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { useForm, useWatch, type FieldErrors, type Resolver } from "react-hook-form";
 
 import { callProblem, saveProblem } from "../../api/access";
@@ -173,6 +173,11 @@ export interface SettingsFormProps {
   config: unknown;
 }
 
+/** A hint's text, kept to a readable line length on a wide screen. */
+function Hint({ children }: { children: ReactNode }) {
+  return <span className="block max-w-prose">{children}</span>;
+}
+
 /**
  * The settings most often changed, grouped as they are used. A save sends
  * only the settings changed here, each through its own route, after showing
@@ -284,21 +289,22 @@ export function SettingsForm({ config }: SettingsFormProps) {
           })(event);
         }}
       >
-        <Card
-          title="Proxy"
-          description="How open-ferry reaches the providers."
-        >
+        <Card title="Proxy" description="How the server reaches the providers.">
           <TextField
             label="Proxy for outbound requests"
             secret
             revealLabel="Show the proxy address"
             hint={
-              <>
-                Such as <Code>http://proxy.example:8080</Code>. Enter <Code>direct</Code> to use no
-                proxy, or leave it empty to use the <Code>HTTPS_PROXY</Code> and{" "}
-                <Code>HTTP_PROXY</Code> environment variables. A credential or key with a proxy of its
-                own uses that instead.
-              </>
+              <Hint>
+                The proxy the server goes through to reach the providers, for requests, sign-ins and
+                token refreshes. Set it when the server can only reach the internet through one: an
+                http:// or https:// address, such as <Code>http://proxy.example:8080</Code> (SOCKS
+                isn&apos;t supported yet). Enter <Code>direct</Code> for none. Left empty, the server
+                uses the <Code>HTTPS_PROXY</Code>, <Code>HTTP_PROXY</Code>, <Code>ALL_PROXY</Code>{" "}
+                and <Code>NO_PROXY</Code> environment variables, but not the system&apos;s proxy
+                settings. A credential or key with a proxy of its own uses that instead, and{" "}
+                <Code>claude-cli</Code> entries use none.
+              </Hint>
             }
             error={errors.proxyUrl?.message}
             warning={warning("proxyUrl")}
@@ -313,7 +319,16 @@ export function SettingsForm({ config }: SettingsFormProps) {
           <SelectField
             label="How credentials are picked"
             options={STRATEGIES.map((strategy) => ({ value: strategy, label: STRATEGY_LABELS[strategy] }))}
-            hint="Round robin takes turns among the credentials that can serve a model. Weighted round robin takes turns in proportion to each credential's weight. Fill first uses the first credential until it reaches a limit, then the next."
+            hint={
+              <Hint>
+                When more than one credential can serve a model, this picks the one for each request,
+                from the ready credentials with the highest <Code>priority</Code>. Round robin takes
+                turns. Weighted round robin takes turns in proportion to each credential&apos;s{" "}
+                <Code>weight</Code> (1 unless set; 0 leaves it out). Fill first keeps to the first
+                credential, in order of their IDs, until it fails and rests or is turned off, then
+                moves to the next: choose it to use up one account before the next.
+              </Hint>
+            }
             error={errors.routingStrategy?.message}
             {...form.register("routingStrategy")}
           />
@@ -321,7 +336,14 @@ export function SettingsForm({ config }: SettingsFormProps) {
             <TextField
               label="Retries"
               inputMode="numeric"
-              hint="More rounds of credentials to try after a request fails. 0 tries once."
+              hint={
+                <Hint>
+                  A request goes once through the credentials, moving on from any that fails. This is
+                  how many more times to go through them after a rate limit, a timeout, a server
+                  error, a 403 or a lost connection; other errors end the request at once. 0 goes
+                  through once. Raise it when requests fail while every credential rests.
+                </Hint>
+              }
               error={errors.requestRetry?.message}
               warning={warning("requestRetry")}
               {...form.register("requestRetry")}
@@ -329,7 +351,12 @@ export function SettingsForm({ config }: SettingsFormProps) {
             <TextField
               label="Credentials per round"
               inputMode="numeric"
-              hint="The most credentials tried in each round. 0 tries all of them."
+              hint={
+                <Hint>
+                  The most credentials one round tries. 0 tries every one that can serve the model.
+                  Lower it for a request to fail sooner.
+                </Hint>
+              }
               error={errors.maxRetryCredentials?.message}
               warning={warning("maxRetryCredentials")}
               {...form.register("maxRetryCredentials")}
@@ -337,7 +364,13 @@ export function SettingsForm({ config }: SettingsFormProps) {
             <TextField
               label="Longest wait for a retry (seconds)"
               inputMode="numeric"
-              hint="While every credential is resting, how long to wait for one. 0 doesn't wait."
+              hint={
+                <Hint>
+                  Before another round, while every credential rests, the server waits for the first
+                  to be ready if that&apos;s within this many seconds; if not, the request fails at
+                  once. 0 never waits. It counts only with Retries at 1 or more.
+                </Hint>
+              }
               error={errors.maxRetryInterval?.message}
               warning={warning("maxRetryInterval")}
               {...form.register("maxRetryInterval")}
@@ -346,10 +379,11 @@ export function SettingsForm({ config }: SettingsFormProps) {
           <CheckboxField
             label="Prefixed credentials need the prefix"
             hint={
-              <>
-                On, a credential or key with a prefix serves only model names that carry it, such as{" "}
-                <Code>team-a/claude-sonnet-4-5</Code>. Off, it serves names without the prefix too.
-              </>
+              <Hint>
+                A credential or key with a <Code>prefix</Code> serves model names that carry it, such
+                as <Code>team-a/claude-sonnet-4-5</Code>. On, that&apos;s all it serves, so it&apos;s
+                kept for the requests that ask for it. Off, it serves the plain names too.
+              </Hint>
             }
             {...form.register("forceModelPrefix")}
           />
@@ -358,24 +392,51 @@ export function SettingsForm({ config }: SettingsFormProps) {
         <Card title="Logs and usage" description="What the server records.">
           <CheckboxField
             label="Request logs"
-            hint="Saves every request and its response in full, prompts included. Off, only failed requests are saved."
+            hint={
+              <Hint>
+                Off, the server saves a log file only for each request that fails (
+                <Code>error-*.log</Code>). On, it saves one for every request clients send through
+                it: what the client sent, and each call to a provider with its answer, prompts and
+                replies included, with keys and tokens masked. Turn it on to look into a problem and
+                off after: the files hold whole conversations and grow fast. The dashboard&apos;s
+                own calls are never logged.
+              </Hint>
+            }
             {...form.register("requestLog")}
           />
           <CheckboxField
             label="Log to files"
-            hint="Writes the server's log to main.log in its log directory, where the Logs page reads it, instead of only to its console."
+            hint={
+              <Hint>
+                On, the server writes its log to <Code>main.log</Code> in its log directory instead
+                of its console, starting a new file every 10 MB. The Logs page can show the log only
+                while this is on.
+              </Hint>
+            }
             {...form.register("loggingToFile")}
           />
           <CheckboxField
             label="Debug logging"
-            hint="Adds much more detail to the server's log."
+            hint={
+              <Hint>
+                Adds the server&apos;s detailed debug messages to its log, for looking into a
+                problem. Turn it off after, as the log grows faster with it. The Logs page shows them
+                only with Log to files on.
+              </Hint>
+            }
             {...form.register("debug")}
           />
           <div className="grid gap-4 sm:grid-cols-2">
             <TextField
               label="Log directory limit (MB)"
               inputMode="numeric"
-              hint="Past it, the oldest log files are deleted. 0 means no limit."
+              hint={
+                <Hint>
+                  Once the log files in the log directory, request logs included, pass this size, the
+                  server deletes the oldest, never the <Code>main.log</Code> in use. It checks every
+                  minute. 0 means no limit.
+                </Hint>
+              }
               error={errors.logsMaxTotalSizeMb?.message}
               warning={warning("logsMaxTotalSizeMb")}
               {...form.register("logsMaxTotalSizeMb")}
@@ -383,7 +444,12 @@ export function SettingsForm({ config }: SettingsFormProps) {
             <TextField
               label="Failed-request logs kept"
               inputMode="numeric"
-              hint="The oldest go first. 0 keeps them all."
+              hint={
+                <Hint>
+                  How many <Code>error-*.log</Code> files to keep, written for failed requests while
+                  Request logs is off. The oldest go first. 0 keeps them all; unset, it&apos;s 10.
+                </Hint>
+              }
               error={errors.errorLogsMaxFiles?.message}
               warning={warning("errorLogsMaxFiles")}
               {...form.register("errorLogsMaxFiles")}
@@ -391,7 +457,13 @@ export function SettingsForm({ config }: SettingsFormProps) {
           </div>
           <CheckboxField
             label="Usage statistics"
-            hint="Records each call's model, tokens and cost for the Usage page. No prompt or response is kept."
+            hint={
+              <Hint>
+                Records each call to a provider for the Usage page, retries included: the model, the
+                credential, the client key masked, the tokens and the time taken. No prompt or reply
+                is kept. Off, nothing new is recorded, and past records stay.
+              </Hint>
+            }
             {...form.register("usageStatisticsEnabled")}
           />
         </Card>

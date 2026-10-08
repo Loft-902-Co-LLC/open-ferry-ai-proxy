@@ -63,7 +63,7 @@ export function proxyUrlProblem(value: string): string | null {
         : null;
     case "socks5:":
     case "socks5h:":
-      return "open-ferry can't use a SOCKS5 proxy yet. Use an HTTP or HTTPS proxy.";
+      return "The server can't use a SOCKS5 proxy yet. Use an HTTP or HTTPS proxy.";
     default:
       return "The address starts with http:// or https://.";
   }
