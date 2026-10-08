@@ -2929,9 +2929,16 @@ async fn the_key_is_found_in_order() {
     assert_eq!(status.json["management"], json!("refused"));
 }
 
+/// How many times a test runs a change again that a busy file kept
+/// changing under: a writer that keeps losing can still give up, as it
+/// should, and a test means to see each change made, not that it never has
+/// to be run again.
+const RUNS: usize = 5;
+
 // Not upstream's: changes through the agent commands and the management
 // API's own writes, made at once, each take the server's write lock, so
-// none is lost.
+// none is lost. One that gives up on a file that kept changing, as it may
+// on a busy machine, is run again, as its hint says to.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_writes_keep_each_other() {
     let live = Arc::new(live(Some(KEY), None).await);
@@ -2946,7 +2953,15 @@ async fn concurrent_writes_keep_each_other() {
         let live = Arc::clone(&live);
         tasks.push(tokio::spawn(async move {
             let ctx = cli(&live.setup.path);
-            let changed = ok(&ctx, set(path, value)).await;
+            let mut runs = 0;
+            let changed = loop {
+                runs += 1;
+                match perform(&ctx, set(path, value)).await {
+                    Ok(changed) => break changed,
+                    Err(failure) if failure.error == "config_changed" && runs < RUNS => {}
+                    Err(failure) => panic!("{path} failed after {runs} runs: {failure:?}"),
+                }
+            };
             assert_eq!(changed.json["via"], json!("server"));
         }));
     }
@@ -2958,14 +2973,23 @@ async fn concurrent_writes_keep_each_other() {
     ] {
         let live = Arc::clone(&live);
         tasks.push(tokio::spawn(async move {
-            live.remote(KEY)
-                .json(
-                    Method::PUT,
-                    route,
-                    Some(Body::Json(json!({"value": value}))),
-                )
-                .await
-                .unwrap();
+            let mut runs = 0;
+            loop {
+                runs += 1;
+                match live
+                    .remote(KEY)
+                    .json(
+                        Method::PUT,
+                        route,
+                        Some(Body::Json(json!({"value": value}))),
+                    )
+                    .await
+                {
+                    Ok(_) => break,
+                    Err(failure) if failure.error == "config_changed" && runs < RUNS => {}
+                    Err(failure) => panic!("{route} failed after {runs} runs: {failure:?}"),
+                }
+            }
         }));
     }
     for task in tasks {

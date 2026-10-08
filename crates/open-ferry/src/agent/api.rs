@@ -133,6 +133,12 @@ pub(crate) fn error_text(body: &[u8]) -> Option<String> {
     }
 }
 
+/// An error answer's `error` code, when its body is JSON that has one.
+fn error_code(body: &[u8]) -> Option<String> {
+    let parsed: Value = serde_json::from_slice(body).ok()?;
+    parsed.get("error")?.as_str().map(str::to_owned)
+}
+
 /// The failure for an answer with `status` and `body` that isn't a 2xx.
 pub(crate) fn answer_failure(status: u16, body: &[u8]) -> Failure {
     let what = error_text(body).unwrap_or_else(|| format!("status {status}"));
@@ -146,6 +152,9 @@ pub(crate) fn answer_failure(status: u16, body: &[u8]) -> Failure {
         ),
         403 => Failure::new("unauthorized", format!("the server refused: {what}")),
         404 => Failure::new("not_found", format!("not found: {what}")),
+        409 if error_code(body).as_deref() == Some("config_changed") => {
+            Failure::new("config_changed", format!("the server refused it: {what}"))
+        }
         400 | 409 | 413 | 422 => Failure::new("refused", format!("the server refused it: {what}")),
         503 => Failure::new("unavailable", format!("the server can't do it now: {what}")),
         _ => Failure::new(

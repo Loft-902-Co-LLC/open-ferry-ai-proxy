@@ -28,6 +28,7 @@
 //! worked out again.
 
 use std::path::Path;
+use std::time::Duration;
 
 use axum::http::Method;
 use open_ferry_core::config::save::{self, SaveErrorKind};
@@ -303,17 +304,27 @@ pub(crate) fn read_config(path: &Path) -> Result<Vec<u8>, Failure> {
     })
 }
 
-/// How many times a change is worked out again when the file changes
-/// under it before it gives up.
-const WORK_OUT_TRIES: usize = 3;
+/// How many times a change is tried when the file changes under it
+/// before it gives up. A change worked out again is made only when it
+/// needs no confirmation, so only those are tried more than twice.
+const WORK_OUT_TRIES: u64 = 10;
+
+/// How long to wait before the `tries`th try again: a few milliseconds,
+/// more for each try, and random, so writers that keep meeting stop
+/// meeting.
+fn backoff(tries: u64) -> Duration {
+    let most = 10_u64.saturating_add(tries.saturating_mul(8));
+    Duration::from_millis(rand::random_range(2..most))
+}
 
 /// Works out `request`, asks for its confirmation if it needs one, makes
 /// it, and says what it changed.
 ///
 /// It is made only to the file it was worked out from. When the file
 /// changed meanwhile, it is worked out again from the file as it is, with
-/// its checks, a few times; but one that then needs a confirmation is
-/// refused, whatever confirmation the first was given.
+/// its checks, after a short random wait, up to [`WORK_OUT_TRIES`] times;
+/// but one that then needs a confirmation is refused, whatever
+/// confirmation the first was given.
 pub(crate) async fn make(ctx: &Context, request: Request) -> Result<Changed, Failure> {
     make_from(ctx, request, read_config(&ctx.path)?).await
 }
@@ -328,6 +339,9 @@ pub(crate) async fn make_from(
 ) -> Result<Changed, Failure> {
     let mut data = data;
     for tries in 0..WORK_OUT_TRIES {
+        if tries > 0 {
+            tokio::time::sleep(backoff(tries)).await;
+        }
         match attempt(ctx, &request, &data, tries > 0).await? {
             Attempt::Done(changed) => return Ok(changed),
             Attempt::Changed(now) => data = now,
@@ -393,7 +407,15 @@ async fn attempt(
     }
     let (via, note) = match &target.reach {
         Reach::Running(server) => {
-            call_server(server, request).await?;
+            match call_server(server, request).await {
+                Ok(()) => {}
+                // The server found its file changed since it loaded it,
+                // and wrote nothing.
+                Err(failure) if failure.error == "config_changed" => {
+                    return Ok(Attempt::Changed(read_config(&ctx.path)?));
+                }
+                Err(failure) => return Err(failure),
+            }
             ("server", None)
         }
         Reach::Refused(failure) | Reach::OtherConfig(failure) => return Err(failure.clone()),
