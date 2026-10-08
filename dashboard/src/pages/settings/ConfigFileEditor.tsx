@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Eye, FileDiff, RotateCw, Save, Undo2 } from "lucide-react";
-import { Suspense, lazy, useId, useState } from "react";
+import { Suspense, lazy, useEffect, useId, useState } from "react";
 
 import { callProblem, saveProblem } from "../../api/access";
 import { isApiError } from "../../api/client";
@@ -216,8 +216,14 @@ function ReviewDialog({ review, base, pending, error, onSave, onClose }: ReviewD
   );
 }
 
+interface ConfigFileProps {
+  initial: string;
+  onReload: () => void;
+  onUnsavedChange?: ((unsaved: boolean) => void) | undefined;
+}
+
 /** The file, in an editor, once loaded. */
-function ConfigFile({ initial, onReload }: { initial: string; onReload: () => void }) {
+function ConfigFile({ initial, onReload, onUnsavedChange }: ConfigFileProps) {
   const call = useApiCall();
   const client = useQueryClient();
   const statusId = useId();
@@ -230,6 +236,10 @@ function ConfigFile({ initial, onReload }: { initial: string; onReload: () => vo
   const [saved, setSaved] = useState(false);
   const [confirmReload, setConfirmReload] = useState(false);
   const edited = draft !== base;
+
+  useEffect(() => {
+    onUnsavedChange?.(edited);
+  }, [edited, onUnsavedChange]);
 
   const read = useMutation({
     mutationFn: async () => {
@@ -352,7 +362,12 @@ function ConfigFile({ initial, onReload }: { initial: string; onReload: () => vo
  * config.yaml itself, for the settings the form doesn't have. It holds keys
  * in plain text, so it shows only when asked.
  */
-export function ConfigFileEditor() {
+export function ConfigFileEditor({
+  onUnsavedChange,
+}: {
+  /** Told whether the editor holds unsaved changes, as that changes. */
+  onUnsavedChange?: (unsaved: boolean) => void;
+}) {
   const call = useApiCall();
   // The file as last loaded, and how many loads there were, so a reload
   // starts the editor afresh.
@@ -407,6 +422,7 @@ export function ConfigFileEditor() {
             onReload={() => {
               load.mutate();
             }}
+            onUnsavedChange={onUnsavedChange}
           />
         </>
       )}

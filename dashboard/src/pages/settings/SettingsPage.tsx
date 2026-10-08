@@ -1,8 +1,10 @@
+import { useState } from "react";
 import { useSearchParams } from "react-router";
 
 import { PageHeader } from "../../components/PageHeader";
 import { Tabs } from "../../components/Tabs";
 import { ConfigFileEditor } from "./ConfigFileEditor";
+import { LeaveGuard } from "./LeaveGuard";
 import { SettingsTab } from "./SettingsTab";
 
 const TABS = [
@@ -14,6 +16,8 @@ const TABS = [
 export function SettingsPage() {
   const [params, setParams] = useSearchParams();
   const tab = params.get("tab") === "file" ? "file" : "settings";
+  const [tabUnsaved, setTabUnsaved] = useState(false);
+  const [fileUnsaved, setFileUnsaved] = useState(false);
   return (
     <>
       <PageHeader
@@ -38,12 +42,13 @@ export function SettingsPage() {
       >
         {/* Both stay mounted, so switching tabs keeps unsaved edits. */}
         <div hidden={tab !== "settings"}>
-          <SettingsTab />
+          <SettingsTab onUnsavedChange={setTabUnsaved} />
         </div>
         <div hidden={tab !== "file"}>
-          <ConfigFileEditor />
+          <ConfigFileEditor onUnsavedChange={setFileUnsaved} />
         </div>
       </Tabs>
+      <LeaveGuard unsaved={tabUnsaved || fileUnsaved} />
     </>
   );
 }

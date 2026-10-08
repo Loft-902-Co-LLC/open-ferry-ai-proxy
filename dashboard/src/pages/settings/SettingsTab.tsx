@@ -58,6 +58,7 @@ interface SettingsEditorProps {
   setKeyChanges: Dispatch<SetStateAction<KeyChange[]>>;
   keysReadOnly: boolean;
   onKeysReadOnly: () => void;
+  onUnsavedChange: (unsaved: boolean) => void;
 }
 
 /**
@@ -71,6 +72,7 @@ function SettingsEditor({
   setKeyChanges,
   keysReadOnly,
   onKeysReadOnly,
+  onUnsavedChange,
 }: SettingsEditorProps) {
   const call = useApiCall();
   const client = useQueryClient();
@@ -85,6 +87,10 @@ function SettingsEditor({
   const unsaved = (settingsShown ? settings.unsaved.length : 0) + pendingKeys.length;
   const [review, setReview] = useState<Review | null>(null);
   const [outcome, setOutcome] = useState<Outcome>(null);
+
+  useEffect(() => {
+    onUnsavedChange(unsaved > 0);
+  }, [unsaved, onUnsavedChange]);
 
   // A field scrolled into view, as by Tab, stops clear of the bar, with room
   // for the start of its hint: its scroll margin is the bar's height and
@@ -295,12 +301,17 @@ function SettingsEditor({
   );
 }
 
+export interface SettingsTabProps {
+  /** Told whether anything on the tab is unsaved, as that changes. */
+  onUnsavedChange: (unsaved: boolean) => void;
+}
+
 /**
  * The Settings tab: client keys and the common settings. Every change, a
  * key added or deleted as much as a setting edited, waits for "Review and
  * save".
  */
-export function SettingsTab() {
+export function SettingsTab({ onUnsavedChange }: SettingsTabProps) {
   const config = useApiQuery<unknown>(CONFIG);
   const keys = useApiQuery<ApiKeysAnswer>(API_KEYS);
   // Kept here, so they outlast the editor starting afresh below.
@@ -319,6 +330,7 @@ export function SettingsTab() {
       onKeysReadOnly={() => {
         setKeysReadOnly(true);
       }}
+      onUnsavedChange={onUnsavedChange}
     />
   );
 }

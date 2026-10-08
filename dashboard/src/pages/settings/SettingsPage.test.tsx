@@ -802,3 +802,86 @@ describe("a server without the settings routes", () => {
     expect(screen.queryByText(/by hand/)).not.toBeInTheDocument();
   });
 });
+
+describe("leaving with unsaved changes", () => {
+  /** Whether the browser would ask before unloading the page now. */
+  function unloadAsks() {
+    const event = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(event);
+    return event.defaultPrevented;
+  }
+
+  it("asks first, and stays when asked to", async () => {
+    server();
+    const { user, router } = await openSettings();
+    await user.click(screen.getByRole("checkbox", { name: "Debug logging" }));
+    await user.click(screen.getByRole("link", { name: "Overview" }));
+    const dialog = await screen.findByRole("dialog", { name: "Leave without saving?" });
+    expect(within(dialog).getByRole("button", { name: "Stay" })).toHaveFocus();
+    await user.click(within(dialog).getByRole("button", { name: "Stay" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(router.state.location.pathname).toBe("/settings");
+    expect(screen.getByRole("checkbox", { name: "Debug logging" })).toBeChecked();
+    expect(screen.getByText("1 unsaved change.")).toBeVisible();
+  });
+
+  it("leaves without saving when confirmed", async () => {
+    const state = server();
+    const { user, router } = await openSettings();
+    await addKey(user);
+    await user.click(screen.getByRole("link", { name: "Overview" }));
+    const dialog = await screen.findByRole("dialog", { name: "Leave without saving?" });
+    await user.click(within(dialog).getByRole("button", { name: "Leave without saving" }));
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe("/");
+    });
+    expect(keyWrites(state.api)).toEqual([]);
+  });
+
+  it("keeps config.yaml edits across the tabs, and asks before leaving with them", async () => {
+    server();
+    const { user, router } = await openSettings();
+    await user.click(screen.getByRole("tab", { name: "config.yaml" }));
+    await user.click(screen.getByRole("button", { name: "Show config.yaml" }));
+    const editor = await screen.findByRole("textbox", { name: "config.yaml" });
+    fireEvent.change(editor, { target: { value: `${YAML}# mine${NL}` } });
+    await user.click(screen.getByRole("tab", { name: "Settings" }));
+    expect(router.state.location.search).toBe("");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "config.yaml" }));
+    expect(screen.getByRole("textbox", { name: "config.yaml" })).toHaveValue(`${YAML}# mine${NL}`);
+    expect(unloadAsks()).toBe(true);
+    await user.click(screen.getByRole("link", { name: "Overview" }));
+    expect(await screen.findByRole("dialog", { name: "Leave without saving?" })).toBeVisible();
+  });
+
+  it("doesn't ask with nothing unsaved", async () => {
+    server();
+    const { user, router } = await openSettings();
+    expect(unloadAsks()).toBe(false);
+    await user.click(screen.getByRole("checkbox", { name: "Debug logging" }));
+    expect(unloadAsks()).toBe(true);
+    await user.click(screen.getByRole("button", { name: "Discard" }));
+    expect(unloadAsks()).toBe(false);
+    await user.click(screen.getByRole("link", { name: "Overview" }));
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe("/");
+    });
+    expect(screen.queryByRole("dialog", { name: "Leave without saving?" })).not.toBeInTheDocument();
+  });
+
+  it("doesn't ask once the changes are saved", async () => {
+    server();
+    const { user, router } = await openSettings();
+    await user.click(screen.getByRole("checkbox", { name: "Debug logging" }));
+    await user.click(screen.getByRole("button", { name: "Review and save" }));
+    const review = await screen.findByRole("dialog", { name: "Review the changes" });
+    await user.click(within(review).getByRole("button", { name: "Save 1 setting" }));
+    expect(await screen.findByText(/Saved 1 setting/)).toBeVisible();
+    expect(unloadAsks()).toBe(false);
+    await user.click(screen.getByRole("link", { name: "Overview" }));
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe("/");
+    });
+  });
+});
