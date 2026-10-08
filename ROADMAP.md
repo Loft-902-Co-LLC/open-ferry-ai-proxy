@@ -26,6 +26,9 @@ Already in place:
 - Each Claude and Codex credential's quota as the provider's last response gave it: the management API lists it, and the dashboard shows how much of each window is used, when it starts over, and which one stopped the account.
 - Codex's response steering on the Responses WebSocket (`upstream.codex.response-steering`, experimental and off by default, as upstream).
 - Session affinity (`routing.session-affinity`, off by default as upstream): a conversation stays on the credential that served it, so its prompt cache stays warm, and moves only when that credential can't serve. Session IDs are only routing keys: none is sent upstream, logged or saved.
+- **Routing by quota,** open-ferry's own (`routing.strategy: quota`): it picks by the quota Claude and Codex report, the credential whose limit resets soonest or the one with the most left, keeping a reserve on each. See [docs/routing.md](docs/routing.md).
+- **A cap on long quota rests,** open-ferry's own (`routing.quota.check-after`, off by default): when a provider says its limit resets hours or days from now, one request goes through after the cap to check, and the wait doubles each time the answer is the same. The management API says when the next check is.
+- **A management address of its own,** open-ferry's own (`management.separate-address`): the management API and the dashboard served only on a second address, such as loopback, so the proxy's port has none of their routes.
 - `claude-cli`, not in CLIProxyAPI: every Claude model on your own Claude subscription, through your own installed Claude Code, which open-ferry runs for each request. Claude Code signs itself in; open-ferry never reads or stores its credentials. The dashboard shows each entry's state. See [docs/claude-subscription.md](docs/claude-subscription.md).
 - Model catalogs from files: a catalog file the `models` section names is read at start and again when it changes, so a new model can be added without waiting for a release. Unlike upstream, open-ferry downloads no catalog. Without a file it uses the catalogs built into the binary, which we update by hand when providers release models.
 - Release basics: CI on Linux and Windows, with the install scripts tested on macOS too; a release workflow that builds binaries for Linux (glibc, and static musl builds for Alpine and older systems), macOS and Windows, with `SHA256SUMS` and build provenance attestations; a changelog; and a migration guide for CLIProxyAPI users.
@@ -41,7 +44,6 @@ Already in place:
 
 Still to come:
 
-- **Routing by quota:** a strategy that picks by the quota the providers report (now recorded for Claude and Codex): the credential whose limit resets soonest, or the one with the most left, keeping a reserve on each. Upstream has no such strategy, so this would be open-ferry's own.
 - **Switching from CLIProxyAPI in one step:** `open-ferry migrate` finds an existing CLIProxyAPI, its config and auth directory and what starts it (a service, a scheduled task, a launcher or a container), says what carries over and what doesn't, backs up the config and credentials, and moves the proxy to open-ferry on the same port with the same files, so clients change nothing. The install scripts offer it when they find CLIProxyAPI, and `open-ferry migrate --undo` switches back.
 - **The first release, 0.1.0,** after it has been tested in real use. The install scripts and the container image are first published with it.
 - **A Homebrew tap.**
@@ -52,12 +54,10 @@ Still to come:
 
 Worth having, but not needed for v1:
 
-- **A cap on long quota cooldowns:** when a provider says its limit resets hours from now, wait at most an hour, then let one request through to check, doubling the wait each time it fails. The dashboard says when the next check is.
 - **In the dashboard:**
   - credential states and new requests shown as they happen, without reloading;
   - a switch that hides emails and keys, for sharing the screen;
   - each request saying why its credential was picked.
-- **A management port of its own:** an option to serve the management API and the dashboard only on a second address, such as loopback, so the public port doesn't have those routes at all.
 - **`open-ferry-translate` on crates.io,** once its API is stable, for anyone who only wants the translation between the API formats.
 - **For teams:** groups of credentials, client keys limited to a group, and limits on each key's requests and spending. The usage ledger already counts each key's use.
 
