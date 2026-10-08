@@ -1226,8 +1226,10 @@ async fn files_are_read_only_for_secrets() {
 }
 
 // Not upstream's: a credential file is refused whatever its shape: a
-// sign-in's or a key's field at any depth, in any case and with any
-// separators, or a PEM block; the refusal names the field, never a value.
+// sign-in's or a key's field at any depth to the limit, in any case and
+// with any separators, or a PEM block; the refusal names the field, never
+// a value. A file nested deeper than the limit is refused as too deep to
+// check.
 #[tokio::test]
 async fn credential_files_are_refused_in_any_shape() {
     const VALUE: &str = "placeholder-credential-value-0123456789";
@@ -1264,6 +1266,22 @@ async fn credential_files_are_refused_in_any_shape() {
             "key.pem",
             format!("-----BEGIN PRIVATE KEY-----\n{VALUE}\n-----END PRIVATE KEY-----\n"),
             "a PEM block",
+        ),
+        // Nested deeper than it is checked to, with a field or without,
+        // and deeper than JSON is read to.
+        (
+            "deep.json",
+            format!("{}\"{VALUE}\"{}", "{\"a\": ".repeat(40), "}".repeat(40)),
+            "too deeply nested to check",
+        ),
+        (
+            "deeper.json",
+            format!(
+                "{}{{\"access_token\": \"{VALUE}\"}}{}",
+                "[".repeat(300),
+                "]".repeat(300)
+            ),
+            "too deeply nested to check",
         ),
     ] {
         let file = setup.file(name, &text);

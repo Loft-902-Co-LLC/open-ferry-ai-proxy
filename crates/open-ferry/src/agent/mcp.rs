@@ -62,8 +62,8 @@ before calling again with `confirm: true`, and with that result's `config_sha256
 No tool returns a secret already in the setup; never ask the user to paste one into the \
 conversation, but to put it in a file and give its path as `from_file`; a file is read only \
 for a secret, never from the auth directory, and never a credential file (one with a PEM \
-block, or with a sign-in's tokens or a key at any depth), and a call with `from_file` needs \
-`confirm: true`. \
+block, or with a sign-in's tokens or a key up to 32 levels down; a file nested deeper is \
+refused too), and a call with `from_file` needs `confirm: true`. \
 The resource open-ferry://docs/agents.md has the details.";
 
 /// What makes a change of the settings need `confirm: true`, for the tool
@@ -348,7 +348,7 @@ fn path_property() -> Value {
 fn from_file_property(what: &str) -> Value {
     json!({
         "type": "string",
-        "description": format!("The path of a file that holds {what}. A secret must come this way, never in the call. A file in the auth directory, or a credential file (one with a PEM block, or with a sign-in's tokens or a key, such as `access_token`, `accessToken`, `tokens` or `private_key`, at any depth), is refused. A call with it needs `confirm: true`, as it reads a file into the config.")
+        "description": format!("The path of a file that holds {what}. A secret must come this way, never in the call. A file in the auth directory, or a credential file (one with a PEM block, or with a sign-in's tokens or a key, such as `access_token`, `accessToken`, `tokens` or `private_key`, up to 32 levels down), or one nested deeper than that, is refused. A call with it needs `confirm: true`, as it reads a file into the config.")
     })
 }
 

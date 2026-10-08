@@ -62,8 +62,9 @@ const CREDENTIAL_FILES: usize = 256;
 
 /// The fields of a credential file (a sign-in's tokens, a service account's
 /// key, a session) that make a file one, at any depth to
-/// [`CREDENTIAL_DEPTH`]: their names without case or separators, so
-/// `access_token`, `accessToken` and `access-token` alike.
+/// [`CREDENTIAL_DEPTH`] (a file nested deeper isn't searched, and is
+/// refused): their names without case or separators, so `access_token`,
+/// `accessToken` and `access-token` alike.
 const CREDENTIAL_FIELDS: [&str; 7] = [
     "accesstoken",
     "refreshtoken",
@@ -75,7 +76,8 @@ const CREDENTIAL_FIELDS: [&str; 7] = [
 ];
 
 /// How deep in a file's mappings and lists a credential field is looked
-/// for.
+/// for: a file with a mapping or a list nested deeper is refused, as too
+/// deeply nested to check.
 const CREDENTIAL_DEPTH: usize = 32;
 
 /// Whether a value under the key `name` is a secret.
@@ -333,21 +335,64 @@ pub(crate) fn auth_dirs(ctx: &Context) -> Vec<PathBuf> {
     dirs
 }
 
-/// What makes `text` a credential file's, when it is one: a PEM block, as
-/// a private key or a certificate is kept in; or, in JSON or YAML, a field
-/// of [`CREDENTIAL_FIELDS`] that is set, at any depth to
-/// [`CREDENTIAL_DEPTH`], named as the file names it. Never a value of the
+/// Why a file a value would be read from is refused.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Mark {
+    /// It is a credential file: it holds this (named as the file names
+    /// it, never a value of the file).
+    Holds(String),
+    /// It nests mappings or lists deeper than [`CREDENTIAL_DEPTH`], or
+    /// deeper than JSON or YAML is read to, so it can't be checked.
+    TooDeep,
+}
+
+impl Mark {
+    /// What the file is, after its path.
+    pub(crate) fn why(&self) -> String {
+        match self {
+            Self::Holds(mark) => format!("is a credential file: it holds {mark}"),
+            Self::TooDeep => format!(
+                "is too deeply nested to check for a sign-in's tokens or a key (more than {CREDENTIAL_DEPTH} levels)"
+            ),
+        }
+    }
+}
+
+/// Mappings or lists nested deeper than a file is checked to.
+struct TooDeep;
+
+/// What makes `text` a file a value isn't read from, when it is one: a
+/// PEM block, as a private key or a certificate is kept in; or, in JSON or
+/// YAML, a field of [`CREDENTIAL_FIELDS`] that is set, at any depth to
+/// [`CREDENTIAL_DEPTH`], named as the file names it; or mappings or lists
+/// nested deeper than that, which aren't checked. Never a value of the
 /// file.
-pub(crate) fn credential_mark(text: &str) -> Option<String> {
+pub(crate) fn credential_mark(text: &str) -> Option<Mark> {
     if has_pem_block(text) {
-        return Some("a PEM block, as a private key or a certificate is kept in".to_owned());
+        return Some(Mark::Holds(
+            "a PEM block, as a private key or a certificate is kept in".to_owned(),
+        ));
     }
     let value = match serde_json::from_str::<Value>(text) {
         Ok(value) => value,
-        Err(_) => any_to_json(&AnyValue::parse_yaml(text).ok()?),
+        Err(json) => match AnyValue::parse_yaml(text) {
+            Ok(value) => any_to_json(&value),
+            // Text that is neither is no structured file, but for one
+            // nested deeper than either reads.
+            Err(yaml) => {
+                let too_deep = json.to_string().contains("recursion limit")
+                    || yaml.to_string().contains("exceeded max depth");
+                return too_deep.then_some(Mark::TooDeep);
+            }
+        },
     };
-    credential_field(&value, 0)
-        .map(|name| format!("the field {name}, as a sign-in's tokens or a key are kept in"))
+    match credential_field(&value, 0) {
+        Ok(Some(name)) => Some(Mark::Holds(format!(
+            "the field {name}, as a sign-in's tokens or a key are kept in"
+        ))),
+        Ok(None) => None,
+        Err(TooDeep) => Some(Mark::TooDeep),
+    }
 }
 
 /// `name` without case or separators: `access_token`, `accessToken` and
@@ -360,28 +405,29 @@ fn bare_name(name: &str) -> String {
 }
 
 /// The name of the first field of [`CREDENTIAL_FIELDS`] set in `value`,
-/// which is `depth` levels down in a file, searching no deeper than
-/// [`CREDENTIAL_DEPTH`].
-fn credential_field(value: &Value, depth: usize) -> Option<String> {
-    if depth > CREDENTIAL_DEPTH {
-        return None;
-    }
-    match value {
-        Value::Object(map) => map
-            .iter()
-            .find(|(key, child)| {
+/// which is `depth` levels down in a file; [`TooDeep`] for a mapping or a
+/// list deeper than [`CREDENTIAL_DEPTH`].
+fn credential_field(value: &Value, depth: usize) -> Result<Option<String>, TooDeep> {
+    let children: Vec<&Value> = match value {
+        Value::Object(_) | Value::Array(_) if depth > CREDENTIAL_DEPTH => return Err(TooDeep),
+        Value::Object(map) => {
+            let field = map.iter().find(|(key, child)| {
                 !child.is_null() && CREDENTIAL_FIELDS.contains(&bare_name(key).as_str())
-            })
-            .map(|(key, _)| key.clone())
-            .or_else(|| {
-                map.values()
-                    .find_map(|child| credential_field(child, depth + 1))
-            }),
-        Value::Array(items) => items
-            .iter()
-            .find_map(|item| credential_field(item, depth + 1)),
-        _ => None,
+            });
+            if let Some((key, _)) = field {
+                return Ok(Some(key.clone()));
+            }
+            map.values().collect()
+        }
+        Value::Array(items) => items.iter().collect(),
+        _ => return Ok(None),
+    };
+    for child in children {
+        if let Some(name) = credential_field(child, depth + 1)? {
+            return Ok(Some(name));
+        }
     }
+    Ok(None)
 }
 
 /// Whether `text` holds a PEM block: `-----BEGIN `, a label of capitals,
@@ -591,9 +637,19 @@ mod tests {
         );
     }
 
+    /// What `text` holds that makes it a credential file, if anything.
+    fn holds(text: &str) -> Option<String> {
+        match credential_mark(text) {
+            Some(Mark::Holds(mark)) => Some(mark),
+            Some(Mark::TooDeep) => panic!("too deep: {text}"),
+            None => None,
+        }
+    }
+
     // Not upstream's: a credential file is told by a PEM block, or by a
-    // sign-in's or a key's field at any depth, whatever its case and
-    // separators; the mark names the field, never a value.
+    // sign-in's or a key's field at any depth to the limit, whatever its
+    // case and separators; the mark names the field, never a value. A file
+    // nested deeper than the limit is refused as too deep to check.
     #[test]
     fn finds_credential_files() {
         let value = "placeholder-value-0123456789";
@@ -618,7 +674,7 @@ mod tests {
             // In YAML.
             (format!("oauth:\n  refresh-token: {value}\n"), "refresh-token"),
         ] {
-            let mark = credential_mark(&text).unwrap_or_else(|| panic!("not found: {text}"));
+            let mark = holds(&text).unwrap_or_else(|| panic!("not found: {text}"));
             assert!(mark.contains(field), "{mark}");
             assert!(!mark.contains(value), "{mark}");
         }
@@ -629,7 +685,7 @@ mod tests {
             "-----BEGIN RSA PRIVATE KEY-----".to_owned(),
             "-----BEGIN CERTIFICATE-----".to_owned(),
         ] {
-            let mark = credential_mark(&text).unwrap();
+            let mark = holds(&text).unwrap();
             assert!(mark.starts_with("a PEM block"), "{mark}");
             assert!(!mark.contains("placeholder"));
         }
@@ -646,12 +702,27 @@ mod tests {
         ] {
             assert_eq!(credential_mark(&text), None, "{text}");
         }
-        // Deeper than it looks, it isn't found.
-        let mut deep = json!({"access_token": value});
-        for _ in 0..=CREDENTIAL_DEPTH {
-            deep = json!({"a": deep});
+        // At the limit, it is found; deeper, the file is too deep to
+        // check, with a field or without, in a mapping or a list, and
+        // deeper than JSON or YAML is read to.
+        let nested =
+            |levels: usize, inner: Value| (0..levels).fold(inner, |inner, _| json!({"a": inner}));
+        let at_limit = nested(CREDENTIAL_DEPTH, json!({"access_token": value}));
+        assert!(holds(&at_limit.to_string()).is_some());
+        assert_eq!(
+            credential_mark(&nested(CREDENTIAL_DEPTH, json!({"b": 1})).to_string()),
+            None
+        );
+        for text in [
+            nested(CREDENTIAL_DEPTH + 1, json!({"access_token": value})).to_string(),
+            nested(CREDENTIAL_DEPTH + 1, json!({"b": 1})).to_string(),
+            nested(CREDENTIAL_DEPTH, json!([[1]])).to_string(),
+            format!("{}1{}", "[".repeat(300), "]".repeat(300)),
+            format!("{}1{}", "{\"a\": ".repeat(300), "}".repeat(300)),
+        ] {
+            assert_eq!(credential_mark(&text), Some(Mark::TooDeep), "{text}");
         }
-        assert_eq!(credential_mark(&deep.to_string()), None);
+        assert!(Mark::TooDeep.why().contains("too deeply nested to check"));
     }
 
     // Not upstream's: the secrets found are what masking hides, and the
