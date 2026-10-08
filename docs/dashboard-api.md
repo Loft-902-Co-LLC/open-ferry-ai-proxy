@@ -574,7 +574,7 @@ The body is optional. A JSON object with any of these fields says what the calle
 
 ## Updates
 
-open-ferry's own updates, which [docs/updates.md](updates.md) describes. CLIProxyAPI's `GET /v0/management/latest-version` is unchanged and still names upstream's latest release. Turning updates off or on is a config change: `PUT /v8/management/config/self-update/mode` with `{"value": "off"}`, `"notify"` or `"auto"`, which the server follows at once.
+open-ferry's own updates, which [docs/updates.md](updates.md) describes. CLIProxyAPI's `GET /v0/management/latest-version` is unchanged and still names upstream's latest release. Turning updates off or on is a config change: `PUT /v8/management/config/self-update/mode` with the body `"off"`, `"notify"` or `"auto"` (a JSON string, as every v8 write of one setting takes its value), which the server follows at once.
 
 ### `GET /open-ferry/api/v1/update`
 
