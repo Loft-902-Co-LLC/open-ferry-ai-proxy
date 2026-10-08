@@ -83,10 +83,14 @@ impl Args {
 /// Why the arguments can't be read.
 enum ArgsError {
     Usage(String),
-    /// A flag that would carry a secret: the flag, as [`flag_name`] shows
-    /// it, and whether it is one for the management key.
-    Secret(String, bool),
+    /// A flag that would carry a secret, never named back ([`SECRET_FLAG`]):
+    /// whether it is one for the management key.
+    Secret(bool),
 }
+
+/// How a flag that names a secret is shown back in a failure: not by its
+/// name, which can be a secret pasted where a flag goes.
+const SECRET_FLAG: &str = "a flag that names a secret";
 
 /// The longest flag name shown back.
 const SHOWN_FLAG: usize = 32;
@@ -136,10 +140,10 @@ fn parse_args(args: &[String]) -> Result<Args, ArgsError> {
         };
         let known = VALUE_FLAGS.contains(&name) || BOOL_FLAGS.contains(&name);
         if SECRET_FLAGS.contains(&name) {
-            return Err(ArgsError::Secret(flag_name(name), true));
+            return Err(ArgsError::Secret(true));
         }
         if !known && is_secret_name(name) {
-            return Err(ArgsError::Secret(flag_name(name), false));
+            return Err(ArgsError::Secret(false));
         }
         if VALUE_FLAGS.contains(&name) {
             let value = match inline {
@@ -224,11 +228,11 @@ pub(crate) fn main(program: &str, args: Vec<String>) -> ExitCode {
                 json,
             );
         }
-        Err(ArgsError::Secret(flag, management)) => {
+        Err(ArgsError::Secret(management)) => {
             return fail(
                 &Failure::new(
                     "secret_in_argument",
-                    format!("{flag}: a secret is never taken from the command line, where it would be seen and kept in the shell's history; nothing was run"),
+                    format!("{SECRET_FLAG}: a secret is never taken from the command line, where it would be seen and kept in the shell's history; nothing was run"),
                 )
                 .hint(if management {
                     KEY_HINT
@@ -607,24 +611,27 @@ fn build(command: &str, parsed: &Args) -> Result<Command, Failure> {
                 reveal: parsed.has("reveal"),
             }))
         }
-        (_, None) => {
+        // What was typed isn't repeated: a secret can be pasted where a
+        // command goes. Only a command of ours is named.
+        (_, None) if super::is_command(command) => {
             Err(Failure::usage(format!("{command} needs a subcommand")).hint(subcommands(command)))
         }
-        (_, Some(other)) => Err(
-            Failure::usage(format!("unknown command: {command} {other}"))
-                .hint(subcommands(command)),
-        ),
+        (_, _) if super::is_command(command) => Err(Failure::usage(format!(
+            "an unknown command or argument after {command}"
+        ))
+        .hint(subcommands(command))),
+        (_, _) => Err(Failure::usage("an unknown command or argument").hint(subcommands(command))),
     }
 }
 
-/// The subcommands of `command`.
+/// The subcommands of `command`, when it is one of ours.
 fn subcommands(command: &str) -> String {
     let names = match command {
         "config" => "get, set, unset, show, diff, undo and replace",
         "keys" => "list, add and remove",
         "credentials" => "list, enable, disable, reset-quota, remove and login",
         "clients" => "setup",
-        _ => "none",
+        _ => return "see `open-ferry --help` for the commands".to_owned(),
     };
     format!("its subcommands: {names}; see `open-ferry {command} --help`")
 }
@@ -689,14 +696,19 @@ mod tests {
             ("--cookie=session=abc", false),
         ] {
             match parse_args(&args(&[flag])) {
-                Err(ArgsError::Secret(shown, which)) => {
-                    assert_eq!(which, management, "{flag}");
-                    assert!(!shown.contains('='), "{flag}: {shown}");
-                    assert!(!shown.contains("abc") && !shown.contains("0123"));
-                }
+                Err(ArgsError::Secret(which)) => assert_eq!(which, management, "{flag}"),
                 _ => panic!("{flag} wasn't refused"),
             }
         }
+        // A short one is refused as any other, its name not carried along
+        // to be shown: it can be a secret pasted where a flag goes.
+        for flag in ["--tok3n-secret", "--ghp-token-ab12"] {
+            assert!(
+                matches!(parse_args(&args(&[flag])), Err(ArgsError::Secret(false))),
+                "{flag}"
+            );
+        }
+        assert!(SECRET_FLAG.starts_with("a flag"));
         // The flags these commands take aren't secrets, though one names
         // the key's file.
         assert!(parse_args(&args(&["--management-key-file", "k"])).is_ok());
@@ -765,6 +777,19 @@ mod tests {
         );
         assert_eq!(command(&["config"]).unwrap_err().code, exit::USAGE);
         assert_eq!(command(&["config", "nope"]).unwrap_err().code, exit::USAGE);
+        // What was typed isn't repeated, and only a command of ours is
+        // named.
+        let failure = command(&["config", "sk-pasted-0123456789"]).unwrap_err();
+        assert_eq!(
+            failure.message,
+            "an unknown command or argument after config"
+        );
+        assert!(!format!("{failure:?}").contains("sk-pasted"));
+        let failure = command(&["sk-pasted-0123456789", "x"]).unwrap_err();
+        assert_eq!(failure.message, "an unknown command or argument");
+        assert!(!format!("{failure:?}").contains("sk-pasted"));
+        let failure = command(&["sk-pasted-0123456789"]).unwrap_err();
+        assert!(!format!("{failure:?}").contains("sk-pasted"));
         assert_eq!(
             command(&["config", "set", "a"]).unwrap_err().code,
             exit::USAGE
