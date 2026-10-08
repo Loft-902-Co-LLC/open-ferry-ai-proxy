@@ -354,6 +354,9 @@ pub(crate) enum Mark {
     /// It nests mappings or lists deeper than [`CREDENTIAL_DEPTH`], or
     /// deeper than JSON or YAML is read to, so it can't be checked.
     TooDeep,
+    /// It has a mapping with a key that isn't text, at any depth, which
+    /// has no JSON form, so what it holds can't be checked.
+    KeyNotText,
 }
 
 impl Mark {
@@ -364,6 +367,9 @@ impl Mark {
             Self::TooDeep => format!(
                 "is too deeply nested to check for a sign-in's tokens or a key (more than {CREDENTIAL_DEPTH} levels)"
             ),
+            Self::KeyNotText => {
+                "has a mapping key that isn't text (a number, say), so it can't be checked for a sign-in's tokens or a key".to_owned()
+            }
         }
     }
 }
@@ -375,8 +381,8 @@ struct TooDeep;
 /// PEM block, as a private key or a certificate is kept in; or, in JSON or
 /// YAML, a field of [`CREDENTIAL_FIELDS`] that is set, at any depth to
 /// [`CREDENTIAL_DEPTH`], named as the file names it; or mappings or lists
-/// nested deeper than that, which aren't checked. Never a value of the
-/// file.
+/// nested deeper than that, or a mapping with a key that isn't text, at
+/// any depth, which aren't checked. Never a value of the file.
 pub(crate) fn credential_mark(text: &str) -> Option<Mark> {
     if has_pem_block(text) {
         return Some(Mark::Holds(
@@ -386,6 +392,9 @@ pub(crate) fn credential_mark(text: &str) -> Option<Mark> {
     let value = match serde_json::from_str::<Value>(text) {
         Ok(value) => value,
         Err(json) => match AnyValue::parse_yaml(text) {
+            // Such a mapping has no JSON form: what it holds, at any
+            // depth, would be lost to the check.
+            Ok(value) if has_key_not_text(&value) => return Some(Mark::KeyNotText),
             Ok(value) => any_to_json(&value),
             // Text that is neither is no structured file, but for one
             // nested deeper than either reads.
@@ -402,6 +411,17 @@ pub(crate) fn credential_mark(text: &str) -> Option<Mark> {
         ))),
         Ok(None) => None,
         Err(TooDeep) => Some(Mark::TooDeep),
+    }
+}
+
+/// Whether `value` has a mapping with a key that isn't text, at any
+/// depth. (YAML is read to a bounded depth, so this recursion is too.)
+fn has_key_not_text(value: &AnyValue) -> bool {
+    match value {
+        AnyValue::AnyMap => true,
+        AnyValue::Seq(items) => items.iter().any(has_key_not_text),
+        AnyValue::Map(entries) => entries.values().any(has_key_not_text),
+        _ => false,
     }
 }
 
@@ -637,7 +657,7 @@ mod tests {
     fn holds(text: &str) -> Option<String> {
         match credential_mark(text) {
             Some(Mark::Holds(mark)) => Some(mark),
-            Some(Mark::TooDeep) => panic!("too deep: {text}"),
+            Some(mark @ (Mark::TooDeep | Mark::KeyNotText)) => panic!("{mark:?}: {text}"),
             None => None,
         }
     }
@@ -719,6 +739,38 @@ mod tests {
             assert_eq!(credential_mark(&text), Some(Mark::TooDeep), "{text}");
         }
         assert!(Mark::TooDeep.why().contains("too deeply nested to check"));
+    }
+
+    // Not upstream's: a YAML mapping with a key that isn't text has no
+    // JSON form, so a credential's field in it, or nesting too deep to
+    // check below it, would be lost to the check: a file with one, at any
+    // depth, is refused as one that can't be checked. A key that is text,
+    // quoted or not, is checked as before.
+    #[test]
+    fn refuses_a_mapping_key_that_isnt_text() {
+        let value = "placeholder-value-0123456789";
+        let deep = format!(
+            "{}1{}",
+            "[".repeat(CREDENTIAL_DEPTH + 8),
+            "]".repeat(CREDENTIAL_DEPTH + 8)
+        );
+        for text in [
+            format!("1: one\naccess_token: {value}\n"),
+            format!("tokens:\n  2: two\n  refresh-token: {value}\n"),
+            format!("list:\n  - {{true: on, client_secret: {value}}}\n"),
+            format!("a:\n  b:\n    ~: none\n    c: {value}\n"),
+            format!("1.5: x\nb: {deep}\n"),
+            format!("a: {{1: one, b: {deep}}}\n"),
+        ] {
+            assert_eq!(credential_mark(&text), Some(Mark::KeyNotText), "{text}");
+        }
+        assert!(
+            Mark::KeyNotText
+                .why()
+                .contains("has a mapping key that isn't text")
+        );
+        assert_eq!(credential_mark(&format!("\"1\": one\nb: {value}\n")), None);
+        assert!(holds(&format!("\"1\": one\naccess_token: {value}\n")).is_some());
     }
 
     // Not upstream's: the secrets found are what masking hides, and the
