@@ -17,8 +17,10 @@ use open_ferry_core::config::v8_edit::{KnownKind, V8Method, known_v8_paths};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
-use super::api::answer_failure;
-use super::change::{Call, Changed, Content, Edit, Request, file_note, make, masked};
+use super::api::{Body, answer_failure};
+use super::change::{
+    Call, Changed, Content, Edit, Request, config_changed, file_note, make, masked, read_config,
+};
 use super::guard::{confirm, sensitive_reasons};
 use super::mask::{holds_secret, is_secret_name, mask_at, mask_tree};
 use super::target::{Reach, probe};
@@ -407,51 +409,119 @@ fn redo_hint(ctx: &Context) -> String {
     }
 }
 
+/// Why an undo of a config changed since its last recorded write needs a
+/// confirmation.
+const CHANGED_SINCE: &str = "the config was changed since the last change that kept a backup (as by a hand edit), and undoing loses that change too";
+
+/// The failure for an undo of a config changed since its last recorded
+/// write, unconfirmed.
+fn changed_since(ctx: &Context, would: Option<Value>) -> Failure {
+    let flag = ctx.confirm_flag();
+    let failure = Failure::new(
+        "changed_since",
+        format!("{CHANGED_SINCE}, so nothing was undone"),
+    )
+    .hint(format!(
+        "look at what it would change, then run it again with {flag} to undo anyway"
+    ));
+    match would {
+        Some(would) => failure.would(would),
+        None => failure,
+    }
+}
+
 /// `config undo`.
+///
+/// It puts back the backup it read, over the file it read: their SHA-256
+/// go with it, to the server's undo route or to the undo in the file, so a
+/// file or backup that changed after the undo was worked out (or asked
+/// about) is refused with `config_changed`. An undo of a file changed since
+/// the last write that kept a backup, as by a hand edit, loses that edit
+/// too: it is refused with `changed_since` unless confirmed.
 pub(crate) async fn undo(ctx: &Context) -> Result<Outcome, Failure> {
     let backup = save::backup_path(&ctx.path);
     if !backup.exists() {
         return Err(no_backup(&backup));
     }
-    let before = read_tree(&ctx.path)?;
-    let after = tree_of(&std::fs::read(&backup).map_err(|error| {
+    let current = read_config(&ctx.path)?;
+    let saved = std::fs::read(&backup).map_err(|error| {
         Failure::new(
             "failed",
             format!("can't read {}: {error}", backup.display()),
         )
-    })?)?;
+    })?;
+    let before = tree_of(&current)?;
+    let after = tree_of(&saved)?;
     let changes = diff_trees(&before, &after);
-    let reasons = sensitive_reasons(&changes, &before, &after);
-    if !reasons.is_empty() {
-        confirm(
-            ctx,
-            "Undoing the last change",
-            &reasons,
-            json!({"changes": masked(&changes)}),
-        )?;
+    let config_sha256 = save::sha256_hex(&current);
+    let backup_sha256 = save::sha256_hex(&saved);
+    let edited = save::recorded_sha256(&ctx.path).as_deref() != Some(config_sha256.as_str());
+    let mut reasons = sensitive_reasons(&changes, &before, &after);
+    if edited {
+        reasons.insert(0, CHANGED_SINCE.to_owned());
     }
+    let would = json!({"changes": masked(&changes)});
+    if edited && !ctx.yes && ctx.ask.is_none() {
+        let mut would = would;
+        if let Value::Object(map) = &mut would {
+            map.insert("reasons".to_owned(), json!(reasons));
+        }
+        return Err(changed_since(ctx, Some(would)));
+    }
+    if !reasons.is_empty() {
+        confirm(ctx, "Undoing the last change", &reasons, would)?;
+    }
+    let check = save::UndoCheck {
+        config_sha256: Some(config_sha256),
+        backup_sha256: Some(backup_sha256),
+        force: edited,
+    };
     let target = probe(ctx).await?;
+    if target.data != current {
+        return Err(config_changed());
+    }
     let mut note = None;
     let via = match &target.reach {
         Reach::Running(server) => {
+            let body = json!({
+                "config_sha256": check.config_sha256,
+                "backup_sha256": check.backup_sha256,
+                "force": check.force,
+            });
             let reply = server
                 .remote
-                .send(Method::POST, "/open-ferry/api/v1/config/undo", None)
+                .send(
+                    Method::POST,
+                    "/open-ferry/api/v1/config/undo",
+                    Some(Body::Json(body)),
+                )
                 .await?;
             match reply.status {
                 200..=299 => "server",
                 404 => {
-                    undo_in_file(ctx, &backup)?;
+                    undo_in_file(ctx, &backup, &check)?;
                     note = Some("The running server has no dashboard API to undo through, so the file was changed; the server loads the change when it sees the file change.".to_owned());
                     "file"
                 }
-                409 => return Err(no_backup(&backup)),
+                409 => {
+                    let code = serde_json::from_slice::<Value>(&reply.body)
+                        .ok()
+                        .and_then(|body| {
+                            body.get("error").and_then(Value::as_str).map(str::to_owned)
+                        });
+                    return Err(match code.as_deref() {
+                        Some("no_backup") => no_backup(&backup),
+                        Some("changed_since") => changed_since(ctx, None),
+                        Some("config_changed") => config_changed(),
+                        _ => answer_failure(409, &reply.body),
+                    });
+                }
                 status => return Err(answer_failure(status, &reply.body)),
             }
         }
         Reach::Refused(failure) | Reach::OtherConfig(failure) => return Err(failure.clone()),
         other => {
-            undo_in_file(ctx, &backup)?;
+            undo_in_file(ctx, &backup, &check)?;
             note = Some(file_note(other));
             "file"
         }
@@ -480,17 +550,22 @@ pub(crate) async fn undo(ctx: &Context) -> Result<Outcome, Failure> {
     Ok(Outcome::of(&changed))
 }
 
-/// Undoes the last change in the file.
-fn undo_in_file(ctx: &Context, backup: &Path) -> Result<(), Failure> {
-    let check = save::UndoCheck {
-        force: true,
-        ..save::UndoCheck::default()
-    };
-    save::undo(&ctx.path, &check)
+/// Undoes the last change in the file, with `check`.
+fn undo_in_file(ctx: &Context, backup: &Path, check: &save::UndoCheck) -> Result<(), Failure> {
+    save::undo(&ctx.path, check)
         .map(|_| ())
         .map_err(|error| match error.kind() {
             SaveErrorKind::NoBackup => no_backup(backup),
-            _ => Failure::new("failed", format!("the undo failed: {error}")),
+            SaveErrorKind::ChangedSince => changed_since(ctx, None),
+            SaveErrorKind::Stale => config_changed(),
+            SaveErrorKind::Io | SaveErrorKind::Symlink | SaveErrorKind::Unwritable => Failure::new(
+                "failed",
+                format!("the config file couldn't be written, so nothing was undone: {error}"),
+            ),
+            _ => Failure::new(
+                "failed",
+                "the backup doesn't load as a config, so nothing was undone",
+            ),
         })
 }
 

@@ -69,7 +69,7 @@ T3 Code runs agents such as Codex and Claude Code, and a thread's agent loads th
 | `config_unset` | `config unset` | `path`; `confirm` | destructive, idempotent |
 | `config_show` | `config show` | none | read-only, idempotent |
 | `config_diff` | `config diff` | none | read-only, idempotent |
-| `config_undo` | `config undo` | `confirm` | destructive |
+| `config_undo` | `config undo` | `confirm` | destructive; refused with `changed_since` without `confirm` when the config was changed since the last backup, as by a hand edit |
 | `config_replace` | `config replace` | `from_file`; `confirm` | destructive, idempotent |
 | `keys_list` | `keys list` | none | read-only, idempotent |
 | `keys_add` | `keys add` | `generate` or `from_file`; `to_file`, `confirm` | not destructive |
