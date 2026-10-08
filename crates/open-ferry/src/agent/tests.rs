@@ -2455,6 +2455,8 @@ async fn a_confirmation_holds_for_the_config_it_was_shown() {
     for command in [
         set("server.host", "0.0.0.0"),
         unset("routing"),
+        // One with nothing to unset is refused too.
+        unset("requests.proxy-url"),
         Command::ConfigUndo,
         Command::ConfigReplace(ReplaceInput {
             source: Source::File(whole),
