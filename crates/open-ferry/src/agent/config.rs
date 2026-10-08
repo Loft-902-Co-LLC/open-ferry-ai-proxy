@@ -508,14 +508,43 @@ fn changed_since(ctx: &Context, would: Option<Value>) -> Failure {
     }
 }
 
+/// Nothing, unless the backup's bytes `saved` aren't the ones the caller
+/// expects (`--expect-backup-sha256`, `expect_backup_sha256`): then the
+/// failure that says the backup changed since it was shown.
+fn check_expected_backup(ctx: &Context, saved: &[u8]) -> Result<(), Failure> {
+    let Some(expected) = &ctx.expect_backup_sha256 else {
+        return Ok(());
+    };
+    if *expected == save::sha256_hex(saved) {
+        return Ok(());
+    }
+    let (flag, again) = match ctx.caller {
+        Caller::Cli => ("--expect-backup-sha256", "run it again without --yes"),
+        Caller::Mcp => ("expect_backup_sha256", "call it again without confirm"),
+    };
+    Err(Failure::new(
+        "config_changed",
+        format!(
+            "the backup changed since the SHA-256 {flag} gives was read from it, so nothing was undone"
+        ),
+    )
+    .hint(format!(
+        "{again} to see what it would change now, and the hashes to give with the confirmation"
+    )))
+}
+
 /// `config undo`.
 ///
 /// It puts back the backup it read, over the file it read: their SHA-256
 /// go with it, to the server's undo route or to the undo in the file, so a
 /// file or backup that changed after the undo was worked out (or asked
-/// about) is refused with `config_changed`. An undo of a file changed since
-/// the last write that kept a backup, as by a hand edit, loses that edit
-/// too: it is refused with `changed_since` unless confirmed.
+/// about) is refused with `config_changed`. What needs a confirmation
+/// gives both (`config_sha256`, `backup_sha256`), and given back
+/// (`--expect-sha256`, `--expect-backup-sha256`) they tie the confirmation
+/// to the file and the backup that were shown: another write can change
+/// the backup and leave the file as it was. An undo of a file changed
+/// since the last write that kept a backup, as by a hand edit, loses that
+/// edit too: it is refused with `changed_since` unless confirmed.
 pub(crate) async fn undo(ctx: &Context) -> Result<Outcome, Failure> {
     let backup = save::backup_path(&ctx.path);
     if !backup.exists() {
@@ -529,6 +558,7 @@ pub(crate) async fn undo(ctx: &Context) -> Result<Outcome, Failure> {
             format!("can't read {}: {error}", backup.display()),
         )
     })?;
+    check_expected_backup(ctx, &saved)?;
     // Putting back the same bytes changes nothing: no server is called,
     // and no file is written. (Through a server, a file left as it was
     // would otherwise read as the server running another one.)
@@ -550,7 +580,11 @@ pub(crate) async fn undo(ctx: &Context) -> Result<Outcome, Failure> {
     if edited {
         reasons.insert(0, CHANGED_SINCE.to_owned());
     }
-    let would = json!({"changes": masked(&changes), "config_sha256": config_sha256});
+    let would = json!({
+        "changes": masked(&changes),
+        "config_sha256": config_sha256,
+        "backup_sha256": backup_sha256,
+    });
     if edited && !ctx.yes && ctx.ask.is_none() {
         let mut would = would;
         if let Value::Object(map) = &mut would {

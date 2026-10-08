@@ -58,7 +58,8 @@ Start with `status`. Settings are paths in the v8 config, as `routing.strategy`;
 replaces the whole config or touches a sensitive setting needs `confirm: true`: without it \
 nothing is changed and the result says what would be, so show that to the user and ask \
 before calling again with `confirm: true`, and with that result's `config_sha256` as \
-`expect_sha256`, so the change is made only to the config the user saw. Every change can be reversed with `config_undo`. \
+`expect_sha256` (and, for `config_undo`, its `backup_sha256` as `expect_backup_sha256`), so \
+the change is made only to the config the user saw. Every change can be reversed with `config_undo`. \
 No tool returns a secret already in the setup; never ask the user to paste one into the \
 conversation, but to put it in a file and give its path as `from_file`; a file is read only \
 for a secret, never from the auth directory, and never a credential file (one with a PEM \
@@ -187,7 +188,7 @@ const TOOLS: [Spec; 18] = [
         destructive: true,
         idempotent: false,
         open_world: false,
-        properties: confirm_properties,
+        properties: undo_properties,
         required: &[],
     },
     Spec {
@@ -356,8 +357,15 @@ fn no_properties() -> Value {
     json!({})
 }
 
-fn confirm_properties() -> Value {
-    json!({ "confirm": confirm_property(), "expect_sha256": expect_sha256_property() })
+fn undo_properties() -> Value {
+    json!({
+        "confirm": confirm_property(),
+        "expect_sha256": expect_sha256_property(),
+        "expect_backup_sha256": {
+            "type": "string",
+            "description": "The `backup_sha256` a result that needed `confirm: true` gave: send it with `confirm: true` and `expect_sha256`, so the undo puts back only the backup that result showed. Else it fails with `config_changed`, and nothing is changed."
+        },
+    })
 }
 
 fn path_properties() -> Value {
@@ -704,14 +712,21 @@ impl Server {
     }
 
     /// The context of a tool call, confirmed with `yes`, for the config
-    /// whose SHA-256 is `expect_sha256` when it is given.
-    fn context(&self, yes: bool, expect_sha256: Option<String>) -> Result<Context, Failure> {
+    /// whose SHA-256 is `expect_sha256` (and an undo of the backup whose
+    /// SHA-256 is `expect_backup_sha256`) when it is given.
+    fn context(
+        &self,
+        yes: bool,
+        expect_sha256: Option<String>,
+        expect_backup_sha256: Option<String>,
+    ) -> Result<Context, Failure> {
         Ok(Context {
             path: self.path.clone()?,
             env: self.env.clone(),
             key_file: self.key_file.clone(),
             yes,
             expect_sha256,
+            expect_backup_sha256,
             ask: None,
             say: None,
             caller: Caller::Mcp,
@@ -732,16 +747,20 @@ impl Server {
         let yes = args.flag("confirm")?;
         let expect_sha256 = args
             .string("expect_sha256")?
-            .map(|text| super::change::parse_sha256(&text, "expect_sha256"))
+            .map(|text| super::change::parse_sha256(&text, "expect_sha256", "config_sha256"))
+            .transpose()?;
+        let expect_backup_sha256 = args
+            .string("expect_backup_sha256")?
+            .map(|text| super::change::parse_sha256(&text, "expect_backup_sha256", "backup_sha256"))
             .transpose()?;
         let command = command(spec, &args)?;
-        let ctx = self.context(yes, expect_sha256)?;
+        let ctx = self.context(yes, expect_sha256, expect_backup_sha256)?;
         perform(&ctx, command).await
     }
 
     /// The config, masked, as YAML.
     async fn masked_config(&self) -> Result<String, Failure> {
-        let ctx = self.context(false, None)?;
+        let ctx = self.context(false, None, None)?;
         perform(&ctx, Command::ConfigShow)
             .await
             .map(|outcome| outcome.text)

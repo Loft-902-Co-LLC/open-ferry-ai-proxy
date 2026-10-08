@@ -125,6 +125,7 @@ fn context(path: &Path, caller: Caller) -> Context {
         key_file: None,
         yes: false,
         expect_sha256: None,
+        expect_backup_sha256: None,
         ask: None,
         say: None,
         caller,
@@ -2198,6 +2199,128 @@ async fn undo_through_the_server_checks_what_it_saw() {
         );
     }
     assert_eq!(live.setup.text(), same);
+}
+
+// Not upstream's: an undo's confirmation is tied to the backup it showed
+// as well as to the config. Another write can change the backup and leave
+// the config as it was; an undo confirmed with both hashes then puts back
+// nothing (`config_changed`), in the file and through the server.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn undo_is_tied_to_the_backup_it_showed() {
+    let sha256 = |text: &str| open_ferry_core::config::save::sha256_hex(text.as_bytes());
+    let live = live(Some(KEY), None).await;
+    let offline = offline(Some(KEY));
+    for (setup, via) in [(&live.setup, "server"), (&offline.setup, "file")] {
+        let path = &setup.path;
+        let backup = setup.dir.path().join("config.yaml.bak");
+        let changed = ok(
+            &confirmed(path, Caller::Cli),
+            set("server.trusted-proxies", "[\"10.0.0.1\"]"),
+        )
+        .await;
+        assert_eq!(changed.json["via"], json!(via));
+        let current = setup.text();
+        let shown = std::fs::read_to_string(&backup).unwrap();
+
+        // The preview gives both hashes, and says to give both back.
+        for caller in [Caller::Cli, Caller::Mcp] {
+            let failure = fails(&context(path, caller), Command::ConfigUndo).await;
+            assert_eq!(failure.error, "needs_confirmation", "{failure:?}");
+            let would = failure.would.as_ref().unwrap();
+            assert_eq!(would["config_sha256"], json!(sha256(&current)));
+            assert_eq!(would["backup_sha256"], json!(sha256(&shown)));
+            let hint = failure.hint.as_deref().unwrap();
+            let wanted = match caller {
+                Caller::Cli => format!(
+                    "--yes --expect-sha256 {} --expect-backup-sha256 {}",
+                    sha256(&current),
+                    sha256(&shown)
+                ),
+                Caller::Mcp => format!(
+                    "confirm: true, expect_sha256: \"{}\" and expect_backup_sha256: \"{}\"",
+                    sha256(&current),
+                    sha256(&shown)
+                ),
+            };
+            assert!(hint.contains(&wanted), "{hint}");
+        }
+
+        // The backup changes; the config doesn't.
+        let swapped = current.replace("10.0.0.1", "10.0.0.2");
+        assert_ne!(swapped, current);
+        std::fs::write(&backup, &swapped).unwrap();
+        let ctx = Context {
+            yes: true,
+            expect_sha256: Some(sha256(&current)),
+            expect_backup_sha256: Some(sha256(&shown)),
+            ..cli(path)
+        };
+        let failure = fails(&ctx, Command::ConfigUndo).await;
+        assert_eq!(failure.error, "config_changed", "{failure:?}");
+        assert!(
+            failure.message.contains("the backup changed"),
+            "{failure:?}"
+        );
+        assert!(failure.hint.as_deref().unwrap().contains("without --yes"));
+        assert_eq!(setup.text(), current);
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), swapped);
+
+        // The backup that was shown goes back.
+        std::fs::write(&backup, &shown).unwrap();
+        let undone = ok(&ctx, Command::ConfigUndo).await;
+        assert_eq!(undone.json["via"], json!(via), "{}", undone.json);
+        assert_eq!(setup.text(), shown);
+    }
+    assert!(live.state.config().trusted_proxies.is_empty());
+
+    // A tool takes it, and refuses a backup that changed.
+    let setup = &offline.setup;
+    ok(
+        &confirmed(&setup.path, Caller::Cli),
+        set("server.trusted-proxies", "[\"10.0.0.1\"]"),
+    )
+    .await;
+    let current = setup.text();
+    let backup = setup.dir.path().join("config.yaml.bak");
+    let shown = std::fs::read_to_string(&backup).unwrap();
+    std::fs::write(&backup, current.replace("10.0.0.1", "10.0.0.2")).unwrap();
+    let server = Server::new(Ok(setup.path.clone()), Env::default(), None);
+    let mut session = server_session(server).await;
+    let result = session
+        .call(
+            "config_undo",
+            json!({
+                "confirm": true,
+                "expect_sha256": sha256(&current),
+                "expect_backup_sha256": sha256(&shown),
+            }),
+        )
+        .await;
+    assert_eq!(
+        result["structuredContent"]["error"],
+        json!("config_changed"),
+        "{result}"
+    );
+    assert!(
+        result["structuredContent"]["hint"]
+            .as_str()
+            .unwrap()
+            .contains("without confirm"),
+        "{result}"
+    );
+    let result = session
+        .call("config_undo", json!({"expect_backup_sha256": "not-a-hash"}))
+        .await;
+    assert_eq!(
+        result["structuredContent"]["error"],
+        json!("usage"),
+        "{result}"
+    );
+    assert!(
+        result.to_string().contains("takes the backup_sha256"),
+        "{result}"
+    );
+    assert_eq!(setup.text(), current);
 }
 
 // Not upstream's: a server on the config's port that takes its key but
