@@ -16,6 +16,7 @@ import {
   type UsageSummary,
 } from "../../api/dashboard";
 import { useApiQuery } from "../../api/hooks";
+import { BreakableText } from "../../components/BreakableText";
 import { buttonClasses, Button } from "../../components/Button";
 import { Card } from "../../components/Card";
 import { PageHeader } from "../../components/PageHeader";
@@ -37,7 +38,7 @@ import { RecentCalls } from "./RecentCalls";
 import {
   CHART_METRICS,
   UsageChart,
-  chartRows,
+  chartData,
   seriesName,
   type ChartMetric,
 } from "./UsageChart";
@@ -145,7 +146,9 @@ function Groups({
             return (
               <tr key={group.key}>
                 <Td>
-                  <span className={groupBy === "client_key" ? "font-mono" : undefined}>{name}</span>
+                  <span className={groupBy === "client_key" ? "font-mono" : undefined}>
+                    <BreakableText text={name} kind="name" />
+                  </span>
                   {group.credential !== undefined && group.credential.label !== group.credential.id && (
                     <span className="block text-xs text-muted">
                       {group.credential.id} · {group.credential.auth_type}
@@ -192,7 +195,7 @@ function Groups({
 
 /** The chart's numbers, for those who can't see the chart. */
 function ChartNumbers({ data, metric }: { data: UsageSeries; metric: ChartMetric }) {
-  const rows = chartRows(data, metric);
+  const { series, rows } = chartData(data, metric);
   const format = (value: number) =>
     metric === "cost" ? formatCost(value, data.currency) : formatInteger(value);
   return (
@@ -202,9 +205,9 @@ function ChartNumbers({ data, metric }: { data: UsageSeries; metric: ChartMetric
         <thead>
           <tr>
             <Th>Starting</Th>
-            {data.series.map((series) => (
-              <Th key={series.key ?? "all"} className="text-right">
-                {seriesName(series.label, data.group_by)}
+            {series.map((one) => (
+              <Th key={one.key} className="text-right">
+                {one.name}
               </Th>
             ))}
           </tr>
@@ -214,7 +217,7 @@ function ChartNumbers({ data, metric }: { data: UsageSeries; metric: ChartMetric
             <tr key={row.start}>
               <Td className="whitespace-nowrap">{formatShortDateTime(row.start)}</Td>
               {row.values.map((value, index) => (
-                <Td key={data.series[index]?.key ?? "all"} className="text-right">
+                <Td key={series[index]?.key ?? index} className="text-right">
                   {format(value)}
                 </Td>
               ))}

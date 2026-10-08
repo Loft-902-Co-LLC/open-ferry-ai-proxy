@@ -62,8 +62,14 @@ describe("the Usage page", () => {
     );
 
     const numbers = await screen.findByRole("table", { name: "The chart's numbers, by time" });
-    expect(within(numbers).getByRole("columnheader", { name: "All calls" })).toBeInTheDocument();
-    expect(within(numbers).getByRole("cell", { name: "820" })).toBeInTheDocument();
+    // Without groups, requests split into the ones that worked and the ones that failed.
+    expect(within(numbers).getAllByRole("columnheader").map((cell) => cell.textContent)).toEqual([
+      "Starting",
+      "Succeeded",
+      "Failed",
+    ]);
+    expect(within(numbers).getByRole("cell", { name: "808" })).toBeInTheDocument();
+    expect(within(numbers).getAllByRole("cell", { name: "12" })).toHaveLength(2);
 
     const calls = await screen.findByRole("table", { name: "Calls to providers, newest first" });
     expect(within(calls).getByText("gpt-5.1-codex")).toBeVisible();

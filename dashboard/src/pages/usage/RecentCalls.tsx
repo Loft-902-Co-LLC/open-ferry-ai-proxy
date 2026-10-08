@@ -18,8 +18,10 @@ import { useApiCall, useApiQuery } from "../../api/hooks";
 import { REQUEST_LOG_SETTING } from "../../api/management";
 import { Alert } from "../../components/Alert";
 import { Badge } from "../../components/Badge";
+import { BreakableText } from "../../components/BreakableText";
 import { Button } from "../../components/Button";
 import { Card } from "../../components/Card";
+import { Checkbox } from "../../components/CheckboxField";
 import { ProblemNotice } from "../../components/ProblemNotice";
 import { Loading } from "../../components/QueryState";
 import { Spinner } from "../../components/Spinner";
@@ -156,9 +158,13 @@ function CallRow({
     <tr>
       <Td className="whitespace-nowrap">{formatDateTime(row.time)}</Td>
       <Td>
-        <span className="font-mono">{row.model}</span>
+        <span className="font-mono">
+          <BreakableText text={row.model} kind="name" />
+        </span>
         {row.alias !== row.model && (
-          <span className="block text-xs text-muted">asked for {row.alias}</span>
+          <span className="block text-xs text-muted">
+            asked for <BreakableText text={row.alias} kind="name" />
+          </span>
         )}
       </Td>
       <Td>
@@ -239,14 +245,12 @@ export function RecentCalls({
       description={`Each call to a provider, newest first, up to ${formatShortDateTime(new Date(asOf).toISOString())}. A client request that was retried has a call per attempt.`}
       actions={
         <>
-          <label className="flex h-8 items-center gap-2">
-            <input
-              type="checkbox"
+          <label className="flex h-8 items-center gap-2 pointer-coarse:min-h-11">
+            <Checkbox
               checked={failedOnly}
               onChange={(event) => {
                 onFailedOnlyChange(event.target.checked);
               }}
-              className="size-4 accent-accent"
             />
             Failed only
           </label>
