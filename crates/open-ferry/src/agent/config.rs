@@ -368,7 +368,11 @@ pub(crate) async fn unset(ctx: &Context, input: &UnsetInput) -> Result<Outcome, 
     let parts = split_path(&input.path);
     check_path(&parts)?;
     let path = dotted(&parts);
-    let tree = read_tree(&ctx.path)?;
+    // A stale hash is refused even when there is nothing to unset, so it
+    // always says the file changed since it was shown.
+    let data = read_config(&ctx.path)?;
+    check_expected(ctx, &data)?;
+    let tree = tree_of(&data)?;
     if get_value(&tree, &parts).is_none() {
         let changed = Changed::nothing(
             "unset",
