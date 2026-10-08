@@ -5,9 +5,10 @@ open-ferry takes CLIProxyAPI's flags ([migration guide](migrating-from-cliproxya
 - **`open-ferry init`** writes a starting config, with new keys.
 - **`open-ferry check`** looks over a setup before you start the proxy, and says how to fix what it finds.
 - **`open-ferry service`** installs open-ferry as a background service, started when you log in or at boot and again when it fails, and removes it.
+- **`open-ferry update`** checks for a new release and installs it, rolls back to the one before, and turns automatic updates off or on ([below](#open-ferry-update)).
 - **`open-ferry status`, `config`, `keys`, `credentials`, `clients` and `mcp`** look at a setup and change it, for you or a coding agent ([below](#looking-at-and-changing-a-setup)).
 
-A subcommand is read only as the first argument, and the flags after it are its own; `open-ferry init -h`, `open-ferry check -h` and `open-ferry service -h` list them. With a flag first, the command line is read as before: `open-ferry -h init` prints the server's usage. CLIProxyAPI has no subcommands: it ignores a first argument that isn't a flag, and serves.
+A subcommand is read only as the first argument, and the flags after it are its own; `open-ferry init -h`, `open-ferry check -h`, `open-ferry service -h` and `open-ferry update -h` list them. With a flag first, the command line is read as before: `open-ferry -h init` prints the server's usage. CLIProxyAPI has no subcommands: it ignores a first argument that isn't a flag, and serves.
 
 ## A first setup
 
@@ -258,6 +259,57 @@ A service doesn't start from your shell, so it doesn't get your shell's environm
 | 0 | It did what was asked: the service was installed, removed or shown, or a dry run printed its plan. Also for `-h` |
 | 1 | It didn't: the config is missing or doesn't load, the service is already installed (for `install`) or isn't (for `uninstall` and `status`), it needs root or an administrator, a path or the auth directory is refused for `-system`, or a command failed. A line on standard error starting `service:` says why |
 | 2 | Bad usage: no action or an unknown one, a flag the action doesn't take, or an argument after the flags. The usage follows on standard error |
+
+## `open-ferry update`
+
+```
+open-ferry update [-config PATH] [-yes] [-json]
+open-ferry update -check [-config PATH] [-json]
+open-ferry update -rollback [-config PATH] [-yes] [-json]
+open-ferry update -mode off|notify|auto [-config PATH] [-json]
+```
+
+Installs the latest release of open-ferry in place of this one, rolls back, or sets whether updates are automatic. [docs/updates.md](updates.md) says how updates work, what they download, and every way to turn them off.
+
+| Flag | What it does |
+|---|---|
+| None of these | Look for the latest release, say what it would do, and ask. Then download it (or take the copy the server staged), check its signature and SHA-256, run it with `--version`, and put it in place of the installed binary, keeping that one for `-rollback` |
+| `-check` | Only say whether a newer release is out, and whether a restart is needed to run the installed version. It changes nothing, not even the update state |
+| `-rollback` | Put back the version before the last update, from the copy kept in the data directory. Nothing is downloaded |
+| `-mode MODE` | Write `self-update.mode: MODE` into the config, as the management API writes it: the new file must load, its comments are kept, and the old one is kept as `<file name>.bak`. A running server that reads the config follows at once. `MODE` is `off`, `notify` or `auto` |
+| `-config PATH` | The config to read, and that `-mode` writes. By default `config.yaml` in the working directory, else the installed config, where `init` writes one |
+| `-yes` | Install or roll back without asking |
+| `-json` | Print one JSON object instead of lines of text. It asks nothing, so it installs or rolls back only with `-yes` |
+
+Only one of `-check`, `-rollback` and `-mode` at a time. `update` first loads the `.env` file in the working directory, as the proxy does at start, so an `OPEN_FERRY_SELF_UPDATE` there counts. It never restarts anything: after an update or a rollback it says how to restart open-ferry for your system.
+
+### What it prints
+
+The first line says whether automatic updates are on, notify-only or off, and what set that. It works while they are off, as you asked, and says so:
+
+```
+Automatic updates are off (set by self-update.mode in /home/you/.config/open-ferry/config.yaml). Checking because you asked.
+open-ferry 0.2.0 is out (0.1.0 is installed). Run `open-ferry update` to install it.
+```
+
+An install that doesn't [update itself](updates.md#which-installs-update-themselves), such as a container or a package manager's copy, says that a release is out and why it can't install it. Without a terminal to ask in, and without `-yes`, nothing is installed or rolled back: it says what it would do and how to go on. An error goes to standard error, starting `update:`.
+
+With `-json`, it prints one JSON object and nothing else on standard output: `action` (`check`, `update`, `rollback` or `mode`), `result` (`up-to-date`, `update-available`, `cannot-update`, `needs-confirmation`, `declined`, `updated`, `rolled-back`, `mode-set` or `error`), `message` (the text it would have printed), `mode`, `mode_source` and `updates` as the [status route](dashboard-api.md#get-open-ferryapiv1update) gives them, and `notes`. When they apply, it adds `latest_version`, `installed_version`, `error`, `switch` (the update or rollback made, as `update-state.json`'s `last_switch` records it), `status` (with `-check`, the status route's object) and `config` (with `-mode`, the file written).
+
+### Exit codes
+
+| Code | When |
+|---|---|
+| 0 | It is up to date, or it did what was asked: installed, rolled back or set the mode. Also for `-h` |
+| 1 | It failed or refused: a download or a check failed, there's no earlier version to roll back to, another update is running, the config doesn't load or can't be written, or a rollback wasn't confirmed. A message says why |
+| 2 | Bad usage: an unknown flag, an argument after the flags, a mode that isn't `off`, `notify` or `auto`, or more than one of `-check`, `-rollback` and `-mode`. The usage follows on standard error |
+| 3 | A newer release is out and wasn't installed: with `-check`, on an install that doesn't update itself, when you answered no, or with no terminal and no `-yes` |
+
+So a script can run `open-ferry update -check` and act on 3.
+
+### `-version`
+
+`open-ferry -version` prints `open-ferry <version>` and exits. `update` runs a downloaded binary with it, and installs it only when it prints the version expected. CLIProxyAPI has no such flag.
 
 ## Looking at and changing a setup
 

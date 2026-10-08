@@ -895,8 +895,9 @@ observability:
 # makes no request of any kind. The server never replaces its binary or restarts itself.
 # To turn automatic updates off, set mode: off here, or run: open-ferry update -mode off
 # OPEN_FERRY_SELF_UPDATE=off (or notify) in the environment lowers the mode; it never raises it.
-# CLIProxyAPI's loader ignores this section, and its management API's writes to a v8 config
-# comment it out. It stays at the top level in both layouts; open-ferry init uncomments it.
+# CLIProxyAPI's loader ignores this section; its v0 management writes to a v8 config comment it
+# out, and its v8 writes refuse a file that has it. It stays at the top level in both layouts;
+# open-ferry init uncomments it.
 # self-update:
 #   mode: auto # auto, notify or off
 #   check-every: 6h # how often to look, a Go duration of at least 1h; default 6h

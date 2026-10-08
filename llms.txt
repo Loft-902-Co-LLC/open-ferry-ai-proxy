@@ -10,8 +10,9 @@ To look at a setup or change it, use open-ferry's own commands, `open-ferry stat
 
 - [Setup for coding agents](https://raw.githubusercontent.com/Loft-902-Co-LLC/open-ferry-ai-proxy/main/docs/agents.md): install, `open-ferry init` and `check`, where the config lives, looking at and changing a setup with the commands or the MCP server, pointing Codex, Claude Code and OpenAI-compatible clients at the proxy, and the management API
 - [README](https://raw.githubusercontent.com/Loft-902-Co-LLC/open-ferry-ai-proxy/main/README.md): what open-ferry does, building it from source, the dashboard, and its parity with CLIProxyAPI
-- [The command line](https://raw.githubusercontent.com/Loft-902-Co-LLC/open-ferry-ai-proxy/main/docs/cli.md): `open-ferry init`, `check` and `service`, and `status`, `config`, `keys`, `credentials`, `clients` and `mcp`, in full: flags, output, exit codes and what needs `--yes`
+- [The command line](https://raw.githubusercontent.com/Loft-902-Co-LLC/open-ferry-ai-proxy/main/docs/cli.md): `open-ferry init`, `check`, `service` and `update`, and `status`, `config`, `keys`, `credentials`, `clients` and `mcp`, in full: flags, output, exit codes and what needs `--yes`
 - [The MCP server](https://raw.githubusercontent.com/Loft-902-Co-LLC/open-ferry-ai-proxy/main/docs/mcp.md): `open-ferry mcp`'s tools, what needs `confirm: true`, and adding it to Claude Code, Codex, T3 Code or Cursor
+- [Updates](https://raw.githubusercontent.com/Loft-902-Co-LLC/open-ferry-ai-proxy/main/docs/updates.md): how open-ferry keeps itself up to date with `open-ferry update`, what it downloads and how often, signed releases, rollback, and every way to turn updates off
 - [Migrating from CLIProxyAPI](https://raw.githubusercontent.com/Loft-902-Co-LLC/open-ferry-ai-proxy/main/docs/migrating-from-cliproxyapi.md): what carries over from a CLIProxyAPI setup and what doesn't
 - [The config template](https://raw.githubusercontent.com/Loft-902-Co-LLC/open-ferry-ai-proxy/main/config.example.yaml): every setting, with comments and commented examples of each provider
 
