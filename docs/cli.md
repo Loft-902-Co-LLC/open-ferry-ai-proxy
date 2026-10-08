@@ -316,7 +316,8 @@ The key is never taken from the command line, where process lists, shell history
   - `management.allow-remote`, `management.secret-key` and `management.separate-address`;
   - `server.host`, set to anything but `localhost` or a loopback address, or unset;
   - anything under `server.tls`;
-  - removing the last client key in `access.api-keys`.
+  - anything under `server.trusted-proxies`, which decides whose forwarded addresses are believed, and so which clients count as local to the management API;
+  - removing the last client key in `access.api-keys`. Keys are counted as the server counts them, trimmed and without empty or repeated ones, so `[""]` or `["  "]` counts as no key.
 
 At a terminal, such a command asks, and goes ahead on `y`. When standard input or standard error isn't a terminal, as in a script or an agent's shell, or with `--from-stdin`, it changes nothing, exits with 3, and says what it would change:
 

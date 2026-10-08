@@ -62,6 +62,15 @@ No tool returns a secret already in the setup; never ask the user to paste one i
 conversation, but to put it in a file and give its path as `from_file`. \
 The resource open-ferry://docs/agents.md has the details.";
 
+/// What makes a change of the settings need `confirm: true`, for the tool
+/// descriptions; it names each of `guard::SENSITIVE_SETTINGS` (a test
+/// checks it).
+macro_rules! sensitive {
+    () => {
+        "A change to a sensitive setting needs `confirm: true`: management.allow-remote, management.secret-key or management.separate-address; server.host unset or set to an address that isn't loopback; anything under server.tls or server.trusted-proxies; or removing the last client key in access.api-keys (blank and repeated keys don't count)."
+    };
+}
+
 /// A tool: its command, and how it is described to a client.
 struct Spec {
     /// The tool's name.
@@ -110,7 +119,11 @@ const TOOLS: [Spec; 18] = [
         name: "config_set",
         command: "config set",
         title: "Change a setting",
-        description: "Sets one setting of the config to `value` (any JSON), or to the YAML or JSON read from the file `from_file`. With a running server the change goes through it and applies at once; else it is written to the config file. A secret (an API key, a password) is refused as `value`: put it in a file and give `from_file`. A sensitive setting (management.allow-remote, management.secret-key, management.separate-address, server.host when it isn't loopback, tls) needs `confirm: true`. The result has each changed setting's old and new value, masked; `config_undo` reverses it.",
+        description: concat!(
+            "Sets one setting of the config to `value` (any JSON), or to the YAML or JSON read from the file `from_file`. With a running server the change goes through it and applies at once; else it is written to the config file. A secret (an API key, a password) is refused as `value`: put it in a file and give `from_file`. ",
+            sensitive!(),
+            " The result has each changed setting's old and new value, masked; `config_undo` reverses it."
+        ),
         read_only: false,
         destructive: true,
         idempotent: true,
@@ -122,7 +135,11 @@ const TOOLS: [Spec; 18] = [
         name: "config_unset",
         command: "config unset",
         title: "Remove a setting",
-        description: "Removes one setting from the config, so the server uses its default (see `config_get`). A sensitive setting needs `confirm: true`. `config_undo` reverses it.",
+        description: concat!(
+            "Removes one setting from the config, so the server uses its default (see `config_get`). ",
+            sensitive!(),
+            " `config_undo` reverses it."
+        ),
         read_only: false,
         destructive: true,
         idempotent: true,
@@ -158,7 +175,10 @@ const TOOLS: [Spec; 18] = [
         name: "config_undo",
         command: "config undo",
         title: "Undo the last change",
-        description: "Reverses the last change to the config, by swapping the config and its backup; calling it again redoes the change. When it would change a sensitive setting it needs `confirm: true`.",
+        description: concat!(
+            "Reverses the last change to the config, by swapping the config and its backup; calling it again redoes the change. ",
+            sensitive!()
+        ),
         read_only: false,
         destructive: true,
         idempotent: false,
@@ -874,6 +894,23 @@ mod tests {
         }
         let names: std::collections::BTreeSet<&str> = TOOLS.iter().map(|spec| spec.name).collect();
         assert_eq!(names.len(), TOOLS.len());
+    }
+
+    // Not upstream's: the tools that change settings name every setting a
+    // change to which needs `confirm: true`, as `guard.rs` judges them.
+    #[test]
+    fn descriptions_name_the_sensitive_settings() {
+        for name in ["config_set", "config_unset", "config_undo"] {
+            let spec = TOOLS.iter().find(|spec| spec.name == name).unwrap();
+            for (setting, _) in super::super::guard::SENSITIVE_SETTINGS {
+                assert!(spec.description.contains(setting), "{name}: {setting}");
+            }
+            assert!(spec.description.contains("server.host unset"), "{name}");
+            assert!(
+                spec.description.contains("removing the last client key"),
+                "{name}"
+            );
+        }
     }
 
     // Not upstream's: an argument a tool doesn't take, or of the wrong

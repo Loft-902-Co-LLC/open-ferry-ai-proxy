@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use super::api::encode;
 use super::target::{KeySource, Reach, probe};
-use super::values::{get, tree_of};
+use super::values::tree_of;
 use super::{Context, Failure, Outcome, Report, credentials, exit};
 
 /// Today's calls.
@@ -123,12 +123,7 @@ pub(crate) async fn status(ctx: &Context) -> Result<Outcome, Failure> {
     let data = std::fs::read(&ctx.path).unwrap_or_default();
     let client_keys = tree_of(&data)
         .ok()
-        .and_then(|tree| {
-            get(&tree, &["access".to_owned(), "api-keys".to_owned()])
-                .and_then(Value::as_array)
-                .map(Vec::len)
-        })
-        .unwrap_or(0);
+        .map_or(0, |tree| super::guard::client_keys(&tree).len());
     let mut report = Status {
         config: ctx.path.display().to_string(),
         running: true,
