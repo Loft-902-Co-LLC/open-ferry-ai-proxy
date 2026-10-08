@@ -11,8 +11,10 @@
 //! refuses a file's value for a setting that doesn't hold one. And a file
 //! is never read from the auth directory, nor when it is a credential file
 //! (one with a PEM block, or with a sign-in's or a key's field at any
-//! depth; see [`credential_mark`]), so a sign-in's tokens can't be copied
-//! into the config. A tool call that reads a file needs `confirm: true`.
+//! depth to 32 levels), nor when it nests deeper than that, so can't be
+//! checked (see [`credential_mark`]), so a sign-in's tokens can't be
+//! copied into the config. A tool call that reads a file needs
+//! `confirm: true`.
 
 use std::fmt;
 use std::io::Read as _;
@@ -91,8 +93,9 @@ impl Source {
 }
 
 /// The text of the file at `path` a value comes from. A file in the auth
-/// directory, or a credential file ([`credential_mark`]), is refused
-/// (`unsafe_file`): a value is never a copy of a sign-in's tokens or a key.
+/// directory, a credential file, or one nested too deeply to check
+/// ([`credential_mark`]) is refused (`unsafe_file`): a value is never a
+/// copy of a sign-in's tokens or a key.
 pub(crate) fn read_value_file(ctx: &Context, path: &Path) -> Result<String, Failure> {
     let refused = |why: &str| {
         Failure::new(
@@ -120,7 +123,7 @@ pub(crate) fn read_value_file(ctx: &Context, path: &Path) -> Result<String, Fail
     }
     let text = read_limited(&real, path)?;
     if let Some(mark) = credential_mark(&text) {
-        return Err(refused(&format!("is a credential file: it holds {mark}")));
+        return Err(refused(&mark.why()));
     }
     Ok(text)
 }
