@@ -108,6 +108,18 @@ describe("the request log search", () => {
     expect(router.state.location.search).toContain("q=rate+limit");
   });
 
+  it("gives its examples as hints, not as placeholders that look typed in", async () => {
+    mockApi(route("GET", REQUEST_LOGS, { json: logSearch([]) }));
+    renderApp("/logs");
+    const status = await screen.findByRole("textbox", { name: "Status" });
+    expect(status).toHaveAccessibleDescription("Such as 502, or 5xx for any server error.");
+    const path = screen.getByRole("textbox", { name: "Path contains" });
+    expect(path).toHaveAccessibleDescription("Such as /v1/chat/completions.");
+    for (const field of screen.getAllByRole("textbox")) {
+      expect(field).not.toHaveAttribute("placeholder");
+    }
+  });
+
   it("refuses a status that isn't one, without searching", async () => {
     const api = mockApi(route("GET", REQUEST_LOGS, { json: logSearch([]) }));
     const { user } = renderApp("/logs");

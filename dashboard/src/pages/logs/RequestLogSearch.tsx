@@ -80,14 +80,18 @@ function SearchForm({ query, onSearch }: { query: LogQuery; onSearch: (query: Lo
         />
         <TextField
           label="Status"
-          placeholder="502 or 5xx"
+          hint="Such as 502, or 5xx for any server error."
           spellCheck={false}
           error={errors.status?.message}
           {...form.register("status")}
         />
         <TextField
           label="Path contains"
-          placeholder="/v1/chat/completions"
+          hint={
+            <>
+              Such as <Code>/v1/chat/completions</Code>.
+            </>
+          }
           spellCheck={false}
           autoCapitalize="none"
           {...form.register("path")}
