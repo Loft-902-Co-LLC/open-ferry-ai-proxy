@@ -24,6 +24,7 @@ import { entriesUnserved, entryHealth } from "../credentials/claudeCli";
 import { clockMinutes } from "../credentials/clock";
 import { credentialNames } from "../credentials/CredentialItem";
 import { pollWhileRead } from "../credentials/CredentialList";
+import { CheckedAt } from "../credentials/PolledState";
 import {
   compareHealth,
   credentialHealth,
@@ -274,11 +275,19 @@ export function ProvidersCard() {
   const rest = board.filter((account) => !needsAttention(account.health));
   const now = Math.max(clock, files.dataUpdatedAt, accounts.dataUpdatedAt);
   const line = restLine(problems.length, rest, keys);
+  // When the accounts on show were read: the older of the two lists polled.
+  const reads = [files.dataUpdatedAt, accounts.dataUpdatedAt].filter((at) => at > 0);
+  const checkedAt = reads.length === 0 ? 0 : Math.min(...reads);
 
   return (
     <Card
       title="Account health"
-      description="The accounts that are failing or resting, and when they're back."
+      description={
+        <>
+          The accounts that are failing or resting, and when they&apos;re back.
+          <CheckedAt at={checkedAt} />
+        </>
+      }
       actions={openLink}
     >
       {upload.result}

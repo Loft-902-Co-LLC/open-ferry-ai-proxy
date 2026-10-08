@@ -251,6 +251,7 @@ describe("the providers card", () => {
     const card = await screen.findByRole("region", { name: HEALTH });
     expect(await within(card).findByText("All 2 accounts are ready.")).toBeVisible();
     expect(within(card).queryByRole("list")).toBeNull();
+    expect(card).toHaveTextContent(/Checked at \d\d:\d\d:\d\d\./);
   });
 
   it("says nothing needs attention when the rest are ready or off", async () => {
@@ -280,11 +281,15 @@ describe("the providers card", () => {
       const row = await within(card).findByRole("listitem");
       expect(row).toHaveTextContent("Back at 14:25 (in about 5 min)");
       expect(row.closest(NOT_LIVE)).toBeNull();
+      const checked = within(card).getByText("Checked at 14:20:00.");
+      expect(checked.closest(NOT_LIVE)).toBeNull();
 
       await act(() => vi.advanceTimersByTimeAsync(60_000));
       // It asked again, and kept what it had when that failed.
       expect(state.api.callsTo("GET", AUTH_FILES).length).toBeGreaterThan(1);
       expect(row).toHaveTextContent("Back at 14:25 (in about 4 min)");
+      // So it says when it last read them.
+      expect(checked).toHaveTextContent("Checked at 14:20:00.");
 
       await act(() => vi.advanceTimersByTimeAsync(3 * 60_000));
       expect(row).toHaveTextContent("Back at 14:25 (in about 1 min)");
