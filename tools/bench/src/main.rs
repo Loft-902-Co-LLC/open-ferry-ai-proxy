@@ -81,7 +81,7 @@ fn workspace() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
 }
 
-fn parse_args() -> Result<Option<Args>, Box<dyn Error>> {
+fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Args>, Box<dyn Error>> {
     let mut parsed = Args {
         upstream: None,
         cliproxyapi: None,
@@ -102,7 +102,7 @@ fn parse_args() -> Result<Option<Args>, Box<dyn Error>> {
         prepare: false,
         out: None,
     };
-    let mut args = std::env::args().skip(1);
+    let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         let mut value = || {
             args.next()
@@ -153,12 +153,29 @@ fn parse_args() -> Result<Option<Args>, Box<dyn Error>> {
     {
         return Err(format!("--only takes open-ferry or cliproxyapi, not {only}").into());
     }
+    // The proxies run in directories of their own, and CLIProxyAPI is built
+    // in its checkout, so a relative path would mean something else there.
+    for path in [
+        Some(&mut parsed.open_ferry),
+        Some(&mut parsed.work),
+        parsed.upstream.as_mut(),
+        parsed.cliproxyapi.as_mut(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        *path = std::path::absolute(&*path)?;
+    }
+    // A bare name such as the default `go` is looked up on PATH.
+    if parsed.go.components().count() > 1 {
+        parsed.go = std::path::absolute(&parsed.go)?;
+    }
     Ok(Some(parsed))
 }
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let args = match parse_args() {
+    let args = match parse_args(std::env::args().skip(1)) {
         Ok(Some(args)) => args,
         Ok(None) => {
             print!("{USAGE}");
@@ -752,6 +769,43 @@ mod tests {
             .filter(|kind| kind.format != kind.upstream)
             .count();
         assert_eq!(translated, 6);
+    }
+
+    // Not upstream's: the paths given are made absolute, as the proxies run
+    // in other directories, but a bare `--go` is left to be found on PATH.
+    #[test]
+    fn makes_paths_absolute() {
+        let given = [
+            "--open-ferry",
+            "target/debug/open-ferry",
+            "--work",
+            "work",
+            "--upstream",
+            "cliproxyapi",
+            "--cliproxyapi",
+            "server",
+            "--machine-note",
+            "  a test  ",
+        ];
+        let args = parse_args(given.map(str::to_owned)).unwrap().unwrap();
+        let here = std::env::current_dir().unwrap();
+        assert_eq!(
+            args.open_ferry,
+            here.join("target").join("debug").join("open-ferry")
+        );
+        assert_eq!(args.work, here.join("work"));
+        assert_eq!(args.upstream, Some(here.join("cliproxyapi")));
+        assert_eq!(args.cliproxyapi, Some(here.join("server")));
+        assert_eq!(args.go, PathBuf::from("go"));
+        assert_eq!(args.machine_note.as_deref(), Some("a test"));
+
+        let args = parse_args(["--go", "sdk/bin/go"].map(str::to_owned))
+            .unwrap()
+            .unwrap();
+        assert_eq!(args.go, here.join("sdk").join("bin").join("go"));
+        assert!(args.open_ferry.is_absolute());
+        assert!(parse_args(["--help".to_owned()]).unwrap().is_none());
+        assert!(parse_args(["--port".to_owned(), "8317".to_owned()]).is_err());
     }
 
     // Not upstream's: where a proxy sent the warm-up's requests, right and
