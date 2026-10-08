@@ -2,8 +2,9 @@
 //!
 //! Every URL, the base and each redirect, must be `https`; plain `http` is
 //! allowed only to `127.0.0.1`, `::1` and `localhost`, for testing a
-//! release server on the same machine. A URL with a user name or password
-//! is refused. At most [`MAX_REDIRECTS`] redirects are followed.
+//! release server on the same machine, and a download that went over
+//! `https` is never redirected to plain `http`. A URL with a user name or
+//! password is refused. At most [`MAX_REDIRECTS`] redirects are followed.
 //!
 //! [`HttpFetch`] goes through the config's `proxy-url` (an `http` or
 //! `https` proxy; `direct`, `none` or empty for none) and never through a
@@ -106,6 +107,18 @@ pub fn check_url(url: &Url) -> Result<(), FetchError> {
     }
 }
 
+/// Whether a download may be redirected to `next` after requesting
+/// `previous`, the original URL first, or why not: `next` must pass
+/// [`check_url`], and once a download has gone over `https`, plain `http`
+/// is refused, even to this machine.
+pub fn check_redirect(next: &Url, previous: &[Url]) -> Result<(), String> {
+    check_url(next).map_err(|error| error.to_string())?;
+    if next.scheme() == "http" && previous.iter().any(|url| url.scheme() == "https") {
+        return Err(format!("{} is plain http, after https", shown(next)));
+    }
+    Ok(())
+}
+
 /// `url` without a user name or password, for messages.
 fn shown(url: &Url) -> String {
     let mut url = url.clone();
@@ -181,12 +194,9 @@ impl HttpFetch {
                 let error = RefusedRedirect(format!("more than {MAX_REDIRECTS} redirects"));
                 return attempt.error(error);
             }
-            match check_url(attempt.url()) {
+            match check_redirect(attempt.url(), attempt.previous()) {
                 Ok(()) => attempt.follow(),
-                Err(error) => {
-                    let error = RefusedRedirect(error.to_string());
-                    attempt.error(error)
-                }
+                Err(message) => attempt.error(RefusedRedirect(message)),
             }
         });
         let builder = reqwest::Client::builder()
