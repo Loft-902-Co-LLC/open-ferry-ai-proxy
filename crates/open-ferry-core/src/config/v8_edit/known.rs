@@ -167,6 +167,9 @@ mod tests {
             ("api-keys", KnownKind::Section),
             ("observability.logs.debug", KnownKind::Value),
             ("claude-cli", KnownKind::List),
+            ("self-update.mode", KnownKind::Value),
+            ("self-update.check-every", KnownKind::Value),
+            ("self-update", KnownKind::Section),
             ("config-version", KnownKind::Value),
         ] {
             assert_eq!(kind(&known, path), Some(want), "{path}");
