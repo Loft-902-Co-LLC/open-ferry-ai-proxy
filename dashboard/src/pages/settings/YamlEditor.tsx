@@ -161,7 +161,7 @@ export function YamlEditor({ initial, label, onChange }: YamlEditorProps) {
   return (
     <div
       ref={host}
-      className="block h-[min(65vh,40rem)] min-h-64 overflow-hidden rounded-md border border-line"
+      className="block h-[min(65vh,40rem)] min-h-64 overflow-hidden rounded-md border border-control"
     />
   );
 }

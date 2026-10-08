@@ -63,7 +63,7 @@ export function SelectField({
         ))}
       </select>
       {hint !== undefined && (
-        <p id={hintId} className="text-muted">
+        <p id={hintId} className="max-w-prose text-muted">
           {hint}
         </p>
       )}

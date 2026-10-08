@@ -11,6 +11,7 @@ import { Alert } from "../../components/Alert";
 import { Badge } from "../../components/Badge";
 import { Button } from "../../components/Button";
 import { Card } from "../../components/Card";
+import { Checkbox } from "../../components/CheckboxField";
 import { Code } from "../../components/Code";
 import { CopyButton } from "../../components/CopyButton";
 import { ProblemNotice } from "../../components/ProblemNotice";
@@ -493,14 +494,13 @@ export function ClientSetupCard({ focusKeys = false, collapsible = false }: Clie
         </div>
       </div>
       <label className="flex items-start gap-2">
-        <input
-          type="checkbox"
+        <Checkbox
           checked={reveal}
           disabled={chosenKey === null}
           onChange={(event) => {
             setReveal(event.target.checked);
           }}
-          className="mt-1 size-4 shrink-0 accent-accent"
+          className="mt-1"
         />
         <span>
           Show the key in the setups{" "}
