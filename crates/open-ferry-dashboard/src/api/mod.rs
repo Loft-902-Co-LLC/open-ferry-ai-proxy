@@ -276,14 +276,35 @@ pub(crate) fn ok<T: Serialize>(value: &T) -> Response {
 /// The body of `request` as a `T`: JSON, an object, of at most
 /// [`MAX_BODY`] bytes.
 pub(crate) async fn read_body<T: DeserializeOwned>(body: Body) -> Result<T, ApiError> {
-    let bytes = axum::body::to_bytes(body, MAX_BODY).await.map_err(|_| {
+    let bytes = body_bytes(body).await?;
+    parse_body(&bytes)
+}
+
+/// [`read_body`], or `T`'s default when the body is empty.
+pub(crate) async fn read_body_or_default<T: DeserializeOwned + Default>(
+    body: Body,
+) -> Result<T, ApiError> {
+    let bytes = body_bytes(body).await?;
+    if bytes.iter().all(u8::is_ascii_whitespace) {
+        return Ok(T::default());
+    }
+    parse_body(&bytes)
+}
+
+/// The bytes of `body`, of at most [`MAX_BODY`].
+async fn body_bytes(body: Body) -> Result<axum::body::Bytes, ApiError> {
+    axum::body::to_bytes(body, MAX_BODY).await.map_err(|_| {
         ApiError::new(
             StatusCode::PAYLOAD_TOO_LARGE,
             "body_too_large",
             "the body is over 64 KiB",
         )
-    })?;
-    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
+    })
+}
+
+/// `bytes` as a `T`: JSON, an object.
+fn parse_body<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, ApiError> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|error| {
         ApiError::new(
             StatusCode::BAD_REQUEST,
             "invalid_json",

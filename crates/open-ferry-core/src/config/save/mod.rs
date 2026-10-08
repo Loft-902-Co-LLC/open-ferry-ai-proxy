@@ -25,6 +25,9 @@
 //! - [`undo`] puts back the file's previous contents from its backup, and
 //!   [`defaults`] gives the settings an empty config holds; both are this
 //!   port's, for `open-ferry config`.
+//! - [`write_file_expecting`] is [`write_file`] made only while the file
+//!   holds the bytes the caller read; it is this port's, for `open-ferry
+//!   config`, which shows a change before it makes it.
 //!
 //! YAML is read and written with a port of gopkg.in/yaml.v3 (the
 //! crate-private `config::yaml3`), so the bytes written are upstream's.
@@ -33,13 +36,15 @@
 //!
 //! Every write is checked to load as a config ([`Config::load`]'s rules
 //! and wording) before anything is written; it is atomic, refuses a
-//! symbolic link, and keeps the file's previous contents as
-//! `<file name>.bak` (see `write`). A refused write leaves the file as it
-//! was and returns a [`SaveError`] that says why.
+//! symbolic link, keeps the file's previous contents as `<file name>.bak`,
+//! and records the SHA-256 of what it wrote as `<file name>.sha256` (see
+//! `write`). A refused write leaves the file as it was and returns a
+//! [`SaveError`] that says why.
 //!
 //! Deviations from upstream:
-//! - The check, the backup, the atomic replacement and the symbolic link
-//!   refusal are this port's; upstream writes the file in place.
+//! - The check, the backup, the record, the atomic replacement and the
+//!   symbolic link refusal are this port's; upstream writes the file in
+//!   place.
 //! - A file that isn't UTF-8 is refused (`yaml: input is not valid
 //!   UTF-8`); yaml.v3 also reads UTF-16.
 //! - After a save that moves the file to the v8 layout, upstream updates
@@ -96,6 +101,13 @@ pub enum SaveErrorKind {
     Unwritable,
     /// There is no backup to undo to (see [`undo`]).
     NoBackup,
+    /// The file, or its backup, no longer holds what the caller read
+    /// (see [`write_file_expecting`] and [`UndoCheck`]).
+    Stale,
+    /// The file was changed since the last write here, by hand or by a
+    /// writer that keeps no record, so an undo would lose that change
+    /// (see [`undo`]).
+    ChangedSince,
 }
 
 /// A refused config write; nothing was written. The message is upstream's
@@ -210,6 +222,17 @@ pub fn write_file(path: &Path, bytes: &[u8]) -> Result<(), SaveError> {
     write::commit(path, &out)
 }
 
+/// [`write_file`], made only while the file at `path` holds `expected`,
+/// the bytes the caller read and worked `bytes` out from: else a
+/// [`SaveErrorKind::Stale`] error, and nothing is written. Not upstream's:
+/// `open-ferry config` writes a change it has shown with it, so it never
+/// writes over a change made since.
+pub fn write_file_expecting(path: &Path, bytes: &[u8], expected: &[u8]) -> Result<(), SaveError> {
+    write::refuse_link(path)?;
+    let out = render_write_file(bytes)?;
+    write::commit_expecting(path, &out, Some(expected))
+}
+
 /// Writes `bytes` as the config file at `path` unchanged, with the checks,
 /// backup and atomic replacement every write here has. Not upstream's:
 /// `open-ferry init` writes the config it makes with it.
@@ -223,12 +246,52 @@ pub fn backup_path(path: &Path) -> PathBuf {
     write::backup_path(path)
 }
 
+/// Where every write here records the SHA-256 of what it wrote:
+/// `<file name>.sha256` beside the file at `path`, in `sha256sum`'s
+/// format.
+pub fn record_path(path: &Path) -> PathBuf {
+    write::record_path(path)
+}
+
+/// The SHA-256 of `data`, in lowercase hex, as the record and
+/// [`UndoCheck`] hold it.
+pub fn sha256_hex(data: &[u8]) -> String {
+    write::sha256_hex(data)
+}
+
+/// The SHA-256 of the last write here to the config file at `path`, as its
+/// record keeps it, when there is a record that holds one. The file holds
+/// what was last written here when its SHA-256 is this one.
+pub fn recorded_sha256(path: &Path) -> Option<String> {
+    write::recorded_sha256(path)
+}
+
+/// What an [`undo`] checks before it puts the backup back.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UndoCheck {
+    /// The SHA-256 the file must have, in hex: the one of the file the
+    /// caller showed the undo of.
+    pub config_sha256: Option<String>,
+    /// The SHA-256 the backup must have, in hex.
+    pub backup_sha256: Option<String>,
+    /// Go ahead even when the file was changed since the last write here.
+    pub force: bool,
+}
+
 /// Puts back the contents the last write replaced: writes the backup of
 /// the config file at `path` (see [`backup_path`]) as the file, with the
 /// checks every write here has. That write keeps what it replaces as the
 /// new backup, so undoing again puts it back. Returns the config the file
 /// now holds. Not upstream's: `open-ferry config undo` uses it.
-pub fn undo(path: &Path) -> Result<Config, SaveError> {
+///
+/// It is refused, and nothing is written:
+/// - with [`SaveErrorKind::Stale`] when `check` gives a SHA-256 the file
+///   or the backup doesn't have, or the file changes while it runs;
+/// - with [`SaveErrorKind::ChangedSince`] when the file isn't what the
+///   last write here wrote (by its record, see [`recorded_sha256`]), as
+///   after a hand edit, unless `check.force`: the backup is from before
+///   that write, so putting it back would lose the edit too.
+pub fn undo(path: &Path, check: &UndoCheck) -> Result<Config, SaveError> {
     let backup = write::backup_path(path);
     let data = match write::read(&backup) {
         Ok(data) => data,
@@ -240,7 +303,32 @@ pub fn undo(path: &Path) -> Result<Config, SaveError> {
         }
         Err(error) => return Err(error),
     };
-    write::commit(path, &data)?;
+    let current = write::read(path)?;
+    let current_sha256 = sha256_hex(&current);
+    let differs = |expected: &Option<String>, actual: &str| {
+        expected
+            .as_deref()
+            .is_some_and(|expected| !expected.trim().eq_ignore_ascii_case(actual))
+    };
+    if differs(&check.config_sha256, &current_sha256) {
+        return Err(SaveError::new(
+            SaveErrorKind::Stale,
+            "the config file changed since the undo was worked out; nothing was undone",
+        ));
+    }
+    if differs(&check.backup_sha256, &sha256_hex(&data)) {
+        return Err(SaveError::new(
+            SaveErrorKind::Stale,
+            "the backup changed since the undo was worked out; nothing was undone",
+        ));
+    }
+    if !check.force && recorded_sha256(path).as_deref() != Some(current_sha256.as_str()) {
+        return Err(SaveError::new(
+            SaveErrorKind::ChangedSince,
+            "the config file was changed since the last change that kept a backup, so undoing would lose that change too; nothing was undone",
+        ));
+    }
+    write::commit_expecting(path, &data, Some(&current))?;
     Config::load_bytes(&data)
         .map_err(|error| SaveError::new(SaveErrorKind::Check, error.to_string()))
 }
@@ -1096,21 +1184,27 @@ mod tests {
     fn undo_swaps_the_file_and_its_backup() {
         let dir = TempDir::new();
         let path = dir.join("config.yaml");
-        assert_eq!(undo(&path).unwrap_err().kind(), SaveErrorKind::NoBackup);
+        assert_eq!(
+            undo(&path, &UndoCheck::default()).unwrap_err().kind(),
+            SaveErrorKind::NoBackup
+        );
         write_as_is(
             &path,
             b"port: 1
 ",
         )
         .unwrap();
-        assert_eq!(undo(&path).unwrap_err().kind(), SaveErrorKind::NoBackup);
+        assert_eq!(
+            undo(&path, &UndoCheck::default()).unwrap_err().kind(),
+            SaveErrorKind::NoBackup
+        );
         write_as_is(
             &path,
             b"port: 2
 ",
         )
         .unwrap();
-        assert_eq!(undo(&path).unwrap().port, 1);
+        assert_eq!(undo(&path, &UndoCheck::default()).unwrap().port, 1);
         assert_eq!(
             fs::read(&path).unwrap(),
             b"port: 1
@@ -1121,7 +1215,7 @@ mod tests {
             b"port: 2
 "
         );
-        assert_eq!(undo(&path).unwrap().port, 2);
+        assert_eq!(undo(&path, &UndoCheck::default()).unwrap().port, 2);
         assert_eq!(
             fs::read(&path).unwrap(),
             b"port: 2
@@ -1134,12 +1228,84 @@ mod tests {
 ",
         )
         .unwrap();
-        assert_eq!(undo(&path).unwrap_err().kind(), SaveErrorKind::Check);
+        assert_eq!(
+            undo(&path, &UndoCheck::default()).unwrap_err().kind(),
+            SaveErrorKind::Check
+        );
         assert_eq!(
             fs::read(&path).unwrap(),
             b"port: 2
 "
         );
+    }
+
+    // Not upstream's: an undo after a hand edit is refused unless forced,
+    // as is one whose file or backup isn't the one the caller saw; a
+    // refused undo writes nothing.
+    #[test]
+    fn undo_checks_what_it_puts_back() {
+        let dir = TempDir::new();
+        let path = dir.join("config.yaml");
+        write_as_is(&path, b"port: 1\n").unwrap();
+        write_as_is(&path, b"port: 2\n").unwrap();
+        let edited = b"port: 3\n";
+        fs::write(&path, edited).unwrap();
+        let refused = undo(&path, &UndoCheck::default()).unwrap_err();
+        assert_eq!(refused.kind(), SaveErrorKind::ChangedSince);
+        assert_eq!(fs::read(&path).unwrap(), edited);
+
+        // A SHA-256 that isn't the file's or the backup's is refused.
+        let wrong = UndoCheck {
+            config_sha256: Some(sha256_hex(b"port: 2\n")),
+            force: true,
+            ..UndoCheck::default()
+        };
+        assert_eq!(
+            undo(&path, &wrong).unwrap_err().kind(),
+            SaveErrorKind::Stale
+        );
+        let wrong = UndoCheck {
+            backup_sha256: Some(sha256_hex(b"port: 2\n")),
+            force: true,
+            ..UndoCheck::default()
+        };
+        assert_eq!(
+            undo(&path, &wrong).unwrap_err().kind(),
+            SaveErrorKind::Stale
+        );
+        assert_eq!(fs::read(&path).unwrap(), edited);
+
+        // Forced, with the right SHA-256s, it goes ahead and keeps the
+        // edit as the new backup.
+        let check = UndoCheck {
+            config_sha256: Some(sha256_hex(edited).to_ascii_uppercase()),
+            backup_sha256: Some(sha256_hex(b"port: 1\n")),
+            force: true,
+        };
+        assert_eq!(undo(&path, &check).unwrap().port, 1);
+        assert_eq!(fs::read(backup_path(&path)).unwrap(), edited);
+        assert_eq!(recorded_sha256(&path), Some(sha256_hex(b"port: 1\n")));
+
+        // With no record, as a file an older writer wrote has, it asks.
+        fs::remove_file(record_path(&path)).unwrap();
+        assert_eq!(
+            undo(&path, &UndoCheck::default()).unwrap_err().kind(),
+            SaveErrorKind::ChangedSince
+        );
+    }
+
+    // Not upstream's: a write that expects the bytes it was worked out
+    // from writes nothing when the file holds others.
+    #[test]
+    fn write_file_expecting_refuses_a_changed_file() {
+        let dir = TempDir::new();
+        let path = dir.join("config.yaml");
+        fs::write(&path, "port: 1\n").unwrap();
+        write_file_expecting(&path, b"port: 2\n", b"port: 1\n").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"port: 2\n");
+        let error = write_file_expecting(&path, b"port: 3\n", b"port: 1\n").unwrap_err();
+        assert_eq!(error.kind(), SaveErrorKind::Stale);
+        assert_eq!(fs::read(&path).unwrap(), b"port: 2\n");
     }
 
     // Not upstream's: the defaults are an empty config's settings, in the

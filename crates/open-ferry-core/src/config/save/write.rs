@@ -9,28 +9,81 @@
 //! refused, before anything is read and again before anything is written.
 //! A file that can't be renamed over, such as a file bind-mounted on its
 //! own into a container, is written in place instead, as upstream does.
+//! [`commit_expecting`] writes only while the file still holds the bytes
+//! the caller read.
+//!
+//! After each write, the SHA-256 of what was written is kept beside the
+//! file as `<file name>.sha256`, in `sha256sum`'s format, so an undo can
+//! tell whether the file was changed by hand since (see [`super::undo`]).
+//! Keeping it is best effort: when it can't be written, the old one is
+//! removed, and an undo then asks before it goes ahead.
 //!
 //! Deviations from upstream:
 //! - Upstream writes the file in place with no check and no backup, and
 //!   follows a symbolic link. The writer writes in place only when the
 //!   rename is refused.
+//! - Upstream keeps no record of its writes.
 //! - A new file is created readable by its owner only (0600 on Unix),
 //!   where upstream's management `WriteConfig` creates it 0644.
 //! - I/O errors are worded `open <path>: <error>` with the platform's
 //!   error text, which differs from Go's.
 
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read as _, Write};
 use std::path::{Path, PathBuf};
+
+use sha2::{Digest as _, Sha256};
 
 use super::super::load::load_bytes;
 use super::{SaveError, SaveErrorKind};
 
+/// The most of a record file read.
+const RECORD_LIMIT: u64 = 4096;
+
 /// The file name of the backup of `path`: `<file name>.bak`.
 pub(crate) fn backup_path(path: &Path) -> PathBuf {
+    with_suffix(path, ".bak")
+}
+
+/// The file name of the record of the last write to `path`: `<file
+/// name>.sha256`.
+pub(crate) fn record_path(path: &Path) -> PathBuf {
+    with_suffix(path, ".sha256")
+}
+
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(".bak");
+    name.push(suffix);
     path.with_file_name(name)
+}
+
+/// The SHA-256 of `data`, in lowercase hex.
+pub(crate) fn sha256_hex(data: &[u8]) -> String {
+    Sha256::digest(data)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// The SHA-256 the record beside `path` keeps of the last write, when
+/// there is a record that holds one.
+pub(crate) fn recorded_sha256(path: &Path) -> Option<String> {
+    let file = fs::File::open(record_path(path)).ok()?;
+    let mut text = String::new();
+    file.take(RECORD_LIMIT).read_to_string(&mut text).ok()?;
+    let hash = text.split_whitespace().next()?.to_ascii_lowercase();
+    (hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(hash)
+}
+
+/// The failure when the file no longer holds what the caller read.
+fn stale(path: &Path) -> SaveError {
+    SaveError::new(
+        SaveErrorKind::Stale,
+        format!(
+            "{} changed since it was read; nothing was written",
+            path.display()
+        ),
+    )
 }
 
 /// Fails when `path` is a symbolic link (or, on Windows, another reparse
@@ -83,9 +136,21 @@ pub(crate) fn read(path: &Path) -> Result<Vec<u8>, SaveError> {
 
 /// Writes `data` to the config file at `path`: checks that it loads as a
 /// config, backs up the file's current contents to `<file name>.bak`, and
-/// replaces the file atomically. Nothing is written if a step fails before
-/// the replacement.
+/// replaces the file atomically, then records the SHA-256 of `data`.
+/// Nothing is written if a step fails before the replacement.
 pub(crate) fn commit(path: &Path, data: &[u8]) -> Result<(), SaveError> {
+    commit_expecting(path, data, None)
+}
+
+/// [`commit`], made only when the file holds `expected`, if given: else a
+/// [`SaveErrorKind::Stale`] error, and nothing is written. The check is
+/// made with the read the backup is taken from, just before the file is
+/// replaced.
+pub(crate) fn commit_expecting(
+    path: &Path,
+    data: &[u8],
+    expected: Option<&[u8]>,
+) -> Result<(), SaveError> {
     load_bytes(data).map_err(|error| SaveError::new(SaveErrorKind::Check, error.to_string()))?;
     refuse_link(path)?;
     let dir = match path.parent() {
@@ -99,10 +164,29 @@ pub(crate) fn commit(path: &Path, data: &[u8]) -> Result<(), SaveError> {
     };
     if permissions.is_some() {
         let current = fs::read(path).map_err(|error| io_error("open", path, error))?;
+        if expected.is_some_and(|expected| expected != current.as_slice()) {
+            return Err(stale(path));
+        }
         let backup = backup_path(path);
         replace(dir, &backup, &current, permissions.as_ref())?;
+    } else if expected.is_some() {
+        return Err(stale(path));
     }
-    replace(dir, path, data, permissions.as_ref())
+    replace(dir, path, data, permissions.as_ref())?;
+    record(dir, path, data, permissions.as_ref());
+    Ok(())
+}
+
+/// Keeps the SHA-256 of `data`, just written to `path`, in the record
+/// beside it; when that fails, removes the old record, which no longer
+/// says what the file holds.
+fn record(dir: &Path, path: &Path, data: &[u8], permissions: Option<&fs::Permissions>) {
+    let target = record_path(path);
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let line = format!("{}  {name}\n", sha256_hex(data));
+    if replace(dir, &target, line.as_bytes(), permissions).is_err() {
+        let _ = fs::remove_file(&target);
+    }
 }
 
 /// Writes `data` to a temporary file in `dir`, with `permissions` on Unix,
@@ -204,12 +288,63 @@ mod tests {
             fs::read_to_string(backup_path(&path)).expect("backup"),
             "port: 2\n"
         );
-        let names: Vec<String> = fs::read_dir(dir.path())
+        let mut names: Vec<String> = fs::read_dir(dir.path())
             .expect("list")
             .filter_map(|entry| entry.ok())
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(names.len(), 2, "{names:?}");
+        names.sort();
+        assert_eq!(
+            names,
+            ["config.yaml", "config.yaml.bak", "config.yaml.sha256"]
+        );
+    }
+
+    // Not upstream's: each write records the SHA-256 of what it wrote, in
+    // sha256sum's format; a record that holds no hash reads as none.
+    #[test]
+    fn commit_records_what_it_wrote() {
+        let dir = TempDir::new();
+        let path = dir.path().join("config.yaml");
+        assert_eq!(recorded_sha256(&path), None);
+        commit(&path, b"port: 2\n").expect("write");
+        let hash = sha256_hex(b"port: 2\n");
+        assert_eq!(recorded_sha256(&path).as_deref(), Some(hash.as_str()));
+        assert_eq!(
+            fs::read_to_string(record_path(&path)).expect("record"),
+            format!("{hash}  config.yaml\n")
+        );
+        // A hand edit leaves the record as it was.
+        fs::write(&path, "port: 3\n").expect("edit");
+        assert_eq!(recorded_sha256(&path).as_deref(), Some(hash.as_str()));
+        fs::write(record_path(&path), "not a hash\n").expect("garble");
+        assert_eq!(recorded_sha256(&path), None);
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    // Not upstream's: a write that expects the bytes it read is refused,
+    // and writes nothing, when the file holds others or is gone.
+    #[test]
+    fn commit_expecting_refuses_a_changed_file() {
+        let dir = TempDir::new();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, "port: 1\n").expect("seed");
+        commit_expecting(&path, b"port: 2\n", Some(b"port: 1\n")).expect("matches");
+        assert_eq!(fs::read_to_string(&path).expect("read"), "port: 2\n");
+        let error = commit_expecting(&path, b"port: 3\n", Some(b"port: 1\n")).expect_err("stale");
+        assert_eq!(error.kind(), SaveErrorKind::Stale);
+        assert_eq!(fs::read_to_string(&path).expect("read"), "port: 2\n");
+        assert_eq!(
+            fs::read_to_string(backup_path(&path)).expect("backup"),
+            "port: 1\n"
+        );
+        let missing = dir.path().join("missing.yaml");
+        let error = commit_expecting(&missing, b"port: 3\n", Some(b"")).expect_err("gone");
+        assert_eq!(error.kind(), SaveErrorKind::Stale);
+        assert!(!missing.exists());
     }
 
     // Not upstream's: contents that don't load are refused and nothing is

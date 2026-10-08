@@ -89,8 +89,8 @@ pub use access::{Refusal, check_address, check_key, set_build_headers};
 pub use auth_files::credential_entry;
 pub use client_ip::TrustedProxies;
 pub use config_write::{
-    ConfigReload, ConfigWriter, FileConfigWriter, ReloadFuture, UndoError, V8Edit, V8EditError,
-    V8Method, WriteError, undo_config,
+    ConfigReload, ConfigWriter, FileConfigWriter, ReloadFuture, UndoCheck, UndoError, V8Edit,
+    V8EditError, V8Method, WriteError, undo_config,
 };
 pub use credential_sync::{CredentialSync, SyncError, SyncFuture};
 pub use log_dir::is_refused as is_refused_log_file;

@@ -478,7 +478,11 @@ pub(crate) async fn undo(ctx: &Context) -> Result<Outcome, Failure> {
 
 /// Undoes the last change in the file.
 fn undo_in_file(ctx: &Context, backup: &Path) -> Result<(), Failure> {
-    save::undo(&ctx.path)
+    let check = save::UndoCheck {
+        force: true,
+        ..save::UndoCheck::default()
+    };
+    save::undo(&ctx.path, &check)
         .map(|_| ())
         .map_err(|error| match error.kind() {
             SaveErrorKind::NoBackup => no_backup(backup),

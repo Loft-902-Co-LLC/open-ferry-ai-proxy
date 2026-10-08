@@ -1760,7 +1760,7 @@ async fn undo_puts_the_backup_back() {
     let raw = "config-version: 8\nserver:\n  port: 8318\n";
     let (dir, api) = over(raw);
     assert_eq!(
-        crate::undo_config(&api.state).await,
+        crate::undo_config(&api.state, crate::UndoCheck::default()).await,
         Err(crate::UndoError::NoBackup)
     );
     request(
@@ -1774,22 +1774,72 @@ async fn undo_puts_the_backup_back() {
     assert_eq!(loaded(&api, &dir).port, 8319);
     let written = read(&dir);
 
-    crate::undo_config(&api.state).await.unwrap();
+    crate::undo_config(&api.state, crate::UndoCheck::default())
+        .await
+        .unwrap();
     assert_eq!(read(&dir), raw);
     assert_eq!(loaded(&api, &dir).port, 8318);
 
-    crate::undo_config(&api.state).await.unwrap();
+    crate::undo_config(&api.state, crate::UndoCheck::default())
+        .await
+        .unwrap();
     assert_eq!(read(&dir), written);
     assert_eq!(loaded(&api, &dir).port, 8319);
 
     // A state without a writer, and a writer that keeps no backup, have
     // nothing to undo.
     assert_eq!(
-        crate::undo_config(&Api::new().state).await,
+        crate::undo_config(&Api::new().state, crate::UndoCheck::default()).await,
         Err(crate::UndoError::Unavailable)
     );
     assert_eq!(
-        crate::undo_config(&Api::writing(Config::default()).state).await,
+        crate::undo_config(
+            &Api::writing(Config::default()).state,
+            crate::UndoCheck::default()
+        )
+        .await,
         Err(crate::UndoError::NoBackup)
     );
+}
+
+// Not upstream's: an undo after the file was changed by hand is refused
+// unless forced, and one whose file or backup isn't the one the caller
+// expected is refused; a refused undo changes nothing.
+#[tokio::test]
+async fn undo_refuses_a_file_changed_since() {
+    use open_ferry_core::config::save::sha256_hex;
+    let raw = "config-version: 8\nserver:\n  port: 8318\n";
+    let (dir, api) = over(raw);
+    request(
+        &api,
+        Method::PUT,
+        &at("server/port"),
+        "8319",
+        StatusCode::OK,
+    )
+    .await;
+    let edited = "config-version: 8\nserver:\n  port: 8320\n";
+    std::fs::write(dir.config_path(), edited).unwrap();
+    assert_eq!(
+        crate::undo_config(&api.state, crate::UndoCheck::default()).await,
+        Err(crate::UndoError::ChangedSince)
+    );
+    let stale = crate::UndoCheck {
+        config_sha256: Some(sha256_hex(b"something else")),
+        force: true,
+        ..crate::UndoCheck::default()
+    };
+    assert_eq!(
+        crate::undo_config(&api.state, stale).await,
+        Err(crate::UndoError::Stale)
+    );
+    assert_eq!(read(&dir), edited);
+    let forced = crate::UndoCheck {
+        config_sha256: Some(sha256_hex(edited.as_bytes())),
+        backup_sha256: Some(sha256_hex(raw.as_bytes())),
+        force: true,
+    };
+    crate::undo_config(&api.state, forced).await.unwrap();
+    assert_eq!(read(&dir), raw);
+    assert_eq!(loaded(&api, &dir).port, 8318);
 }
