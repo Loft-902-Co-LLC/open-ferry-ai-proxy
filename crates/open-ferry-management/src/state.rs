@@ -32,7 +32,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use axum::response::{IntoResponse, Response};
 use http::StatusCode;
@@ -62,7 +62,7 @@ pub struct ManagementState {
 }
 
 struct Inner {
-    config: RwLock<Arc<Config>>,
+    config: RwLock<Loaded>,
     manager: Manager,
     registry: Arc<ModelRegistry>,
     env_secret: Vec<u8>,
@@ -74,6 +74,14 @@ struct Inner {
     credential_lock: tokio::sync::Mutex<()>,
     /// Upstream's `mu`, as the handlers that change the config take it.
     config_write_lock: tokio::sync::Mutex<()>,
+}
+
+/// The config the handlers read, and the SHA-256 of the config file's
+/// contents it was loaded from or last written as, in lowercase hex, when
+/// known: a save of it is made only while the file still holds them.
+struct Loaded {
+    config: Arc<Config>,
+    sha256: Option<String>,
 }
 
 /// What the builder methods set.
@@ -112,7 +120,10 @@ impl ManagementState {
         let trusted_proxies = TrustedProxies::new(&config.trusted_proxies);
         Self {
             inner: Arc::new(Inner {
-                config: RwLock::new(config),
+                config: RwLock::new(Loaded {
+                    config,
+                    sha256: None,
+                }),
                 manager,
                 registry,
                 env_secret,
@@ -162,6 +173,21 @@ impl ManagementState {
         self
     }
 
+    /// Records that the config the state was made with was loaded from
+    /// contents with the SHA-256 `sha256`, in hex, as
+    /// [`Config::load_with_sha256`] gives it. A route that saves the config
+    /// the handlers read then saves it only while the file still holds
+    /// those contents, or the ones the last write here wrote, and answers
+    /// 409 `{"error":"config_changed"}` otherwise, writing nothing (see the
+    /// `config_write` module). Without it nothing is checked until a config
+    /// is applied with [`set_loaded_config`](Self::set_loaded_config) or
+    /// written here. Not upstream's.
+    #[must_use]
+    pub fn with_config_sha256(self, sha256: impl Into<String>) -> Self {
+        self.loaded_mut().sha256 = Some(sha256.into());
+        self
+    }
+
     /// Has the running service load the config file again through
     /// `reload` once a route has saved it (upstream's
     /// `SetConfigReloadHook`).
@@ -206,14 +232,51 @@ impl ManagementState {
     /// Applies a reloaded config (upstream's `SetConfig`). The management
     /// key, `allow-remote` and the proxies take effect on the next request;
     /// `trusted-proxies` takes a restart, as upstream. The local management
-    /// password no longer turns the API on.
+    /// password no longer turns the API on. The SHA-256 a save checks the
+    /// file for is kept as it was: apply a config loaded from the file with
+    /// [`set_loaded_config`](Self::set_loaded_config).
     pub fn set_config(&self, config: Arc<Config>) {
         self.parts.local_enables.store(false, Ordering::Relaxed);
-        *self
-            .inner
+        self.loaded_mut().config = config;
+    }
+
+    /// [`set_config`](Self::set_config) for a config loaded from the config
+    /// file, as the service applies one after a reload, with `sha256`, the
+    /// SHA-256 of the contents it was loaded from, in hex: a route saves
+    /// the config only while the file still holds them (see
+    /// [`with_config_sha256`](Self::with_config_sha256)). `None` checks
+    /// nothing. The two change together, so a save never pairs a config
+    /// with the SHA-256 of other contents. Not upstream's.
+    pub fn set_loaded_config(&self, config: Arc<Config>, sha256: Option<String>) {
+        self.parts.local_enables.store(false, Ordering::Relaxed);
+        *self.loaded_mut() = Loaded { config, sha256 };
+    }
+
+    /// The SHA-256, in lowercase hex, the config file must have for a
+    /// route to save the config the handlers read, if known: that of the
+    /// contents the config was loaded from or last written as.
+    pub fn config_sha256(&self) -> Option<String> {
+        self.loaded().sha256.clone()
+    }
+
+    /// The config the handlers read, with [`config_sha256`](Self::config_sha256).
+    pub(crate) fn loaded_config(&self) -> (Arc<Config>, Option<String>) {
+        let loaded = self.loaded();
+        (Arc::clone(&loaded.config), loaded.sha256.clone())
+    }
+
+    fn loaded(&self) -> RwLockReadGuard<'_, Loaded> {
+        self.inner
+            .config
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn loaded_mut(&self) -> RwLockWriteGuard<'_, Loaded> {
+        self.inner
             .config
             .write()
-            .unwrap_or_else(PoisonError::into_inner) = config;
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Stops the OAuth logins in progress and waits for them to end; no
@@ -224,13 +287,7 @@ impl ManagementState {
 
     /// The current config.
     pub fn config(&self) -> Arc<Config> {
-        Arc::clone(
-            &self
-                .inner
-                .config
-                .read()
-                .unwrap_or_else(PoisonError::into_inner),
-        )
+        Arc::clone(&self.loaded().config)
     }
 
     pub(crate) fn manager(&self) -> &Manager {

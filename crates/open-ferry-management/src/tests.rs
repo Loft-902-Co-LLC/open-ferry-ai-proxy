@@ -151,25 +151,39 @@ impl Api {
     }
 
     /// The API over the config file of `dir`, written with `raw` first:
-    /// with the config the file loads as, key [`KEY`] as
+    /// with the config the file loads as and the SHA-256 of what it loaded
+    /// from, as the service gives them, key [`KEY`] as
     /// `MANAGEMENT_PASSWORD` (the file need not hold one), the directory's
     /// store, the [`FakeSync`] and the config path; saving the file with a
     /// [`FileConfigWriter`] and reloading it with a [`FileReload`].
     fn over_config_file(dir: &AuthDir, raw: &str) -> Self {
         let path = dir.config_path();
         std::fs::write(&path, raw).unwrap();
-        let config = Config::load(&path).unwrap();
+        let (config, sha256) = Config::load_with_sha256(&path).unwrap();
         let mut api = Self::over_with(dir, config, Some(KEY));
         let reload = Arc::new(FileReload::new(path.clone()));
         let state = api
             .state
             .clone()
+            .with_config_sha256(sha256)
             .with_config_writer(Arc::new(FileConfigWriter::new(path)))
             .with_config_reload(Arc::clone(&reload) as _);
         reload.watch(state.clone());
         api.router = router(state.clone());
         api.state = state;
         api
+    }
+
+    /// This API, reloading through the [`FakeReload`], which loads nothing,
+    /// as a service whose file watcher had loaded the file already.
+    fn reloading_nothing(mut self) -> Self {
+        let state = self
+            .state
+            .clone()
+            .with_config_reload(Arc::clone(&self.reload) as _);
+        self.router = router(state.clone());
+        self.state = state;
+        self
     }
 
     /// This API, saving the config through the [`FakeWriter`] and reloading
@@ -610,23 +624,26 @@ impl ConfigWriter for FakeWriter {
         &self,
         config: &Config,
         migrate_v8: bool,
-    ) -> Result<(), WriteError> {
+        expected_sha256: Option<&str>,
+    ) -> Result<Option<String>, WriteError> {
+        assert_eq!(expected_sha256, None, "the fake writer keeps no SHA-256");
         self.record(Written::Saved {
             config: Box::new(config.clone()),
             migrate_v8,
         })
+        .map(|()| None)
     }
 
-    fn write_file(&self, data: &[u8]) -> Result<(), WriteError> {
-        self.record(Written::File(data.to_vec()))
+    fn write_file(&self, data: &[u8]) -> Result<Option<String>, WriteError> {
+        self.record(Written::File(data.to_vec())).map(|()| None)
     }
 
-    fn edit_v8(&self, edit: &V8Edit) -> Result<Config, V8EditError> {
+    fn edit_v8(&self, edit: &V8Edit) -> Result<(Config, Option<String>), V8EditError> {
         self.record(Written::V8(edit.clone()))
             .map_err(|error| V8EditError::WriteFailed(error.to_string()))?;
         match self.v8_result.lock().unwrap().clone() {
-            Some(result) => result,
-            None => Ok(keyed_config()),
+            Some(result) => result.map(|config| (config, None)),
+            None => Ok((keyed_config(), None)),
         }
     }
 }
@@ -678,9 +695,9 @@ impl FileReload {
 impl ConfigReload for FileReload {
     fn reload(&self) -> ReloadFuture<'_> {
         Box::pin(async {
-            let config = Config::load(&self.path).unwrap();
+            let (config, sha256) = Config::load_with_sha256(&self.path).unwrap();
             if let Some(state) = self.state.get() {
-                state.set_config(Arc::new(config));
+                state.set_loaded_config(Arc::new(config), Some(sha256));
             }
         })
     }

@@ -60,12 +60,21 @@ const DEFAULT_PORT: i64 = 8317;
 pub async fn run(
     flags: Flags,
     config: Config,
+    config_sha256: String,
     config_path: PathBuf,
     auth_dir: PathBuf,
     log_level: LogLevel,
 ) -> ExitCode {
     if flags.standalone {
-        standalone(flags, config, config_path, auth_dir, log_level).await;
+        standalone(
+            flags,
+            config,
+            config_sha256,
+            config_path,
+            auth_dir,
+            log_level,
+        )
+        .await;
     } else {
         let base_url = resolve_management_base_url(&flags.management_base_url, Some(&config));
         if let Err(error) =
@@ -81,6 +90,7 @@ pub async fn run(
 async fn standalone(
     flags: Flags,
     config: Config,
+    config_sha256: String,
     config_path: PathBuf,
     auth_dir: PathBuf,
     log_level: LogLevel,
@@ -109,6 +119,7 @@ async fn standalone(
         local_password: password.clone(),
         keep_alive: false,
         announce: false,
+        config_sha256: Some(config_sha256),
     };
     let server = tokio::spawn(service::run(
         config,

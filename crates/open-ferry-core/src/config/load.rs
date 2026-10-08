@@ -44,14 +44,16 @@ impl Config {
     /// Loads the config file at `path`, as upstream's `LoadConfig` does
     /// without writing anything back.
     pub fn load(path: impl AsRef<Path>) -> Result<Config, ConfigError> {
-        let path = path.as_ref();
-        let data = fs::read(path).map_err(|error| {
-            ConfigError::new(
-                ConfigErrorKind::Read,
-                format!("failed to read config file: {}: {error}", path.display()),
-            )
-        })?;
-        load_bytes(&data)
+        load_bytes(&read(path.as_ref())?)
+    }
+
+    /// [`Config::load`], returning with the config the SHA-256 of the
+    /// contents it loaded, in lowercase hex. Not upstream's: the
+    /// management API saves the config only while the file still holds
+    /// them, or what it last wrote.
+    pub fn load_with_sha256(path: impl AsRef<Path>) -> Result<(Config, String), ConfigError> {
+        let data = read(path.as_ref())?;
+        Ok((load_bytes(&data)?, super::save::sha256_hex(&data)))
     }
 
     /// Loads a config file's contents, as [`Config::load`] loads the file:
@@ -72,6 +74,17 @@ impl Config {
         }
         from_bytes(data, "parse config payload: ")
     }
+}
+
+/// The contents of the config file at `path`, with [`Config::load`]'s
+/// error wording.
+fn read(path: &Path) -> Result<Vec<u8>, ConfigError> {
+    fs::read(path).map_err(|error| {
+        ConfigError::new(
+            ConfigErrorKind::Read,
+            format!("failed to read config file: {}: {error}", path.display()),
+        )
+    })
 }
 
 /// Loads a config file's contents, with [`Config::load`]'s error wording.
