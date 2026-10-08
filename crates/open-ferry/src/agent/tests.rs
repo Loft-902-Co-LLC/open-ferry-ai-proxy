@@ -1554,12 +1554,11 @@ async fn the_key_is_found_in_order() {
     assert_eq!(status.json["management"], json!("no_key"));
     let changed = ok(&ctx, set("routing.strategy", "fill-first")).await;
     assert_eq!(changed.json["via"], json!("file"));
-    assert!(
-        changed.json["note"]
-            .as_str()
-            .unwrap()
-            .contains("no management key")
-    );
+    let note = changed.json["note"].as_str().unwrap();
+    assert!(note.contains("no management key"));
+    // A save by the server of what it holds can write over it, and the
+    // note says so.
+    assert!(note.contains("can undo this change"), "{note}");
     let failure = fails(&ctx, Command::CredentialsList(CredentialsList::default())).await;
     assert_eq!(failure.error, "no_management_key");
     assert!(failure.hint.unwrap().contains("MANAGEMENT_PASSWORD"));
