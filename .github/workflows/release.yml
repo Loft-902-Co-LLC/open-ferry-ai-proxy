@@ -4,9 +4,10 @@ name: Release
 # for the archives and the install scripts, signs it with the release key
 # (SHA256SUMS.minisig) once the maintainer approves the release-signing
 # environment, attests their build provenance and creates a draft GitHub
-# release for the maintainer to review and publish. It then builds the container image from the static Linux
-# archives, for linux/amd64 and linux/arm64, pushes it to
-# ghcr.io/loft-902-co-llc/open-ferry and attests it.
+# release for the maintainer to review and publish. It then builds the
+# container image from the static Linux archives, for linux/amd64 and
+# linux/arm64, pushes it to ghcr.io/loft-902-co-llc/open-ferry and attests
+# it.
 #
 # Running the workflow by hand (workflow_dispatch) is a dry run: it builds,
 # packages and checksums the same archives, builds and tests the image for
