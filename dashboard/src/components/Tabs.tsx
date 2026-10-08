@@ -58,7 +58,7 @@ export function Tabs({ label, items, selected, onSelect, children }: TabsProps) 
         role="tablist"
         aria-label={label}
         onKeyDown={move}
-        className="flex gap-1 overflow-x-auto border-b border-line"
+        className="flex flex-wrap gap-x-1 border-b border-line"
       >
         {items.map((item) => {
           const active = item.id === selected;
@@ -82,7 +82,7 @@ export function Tabs({ label, items, selected, onSelect, children }: TabsProps) 
                 onSelect(item.id);
               }}
               className={cn(
-                "-mb-px border-b-2 px-3 py-2 font-medium whitespace-nowrap",
+                "-mb-px border-b-2 px-3 py-2 font-medium whitespace-nowrap pointer-coarse:min-h-11",
                 active
                   ? "border-accent text-fg"
                   : "border-transparent text-muted hover:border-line hover:text-fg",

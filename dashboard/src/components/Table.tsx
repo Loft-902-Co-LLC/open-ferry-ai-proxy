@@ -2,7 +2,11 @@ import type { ReactNode, TdHTMLAttributes, ThHTMLAttributes } from "react";
 
 import { cn } from "../lib/cn";
 
-/** A dense data table that scrolls sideways on narrow screens. */
+/**
+ * A dense data table that scrolls sideways on narrow screens. The wrapper is
+ * positioned so that sr-only text in a cell (absolutely placed) is clipped by
+ * it, not by the page, which it would otherwise widen.
+ */
 export function Table({
   caption,
   children,
@@ -14,7 +18,7 @@ export function Table({
   className?: string;
 }) {
   return (
-    <div className={cn("-mx-4 overflow-x-auto px-4", className)}>
+    <div className={cn("relative -mx-4 overflow-x-auto px-4", className)}>
       <table className="w-full border-collapse text-left tabular-nums">
         <caption className="sr-only">{caption}</caption>
         {children}

@@ -33,14 +33,14 @@ export function AppShell() {
           <Link to="/" className="text-fg hover:no-underline" aria-label="open-ferry overview">
             <Brand />
           </Link>
-          <nav aria-label="Main" className="order-last -mx-1 w-full overflow-x-auto sm:order-none sm:w-auto sm:flex-1">
-            <ul className="flex gap-1">
+          <nav aria-label="Main" className="order-last -mx-1 w-full sm:order-none sm:w-auto sm:flex-1">
+            <ul className="flex flex-wrap gap-1">
               {NAV_ITEMS.map((item) => (
                 <li key={item.to}>
                   <NavLink
                     to={item.to}
                     end={item.to === "/"}
-                    className="block rounded-md px-2.5 py-1.5 font-medium whitespace-nowrap text-muted hover:bg-raised hover:text-fg hover:no-underline aria-[current=page]:bg-raised aria-[current=page]:text-fg"
+                    className="flex items-center rounded-md px-2.5 py-1.5 font-medium whitespace-nowrap text-muted pointer-coarse:min-h-11 hover:bg-raised hover:text-fg hover:no-underline aria-[current=page]:bg-raised aria-[current=page]:text-fg"
                   >
                     {item.label}
                   </NavLink>

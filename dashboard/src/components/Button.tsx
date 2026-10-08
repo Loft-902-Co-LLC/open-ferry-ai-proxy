@@ -12,8 +12,9 @@ const VARIANTS: Record<ButtonVariant, string> = {
   danger: "border-transparent bg-danger-strong text-danger-fg hover:bg-danger-strong/90",
 };
 
+/** A small button is still 44 px tall where the pointer is a finger. */
 const SIZES: Record<ButtonSize, string> = {
-  sm: "h-8 px-2.5 text-sm",
+  sm: "h-8 px-2.5 text-sm pointer-coarse:min-h-11",
   md: "h-9 px-3.5 text-sm",
 };
 
