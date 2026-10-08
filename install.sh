@@ -16,6 +16,12 @@
 #                                place of the GitHub repository's releases
 #                                URL (for a mirror, or a test server)
 #   OPEN_FERRY_INSTALL_GH        the GitHub CLI command (default: gh)
+#   OPEN_FERRY_INSTALL_SELF_UPDATE  off, notify or auto: set self-update.mode
+#                                in the config (--no-auto-update is off)
+#
+# It writes install-receipt.json in open-ferry's data directory
+# ($XDG_DATA_HOME/open-ferry, or ~/.local/share/open-ferry), which lets the
+# binary update itself; see docs/updates.md for turning that off.
 #
 # See https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy#install
 set -eu
@@ -41,6 +47,8 @@ Options:
                      isn't an absolute path)
   --no-attestation   don't check the build provenance attestation, even
                      when gh is installed; the SHA256SUMS check still runs
+  --no-auto-update   turn automatic updates off (self-update.mode: off in
+                     the config); open-ferry update -mode auto turns them on
   -h, --help         show this help
 EOF
 }
@@ -71,6 +79,7 @@ target=
 bin_dir=
 config=
 attestation=1
+self_update=${OPEN_FERRY_INSTALL_SELF_UPDATE:-}
 while [ "$#" -gt 0 ]; do
   case $1 in
     --version | --target | --bin-dir | --config)
@@ -102,6 +111,10 @@ while [ "$#" -gt 0 ]; do
       attestation=0
       shift
       ;;
+    --no-auto-update)
+      self_update=off
+      shift
+      ;;
     -h | --help)
       usage
       exit 0
@@ -111,6 +124,11 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+case $self_update in
+  '' | off | notify | auto) ;;
+  *) usage_error "OPEN_FERRY_INSTALL_SELF_UPDATE is \"$self_update\": use off, notify or auto" ;;
+esac
 
 if [ -z "$bin_dir" ] || [ -z "$config" ]; then
   if [ -z "${HOME:-}" ]; then
@@ -339,6 +357,25 @@ fi
 installed=$bin_dir/open-ferry
 say "Installed open-ferry $version as $installed."
 
+# The install receipt: open-ferry updates itself only when it names the
+# binary that runs (see docs/updates.md).
+json() { printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"; }
+case ${XDG_DATA_HOME:-} in
+  /*) receipt=$XDG_DATA_HOME/open-ferry/install-receipt.json ;;
+  *) receipt=${HOME:+$HOME/.local/share/open-ferry/install-receipt.json} ;;
+esac
+if [ -n "$receipt" ] && mkdir -p "${receipt%/*}" 2>/dev/null &&
+  printf '{"format":1,"installer":"install.sh","version":%s,"binary":%s,"target":%s,"installed_at":%s}\n' \
+    "$(json "$version")" "$(json "$installed")" "$(json "$target")" \
+    "$(json "$(date -u +%Y-%m-%dT%H:%M:%SZ)")" 2>/dev/null >"$receipt.$$" &&
+  mv -f "$receipt.$$" "$receipt"; then
+  receipt_ok=1
+else
+  receipt_ok=0
+  [ -z "$receipt" ] || rm -f "$receipt.$$"
+  say "Couldn't write the install receipt ${receipt:-as HOME is unset}, so open-ferry won't update itself; it will say when a release is out."
+fi
+
 if [ -e "$config" ]; then
   wrote_config=0
   say "Keeping your config at $config."
@@ -348,6 +385,10 @@ else
   say ""
   "$installed" init -config "$config" || die "open-ferry init couldn't write $config"
   say ""
+fi
+if [ -n "$self_update" ]; then
+  "$installed" update -mode "$self_update" -config "$config" ||
+    die "open-ferry update couldn't set self-update.mode to $self_update in $config"
 fi
 
 # --- Next steps --------------------------------------------------------------
@@ -387,3 +428,12 @@ else
   say "  Open the dashboard:  http://127.0.0.1:<port>/dashboard/, with your config's port (8317 by default)"
 fi
 say "  Check the setup:     $command check -config \"$config\""
+say ""
+off="To turn that off: $command update -mode off -config \"$config\""
+case $self_update:$receipt_ok:$wrote_config in
+  off:*) say "Automatic updates are off. To turn them on: $command update -mode auto -config \"$config\"" ;;
+  notify:*) say "open-ferry says when a release is out, but doesn't install it. $off" ;;
+  *:0:*) say "open-ferry says when a release is out. $off" ;;
+  auto:* | *:1) say "open-ferry keeps itself up to date. $off" ;;
+  *) say "open-ferry keeps itself up to date, unless your config says otherwise. $off" ;;
+esac
