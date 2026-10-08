@@ -1990,6 +1990,22 @@ async fn undo_through_the_server_checks_what_it_saw() {
     assert_eq!(undone.json["via"], json!("server"));
     assert!(!live.setup.text().contains("round-robin"));
     assert_ne!(live.state.config().routing.strategy, "fill-first");
+
+    // A backup the same as the config: nothing to undo, and no call, so
+    // no note that the server runs another file.
+    let same = live.setup.text();
+    std::fs::write(&backup, &same).unwrap();
+    for ctx in [cli(&path), confirmed(&path, Caller::Mcp)] {
+        let undone = ok(&ctx, Command::ConfigUndo).await;
+        assert_eq!(undone.json["changed"], json!(false), "{}", undone.json);
+        assert!(undone.json.get("via").is_none(), "{}", undone.json);
+        assert!(undone.json.get("note").is_none(), "{}", undone.json);
+        assert_eq!(
+            undone.text,
+            "Nothing to undo: the backup is the same as the config.\n"
+        );
+    }
+    assert_eq!(live.setup.text(), same);
 }
 
 // Not upstream's: a server on the config's port that takes its key but

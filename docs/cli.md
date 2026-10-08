@@ -415,6 +415,7 @@ A path is the v8 config's, as the `/v8/management/config/` route and the dashboa
 - **`undo`** puts `<config>.bak` back, and keeps the config it replaces as the new `.bak`, so running it again redoes the change. With a server running, it goes through the dashboard API's `POST /open-ferry/api/v1/config/undo`, under the lock every management write takes. There is one backup, so it goes back one write.
   - When the config was changed since the last write that kept a backup, as by a hand edit, undoing loses that change too: without `--yes` it changes nothing, exits with 1 (`changed_since`) and lists what it would change; at a terminal it asks.
   - It puts back only the backup it showed, over the config it showed: their SHA-256 go with it, and when either changed after that, nothing is undone (`config_changed`, exit code 1).
+  - When `<config>.bak` holds the same bytes as the config, there is nothing to undo: it says so, calls no server and writes nothing.
 - **`replace`** replaces the whole config with the YAML read from standard input or a file, after the same checks. It always needs `--yes`.
 
 ```
