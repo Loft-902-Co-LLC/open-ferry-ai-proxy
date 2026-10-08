@@ -62,7 +62,7 @@ pub const NAME: &str = "service";
 
 /// The service's name: the systemd unit's, the scheduled task's and the
 /// Windows service's.
-const SERVICE_NAME: &str = "open-ferry";
+pub(crate) const SERVICE_NAME: &str = "open-ferry";
 
 /// Where the service definitions point for help.
 const DOCS: &str = "https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy";
@@ -261,7 +261,7 @@ fn installed_config() -> Result<String, String> {
 
 /// The platform whose service manager is used, and whose path rules apply.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Platform {
+pub(crate) enum Platform {
     Linux,
     MacOs,
     Windows,
@@ -269,7 +269,7 @@ enum Platform {
 
 impl Platform {
     /// The platform this build runs on, if `service` supports it.
-    const HOST: Option<Platform> = if cfg!(target_os = "linux") {
+    pub(crate) const HOST: Option<Platform> = if cfg!(target_os = "linux") {
         Some(Platform::Linux)
     } else if cfg!(target_os = "macos") {
         Some(Platform::MacOs)
@@ -279,20 +279,20 @@ impl Platform {
         None
     };
 
-    fn separator(self) -> char {
+    pub(crate) fn separator(self) -> char {
         match self {
             Platform::Windows => '\\',
             Platform::Linux | Platform::MacOs => '/',
         }
     }
 
-    fn is_separator(self, c: char) -> bool {
+    pub(crate) fn is_separator(self, c: char) -> bool {
         c == '/' || (self == Platform::Windows && c == '\\')
     }
 
     /// Whether `path` is a full path: from `/`, or on Windows from a drive's
     /// root or a UNC share.
-    fn is_absolute(self, path: &str) -> bool {
+    pub(crate) fn is_absolute(self, path: &str) -> bool {
         match self {
             Platform::Windows => {
                 matches!(
@@ -305,7 +305,7 @@ impl Platform {
     }
 
     /// `path` as a full path from `cwd`, with `.` and `..` folded away.
-    fn absolute(self, cwd: &str, path: &str) -> Result<String, String> {
+    pub(crate) fn absolute(self, cwd: &str, path: &str) -> Result<String, String> {
         let full = if self.is_absolute(path) {
             path.to_owned()
         } else if self == Platform::Windows && path.starts_with(['/', '\\']) {
@@ -325,7 +325,7 @@ impl Platform {
 
     /// A full path with `.`, `..` and repeated separators folded away, and
     /// on Windows `/` written as `\`.
-    fn clean(self, path: &str) -> String {
+    pub(crate) fn clean(self, path: &str) -> String {
         let sep = self.separator();
         let (mut out, rest) = match self {
             Platform::Linux | Platform::MacOs => ("/".to_owned(), path),
@@ -369,7 +369,7 @@ impl Platform {
     }
 
     /// `name` under `dir`.
-    fn join(self, dir: &str, name: &str) -> String {
+    pub(crate) fn join(self, dir: &str, name: &str) -> String {
         if dir.ends_with(|c| self.is_separator(c)) {
             format!("{dir}{name}")
         } else {
@@ -378,7 +378,7 @@ impl Platform {
     }
 
     /// The directory of the full path `path`, or `None` at the root.
-    fn parent(self, path: &str) -> Option<String> {
+    pub(crate) fn parent(self, path: &str) -> Option<String> {
         let path = self.clean(path);
         // The root's length: `/`, `C:\`, or `\\server\share\`.
         let root = match self {
@@ -399,7 +399,7 @@ impl Platform {
 
     /// Whether the full path `path` is `dir` or under it; on Windows
     /// without regard to case.
-    fn is_within(self, path: &str, dir: &str) -> bool {
+    pub(crate) fn is_within(self, path: &str, dir: &str) -> bool {
         let (path, dir) = match self {
             Platform::Windows => (
                 self.clean(path).to_lowercase(),
@@ -419,7 +419,7 @@ impl Platform {
 
     /// `word` as a shell would need it typed, for the commands `service`
     /// suggests.
-    fn quote(self, word: &str) -> String {
+    pub(crate) fn quote(self, word: &str) -> String {
         match self {
             Platform::Windows => {
                 if word.is_empty() || word.contains([' ', '\t', '"']) {
@@ -442,22 +442,23 @@ impl Platform {
 
 /// What `service` knows of where it runs.
 #[derive(Clone, Debug)]
-struct Context {
-    platform: Platform,
+pub(crate) struct Context {
+    pub(crate) platform: Platform,
     /// The running binary's full path.
-    exe: String,
+    pub(crate) exe: String,
     /// The working directory.
-    cwd: String,
+    pub(crate) cwd: String,
     /// The environment variables of [`ENV_VARS`] that are set and not empty.
-    env: BTreeMap<String, String>,
+    pub(crate) env: BTreeMap<String, String>,
     /// The installed config path, or why there is none: the config when
     /// `-config` isn't given.
-    installed_config: Result<String, String>,
+    pub(crate) installed_config: Result<String, String>,
 }
 
-/// The environment variables `service` reads.
-const ENV_VARS: [&str; 8] = [
+/// The environment variables `service` and `migrate` read.
+const ENV_VARS: [&str; 9] = [
     "HOME",
+    "USERPROFILE",
     "XDG_CONFIG_HOME",
     "TEMP",
     "TMP",
@@ -469,7 +470,7 @@ const ENV_VARS: [&str; 8] = [
 
 impl Context {
     /// This process's.
-    fn host() -> Result<Context, String> {
+    pub(crate) fn host() -> Result<Context, String> {
         let platform =
             Platform::HOST.ok_or("open-ferry service supports Linux, macOS and Windows only")?;
         let cwd = std::env::current_dir()
@@ -501,11 +502,11 @@ impl Context {
         })
     }
 
-    fn var(&self, name: &str) -> Option<&str> {
+    pub(crate) fn var(&self, name: &str) -> Option<&str> {
         self.env.get(name).map(String::as_str)
     }
 
-    fn home(&self) -> Result<&str, String> {
+    pub(crate) fn home(&self) -> Result<&str, String> {
         self.var("HOME")
             .ok_or_else(|| "HOME isn't set, so the service has nowhere to go".to_owned())
     }
@@ -524,29 +525,29 @@ impl Context {
 
 /// A path's owner and permissions, on Unix.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Owner {
-    uid: u32,
-    gid: u32,
-    mode: u32,
-    dir: bool,
+pub(crate) struct Owner {
+    pub(crate) uid: u32,
+    pub(crate) gid: u32,
+    pub(crate) mode: u32,
+    pub(crate) dir: bool,
 }
 
 /// A command `service` runs.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Cmd {
-    program: &'static str,
-    args: Vec<String>,
+pub(crate) struct Cmd {
+    pub(crate) program: &'static str,
+    pub(crate) args: Vec<String>,
 }
 
 impl Cmd {
-    fn new(program: &'static str, args: &[&str]) -> Cmd {
+    pub(crate) fn new(program: &'static str, args: &[&str]) -> Cmd {
         Cmd {
             program,
             args: args.iter().map(|arg| (*arg).to_owned()).collect(),
         }
     }
 
-    fn arg(mut self, arg: impl Into<String>) -> Cmd {
+    pub(crate) fn arg(mut self, arg: impl Into<String>) -> Cmd {
         self.args.push(arg.into());
         self
     }
@@ -568,20 +569,20 @@ impl fmt::Display for Cmd {
 
 /// What a command that ran said.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct Output {
+pub(crate) struct Output {
     /// The exit code, or `None` when a signal ended it.
-    code: Option<i32>,
-    stdout: String,
-    stderr: String,
+    pub(crate) code: Option<i32>,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
 }
 
 impl Output {
-    fn success(&self) -> bool {
+    pub(crate) fn success(&self) -> bool {
         self.code == Some(0)
     }
 
     /// How it failed, for a message.
-    fn failure(&self) -> String {
+    pub(crate) fn failure(&self) -> String {
         let status = match self.code {
             Some(code) => format!("exit code {code}"),
             None => "ended by a signal".to_owned(),
@@ -597,7 +598,7 @@ impl Output {
 }
 
 /// The commands and files `service` uses; [`Host`]'s are real.
-trait System {
+pub(crate) trait System {
     /// Runs `cmd`, its output captured.
     fn run(&mut self, cmd: &Cmd) -> io::Result<Output>;
     /// Runs `cmd` with its output shown, and gives its exit code.
@@ -614,7 +615,7 @@ trait System {
 }
 
 /// The real system.
-struct Host;
+pub(crate) struct Host;
 
 impl System for Host {
     fn run(&mut self, cmd: &Cmd) -> io::Result<Output> {
@@ -686,7 +687,7 @@ impl System for Host {
 }
 
 /// Runs `cmd`, and fails unless it succeeds.
-fn run_checked(system: &mut dyn System, cmd: &Cmd) -> Result<Output, String> {
+pub(crate) fn run_checked(system: &mut dyn System, cmd: &Cmd) -> Result<Output, String> {
     let output = system
         .run(cmd)
         .map_err(|error| format!("failed to run `{cmd}`: {error}"))?;
@@ -699,7 +700,7 @@ fn run_checked(system: &mut dyn System, cmd: &Cmd) -> Result<Output, String> {
 
 /// One change `install` or `uninstall` makes.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Step {
+pub(crate) enum Step {
     CreateDir(String),
     Write {
         path: String,
@@ -717,10 +718,10 @@ enum Step {
 
 /// What `install` or `uninstall` does.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct Plan {
-    steps: Vec<Step>,
+pub(crate) struct Plan {
+    pub(crate) steps: Vec<Step>,
     /// Files removed once the steps are done, or have failed.
-    cleanup: Vec<String>,
+    pub(crate) cleanup: Vec<String>,
 }
 
 /// A text's bytes as [`Step::Write`] writes them.
@@ -736,14 +737,14 @@ fn encode(text: &str, utf16: bool) -> Vec<u8> {
 }
 
 /// A plan that failed part way.
-struct Failed {
-    message: String,
+pub(crate) struct Failed {
+    pub(crate) message: String,
     /// Whether a step before the failed one changed something.
-    changed: bool,
+    pub(crate) changed: bool,
 }
 
 /// Carries out `plan`, saying what it did.
-fn apply(system: &mut dyn System, plan: &Plan, out: &mut dyn Write) -> Result<(), Failed> {
+pub(crate) fn apply(system: &mut dyn System, plan: &Plan, out: &mut dyn Write) -> Result<(), Failed> {
     let mut changed = false;
     let mut result = Ok(());
     for step in &plan.steps {
@@ -812,7 +813,7 @@ fn apply_step(system: &mut dyn System, step: &Step, out: &mut dyn Write) -> Resu
 }
 
 /// Prints what `plan` would do.
-fn describe(plan: &Plan, out: &mut dyn Write) {
+pub(crate) fn describe(plan: &Plan, out: &mut dyn Write) {
     for step in &plan.steps {
         match step {
             Step::CreateDir(dir) => say(out, format_args!("Would create {dir}")),
@@ -838,13 +839,13 @@ fn describe(plan: &Plan, out: &mut dyn Write) {
 }
 
 /// Prints a line; a closed standard output doesn't stop the work.
-fn say(out: &mut dyn Write, line: fmt::Arguments<'_>) {
+pub(crate) fn say(out: &mut dyn Write, line: fmt::Arguments<'_>) {
     let _ = writeln!(out, "{line}");
 }
 
 /// Which service manager, and whose service.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Target {
+pub(crate) enum Target {
     SystemdUser,
     SystemdSystem,
     LaunchAgent,
@@ -854,7 +855,7 @@ enum Target {
 }
 
 impl Target {
-    fn new(platform: Platform, system: bool) -> Target {
+    pub(crate) fn new(platform: Platform, system: bool) -> Target {
         match (platform, system) {
             (Platform::Linux, false) => Target::SystemdUser,
             (Platform::Linux, true) => Target::SystemdSystem,
@@ -865,7 +866,7 @@ impl Target {
         }
     }
 
-    fn system(self) -> bool {
+    pub(crate) fn system(self) -> bool {
         matches!(
             self,
             Target::SystemdSystem | Target::LaunchDaemon | Target::WindowsService
@@ -874,11 +875,11 @@ impl Target {
 
     /// `-system` when it is the machine's, for the commands `service`
     /// suggests.
-    fn flag(self) -> &'static str {
+    pub(crate) fn flag(self) -> &'static str {
         if self.system() { " -system" } else { "" }
     }
 
-    fn kind(self) -> &'static str {
+    pub(crate) fn kind(self) -> &'static str {
         match self {
             Target::SystemdUser => "a systemd user service",
             Target::SystemdSystem => "a systemd system service",
@@ -903,7 +904,7 @@ impl Target {
     }
 
     /// Where the service is defined, for messages.
-    fn location(self, context: &Context) -> Result<String, String> {
+    pub(crate) fn location(self, context: &Context) -> Result<String, String> {
         Ok(match self.definition_path(context)? {
             Some(path) => path,
             None if self == Target::ScheduledTask => format!("the task named {SERVICE_NAME}"),
@@ -912,7 +913,7 @@ impl Target {
     }
 
     /// Whether the service is installed.
-    fn installed(self, system: &mut dyn System, context: &Context) -> Result<bool, String> {
+    pub(crate) fn installed(self, system: &mut dyn System, context: &Context) -> Result<bool, String> {
         if let Some(path) = self.definition_path(context)? {
             return Ok(system.exists(&path));
         }
@@ -936,7 +937,7 @@ impl Target {
 
 /// Who runs `service`, as far as it matters.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Account {
+pub(crate) enum Account {
     /// On Unix: the user ID.
     Unix { uid: u32 },
     /// On Windows: whether the process is elevated.
@@ -944,7 +945,7 @@ enum Account {
 }
 
 impl Account {
-    fn probe(
+    pub(crate) fn probe(
         system: &mut dyn System,
         platform: Platform,
         target: Target,
@@ -967,7 +968,7 @@ impl Account {
     }
 
     /// Whether it may install or remove a system service.
-    fn privileged(&self) -> bool {
+    pub(crate) fn privileged(&self) -> bool {
         match self {
             Account::Unix { uid } => *uid == 0,
             Account::Windows { elevated } => *elevated,
@@ -995,13 +996,13 @@ fn needs_admin(platform: Platform, doing: &str, command: &str) -> String {
     }
 }
 
-/// What a service runs: `exe -config config`, in `dir`, the config's
-/// directory.
+/// What a service runs: `exe -config config`, in `dir`: the config's
+/// directory, unless `open-ferry migrate` keeps CLIProxyAPI's.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Definition {
-    exe: String,
-    config: String,
-    dir: String,
+pub(crate) struct Definition {
+    pub(crate) exe: String,
+    pub(crate) config: String,
+    pub(crate) dir: String,
 }
 
 /// Carries out `request`.
@@ -1032,54 +1033,11 @@ fn install(
         Some(path) => platform.absolute(&context.cwd, path)?,
         None => platform.absolute(&context.cwd, context.installed_config.as_ref()?)?,
     };
-    check_path(platform, "The open-ferry binary's path", &context.exe)?;
-    check_path(platform, "The config's path", &config)?;
-    let account = Account::probe(system, platform, target)?;
-    let command = format!(
-        "{} {NAME} install{} -config {}",
-        platform.quote(&context.exe),
-        target.flag(),
-        platform.quote(&config)
-    );
-    if let Account::Unix { uid: 0 } = account
-        && !target.system()
-    {
-        return Err(format!(
-            "You are root, so this would install a service for root. Run it as the user the service is for, or add -system for a service of the whole machine:\n  {command}"
-        ));
-    }
-    if target.system() && !account.privileged() && !request.dry_run {
-        return Err(needs_admin(platform, "Installing", &command));
-    }
-    if !system.exists(&config) {
-        return Err(format!(
-            "There is no config at {config}. Make one with `open-ferry init`, or name another with -config."
-        ));
-    }
-    let data = system
-        .read(&config)
-        .map_err(|error| format!("failed to read the config at {config}: {error}"))?;
-    let loaded = Config::load_bytes(&data)
-        .map_err(|error| format!("The config at {config} doesn't load: {error}"))?;
-    let definition = if target.system() {
-        check_auth_dir(platform, &loaded)?;
-        protected(system, context, &config)?
-    } else {
-        Definition {
-            exe: context.exe.clone(),
-            dir: platform.parent(&config).unwrap_or_else(|| config.clone()),
-            config,
-        }
-    };
-    if target.installed(system, context)? {
-        return Err(format!(
-            "open-ferry is already installed as {} ({}). To install it again, run `open-ferry {NAME} uninstall{}` first.",
-            target.kind(),
-            target.location(context)?,
-            target.flag()
-        ));
-    }
-    let plan = install_plan(system, context, target, &definition, &account)?;
+    let Prepared {
+        plan,
+        definition,
+        account,
+    } = prepare_install(system, context, target, &config, None, request.dry_run)?;
     if request.dry_run {
         describe(&plan, out);
         if target.system() && !account.privileged() {
@@ -1119,6 +1077,91 @@ fn install(
         ),
     );
     Ok(())
+}
+
+/// What installing open-ferry as `target` would do, and the account doing
+/// it.
+pub(crate) struct Prepared {
+    pub(crate) plan: Plan,
+    pub(crate) definition: Definition,
+    pub(crate) account: Account,
+}
+
+/// Checks that open-ferry can be installed as `target` with `config`, a
+/// full path, and makes the plan that installs it, changing nothing. The
+/// service runs in `dir` when it is given (`open-ferry migrate` keeps
+/// CLIProxyAPI's working directory), else in the config's directory. With
+/// `dry_run`, a system service is planned without root or an
+/// administrator.
+pub(crate) fn prepare_install(
+    system: &mut dyn System,
+    context: &Context,
+    target: Target,
+    config: &str,
+    dir: Option<&str>,
+    dry_run: bool,
+) -> Result<Prepared, String> {
+    let platform = context.platform;
+    let config = config.to_owned();
+    check_path(platform, "The open-ferry binary's path", &context.exe)?;
+    check_path(platform, "The config's path", &config)?;
+    if let Some(dir) = dir {
+        check_path(platform, "The working directory's path", dir)?;
+    }
+    let account = Account::probe(system, platform, target)?;
+    let command = format!(
+        "{} {NAME} install{} -config {}",
+        platform.quote(&context.exe),
+        target.flag(),
+        platform.quote(&config)
+    );
+    if let Account::Unix { uid: 0 } = account
+        && !target.system()
+    {
+        return Err(format!(
+            "You are root, so this would install a service for root. Run it as the user the service is for, or add -system for a service of the whole machine:\n  {command}"
+        ));
+    }
+    if target.system() && !account.privileged() && !dry_run {
+        return Err(needs_admin(platform, "Installing", &command));
+    }
+    if !system.exists(&config) {
+        return Err(format!(
+            "There is no config at {config}. Make one with `open-ferry init`, or name another with -config."
+        ));
+    }
+    let data = system
+        .read(&config)
+        .map_err(|error| format!("failed to read the config at {config}: {error}"))?;
+    let loaded = Config::load_bytes(&data)
+        .map_err(|error| format!("The config at {config} doesn't load: {error}"))?;
+    let definition = if target.system() {
+        check_auth_dir(platform, &loaded)?;
+        protected(system, context, &config, dir)?
+    } else {
+        Definition {
+            exe: context.exe.clone(),
+            dir: match dir {
+                Some(dir) => dir.to_owned(),
+                None => platform.parent(&config).unwrap_or_else(|| config.clone()),
+            },
+            config,
+        }
+    };
+    if target.installed(system, context)? {
+        return Err(format!(
+            "open-ferry is already installed as {} ({}). To install it again, run `open-ferry {NAME} uninstall{}` first.",
+            target.kind(),
+            target.location(context)?,
+            target.flag()
+        ));
+    }
+    let plan = install_plan(system, context, target, &definition, &account)?;
+    Ok(Prepared {
+        plan,
+        definition,
+        account,
+    })
 }
 
 /// Refuses a path a service definition can't hold.
@@ -1168,9 +1211,10 @@ fn protected(
     system: &mut dyn System,
     context: &Context,
     config: &str,
+    dir: Option<&str>,
 ) -> Result<Definition, String> {
     let platform = context.platform;
-    let (exe, config) = match platform {
+    let (exe, config, dir) = match platform {
         Platform::Windows => {
             let roots: Vec<&str> = [
                 "ProgramFiles",
@@ -1183,7 +1227,10 @@ fn protected(
             .filter(|dir| platform.is_absolute(dir))
             .collect();
             let program_files = context.var("ProgramFiles").unwrap_or(r"C:\Program Files");
-            for path in [&context.exe, config] {
+            for path in [Some(context.exe.as_str()), Some(config), dir]
+                .into_iter()
+                .flatten()
+            {
                 if !roots.iter().any(|root| platform.is_within(path, root)) {
                     return Err(format!(
                         "A Windows service runs as LocalSystem, so open-ferry's binary and its config must be where only administrators can change them, such as {program_files}; {path} isn't. Copy them to {}, and pass -config.",
@@ -1191,7 +1238,11 @@ fn protected(
                     ));
                 }
             }
-            (context.exe.clone(), config.to_owned())
+            (
+                context.exe.clone(),
+                config.to_owned(),
+                dir.map(str::to_owned),
+            )
         }
         Platform::Linux | Platform::MacOs => {
             let real = |system: &mut dyn System, path: &str| {
@@ -1201,19 +1252,23 @@ fn protected(
             };
             let exe = real(system, &context.exe)?;
             let config = real(system, config)?;
-            for path in [&exe, &config] {
+            let dir = dir.map(|dir| real(system, dir)).transpose()?;
+            for path in [Some(&exe), Some(&config), dir.as_ref()]
+                .into_iter()
+                .flatten()
+            {
                 if let Some(problem) = unprotected(system, platform, path)? {
                     return Err(format!(
                         "A system service runs as root, so open-ferry's binary and its config, and the directories above them, must be owned by root and writable by no one else; {problem}. Copy them where only root can change them, such as /usr/local/bin/open-ferry and /etc/open-ferry/config.yaml, and pass -config."
                     ));
                 }
             }
-            (exe, config)
+            (exe, config, dir)
         }
     };
     Ok(Definition {
         exe,
-        dir: platform.parent(&config).unwrap_or_else(|| config.clone()),
+        dir: dir.unwrap_or_else(|| platform.parent(&config).unwrap_or_else(|| config.clone())),
         config,
     })
 }
@@ -1302,7 +1357,7 @@ fn install_plan(
 }
 
 /// What to say once `install` is done.
-fn installed_notes(context: &Context, target: Target, definition: &Definition) -> String {
+pub(crate) fn installed_notes(context: &Context, target: Target, definition: &Definition) -> String {
     let windows_log = || context.platform.join(&definition.dir, windows::LOG_FILE);
     match target {
         Target::SystemdUser | Target::SystemdSystem => systemd::notes(target.system()),
@@ -1315,7 +1370,7 @@ fn installed_notes(context: &Context, target: Target, definition: &Definition) -
     }
 }
 
-fn uninstall(
+pub(crate) fn uninstall(
     system: &mut dyn System,
     context: &Context,
     target: Target,
