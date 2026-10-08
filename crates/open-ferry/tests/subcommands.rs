@@ -111,7 +111,8 @@ fn init_writes_a_config_that_check_passes() {
             "auth directory",
             "address",
             "dashboard",
-            "clock"
+            "clock",
+            "self-update"
         ]
     );
 

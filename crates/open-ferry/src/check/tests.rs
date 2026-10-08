@@ -8,6 +8,7 @@ use tokio::net::{TcpListener, TcpSocket};
 
 use super::*;
 
+mod self_update;
 mod separate_address;
 
 /// The time the tests take as now.
@@ -21,6 +22,13 @@ fn env() -> Environment {
         build_date: None,
         dashboard_built: true,
         management_password: false,
+        updates: super::self_update::Updates {
+            mode_env: None,
+            trusts_key: true,
+            install: open_ferry_update::Install::SelfUpdating {
+                binary: PathBuf::from("/usr/local/bin/open-ferry"),
+            },
+        },
     }
 }
 
@@ -129,6 +137,7 @@ async fn a_good_setup_is_all_ok() {
             (Level::Ok, "address"),
             (Level::Ok, "dashboard"),
             (Level::Ok, "clock"),
+            (Level::Ok, "self-update"),
         ],
         "{findings:#?}"
     );

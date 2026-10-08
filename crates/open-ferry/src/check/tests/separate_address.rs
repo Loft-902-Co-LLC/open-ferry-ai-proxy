@@ -42,6 +42,7 @@ async fn checks_the_management_address() {
             (Level::Ok, "management address"),
             (Level::Ok, "dashboard"),
             (Level::Ok, "clock"),
+            (Level::Ok, "self-update"),
         ],
         "{findings:#?}"
     );

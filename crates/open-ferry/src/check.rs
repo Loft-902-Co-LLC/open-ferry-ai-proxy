@@ -30,7 +30,8 @@
 //!   build date (release builds know it), and against each credential's
 //!   last refresh and expiry;
 //! - each enabled `claude-cli` entry's Claude Code, with `claude --version`
-//!   as the server checks it at start. It never runs `claude auth status`.
+//!   as the server checks it at start. It never runs `claude auth status`;
+//! - whether open-ferry updates itself, and can (see [`self_update`]).
 //!
 //! It writes nothing, and its only connections are those to loopback.
 //!
@@ -57,6 +58,7 @@ use serde_json::{Map, Value, json};
 use crate::flags::{self, Definition, FlagError, Kind};
 
 mod management;
+mod self_update;
 
 /// The subcommand's name: the first argument that runs it.
 pub const NAME: &str = "check";
@@ -247,6 +249,8 @@ struct Environment {
     dashboard_built: bool,
     /// Whether `MANAGEMENT_PASSWORD` sets a management key.
     management_password: bool,
+    /// What the `self-update` finding reads.
+    updates: self_update::Updates,
 }
 
 impl Environment {
@@ -261,6 +265,7 @@ impl Environment {
             dashboard_built: open_ferry_dashboard::app_built(),
             management_password: open_ferry_management::management_password_from_env()
                 .is_some_and(|password| !password.is_empty()),
+            updates: self_update::Updates::current(),
         }
     }
 }
@@ -281,6 +286,7 @@ async fn run(path: &Path, env: &Environment) -> Vec<Finding> {
     check_dashboard(&config, env, &mut findings);
     check_clock(env, &auths, &mut findings);
     check_claude_cli(&config, &mut findings).await;
+    self_update::check_self_update(&config, env, &mut findings);
     findings
 }
 
