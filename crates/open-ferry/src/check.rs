@@ -180,14 +180,14 @@ fn usage_error(program: &str, message: &str) -> ExitCode {
 
 /// How much a finding matters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum Level {
+pub(crate) enum Level {
     Ok,
     Warning,
     Error,
 }
 
 impl Level {
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Level::Ok => "ok",
             Level::Warning => "warning",
@@ -199,11 +199,11 @@ impl Level {
 /// One finding: its level, what was checked, what was found, and what to
 /// do when it isn't ok. None of it holds a secret.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Finding {
-    level: Level,
-    check: String,
-    message: String,
-    fix: String,
+pub(crate) struct Finding {
+    pub(crate) level: Level,
+    pub(crate) check: String,
+    pub(crate) message: String,
+    pub(crate) fix: String,
 }
 
 impl Finding {
@@ -239,22 +239,22 @@ impl Finding {
 }
 
 /// What the checks read besides the config.
-struct Environment {
+pub(crate) struct Environment {
     /// The system time.
-    now: DateTime<Utc>,
+    pub(crate) now: DateTime<Utc>,
     /// When this binary was built, when the build said
     /// (`OPEN_FERRY_BUILD_DATE`).
-    build_date: Option<DateTime<Utc>>,
+    pub(crate) build_date: Option<DateTime<Utc>>,
     /// Whether the dashboard app is built in.
-    dashboard_built: bool,
+    pub(crate) dashboard_built: bool,
     /// Whether `MANAGEMENT_PASSWORD` sets a management key.
-    management_password: bool,
+    pub(crate) management_password: bool,
     /// What the `self-update` finding reads.
     updates: self_update::Updates,
 }
 
 impl Environment {
-    fn current() -> Self {
+    pub(crate) fn current() -> Self {
         Self {
             now: Utc::now(),
             build_date: option_env!("OPEN_FERRY_BUILD_DATE").and_then(|date| {
@@ -272,7 +272,7 @@ impl Environment {
 
 /// Checks the setup of the config at `path`. Without a config that loads,
 /// that is the only finding.
-async fn run(path: &Path, env: &Environment) -> Vec<Finding> {
+pub(crate) async fn run(path: &Path, env: &Environment) -> Vec<Finding> {
     let mut findings = Vec::new();
     let Some(config) = check_config(path, &mut findings) else {
         return findings;
