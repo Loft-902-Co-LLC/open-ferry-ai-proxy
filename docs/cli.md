@@ -308,7 +308,7 @@ A command that calls the server looks for the management key in this order:
 2. `MANAGEMENT_PASSWORD`, from the environment or `.env`;
 3. the first line of the file `--management-key-file` names, else of the file `OPEN_FERRY_MANAGEMENT_KEY_FILE` names.
 
-The key is never taken from the command line, where process lists, shell history and agent transcripts would keep it: `--management-key`, `--management-password`, `--password`, `--secret-key` and `--api-key` are refused with exit code 2. With a hashed key in the config and no other, the settings commands change the file and the others say there is no key.
+The key is never taken from the command line, where process lists, shell history and agent transcripts would keep it: `--management-key`, `--management-password`, `--password`, `--secret-key` and `--api-key` are refused with exit code 2, as is any other flag whose name names a secret (`--token`, `--client-secret`, `--cookie` and the like). An unknown flag is named in the error without its value, and one with an odd or long name isn't repeated at all. With a hashed key in the config and no other, the settings commands change the file and the others say there is no key.
 
 ### What needs `--yes`
 
