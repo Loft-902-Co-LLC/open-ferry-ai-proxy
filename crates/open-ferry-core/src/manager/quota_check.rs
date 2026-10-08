@@ -28,9 +28,11 @@
 //! claim of a check in flight. `save-cooldown-status` saves the first three
 //! with the cooldown they belong to (see `cooldown_store`), so a restart
 //! keeps the doubling; a check in flight at the save is due at once after
-//! the restart. Turning the cap off forgets the rests as each credential's
-//! next outcome is recorded, and stops claims and saves at once; the times
-//! already brought back stay.
+//! the restart. A credential's rests are forgotten when it is removed,
+//! registered again or reloaded from the store, as its cooldowns are
+//! replaced then. Turning the cap off forgets the rests as each
+//! credential's next outcome is recorded, and stops claims and saves at
+//! once; the times already brought back stay.
 //!
 //! Deviations from upstream:
 //! - The whole module is open-ferry's own. Upstream rests a credential

@@ -401,6 +401,35 @@ async fn reset_quota_forgets_the_rest() {
     assert_eq!(rig.checks(), [check(MODEL, rig.at(HOUR), reset, HOUR)]);
 }
 
+// Not upstream's: a credential removed, or registered again, takes its
+// capped rests with it, so none is left to hold back the next one's calls.
+#[tokio::test(start_paused = true)]
+async fn a_removed_or_replaced_credential_forgets_its_rest() {
+    let rig = Rig::new(HOUR, &[MODEL]);
+    let reset = rig.at(5 * DAY);
+    rig.answer(Answer::Quota(reset, false));
+    assert!(!rig.call(MODEL).await);
+    assert_eq!(rig.checks().len(), 1);
+    rig.h.manager.remove("a");
+    assert_eq!(rig.checks(), []);
+
+    rig.h.add(auth("a", "claude"), &[MODEL]);
+    assert_eq!(rig.checks(), []);
+    assert!(!rig.call(MODEL).await);
+    assert_eq!(rig.checks().len(), 1);
+    rig.h.add(auth("a", "claude"), &[MODEL]);
+    assert_eq!(rig.checks(), []);
+
+    // Its calls aren't held back as checks.
+    rig.executor.set_delay(Duration::from_secs(10));
+    rig.answer(Answer::Ok);
+    let manager = rig.h.manager.clone();
+    let first = tokio::spawn(async move { call(&manager, MODEL).await });
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(rig.call(MODEL).await, "a second call at once");
+    assert!(first.await.expect("join"));
+}
+
 /// Installs `store` on `rig`'s manager and restores from it, as a start
 /// with `save-cooldown-status` on does. It saves only when flushed.
 fn attach(rig: &Rig, store: &Arc<RecordingStore>) {

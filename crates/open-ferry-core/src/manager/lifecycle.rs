@@ -263,6 +263,8 @@ impl Manager {
                 None => {}
             }
             auth.generation = 1;
+            // open-ferry's capped quota rests go with the state replaced.
+            state.quota_checks.forget(&auth.id);
             let snapshot = Arc::new(auth);
             state.auths.insert(
                 snapshot.id.clone(),
@@ -479,6 +481,7 @@ impl Manager {
             if let Some(affinity) = state.affinity.as_mut() {
                 affinity.invalidate_auth(id);
             }
+            state.quota_checks.forget(id);
             state.sync_scheduler(self.models(), id, self.now());
             let slot = state.epochs.entry(id.to_owned()).or_insert(0);
             *slot = (*slot)
@@ -511,6 +514,10 @@ impl Manager {
         let mut guard = self.lock();
         let state = &mut *guard;
         let previous = std::mem::take(&mut state.auths);
+        // open-ferry's capped quota rests go with the state replaced.
+        for id in previous.keys() {
+            state.quota_checks.forget(id);
+        }
         for mut auth in items {
             if auth.id.is_empty() {
                 continue;
