@@ -2,6 +2,8 @@
 
 How open-ferry picks a credential for each request, and the two routing settings of its own: routing by the quota the providers report, and a cap on long quota rests. CLIProxyAPI has neither; see [what it does with them](#cliproxyapi-and-these-settings).
 
+The dashboard's Settings page sets both, and its Credentials page and Overview say when each capped rest is next checked.
+
 ## How a credential is picked
 
 For each request, the credential manager takes the credentials that can serve the model and aren't resting (cooling down after a failure, turned off, or out of quota), then:
