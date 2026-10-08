@@ -290,8 +290,8 @@ export function SaveBar({
         </p>
       )}
       {reviewError !== null && <ProblemNotice problem={callProblem(reviewError)} live />}
-      <div className={active ? "flex flex-wrap items-center justify-between gap-3" : "sr-only"}>
-        <p role="status" className="font-medium">
+      <div className={active ? "flex flex-wrap items-center justify-between gap-3" : undefined}>
+        <p role="status" className={active ? "font-medium" : "sr-only"}>
           {unsaved === 0
             ? "No unsaved changes."
             : `${plural(unsaved, "unsaved change", "unsaved changes")}.`}
