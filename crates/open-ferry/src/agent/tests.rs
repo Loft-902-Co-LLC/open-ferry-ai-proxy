@@ -659,6 +659,250 @@ async fn sensitive_settings_need_a_confirmation() {
     ok(&ctx, set("routing.strategy", "fill-first")).await;
 }
 
+/// Whether `command` is refused for want of a confirmation, from the
+/// command line and as a tool, with a reason that holds each of `reasons`,
+/// leaving the config as it was.
+async fn needs_confirmation_for(setup: &Setup, command: &Command, reasons: &[&str]) {
+    let before = setup.text();
+    for caller in [Caller::Cli, Caller::Mcp] {
+        let failure = fails(&context(&setup.path, caller), command.clone()).await;
+        assert_eq!(
+            failure.error, "needs_confirmation",
+            "{reasons:?}: {failure:?}"
+        );
+        let would = failure.would.clone().unwrap();
+        let given = would["reasons"].to_string();
+        for reason in reasons {
+            assert!(given.contains(reason), "{reason} not in {given}");
+        }
+        assert!(!failure_shows(&failure, KEY));
+        assert!(!failure_shows(&failure, CLIENT_KEY));
+        assert_eq!(setup.text(), before);
+    }
+}
+
+// Not upstream's: a section set or unset whole is checked for each
+// sensitive setting in it, and a parent set to a value that isn't a
+// mapping is refused.
+#[tokio::test]
+async fn sections_set_whole_are_checked() {
+    let offline = offline(Some(KEY));
+    let setup = &offline.setup;
+    let before = setup.text();
+    needs_confirmation_for(setup, &set("server", "{}"), &["server.host"]).await;
+    needs_confirmation_for(setup, &unset("server"), &["server.host"]).await;
+    needs_confirmation_for(
+        setup,
+        &set("server", r#"{"host": "0.0.0.0", "port": 1}"#),
+        &["server.host would be 0.0.0.0"],
+    )
+    .await;
+    needs_confirmation_for(setup, &set("management", "{}"), &["management.secret-key"]).await;
+    needs_confirmation_for(setup, &unset("management"), &["management.secret-key"]).await;
+    needs_confirmation_for(
+        setup,
+        &set("management", r#"{"allow-remote": true}"#),
+        &["management.allow-remote", "management.secret-key"],
+    )
+    .await;
+    for ctx in [cli(&setup.path), confirmed(&setup.path, Caller::Mcp)] {
+        for value in ["null", "1", "[]", "text"] {
+            for path in ["server", "management", "access"] {
+                let failure = fails(&ctx, set(path, value)).await;
+                assert_eq!(
+                    failure.error, "invalid_value",
+                    "{path} {value}: {failure:?}"
+                );
+                assert_eq!(setup.text(), before, "{path} {value}");
+            }
+        }
+    }
+}
+
+// Not upstream's: a pre-v8 name isn't taken for its v8 setting, so it
+// can't go around the checks: `config set` and `config unset` refuse it,
+// naming the v8 one, and so does `config replace`, for a config that holds
+// one.
+#[tokio::test]
+async fn legacy_names_are_refused() {
+    let offline = offline(Some(KEY));
+    let setup = &offline.setup;
+    let port = offline_port(setup);
+    let before = setup.text();
+    let ctx = confirmed(&setup.path, Caller::Cli);
+    for (legacy, current, value) in [
+        ("host", "server.host", "0.0.0.0"),
+        ("tls.enable", "server.tls.enable", "true"),
+        (
+            "remote-management.allow-remote",
+            "management.allow-remote",
+            "true",
+        ),
+        ("remote-management.secret-key", "management.secret-key", ""),
+    ] {
+        for command in [set(legacy, value), unset(legacy)] {
+            let failure = fails(&ctx, command).await;
+            assert!(
+                matches!(failure.error, "unknown_path" | "secret_in_argument"),
+                "{legacy}: {failure:?}"
+            );
+            assert_eq!(failure.code, exit::USAGE);
+            if failure.error == "unknown_path" {
+                assert!(failure.text().contains(current), "{legacy}: {failure:?}");
+            }
+        }
+    }
+    // `api-keys` is the v8 providers' keys: never the client keys, and a
+    // secret.
+    let failure = fails(&ctx, set("api-keys", r#"["sk-new-0123456789"]"#)).await;
+    assert_eq!(failure.error, "secret_in_argument", "{failure:?}");
+    let failure = fails(
+        &ctx,
+        set_from(
+            "api-keys",
+            Source::Stdin(r#"["sk-new-0123456789"]"#.to_owned()),
+        ),
+    )
+    .await;
+    assert_eq!(failure.error, "invalid_value", "{failure:?}");
+    assert!(!failure_shows(&failure, "sk-new-0123456789"));
+    assert_eq!(setup.text(), before);
+
+    // A whole config with an old name, or all in the old layout, is
+    // refused, naming the v8 setting.
+    let current = config_text(u16::try_from(port).unwrap(), Some(KEY), &setup.auth_dir);
+    let auth_dir = setup.auth_dir.display().to_string().replace('\\', "/");
+    for (legacy, name) in [
+        ("host: \"0.0.0.0\"\n".to_owned(), "server.host"),
+        ("tls:\n  enable: true\n".to_owned(), "server.tls"),
+        (
+            "remote-management:\n  allow-remote: true\n".to_owned(),
+            "management.allow-remote",
+        ),
+        (
+            format!("api-keys:\n  - \"{CLIENT_KEY}\"\n"),
+            "access.api-keys",
+        ),
+        (
+            format!(
+                "host: \"0.0.0.0\"\nport: {port}\nremote-management:\n  allow-remote: true\n  secret-key: \"{KEY}\"\napi-keys: []\nauth-dir: '{auth_dir}'\n"
+            ),
+            "",
+        ),
+    ] {
+        let text = if name.is_empty() {
+            legacy.clone()
+        } else {
+            format!("{current}{legacy}")
+        };
+        let file = setup.file("old.yaml", &text);
+        let failure = fails(
+            &ctx,
+            Command::ConfigReplace(ReplaceInput {
+                source: Source::File(file),
+            }),
+        )
+        .await;
+        assert_eq!(failure.error, "invalid_value", "{legacy}: {failure:?}");
+        assert!(failure.message.contains(name), "{legacy}: {failure:?}");
+        assert!(!failure_shows(&failure, KEY));
+        assert!(!failure_shows(&failure, CLIENT_KEY));
+        assert_eq!(setup.text(), before);
+    }
+}
+
+// Not upstream's: an undo, and a replace, give the reason of each
+// sensitive setting they change, besides their own.
+#[tokio::test]
+async fn undo_and_replace_give_their_reasons() {
+    let offline = offline(Some(KEY));
+    let setup = &offline.setup;
+    let ctx = confirmed(&setup.path, Caller::Cli);
+    ok(&ctx, set("server.host", "0.0.0.0")).await;
+    ok(&cli(&setup.path), set("server.host", "localhost")).await;
+    needs_confirmation_for(
+        setup,
+        &Command::ConfigUndo,
+        &["server.host would be 0.0.0.0"],
+    )
+    .await;
+    ok(&ctx, set("management.allow-remote", "true")).await;
+    ok(&ctx, set("management.allow-remote", "false")).await;
+    needs_confirmation_for(setup, &Command::ConfigUndo, &["management.allow-remote"]).await;
+    let undone = ok(&ctx, Command::ConfigUndo).await;
+    assert_eq!(
+        ok(&ctx, get("management.allow-remote")).await.json["value"],
+        json!(true),
+        "{}",
+        undone.text
+    );
+
+    let port = offline_port(setup);
+    let open = setup.file(
+        "open.yaml",
+        &config_text(u16::try_from(port).unwrap(), Some(KEY), &setup.auth_dir).replace(
+            "host: \"127.0.0.1\"",
+            "host: \"192.0.2.1\"\n  trusted-proxies: [\"10.0.0.0/8\"]",
+        ),
+    );
+    needs_confirmation_for(
+        setup,
+        &Command::ConfigReplace(ReplaceInput {
+            source: Source::File(open),
+        }),
+        &[
+            "it replaces the whole config",
+            "server.host would be 192.0.2.1",
+            "server.trusted-proxies",
+            "management.allow-remote",
+        ],
+    )
+    .await;
+}
+
+// Not upstream's: a whole config with YAML anchors, aliases and merge keys
+// is checked as it loads, so a sensitive setting reached through one is
+// found, and the changes name the settings, not the YAML.
+#[tokio::test]
+async fn anchors_and_merge_keys_are_resolved() {
+    let offline = offline(Some(KEY));
+    let setup = &offline.setup;
+    let port = offline_port(setup);
+    let auth_dir = setup.auth_dir.display().to_string().replace('\\', "/");
+    let merged = setup.file(
+        "merged.yaml",
+        &format!(
+            "config-version: 8\nserver:\n  <<: {{host: \"0.0.0.0\"}}\n  port: {port}\nmanagement:\n  secret-key: \"{KEY}\"\naccess:\n  api-keys:\n    - &first \"{CLIENT_KEY}\"\noauth:\n  auth-dir: '{auth_dir}'\n"
+        ),
+    );
+    let aliased = setup.file(
+        "aliased.yaml",
+        &format!(
+            "config-version: 8\nserver:\n  host: \"127.0.0.1\"\n  port: {port}\naccess:\n  api-keys:\n    - &first \"{CLIENT_KEY}\"\nmanagement:\n  secret-key: *first\noauth:\n  auth-dir: '{auth_dir}'\n"
+        ),
+    );
+    let replace = |file: &PathBuf| {
+        Command::ConfigReplace(ReplaceInput {
+            source: Source::File(file.clone()),
+        })
+    };
+    needs_confirmation_for(setup, &replace(&merged), &["server.host would be 0.0.0.0"]).await;
+    needs_confirmation_for(setup, &replace(&aliased), &["management.secret-key"]).await;
+    let failure = fails(&cli(&setup.path), replace(&merged)).await;
+    let changes = failure.would.unwrap()["changes"].clone();
+    assert_eq!(
+        changes,
+        json!([{"path": "server.host", "old": "127.0.0.1", "new": "0.0.0.0"}])
+    );
+
+    let ctx = confirmed(&setup.path, Caller::Cli);
+    ok(&ctx, replace(&merged)).await;
+    assert_eq!(
+        ok(&ctx, get("server.host")).await.json["value"],
+        json!("0.0.0.0")
+    );
+}
+
 // Not upstream's: client keys are counted as the server counts them, so a
 // list of blank keys is no key: making the list blank needs a
 // confirmation, by `config set` or `config replace`, from the command line
