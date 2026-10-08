@@ -1,8 +1,20 @@
 import type { ReactNode } from "react";
+import { Link } from "react-router";
 
 import type { CallProblem } from "../api/access";
+import { useSession } from "../session/session";
 import { Alert, type AlertTone } from "./Alert";
 import { Code } from "./Code";
+
+/** Where the server log is shown: the Logs page's second tab. */
+export const SERVER_LOG_PATH = "/logs?tab=server";
+
+/** "server log", linked to it while signed in; signed out, the Logs page
+ * isn't open to you, so it stays plain text. */
+function ServerLogLink() {
+  const { key } = useSession();
+  return key === null ? "server log" : <Link to={SERVER_LOG_PATH}>server log</Link>;
+}
 
 interface Explanation {
   tone: AlertTone;
@@ -137,8 +149,8 @@ export function explainProblem(problem: CallProblem): Explanation {
         title: `The server failed (HTTP ${String(problem.status)})`,
         body: (
           <p>
-            {problem.message ?? "It didn't say why."} The server's log may say more. Try again in a
-            moment.
+            {problem.message ?? "It didn't say why."} The <ServerLogLink /> may say more. Try again
+            in a moment.
           </p>
         ),
       };

@@ -200,6 +200,18 @@ describe("the request log search", () => {
     expect(await screen.findByRole("heading", { name: "Logs", level: 1 })).toBeVisible();
     expect(router.state.location.pathname).toBe("/logs");
   });
+
+  it("links a server failure to the server log", async () => {
+    mockApi(
+      route("GET", REQUEST_LOGS, { status: 500, json: { error: "disk full" } }),
+      route("GET", SERVER_LOGS, { json: serverLogPage(["[info ] started"]) }),
+    );
+    const { user, router } = renderApp("/logs");
+    expect(await screen.findByText("The server failed (HTTP 500)")).toBeVisible();
+    await user.click(screen.getByRole("link", { name: "server log" }));
+    expect(await screen.findByRole("log", { name: "Server log lines" })).toBeVisible();
+    expect(router.state.location.search).toBe("?tab=server");
+  });
 });
 
 describe("the server log", () => {
