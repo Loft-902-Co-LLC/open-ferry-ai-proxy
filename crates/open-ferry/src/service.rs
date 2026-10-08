@@ -137,6 +137,9 @@
 //!   loaded, at start as on a reload; P3 ports what is behind them. pprof,
 //!   the discovery advertiser, the WebSocket gateway, plugins and Home
 //!   aren't ported.
+//! - open-ferry's own update checks (see `docs/updates.md`) run beside
+//!   the server when [`Options::self_update`] is set, and follow the
+//!   config's `self-update` on a reload; upstream has none.
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::io;
@@ -174,6 +177,8 @@ use open_ferry_providers::openai_compat::OpenAiCompatExecutor;
 use open_ferry_providers::xai::XaiExecutor;
 use open_ferry_server::{AppState, ServerConfig, router_with};
 use open_ferry_translate::go;
+use open_ferry_update::background::{self as update_checks, FIRST_CHECK};
+use open_ferry_update::{DataDir, UpdateService, Updater, settings as update_settings};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -221,6 +226,9 @@ pub struct Options {
     /// there since. Without it, nothing is checked until the config is
     /// loaded again or written.
     pub config_sha256: Option<String>,
+    /// Whether to run open-ferry's own update checks beside the server,
+    /// as `self-update` in the config says. Not upstream's.
+    pub self_update: bool,
 }
 
 /// Serves until `stop` resolves, or until the server fails.
@@ -258,6 +266,11 @@ pub async fn run(
         .with_local_password(&options.local_password);
     if let Some(sha256) = &options.config_sha256 {
         service.management = service.management.clone().with_config_sha256(sha256);
+    }
+    if options.self_update
+        && let Some(updates) = start_update_checks(&config)
+    {
+        service.management = service.management.clone().with_updates(updates);
     }
     service.register_executors();
     claude_cli::warn_outdated(&config.claude_cli);
@@ -359,6 +372,7 @@ pub async fn run(
                 break;
             }
             result = &mut server => {
+                stop_update_checks(&service.management);
                 service.stop_catalogs();
                 service.manager.stop_auto_refresh();
                 service.management.shutdown().await;
@@ -391,10 +405,54 @@ pub async fn run(
 
 type Server = tokio::task::JoinHandle<io::Result<()>>;
 
-/// Stops following the catalog files, refresh, the management API's OAuth
+/// Starts open-ferry's own update checks for this binary, the first a few
+/// minutes from now, or warns and returns `None` when they can't run. The
+/// checks follow `config`'s `self-update`; while it is `off` they make no
+/// request.
+fn start_update_checks(config: &Config) -> Option<UpdateService> {
+    let data = match DataDir::for_this_user() {
+        Ok(data) => data,
+        Err(error) => {
+            tracing::warn!("update checks don't run: {error}");
+            return None;
+        }
+    };
+    let make_fetch = update_checks::http_fetch();
+    // Each check makes its own downloader from the config in force, so a
+    // `proxy-url` that can't be used yet only fails the checks it is
+    // in force for.
+    let fetch = match make_fetch(&config.proxy_url).or_else(|_| make_fetch("")) {
+        Ok(fetch) => fetch,
+        Err(error) => {
+            tracing::warn!("update checks don't run: {error}");
+            return None;
+        }
+    };
+    match Updater::for_this_binary(fetch, data) {
+        Ok(updater) => {
+            let updates = UpdateService::new(updater, make_fetch, config);
+            updates.start(update_settings::between(FIRST_CHECK.0, FIRST_CHECK.1));
+            Some(updates)
+        }
+        Err(error) => {
+            tracing::warn!("update checks don't run: {error}");
+            None
+        }
+    }
+}
+
+/// Stops the update checks, if they run.
+fn stop_update_checks(management: &ManagementState) {
+    if let Some(updates) = management.updates() {
+        updates.stop();
+    }
+}
+
+/// Stops the update checks, following the catalog files, refresh, the management API's OAuth
 /// logins and the server, giving open requests up to [`SHUTDOWN_TIMEOUT`],
 /// then the usage ledger, and saves the cooldowns.
 async fn shut_down(service: &Service, stop: &watch::Sender<bool>, mut server: Server) -> ExitCode {
+    stop_update_checks(&service.management);
     service.stop_catalogs();
     service.manager.stop_auto_refresh();
     service.management.shutdown().await;
@@ -1285,6 +1343,9 @@ impl Service {
         self.state.set_config(ServerConfig::from(&*config));
         self.management
             .set_loaded_config(Arc::clone(&config), sha256);
+        if let Some(updates) = self.management.updates() {
+            updates.set_config(&config);
+        }
         // Before any credential is registered, so they get its models.
         self.catalogs.update(&config.models);
         if previous.claude_cli != config.claude_cli {
@@ -1707,6 +1768,49 @@ mod tests {
         service.start_catalogs();
         await_catalog_model(&mut service, "claude-after-a-restart").await;
         service.stop_catalogs();
+    }
+
+    // Not upstream's: the update checks follow a reloaded config's
+    // `self-update`.
+    #[tokio::test]
+    async fn a_reload_passes_self_update_to_the_update_checks() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut service = service(dir.path(), "");
+        let make_fetch = update_checks::http_fetch();
+        let updater = Updater {
+            base: open_ferry_update::fetch::parse_base_url("http://127.0.0.1:9/").unwrap(),
+            keys: open_ferry_update::ReleaseKeys::none(),
+            system: Arc::new(open_ferry_update::install::RealSystem { write_probe: false }),
+            ..Updater::for_this_binary(
+                make_fetch("").unwrap(),
+                DataDir::at(dir.path().join("updates")),
+            )
+            .unwrap()
+        };
+        let updates = UpdateService::new(updater, make_fetch, &service.config);
+        service.management = service.management.clone().with_updates(updates.clone());
+        assert_eq!(
+            updates.settings().mode,
+            open_ferry_update::SelfUpdateMode::Auto
+        );
+
+        let config = format!(
+            "auth-dir: '{}'
+self-update:
+  mode: off
+",
+            dir.path().display()
+        );
+        service.apply_config(
+            Arc::new(Config::parse(config).unwrap()),
+            &dir.path().join("config.yaml"),
+        );
+
+        assert_eq!(
+            updates.settings().mode,
+            open_ferry_update::SelfUpdateMode::Off
+        );
+        stop_update_checks(&service.management);
     }
 
     #[tokio::test]

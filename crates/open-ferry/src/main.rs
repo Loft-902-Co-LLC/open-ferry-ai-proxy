@@ -217,6 +217,7 @@ async fn run(
         keep_alive: true,
         announce: true,
         config_sha256: Some(config_sha256),
+        self_update: true,
     };
     service::run(config, config_path, auth_dir, log_level, options, stop).await
 }

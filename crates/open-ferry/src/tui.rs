@@ -120,6 +120,7 @@ async fn standalone(
         keep_alive: false,
         announce: false,
         config_sha256: Some(config_sha256),
+        self_update: false,
     };
     let server = tokio::spawn(service::run(
         config,
