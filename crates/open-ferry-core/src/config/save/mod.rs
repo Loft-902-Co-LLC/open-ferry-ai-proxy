@@ -22,6 +22,9 @@
 //!   first, and comment lines are moved to the start of their line.
 //! - [`write_as_is`] writes a whole file unchanged; it is this port's, for
 //!   `open-ferry init`.
+//! - [`undo`] puts back the file's previous contents from its backup, and
+//!   [`defaults`] gives the settings an empty config holds; both are this
+//!   port's, for `open-ferry config`.
 //!
 //! YAML is read and written with a port of gopkg.in/yaml.v3 (the
 //! crate-private `config::yaml3`), so the bytes written are upstream's.
@@ -53,10 +56,11 @@ mod v8;
 mod write;
 
 use std::borrow::Cow;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::{fmt, io};
 
 use super::Config;
+use super::layout::V8Document;
 use super::v8 as loader_v8;
 use super::yaml as loader_yaml;
 use super::yaml3::compose::{self, YamlError};
@@ -90,6 +94,8 @@ pub enum SaveErrorKind {
     Symlink,
     /// The config holds a value the writer can't express.
     Unwritable,
+    /// There is no backup to undo to (see [`undo`]).
+    NoBackup,
 }
 
 /// A refused config write; nothing was written. The message is upstream's
@@ -209,6 +215,48 @@ pub fn write_file(path: &Path, bytes: &[u8]) -> Result<(), SaveError> {
 /// `open-ferry init` writes the config it makes with it.
 pub fn write_as_is(path: &Path, bytes: &[u8]) -> Result<(), SaveError> {
     write::commit(path, bytes)
+}
+
+/// Where every write here keeps the contents it replaced: `<file
+/// name>.bak` beside the file at `path`.
+pub fn backup_path(path: &Path) -> PathBuf {
+    write::backup_path(path)
+}
+
+/// Puts back the contents the last write replaced: writes the backup of
+/// the config file at `path` (see [`backup_path`]) as the file, with the
+/// checks every write here has. That write keeps what it replaces as the
+/// new backup, so undoing again puts it back. Returns the config the file
+/// now holds. Not upstream's: `open-ferry config undo` uses it.
+pub fn undo(path: &Path) -> Result<Config, SaveError> {
+    let backup = write::backup_path(path);
+    let data = match write::read(&backup) {
+        Ok(data) => data,
+        Err(error) if error.kind() == SaveErrorKind::Io && !backup.exists() => {
+            return Err(SaveError::new(
+                SaveErrorKind::NoBackup,
+                format!("there is no backup to undo to: {}", backup.display()),
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+    write::commit(path, &data)?;
+    Config::load_bytes(&data)
+        .map_err(|error| SaveError::new(SaveErrorKind::Check, error.to_string()))
+}
+
+/// The settings a config that sets nothing holds, as the loader gives
+/// them, in the v8 layout: what the writer would write for
+/// [`Config::load_bytes`] of an empty file, with upstream's `omitempty`,
+/// so some settings whose default is empty or zero aren't there. Not
+/// upstream's: `open-ferry config get` shows a default from it.
+pub fn defaults() -> Result<V8Document, SaveError> {
+    let config = Config::load_bytes(b"")
+        .map_err(|error| SaveError::new(SaveErrorKind::Check, error.to_string()))?;
+    let value = generate::legacy_config(&config)
+        .map_err(|error| SaveError::new(SaveErrorKind::Unwritable, error.0))?;
+    let rendered = encode::marshal(&value)?;
+    V8Document::migrate(&rendered).map_err(|error| invalid(error.to_string()))
 }
 
 /// The bytes [`write_file`] writes for `data`.
@@ -364,6 +412,7 @@ mod tests {
 
     use super::tree::set_yaml_path;
     use super::*;
+    use crate::config::AnyValue;
     use crate::config::testing::TempDir;
 
     fn root(data: &[u8]) -> Node {
@@ -1039,5 +1088,75 @@ mod tests {
             error.to_string(),
             "yaml: line 1: did not find expected node content"
         );
+    }
+
+    // Not upstream's: undo puts back the backup and keeps what it replaces
+    // as the new one, so undoing twice is no change.
+    #[test]
+    fn undo_swaps_the_file_and_its_backup() {
+        let dir = TempDir::new();
+        let path = dir.join("config.yaml");
+        assert_eq!(undo(&path).unwrap_err().kind(), SaveErrorKind::NoBackup);
+        write_as_is(
+            &path,
+            b"port: 1
+",
+        )
+        .unwrap();
+        assert_eq!(undo(&path).unwrap_err().kind(), SaveErrorKind::NoBackup);
+        write_as_is(
+            &path,
+            b"port: 2
+",
+        )
+        .unwrap();
+        assert_eq!(undo(&path).unwrap().port, 1);
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            b"port: 1
+"
+        );
+        assert_eq!(
+            fs::read(backup_path(&path)).unwrap(),
+            b"port: 2
+"
+        );
+        assert_eq!(undo(&path).unwrap().port, 2);
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            b"port: 2
+"
+        );
+        // A backup that doesn't load is refused, and nothing changes.
+        fs::write(
+            backup_path(&path),
+            b"port: [
+",
+        )
+        .unwrap();
+        assert_eq!(undo(&path).unwrap_err().kind(), SaveErrorKind::Check);
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            b"port: 2
+"
+        );
+    }
+
+    // Not upstream's: the defaults are an empty config's settings, in the
+    // v8 layout, as the writer writes them.
+    #[test]
+    fn defaults_are_an_empty_configs_settings() {
+        let defaults = defaults().unwrap();
+        let value = |path: &str| {
+            let parts: Vec<&str> = path.split('.').collect();
+            defaults.value(&parts).map(Result::unwrap)
+        };
+        assert_eq!(value("server.port"), Some(AnyValue::Int(0)));
+        assert_eq!(
+            value("management.allow-remote"),
+            Some(AnyValue::Bool(false))
+        );
+        assert_eq!(value("routing.strategy"), None);
+        assert_eq!(value("config-version"), Some(AnyValue::Int(8)));
     }
 }

@@ -482,6 +482,19 @@ impl AnyValue {
     pub(crate) fn from_timestamp(time: Timestamp) -> Self {
         Self::Time(time.json_text(), YamlTime(time))
     }
+
+    /// The value the YAML (or JSON) `text` holds, decoded as the loader
+    /// reads a document; `Null` when `text` holds no document. Not
+    /// upstream's: `open-ferry config set` reads the value it is given
+    /// with it. The error is the loader's, and quotes no value.
+    pub fn parse_yaml(text: &str) -> Result<Self, ConfigError> {
+        match parse_document(text) {
+            Ok(Some(root)) => decode_any_value(&root)
+                .map_err(|message| ConfigError::new(ConfigErrorKind::Decode, message)),
+            Ok(None) => Ok(Self::Null),
+            Err(error) => Err(ConfigError::new(ConfigErrorKind::Syntax, error.message())),
+        }
+    }
 }
 
 /// The `time.Time` yaml.v3 decodes a timestamp to, as `reflect.DeepEqual`
@@ -1183,6 +1196,31 @@ mod tests {
                 map(&[("urls", AnyValue::Seq(vec![text("turn:b")]))]),
             ]))
         );
+    }
+
+    /// Not upstream's: a value given as YAML or JSON decodes as the loader
+    /// reads one, and no document is null.
+    #[test]
+    fn values_parse_from_yaml() {
+        assert_eq!(
+            AnyValue::parse_yaml("fill-first"),
+            Ok(AnyValue::Str("fill-first".into()))
+        );
+        assert_eq!(AnyValue::parse_yaml("8318"), Ok(AnyValue::Int(8318)));
+        assert_eq!(
+            AnyValue::parse_yaml("\"8318\""),
+            Ok(AnyValue::Str("8318".into()))
+        );
+        assert_eq!(AnyValue::parse_yaml("true"), Ok(AnyValue::Bool(true)));
+        assert_eq!(AnyValue::parse_yaml(""), Ok(AnyValue::Null));
+        assert_eq!(
+            AnyValue::parse_yaml("[a, {\"b\": 1}]"),
+            Ok(AnyValue::Seq(vec![
+                AnyValue::Str("a".into()),
+                AnyValue::Map(BTreeMap::from([("b".to_owned(), AnyValue::Int(1))])),
+            ]))
+        );
+        assert!(AnyValue::parse_yaml("[").is_err());
     }
 
     /// Not upstream's: a plain management key is found wherever it was
