@@ -1356,6 +1356,149 @@ async fn a_file_with_a_key_that_isnt_text_is_refused() {
     }
 }
 
+// Not upstream's: a file a value is read from is one line of plain text,
+// or a YAML or JSON mapping or list that reads without loss. Anything else
+// can't be checked for credentials, so it is refused (`unsafe_file`), for
+// a secret setting, as text (--string) too, as a client key and as a whole
+// config, and neither the config nor its backup changes: YAML that doesn't
+// read (a mapping key that is a list, beside a credential's field; a key
+// given twice, which a JSON reader takes the last of), a number that isn't
+// finite (which JSON can't hold, so a credential's field holding one read
+// as unset), a tag, a second document, lines that read as one value, and
+// one line that doesn't read but starts as JSON does. A key of one line is
+// still read, even one YAML doesn't read.
+#[tokio::test]
+async fn a_value_file_that_cant_be_checked_is_refused() {
+    const VALUE: &str = "placeholder-credential-value-0123456789";
+    let offline = offline(Some(KEY));
+    let setup = &offline.setup;
+    ok(&cli(&setup.path), set("routing.strategy", "fill-first")).await;
+    let backup = setup.dir.path().join("config.yaml.bak");
+    let (before, backup_before) = (setup.text(), std::fs::read(&backup).unwrap());
+    let not_read = "isn't one line of plain text, nor a YAML or JSON mapping or list that reads";
+    let twice = format!("{{{k:?}: {VALUE:?}, {k:?}: null}}\n", k = "access_token");
+    for (name, text, why) in [
+        (
+            "complex-key.yaml",
+            format!("? [a, b]\n: x\naccess_token: {VALUE}\n"),
+            not_read,
+        ),
+        (
+            "complex-key-line.yaml",
+            format!("{{? [a, b] : x, access_token: {VALUE}}}\n"),
+            not_read,
+        ),
+        (
+            "complex-key-config.yaml",
+            format!("{before}? [a, b]\n: x\n"),
+            not_read,
+        ),
+        ("twice.json", twice, not_read),
+        (
+            "unclosed.json",
+            format!("{{{k:?}: {VALUE:?},\n", k = "access_token"),
+            not_read,
+        ),
+        (
+            "tokens.env",
+            format!("ACCESS_TOKEN={VALUE}\nREFRESH_TOKEN={VALUE}\n"),
+            not_read,
+        ),
+        (
+            "nan.yaml",
+            format!("account: example\naccess_token: .nan\nrefresh: {VALUE}\n"),
+            "a number that isn't finite",
+        ),
+        (
+            "nan-line.yaml",
+            "access_token: .nan\n".to_owned(),
+            "a number that isn't finite",
+        ),
+        (
+            "inf-config.yaml",
+            format!("{before}payload: [-.inf, {VALUE}]\n"),
+            "a number that isn't finite",
+        ),
+        (
+            "tagged.yaml",
+            format!("name: example\nkey: !!str {VALUE}\n"),
+            "a YAML tag",
+        ),
+        (
+            "documents.yaml",
+            format!("name: example\n---\naccess_token: {VALUE}\n"),
+            "more than one YAML document",
+        ),
+    ] {
+        let file = setup.file(name, &text);
+        for caller in [Caller::Cli, Caller::Mcp] {
+            let ctx = confirmed(&setup.path, caller);
+            for command in [
+                set_from("management.secret-key", Source::File(file.clone())),
+                Command::ConfigSet(SetInput {
+                    path: "management.secret-key".to_owned(),
+                    value: Source::File(file.clone()),
+                    string: true,
+                }),
+                Command::KeysAdd(AddInput {
+                    source: Some(Source::File(file.clone())),
+                    ..AddInput::default()
+                }),
+                Command::ConfigReplace(ReplaceInput {
+                    source: Source::File(file.clone()),
+                }),
+            ] {
+                let failure = match perform(&ctx, command).await {
+                    Ok(outcome) => panic!("{name} was read: {}", outcome.json),
+                    Err(failure) => failure,
+                };
+                assert_eq!(failure.error, "unsafe_file", "{name}: {failure:?}");
+                assert_eq!(failure.code, exit::FAILED, "{name}");
+                assert!(
+                    failure.message.contains("can't be checked for credentials"),
+                    "{name}: {failure:?}"
+                );
+                assert!(failure.message.contains(why), "{name}: {failure:?}");
+                assert!(!failure_shows(&failure, VALUE), "{failure:?}");
+                assert_eq!(setup.text(), before, "{name}");
+                assert_eq!(std::fs::read(&backup).unwrap(), backup_before, "{name}");
+            }
+        }
+    }
+
+    // A key of one line is read, as a setting's text and as a client key,
+    // even one YAML doesn't read.
+    let ctx = confirmed(&setup.path, Caller::Cli);
+    for (name, key, string) in [
+        ("key.txt", "sk-placeholder-key-0123456789", false),
+        ("at-key.txt", "@placeholder-key-0123456789", false),
+        ("quote-key.txt", "'placeholder-key-0123456789", true),
+    ] {
+        let file = setup.file(name, &format!("{key}\n"));
+        ok(
+            &ctx,
+            Command::ConfigSet(SetInput {
+                path: "management.secret-key".to_owned(),
+                value: Source::File(file.clone()),
+                string,
+            }),
+        )
+        .await;
+        let config = Config::load(&setup.path).unwrap();
+        assert_eq!(config.remote_management.secret_key, key, "{name}");
+        ok(
+            &ctx,
+            Command::KeysAdd(AddInput {
+                source: Some(Source::File(file.clone())),
+                ..AddInput::default()
+            }),
+        )
+        .await;
+        let config = Config::load(&setup.path).unwrap();
+        assert!(config.api_keys.iter().any(|added| added == key), "{name}");
+    }
+}
+
 // Not upstream's: over MCP, a call that reads a file into the config needs
 // confirm: true, with that reason, even when what it changes needs none; on
 // the command line, naming the file is the user's own doing.

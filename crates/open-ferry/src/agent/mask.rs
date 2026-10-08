@@ -31,7 +31,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use open_ferry_core::config::save::backup_path;
-use open_ferry_core::config::{AnyValue, Config};
+use open_ferry_core::config::{AnyValue, Config, ConfigErrorKind};
 use open_ferry_core::observe::mask::{
     is_credential_header, mask_emails, mask_header_value, mask_sensitive_query,
 };
@@ -364,18 +364,57 @@ pub(crate) enum Mark {
     /// It has a mapping with a key that isn't text, at any depth, which
     /// has no JSON form, so what it holds can't be checked.
     KeyNotText,
+    /// It isn't one line of plain text, nor YAML or JSON that reads
+    /// without loss, so what it holds can't be checked (not upstream's).
+    Unchecked(Unchecked),
+}
+
+/// Why a file that isn't one line of plain text can't be checked for
+/// credentials (not upstream's).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Unchecked {
+    /// It isn't YAML or JSON that reads, or it reads as a single value, as
+    /// lines of text (a `.env` file, say) do, not as a mapping or a list.
+    NotStructured,
+    /// It has a number that isn't finite (`.nan`, `.inf`), which has no
+    /// JSON form.
+    NotFinite,
+    /// It has a time with no JSON form (one with a zone 24 hours or more
+    /// from UTC).
+    Time,
+    /// It has a YAML tag (`!!str 1`, `!x a`), which says how a value is
+    /// read, rather than leaving it to its text.
+    Tag,
+    /// It holds more than one YAML document, and only the first is read.
+    Documents,
 }
 
 impl Mark {
     /// What the file is, after its path.
     pub(crate) fn why(&self) -> String {
+        let unchecked = |what: &str| {
+            format!("can't be checked for credentials (a sign-in's tokens or a key): it {what}")
+        };
         match self {
             Self::Holds(mark) => format!("is a credential file: it holds {mark}"),
             Self::TooDeep => format!(
                 "is too deeply nested to check for a sign-in's tokens or a key (more than {CREDENTIAL_DEPTH} levels)"
             ),
-            Self::KeyNotText => {
-                "has a mapping key that isn't text (a number, say), so it can't be checked for a sign-in's tokens or a key".to_owned()
+            Self::KeyNotText => unchecked("has a mapping key that isn't text (a number, say)"),
+            Self::Unchecked(Unchecked::NotStructured) => unchecked(
+                "isn't one line of plain text, nor a YAML or JSON mapping or list that reads",
+            ),
+            Self::Unchecked(Unchecked::NotFinite) => {
+                unchecked("has a number that isn't finite (.nan or .inf), which JSON can't hold")
+            }
+            Self::Unchecked(Unchecked::Time) => {
+                unchecked("has a time JSON can't hold (a zone 24 hours or more from UTC)")
+            }
+            Self::Unchecked(Unchecked::Tag) => {
+                unchecked("has a YAML tag (such as !!str), which says how a value is read")
+            }
+            Self::Unchecked(Unchecked::Documents) => {
+                unchecked("holds more than one YAML document, and only the first is read")
             }
         }
     }
@@ -384,34 +423,61 @@ impl Mark {
 /// Mappings or lists nested deeper than a file is checked to.
 struct TooDeep;
 
-/// What makes `text` a file a value isn't read from, when it is one: a
-/// PEM block, as a private key or a certificate is kept in; or, in JSON or
-/// YAML, a field of [`CREDENTIAL_FIELDS`] that is set, at any depth to
-/// [`CREDENTIAL_DEPTH`], named as the file names it; or mappings or lists
-/// nested deeper than that, or a mapping with a key that isn't text, at
-/// any depth, which aren't checked. Never a value of the file.
+/// What makes `text` a file a value isn't read from, when it is one, never
+/// naming a value of the file:
+/// - a PEM block, as a private key or a certificate is kept in;
+/// - unless it is one line of plain text, that it can't be checked (not
+///   upstream's): it isn't a YAML or JSON mapping or list that reads
+///   ([`Unchecked`]), or it has what reading it as one loses, at any depth:
+///   a mapping key that isn't text, a number or a time JSON can't hold, a
+///   tag, or a document after the first;
+/// - a field of [`CREDENTIAL_FIELDS`] that is set, at any depth to
+///   [`CREDENTIAL_DEPTH`], named as the file names it, or mappings or
+///   lists nested deeper than that, which aren't checked.
+///
+/// One line, after trimming, is plain text when it reads as a single
+/// value, or when it doesn't read, as a key starting with `@` doesn't, but
+/// doesn't start as a JSON object or list does (`{`, `[`) nor names a
+/// field of [`CREDENTIAL_FIELDS`] ([`plain_line`]). JSON is read as YAML,
+/// which reads it whole, a key given twice included, where a JSON reader
+/// keeps the last.
 pub(crate) fn credential_mark(text: &str) -> Option<Mark> {
     if has_pem_block(text) {
         return Some(Mark::Holds(
             "a PEM block, as a private key or a certificate is kept in".to_owned(),
         ));
     }
-    let value = match serde_json::from_str::<Value>(text) {
-        Ok(value) => value,
-        Err(json) => match AnyValue::parse_yaml(text) {
-            // Such a mapping has no JSON form: what it holds, at any
-            // depth, would be lost to the check.
-            Ok(value) if has_key_not_text(&value) => return Some(Mark::KeyNotText),
-            Ok(value) => any_to_json(&value),
-            // Text that is neither is no structured file, but for one
-            // nested deeper than either reads.
-            Err(yaml) => {
-                let too_deep = json.to_string().contains("recursion limit")
-                    || yaml.to_string().contains("exceeded max depth");
-                return too_deep.then_some(Mark::TooDeep);
-            }
-        },
+    let line = text.trim();
+    let one_line = !line.contains(is_line_break);
+    let (value, extras) = match AnyValue::parse_yaml_with_extras(text) {
+        Ok(read) => read,
+        Err(error) if too_deep_to_read(&error.to_string()) => return Some(Mark::TooDeep),
+        Err(error)
+            if one_line && matches!(error.kind(), ConfigErrorKind::Syntax) && plain_line(line) =>
+        {
+            return None;
+        }
+        Err(_) => return Some(Mark::Unchecked(Unchecked::NotStructured)),
     };
+    let structured = matches!(
+        value,
+        AnyValue::Seq(_) | AnyValue::Map(_) | AnyValue::AnyMap
+    );
+    if one_line && !structured {
+        return None;
+    }
+    if !structured && !matches!(value, AnyValue::Null) {
+        return Some(Mark::Unchecked(Unchecked::NotStructured));
+    }
+    if let Some(mark) = lossy(&value) {
+        return Some(mark);
+    }
+    if extras.tagged {
+        return Some(Mark::Unchecked(Unchecked::Tag));
+    }
+    if extras.more_documents {
+        return Some(Mark::Unchecked(Unchecked::Documents));
+    }
     match credential_field(&value, 0) {
         Ok(Some(name)) => Some(Mark::Holds(format!(
             "the field {name}, as a sign-in's tokens or a key are kept in"
@@ -421,14 +487,42 @@ pub(crate) fn credential_mark(text: &str) -> Option<Mark> {
     }
 }
 
-/// Whether `value` has a mapping with a key that isn't text, at any
-/// depth. (YAML is read to a bounded depth, so this recursion is too.)
-fn has_key_not_text(value: &AnyValue) -> bool {
+/// Whether YAML's `error` says the text is nested deeper than it is read
+/// to: a block deeper than the reader goes, or flow collections deeper
+/// than its scanner goes.
+fn too_deep_to_read(error: &str) -> bool {
+    error.contains("exceeded max depth") || error.contains("recursion limit exceeded")
+}
+
+/// Whether `c` ends a line, as YAML may read one: a line feed or a
+/// carriage return, or NEL, LS or PS, which yaml.v3 reads as one too.
+fn is_line_break(c: char) -> bool {
+    matches!(c, '\n' | '\r' | '\u{85}' | '\u{2028}' | '\u{2029}')
+}
+
+/// Whether `line`, one line YAML doesn't read, is plain text, as a key or
+/// a token may be (`@k3y`, `'k3y`): it doesn't start as a JSON object or
+/// list does, and names no field of [`CREDENTIAL_FIELDS`], in any case and
+/// with or without separators (not upstream's).
+fn plain_line(line: &str) -> bool {
+    let bare = bare_name(line);
+    !line.starts_with(['{', '[']) && !CREDENTIAL_FIELDS.iter().any(|field| bare.contains(field))
+}
+
+/// What in `value`, a file's YAML, has no JSON form, at any depth: a
+/// mapping with a key that isn't text, which would hide what it holds, a
+/// number that isn't finite, or a time JSON can't hold, which would read
+/// as unset. (YAML is read to a bounded depth, so this recursion is too.)
+fn lossy(value: &AnyValue) -> Option<Mark> {
     match value {
-        AnyValue::AnyMap => true,
-        AnyValue::Seq(items) => items.iter().any(has_key_not_text),
-        AnyValue::Map(entries) => entries.values().any(has_key_not_text),
-        _ => false,
+        AnyValue::AnyMap => Some(Mark::KeyNotText),
+        AnyValue::Float(number) if !number.is_finite() => {
+            Some(Mark::Unchecked(Unchecked::NotFinite))
+        }
+        AnyValue::Time(None, _) => Some(Mark::Unchecked(Unchecked::Time)),
+        AnyValue::Seq(items) => items.iter().find_map(lossy),
+        AnyValue::Map(entries) => entries.values().find_map(lossy),
+        _ => None,
     }
 }
 
@@ -441,22 +535,23 @@ fn bare_name(name: &str) -> String {
         .collect()
 }
 
-/// The name of the first field of [`CREDENTIAL_FIELDS`] set in `value`,
-/// which is `depth` levels down in a file; [`TooDeep`] for a mapping or a
-/// list deeper than [`CREDENTIAL_DEPTH`].
-fn credential_field(value: &Value, depth: usize) -> Result<Option<String>, TooDeep> {
-    let children: Vec<&Value> = match value {
-        Value::Object(_) | Value::Array(_) if depth > CREDENTIAL_DEPTH => return Err(TooDeep),
-        Value::Object(map) => {
-            let field = map.iter().find(|(key, child)| {
-                !child.is_null() && CREDENTIAL_FIELDS.contains(&bare_name(key).as_str())
+/// The name of the first field of [`CREDENTIAL_FIELDS`] set in `value`, a
+/// file's YAML, which is `depth` levels down in it; [`TooDeep`] for a
+/// mapping or a list deeper than [`CREDENTIAL_DEPTH`].
+fn credential_field(value: &AnyValue, depth: usize) -> Result<Option<String>, TooDeep> {
+    let children: Vec<&AnyValue> = match value {
+        AnyValue::Map(_) | AnyValue::Seq(_) if depth > CREDENTIAL_DEPTH => return Err(TooDeep),
+        AnyValue::Map(entries) => {
+            let field = entries.iter().find(|(key, child)| {
+                !matches!(child, AnyValue::Null)
+                    && CREDENTIAL_FIELDS.contains(&bare_name(key).as_str())
             });
             if let Some((key, _)) = field {
                 return Ok(Some(key.clone()));
             }
-            map.values().collect()
+            entries.values().collect()
         }
-        Value::Array(items) => items.iter().collect(),
+        AnyValue::Seq(items) => items.iter().collect(),
         _ => return Ok(None),
     };
     for child in children {
@@ -803,7 +898,9 @@ mod tests {
     fn holds(text: &str) -> Option<String> {
         match credential_mark(text) {
             Some(Mark::Holds(mark)) => Some(mark),
-            Some(mark @ (Mark::TooDeep | Mark::KeyNotText)) => panic!("{mark:?}: {text}"),
+            Some(mark @ (Mark::TooDeep | Mark::KeyNotText | Mark::Unchecked(_))) => {
+                panic!("{mark:?}: {text}")
+            }
             None => None,
         }
     }
@@ -917,6 +1014,126 @@ mod tests {
         );
         assert_eq!(credential_mark(&format!("\"1\": one\nb: {value}\n")), None);
         assert!(holds(&format!("\"1\": one\naccess_token: {value}\n")).is_some());
+    }
+
+    // Not upstream's: a file is one line of plain text, or a YAML or JSON
+    // mapping or list that reads without loss, or it can't be checked:
+    // YAML that doesn't read, as a mapping key that is a list or a key
+    // given twice; lines that read as a single value; a number that isn't
+    // finite, which JSON can't hold, so a credential's field holding one
+    // would read as unset; a time JSON can't hold; a tag; a document after
+    // the first. One line that reads as a single value is plain text, and
+    // so is one that doesn't read, unless it starts as a JSON object or
+    // list does or names a credential's field.
+    #[test]
+    fn refuses_files_that_cant_be_checked() {
+        let value = "placeholder-value-0123456789";
+        let unchecked = |why| Some(Mark::Unchecked(why));
+        let twice = format!("{{{k:?}: {value:?}, {k:?}: null}}", k = "access_token");
+        for (text, mark) in [
+            (
+                format!("? [a, b]\n: x\naccess_token: {value}\n"),
+                unchecked(Unchecked::NotStructured),
+            ),
+            (
+                format!("{{? [a, b] : x, access_token: {value}}}"),
+                unchecked(Unchecked::NotStructured),
+            ),
+            (
+                format!("[{{? [a] : x}}, {{access_token: {value}}}]\n"),
+                unchecked(Unchecked::NotStructured),
+            ),
+            (twice.clone(), unchecked(Unchecked::NotStructured)),
+            (format!("{twice}\n"), unchecked(Unchecked::NotStructured)),
+            (
+                format!("a: [\naccess_token: {value}\n"),
+                unchecked(Unchecked::NotStructured),
+            ),
+            (
+                format!("ACCESS_TOKEN={value}\nREFRESH_TOKEN={value}\n"),
+                unchecked(Unchecked::NotStructured),
+            ),
+            (
+                format!("{value}\n{value}\n"),
+                unchecked(Unchecked::NotStructured),
+            ),
+            (
+                format!("\"{value}\"\n# a note\n"),
+                unchecked(Unchecked::NotStructured),
+            ),
+            ("{\"a\": 1,".to_owned(), unchecked(Unchecked::NotStructured)),
+            (
+                format!("@access_token={value}"),
+                unchecked(Unchecked::NotStructured),
+            ),
+            (
+                "access_token: .nan".to_owned(),
+                unchecked(Unchecked::NotFinite),
+            ),
+            (
+                format!("account: x\naccess_token: .nan\nb: {value}\n"),
+                unchecked(Unchecked::NotFinite),
+            ),
+            (
+                "a:\n  - b: -.inf\n".to_owned(),
+                unchecked(Unchecked::NotFinite),
+            ),
+            ("[.Inf]".to_owned(), unchecked(Unchecked::NotFinite)),
+            (
+                "a: 2024-01-02T03:04:05+24:00\n".to_owned(),
+                unchecked(Unchecked::Time),
+            ),
+            (
+                format!("a: !!str 1\nb: {value}\n"),
+                unchecked(Unchecked::Tag),
+            ),
+            ("a: !x [1]\nb: 2\n".to_owned(), unchecked(Unchecked::Tag)),
+            (
+                "access_token: !!str 1\n".to_owned(),
+                unchecked(Unchecked::Tag),
+            ),
+            (
+                format!("a: 1\n---\naccess_token: {value}\n"),
+                unchecked(Unchecked::Documents),
+            ),
+            ("a: 1\n---\n".to_owned(), unchecked(Unchecked::Documents)),
+        ] {
+            assert_eq!(credential_mark(&text), mark, "{text}");
+        }
+        for mark in [
+            Unchecked::NotStructured,
+            Unchecked::NotFinite,
+            Unchecked::Time,
+            Unchecked::Tag,
+            Unchecked::Documents,
+        ] {
+            let why = Mark::Unchecked(mark).why();
+            assert!(why.starts_with("can't be checked for credentials"), "{why}");
+        }
+        // Plain text, a file that reads without loss, and nothing at all.
+        for text in [
+            format!("{value}\n"),
+            format!("  {value}  \r\n\r\n"),
+            format!("@{value}\n"),
+            format!("'{value}"),
+            format!("%{value}"),
+            format!("a: b: {value}"),
+            format!("!!str {value}"),
+            format!("\"{value}\""),
+            "sk-a:b".to_owned(),
+            "1e400".to_owned(),
+            ".nan".to_owned(),
+            format!("a: {value}\nb: [1, 2.5, x]\nc: 2024-01-02T03:04:05Z\n"),
+            "---\na: 1\n...\n".to_owned(),
+            "a: &x 1\nb: *x\n".to_owned(),
+            "!!map {a: 1}".to_owned(),
+            json!({"a": [1, 2.5, null, {"b": "c"}]}).to_string(),
+            json!({"a": 1, "b": 2}).to_string(),
+            String::new(),
+            "# a note\n# and another\n".to_owned(),
+        ] {
+            assert_eq!(credential_mark(&text), None, "{text}");
+        }
     }
 
     // Not upstream's: the secrets found are what masking hides, and the
