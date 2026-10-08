@@ -10,7 +10,7 @@
 # nothing else; CI never runs it. Running it again is safe: it installs only
 # what's missing, fetches the refs again, and builds again only what changed.
 #
-#   bash run-ubuntu.sh --note "Azure Standard_D8as_v5, East US"
+#   bash run-ubuntu.sh --note "Azure Standard_D8s_v6, East US"
 #
 # See docs/benchmarks.md, "Running it", and `bash run-ubuntu.sh --help`.
 set -euo pipefail

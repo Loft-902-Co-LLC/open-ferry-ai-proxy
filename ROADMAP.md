@@ -39,7 +39,7 @@ Already in place:
   - `open-ferry init` writes a starting config with new keys;
   - `open-ferry check` looks over the config, the auth directory, the port, the dashboard and the clock before a start, says how to fix what it finds, and exits with a code a CI job or a service manager can act on;
   - `open-ferry service install` and `uninstall` run the proxy at login or at boot, under systemd, launchd, or Windows' Task Scheduler or service manager.
-- Numbers to back the claims: the parity tool's results at the pin, in the README, and a benchmark against the pinned CLIProxyAPI build that anyone can rerun ([docs/benchmarks.md](docs/benchmarks.md)). Its first results are preliminary.
+- Numbers to back the claims: the parity tool's results at the pin, in the README, and a benchmark against the pinned CLIProxyAPI release that anyone can rerun, with results from a rented cloud machine that include requests translated between the API formats ([docs/benchmarks.md](docs/benchmarks.md)).
 - A setup page for coding agents ([docs/agents.md](docs/agents.md)), and an `llms.txt`.
 
 Still to come:
@@ -47,7 +47,6 @@ Still to come:
 - **Switching from CLIProxyAPI in one step:** `open-ferry migrate` finds an existing CLIProxyAPI, its config and auth directory and what starts it (a service, a scheduled task, a launcher or a container), says what carries over and what doesn't, backs up the config and credentials, and moves the proxy to open-ferry on the same port with the same files, so clients change nothing. The install scripts offer it when they find CLIProxyAPI, and `open-ferry migrate --undo` switches back.
 - **The first release, 0.1.0,** after it has been tested in real use. The install scripts and the container image are first published with it.
 - **A Homebrew tap.**
-- **Benchmark results to quote,** in place of the preliminary ones: a run against the pinned CLIProxyAPI release on a cloud machine anyone can rent, which also measures requests translated between the API formats.
 - **Being findable:** once the first release is out, ask to be listed with the related projects in CLIProxyAPI's README.
 
 ## After v1: smaller additions

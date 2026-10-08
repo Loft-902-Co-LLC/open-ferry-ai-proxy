@@ -351,7 +351,7 @@ git clone --branch v8.0.20 https://github.com/router-for-me/CLIProxyAPI ../CLIPr
 cargo run --release -p open-ferry-parity -- --upstream ../CLIProxyAPI --go go1.26.4 --random 1000 --seed 13 --summary README.md
 ```
 
-Parity says nothing about speed: [docs/benchmarks.md](docs/benchmarks.md) compares the two proxies' start time, throughput, latency and memory.
+Parity says nothing about speed: [docs/benchmarks.md](docs/benchmarks.md) compares the two proxies in front of the same fake upstream, on a rented cloud machine with 8 vCPUs. In its latest run, against CLIProxyAPI v8.0.20, open-ferry added 2.6 to 6.6 times less time to a coding agent's long conversation, spent less CPU time per request, reused its connections to the upstream, and started in 15.5 ms against 23.9 ms. On short requests the two were close, with CLIProxyAPI adding a little less time at 16 clients at once, and under load CLIProxyAPI used a little less memory. The page has every number, and how to rerun it.
 
 ## Roadmap
 
