@@ -6,6 +6,9 @@ import { ProblemNotice } from "../components/ProblemNotice";
 import { Spinner } from "../components/Spinner";
 
 const LICENSES_URL = `${import.meta.env.BASE_URL}third-party-licenses.txt`;
+const REPO_URL = "https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy";
+const DOCS_URL = `${REPO_URL}/tree/main/docs`;
+const DASHBOARD_API_URL = `${REPO_URL}/blob/main/docs/dashboard-api.md`;
 
 function Fact({ term, value }: { term: string; value: string | null }) {
   return (
@@ -30,6 +33,21 @@ export function AboutPage() {
             </a>
             , the MIT-licensed proxy by router-for-me. It keeps CLIProxyAPI&apos;s configuration
             and management API, and adds this dashboard.
+          </p>
+          <p>
+            How to install, set up and run it is in{" "}
+            <a href={REPO_URL} rel="noreferrer" target="_blank">
+              open-ferry&apos;s README
+            </a>
+            , and the rest is in{" "}
+            <a href={DOCS_URL} rel="noreferrer" target="_blank">
+              its docs
+            </a>
+            , on GitHub. The API this dashboard uses is described in{" "}
+            <a href={DASHBOARD_API_URL} rel="noreferrer" target="_blank">
+              dashboard-api.md
+            </a>
+            .
           </p>
           <p>
             The dashboard is built from open-source packages. Their licenses and notices are in{" "}
