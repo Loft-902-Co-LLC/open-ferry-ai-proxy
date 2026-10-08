@@ -23,3 +23,5 @@ pub mod multipart;
 pub mod observe;
 pub mod registry;
 pub mod session;
+#[cfg(test)]
+mod test_tracing;

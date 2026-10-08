@@ -53,6 +53,7 @@ impl Drop for TempDir {
 /// Runs `f` and returns its result with the message of each warning and
 /// error it logged on this thread.
 pub(crate) fn logged<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
+    crate::test_tracing::keep_every_callsite_open();
     let messages = Arc::new(Mutex::new(Vec::new()));
     let value = tracing::subscriber::with_default(Warnings(Arc::clone(&messages)), f);
     let messages = messages

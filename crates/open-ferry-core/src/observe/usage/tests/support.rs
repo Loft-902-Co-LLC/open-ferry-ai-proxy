@@ -266,6 +266,7 @@ pub(super) struct Warnings {
 
 impl Warnings {
     pub(super) fn capture() -> Self {
+        crate::test_tracing::keep_every_callsite_open();
         let lines = Arc::new(Mutex::new(Vec::new()));
         let dispatch = tracing::Dispatch::new(Capture(Arc::clone(&lines)));
         let guard = tracing::dispatcher::set_default(&dispatch);
