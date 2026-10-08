@@ -31,7 +31,7 @@ use super::{Family, Pair, ResponseCases, Stage, Suite, mask_volatile};
 use crate::cases::Case;
 use crate::compare::{Deviation, JsonAt, JsonForm};
 use crate::generate::interactions::chat as generate;
-use crate::translator::{Translator, sse_frames};
+use crate::translator::{Translator, refused, sse_frames};
 
 /// The family's suites, a variant each.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -194,8 +194,9 @@ impl Family for Kind {
         };
         let output = match self {
             Self::ChatRequest => {
-                convert_openai_request_to_interactions(model, &parse(&case.request), stream)
-                    .to_string()
+                let (body, err) =
+                    convert_openai_request_to_interactions(model, &parse(&case.request), stream);
+                refused(body, err).to_string()
             }
             Self::InteractionsRequest => {
                 convert_interactions_request_to_openai(model, &parse(&case.request), stream)

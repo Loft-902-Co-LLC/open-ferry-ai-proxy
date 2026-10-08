@@ -89,7 +89,7 @@ fn the_same_bytes_are_translated_once() {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .push((model.to_owned(), stream));
-            body
+            (body, None)
         })),
         Default::default(),
     );

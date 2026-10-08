@@ -1,9 +1,13 @@
 // Ported from CLIProxyAPI internal/translator/gemini/claude/gemini_claude_request_test.go,
 // gemini_claude_compat_test.go and internal/util/claude_tool_result_test.go
-// (v8.0.15, MIT). https://github.com/router-for-me/CLIProxyAPI
+// (v8.0.15, MIT), and the v8.0.20 tests of gemini_claude_request_test.go and
+// gemini_claude_user_turn_test.go (v8.0.20, MIT).
+// https://github.com/router-for-me/CLIProxyAPI
 //
-// All tests are ported. The tests after them are new; their expected output
-// comes from upstream.
+// All tests are ported. Upstream's tests through the registry call the
+// translator here and check that the registry gives the same refusal. The
+// tests marked "Not upstream's" are new; their expected output comes from
+// upstream.
 
 use serde_json::{Value, json};
 
@@ -18,11 +22,15 @@ fn models() -> &'static ModelCatalog {
 }
 
 fn translate(model: &str, input: Value) -> Value {
-    convert_claude_request_to_gemini(model, &input, false, models())
+    let (body, err) = convert_claude_request_to_gemini(model, &input, false, models());
+    assert_eq!(err, None, "{body}");
+    body
 }
 
 fn translate_compat(model: &str, input: Value) -> Value {
-    convert_claude_request_to_gemini_with_compat(model, &input, false, models())
+    let (body, err) = convert_claude_request_to_gemini_with_compat(model, &input, false, models());
+    assert_eq!(err, None, "{body}");
+    body
 }
 
 /// Translates `input` for `gemini-2.5-pro` and returns the result without
@@ -510,8 +518,9 @@ fn compat_preserves_empty_thinking() {
         {"type": "thinking", "thinking": "reason", "signature": ""}
     ]}]});
 
+    // A message left with no parts isn't sent (v8.0.20).
     let output = translate("deepseek-v4", input.clone());
-    assert_eq!(output["contents"][0]["parts"], json!([]));
+    assert_eq!(output["contents"], json!([]), "{output}");
 
     let output = translate_compat("deepseek-v4", input);
     let part = &output["contents"][0]["parts"][0];
@@ -700,5 +709,348 @@ fn messages_and_system_in_detail() {
         json!([{"role": "user", "parts": [{
             "text": "7", "thought": true, "thoughtSignature": GEMINI_SKIP_THOUGHT_SIGNATURE_VALIDATOR
         }]}])
+    );
+}
+
+/// The translator's body and refusal for `input`, through
+/// [`convert_claude_request_to_gemini_with_compat`] if `compat`.
+fn convert_checked(input: &str, compat: bool) -> (Value, Option<UnsupportedPartError>) {
+    let input: Value = serde_json::from_str(input).expect("test request is valid JSON");
+    if compat {
+        convert_claude_request_to_gemini_with_compat("m", &input, false, models())
+    } else {
+        convert_claude_request_to_gemini("m", &input, false, models())
+    }
+}
+
+#[track_caller]
+fn require_refusal((body, err): (Value, Option<UnsupportedPartError>), want: &str) {
+    let err = err.unwrap_or_else(|| panic!("no refusal, want {want}; body = {body}"));
+    assert_eq!(err.part_type, want, "{body}");
+    assert_eq!(err.status_code(), 400);
+    assert!(err.is_request_scoped());
+    assert_eq!(err.to_string(), format!("unsupported content part: {want}"));
+    assert!(body.is_object(), "{body}");
+}
+
+#[track_caller]
+fn require_sent((body, err): (Value, Option<UnsupportedPartError>)) -> Value {
+    assert_eq!(err, None, "{body}");
+    body
+}
+
+// TestConvertClaudeRequestToGemini_Issue5960_DocumentPreservation
+#[test]
+fn issue_5960_document_preservation() {
+    let pdf = translate(
+        "gemini-2.5-pro",
+        json!({"model": "gemini-2.5-pro", "messages": [{"role": "user", "content": [
+            {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "JVBERi0xLjQK"}}
+        ]}]}),
+    );
+    assert_eq!(
+        pdf["contents"][0]["parts"][0],
+        json!({"inline_data": {"mime_type": "application/pdf", "data": "JVBERi0xLjQK"}}),
+        "{pdf}"
+    );
+
+    let mixed = translate(
+        "gemini-2.5-pro",
+        json!({"model": "gemini-2.5-pro", "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "Please summarize this document:"},
+            {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "JVBERi0xLjQK"}}
+        ]}]}),
+    );
+    let parts = &mixed["contents"][0]["parts"];
+    assert_eq!(parts.as_array().map(Vec::len), Some(2), "{mixed}");
+    assert_eq!(
+        parts[0]["text"], "Please summarize this document:",
+        "{mixed}"
+    );
+    assert_eq!(
+        parts[1]["inline_data"]["mime_type"], "application/pdf",
+        "{mixed}"
+    );
+
+    let interleaved = translate(
+        "gemini-2.5-pro",
+        json!({"model": "gemini-2.5-pro", "messages": [{"role": "user", "content": [
+            {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "PDF_ONE"}},
+            {"type": "text", "text": "compare with"},
+            {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "PDF_TWO"}}
+        ]}]}),
+    );
+    let parts = &interleaved["contents"][0]["parts"];
+    assert_eq!(parts.as_array().map(Vec::len), Some(3), "{interleaved}");
+    assert_eq!(parts[0]["inline_data"]["data"], "PDF_ONE", "{interleaved}");
+    assert_eq!(parts[2]["inline_data"]["data"], "PDF_TWO", "{interleaved}");
+
+    let unsupported = translate(
+        "gemini-2.5-pro",
+        json!({"model": "gemini-2.5-pro", "messages": [{"role": "user", "content": [
+            {"type": "unsupported_unknown_block", "foo": "bar"}
+        ]}]}),
+    );
+    assert_eq!(unsupported["contents"], json!([]), "{unsupported}");
+}
+
+// TestConvertClaudeRequestToGemini_ContainerUploadKeepsOtherText
+#[test]
+fn container_upload_keeps_other_text() {
+    let output = translate(
+        "gemini-3-flash-preview",
+        json!({"model": "gemini-3-flash-preview", "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "keep me"},
+            {"type": "container_upload", "file_id": "file-example"}
+        ]}]}),
+    );
+    assert_eq!(
+        output["contents"][0]["parts"],
+        json!([{"text": "keep me"}]),
+        "{output}"
+    );
+}
+
+// TestConvertClaudeRequestToGemini_UnsendableFileNamesTheDroppedPart
+#[test]
+fn unsendable_file_names_the_dropped_part() {
+    for (part_type, block) in [
+        (
+            "container_upload",
+            r#"{"type": "container_upload", "file_id": "file-example"}"#,
+        ),
+        (
+            "document",
+            r#"{"type": "document", "source": {"type": "file", "file_id": "file-example"}}"#,
+        ),
+    ] {
+        require_refusal(
+            convert_checked(
+                &format!(
+                    r#"{{"model": "gemini-3-flash-preview", "messages": [{{"role": "user", "content": [{block}]}}]}}"#
+                ),
+                true,
+            ),
+            part_type,
+        );
+    }
+}
+
+// TestConvertClaudeRequestToGemini_ImageURLAndRedactedThinkingStaySkipped
+#[test]
+fn image_url_and_redacted_thinking_stay_skipped() {
+    let output = translate(
+        "gemini-3-flash-preview",
+        json!({"model": "gemini-3-flash-preview", "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "keep me"},
+            {"type": "image", "source": {"type": "url", "url": "https://example.test/a.png"}},
+            {"type": "redacted_thinking", "data": "abc"}
+        ]}]}),
+    );
+    assert_eq!(
+        output["contents"][0]["parts"],
+        json!([{"text": "keep me"}]),
+        "{output}"
+    );
+}
+
+const USER_TURN_UPLOAD: &str = r#"{"type":"container_upload","file_id":"file-1"}"#;
+
+// TestConvertClaudeRequestToGemini_RefusesAnyEmptiedUserTurn
+#[test]
+fn refuses_any_emptied_user_turn() {
+    let cases = [
+        (
+            format!(
+                r#"{{"model":"m","messages":[{{"role":"user","content":"hello"}},{{"role":"assistant","content":[{{"type":"text","text":"hi"}}]}},{{"role":"user","content":[{USER_TURN_UPLOAD}]}}]}}"#
+            ),
+            "container_upload",
+        ),
+        (
+            format!(
+                r#"{{"model":"m","system":"sys","messages":[{{"role":"system","content":"reminder"}},{{"role":"user","content":[{USER_TURN_UPLOAD}]}}]}}"#
+            ),
+            "container_upload",
+        ),
+        (
+            format!(
+                r#"{{"model":"m","messages":[{{"role":"user","content":[{USER_TURN_UPLOAD}]}},{{"role":"assistant","content":[{{"type":"text","text":"ok"}}]}},{{"role":"user","content":"next"}}]}}"#
+            ),
+            "container_upload",
+        ),
+        (
+            r#"{"model":"m","messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":[{"type":"document","source":{"type":"file","file_id":"file-1"}}]}]}"#.to_owned(),
+            "document",
+        ),
+    ];
+    for (input, want) in cases {
+        require_refusal(convert_checked(&input, true), want);
+    }
+}
+
+// TestConvertClaudeRequestToGemini_KeepsTurnWithTextBesideAttachment
+#[test]
+fn keeps_turn_with_text_beside_attachment() {
+    let body = require_sent(convert_checked(
+        &format!(
+            r#"{{"model":"m","messages":[{{"role":"user","content":"hello"}},{{"role":"assistant","content":"hi"}},{{"role":"user","content":[{{"type":"text","text":"keep me"}},{USER_TURN_UPLOAD}]}}]}}"#
+        ),
+        true,
+    ));
+    assert_eq!(body["contents"][2]["parts"][0]["text"], "keep me", "{body}");
+}
+
+// TestConvertClaudeRequestToGemini_Base64DocumentAfterHistoryStaysInlineData
+#[test]
+fn base64_document_after_history_stays_inline_data() {
+    let body = require_sent(convert_checked(
+        r#"{"model":"m","messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":[{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0xLjQK"}}]}]}"#,
+        true,
+    ));
+    assert_eq!(
+        body["contents"][2]["parts"][0]["inline_data"],
+        json!({"mime_type": "application/pdf", "data": "JVBERi0xLjQK"}),
+        "{body}"
+    );
+}
+
+/// `claudeImageTurnToGemini`: two history turns followed by a final user
+/// turn holding `final_content`, after checking that the registration gives
+/// the same refusal.
+fn claude_image_turn_to_gemini(final_content: &str) -> (Value, Option<UnsupportedPartError>) {
+    let input = format!(
+        r#"{{"model":"m","messages":[{{"role":"user","content":"a"}},{{"role":"assistant","content":"b"}},{{"role":"user","content":[{final_content}]}}]}}"#
+    );
+    let request: Value = serde_json::from_str(&input).expect("test request is valid JSON");
+    let registered = crate::registry::Registry::global().translate_request_checked(
+        &"claude".into(),
+        &"gemini".into(),
+        "m",
+        request.clone(),
+        false,
+    );
+    let (body, err) = convert_claude_request_to_gemini("m", &request, false, models());
+    assert_eq!(registered.err(), err, "the registration's refusal");
+    (body, err)
+}
+
+// TestClaudeToGeminiUnrepresentableImageOnlyTurnIsRefused
+#[test]
+fn unrepresentable_image_only_turn_is_refused() {
+    for source in [
+        r#"{"type":"url","url":"https://example.test/a.png"}"#,
+        r#"{"type":"file","file_id":"file-1"}"#,
+    ] {
+        require_refusal(
+            claude_image_turn_to_gemini(&format!(r#"{{"type":"image","source":{source}}}"#)),
+            "image",
+        );
+    }
+}
+
+// TestClaudeToGeminiUnrepresentableImageBesideTextStillSucceeds
+#[test]
+fn unrepresentable_image_beside_text_still_succeeds() {
+    for source in [
+        r#"{"type":"url","url":"https://example.test/a.png"}"#,
+        r#"{"type":"file","file_id":"file-1"}"#,
+    ] {
+        let body = require_sent(claude_image_turn_to_gemini(&format!(
+            r#"{{"type":"text","text":"keep me"}},{{"type":"image","source":{source}}}"#
+        )));
+        assert_eq!(
+            body["contents"][2]["parts"],
+            json!([{"text": "keep me"}]),
+            "{body}"
+        );
+    }
+}
+
+// TestClaudeToGeminiEmptyTextDoesNotHideAnUnrepresentableImage
+#[test]
+fn empty_text_does_not_hide_an_unrepresentable_image() {
+    require_refusal(
+        claude_image_turn_to_gemini(
+            r#"{"type":"text","text":""},{"type":"image","source":{"type":"url","url":"https://example.test/a.png"}}"#,
+        ),
+        "image",
+    );
+}
+
+// TestClaudeToGeminiBase64ImageOnlyTurnStaysInlineData
+#[test]
+fn base64_image_only_turn_stays_inline_data() {
+    let body = require_sent(claude_image_turn_to_gemini(
+        r#"{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGVsbG8="}}"#,
+    ));
+    assert_eq!(
+        body["contents"][2]["parts"][0]["inline_data"],
+        json!({"mime_type": "image/png", "data": "aGVsbG8="}),
+        "{body}"
+    );
+}
+
+// TestClaudeToGeminiWhitespaceTextDoesNotHideAnUnrepresentableImage
+#[test]
+fn whitespace_text_does_not_hide_an_unrepresentable_image() {
+    for text in [r#"  "#, r#" \n\t"#, r#" "#] {
+        require_refusal(
+            claude_image_turn_to_gemini(&format!(
+                r#"{{"type":"text","text":"{text}"}},{{"type":"image","source":{{"type":"file","file_id":"file-1"}}}}"#
+            )),
+            "image",
+        );
+    }
+    require_refusal(
+        claude_image_turn_to_gemini(
+            r#"{"type":"image","source":{"type":"url","url":"https://example.test/a.png"}},{"type":"text","text":"  "}"#,
+        ),
+        "image",
+    );
+}
+
+// TestClaudeToGeminiRealTextBesideWhitespaceAndAnImageStillSucceeds
+#[test]
+fn real_text_beside_whitespace_and_an_image_still_succeeds() {
+    let body = require_sent(claude_image_turn_to_gemini(
+        r#"{"type":"text","text":"  "},{"type":"text","text":"keep me"},{"type":"image","source":{"type":"file","file_id":"file-1"}}"#,
+    ));
+    let parts = body["contents"][2]["parts"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(parts.iter().any(|part| part["text"] == "keep me"), "{body}");
+}
+
+// Not upstream's: an assistant's unsendable media isn't refused and its
+// emptied message isn't sent, a tool result keeps the turn alive, and a
+// base64 source without data is dropped like a URL.
+#[test]
+fn user_turns_in_detail() {
+    let body = require_sent(convert_checked(
+        &format!(
+            r#"{{"messages":[{{"role":"user","content":"q"}},{{"role":"assistant","content":[{USER_TURN_UPLOAD}]}},{{"role":"user","content":"r"}}]}}"#
+        ),
+        false,
+    ));
+    assert_eq!(
+        body["contents"],
+        json!([{"role": "user", "parts": [{"text": "q"}, {"text": "r"}]}]),
+        "{body}"
+    );
+
+    require_sent(convert_checked(
+        &format!(
+            r#"{{"messages":[{{"role":"assistant","content":[{{"type":"tool_use","id":"t","name":"f","input":{{}}}}]}},{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"t","content":"ok"}},{USER_TURN_UPLOAD}]}}]}}"#
+        ),
+        false,
+    ));
+
+    require_refusal(
+        convert_checked(
+            r#"{"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":""}}]}]}"#,
+            false,
+        ),
+        "image",
     );
 }

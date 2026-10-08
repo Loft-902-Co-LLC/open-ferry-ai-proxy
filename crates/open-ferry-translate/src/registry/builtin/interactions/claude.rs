@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use super::super::to_vec;
+use super::super::{checked, to_vec};
 use crate::claude::interactions as claude_interactions;
 use crate::interactions::claude as interactions_claude;
 use crate::registry::{Format, Registry, ResponseTransform, StreamTranslator};
@@ -21,9 +21,9 @@ pub(super) fn register(registry: &Registry) {
     registry.register(
         Format::CLAUDE,
         Format::INTERACTIONS,
-        Some(Arc::new(|model, body, stream| {
+        checked(|model, body, stream| {
             interactions_claude::convert_claude_request_to_interactions(model, &body, stream)
-        })),
+        }),
         ResponseTransform {
             stream: Some(Arc::new(|context| {
                 Box::new(InteractionsToClaude(
@@ -46,9 +46,9 @@ pub(super) fn register(registry: &Registry) {
     registry.register(
         Format::INTERACTIONS,
         Format::CLAUDE,
-        Some(Arc::new(|model, body, stream| {
+        checked(|model, body, stream| {
             claude_interactions::convert_interactions_request_to_claude(model, &body, stream)
-        })),
+        }),
         ResponseTransform {
             stream: Some(Arc::new(|context| {
                 Box::new(ClaudeToInteractions(

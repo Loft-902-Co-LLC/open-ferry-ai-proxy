@@ -18,10 +18,9 @@
 
 use serde_json::{Value, json};
 
+use super::super::test_support::convert_openai_responses_request_to_gemini;
 use super::super::test_support::{GEMINI_SIGNATURE, different_gemini_signature, sse_events};
-use super::super::{
-    GeminiToOpenAIResponsesStream, array_of, at, convert_openai_responses_request_to_gemini,
-};
+use super::super::{GeminiToOpenAIResponsesStream, array_of, at};
 use super::*;
 
 const MODEL: &str = "gemini-3.8-flash-high";

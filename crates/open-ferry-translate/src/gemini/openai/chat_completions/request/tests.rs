@@ -1,7 +1,9 @@
 // Ported from CLIProxyAPI
 // internal/translator/gemini/openai/chat-completions/gemini_openai_request_test.go,
 // gemini_openai_file_data_test.go, gemini_openai_signature_test.go and the
-// request test in noop_optimization_test.go (v8.0.15, MIT).
+// request test in noop_optimization_test.go (v8.0.15, MIT), and
+// gemini_openai_file_id_test.go, gemini_openai_media_url_test.go and
+// gemini_openai_user_turn_test.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 //
 // All tests are ported; table-driven Go subtests become one table per test.
@@ -16,6 +18,13 @@ use crate::signature::{
 
 const CAPTURED_GEMINI_TOOL_CALL_THOUGHT_SIGNATURE: &str =
     "EjQKMgEMOdbHO0Gd+c9Mxk4ELwPGbpCEcp2mFfYYLix2UVtBH3fL8GECc4+JITVnHF4qZDsA";
+
+/// `ConvertOpenAIRequestToGemini`'s body, which must come without a refusal.
+fn convert_openai_request_to_gemini(model: &str, request: &Value, stream: bool) -> Value {
+    let (body, err) = super::convert_openai_request_to_gemini(model, request, stream);
+    assert_eq!(err, None, "refused: {body}");
+    body
+}
 
 fn translate(model: &str, input: &str) -> Value {
     convert_openai_request_to_gemini(model, &serde_json::from_str(input).unwrap(), false)
@@ -1081,23 +1090,39 @@ fn lone_system_message_is_demoted() {
     );
 }
 
-/// Upstream slices data URLs by byte, so a URL whose fixed-width prefix ends
-/// inside a character leaves stray bytes, which become U+FFFD as upstream's
-/// JSON writer does.
+/// Upstream slices an assistant message's data URLs by byte, so a URL whose
+/// fixed-width prefix ends inside a character leaves stray bytes, which
+/// become U+FFFD as upstream's JSON writer does.
 #[test]
 fn data_url_slicing_in_detail() {
     assert_eq!(
         convert(concat!(
-            r#"{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"dataé;base64é,"#,
-            r#"Q"}},{"type":"video_url","video_url":{"url":"data:a;b;base64,Q"}},{"type":"image_url","#,
-            r#""image_url":{"url":"data:"}},{"type":"file","file":{"file_data":"QQ"}},{"type":"input_audio","#,
-            r#""input_audio":{"data":"","format":"mp3"}}]},{"role":"assistant","content":"x"},{"role":"user","#,
-            r#""content":5}]}"#
+            r#"{"messages":[{"role":"user","content":"q"},{"role":"assistant","content":[{"type":"image_url","#,
+            r#""image_url":{"url":"dataé;base64é,Q"}},{"type":"image_url","image_url":{"url":"data:a;b;base64,Q"}},"#,
+            r#"{"type":"image_url","image_url":{"url":"data:"}}]},{"role":"user","content":"next"}]}"#
         )),
         concat!(
-            r#"{"contents":[{"role":"user","parts":[{"inlineData":{"mime_type":"�","data":"�,Q"}},"#,
-            r#"{"inlineData":{"mime_type":"a","data":"4,Q"}}]}],"model":"m"}"#
+            r#"{"contents":[{"role":"user","parts":[{"text":"q"}]},{"role":"model","parts":[{"inlineData":{"mime_type":"�","data":"�,Q"}},"#,
+            r#"{"inlineData":{"mime_type":"a","data":"4,Q"}}]},{"role":"user","parts":[{"text":"next"}]}],"model":"m"}"#
         )
+    );
+}
+
+/// A user message's media is read as `NormalizeOpenAIFileData` reads it:
+/// only a `data:` URL marked base64 is inlined.
+#[test]
+fn user_media_needs_a_base64_data_url() {
+    let (body, err) = convert_checked(concat!(
+        r#"{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"dataé;base64é,"#,
+        r#"Q"}},{"type":"video_url","video_url":{"url":"data:a;b;base64,Q"}},{"type":"image_url","#,
+        r#""image_url":{"url":"data:"}},{"type":"file","file":{"file_data":"QQ"}},{"type":"input_audio","#,
+        r#""input_audio":{"data":"","format":"mp3"}}]},{"role":"assistant","content":"x"},{"role":"user","#,
+        r#""content":5}]}"#
+    ));
+    assert_eq!(err, None, "{body}");
+    assert_eq!(
+        body["contents"],
+        json!([{"role": "user", "parts": [{"inlineData": {"mime_type": "a", "data": "Q"}}]}])
     );
 }
 
@@ -1112,4 +1137,198 @@ fn tool_parameters_keep_number_text() {
     let output = convert_openai_request_to_gemini("m", &request, false).to_string();
     let want = r#""x":{"type":"number","minimum":-0,"maximum":1E20}"#;
     assert!(output.contains(want), "{output}");
+}
+
+/// `convertOpenAIRequestToGemini`: the body and the refusal.
+fn convert_checked(input: &str) -> (Value, Option<UnsupportedPartError>) {
+    let request: Value = serde_json::from_str(input).expect("test request is valid JSON");
+    super::convert_openai_request_to_gemini("m", &request, false)
+}
+
+/// `TranslateRequestEnvelope` from Chat Completions to Gemini: the body, or
+/// the refusal.
+fn openai_to_gemini_envelope(model: &str, input: &str) -> Result<Value, UnsupportedPartError> {
+    let request: Value = serde_json::from_str(input).expect("test request is valid JSON");
+    crate::registry::Registry::global().translate_request_checked(
+        &"openai".into(),
+        &"gemini".into(),
+        model,
+        request,
+        false,
+    )
+}
+
+fn require_refusal(name: &str, input: &str, want: &str) {
+    let (body, err) = convert_checked(input);
+    let err = err.unwrap_or_else(|| panic!("{name}: no refusal; body = {body}"));
+    assert_eq!(err.part_type, want, "{name}");
+    assert_eq!(err.status_code(), 400, "{name}");
+    assert_eq!(
+        err.to_string(),
+        format!("unsupported content part: {want}"),
+        "{name}"
+    );
+    assert!(body.is_object(), "{name}: {body}");
+}
+
+// TestConvertOpenAIRequestToGemini_FileID
+#[test]
+fn file_id() {
+    const TEXT: &str = r#"{"type":"text","text":"read it"}"#;
+    const MISSING: &str = r#"{"type":"file","file":{"file_id":"file-absent"}}"#;
+    let payload = |content: &str| {
+        format!(
+            r#"{{"model":"gemini-2.5-pro","messages":[{{"role":"user","content":[{content}]}}]}}"#
+        )
+    };
+    let err = openai_to_gemini_envelope("gemini-2.5-pro", &payload(MISSING))
+        .expect_err("unknown file id alone");
+    assert_eq!(err.part_type, "file");
+    let body = openai_to_gemini_envelope("gemini-2.5-pro", &payload(&format!("{TEXT},{MISSING}")))
+        .expect("text beside an unknown file id");
+    assert_eq!(
+        body["contents"][0]["parts"].as_array().map(Vec::len),
+        Some(1),
+        "{body}"
+    );
+}
+
+const MEDIA_IMAGE_URL: &str = r#"{"type":"image_url","image_url":{"url":"https://x.test/a.png"}}"#;
+const MEDIA_IMAGE_DATA: &str =
+    r#"{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgo="}}"#;
+const MEDIA_VIDEO_URL: &str = r#"{"type":"video_url","video_url":{"url":"https://x.test/a.mp4"}}"#;
+const MEDIA_AUDIO_NONE: &str = r#"{"type":"input_audio","input_audio":{"data":"","format":"wav"}}"#;
+
+fn media_turn(parts: &str) -> String {
+    format!(
+        r#"{{"model":"m","messages":[{{"role":"user","content":"hello"}},{{"role":"assistant","content":"hi"}},{{"role":"user","content":[{parts}]}}]}}"#
+    )
+}
+
+// TestConvertOpenAIRequestToGemini_RefusesAnAttachmentOnlyTurnItCannotSend
+#[test]
+fn refuses_an_attachment_only_turn_it_cannot_send() {
+    let cases = [
+        ("http image_url", MEDIA_IMAGE_URL.to_owned(), "image_url"),
+        (
+            "image_url without a base64 payload",
+            r#"{"type":"image_url","image_url":{"url":"data:image/png,raw"}}"#.to_owned(),
+            "image_url",
+        ),
+        (
+            "image_url as a bare string",
+            r#"{"type":"image_url","image_url":"https://x.test/a.png"}"#.to_owned(),
+            "image_url",
+        ),
+        ("http video_url", MEDIA_VIDEO_URL.to_owned(), "video_url"),
+        (
+            "input_audio without bytes",
+            MEDIA_AUDIO_NONE.to_owned(),
+            "input_audio",
+        ),
+        (
+            "whitespace text beside http image_url",
+            format!(r#"{{"type":"text","text":"  "}},{MEDIA_IMAGE_URL}"#),
+            "image_url",
+        ),
+        (
+            "first dropped type is reported",
+            format!("{MEDIA_VIDEO_URL},{MEDIA_IMAGE_URL}"),
+            "video_url",
+        ),
+    ];
+    for (name, parts, want) in cases {
+        require_refusal(name, &media_turn(&parts), want);
+    }
+}
+
+const USER_TURN_FILE_ID: &str = r#"{"type":"file","file":{"file_id":"file-absent"}}"#;
+const USER_TURN_TEXT: &str = r#"{"type":"text","text":"keep me"}"#;
+const USER_TURN_INLINE: &str = r#"{"type":"file","file":{"filename":"a.pdf","file_data":"data:application/pdf;base64,JVBERi0xLjQK"}}"#;
+
+// TestConvertOpenAIRequestToGemini_RealTextBesideAnUnsendableAttachmentStillSucceeds
+#[test]
+fn real_text_beside_an_unsendable_attachment_still_succeeds() {
+    for parts in [
+        format!("{USER_TURN_TEXT},{MEDIA_IMAGE_URL}"),
+        format!("{MEDIA_IMAGE_URL},{USER_TURN_TEXT}"),
+        format!(
+            r#"{{"type":"text","text":"  "}},{USER_TURN_TEXT},{MEDIA_VIDEO_URL},{MEDIA_AUDIO_NONE}"#
+        ),
+    ] {
+        let (body, err) = convert_checked(&media_turn(&parts));
+        assert_eq!(err, None, "{parts}: {body}");
+        let found = body["contents"][2]["parts"]
+            .as_array()
+            .is_some_and(|parts| parts.iter().any(|part| part["text"] == "keep me"));
+        assert!(found, "{parts}: text was lost: {body}");
+    }
+}
+
+// TestConvertOpenAIRequestToGemini_DataURLImageStillConverts
+#[test]
+fn data_url_image_still_converts() {
+    let (body, err) = convert_checked(&media_turn(MEDIA_IMAGE_DATA));
+    assert_eq!(err, None, "{body}");
+    assert_eq!(
+        body["contents"][2]["parts"][0]["inlineData"],
+        json!({"mime_type": "image/png", "data": "iVBORw0KGgo="}),
+        "{body}"
+    );
+}
+
+// TestOpenAIToGeminiRegistryCarriesTheImageURLRefusal
+#[test]
+fn registry_carries_the_image_url_refusal() {
+    let err = openai_to_gemini_envelope("m", &media_turn(MEDIA_IMAGE_URL)).expect_err("refused");
+    assert_eq!(err.part_type, "image_url");
+}
+
+// TestConvertOpenAIRequestToGemini_RefusesAnyEmptiedUserTurn
+#[test]
+fn refuses_any_emptied_user_turn() {
+    let cases = [
+        (
+            "history then file id only",
+            format!(
+                r#"{{"model":"m","messages":[{{"role":"user","content":"hello"}},{{"role":"assistant","content":"hi"}},{{"role":"user","content":[{USER_TURN_FILE_ID}]}}]}}"#
+            ),
+        ),
+        (
+            "system and developer prompts do not hide the empty turn",
+            format!(
+                r#"{{"model":"m","messages":[{{"role":"system","content":"sys"}},{{"role":"developer","content":"dev"}},{{"role":"user","content":[{USER_TURN_FILE_ID}]}}]}}"#
+            ),
+        ),
+        (
+            "emptied turn before a later text turn",
+            format!(
+                r#"{{"model":"m","messages":[{{"role":"user","content":[{USER_TURN_FILE_ID}]}},{{"role":"assistant","content":"ok"}},{{"role":"user","content":"next"}}]}}"#
+            ),
+        ),
+    ];
+    for (name, input) in cases {
+        require_refusal(name, &input, "file");
+    }
+}
+
+// TestConvertOpenAIRequestToGemini_KeepsTurnWithTextBesideAttachment
+#[test]
+fn keeps_turn_with_text_beside_attachment() {
+    let (body, err) = convert_checked(&media_turn(&format!(
+        "{USER_TURN_TEXT},{USER_TURN_FILE_ID}"
+    )));
+    assert_eq!(err, None, "{body}");
+    assert_eq!(body["contents"][2]["parts"][0]["text"], "keep me", "{body}");
+}
+
+// TestConvertOpenAIRequestToGemini_InlineFileAfterHistoryStaysInlineData
+#[test]
+fn inline_file_after_history_stays_inline_data() {
+    let (body, err) = convert_checked(&media_turn(USER_TURN_INLINE));
+    assert_eq!(err, None, "{body}");
+    assert_eq!(
+        body["contents"][2]["parts"][0]["inlineData"]["mime_type"], "application/pdf",
+        "{body}"
+    );
 }

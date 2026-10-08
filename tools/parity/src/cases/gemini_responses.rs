@@ -690,7 +690,7 @@ fn gemini_name(at: usize, child: Option<usize>) -> String {
         tool["tools"] = json!([tool["tools"][child].clone()]);
     }
     let request = json!({ "input": "x", "tools": [tool] });
-    let gemini = convert_openai_responses_request_to_gemini("gemini-2.5-pro", &request, true);
+    let (gemini, _) = convert_openai_responses_request_to_gemini("gemini-2.5-pro", &request, true);
     gemini["tools"][0]["functionDeclarations"][0]["name"]
         .as_str()
         .expect("the tool is declared")

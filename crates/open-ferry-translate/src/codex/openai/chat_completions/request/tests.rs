@@ -1,11 +1,25 @@
 // Ported from CLIProxyAPI internal/translator/codex/openai/chat-completions/codex_openai_request_test.go
-// (v8.0.15, MIT). https://github.com/router-for-me/CLIProxyAPI
+// (v8.0.15, MIT), and codex_openai_user_turn_test.go (v8.0.20, MIT).
+// https://github.com/router-for-me/CLIProxyAPI
 
 use serde_json::{Value, json};
 
 use super::*;
 use crate::codex::openai::chat_completions::convert_codex_response_to_openai_chat_completions_non_stream;
 use crate::json::bool_of;
+
+/// [`super::convert_openai_chat_completions_request_to_codex`], for requests
+/// it doesn't refuse.
+fn convert_openai_chat_completions_request_to_codex(
+    model: &str,
+    request: &Value,
+    stream: bool,
+) -> Value {
+    let (body, err) =
+        super::convert_openai_chat_completions_request_to_codex(model, request, stream);
+    assert_eq!(err, None, "{body}");
+    body
+}
 
 /// Looks up a dotted path such as `input.0.role`, like a plain gjson path.
 fn at<'v>(value: &'v Value, path: &str) -> Option<&'v Value> {
@@ -2001,4 +2015,209 @@ fn apply_patch_chat_history_boundary() {
             "{name}: history boundary: {out}"
         );
     }
+}
+
+const USER_TURN_FILE_ID: &str = r#"{"type":"file","file":{"file_id":"file-1"}}"#;
+const USER_TURN_FILE_URL: &str =
+    r#"{"type":"file","file":{"file_url":"https://example.test/a.pdf","filename":"a.pdf"}}"#;
+const USER_TURN_EMPTY_FILE: &str = r#"{"type":"file","file":{"filename":"a.pdf"}}"#;
+const USER_TURN_EMPTY_AUDIO: &str = r#"{"type":"input_audio","input_audio":{"format":"wav"}}"#;
+const USER_TURN_TEXT: &str = r#"{"type":"text","text":"keep me"}"#;
+const USER_TURN_EMPTY_TEXT: &str = r#"{"type":"text","text":""}"#;
+const USER_TURN_INLINE: &str = r#"{"type":"file","file":{"filename":"a.pdf","file_data":"data:application/pdf;base64,JVBERi0xLjQK"}}"#;
+const USER_TURN_AUDIO: &str =
+    r#"{"type":"input_audio","input_audio":{"data":"UklGRg==","format":"wav"}}"#;
+
+/// The translator's body and refusal.
+fn convert_checked(input: &str) -> (Value, Option<UnsupportedPartError>) {
+    let request: Value = serde_json::from_str(input).expect("test request is valid JSON");
+    super::convert_openai_chat_completions_request_to_codex("m", &request, false)
+}
+
+// TestConvertOpenAIRequestToCodex_RefusesAnyEmptiedUserTurn
+#[test]
+fn refuses_any_emptied_user_turn() {
+    let cases = [
+        (
+            "history then file without a source",
+            format!(
+                r#"{{"model":"m","messages":[{{"role":"user","content":"hello"}},{{"role":"assistant","content":"hi"}},{{"role":"user","content":[{USER_TURN_EMPTY_FILE}]}}]}}"#
+            ),
+            "file",
+        ),
+        (
+            "system and developer prompts do not hide the empty turn",
+            format!(
+                r#"{{"model":"m","messages":[{{"role":"system","content":"sys"}},{{"role":"developer","content":"dev"}},{{"role":"user","content":[{USER_TURN_EMPTY_FILE}]}}]}}"#
+            ),
+            "file",
+        ),
+        (
+            "emptied turn before a later text turn",
+            format!(
+                r#"{{"model":"m","messages":[{{"role":"user","content":[{USER_TURN_EMPTY_FILE}]}},{{"role":"assistant","content":"ok"}},{{"role":"user","content":"next"}}]}}"#
+            ),
+            "file",
+        ),
+        (
+            "audio without bytes",
+            format!(
+                r#"{{"model":"m","messages":[{{"role":"user","content":"hello"}},{{"role":"assistant","content":"hi"}},{{"role":"user","content":[{USER_TURN_EMPTY_AUDIO}]}}]}}"#
+            ),
+            "input_audio",
+        ),
+        (
+            "empty text beside the empty file does not count as sendable",
+            format!(
+                r#"{{"model":"m","messages":[{{"role":"user","content":[{USER_TURN_EMPTY_TEXT},{USER_TURN_EMPTY_FILE}]}}]}}"#
+            ),
+            "file",
+        ),
+    ];
+    for (name, input, want) in cases {
+        let (body, err) = convert_checked(&input);
+        let err = err.unwrap_or_else(|| panic!("{name}: no refusal; body = {body}"));
+        assert_eq!(err.part_type, want, "{name}");
+        assert_eq!(err.status_code(), 400, "{name}");
+        assert_eq!(
+            err.to_string(),
+            format!("unsupported content part: {want}"),
+            "{name}"
+        );
+        assert!(body.is_object(), "{name}: {body}");
+
+        let request: Value = serde_json::from_str(&input).expect("test request is valid JSON");
+        let registered = crate::registry::Registry::global().translate_request_checked(
+            &"openai".into(),
+            &"codex".into(),
+            "m",
+            request,
+            false,
+        );
+        assert_eq!(
+            registered.err().map(|err| err.part_type),
+            Some(want.to_owned()),
+            "{name}: the registration's refusal"
+        );
+    }
+}
+
+// TestConvertOpenAIRequestToCodex_FileIDStaysAnInputFile
+#[test]
+fn file_id_stays_an_input_file() {
+    let cases = [
+        ("file id", USER_TURN_FILE_ID, "file_id", "file-1"),
+        (
+            "file url",
+            USER_TURN_FILE_URL,
+            "file_url",
+            "https://example.test/a.pdf",
+        ),
+        (
+            "file data",
+            USER_TURN_INLINE,
+            "file_data",
+            "data:application/pdf;base64,JVBERi0xLjQK",
+        ),
+    ];
+    for (name, part, key, want) in cases {
+        let (body, err) = convert_checked(&format!(
+            r#"{{"model":"m","messages":[{{"role":"user","content":"hello"}},{{"role":"assistant","content":"hi"}},{{"role":"user","content":[{part}]}}]}}"#
+        ));
+        assert_eq!(err, None, "{name}: {body}");
+        assert_eq!(
+            text_at(&body, "input.2.content.0.type"),
+            "input_file",
+            "{name}: {body}"
+        );
+        assert_eq!(
+            text_at(&body, &format!("input.2.content.0.{key}")),
+            want,
+            "{name}: {body}"
+        );
+    }
+}
+
+// TestConvertOpenAIRequestToCodex_KeepsTurnWithTextBesideAttachment
+#[test]
+fn keeps_turn_with_text_beside_attachment() {
+    let (body, err) = convert_checked(&format!(
+        r#"{{"model":"m","messages":[{{"role":"user","content":"hello"}},{{"role":"assistant","content":"hi"}},{{"role":"user","content":[{USER_TURN_TEXT},{USER_TURN_EMPTY_FILE}]}}]}}"#
+    ));
+    assert_eq!(err, None, "{body}");
+    assert_eq!(
+        text_at(&body, "input.2.content.0.text"),
+        "keep me",
+        "{body}"
+    );
+}
+
+// TestConvertOpenAIRequestToCodex_AudioAfterHistoryStaysAudio
+#[test]
+fn audio_after_history_stays_audio() {
+    let (body, err) = convert_checked(&format!(
+        r#"{{"model":"m","messages":[{{"role":"user","content":"hello"}},{{"role":"assistant","content":"hi"}},{{"role":"user","content":[{USER_TURN_AUDIO}]}}]}}"#
+    ));
+    assert_eq!(err, None, "{body}");
+    assert_eq!(
+        text_at(&body, "input.2.content.0.type"),
+        "input_audio",
+        "{body}"
+    );
+    assert_eq!(
+        text_at(&body, "input.2.content.0.data"),
+        "UklGRg==",
+        "{body}"
+    );
+}
+
+// TestConvertOpenAIRequestToCodex_ExportedWrapperKeepsAJSONBody
+#[test]
+fn exported_wrapper_keeps_a_json_body() {
+    let (body, err) = convert_checked(&format!(
+        r#"{{"model":"m","messages":[{{"role":"user","content":[{USER_TURN_EMPTY_FILE}]}}]}}"#
+    ));
+    assert!(err.is_some(), "{body}");
+    assert!(body.is_object(), "{body}");
+}
+
+// Not upstream's: an assistant's unsendable file isn't refused, an image
+// or a tool message keeps nothing alive across messages, whitespace text
+// counts as sent (upstream doesn't trim), and a tool output's file part
+// takes the same fields.
+#[test]
+fn user_turns_in_detail() {
+    let (body, err) = convert_checked(&format!(
+        r#"{{"messages":[{{"role":"user","content":"q"}},{{"role":"assistant","content":[{USER_TURN_EMPTY_FILE}]}}]}}"#
+    ));
+    assert_eq!(err, None, "{body}");
+
+    let (body, err) = convert_checked(&format!(
+        r#"{{"messages":[{{"role":"user","content":[{{"type":"image_url","image_url":{{"url":"https://example.test/a.png"}}}},{USER_TURN_EMPTY_FILE}]}}]}}"#
+    ));
+    assert_eq!(err, None, "{body}");
+
+    let (body, err) = convert_checked(&format!(
+        r#"{{"messages":[{{"role":"user","content":[{{"type":"text","text":" "}},{USER_TURN_EMPTY_AUDIO}]}}]}}"#
+    ));
+    assert_eq!(err, None, "{body}");
+
+    let (body, err) = convert_checked(&format!(
+        r#"{{"messages":[{{"role":"assistant","content":null,"tool_calls":[{{"id":"c1","type":"function","function":{{"name":"f","arguments":"{{}}"}}}}]}},{{"role":"tool","tool_call_id":"c1","content":"ok"}},{{"role":"user","content":[{USER_TURN_EMPTY_FILE}]}}]}}"#
+    ));
+    let err = err.unwrap_or_else(|| panic!("no refusal; body = {body}"));
+    assert_eq!(err.part_type, "file");
+
+    let (body, err) = convert_checked(&format!(
+        r#"{{"messages":[{{"role":"assistant","content":null,"tool_calls":[{{"id":"c1","type":"function","function":{{"name":"f","arguments":"{{}}"}}}}]}},{{"role":"tool","tool_call_id":"c1","content":[{USER_TURN_FILE_URL},{USER_TURN_EMPTY_FILE}]}}]}}"#
+    ));
+    assert_eq!(err, None, "{body}");
+    assert_eq!(
+        at(&body, "input.1.output"),
+        Some(&json!([
+            {"type": "input_file", "file_url": "https://example.test/a.pdf", "filename": "a.pdf"},
+            {"type": "input_text", "text": USER_TURN_EMPTY_FILE}
+        ])),
+        "{body}"
+    );
 }

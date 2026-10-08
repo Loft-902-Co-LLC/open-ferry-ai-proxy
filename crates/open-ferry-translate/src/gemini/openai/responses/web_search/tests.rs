@@ -45,10 +45,10 @@ use std::collections::HashMap;
 
 use serde_json::{Value, json};
 
+use super::super::test_support::convert_openai_responses_request_to_gemini;
 use super::super::test_support::{GEMINI_SIGNATURE, events_by_type, sse_events};
 use super::super::{
     GeminiToOpenAIResponsesStream, convert_gemini_response_to_openai_responses_non_stream,
-    convert_openai_responses_request_to_gemini,
 };
 use super::*;
 use crate::json::bool_of;

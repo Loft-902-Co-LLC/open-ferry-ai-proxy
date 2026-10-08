@@ -12,6 +12,7 @@ pub(crate) mod gemini_response;
 pub(crate) mod interactions_usage;
 pub(crate) mod mime_types;
 pub(crate) mod openai_tools;
+pub(crate) mod parts;
 pub(crate) mod responses;
 pub(crate) mod sse;
 pub(crate) mod tool_names;

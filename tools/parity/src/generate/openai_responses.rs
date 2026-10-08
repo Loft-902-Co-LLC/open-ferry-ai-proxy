@@ -296,7 +296,7 @@ impl Generator {
         let translated = match self.rng.below(10) {
             0..=2 => return (original_text, String::new()),
             3..=6 => {
-                convert_openai_responses_request_to_openai_chat_completions(model, original, true)
+                convert_openai_responses_request_to_openai_chat_completions(model, original, true).0
             }
             _ => self.echoed_fields(),
         };
@@ -826,12 +826,69 @@ impl Generator {
             9..=11 => self.input_image(),
             12 | 13 => self.video_part(),
             14 => json!({ "type": "refusal", "refusal": "No." }),
-            15 => json!({ "type": "input_file", "file_id": "file_1", "filename": "a.pdf" }),
-            16 => {
-                json!({ "type": "input_audio", "input_audio": { "data": "AAAA", "format": "wav" } })
-            }
+            15 => self.input_file(),
+            16 => self.input_audio(),
             _ => self.one_of(&[json!("bare string"), json!(5), Value::Null, json!({})]),
         }
+    }
+
+    /// A file part: by id, by its bytes, by URL only (which Chat Completions
+    /// has no field for), with nothing to send, or with an odd id.
+    fn input_file(&mut self) -> Value {
+        let mut fields = vec![("type", json!("input_file"))];
+        match self.rng.below(8) {
+            0 | 1 => fields.push(("file_id", json!("file_1"))),
+            2 | 3 => {
+                fields.push((
+                    "file_data",
+                    json!("data:application/pdf;base64,JVBERi0xLjQK"),
+                ));
+                if self.rng.chance(30) {
+                    fields.push(("file_url", json!("https://example.test/a.pdf")));
+                }
+            }
+            4 | 5 => fields.push(("file_url", json!("https://example.test/a.pdf"))),
+            6 => {}
+            _ => {
+                let id = self.one_of(&[json!(5), json!(""), Value::Null, json!(" ")]);
+                fields.push(("file_id", id));
+            }
+        }
+        if self.rng.chance(40) {
+            fields.push(("filename", json!("a.pdf")));
+        }
+        self.object(fields)
+    }
+
+    /// An audio part: its bytes and format under `input_audio` or on the
+    /// part itself, or no bytes to send.
+    fn input_audio(&mut self) -> Value {
+        let mut fields = vec![("type", json!("input_audio"))];
+        match self.rng.below(7) {
+            0..=2 => {
+                let format = self.rng.pick(&["wav", "mp3", ""]);
+                fields.push(("input_audio", json!({ "data": "AAAA", "format": format })));
+            }
+            3 => fields.push(("input_audio", json!({ "format": "wav" }))),
+            4 => {
+                fields.push(("data", json!("AAAA")));
+                fields.push(("format", json!("mp3")));
+            }
+            5 => {
+                fields.push(("input_audio", json!({ "data": "AAAA", "format": "" })));
+                fields.push(("format", json!("wav")));
+            }
+            _ => {
+                let audio = self.one_of(&[
+                    json!({ "data": "" }),
+                    json!({ "data": " " }),
+                    json!("x"),
+                    Value::Null,
+                ]);
+                fields.push(("input_audio", audio));
+            }
+        }
+        self.object(fields)
     }
 
     fn input_image(&mut self) -> Value {
@@ -1607,7 +1664,7 @@ fn tame_numbers(value: &mut Value) {
 /// and by a name neither declares, each with arguments of the kind its tool
 /// takes, a shell action for the local shell's function.
 fn calls(request: &Value, declared: &[Value]) -> Vec<Call> {
-    let translated =
+    let (translated, _) =
         convert_openai_responses_request_to_openai_chat_completions("gpt-4o", request, true);
     let mut calls: Vec<Call> = Vec::new();
     if let Some(Value::Array(tools)) = translated.get("tools") {

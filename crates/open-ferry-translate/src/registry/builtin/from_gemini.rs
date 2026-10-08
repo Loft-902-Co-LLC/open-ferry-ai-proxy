@@ -7,6 +7,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use super::super::{Format, Registry, ResponseTransform, StreamTranslator};
+use super::{checked, sends};
 use crate::claude::gemini as claude_gemini;
 use crate::codex::gemini as codex_gemini;
 use crate::models::ModelCatalog;
@@ -17,9 +18,7 @@ pub(super) fn register(registry: &Registry) {
     registry.register(
         Format::GEMINI,
         Format::CODEX,
-        Some(Arc::new(|model, body, _stream| {
-            codex_gemini::convert_gemini_request_to_codex(model, &body)
-        })),
+        sends(|model, body, _stream| codex_gemini::convert_gemini_request_to_codex(model, &body)),
         ResponseTransform {
             stream: Some(Arc::new(|context| {
                 Box::new(CodexToGemini(codex_gemini::CodexToGeminiStream::new(
@@ -46,14 +45,14 @@ pub(super) fn register(registry: &Registry) {
     registry.register(
         Format::GEMINI,
         Format::CLAUDE,
-        Some(Arc::new(|model, body, stream| {
+        checked(|model, body, stream| {
             claude_gemini::convert_gemini_request_to_claude(
                 model,
                 &body,
                 stream,
                 &ModelCatalog::current(),
             )
-        })),
+        }),
         ResponseTransform {
             stream: Some(Arc::new(|context| {
                 Box::new(ClaudeToGemini(claude_gemini::ClaudeToGeminiStream::new(
@@ -77,9 +76,9 @@ pub(super) fn register(registry: &Registry) {
     registry.register(
         Format::GEMINI,
         Format::OPENAI,
-        Some(Arc::new(|model, body, stream| {
+        sends(|model, body, stream| {
             openai_gemini::convert_gemini_request_to_openai(model, &body, stream)
-        })),
+        }),
         ResponseTransform {
             stream: Some(Arc::new(|_context| {
                 Box::new(OpenAIToGemini(openai_gemini::OpenAIToGeminiStream::new()))

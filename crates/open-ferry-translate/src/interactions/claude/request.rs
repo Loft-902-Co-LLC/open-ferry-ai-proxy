@@ -20,6 +20,11 @@
 //! dropped, except by [`convert_claude_request_to_interactions_with_compat`].
 //! Signatures are dropped: Interactions steps don't carry Claude's.
 //!
+//! An `image`, `document` or `container_upload` block without both a media
+//! type and data is dropped. The rest of a user message is still sent, but a
+//! user message left with nothing to send is refused with an
+//! [`UnsupportedPartError`].
+//!
 //! Deviations from upstream:
 //! - Where upstream copies the client's JSON text into a string (a `system`,
 //!   text, thinking, name, ID, media type or data that is an object or an
@@ -31,17 +36,22 @@ use std::collections::HashMap;
 use serde_json::{Value, json};
 
 use crate::common::claude::{align_tool_results, message_system_reminder_text};
+use crate::common::parts::UserTurnDrops;
 use crate::go;
 use crate::json::{bool_of, object, path, set_path, str_of};
+use crate::registry::UnsupportedPartError;
 
 /// Converts a Claude Messages request body into an Interactions request for
 /// `model_name`. Empty assistant thinking blocks are dropped. The request's
 /// own `stream` wins over `stream`.
+///
+/// The error is set when a user message had only blocks Interactions can't
+/// take; the body is still returned.
 pub fn convert_claude_request_to_interactions(
     model_name: &str,
     request: &Value,
     stream: bool,
-) -> Value {
+) -> (Value, Option<UnsupportedPartError>) {
     convert(model_name, request, stream, false)
 }
 
@@ -51,11 +61,16 @@ pub fn convert_claude_request_to_interactions_with_compat(
     model_name: &str,
     request: &Value,
     stream: bool,
-) -> Value {
+) -> (Value, Option<UnsupportedPartError>) {
     convert(model_name, request, stream, true)
 }
 
-fn convert(model_name: &str, request: &Value, stream: bool, keep_empty_thinking: bool) -> Value {
+fn convert(
+    model_name: &str,
+    request: &Value,
+    stream: bool,
+    keep_empty_thinking: bool,
+) -> (Value, Option<UnsupportedPartError>) {
     let mut out = json!({"model": "", "input": []});
     out["model"] = first_non_empty(&[model_name, &str_of(request.get("model"))]).into();
     match request.get("stream") {
@@ -84,8 +99,11 @@ fn convert(model_name: &str, request: &Value, stream: bool, keep_empty_thinking:
         set_path(&mut out, "generation_config.tool_choice", choice);
     }
 
+    let mut refusal = None;
     if let Some(Value::Array(messages)) = request.get("messages") {
-        out["input"] = Value::Array(convert_messages(messages, keep_empty_thinking));
+        let (steps, err) = convert_messages(messages, keep_empty_thinking);
+        out["input"] = Value::Array(steps);
+        refusal = err;
     }
 
     if let Some(Value::Array(tools)) = request.get("tools") {
@@ -94,7 +112,7 @@ fn convert(model_name: &str, request: &Value, stream: bool, keep_empty_thinking:
             out["tools"] = Value::Array(tools);
         }
     }
-    out
+    (out, refusal)
 }
 
 /// The first of `values` that isn't blank, as it is; `""` if they all are.
@@ -192,9 +210,14 @@ struct Steps {
     pending_reminders: Vec<Value>,
     tool_names_by_id: HashMap<String, String>,
     keep_empty_thinking: bool,
+    /// The blocks each user message couldn't send.
+    drops: UserTurnDrops,
 }
 
-fn convert_messages(messages: &[Value], keep_empty_thinking: bool) -> Vec<Value> {
+fn convert_messages(
+    messages: &[Value],
+    keep_empty_thinking: bool,
+) -> (Vec<Value>, Option<UnsupportedPartError>) {
     let mut steps = Steps {
         keep_empty_thinking,
         ..Steps::default()
@@ -226,11 +249,15 @@ fn convert_messages(messages: &[Value], keep_empty_thinking: bool) -> Vec<Value>
             Some(parts) => Content::Parts(parts),
             None => Content::from(content),
         };
-        steps.append_message(&role, content);
+        let sendable = steps.append_message(&role, content);
+        if role == "user" {
+            steps.drops.end_turn(sendable);
+        }
         steps.flush_reminders();
     }
     steps.flush_reminders();
-    steps.items
+    let refusal = steps.drops.err();
+    (steps.items, refusal)
 }
 
 impl Steps {
@@ -259,7 +286,10 @@ impl Steps {
         }
     }
 
-    fn append_message(&mut self, role: &str, content: Content<'_>) {
+    /// Adds a message's steps, and says how many of its parts it sends.
+    /// Text that is only whitespace is sent but isn't counted, nor are
+    /// system reminders flushed beside it.
+    fn append_message(&mut self, role: &str, content: Content<'_>) -> usize {
         let step_type = if role == "assistant" {
             "model_output"
         } else {
@@ -270,12 +300,13 @@ impl Steps {
                 self.flush_reminders();
                 self.items
                     .push(json!({"type": step_type, "content": [{"type": "text", "text": text}]}));
-                return;
+                return 1;
             }
             Content::Parts(parts) => parts,
-            Content::Other => return,
+            Content::Other => return 0,
         };
 
+        let mut sendable = 0;
         let mut step_content = Vec::new();
         for part in parts {
             let part_type = go::to_lower(str_of(part.get("type")).trim());
@@ -284,6 +315,9 @@ impl Steps {
                     let text = str_of(part.get("text"));
                     if !text.is_empty() {
                         self.flush_reminders_before_part(step_type, &mut step_content);
+                        if !text.trim().is_empty() {
+                            sendable += 1;
+                        }
                         step_content.push(json!({"type": "text", "text": text}));
                     }
                 }
@@ -294,12 +328,16 @@ impl Steps {
                         self.items.push(
                             json!({"type": "thought", "content": [{"type": "text", "text": text}]}),
                         );
+                        sendable += 1;
                     }
                 }
-                "image" | "document" => {
+                "image" | "document" | "container_upload" => {
                     if let Some(media) = media_part(part, &part_type) {
                         self.flush_reminders_before_part(step_type, &mut step_content);
                         step_content.push(media);
+                        sendable += 1;
+                    } else if role == "user" {
+                        self.drops.drop_part(&part_type);
                     }
                 }
                 "tool_use" => {
@@ -314,21 +352,24 @@ impl Steps {
                         }
                     }
                     self.items.push(tool_use_step(part));
+                    sendable += 1;
                 }
                 "tool_result" => {
                     self.flush_content(step_type, &mut step_content);
                     self.items
                         .push(tool_result_step(part, &self.tool_names_by_id));
+                    sendable += 1;
                 }
                 _ => {}
             }
         }
         self.flush_content(step_type, &mut step_content);
+        sendable
     }
 }
 
-/// An `image` or `document` block as an Interactions media part, if it has
-/// both a media type and data.
+/// An `image`, `document` or `container_upload` block as an Interactions
+/// media part of the same type, if it has both a media type and data.
 fn media_part(part: &Value, part_type: &str) -> Option<Value> {
     let source = part.get("source");
     let mut media_type = str_of(source.and_then(|source| source.get("media_type")));
@@ -413,7 +454,9 @@ fn tool_result_item(item: &Value) -> Value {
                 item.clone()
             }
         }
-        "image" | "document" => media_part(item, &item_type).unwrap_or_else(|| item.clone()),
+        "image" | "document" | "container_upload" => {
+            media_part(item, &item_type).unwrap_or_else(|| item.clone())
+        }
         _ => item.clone(),
     }
 }

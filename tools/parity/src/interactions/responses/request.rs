@@ -25,6 +25,7 @@ use super::super::{Family, Pair, Stage};
 use crate::cases::Case;
 use crate::compare::{Deviation, JsonAt, JsonForm};
 use crate::generate::interactions::responses::request as generate;
+use crate::translator::refused;
 
 /// The suites, a variant each.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -92,7 +93,9 @@ impl Family for Kind {
         let stream = case.options["stream"].as_bool().unwrap_or(false);
         Ok(match self {
             Self::ResponsesToInteractions => {
-                convert_openai_responses_request_to_interactions(&case.model, &request, stream)
+                let (body, err) =
+                    convert_openai_responses_request_to_interactions(&case.model, &request, stream);
+                refused(body, err)
             }
             Self::InteractionsToResponses => {
                 convert_interactions_request_to_openai_responses(&case.model, &request, stream)
@@ -130,10 +133,10 @@ impl Family for Kind {
 
 /// Where the Responses → Interactions translator writes the JSON text of a
 /// value given where a string belongs, which upstream copies as written and
-/// we write compactly: names, IDs, texts, image fields, a custom tool call's
-/// input and tool descriptions. A qualified name or an instruction can hold
-/// it within other text: a namespace and its tool's name joined, or the
-/// texts of instruction parts run together.
+/// we write compactly: names, IDs, texts, image and file fields, a custom
+/// tool call's input and tool descriptions. A qualified name or an
+/// instruction can hold it within other text: a namespace and its tool's
+/// name joined, or the texts of instruction parts run together.
 const RESPONSES_TO_INTERACTIONS_JSON: &[JsonAt] = &[
     ("$.model", JsonForm::Whole),
     ("$.system_instruction", JsonForm::InText),
@@ -143,6 +146,8 @@ const RESPONSES_TO_INTERACTIONS_JSON: &[JsonAt] = &[
     ("$.input[*].content[*].image_url", JsonForm::Whole),
     ("$.input[*].content[*].data", JsonForm::Whole),
     ("$.input[*].content[*].mime_type", JsonForm::Whole),
+    ("$.input[*].content[*].filename", JsonForm::Whole),
+    ("$.input[*].content[*].file_url", JsonForm::Whole),
     ("$.input[*].name", JsonForm::InText),
     ("$.input[*].call_id", JsonForm::Whole),
     ("$.input[*].arguments.input", JsonForm::Whole),

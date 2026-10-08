@@ -42,6 +42,11 @@
 //! input holds a carrier, the parts are laid out as Gemini sent them;
 //! otherwise each reasoning item is a thought part of its own.
 //!
+//! An image, audio, video or file in a user message that can't become a
+//! Gemini part, such as a bare file ID, is dropped. The rest of the message
+//! is still sent, but a user message with list content left with nothing to
+//! send is refused with an [`UnsupportedPartError`].
+//!
 //! Deviations from upstream:
 //! - A function call's `arguments` that start like a JSON object or array
 //!   but aren't valid JSON go into `args.arguments` as text. Upstream copies
@@ -85,10 +90,12 @@ use crate::common::gemini::{
     set_gemini_function_response_result,
 };
 use crate::common::mime_types::mime_type;
+use crate::common::parts::UserTurnDrops;
 use crate::common::responses::{extract_responses_call_id, normalize_responses_tool_call_outputs};
 use crate::gemini::common::attach_default_safety_settings;
 use crate::go;
 use crate::json::{bool_of, float_of, int_of, object, path, set_path, str_of};
+use crate::registry::UnsupportedPartError;
 use crate::responses_tools::{
     build_gemini_function_declarations, convert_responses_tool_choice_to_gemini,
     map_responses_tool_name, qualify_namespace_tool_name,
@@ -107,12 +114,16 @@ const BYPASS: &str = GEMINI_SKIP_THOUGHT_SIGNATURE_VALIDATOR;
 const RESULT_PATH: &str = "functionResponse.response.result";
 
 /// `ConvertOpenAIResponsesRequestToGemini`.
+///
+/// The error is set when a user message had only parts Gemini can't take;
+/// the body is still returned.
 pub fn convert_openai_responses_request_to_gemini(
     model: &str,
     body: &Value,
     _stream: bool,
-) -> Value {
+) -> (Value, Option<UnsupportedPartError>) {
     let root = body;
+    let mut drops = UserTurnDrops::default();
     let mut native = Provider::from_model_name(model) == Provider::Gemini;
     let mut out = Value::Object(Map::new());
     out["contents"] = Value::Array(Vec::new());
@@ -167,7 +178,13 @@ pub fn convert_openai_responses_request_to_gemini(
                 .map(Cow::into_owned)
                 .collect();
             let items = pair_reasoning_with_function_calls(items);
-            let contents = convert_items(items, native, &declarations.forward, &mut system_parts);
+            let contents = convert_items(
+                items,
+                native,
+                &declarations.forward,
+                &mut system_parts,
+                &mut drops,
+            );
             out["contents"] = Value::Array(contents);
         }
         Some(Value::String(input)) => {
@@ -225,16 +242,18 @@ pub fn convert_openai_responses_request_to_gemini(
         sanitize_gemini_request_thought_signatures(&mut out, "contents");
     }
     strip_trailing_model_prefill(&mut out);
-    out
+    (out, drops.err())
 }
 
 /// The input items as Gemini contents. System and developer messages before
-/// the conversation go into `system_parts`.
+/// the conversation go into `system_parts`. Each message with list content
+/// is recorded in `drops`.
 fn convert_items(
     items: Vec<Value>,
     native: bool,
     forward: &HashMap<String, String>,
     system_parts: &mut Vec<Value>,
+    drops: &mut UserTurnDrops,
 ) -> Vec<Value> {
     let mut names_by_call_id: HashMap<String, String> = HashMap::new();
     for item in &items {
@@ -383,6 +402,9 @@ fn convert_items(
                     if !parts_to_process.is_empty() {
                         let mut current_role = String::new();
                         let mut current_parts: Vec<Value> = Vec::new();
+                        // The user parts this item really sends; an empty
+                        // text part doesn't count.
+                        let mut user_sendable = 0;
                         let flush =
                             |contents: &mut Vec<Value>,
                              current_role: &str,
@@ -410,15 +432,36 @@ fn convert_items(
                             if current_role.is_empty() {
                                 current_role = effective_role;
                             }
-                            let gemini_part = match &*content_type {
-                                "input_text" | "output_text" | "text" => {
-                                    part.get("text").map(|text| text_part(str_of(Some(text))))
-                                }
-                                _ => part_from_block(part),
+                            let user = current_role == "user";
+                            let (gemini_part, sends) = match &*content_type {
+                                "input_text" | "output_text" | "text" => match part.get("text") {
+                                    Some(text) => {
+                                        let text = str_of(Some(text));
+                                        let sends = !text.is_empty();
+                                        (Some(text_part(text)), sends)
+                                    }
+                                    None => (None, false),
+                                },
+                                _ => match part_from_block(part) {
+                                    Some(gemini_part) => (Some(gemini_part), true),
+                                    None => {
+                                        if user && is_attachment_part_type(&content_type) {
+                                            // Gemini has no field for a bare
+                                            // file ID and no way to fetch the
+                                            // bytes.
+                                            drops.drop_part(&content_type);
+                                        }
+                                        (None, false)
+                                    }
+                                },
                             };
                             current_parts.extend(gemini_part);
+                            if sends && user {
+                                user_sendable += 1;
+                            }
                         }
                         flush(&mut contents, &current_role, &mut current_parts);
+                        drops.end_turn(user_sendable);
                     } else if let Some(Value::String(text)) = content {
                         contents.push(gemini_content(
                             &effective_role(&role),
@@ -1123,6 +1166,24 @@ fn parse_data_url(raw: &str) -> Option<(String, String)> {
         return None;
     }
     Some((mime_type.to_owned(), payload.to_owned()))
+}
+
+/// `isResponsesAttachmentPartType`: the content part types that carry a
+/// file, image, audio or video rather than text.
+fn is_attachment_part_type(kind: &str) -> bool {
+    matches!(
+        go::to_lower(kind.trim()).as_str(),
+        "input_image"
+            | "image_url"
+            | "image"
+            | "input_audio"
+            | "audio"
+            | "input_video"
+            | "video_url"
+            | "video"
+            | "input_file"
+            | "file"
+    )
 }
 
 /// `isResponsesContentPartType`.

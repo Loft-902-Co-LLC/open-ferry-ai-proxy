@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/claude/openai/responses/claude_openai-responses_request_test.go
-// (v8.0.15, MIT).
+// (v8.0.15, MIT) and claude_openai-responses_user_turn_test.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use std::collections::HashMap;
@@ -29,15 +29,39 @@ const PATCH_INSTRUCTIONS: [&str; 10] = [
     "JSON object",
 ];
 
+/// A conversion's body, which must come without a refusal.
+fn sent((body, err): (Value, Option<UnsupportedPartError>)) -> Value {
+    assert_eq!(err, None, "refused: {body}");
+    body
+}
+
 fn convert(model: &str, request: &Value) -> Value {
-    convert_openai_responses_request_to_claude(model, request, false, ModelCatalog::embedded())
+    sent(convert_openai_responses_request_to_claude(
+        model,
+        request,
+        false,
+        ModelCatalog::embedded(),
+    ))
 }
 
 fn convert_streaming(model: &str, request: &Value) -> Value {
-    convert_openai_responses_request_to_claude(model, request, true, ModelCatalog::embedded())
+    sent(convert_openai_responses_request_to_claude(
+        model,
+        request,
+        true,
+        ModelCatalog::embedded(),
+    ))
 }
 
 fn convert_with_compat(model: &str, request: &Value) -> Value {
+    sent(convert_with_compat_checked(model, request))
+}
+
+/// `ConvertOpenAIResponsesRequestToClaudeWithCompat`, with its refusal.
+fn convert_with_compat_checked(
+    model: &str,
+    request: &Value,
+) -> (Value, Option<UnsupportedPartError>) {
     convert_openai_responses_request_to_claude_with_compat(
         model,
         request,
@@ -2541,4 +2565,146 @@ fn custom_tool_input_unwraps_like_upstream() {
     for (arguments, want) in cases {
         assert_eq!(unwrap_custom_tool_input(arguments), want, "{arguments}");
     }
+}
+
+const RESPONSES_USER_HELLO: &str =
+    r#"{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}"#;
+const RESPONSES_ASSISTANT_HI: &str =
+    r#"{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]}"#;
+const RESPONSES_USER_NEXT: &str =
+    r#"{"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]}"#;
+const RESPONSES_FILE_ID_PART: &str = r#"{"type":"input_file","file_id":"file-1"}"#;
+const RESPONSES_AUDIO_PART: &str =
+    r#"{"type":"input_audio","input_audio":{"data":"UklGRg==","format":"wav"}}"#;
+const RESPONSES_TEXT_PART: &str = r#"{"type":"input_text","text":"keep me"}"#;
+const RESPONSES_INLINE_FILE: &str = r#"{"type":"input_file","filename":"a.pdf","file_data":"data:application/pdf;base64,JVBERi0xLjQK"}"#;
+const RESPONSES_DEVELOPER_MSG: &str =
+    r#"{"type":"message","role":"developer","content":[{"type":"input_text","text":"dev"}]}"#;
+
+fn responses_user_turn(parts: &[&str]) -> String {
+    format!(
+        r#"{{"type":"message","role":"user","content":[{}]}}"#,
+        parts.join(",")
+    )
+}
+
+fn responses_payload(instructions: &str, items: &[&str]) -> Value {
+    let mut prefix = r#"{"model":"claude-sonnet-4","#.to_owned();
+    if !instructions.is_empty() {
+        prefix += &format!(r#""instructions":"{instructions}","#);
+    }
+    serde_json::from_str(&format!(r#"{prefix}"input":[{}]}}"#, items.join(","))).unwrap()
+}
+
+// TestConvertOpenAIResponsesRequestToClaude_RefusesAnyEmptiedUserTurn
+#[test]
+fn refuses_any_emptied_user_turn() {
+    let file_id_turn = responses_user_turn(&[RESPONSES_FILE_ID_PART]);
+    let audio_turn = responses_user_turn(&[RESPONSES_AUDIO_PART]);
+    let file_url_turn =
+        responses_user_turn(&[r#"{"type":"input_file","file_url":"https://example.test/a.pdf"}"#]);
+    let cases = [
+        (
+            "history then file id only",
+            responses_payload(
+                "",
+                &[RESPONSES_USER_HELLO, RESPONSES_ASSISTANT_HI, &file_id_turn],
+            ),
+            "input_file",
+        ),
+        (
+            "audio only after history",
+            responses_payload(
+                "",
+                &[RESPONSES_USER_HELLO, RESPONSES_ASSISTANT_HI, &audio_turn],
+            ),
+            "input_audio",
+        ),
+        (
+            "instructions and developer prompt do not hide the empty turn",
+            responses_payload("sys", &[RESPONSES_DEVELOPER_MSG, &file_id_turn]),
+            "input_file",
+        ),
+        (
+            "emptied turn before a later text turn",
+            responses_payload(
+                "",
+                &[&file_id_turn, RESPONSES_ASSISTANT_HI, RESPONSES_USER_NEXT],
+            ),
+            "input_file",
+        ),
+        (
+            "file url carries no bytes",
+            responses_payload("", &[&file_url_turn]),
+            "input_file",
+        ),
+    ];
+    for (name, input, want) in cases {
+        let (body, err) = convert_with_compat_checked("claude-sonnet-4", &input);
+        let err = err.unwrap_or_else(|| panic!("{name}: no refusal; body = {body}"));
+        assert_eq!(err.part_type, want, "{name}");
+        assert_eq!(err.status_code(), 400, "{name}");
+        assert_eq!(
+            err.to_string(),
+            format!("unsupported content part: {want}"),
+            "{name}"
+        );
+        assert!(body.is_object(), "{name}: {body}");
+
+        let err = crate::registry::Registry::global()
+            .translate_request_checked(
+                &"openai-response".into(),
+                &"claude".into(),
+                "claude-sonnet-4",
+                input,
+                false,
+            )
+            .expect_err(name);
+        assert_eq!(err.part_type, want, "{name}: registry");
+    }
+}
+
+// TestConvertOpenAIResponsesRequestToClaude_KeepsTurnWithTextBesideAttachment
+#[test]
+fn keeps_turn_with_text_beside_attachment() {
+    for (name, attachment) in [
+        ("file id", RESPONSES_FILE_ID_PART),
+        ("audio", RESPONSES_AUDIO_PART),
+    ] {
+        let turn = responses_user_turn(&[RESPONSES_TEXT_PART, attachment]);
+        let input = responses_payload("", &[RESPONSES_USER_HELLO, RESPONSES_ASSISTANT_HI, &turn]);
+        let (body, err) = convert_with_compat_checked("claude-sonnet-4", &input);
+        assert_eq!(err, None, "{name}");
+        assert_eq!(
+            text(&body["messages"][2]["content"]),
+            "keep me",
+            "{name}: {body}"
+        );
+    }
+}
+
+// TestConvertOpenAIResponsesRequestToClaude_InlineFileStaysADocument
+#[test]
+fn inline_file_stays_a_document() {
+    let turn = responses_user_turn(&[RESPONSES_INLINE_FILE]);
+    let input = responses_payload("", &[RESPONSES_USER_HELLO, RESPONSES_ASSISTANT_HI, &turn]);
+    let body = convert_with_compat("claude-sonnet-4", &input);
+    let part = &body["messages"][2]["content"][0];
+    assert_eq!(text(&part["type"]), "document", "{body}");
+    assert_eq!(text(&part["source"]["data"]), "JVBERi0xLjQK", "{body}");
+}
+
+// TestConvertOpenAIResponsesRequestToClaude_ExportedWrappersKeepAJSONBody
+#[test]
+fn exported_wrappers_keep_a_json_body() {
+    let input = responses_payload("", &[&responses_user_turn(&[RESPONSES_FILE_ID_PART])]);
+    let (plain, err_plain) = convert_openai_responses_request_to_claude(
+        "claude-sonnet-4",
+        &input,
+        false,
+        ModelCatalog::embedded(),
+    );
+    let (compat, err_compat) = convert_with_compat_checked("claude-sonnet-4", &input);
+    assert!(plain.is_object() && compat.is_object());
+    assert!(err_plain.is_some() && err_compat.is_some());
 }

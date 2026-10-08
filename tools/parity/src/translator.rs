@@ -77,7 +77,9 @@ use open_ferry_translate::openai::responses::{
     convert_openai_chat_completions_response_to_openai_responses_non_stream,
     convert_openai_responses_request_to_openai_chat_completions,
 };
-use open_ferry_translate::registry::{Format, Registry, ResponseContext, ResponseTransform};
+use open_ferry_translate::registry::{
+    Format, Registry, ResponseContext, ResponseTransform, UnsupportedPartError,
+};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -565,15 +567,15 @@ impl Translator {
             Self::Request => {
                 let request = request
                     .map_err(|err| format!("case {} is not valid JSON: {err}", case.name))?;
-                Ok(convert_claude_request_to_codex(&case.model, &request))
+                let (body, err) = convert_claude_request_to_codex(&case.model, &request);
+                Ok(refused(body, err))
             }
             Self::RequestCompat => {
                 let request = request
                     .map_err(|err| format!("case {} is not valid JSON: {err}", case.name))?;
-                Ok(convert_claude_request_to_codex_with_compat(
-                    &case.model,
-                    &request,
-                ))
+                let (body, err) =
+                    convert_claude_request_to_codex_with_compat(&case.model, &request);
+                Ok(refused(body, err))
             }
             Self::SignatureInspect => Ok(signature::inspect(
                 &case.model,
@@ -654,11 +656,9 @@ impl Translator {
             Self::ChatRequest => {
                 let request = request
                     .map_err(|err| format!("case {} is not valid JSON: {err}", case.name))?;
-                Ok(convert_openai_chat_completions_request_to_codex(
-                    &case.model,
-                    &request,
-                    true,
-                ))
+                let (body, err) =
+                    convert_openai_chat_completions_request_to_codex(&case.model, &request, true);
+                Ok(refused(body, err))
             }
             Self::ChatStream => {
                 let mut stream = CodexToOpenAIChatCompletionsStream::new(
@@ -692,10 +692,10 @@ impl Translator {
                 } else {
                     convert_openai_chat_completions_request_to_claude_with_compat
                 };
-                let output = convert(&case.model, &request, true, ModelCatalog::embedded());
+                let (body, err) = convert(&case.model, &request, true, ModelCatalog::embedded());
                 // Read back, so generated IDs are masked as upstream's are.
                 Ok(self
-                    .read(case, output.to_string().as_bytes())
+                    .read(case, refused(body, err).to_string().as_bytes())
                     .expect("requests always read"))
             }
             Self::ClaudeChatStream => {
@@ -724,10 +724,10 @@ impl Translator {
                 } else {
                     convert_openai_responses_request_to_claude_with_compat
                 };
-                let output = convert(&case.model, &request, true, ModelCatalog::embedded());
+                let (body, err) = convert(&case.model, &request, true, ModelCatalog::embedded());
                 // Read back, so generated IDs are masked as upstream's are.
                 Ok(self
-                    .read(case, output.to_string().as_bytes())
+                    .read(case, refused(body, err).to_string().as_bytes())
                     .expect("requests always read"))
             }
             Self::ClaudeResponsesStream => {
@@ -754,14 +754,14 @@ impl Translator {
             Self::OpenAIResponsesRequest => {
                 let request = request
                     .map_err(|err| format!("case {} is not valid JSON: {err}", case.name))?;
-                let output = convert_openai_responses_request_to_openai_chat_completions(
+                let (body, err) = convert_openai_responses_request_to_openai_chat_completions(
                     &case.model,
                     &request,
                     true,
                 );
                 // Read back, as upstream's output is.
                 Ok(self
-                    .read(case, output.to_string().as_bytes())
+                    .read(case, refused(body, err).to_string().as_bytes())
                     .expect("requests always read"))
             }
             Self::OpenAIResponsesStream => {
@@ -806,7 +806,8 @@ impl Translator {
                     convert_claude_request_to_openai_with_compat
                 };
                 let stream = case.options["stream"].as_bool().unwrap_or(false);
-                Ok(convert(&case.model, &request, stream))
+                let (body, err) = convert(&case.model, &request, stream);
+                Ok(refused(body, err))
             }
             Self::OpenAIClaudeStream => {
                 let mut stream = OpenAIToClaudeStream::new(&request.unwrap_or_default());
@@ -860,12 +861,13 @@ impl Translator {
                     .map_err(|err| format!("case {} is not valid JSON: {err}", case.name))?;
                 let stream = case.options["stream"].as_bool().unwrap_or(false);
                 let output = if self == Self::ClaudeGeminiRequest {
-                    convert_gemini_request_to_claude(
+                    let (body, err) = convert_gemini_request_to_claude(
                         &case.model,
                         &request,
                         stream,
                         ModelCatalog::embedded(),
-                    )
+                    );
+                    refused(body, err)
                 } else {
                     convert_gemini_request_to_openai(&case.model, &request, stream)
                 };
@@ -956,12 +958,8 @@ impl Translator {
                     convert_claude_request_to_gemini_with_compat
                 };
                 let stream = case.options["stream"].as_bool().unwrap_or(false);
-                Ok(convert(
-                    &case.model,
-                    &request,
-                    stream,
-                    ModelCatalog::embedded(),
-                ))
+                let (body, err) = convert(&case.model, &request, stream, ModelCatalog::embedded());
+                Ok(refused(body, err))
             }
             Self::GeminiClaudeStream => {
                 let mut stream = GeminiToClaudeStream::new(&request.unwrap_or_default());
@@ -988,11 +986,8 @@ impl Translator {
                 let request = request
                     .map_err(|err| format!("case {} is not valid JSON: {err}", case.name))?;
                 let stream = case.options["stream"].as_bool().unwrap_or(false);
-                Ok(convert_openai_request_to_gemini(
-                    &case.model,
-                    &request,
-                    stream,
-                ))
+                let (body, err) = convert_openai_request_to_gemini(&case.model, &request, stream);
+                Ok(refused(body, err))
             }
             Self::GeminiChatStream => {
                 let mut stream = GeminiToOpenAIStream::new(&request.unwrap_or_default());
@@ -1024,7 +1019,7 @@ impl Translator {
                     registry.register(
                         from.clone(),
                         to.clone(),
-                        Some(Arc::new(|_, body, _| body)),
+                        Some(Arc::new(|_, body, _| (body, None))),
                         ResponseTransform::default(),
                     );
                     registry.translate_request(&from, &to, &case.model, request, stream)
@@ -1142,8 +1137,9 @@ impl Translator {
             Self::GeminiResponsesRequest => {
                 let request = request
                     .map_err(|err| format!("case {} is not valid JSON: {err}", case.name))?;
-                let output =
+                let (body, err) =
                     convert_openai_responses_request_to_gemini(&case.model, &request, true);
+                let output = refused(body, err);
                 // Read back, as upstream's output is.
                 Ok(self
                     .read(case, output.to_string().as_bytes())
@@ -1636,7 +1632,7 @@ impl Translator {
         if client_id(metadata_id) || client_id(request.get("user")) {
             return None;
         }
-        let metadata = go.get_mut("metadata")?.as_object_mut()?;
+        let metadata = refused_body_mut(go).get_mut("metadata")?.as_object_mut()?;
         metadata.shift_remove("user_id")?;
         Some(Deviation::SyntheticUserId)
     }
@@ -1855,6 +1851,29 @@ impl Translator {
             input.get_or_init(|| input_text(case)).contains(id)
         });
         Some(value)
+    }
+}
+
+/// A request translator's output as the harness writes upstream's: its body,
+/// or, when the translator refused the request, `{"body": …, "error": …}`
+/// with the refusal's message.
+pub(crate) fn refused(body: Value, err: Option<UnsupportedPartError>) -> Value {
+    match err {
+        None => body,
+        Some(err) => object([("body", body), ("error", err.to_string().into())]),
+    }
+}
+
+/// The body in a request translator's output read by [`refused`]'s rule: the
+/// `body` of a refusal, or else the whole output.
+pub(crate) fn refused_body_mut(output: &mut Value) -> &mut Value {
+    let is_refusal = output.as_object().is_some_and(|fields| {
+        fields.len() == 2 && fields.contains_key("body") && fields.contains_key("error")
+    });
+    if is_refusal {
+        &mut output["body"]
+    } else {
+        output
     }
 }
 

@@ -16,9 +16,10 @@ mod noop_optimization;
 
 use std::collections::HashMap;
 
+use super::super::array_of;
 use super::super::signature_carrier::{PREFIX, decode};
+use super::super::test_support::convert_openai_responses_request_to_gemini;
 use super::super::test_support::{GEMINI_SIGNATURE, different_gemini_signature, sse_events};
-use super::super::{array_of, convert_openai_responses_request_to_gemini};
 use super::*;
 use crate::json::exact;
 

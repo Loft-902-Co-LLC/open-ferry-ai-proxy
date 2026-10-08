@@ -1,5 +1,6 @@
 // Ported from CLIProxyAPI internal/translator/openai/interactions/responses/interactions_openai_responses_request_test.go
-// (v8.0.15, MIT).
+// (v8.0.15, MIT), and interactions_openai_responses_user_turn_test.go
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 // 24 of the 30 tests are ported whole, and two in part. Dropped, because an
@@ -21,6 +22,19 @@ use serde_json::json;
 use super::*;
 
 mod patch_declaration;
+
+/// The translator's body, which must not be refused.
+#[track_caller]
+fn convert_openai_responses_request_to_interactions(
+    model: &str,
+    request: &Value,
+    stream: bool,
+) -> Value {
+    let (out, err) =
+        super::convert_openai_responses_request_to_interactions(model, request, stream);
+    assert_eq!(err, None, "{out}");
+    out
+}
 
 fn to_interactions(model: &str, request: Value) -> Value {
     convert_openai_responses_request_to_interactions(model, &request, false)
@@ -1062,4 +1076,324 @@ fn embedded_json_keeps_numbers_as_written() {
     );
     assert_eq!(out["input"][0]["arguments"].to_string(), spelled, "{out}");
     assert_eq!(out["input"][1]["result"].to_string(), spelled, "{out}");
+}
+
+// The v8.0.20 tests of interactions_openai_responses_user_turn_test.go.
+
+const TURN_HELLO: &str =
+    r#"{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}"#;
+const TURN_ASSISTANT: &str =
+    r#"{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]}"#;
+const TURN_NEXT: &str =
+    r#"{"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]}"#;
+const TURN_FILE_ID: &str = r#"{"type":"input_file","file_id":"file-1"}"#;
+const TURN_FILE_DATA: &str = r#"{"type":"input_file","filename":"a.pdf","file_data":"data:application/pdf;base64,JVBERi0xLjQK"}"#;
+const TURN_FILE_URL: &str = r#"{"type":"input_file","file_url":"https://example.test/a.pdf"}"#;
+const TURN_AUDIO: &str =
+    r#"{"type":"input_audio","input_audio":{"data":"UklGRg==","format":"wav"}}"#;
+const TURN_NO_AUDIO: &str = r#"{"type":"input_audio","input_audio":{"format":"wav"}}"#;
+const TURN_VIDEO: &str = r#"{"type":"input_video","video_url":"https://example.test/a.mp4"}"#;
+const TURN_TEXT: &str = r#"{"type":"input_text","text":"keep me"}"#;
+const TURN_EMPTY_TEXT: &str = r#"{"type":"input_text","text":""}"#;
+
+/// `interactionsUserTurn`: a message of `role` holding `parts`.
+fn user_turn(role: &str, parts: &[&str]) -> String {
+    format!(
+        r#"{{"type":"message","role":"{role}","content":[{}]}}"#,
+        parts.join(",")
+    )
+}
+
+/// `interactionsTurnPayload`: a request with `items` as its input, and
+/// `instructions` if given.
+fn turn_payload(instructions: &str, items: &[&str]) -> String {
+    let mut prefix = r#"{"model":"gemini-3.5-flash","#.to_owned();
+    if !instructions.is_empty() {
+        prefix += &format!(r#""instructions":"{instructions}","#);
+    }
+    format!(r#"{prefix}"input":[{}]}}"#, items.join(","))
+}
+
+/// The translator's body and refusal for `input`, after checking that the
+/// registration gives the same refusal.
+fn checked_request(input: &str) -> (Value, Option<UnsupportedPartError>) {
+    let body: Value = serde_json::from_str(input).expect("test request is JSON");
+    let registered = crate::registry::Registry::global().translate_request_checked(
+        &"openai-response".into(),
+        &"interactions".into(),
+        "gemini-3.5-flash",
+        body.clone(),
+        false,
+    );
+    let (out, err) =
+        super::convert_openai_responses_request_to_interactions("gemini-3.5-flash", &body, false);
+    assert_eq!(registered.err(), err, "the registration's refusal");
+    (out, err)
+}
+
+// TestConvertOpenAIResponsesRequestToInteractions_RefusesAnyEmptiedUserTurn
+#[test]
+fn refuses_any_emptied_user_turn() {
+    for (name, input, want) in [
+        (
+            "file id only",
+            turn_payload("", &[&user_turn("user", &[TURN_FILE_ID])]),
+            "input_file",
+        ),
+        (
+            "history then file id only",
+            turn_payload(
+                "",
+                &[
+                    TURN_HELLO,
+                    TURN_ASSISTANT,
+                    &user_turn("user", &[TURN_FILE_ID]),
+                ],
+            ),
+            "input_file",
+        ),
+        (
+            "audio without bytes",
+            turn_payload(
+                "",
+                &[
+                    TURN_HELLO,
+                    TURN_ASSISTANT,
+                    &user_turn("user", &[TURN_NO_AUDIO]),
+                ],
+            ),
+            "input_audio",
+        ),
+        (
+            "video has no counterpart",
+            turn_payload(
+                "",
+                &[
+                    TURN_HELLO,
+                    TURN_ASSISTANT,
+                    &user_turn("user", &[TURN_VIDEO]),
+                ],
+            ),
+            "input_video",
+        ),
+        (
+            "instructions and developer prompt do not hide the empty turn",
+            turn_payload(
+                "sys",
+                &[
+                    &user_turn("developer", &[TURN_TEXT]),
+                    &user_turn("user", &[TURN_FILE_ID]),
+                ],
+            ),
+            "input_file",
+        ),
+        (
+            "emptied turn before a later text turn",
+            turn_payload(
+                "",
+                &[
+                    &user_turn("user", &[TURN_FILE_ID]),
+                    TURN_ASSISTANT,
+                    TURN_NEXT,
+                ],
+            ),
+            "input_file",
+        ),
+        (
+            "empty text beside the file id does not count as sendable",
+            turn_payload("", &[&user_turn("user", &[TURN_EMPTY_TEXT, TURN_FILE_ID])]),
+            "input_file",
+        ),
+        (
+            "bare input file item",
+            turn_payload("", &[TURN_HELLO, TURN_ASSISTANT, TURN_FILE_ID]),
+            "input_file",
+        ),
+    ] {
+        let (body, err) = checked_request(&input);
+        let err = err.unwrap_or_else(|| panic!("{name}: no refusal; body = {body}"));
+        assert_eq!(err.part_type, want, "{name}");
+        assert_eq!(err.status_code(), 400);
+        assert_eq!(err.to_string(), format!("unsupported content part: {want}"));
+        assert!(body.is_object(), "{name}: {body}");
+    }
+}
+
+// TestConvertOpenAIResponsesRequestToInteractions_KeepsTurnWithTextBesideAttachment
+#[test]
+fn keeps_turn_with_text_beside_attachment() {
+    for (name, attachment) in [
+        ("file id", TURN_FILE_ID),
+        ("audio without bytes", TURN_NO_AUDIO),
+    ] {
+        let (body, err) = checked_request(&turn_payload(
+            "",
+            &[
+                TURN_HELLO,
+                TURN_ASSISTANT,
+                &user_turn("user", &[TURN_TEXT, attachment]),
+            ],
+        ));
+        assert_eq!(err, None, "{name}: {body}");
+        assert_eq!(
+            body["input"][2]["content"][0]["text"], "keep me",
+            "{name}: {body}"
+        );
+    }
+}
+
+// TestConvertOpenAIResponsesRequestToInteractions_MapsBytesAndUrls
+#[test]
+fn maps_bytes_and_urls() {
+    for (name, part, want) in [
+        (
+            "file data",
+            TURN_FILE_DATA,
+            json!({"type": "document", "mime_type": "application/pdf", "data": "JVBERi0xLjQK", "filename": "a.pdf"}),
+        ),
+        (
+            "file url",
+            TURN_FILE_URL,
+            json!({"type": "document", "file_url": "https://example.test/a.pdf"}),
+        ),
+        (
+            "audio",
+            TURN_AUDIO,
+            json!({"type": "audio", "data": "UklGRg==", "mime_type": "audio/wav"}),
+        ),
+    ] {
+        let (body, err) = checked_request(&turn_payload(
+            "",
+            &[TURN_HELLO, TURN_ASSISTANT, &user_turn("user", &[part])],
+        ));
+        assert_eq!(err, None, "{name}: {body}");
+        let got = &body["input"][2]["content"][0];
+        for (key, want) in want.as_object().into_iter().flatten() {
+            assert_eq!(&got[key], want, "{name}: {key} of {got}; body = {body}");
+        }
+    }
+}
+
+// TestConvertOpenAIResponsesRequestToInteractions_BareFileItemStaysADocument
+#[test]
+fn bare_file_item_stays_a_document() {
+    let (body, err) = checked_request(&turn_payload(
+        "",
+        &[TURN_HELLO, TURN_ASSISTANT, TURN_FILE_DATA],
+    ));
+    assert_eq!(err, None, "{body}");
+    let step = &body["input"][2];
+    assert_eq!(step["type"], "user_input", "{body}");
+    assert_eq!(step["content"][0]["type"], "document", "{body}");
+    assert_eq!(step["content"][0]["data"], "JVBERi0xLjQK", "{body}");
+}
+
+// TestConvertOpenAIResponsesRequestToInteractions_DeveloperAttachmentIsNotAUserTurn
+#[test]
+fn developer_attachment_is_not_a_user_turn() {
+    let (body, err) = checked_request(&turn_payload(
+        "",
+        &[&user_turn("developer", &[TURN_FILE_ID]), TURN_NEXT],
+    ));
+    assert_eq!(err, None, "{body}");
+}
+
+// TestConvertOpenAIResponsesRequestToInteractions_ExportedWrapperKeepsAJSONBody
+#[test]
+fn refusal_keeps_a_json_body() {
+    let (body, err) = checked_request(&turn_payload("", &[&user_turn("user", &[TURN_FILE_ID])]));
+    assert!(err.is_some() && body.is_object(), "{body}");
+}
+
+// Not upstream's: user turns in detail. A message without a role is the
+// user's, and so is an item without a type that has content; a system,
+// developer, tool or model message isn't. Bare attachment items but
+// `output_image` are user turns. Audio bytes may sit on the part itself, a
+// blank one counts as none, and the format sets the MIME type; a file takes
+// the MIME type given beside bare base64; a type with spaces around it isn't
+// an attachment; the first part dropped in the first emptied turn is the one
+// named. The expected output comes from upstream.
+#[test]
+fn user_turns_in_detail() {
+    for (input, want_body, want_err) in [
+        (
+            r#"{"input":[{"type":"message","content":[{"type":"input_file","file_id":"f"}]},{"type":"message","role":"system","content":[{"type":"input_audio","input_audio":{}}]}]}"#,
+            r#"{"model":"m","input":[{"type":"user_input","content":[]},{"type":"user_input","content":[]}]}"#,
+            Some("input_file"),
+        ),
+        (
+            r#"{"input":[{"type":"message","role":"model","content":[{"type":"input_file","file_id":"f"}]},{"type":"output_image"},{"type":"input_video","text":"t"}]}"#,
+            r#"{"model":"m","input":[{"type":"model_output","content":[]},{"type":"model_output","content":[{"type":"image"}]},{"type":"user_input","content":[{"type":"text","text":"t"}]}]}"#,
+            None,
+        ),
+        (
+            r#"{"input":[{"type":"input_audio","data":"QQ==","format":" FLAC "},{"type":"input_audio","input_audio":{"data":" "},"data":"Zg=="},{"type":"input_file","file_data":"QUJD","mimeType":"text/csv"},{"type":"input_file","file_url":" "}]}"#,
+            r#"{"model":"m","input":[{"type":"user_input","content":[{"type":"audio","data":"QQ==","mime_type":"audio/flac"}]},{"type":"user_input","content":[{"type":"audio","data":"Zg=="}]},{"type":"user_input","content":[{"type":"document","mime_type":"text/csv","data":"QUJD"}]},{"type":"user_input","content":[{"type":"document","file_url":" "}]}]}"#,
+            None,
+        ),
+        (
+            r#"{"input":[{"type":"input_file","filename":"x.unknownext","file_data":"QUJD"}]}"#,
+            r#"{"model":"m","input":[{"type":"user_input","content":[]}]}"#,
+            Some("input_file"),
+        ),
+        (
+            r#"{"input":[{"type":"message","role":"user","content":[{"type":" input_file ","file_id":"f"}]},{"type":"message","role":"user","content":""},{"type":"message","role":"user","content":[{"type":"input_image"}]}]}"#,
+            r#"{"model":"m","input":[{"type":"user_input","content":[]},{"type":"user_input","content":[{"type":"text","text":""}]},{"type":"user_input","content":[{"type":"image"}]}]}"#,
+            None,
+        ),
+        (
+            r#"{"input":[{"type":"message","role":"user","content":[{"type":"input_audio"}]},{"type":"message","role":"user","content":[{"type":"input_video"},{"type":"input_file"}]}]}"#,
+            r#"{"model":"m","input":[{"type":"user_input","content":[]},{"type":"user_input","content":[]}]}"#,
+            Some("input_audio"),
+        ),
+        (
+            r#"{"input":[{"type":"message","role":"user","content":[{"type":"input_video"},{"type":"input_file"}]}]}"#,
+            r#"{"model":"m","input":[{"type":"user_input","content":[]}]}"#,
+            Some("input_video"),
+        ),
+        (
+            r#"{"input":{"type":"message","role":"user","content":{"type":"input_file","file_id":"f"}}}"#,
+            r#"{"model":"m","input":[{"type":"user_input","content":[]}]}"#,
+            Some("input_file"),
+        ),
+        (
+            r#"{"input":{"type":"input_file","file_id":"f"}}"#,
+            r#"{"model":"m","input":[{"type":"user_input","content":[]}]}"#,
+            Some("input_file"),
+        ),
+        (
+            r#"{"input":"x"}"#,
+            r#"{"model":"m","input":[{"type":"user_input","content":[{"type":"text","text":"x"}]}]}"#,
+            None,
+        ),
+        (
+            r#"{"input":[{"role":"user","content":[{"text":""},{"type":"input_file","file_id":"f"}]}]}"#,
+            r#"{"model":"m","input":[{"type":"user_input","content":[{"type":"text","text":""}]}]}"#,
+            Some("input_file"),
+        ),
+        (
+            r#"{"input":[{"role":"tool","content":[{"type":"input_file","file_id":"f"}]},{"content":[{"type":"input_audio","format":"wav"}]}]}"#,
+            r#"{"model":"m","input":[{"type":"user_input","content":[]},{"type":"user_input","content":[]}]}"#,
+            Some("input_audio"),
+        ),
+        (
+            r#"{"input":[{"type":"message","role":"user"},{"type":"message","role":"user","content":5},{"type":"message","role":"user","content":["s",{"type":"input_file","file_url":"u","file_data":"data:application/pdf;base64,QQ==","filename":"a.txt"}]}]}"#,
+            r#"{"model":"m","input":[{"type":"user_input","content":[]},{"type":"user_input","content":[]},{"type":"user_input","content":[{"type":"document","filename":"a.txt","mime_type":"application/pdf","data":"QQ==","file_url":"u"}]}]}"#,
+            None,
+        ),
+        (
+            r#"{"input":[{"type":"message","role":"assistant","content":[{"type":"input_file","file_id":"f"}]},{"type":"message","role":"developer","content":[{"type":"input_video"}]},{"type":"input_text","text":""},{"type":"message","role":"user","content":[{"type":"input_video","video_url":"v"},{"type":"input_text","text":" "}]}]}"#,
+            r#"{"model":"m","input":[{"type":"model_output","content":[]},{"type":"user_input","content":[]},{"type":"user_input","content":[{"type":"text","text":""}]},{"type":"user_input","content":[{"type":"text","text":" "}]}]}"#,
+            None,
+        ),
+    ] {
+        let body: Value = serde_json::from_str(input).expect("test request is JSON");
+        let (out, err) = super::convert_openai_responses_request_to_interactions("m", &body, false);
+        assert_eq!(out.to_string(), want_body, "{input}");
+        assert_eq!(
+            err.map(|err| err.part_type),
+            want_err.map(str::to_owned),
+            "{input}"
+        );
+    }
 }

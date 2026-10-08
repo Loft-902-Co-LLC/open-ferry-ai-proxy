@@ -35,7 +35,7 @@ use super::{Family, Pair, ResponseCases, Stage, Suite, mask_volatile};
 use crate::cases::Case;
 use crate::compare::{Deviation, JsonAt, JsonForm};
 use crate::generate::interactions::gemini as generate;
-use crate::translator::{Translator, sse_frames};
+use crate::translator::{Translator, refused, sse_frames};
 
 /// The family's suites, a variant each.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -348,18 +348,14 @@ impl Family for Kind {
         };
         let output = match self {
             Self::InteractionsToGeminiRequest => {
-                return Ok(convert_interactions_request_to_gemini(
-                    &case.model,
-                    &request()?,
-                    stream,
-                ));
+                let (body, err) =
+                    convert_interactions_request_to_gemini(&case.model, &request()?, stream);
+                return Ok(refused(body, err));
             }
             Self::GeminiToInteractionsRequest => {
-                return Ok(convert_gemini_request_to_interactions(
-                    &case.model,
-                    &request()?,
-                    stream,
-                ));
+                let (body, err) =
+                    convert_gemini_request_to_interactions(&case.model, &request()?, stream);
+                return Ok(refused(body, err));
             }
             Self::PassthroughRequest => {
                 return Ok(convert_interactions_request_to_interactions(

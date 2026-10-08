@@ -6,8 +6,10 @@
 // custom_tool_namespace_recovery_test.go and the one in
 // responses_request_state_test.go. The full responses_compatibility_digest_test.go
 // is in the request's tests, since it hashes requests as well.
-// responses_perf_test.go holds only benchmarks and is not ported. One test
-// of our own, marked as such, checks finalizing a stream that had no lines.
+// responses_perf_test.go holds only benchmarks and is not ported. Tests of
+// our own, marked as such, check finalizing a stream that had no lines, and
+// the translator side of v8.0.20's issue6381_responses_eof_test.go, whose
+// tests drive the executor.
 //
 // Table-driven tests run their cases in a loop rather than as subtests.
 // Where upstream passes no request, or one that isn't valid JSON, these pass
@@ -2116,4 +2118,82 @@ fn stream_echo_keeps_negative_zero() {
     ] {
         assert!(completed.contains(want), "{want} in {completed}");
     }
+}
+
+/// Not upstream's: the translator side of v8.0.20's
+/// `TestOpenAICompatExecutorResponsesEOFAfterFinishReasonCompletesStream`.
+/// Once a finish reason closed the message, a stream that ends without
+/// `[DONE]` can be finished by sending `[DONE]`, and late usage still counts.
+#[test]
+fn eof_after_a_finish_reason_can_finish_the_stream() {
+    let mut feed = Feed::new("test", r#"{"model":"test"}"#, "");
+    feed.line(r#"data: {"id":"chatcmpl-eof","object":"chat.completion.chunk","created":1773896263,"model":"test","choices":[{"index":0,"delta":{"role":"assistant","content":"done"},"finish_reason":null}]}"#);
+    assert!(!feed.0.can_finalize_response_stream());
+    feed.line(r#"data: {"id":"chatcmpl-eof","object":"chat.completion.chunk","created":1773896263,"model":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#);
+    assert!(feed.0.can_finalize_response_stream());
+    feed.line(r#"data: {"id":"chatcmpl-eof","object":"chat.completion.chunk","created":1773896263,"model":"test","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}"#);
+    assert!(feed.0.can_finalize_response_stream());
+
+    let out = feed.line("data: [DONE]");
+    assert_eq!(count(&out, "response.completed"), 1);
+    let completed = last(&out, "response.completed");
+    assert_eq!(int_at(completed, "response.usage.input_tokens"), 3);
+    assert_eq!(int_at(completed, "response.usage.output_tokens"), 1);
+    assert!(!feed.0.can_finalize_response_stream());
+}
+
+/// Not upstream's: a stream can't be finished without `[DONE]` before a
+/// finish reason, or with nothing but reasoning. A finish reason that closes
+/// a tool call can finish it.
+#[test]
+fn eof_without_a_closing_finish_reason_cannot_finish_the_stream() {
+    let mut feed = Feed::new("test", "", "");
+    feed.line(
+        r#"data: {"id":"r","created":1,"choices":[{"index":0,"delta":{"content":"partial"}}]}"#,
+    );
+    assert!(!feed.0.can_finalize_response_stream());
+
+    let mut feed = Feed::new("test", "", "");
+    feed.line(r#"data: {"id":"r","created":1,"choices":[{"index":0,"delta":{"reasoning_content":"think"},"finish_reason":"stop"}]}"#);
+    assert!(!feed.0.can_finalize_response_stream());
+
+    let mut feed = Feed::new("test", "", "");
+    feed.line(r#"data: {"id":"r","created":1,"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"run","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#);
+    assert!(feed.0.can_finalize_response_stream());
+}
+
+/// Not upstream's: the translator side of v8.0.20's
+/// `TestOpenAICompatExecutorResponsesEOFAfterApplyPatchFinishReasonCompletesStream`.
+/// An `apply_patch` call that a finish reason closed doesn't fail the stream
+/// at its end; one still open does.
+#[test]
+fn eof_after_a_finished_patch_call_does_not_fail() {
+    let request = parse(PATCH_REQUEST);
+    let start = patch_start(0, "call_p", "apply_patch");
+    let fragment = patch_fragment(
+        0,
+        r#"{"input":"*** Begin Patch\n*** Add File: a.txt\n+hello\n*** End Patch\n"}"#,
+    );
+
+    let mut stream = OpenAIToOpenAIResponsesStream::new("test", &request, &Value::Null);
+    stream.translate_line(start.as_bytes());
+    stream.translate_line(fragment.as_bytes());
+    stream.translate_line(PATCH_END[0].as_bytes());
+    assert!(stream.can_finalize_response_stream());
+    assert_eq!(stream.finalize_tool_input(), "");
+    assert!(stream.tool_input_error().is_none());
+    let out = events(&stream.translate_line(b"data: [DONE]"));
+    assert_eq!(count(&out, "response.completed"), 1);
+    assert_eq!(count(&out, "response.failed"), 0);
+
+    let mut stream = OpenAIToOpenAIResponsesStream::new("test", &request, &Value::Null);
+    stream.translate_line(start.as_bytes());
+    stream.translate_line(fragment.as_bytes());
+    assert!(!stream.can_finalize_response_stream());
+    assert!(
+        stream
+            .finalize_tool_input()
+            .starts_with("event: response.failed\n")
+    );
+    assert!(!stream.can_finalize_response_stream());
 }

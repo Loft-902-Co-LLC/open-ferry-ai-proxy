@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/codex/interactions/interactions_codex_request.go
-// (v8.0.15, MIT).
+// (v8.0.15, MIT), with the v8.0.20 user turn checks.
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Gemini Interactions request → Codex (OpenAI Responses) request.
@@ -10,6 +10,14 @@
 //! Codex reads them. A handful of top-level fields (`tool_choice`,
 //! `parallel_tool_calls`, `store`, `metadata`, `include`, `truncation`) pass
 //! through as the client wrote them.
+//!
+//! A step that names itself `system` or `developer`, by its role or its
+//! type, is sent as a developer message. A user part that doesn't convert
+//! (audio by URI, say, or an image with nothing to show) is dropped. The
+//! rest of the turn is still sent, but a run of user content left with
+//! nothing to send (blank text doesn't count) is refused with an
+//! [`UnsupportedPartError`]; a tool result keeps the turn alive, and any
+//! other step closes it. A plain string input is never refused.
 //!
 //! No client identity is added: like upstream, the request carries no
 //! Originator, no session or conversation ID, no `prompt_cache_key` and no
@@ -37,9 +45,13 @@
 use serde_json::{Map, Value};
 
 use super::super::unique_names::truncate_bytes;
+use crate::common::parts::{
+    UserRun, interactions_attachment_type, is_interactions_instruction_step,
+};
 use crate::go;
 use crate::json::lenient::{self, Found};
 use crate::json::{bool_of, int_of, object, path, set_path, str_of};
+use crate::registry::UnsupportedPartError;
 use crate::thinking::budget_to_level;
 
 /// The Responses API limit on function names.
@@ -123,11 +135,14 @@ const PASSED_THROUGH: &[&str] = &[
 /// `ConvertInteractionsRequestToCodex`: converts an Interactions request body
 /// into a Codex request body for `model_name`. The request streams if
 /// `stream` is set or the body asks for it.
+///
+/// The error is set when a user turn had only parts Codex can't take; the
+/// body is still returned.
 pub fn convert_interactions_request_to_codex(
     model_name: &str,
     request: &Value,
     stream: bool,
-) -> Value {
+) -> (Value, Option<UnsupportedPartError>) {
     let mut out = object([
         ("model", model_name.into()),
         ("instructions", "".into()),
@@ -139,13 +154,13 @@ pub fn convert_interactions_request_to_codex(
     copy_system(&mut out, request);
     copy_generation_config(&mut out, request);
     let mut items = Vec::new();
-    push_input(&mut items, request.get("input"));
+    let refusal = push_input(&mut items, request.get("input"));
     if !items.is_empty() {
         set_path(&mut out, "input", Value::Array(items));
     }
     copy_tools(&mut out, request);
     copy_top_level(&mut out, request);
-    out
+    (out, refusal)
 }
 
 /// `copyInteractionsSystemToCodex`: the system instruction, a string, an
@@ -241,77 +256,156 @@ fn reasoning_summary(config: &Value) -> Option<&'static str> {
 }
 
 /// `appendInteractionsInputToCodex`: a string, a list of steps, an object
-/// with `steps` (and a `role` for them), or a single step.
-fn push_input(items: &mut Vec<Value>, input: Option<&Value>) {
+/// with `steps` (and a `role` for them), or a single step. Gives the refusal
+/// for the first run of user content left with nothing to send.
+fn push_input(items: &mut Vec<Value>, input: Option<&Value>) -> Option<UnsupportedPartError> {
+    let mut run = UserRun::default();
     match input {
-        None => {}
-        Some(Value::String(text)) => push_text(items, "user", text),
+        None => return None,
+        Some(Value::String(text)) => {
+            push_text(items, "user", text);
+            return None;
+        }
         Some(Value::Array(steps)) => {
             for step in steps {
-                push_step(items, step, "user");
+                push_step(items, step, "user", &mut run);
             }
         }
         Some(input) => match input.get("steps") {
             Some(Value::Array(steps)) => {
-                let role = default_role(&str_of(input.get("role")), "user");
+                let role = step_role(input, "user");
                 for step in steps {
-                    push_step(items, step, role);
+                    push_step(items, step, role, &mut run);
                 }
             }
-            _ => push_step(items, input, "user"),
+            _ => push_step(items, input, "user", &mut run),
         },
     }
+    run.end();
+    run.err()
 }
 
-/// `appendInteractionsStepToCodex`.
-fn push_step(items: &mut Vec<Value>, step: &Value, role: &'static str) {
+/// `appendInteractionsStepToCodex`. A tool result keeps the open user turn
+/// alive; a call, the model's output and a thought close it.
+fn push_step(items: &mut Vec<Value>, step: &Value, role: &'static str, run: &mut UserRun) {
     if let Value::String(text) = step {
-        push_text(items, role, text);
+        push_role_text(items, role, text, run);
         return;
     }
     if let Some(Value::Array(steps)) = step.get("steps") {
-        let role = default_role(&str_of(step.get("role")), role);
+        let role = step_role(step, role);
         for nested in steps {
-            push_step(items, nested, role);
+            push_step(items, nested, role, run);
         }
         return;
     }
     match go::to_lower(str_of(step.get("type")).trim()).as_str() {
-        "function_call" => items.push(function_call(step)),
-        "function_result" | "function_call_output" => items.push(function_result(step)),
-        "model_output" | "assistant" => push_content(items, step.get("content"), "assistant"),
-        "thought" | "reasoning" => items.push(thought(step)),
+        "function_call" => {
+            run.end();
+            items.push(function_call(step));
+        }
+        "function_result" | "function_call_output" => {
+            // The model reads a tool result, so it keeps the user turn.
+            run.add();
+            items.push(function_result(step));
+        }
+        "model_output" | "assistant" => {
+            run.end();
+            push_content(items, step.get("content"), "assistant", run);
+        }
+        "thought" | "reasoning" => {
+            run.end();
+            items.push(thought(step));
+        }
         // `user_input`, `message`, no type, and any other.
         _ => {
-            let role = default_role(&str_of(step.get("role")), role);
+            let role = step_role(step, role);
             if let Some(content) = step.get("content") {
-                push_content(items, Some(content), role);
+                push_content(items, Some(content), role, run);
             } else if let Some(text) = step.get("text") {
-                push_text(items, role, &str_of(Some(text)));
+                push_role_text(items, role, &str_of(Some(text)), run);
             }
         }
+    }
+}
+
+/// `interactionsCodexUserRun`: `run` for user content. Content of any other
+/// role closes the open user turn and isn't tracked.
+fn user_run<'r>(run: &'r mut UserRun, role: &str) -> Option<&'r mut UserRun> {
+    if role == "user" {
+        return Some(run);
+    }
+    run.end();
+    None
+}
+
+/// `appendInteractionsRoleTextToCodex`: a text message. Blank text doesn't
+/// keep a user turn alive.
+fn push_role_text(items: &mut Vec<Value>, role: &'static str, text: &str, run: &mut UserRun) {
+    push_text(items, role, text);
+    if let Some(run) = user_run(run, role)
+        && !text.trim().is_empty()
+    {
+        run.add();
     }
 }
 
 /// `appendInteractionsContentToCodexItem`: a message for a string, and one
 /// for each part that converts.
-fn push_content(items: &mut Vec<Value>, content: Option<&Value>, role: &'static str) {
+fn push_content(
+    items: &mut Vec<Value>,
+    content: Option<&Value>,
+    role: &'static str,
+    run: &mut UserRun,
+) {
+    let Some(content) = content else {
+        return;
+    };
+    if let Value::String(text) = content {
+        push_role_text(items, role, text, run);
+        return;
+    }
+    let mut run = user_run(run, role);
     match content {
-        Some(Value::String(text)) => push_text(items, role, text),
-        Some(Value::Array(parts)) => {
+        Value::Array(parts) => {
             for part in parts {
-                if let Some(part) = message_part(part, role) {
-                    push_message(items, role, part);
-                }
+                push_part(items, part, role, run.as_deref_mut());
             }
         }
-        Some(part @ Value::Object(_)) => {
-            if let Some(part) = message_part(part, role) {
-                push_message(items, role, part);
-            }
-        }
+        Value::Object(_) => push_part(items, content, role, run),
         _ => {}
     }
+}
+
+/// `appendInteractionsContentPartToCodex`: one content part as a message.
+/// `run` is `None` for content that isn't the user's; for user content it
+/// records what is sent and what can't be.
+fn push_part(items: &mut Vec<Value>, part: &Value, role: &'static str, run: Option<&mut UserRun>) {
+    let Some(item) = message_part(part, role) else {
+        let dropped = interactions_attachment_type(part);
+        if let Some(run) = run
+            && !dropped.is_empty()
+        {
+            run.drop_part(&dropped);
+        }
+        return;
+    };
+    let blank = is_blank_text(&item);
+    push_message(items, role, item);
+    if let Some(run) = run
+        && !blank
+    {
+        run.add();
+    }
+}
+
+/// `interactionsCodexIsBlankText`: whether a Codex message part is a text
+/// part holding only whitespace.
+fn is_blank_text(item: &Value) -> bool {
+    matches!(
+        str_of(item.get("type")).as_ref(),
+        "input_text" | "output_text"
+    ) && str_of(item.get("text")).trim().is_empty()
 }
 
 /// `appendInteractionsFunctionCallToCodex`.
@@ -426,15 +520,13 @@ fn input_image(url: String) -> Value {
     object([("type", "input_image".into()), ("image_url", url.into())])
 }
 
-/// `interactionsCodexImagePart`: a URL, a file URI, or inline data as a
-/// data URL.
+/// `interactionsCodexImagePart`: a URL or file URI (the first that isn't
+/// blank, trimmed), or inline data as a data URL. `uri` is the Interactions
+/// spelling of `file_uri`.
 fn image_part(part: &Value) -> Option<Value> {
-    if let Some(url) = part.get("url") {
-        return Some(input_image(str_of(Some(url)).into_owned()));
-    }
-    let uri = first_string(part, &["file_uri", "fileUri"]);
-    if !uri.is_empty() {
-        return Some(input_image(uri));
+    let url = first_non_blank_string(part, &["url", "file_uri", "fileUri", "uri"]);
+    if !url.is_empty() {
+        return Some(input_image(url));
     }
     let mime_type = first_string(part, &["mime_type", "mimeType"]);
     let data = str_of(part.get("data"));
@@ -463,8 +555,8 @@ fn audio_part(part: &Value) -> Option<Value> {
     ]))
 }
 
-/// `interactionsCodexFilePart`: a `file` object's data, a file URI or URL,
-/// or inline data.
+/// `interactionsCodexFilePart`: a `file` object's data, a file URI or URL
+/// (the first that isn't blank, trimmed), or inline data.
 fn file_part(part: &Value) -> Option<Value> {
     let file_data = str_of(path(part, "file.file_data"));
     if !file_data.is_empty() {
@@ -478,7 +570,7 @@ fn file_part(part: &Value) -> Option<Value> {
         ]));
     }
     let mime_type = first_string(part, &["mime_type", "mimeType"]);
-    let uri = first_string(part, &["file_uri", "fileUri", "url"]);
+    let uri = first_non_blank_string(part, &["file_uri", "fileUri", "uri", "url"]);
     if !uri.is_empty() {
         return Some(object([
             ("type", "input_file".into()),
@@ -691,12 +783,31 @@ fn json_text(value: &Value) -> String {
     }
 }
 
+/// `firstNonBlankString`: the first of `keys` whose value isn't blank,
+/// trimmed.
+fn first_non_blank_string(value: &Value, keys: &[&str]) -> String {
+    keys.iter()
+        .map(|key| str_of(value.get(*key)).trim().to_owned())
+        .find(|found| !found.is_empty())
+        .unwrap_or_default()
+}
+
 /// `firstString`: the first of `keys` that `value` has, as a string.
 fn first_string(value: &Value, keys: &[&str]) -> String {
     keys.iter()
         .find_map(|key| value.get(*key))
         .map(|found| str_of(Some(found)).into_owned())
         .unwrap_or_default()
+}
+
+/// `interactionsCodexStepRole`: a step that carries system or developer
+/// content, named by its role or its type, is developer content; any other
+/// takes its own role, then the one it inherits.
+fn step_role(step: &Value, inherited: &'static str) -> &'static str {
+    if is_interactions_instruction_step(step, inherited == "developer") {
+        return "developer";
+    }
+    default_role(&str_of(step.get("role")), inherited)
 }
 
 /// `interactionsCodexDefaultRole`: the role named, else `fallback` if it is

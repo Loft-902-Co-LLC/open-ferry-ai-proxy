@@ -19,7 +19,7 @@ import (
 
 func init() {
 	translators["codex/interactions/request"] = func(in input) []byte {
-		return codexinteractions.ConvertInteractionsRequestToCodex(in.Model, []byte(in.Request), streamOption(in))
+		return refused(codexinteractions.ConvertInteractionsRequestToCodex(in.Model, []byte(in.Request), streamOption(in)))
 	}
 	translators["codex/interactions/response"] = func(in input) []byte {
 		return joined(streamChunks(in, codexinteractions.ConvertCodexResponseToInteractions))

@@ -1,11 +1,12 @@
 // Ported from CLIProxyAPI internal/translator/openai/claude/openai_claude_request_test.go
-// and openai_claude_compat_test.go (v8.0.15, MIT).
+// and openai_claude_compat_test.go (v8.0.15, MIT), and openai_claude_user_turn_test.go
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
-// All 28 request tests and 5 compat tests are ported. Table-driven tests
-// run their cases in a loop rather than as subtests.
+// All 28 request tests and 5 compat tests, the 4 new request tests and the 8
+// user turn tests are ported. Table-driven tests run their cases in a loop
+// rather than as subtests.
 
-use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE;
 use serde_json::{Value, json};
 
@@ -13,12 +14,17 @@ use super::*;
 
 fn convert(model: &str, request: &str) -> Value {
     let request: Value = serde_json::from_str(request).expect("test request is valid JSON");
-    convert_claude_request_to_openai(model, &request, false)
+    sent(convert_claude_request_to_openai(model, &request, false))
 }
 
 fn convert_with_compat(model: &str, request: &str) -> Value {
-    let request: Value = serde_json::from_str(request).expect("test request is valid JSON");
-    convert_claude_request_to_openai_with_compat(model, &request, false)
+    sent(convert_with_compat_checked(model, request))
+}
+
+/// A conversion's body, which must come without a refusal.
+fn sent((body, err): (Value, Option<UnsupportedPartError>)) -> Value {
+    assert_eq!(err, None, "refused: {body}");
+    body
 }
 
 /// Looks up a dotted path such as `messages.0.content`, like a plain gjson
@@ -283,7 +289,7 @@ fn signed_thinking_compatibility() {
                 ]
             }]
         });
-        let out = convert_claude_request_to_openai("gpt-5", &request, false);
+        let out = sent(convert_claude_request_to_openai("gpt-5", &request, false));
         let assistant = at(&out, "messages.0").unwrap_or(&Value::Null);
         assert_eq!(
             assistant.get("reasoning_content").and_then(Value::as_str),
@@ -1504,4 +1510,269 @@ fn without_compat_does_not_add_reasoning_for_tool_calls() {
         r#"{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"Read","input":{}}]}]}"#,
     );
     assert!(at(&out, "messages.0.reasoning_content").is_none(), "{out}");
+}
+
+/// `ConvertClaudeRequestToOpenAIWithCompat`, with its refusal.
+fn convert_with_compat_checked(
+    model: &str,
+    request: &str,
+) -> (Value, Option<UnsupportedPartError>) {
+    let request: Value = serde_json::from_str(request).expect("test request is valid JSON");
+    convert_claude_request_to_openai_with_compat(model, &request, false)
+}
+
+/// `TranslateRequestEnvelope` from Claude to Chat Completions: the body, or
+/// the refusal.
+fn claude_to_openai_envelope(model: &str, input: &str) -> Result<Value, UnsupportedPartError> {
+    let request: Value = serde_json::from_str(input).expect("test request is valid JSON");
+    crate::registry::Registry::global().translate_request_checked(
+        &"claude".into(),
+        &"openai".into(),
+        model,
+        request,
+        false,
+    )
+}
+
+// TestConvertClaudeRequestToOpenAI_UncachedFileKeepsOldDrop
+#[test]
+fn uncached_file_keeps_old_drop() {
+    let input = r#"{"model":"gpt-5","messages":[{"role":"user","content":[{"type":"text","text":"read"},{"type":"container_upload","file_id":"file-absent"}]}]}"#;
+    let output = convert("gpt-5", input).to_string();
+    assert!(!output.contains("file_data"), "output = {output}");
+    assert!(
+        output.contains(r#""text":"read""#),
+        "text was lost: {output}"
+    );
+}
+
+// TestClaudeFileOnlyRequestSurfacesUnsupportedPart
+#[test]
+fn file_only_request_surfaces_unsupported_part() {
+    let input = r#"{"model":"gpt-5","messages":[{"role":"user","content":[{"type":"container_upload","file_id":"file-absent"}]}]}"#;
+    let err = claude_to_openai_envelope("gpt-5", input).expect_err("refused");
+    assert!(err.to_string().contains("container_upload"), "err = {err}");
+}
+
+// TestClaudeBase64DocumentBecomesFilePart
+#[test]
+fn base64_document_becomes_file_part() {
+    let input = r#"{"model":"gpt-5","messages":[{"role":"user","content":[{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0xLjQK"}}]}]}"#;
+    let body = claude_to_openai_envelope("gpt-5", input).expect("sent");
+    assert_eq!(
+        text_at(&body, "messages.0.content.0.type"),
+        "file",
+        "{body}"
+    );
+    assert_eq!(
+        text_at(&body, "messages.0.content.0.file.file_data"),
+        "data:application/pdf;base64,JVBERi0xLjQK",
+        "{body}"
+    );
+}
+
+// TestClaudeTextWithUncachedFileKeepsText
+#[test]
+fn text_with_uncached_file_keeps_text() {
+    let input = r#"{"model":"gpt-5","messages":[{"role":"user","content":[{"type":"text","text":"read"},{"type":"container_upload","file_id":"file-absent"}]}]}"#;
+    let body = claude_to_openai_envelope("gpt-5", input).expect("sent");
+    assert!(
+        body.to_string().contains(r#""text":"read""#),
+        "body = {body}"
+    );
+}
+
+const USER_TURN_UPLOAD: &str = r#"{"type":"container_upload","file_id":"file-1"}"#;
+
+// TestConvertClaudeRequestToOpenAI_RefusesAnyEmptiedUserTurn
+#[test]
+fn refuses_any_emptied_user_turn() {
+    let cases = [
+        (
+            "history then attachment only",
+            format!(
+                r#"{{"model":"m","messages":[{{"role":"user","content":"hello"}},{{"role":"assistant","content":[{{"type":"text","text":"hi"}}]}},{{"role":"user","content":[{USER_TURN_UPLOAD}]}}]}}"#
+            ),
+            "container_upload",
+        ),
+        (
+            "system prompt and system reminder",
+            format!(
+                r#"{{"model":"m","system":"sys","messages":[{{"role":"system","content":"reminder"}},{{"role":"user","content":[{USER_TURN_UPLOAD}]}}]}}"#
+            ),
+            "container_upload",
+        ),
+        (
+            "emptied turn before a later text turn",
+            format!(
+                r#"{{"model":"m","messages":[{{"role":"user","content":[{USER_TURN_UPLOAD}]}},{{"role":"assistant","content":[{{"type":"text","text":"ok"}}]}},{{"role":"user","content":"next"}}]}}"#
+            ),
+            "container_upload",
+        ),
+        (
+            "document without bytes",
+            r#"{"model":"m","messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":[{"type":"document","source":{"type":"file","file_id":"file-1"}}]}]}"#.to_owned(),
+            "document",
+        ),
+    ];
+    for (name, input, want) in cases {
+        let (body, err) = convert_with_compat_checked("m", &input);
+        let err = err.unwrap_or_else(|| panic!("{name}: no refusal; body = {body}"));
+        assert_eq!(err.part_type, want, "{name}");
+        assert_eq!(err.status_code(), 400, "{name}");
+        assert_eq!(
+            err.to_string(),
+            format!("unsupported content part: {want}"),
+            "{name}"
+        );
+        assert!(body.is_object(), "{name}: {body}");
+    }
+}
+
+// TestConvertClaudeRequestToOpenAI_KeepsTurnWithTextBesideAttachment
+#[test]
+fn keeps_turn_with_text_beside_attachment() {
+    let input = format!(
+        r#"{{"model":"m","messages":[{{"role":"user","content":"hello"}},{{"role":"assistant","content":"hi"}},{{"role":"user","content":[{{"type":"text","text":"keep me"}},{USER_TURN_UPLOAD}]}}]}}"#
+    );
+    let (body, err) = convert_with_compat_checked("m", &input);
+    assert_eq!(err, None);
+    assert_eq!(
+        text_at(&body, "messages.2.content.0.text"),
+        "keep me",
+        "{body}"
+    );
+}
+
+// TestConvertClaudeRequestToOpenAI_Base64DocumentAfterHistoryStaysAFilePart
+#[test]
+fn base64_document_after_history_stays_a_file_part() {
+    let input = r#"{"model":"m","messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":[{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0xLjQK"}}]}]}"#;
+    let (body, err) = convert_with_compat_checked("m", input);
+    assert_eq!(err, None);
+    assert_eq!(
+        text_at(&body, "messages.2.content.0.type"),
+        "file",
+        "{body}"
+    );
+    assert_eq!(
+        text_at(&body, "messages.2.content.0.file.file_data"),
+        "data:application/pdf;base64,JVBERi0xLjQK",
+        "{body}"
+    );
+}
+
+// TestConvertClaudeRequestToOpenAI_ToolResultKeepsTurnBesideUnsendableFile
+#[test]
+fn tool_result_keeps_turn_beside_unsendable_file() {
+    let input = format!(
+        r#"{{"model":"m","messages":[{{"role":"user","content":"run"}},{{"role":"assistant","content":[{{"type":"tool_use","id":"toolu_1","name":"t","input":{{}}}}]}},{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"toolu_1","content":"done"}},{USER_TURN_UPLOAD}]}}]}}"#
+    );
+    let (body, err) = convert_with_compat_checked("m", &input);
+    assert_eq!(err, None, "a tool result is a sendable part; body = {body}");
+}
+
+/// `claudeImageTurnToOpenAI`: two history turns, then a user turn of
+/// `final_content`.
+fn claude_image_turn_to_openai(final_content: &str) -> Result<Value, UnsupportedPartError> {
+    let input = format!(
+        r#"{{"model":"m","messages":[{{"role":"user","content":"a"}},{{"role":"assistant","content":"b"}},{{"role":"user","content":[{final_content}]}}]}}"#
+    );
+    claude_to_openai_envelope("m", &input)
+}
+
+fn require_image_refusal(envelope: Result<Value, UnsupportedPartError>) {
+    let err = envelope.expect_err("refused");
+    assert_eq!(err.part_type, "image");
+    assert_eq!(err.status_code(), 400);
+    assert_eq!(err.to_string(), "unsupported content part: image");
+}
+
+// TestClaudeToOpenAIImageOnlyTurnKeepsTheImage
+#[test]
+fn image_only_turn_keeps_the_image() {
+    let cases = [
+        (
+            "base64",
+            r#"{"type":"base64","media_type":"image/png","data":"aGVsbG8="}"#,
+            "data:image/png;base64,aGVsbG8=",
+        ),
+        (
+            "http url",
+            r#"{"type":"url","url":"https://example.test/a.png"}"#,
+            "https://example.test/a.png",
+        ),
+    ];
+    for (name, source, want) in cases {
+        let body = claude_image_turn_to_openai(&format!(r#"{{"type":"image","source":{source}}}"#))
+            .unwrap_or_else(|err| panic!("{name}: {err}"));
+        assert_eq!(
+            text_at(&body, "messages.2.content.0.type"),
+            "image_url",
+            "{name}: {body}"
+        );
+        assert_eq!(
+            text_at(&body, "messages.2.content.0.image_url.url"),
+            want,
+            "{name}: {body}"
+        );
+    }
+}
+
+// TestClaudeToOpenAIFileImageOnlyTurnIsRefused
+#[test]
+fn file_image_only_turn_is_refused() {
+    require_image_refusal(claude_image_turn_to_openai(
+        r#"{"type":"image","source":{"type":"file","file_id":"file-1"}}"#,
+    ));
+}
+
+// TestClaudeToOpenAIFileImageBesideTextStillSucceeds
+#[test]
+fn file_image_beside_text_still_succeeds() {
+    let body = claude_image_turn_to_openai(
+        r#"{"type":"text","text":"keep me"},{"type":"image","source":{"type":"file","file_id":"file-1"}}"#,
+    )
+    .expect("sent");
+    let parts = at(&body, "messages.2.content")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(parts.len(), 1, "text was lost or an image leaked: {body}");
+    assert_eq!(str_of(parts[0].get("text")), "keep me", "{body}");
+}
+
+// TestClaudeToOpenAIEmptyTextDoesNotHideAFileImage
+#[test]
+fn empty_text_does_not_hide_a_file_image() {
+    require_image_refusal(claude_image_turn_to_openai(
+        r#"{"type":"text","text":""},{"type":"image","source":{"type":"file","file_id":"file-1"}}"#,
+    ));
+}
+
+// Not upstream's: data that isn't base64 can't be sent, and data with line
+// breaks is written again without them.
+#[test]
+fn document_data_is_read_as_go_reads_base64() {
+    let turn = |data: &str| {
+        format!(
+            r#"{{"model":"m","messages":[{{"role":"user","content":[{{"type":"text","text":"x"}},{{"type":"document","filename":"a.pdf","source":{{"type":"base64","media_type":"","data":"{data}"}}}}]}}]}}"#
+        )
+    };
+    let body = convert("m", &turn("JVBE\\r\\nRi0xLjQK"));
+    assert_eq!(
+        at(&body, "messages.0.content.1"),
+        Some(
+            &json!({"type": "file", "file": {"filename": "a.pdf", "file_data": "data:application/octet-stream;base64,JVBERi0xLjQK"}})
+        ),
+        "{body}"
+    );
+    let body = convert("m", &turn("not base64!"));
+    assert_eq!(array_len(&body, "messages.0.content"), 1, "{body}");
+}
+
+fn array_len(value: &Value, path: &str) -> usize {
+    at(value, path)
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len)
 }

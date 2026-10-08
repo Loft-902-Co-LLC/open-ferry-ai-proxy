@@ -1,8 +1,12 @@
 // Ported from CLIProxyAPI internal/translator/codex/interactions/interactions_codex_test.go
-// and noop_optimization_test.go (v8.0.15, MIT).
+// and noop_optimization_test.go (v8.0.15, MIT), and interactions_codex_uri_test.go
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 //
-// All ten tests of interactions_codex_test.go are ported whole. Changed:
+// All ten tests of interactions_codex_test.go are ported whole, and all of
+// interactions_codex_uri_test.go. Upstream's URI tests go through the
+// registry; ours call the translator and check that the registry gives the
+// same refusal. Changed:
 // TestSetInteractionsCodexRawIfDifferentReusesMatchingValue checks that the
 // payload isn't copied when a pass-through field already holds the same
 // value; here it checks that such a field passes through unchanged, in its
@@ -11,10 +15,18 @@
 
 use serde_json::{Value, json};
 
-use super::request::convert_interactions_request_to_codex;
 use super::response::{
     CodexToInteractionsStream, convert_codex_response_to_interactions_non_stream,
 };
+use crate::registry::UnsupportedPartError;
+
+/// [`super::request::convert_interactions_request_to_codex`], for requests
+/// it doesn't refuse.
+fn convert_interactions_request_to_codex(model: &str, request: &Value, stream: bool) -> Value {
+    let (body, err) = super::request::convert_interactions_request_to_codex(model, request, stream);
+    assert_eq!(err, None, "{body}");
+    body
+}
 
 fn convert(request: &str, stream: bool) -> Value {
     let request: Value = serde_json::from_str(request).expect("test request is valid JSON");
@@ -504,4 +516,311 @@ fn request_arguments_keep_their_numbers() {
     let out = convert_interactions_request_to_codex("m", &request, false);
     assert_eq!(at(&out, "input.0.arguments"), r#"{"x":-0}"#);
     assert_eq!(at(&out, "input.1.arguments"), spelled);
+}
+
+const INTERACTIONS_CODEX_HISTORY: &str = r#"{"type":"user_input","content":[{"type":"text","text":"a"}]},{"type":"model_output","content":[{"type":"text","text":"b"}]}"#;
+
+/// `interactionsToCodexEnvelope`: the translator's body and refusal, after
+/// checking that the registration gives the same refusal.
+fn envelope(input: &str) -> (Value, Option<UnsupportedPartError>) {
+    let request: Value = serde_json::from_str(input).expect("test request is valid JSON");
+    let (body, err) = super::request::convert_interactions_request_to_codex("m", &request, false);
+    let registered = crate::registry::Registry::global().translate_request_checked(
+        &"interactions".into(),
+        &"codex".into(),
+        "m",
+        request,
+        false,
+    );
+    assert_eq!(registered.err(), err, "the registration's refusal");
+    (body, err)
+}
+
+/// `interactionsFinalTurnToCodex`: two history turns followed by a final
+/// user step holding `final_content`.
+fn final_turn(final_content: &str) -> (Value, Option<UnsupportedPartError>) {
+    envelope(&format!(
+        r#"{{"model":"m","input":[{INTERACTIONS_CODEX_HISTORY},{{"type":"user_input","content":[{final_content}]}}]}}"#
+    ))
+}
+
+/// `requireInteractionsToCodexRefusal`.
+#[track_caller]
+fn require_refusal((body, err): (Value, Option<UnsupportedPartError>), want: &str) {
+    let err = err.unwrap_or_else(|| panic!("no refusal, want {want}; body = {body}"));
+    assert_eq!(err.part_type, want, "{body}");
+    assert_eq!(err.status_code(), 400);
+    assert_eq!(err.to_string(), format!("unsupported content part: {want}"));
+    assert!(body.is_object(), "{body}");
+}
+
+#[track_caller]
+fn require_sent((body, err): (Value, Option<UnsupportedPartError>)) -> Value {
+    assert_eq!(err, None, "{body}");
+    body
+}
+
+// TestInteractionsToCodexKeepsTheMediaGeminiToInteractionsWrites
+#[test]
+fn keeps_the_media_gemini_to_interactions_writes() {
+    let body = require_sent(final_turn(
+        r#"{"type":"image","uri":"gs://b/a.png","mime_type":"image/png"}"#,
+    ));
+    assert_eq!(body["input"].as_array().map(Vec::len), Some(3), "{body}");
+    let part = at(&body, "input.2.content.0");
+    assert_eq!(part["type"], "input_image", "{body}");
+    assert_eq!(part["image_url"], "gs://b/a.png", "{body}");
+}
+
+// TestInteractionsToCodexReadsURIAsAFileReference
+#[test]
+fn reads_uri_as_a_file_reference() {
+    for field in ["uri", "file_uri", "fileUri", "url"] {
+        let body = require_sent(final_turn(&format!(
+            r#"{{"type":"image","mime_type":"image/png","{field}":"https://example.test/a.png"}}"#
+        )));
+        let part = at(&body, "input.2.content.0");
+        assert_eq!(part["type"], "input_image", "image {field}: {body}");
+        assert_eq!(
+            part["image_url"], "https://example.test/a.png",
+            "image {field}: {body}"
+        );
+
+        let body = require_sent(final_turn(&format!(
+            r#"{{"type":"document","mime_type":"application/pdf","{field}":"https://example.test/a.pdf"}}"#
+        )));
+        let part = at(&body, "input.2.content.0");
+        assert_eq!(part["type"], "input_file", "document {field}: {body}");
+        assert_eq!(
+            part["file_url"], "https://example.test/a.pdf",
+            "document {field}: {body}"
+        );
+    }
+}
+
+// TestInteractionsToCodexInlineDataStillConverts
+#[test]
+fn inline_data_still_converts() {
+    let image = require_sent(final_turn(
+        r#"{"type":"image","mime_type":"image/png","data":"aGVsbG8="}"#,
+    ));
+    assert_eq!(
+        at(&image, "input.2.content.0.image_url"),
+        "data:image/png;base64,aGVsbG8=",
+        "{image}"
+    );
+    let audio = require_sent(final_turn(
+        r#"{"type":"audio","mime_type":"audio/wav","data":"UklGRg=="}"#,
+    ));
+    assert_eq!(
+        at(&audio, "input.2.content.0.input_audio.data"),
+        "UklGRg==",
+        "{audio}"
+    );
+}
+
+// TestInteractionsToCodexUnrepresentableAttachmentOnlyTurnIsRefused
+#[test]
+fn unrepresentable_attachment_only_turn_is_refused() {
+    let cases = [
+        (
+            "audio by uri",
+            r#"{"type":"audio","mime_type":"audio/wav","uri":"gs://b/a.wav"}"#,
+            "audio",
+        ),
+        ("image without anything", r#"{"type":"image"}"#, "image"),
+        (
+            "document without anything",
+            r#"{"type":"document","mime_type":"application/pdf"}"#,
+            "document",
+        ),
+        (
+            "empty text does not hide it",
+            r#"{"type":"text","text":""},{"type":"audio","mime_type":"audio/wav"}"#,
+            "audio",
+        ),
+        (
+            "whitespace text does not hide it",
+            r#"{"type":"text","text":" \n"},{"type":"audio","mime_type":"audio/wav"}"#,
+            "audio",
+        ),
+    ];
+    for (name, content, want) in cases {
+        let (body, err) = final_turn(content);
+        assert!(err.is_some(), "{name}: no refusal; body = {body}");
+        require_refusal((body, err), want);
+    }
+}
+
+// TestInteractionsToCodexRefusesAnEmptiedTurnBeforeALaterTextTurn
+#[test]
+fn refuses_an_emptied_turn_before_a_later_text_turn() {
+    require_refusal(
+        envelope(
+            r#"{"model":"m","input":[{"type":"user_input","content":[{"type":"audio","mime_type":"audio/wav"}]},{"type":"model_output","content":[{"type":"text","text":"ok"}]},{"type":"user_input","content":[{"type":"text","text":"next"}]}]}"#,
+        ),
+        "audio",
+    );
+}
+
+// TestInteractionsToCodexInstructionStepDoesNotHideAnEmptiedTurn
+#[test]
+fn instruction_step_does_not_hide_an_emptied_turn() {
+    const EMPTIED: &str = r#"{"type":"user_input","content":[{"type":"audio","mime_type":"audio/wav","uri":"gs://b/a.wav"}]}"#;
+    let cases = [
+        (
+            "role developer",
+            r#"{"type":"user_input","role":"developer","content":[{"type":"text","text":"note"}]}"#,
+        ),
+        (
+            "role system",
+            r#"{"type":"user_input","role":"system","content":[{"type":"text","text":"note"}]}"#,
+        ),
+        (
+            "type developer",
+            r#"{"type":"developer","content":[{"type":"text","text":"note"}]}"#,
+        ),
+        (
+            "type system",
+            r#"{"type":"system","content":[{"type":"text","text":"note"}]}"#,
+        ),
+        (
+            "type system wrapper",
+            r#"{"type":"system","steps":[{"type":"user_input","content":[{"type":"text","text":"note"}]}]}"#,
+        ),
+    ];
+    for (name, instruction) in cases {
+        let (body, err) = envelope(&format!(
+            r#"{{"model":"m","input":[{INTERACTIONS_CODEX_HISTORY},{EMPTIED},{instruction}]}}"#
+        ));
+        assert!(err.is_some(), "{name}: no refusal; body = {body}");
+        require_refusal((body, err), "audio");
+    }
+}
+
+// TestInteractionsToCodexTypeOnlyInstructionStepIsSentAsDeveloper
+#[test]
+fn type_only_instruction_step_is_sent_as_developer() {
+    for step_type in ["system", "developer"] {
+        let body = require_sent(envelope(&format!(
+            r#"{{"model":"m","input":[{INTERACTIONS_CODEX_HISTORY},{{"type":"{step_type}","content":[{{"type":"text","text":"note"}}]}}]}}"#
+        )));
+        let last = at(&body, "input.2");
+        assert_eq!(last["role"], "developer", "{step_type}: {body}");
+        assert_eq!(at(last, "content.0.text"), "note", "{step_type}: {body}");
+    }
+}
+
+// TestInteractionsToCodexUnrepresentableAttachmentBesideTextStillSucceeds
+#[test]
+fn unrepresentable_attachment_beside_text_still_succeeds() {
+    let body = require_sent(final_turn(
+        r#"{"type":"text","text":"keep me"},{"type":"audio","mime_type":"audio/wav"}"#,
+    ));
+    assert_eq!(at(&body, "input.2.content.0.text"), "keep me", "{body}");
+    assert_eq!(body["input"].as_array().map(Vec::len), Some(3), "{body}");
+}
+
+// TestInteractionsToCodexNeighbouringStepKeepsTheTurnAlive
+#[test]
+fn neighbouring_step_keeps_the_turn_alive() {
+    let cases = [
+        (
+            "text step",
+            r#"{"type":"user_input","content":[{"type":"text","text":"keep me"}]},{"type":"user_input","content":[{"type":"audio","mime_type":"audio/wav"}]}"#,
+        ),
+        (
+            "tool result",
+            r#"{"type":"function_call","name":"f","call_id":"c1","arguments":{}},{"type":"function_result","name":"f","call_id":"c1","result":{"ok":true}},{"type":"user_input","content":[{"type":"audio","mime_type":"audio/wav"}]}"#,
+        ),
+        (
+            "string step",
+            r#""keep me",{"type":"user_input","content":[{"type":"audio","mime_type":"audio/wav"}]}"#,
+        ),
+        (
+            "turn of steps",
+            r#"{"role":"user","steps":[{"type":"user_input","content":[{"type":"text","text":"keep me"}]},{"type":"user_input","content":[{"type":"audio","mime_type":"audio/wav"}]}]}"#,
+        ),
+    ];
+    for (name, steps) in cases {
+        let (body, err) = envelope(&format!(
+            r#"{{"model":"m","input":[{INTERACTIONS_CODEX_HISTORY},{steps}]}}"#
+        ));
+        assert_eq!(err, None, "{name}: {body}");
+    }
+}
+
+// TestInteractionsToCodexAssistantMediaIsNotAUserTurn
+#[test]
+fn assistant_media_is_not_a_user_turn() {
+    require_sent(envelope(
+        r#"{"model":"m","input":[{"type":"user_input","content":[{"type":"text","text":"a"}]},{"type":"model_output","content":[{"type":"audio","mime_type":"audio/wav"}]},{"type":"user_input","content":[{"type":"text","text":"c"}]}]}"#,
+    ));
+}
+
+// TestInteractionsToCodexExportedWrapperKeepsAJSONBody
+#[test]
+fn exported_wrapper_keeps_a_json_body() {
+    let request: Value = serde_json::from_str(&format!(
+        r#"{{"model":"m","input":[{INTERACTIONS_CODEX_HISTORY},{{"type":"user_input","content":[{{"type":"audio","mime_type":"audio/wav"}}]}}]}}"#
+    ))
+    .expect("test request is valid JSON");
+    let (body, err) = super::request::convert_interactions_request_to_codex("m", &request, false);
+    assert!(err.is_some(), "{body}");
+    assert!(body.is_object(), "{body}");
+}
+
+// Not upstream's: a blank URL falls through to the next field, and the URL
+// sent is trimmed.
+#[test]
+fn blank_urls_fall_through_and_urls_are_trimmed() {
+    let body = require_sent(final_turn(
+        r#"{"type":"image","url":" ","file_uri":" https://example.test/a.png "}"#,
+    ));
+    assert_eq!(
+        at(&body, "input.2.content.0.image_url"),
+        "https://example.test/a.png",
+        "{body}"
+    );
+    let body = require_sent(final_turn(
+        r#"{"type":"document","mime_type":"application/pdf","file_uri":"","url":" https://example.test/a.pdf"}"#,
+    ));
+    assert_eq!(
+        at(&body, "input.2.content.0.file_url"),
+        "https://example.test/a.pdf",
+        "{body}"
+    );
+    require_refusal(final_turn(r#"{"type":"image","url":"  "}"#), "image");
+}
+
+// Not upstream's: a function call or a thought closes the emptied turn, a
+// developer step with null content does too, blank string steps don't keep
+// the turn alive, and a plain string input is never refused.
+#[test]
+fn user_turns_in_detail() {
+    const EMPTIED: &str =
+        r#"{"type":"user_input","content":[{"type":"audio","mime_type":"audio/wav"}]}"#;
+    for closer in [
+        r#"{"type":"function_call","name":"f","call_id":"c1","arguments":{}}"#,
+        r#"{"type":"thought","text":"hmm"}"#,
+        r#"{"type":"developer","content":null}"#,
+    ] {
+        require_refusal(
+            envelope(&format!(
+                r#"{{"model":"m","input":[{EMPTIED},{closer},"later text"]}}"#
+            )),
+            "audio",
+        );
+    }
+    require_refusal(
+        envelope(&format!(r#"{{"model":"m","input":[" ",{EMPTIED}]}}"#)),
+        "audio",
+    );
+    require_refusal(
+        envelope(&format!(
+            r#"{{"model":"m","input":{{"role":"user","steps":[{EMPTIED}]}}}}"#
+        )),
+        "audio",
+    );
+    require_sent(envelope(r#"{"model":"m","input":"just text"}"#));
 }

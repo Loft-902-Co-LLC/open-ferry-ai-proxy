@@ -11,6 +11,10 @@
 //! models that take one, or a thinking budget for older models; which kind a
 //! model takes comes from the [`ModelCatalog`].
 //!
+//! A user message's `file` part without inline data, or `input_audio` part,
+//! has no Claude block. The rest of the message is still sent, but a user
+//! message left with nothing is refused with an [`UnsupportedPartError`].
+//!
 //! Deviations from upstream:
 //! - `metadata.user_id` is only set to an ID the client sent, in
 //!   `metadata.user_id` or `user`. Without one, upstream derives an ID from
@@ -36,9 +40,11 @@ use crate::common::claude::{
     MessageAccumulator, apply_reasoning_effort, client_user_id, generate_tool_call_id,
     sanitize_function_name, sanitize_tool_id, structured_output_instruction,
 };
+use crate::common::parts::UserTurnDrops;
 use crate::go;
 use crate::json::{float_of, int_of, object, path, str_of};
 use crate::models::ModelCatalog;
+use crate::registry::UnsupportedPartError;
 use crate::schema::normalize_claude_tool_input_schema;
 use crate::thinking::summary::apply_translated_to_claude;
 
@@ -48,12 +54,15 @@ const DEFAULT_MAX_TOKENS: i64 = 32000;
 /// body for `model_name`. `stream` is whether the client asked to stream.
 /// `models` says which thinking settings the model takes; pass
 /// [`ModelCatalog::current`] unless you have your own.
+///
+/// The error is set when a user message had only parts Claude can't take;
+/// the body is still returned.
 pub fn convert_openai_chat_completions_request_to_claude(
     model_name: &str,
     request: &Value,
     stream: bool,
     models: &ModelCatalog,
-) -> Value {
+) -> (Value, Option<UnsupportedPartError>) {
     convert(model_name, request, stream, models, false)
 }
 
@@ -65,7 +74,7 @@ pub fn convert_openai_chat_completions_request_to_claude_with_compat(
     request: &Value,
     stream: bool,
     models: &ModelCatalog,
-) -> Value {
+) -> (Value, Option<UnsupportedPartError>) {
     convert(model_name, request, stream, models, true)
 }
 
@@ -75,7 +84,7 @@ fn convert(
     stream: bool,
     models: &ModelCatalog,
     keep_reasoning: bool,
-) -> Value {
+) -> (Value, Option<UnsupportedPartError>) {
     let mut out = Map::new();
     out.insert("model".into(), model_name.into());
     out.insert("max_tokens".into(), DEFAULT_MAX_TOKENS.into());
@@ -111,14 +120,18 @@ fn convert(
     out.insert("stream".into(), stream.into());
 
     let mut system = Vec::new();
+    let mut drops = UserTurnDrops::default();
     let mut messages = match request.get("messages") {
-        Some(Value::Array(messages)) => convert_messages(messages, &mut system, keep_reasoning),
+        Some(Value::Array(messages)) => {
+            convert_messages(messages, &mut system, &mut drops, keep_reasoning)
+        }
         _ => Vec::new(),
     };
     if let Some(instruction) = structured_output_instruction(request.get("response_format")) {
         system.push(text_block(instruction));
     }
-    // A request of only system messages still needs a turn.
+    // A request of only system messages still needs a turn. It doesn't make
+    // up for a user message that was emptied, which is decided per message.
     if messages.is_empty() && !system.is_empty() {
         messages.push(json!({"role": "user", "content": [{"type": "text", "text": ""}]}));
     }
@@ -167,14 +180,15 @@ fn convert(
 
     let mut out = Value::Object(out);
     apply_translated_to_claude(&mut out, request, "openai", model_name, models);
-    out
+    (out, drops.err())
 }
 
 /// Converts the messages into Claude turns, collecting system blocks into
-/// `system` on the way.
+/// `system` and the parts each user message dropped into `drops` on the way.
 fn convert_messages(
     messages: &[Value],
     system: &mut Vec<Value>,
+    drops: &mut UserTurnDrops,
     keep_reasoning: bool,
 ) -> Vec<Value> {
     // A call answered more than once takes its last answer, in the place of
@@ -194,8 +208,12 @@ fn convert_messages(
             // Developer messages rank with system messages in OpenAI's
             // instruction hierarchy, so both become system blocks.
             "system" | "developer" => system_blocks(message, system),
-            "user" => turns.push("user", message_blocks(message, false)),
-            "assistant" => turns.push("assistant", message_blocks(message, keep_reasoning)),
+            "user" => {
+                let blocks = message_blocks(message, false, Some(&mut *drops));
+                drops.end_turn(blocks.len());
+                turns.push("user", blocks);
+            }
+            "assistant" => turns.push("assistant", message_blocks(message, keep_reasoning, None)),
             "tool" => {
                 let raw_id = str_of(message.get("tool_call_id"));
                 let id = sanitize_tool_id(&raw_id);
@@ -247,8 +265,13 @@ fn system_blocks(message: &Value, system: &mut Vec<Value>) {
 }
 
 /// The blocks of a user or assistant message: its text and content parts,
-/// then, for an assistant, its tool calls.
-fn message_blocks(message: &Value, keep_reasoning: bool) -> Vec<Value> {
+/// then, for an assistant, its tool calls. A user message passes `drops`, to
+/// record a `file` or `input_audio` part that has no block.
+fn message_blocks(
+    message: &Value,
+    keep_reasoning: bool,
+    mut drops: Option<&mut UserTurnDrops>,
+) -> Vec<Value> {
     let mut blocks = Vec::new();
     if keep_reasoning
         && let Some(Value::String(reasoning)) = message.get("reasoning_content")
@@ -263,11 +286,17 @@ fn message_blocks(message: &Value, keep_reasoning: bool) -> Vec<Value> {
     match message.get("content") {
         Some(Value::String(text)) if !text.is_empty() => blocks.push(text_block(text.as_str())),
         Some(Value::Array(parts)) => {
-            blocks.extend(parts.iter().filter_map(|part| {
-                let mut block = content_part(part)?;
-                cache_control::attach_to(&mut block, part);
-                Some(block)
-            }));
+            for part in parts {
+                if let Some(mut block) = content_part(part) {
+                    cache_control::attach_to(&mut block, part);
+                    blocks.push(block);
+                } else if let Some(drops) = drops.as_deref_mut() {
+                    let kind = str_of(part.get("type"));
+                    if matches!(&*kind, "file" | "input_audio") {
+                        drops.drop_part(&kind);
+                    }
+                }
+            }
         }
         _ => {}
     }

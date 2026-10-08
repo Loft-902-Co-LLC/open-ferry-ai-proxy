@@ -4,7 +4,9 @@
 // interactionsContentPartToGeminiPart, geminiTextPartJSON, geminiInlineDataPartJSON,
 // geminiFileDataPartJSON, geminiInlineDataPartFromDataURL,
 // interactionsInputAudioMimeType, geminiInlineDataToInteractionsContent and
-// geminiThoughtStepJSON) (v8.0.15, MIT).
+// geminiThoughtStepJSON) (v8.0.15, MIT), with v8.0.20's user turn refusals,
+// geminiPartFileData, geminiFileDataToInteractionsContent and
+// geminiInteractionsMediaType (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Gemini Interactions request → Gemini request, and Gemini request →
@@ -20,7 +22,15 @@
 //!
 //! The other way, each Gemini part becomes a step of its own, and the
 //! generation config's keys become snake_case, with the thinking settings
-//! copied to the top-level names Interactions uses.
+//! copied to the top-level names Interactions uses. A `fileData` part
+//! becomes a media part that names the file by `uri`.
+//!
+//! Both ways refuse a request whose user turn is left with nothing to send
+//! because its only attachment has no equivalent on the other side
+//! ([`UnsupportedPartError`]). Text or any other sendable part beside it
+//! keeps the turn; blank text doesn't. In Interactions input, consecutive
+//! user steps make one turn, and a tool result keeps it; developer and
+//! system steps close it without keeping it.
 
 use std::borrow::Cow;
 
@@ -29,13 +39,23 @@ use serde_json::{Map, Value};
 use super::case::{camel_to_snake, snake_to_camel};
 use crate::common::file_data::normalize_openai_file_data;
 use crate::common::gemini::{reorder_gemini_user_parts, set_gemini_function_response_result};
+use crate::common::parts::{
+    UserRun, UserTurnDrops, gemini_part_is_sendable, interactions_attachment_type,
+    is_interactions_instruction_step,
+};
 use crate::go;
 use crate::json::{bool_of, go_marshaled, object, path, set_path, str_of};
+use crate::registry::UnsupportedPartError;
 
 /// `ConvertInteractionsRequestToGemini`: a Gemini Interactions request as a
 /// Gemini request. `model` replaces the client's model when the client named
-/// one.
-pub fn convert_interactions_request_to_gemini(model: &str, body: &Value, _stream: bool) -> Value {
+/// one. The refusal names the first user turn left with nothing to send
+/// because its only attachment has no Gemini equivalent.
+pub fn convert_interactions_request_to_gemini(
+    model: &str,
+    body: &Value,
+    _stream: bool,
+) -> (Value, Option<UnsupportedPartError>) {
     let mut out = object([
         ("model", Value::String(String::new())),
         ("contents", Value::Array(Vec::new())),
@@ -49,14 +69,19 @@ pub fn convert_interactions_request_to_gemini(model: &str, body: &Value, _stream
     copy_tools(&mut out, body);
     copy_tool_choice(&mut out, body);
     copy_service_tier(&mut out, body);
-    let contents = input_contents(body.get("input"));
+    let (contents, err) = input_contents(body.get("input"));
     set_path(&mut out, "contents", Value::Array(contents));
-    out
+    (out, err)
 }
 
 /// `ConvertGeminiRequestToInteractions`: a Gemini request as a Gemini
-/// Interactions request for `model`.
-pub fn convert_gemini_request_to_interactions(model: &str, body: &Value, stream: bool) -> Value {
+/// Interactions request for `model`. The refusal names the first user turn
+/// left with nothing to send because its only part couldn't be carried over.
+pub fn convert_gemini_request_to_interactions(
+    model: &str,
+    body: &Value,
+    stream: bool,
+) -> (Value, Option<UnsupportedPartError>) {
     let mut out = object([
         ("model", Value::String(model.to_owned())),
         ("input", Value::Array(Vec::new())),
@@ -73,6 +98,7 @@ pub fn convert_gemini_request_to_interactions(model: &str, body: &Value, stream:
         normalize_gemini_thinking_config(&mut out);
     }
     copy_gemini_tools(&mut out, body);
+    let mut drops = UserTurnDrops::default();
     let mut input = Vec::new();
     for content in each(body.get("contents")) {
         let role = str_of(content.get("role"));
@@ -81,18 +107,26 @@ pub fn convert_gemini_request_to_interactions(model: &str, body: &Value, stream:
         } else {
             "user_input"
         };
+        // What this turn sends; empty text isn't sendable.
+        let mut sendable = 0;
         for part in each(content.get("parts")) {
-            let empty_text = part
+            if part.get("functionCall").is_some() || part.get("functionResponse").is_some() {
+                let steps = gemini_part_to_steps(part);
+                sendable += steps.len();
+                input.extend(steps);
+                continue;
+            }
+            if part
                 .get("text")
-                .is_some_and(|text| str_of(Some(text)).is_empty());
-            if part.get("functionCall").is_some()
-                || part.get("functionResponse").is_some()
-                || empty_text
+                .is_some_and(|text| str_of(Some(text)).is_empty())
             {
                 input.extend(gemini_part_to_steps(part));
                 continue;
             }
             let Some(item) = gemini_part_to_content(part) else {
+                if role != "model" && gemini_part_file_data(part).is_some() {
+                    drops.drop_part("fileData");
+                }
                 continue;
             };
             let step_type = if part.get("thought").is_some_and(bool_of) && role == "model" {
@@ -104,11 +138,15 @@ pub fn convert_gemini_request_to_interactions(model: &str, body: &Value, stream:
                 ("type", Value::String(step_type.to_owned())),
                 ("content", Value::Array(vec![item])),
             ]));
+            sendable += 1;
+        }
+        if role != "model" {
+            drops.end_turn(sendable);
         }
     }
     set_path(&mut out, "input", Value::Array(input));
     set_path(&mut out, "stream", Value::Bool(stream));
-    out
+    (out, drops.err())
 }
 
 /// gjson's `ForEach`: an array's items, an object's values, or anything else
@@ -447,17 +485,24 @@ struct Input {
     in_model_turn: bool,
     last_step_type: &'static str,
     pending_signature: String,
+    /// Follows the consecutive user content, so that an attachment Gemini
+    /// can't carry is refused only when its whole user turn is left with
+    /// nothing to send.
+    run: UserRun,
+    /// Set while the step being added is developer or system content.
+    instruction: bool,
 }
 
 /// `appendInteractionsInput`: the Gemini contents for an Interactions
-/// `input`: text, a list of steps, a turn holding `steps`, or one step.
-fn input_contents(input: Option<&Value>) -> Vec<Value> {
+/// `input`: text, a list of steps, a turn holding `steps`, or one step; and
+/// the refusal for the first user turn it emptied.
+fn input_contents(input: Option<&Value>) -> (Vec<Value>, Option<UnsupportedPartError>) {
     let Some(input) = input else {
-        return Vec::new();
+        return (Vec::new(), None);
     };
     let mut ctx = Input::default();
     match input {
-        Value::String(text) => return vec![text_content("user", text)],
+        Value::String(text) => return (vec![text_content("user", text)], None),
         Value::Array(items) => {
             for item in items {
                 ctx.step(item, "user");
@@ -469,23 +514,36 @@ fn input_contents(input: Option<&Value>) -> Vec<Value> {
                     "model" | "assistant" => "model",
                     _ => "user",
                 };
+                ctx.instruction = is_interactions_instruction_step(input, false);
                 for step in steps {
                     ctx.step(step, role);
                 }
+                ctx.instruction = false;
             }
             _ => ctx.step(input, "user"),
         },
     }
     ctx.flush_pending_signature();
-    ctx.items
+    ctx.run.end();
+    let err = ctx.run.err();
+    (ctx.items, err)
 }
 
 impl Input {
-    /// `appendInteractionsStepToGemini`.
+    /// `appendInteractionsStepToGemini`. A step that names no role or type
+    /// is instruction content if the step around it is.
     fn step(&mut self, item: &Value, default_role: &'static str) {
+        let inherited = self.instruction;
+        self.instruction = is_interactions_instruction_step(item, inherited);
+        self.add_step(item, default_role);
+        self.instruction = inherited;
+    }
+
+    /// [`Self::step`] without the instruction bookkeeping.
+    fn add_step(&mut self, item: &Value, default_role: &'static str) {
         if let Value::String(text) = item {
             self.leave_model_turn();
-            self.items.push(text_content(default_role, text));
+            self.append_text(default_role, text);
             self.last_step_type = "text";
             return;
         }
@@ -502,6 +560,7 @@ impl Input {
         }
         match str_of(item.get("type")).as_ref() {
             "model_output" => {
+                self.run.end();
                 if !self.pending_signature.is_empty() {
                     let carrier = signature_carrier(std::mem::take(&mut self.pending_signature));
                     self.append_to_model_turn(vec![carrier]);
@@ -514,6 +573,7 @@ impl Input {
                 self.last_step_type = "model_output";
             }
             "thought" => {
+                self.run.end();
                 let signature = step_signature(item);
                 if !signature.is_empty() {
                     if !self.pending_signature.is_empty() && self.pending_signature != signature {
@@ -534,6 +594,7 @@ impl Input {
                 self.last_step_type = "thought";
             }
             "function_call" => {
+                self.run.end();
                 let mut part = function_call_part(item);
                 let mut signature = step_signature(item);
                 if signature.is_empty() {
@@ -554,6 +615,9 @@ impl Input {
             "function_result" => {
                 self.leave_model_turn();
                 let part = function_result_part(item);
+                // A tool result is content the model reads, so it keeps the
+                // user turn around it.
+                self.run.add();
                 match self.items.last_mut() {
                     Some(last)
                         if self.last_step_type == "function_result" && role_is(last, "user") =>
@@ -584,11 +648,31 @@ impl Input {
                 } else if let Some(list) = item.get("content") {
                     self.content_list(default_role, Some(list));
                 } else if let Some(text) = item.get("text") {
-                    self.items
-                        .push(text_content(default_role, &str_of(Some(text))));
+                    self.append_text(default_role, &str_of(Some(text)));
                 }
                 self.last_step_type = "default";
             }
+        }
+    }
+
+    /// `userRun`: whether content added with `role` is the user's, which
+    /// [`Self::run`] follows. Model content and developer or system content
+    /// close the open user turn instead, so they can never keep an emptied
+    /// one alive.
+    fn tracks(&mut self, role: &str) -> bool {
+        if role == "user" && !self.instruction {
+            return true;
+        }
+        self.run.end();
+        false
+    }
+
+    /// `appendText`: a content holding one text part. Blank text doesn't
+    /// keep a user turn alive.
+    fn append_text(&mut self, role: &str, text: &str) {
+        self.items.push(text_content(role, text));
+        if self.tracks(role) && !text.trim().is_empty() {
+            self.run.add();
         }
     }
 
@@ -635,31 +719,64 @@ impl Input {
         let Some(Value::Array(parts)) = item.get("parts") else {
             return;
         };
-        let parts: Vec<Value> = parts.iter().filter_map(native_part).collect();
-        if parts.is_empty() {
+        let role = content_role(&str_of(item.get("role")), default_role);
+        let tracked = self.tracks(role);
+        let mut kept = Vec::new();
+        for part in parts {
+            match native_part(part) {
+                Some(part) => {
+                    if tracked && gemini_part_is_sendable(&part) {
+                        self.run.add();
+                    }
+                    kept.push(part);
+                }
+                None => self.drop_part(part, tracked),
+            }
+        }
+        if kept.is_empty() {
             return;
         }
-        let role = content_role(&str_of(item.get("role")), default_role);
-        self.items.push(content(role, parts));
+        self.items.push(content(role, kept));
     }
 
     /// `appendInteractionsContentList`: a content of its own for each part.
     fn content_list(&mut self, role: &str, list: Option<&Value>) {
+        let Some(list) = list else {
+            return;
+        };
+        let tracked = self.tracks(role);
         match list {
-            Some(Value::Array(list)) => {
+            Value::Array(list) => {
                 for part in list {
-                    if let Some(part) = content_part(part, false) {
-                        self.items.push(content(role, vec![part]));
-                    }
+                    self.add_content_part(role, part, tracked);
                 }
             }
-            Some(part @ Value::Object(_)) => {
-                if let Some(part) = content_part(part, false) {
-                    self.items.push(content(role, vec![part]));
-                }
-            }
-            Some(Value::String(text)) => self.items.push(text_content(role, text)),
+            Value::Object(_) => self.add_content_part(role, list, tracked),
+            Value::String(text) => self.append_text(role, text),
             _ => {}
+        }
+    }
+
+    /// `appendInteractionsContentPart`: a content holding one part.
+    /// `tracked` is whether it's user content, whose sendable parts and
+    /// dropped attachments [`Self::run`] records.
+    fn add_content_part(&mut self, role: &str, part: &Value, tracked: bool) {
+        let Some(converted) = content_part(part, false) else {
+            self.drop_part(part, tracked);
+            return;
+        };
+        let sendable = gemini_part_is_sendable(&converted);
+        self.items.push(content(role, vec![converted]));
+        if tracked && sendable {
+            self.run.add();
+        }
+    }
+
+    /// Records a user part Gemini can't take, if it's an attachment.
+    fn drop_part(&mut self, part: &Value, tracked: bool) {
+        let dropped = interactions_attachment_type(part);
+        if tracked && !dropped.is_empty() {
+            self.run.drop_part(&dropped);
         }
     }
 }
@@ -805,11 +922,10 @@ pub(super) fn content_part(part: &Value, thought: bool) -> Option<Value> {
                     return inline_data(&mime_type(), &data);
                 }
             }
-            if part.get("file_uri").is_some() || part.get("fileUri").is_some() {
-                let mut uri = str_of(part.get("file_uri"));
-                if uri.is_empty() {
-                    uri = str_of(part.get("fileUri"));
-                }
+            // `uri` is the Interactions spelling of `file_uri`.
+            let uri =
+                first_trimmed(["file_uri", "fileUri", "uri"].map(|key| str_of(part.get(key))));
+            if !uri.is_empty() {
                 return file_data(&mime_type(), &uri);
             }
             part.get("url")
@@ -1087,8 +1203,8 @@ fn function_tool(declaration: &Value, name: &Value) -> Value {
     fields(entry)
 }
 
-/// `geminiPartToInteractionsContent`: a Gemini text or inline data part as
-/// Interactions content.
+/// `geminiPartToInteractionsContent`: a Gemini text, inline data or file
+/// data part as Interactions content.
 fn gemini_part_to_content(part: &Value) -> Option<Value> {
     if let Some(text) = part.get("text") {
         return Some(object([
@@ -1103,17 +1219,63 @@ fn gemini_part_to_content(part: &Value) -> Option<Value> {
         }
         return Some(inline_data_content(&mime_type, &str_of(inline.get("data"))));
     }
-    let inline = part.get("inline_data")?;
-    Some(inline_data_content(
-        &str_of(inline.get("mime_type")),
-        &str_of(inline.get("data")),
-    ))
+    if let Some(inline) = part.get("inline_data") {
+        return Some(inline_data_content(
+            &str_of(inline.get("mime_type")),
+            &str_of(inline.get("data")),
+        ));
+    }
+    file_data_content(gemini_part_file_data(part)?)
+}
+
+/// `geminiPartFileData`: a Gemini part's `fileData`, in either spelling.
+fn gemini_part_file_data(part: &Value) -> Option<&Value> {
+    part.get("fileData").or_else(|| part.get("file_data"))
 }
 
 /// `geminiInlineDataToInteractionsContent`: typed by the MIME type's family.
 fn inline_data_content(mime_type: &str, data: &str) -> Value {
+    object([
+        ("type", Value::String(media_type(mime_type).to_owned())),
+        ("mime_type", Value::String(mime_type.to_owned())),
+        ("data", Value::String(data.to_owned())),
+    ])
+}
+
+/// `geminiFileDataToInteractionsContent`: a Gemini `fileData` as an
+/// Interactions media part that names the file by `uri`. `None` without a
+/// URI, which leaves nothing to send.
+fn file_data_content(file: &Value) -> Option<Value> {
+    let mut uri = str_of(file.get("fileUri")).trim().to_owned();
+    if uri.is_empty() {
+        uri = str_of(file.get("file_uri")).trim().to_owned();
+    }
+    if uri.is_empty() {
+        return None;
+    }
+    let mut mime_type = str_of(file.get("mimeType"));
+    if mime_type.is_empty() {
+        mime_type = str_of(file.get("mime_type"));
+    }
+    let mut item = object([
+        ("type", Value::String(media_type(&mime_type).to_owned())),
+        ("uri", Value::String(uri)),
+    ]);
+    if !mime_type.is_empty() {
+        set_path(
+            &mut item,
+            "mime_type",
+            Value::String(mime_type.into_owned()),
+        );
+    }
+    Some(item)
+}
+
+/// `geminiInteractionsMediaType`: the Interactions content type for a MIME
+/// type's family.
+fn media_type(mime_type: &str) -> &'static str {
     let lower = go::to_lower(mime_type);
-    let kind = if lower.starts_with("image/") {
+    if lower.starts_with("image/") {
         "image"
     } else if lower.starts_with("audio/") {
         "audio"
@@ -1121,12 +1283,7 @@ fn inline_data_content(mime_type: &str, data: &str) -> Value {
         "video"
     } else {
         "document"
-    };
-    object([
-        ("type", Value::String(kind.to_owned())),
-        ("mime_type", Value::String(mime_type.to_owned())),
-        ("data", Value::String(data.to_owned())),
-    ])
+    }
 }
 
 /// `interactionsThoughtSignature`: a part's first non-blank

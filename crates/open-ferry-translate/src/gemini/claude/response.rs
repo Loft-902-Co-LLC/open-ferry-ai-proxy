@@ -11,6 +11,14 @@
 //! thinking blocks, with their signature; function calls become `tool_use`
 //! blocks, under the name the client declared.
 //!
+//! A signature on a part that isn't a thought (visible text, a function
+//! call, or nothing else), when no thinking block is there to take it, goes
+//! in a carrier: a thinking block of its own with no text, ahead of the
+//! part. Gemini's finish reason gives the stop reason: a safety or similar
+//! block is a `refusal`. A stream that ends with no content still gets an
+//! empty text block and its closing events, once Gemini has answered at
+//! all.
+//!
 //! Deviations from upstream:
 //! - A chunk or body that is not valid JSON is treated as having no fields.
 //!   gjson reads what it can from malformed JSON.
@@ -67,6 +75,11 @@ pub struct GeminiToClaudeStream {
     has_content: bool,
     saw_tool_call: bool,
     has_final_events: bool,
+    /// The last finish reason Gemini gave, and the last usage counts.
+    finish_reason: String,
+    input_tokens: i64,
+    output_tokens: i64,
+    cached_tokens: i64,
 }
 
 impl GeminiToClaudeStream {
@@ -82,6 +95,10 @@ impl GeminiToClaudeStream {
             has_content: false,
             saw_tool_call: false,
             has_final_events: false,
+            finish_reason: String::new(),
+            input_tokens: 0,
+            output_tokens: 0,
+            cached_tokens: 0,
         }
     }
 
@@ -93,10 +110,7 @@ impl GeminiToClaudeStream {
     pub fn translate(&mut self, chunk: &[u8]) -> String {
         let mut out = String::new();
         if chunk == b"[DONE]" {
-            // A message without content gets no stop event.
-            if self.has_content {
-                push_event(&mut out, "message_stop", &json!({"type": "message_stop"}));
-            }
+            self.finish(&mut out);
             return out;
         }
         let response: Value = serde_json::from_slice(json_start(chunk)).unwrap_or(Value::Null);
@@ -132,40 +146,83 @@ impl GeminiToClaudeStream {
             }
         }
 
-        if let Some(usage) = response.get("usageMetadata")
-            && contains(chunk, br#""finishReason""#)
-            && !self.has_final_events
-            && self.has_content
-        {
-            if self.block != Block::None {
-                self.push_block_stop(&mut out);
-                self.block = Block::None;
-            }
-            let stop_reason = if self.saw_tool_call {
-                "tool_use"
-            } else if str_of(get(&response, "candidates.0.finishReason")) == "MAX_TOKENS" {
-                "max_tokens"
-            } else {
-                "end_turn"
-            };
+        let finish_reason = str_of(get(&response, "candidates.0.finishReason"));
+        if !finish_reason.is_empty() {
+            self.finish_reason = finish_reason.into_owned();
+        }
+        let usage = response.get("usageMetadata");
+        if let Some(usage) = usage {
             let count = |key: &str| usage.get(key).map_or(0, int_of);
             let cached = count("cachedContentTokenCount");
-            let mut delta = json!({
-                "type": "message_delta",
-                "delta": {"stop_reason": stop_reason, "stop_sequence": null},
-                "usage": {
-                    "input_tokens": count("promptTokenCount").wrapping_sub(cached).max(0),
-                    "output_tokens": count("candidatesTokenCount")
-                        .wrapping_add(count("thoughtsTokenCount")),
-                },
-            });
-            if cached > 0 {
-                delta["usage"]["cache_read_input_tokens"] = Value::from(cached);
+            let prompt = count("promptTokenCount");
+            let mut output =
+                count("candidatesTokenCount").wrapping_add(count("thoughtsTokenCount"));
+            let total = count("totalTokenCount");
+            if output == 0 && total > 0 {
+                output = total.wrapping_sub(prompt).max(0);
             }
-            push_event(&mut out, "message_delta", &delta);
-            self.has_final_events = true;
+            self.input_tokens = prompt.wrapping_sub(cached).max(0);
+            self.output_tokens = output;
+            self.cached_tokens = cached;
+        }
+
+        if usage.is_some() && contains(chunk, br#""finishReason""#) && !self.has_final_events {
+            self.open_empty_text_block(&mut out);
+            if self.has_content {
+                self.stop_open_block(&mut out);
+                self.push_message_delta(&mut out);
+            }
         }
         out
+    }
+
+    /// The end of the stream: closes the message, if it was started, with an
+    /// empty text block if nothing else was sent.
+    fn finish(&mut self, out: &mut String) {
+        self.open_empty_text_block(out);
+        if !self.has_content {
+            return;
+        }
+        self.stop_open_block(out);
+        if !self.has_final_events {
+            self.push_message_delta(out);
+        }
+        push_event(out, "message_stop", &json!({"type": "message_stop"}));
+    }
+
+    /// Opens an empty text block if the message was started but nothing has
+    /// been sent, so a client gets a well-formed message.
+    fn open_empty_text_block(&mut self, out: &mut String) {
+        if self.has_first_response && !self.has_content {
+            self.push_block_start(json!({"type": "text", "text": ""}), out);
+            self.block = Block::Text;
+            self.has_content = true;
+        }
+    }
+
+    /// Stops the open content block, if there is one, at the end of the
+    /// message.
+    fn stop_open_block(&mut self, out: &mut String) {
+        if self.block != Block::None {
+            self.push_block_stop(out);
+            self.block = Block::None;
+        }
+    }
+
+    fn push_message_delta(&mut self, out: &mut String) {
+        let mut delta = json!({
+            "type": "message_delta",
+            "delta": {
+                "stop_reason": stop_reason(&self.finish_reason, self.saw_tool_call),
+                "stop_sequence": null,
+            },
+            "usage": {"input_tokens": self.input_tokens, "output_tokens": self.output_tokens},
+        });
+        if self.cached_tokens > 0 {
+            delta["usage"]["cache_read_input_tokens"] = Value::from(self.cached_tokens);
+        }
+        push_event(out, "message_delta", &delta);
+        self.has_final_events = true;
     }
 
     fn translate_part(&mut self, part: &Value, out: &mut String) {
@@ -176,37 +233,35 @@ impl GeminiToClaudeStream {
             .or_else(|| part.get("thought_signature"));
         let signature = str_of(signature);
         let has_signature = !signature.is_empty();
+        let text_is_empty = text.is_none_or(|text| str_of(Some(text)).is_empty());
 
-        if has_signature && text.is_none() && function_call.is_none() {
+        // A part that carries only a signature.
+        if has_signature && text_is_empty && function_call.is_none() {
+            self.push_signature(&signature, out);
+            return;
+        }
+
+        if part.get("thought").is_some_and(bool_of) {
+            // A thought with a function call but no text.
+            if has_signature && text_is_empty {
+                self.push_signature(&signature, out);
+                return;
+            }
+            if self.block != Block::Thinking {
+                self.close_block(out);
+                self.push_block_start(json!({"type": "thinking", "thinking": ""}), out);
+                self.block = Block::Thinking;
+            }
+            self.push_delta(
+                json!({"type": "thinking_delta", "thinking": str_of(text)}),
+                out,
+            );
+            self.has_content = true;
             self.push_signature_delta(&signature, out);
             return;
         }
 
-        if let Some(text) = text {
-            let text = str_of(Some(text));
-            if part.get("thought").is_some_and(bool_of) || has_signature {
-                if has_signature && text.is_empty() {
-                    self.push_signature_delta(&signature, out);
-                    return;
-                }
-                if self.block != Block::Thinking {
-                    self.close_block(out);
-                    self.push_block_start(json!({"type": "thinking", "thinking": ""}), out);
-                    self.block = Block::Thinking;
-                }
-                self.push_delta(json!({"type": "thinking_delta", "thinking": text}), out);
-                self.has_content = true;
-                self.push_signature_delta(&signature, out);
-            } else {
-                if self.block != Block::Text {
-                    self.close_block(out);
-                    self.push_block_start(json!({"type": "text", "text": ""}), out);
-                    self.block = Block::Text;
-                }
-                self.push_delta(json!({"type": "text_delta", "text": text}), out);
-                self.has_content = true;
-            }
-        } else if let Some(call) = function_call {
+        if let Some(call) = function_call {
             self.saw_tool_call = true;
             let upstream_name = restore_sanitized_tool_name(
                 self.sanitized_names.as_ref(),
@@ -221,8 +276,10 @@ impl GeminiToClaudeStream {
                 if let Some(args) = args {
                     self.push_input_delta(args, out);
                 }
+                self.push_carrier(&signature, out);
                 return;
             }
+            self.push_carrier(&signature, out);
             self.close_block(out);
             self.block = Block::None;
 
@@ -240,6 +297,20 @@ impl GeminiToClaudeStream {
                 self.push_input_delta(args, out);
             }
             self.block = Block::ToolUse;
+            self.has_content = true;
+        } else if let Some(text) = text {
+            // Visible text; a signature on it was sent above if the text
+            // is empty.
+            self.push_carrier(&signature, out);
+            if self.block != Block::Text {
+                self.close_block(out);
+                self.push_block_start(json!({"type": "text", "text": ""}), out);
+                self.block = Block::Text;
+            }
+            self.push_delta(
+                json!({"type": "text_delta", "text": str_of(Some(text))}),
+                out,
+            );
             self.has_content = true;
         }
     }
@@ -286,6 +357,35 @@ impl GeminiToClaudeStream {
             json!({"type": "input_json_delta", "partial_json": args.to_string()}),
             out,
         );
+    }
+
+    /// Sends a thought signature: to the open thinking block, or else in a
+    /// carrier.
+    fn push_signature(&mut self, signature: &str, out: &mut String) {
+        if self.block == Block::Thinking {
+            self.push_signature_delta(signature, out);
+        } else {
+            self.push_carrier(signature, out);
+        }
+    }
+
+    /// `appendCarrierThinkingBlock`: sends a signature, if there is one, in a
+    /// thinking block of its own with no text, after stopping the open
+    /// block.
+    fn push_carrier(&mut self, signature: &str, out: &mut String) {
+        if signature.is_empty() {
+            return;
+        }
+        self.close_block(out);
+        self.push_block_start(json!({"type": "thinking", "thinking": ""}), out);
+        self.push_delta(
+            json!({"type": "signature_delta", "signature": signature}),
+            out,
+        );
+        self.push_block_stop(out);
+        self.block_index += 1;
+        self.block = Block::None;
+        self.has_content = true;
     }
 
     /// Sends a thought signature, if there is one and a thinking block is
@@ -341,28 +441,34 @@ pub fn convert_gemini_response_to_claude_non_stream(
                 part.get("thoughtSignature")
                     .or_else(|| part.get("thought_signature")),
             );
-            let has_signature = !signature.is_empty();
-            if has_signature {
-                blocks.thinking_signature = signature.into_owned();
-            }
             let text = str_of(part.get("text"));
             let function_call = part.get("functionCall");
-            if has_signature && text.is_empty() && function_call.is_none() {
+            if part.get("thought").is_some_and(bool_of) {
+                blocks.flush_text();
+                if !signature.is_empty() {
+                    blocks.thinking_signature = signature.into_owned();
+                }
+                blocks.thinking.push_str(&text);
                 continue;
             }
-            if !text.is_empty() {
-                if part.get("thought").is_some_and(bool_of) || has_signature {
-                    blocks.flush_text();
-                    blocks.thinking.push_str(&text);
-                } else {
-                    blocks.flush_thinking();
-                    blocks.text.push_str(&text);
+            if text.is_empty() && function_call.is_none() {
+                // A signature alone belongs to the thinking in progress, or
+                // else to a carrier.
+                if !signature.is_empty() {
+                    if blocks.thinking.is_empty() {
+                        blocks.flush_thinking();
+                        blocks.flush_text();
+                        blocks.push_carrier(&signature);
+                    } else {
+                        blocks.thinking_signature = signature.into_owned();
+                    }
                 }
                 continue;
             }
+            blocks.flush_thinking();
             if let Some(call) = function_call {
-                blocks.flush_thinking();
                 blocks.flush_text();
+                blocks.push_carrier(&signature);
                 blocks.has_tool_call = true;
                 let upstream_name = restore_sanitized_tool_name(
                     sanitized_names.as_ref(),
@@ -379,7 +485,14 @@ pub fn convert_gemini_response_to_claude_non_stream(
                     "name": map_tool_name(tool_names.as_ref(), &upstream_name),
                     "input": input,
                 }));
+                continue;
             }
+            // Visible text.
+            if !signature.is_empty() {
+                blocks.flush_text();
+                blocks.push_carrier(&signature);
+            }
+            blocks.text.push_str(&text);
         }
     }
     blocks.flush_thinking();
@@ -388,20 +501,38 @@ pub fn convert_gemini_response_to_claude_non_stream(
         out["content"] = Value::Array(blocks.blocks);
     }
 
-    out["stop_reason"] = Value::from(if blocks.has_tool_call {
-        "tool_use"
-    } else if str_of(get(response, "candidates.0.finishReason")) == "MAX_TOKENS" {
-        "max_tokens"
-    } else {
-        "end_turn"
-    });
+    out["stop_reason"] = Value::from(stop_reason(
+        &str_of(get(response, "candidates.0.finishReason")),
+        blocks.has_tool_call,
+    ));
 
-    if input_tokens == 0 && output_tokens == 0 && response.get("usageMetadata").is_none() {
-        out.as_object_mut()
-            .expect("built as an object")
-            .shift_remove("usage");
+    if input_tokens == 0
+        && output_tokens == 0
+        && response.get("usageMetadata").is_none()
+        && let Some(fields) = out.as_object_mut()
+    {
+        fields.shift_remove("usage");
     }
     out
+}
+
+/// `resolveGeminiClaudeStopReason`: the Claude stop reason for Gemini's
+/// finish reason.
+fn stop_reason(finish_reason: &str, saw_tool_call: bool) -> &'static str {
+    if saw_tool_call {
+        return "tool_use";
+    }
+    match finish_reason {
+        "MAX_TOKENS" => "max_tokens",
+        "SAFETY"
+        | "RECITATION"
+        | "PROHIBITED_CONTENT"
+        | "SPII"
+        | "BLOCKLIST"
+        | "MALFORMED_FUNCTION_CALL"
+        | "IMAGE_SAFETY" => "refusal",
+        _ => "end_turn",
+    }
 }
 
 /// The content blocks of a non-streaming message, and the text and thinking
@@ -434,6 +565,15 @@ impl Blocks {
             block["signature"] = Value::String(signature);
         }
         self.blocks.push(block);
+    }
+
+    /// `appendCarrierThinkingBlock`: a signature, if there is one, in a
+    /// thinking block of its own with no text.
+    fn push_carrier(&mut self, signature: &str) {
+        if !signature.is_empty() {
+            self.blocks
+                .push(json!({"type": "thinking", "thinking": "", "signature": signature}));
+        }
     }
 }
 

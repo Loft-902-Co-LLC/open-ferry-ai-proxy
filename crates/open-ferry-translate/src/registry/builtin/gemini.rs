@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use super::{non_empty, parse, to_vec};
+use super::{checked, non_empty, parse, sends, to_vec};
 use crate::gemini::claude as gemini_claude;
 use crate::gemini::gemini as gemini_gemini;
 use crate::gemini::openai::chat_completions as gemini_chat;
@@ -21,9 +21,9 @@ pub(super) fn register(registry: &Registry) {
     registry.register(
         Format::GEMINI,
         Format::GEMINI,
-        Some(Arc::new(|model, body, stream| {
+        sends(|model, body, stream| {
             gemini_gemini::convert_gemini_request_to_gemini(model, body, stream)
-        })),
+        }),
         ResponseTransform {
             stream: Some(Arc::new(|_context| Box::new(GeminiToGemini))),
             non_stream: Some(Arc::new(|_context, body| {
@@ -39,14 +39,14 @@ pub(super) fn register(registry: &Registry) {
     registry.register(
         Format::CLAUDE,
         Format::GEMINI,
-        Some(Arc::new(|model, body, stream| {
+        checked(|model, body, stream| {
             gemini_claude::convert_claude_request_to_gemini(
                 model,
                 &body,
                 stream,
                 &ModelCatalog::current(),
             )
-        })),
+        }),
         ResponseTransform {
             stream: Some(Arc::new(|context| {
                 Box::new(GeminiToClaude(gemini_claude::GeminiToClaudeStream::new(
@@ -70,9 +70,9 @@ pub(super) fn register(registry: &Registry) {
     registry.register(
         Format::OPENAI,
         Format::GEMINI,
-        Some(Arc::new(|model, body, stream| {
+        checked(|model, body, stream| {
             gemini_chat::convert_openai_request_to_gemini(model, &body, stream)
-        })),
+        }),
         ResponseTransform {
             stream: Some(Arc::new(|context| {
                 Box::new(GeminiToChat(gemini_chat::GeminiToOpenAIStream::new(

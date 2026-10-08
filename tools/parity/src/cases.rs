@@ -243,7 +243,7 @@ fn request_with_tools() -> Value {
 
 /// The long tool's name as Codex sees it.
 fn shortened_tool_name() -> String {
-    let codex = convert_claude_request_to_codex("gpt-5", &request_with_tools());
+    let (codex, _) = convert_claude_request_to_codex("gpt-5", &request_with_tools());
     codex["tools"][1]["name"]
         .as_str()
         .expect("tool is named")

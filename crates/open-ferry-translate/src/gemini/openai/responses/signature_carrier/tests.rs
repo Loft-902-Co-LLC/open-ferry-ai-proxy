@@ -10,10 +10,9 @@
 use base64::engine::general_purpose::STANDARD;
 use serde_json::{Value, json};
 
+use super::super::test_support::convert_openai_responses_request_to_gemini;
 use super::super::test_support::{GEMINI_SIGNATURE, sse_events};
-use super::super::{
-    GeminiToOpenAIResponsesStream, array_of, convert_openai_responses_request_to_gemini,
-};
+use super::super::{GeminiToOpenAIResponsesStream, array_of};
 use super::*;
 use crate::json::bool_of;
 use crate::signature::GEMINI_SKIP_THOUGHT_SIGNATURE_VALIDATOR;

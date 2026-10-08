@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/claude/interactions/interactions_claude_request.go
-// (ConvertInteractionsRequestToClaude) (v8.0.15, MIT).
+// (ConvertInteractionsRequestToClaude) (v8.0.15, MIT), with the v8.0.20 user turn checks.
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Gemini Interactions request → Claude Messages request.
@@ -17,6 +17,14 @@
 //! makes it adaptive, a known level gives a token budget, and any other level
 //! becomes an adaptive effort.
 //!
+//! An image or document is sent with its bytes, or else by its `http(s)`
+//! URL. A user part Claude can't carry (audio, video, media with neither, or
+//! another part with only bytes) is dropped rather than replaced by a note;
+//! assistant and tool result content keeps the note. Consecutive user content
+//! makes one turn, as Claude joins it, and a turn left with nothing to send
+//! is refused with an [`UnsupportedPartError`]. Developer and system steps
+//! are sent as user content but close the user's turn rather than join it.
+//!
 //! Deviations from upstream:
 //! - Where upstream copies the client's JSON text into a string (a text,
 //!   name, ID, media type or data that is an object or an array, and a
@@ -28,8 +36,12 @@ use std::borrow::Cow;
 use serde_json::{Value, json};
 
 use crate::common::claude::{MessageAccumulator, sanitize_function_name, sanitize_tool_id};
+use crate::common::parts::{
+    UserRun, interactions_attachment_type, is_http_url, is_interactions_instruction_step,
+};
 use crate::go;
 use crate::json::{bool_of, delete_path, path, set_path, str_of};
+use crate::registry::UnsupportedPartError;
 use crate::schema::normalize_claude_tool_input_schema;
 use crate::thinking::level_to_budget;
 
@@ -48,11 +60,14 @@ const COPIED_CONFIG: [(&str, &str); 7] = [
 /// Converts an Interactions request body into a Claude Messages request for
 /// `model_name`. The request streams if `stream` is set or the request asks
 /// to.
+///
+/// The error is set when a user turn had only parts Claude can't take; the
+/// body is still returned.
 pub fn convert_interactions_request_to_claude(
     model_name: &str,
     request: &Value,
     stream: bool,
-) -> Value {
+) -> (Value, Option<UnsupportedPartError>) {
     let mut out = json!({"model": model_name, "max_tokens": 32000, "messages": []});
     if stream || request.get("stream").is_some_and(bool_of) {
         out["stream"] = true.into();
@@ -94,9 +109,11 @@ pub fn convert_interactions_request_to_claude(
     apply_tool_choice(&mut out, request.get("tool_choice"));
     apply_tool_choice(&mut out, request.get("toolChoice"));
 
-    let mut messages = MessageAccumulator::default();
-    append_input(&mut messages, request.get("input"));
-    let messages = messages.into_messages();
+    let mut messages = Messages::default();
+    messages.append_input(request.get("input"));
+    messages.run.end();
+    let refusal = messages.run.err();
+    let messages = messages.claude.into_messages();
     if !messages.is_empty() {
         out["messages"] = Value::Array(messages);
     }
@@ -120,7 +137,7 @@ pub fn convert_interactions_request_to_claude(
             out["tools"] = Value::Array(converted);
         }
     }
-    out
+    (out, refusal)
 }
 
 /// The first of `paths` that `value` has, whatever its value.
@@ -192,84 +209,144 @@ fn apply_tool_choice(out: &mut Value, choice: Option<&Value>) {
     }
 }
 
-/// Adds the request's `input`: a string as one user turn, one step, or a
-/// list of steps.
-fn append_input(messages: &mut MessageAccumulator, input: Option<&Value>) {
-    match input {
-        None => {}
-        Some(Value::String(text)) => {
-            let content = json!([{"type": "text", "text": text}]);
-            append_content(messages, "user", Some(&content), None);
+/// The Claude messages being built, and the user turn they're in.
+#[derive(Default)]
+struct Messages {
+    claude: MessageAccumulator,
+    /// `interactionsClaudeUserRun`: the consecutive user content Claude
+    /// joins into one user message. A part Claude can't carry is refused
+    /// only when that whole turn is left with nothing to send, so text or a
+    /// tool result in a neighbouring step keeps the turn.
+    run: UserRun,
+}
+
+impl Messages {
+    /// Adds the request's `input`: a string as one user turn, one step, or a
+    /// list of steps.
+    fn append_input(&mut self, input: Option<&Value>) {
+        match input {
+            None => {}
+            Some(Value::String(text)) => {
+                let step =
+                    json!({"type": "user_input", "content": [{"type": "text", "text": text}]});
+                self.append_step(&step, "user", false);
+            }
+            Some(Value::Array(items)) => {
+                for item in items {
+                    self.append_item(item);
+                }
+            }
+            Some(item) => self.append_item(item),
         }
-        Some(Value::Array(items)) => {
-            for item in items {
-                append_item(messages, item);
+    }
+
+    /// Adds one input item: a turn holding `steps`, a Gemini-style turn
+    /// holding `parts`, or a single step.
+    fn append_item(&mut self, item: &Value) {
+        let model_role = matches!(str_of(item.get("role")).as_ref(), "model" | "assistant");
+        let instruction = is_interactions_instruction_step(item, false);
+        if let Some(Value::Array(steps)) = item.get("steps") {
+            let role = if model_role { "assistant" } else { "user" };
+            for step in steps {
+                self.append_step(step, role, instruction);
+            }
+            return;
+        }
+        if let Some(parts) = item.get("parts") {
+            // Upstream wraps the parts in a step without a role, so they
+            // always join a user turn.
+            let step_type = if model_role {
+                "model_output"
+            } else {
+                "user_input"
+            };
+            let step = json!({"type": step_type, "content": parts.clone()});
+            self.append_step(&step, "user", instruction);
+            return;
+        }
+        match str_of(item.get("type")).as_ref() {
+            "function_call" => append_function_call(self, item),
+            "function_result" => append_function_result(self, item),
+            "model_output" | "thought" => self.append_step(item, "assistant", false),
+            _ => self.append_step(item, "user", false),
+        }
+    }
+
+    /// Adds a step's content (a string or a list of parts, or else its
+    /// `text`, or else the step itself if it is a media part) as one message
+    /// of the step's own role, if it is `user` or `assistant`, or else of
+    /// `default_role`.
+    ///
+    /// `instruction` says the step sits in a developer or system wrapper.
+    /// Developer and system content is sent as user content, but it isn't
+    /// the user's own turn: it closes the open user turn and never keeps an
+    /// emptied one alive.
+    fn append_step(&mut self, step: &Value, default_role: &'static str, instruction: bool) {
+        let role = match str_of(step.get("role")).as_ref() {
+            "user" => "user",
+            "assistant" => "assistant",
+            _ => default_role,
+        };
+        let user_content = role == "user" && !is_interactions_instruction_step(step, instruction);
+        let mut blocks = Vec::new();
+        match step.get("content") {
+            Some(Value::String(content)) => {
+                let part = json!({"type": "text", "text": content});
+                self.append_part(&mut blocks, &part, role, user_content);
+            }
+            Some(Value::Array(parts)) => {
+                for part in parts {
+                    self.append_part(&mut blocks, part, role, user_content);
+                }
+            }
+            _ => {
+                if let Some(text) = step.get("text") {
+                    let part = json!({"type": "text", "text": str_of(Some(text))});
+                    self.append_part(&mut blocks, &part, role, user_content);
+                } else if dropped_media(step).is_some() {
+                    // A bare media part stands for a step of its own.
+                    self.append_part(&mut blocks, step, role, user_content);
+                }
             }
         }
-        Some(item) => append_item(messages, item),
-    }
-}
-
-/// Adds one input item: a turn holding `steps`, a Gemini-style turn holding
-/// `parts`, or a single step.
-fn append_item(messages: &mut MessageAccumulator, item: &Value) {
-    let model_role = matches!(str_of(item.get("role")).as_ref(), "model" | "assistant");
-    if let Some(Value::Array(steps)) = item.get("steps") {
-        let role = if model_role { "assistant" } else { "user" };
-        for step in steps {
-            append_step(messages, step, role);
+        if blocks.is_empty() {
+            return;
         }
-        return;
+        if !user_content {
+            self.run.end();
+        }
+        self.claude.push(role, blocks);
     }
-    if let Some(parts) = item.get("parts") {
-        // Upstream wraps the parts in a step without a role, so they always
-        // join a user turn.
-        append_content(messages, "user", Some(parts), None);
-        return;
-    }
-    match str_of(item.get("type")).as_ref() {
-        "function_call" => append_function_call(messages, item),
-        "function_result" => append_function_result(messages, item),
-        "model_output" | "thought" => append_step(messages, item, "assistant"),
-        _ => append_step(messages, item, "user"),
-    }
-}
 
-/// Adds a step's content to a turn of its own role, if it is `user` or
-/// `assistant`, or else of `default_role`.
-fn append_step(messages: &mut MessageAccumulator, step: &Value, default_role: &'static str) {
-    let role = match str_of(step.get("role")).as_ref() {
-        "user" => "user",
-        "assistant" => "assistant",
-        _ => default_role,
-    };
-    append_content(messages, role, step.get("content"), step.get("text"));
-}
-
-/// Adds `content` (a string or a list of parts), or else `text`, as one
-/// message.
-fn append_content(
-    messages: &mut MessageAccumulator,
-    role: &'static str,
-    content: Option<&Value>,
-    text: Option<&Value>,
-) {
-    let blocks = match content {
-        Some(Value::String(content)) => vec![json!({"type": "text", "text": content})],
-        Some(Value::Array(parts)) => parts
-            .iter()
-            .filter_map(|part| content_to_claude(part, role))
-            .collect(),
-        _ => match text {
-            Some(text) => vec![json!({"type": "text", "text": str_of(Some(text))})],
-            None => Vec::new(),
-        },
-    };
-    messages.push(role, blocks);
+    /// Adds one part to `blocks`, counting it in the user's turn when it is
+    /// sendable user content, or recording it there as dropped when Claude
+    /// can't carry it.
+    fn append_part(
+        &mut self,
+        blocks: &mut Vec<Value>,
+        part: &Value,
+        role: &str,
+        user_content: bool,
+    ) {
+        let Some(block) = content_to_claude(part, role) else {
+            if user_content {
+                let dropped = dropped_part(part);
+                if !dropped.is_empty() {
+                    self.run.drop_part(&dropped);
+                }
+            }
+            return;
+        };
+        if user_content && is_sendable(&block) {
+            self.run.add();
+        }
+        blocks.push(block);
+    }
 }
 
 /// One content part as a Claude block. Thinking is kept only for assistant
-/// turns; media the block can't carry becomes a note that it was left out.
+/// turns. Other parts that only carry bytes become a note that they were
+/// left out, except in a user turn (`role` is `tool_result` inside one).
 fn content_to_claude(part: &Value, role: &str) -> Option<Value> {
     let mut part_type = str_of(part.get("type"));
     if part_type.is_empty() && part.get("text").is_some() {
@@ -286,15 +363,50 @@ fn content_to_claude(part: &Value, role: &str) -> Option<Value> {
             if !text.is_empty() {
                 return Some(json!({"type": "text", "text": text}));
             }
-            let has_data =
-                !str_of(part.get("data")).is_empty() || !str_of(part.get("file_data")).is_empty();
-            has_data
+            // A user attachment Claude can't carry is never replaced by a
+            // note; the caller records it as dropped. Assistant and tool
+            // result content only echoes earlier output, so it keeps one.
+            (role != "user" && has_data(part))
                 .then(|| json!({"type": "text", "text": format!("[{part_type} content omitted]")}))
         }
     }
 }
 
-fn append_function_call(messages: &mut MessageAccumulator, step: &Value) {
+/// Whether a part carries `data` or `file_data`.
+fn has_data(part: &Value) -> bool {
+    !str_of(part.get("data")).is_empty() || !str_of(part.get("file_data")).is_empty()
+}
+
+/// `interactionsClaudeDroppedMedia`: the media type of a part
+/// [`content_to_claude`] left out, or `None` when the part isn't media.
+fn dropped_media(part: &Value) -> Option<&'static str> {
+    match str_of(part.get("type")).as_ref() {
+        "image" => Some("image"),
+        "audio" => Some("audio"),
+        "video" => Some("video"),
+        "document" | "file" => Some("document"),
+        _ => None,
+    }
+}
+
+/// `interactionsClaudeDroppedPart`: the type of a user part
+/// [`content_to_claude`] left out, media or any other part with bytes, or
+/// `""` when it holds nothing to report.
+fn dropped_part(part: &Value) -> String {
+    match dropped_media(part) {
+        Some(media) => media.to_owned(),
+        None if has_data(part) => interactions_attachment_type(part),
+        None => String::new(),
+    }
+}
+
+/// Whether a Claude block gives the model something to read. Blank text
+/// doesn't.
+fn is_sendable(block: &Value) -> bool {
+    str_of(block.get("type")) != "text" || !str_of(block.get("text")).trim().is_empty()
+}
+
+fn append_function_call(messages: &mut Messages, step: &Value) {
     let mut tool_use = json!({
         "type": "tool_use",
         "id": tool_id(step),
@@ -304,10 +416,11 @@ fn append_function_call(messages: &mut MessageAccumulator, step: &Value) {
     if let Some(arguments @ Value::Object(_)) = step.get("arguments").or_else(|| step.get("args")) {
         tool_use["input"] = arguments.clone();
     }
-    messages.push("assistant", vec![tool_use]);
+    messages.run.end();
+    messages.claude.push("assistant", vec![tool_use]);
 }
 
-fn append_function_result(messages: &mut MessageAccumulator, step: &Value) {
+fn append_function_result(messages: &mut Messages, step: &Value) {
     let mut tool_result =
         json!({"type": "tool_result", "tool_use_id": tool_id(step), "content": ""});
     if step.get("is_error").is_some_and(bool_of) {
@@ -317,14 +430,16 @@ fn append_function_result(messages: &mut MessageAccumulator, step: &Value) {
         Some(Value::Array(parts)) => {
             tool_result["content"] = parts
                 .iter()
-                .filter_map(|part| content_to_claude(part, "user"))
+                .filter_map(|part| content_to_claude(part, "tool_result"))
                 .collect();
         }
         // Upstream stores any other result as its JSON text.
         Some(result) => tool_result["content"] = result.to_string().into(),
         None => {}
     }
-    messages.push("user", vec![tool_result]);
+    // A tool result is content the model reads, so it keeps the user's turn.
+    messages.run.add();
+    messages.claude.push("user", vec![tool_result]);
 }
 
 /// A function declaration as a Claude tool, if it has a name.
@@ -404,7 +519,8 @@ fn claude_text(value: Option<&Value>) -> Cow<'_, str> {
 }
 
 /// An image or document part as a Claude block with base64 data, if it has
-/// both a media type and data.
+/// both a media type and data, or else with a URL source, if it has an
+/// `http(s)` URL.
 fn media_part(part: &Value, claude_type: &str) -> Option<Value> {
     let mut media_type = str_of(first_existing(
         part,
@@ -419,13 +535,17 @@ fn media_part(part: &Value, claude_type: &str) -> Option<Value> {
             data = str_of(source.get("data"));
         }
     }
-    if media_type.is_empty() || data.is_empty() {
-        return None;
+    if !media_type.is_empty() && !data.is_empty() {
+        return Some(json!({
+            "type": claude_type,
+            "source": {"type": "base64", "media_type": media_type, "data": data},
+        }));
     }
-    Some(json!({
-        "type": claude_type,
-        "source": {"type": "base64", "media_type": media_type, "data": data},
-    }))
+    ["uri", "file_uri", "fileUri", "url"]
+        .into_iter()
+        .map(|key| str_of(part.get(key)))
+        .find(|uri| is_http_url(uri))
+        .map(|uri| json!({"type": claude_type, "source": {"type": "url", "url": uri.trim()}}))
 }
 
 #[cfg(test)]

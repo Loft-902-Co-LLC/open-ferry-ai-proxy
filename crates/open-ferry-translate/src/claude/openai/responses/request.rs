@@ -21,6 +21,11 @@
 //! Tools declared at the top level, in `additional_tools` items and in
 //! namespaces are named for Claude as [`super::tools`] describes.
 //!
+//! A user message's `input_file` part without `file_data`, or `input_audio`
+//! part, has no Claude block. The rest of the message is still sent, but a
+//! user message left with nothing is refused with an
+//! [`UnsupportedPartError`].
+//!
 //! Deviations from upstream:
 //! - `metadata.user_id` is only set to an ID the client sent, in
 //!   `metadata.user_id` or `user`. Without one, upstream derives an ID from
@@ -64,11 +69,13 @@ use crate::common::claude::{
     apply_reasoning_effort, client_user_id, generate_tool_call_id, sanitize_function_name,
     sanitize_tool_id, structured_output_instruction,
 };
+use crate::common::parts::UserTurnDrops;
 use crate::common::responses::{extract_responses_call_id, normalize_responses_tool_call_outputs};
 use crate::go;
 use crate::json::lenient::{self, Found};
 use crate::json::{int_of, object, path, str_of};
 use crate::models::ModelCatalog;
+use crate::registry::UnsupportedPartError;
 use crate::schema::normalize_claude_tool_input_schema;
 use crate::signature::{Provider, compatible_signature_for_provider};
 use crate::thinking::summary::apply_translated_to_claude;
@@ -91,12 +98,15 @@ const EMPTY_TOOL_RESULT: &str = "Tool result was empty.";
 /// `model_name`. `stream` is whether the client asked to stream. `models`
 /// says which thinking settings and output limit the model has; pass
 /// [`ModelCatalog::current`] unless you have your own.
+///
+/// The error is set when a user message had only parts Claude can't take;
+/// the body is still returned.
 pub fn convert_openai_responses_request_to_claude(
     model_name: &str,
     request: &Value,
     stream: bool,
     models: &ModelCatalog,
-) -> Value {
+) -> (Value, Option<UnsupportedPartError>) {
     convert(model_name, request, stream, models, false)
 }
 
@@ -109,7 +119,7 @@ pub fn convert_openai_responses_request_to_claude_with_compat(
     request: &Value,
     stream: bool,
     models: &ModelCatalog,
-) -> Value {
+) -> (Value, Option<UnsupportedPartError>) {
     convert(model_name, request, stream, models, true)
 }
 
@@ -119,7 +129,7 @@ fn convert(
     stream: bool,
     models: &ModelCatalog,
     compat: bool,
-) -> Value {
+) -> (Value, Option<UnsupportedPartError>) {
     let request = normalize_codex_agent_messages(request);
     let request = request.as_ref();
 
@@ -175,7 +185,8 @@ fn convert(
     }
 
     let tools = RequestTools::new(request);
-    let mut messages = convert_input(input, &tools, compat);
+    let mut drops = UserTurnDrops::default();
+    let mut messages = convert_input(input, &tools, &mut drops, compat);
     let had_messages = !messages.is_empty();
     if !compat {
         strip_trailing_thinking(&mut messages);
@@ -222,7 +233,7 @@ fn convert(
 
     let mut out = Value::Object(out);
     apply_translated_to_claude(&mut out, request, "openai-response", model_name, models);
-    out
+    (out, drops.err())
 }
 
 /// `defaultClaudeResponsesMaxTokensForModel`: 64000 for Fable models and
@@ -435,7 +446,14 @@ fn message_content(parts: Vec<Value>) -> Value {
     parts.into()
 }
 
-fn convert_input(input: Option<&Value>, tools: &RequestTools, compat: bool) -> Vec<Value> {
+/// The input items as Claude turns. Each user message item's dropped parts
+/// go into `drops`.
+fn convert_input(
+    input: Option<&Value>,
+    tools: &RequestTools,
+    drops: &mut UserTurnDrops,
+    compat: bool,
+) -> Vec<Value> {
     let mut turns = Turns::default();
     let items = match input {
         Some(Value::Array(items)) => normalize_responses_tool_call_outputs(items),
@@ -472,7 +490,13 @@ fn convert_input(input: Option<&Value>, tools: &RequestTools, compat: bool) -> V
         }
         match &*kind {
             "message" => {
-                let (role, parts) = message_parts(item);
+                let (role, parts, dropped) = message_parts(item);
+                if role == "user" {
+                    if let Some(dropped) = dropped {
+                        drops.drop_part(dropped);
+                    }
+                    drops.end_turn(parts.len());
+                }
                 turns.push(role, parts);
             }
             "web_search_call" => {
@@ -561,11 +585,14 @@ fn is_tool_output(item: &Value) -> bool {
     )
 }
 
-/// A message item's content as Claude blocks, and the role of the turn they
-/// go in: the role its parts imply, or else the item's own.
-fn message_parts(item: &Value) -> (&'static str, Vec<Value>) {
+/// A message item's content as Claude blocks, the role of the turn they go
+/// in (the role its parts imply, or else the item's own) and the type of the
+/// first part that has no block: an `input_file` without `file_data`, or
+/// `input_audio`, which Claude has no block for.
+fn message_parts(item: &Value) -> (&'static str, Vec<Value>, Option<&'static str>) {
     let mut role = "";
     let mut parts = Vec::new();
+    let mut dropped = None;
     match item.get("content") {
         Some(Value::Array(content)) => {
             for part in content {
@@ -596,14 +623,19 @@ fn message_parts(item: &Value) -> (&'static str, Vec<Value>) {
                         }
                         role = "assistant";
                     }
-                    "input_image" | "input_file" => {
+                    kind @ ("input_image" | "input_file") => {
                         if let Some(mut block) = content_part(part) {
                             cache_control::attach_to(&mut block, part);
                             parts.push(block);
                             if role.is_empty() {
                                 role = "user";
                             }
+                        } else if kind == "input_file" {
+                            dropped.get_or_insert("input_file");
                         }
+                    }
+                    "input_audio" => {
+                        dropped.get_or_insert("input_audio");
                     }
                     _ => {}
                 }
@@ -620,7 +652,7 @@ fn message_parts(item: &Value) -> (&'static str, Vec<Value>) {
     }
     // An item's marker goes on its last block.
     cache_control::attach_to_last_block(&mut parts, item);
-    (role, parts)
+    (role, parts, dropped)
 }
 
 /// `convertResponsesContentPartToClaude`: a text, image or file part as a

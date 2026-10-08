@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use super::super::{events, to_vec};
+use super::super::{checked, events, sends, to_vec};
 use super::parse;
 use crate::openai::interactions::chat_completions as chat;
 use crate::registry::{Format, Registry, ResponseTransform, StreamTranslator};
@@ -20,9 +20,9 @@ pub(super) fn register(registry: &Registry) {
     registry.register(
         Format::OPENAI,
         Format::INTERACTIONS,
-        Some(Arc::new(|model, body, stream| {
+        checked(|model, body, stream| {
             chat::convert_openai_request_to_interactions(model, &body, stream)
-        })),
+        }),
         ResponseTransform {
             stream: Some(Arc::new(|context| {
                 Box::new(InteractionsToChat(chat::InteractionsToOpenAIStream::new(
@@ -42,9 +42,9 @@ pub(super) fn register(registry: &Registry) {
     registry.register(
         Format::INTERACTIONS,
         Format::OPENAI,
-        Some(Arc::new(|model, body, stream| {
+        sends(|model, body, stream| {
             chat::convert_interactions_request_to_openai(model, &body, stream)
-        })),
+        }),
         ResponseTransform {
             stream: Some(Arc::new(|context| {
                 Box::new(ChatToInteractions(chat::OpenAIToInteractionsStream::new(

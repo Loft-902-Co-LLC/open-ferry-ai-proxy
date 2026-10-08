@@ -367,20 +367,35 @@ impl<'a> Walker<'a> {
     }
 
     /// How the translator writes JSON in the string at the walk's path, if it
-    /// is one where we write JSON compactly.
+    /// is one where we write JSON compactly. In a refused request's output,
+    /// `{"body": …, "error": …}`, the paths are read within `body`.
     fn json_form(&self) -> Option<JsonForm> {
         let shape = self.path_text(false);
+        let within_body = shape
+            .strip_prefix("$.body")
+            .filter(|rest| rest.is_empty() || rest.starts_with(['.', '[']))
+            .map(|rest| format!("${rest}"));
         self.embedded_json
             .iter()
-            .find(|(path, _)| path_matches(path, &shape))
+            .find(|(path, _)| {
+                path_matches(path, &shape)
+                    || within_body
+                        .as_deref()
+                        .is_some_and(|shape| path_matches(path, shape))
+            })
             .map(|&(_, form)| form)
     }
 
     /// Reports whether the walk is inside `tools[i].parameters`, or a Chat
-    /// Completions request's `tools[i].function.parameters`.
+    /// Completions request's `tools[i].function.parameters`. As in
+    /// [`Self::json_form`], a refused request's paths are read within `body`.
     fn in_tool_parameters(&self) -> bool {
+        let path = match self.path.as_slice() {
+            [Segment::Key("body"), rest @ ..] => rest,
+            path => path,
+        };
         matches!(
-            self.path.as_slice(),
+            path,
             [
                 Segment::Key("tools"),
                 Segment::Index(_),
@@ -601,6 +616,21 @@ mod tests {
             cmp.deviations,
             BTreeSet::from([Deviation::ParametersKeyOrder])
         );
+
+        // And within a refused request's body.
+        let go = parse(
+            r#"{"body":{"tools":[{"parameters":{"a":1,"b":2}}],"x":{"a":1,"b":2}},"error":"e"}"#,
+        );
+        let rust = parse(
+            r#"{"body":{"tools":[{"parameters":{"b":2,"a":1}}],"x":{"b":2,"a":1}},"error":"e"}"#,
+        );
+        let cmp = compare(&go, &rust, JSON_AT);
+        assert_eq!(
+            cmp.deviations,
+            BTreeSet::from([Deviation::ParametersKeyOrder])
+        );
+        assert_eq!(cmp.differences.len(), 1);
+        assert_eq!(cmp.differences[0].path, "$.body.x");
     }
 
     #[test]

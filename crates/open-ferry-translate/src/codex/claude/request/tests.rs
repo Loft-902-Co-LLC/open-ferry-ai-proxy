@@ -1,11 +1,28 @@
 // Ported from CLIProxyAPI internal/translator/codex/claude/codex_claude_request_test.go,
-// codex_claude_compat_test.go and noop_optimization_test.go (v8.0.15, MIT).
+// codex_claude_compat_test.go and noop_optimization_test.go (v8.0.15, MIT), and
+// codex_claude_user_turn_test.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use serde_json::{Value, json};
 
 use super::*;
 use crate::signature::tests::valid_codex_reasoning_signature;
+
+/// [`super::convert_claude_request_to_codex`], for requests it doesn't
+/// refuse.
+fn convert_claude_request_to_codex(model: &str, request: &Value) -> Value {
+    let (body, err) = super::convert_claude_request_to_codex(model, request);
+    assert_eq!(err, None, "{body}");
+    body
+}
+
+/// [`super::convert_claude_request_to_codex_with_compat`], for requests it
+/// doesn't refuse.
+fn convert_claude_request_to_codex_with_compat(model: &str, request: &Value) -> Value {
+    let (body, err) = super::convert_claude_request_to_codex_with_compat(model, request);
+    assert_eq!(err, None, "{body}");
+    body
+}
 
 const GROK_SIGNATURE: &str = "HmlYdr2aCAqCYP/m9mr8PS6KOsdMs72FGDigmydR+Jsmuv8KX97yWPlbOwmXJgWn0CbHaCacdQD3+n5EvpgLfPNmafS3kdICBjRuDf4bzHy7uBiUhNVhqPtp/ee1y9q4imPE4LYgD1VZ4J+bp9mTeqA1+nC9Oue58CiNEMV9SVaGenCD+aBnVuSTzQhD32Y+68i6HLJW0Dx6ifaRfb8hxYtA/sPM+/FTvAMW11nRho5a2BBSkpnzfqqAz/e/vGJ77/bygpXM823QA9wL9i0X";
 
@@ -1427,5 +1444,270 @@ fn output_keeps_codex_field_order() {
     assert_eq!(
         out["tools"][0].to_string(),
         r#"{"name":"lookup","type":"function","parameters":{"type":"object","properties":{}},"strict":false}"#
+    );
+}
+
+const USER_TURN_UPLOAD: &str = r#"{"type":"container_upload","file_id":"file-1"}"#;
+
+/// `ConvertClaudeRequestToCodexWithCompat`, with its refusal.
+fn convert_checked(input: &str) -> (Value, Option<UnsupportedPartError>) {
+    let request: Value = serde_json::from_str(input).expect("test request is valid JSON");
+    super::convert_claude_request_to_codex_with_compat("m", &request)
+}
+
+/// Two history turns followed by a final user turn holding `final_content`,
+/// through the registry as upstream's `claudeImageTurnToCodex` does. The
+/// body comes from the translator.
+fn claude_image_turn_to_codex(final_content: &str) -> (Value, Option<UnsupportedPartError>) {
+    let input = format!(
+        r#"{{"model":"m","messages":[{{"role":"user","content":"a"}},{{"role":"assistant","content":"b"}},{{"role":"user","content":[{final_content}]}}]}}"#
+    );
+    let request: Value = serde_json::from_str(&input).expect("test request is valid JSON");
+    let registered = crate::registry::Registry::global().translate_request_checked(
+        &"claude".into(),
+        &"codex".into(),
+        "m",
+        request.clone(),
+        false,
+    );
+    let (body, err) = super::convert_claude_request_to_codex("m", &request);
+    assert_eq!(registered.err(), err, "the registration's refusal");
+    (body, err)
+}
+
+// TestConvertClaudeRequestToCodex_RefusesAnyEmptiedUserTurn
+#[test]
+fn refuses_any_emptied_user_turn() {
+    let cases = [
+        (
+            "history then attachment only",
+            format!(
+                r#"{{"model":"m","messages":[{{"role":"user","content":"hello"}},{{"role":"assistant","content":[{{"type":"text","text":"hi"}}]}},{{"role":"user","content":[{USER_TURN_UPLOAD}]}}]}}"#
+            ),
+            "container_upload",
+        ),
+        (
+            "system prompt and system reminder",
+            format!(
+                r#"{{"model":"m","system":"sys","messages":[{{"role":"system","content":"reminder"}},{{"role":"user","content":[{USER_TURN_UPLOAD}]}}]}}"#
+            ),
+            "container_upload",
+        ),
+        (
+            "emptied turn before a later text turn",
+            format!(
+                r#"{{"model":"m","messages":[{{"role":"user","content":[{USER_TURN_UPLOAD}]}},{{"role":"assistant","content":[{{"type":"text","text":"ok"}}]}},{{"role":"user","content":"next"}}]}}"#
+            ),
+            "container_upload",
+        ),
+        (
+            "document without bytes",
+            r#"{"model":"m","messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":[{"type":"document","source":{"type":"file","file_id":"file-1"}}]}]}"#.to_owned(),
+            "document",
+        ),
+    ];
+    for (name, input, want) in cases {
+        let (body, err) = convert_checked(&input);
+        let err = err.unwrap_or_else(|| panic!("{name}: no refusal; body = {body}"));
+        assert_eq!(err.part_type, want, "{name}");
+        assert_eq!(err.status_code(), 400, "{name}");
+        assert_eq!(
+            err.to_string(),
+            format!("unsupported content part: {want}"),
+            "{name}"
+        );
+        assert!(body.is_object(), "{name}: {body}");
+    }
+}
+
+// TestConvertClaudeRequestToCodex_KeepsTurnWithTextBesideAttachment
+#[test]
+fn keeps_turn_with_text_beside_attachment() {
+    let (body, err) = convert_checked(&format!(
+        r#"{{"model":"m","messages":[{{"role":"user","content":"hello"}},{{"role":"assistant","content":"hi"}},{{"role":"user","content":[{{"type":"text","text":"keep me"}},{USER_TURN_UPLOAD}]}}]}}"#
+    ));
+    assert_eq!(err, None, "{body}");
+    assert_eq!(
+        text_at(&body, "input.2.content.0.text"),
+        "keep me",
+        "{body}"
+    );
+}
+
+// TestConvertClaudeRequestToCodex_Base64DocumentAfterHistoryStaysAFile
+#[test]
+fn base64_document_after_history_stays_a_file() {
+    let (body, err) = convert_checked(
+        r#"{"model":"m","messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":[{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0xLjQK"}}]}]}"#,
+    );
+    assert_eq!(err, None, "{body}");
+    assert_eq!(
+        text_at(&body, "input.2.content.0.type"),
+        "input_file",
+        "{body}"
+    );
+    assert_eq!(
+        text_at(&body, "input.2.content.0.file_data"),
+        "data:application/pdf;base64,JVBERi0xLjQK",
+        "{body}"
+    );
+}
+
+// TestConvertClaudeRequestToCodex_EmptyTextDoesNotHideAnEmptiedUserTurn
+#[test]
+fn empty_text_does_not_hide_an_emptied_user_turn() {
+    let cases = [
+        (
+            "array content",
+            format!(
+                r#"{{"model":"m","messages":[{{"role":"user","content":[{{"type":"text","text":""}},{USER_TURN_UPLOAD}]}}]}}"#
+            ),
+        ),
+        (
+            "after history",
+            format!(
+                r#"{{"model":"m","messages":[{{"role":"user","content":"hello"}},{{"role":"assistant","content":"hi"}},{{"role":"user","content":[{USER_TURN_UPLOAD},{{"type":"text","text":""}}]}}]}}"#
+            ),
+        ),
+    ];
+    for (name, input) in cases {
+        let (body, err) = convert_checked(&input);
+        let err = err.unwrap_or_else(|| panic!("{name}: no refusal; body = {body}"));
+        assert_eq!(err.part_type, "container_upload", "{name}");
+        assert_eq!(err.status_code(), 400, "{name}");
+        assert!(body.is_object(), "{name}: {body}");
+    }
+}
+
+// TestConvertClaudeRequestToCodex_NonEmptyTextBesideAttachmentStillSucceeds
+#[test]
+fn non_empty_text_beside_attachment_still_succeeds() {
+    let (body, err) = convert_checked(&format!(
+        r#"{{"model":"m","messages":[{{"role":"user","content":[{{"type":"text","text":""}},{{"type":"text","text":"keep me"}},{USER_TURN_UPLOAD}]}}]}}"#
+    ));
+    assert_eq!(err, None, "{body}");
+    assert_eq!(
+        text_at(&body, "input.0.content.1.text"),
+        "keep me",
+        "{body}"
+    );
+}
+
+// TestClaudeToCodexImageOnlyTurnKeepsTheImage
+#[test]
+fn image_only_turn_keeps_the_image() {
+    let cases = [
+        (
+            "base64",
+            r#"{"type":"base64","media_type":"image/png","data":"aGVsbG8="}"#,
+            "image_url",
+            "data:image/png;base64,aGVsbG8=",
+        ),
+        (
+            "http url",
+            r#"{"type":"url","url":"https://example.test/a.png"}"#,
+            "image_url",
+            "https://example.test/a.png",
+        ),
+        (
+            "file id",
+            r#"{"type":"file","file_id":"file-1"}"#,
+            "file_id",
+            "file-1",
+        ),
+    ];
+    for (name, source, field, want) in cases {
+        let (body, err) =
+            claude_image_turn_to_codex(&format!(r#"{{"type":"image","source":{source}}}"#));
+        assert_eq!(err, None, "{name}: {body}");
+        let part = &body["input"][2]["content"][0];
+        assert_eq!(part["type"], "input_image", "{name}: {body}");
+        assert_eq!(part[field], want, "{name}: {body}");
+    }
+}
+
+// TestClaudeToCodexUnrepresentableImageOnlyTurnIsRefused
+#[test]
+fn unrepresentable_image_only_turn_is_refused() {
+    let cases = [
+        (
+            "non http url",
+            r#"{"type":"url","url":"ftp://example.test/a.png"}"#,
+        ),
+        ("empty url", r#"{"type":"url","url":""}"#),
+        ("file no id", r#"{"type":"file"}"#),
+        ("unknown kind", r#"{"type":"unknown"}"#),
+        (
+            "base64 no data",
+            r#"{"type":"base64","media_type":"image/png","data":""}"#,
+        ),
+    ];
+    for (name, source) in cases {
+        let (body, err) =
+            claude_image_turn_to_codex(&format!(r#"{{"type":"image","source":{source}}}"#));
+        let err = err.unwrap_or_else(|| panic!("{name}: no refusal; body = {body}"));
+        assert_eq!(err.part_type, "image", "{name}");
+        assert_eq!(err.status_code(), 400, "{name}");
+        assert_eq!(err.to_string(), "unsupported content part: image", "{name}");
+    }
+}
+
+// TestClaudeToCodexUnrepresentableImageBesideTextStillSucceeds
+#[test]
+fn unrepresentable_image_beside_text_still_succeeds() {
+    let (body, err) = claude_image_turn_to_codex(
+        r#"{"type":"text","text":"keep me"},{"type":"image","source":{"type":"file"}}"#,
+    );
+    assert_eq!(err, None, "{body}");
+    assert_eq!(
+        text_at(&body, "input.2.content.0.text"),
+        "keep me",
+        "{body}"
+    );
+}
+
+// TestClaudeToCodexEmptyTextDoesNotHideAnUnrepresentableImage
+#[test]
+fn empty_text_does_not_hide_an_unrepresentable_image() {
+    let (body, err) = claude_image_turn_to_codex(
+        r#"{"type":"text","text":""},{"type":"image","source":{"type":"file"}}"#,
+    );
+    let err = err.unwrap_or_else(|| panic!("no refusal; body = {body}"));
+    assert_eq!(err.part_type, "image");
+}
+
+// Not upstream's: an image without a source, an assistant's unsendable
+// image and a tool result beside an emptied attachment aren't refused;
+// text that is only spaces counts as sent, as upstream counts it; and an
+// image URL is trimmed.
+#[test]
+fn user_turns_in_detail() {
+    let (body, err) = claude_image_turn_to_codex(r#"{"type":"image"}"#);
+    let err = err.unwrap_or_else(|| panic!("no refusal; body = {body}"));
+    assert_eq!(err.part_type, "image");
+
+    let (body, err) = convert_checked(&format!(
+        r#"{{"messages":[{{"role":"user","content":"q"}},{{"role":"assistant","content":[{USER_TURN_UPLOAD},{{"type":"image","source":{{"type":"file"}}}}]}}]}}"#
+    ));
+    assert_eq!(err, None, "{body}");
+
+    let (body, err) = convert_checked(&format!(
+        r#"{{"messages":[{{"role":"assistant","content":[{{"type":"tool_use","id":"t","name":"f","input":{{}}}}]}},{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"t","content":"ok"}},{USER_TURN_UPLOAD}]}}]}}"#
+    ));
+    assert_eq!(err, None, "{body}");
+
+    let (body, err) = convert_checked(&format!(
+        r#"{{"messages":[{{"role":"user","content":[{{"type":"text","text":" "}},{USER_TURN_UPLOAD}]}}]}}"#
+    ));
+    assert_eq!(err, None, "{body}");
+
+    let (body, err) = claude_image_turn_to_codex(
+        r#"{"type":"image","source":{"type":"url","url":" https://example.test/a.png "}}"#,
+    );
+    assert_eq!(err, None, "{body}");
+    assert_eq!(
+        text_at(&body, "input.2.content.0.image_url"),
+        "https://example.test/a.png",
+        "{body}"
     );
 }

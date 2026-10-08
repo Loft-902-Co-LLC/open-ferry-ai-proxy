@@ -1,5 +1,6 @@
 // Ported from CLIProxyAPI internal/translator/openai/openai/responses/openai_openai-responses_request.go
-// (v8.0.15, MIT).
+// (v8.0.15, MIT), with v8.0.20's user turn refusal and file and audio parts
+// (responsesInputFileToChatPart, responsesInputAudioToChatPart) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! OpenAI Responses request → OpenAI Chat Completions request.
@@ -16,6 +17,14 @@
 //! function, and its calls and their outputs in `input` become calls to that
 //! function and their outputs (see [`super::shell_tool`]).
 //!
+//! An `input_file` with a file id or its bytes becomes a `file` part, and an
+//! `input_audio` with its bytes an `input_audio` part. A request is refused
+//! when a user message is left with nothing to send because its file or audio
+//! can't be sent: a file given only by URL, which Chat Completions has no
+//! field for, or audio without bytes. Text beside the attachment keeps the
+//! message; empty text doesn't. A developer message is sent as a user
+//! message, but it isn't the user's turn and is never refused.
+//!
 //! Deviations from upstream:
 //! - Tool parameter schemas are passed on as the client wrote them. Upstream
 //!   reads each tool into a Go map and writes it back, which sorts the
@@ -25,7 +34,8 @@
 //! - Where upstream copies the client's raw JSON into a string, we write
 //!   compact JSON. The values are the same JSON. This applies to a
 //!   non-string `instructions`, message `content` or `text`, `role`, image
-//!   URL, `reasoning_content`, reasoning summary `text` or function call
+//!   URL, `input_file` `file_id`, `file_data` or `filename`, `input_audio`
+//!   `data` or `format`, `reasoning_content`, reasoning summary `text` or function call
 //!   `arguments`; a custom tool call `input` that isn't a string, inside the
 //!   call's `{"input": ...}` arguments; a tool output that isn't a string, or
 //!   a part of one that isn't text or an image; a `shell_call`'s `action`
@@ -57,20 +67,23 @@ use super::shell_tool;
 use super::tool_index::ToolIndex;
 use super::tools::tool_output_text;
 use crate::common::openai_tools::align_openai_tool_call_messages;
+use crate::common::parts::UserTurnDrops;
 use crate::common::responses::{extract_responses_call_id, normalize_responses_tool_call_outputs};
 use crate::go;
 use crate::json::{bool_of, go_value, object, path, raw, set_path, str_of};
+use crate::registry::UnsupportedPartError;
 
 /// What upstream writes for reasoning it knows happened but can't show.
 const REASONING_UNAVAILABLE: &str = "[reasoning unavailable]";
 
 /// `ConvertOpenAIResponsesRequestToOpenAIChatCompletions`: converts a
-/// Responses request for an OpenAI Chat Completions upstream.
+/// Responses request for an OpenAI Chat Completions upstream. The refusal
+/// names the first user message left with nothing to send.
 pub fn convert_openai_responses_request_to_openai_chat_completions(
     model_name: &str,
     request: &Value,
     stream: bool,
-) -> Value {
+) -> (Value, Option<UnsupportedPartError>) {
     let mut out = Map::new();
     out.insert("model".into(), model_name.into());
     out.insert("messages".into(), json!([]));
@@ -101,6 +114,7 @@ pub fn convert_openai_responses_request_to_openai_chat_completions(
         ])),
         _ => {}
     }
+    let err = history.drops.err();
     if !history.messages.is_empty() {
         let messages = align_openai_tool_call_messages(
             history.messages,
@@ -133,7 +147,7 @@ pub fn convert_openai_responses_request_to_openai_chat_completions(
         }
     }
 
-    Value::Object(out)
+    (Value::Object(out), err)
 }
 
 /// The messages built from `input`, and what converting it keeps track of.
@@ -157,6 +171,8 @@ struct History<'i> {
     duplicate_output_ids: BTreeSet<String>,
     /// The assistant message pending tool calls can join, if it's the last.
     mergeable_assistant: Option<usize>,
+    /// The user messages left with nothing to send.
+    drops: UserTurnDrops,
 }
 
 impl<'i> History<'i> {
@@ -173,6 +189,7 @@ impl<'i> History<'i> {
             output_counts: HashMap::new(),
             duplicate_output_ids: BTreeSet::new(),
             mergeable_assistant: None,
+            drops: UserTurnDrops::default(),
         }
     }
 
@@ -281,6 +298,9 @@ impl<'i> History<'i> {
 
     fn convert_message(&mut self, item: &Value) {
         let mut role = str_of(item.get("role")).into_owned();
+        // Only the user's own turn can be refused: a developer message is
+        // sent as user text, but it isn't the user's turn.
+        let user_turn = role == "user";
         if role == "developer" {
             role = "user".into();
         }
@@ -292,9 +312,7 @@ impl<'i> History<'i> {
         }
 
         let content = match item.get("content") {
-            Some(Value::Array(parts)) => {
-                Value::Array(parts.iter().filter_map(message_part).collect())
-            }
+            Some(Value::Array(parts)) => Value::Array(self.message_parts(parts, user_turn)),
             Some(Value::String(text)) => text.as_str().into(),
             _ => json!([]),
         };
@@ -315,6 +333,31 @@ impl<'i> History<'i> {
         if assistant {
             self.mergeable_assistant = Some(self.messages.len() - 1);
         }
+    }
+
+    /// The message's content parts that convert. In a user turn, a file or
+    /// audio part that can't be sent is recorded in `drops`, and the turn is
+    /// closed with the number of parts it sends; empty text doesn't count.
+    fn message_parts(&mut self, parts: &[Value], user_turn: bool) -> Vec<Value> {
+        let mut converted = Vec::new();
+        let mut sendable = 0;
+        for part in parts {
+            if let Some(part) = message_part(part) {
+                if str_of(part.get("type")) != "text" || !str_of(part.get("text")).is_empty() {
+                    sendable += 1;
+                }
+                converted.push(part);
+                continue;
+            }
+            let part_type = str_of(part.get("type"));
+            if user_turn && matches!(part_type.as_ref(), "input_file" | "input_audio") {
+                self.drops.drop_part(&part_type);
+            }
+        }
+        if user_turn {
+            self.drops.end_turn(sendable);
+        }
+        converted
     }
 
     /// A call's `reasoning_content` goes with the calls it's buffered with.
@@ -501,7 +544,8 @@ fn is_tool_output(item: &Value) -> bool {
 }
 
 /// A message content part in Chat Completions form, or `None` for a kind
-/// Chat Completions has no part for. A part without a type is text.
+/// Chat Completions has no part for, a file without an id or bytes, or audio
+/// without bytes. A part without a type is text.
 fn message_part(part: &Value) -> Option<Value> {
     let part_type = str_of(part.get("type"));
     let part_type = if part_type.is_empty() {
@@ -544,8 +588,64 @@ fn message_part(part: &Value) -> Option<Value> {
                 ("image_url", image_url),
             ]))
         }
+        "input_file" => input_file_part(part),
+        "input_audio" => input_audio_part(part),
         _ => None,
     }
+}
+
+/// `responsesInputFileToChatPart`: an `input_file` as a `file` part, or
+/// `None` if it has neither a file id nor its bytes: Chat Completions has no
+/// field for a file's URL.
+fn input_file_part(part: &Value) -> Option<Value> {
+    let file_id = str_of(part.get("file_id"));
+    let file_data = str_of(part.get("file_data"));
+    if file_id.is_empty() && file_data.is_empty() {
+        return None;
+    }
+    let mut file = Map::new();
+    if !file_id.is_empty() {
+        file.insert("file_id".into(), file_id.into_owned().into());
+    }
+    if !file_data.is_empty() {
+        file.insert("file_data".into(), file_data.into_owned().into());
+    }
+    let filename = str_of(part.get("filename"));
+    if !filename.is_empty() {
+        file.insert("filename".into(), filename.into_owned().into());
+    }
+    Some(object([
+        ("type", "file".into()),
+        ("file", Value::Object(file)),
+    ]))
+}
+
+/// `responsesInputAudioToChatPart`: an `input_audio` as an `input_audio`
+/// part, its bytes and format read from `input_audio` or else from the part,
+/// or `None` if it has no bytes.
+fn input_audio_part(part: &Value) -> Option<Value> {
+    let either = |key: &str| {
+        let nested = str_of(part.get("input_audio").and_then(|audio| audio.get(key)));
+        if nested.is_empty() {
+            str_of(part.get(key))
+        } else {
+            nested
+        }
+    };
+    let data = either("data");
+    if data.is_empty() {
+        return None;
+    }
+    let mut audio = Map::new();
+    audio.insert("data".into(), data.into_owned().into());
+    let format = either("format");
+    if !format.is_empty() {
+        audio.insert("format".into(), format.into_owned().into());
+    }
+    Some(object([
+        ("type", "input_audio".into()),
+        ("input_audio", Value::Object(audio)),
+    ]))
 }
 
 /// `normalizeChatImageDetail`: an image `detail` Chat Completions accepts, or

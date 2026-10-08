@@ -12,7 +12,7 @@
 use std::error::Error;
 use std::sync::Arc;
 
-use super::super::{events, to_vec};
+use super::super::{checked, events, sends, to_vec};
 use crate::openai::interactions::responses as openai_interactions;
 use crate::registry::{Format, Registry, ResponseTransform, StreamTranslator};
 
@@ -21,11 +21,11 @@ pub(super) fn register(registry: &Registry) {
     registry.register(
         Format::OPENAI_RESPONSE,
         Format::INTERACTIONS,
-        Some(Arc::new(|model, body, stream| {
+        checked(|model, body, stream| {
             openai_interactions::convert_openai_responses_request_to_interactions(
                 model, &body, stream,
             )
-        })),
+        }),
         ResponseTransform {
             stream: Some(Arc::new(|context| {
                 Box::new(InteractionsToResponses(
@@ -52,11 +52,11 @@ pub(super) fn register(registry: &Registry) {
     registry.register(
         Format::INTERACTIONS,
         Format::OPENAI_RESPONSE,
-        Some(Arc::new(|model, body, stream| {
+        sends(|model, body, stream| {
             openai_interactions::convert_interactions_request_to_openai_responses(
                 model, &body, stream,
             )
-        })),
+        }),
         ResponseTransform {
             stream: Some(Arc::new(|context| {
                 Box::new(ResponsesToInteractions(

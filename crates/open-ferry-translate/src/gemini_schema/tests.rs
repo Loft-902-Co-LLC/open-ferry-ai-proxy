@@ -1,4 +1,5 @@
-//! Ports internal/util/gemini_schema_test.go (v8.0.15).
+//! Ports internal/util/gemini_schema_test.go (v8.0.15, with v8.0.20's
+//! TestCleanJSONSchema_EnforcesObjectTypeForProperties_Issue6394).
 //!
 //! Upstream runs most of these tests against several of its cleaners. Only
 //! `CleanJSONSchemaForGeminiJSONSchema` is ported, so they run against it. A
@@ -1132,7 +1133,7 @@ fn matches_upstream_output() {
         ),
         (
             r#"{"allOf":[{"properties":{"a.b":{"type":"string"}},"required":["a.b"]},{"required":["c"],"if":{}}],"type":"object","properties":{"c":{"type":"integer"}}}"#,
-            r#"{"type":"object","properties":{"c":{"type":"integer"},"a.b":{"type":"string"}},"required":["a.b","c"]}"#,
+            r#"{"properties":{"c":{"type":"integer"},"a.b":{"type":"string"}},"type":"object","required":["a.b","c"]}"#,
         ),
         (
             r#"{"type":"object","properties":{"k":{"type":"integer","enum":[1,2,3]},"c":{"const":true}}}"#,
@@ -1140,7 +1141,7 @@ fn matches_upstream_output() {
         ),
         (
             r#"{"type":"object","properties":{"x":{"type":"object","properties":{"y":{"type":"string"}},"oneOf":[{"properties":{"z":{"type":"number"}}},{"type":"null"}]}}}"#,
-            r#"{"type":"object","properties":{"x":{"type":"object","properties":{"y":{"type":"string"},"z":{"type":"number"}}}}}"#,
+            r#"{"properties":{"x":{"properties":{"y":{"type":"string"},"z":{"type":"number"}},"type":"object"}},"type":"object"}"#,
         ),
         // A key that is an index makes upstream build an array.
         (
@@ -1153,7 +1154,7 @@ fn matches_upstream_output() {
         ),
         (
             r#"{"type":["array","null"],"items":{"type":"string"},"x-a":1,"properties":{"x-b":{"x-c":2}}}"#,
-            r#"{"type":"array","items":{"type":"string"},"properties":{"x-b":{}}}"#,
+            r#"{"type":"object","items":{"type":"string"},"properties":{"x-b":{}}}"#,
         ),
         // A root const: upstream's path ".enum" names a key under "".
         (
@@ -1229,7 +1230,7 @@ fn matches_upstream_output() {
         ),
         (
             r#"{"type":"object","properties":{"a":{"type":"object","properties":{"x":{"type":"string"}}}},"allOf":[{"properties":{"a":{"properties":{"y":{"type":"integer"}}}}}]}"#,
-            r#"{"type":"object","properties":{"a":{"type":"object","properties":{"x":{"type":"string"},"y":{"type":"integer"}}}}}"#,
+            r#"{"properties":{"a":{"properties":{"x":{"type":"string"},"y":{"type":"integer"}},"type":"object"}},"type":"object"}"#,
         ),
         (
             r#"{"allOf":["s",{"type":"string"}]}"#,
@@ -1253,7 +1254,7 @@ fn matches_upstream_output() {
         ),
         (
             r#"{"type":"object","description":"x","properties":{"a":{"type":"string"}},"else":{"properties":{"a":{"type":"integer"},"b":{"type":"boolean"}}}}"#,
-            r#"{"type":"object","description":"x","properties":{"a":{"type":"string"},"b":{"type":"boolean"}}}"#,
+            r#"{"description":"x","properties":{"a":{"type":"string"},"b":{"type":"boolean"}},"type":"object"}"#,
         ),
         (
             r##"{"type":"object","properties":{"r":{"$ref":"#/x/"}}}"##,
@@ -1396,14 +1397,15 @@ fn nested_conditionals_copy_within_a_budget() {
     let cleaned = clean_json_schema_for_gemini_json_schema(&schema).to_string();
     assert!(cleaned.len() < 1 << 16, "{} bytes", cleaned.len());
 
-    // A few levels are all copied.
+    // A few levels are all copied, and each node with properties becomes an
+    // object.
     let schema = (0..3).fold(
         json!({"type": "string"}),
         |schema, _| json!({"if": {}, "then": {"properties": {"a": schema}}}),
     );
     assert_eq!(
         clean_json_schema_for_gemini_json_schema(&schema),
-        json!({"properties": {"a": {"properties": {"a": {"properties": {"a": {"type": "string"}}}}}}})
+        json!({"properties": {"a": {"properties": {"a": {"properties": {"a": {"type": "string"}}, "type": "object"}}, "type": "object"}}, "type": "object"})
     );
 }
 
@@ -1463,4 +1465,129 @@ fn deleting_object_keys_together_matches_one_at_a_time() {
     let mut paths = Vec::new();
     walk_for_extensions(&doc, "", &mut paths);
     assert_eq!(together(&paths), one_at_a_time(&paths), "extensions");
+}
+
+// TestCleanJSONSchema_EnforcesObjectTypeForProperties_Issue6394 (v8.0.20),
+// for this cleaner only.
+#[test]
+fn enforces_object_type_for_properties() {
+    // TypeArrayWithPropertiesPrefersObject
+    let got = clean(
+        r#"{"type":"object","properties":{"requestBody":{"type":"object","properties":{"delivery":{"type":"object","properties":{"endpoint":{"type":["string","object"],"properties":{"traces":{"type":"string"}},"required":["traces"]}},"required":["endpoint"]}},"required":["delivery"]}},"required":["requestBody"]}"#,
+    );
+    let endpoint = "properties.requestBody.properties.delivery.properties.endpoint";
+    assert!(
+        text(&got, &format!("{endpoint}.type")).eq_ignore_ascii_case("object"),
+        "{got}"
+    );
+    assert!(
+        exists(&got, &format!("{endpoint}.properties.traces")),
+        "{got}"
+    );
+
+    // AnyOfUnionMergedIntoNodeWithoutTypeEnsuresObject
+    let got = clean(
+        r#"{"type":"object","properties":{"endpoint":{"properties":{"traces":{"type":"string"}},"required":["traces"],"anyOf":[{"type":"string"},{"type":"object","properties":{"other":{"type":"string"}}}]}}}"#,
+    );
+    assert!(
+        text(&got, "properties.endpoint.type").eq_ignore_ascii_case("object"),
+        "{got}"
+    );
+    assert!(
+        exists(&got, "properties.endpoint.properties.traces"),
+        "{got}"
+    );
+
+    // PrimitiveTypeWithPropertiesPromotedToObject
+    let got = clean(
+        r#"{"type":"object","properties":{"endpoint":{"type":"string","properties":{"traces":{"type":"string"}},"required":["traces"]}}}"#,
+    );
+    assert!(
+        text(&got, "properties.endpoint.type").eq_ignore_ascii_case("object"),
+        "{got}"
+    );
+}
+
+// Not upstream's: a node with `properties` becomes an object however it got
+// there. A type array allowing an object picks it, unless `items` and `array`
+// pick an array first; the later pass makes that node an object anyway and
+// keeps its `items`. An empty or null type beside a union becomes an object,
+// a declared type in another case is kept, a type of another kind is
+// replaced, and `properties` that isn't an object changes nothing. The
+// expected output comes from upstream.
+#[test]
+fn object_type_for_properties_in_detail() {
+    let cases = [
+        (
+            r#"{"type":"object","properties":{"e":{"type":["object","string"],"properties":{"x":{"type":"string"}}}}}"#,
+            r#"{"type":"object","properties":{"e":{"type":"object","properties":{"x":{"type":"string"}},"description":"Accepts: object | string"}}}"#,
+        ),
+        (
+            r#"{"type":"object","properties":{"e":{"type":["string","object"],"items":{"type":"string"},"properties":{"x":{"type":"string"}}}}}"#,
+            r#"{"type":"object","properties":{"e":{"type":"object","properties":{"x":{"type":"string"}},"description":"Accepts: string | object"}}}"#,
+        ),
+        (
+            r#"{"type":"object","properties":{"e":{"type":["array","object"],"items":{"type":"string"},"properties":{"x":{"type":"string"}}}}}"#,
+            r#"{"type":"object","properties":{"e":{"type":"object","items":{"type":"string"},"properties":{"x":{"type":"string"}},"description":"Accepts: array | object"}}}"#,
+        ),
+        (
+            r#"{"type":"object","properties":{"e":{"type":"OBJECT","properties":{}}}}"#,
+            r#"{"type":"object","properties":{"e":{"type":"OBJECT","properties":{}}}}"#,
+        ),
+        (
+            r#"{"type":"object","properties":{"e":{"type":"","properties":{"a":{"type":"string"}},"anyOf":[{"type":"null"}]}}}"#,
+            r#"{"type":"object","properties":{"e":{"type":"object","properties":{"a":{"type":"string"}}}}}"#,
+        ),
+        (
+            r#"{"type":"object","properties":{"e":{"type":null,"properties":{"a":{"type":"string"}},"oneOf":[{"properties":{"b":{"type":"integer"}}}]}}}"#,
+            r#"{"properties":{"e":{"properties":{"a":{"type":"string"},"b":{"type":"integer"}},"type":"object"}},"type":"object"}"#,
+        ),
+        (
+            r#"{"type":"object","properties":{"e":{"type":5,"properties":{"a":{"type":"string"}}}}}"#,
+            r#"{"type":"object","properties":{"e":{"type":"object","properties":{"a":{"type":"string"}}}}}"#,
+        ),
+        (
+            r#"{"properties":{"properties":{"type":"string"}}}"#,
+            r#"{"properties":{"properties":{"type":"string"}},"type":"object"}"#,
+        ),
+        (
+            r#"{"type":"object","properties":{"e":{"type":"string","properties":"x"}}}"#,
+            r#"{"type":"object","properties":{"e":{"type":"string","properties":"x"}}}"#,
+        ),
+        (
+            r#"{"type":"string","properties":{"a":{"type":"integer"}}}"#,
+            r#"{"type":"object","properties":{"a":{"type":"integer"}}}"#,
+        ),
+        (
+            r#"{"type":"object","properties":{"l":{"type":"array","items":{"type":null,"properties":{"a":{"type":"string"}},"oneOf":[{"type":"null"},{"properties":{"b":{"type":"integer"}}}]}}}}"#,
+            r#"{"properties":{"l":{"items":{"properties":{"a":{"type":"string"},"b":{"type":"integer"}},"type":"object"},"type":"array"}},"type":"object"}"#,
+        ),
+        (
+            r#"{"type":"object","properties":{"a.b":{"type":"string","properties":{"c":{"type":"string"}}}}}"#,
+            r#"{"type":"object","properties":{"a.b":{"type":"object","properties":{"c":{"type":"string"}}}}}"#,
+        ),
+        (
+            r#"{"type":"array","items":[{"type":"string","properties":{"a":{}}}]}"#,
+            r#"{"type":"array","items":[{"type":"object","properties":{"a":{}}}]}"#,
+        ),
+        (
+            r#"{"type":"object","properties":{"e":{"type":["null","integer","object"],"properties":{"a":{"type":"string"}}}},"required":["e"]}"#,
+            r#"{"type":"object","properties":{"e":{"type":"object","properties":{"a":{"type":"string"}},"description":"Accepts: integer | object ((nullable))"}}}"#,
+        ),
+        (
+            r#"{"type":"object","properties":{"e":{"type":["null"],"properties":{"a":{"type":"string"}}}}}"#,
+            r#"{"type":"object","properties":{"e":{"type":"object","properties":{"a":{"type":"string"}},"description":"(nullable)"}}}"#,
+        ),
+        (
+            r#"{"type":"object","properties":{"e":{"type":"array","items":{"type":"string"},"properties":{"a":{"type":"string"}}}}}"#,
+            r#"{"type":"object","properties":{"e":{"type":"object","items":{"type":"string"},"properties":{"a":{"type":"string"}}}}}"#,
+        ),
+        (
+            r#"{"type":"object","properties":{"e":{"properties":{"a":{"type":"string"}},"anyOf":[{"type":"null"},{"type":"string"}]}}}"#,
+            r#"{"properties":{"e":{"properties":{"a":{"type":"string"}},"type":"object"}},"type":"object"}"#,
+        ),
+    ];
+    for (input, expected) in cases {
+        assert_eq!(clean(input).to_string(), expected, "{input}");
+    }
 }

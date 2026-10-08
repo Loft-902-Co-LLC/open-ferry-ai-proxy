@@ -144,7 +144,7 @@ impl Generator {
         fields.push(("messages", json!([{ "role": "user", "content": "hi" }])));
         let request = to_object(fields);
 
-        let codex = convert_claude_request_to_codex("gpt-5", &request);
+        let (codex, _) = convert_claude_request_to_codex("gpt-5", &request);
         self.codex_names = codex["tools"]
             .as_array()
             .into_iter()

@@ -22,7 +22,7 @@ import (
 
 func init() {
 	translators["interactions/openai-chat/request"] = func(in input) []byte {
-		return chat.ConvertOpenAIRequestToInteractions(in.Model, []byte(in.Request), streamOption(in))
+		return refused(chat.ConvertOpenAIRequestToInteractions(in.Model, []byte(in.Request), streamOption(in)))
 	}
 	translators["interactions/openai-chat/response"] = func(in input) []byte {
 		return chunkList(streamChunks(in, chat.ConvertInteractionsResponseToOpenAI))
@@ -31,7 +31,7 @@ func init() {
 		return chat.ConvertInteractionsResponseToOpenAINonStream(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), nil)
 	}
 	translators["openai/interactions/request"] = func(in input) []byte {
-		return chat.ConvertInteractionsRequestToOpenAI(in.Model, []byte(in.Request), streamOption(in))
+		return refused(chat.ConvertInteractionsRequestToOpenAI(in.Model, []byte(in.Request), streamOption(in)))
 	}
 	translators["openai/interactions/response"] = func(in input) []byte {
 		return joined(streamChunks(in, chat.ConvertOpenAIResponseToInteractions))

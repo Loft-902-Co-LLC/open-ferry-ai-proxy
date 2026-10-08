@@ -24,7 +24,7 @@ import (
 
 func init() {
 	translators["gemini/interactions/request"] = func(in input) []byte {
-		return geminiinteractions.ConvertInteractionsRequestToGemini(in.Model, []byte(in.Request), streamOption(in))
+		return refused(geminiinteractions.ConvertInteractionsRequestToGemini(in.Model, []byte(in.Request), streamOption(in)))
 	}
 	translators["gemini/interactions/response"] = func(in input) []byte {
 		return joined(streamChunks(in, geminiinteractions.ConvertGeminiResponseToInteractions))
@@ -33,7 +33,7 @@ func init() {
 		return geminiinteractions.ConvertGeminiResponseToInteractionsNonStream(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), nil)
 	}
 	translators["interactions/gemini/request"] = func(in input) []byte {
-		return geminiinteractions.ConvertGeminiRequestToInteractions(in.Model, []byte(in.Request), streamOption(in))
+		return refused(geminiinteractions.ConvertGeminiRequestToInteractions(in.Model, []byte(in.Request), streamOption(in)))
 	}
 	translators["interactions/gemini/response"] = func(in input) []byte {
 		return chunkList(streamChunks(in, geminiinteractions.ConvertInteractionsResponseToGemini))
@@ -42,7 +42,7 @@ func init() {
 		return geminiinteractions.ConvertInteractionsResponseToGeminiNonStream(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), nil)
 	}
 	translators["interactions/interactions/request"] = func(in input) []byte {
-		return geminiinteractions.ConvertInteractionsRequestToInteractions(in.Model, []byte(in.Request), streamOption(in))
+		return refused(geminiinteractions.ConvertInteractionsRequestToInteractions(in.Model, []byte(in.Request), streamOption(in)))
 	}
 	translators["interactions/interactions/response"] = func(in input) []byte {
 		return chunkList(streamChunks(in, geminiinteractions.ConvertInteractionsResponsePassthrough))

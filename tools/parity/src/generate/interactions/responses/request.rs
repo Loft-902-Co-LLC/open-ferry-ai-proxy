@@ -584,7 +584,7 @@ fn input(rng: &mut Rng, declared: &[Declared]) -> Value {
 /// One input item. `calls` holds the IDs of the calls made so far, for
 /// outputs to answer.
 fn item(rng: &mut Rng, declared: &[Declared], calls: &mut Vec<String>) -> Value {
-    match rng.below(16) {
+    match rng.below(17) {
         0..=3 => json!({ "type": "message", "role": rng.pick(ROLES), "content": content(rng) }),
         4 | 5 => call(rng, declared, calls, false),
         6 => call(rng, declared, calls, true),
@@ -623,6 +623,7 @@ fn item(rng: &mut Rng, declared: &[Declared], calls: &mut Vec<String>) -> Value 
         }
         13 => json!({ "role": rng.pick(ROLES), "content": content(rng) }),
         14 => json!({ "type": "item_reference", "id": "msg_1" }),
+        15 => attachment(rng),
         _ => {
             if rng.chance(50) {
                 json!({ "type": "message", "role": rng.pick(ROLES) })
@@ -658,6 +659,35 @@ fn part(rng: &mut Rng) -> Value {
             image(rng, image_type)
         }
         8 => json!({ "type": rng.pick(&["refusal", "summary_text", ""]), "text": text(rng) }),
+        _ => attachment(rng),
+    }
+}
+
+/// A file, audio or video part or item, with something the translator can
+/// send or not.
+fn attachment(rng: &mut Rng) -> Value {
+    match rng.below(10) {
+        0 => {
+            json!({ "type": "input_file", "filename": "a.pdf", "file_data": "data:application/pdf;base64,JVBERi0xLjQK" })
+        }
+        1 => {
+            json!({ "type": "input_file", "file_data": "JVBERi0xLjQK", "mime_type": "application/pdf" })
+        }
+        2 => {
+            let url = rng.pick(&["https://example.test/a.pdf", " ", ""]);
+            json!({ "type": "input_file", "file_url": url })
+        }
+        3 => {
+            let format = rng.pick(&["wav", "mp3", "flac", "opus", "pcm16", "WAV", ""]);
+            json!({ "type": "input_audio", "input_audio": { "data": "UklGRg==", "format": format } })
+        }
+        4 => {
+            let data = rng.pick(&["UklGRg==", " ", ""]);
+            json!({ "type": "input_audio", "data": data })
+        }
+        5 => json!({ "type": "input_audio", "input_audio": { "format": "wav" } }),
+        6 => json!({ "type": "input_video", "video_url": "https://example.test/v.mp4" }),
+        7 => json!({ "type": " input_file ", "file_url": "https://example.test/a.pdf" }),
         _ => json!({ "type": rng.pick(&["input_file", "input_audio"]), "file_id": "file_1" }),
     }
 }
@@ -967,7 +997,7 @@ mod tests {
         let (mut tools, mut choices) = (0, 0);
         for case in responses_cases(3, 1000) {
             let request: Value = serde_json::from_str(&case.request).expect("a request is JSON");
-            let out =
+            let (out, _) =
                 convert_openai_responses_request_to_interactions(&case.model, &request, false);
             let mentions = |value: Option<&Value>| {
                 value.is_some_and(|value| {

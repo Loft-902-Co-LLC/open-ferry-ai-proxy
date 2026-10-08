@@ -24,18 +24,23 @@ const MODEL: &str = "claude-test";
 
 /// `ConvertOpenAIResponsesRequestToClaude` for a non-streaming request.
 fn convert(model: &str, request: &Value) -> Value {
-    convert_openai_responses_request_to_claude(model, request, false, ModelCatalog::embedded())
+    let (body, err) =
+        convert_openai_responses_request_to_claude(model, request, false, ModelCatalog::embedded());
+    assert_eq!(err, None, "refused: {body}");
+    body
 }
 
 /// `ConvertOpenAIResponsesRequestToClaudeWithCompat` for a non-streaming
 /// request.
 fn convert_with_compat(model: &str, request: &Value) -> Value {
-    convert_openai_responses_request_to_claude_with_compat(
+    let (body, err) = convert_openai_responses_request_to_claude_with_compat(
         model,
         request,
         false,
         ModelCatalog::embedded(),
-    )
+    );
+    assert_eq!(err, None, "refused: {body}");
+    body
 }
 
 /// Replays Responses output items as the input of the next request.

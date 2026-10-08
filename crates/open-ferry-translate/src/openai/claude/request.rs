@@ -14,6 +14,12 @@
 //! replay, or always in compatibility mode. The thinking settings become a
 //! `reasoning_effort`.
 //!
+//! A `document` or `container_upload` block with inline base64 bytes becomes
+//! a `file` part; one that names a file ID carries no bytes, so it has no
+//! part. The rest of a user message is still sent, but a user message left
+//! with nothing, because of such a block or an image without a source, is
+//! refused with an [`UnsupportedPartError`].
+//!
 //! Deviations from upstream:
 //! - A tool's `input_schema` keeps the client's key order and number text;
 //!   upstream round-trips it through a Go map, which sorts the keys and
@@ -28,14 +34,18 @@
 //!   or the string `"NaN"`, is left out. Go writes it as `+Inf` or `NaN`,
 //!   which isn't JSON.
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use serde_json::{Map, Value, json};
 
 use crate::common::claude::{
     align_tool_results, is_attribution_system_text, message_system_reminder_text,
 };
 use crate::common::openai_tools::align_openai_tool_call_messages;
+use crate::common::parts::UserTurnDrops;
 use crate::go;
 use crate::json::{float_of, int_of, object, path, str_of};
+use crate::registry::UnsupportedPartError;
 use crate::schema::{MAP_KEYWORDS, VALUE_KEYWORDS, has_unsupported_unicode_property_escape};
 use crate::signature::{Provider, compatible_signature_for_provider};
 use crate::thinking::{LEVEL_XHIGH, budget_to_level, thinking_text};
@@ -50,7 +60,14 @@ pub(super) const TOOL_RESULT_IMAGE_RELAY_NOTICE: &str =
 
 /// Converts a Claude Messages request body into a Chat Completions request
 /// body for `model_name`. `stream` is whether the client asked to stream.
-pub fn convert_claude_request_to_openai(model_name: &str, request: &Value, stream: bool) -> Value {
+///
+/// The error is set when a user message had only blocks Chat Completions
+/// can't take; the body is still returned.
+pub fn convert_claude_request_to_openai(
+    model_name: &str,
+    request: &Value,
+    stream: bool,
+) -> (Value, Option<UnsupportedPartError>) {
     convert(model_name, request, stream, false)
 }
 
@@ -61,11 +78,16 @@ pub fn convert_claude_request_to_openai_with_compat(
     model_name: &str,
     request: &Value,
     stream: bool,
-) -> Value {
+) -> (Value, Option<UnsupportedPartError>) {
     convert(model_name, request, stream, true)
 }
 
-fn convert(model_name: &str, request: &Value, stream: bool, keep_thinking: bool) -> Value {
+fn convert(
+    model_name: &str,
+    request: &Value,
+    stream: bool,
+    keep_thinking: bool,
+) -> (Value, Option<UnsupportedPartError>) {
     let mut out = Map::new();
     out.insert("model".into(), model_name.into());
     out.insert("messages".into(), json!([]));
@@ -92,6 +114,7 @@ fn convert(model_name: &str, request: &Value, stream: bool, keep_thinking: bool)
     }
 
     let mut messages = Vec::new();
+    let mut refusal = None;
     if let Some(system) = system_message(request.get("system")) {
         messages.push(system);
     }
@@ -102,10 +125,12 @@ fn convert(model_name: &str, request: &Value, stream: bool, keep_thinking: bool)
             pending_tool_use_ids: Vec::new(),
             pending_reminders: Vec::new(),
             tool_names: std::collections::HashMap::new(),
+            drops: UserTurnDrops::default(),
         };
         for message in items {
             converter.push(message);
         }
+        refusal = converter.drops.err();
         messages = converter.finish();
     }
     if !messages.is_empty() {
@@ -133,7 +158,7 @@ fn convert(model_name: &str, request: &Value, stream: bool, keep_thinking: bool)
         out.insert("user".into(), str_of(Some(user)).into());
     }
 
-    Value::Object(out)
+    (Value::Object(out), refusal)
 }
 
 /// The `reasoning_effort` for Claude's `thinking` settings, if they call for
@@ -195,6 +220,8 @@ struct Messages {
     pending_reminders: Vec<Value>,
     /// Each `tool_use` ID's tool name, from every assistant message so far.
     tool_names: std::collections::HashMap<String, String>,
+    /// The blocks each user message with list content couldn't send.
+    drops: UserTurnDrops,
 }
 
 impl Messages {
@@ -251,7 +278,13 @@ impl Messages {
                         }
                     }
                 }
-                "text" | "image" => content.extend(convert_content_part(part)),
+                kind @ ("text" | "image" | "document" | "container_upload") => {
+                    match convert_content_part(part) {
+                        Some(item) => content.push(item),
+                        None if role == "user" && kind != "text" => self.drops.drop_part(kind),
+                        None => {}
+                    }
+                }
                 "tool_use" if role == "assistant" => {
                     let id = str_of(part.get("id"));
                     let name = str_of(part.get("name"));
@@ -297,6 +330,9 @@ impl Messages {
             }
         }
 
+        if role == "user" {
+            self.drops.end_turn(content.len() + tool_results.len());
+        }
         let has_content = !content.is_empty();
         let reasoning = reasoning.join("\n\n");
 
@@ -369,8 +405,9 @@ fn text_part(text: &str) -> Value {
     object([("type", "text".into()), ("text", text.into())])
 }
 
-/// A text or image block as a Chat Completions content part. `None` for
-/// blank or attribution text, an image with no URL, and other blocks.
+/// A text, image or file block as a Chat Completions content part. `None`
+/// for blank or attribution text, an image with no URL, a file block without
+/// inline bytes, and other blocks.
 fn convert_content_part(part: &Value) -> Option<Value> {
     match &*str_of(part.get("type")) {
         "text" => {
@@ -409,8 +446,38 @@ fn convert_content_part(part: &Value) -> Option<Value> {
                 ("image_url", object([("url", url.into())])),
             ]))
         }
+        "document" | "container_upload" => file_part(part),
         _ => None,
     }
+}
+
+/// `convertClaudeFilePartToOpenAI`: a block's inline base64 bytes as a
+/// `file` part, written in standard padded base64. A file ID carries no
+/// bytes, and data that isn't base64 can't be sent, so neither has a part.
+fn file_part(part: &Value) -> Option<Value> {
+    let source = |key: &str| part.get("source").and_then(|source| source.get(key));
+    if str_of(source("type")) != "base64" {
+        return None;
+    }
+    let data = go::base64::STD.decode(str_of(source("data")).trim()).ok()?;
+    if data.is_empty() {
+        return None;
+    }
+    let mut media_type = str_of(source("media_type"));
+    if media_type.is_empty() {
+        media_type = "application/octet-stream".into();
+    }
+    let file_data = format!("data:{media_type};base64,{}", STANDARD.encode(&data));
+    Some(object([
+        ("type", "file".into()),
+        (
+            "file",
+            object([
+                ("filename", str_of(part.get("filename")).into()),
+                ("file_data", file_data.into()),
+            ]),
+        ),
+    ]))
 }
 
 /// A tool result's content as the text of a tool message, and the images in

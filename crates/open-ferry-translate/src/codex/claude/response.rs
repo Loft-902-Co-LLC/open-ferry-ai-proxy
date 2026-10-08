@@ -814,12 +814,18 @@ fn web_search_query(event: &Value, item: &Value) -> String {
 }
 
 /// The search results as Claude `web_search_result` blocks, or `None` when
-/// neither the item nor the event has a `results` array.
+/// neither the item nor the event has a `results` or `action.sources` array.
+/// The first array of the item's `results`, the event's, the item's
+/// `action.sources` and the event's is read.
 fn web_search_results(event: &Value, item: &Value) -> Option<Vec<Value>> {
-    let results = match (item.get("results"), event.get("results")) {
-        (Some(Value::Array(results)), _) | (_, Some(Value::Array(results))) => results,
-        _ => return None,
-    };
+    let results = [
+        item.get("results"),
+        event.get("results"),
+        path(item, "action.sources"),
+        path(event, "action.sources"),
+    ]
+    .into_iter()
+    .find_map(|candidate| candidate.and_then(Value::as_array))?;
     let blocks = results.iter().filter_map(|result| {
         let url = str_of(result.get("url")).trim().to_owned();
         if url.is_empty() {

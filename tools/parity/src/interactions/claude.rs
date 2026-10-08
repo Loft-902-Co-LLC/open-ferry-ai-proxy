@@ -35,7 +35,7 @@ use super::{Family, Pair, ResponseCases, Stage, Suite};
 use crate::cases::Case;
 use crate::compare::{Deviation, JsonAt, JsonForm};
 use crate::generate::interactions::claude as generate;
-use crate::translator::{Translator, object};
+use crate::translator::{Translator, object, refused};
 
 /// The family's suites, a variant each, named after the upstream package
 /// they run (`interactions/claude` or `claude/interactions`).
@@ -164,10 +164,17 @@ impl Family for Kind {
         let body = case.events.first().map_or(&b""[..], |body| body.as_bytes());
         let output = match self {
             Self::InteractionsRequest => {
-                convert_claude_request_to_interactions(&case.model, &request()?, stream)
+                let (body, err) =
+                    convert_claude_request_to_interactions(&case.model, &request()?, stream);
+                refused(body, err)
             }
             Self::InteractionsRequestCompat => {
-                convert_claude_request_to_interactions_with_compat(&case.model, &request()?, stream)
+                let (body, err) = convert_claude_request_to_interactions_with_compat(
+                    &case.model,
+                    &request()?,
+                    stream,
+                );
+                refused(body, err)
             }
             Self::InteractionsStream => {
                 let mut translator = InteractionsToClaudeStream::new(&case.model);
@@ -182,7 +189,9 @@ impl Family for Kind {
                 convert_interactions_response_to_claude_non_stream(&case.model, body)
             }
             Self::ClaudeRequest => {
-                convert_interactions_request_to_claude(&case.model, &request()?, stream)
+                let (body, err) =
+                    convert_interactions_request_to_claude(&case.model, &request()?, stream);
+                refused(body, err)
             }
             Self::ClaudeStream => {
                 let mut translator = ClaudeToInteractionsStream::new(&case.model);

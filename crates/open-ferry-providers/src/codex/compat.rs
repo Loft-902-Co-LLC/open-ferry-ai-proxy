@@ -435,7 +435,7 @@ pub(crate) fn translate(
     }
     if *source == Format::CLAUDE && *to == Format::CODEX && is_compat(context, request, options) {
         let summary = summary::extract_translated(&payload, source.as_str(), to.as_str());
-        let mut body = convert_claude_request_to_codex_with_compat(base, &payload);
+        let (mut body, _) = convert_claude_request_to_codex_with_compat(base, &payload);
         summary::apply_for_model(&mut body, to.as_str(), base, summary, &Catalog::current());
         return body;
     }

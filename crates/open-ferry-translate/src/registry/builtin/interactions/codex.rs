@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use super::super::{events, to_vec};
+use super::super::{checked, events, to_vec};
 use super::parse;
 use crate::codex::interactions as codex_interactions;
 use crate::registry::{Format, Registry, ResponseTransform, StreamTranslator};
@@ -18,9 +18,9 @@ pub(super) fn register(registry: &Registry) {
     registry.register(
         Format::INTERACTIONS,
         Format::CODEX,
-        Some(Arc::new(|model, body, stream| {
+        checked(|model, body, stream| {
             codex_interactions::convert_interactions_request_to_codex(model, &body, stream)
-        })),
+        }),
         ResponseTransform {
             stream: Some(Arc::new(|context| {
                 Box::new(CodexToInteractions(

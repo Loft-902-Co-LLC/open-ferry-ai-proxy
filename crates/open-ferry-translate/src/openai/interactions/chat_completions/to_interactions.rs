@@ -1,7 +1,8 @@
 // Ported from CLIProxyAPI internal/translator/openai/interactions/chat-completions/openai_interactions_request.go
 // (ConvertOpenAIRequestToInteractions) and interactions_openai_response.go
 // (ConvertOpenAIResponseToInteractions, ConvertOpenAIResponseToInteractionsNonStream)
-// (v8.0.15, MIT).
+// (v8.0.15, MIT), with v8.0.20's user turn refusal (openAIChatPartType,
+// isOpenAIChatAttachmentType) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Into Interactions: a Chat Completions request becomes an Interactions
@@ -14,7 +15,10 @@
 //! their content, a `function_call` for each tool call and a
 //! `function_result` for each tool message, named after the call it answers
 //! where the message names none. The sampling settings go into
-//! `generation_config`, and function tools into `tools`.
+//! `generation_config`, and function tools into `tools`. A request whose
+//! user message is left with nothing to send because its only file or audio
+//! part can't be sent is refused; text beside it keeps the message, empty
+//! text doesn't.
 //!
 //! The stream opens with `interaction.created` and
 //! `interaction.status_update`, then frames a step for each run of reasoning,
@@ -33,18 +37,21 @@ use super::common::{
 };
 use crate::common::file_data::normalize_openai_file_data;
 use crate::common::gemini_response::create_time;
+use crate::common::parts::UserTurnDrops;
 use crate::common::sse::{push_event, push_frame};
 use crate::go;
 use crate::json::{bool_of, exact, object, path, set_path, str_of};
+use crate::registry::UnsupportedPartError;
 
 /// `ConvertOpenAIRequestToInteractions`: a Chat Completions request as an
 /// Interactions request for `model_name`, or for the request's own model if
-/// that is blank. `stream` sets `stream` when the request doesn't.
+/// that is blank. `stream` sets `stream` when the request doesn't. The
+/// refusal names the first user message left with nothing to send.
 pub fn convert_openai_request_to_interactions(
     model_name: &str,
     root: &Value,
     stream: bool,
-) -> Value {
+) -> (Value, Option<UnsupportedPartError>) {
     let model = first_non_empty(&[model_name, &text_at(root, "model")]);
     let mut out = Map::new();
     out.insert("model".into(), model.into());
@@ -73,18 +80,20 @@ pub fn convert_openai_request_to_interactions(
         out.insert("agent_config".into(), agent_config.clone());
     }
     let mut out = Value::Object(out);
-    append_messages(&mut out, root.get("messages"));
+    let err = append_messages(&mut out, root.get("messages"));
     copy_generation_config(&mut out, root);
     append_tools(&mut out, root.get("tools"));
-    out
+    (out, err)
 }
 
 /// `appendOpenAIMessagesToInteractions`: the system text and the `input`
-/// steps of the request's `messages`.
-fn append_messages(out: &mut Value, messages: Option<&Value>) {
+/// steps of the request's `messages`, and the refusal for the first user
+/// message they emptied.
+fn append_messages(out: &mut Value, messages: Option<&Value>) -> Option<UnsupportedPartError> {
     let Some(Value::Array(messages)) = messages else {
-        return;
+        return None;
     };
+    let mut drops = UserTurnDrops::default();
     let mut steps = Vec::new();
     let mut system = String::new();
     // The name of each tool call, by its ID, for the results that name none.
@@ -100,13 +109,14 @@ fn append_messages(out: &mut Value, messages: Option<&Value>) {
                 system.push_str(&text);
             }
         } else {
-            append_message(&mut steps, message, &role, &mut tool_names);
+            append_message(&mut steps, message, &role, &mut tool_names, &mut drops);
         }
     }
     if !system.is_empty() {
         set_path(out, "system_instruction", system.into());
     }
     set_path(out, "input", Value::Array(steps));
+    drops.err()
 }
 
 /// `appendOpenAIMessageToInteractions`: the steps of a message that isn't a
@@ -116,6 +126,7 @@ fn append_message(
     message: &Value,
     role: &str,
     tool_names: &mut HashMap<String, String>,
+    drops: &mut UserTurnDrops,
 ) {
     match role {
         "assistant" => {
@@ -126,7 +137,7 @@ fn append_message(
                         .map(|text| text_step("thought", text)),
                 );
             }
-            steps.extend(content_step("model_output", message.get("content")));
+            steps.extend(content_step("model_output", message.get("content"), None));
             if let Some(Value::Array(tool_calls)) = message.get("tool_calls") {
                 for tool_call in tool_calls {
                     let id = text_at(tool_call, "id");
@@ -139,25 +150,49 @@ fn append_message(
             }
         }
         "tool" | "function" => steps.push(tool_result(message, tool_names)),
-        _ => steps.extend(content_step("user_input", message.get("content"))),
+        _ => steps.extend(content_step(
+            "user_input",
+            message.get("content"),
+            Some(drops),
+        )),
     }
 }
 
 /// `openAIChatContentStep`: a step of `step_type` holding a message's
-/// content, if any part of it converts.
-fn content_step(step_type: &str, content: Option<&Value>) -> Option<Value> {
-    let parts: Vec<Value> = match content {
-        Some(Value::String(text)) if text.is_empty() => return None,
+/// content, if any part of it converts. `drops` is given for a user message,
+/// and closes its turn: an attachment that can't be sent is recorded, and
+/// text or any other sendable part beside it keeps the turn. Empty text is
+/// sent but doesn't count.
+fn content_step(
+    step_type: &str,
+    content: Option<&Value>,
+    mut drops: Option<&mut UserTurnDrops>,
+) -> Option<Value> {
+    let mut parts = Vec::new();
+    let mut sendable = 0;
+    match content {
         Some(Value::String(text)) => {
-            vec![object([
-                ("type", "text".into()),
-                ("text", text.as_str().into()),
-            ])]
+            if !text.is_empty() {
+                parts.push(object([
+                    ("type", "text".into()),
+                    ("text", text.as_str().into()),
+                ]));
+                sendable += 1;
+            }
         }
-        Some(Value::Array(parts)) => parts.iter().filter_map(content_part).collect(),
-        Some(part @ Value::Object(_)) => content_part(part).into_iter().collect(),
-        _ => Vec::new(),
-    };
+        Some(Value::Array(list)) => {
+            for part in list {
+                push_content_part(&mut parts, &mut sendable, part, drops.as_deref_mut());
+            }
+        }
+        Some(part @ Value::Object(_)) => {
+            push_content_part(&mut parts, &mut sendable, part, drops.as_deref_mut());
+        }
+        _ => {}
+    }
+    if let Some(drops) = drops {
+        drops.end_turn(sendable);
+    }
     if parts.is_empty() {
         return None;
     }
@@ -167,14 +202,53 @@ fn content_step(step_type: &str, content: Option<&Value>) -> Option<Value> {
     ]))
 }
 
+/// One part of [`content_step`]: converted and counted if it's sendable, or
+/// recorded in `drops` if it's an attachment that can't be sent.
+fn push_content_part(
+    parts: &mut Vec<Value>,
+    sendable: &mut usize,
+    part: &Value,
+    drops: Option<&mut UserTurnDrops>,
+) {
+    let Some(converted) = content_part(part) else {
+        let part_type = chat_part_type(part);
+        if let Some(drops) = drops
+            && is_attachment_type(&part_type)
+        {
+            drops.drop_part(&part_type);
+        }
+        return;
+    };
+    if text_at(&converted, "type") != "text" || !text_at(&converted, "text").is_empty() {
+        *sendable += 1;
+    }
+    parts.push(converted);
+}
+
+/// `openAIChatPartType`: a part's lowercased type, or `text` for an untyped
+/// part with text.
+fn chat_part_type(part: &Value) -> String {
+    let part_type = go::to_lower(text_at(part, "type").trim());
+    if part_type.is_empty() && part.get("text").is_some() {
+        return "text".to_owned();
+    }
+    part_type
+}
+
+/// `isOpenAIChatAttachmentType`: the part types whose loss is refused when
+/// it leaves a user message with nothing to send.
+fn is_attachment_type(part_type: &str) -> bool {
+    matches!(
+        part_type,
+        "file" | "input_file" | "document" | "input_audio" | "audio"
+    )
+}
+
 /// `openAIChatContentPartToInteractions`: a Chat Completions content part
 /// as an Interactions one: text, an image, audio or a document. `None` for a
 /// part of another type, audio without data, or a document without a file.
 fn content_part(part: &Value) -> Option<Value> {
-    let mut part_type = go::to_lower(text_at(part, "type").trim());
-    if part_type.is_empty() && part.get("text").is_some() {
-        part_type = "text".to_owned();
-    }
+    let part_type = chat_part_type(part);
     match part_type.as_str() {
         "text" | "input_text" | "output_text" => Some(object([
             ("type", "text".into()),

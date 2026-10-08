@@ -1203,7 +1203,7 @@ fn claude_requests_to_compatibility_models_use_their_translator() {
     let payload = r#"{"model":"model","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"thinking","thinking":"pondering","signature":""},{"type":"text","text":"ok"}]},{"role":"user","content":"again"}]}"#;
     let options = options("claude", &[]);
     let compat_input =
-        convert_claude_request_to_codex_with_compat("model", &json(payload))["input"].clone();
+        convert_claude_request_to_codex_with_compat("model", &json(payload)).0["input"].clone();
     let plain = Registry::global().translate_request(
         &Format::CLAUDE,
         &Format::CODEX,

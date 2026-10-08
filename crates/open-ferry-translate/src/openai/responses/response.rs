@@ -1,7 +1,8 @@
 // Ported from CLIProxyAPI internal/translator/openai/openai/responses/openai_openai-responses_response.go
 // (ConvertOpenAIChatCompletionsResponseToOpenAIResponses,
 // ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream, FinalizeToolInput)
-// and shell_tool.go (responsesToolInputFailure) (v8.0.15, MIT).
+// and shell_tool.go (responsesToolInputFailure) (v8.0.15, MIT), with v8.0.20's
+// CanFinalizeResponseStream (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! OpenAI Chat Completions responses → OpenAI Responses responses.
@@ -20,13 +21,16 @@
 //! but the final event waits for `[DONE]`, so that usage sent after the
 //! finish reason still counts. A `length` or `content_filter` finish leaves
 //! the response incomplete. A stream that ends with a tool call still open,
-//! or with no message or tool call at all, gets no final event.
+//! or with no message or tool call at all, gets no final event. A stream
+//! whose finish reason closed every item it started can still end without
+//! `[DONE]`: [`OpenAIToOpenAIResponsesStream::can_finalize_response_stream`]
+//! tells the caller it may send `[DONE]` itself.
 //!
 //! A call to the client's `apply_patch` custom tool streams as custom tool
 //! input: the patch text is decoded from the arguments as they arrive.
 //! Arguments that aren't one valid input string, a call whose ID or name
-//! changes, and a stream that ends before `[DONE]` all end the response with
-//! `response.failed`.
+//! changes, and a stream that ends before `[DONE]`, unless its finish reason
+//! closed every item, all end the response with `response.failed`.
 //!
 //! A call to the client's local shell (see [`super::shell_tool`]) becomes a
 //! `shell_call` item. A stream announces it once the call's ID and name are
@@ -97,6 +101,9 @@ pub struct OpenAIToOpenAIResponsesStream {
     given_line: bool,
     started: bool,
     completed: bool,
+    /// Whether the last finish reason closed every item the stream started,
+    /// so the stream may end without `[DONE]`.
+    completion_pending: bool,
     seq: i64,
     response_id: String,
     created_at: i64,
@@ -245,6 +252,7 @@ impl OpenAIToOpenAIResponsesStream {
             given_line: false,
             started: false,
             completed: false,
+            completion_pending: false,
             seq: 0,
             response_id: String::new(),
             created_at: 0,
@@ -324,14 +332,28 @@ impl OpenAIToOpenAIResponsesStream {
     /// `FinalizeToolInput`: call when the Chat Completions stream ends. If
     /// the request declares `apply_patch` and the stream ended before
     /// `[DONE]` brought the final event, returns `response.failed`, since a
-    /// patch may be cut short. Returns `""` if no line was given at all, as
-    /// upstream has no state to finalize then.
+    /// patch may be cut short, unless the stream can still be finished (see
+    /// [`can_finalize_response_stream`](Self::can_finalize_response_stream)).
+    /// Returns `""` if no line was given at all, as upstream has no state to
+    /// finalize then.
     pub fn finalize_tool_input(&mut self) -> String {
         let mut out = String::new();
-        if self.given_line && !self.completed && self.tools.patch_enabled() {
+        if self.given_line
+            && !self.completed
+            && !self.can_finalize_response_stream()
+            && self.tools.patch_enabled()
+        {
             self.fail_tool_input(ToolInputError::Unterminated, &mut out);
         }
         out
+    }
+
+    /// `CanFinalizeResponseStream`: whether a stream that ended without
+    /// `[DONE]` may be finished by translating `[DONE]` now. True once a
+    /// finish reason closed every message and tool call the stream started,
+    /// with no reasoning left open, and before the final event or a failure.
+    pub fn can_finalize_response_stream(&self) -> bool {
+        self.error.is_none() && !self.completed && self.completion_pending
     }
 
     /// `ToolInputError`: why the stream failed, if a tool call's input was
@@ -350,6 +372,7 @@ impl OpenAIToOpenAIResponsesStream {
         self.created_at = chunk.get("created").map_or(0, int_of);
         self.usage = Usage::default();
         self.finish_reason.clear();
+        self.completion_pending = false;
 
         let mut created = Map::new();
         created.insert("id".into(), self.response_id.clone().into());
@@ -420,8 +443,24 @@ impl OpenAIToOpenAIResponsesStream {
         if !reason.is_empty() {
             self.finish_reason = reason.into_owned();
             self.finalize_open_items(out);
+            self.completion_pending = self.can_finalize_response();
         }
         self.error.is_none()
+    }
+
+    /// `canFinalizeResponse`: whether everything the stream started is
+    /// finished after a finish reason.
+    fn can_finalize_response(&self) -> bool {
+        let added_call = self.calls.values().any(|call| call.item_added);
+        self.error.is_none()
+            && !self.finish_reason.is_empty()
+            && (!self.messages.is_empty() || added_call)
+            && self.messages.values().all(|message| message.done)
+            && self
+                .calls
+                .values()
+                .all(|call| !call.item_added || call.item_done)
+            && self.reasoning_id.is_empty()
     }
 
     fn reasoning_delta(&mut self, index: i64, text: &str, out: &mut String) {

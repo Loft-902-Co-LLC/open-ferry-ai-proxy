@@ -106,6 +106,15 @@ func decodeOptions(in input, options any) {
 	}
 }
 
+// refused is a request translator's output: its body, or, when the
+// translator refused the request, {"body":<body>,"error":<message>}.
+func refused(body []byte, err error) []byte {
+	if err == nil {
+		return body
+	}
+	return marshal(map[string]any{"body": json.RawMessage(body), "error": err.Error()})
+}
+
 // marshal encodes a report without escaping <, > and &, so strings read
 // back unchanged.
 func marshal(value any) []byte {

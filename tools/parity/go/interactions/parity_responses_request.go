@@ -16,9 +16,9 @@ import (
 
 func init() {
 	translators["interactions/openai-responses/request"] = func(in input) []byte {
-		return responsesinteractions.ConvertOpenAIResponsesRequestToInteractions(in.Model, []byte(in.Request), streamOption(in))
+		return refused(responsesinteractions.ConvertOpenAIResponsesRequestToInteractions(in.Model, []byte(in.Request), streamOption(in)))
 	}
 	translators["openai-responses/interactions/request"] = func(in input) []byte {
-		return responsesinteractions.ConvertInteractionsRequestToOpenAIResponses(in.Model, []byte(in.Request), streamOption(in))
+		return refused(responsesinteractions.ConvertInteractionsRequestToOpenAIResponses(in.Model, []byte(in.Request), streamOption(in)))
 	}
 }

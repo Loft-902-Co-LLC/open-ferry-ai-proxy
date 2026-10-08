@@ -46,7 +46,7 @@ use super::{Family, Pair, ResponseCases, Stage, Suite, mask_volatile};
 use crate::cases::Case;
 use crate::compare::{Deviation, JsonAt, JsonForm};
 use crate::generate::interactions::codex as generate;
-use crate::translator::{Translator, sse_frames};
+use crate::translator::{Translator, refused, refused_body_mut, sse_frames};
 
 /// The family's suites, a variant each.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -127,7 +127,9 @@ impl Family for Kind {
                     .map_err(|err| format!("case {} is not valid JSON: {err}", case.name))?;
                 // As the harness's streamOption reads it.
                 let stream = case.options["stream"].as_bool().unwrap_or(false);
-                convert_interactions_request_to_codex(&case.model, &request, stream).to_string()
+                let (body, err) =
+                    convert_interactions_request_to_codex(&case.model, &request, stream);
+                refused(body, err).to_string()
             }
             // One event at a time, the chunks joined, as the harness writes them.
             Self::Stream => {
@@ -159,7 +161,7 @@ impl Family for Kind {
         let mut value = match self {
             Self::Request => {
                 let mut request = exact::from_str(&text).ok()?;
-                settings_in_listed_order(case, &mut request);
+                settings_in_listed_order(case, refused_body_mut(&mut request));
                 request
             }
             Self::Stream => sse_frames(&text),

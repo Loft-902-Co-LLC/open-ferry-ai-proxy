@@ -1,6 +1,9 @@
 // Ported from CLIProxyAPI internal/translator/openai/interactions/responses/interactions_openai_responses_request.go
 // (ConvertOpenAIResponsesRequestToInteractions, ConvertInteractionsRequestToOpenAIResponses)
-// (v8.0.15, MIT).
+// (v8.0.15, MIT), with v8.0.20's user turn refusal and file and audio parts
+// (responsesUserTurnDrops, isResponsesUnsendableAttachmentType,
+// responsesFilePartToInteractions, responsesAudioPartToInteractions,
+// responsesInputAudioMIMEType) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! OpenAI Responses requests to Gemini Interactions requests, and back.
@@ -15,6 +18,15 @@
 //! input items and inside namespaces are flattened into functions, one per
 //! name (see [`crate::responses_tools`]). The sampling knobs, reasoning and
 //! `tool_choice` go into `generation_config`.
+//!
+//! An `input_file` becomes a `document` part when it carries its bytes or a
+//! URL, and an `input_audio` an `audio` part when it carries its bytes. A
+//! request is refused when a user message, or a bare `input_image`,
+//! `input_file`, `input_audio` or `input_video` item, is left with nothing to
+//! send because its file, audio or video can't be sent: a file named only by
+//! its id, audio without bytes, or any video. Text beside the attachment
+//! keeps the message; empty text doesn't. System and developer messages are
+//! not the user's turns and are never refused.
 //!
 //! The `automation_update` tool of the `mcp__codex_app` namespace is left
 //! out, and so is a `tool_choice` that names it.
@@ -55,21 +67,26 @@ use std::collections::{HashMap, HashSet};
 use serde_json::{Map, Value, json};
 
 use crate::apply_patch;
+use crate::common::file_data::normalize_openai_file_data;
+use crate::common::parts::UserTurnDrops;
 use crate::go;
 use crate::json::{bool_of, exact, float_of, int_of, object, path, set_path, str_of};
+use crate::registry::UnsupportedPartError;
 use crate::responses_tools::{
     ToolIdentity, collect_tool_descriptors, collect_tool_winners, qualify_namespace_tool_name,
     tool_description, tool_parameters, unwrap_responses_custom_tool_input,
 };
 
 /// `ConvertOpenAIResponsesRequestToInteractions`: an OpenAI Responses request
-/// as a Gemini Interactions request.
+/// as a Gemini Interactions request, and the refusal for the first user turn
+/// left with nothing to send.
 pub fn convert_openai_responses_request_to_interactions(
     model_name: &str,
     request: &Value,
     stream: bool,
-) -> Value {
+) -> (Value, Option<UnsupportedPartError>) {
     let root = request;
+    let mut drops = UserTurnDrops::default();
     let mut out = object([
         ("model", request_model(model_name, root).into()),
         ("input", Value::Array(Vec::new())),
@@ -106,7 +123,7 @@ pub fn convert_openai_responses_request_to_interactions(
         set_path(&mut out, "agent_config", agent_config.clone());
     }
     if let Some(input) = root.get("input") {
-        set_responses_input_on_interactions(&mut out, input);
+        set_responses_input_on_interactions(&mut out, input, &mut drops);
     }
     append_responses_tools_to_interactions(&mut out, root);
     if let Some(tool_choice) = root.get("tool_choice")
@@ -158,7 +175,7 @@ pub fn convert_openai_responses_request_to_interactions(
     if let Some(stop) = root.get("stop") {
         set_path(&mut out, "generation_config.stop_sequences", stop.clone());
     }
-    out
+    (out, drops.err())
 }
 
 /// `ConvertInteractionsRequestToOpenAIResponses`: a Gemini Interactions
@@ -333,20 +350,25 @@ fn is_devin_codex_app_automation_update(namespace: &str, tool: &str) -> bool {
 }
 
 /// `setResponsesInputOnInteractions`: `input` as Interactions steps.
-fn set_responses_input_on_interactions(out: &mut Value, input: &Value) {
+fn set_responses_input_on_interactions(out: &mut Value, input: &Value, drops: &mut UserTurnDrops) {
     let mut names_by_call_id = HashMap::new();
     let mut items = Vec::new();
     match input {
         Value::String(text) => items.push(interactions_text_step("user_input", text)),
         Value::Array(list) => {
-            items.extend(list.iter().filter_map(|item| {
-                responses_input_item_to_interactions(item, &mut names_by_call_id)
-            }))
+            for item in list {
+                items.extend(responses_input_item_to_interactions(
+                    item,
+                    &mut names_by_call_id,
+                    drops,
+                ));
+            }
         }
         Value::Object(_) => {
             items.extend(responses_input_item_to_interactions(
                 input,
                 &mut names_by_call_id,
+                drops,
             ));
         }
         _ => {}
@@ -356,22 +378,33 @@ fn set_responses_input_on_interactions(out: &mut Value, input: &Value) {
     }
 }
 
+/// `responsesUserTurnDrops`: `drops` when an item of `role` is a user turn,
+/// which is when its role is `user` or not given. A system or developer
+/// message is sent as a `user_input` step too, but it isn't the user's turn,
+/// so it is never refused and never hides an emptied one.
+fn user_turn_drops<'d>(role: &str, drops: &'d mut UserTurnDrops) -> Option<&'d mut UserTurnDrops> {
+    (role.is_empty() || role == "user").then_some(drops)
+}
+
 /// `responsesInputItemToInteractions`: one Responses input item as a step.
+/// A user message, or a bare attachment item other than an `output_image`,
+/// closes a user turn in `drops`.
 fn responses_input_item_to_interactions(
     item: &Value,
     names_by_call_id: &mut HashMap<String, String>,
+    drops: &mut UserTurnDrops,
 ) -> Option<Value> {
     let item_type = str_of(item.get("type"));
     match item_type.as_ref() {
         "message" => {
             let role = str_of(item.get("role"));
-            let step_type = if role == "assistant" || role == "model" {
-                "model_output"
+            let (step_type, turn_drops) = if role == "assistant" || role == "model" {
+                ("model_output", None)
             } else {
-                "user_input"
+                ("user_input", user_turn_drops(&role, drops))
             };
             let mut step = empty_step(step_type);
-            append_responses_content_to_interactions(&mut step, item.get("content"));
+            append_responses_content_to_interactions(&mut step, item.get("content"), turn_drops);
             Some(step)
         }
         "function_call" | "custom_tool_call" => {
@@ -397,21 +430,24 @@ fn responses_input_item_to_interactions(
             };
             Some(interactions_text_step(step_type, &str_of(item.get("text"))))
         }
-        "input_image" | "output_image" => {
-            let step_type = if item_type == "output_image" {
-                "model_output"
+        "input_image" | "output_image" | "input_file" | "input_audio" | "input_video" => {
+            let (step_type, turn_drops) = if item_type == "output_image" {
+                ("model_output", None)
             } else {
-                "user_input"
+                ("user_input", Some(drops))
             };
             let mut step = empty_step(step_type);
-            if let Some(part) = responses_content_part_to_interactions(item) {
-                set_path(&mut step, "content", Value::Array(vec![part]));
-            }
+            append_responses_content_to_interactions(&mut step, Some(item), turn_drops);
             Some(step)
         }
         _ => item.get("content").map(|content| {
             let mut step = empty_step("user_input");
-            append_responses_content_to_interactions(&mut step, Some(content));
+            let role = str_of(item.get("role"));
+            append_responses_content_to_interactions(
+                &mut step,
+                Some(content),
+                user_turn_drops(&role, drops),
+            );
             step
         }),
     }
@@ -426,22 +462,72 @@ fn empty_step(step_type: &str) -> Value {
 }
 
 /// `appendResponsesContentToInteractions`: a message's content as the step's
-/// content parts. The step keeps its empty `content` if none convert.
-fn append_responses_content_to_interactions(step: &mut Value, content: Option<&Value>) {
-    let parts: Vec<Value> = match content {
-        Some(Value::String(text)) => vec![text_part(text)],
-        Some(Value::Array(list)) => list
-            .iter()
-            .filter_map(responses_content_part_to_interactions)
-            .collect(),
-        Some(part @ Value::Object(_)) => responses_content_part_to_interactions(part)
-            .into_iter()
-            .collect(),
-        _ => Vec::new(),
-    };
+/// content parts. The step keeps its empty `content` if none convert. Given
+/// `drops`, it closes a user turn: an attachment that can't be sent is
+/// recorded, and text or any other sendable part beside it keeps the turn.
+/// Empty text is sent but doesn't count.
+fn append_responses_content_to_interactions(
+    step: &mut Value,
+    content: Option<&Value>,
+    mut drops: Option<&mut UserTurnDrops>,
+) {
+    let mut parts = Vec::new();
+    let mut sendable = 0;
+    match content {
+        Some(Value::String(text)) => {
+            parts.push(text_part(text));
+            if !text.is_empty() {
+                sendable += 1;
+            }
+        }
+        Some(Value::Array(list)) => {
+            for part in list {
+                push_content_part(&mut parts, &mut sendable, part, drops.as_deref_mut());
+            }
+        }
+        Some(part @ Value::Object(_)) => {
+            push_content_part(&mut parts, &mut sendable, part, drops.as_deref_mut());
+        }
+        _ => {}
+    }
+    if let Some(drops) = drops {
+        drops.end_turn(sendable);
+    }
     if !parts.is_empty() {
         set_path(step, "content", Value::Array(parts));
     }
+}
+
+/// One part of [`append_responses_content_to_interactions`]: converted and
+/// counted if it's sendable, or recorded in `drops` if it's an attachment
+/// that can't be sent.
+fn push_content_part(
+    parts: &mut Vec<Value>,
+    sendable: &mut usize,
+    part: &Value,
+    drops: Option<&mut UserTurnDrops>,
+) {
+    let Some(converted) = responses_content_part_to_interactions(part) else {
+        let part_type = str_of(part.get("type"));
+        if let Some(drops) = drops
+            && is_unsendable_attachment_type(&part_type)
+        {
+            drops.drop_part(&part_type);
+        }
+        return;
+    };
+    if str_of(converted.get("type")) != "text" || !str_of(converted.get("text")).is_empty() {
+        *sendable += 1;
+    }
+    parts.push(converted);
+}
+
+/// `isResponsesUnsendableAttachmentType`: the attachment types whose loss is
+/// refused when it leaves a user turn with nothing to send. A file named
+/// only by its id, audio without bytes and a video have no Interactions
+/// counterpart.
+fn is_unsendable_attachment_type(part_type: &str) -> bool {
+    matches!(part_type, "input_file" | "input_audio" | "input_video")
 }
 
 /// An Interactions text part.
@@ -450,15 +536,84 @@ fn text_part(text: &str) -> Value {
 }
 
 /// `responsesContentPartToInteractions`: a Responses content part as an
-/// Interactions content part: text and images, and anything else with a
-/// `text` as text.
+/// Interactions content part: text, images, files with their bytes or a URL
+/// and audio with its bytes, and anything else with a `text` as text.
 pub(super) fn responses_content_part_to_interactions(part: &Value) -> Option<Value> {
     match str_of(part.get("type")).as_ref() {
         "input_text" | "output_text" | "text" => return Some(text_part(&str_of(part.get("text")))),
         "input_image" | "output_image" => return Some(responses_image_part_to_interactions(part)),
+        "input_file" => return responses_file_part_to_interactions(part),
+        "input_audio" => return responses_audio_part_to_interactions(part),
         _ => {}
     }
     part.get("text").map(|text| text_part(&str_of(Some(text))))
+}
+
+/// `responsesFilePartToInteractions`: an `input_file` as a `document` part.
+/// Interactions takes inline bytes or a URL; a bare `file_id` names a file
+/// only the OpenAI side can find, so that gives `None`.
+fn responses_file_part_to_interactions(part: &Value) -> Option<Value> {
+    let filename = str_of(part.get("filename"));
+    let (snake, camel) = (str_of(part.get("mime_type")), str_of(part.get("mimeType")));
+    let fallback_mime_type = first_non_empty([&snake, &camel]);
+    let mut out = object([("type", "document".into())]);
+    if !filename.is_empty() {
+        set_path(&mut out, "filename", filename.as_ref().into());
+    }
+    let mut has_content = false;
+    if let Some(file) = normalize_openai_file_data(
+        &filename,
+        fallback_mime_type,
+        &str_of(part.get("file_data")),
+    ) {
+        set_path(&mut out, "mime_type", file.mime_type.into());
+        set_path(&mut out, "data", file.data.into());
+        has_content = true;
+    }
+    let file_url = str_of(part.get("file_url"));
+    if !file_url.is_empty() {
+        set_path(&mut out, "file_url", file_url.into_owned().into());
+        has_content = true;
+    }
+    has_content.then_some(out)
+}
+
+/// `responsesAudioPartToInteractions`: an `input_audio` with its bytes, in
+/// `input_audio` or on the part itself, as an `audio` part.
+fn responses_audio_part_to_interactions(part: &Value) -> Option<Value> {
+    let (nested, own) = (
+        str_of(path(part, "input_audio.data")),
+        str_of(part.get("data")),
+    );
+    let data = first_non_empty([&nested, &own]);
+    if data.is_empty() {
+        return None;
+    }
+    let mut out = object([("type", "audio".into()), ("data", data.into())]);
+    let (nested, own) = (
+        str_of(path(part, "input_audio.format")),
+        str_of(part.get("format")),
+    );
+    let format = first_non_empty([&nested, &own]);
+    if !format.is_empty() {
+        set_path(
+            &mut out,
+            "mime_type",
+            responses_input_audio_mime_type(format).into(),
+        );
+    }
+    Some(out)
+}
+
+/// `responsesInputAudioMIMEType`: the MIME type of an `input_audio` format.
+fn responses_input_audio_mime_type(format: &str) -> &'static str {
+    match go::to_lower(format.trim()).as_str() {
+        "wav" => "audio/wav",
+        "flac" => "audio/flac",
+        "opus" => "audio/opus",
+        "pcm16" => "audio/pcm",
+        _ => "audio/mpeg",
+    }
 }
 
 /// `responsesImagePartToInteractions`: an image part as inline data when its

@@ -958,6 +958,53 @@ fn stream_web_search_call_reuses_fallback_tool_use_id() {
     );
 }
 
+/// Checks the `web_search_tool_result` made from an `action.sources` list:
+/// blank URLs are left out, and a missing title is the URL.
+fn assert_action_sources_content(content: &Value) {
+    let content = content.as_array().expect("content is an array");
+    assert_eq!(
+        content.len(),
+        2,
+        "web_search_tool_result.content: {content:?}"
+    );
+    assert_eq!(
+        text_at(&content[0], "url"),
+        "https://docs.x.ai/developers/tools/web-search"
+    );
+    assert_eq!(text_at(&content[0], "title"), "xAI Docs");
+    assert_eq!(text_at(&content[1], "url"), "https://example.com/notitle");
+    assert_eq!(
+        text_at(&content[1], "title"),
+        "https://example.com/notitle",
+        "fallback to url"
+    );
+}
+
+// TestConvertCodexResponseToClaude_StreamWebSearchCallActionSources
+#[test]
+fn stream_web_search_call_action_sources() {
+    let output = run_stream(
+        r#"{
+            "tools":[{"type":"web_search_20250305","name":"web_search"}],
+            "messages":[{"role":"user","content":"search xai docs"}]
+        }"#,
+        &[
+            r#"data: {"type":"response.created","response":{"id":"resp_1","model":"grok-4"}}"#,
+            r#"data: {"type":"response.output_item.added","item":{"id":"ws_123","type":"web_search_call","status":"in_progress"}}"#,
+            r#"data: {"type":"response.output_item.done","item":{"id":"ws_123","type":"web_search_call","status":"completed","action":{"type":"search","query":"xAI web search docs","sources":[{"type":"url","url":"https://docs.x.ai/developers/tools/web-search","title":"xAI Docs"},{"type":"url","url":"https://example.com/notitle"},{"type":"url","url":""},{"type":"url","url":"   "}]}}}"#,
+            r#"data: {"type":"response.completed","response":{"stop_reason":"stop","usage":{"input_tokens":5,"output_tokens":10}}}"#,
+        ],
+    );
+    let block = payloads(&output)
+        .into_iter()
+        .rfind(|data| {
+            text_at(data, "type") == "content_block_start"
+                && text_at(data, "content_block.type") == "web_search_tool_result"
+        })
+        .expect("web_search_tool_result block in stream output");
+    assert_action_sources_content(&block["content_block"]["content"]);
+}
+
 #[test]
 fn shortens_long_tool_use_ids() {
     let long_call_id = format!("call_{}", "a".repeat(62));
@@ -1149,6 +1196,51 @@ fn non_stream_web_search_dedupes_empty_open_page_items() {
         raw.contains("weather"),
         "expected populated query item to be kept: {raw}"
     );
+}
+
+// TestConvertCodexResponseToClaudeNonStream_WebSearchCallActionSources
+#[test]
+fn non_stream_web_search_call_action_sources() {
+    let out = convert_non_stream(
+        r#"{"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"search xai docs"}]}"#,
+        r#"{
+            "type":"response.completed",
+            "response":{
+                "id":"resp_1",
+                "model":"grok-4",
+                "stop_reason":"stop",
+                "usage":{"input_tokens":5,"output_tokens":10},
+                "output":[
+                    {
+                        "type":"web_search_call",
+                        "id":"ws_123",
+                        "status":"completed",
+                        "action":{
+                            "type":"search",
+                            "query":"xAI web search docs",
+                            "sources":[
+                                {"type":"url","url":"https://docs.x.ai/developers/tools/web-search","title":"xAI Docs"},
+                                {"type":"url","url":"https://example.com/notitle"},
+                                {"type":"url","url":""},
+                                {"type":"url","url":"   "}
+                            ]
+                        }
+                    },
+                    {
+                        "type":"message",
+                        "content":[{"type":"output_text","text":"here are the docs"}]
+                    }
+                ]
+            }
+        }"#,
+    );
+    let block = out["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|block| text_at(block, "type") == "web_search_tool_result")
+        .unwrap_or_else(|| panic!("missing web_search_tool_result in non-stream content: {out}"));
+    assert_action_sources_content(&block["content"]);
 }
 
 #[test]

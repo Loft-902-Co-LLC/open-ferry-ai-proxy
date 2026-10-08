@@ -29,6 +29,11 @@
 //! reasoning summaries, in the provider's own terms. With no translator, the
 //! request is passed on with only its `model` replaced.
 //!
+//! A request translator can refuse a request it can't send faithfully, such
+//! as a user turn left empty by an attachment the provider can't take. The
+//! refusal is [`RequestEnvelope::err`]; [`Registry::translate_request_checked`]
+//! returns it, so executors can answer 400 without calling the provider.
+//!
 //! Deviations from upstream:
 //! - Request bodies are parsed JSON. Response chunks and bodies are bytes, as
 //!   upstream's are. So with no translator, a `model` that is an object or
@@ -63,6 +68,7 @@ use std::sync::{Arc, LazyLock, PoisonError, RwLock};
 
 use serde_json::Value;
 
+pub use crate::common::parts::UnsupportedPartError;
 use crate::json::{set_path, str_of};
 use crate::models::ModelCatalog;
 use crate::thinking::summary;
@@ -139,10 +145,28 @@ pub struct RequestEnvelope {
     pub stream: bool,
     /// The request.
     pub body: Value,
+    /// Why the request must not be sent, when a translator refused it
+    /// (upstream's `Err`). `body` still holds what the translator produced.
+    pub err: Option<UnsupportedPartError>,
 }
 
-/// Translates a request body, given the model and whether it streams.
-pub type RequestTransform = Arc<dyn Fn(&str, Value, bool) -> Value + Send + Sync>;
+/// Translates a request body, given the model and whether it streams. It
+/// gives back the body, and a refusal when the request must not be sent.
+pub type RequestTransform =
+    Arc<dyn Fn(&str, Value, bool) -> (Value, Option<UnsupportedPartError>) + Send + Sync>;
+
+impl RequestEnvelope {
+    /// A request in `format` for `model`, not yet refused.
+    pub fn new(format: &Format, model: &str, stream: bool, body: Value) -> Self {
+        Self {
+            format: format.clone(),
+            model: model.to_owned(),
+            stream,
+            body,
+            err: None,
+        }
+    }
+}
 
 /// Translates a whole [`RequestEnvelope`].
 pub type RequestEnvelopeTransform = Arc<dyn Fn(RequestEnvelope) -> RequestEnvelope + Send + Sync>;
@@ -299,7 +323,9 @@ impl Registry {
         let mut tables = self.write();
         if let Some(request) = request {
             let envelope: RequestEnvelopeTransform = Arc::new(move |mut req: RequestEnvelope| {
-                req.body = request(&req.model, req.body, req.stream);
+                let (body, err) = request(&req.model, req.body, req.stream);
+                req.body = body;
+                req.err = err;
                 req
             });
             tables
@@ -360,8 +386,8 @@ impl Registry {
             .is_some_and(|response| response.non_stream.is_some())
     }
 
-    /// Translates a request body from `from` to `to`. See
-    /// [`translate_request_envelope`](Self::translate_request_envelope).
+    /// Translates a request body from `from` to `to`, ignoring a refusal.
+    /// See [`translate_request_envelope`](Self::translate_request_envelope).
     pub fn translate_request(
         &self,
         from: &Format,
@@ -370,13 +396,30 @@ impl Registry {
         body: Value,
         stream: bool,
     ) -> Value {
-        let req = RequestEnvelope {
-            format: from.clone(),
-            model: model.to_owned(),
-            stream,
-            body,
-        };
-        self.translate_request_envelope(from, to, req).body
+        self.translate_request_envelope(from, to, RequestEnvelope::new(from, model, stream, body))
+            .body
+    }
+
+    /// Translates a request body from `from` to `to`, or gives the reason
+    /// the request must not be sent. Executors use this for the body they
+    /// send, so a refused request never reaches the provider.
+    pub fn translate_request_checked(
+        &self,
+        from: &Format,
+        to: &Format,
+        model: &str,
+        body: Value,
+        stream: bool,
+    ) -> Result<Value, UnsupportedPartError> {
+        let req = self.translate_request_envelope(
+            from,
+            to,
+            RequestEnvelope::new(from, model, stream, body),
+        );
+        match req.err {
+            Some(err) => Err(err),
+            None => Ok(req.body),
+        }
     }
 
     /// Translates a request from `from` to `to`, then asks it to show or hide

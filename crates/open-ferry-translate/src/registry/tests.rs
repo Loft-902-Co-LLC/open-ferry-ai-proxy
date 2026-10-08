@@ -13,11 +13,11 @@ use super::*;
 use crate::json::path;
 
 fn identity() -> RequestTransform {
-    Arc::new(|_, body, _| body)
+    Arc::new(|_, body, _| (body, None))
 }
 
 fn returning(body: Value) -> RequestTransform {
-    Arc::new(move |_, _, _| body.clone())
+    Arc::new(move |_, _, _| (body.clone(), None))
 }
 
 const NO_REQUEST: Value = Value::Null;
@@ -135,15 +135,47 @@ fn fallback_sets_model_as_sjson_does() {
 #[test]
 fn fallback_moves_format_to_target() {
     let registry = Registry::new();
-    let req = RequestEnvelope {
-        format: Format::OPENAI,
-        model: String::new(),
-        stream: true,
-        body: json!({}),
-    };
+    let req = RequestEnvelope::new(&Format::OPENAI, "", true, json!({}));
     let got = registry.translate_request_envelope(&Format::OPENAI, &Format::CODEX, req);
     assert_eq!(got.format, Format::CODEX);
     assert!(got.stream);
+}
+
+// Not upstream's: Register stores a translator's refusal on the envelope
+// (upstream's `req.Body, req.Err = request(...)`), TranslateRequest still
+// returns the body, and the checked call returns the refusal.
+#[test]
+fn refusal_is_kept_on_the_envelope() {
+    let registry = Registry::new();
+    registry.register(
+        Format::CLAUDE,
+        Format::GEMINI,
+        Some(Arc::new(|_, _, _| {
+            (
+                json!({"contents": []}),
+                Some(UnsupportedPartError::new("document")),
+            )
+        })),
+        ResponseTransform::default(),
+    );
+    let body = json!({"messages": []});
+    let req = RequestEnvelope::new(&Format::CLAUDE, "m", false, body.clone());
+    let got = registry.translate_request_envelope(&Format::CLAUDE, &Format::GEMINI, req);
+    assert_eq!(got.err, Some(UnsupportedPartError::new("document")));
+    assert_eq!(got.body["contents"], json!([]));
+
+    let translated =
+        registry.translate_request(&Format::CLAUDE, &Format::GEMINI, "m", body.clone(), false);
+    assert_eq!(translated["contents"], json!([]));
+
+    let err = registry
+        .translate_request_checked(&Format::CLAUDE, &Format::GEMINI, "m", body.clone(), false)
+        .unwrap_err();
+    assert_eq!(err.to_string(), "unsupported content part: document");
+
+    // With no translator nothing refuses.
+    let got = registry.translate_request_checked(&Format::CLAUDE, &Format::CODEX, "m", body, false);
+    assert!(got.is_ok());
 }
 
 #[test]
@@ -370,12 +402,7 @@ fn request_envelope_transform_is_used_until_replaced() {
         json!({"input": "hello"}),
         json!({"input": "weather", "tools": [{"type": "web_search"}]}),
     ] {
-        let req = RequestEnvelope {
-            format: from.clone(),
-            model: "home-model".into(),
-            stream: false,
-            body,
-        };
+        let req = RequestEnvelope::new(&from, "home-model", false, body);
         let got = registry.translate_request_envelope(&from, &to, req);
         assert_eq!(got.body["source"], "custom");
         assert_eq!(got.format, to);
@@ -472,7 +499,7 @@ fn translators_run_outside_the_lock() {
                 ResponseTransform::default(),
             );
             seen.store(true, Ordering::SeqCst);
-            body
+            (body, None)
         })),
         ResponseTransform::default(),
     );

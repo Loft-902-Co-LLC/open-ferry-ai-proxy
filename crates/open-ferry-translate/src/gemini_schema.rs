@@ -1,5 +1,6 @@
 // Ported from CLIProxyAPI internal/util/gemini_schema.go (CleanJSONSchemaForGeminiJSONSchema and the
-// passes it runs) and internal/util/translator.go (Walk) (v8.0.15, MIT).
+// passes it runs) and internal/util/translator.go (Walk) (v8.0.15, MIT), with v8.0.20's
+// sanitizeObjectProperties and object type for nodes with properties (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Making a JSON Schema fit for a Gemini function declaration's
@@ -18,7 +19,9 @@
 //!
 //! It also repairs schemas some MCP servers write: a bare property map gets
 //! its `type` and `properties` wrapper, a boolean `required` on a property
-//! moves into its parent's `required`, and an array gets `items`.
+//! moves into its parent's `required`, and an array gets `items`. Gemini only
+//! takes `properties` and `required` on an object, so a node with
+//! `properties` always ends up an object.
 //!
 //! Upstream rewrites the schema's JSON text one gjson path at a time, and
 //! several of its passes depend on how those paths resolve:
@@ -153,7 +156,25 @@ pub(crate) fn clean_json_schema_for_gemini_json_schema(schema: &Value) -> Value 
     remove_placeholder_fields(&mut doc);
     cleanup_required_fields(&mut doc);
     sanitize_array_items(&mut doc);
+    sanitize_object_properties(&mut doc);
     doc
+}
+
+/// Upstream's `sanitizeObjectProperties`: a schema node whose `properties` is
+/// an object becomes an object, whatever type it declared.
+fn sanitize_object_properties(doc: &mut Value) {
+    let mut paths = find_paths(doc, "properties");
+    sort_by_depth(&mut paths);
+    for path in paths {
+        let parent = trim_suffix(&path, ".properties");
+        if is_property_definition(&parent) || !matches!(get(doc, &path), Some(Value::Object(_))) {
+            continue;
+        }
+        let type_path = join_path(&parent, "type");
+        if !str_of(get(doc, &type_path)).eq_ignore_ascii_case("object") {
+            set(doc, &type_path, Value::from("object"));
+        }
+    }
 }
 
 /// Ensures a schema node that has `items` is an array: a missing type becomes
@@ -378,7 +399,8 @@ fn is_api_request_document(fields: &Map<String, Value>) -> bool {
 ///
 /// Unless the node declares a type other than object, its object-valued keys
 /// that aren't keywords are bare property definitions: they move into
-/// `properties`, and the node becomes an object if it has no type. Properties
+/// `properties`, and the node becomes an object if it has no type. A node
+/// with `properties` and no type becomes an object too. Properties
 /// are repaired (see [`repair_property_map`]), an array without `items` gets
 /// `{"type":"string"}`, a node with `items` and no type becomes an array, and
 /// every subschema is repaired in turn, `true` becoming `{}`.
@@ -410,6 +432,10 @@ fn repair_schema_node(node: &Map<String, Value>) -> (Map<String, Value>, bool) {
         }
     }
 
+    if matches!(node.get("properties"), Some(Value::Object(_))) && !node.contains_key("type") {
+        node.insert("type".into(), Value::from("object"));
+        modified = true;
+    }
     if let Some(Value::Object(properties)) = node.get("properties") {
         let (repaired, promoted, properties_modified) = repair_property_map(properties);
         if properties_modified {
@@ -860,8 +886,9 @@ fn merge_missing_schema_at_path(doc: &mut Value, destination: &str, incoming: &V
 }
 
 /// Resolves each `anyOf` and `oneOf`. Where the parent has `properties`, the
-/// branches' properties fill what it lacks and a null branch makes it
-/// nullable. Otherwise the parent is replaced by its best branch (see
+/// branches' properties fill what it lacks, a null branch makes it nullable,
+/// and it becomes an object if it had no type. Otherwise the parent is
+/// replaced by its best branch (see
 /// [`select_best`]), with the parent's description and an `Accepts: ...` hint
 /// naming the branches' types.
 fn flatten_any_of_one_of(doc: &mut Value) {
@@ -882,10 +909,11 @@ fn flatten_any_of_one_of(doc: &mut Value) {
                 get(doc, &parent_path)
             };
 
-            if parent
-                .and_then(|parent| child(parent, "properties"))
-                .is_some_and(Value::is_object)
+            if let Some(parent) =
+                parent.filter(|parent| child(parent, "properties").is_some_and(Value::is_object))
             {
+                // Read before the merges, as upstream reads it.
+                let untyped = str_of(child(parent, "type")).is_empty();
                 let mut has_null = false;
                 for item in &items {
                     if str_of(child(item, "type")) == "null" {
@@ -903,6 +931,9 @@ fn flatten_any_of_one_of(doc: &mut Value) {
                 }
                 if has_null {
                     set(doc, &join_path(&parent_path, "nullable"), Value::Bool(true));
+                }
+                if untyped {
+                    set(doc, &join_path(&parent_path, "type"), Value::from("object"));
                 }
                 delete(doc, &path);
                 continue;
@@ -964,7 +995,8 @@ fn select_best(items: &[Value]) -> (usize, Vec<String>) {
 }
 
 /// Flattens each type array to one type: `array` if the node has `items` and
-/// allows it, otherwise the first non-null type, or `string`. Other non-null
+/// allows it, else `object` if it has `properties` and allows that, otherwise
+/// the first non-null type, or `string`. Other non-null
 /// types become an `Accepts: ...` hint. A property allowing null gets a
 /// `(nullable)` hint and is dropped from its object's `required`.
 fn flatten_type_arrays(doc: &mut Value) {
@@ -997,6 +1029,12 @@ fn flatten_type_arrays(doc: &mut Value) {
             None => "string".to_owned(),
             Some(_) if get(doc, &items_path).is_some() && non_null.iter().any(|k| k == "array") => {
                 "array".to_owned()
+            }
+            Some(_)
+                if get(doc, &join_path(&parent, "properties")).is_some()
+                    && non_null.iter().any(|k| k == "object") =>
+            {
+                "object".to_owned()
             }
             Some(first) => first.clone(),
         };

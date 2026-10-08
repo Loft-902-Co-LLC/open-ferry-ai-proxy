@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/codex/openai/chat-completions/codex_openai_request.go
-// (v8.0.15, MIT).
+// (v8.0.15, MIT), with the v8.0.20 user turn checks.
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! OpenAI Chat Completions request → Codex request.
@@ -8,6 +8,11 @@
 //! become `function_call` or `custom_tool_call` items, and each tool message
 //! the output item of the call it answers. Tool names are made safe for Codex
 //! and fit within its 64-byte limit; the response translator restores them.
+//!
+//! A user's file part is sent if it names a file ID, bytes or a URL, and
+//! audio if it has bytes; one with none of these is dropped. The rest of the
+//! message is still sent, but a user message left with nothing to send
+//! (empty text doesn't count) is refused with an [`UnsupportedPartError`].
 //!
 //! Deviations from upstream:
 //! - Where upstream copies the client's JSON text into a string, we write the
@@ -27,8 +32,10 @@ use serde_json::{Map, Value, json};
 
 use super::super::super::unique_names::UniqueNames;
 use crate::apply_patch;
+use crate::common::parts::UserTurnDrops;
 use crate::go;
 use crate::json::{go_value, object, path, str_of};
+use crate::registry::UnsupportedPartError;
 
 /// Codex's limit on tool name length, in bytes.
 const NAME_LIMIT: usize = 64;
@@ -38,11 +45,14 @@ pub(super) type ToolNameMap = HashMap<String, String>;
 
 /// Converts a Chat Completions request body into a Codex Responses request
 /// body for `model_name`. `stream` is whether the client asked to stream.
+///
+/// The error is set when a user message had only parts Codex can't take;
+/// the body is still returned.
 pub fn convert_openai_chat_completions_request_to_codex(
     model_name: &str,
     request: &Value,
     stream: bool,
-) -> Value {
+) -> (Value, Option<UnsupportedPartError>) {
     let tools = match request.get("tools") {
         Some(Value::Array(tools)) if !tools.is_empty() => Some(tools),
         _ => None,
@@ -66,7 +76,8 @@ pub fn convert_openai_chat_completions_request_to_codex(
     // Reasoning summaries are opt-in on the Responses API, so only the effort is set.
     out.insert("include".into(), json!(["reasoning.encrypted_content"]));
     out.insert("model".into(), model_name.into());
-    out.insert("input".into(), input_items(request, &names).into());
+    let (input, refusal) = input_items(request, &names);
+    out.insert("input".into(), input.into());
     if let Some(text) = text_settings(request) {
         out.insert("text".into(), text);
     }
@@ -81,7 +92,7 @@ pub fn convert_openai_chat_completions_request_to_codex(
         out.insert("tool_choice".into(), choice);
     }
     out.insert("store".into(), false.into());
-    Value::Object(out)
+    (Value::Object(out), refusal)
 }
 
 struct ToolNames {
@@ -159,10 +170,13 @@ struct PendingCall {
     consumed: bool,
 }
 
-fn input_items(request: &Value, names: &ToolNames) -> Vec<Value> {
+/// The messages as input items, and the refusal for the first user message
+/// left with nothing to send.
+fn input_items(request: &Value, names: &ToolNames) -> (Vec<Value>, Option<UnsupportedPartError>) {
     let Some(Value::Array(messages)) = request.get("messages") else {
-        return Vec::new();
+        return (Vec::new(), None);
     };
+    let mut drops = UserTurnDrops::default();
     let mut items = Vec::with_capacity(messages.len());
     let mut pending: Vec<PendingCall> = Vec::new();
     // IDs used by more than one call in the latest batch. Their outputs can't
@@ -198,7 +212,10 @@ fn input_items(request: &Value, names: &ToolNames) -> Vec<Value> {
         // Any other message starts a new batch of tool calls.
         pending.clear();
         ambiguous.clear();
-        let content = message_content(&role, message.get("content"));
+        let (content, sendable) = message_content(&role, message.get("content"), &mut drops);
+        if role == "user" {
+            drops.end_turn(sendable);
+        }
         // An assistant message holding only tool calls becomes just the call
         // items, or Codex can't match call IDs.
         if role != "assistant" || !content.is_empty() {
@@ -215,7 +232,7 @@ fn input_items(request: &Value, names: &ToolNames) -> Vec<Value> {
             push_tool_calls(calls, i, names, &mut pending, &mut ambiguous, &mut items);
         }
     }
-    items
+    (items, drops.err())
 }
 
 /// Adds an assistant message's tool calls to `items`, and to `pending` for
@@ -295,29 +312,53 @@ fn push_tool_calls(
     }
 }
 
-fn message_content(role: &str, content: Option<&Value>) -> Vec<Value> {
+/// A message's content parts, and how many of them it sends: a part counts
+/// unless it is empty text. A user's file or audio part that can't be sent
+/// is recorded in `drops`.
+fn message_content(
+    role: &str,
+    content: Option<&Value>,
+    drops: &mut UserTurnDrops,
+) -> (Vec<Value>, usize) {
     let text_type = if role == "assistant" {
         "output_text"
     } else {
         "input_text"
     };
     match content {
-        Some(Value::String(text)) if !text.is_empty() => {
+        Some(Value::String(text)) if !text.is_empty() => (
             vec![object([
                 ("type", text_type.into()),
                 ("text", text.as_str().into()),
-            ])]
+            ])],
+            1,
+        ),
+        Some(Value::Array(parts)) => {
+            let mut items = Vec::with_capacity(parts.len());
+            let mut sendable = 0;
+            for part in parts {
+                let part_type = str_of(part.get("type"));
+                match content_part(role, text_type, &part_type, part) {
+                    Some(item) => {
+                        if part_type != "text" || !str_of(part.get("text")).is_empty() {
+                            sendable += 1;
+                        }
+                        items.push(item);
+                    }
+                    None if role == "user" && matches!(&*part_type, "file" | "input_audio") => {
+                        drops.drop_part(&part_type);
+                    }
+                    None => {}
+                }
+            }
+            (items, sendable)
         }
-        Some(Value::Array(parts)) => parts
-            .iter()
-            .filter_map(|part| content_part(role, text_type, part))
-            .collect(),
-        _ => Vec::new(),
+        _ => (Vec::new(), 0),
     }
 }
 
-fn content_part(role: &str, text_type: &str, part: &Value) -> Option<Value> {
-    match &*str_of(part.get("type")) {
+fn content_part(role: &str, text_type: &str, part_type: &str, part: &Value) -> Option<Value> {
+    match part_type {
         "text" => Some(object([
             ("type", text_type.into()),
             ("text", str_of(part.get("text")).into()),
@@ -330,20 +371,7 @@ fn content_part(role: &str, text_type: &str, part: &Value) -> Option<Value> {
             }
             Some(Value::Object(image))
         }
-        "file" if role == "user" => {
-            let data = str_of(path(part, "file.file_data"));
-            if data.is_empty() {
-                return None;
-            }
-            let mut file = Map::new();
-            file.insert("type".into(), "input_file".into());
-            file.insert("file_data".into(), data.into());
-            let filename = str_of(path(part, "file.filename"));
-            if !filename.is_empty() {
-                file.insert("filename".into(), filename.into());
-            }
-            Some(Value::Object(file))
-        }
+        "file" if role == "user" => input_file_part(part),
         "input_audio" if role == "user" => {
             let data = str_of(path(part, "input_audio.data"));
             if data.is_empty() {
@@ -415,27 +443,31 @@ fn tool_output_part(part: &Value) -> Value {
             }
             Value::Object(image)
         }
-        "file" => {
-            let fields = [
-                ("file_id", str_of(path(part, "file.file_id"))),
-                ("file_data", str_of(path(part, "file.file_data"))),
-                ("file_url", str_of(path(part, "file.file_url"))),
-            ];
-            if fields.iter().all(|(_, value)| value.is_empty()) {
-                return fallback_part(part);
-            }
-            let mut file = Map::new();
-            file.insert("type".into(), "input_file".into());
-            let filename = ("filename", str_of(path(part, "file.filename")));
-            for (key, value) in fields.into_iter().chain([filename]) {
-                if !value.is_empty() {
-                    file.insert(key.into(), value.into());
-                }
-            }
-            Value::Object(file)
-        }
+        "file" => input_file_part(part).unwrap_or_else(|| fallback_part(part)),
         _ => fallback_part(part),
     }
+}
+
+/// `codexInputFilePart`: a Chat Completions file part as a Responses
+/// `input_file` part, if it names a file ID, bytes or a URL.
+fn input_file_part(part: &Value) -> Option<Value> {
+    let fields = [
+        ("file_id", str_of(path(part, "file.file_id"))),
+        ("file_data", str_of(path(part, "file.file_data"))),
+        ("file_url", str_of(path(part, "file.file_url"))),
+    ];
+    if fields.iter().all(|(_, value)| value.is_empty()) {
+        return None;
+    }
+    let mut file = Map::new();
+    file.insert("type".into(), "input_file".into());
+    let filename = ("filename", str_of(path(part, "file.filename")));
+    for (key, value) in fields.into_iter().chain([filename]) {
+        if !value.is_empty() {
+            file.insert(key.into(), value.into());
+        }
+    }
+    Some(Value::Object(file))
 }
 
 /// A tool output part we don't recognize, passed on as its JSON text.

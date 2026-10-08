@@ -735,7 +735,9 @@ fn patch_request() -> Value {
 
 /// `request` as translated for the Chat Completions upstream.
 fn translated(request: &Value) -> String {
-    convert_openai_responses_request_to_openai_chat_completions(MODEL, request, true).to_string()
+    convert_openai_responses_request_to_openai_chat_completions(MODEL, request, true)
+        .0
+        .to_string()
 }
 
 /// A case answering `request`, given both as the client sent it and as

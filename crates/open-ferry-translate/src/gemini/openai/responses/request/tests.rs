@@ -1,4 +1,5 @@
-// Ported from CLIProxyAPI internal/translator/gemini/openai/responses/gemini_openai-responses_request_test.go (v8.0.15, MIT).
+// Ported from CLIProxyAPI internal/translator/gemini/openai/responses/gemini_openai-responses_request_test.go (v8.0.15, MIT)
+// and gemini_openai-responses_user_turn_test.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Tests for the OpenAI Responses to Gemini request translator: thought
@@ -13,7 +14,9 @@ use base64::engine::general_purpose::{STANDARD, URL_SAFE};
 use serde_json::json;
 
 use super::super::at;
-use super::super::test_support::{GEMINI_SIGNATURE, different_gemini_signature};
+use super::super::test_support::{
+    GEMINI_SIGNATURE, convert_openai_responses_request_to_gemini, different_gemini_signature,
+};
 use super::*;
 use crate::signature::validate_gemini_function_call_pairing;
 
@@ -3905,7 +3908,10 @@ fn convert_openai_responses_request_to_gemini_invalid_data_urls_rejected() {
     ];
 
     for (name, input) in tests {
-        let output = convert("gemini-2.5-flash", &input);
+        // A user turn of only an invalid part is refused; the body still
+        // comes back.
+        let (output, _) =
+            super::convert_openai_responses_request_to_gemini("gemini-2.5-flash", &input, false);
         // No inline_data should be created for invalid data URLs.
         for part in all_parts(&output) {
             assert!(
@@ -4173,4 +4179,159 @@ fn convert_openai_responses_request_to_gemini_unsigned_model_text_does_not_synth
         "sanitizer left unexpected thoughtSignature on text part: {}",
         sanitized_parts[1]
     );
+}
+
+const GEMINI_TURN_HELLO: &str =
+    r#"{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}"#;
+const GEMINI_TURN_ASSISTANT: &str =
+    r#"{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]}"#;
+const GEMINI_TURN_NEXT: &str =
+    r#"{"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]}"#;
+const GEMINI_TURN_DEVELOPER: &str =
+    r#"{"type":"message","role":"developer","content":[{"type":"input_text","text":"dev"}]}"#;
+const GEMINI_TURN_FILE_ID: &str = r#"{"type":"input_file","file_id":"file-1"}"#;
+const GEMINI_TURN_FILE_DATA: &str = r#"{"type":"input_file","filename":"a.pdf","file_data":"data:application/pdf;base64,JVBERi0xLjQK"}"#;
+const GEMINI_TURN_FILE_URL: &str =
+    r#"{"type":"input_file","file_url":"https://example.test/a.pdf","filename":"a.pdf"}"#;
+const GEMINI_TURN_TEXT: &str = r#"{"type":"input_text","text":"keep me"}"#;
+const GEMINI_TURN_EMPTY_TEXT: &str = r#"{"type":"input_text","text":""}"#;
+
+fn gemini_user_turn(parts: &[&str]) -> String {
+    format!(
+        r#"{{"type":"message","role":"user","content":[{}]}}"#,
+        parts.join(",")
+    )
+}
+
+fn gemini_turn_payload(instructions: &str, items: &[&str]) -> Value {
+    let mut prefix = r#"{"model":"gemini-3-pro","#.to_owned();
+    if !instructions.is_empty() {
+        prefix += &format!(r#""instructions":"{instructions}","#);
+    }
+    serde_json::from_str(&format!(r#"{prefix}"input":[{}]}}"#, items.join(",")))
+        .expect("test request is valid JSON")
+}
+
+/// `ConvertOpenAIResponsesRequestToGemini`, with its refusal.
+fn convert_checked(request: &Value) -> (Value, Option<UnsupportedPartError>) {
+    super::convert_openai_responses_request_to_gemini("gemini-3-pro", request, false)
+}
+
+// TestConvertOpenAIResponsesRequestToGemini_RefusesAnyEmptiedUserTurn
+#[test]
+fn refuses_any_emptied_user_turn() {
+    let file_id_turn = gemini_user_turn(&[GEMINI_TURN_FILE_ID]);
+    let empty_text_turn = gemini_user_turn(&[GEMINI_TURN_EMPTY_TEXT, GEMINI_TURN_FILE_ID]);
+    let cases = [
+        ("file id only", gemini_turn_payload("", &[&file_id_turn])),
+        (
+            "history then file id only",
+            gemini_turn_payload(
+                "",
+                &[GEMINI_TURN_HELLO, GEMINI_TURN_ASSISTANT, &file_id_turn],
+            ),
+        ),
+        (
+            "instructions and developer prompt do not hide the empty turn",
+            gemini_turn_payload("sys", &[GEMINI_TURN_DEVELOPER, &file_id_turn]),
+        ),
+        (
+            "emptied turn before a later text turn",
+            gemini_turn_payload(
+                "",
+                &[&file_id_turn, GEMINI_TURN_ASSISTANT, GEMINI_TURN_NEXT],
+            ),
+        ),
+        (
+            "empty text beside the file id does not count as sendable",
+            gemini_turn_payload(
+                "",
+                &[GEMINI_TURN_HELLO, GEMINI_TURN_ASSISTANT, &empty_text_turn],
+            ),
+        ),
+    ];
+    for (name, input) in cases {
+        let (body, err) = convert_checked(&input);
+        let err = err.unwrap_or_else(|| panic!("{name}: no refusal; body = {body}"));
+        assert_eq!(err.part_type, "input_file", "{name}");
+        assert_eq!(err.status_code(), 400, "{name}");
+        assert_eq!(
+            err.to_string(),
+            "unsupported content part: input_file",
+            "{name}"
+        );
+        assert!(body.is_object(), "{name}: {body}");
+
+        let err = crate::registry::Registry::global()
+            .translate_request_checked(
+                &"openai-response".into(),
+                &"gemini".into(),
+                "gemini-3-pro",
+                input,
+                false,
+            )
+            .expect_err(name);
+        assert_eq!(err.part_type, "input_file", "{name}: registry");
+    }
+}
+
+// TestConvertOpenAIResponsesRequestToGemini_KeepsTurnWithTextBesideFileID
+#[test]
+fn keeps_turn_with_text_beside_file_id() {
+    let turn = gemini_user_turn(&[GEMINI_TURN_TEXT, GEMINI_TURN_FILE_ID]);
+    let input = gemini_turn_payload("", &[GEMINI_TURN_HELLO, GEMINI_TURN_ASSISTANT, &turn]);
+    let (body, err) = convert_checked(&input);
+    assert_eq!(err, None, "{body}");
+    assert_eq!(body["contents"][2]["parts"][0]["text"], "keep me", "{body}");
+}
+
+// TestConvertOpenAIResponsesRequestToGemini_InlineAndRemoteFilesStayParts
+#[test]
+fn inline_and_remote_files_stay_parts() {
+    let cases = [
+        (
+            "inline bytes",
+            GEMINI_TURN_FILE_DATA,
+            "/contents/2/parts/0/inline_data/mime_type",
+            "application/pdf",
+        ),
+        (
+            "remote url",
+            GEMINI_TURN_FILE_URL,
+            "/contents/2/parts/0/file_data/file_uri",
+            "https://example.test/a.pdf",
+        ),
+    ];
+    for (name, part, pointer, want) in cases {
+        let turn = gemini_user_turn(&[part]);
+        let input = gemini_turn_payload("", &[GEMINI_TURN_HELLO, GEMINI_TURN_ASSISTANT, &turn]);
+        let (body, err) = convert_checked(&input);
+        assert_eq!(err, None, "{name}: {body}");
+        assert_eq!(
+            body.pointer(pointer).and_then(Value::as_str),
+            Some(want),
+            "{name}: {body}"
+        );
+    }
+}
+
+// TestConvertOpenAIResponsesRequestToGemini_ExportedWrapperKeepsAJSONBody
+#[test]
+fn exported_wrapper_keeps_a_json_body() {
+    let input = gemini_turn_payload("", &[&gemini_user_turn(&[GEMINI_TURN_FILE_ID])]);
+    let (body, err) = convert_checked(&input);
+    assert!(body.is_object(), "{body}");
+    assert!(err.is_some());
+}
+
+// Not upstream's: only a user message's attachment is refused, and text
+// that is only whitespace counts as sent here, as upstream counts it.
+#[test]
+fn only_user_attachments_are_refused() {
+    let model_turn = r#"{"type":"message","role":"assistant","content":[{"type":"input_file","file_id":"file-1"}]}"#;
+    let (body, err) = convert_checked(&gemini_turn_payload("", &[GEMINI_TURN_HELLO, model_turn]));
+    assert_eq!(err, None, "{body}");
+    let spaces = gemini_user_turn(&[r#"{"type":"input_text","text":" "}"#, GEMINI_TURN_FILE_ID]);
+    let (body, err) = convert_checked(&gemini_turn_payload("", &[&spaces]));
+    assert_eq!(err, None, "{body}");
 }

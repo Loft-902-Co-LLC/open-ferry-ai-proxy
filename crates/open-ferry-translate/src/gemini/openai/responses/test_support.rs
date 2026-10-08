@@ -10,6 +10,18 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use serde_json::Value;
 
+/// `ConvertOpenAIResponsesRequestToGemini`'s body, which must come without a
+/// refusal.
+pub(super) fn convert_openai_responses_request_to_gemini(
+    model: &str,
+    body: &Value,
+    stream: bool,
+) -> Value {
+    let (body, err) = super::convert_openai_responses_request_to_gemini(model, body, stream);
+    assert_eq!(err, None, "refused: {body}");
+    body
+}
+
 /// `testResponsesGeminiThoughtSignature`: a valid Gemini thought signature.
 pub(super) const GEMINI_SIGNATURE: &str =
     "EjQKMgEMOdbHO0Gd+c9Mxk4ELwPGbpCEcp2mFfYYLix2UVtBH3fL8GECc4+JITVnHF4qZDsA";

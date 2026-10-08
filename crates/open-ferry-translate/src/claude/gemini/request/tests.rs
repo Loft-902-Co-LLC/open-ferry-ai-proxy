@@ -1,5 +1,6 @@
 // Ported from CLIProxyAPI internal/translator/claude/gemini/claude_gemini_request_test.go
-// and noop_optimization_test.go (v8.0.15, MIT).
+// and noop_optimization_test.go (v8.0.15, MIT), and claude_gemini_user_turn_test.go
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 //
 // Changed: TestConvertGeminiRequestToClaude_DifferentSessionsProduceDifferentUserIDs
@@ -14,6 +15,13 @@ use serde_json::{Value, json};
 use super::*;
 
 fn convert(model: &str, request: &str) -> Value {
+    let (body, err) = convert_checked(model, request);
+    assert_eq!(err, None, "refused: {body}");
+    body
+}
+
+/// `ConvertGeminiRequestToClaude`, with its refusal.
+fn convert_checked(model: &str, request: &str) -> (Value, Option<UnsupportedPartError>) {
     let request: Value = serde_json::from_str(request).expect("test request is valid JSON");
     convert_gemini_request_to_claude(model, &request, false, ModelCatalog::embedded())
 }
@@ -134,11 +142,11 @@ fn splits_non_image_inline_data_by_mime() {
         "claude-sonnet-4",
         r#"{"contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"audio/wav","data":"UklGRg=="}},{"inlineData":{"mimeType":"video/mp4","data":"AAAAIGZ0eXA="}},{"inlineData":{"mimeType":"application/pdf","data":"JVBERi0="}}]}]}"#,
     );
+    // A user attachment Claude can't read is dropped rather than replaced by
+    // placeholder text.
     assert_eq!(
         out["messages"][0]["content"],
         json!([
-            {"type": "text", "text": "Media content: inline data (Type: audio/wav)"},
-            {"type": "text", "text": "Media content: inline data (Type: video/mp4)"},
             {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "JVBERi0="}}
         ])
     );
@@ -483,4 +491,194 @@ fn tool_choice_modes() {
         Some(json!({"type": "tool", "name": "a"}))
     );
     assert_eq!(choice(r#"{"mode":"auto"}"#), None);
+}
+
+// TestConvertGeminiRequestToClaude_SupportsCamelCaseSystemInstruction
+#[test]
+fn supports_camel_case_system_instruction() {
+    let out = convert(
+        "claude-test",
+        r#"{"systemInstruction":{"parts":[{"text":"system rule in camelCase"}]},"contents":[{"role":"user","parts":[{"text":"question"}]}]}"#,
+    );
+    assert_eq!(
+        out["messages"],
+        json!([
+            {"role": "user", "content": [{"type": "text", "text": "system rule in camelCase"}]},
+            {"role": "user", "content": [{"type": "text", "text": "question"}]}
+        ])
+    );
+}
+
+// Not upstream's: `systemInstruction` is read before `system_instruction`.
+#[test]
+fn camel_case_system_instruction_comes_first() {
+    let out = convert(
+        "claude-test",
+        r#"{"system_instruction":{"parts":[{"text":"snake"}]},"systemInstruction":{"parts":[{"text":"camel"}]},"contents":[{"role":"user","parts":[{"text":"question"}]}]}"#,
+    );
+    assert_eq!(out["messages"][0]["content"][0]["text"], "camel", "{out}");
+}
+
+const GEMINI_AUDIO_PART: &str = r#"{"inlineData":{"mimeType":"audio/wav","data":"UklGRg=="}}"#;
+const GEMINI_VIDEO_PART: &str =
+    r#"{"inline_data":{"mime_type":"video/mp4","data":"AAAAIGZ0eXA="}}"#;
+
+/// `TranslateRequestEnvelope` from Gemini to Claude: the body, or the refusal.
+fn gemini_to_claude_envelope(input: &str) -> Result<Value, UnsupportedPartError> {
+    let request: Value = serde_json::from_str(input).expect("test request is valid JSON");
+    crate::registry::Registry::global().translate_request_checked(
+        &"gemini".into(),
+        &"claude".into(),
+        "claude-sonnet-4",
+        request,
+        false,
+    )
+}
+
+/// `geminiTurnToClaude`: a user turn and a model turn, then a user turn of
+/// `final_parts`.
+fn gemini_turn_to_claude(final_parts: &str) -> Result<Value, UnsupportedPartError> {
+    gemini_to_claude_envelope(&format!(
+        r#"{{"contents":[{{"role":"user","parts":[{{"text":"a"}}]}},{{"role":"model","parts":[{{"text":"b"}}]}},{{"role":"user","parts":[{final_parts}]}}]}}"#
+    ))
+}
+
+/// `requireInlineDataRefusal`, which also checks the body through
+/// [`convert_checked`].
+fn require_inline_data_refusal(name: &str, envelope: Result<Value, UnsupportedPartError>) {
+    let err = envelope.expect_err(name);
+    assert_eq!(err.part_type, "inlineData", "{name}");
+    assert_eq!(err.status_code(), 400, "{name}");
+    assert_eq!(
+        err.to_string(),
+        "unsupported content part: inlineData",
+        "{name}"
+    );
+}
+
+// TestGeminiToClaudeAudioOnlyUserTurnIsRefusedInsteadOfBecomingPlaceholderText
+#[test]
+fn audio_only_user_turn_is_refused_instead_of_becoming_placeholder_text() {
+    let cases = [
+        ("audio", GEMINI_AUDIO_PART.to_owned()),
+        ("video", GEMINI_VIDEO_PART.to_owned()),
+        (
+            "audio and video",
+            format!("{GEMINI_AUDIO_PART},{GEMINI_VIDEO_PART}"),
+        ),
+        (
+            "empty text beside audio",
+            format!(r#"{{"text":""}},{GEMINI_AUDIO_PART}"#),
+        ),
+        (
+            "whitespace beside audio",
+            format!(r#"{{"text":"  \n"}},{GEMINI_AUDIO_PART}"#),
+        ),
+        (
+            "audio beside whitespace",
+            format!(r#"{GEMINI_AUDIO_PART},{{"text":" "}}"#),
+        ),
+        (
+            "inline data without a mime",
+            r#"{"inlineData":{"data":"UklGRg=="}}"#.to_owned(),
+        ),
+    ];
+    for (name, parts) in cases {
+        require_inline_data_refusal(name, gemini_turn_to_claude(&parts));
+        let input = format!(
+            r#"{{"contents":[{{"role":"user","parts":[{{"text":"a"}}]}},{{"role":"model","parts":[{{"text":"b"}}]}},{{"role":"user","parts":[{parts}]}}]}}"#
+        );
+        let (body, err) = convert_checked("claude-sonnet-4", &input);
+        assert!(err.is_some(), "{name}");
+        assert!(body.is_object(), "{name}: {body}");
+        assert!(
+            !body.to_string().contains("Media content"),
+            "{name}: placeholder text was made up: {body}"
+        );
+    }
+}
+
+// TestGeminiToClaudeRefusesAnEmptiedUserTurnBeforeALaterTextTurn
+#[test]
+fn refuses_an_emptied_user_turn_before_a_later_text_turn() {
+    let input = format!(
+        r#"{{"contents":[{{"role":"user","parts":[{GEMINI_AUDIO_PART}]}},{{"role":"model","parts":[{{"text":"ok"}}]}},{{"role":"user","parts":[{{"text":"next"}}]}}]}}"#
+    );
+    require_inline_data_refusal("later text turn", gemini_to_claude_envelope(&input));
+}
+
+// TestGeminiToClaudeRealTextBesideAudioIsSentWithoutAPlaceholder
+#[test]
+fn real_text_beside_audio_is_sent_without_a_placeholder() {
+    let body = gemini_turn_to_claude(&format!(
+        r#"{{"text":"  "}},{{"text":"keep me"}},{GEMINI_AUDIO_PART}"#
+    ))
+    .expect("sent");
+    assert!(!body.to_string().contains("Media content"), "{body}");
+    let found = body["messages"][2]["content"]
+        .as_array()
+        .is_some_and(|blocks| blocks.iter().any(|block| block["text"] == "keep me"));
+    assert!(found, "text was lost: {body}");
+}
+
+// TestGeminiToClaudeAudioBesideADocumentOrToolResultStillSucceeds
+#[test]
+fn audio_beside_a_document_or_tool_result_still_succeeds() {
+    let cases = [
+        (
+            "document",
+            format!(
+                r#"{GEMINI_AUDIO_PART},{{"inlineData":{{"mimeType":"application/pdf","data":"JVBERi0="}}}}"#
+            ),
+        ),
+        (
+            "tool result",
+            format!(
+                r#"{GEMINI_AUDIO_PART},{{"functionResponse":{{"name":"f","response":{{"result":"ok"}}}}}}"#
+            ),
+        ),
+    ];
+    for (name, parts) in cases {
+        if let Err(err) = gemini_turn_to_claude(&parts) {
+            panic!("{name}: {err}");
+        }
+    }
+}
+
+// TestGeminiToClaudeModelAudioKeepsItsPlaceholder
+#[test]
+fn model_audio_keeps_its_placeholder() {
+    let body = gemini_to_claude_envelope(&format!(
+        r#"{{"contents":[{{"role":"user","parts":[{{"text":"a"}}]}},{{"role":"model","parts":[{GEMINI_AUDIO_PART}]}},{{"role":"user","parts":[{{"text":"b"}}]}}]}}"#
+    ))
+    .expect("sent");
+    assert_eq!(
+        body["messages"][1]["content"][0]["text"], "Media content: inline data (Type: audio/wav)",
+        "{body}"
+    );
+}
+
+// TestGeminiToClaudeExportedWrapperKeepsAJSONBody
+#[test]
+fn exported_wrapper_keeps_a_json_body() {
+    let input = format!(r#"{{"contents":[{{"role":"user","parts":[{GEMINI_AUDIO_PART}]}}]}}"#);
+    let (body, err) = convert_checked("claude-sonnet-4", &input);
+    assert!(body.is_object(), "{body}");
+    assert!(err.is_some());
+}
+
+// Not upstream's: file data without a URI can't be sent either, and a turn
+// of another role counts as the user's.
+#[test]
+fn file_data_without_a_uri_is_refused() {
+    let (_, err) = convert_checked(
+        "claude-test",
+        r#"{"contents":[{"role":"user","parts":[{"fileData":{"mimeType":"image/png"}}]}]}"#,
+    );
+    assert_eq!(err.map(|err| err.part_type), Some("fileData".to_owned()));
+    let (_, err) = convert_checked(
+        "claude-test",
+        &format!(r#"{{"contents":[{{"role":"system","parts":[{GEMINI_AUDIO_PART}]}}]}}"#),
+    );
+    assert_eq!(err.map(|err| err.part_type), Some("inlineData".to_owned()));
 }

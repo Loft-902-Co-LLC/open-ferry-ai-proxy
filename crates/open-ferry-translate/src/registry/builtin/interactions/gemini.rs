@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use super::super::{non_empty, to_vec};
+use super::super::{checked, non_empty, sends, to_vec};
 use crate::gemini::interactions as gemini_interactions;
 use crate::registry::{Format, Registry, ResponseTransform, StreamTranslator};
 
@@ -18,9 +18,9 @@ pub(super) fn register(registry: &Registry) {
     registry.register(
         Format::INTERACTIONS,
         Format::INTERACTIONS,
-        Some(Arc::new(|model, body, stream| {
+        sends(|model, body, stream| {
             gemini_interactions::convert_interactions_request_to_interactions(model, body, stream)
-        })),
+        }),
         ResponseTransform {
             stream: Some(Arc::new(|_context| Box::new(InteractionsPassthrough))),
             non_stream: Some(Arc::new(|_context, body| {
@@ -36,9 +36,9 @@ pub(super) fn register(registry: &Registry) {
     registry.register(
         Format::INTERACTIONS,
         Format::GEMINI,
-        Some(Arc::new(|model, body, stream| {
+        checked(|model, body, stream| {
             gemini_interactions::convert_interactions_request_to_gemini(model, &body, stream)
-        })),
+        }),
         ResponseTransform {
             stream: Some(Arc::new(|context| {
                 Box::new(GeminiToInteractions(
@@ -60,9 +60,9 @@ pub(super) fn register(registry: &Registry) {
     registry.register(
         Format::GEMINI,
         Format::INTERACTIONS,
-        Some(Arc::new(|model, body, stream| {
+        checked(|model, body, stream| {
             gemini_interactions::convert_gemini_request_to_interactions(model, &body, stream)
-        })),
+        }),
         ResponseTransform {
             stream: Some(Arc::new(|context| {
                 Box::new(InteractionsToGemini(

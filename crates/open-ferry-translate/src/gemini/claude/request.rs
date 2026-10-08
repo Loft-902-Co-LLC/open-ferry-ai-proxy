@@ -1,7 +1,8 @@
 // Ported from CLIProxyAPI internal/translator/gemini/claude/gemini_claude_request.go
 // (ConvertClaudeRequestToGemini, ConvertClaudeRequestToGeminiWithCompat,
 // geminiContentWithParts and toolNameFromClaudeToolUseID) and
-// internal/util/claude_tool_result.go (ConvertClaudeToolResultContent) (v8.0.15, MIT).
+// internal/util/claude_tool_result.go (ConvertClaudeToolResultContent) (v8.0.15, MIT),
+// with the v8.0.20 document blocks and user turn checks (claudeBase64InlineData).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Claude Messages request → Gemini request.
@@ -19,6 +20,13 @@
 //! [`convert_claude_request_to_gemini_with_compat`]. Adaptive thinking without
 //! an effort asks for the model's largest thinking budget, from the static
 //! catalog ([`ModelCatalog`]).
+//!
+//! An image, document or container upload is sent only as base64 inline
+//! data. A user's block that can't be (a URL or file source, say) is
+//! dropped. The rest of the message is still sent, but a user message left
+//! with nothing to send (blank text doesn't count) is refused with an
+//! [`UnsupportedPartError`]. A message left with no parts at all isn't
+//! sent.
 //!
 //! Deviations from upstream:
 //! - Where upstream copies the client's JSON text, we write the same JSON
@@ -39,11 +47,13 @@ use crate::common::gemini::{
     merge_adjacent_gemini_contents, reorder_gemini_user_parts, sanitize_gemini_function_name,
     set_gemini_function_response_result,
 };
+use crate::common::parts::{UserTurnDrops, count_sendable_gemini_parts};
 use crate::gemini::common::attach_default_safety_settings;
 use crate::gemini_schema::clean_json_schema_for_gemini_json_schema;
 use crate::go;
 use crate::json::{float_of, int_of, object, path, set_path, str_of};
 use crate::models::ModelCatalog;
+use crate::registry::UnsupportedPartError;
 use crate::signature::{
     BlockKind, GEMINI_SKIP_THOUGHT_SIGNATURE_VALIDATOR, gemini_replay_signature_or_bypass,
 };
@@ -61,12 +71,15 @@ const DROPPED_TOOL_FIELDS: [&str; 6] = [
 /// Converts a Claude Messages request body into a Gemini request body for
 /// `model_name`. Assistant thinking blocks are dropped. The stream flag isn't
 /// used: Gemini picks streaming by URL.
+///
+/// The error is set when a user message had only parts Gemini can't take;
+/// the body is still returned.
 pub fn convert_claude_request_to_gemini(
     model_name: &str,
     request: &Value,
     _stream: bool,
     models: &ModelCatalog,
-) -> Value {
+) -> (Value, Option<UnsupportedPartError>) {
     convert(model_name, request, false, models)
 }
 
@@ -78,18 +91,24 @@ pub fn convert_claude_request_to_gemini_with_compat(
     request: &Value,
     _stream: bool,
     models: &ModelCatalog,
-) -> Value {
+) -> (Value, Option<UnsupportedPartError>) {
     convert(model_name, request, true, models)
 }
 
-fn convert(model_name: &str, request: &Value, keep_thinking: bool, models: &ModelCatalog) -> Value {
+fn convert(
+    model_name: &str,
+    request: &Value,
+    keep_thinking: bool,
+    models: &ModelCatalog,
+) -> (Value, Option<UnsupportedPartError>) {
     let mut out = json!({"contents": [], "model": model_name});
+    let mut drops = UserTurnDrops::default();
 
     if let Some(instruction) = system_instruction(request.get("system")) {
         out["systemInstruction"] = instruction;
     }
     if let Some(Value::Array(messages)) = request.get("messages") {
-        out["contents"] = Value::Array(convert_messages(messages, keep_thinking));
+        out["contents"] = Value::Array(convert_messages(messages, keep_thinking, &mut drops));
     }
 
     let (tools, has_strict_tool) = convert_tools(request.get("tools"));
@@ -117,7 +136,7 @@ fn convert(model_name: &str, request: &Value, keep_thinking: bool, models: &Mode
     }
 
     attach_default_safety_settings(&mut out, "safetySettings");
-    out
+    (out, drops.err())
 }
 
 /// The top-level system prompt, without Claude Code's attribution text. A
@@ -145,8 +164,13 @@ fn system_instruction(system: Option<&Value>) -> Option<Value> {
     }
 }
 
-/// Converts the messages into Gemini turns.
-fn convert_messages(messages: &[Value], keep_thinking: bool) -> Vec<Value> {
+/// Converts the messages into Gemini turns. A user message's blocks that
+/// can't be sent are recorded in `drops`.
+fn convert_messages(
+    messages: &[Value],
+    keep_thinking: bool,
+    drops: &mut UserTurnDrops,
+) -> Vec<Value> {
     let mut turns = Vec::with_capacity(messages.len());
     let mut tool_names: HashMap<String, String> = HashMap::new();
     // The tool calls of the last assistant message, which the next user
@@ -195,12 +219,19 @@ fn convert_messages(messages: &[Value], keep_thinking: bool) -> Vec<Value> {
                         &mut tool_names,
                         &mut pending_tool_use_ids,
                         &mut parts,
+                        drops,
                     );
                 }
                 if role == "user" {
                     parts = reorder_gemini_user_parts(parts);
                 }
-                turns.push(content_with_parts(role, parts));
+                if original_role == "user" {
+                    // Blank text is sent, but doesn't keep an emptied turn alive.
+                    drops.end_turn(count_sendable_gemini_parts(&parts));
+                }
+                if !parts.is_empty() {
+                    turns.push(content_with_parts(role, parts));
+                }
             }
             Some(Value::String(text)) => {
                 turns.push(content_with_parts(role, vec![json!({ "text": text })]));
@@ -221,7 +252,7 @@ fn convert_messages(messages: &[Value], keep_thinking: bool) -> Vec<Value> {
 }
 
 /// Converts one content block into parts, if Gemini has a counterpart for
-/// it.
+/// it. A user's media block that can't be sent is recorded in `drops`.
 fn convert_block(
     block: &Value,
     original_role: &str,
@@ -229,6 +260,7 @@ fn convert_block(
     tool_names: &mut HashMap<String, String>,
     pending_tool_use_ids: &mut Vec<String>,
     parts: &mut Vec<Value>,
+    drops: &mut UserTurnDrops,
 ) {
     match str_of(block.get("type")).as_ref() {
         "text" => {
@@ -298,24 +330,35 @@ fn convert_block(
             parts.push(part);
             parts.extend(result.images.into_iter().map(inline_data));
         }
-        "image" => {
-            let Some(source) = block.get("source") else {
-                return;
-            };
-            if str_of(source.get("type")) != "base64" {
-                return;
-            }
-            let mime_type = str_of(source.get("media_type"));
-            let data = str_of(source.get("data"));
-            if !mime_type.is_empty() && !data.is_empty() {
-                parts.push(inline_data(Image {
-                    mime_type: mime_type.into_owned(),
-                    data: data.into_owned(),
-                }));
+        block_type @ ("image" | "document" | "container_upload") => {
+            if let Some(part) = base64_inline_data(block.get("source")) {
+                parts.push(part);
+            } else if original_role == "user" {
+                // A URL or file source can't be inlined. The message is
+                // refused only if nothing else is left.
+                drops.drop_part(block_type);
             }
         }
         _ => {}
     }
+}
+
+/// `claudeBase64InlineData`: a base64 source with a media type and data, as
+/// a Gemini inline data part.
+fn base64_inline_data(source: Option<&Value>) -> Option<Value> {
+    let source = source?;
+    if str_of(source.get("type")) != "base64" {
+        return None;
+    }
+    let mime_type = str_of(source.get("media_type"));
+    let data = str_of(source.get("data"));
+    if mime_type.is_empty() || data.is_empty() {
+        return None;
+    }
+    Some(inline_data(Image {
+        mime_type: mime_type.into_owned(),
+        data: data.into_owned(),
+    }))
 }
 
 /// A `tool_use` block's input as function call arguments: an object, or a

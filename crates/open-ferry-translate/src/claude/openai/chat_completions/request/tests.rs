@@ -1,5 +1,6 @@
 // Ported from CLIProxyAPI internal/translator/claude/openai/chat-completions/claude_openai_request_test.go
-// and claude_openai_compat_test.go (v8.0.15, MIT). https://github.com/router-for-me/CLIProxyAPI
+// and claude_openai_compat_test.go (v8.0.15, MIT), claude_openai_user_turn_test.go and
+// claude_openai_file_test.go (v8.0.20, MIT). https://github.com/router-for-me/CLIProxyAPI
 
 use serde_json::{Value, json};
 
@@ -12,9 +13,18 @@ fn convert(model: &str, request: &Value) -> Value {
         false,
         ModelCatalog::embedded(),
     )
+    .0
 }
 
 fn convert_with_compat(model: &str, request: &Value) -> Value {
+    convert_with_compat_checked(model, request).0
+}
+
+/// `ConvertOpenAIRequestToClaudeWithCompat`, with its refusal.
+fn convert_with_compat_checked(
+    model: &str,
+    request: &Value,
+) -> (Value, Option<UnsupportedPartError>) {
     convert_openai_chat_completions_request_to_claude_with_compat(
         model,
         request,
@@ -1366,4 +1376,168 @@ fn with_compat_preserves_reasoning_content() {
         Some(&json!({"type": "thinking", "thinking": "reason", "signature": ""})),
         "compat translation missing unsigned thinking block: {with_compat}"
     );
+}
+
+const USER_TURN_FILE_ID: &str = r#"{"type":"file","file":{"file_id":"file-absent"}}"#;
+const USER_TURN_TEXT: &str = r#"{"type":"text","text":"keep me"}"#;
+const USER_TURN_INLINE: &str = r#"{"type":"file","file":{"filename":"a.pdf","file_data":"data:application/pdf;base64,JVBERi0xLjQK"}}"#;
+const USER_TURN_AUDIO: &str =
+    r#"{"type":"input_audio","input_audio":{"format":"wav","data":"UklGRg=="}}"#;
+
+fn parse(raw: &str) -> Value {
+    serde_json::from_str(raw).unwrap()
+}
+
+// TestConvertOpenAIRequestToClaude_RefusesAnyEmptiedUserTurn
+#[test]
+fn refuses_any_emptied_user_turn() {
+    let cases = [
+        (
+            "history then file id only",
+            format!(
+                r#"{{"model":"m","messages":[{{"role":"user","content":"hello"}},{{"role":"assistant","content":"hi"}},{{"role":"user","content":[{USER_TURN_FILE_ID}]}}]}}"#
+            ),
+            "file",
+        ),
+        (
+            "system and developer prompts do not hide the empty turn",
+            format!(
+                r#"{{"model":"m","messages":[{{"role":"system","content":"sys"}},{{"role":"developer","content":"dev"}},{{"role":"user","content":[{USER_TURN_FILE_ID}]}}]}}"#
+            ),
+            "file",
+        ),
+        (
+            "emptied turn before a later text turn",
+            format!(
+                r#"{{"model":"m","messages":[{{"role":"user","content":[{USER_TURN_FILE_ID}]}},{{"role":"assistant","content":"ok"}},{{"role":"user","content":"next"}}]}}"#
+            ),
+            "file",
+        ),
+        (
+            "audio only after history",
+            format!(
+                r#"{{"model":"m","messages":[{{"role":"user","content":"hello"}},{{"role":"assistant","content":"hi"}},{{"role":"user","content":[{USER_TURN_AUDIO}]}}]}}"#
+            ),
+            "input_audio",
+        ),
+    ];
+    for (name, input, want) in cases {
+        let (body, err) = convert_with_compat_checked("m", &parse(&input));
+        let err = err.unwrap_or_else(|| panic!("{name}: no refusal; body = {body}"));
+        assert_eq!(err.part_type, want, "{name}");
+        assert_eq!(err.status_code(), 400, "{name}");
+        assert_eq!(
+            err.to_string(),
+            format!("unsupported content part: {want}"),
+            "{name}"
+        );
+        assert!(body.is_object(), "{name}: {body}");
+    }
+}
+
+// TestConvertOpenAIRequestToClaude_KeepsTurnWithTextBesideAttachment
+#[test]
+fn keeps_turn_with_text_beside_attachment() {
+    let input = format!(
+        r#"{{"model":"m","messages":[{{"role":"user","content":"hello"}},{{"role":"assistant","content":"hi"}},{{"role":"user","content":[{USER_TURN_TEXT},{USER_TURN_FILE_ID}]}}]}}"#
+    );
+    let (body, err) = convert_with_compat_checked("m", &parse(&input));
+    assert_eq!(err, None);
+    assert_eq!(
+        text_at(&body, "messages.2.content.0.text"),
+        "keep me",
+        "{body}"
+    );
+}
+
+// TestConvertOpenAIRequestToClaude_InlineFileAfterHistoryStaysADocument
+#[test]
+fn inline_file_after_history_stays_a_document() {
+    let input = format!(
+        r#"{{"model":"m","messages":[{{"role":"user","content":"hello"}},{{"role":"assistant","content":"hi"}},{{"role":"user","content":[{USER_TURN_INLINE}]}}]}}"#
+    );
+    let (body, err) = convert_with_compat_checked("m", &parse(&input));
+    assert_eq!(err, None);
+    assert_eq!(
+        text_at(&body, "messages.2.content.0.type"),
+        "document",
+        "{body}"
+    );
+}
+
+// TestConvertOpenAIRequestToClaude_FileParts
+#[test]
+fn file_parts() {
+    let system = r#"{"role":"system","content":"be brief"},"#;
+    let cases = [
+        (
+            "unknown file id alone",
+            "",
+            USER_TURN_FILE_ID.to_owned(),
+            Some("file"),
+            "",
+        ),
+        (
+            "audio alone",
+            "",
+            USER_TURN_AUDIO.to_owned(),
+            Some("input_audio"),
+            "",
+        ),
+        (
+            "a system prompt does not hide the empty turn",
+            system,
+            USER_TURN_FILE_ID.to_owned(),
+            Some("file"),
+            "",
+        ),
+        (
+            "text beside an unknown file id",
+            "",
+            format!(r#"{{"type":"text","text":"read it"}},{USER_TURN_FILE_ID}"#),
+            None,
+            r#"["text"]"#,
+        ),
+        (
+            "text beside audio",
+            "",
+            format!(r#"{{"type":"text","text":"read it"}},{USER_TURN_AUDIO}"#),
+            None,
+            r#"["text"]"#,
+        ),
+        (
+            "inline file data becomes a document",
+            "",
+            USER_TURN_INLINE.to_owned(),
+            None,
+            r#"["document"]"#,
+        ),
+    ];
+    let registry = crate::registry::Registry::global();
+    for (name, prefix, content, want_err, want_types) in cases {
+        let payload = format!(
+            r#"{{"model":"claude-sonnet-4","messages":[{prefix}{{"role":"user","content":[{content}]}}]}}"#
+        );
+        let got = registry.translate_request_checked(
+            &"openai".into(),
+            &"claude".into(),
+            "claude-sonnet-4",
+            parse(&payload),
+            false,
+        );
+        match want_err {
+            Some(want) => {
+                let err = got.expect_err(name);
+                assert_eq!(err.part_type, want, "{name}");
+            }
+            None => {
+                let body = got.unwrap_or_else(|err| panic!("{name}: {err}"));
+                let types: Vec<Value> = array_at(&body, "messages.0.content")
+                    .into_iter()
+                    .map(|block| block.get("type").cloned().unwrap_or_default())
+                    .collect();
+                assert_eq!(Value::from(types), parse(want_types), "{name}: {body}");
+            }
+        }
+    }
 }

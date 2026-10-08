@@ -8,7 +8,9 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use super::{Format, Registry, ResponseTransform, StreamTranslator};
+use super::{
+    Format, Registry, RequestTransform, ResponseTransform, StreamTranslator, UnsupportedPartError,
+};
 use crate::claude::openai::{chat_completions as claude_chat, responses as claude_responses};
 use crate::codex::claude as codex_claude;
 use crate::codex::openai::{chat_completions as codex_chat, responses as codex_responses};
@@ -23,6 +25,25 @@ mod from_gemini;
 mod gemini_responses;
 mod interactions;
 
+/// A request translator that never refuses a request.
+fn sends(
+    translate: impl Fn(&str, Value, bool) -> Value + Send + Sync + 'static,
+) -> Option<RequestTransform> {
+    Some(Arc::new(move |model, body, stream| {
+        (translate(model, body, stream), None)
+    }))
+}
+
+/// A request translator that can refuse a request.
+fn checked(
+    translate: impl Fn(&str, Value, bool) -> (Value, Option<UnsupportedPartError>)
+    + Send
+    + Sync
+    + 'static,
+) -> Option<RequestTransform> {
+    Some(Arc::new(translate))
+}
+
 pub(super) fn register(registry: &Registry) {
     from_gemini::register(registry);
 
@@ -30,9 +51,7 @@ pub(super) fn register(registry: &Registry) {
     registry.register(
         Format::CLAUDE,
         Format::CODEX,
-        Some(Arc::new(|model, body, _stream| {
-            codex_claude::convert_claude_request_to_codex(model, &body)
-        })),
+        checked(|model, body, _stream| codex_claude::convert_claude_request_to_codex(model, &body)),
         ResponseTransform {
             stream: Some(Arc::new(|context| {
                 Box::new(CodexToClaude(codex_claude::CodexToClaudeStream::new(
@@ -57,9 +76,9 @@ pub(super) fn register(registry: &Registry) {
     registry.register(
         Format::OPENAI,
         Format::CODEX,
-        Some(Arc::new(|model, body, stream| {
+        checked(|model, body, stream| {
             codex_chat::convert_openai_chat_completions_request_to_codex(model, &body, stream)
-        })),
+        }),
         ResponseTransform {
             stream: Some(Arc::new(|context| {
                 Box::new(CodexToChat(
@@ -86,9 +105,9 @@ pub(super) fn register(registry: &Registry) {
     registry.register(
         Format::OPENAI_RESPONSE,
         Format::CODEX,
-        Some(Arc::new(|model, body, _stream| {
+        sends(|model, body, _stream| {
             codex_responses::convert_openai_responses_request_to_codex(model, body)
-        })),
+        }),
         ResponseTransform {
             stream: Some(Arc::new(|context| {
                 Box::new(CodexToResponses(
@@ -110,14 +129,14 @@ pub(super) fn register(registry: &Registry) {
     registry.register(
         Format::OPENAI,
         Format::CLAUDE,
-        Some(Arc::new(|model, body, stream| {
+        checked(|model, body, stream| {
             claude_chat::convert_openai_chat_completions_request_to_claude(
                 model,
                 &body,
                 stream,
                 &ModelCatalog::current(),
             )
-        })),
+        }),
         ResponseTransform {
             stream: Some(Arc::new(|context| {
                 Box::new(ClaudeToChat(
@@ -139,14 +158,14 @@ pub(super) fn register(registry: &Registry) {
     registry.register(
         Format::OPENAI_RESPONSE,
         Format::CLAUDE,
-        Some(Arc::new(|model, body, stream| {
+        checked(|model, body, stream| {
             claude_responses::convert_openai_responses_request_to_claude(
                 model,
                 &body,
                 stream,
                 &ModelCatalog::current(),
             )
-        })),
+        }),
         ResponseTransform {
             stream: Some(Arc::new(|context| {
                 Box::new(ClaudeToResponses(
@@ -174,9 +193,9 @@ pub(super) fn register(registry: &Registry) {
     registry.register(
         Format::CLAUDE,
         Format::OPENAI,
-        Some(Arc::new(|model, body, stream| {
+        checked(|model, body, stream| {
             openai_claude::convert_claude_request_to_openai(model, &body, stream)
-        })),
+        }),
         ResponseTransform {
             stream: Some(Arc::new(|context| {
                 Box::new(OpenAIToClaude(openai_claude::OpenAIToClaudeStream::new(
@@ -200,9 +219,7 @@ pub(super) fn register(registry: &Registry) {
     registry.register(
         Format::OPENAI,
         Format::OPENAI,
-        Some(Arc::new(|model, body, _stream| {
-            openai_chat::convert_openai_request_to_openai(model, body)
-        })),
+        sends(|model, body, _stream| openai_chat::convert_openai_request_to_openai(model, body)),
         ResponseTransform {
             stream: Some(Arc::new(|_context| {
                 Box::new(OpenAIToChat(openai_chat::OpenAIToOpenAIStream::new()))
@@ -218,11 +235,11 @@ pub(super) fn register(registry: &Registry) {
     registry.register(
         Format::OPENAI_RESPONSE,
         Format::OPENAI,
-        Some(Arc::new(|model, body, stream| {
+        checked(|model, body, stream| {
             openai_responses::convert_openai_responses_request_to_openai_chat_completions(
                 model, &body, stream,
             )
-        })),
+        }),
         ResponseTransform {
             stream: Some(Arc::new(|context| {
                 Box::new(OpenAIToResponses(

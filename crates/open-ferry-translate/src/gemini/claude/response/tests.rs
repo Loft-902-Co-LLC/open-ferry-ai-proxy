@@ -1,9 +1,10 @@
 // Ported from CLIProxyAPI internal/translator/gemini/claude/gemini_claude_response_test.go
-// (v8.0.15, MIT). https://github.com/router-for-me/CLIProxyAPI
+// (v8.0.15, MIT), and its v8.0.20 tests (v8.0.20, MIT).
+// https://github.com/router-for-me/CLIProxyAPI
 //
-// All tests are ported. The tests after them are new; their expected output
-// comes from upstream, with tool call numbers masked: the counter is shared
-// by every stream in the process.
+// All tests are ported. The tests without an upstream name are new; their
+// expected output comes from upstream, with tool call numbers masked: the
+// counter is shared by every stream in the process.
 
 use serde_json::{Value, json};
 
@@ -160,11 +161,12 @@ fn non_stream_part_with_thought_signature_without_thought_bool() {
             "responseId": "resp-non-stream-2"
         }"#,
     );
+    // v8.0.20: a signature on visible text goes in a carrier.
     assert_eq!(
         output["content"],
         json!([
-            {"type": "thinking", "thinking": "inferred reasoning", "signature": "sig-snake-case"},
-            {"type": "text", "text": "final answer"}
+            {"type": "thinking", "thinking": "", "signature": "sig-snake-case"},
+            {"type": "text", "text": "inferred reasoningfinal answer"}
         ])
     );
 }
@@ -336,15 +338,31 @@ fn streams_text_thinking_and_tool_calls() {
 }
 
 #[test]
-fn stream_without_content_has_no_stop() {
+fn stream_without_content_closes_with_an_empty_text_block() {
     let output = stream(&json!({}), &["not json", "[DONE]"]);
     assert_eq!(
         output,
         [
             message_start(DEFAULT_MESSAGE_ID, DEFAULT_MODEL),
-            String::new()
+            events(&[
+                (
+                    "content_block_start",
+                    r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+                ),
+                (
+                    "content_block_stop",
+                    r#"{"type":"content_block_stop","index":0}"#,
+                ),
+                (
+                    "message_delta",
+                    r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}"#,
+                ),
+                ("message_stop", r#"{"type":"message_stop"}"#),
+            ]),
         ]
     );
+    // Without a first chunk, there's no message to close.
+    assert_eq!(stream(&json!({}), &["[DONE]"]), [String::new()]);
 }
 
 #[test]
@@ -407,7 +425,7 @@ fn stream_edge_cases() {
                 ),
                 (
                     "content_block_delta",
-                    r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":""}}"#,
+                    r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"s0"}}"#,
                 ),
                 (
                     "content_block_stop",
@@ -415,18 +433,30 @@ fn stream_edge_cases() {
                 ),
                 (
                     "content_block_start",
-                    r#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#,
+                    r#"{"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":""}}"#,
                 ),
                 (
                     "content_block_delta",
-                    r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"t"}}"#,
+                    r#"{"type":"content_block_delta","index":1,"delta":{"type":"thinking_delta","thinking":""}}"#,
+                ),
+                (
+                    "content_block_stop",
+                    r#"{"type":"content_block_stop","index":1}"#,
+                ),
+                (
+                    "content_block_start",
+                    r#"{"type":"content_block_start","index":2,"content_block":{"type":"text","text":""}}"#,
+                ),
+                (
+                    "content_block_delta",
+                    r#"{"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"t"}}"#,
                 ),
             ]),
         String::new(),
         events(&[
             (
                 "content_block_stop",
-                r#"{"type":"content_block_stop","index":1}"#,
+                r#"{"type":"content_block_stop","index":2}"#,
             ),
             (
                 "message_delta",
@@ -445,8 +475,24 @@ fn stream_edge_cases() {
             r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"","args":"s"}},{"text":"x","thoughtSignature":"z"}]}}]}"#,
         ],
     );
+    // The empty text block's stop leaves the index where it was, as
+    // upstream's does, so the call after the final events reuses index 0.
     let expected = [
-        message_start(DEFAULT_MESSAGE_ID, DEFAULT_MODEL),
+        message_start(DEFAULT_MESSAGE_ID, DEFAULT_MODEL)
+            + &events(&[
+                (
+                    "content_block_start",
+                    r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+                ),
+                (
+                    "content_block_stop",
+                    r#"{"type":"content_block_stop","index":0}"#,
+                ),
+                (
+                    "message_delta",
+                    r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}"#,
+                ),
+            ]),
         events(&[
             (
                 "content_block_start",
@@ -466,11 +512,19 @@ fn stream_edge_cases() {
             ),
             (
                 "content_block_delta",
-                r#"{"type":"content_block_delta","index":1,"delta":{"type":"thinking_delta","thinking":"x"}}"#,
+                r#"{"type":"content_block_delta","index":1,"delta":{"type":"signature_delta","signature":"z"}}"#,
+            ),
+            (
+                "content_block_stop",
+                r#"{"type":"content_block_stop","index":1}"#,
+            ),
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":2,"content_block":{"type":"text","text":""}}"#,
             ),
             (
                 "content_block_delta",
-                r#"{"type":"content_block_delta","index":1,"delta":{"type":"signature_delta","signature":"z"}}"#,
+                r#"{"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"x"}}"#,
             ),
         ]),
     ];
@@ -493,7 +547,8 @@ fn non_stream_edge_cases() {
         concat!(
             r#"{"id":"","type":"message","role":"assistant","model":"","content":[{"type":"thinking","thinking":"a","signature":"s"},"#,
             r#"{"type":"text","text":"b"},{"type":"tool_use","id":"a_b-1","name":"a b","input":{}},"#,
-            r#"{"type":"tool_use","id":"read-2","name":"Read","input":{"k":[1]}},{"type":"thinking","thinking":"c","signature":"t"}],"#,
+            r#"{"type":"tool_use","id":"read-2","name":"Read","input":{"k":[1]}},{"type":"thinking","thinking":"","signature":"t"},"#,
+            r#"{"type":"text","text":"c"}],"#,
             r#""stop_reason":"tool_use","stop_sequence":null}"#
         )
     );
@@ -512,7 +567,7 @@ fn non_stream_edge_cases() {
         .to_string(),
         concat!(
             r#"{"id":"1","type":"message","role":"assistant","model":"{\"a\":1}","#,
-            r#""content":[{"type":"thinking","thinking":"","signature":"q"},{"type":"text","text":"x"}],"#,
+            r#""content":[{"type":"text","text":"x"},{"type":"thinking","thinking":"","signature":"q"}],"#,
             r#""stop_reason":"max_tokens","stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":5}}"#
         )
     );
@@ -521,6 +576,494 @@ fn non_stream_edge_cases() {
         concat!(
             r#"{"id":"","type":"message","role":"assistant","model":"","content":[],"#,
             r#""stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}"#
+        )
+    );
+}
+
+/// Panics unless each of `names` is an event in `output`, in this order.
+#[track_caller]
+fn require_event_order(output: &str, names: &[&str]) {
+    let mut last = None;
+    for name in names {
+        let index = output
+            .find(&format!("event: {name}\n"))
+            .unwrap_or_else(|| panic!("event {name:?} not found in output:\n{output}"));
+        assert!(
+            last.is_none_or(|last| index > last),
+            "event {name:?} is out of order in output:\n{output}"
+        );
+        last = Some(index);
+    }
+}
+
+/// The data of the stream's `message_delta` event.
+#[track_caller]
+fn message_delta(output: &str) -> Value {
+    let data = output
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .find(|data| data.contains(r#""type":"message_delta""#))
+        .unwrap_or_else(|| panic!("no message_delta in output:\n{output}"));
+    serde_json::from_str(data).unwrap()
+}
+
+fn hi_request() -> Value {
+    json!({"model": "claude-opus-5-5", "messages": [{"role": "user", "content": "hi"}]})
+}
+
+// TestConvertGeminiResponseToClaudeStream_PartlessSafetyClosesMessageWithRefusal
+#[test]
+fn partless_safety_closes_message_with_refusal() {
+    let chunk = r#"{
+        "candidates": [{"content": {"role": "model", "parts": []}, "index": 0, "finishReason": "SAFETY"}],
+        "modelVersion": "m",
+        "usageMetadata": {"promptTokenCount": 120, "candidatesTokenCount": 37, "totalTokenCount": 157}
+    }"#;
+    let output = stream(&hi_request(), &[chunk, "[DONE]"]).concat();
+    require_event_order(
+        &output,
+        &[
+            "message_start",
+            "content_block_start",
+            "content_block_stop",
+            "message_delta",
+            "message_stop",
+        ],
+    );
+    let delta = message_delta(&output);
+    assert_eq!(delta["delta"]["stop_reason"], "refusal", "{delta}");
+    assert_eq!(delta["usage"]["input_tokens"], 120, "{delta}");
+    assert_eq!(delta["usage"]["output_tokens"], 37, "{delta}");
+}
+
+// TestConvertGeminiResponseToClaudeStream_PartlessMalformedFunctionCallClosesMessage
+#[test]
+fn partless_malformed_function_call_closes_message() {
+    let chunk = r#"{
+        "candidates": [{"content": {"role": "model", "parts": []}, "index": 0, "finishReason": "MALFORMED_FUNCTION_CALL"}],
+        "modelVersion": "m",
+        "usageMetadata": {"promptTokenCount": 50, "candidatesTokenCount": 10, "totalTokenCount": 60}
+    }"#;
+    let output = stream(&hi_request(), &[chunk, "[DONE]"]).concat();
+    assert!(output.contains(r#""type":"message_stop""#), "{output}");
+    assert_eq!(
+        message_delta(&output)["delta"]["stop_reason"],
+        "refusal",
+        "{output}"
+    );
+}
+
+// TestConvertGeminiResponseToClaudeStream_PartlessStopClosesMessageWithEndTurn
+#[test]
+fn partless_stop_closes_message_with_end_turn() {
+    let chunk = r#"{
+        "candidates": [{"content": {"role": "model", "parts": [{"text": ""}]}, "index": 0, "finishReason": "STOP"}],
+        "modelVersion": "m",
+        "usageMetadata": {"promptTokenCount": 80, "candidatesTokenCount": 0, "totalTokenCount": 80}
+    }"#;
+    let output = stream(&hi_request(), &[chunk, "[DONE]"]).concat();
+    require_event_order(
+        &output,
+        &[
+            "message_start",
+            "content_block_start",
+            "content_block_stop",
+            "message_delta",
+            "message_stop",
+        ],
+    );
+    assert_eq!(
+        message_delta(&output)["delta"]["stop_reason"],
+        "end_turn",
+        "{output}"
+    );
+}
+
+// TestConvertGeminiResponseToClaudeNonStream_SafetyAndMalformedFunctionCallRefusal
+#[test]
+fn non_stream_safety_and_malformed_function_call_refusal() {
+    for (finish_reason, want) in [
+        ("SAFETY", "refusal"),
+        ("MALFORMED_FUNCTION_CALL", "refusal"),
+        ("RECITATION", "refusal"),
+        ("PROHIBITED_CONTENT", "refusal"),
+        ("SPII", "refusal"),
+        ("BLOCKLIST", "refusal"),
+        ("MAX_TOKENS", "max_tokens"),
+        ("STOP", "end_turn"),
+    ] {
+        let output = non_stream(
+            &hi_request(),
+            &format!(
+                r#"{{
+                    "candidates": [{{"content": {{"role": "model", "parts": []}}, "finishReason": "{finish_reason}"}}],
+                    "usageMetadata": {{"promptTokenCount": 120, "candidatesTokenCount": 37, "totalTokenCount": 157}},
+                    "modelVersion": "m",
+                    "responseId": "resp-test"
+                }}"#
+            ),
+        );
+        assert_eq!(output["stop_reason"], want, "{finish_reason}: {output}");
+    }
+}
+
+fn lite_request() -> Value {
+    json!({"model": "gemini-3.5-flash-lite", "messages": [{"role": "user", "content": "hi"}]})
+}
+
+// TestConvertGeminiResponseToClaudeNonStream_Issue6409_SignedVisibleText
+#[test]
+fn non_stream_issue_6409_signed_visible_text() {
+    let output = non_stream(
+        &lite_request(),
+        r#"{
+            "candidates": [{
+                "content": {"parts": [{"text": "ok", "thoughtSignature": "EmAKXgFpFH0Tb/MkBw="}], "role": "model"},
+                "finishReason": "STOP",
+                "index": 0
+            }],
+            "usageMetadata": {"promptTokenCount": 5, "candidatesTokenCount": 1},
+            "modelVersion": "gemini-3.5-flash-lite",
+            "responseId": "5Qm-as2qBuLI-sAP76KVkAk"
+        }"#,
+    );
+    assert_eq!(
+        output["content"],
+        json!([
+            {"type": "thinking", "thinking": "", "signature": "EmAKXgFpFH0Tb/MkBw="},
+            {"type": "text", "text": "ok"}
+        ]),
+        "{output}"
+    );
+}
+
+// TestConvertGeminiResponseToClaudeNonStream_Issue6409_ThinkingFollowedBySignedVisibleText
+#[test]
+fn non_stream_issue_6409_thinking_followed_by_signed_visible_text() {
+    let output = non_stream(
+        &lite_request(),
+        r#"{
+            "candidates": [{
+                "content": {"parts": [
+                    {"text": "reasoning step", "thought": true, "thoughtSignature": "sig-think"},
+                    {"text": "final answer", "thoughtSignature": "sig-visible"}
+                ], "role": "model"},
+                "finishReason": "STOP"
+            }],
+            "modelVersion": "gemini-3.5-flash-lite",
+            "responseId": "resp-mixed"
+        }"#,
+    );
+    assert_eq!(
+        output["content"],
+        json!([
+            {"type": "thinking", "thinking": "reasoning step", "signature": "sig-think"},
+            {"type": "thinking", "thinking": "", "signature": "sig-visible"},
+            {"type": "text", "text": "final answer"}
+        ]),
+        "{output}"
+    );
+}
+
+// TestConvertGeminiResponseToClaudeNonStream_Issue6409_ConsecutiveSignedVisibleTexts
+#[test]
+fn non_stream_issue_6409_consecutive_signed_visible_texts() {
+    let output = non_stream(
+        &lite_request(),
+        r#"{
+            "candidates": [{
+                "content": {"parts": [
+                    {"text": "part A", "thoughtSignature": "sig-A"},
+                    {"text": "part B", "thoughtSignature": "sig-B"}
+                ], "role": "model"},
+                "finishReason": "STOP"
+            }],
+            "modelVersion": "gemini-3.5-flash-lite",
+            "responseId": "resp-consecutive"
+        }"#,
+    );
+    assert_eq!(
+        output["content"],
+        json!([
+            {"type": "thinking", "thinking": "", "signature": "sig-A"},
+            {"type": "text", "text": "part A"},
+            {"type": "thinking", "thinking": "", "signature": "sig-B"},
+            {"type": "text", "text": "part B"}
+        ]),
+        "{output}"
+    );
+}
+
+#[track_caller]
+fn require_contains(output: &str, wants: &[&str]) {
+    for want in wants {
+        assert!(output.contains(want), "expected {want} in:\n{output}");
+    }
+}
+
+// TestConvertGeminiResponseToClaudeStream_Issue6409_SignedVisibleText
+#[test]
+fn stream_issue_6409_signed_visible_text() {
+    let chunk = r#"{
+        "candidates": [{
+            "content": {"parts": [{"text": "ok", "thoughtSignature": "sig-stream-1"}], "role": "model"},
+            "finishReason": "STOP",
+            "index": 0
+        }],
+        "usageMetadata": {"promptTokenCount": 5, "candidatesTokenCount": 1},
+        "modelVersion": "gemini-3.5-flash-lite",
+        "responseId": "resp-s1"
+    }"#;
+    let output = stream(&lite_request(), &[chunk, "[DONE]"]).concat();
+    assert!(!output.contains(r#""thinking_delta""#), "{output}");
+    require_contains(
+        &output,
+        &[
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig-stream-1"}}"#,
+            r#"{"type":"content_block_stop","index":0}"#,
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#,
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"ok"}}"#,
+            r#"{"type":"content_block_stop","index":1}"#,
+        ],
+    );
+}
+
+// TestConvertGeminiResponseToClaudeStream_Issue6409_SplitTrailingSignature
+#[test]
+fn stream_issue_6409_split_trailing_signature() {
+    let text = r#"{
+        "candidates": [{"content": {"parts": [{"text": "ok"}]}}],
+        "modelVersion": "gemini-3.5-flash-lite",
+        "responseId": "resp-s2"
+    }"#;
+    let signature = r#"{
+        "candidates": [{
+            "content": {"parts": [{"text": "", "thoughtSignature": "sig-stream-trailing"}]},
+            "finishReason": "STOP"
+        }],
+        "usageMetadata": {"promptTokenCount": 5, "candidatesTokenCount": 1},
+        "modelVersion": "gemini-3.5-flash-lite",
+        "responseId": "resp-s2"
+    }"#;
+    let output = stream(&lite_request(), &[text, signature, "[DONE]"]).concat();
+    assert!(!output.contains(r#""thinking_delta""#), "{output}");
+    require_contains(
+        &output,
+        &[
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}"#,
+            r#"{"type":"content_block_stop","index":0}"#,
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":""}}"#,
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"signature_delta","signature":"sig-stream-trailing"}}"#,
+            r#"{"type":"content_block_stop","index":1}"#,
+        ],
+    );
+}
+
+// TestConvertGeminiResponseToClaudeStream_Issue6409_SignedFunctionCall
+#[test]
+fn stream_issue_6409_signed_function_call() {
+    let chunk = r#"{
+        "candidates": [{
+            "content": {"parts": [{"thoughtSignature": "sig-fc-stream", "functionCall": {"name": "test_tool", "args": {}}}]},
+            "finishReason": "STOP"
+        }],
+        "usageMetadata": {"promptTokenCount": 5, "candidatesTokenCount": 1},
+        "modelVersion": "gemini-3.5-flash-lite",
+        "responseId": "resp-fc"
+    }"#;
+    let output = stream(&lite_request(), &[chunk, "[DONE]"]).concat();
+    require_contains(
+        &output,
+        &[
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig-fc-stream"}}"#,
+            r#"{"type":"content_block_stop","index":0}"#,
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use""#,
+            r#"{"type":"content_block_stop","index":1}"#,
+        ],
+    );
+}
+
+// TestConvertGeminiResponseToClaudeStream_Issue6409_FunctionCallContinuationSignature
+#[test]
+fn stream_issue_6409_function_call_continuation_signature() {
+    let call = r#"{
+        "candidates": [{"content": {"parts": [{"functionCall": {"name": "test_tool", "args": {}}}]}}],
+        "modelVersion": "gemini-3.5-flash-lite",
+        "responseId": "resp-fc-cont"
+    }"#;
+    let continuation = r#"{
+        "candidates": [{
+            "content": {"parts": [{"thoughtSignature": "sig-fc-cont-done", "functionCall": {"args": {"key": "val"}}}]},
+            "finishReason": "STOP"
+        }],
+        "modelVersion": "gemini-3.5-flash-lite",
+        "responseId": "resp-fc-cont"
+    }"#;
+    let output = stream(&lite_request(), &[call, continuation, "[DONE]"]).concat();
+    require_contains(
+        &output,
+        &[
+            r#""type":"input_json_delta""#,
+            r#""signature":"sig-fc-cont-done""#,
+        ],
+    );
+}
+
+// TestConvertGeminiResponseToClaudeStream_Issue6409_ThinkingFollowedBySignedVisibleText
+#[test]
+fn stream_issue_6409_thinking_followed_by_signed_visible_text() {
+    let thinking = r#"{
+        "candidates": [{"content": {"parts": [{"text": "thinking step", "thought": true, "thoughtSignature": "sig-stream-think"}]}}],
+        "modelVersion": "gemini-3.5-flash-lite",
+        "responseId": "resp-mixed-stream"
+    }"#;
+    let visible = r#"{
+        "candidates": [{
+            "content": {"parts": [{"text": "visible text", "thoughtSignature": "sig-stream-visible"}]},
+            "finishReason": "STOP"
+        }],
+        "modelVersion": "gemini-3.5-flash-lite",
+        "responseId": "resp-mixed-stream"
+    }"#;
+    let output = stream(&lite_request(), &[thinking, visible, "[DONE]"]).concat();
+    require_contains(
+        &output,
+        &[
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig-stream-think"}}"#,
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":""}}"#,
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"signature_delta","signature":"sig-stream-visible"}}"#,
+            r#"{"type":"content_block_start","index":2,"content_block":{"type":"text","text":""}}"#,
+            r#"{"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"visible text"}}"#,
+        ],
+    );
+}
+
+// Not upstream's: signatures on thoughts with function calls, a function
+// call's continuation and null text; output tokens from the total; and a
+// finish reason that a later chunk leaves out.
+#[test]
+fn stream_carriers_in_detail() {
+    let output = stream(
+        &json!({}),
+        &[
+            concat!(
+                r#"{"candidates":[{"content":{"parts":[{"text":"a"},{"thought":true,"functionCall":{"name":"f"},"thoughtSignature":"p"},"#,
+                r#"{"thought":true,"functionCall":{"name":"g"}},{"functionCall":{"name":"h","args":{}},"thoughtSignature":"q"},"#,
+                r#"{"functionCall":{"args":{"k":1}},"thoughtSignature":"r"},{"text":""},{"text":null,"thoughtSignature":"u"}]},"#,
+                r#""finishReason":"IMAGE_SAFETY"}],"usageMetadata":{"promptTokenCount":4,"totalTokenCount":10}}"#
+            ),
+            "[DONE]",
+        ],
+    );
+    let block = |index: usize, content_block: &str, deltas: &[&str]| {
+        let mut list = vec![event(
+            "content_block_start",
+            &format!(
+                r#"{{"type":"content_block_start","index":{index},"content_block":{content_block}}}"#
+            ),
+        )];
+        for delta in deltas {
+            list.push(event(
+                "content_block_delta",
+                &format!(r#"{{"type":"content_block_delta","index":{index},"delta":{delta}}}"#),
+            ));
+        }
+        list.push(event(
+            "content_block_stop",
+            &format!(r#"{{"type":"content_block_stop","index":{index}}}"#),
+        ));
+        list.concat()
+    };
+    let thinking = r#"{"type":"thinking","thinking":""}"#;
+    let expected = [
+        message_start(DEFAULT_MESSAGE_ID, DEFAULT_MODEL)
+            + &block(
+                0,
+                r#"{"type":"text","text":""}"#,
+                &[r#"{"type":"text_delta","text":"a"}"#],
+            )
+            + &block(
+                1,
+                thinking,
+                &[r#"{"type":"signature_delta","signature":"p"}"#],
+            )
+            + &block(2, thinking, &[r#"{"type":"thinking_delta","thinking":""}"#])
+            + &block(
+                3,
+                thinking,
+                &[r#"{"type":"signature_delta","signature":"q"}"#],
+            )
+            + &block(
+                4,
+                r#"{"type":"tool_use","id":"h-N","name":"h","input":{}}"#,
+                &[
+                    r#"{"type":"input_json_delta","partial_json":"{}"}"#,
+                    r#"{"type":"input_json_delta","partial_json":"{\"k\":1}"}"#,
+                ],
+            )
+            + &block(
+                5,
+                thinking,
+                &[r#"{"type":"signature_delta","signature":"r"}"#],
+            )
+            + &block(
+                6,
+                r#"{"type":"text","text":""}"#,
+                &[r#"{"type":"text_delta","text":""}"#],
+            )
+            + &block(
+                7,
+                thinking,
+                &[r#"{"type":"signature_delta","signature":"u"}"#],
+            )
+            + &event(
+                "message_delta",
+                r#"{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":4,"output_tokens":6}}"#,
+            ),
+        event("message_stop", r#"{"type":"message_stop"}"#),
+    ];
+    assert_eq!(output, expected);
+
+    let output = stream(
+        &json!({}),
+        &[
+            r#"{"candidates":[{"content":{"parts":[{"text":"hi"}]},"finishReason":"RECITATION"}]}"#,
+            r#"{"candidates":[{"finishReason":""}]}"#,
+            "[DONE]",
+        ],
+    )
+    .concat();
+    assert_eq!(
+        message_delta(&output),
+        json!({"type": "message_delta", "delta": {"stop_reason": "refusal", "stop_sequence": null}, "usage": {"input_tokens": 0, "output_tokens": 0}})
+    );
+}
+
+// Not upstream's: a signature on a thought without text, then one alone,
+// a thought's function call (dropped, as upstream does), and a signed call.
+#[test]
+fn non_stream_carriers_in_detail() {
+    let output = non_stream(
+        &json!({}),
+        concat!(
+            r#"{"candidates":[{"content":{"parts":[{"thought":true,"thoughtSignature":"a"},{"thoughtSignature":"b"},"#,
+            r#"{"text":"x","thought":true},{"thoughtSignature":"c"},{"functionCall":{"name":"f"},"thought":true},"#,
+            r#"{"functionCall":{"name":"g"},"thoughtSignature":"d"},{"text":"y"},{"text":"z","thoughtSignature":"e"}]},"#,
+            r#""finishReason":"SPII"}]}"#
+        ),
+    );
+    assert_eq!(
+        output.to_string(),
+        concat!(
+            r#"{"id":"","type":"message","role":"assistant","model":"","content":[{"type":"thinking","thinking":"","signature":"a"},"#,
+            r#"{"type":"thinking","thinking":"","signature":"b"},{"type":"thinking","thinking":"x","signature":"c"},"#,
+            r#"{"type":"thinking","thinking":"","signature":"d"},{"type":"tool_use","id":"g-1","name":"g","input":{}},"#,
+            r#"{"type":"text","text":"y"},{"type":"thinking","thinking":"","signature":"e"},{"type":"text","text":"z"}],"#,
+            r#""stop_reason":"tool_use","stop_sequence":null}"#
         )
     );
 }

@@ -48,7 +48,9 @@ pub(crate) async fn chat_completions(
     let mut stream = parsed.get("stream") == Some(&Value::Bool(true));
     if is_responses_format(&parsed) {
         let model = gjson_string(parsed.get("model"));
-        parsed =
+        // As upstream, a refusal is not acted on here: the Chat Completions
+        // body goes on, and the provider's translator judges it.
+        (parsed, _) =
             convert_openai_responses_request_to_openai_chat_completions(&model, &parsed, stream);
         stream = parsed.get("stream").is_some_and(gjson_bool);
         payload = Bytes::from(parsed.to_string());

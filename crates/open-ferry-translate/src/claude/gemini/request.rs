@@ -10,6 +10,12 @@
 //! models that take one, or a thinking budget for older models; which kind a
 //! model takes comes from the [`ModelCatalog`].
 //!
+//! Inline data Claude can't read becomes text naming its media type only in
+//! a model turn. In any other turn it's dropped, as is inline data without a
+//! media type or data and file data without a URI; the rest of the turn is
+//! still sent, but a turn left with nothing to send is refused with an
+//! [`UnsupportedPartError`].
+//!
 //! Deviations from upstream:
 //! - `metadata.user_id` is only set to an ID the client sent, in
 //!   `metadata.user_id` or `user`. Without one, upstream derives an ID from
@@ -39,9 +45,11 @@ use std::collections::VecDeque;
 use serde_json::{Map, Value};
 
 use crate::common::claude::{MessageAccumulator, client_user_id, sanitize_function_name};
+use crate::common::parts::UserTurnDrops;
 use crate::go;
 use crate::json::{bool_of, float_of, go_marshaled, int_of, object, path, str_of};
 use crate::models::ModelCatalog;
+use crate::registry::UnsupportedPartError;
 use crate::thinking::summary::apply_translated_to_claude;
 use crate::thinking::{budget_to_level, claude_effort, has_level, level_to_budget};
 
@@ -54,12 +62,15 @@ const MAX_ARRAY_PADDING: usize = 1024;
 /// `model_name`. `stream` is whether the client asked to stream. `models` says
 /// which thinking settings the model takes; pass [`ModelCatalog::current`]
 /// unless you have your own.
+///
+/// The error is set when a turn other than the model's had only parts Claude
+/// can't take; the body is still returned.
 pub fn convert_gemini_request_to_claude(
     model_name: &str,
     request: &Value,
     stream: bool,
     models: &ModelCatalog,
-) -> Value {
+) -> (Value, Option<UnsupportedPartError>) {
     let mut out = Map::new();
     out.insert("model".into(), model_name.into());
     out.insert("max_tokens".into(), DEFAULT_MAX_TOKENS.into());
@@ -77,7 +88,11 @@ pub fn convert_gemini_request_to_claude(
         apply_generation_config(&mut out, config, model_name, models);
     }
 
-    out.insert("messages".into(), convert_messages(request).into());
+    let mut drops = UserTurnDrops::default();
+    out.insert(
+        "messages".into(),
+        convert_messages(request, &mut drops).into(),
+    );
 
     if let Some(Value::Array(tools)) = request.get("tools") {
         let tools: Vec<Value> = tools
@@ -106,7 +121,7 @@ pub fn convert_gemini_request_to_claude(
 
     let mut out = Value::Object(out);
     apply_translated_to_claude(&mut out, request, "gemini", model_name, models);
-    out
+    (out, drops.err())
 }
 
 /// `IsGeminiThoughtPart`: a part marked as the model's hidden reasoning.
@@ -214,11 +229,14 @@ fn text_block(text: impl Into<Value>) -> Value {
 }
 
 /// The system instruction, as a user turn of its own, then the contents as
-/// alternating turns.
-fn convert_messages(request: &Value) -> Vec<Value> {
+/// alternating turns. Each turn other than the model's is recorded in
+/// `drops`.
+fn convert_messages(request: &Value, drops: &mut UserTurnDrops) -> Vec<Value> {
     let mut messages = Vec::new();
-    // Upstream reads only `system_instruction`, not `systemInstruction`.
-    if let Some(Value::Array(parts)) = path(request, "system_instruction.parts") {
+    let system = request
+        .get("systemInstruction")
+        .or_else(|| request.get("system_instruction"));
+    if let Some(Value::Array(parts)) = system.and_then(|system| system.get("parts")) {
         // A newline goes before each text once there is some text, so empty
         // texts at the start add none.
         let mut text = String::new();
@@ -252,14 +270,32 @@ fn convert_messages(request: &Value) -> Vec<Value> {
             // Upstream drops turns of any other role.
             _ => "",
         };
+        // Upstream counts any role but the model's as the user's here, even
+        // one whose turn it then drops.
+        let user = role != "assistant";
         let Some(Value::Array(parts)) = content.get("parts") else {
+            if user {
+                drops.end_turn(0);
+            }
             continue;
         };
-        let blocks: Vec<Value> = parts
-            .iter()
-            .filter(|part| !is_thought(part))
-            .filter_map(|part| convert_part(part, role, &mut tool_ids))
-            .collect();
+        let mut blocks = Vec::new();
+        let mut sendable = 0;
+        for part in parts.iter().filter(|part| !is_thought(part)) {
+            match convert_part(part, role, &mut tool_ids) {
+                Converted::Block(block) => {
+                    if is_sendable(&block) {
+                        sendable += 1;
+                    }
+                    blocks.push(block);
+                }
+                Converted::Dropped(kind) if user => drops.drop_part(kind),
+                Converted::Dropped(_) | Converted::Nothing => {}
+            }
+        }
+        if user {
+            drops.end_turn(sendable);
+        }
         if !role.is_empty() {
             accumulator.push(role, blocks);
         }
@@ -268,10 +304,29 @@ fn convert_messages(request: &Value) -> Vec<Value> {
     messages
 }
 
+/// What became of one content part.
+enum Converted {
+    /// The Claude block it became.
+    Block(Value),
+    /// It can't be sent; the part type is the one a refusal names.
+    Dropped(&'static str),
+    /// It had nothing to convert.
+    Nothing,
+}
+
+/// Whether a converted block gives the model something to read: text that
+/// isn't empty or only whitespace, or any other block.
+fn is_sendable(block: &Value) -> bool {
+    match block.get("type") {
+        Some(Value::String(kind)) if kind == "text" => !str_of(block.get("text")).trim().is_empty(),
+        _ => true,
+    }
+}
+
 /// One content part as a Claude block, if it converts to one.
-fn convert_part(part: &Value, role: &str, tool_ids: &mut ToolIds) -> Option<Value> {
+fn convert_part(part: &Value, role: &str, tool_ids: &mut ToolIds) -> Converted {
     if let Some(text) = part.get("text") {
-        return Some(text_block(text_of(text)));
+        return Converted::Block(text_block(text_of(text)));
     }
     if role == "assistant"
         && let Some(call) = part.get("functionCall")
@@ -285,7 +340,7 @@ fn convert_part(part: &Value, role: &str, tool_ids: &mut ToolIds) -> Option<Valu
             Some(args @ Value::Object(_)) => args.clone(),
             _ => Value::Object(Map::new()),
         };
-        return Some(object([
+        return Converted::Block(object([
             ("type", "tool_use".into()),
             ("id", id.into()),
             ("name", name.into()),
@@ -301,19 +356,25 @@ fn convert_part(part: &Value, role: &str, tool_ids: &mut ToolIds) -> Option<Valu
         } else {
             "".into()
         };
-        return Some(object([
+        return Converted::Block(object([
             ("type", "tool_result".into()),
             ("tool_use_id", id.into()),
             ("content", content),
         ]));
     }
     if let Some(inline) = part.get("inlineData").or_else(|| part.get("inline_data")) {
-        return inline_data_block(inline);
+        return match inline_data_block(inline, role == "assistant") {
+            Some(block) => Converted::Block(block),
+            None => Converted::Dropped("inlineData"),
+        };
     }
     if let Some(file) = part.get("fileData").or_else(|| part.get("file_data")) {
-        return file_data_block(file);
+        return match file_data_block(file) {
+            Some(block) => Converted::Block(block),
+            None => Converted::Dropped("fileData"),
+        };
     }
-    None
+    Converted::Nothing
 }
 
 /// Pairs function calls with their responses. A call or response keeps an ID
@@ -358,8 +419,8 @@ fn client_tool_id(node: &Value) -> Option<String> {
 }
 
 /// Inline data with both a MIME type and data: an image, a document, or else
-/// text naming the media type.
-fn inline_data_block(inline: &Value) -> Option<Value> {
+/// text naming the media type when `keep_placeholder` is set.
+fn inline_data_block(inline: &Value, keep_placeholder: bool) -> Option<Value> {
     let mut mime_type = str_of(inline.get("mimeType"));
     if mime_type.is_empty() {
         mime_type = str_of(inline.get("mime_type"));
@@ -373,10 +434,12 @@ fn inline_data_block(inline: &Value) -> Option<Value> {
         "image"
     } else if lower.starts_with("application/") || lower.starts_with("text/") {
         "document"
-    } else {
+    } else if keep_placeholder {
         return Some(text_block(format!(
             "Media content: inline data (Type: {mime_type})"
         )));
+    } else {
+        return None;
     };
     Some(object([
         ("type", kind.into()),

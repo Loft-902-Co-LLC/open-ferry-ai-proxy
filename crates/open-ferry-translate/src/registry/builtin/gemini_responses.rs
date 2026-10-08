@@ -8,7 +8,7 @@
 use std::error::Error;
 use std::sync::Arc;
 
-use super::{events, to_vec};
+use super::{checked, events, to_vec};
 use crate::gemini::openai::responses as gemini_responses;
 use crate::registry::{Format, Registry, ResponseTransform, StreamTranslator};
 
@@ -17,9 +17,9 @@ pub(super) fn register(registry: &Registry) {
     registry.register(
         Format::OPENAI_RESPONSE,
         Format::GEMINI,
-        Some(Arc::new(|model, body, stream| {
+        checked(|model, body, stream| {
             gemini_responses::convert_openai_responses_request_to_gemini(model, &body, stream)
-        })),
+        }),
         ResponseTransform {
             stream: Some(Arc::new(|context| {
                 Box::new(GeminiToResponses(

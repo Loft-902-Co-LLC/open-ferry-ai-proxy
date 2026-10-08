@@ -25,6 +25,12 @@
 //! isn't declared, or `parallel_tool_calls: false`. A strict tool asks for
 //! `VALIDATED` mode.
 //!
+//! In a user message, or a system message that became a user turn, an image
+//! or video is inlined only from a base64 `data:` URL, and a file only from
+//! data whose type can be told; audio needs data. Anything else there is
+//! dropped. The rest of the turn is still sent, but a turn left with nothing
+//! to send is refused with an [`UnsupportedPartError`].
+//!
 //! Deviations from upstream:
 //! - A tool call whose `arguments` isn't JSON, such as `""` or missing,
 //!   gets no `args`. Upstream copies the text as it is, which makes the
@@ -47,10 +53,12 @@ use serde_json::{Map, Value, json};
 use crate::common::claude::system_reminder_text;
 use crate::common::file_data::normalize_openai_file_data;
 use crate::common::gemini::sanitize_gemini_function_name;
+use crate::common::parts::{UserTurnDrops, count_sendable_gemini_parts};
 use crate::gemini::common::attach_default_safety_settings;
 use crate::gemini_schema::clean_json_schema_for_gemini_json_schema;
 use crate::go;
 use crate::json::{delete_path, float_of, int_of, object, path, set_path, str_of};
+use crate::registry::UnsupportedPartError;
 use crate::signature::{
     BlockKind, GEMINI_SKIP_THOUGHT_SIGNATURE_VALIDATOR, gemini_replay_signature_or_bypass,
 };
@@ -69,8 +77,16 @@ const ALLOWED_FUNCTION_NAMES: &str = "toolConfig.functionCallingConfig.allowedFu
 /// Converts an OpenAI Chat Completions request body into a Gemini request
 /// body for `model_name`. The stream flag isn't used: Gemini picks streaming
 /// by URL.
-pub fn convert_openai_request_to_gemini(model_name: &str, request: &Value, _stream: bool) -> Value {
+///
+/// The error is set when a user turn had only parts Gemini can't take; the
+/// body is still returned.
+pub fn convert_openai_request_to_gemini(
+    model_name: &str,
+    request: &Value,
+    _stream: bool,
+) -> (Value, Option<UnsupportedPartError>) {
     let mut out = json!({"contents": [], "model": model_name});
+    let mut drops = UserTurnDrops::default();
 
     if let Some(config) = request.get("generationConfig") {
         out["generationConfig"] = config.clone();
@@ -78,7 +94,7 @@ pub fn convert_openai_request_to_gemini(model_name: &str, request: &Value, _stre
     apply_generation_settings(&mut out, request);
 
     if let Some(Value::Array(messages)) = request.get("messages") {
-        let (system_parts, mut contents) = convert_messages(messages);
+        let (system_parts, mut contents) = convert_messages(messages, &mut drops);
         if !system_parts.is_empty() {
             out["systemInstruction"] = content_node("user", system_parts);
         }
@@ -96,7 +112,7 @@ pub fn convert_openai_request_to_gemini(model_name: &str, request: &Value, _stre
     apply_tool_config(&mut out, request, &tools, allowed.as_ref());
 
     attach_default_safety_settings(&mut out, "safetySettings");
-    out
+    (out, drops.err())
 }
 
 /// The `generationConfig` settings read from the request's OpenAI fields.
@@ -212,8 +228,9 @@ fn apply_response_format(out: &mut Value, format: Option<&Value>) {
     }
 }
 
-/// The system instruction's parts and the contents, from the messages.
-fn convert_messages(messages: &[Value]) -> (Vec<Value>, Vec<Value>) {
+/// The system instruction's parts and the contents, from the messages. Each
+/// user turn is recorded in `drops`.
+fn convert_messages(messages: &[Value], drops: &mut UserTurnDrops) -> (Vec<Value>, Vec<Value>) {
     let mut system_parts = Vec::new();
     let mut contents = Vec::new();
     let mut in_conversation = false;
@@ -238,7 +255,9 @@ fn convert_messages(messages: &[Value]) -> (Vec<Value>, Vec<Value>) {
             }
         } else if role == "user" || is_system {
             in_conversation = true;
-            let parts = user_parts(content, is_system);
+            let parts = user_parts(content, is_system, drops);
+            // Whitespace-only text is sent but doesn't keep an emptied turn.
+            drops.end_turn(count_sendable_gemini_parts(&parts));
             if !parts.is_empty() {
                 contents.push(content_node("user", parts));
             }
@@ -251,8 +270,9 @@ fn convert_messages(messages: &[Value]) -> (Vec<Value>, Vec<Value>) {
 }
 
 /// A user message's parts, or a mid-conversation system message's, whose
-/// text is wrapped as a reminder.
-fn user_parts(content: Option<&Value>, demoted: bool) -> Vec<Value> {
+/// text is wrapped as a reminder. The parts that can't be sent are recorded
+/// in `drops`.
+fn user_parts(content: Option<&Value>, demoted: bool, drops: &mut UserTurnDrops) -> Vec<Value> {
     let text = |text: &str| text_part(demoted_system_text(text.to_owned(), demoted));
     match content {
         Some(Value::String(content)) => vec![text(content)],
@@ -261,27 +281,36 @@ fn user_parts(content: Option<&Value>, demoted: bool) -> Vec<Value> {
         }
         Some(Value::Array(items)) => items
             .iter()
-            .filter_map(|item| match str_of(item.get("type")).as_ref() {
-                "text" => {
-                    let content = str_of(item.get("text"));
-                    (!content.is_empty()).then(|| text(&content))
+            .filter_map(|item| {
+                let kind = str_of(item.get("type"));
+                let part = match kind.as_ref() {
+                    "text" => {
+                        let content = str_of(item.get("text"));
+                        return (!content.is_empty()).then(|| text(&content));
+                    }
+                    // Only a base64 data URL can be inlined; a remote URL has
+                    // no equivalent here.
+                    "image_url" => data_url_file_part(&str_of(path(item, "image_url.url"))),
+                    "video_url" => data_url_file_part(&str_of(path(item, "video_url.url"))),
+                    "file" => normalize_openai_file_data(
+                        &str_of(path(item, "file.filename")),
+                        "",
+                        &str_of(path(item, "file.file_data")),
+                    )
+                    .map(|file| inline_data_part(file.mime_type, file.data)),
+                    "input_audio" => {
+                        let data = str_of(path(item, "input_audio.data"));
+                        (!data.is_empty()).then(|| {
+                            let format = str_of(path(item, "input_audio.format"));
+                            inline_data_part(input_audio_mime_type(&format), data.into_owned())
+                        })
+                    }
+                    _ => return None,
+                };
+                if part.is_none() {
+                    drops.drop_part(&kind);
                 }
-                "image_url" => data_url_part(&str_of(path(item, "image_url.url"))),
-                "video_url" => data_url_part(&str_of(path(item, "video_url.url"))),
-                "file" => normalize_openai_file_data(
-                    &str_of(path(item, "file.filename")),
-                    "",
-                    &str_of(path(item, "file.file_data")),
-                )
-                .map(|file| inline_data_part(file.mime_type, file.data)),
-                "input_audio" => {
-                    let data = str_of(path(item, "input_audio.data"));
-                    (!data.is_empty()).then(|| {
-                        let format = str_of(path(item, "input_audio.format"));
-                        inline_data_part(input_audio_mime_type(&format), data.into_owned())
-                    })
-                }
-                _ => None,
+                part
             })
             .collect(),
         _ => Vec::new(),
@@ -396,6 +425,12 @@ fn tool_call_thought_signature(call: &Value) -> String {
                 )
             },
         )
+}
+
+/// The inline data part for a base64 `data:` URL, read as
+/// `NormalizeOpenAIFileData` reads it. `None` for anything else.
+fn data_url_file_part(url: &str) -> Option<Value> {
+    normalize_openai_file_data("", "", url).map(|file| inline_data_part(file.mime_type, file.data))
 }
 
 /// The inline data part for a `data:` URL, read as upstream reads it: the

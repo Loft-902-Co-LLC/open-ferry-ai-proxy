@@ -20,10 +20,10 @@ import (
 
 func init() {
 	translators["interactions/claude/request"] = func(in input) []byte {
-		return interactionsclaude.ConvertClaudeRequestToInteractions(in.Model, []byte(in.Request), streamOption(in))
+		return refused(interactionsclaude.ConvertClaudeRequestToInteractions(in.Model, []byte(in.Request), streamOption(in)))
 	}
 	translators["interactions/claude/request-compat"] = func(in input) []byte {
-		return interactionsclaude.ConvertClaudeRequestToInteractionsWithCompat(in.Model, []byte(in.Request), streamOption(in))
+		return refused(interactionsclaude.ConvertClaudeRequestToInteractionsWithCompat(in.Model, []byte(in.Request), streamOption(in)))
 	}
 	translators["interactions/claude/response"] = func(in input) []byte {
 		return chunkList(streamChunks(in, interactionsclaude.ConvertInteractionsResponseToClaude))
@@ -32,7 +32,7 @@ func init() {
 		return interactionsclaude.ConvertInteractionsResponseToClaudeNonStream(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), nil)
 	}
 	translators["claude/interactions/request"] = func(in input) []byte {
-		return claudeinteractions.ConvertInteractionsRequestToClaude(in.Model, []byte(in.Request), streamOption(in))
+		return refused(claudeinteractions.ConvertInteractionsRequestToClaude(in.Model, []byte(in.Request), streamOption(in)))
 	}
 	translators["claude/interactions/response"] = func(in input) []byte {
 		return chunkList(streamChunks(in, claudeinteractions.ConvertClaudeResponseToInteractions))

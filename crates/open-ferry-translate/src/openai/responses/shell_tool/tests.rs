@@ -11,7 +11,6 @@ use serde_json::{Value, json};
 use super::super::{
     OpenAIToOpenAIResponsesStream,
     convert_openai_chat_completions_response_to_openai_responses_non_stream,
-    convert_openai_responses_request_to_openai_chat_completions,
 };
 use super::INVALID_ACTION;
 use crate::json::{exact, str_of};
@@ -39,6 +38,20 @@ fn count_at(value: &Value, path: &str) -> usize {
     at(value, path)
         .and_then(Value::as_array)
         .map_or(0, Vec::len)
+}
+
+/// The request translator's body, which must not be refused.
+#[track_caller]
+fn convert_openai_responses_request_to_openai_chat_completions(
+    model: &str,
+    request: &Value,
+    stream: bool,
+) -> Value {
+    let (out, err) = super::super::convert_openai_responses_request_to_openai_chat_completions(
+        model, request, stream,
+    );
+    assert_eq!(err, None, "{out}");
+    out
 }
 
 fn chat(request: &str) -> Value {

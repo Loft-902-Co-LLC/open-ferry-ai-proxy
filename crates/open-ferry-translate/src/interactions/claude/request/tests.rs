@@ -1,5 +1,6 @@
 // Ported from CLIProxyAPI internal/translator/interactions/claude/interactions_claude_test.go
-// (the request tests) and interactions_claude_compat_test.go (v8.0.15, MIT).
+// (the request tests) and interactions_claude_compat_test.go (v8.0.15, MIT),
+// and interactions_claude_user_turn_test.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 //
 // All tests are ported. PreservesBusinessObjectsInToolResultArray checked
@@ -10,6 +11,27 @@
 use serde_json::{Value, json};
 
 use super::*;
+
+/// [`super::convert_claude_request_to_interactions`], for requests it
+/// doesn't refuse.
+fn convert_claude_request_to_interactions(model: &str, request: &Value, stream: bool) -> Value {
+    let (body, err) = super::convert_claude_request_to_interactions(model, request, stream);
+    assert_eq!(err, None, "{body}");
+    body
+}
+
+/// [`super::convert_claude_request_to_interactions_with_compat`], for
+/// requests it doesn't refuse.
+fn convert_claude_request_to_interactions_with_compat(
+    model: &str,
+    request: &Value,
+    stream: bool,
+) -> Value {
+    let (body, err) =
+        super::convert_claude_request_to_interactions_with_compat(model, request, stream);
+    assert_eq!(err, None, "{body}");
+    body
+}
 
 fn translate(model: &str, input: &str, stream: bool) -> Value {
     convert_claude_request_to_interactions(model, &serde_json::from_str(input).unwrap(), stream)
@@ -318,4 +340,163 @@ fn numbers_keep_their_text() {
     let request = crate::json::exact::from_str(&request).unwrap();
     let out = convert_claude_request_to_interactions("m", &request, false);
     assert_eq!(out["input"][0]["arguments"].to_string(), spelled);
+}
+
+const USER_TURN_UPLOAD: &str = r#"{"type":"container_upload","file_id":"file-1"}"#;
+
+/// `ConvertClaudeRequestToInteractionsWithCompat`, with its refusal.
+fn convert_checked(input: &str) -> (Value, Option<UnsupportedPartError>) {
+    let request = serde_json::from_str(input).expect("test request is valid JSON");
+    super::convert_claude_request_to_interactions_with_compat("m", &request, false)
+}
+
+// TestConvertClaudeRequestToInteractions_RefusesAnyEmptiedUserTurn
+#[test]
+fn refuses_any_emptied_user_turn() {
+    let cases = [
+        (
+            "history then attachment only",
+            format!(
+                r#"{{"model":"m","messages":[{{"role":"user","content":"hello"}},{{"role":"assistant","content":[{{"type":"text","text":"hi"}}]}},{{"role":"user","content":[{USER_TURN_UPLOAD}]}}]}}"#
+            ),
+            "container_upload",
+        ),
+        (
+            "system prompt and system reminder",
+            format!(
+                r#"{{"model":"m","system":"sys","messages":[{{"role":"system","content":"reminder"}},{{"role":"user","content":[{USER_TURN_UPLOAD}]}}]}}"#
+            ),
+            "container_upload",
+        ),
+        (
+            "emptied turn before a later text turn",
+            format!(
+                r#"{{"model":"m","messages":[{{"role":"user","content":[{USER_TURN_UPLOAD}]}},{{"role":"assistant","content":[{{"type":"text","text":"ok"}}]}},{{"role":"user","content":"next"}}]}}"#
+            ),
+            "container_upload",
+        ),
+        (
+            "document without bytes",
+            r#"{"model":"m","messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":[{"type":"document","source":{"type":"file","file_id":"file-1"}}]}]}"#.to_owned(),
+            "document",
+        ),
+    ];
+    for (name, input, want) in cases {
+        let (body, err) = convert_checked(&input);
+        let err = err.unwrap_or_else(|| panic!("{name}: no refusal; body = {body}"));
+        assert_eq!(err.part_type, want, "{name}");
+        assert_eq!(err.status_code(), 400, "{name}");
+        assert_eq!(
+            err.to_string(),
+            format!("unsupported content part: {want}"),
+            "{name}"
+        );
+        assert!(body.is_object(), "{name}: {body}");
+    }
+}
+
+// TestConvertClaudeRequestToInteractions_KeepsTurnWithTextBesideAttachment
+#[test]
+fn keeps_turn_with_text_beside_attachment() {
+    let input = format!(
+        r#"{{"model":"m","messages":[{{"role":"user","content":"hello"}},{{"role":"assistant","content":"hi"}},{{"role":"user","content":[{{"type":"text","text":"keep me"}},{USER_TURN_UPLOAD}]}}]}}"#
+    );
+    let (body, err) = convert_checked(&input);
+    assert_eq!(err, None, "{body}");
+    assert_eq!(body["input"][2]["content"][0]["text"], "keep me", "{body}");
+}
+
+// TestConvertClaudeRequestToInteractions_Base64DocumentAfterHistoryStaysMedia
+#[test]
+fn base64_document_after_history_stays_media() {
+    let (body, err) = convert_checked(
+        r#"{"model":"m","messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":[{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0xLjQK"}}]}]}"#,
+    );
+    assert_eq!(err, None, "{body}");
+    let part = &body["input"][2]["content"][0];
+    assert_eq!(part["type"], "document", "{body}");
+    assert_eq!(part["mime_type"], "application/pdf", "{body}");
+    assert_eq!(part["data"], "JVBERi0xLjQK", "{body}");
+}
+
+// TestConvertClaudeRequestToInteractions_WhitespaceTextDoesNotHideAnUnrepresentableImage
+#[test]
+fn whitespace_text_does_not_hide_an_unrepresentable_image() {
+    let file_image = r#"{"type":"image","source":{"type":"file","file_id":"f1"}}"#;
+    let cases = [
+        (
+            "spaces before image",
+            format!(r#"{{"type":"text","text":"  "}},{file_image}"#),
+        ),
+        (
+            "mixed whitespace before image",
+            format!(r#"{{"type":"text","text":" \n\t"}},{file_image}"#),
+        ),
+        (
+            "spaces after image",
+            format!(r#"{file_image},{{"type":"text","text":"  "}}"#),
+        ),
+    ];
+    for (name, parts) in cases {
+        let input =
+            format!(r#"{{"model":"m","messages":[{{"role":"user","content":[{parts}]}}]}}"#);
+        let (body, err) = convert_checked(&input);
+        let err = err.unwrap_or_else(|| panic!("{name}: no refusal; body = {body}"));
+        assert_eq!(err.part_type, "image", "{name}");
+        assert_eq!(err.status_code(), 400, "{name}");
+    }
+}
+
+// TestConvertClaudeRequestToInteractions_RealTextBesideWhitespaceAndAnImageStillSucceeds
+#[test]
+fn real_text_beside_whitespace_and_an_image_still_succeeds() {
+    let (body, err) = convert_checked(
+        r#"{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"  "},{"type":"text","text":"keep me"},{"type":"image","source":{"type":"file","file_id":"f1"}}]}]}"#,
+    );
+    assert_eq!(err, None, "{body}");
+    let parts = body["input"][0]["content"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        parts.iter().any(|part| part["text"] == "keep me"),
+        "text was lost: {body}"
+    );
+}
+
+// TestClaudeToInteractionsRegistrationCarriesWhitespaceImageRefusal
+#[test]
+fn registration_carries_whitespace_image_refusal() {
+    let input = json!({"model": "m", "messages": [{"role": "user", "content": [{"type": "text", "text": "  "}, {"type": "image", "source": {"type": "file", "file_id": "f1"}}]}]});
+    let err = crate::registry::Registry::global()
+        .translate_request_checked(&"claude".into(), &"interactions".into(), "m", input, false)
+        .expect_err("the registration carries the refusal");
+    assert_eq!(err.part_type, "image");
+}
+
+// Not upstream's: an assistant's unsendable media isn't refused, and a
+// container upload with its bytes becomes a media part of its own type,
+// in a message and in a tool result.
+#[test]
+fn only_user_media_is_refused_and_uploads_with_bytes_are_sent() {
+    let (body, err) = convert_checked(&format!(
+        r#"{{"messages":[{{"role":"user","content":"q"}},{{"role":"assistant","content":[{USER_TURN_UPLOAD}]}}]}}"#
+    ));
+    assert_eq!(err, None, "{body}");
+
+    let upload = r#"{"type":"container_upload","source":{"media_type":"text/csv","data":"YQ=="}}"#;
+    let (body, err) = convert_checked(&format!(
+        r#"{{"messages":[{{"role":"user","content":[{upload}]}},{{"role":"assistant","content":[{{"type":"tool_use","id":"t","name":"f","input":{{}}}}]}},{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"t","content":[{upload}]}}]}}]}}"#
+    ));
+    assert_eq!(err, None, "{body}");
+    assert_eq!(
+        body["input"][0]["content"][0],
+        json!({"type": "container_upload", "mime_type": "text/csv", "data": "YQ=="}),
+        "{body}"
+    );
+    assert_eq!(
+        body["input"][2]["result"][0],
+        json!({"type": "container_upload", "mime_type": "text/csv", "data": "YQ=="}),
+        "{body}"
+    );
 }

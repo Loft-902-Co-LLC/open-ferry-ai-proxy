@@ -3,6 +3,12 @@
 
 //! Claude Messages request → Codex (OpenAI Responses) request.
 //!
+//! An image is sent by its base64 bytes, its `http(s)` URL or its file ID,
+//! and a document or container upload only as a base64 PDF. A user part
+//! with none of these is dropped. The rest of the message is still sent,
+//! but a user message left with nothing to send (empty text doesn't count)
+//! is refused with an [`UnsupportedPartError`].
+//!
 //! Deviations from upstream:
 //! - Tool parameter schemas keep the client's key order. Upstream round-trips
 //!   them through a Go map, which sorts keys alphabetically.
@@ -24,8 +30,10 @@ use super::super::unique_names::{UniqueNames, truncate_bytes};
 use crate::common::claude::{
     align_tool_results, is_attribution_system_text, message_system_reminder_text,
 };
+use crate::common::parts::{UserTurnDrops, is_http_url};
 use crate::go;
 use crate::json::{bool_of, int_of, object, str_of};
+use crate::registry::UnsupportedPartError;
 use crate::schema::{MAP_KEYWORDS, VALUE_KEYWORDS, has_unsupported_unicode_property_escape};
 use crate::signature::{
     BlockKind, Provider, compatible_signature_for_provider, detect_signature_provider_for_block,
@@ -42,21 +50,35 @@ pub(super) type ToolNameMap = HashMap<String, String>;
 
 /// Converts a Claude Messages request body into a Codex Responses request body
 /// for `model_name`. Codex requests always stream and are never stored.
-pub fn convert_claude_request_to_codex(model_name: &str, request: &Value) -> Value {
+///
+/// The error is set when a user message had only parts Codex can't take;
+/// the body is still returned.
+pub fn convert_claude_request_to_codex(
+    model_name: &str,
+    request: &Value,
+) -> (Value, Option<UnsupportedPartError>) {
     convert(model_name, request, false)
 }
 
 /// [`convert_claude_request_to_codex`] for compatibility endpoints, which also
 /// get back assistant thinking blocks whose signature is blank or in no known
 /// format.
-pub fn convert_claude_request_to_codex_with_compat(model_name: &str, request: &Value) -> Value {
+pub fn convert_claude_request_to_codex_with_compat(
+    model_name: &str,
+    request: &Value,
+) -> (Value, Option<UnsupportedPartError>) {
     convert(model_name, request, true)
 }
 
-fn convert(model_name: &str, request: &Value, preserve_unknown_signatures: bool) -> Value {
+fn convert(
+    model_name: &str,
+    request: &Value,
+    preserve_unknown_signatures: bool,
+) -> (Value, Option<UnsupportedPartError>) {
     let tool_names = build_tool_name_map(request.get("tools"));
 
     let mut input = Vec::new();
+    let mut refusal = None;
     input.extend(convert_system(request.get("system")));
     if let Some(Value::Array(messages)) = request.get("messages") {
         let replay = SignatureReplay {
@@ -67,6 +89,7 @@ fn convert(model_name: &str, request: &Value, preserve_unknown_signatures: bool)
         for message in messages {
             builder.push_message(message);
         }
+        refusal = builder.drops.err();
         input.extend(builder.finish());
     }
 
@@ -123,7 +146,7 @@ fn convert(model_name: &str, request: &Value, preserve_unknown_signatures: bool)
             .collect();
         out.insert("tools".into(), tools.into());
     }
-    Value::Object(out)
+    (Value::Object(out), refusal)
 }
 
 /// Turns the top-level `system` prompt into a single developer message.
@@ -172,6 +195,8 @@ struct InputBuilder<'a> {
     /// Mid-conversation system messages that arrived between a tool call and
     /// its result. They are held back so the call and result stay adjacent.
     pending_reminders: Vec<Value>,
+    /// The parts each user message couldn't send.
+    drops: UserTurnDrops,
 }
 
 /// Which thinking signatures are replayed as reasoning `encrypted_content`.
@@ -208,6 +233,9 @@ impl SignatureReplay {
 struct PendingMessage<'r> {
     role: &'r str,
     content: Vec<Value>,
+    /// What the message itself sends: its parts other than empty text, and
+    /// its tool results. System reminders flushed beside it don't count.
+    sendable: usize,
 }
 
 impl<'a> InputBuilder<'a> {
@@ -218,6 +246,7 @@ impl<'a> InputBuilder<'a> {
             items: Vec::new(),
             pending_tool_use_ids: Vec::new(),
             pending_reminders: Vec::new(),
+            drops: UserTurnDrops::default(),
         }
     }
 
@@ -250,6 +279,7 @@ impl<'a> InputBuilder<'a> {
         let mut pending = PendingMessage {
             role: &role,
             content: Vec::new(),
+            sendable: 0,
         };
         match message.get("content") {
             Some(Value::Array(parts)) => {
@@ -267,6 +297,9 @@ impl<'a> InputBuilder<'a> {
         }
         self.flush(&mut pending);
         self.flush_reminders();
+        if role == "user" {
+            self.drops.end_turn(pending.sendable);
+        }
     }
 
     fn push_part(&mut self, message: &mut PendingMessage<'_>, part: &Value) {
@@ -294,11 +327,14 @@ impl<'a> InputBuilder<'a> {
             }
             "image" => {
                 self.flush_reminders();
-                if let Some(url) = image_data_url(part.get("source")) {
-                    message.content.push(input_image(url));
+                if let Some(image) = image_input_part(part.get("source")) {
+                    message.content.push(image);
+                    message.sendable += 1;
+                } else if message.role == "user" {
+                    self.drops.drop_part("image");
                 }
             }
-            "document" => {
+            part_type @ ("document" | "container_upload") => {
                 self.flush_reminders();
                 if let Some(url) = pdf_data_url(part.get("source")) {
                     message.content.push(object([
@@ -306,6 +342,9 @@ impl<'a> InputBuilder<'a> {
                         ("file_data", url.into()),
                         ("filename", "document.pdf".into()),
                     ]));
+                    message.sendable += 1;
+                } else if message.role == "user" {
+                    self.drops.drop_part(part_type);
                 }
             }
             "tool_use" => {
@@ -331,6 +370,7 @@ impl<'a> InputBuilder<'a> {
                     ("call_id", call_id.into()),
                     ("output", tool_result_output(part.get("content"))),
                 ]));
+                message.sendable += 1;
             }
             _ => {}
         }
@@ -357,6 +397,9 @@ impl PendingMessage<'_> {
         };
         self.content
             .push(object([("type", part_type.into()), ("text", text.into())]));
+        if !text.is_empty() {
+            self.sendable += 1;
+        }
     }
 }
 
@@ -384,6 +427,29 @@ fn tool_result_output(content: Option<&Value>) -> Value {
 
 fn input_image(url: String) -> Value {
     object([("type", "input_image".into()), ("image_url", url.into())])
+}
+
+/// `claudeImageInputPart`: a Claude image source as an `input_image` part.
+/// Base64 bytes become a data URL, an `http(s)` URL passes through and a
+/// file ID is carried as `file_id`; a source with none of them gives `None`.
+fn image_input_part(source: Option<&Value>) -> Option<Value> {
+    if let Some(url) = image_data_url(source) {
+        return Some(input_image(url));
+    }
+    let source = source?;
+    let kind = str_of(source.get("type"));
+    let url = str_of(source.get("url"));
+    let file_id = str_of(source.get("file_id"));
+    if kind == "url" && is_http_url(&url) {
+        Some(input_image(url.trim().to_owned()))
+    } else if kind == "file" && !file_id.is_empty() {
+        Some(object([
+            ("type", "input_image".into()),
+            ("file_id", file_id.into()),
+        ]))
+    } else {
+        None
+    }
 }
 
 fn image_data_url(source: Option<&Value>) -> Option<String> {

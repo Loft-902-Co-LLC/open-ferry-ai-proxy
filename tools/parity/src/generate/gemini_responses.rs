@@ -1835,7 +1835,7 @@ impl Generator {
         if !root.is_object() {
             return;
         }
-        let gemini = convert_openai_responses_request_to_gemini("gemini-2.5-pro", &root, true);
+        let (gemini, _) = convert_openai_responses_request_to_gemini("gemini-2.5-pro", &root, true);
         self.gemini_names = gemini["tools"]
             .as_array()
             .into_iter()

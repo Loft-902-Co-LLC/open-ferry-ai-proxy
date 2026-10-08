@@ -1323,7 +1323,7 @@ fn apply_patch_chat_completion_native_history_round_trip() {
         ]
         .concat(),
     );
-    let request = convert_openai_chat_completions_request_to_codex("m", &followup, true);
+    let (request, _) = convert_openai_chat_completions_request_to_codex("m", &followup, true);
     assert_eq!(
         text_at(&request, "input.0.input"),
         "p",

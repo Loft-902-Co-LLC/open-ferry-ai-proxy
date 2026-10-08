@@ -117,10 +117,10 @@ type output struct {
 
 var translators = map[string]func(in input) []byte{
 	"codex/claude/request": func(in input) []byte {
-		return codexclaude.ConvertClaudeRequestToCodex(in.Model, []byte(in.Request), true)
+		return refused(codexclaude.ConvertClaudeRequestToCodex(in.Model, []byte(in.Request), true))
 	},
 	"codex/claude/request-compat": func(in input) []byte {
-		return codexclaude.ConvertClaudeRequestToCodexWithCompat(in.Model, []byte(in.Request), true)
+		return refused(codexclaude.ConvertClaudeRequestToCodexWithCompat(in.Model, []byte(in.Request), true))
 	},
 	"codex/claude/response": func(in input) []byte {
 		var param any
@@ -137,7 +137,7 @@ var translators = map[string]func(in input) []byte{
 		return codexclaude.ConvertCodexResponseToClaudeNonStream(context.Background(), in.Model, []byte(in.Request), nil, finalEvent(in), nil)
 	},
 	"codex/openai-responses/request": func(in input) []byte {
-		return codexresponses.ConvertOpenAIResponsesRequestToCodex(in.Model, []byte(in.Request), true)
+		return refused(codexresponses.ConvertOpenAIResponsesRequestToCodex(in.Model, []byte(in.Request), true))
 	},
 	"codex/openai-responses/response": func(in input) []byte {
 		chunks := []string{}
@@ -160,7 +160,7 @@ var translators = map[string]func(in input) []byte{
 		return codexresponses.ConvertCodexResponseToOpenAIResponsesNonStream(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), nil)
 	},
 	"codex/openai-chat/request": func(in input) []byte {
-		return codexchat.ConvertOpenAIRequestToCodex(in.Model, []byte(in.Request), true)
+		return refused(codexchat.ConvertOpenAIRequestToCodex(in.Model, []byte(in.Request), true))
 	},
 	"codex/openai-chat/response": func(in input) []byte {
 		var param any
@@ -180,10 +180,10 @@ var translators = map[string]func(in input) []byte{
 		return codexchat.ConvertCodexResponseToOpenAINonStream(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), nil)
 	},
 	"claude/openai-chat/request": func(in input) []byte {
-		return claudechat.ConvertOpenAIRequestToClaude(in.Model, []byte(in.Request), true)
+		return refused(claudechat.ConvertOpenAIRequestToClaude(in.Model, []byte(in.Request), true))
 	},
 	"claude/openai-chat/request-compat": func(in input) []byte {
-		return claudechat.ConvertOpenAIRequestToClaudeWithCompat(in.Model, []byte(in.Request), true)
+		return refused(claudechat.ConvertOpenAIRequestToClaudeWithCompat(in.Model, []byte(in.Request), true))
 	},
 	"claude/openai-chat/response": func(in input) []byte {
 		var param any
@@ -203,10 +203,10 @@ var translators = map[string]func(in input) []byte{
 		return claudechat.ConvertClaudeResponseToOpenAINonStream(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), nil)
 	},
 	"claude/openai-responses/request": func(in input) []byte {
-		return clauderesponses.ConvertOpenAIResponsesRequestToClaude(in.Model, []byte(in.Request), true)
+		return refused(clauderesponses.ConvertOpenAIResponsesRequestToClaude(in.Model, []byte(in.Request), true))
 	},
 	"claude/openai-responses/request-compat": func(in input) []byte {
-		return clauderesponses.ConvertOpenAIResponsesRequestToClaudeWithCompat(in.Model, []byte(in.Request), true)
+		return refused(clauderesponses.ConvertOpenAIResponsesRequestToClaudeWithCompat(in.Model, []byte(in.Request), true))
 	},
 	"claude/openai-responses/response": func(in input) []byte {
 		var param any
@@ -228,7 +228,7 @@ var translators = map[string]func(in input) []byte{
 		return clauderesponses.ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), nil)
 	},
 	"openai/openai-responses/request": func(in input) []byte {
-		return openairesponses.ConvertOpenAIResponsesRequestToOpenAIChatCompletions(in.Model, []byte(in.Request), true)
+		return refused(openairesponses.ConvertOpenAIResponsesRequestToOpenAIChatCompletions(in.Model, []byte(in.Request), true))
 	},
 	"openai/openai-responses/response": func(in input) []byte {
 		var param any
@@ -249,10 +249,10 @@ var translators = map[string]func(in input) []byte{
 		return openairesponses.ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), nil)
 	},
 	"openai/claude/request": func(in input) []byte {
-		return openaiclaude.ConvertClaudeRequestToOpenAI(in.Model, []byte(in.Request), streamOption(in))
+		return refused(openaiclaude.ConvertClaudeRequestToOpenAI(in.Model, []byte(in.Request), streamOption(in)))
 	},
 	"openai/claude/request-compat": func(in input) []byte {
-		return openaiclaude.ConvertClaudeRequestToOpenAIWithCompat(in.Model, []byte(in.Request), streamOption(in))
+		return refused(openaiclaude.ConvertClaudeRequestToOpenAIWithCompat(in.Model, []byte(in.Request), streamOption(in)))
 	},
 	"openai/claude/response": func(in input) []byte {
 		var param any
@@ -268,7 +268,7 @@ var translators = map[string]func(in input) []byte{
 		return openaiclaude.ConvertOpenAIResponseToClaudeNonStream(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), nil)
 	},
 	"openai/openai-chat/request": func(in input) []byte {
-		return openaichat.ConvertOpenAIRequestToOpenAI(in.Model, []byte(in.Request), true)
+		return refused(openaichat.ConvertOpenAIRequestToOpenAI(in.Model, []byte(in.Request), true))
 	},
 	"openai/openai-chat/response": func(in input) []byte {
 		var param any
@@ -284,7 +284,7 @@ var translators = map[string]func(in input) []byte{
 		return openaichat.ConvertOpenAIResponseToOpenAINonStream(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), nil)
 	},
 	"codex/gemini/request": func(in input) []byte {
-		return codexgemini.ConvertGeminiRequestToCodex(in.Model, []byte(in.Request), streamOption(in))
+		return refused(codexgemini.ConvertGeminiRequestToCodex(in.Model, []byte(in.Request), streamOption(in)))
 	},
 	"codex/gemini/response": func(in input) []byte {
 		var param any
@@ -300,7 +300,7 @@ var translators = map[string]func(in input) []byte{
 		return codexgemini.ConvertCodexResponseToGeminiNonStream(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), nil)
 	},
 	"claude/gemini/request": func(in input) []byte {
-		return claudegemini.ConvertGeminiRequestToClaude(in.Model, []byte(in.Request), streamOption(in))
+		return refused(claudegemini.ConvertGeminiRequestToClaude(in.Model, []byte(in.Request), streamOption(in)))
 	},
 	"claude/gemini/response": func(in input) []byte {
 		var param any
@@ -316,7 +316,7 @@ var translators = map[string]func(in input) []byte{
 		return claudegemini.ConvertClaudeResponseToGeminiNonStream(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), nil)
 	},
 	"openai/gemini/request": func(in input) []byte {
-		return openaigemini.ConvertGeminiRequestToOpenAI(in.Model, []byte(in.Request), streamOption(in))
+		return refused(openaigemini.ConvertGeminiRequestToOpenAI(in.Model, []byte(in.Request), streamOption(in)))
 	},
 	"openai/gemini/response": func(in input) []byte {
 		var param any
@@ -332,7 +332,7 @@ var translators = map[string]func(in input) []byte{
 		return openaigemini.ConvertOpenAIResponseToGeminiNonStream(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), nil)
 	},
 	"gemini/gemini/request": func(in input) []byte {
-		return geminigemini.ConvertGeminiRequestToGemini(in.Model, []byte(in.Request), streamOption(in))
+		return refused(geminigemini.ConvertGeminiRequestToGemini(in.Model, []byte(in.Request), streamOption(in)))
 	},
 	"gemini/gemini/response": func(in input) []byte {
 		chunks := []string{}
@@ -347,10 +347,10 @@ var translators = map[string]func(in input) []byte{
 		return geminigemini.PassthroughGeminiResponseNonStream(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), nil)
 	},
 	"gemini/claude/request": func(in input) []byte {
-		return geminiclaude.ConvertClaudeRequestToGemini(in.Model, []byte(in.Request), streamOption(in))
+		return refused(geminiclaude.ConvertClaudeRequestToGemini(in.Model, []byte(in.Request), streamOption(in)))
 	},
 	"gemini/claude/request-compat": func(in input) []byte {
-		return geminiclaude.ConvertClaudeRequestToGeminiWithCompat(in.Model, []byte(in.Request), streamOption(in))
+		return refused(geminiclaude.ConvertClaudeRequestToGeminiWithCompat(in.Model, []byte(in.Request), streamOption(in)))
 	},
 	"gemini/claude/response": func(in input) []byte {
 		var param any
@@ -366,7 +366,7 @@ var translators = map[string]func(in input) []byte{
 		return geminiclaude.ConvertGeminiResponseToClaudeNonStream(context.Background(), in.Model, []byte(in.Request), translatedRequest(in), finalEvent(in), nil)
 	},
 	"gemini/openai-chat/request": func(in input) []byte {
-		return geminichat.ConvertOpenAIRequestToGemini(in.Model, []byte(in.Request), streamOption(in))
+		return refused(geminichat.ConvertOpenAIRequestToGemini(in.Model, []byte(in.Request), streamOption(in)))
 	},
 	"gemini/openai-chat/response": func(in input) []byte {
 		var param any
@@ -389,7 +389,7 @@ var translators = map[string]func(in input) []byte{
 	"signature/claude-messages":    sanitizeClaudeMessages,
 	"signature/gemini":             sanitizeGemini,
 	"gemini/openai-responses/request": func(in input) []byte {
-		return geminiresponses.ConvertOpenAIResponsesRequestToGemini(in.Model, []byte(in.Request), true)
+		return refused(geminiresponses.ConvertOpenAIResponsesRequestToGemini(in.Model, []byte(in.Request), true))
 	},
 	"gemini/openai-responses/response": func(in input) []byte {
 		var param any
@@ -461,7 +461,7 @@ func registryRequest(in input) []byte {
 	from, to := options.formats()
 	if options.Identity {
 		registry := sdktranslator.NewRegistry()
-		identity := func(_ string, rawJSON []byte, _ bool) []byte { return rawJSON }
+		identity := func(_ string, rawJSON []byte, _ bool) ([]byte, error) { return rawJSON, nil }
 		registry.Register(from, to, identity, sdktranslator.ResponseTransform{})
 		return registry.TranslateRequest(from, to, in.Model, []byte(in.Request), options.Stream)
 	}
@@ -793,6 +793,15 @@ func decodeOptions(in input, options any) {
 	if err := json.Unmarshal(in.Options, options); err != nil {
 		panic(fmt.Sprintf("bad options: %v", err))
 	}
+}
+
+// refused is a request translator's output: its body, or, when the
+// translator refused the request, {"body":<body>,"error":<message>}.
+func refused(body []byte, err error) []byte {
+	if err == nil {
+		return body
+	}
+	return marshal(map[string]any{"body": json.RawMessage(body), "error": err.Error()})
 }
 
 // marshal encodes a report without escaping <, > and &, so strings read
