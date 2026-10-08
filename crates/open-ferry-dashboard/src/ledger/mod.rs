@@ -62,6 +62,7 @@ pub(crate) use query::{
     unpriced_models, upsert_price,
 };
 pub(crate) use schema::{Settings, read_settings, write_settings};
+pub use writer::mask_client_key;
 
 /// The ledger's file name, in the log directory.
 pub const LEDGER_FILE: &str = "open-ferry-usage.sqlite3";

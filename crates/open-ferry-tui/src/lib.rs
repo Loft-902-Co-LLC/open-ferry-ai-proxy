@@ -44,6 +44,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
+pub use client::{Client as ManagementClient, Reply};
 pub use loghook::LogHook;
 
 use crate::app::App;

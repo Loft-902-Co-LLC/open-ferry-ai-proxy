@@ -245,7 +245,7 @@ fn init(path: &Path, listen: &Listen, force: bool) -> Result<Written, String> {
 }
 
 /// [`KEY_BYTES`] bytes from the operating system's random generator.
-fn random_bytes() -> Result<[u8; KEY_BYTES], String> {
+pub(crate) fn random_bytes() -> Result<[u8; KEY_BYTES], String> {
     let mut bytes = [0; KEY_BYTES];
     SysRng
         .try_fill_bytes(&mut bytes)
@@ -255,7 +255,7 @@ fn random_bytes() -> Result<[u8; KEY_BYTES], String> {
 
 /// A client key, as the dashboard makes one: `sk-` and `bytes` in unpadded
 /// base64url.
-fn client_key(bytes: &[u8]) -> String {
+pub(crate) fn client_key(bytes: &[u8]) -> String {
     format!("sk-{}", URL_SAFE_NO_PAD.encode(bytes))
 }
 

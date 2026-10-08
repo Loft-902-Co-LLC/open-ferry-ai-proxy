@@ -50,7 +50,7 @@ use axum::response::Response;
 use http::{HeaderName, HeaderValue};
 use open_ferry_management::ManagementState;
 
-pub use ledger::{LEDGER_FILE, Ledger};
+pub use ledger::{LEDGER_FILE, Ledger, mask_client_key};
 
 use crate::assets::Assets;
 
