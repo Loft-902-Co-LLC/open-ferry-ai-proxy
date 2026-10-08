@@ -10,7 +10,8 @@ use std::time::{Duration, SystemTime};
 
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
 
-use crate::load::Outcome;
+use crate::load::{Outcome, Percentiles};
+use crate::ports::PortRule;
 use crate::proxy::Memory;
 
 pub const START: &str = "<!-- bench-results:start -->";
@@ -19,16 +20,19 @@ pub const END: &str = "<!-- bench-results:end -->";
 /// The machine the run was on.
 pub struct Machine {
     pub os: String,
+    pub kernel: String,
     pub cpu: String,
     pub cpus: usize,
     pub memory: u64,
     /// How busy all CPUs were, in percent, over a second before the run.
     pub busy: f32,
+    /// What the person running it said about the machine (`--machine-note`).
+    pub note: Option<String>,
 }
 
 impl Machine {
     /// Reads the machine's description, and watches its CPUs for a second.
-    pub fn read() -> Self {
+    pub fn read(note: Option<String>) -> Self {
         let mut system = System::new_with_specifics(
             RefreshKind::nothing()
                 .with_cpu(CpuRefreshKind::nothing().with_cpu_usage())
@@ -43,6 +47,7 @@ impl Machine {
             .unwrap_or_default();
         Self {
             os: System::long_os_version().unwrap_or_else(|| "an unknown OS".to_owned()),
+            kernel: System::kernel_long_version(),
             cpu: if cpu.is_empty() {
                 "an unknown CPU".to_owned()
             } else {
@@ -51,24 +56,32 @@ impl Machine {
             cpus: system.cpus().len(),
             memory: system.total_memory(),
             busy: system.global_cpu_usage(),
+            note,
         }
     }
 }
 
-/// What the run was asked to do.
+/// What the run was asked to do, and with what.
 pub struct Settings {
     pub delay: Duration,
     pub duration: Duration,
     pub concurrency: Vec<usize>,
     pub starts: usize,
     pub long_requests: usize,
-    /// New upstream connections a proxy may open within
-    /// [`crate::fake::TIME_WAIT`] before a load level stops.
-    pub port_budget: usize,
+    /// When a load level stops for the upstream connections it opened.
+    pub ports: PortRule,
     /// The long conversation's size in bytes and its number of messages, in
-    /// the Chat Completions and the Claude Messages formats.
+    /// the Chat Completions and the Claude Messages formats, and its number
+    /// of input items in the Responses format.
     pub long_chat: (usize, usize),
     pub long_claude: (usize, usize),
+    pub long_responses: (usize, usize),
+    /// `rustc -V` in this workspace, and the Go version CLIProxyAPI was
+    /// built with, when known.
+    pub rustc: Option<String>,
+    pub go: Option<String>,
+    /// Whether the benchmark itself is a debug build.
+    pub debug: bool,
 }
 
 /// One proxy's results.
@@ -79,15 +92,23 @@ pub struct ProxyResult {
     /// Per request kind, a row for each concurrency level.
     pub short: Vec<(&'static str, Vec<ShortRow>)>,
     pub memory: Memory,
-    pub long: Vec<(&'static str, Outcome)>,
+    pub long: Vec<(&'static str, Measured)>,
 }
 
-/// Short requests from a number of clients at once: what they got, the CPU
-/// time the proxy spent per request, and the connections it opened to the
-/// fake upstream.
+/// Requests sent one after another: what they got, and the fake upstream's
+/// own time for them.
+pub struct Measured {
+    pub outcome: Outcome,
+    pub upstream: Option<Percentiles>,
+}
+
+/// Short requests from a number of clients at once: what they got, the fake
+/// upstream's own time for them, the CPU time the proxy spent per request,
+/// and the connections it opened to the fake upstream.
 pub struct ShortRow {
     pub clients: usize,
     pub outcome: Outcome,
+    pub upstream: Option<Percentiles>,
     pub cpu: Option<Duration>,
     pub connections: u64,
 }
@@ -97,7 +118,15 @@ pub struct FakeSeen {
     pub answered: u64,
     pub other: u64,
     pub last_other: Option<String>,
+    pub refused: u64,
+    pub last_refused: Option<String>,
     pub mean_delay: Option<Duration>,
+}
+
+/// What a proxy added to its requests: the latency's p50 minus the fake
+/// upstream's own p50 for the same requests.
+fn adds(outcome: &Outcome, upstream: Option<Percentiles>) -> Option<Duration> {
+    Some(outcome.total?.p50.saturating_sub(upstream?.p50))
 }
 
 pub fn render(
@@ -113,18 +142,34 @@ pub fn render(
     );
     let _ = writeln!(
         out,
-        "Run on {} on {}, {} with {} logical CPUs and {} of memory. \
+        "Run on {} on {} ({}), {} with {} logical CPUs and {} of memory. \
          Before the run its CPUs were {:.0}% busy.",
         today(),
         machine.os,
+        machine.kernel,
         machine.cpu,
         machine.cpus,
         gib(machine.memory),
         machine.busy,
     );
+    if let Some(note) = &machine.note {
+        let _ = writeln!(out, "\nThe machine: {}", note.trim());
+    }
     out.push('\n');
     for proxy in proxies {
         let _ = writeln!(out, "- {}: {}", proxy.name, proxy.version);
+    }
+    let rustc = settings
+        .rustc
+        .as_deref()
+        .map_or_else(|| "unknown".to_owned(), |rustc| format!("`{rustc}`"));
+    match &settings.go {
+        Some(go) => {
+            let _ = writeln!(out, "\nThe Rust toolchain was {rustc}, and Go {go}.");
+        }
+        None => {
+            let _ = writeln!(out, "\nThe Rust toolchain was {rustc}.");
+        }
     }
     out.push('\n');
     let _ = writeln!(
@@ -138,6 +183,15 @@ pub fn render(
         times(settings.starts),
         times(settings.long_requests),
     );
+    if settings.debug {
+        out.push_str(
+            "\n**The benchmark itself was a debug build**, whose load generator and fake \
+             upstream are slower than a release build's: these numbers show the tool working, \
+             not the proxies' speed.\n",
+        );
+    }
+
+    render_adds(&mut out, settings, proxies);
 
     out.push_str("\n#### Start time\n\nFrom starting the process to its first answer on `GET /v1/models`.\n\n");
     out.push_str("| Proxy | Median | Fastest | Slowest |\n|---|---:|---:|---:|\n");
@@ -155,16 +209,22 @@ pub fn render(
         );
     }
 
+    let ports = &settings.ports;
     let _ = writeln!(
         out,
         "\n#### Short requests\n\nA system prompt and a one-line question, sent again and \
-         again by each number of clients at once. Latency is to the end of the answer; CPU is \
+         again by each number of clients at once. Latency is to the end of the answer; the \
+         proxy adds the p50 minus the fake upstream's own p50 for the same requests. CPU is \
          the proxy's own user and system time, divided by the requests it answered. Upstream \
          connections are the connections the proxy opened to the fake upstream. Each closed \
-         one holds a port of the machine for up to {}, so a level stops early once the proxy \
-         has opened {} within that time, and the next waits until enough are freed.",
-        duration_words(crate::fake::TIME_WAIT),
-        thousands(settings.port_budget as u64),
+         one holds a port of the machine for up to {}, and the machine has {} ports for \
+         outgoing connections ({}). So a level stops early once the proxy has opened {} \
+         within that time, a quarter of them, and the next waits until fewer than {} were.",
+        duration_words(ports.window),
+        thousands(ports.ports as u64),
+        ports.source,
+        thousands(ports.budget as u64),
+        thousands((ports.budget / 2) as u64),
     );
     let kinds: Vec<&'static str> = proxies
         .first()
@@ -175,37 +235,29 @@ pub fn render(
     for kind in kinds {
         let _ = writeln!(out, "\n{kind}:\n");
         out.push_str(
-            "| Clients | Proxy | Requests/s | p50 | p90 | p99 | CPU per request | Errors | \
-             Upstream connections |\n|---:|---|---:|---:|---:|---:|---:|---:|---:|\n",
+            "| Clients | Proxy | Requests/s | p50 | p90 | p99 | Proxy adds | CPU per request | \
+             Errors | Upstream connections |\n|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|\n",
         );
         for &level in &settings.concurrency {
             for proxy in proxies {
-                let Some(ShortRow {
-                    outcome,
-                    cpu,
-                    connections,
-                    ..
-                }) = proxy
-                    .short
-                    .iter()
-                    .find(|(k, _)| *k == kind)
-                    .and_then(|(_, rows)| rows.iter().find(|row| row.clients == level))
-                else {
+                let Some(row) = short_row(proxy, kind, level) else {
                     continue;
                 };
+                let outcome = &row.outcome;
                 let total = outcome.total;
                 let _ = writeln!(
                     out,
-                    "| {level} | {} | {}{} | {} | {} | {} | {} | {} | {} |",
+                    "| {level} | {} | {}{} | {} | {} | {} | {} | {} | {} | {} |",
                     proxy.name,
                     thousands(outcome.per_second().round() as u64),
                     if outcome.stopped { "*" } else { "" },
                     maybe(total.map(|p| p.p50)),
                     maybe(total.map(|p| p.p90)),
                     maybe(total.map(|p| p.p99)),
-                    maybe(*cpu),
+                    maybe(adds(outcome, row.upstream)),
+                    maybe(row.cpu),
                     thousands(outcome.errors as u64),
-                    thousands(*connections),
+                    thousands(row.connections),
                 );
                 if outcome.stopped {
                     stopped.push(format!(
@@ -248,15 +300,18 @@ pub fn render(
         out,
         "\n#### Long conversation\n\nA coding agent's conversation: a system prompt, two \
          tools, and {} messages with a tool call every fourth turn; {} as a Chat Completions \
-         request ({} messages there), {} as a Claude Messages one.\n",
+         request ({} messages there), {} as a Claude Messages one, and {} as a Responses one \
+         ({} input items).\n",
         settings.long_claude.1,
         kib(settings.long_chat.0),
         settings.long_chat.1,
         kib(settings.long_claude.0),
+        kib(settings.long_responses.0),
+        settings.long_responses.1,
     );
     out.push_str(
-        "| Request | Proxy | p50 | p90 | Slowest | First bytes p50 | Errors |\n\
-         |---|---|---:|---:|---:|---:|---:|\n",
+        "| Request | Proxy | p50 | p90 | Slowest | First bytes p50 | Proxy adds | Errors |\n\
+         |---|---|---:|---:|---:|---:|---:|---:|\n",
     );
     let kinds: Vec<&'static str> = proxies
         .first()
@@ -264,17 +319,19 @@ pub fn render(
         .unwrap_or_default();
     for kind in kinds {
         for proxy in proxies {
-            let Some((_, outcome)) = proxy.long.iter().find(|(k, _)| *k == kind) else {
+            let Some((_, measured)) = proxy.long.iter().find(|(k, _)| *k == kind) else {
                 continue;
             };
+            let outcome = &measured.outcome;
             let _ = writeln!(
                 out,
-                "| {kind} | {} | {} | {} | {} | {} | {} |",
+                "| {kind} | {} | {} | {} | {} | {} | {} | {} |",
                 proxy.name,
                 maybe(outcome.total.map(|p| p.p50)),
                 maybe(outcome.total.map(|p| p.p90)),
                 maybe(outcome.total.map(|p| p.max)),
                 maybe(outcome.first_byte.map(|p| p.p50)),
+                maybe(adds(outcome, measured.upstream)),
                 thousands(outcome.errors as u64),
             );
             if let Some(error) = &outcome.first_error {
@@ -289,6 +346,14 @@ pub fn render(
         thousands(fake.answered),
         maybe(fake.mean_delay),
     );
+    if fake.refused > 0 {
+        let _ = writeln!(
+            out,
+            "It refused {} for not being in its own format, the last for {}.",
+            thousands(fake.refused),
+            fake.last_refused.as_deref().unwrap_or("?"),
+        );
+    }
     if fake.other > 0 {
         let _ = writeln!(
             out,
@@ -304,6 +369,68 @@ pub fn render(
         }
     }
     out
+}
+
+/// A proxy's row for `kind` at `level` clients.
+fn short_row<'a>(proxy: &'a ProxyResult, kind: &str, level: usize) -> Option<&'a ShortRow> {
+    proxy
+        .short
+        .iter()
+        .find(|(k, _)| *k == kind)
+        .and_then(|(_, rows)| rows.iter().find(|row| row.clients == level))
+}
+
+/// The table of what each proxy adds: to short requests at the fewest
+/// clients, and to the long conversation.
+fn render_adds(out: &mut String, settings: &Settings, proxies: &[ProxyResult]) {
+    let Some(fewest) = settings.concurrency.iter().min().copied() else {
+        return;
+    };
+    let _ = writeln!(
+        out,
+        "\n#### What each proxy adds\n\nThe time a proxy adds to a request, on top of the fake \
+         upstream's: the latency at the 50th percentile, minus the fake upstream's own time for \
+         the same requests at the 50th percentile, which it measures from reading the request \
+         to handing over the last of its answer. Short requests are with {} at once, the long \
+         conversation one request after another. The tables below give it for every level.\n",
+        if fewest == 1 {
+            "one client".to_owned()
+        } else {
+            format!("{fewest} clients")
+        },
+    );
+    out.push_str("| Request |");
+    for part in ["short", "long"] {
+        for proxy in proxies {
+            let _ = write!(out, " {}, {part} |", proxy.name);
+        }
+    }
+    out.push_str("\n|---|");
+    for _ in 0..proxies.len() * 2 {
+        out.push_str("---:|");
+    }
+    out.push('\n');
+    let kinds: Vec<&'static str> = proxies
+        .first()
+        .map(|proxy| proxy.short.iter().map(|(kind, _)| *kind).collect())
+        .unwrap_or_default();
+    for kind in kinds {
+        let _ = write!(out, "| {kind} |");
+        for proxy in proxies {
+            let added =
+                short_row(proxy, kind, fewest).and_then(|row| adds(&row.outcome, row.upstream));
+            let _ = write!(out, " {} |", maybe(added));
+        }
+        for proxy in proxies {
+            let added = proxy
+                .long
+                .iter()
+                .find(|(k, _)| *k == kind)
+                .and_then(|(_, measured)| adds(&measured.outcome, measured.upstream));
+            let _ = write!(out, " {} |", maybe(added));
+        }
+        out.push('\n');
+    }
 }
 
 /// Writes `results` between the markers of the file at `path`, or makes the
@@ -417,7 +544,6 @@ fn civil(days: i64) -> (i64, i64, i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::load::Percentiles;
 
     // Not upstream's: dates, durations and counts as the report shows them.
     #[test]
@@ -442,6 +568,7 @@ mod tests {
     #[test]
     fn renders_and_writes() {
         let p = Percentiles::of_millis(&[21, 22, 30]);
+        let upstream = Percentiles::of_millis(&[20, 20, 21]);
         let outcome = |errors: usize| Outcome {
             ok: 3,
             errors,
@@ -461,6 +588,7 @@ mod tests {
                     vec![ShortRow {
                         clients: 1,
                         outcome: outcome(0),
+                        upstream,
                         cpu: Some(Duration::from_micros(300)),
                         connections: 1,
                     }],
@@ -470,6 +598,7 @@ mod tests {
                     vec![ShortRow {
                         clients: 1,
                         outcome: outcome(1),
+                        upstream: None,
                         cpu: None,
                         connections: 4_000,
                     }],
@@ -480,14 +609,22 @@ mod tests {
                 load: Some(20 << 20),
                 peak: Some(30 << 20),
             },
-            long: vec![("Chat, streamed", outcome(1))],
+            long: vec![(
+                "Chat",
+                Measured {
+                    outcome: outcome(1),
+                    upstream,
+                },
+            )],
         }];
         let machine = Machine {
             os: "Test OS".to_owned(),
+            kernel: "Linux 6.8.0".to_owned(),
             cpu: "Test CPU".to_owned(),
             cpus: 8,
             memory: 16 << 30,
             busy: 12.4,
+            note: Some("Azure Standard_D8as_v5, eastus ".to_owned()),
         };
         let settings = Settings {
             delay: Duration::from_millis(20),
@@ -495,45 +632,66 @@ mod tests {
             concurrency: vec![1],
             starts: 2,
             long_requests: 3,
-            port_budget: 4000,
+            ports: PortRule::new(
+                28_232,
+                Duration::from_secs(60),
+                "the test's range".to_owned(),
+            ),
             long_chat: (300_000, 302),
             long_claude: (310_000, 241),
+            long_responses: (305_000, 301),
+            rustc: Some("rustc 1.99.0 (abc 2026-09-01)".to_owned()),
+            go: Some("go1.26.4".to_owned()),
+            debug: true,
         };
         let fake = FakeSeen {
             answered: 6,
             other: 0,
             last_other: None,
+            refused: 2,
+            last_refused: Some("/v1/messages: no model".to_owned()),
             mean_delay: Some(Duration::from_micros(20_140)),
         };
         let text = render(&machine, &settings, &proxies, &fake);
         assert!(text.contains(
-            "8 logical CPUs and 16 GiB of memory. Before the run its CPUs were 12% busy."
+            "on Test OS (Linux 6.8.0), Test CPU with 8 logical CPUs and 16 GiB of memory. Before \
+             the run its CPUs were 12% busy.\n\nThe machine: Azure Standard_D8as_v5, eastus\n"
+        ));
+        assert!(text.contains(
+            "The Rust toolchain was `rustc 1.99.0 (abc 2026-09-01)`, and Go go1.26.4.\n"
+        ));
+        assert!(text.contains("**The benchmark itself was a debug build**"));
+        assert!(text.contains(
+            "| Request | open-ferry, short | open-ferry, long |\n|---|---:|---:|\n\
+             | Chat | 2.00 ms | 2.00 ms |\n| Claude | - | - |\n"
         ));
         assert!(text.contains("| open-ferry | 30.0 ms | 10.0 ms | 30.0 ms |\n"));
-        assert!(
-            text.contains(
-                "| 1 | open-ferry | 3 | 22.0 ms | 30.0 ms | 30.0 ms | 300 µs | 0 | 1 |\n"
-            )
-        );
         assert!(text.contains(
-            "for up to 2 minutes, so a level stops early once the proxy has opened 4,000"
+            "| 1 | open-ferry | 3 | 22.0 ms | 30.0 ms | 30.0 ms | 2.00 ms | 300 µs | 0 | 1 |\n"
         ));
-        assert!(
-            text.contains(
-                "| 1 | open-ferry | 3* | 22.0 ms | 30.0 ms | 30.0 ms | - | 1 | 4,000 |\n"
-            )
-        );
+        assert!(text.contains(
+            "for up to a minute, and the machine has 28,232 ports for outgoing connections (the \
+             test's range). So a level stops early once the proxy has opened 7,000 within that \
+             time, a quarter of them, and the next waits until fewer than 3,500 were."
+        ));
+        assert!(text.contains(
+            "| 1 | open-ferry | 3* | 22.0 ms | 30.0 ms | 30.0 ms | - | - | 1 | 4,000 |\n"
+        ));
         assert!(text.contains(
             "\\* Stopped early, at the limit of upstream connections:\n\n\
              - open-ferry, Claude, 1 clients: after 1.00 s\n"
         ));
         assert!(text.contains("- open-ferry, Claude, 1 clients: HTTP 502 Bad Gateway: no\n"));
         assert!(text.contains("| open-ferry | 10.0 MiB | 20.0 MiB | 30.0 MiB |\n"));
+        assert!(text.contains("and 298 KiB as a Responses one (301 input items)."));
         assert!(text.contains(
-            "| Chat, streamed | open-ferry | 22.0 ms | 30.0 ms | 30.0 ms | 22.0 ms | 1 |\n"
+            "| Chat | open-ferry | 22.0 ms | 30.0 ms | 30.0 ms | 22.0 ms | 2.00 ms | 1 |\n"
         ));
-        assert!(text.contains("- open-ferry, long Chat, streamed: HTTP 502 Bad Gateway: no\n"));
+        assert!(text.contains("- open-ferry, long Chat: HTTP 502 Bad Gateway: no\n"));
         assert!(text.contains("answered 6 requests, after 20.1 ms on average."));
+        assert!(text.contains(
+            "It refused 2 for not being in its own format, the last for /v1/messages: no model."
+        ));
 
         let dir = std::env::temp_dir().join(format!("bench-report-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();

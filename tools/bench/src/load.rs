@@ -7,13 +7,16 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 
+use crate::answer;
 use crate::body::Format;
-use crate::fake::MARKER;
 
 /// One request, sent the same way every time.
 pub struct Request {
     pub url: String,
+    /// The client format, which the answer must be in too.
     pub format: Format,
+    /// Whether the body asks for a stream.
+    pub stream: bool,
     pub key: String,
     pub body: Bytes,
 }
@@ -28,7 +31,8 @@ pub struct Percentiles {
 }
 
 impl Percentiles {
-    fn of(mut micros: Vec<u64>) -> Option<Self> {
+    /// The percentiles of durations in microseconds, if there are any.
+    pub fn of(mut micros: Vec<u64>) -> Option<Self> {
         micros.sort_unstable();
         let at = |p: usize| {
             let rank = (p * micros.len()).div_ceil(100).max(1);
@@ -138,8 +142,8 @@ pub fn client() -> reqwest::Result<reqwest::Client> {
 }
 
 /// Sends `request` once, reading the whole answer. Returns the time to the
-/// first body bytes and to the end, or why the answer isn't one the fake
-/// upstream gave.
+/// first body bytes and to the end, or why the answer isn't the fake
+/// upstream's, whole and in the client's format (see [`answer::check`]).
 pub async fn send(
     client: &reqwest::Client,
     request: &Request,
@@ -149,7 +153,7 @@ pub async fn send(
         .post(&request.url)
         .header("content-type", "application/json");
     let builder = match request.format {
-        Format::Chat => builder.bearer_auth(&request.key),
+        Format::Chat | Format::Responses => builder.bearer_auth(&request.key),
         Format::Claude => builder
             .header("x-api-key", &request.key)
             .header("anthropic-version", "2023-06-01"),
@@ -172,12 +176,7 @@ pub async fn send(
         let text: String = text.chars().take(300).collect();
         return Err(format!("HTTP {status}: {text}"));
     }
-    if !answer
-        .windows(MARKER.len())
-        .any(|window| window == MARKER.as_bytes())
-    {
-        return Err("an answer without the fake upstream's text".to_owned());
-    }
+    answer::check(request.format, request.stream, &answer)?;
     Ok((first_byte.unwrap_or(total), total))
 }
 
@@ -264,11 +263,14 @@ mod tests {
     // which answers it as it answers a proxy.
     #[tokio::test]
     async fn sends_and_checks_answers() {
-        let fake = crate::fake::start(Duration::ZERO).await.unwrap();
+        let fake = crate::fake::start(Duration::ZERO, Duration::from_secs(60))
+            .await
+            .unwrap();
         let client = client().unwrap();
         let request = Arc::new(Request {
             url: format!("http://{}/v1/chat/completions", fake.addr),
             format: Format::Chat,
+            stream: true,
             key: "k".into(),
             body: crate::body::short(Format::Chat, "m", true),
         });
@@ -305,6 +307,7 @@ mod tests {
         let missing = Request {
             url: format!("http://{}/v1/other", fake.addr),
             format: Format::Claude,
+            stream: false,
             key: "k".into(),
             body: Bytes::from_static(b"{}"),
         };
@@ -315,6 +318,20 @@ mod tests {
                 .first_error
                 .unwrap()
                 .starts_with("HTTP 404 Not Found: {\"error\"")
+        );
+
+        // An answer in another format than the client's is an error too.
+        let mismatched = Request {
+            url: request.url.clone(),
+            format: Format::Claude,
+            stream: false,
+            key: "k".into(),
+            body: crate::body::short(Format::Chat, "m", false),
+        };
+        let error = send(&client, &mismatched).await.unwrap_err();
+        assert!(
+            error.starts_with("an answer without the fake upstream's text, which had \"\""),
+            "{error}"
         );
     }
 }

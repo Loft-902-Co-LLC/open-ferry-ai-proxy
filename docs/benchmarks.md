@@ -1,13 +1,17 @@
 # Benchmarks
 
-`tools/bench` runs open-ferry and CLIProxyAPI, one after the other, in front of the same fake upstream on 127.0.0.1, with the same config, and sends both the same requests. It measures how long each takes to start, how many short requests it answers a second and how fast, the CPU time it spends on each, its memory, and how fast it passes on a long conversation.
+`tools/bench` runs open-ferry and CLIProxyAPI, one after the other, in front of the same fake upstream on 127.0.0.1, with the same config, and sends both the same requests: to each provider in its own format, and translated from another. It measures how long each takes to start, how many short requests it answers a second and how fast, how much time it adds to the upstream's, the CPU time it spends on each request, its memory, and how fast it passes on a long conversation.
 
 > [!WARNING]
 > **The results below are preliminary.** They come from a run on a machine that was busy with other builds at the time, so they show the tool working and the rough shape of the numbers, not a result to quote. They go in the README only after a run on a quiet machine.
 
 ## What it measures
 
-**The fake upstream** runs inside the benchmark, on an ephemeral port of 127.0.0.1. It answers `POST /v1/chat/completions` as an OpenAI-compatible provider and `POST /v1/messages` as Claude, each streamed or not as the request asks, after a fixed delay (20 ms by default). Every answer is the same sixteen words, as one message or as sixteen events, with usage. It counts any request to another path, which neither proxy should make, and the report says so if there was one.
+**The fake upstream** runs inside the benchmark, on an ephemeral port of 127.0.0.1. It answers `POST /v1/chat/completions` as an OpenAI-compatible provider and `POST /v1/messages` as Claude, each streamed or not as the request asks, after a fixed delay (20 ms by default). Every answer is the same sixteen words, as one message or as sixteen events, with usage. It:
+
+- checks that each request is in its own provider's format, as a proxy that translates has to send it, and refuses one that isn't with a 400 in that provider's error format, saying why: for Chat Completions, no `system`, `input` or `instructions` field, messages with the roles and parts Chat Completions has, and tools and tool calls as functions; for Claude Messages, a `max_tokens`, only user and assistant messages, Claude's content blocks, and tools with an `input_schema`;
+- measures its own time for each request, from having read it whole to handing over the last of its answer, so that the report can say what each proxy adds;
+- counts the connections each proxy opens to it, any request it refuses, and any request to another path, which neither proxy should make. The report says so if there was one.
 
 **The proxies** run with the same config, written fresh for each run:
 
@@ -16,18 +20,38 @@
 - no management key (so no management API), no control panel, no mDNS announcements, no request log, no log file, no usage statistics, and no retries;
 - CLIProxyAPI's Claude request cloaking off, as open-ferry has none, so both pass the client's request on as it came.
 
-Each is started with `-config <file> -local-model`, in a directory of its own holding the config, the auth directory and a home and temporary directory, and with an environment holding little more than those. The environment's `HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY` point at a closed port on 127.0.0.1, so any request beyond loopback fails at once rather than leaving the machine: CLIProxyAPI fetches a version list at start, whatever its config says.
+Each is started with `-config <file> -local-model`, in a directory of its own holding the config, the auth directory and a home and temporary directory, and with an environment holding little more than those. The environment's `HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY` (and their lowercase forms) point at a closed port on 127.0.0.1, so any request beyond loopback fails at once rather than leaving the machine: CLIProxyAPI fetches a version list at start, whatever its config says.
+
+**The requests**, each streamed and not. The model picks the provider; the client's path picks the format:
+
+| Request | Client sends | Model | The fake upstream gets |
+|---|---|---|---|
+| Chat Completions | `POST /v1/chat/completions` | `bench-gpt` | Chat Completions, as it came |
+| Claude Messages | `POST /v1/messages` | `bench-claude` | Claude Messages, as it came |
+| Chat Completions → Claude Messages | `POST /v1/chat/completions` | `bench-claude` | Claude Messages |
+| Claude Messages → Chat Completions | `POST /v1/messages` | `bench-gpt` | Chat Completions |
+| Responses → Chat Completions | `POST /v1/responses` | `bench-gpt` | Chat Completions |
+
+Both proxies serve each of these: CLIProxyAPI's Claude executor translates a Chat Completions request to Claude's format, and its OpenAI-compatible executor translates Claude Messages and Responses requests to Chat Completions and sends them to the provider's `/chat/completions`; open-ferry, a port of it, does the same. Before measuring, each kind is sent 20 times, one after another, and the run stops with an error unless all 20 answers came through and the fake upstream answered all 20 at its endpoint for the provider's format, refused none, and got nothing at its other endpoint or any other path.
+
+Every answer the load generator gets is checked: it has to be in the client's format, whole (when streamed, with the format's last event: `finish_reason`, `message_stop` or `response.completed`), and carry the fake upstream's text, translated back if it was translated. Anything else is counted as an error.
 
 **The measures**, for each proxy:
 
 - **Start time:** from starting the process to its first answer on `GET /v1/models`, polled every millisecond. The proxy is started once without measuring, which puts its binary in the OS's file cache, then five times measured; the report gives the median, fastest and slowest.
-- **Short requests:** a system prompt and a one-line question, as a Chat Completions request to the OpenAI-compatible provider and as a Claude Messages request to the Claude one, each streamed and not. Each number of clients (1, 16 and 64) sends them for 10 seconds, each client sending its next request as soon as it has read the whole answer to the last. The report gives requests answered per second and the latency to the end of the answer at the 50th, 90th and 99th percentiles. Every answer is checked for the fake upstream's text, and anything else is counted as an error.
-- **Upstream connections:** how many connections the proxy opened to the fake upstream over each load level. A proxy that keeps its connections open needs about one per client; one that closes them opens about one per request. Each closed connection holds a port of the machine for up to two minutes (TIME_WAIT on Windows; less elsewhere), and the ports for outgoing connections, 16,384 by default on Windows, are shared by every program on the machine. So a level stops early once the proxy has opened 4,000 connections within two minutes, and is marked so; its requests per second are over the time it ran. The next level waits until fewer than 2,000 were opened within two minutes.
+- **Short requests:** a system prompt and a one-line question, of each kind above. Each number of clients (1, 16 and 64) sends them for 10 seconds, each client sending its next request as soon as it has read the whole answer to the last. The report gives requests answered per second and the latency to the end of the answer at the 50th, 90th and 99th percentiles.
+- **What the proxy adds:** the latency at the 50th percentile minus the fake upstream's own time at the 50th percentile for the same requests, as "Proxy adds" in each table, and in a table of its own for one client at a time and the long conversation. It's the proxy's own time for a request plus the load generator's and the loopback hops, which are the same for both proxies. It's measured rather than worked out from the configured delay, which a busy machine stretches.
+- **Upstream connections:** how many connections the proxy opened to the fake upstream over each load level. A proxy that keeps its connections open needs about one per client; one that closes them opens about one per request. Each closed connection holds a port of the machine for a while (TIME_WAIT), and the ports for outgoing connections are shared by every program on the machine. So a level stops early once the proxy has opened a quarter of those ports, rounded down to hundreds, within the TIME_WAIT time, and is marked so; its requests per second are over the time it ran. The next level waits until fewer than half that many were opened within that time. The rule is the same for both proxies, and only a proxy that opens many connections meets it:
+  - Windows: 16,384 ports (49152 to 65535) and two minutes, its defaults, so 4,000 connections within two minutes.
+  - Linux: the range in `/proc/sys/net/ipv4/ip_local_port_range` (32768 to 60999, 28,232 ports, by default) and a minute, which Linux doesn't let one change: 7,000 connections within a minute by default. Linux can reuse a port in TIME_WAIT for a new connection on loopback after a second (`net.ipv4.tcp_tw_reuse`, on for loopback by default), so the rule is cautious there.
+  - macOS: 16,384 ports and 30 seconds, so 4,000 connections within 30 seconds.
 - **CPU time per request:** the proxy process's user and system CPU time, as the OS reports it, over each load level, divided by the requests answered. It includes whatever else the proxy did meanwhile.
 - **Memory:** the proxy's resident memory (the working set on Windows), sampled every 50 ms: the median over the two seconds after it starts, the median under the short-request load, and the peak over the whole run.
-- **Long conversation:** a coding agent's conversation of 120 turns: a 2 KB system prompt, two tools, and a tool call with a 2.4 KB result every fourth turn, about 300 KiB as either kind of request. Each kind, streamed and not, is sent 30 times, one after another, after two that aren't measured. The report gives the latency at the 50th and 90th percentiles, the slowest, and the median time to the answer's first bytes.
+- **Long conversation:** a coding agent's conversation of 120 turns: a 2 KB system prompt, two tools, and a tool call with a 2.4 KB result every fourth turn, about 300 KiB as a request of any of the three formats. Each kind above is sent 30 times, one after another, after two that aren't measured. The report gives the latency at the 50th and 90th percentiles, the slowest, the median time to the answer's first bytes, and what the proxy adds.
 
-Each request goes to a provider of its own format, so this measures the proxies' handling of a request, not translation between formats. It doesn't measure real providers, TLS, OAuth credentials or WebSockets.
+It doesn't measure real providers, TLS, OAuth credentials or WebSockets.
+
+**The machine.** The report gives the date, the OS and its kernel, the CPU, the number of logical CPUs, the memory and how busy the CPUs were in the second before the run, the `rustc -V` of the workspace's toolchain and the Go version CLIProxyAPI was built with, and what `--machine-note` says, such as a cloud VM's size and region. It says so if the benchmark itself is a debug build, whose load generator and fake upstream are slower.
 
 **Fairness.** The load generator and the fake upstream run on the same machine as the proxy and share its CPUs; the two proxies never run at the same time. open-ferry is the workspace's release build (`cargo build --release -p open-ferry`). CLIProxyAPI is built from a checkout with the flags of its release builds, but without cgo, which only its plugin loader needs. Go's and Tokio's worker threads both default to the number of logical CPUs. With the default 20 ms delay, 64 clients can make at most 3,200 requests a second.
 
@@ -38,12 +62,12 @@ Each request goes to a provider of its own format, so this measures the proxies'
 You need Git, Go 1.26 ([UPSTREAM.md](../UPSTREAM.md#checking-parity) says how to get Go 1.26.4) and a CLIProxyAPI checkout at the pinned tag beside this one. On a quiet machine, plugged in, with nothing else running, from the root of this repository:
 
 ```sh
-git clone --branch v8.0.15 https://github.com/router-for-me/CLIProxyAPI ../CLIProxyAPI
+git clone --branch v8.0.20 https://github.com/router-for-me/CLIProxyAPI ../CLIProxyAPI
 cargo build --release --locked -p open-ferry
-cargo run --release --locked -p open-ferry-bench -- --upstream ../CLIProxyAPI --go go1.26.4 --out docs/benchmarks.md
+cargo run --release --locked -p open-ferry-bench -- --upstream ../CLIProxyAPI --go go1.26.4 --machine-note "<what the machine is>" --out docs/benchmarks.md
 ```
 
-It builds CLIProxyAPI into `target/bench` (changing nothing in the checkout), runs both proxies, prints the results, and with `--out` writes them in place of the results below. A run takes about six minutes, and longer when a level has to wait for ports to be freed. The options:
+It builds CLIProxyAPI into `target/bench` (changing nothing in the checkout, and using the build from before when it was of the same clean commit, with the same Go and flags), runs both proxies, prints the results, and with `--out` writes them in place of the results below. A run takes about 12 minutes, and longer when a level has to wait for ports to be freed. The options:
 
 | Option | Default | |
 |---|---|---|
@@ -59,11 +83,13 @@ It builds CLIProxyAPI into `target/bench` (changing nothing in the checkout), ru
 | `--starts <n>` | 5 | Starts measured for the start time |
 | `--long-requests <n>` | 30 | How many times each kind of long conversation request is sent |
 | `--only <name>` | | Run only `open-ferry` or only `cliproxyapi` |
+| `--machine-note <text>` | | What the machine is, for the report, such as "Azure Standard_D8as_v5, eastus" |
+| `--prepare` | | Build CLIProxyAPI, check both binaries, and exit without measuring anything |
 | `--out <file>` | | Also write the results to `<file>`, between its `bench-results` markers |
 
 ## Results
 
-Preliminary: see the warning above.
+Preliminary: see the warning above. These are from before the translated requests, the "Proxy adds" columns, the machine note and the Linux port rule were added, against CLIProxyAPI v8.0.15; the next run replaces them in the new layout.
 
 <!-- bench-results:start -->
 <!-- Written by tools/bench's --out option. Don't edit it by hand: rerun the tool. -->
