@@ -25,9 +25,12 @@
 //! still in flight.
 //!
 //! The table keeps each rest's wait, check time and provider reset, and the
-//! claim of a check in flight, in memory. Turning the cap off forgets the
-//! rests as each credential's next outcome is recorded, and stops claims at
-//! once; the times already brought back stay.
+//! claim of a check in flight. `save-cooldown-status` saves the first three
+//! with the cooldown they belong to (see `cooldown_store`), so a restart
+//! keeps the doubling; a check in flight at the save is due at once after
+//! the restart. Turning the cap off forgets the rests as each credential's
+//! next outcome is recorded, and stops claims and saves at once; the times
+//! already brought back stay.
 //!
 //! Deviations from upstream:
 //! - The whole module is open-ferry's own. Upstream rests a credential
@@ -41,8 +44,9 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use super::cooldown::{CallResult, add};
+use super::cooldown_store::QuotaCheckRecord;
 use super::text::canonical_model_key;
-use super::{Entry, Manager, Shared, State, lock};
+use super::{Entry, Manager, Settings, Shared, State, lock};
 use crate::auth::{Auth, ModelState, Timestamp};
 
 /// The scope of a rest of the whole credential.
@@ -453,6 +457,65 @@ impl QuotaChecks {
             }
         }
         released
+    }
+
+    /// The rests to save with the cooldowns, by credential and scope: none
+    /// while the cap is off, and only those short of the provider's reset.
+    pub(crate) fn records(
+        &self,
+        settings: &Settings,
+        now: Timestamp,
+    ) -> BTreeMap<(String, String), QuotaCheckRecord> {
+        if settings.quota_check_after.is_zero() {
+            return BTreeMap::new();
+        }
+        self.rests
+            .iter()
+            .filter(|(_, rest)| now < rest.reset_at)
+            .map(|(key, rest)| {
+                let record = QuotaCheckRecord {
+                    wait: rest.wait,
+                    check_at: rest.check_at,
+                    reset_at: rest.reset_at,
+                };
+                (key.clone(), record)
+            })
+            .collect()
+    }
+
+    /// Puts a saved rest back on `auth` once the cooldown of `model` (empty
+    /// for the credential's own) it was saved with is restored. The times
+    /// of that rest between its check and the provider's reset, those of a
+    /// check in flight at the save, are brought back to the check, so the
+    /// check is due then. A rest already in the table, or one with no quota
+    /// rest under it, is left as it is.
+    pub(crate) fn restore(
+        &mut self,
+        settings: &Settings,
+        auth: &mut Auth,
+        model: &str,
+        record: &QuotaCheckRecord,
+        now: Timestamp,
+    ) {
+        if settings.quota_check_after.is_zero()
+            || record.reset_at <= now
+            || record.check_at >= record.reset_at
+        {
+            return;
+        }
+        let scope = canonical_model_key(model);
+        let key = Self::key(&auth.id, &scope);
+        if self.rests.contains_key(&key) || rest_end(auth, &scope, now).is_none() {
+            return;
+        }
+        retime(auth, &scope, record.check_at, record.reset_at);
+        let rest = Rest {
+            wait: record.wait.max(Duration::from_secs(1)),
+            check_at: record.check_at,
+            reset_at: record.reset_at,
+            claim: None,
+        };
+        self.rests.insert(key, rest);
     }
 
     /// Credential `id`'s rests, for the management API.

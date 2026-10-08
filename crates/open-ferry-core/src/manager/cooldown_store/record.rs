@@ -21,7 +21,20 @@
 //!
 //! and each record has `provider`, `auth_id`, `model`, `status`,
 //! `next_retry_after`, `reason`, `quota` and `last_error`, and
-//! `updated_at`, with upstream's field names, order and `omitempty`s.
+//! `updated_at`, with upstream's field names, order and `omitempty`s. A
+//! record whose quota rest open-ferry's `routing.quota.check-after` capped
+//! ends with that rest's `open_ferry_quota_check`:
+//!
+//! ```json
+//! "open_ferry_quota_check": {
+//!   "wait_seconds": 7200,
+//!   "check_at": "2026-06-01T03:00:00Z",
+//!   "reset_at": "2026-06-05T00:00:00Z"
+//! }
+//! ```
+//!
+//! the rest's wait, in whole seconds, its next check and the provider's
+//! reset (see `quota_check`).
 //! Reading takes the fields as Go's decoder does: a key matches its field
 //! whatever its case, unknown keys are ignored, `null` leaves a field as it
 //! is, and a value of the wrong type fails the whole file.
@@ -33,8 +46,13 @@
 //!   is left out of the file; upstream's save fails.
 //! - Reading, an `http_status` or `backoff_level` outside the port's range
 //!   reads as zero.
+//! - `open_ferry_quota_check` is open-ferry's own, written only while the
+//!   cap is on; upstream's decoder ignores the unknown key. Reading, one
+//!   that isn't an object with a positive `wait_seconds` and both times is
+//!   ignored rather than failing the file.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use serde_json::{Map, Value};
 
@@ -60,6 +78,21 @@ pub(crate) struct Record {
     pub(crate) quota: QuotaState,
     pub(crate) last_error: Option<AuthError>,
     pub(crate) updated_at: Option<Timestamp>,
+    /// open-ferry's capped quota rest under this cooldown, if any
+    /// (`open_ferry_quota_check`; see `quota_check`).
+    pub(crate) quota_check: Option<QuotaCheckRecord>,
+}
+
+/// A capped quota rest, as a record keeps it (open-ferry's own; see
+/// `quota_check`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct QuotaCheckRecord {
+    /// The rest's length since the last quota answer.
+    pub(crate) wait: Duration,
+    /// When one call is next let through to check.
+    pub(crate) check_at: Timestamp,
+    /// The provider's reset.
+    pub(crate) reset_at: Timestamp,
 }
 
 /// `time`, or `None` for Go's zero time.
@@ -73,6 +106,8 @@ pub(crate) fn writable(record: &Record) -> bool {
         record.next_retry_after,
         record.updated_at,
         record.quota.next_recover_at,
+        record.quota_check.map(|check| check.check_at),
+        record.quota_check.map(|check| check.reset_at),
     ]
     .into_iter()
     .flatten()
@@ -138,7 +173,20 @@ fn record_node(record: &Record) -> Node {
         fields.push(("last_error", error_node(err)));
     }
     fields.push(("updated_at", time(record.updated_at)));
+    if let Some(check) = &record.quota_check {
+        fields.push(("open_ferry_quota_check", quota_check_node(check)));
+    }
     Node::Object(fields)
+}
+
+/// open-ferry's capped quota rest (see `quota_check`).
+fn quota_check_node(check: &QuotaCheckRecord) -> Node {
+    let wait = check.wait.as_secs().max(1);
+    Node::Object(vec![
+        ("wait_seconds", Node::Raw(wait.to_string())),
+        ("check_at", time(Some(check.check_at))),
+        ("reset_at", time(Some(check.reset_at))),
+    ])
 }
 
 fn quota_node(quota: &QuotaState) -> Node {
@@ -290,6 +338,7 @@ fn decode_record(value: &Value) -> Result<Record, String> {
         "quota",
         "last_error",
         "updated_at",
+        "open_ferry_quota_check",
     ];
     let mut record = Record::default();
     let map = match value {
@@ -319,10 +368,40 @@ fn decode_record(value: &Value) -> Result<Record, String> {
                 }
                 other => return Err(mismatch(other, key)),
             },
+            Some("open_ferry_quota_check") => record.quota_check = decode_quota_check(value),
             _ => {}
         }
     }
     Ok(record)
+}
+
+/// open-ferry's capped quota rest, or `None` for anything but an object
+/// with a positive `wait_seconds` and both times (see `quota_check`).
+fn decode_quota_check(value: &Value) -> Option<QuotaCheckRecord> {
+    const FIELDS: &[&str] = &["wait_seconds", "check_at", "reset_at"];
+    let Value::Object(map) = value else {
+        return None;
+    };
+    let (mut wait, mut check_at, mut reset_at) = (None, None, None);
+    for (key, value) in map {
+        let time = || timestamp(value, key).ok().flatten().flatten();
+        match field(key, FIELDS) {
+            Some("wait_seconds") => {
+                wait = value
+                    .as_u64()
+                    .filter(|seconds| *seconds > 0)
+                    .map(Duration::from_secs);
+            }
+            Some("check_at") => check_at = time(),
+            Some("reset_at") => reset_at = time(),
+            _ => {}
+        }
+    }
+    Some(QuotaCheckRecord {
+        wait: wait?,
+        check_at: check_at?,
+        reset_at: reset_at?,
+    })
 }
 
 fn decode_quota(quota: &mut QuotaState, map: &Map<String, Value>) -> Result<(), String> {

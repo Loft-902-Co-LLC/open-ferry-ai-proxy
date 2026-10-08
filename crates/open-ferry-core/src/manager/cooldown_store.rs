@@ -66,6 +66,13 @@
 //!   records from it, skipping a file over either with a warning; upstream
 //!   reads a file whole and restores every record.
 //! - Load and save failures are logged; there is no context to cancel them.
+//! - A record carries open-ferry's capped quota rest under its cooldown,
+//!   if any (`routing.quota.check-after`, see `super::quota_check`), and
+//!   restoring the record puts the rest back, so a restart keeps its
+//!   doubling. A check in flight at the save is due at once after the
+//!   restart. A rest whose check is due when it is saved, or comes due
+//!   before the restart, has no cooldown left to carry it, so it is lost:
+//!   the next quota answer starts again at the cap.
 //! - What a file keeps of a credential's free text is scrubbed of that
 //!   credential's secrets: its own keys and tokens, its credential headers
 //!   and each cookie value among them, and its proxy's password, every one
@@ -104,7 +111,7 @@ use crate::observe::redact::{Policy, Secrets};
 pub(crate) use file::FileStore;
 #[cfg(test)]
 pub(crate) use file::{Limits, MAX_FILE_BYTES, sanitize};
-pub(crate) use record::Record;
+pub(crate) use record::{QuotaCheckRecord, Record};
 
 /// How long the worker waits after a change for more before saving.
 pub const DEBOUNCE: Duration = Duration::from_millis(500);
@@ -464,18 +471,24 @@ fn save_locked(manager: &Manager, io: &mut Io) -> bool {
 /// `cooldownStateRecordsSnapshot`). Only the handles are taken under the
 /// lock.
 pub(crate) fn snapshot(manager: &Manager, now: Timestamp) -> Vec<Record> {
-    let (settings, auths) = {
+    let (settings, auths, checks) = {
         let state = manager.lock();
         let auths: Vec<Arc<Auth>> = state
             .auths
             .values()
             .map(|entry| entry.auth.clone())
             .collect();
-        (state.settings.clone(), auths)
+        let checks = state.quota_checks.records(&state.settings, now);
+        (state.settings.clone(), auths, checks)
     };
     let mut records = Vec::new();
     for auth in &auths {
         records_for_auth(&settings, auth, now, &mut records);
+    }
+    // open-ferry's capped quota rests ride with their cooldowns.
+    for record in &mut records {
+        let scope = canonical_model_key(record.model.trim());
+        record.quota_check = checks.get(&(record.auth_id.clone(), scope)).copied();
     }
     records.sort_by(|a, b| {
         a.provider
@@ -546,6 +559,7 @@ fn collect_records(settings: &Settings, auth: &Auth, now: Timestamp, out: &mut V
             quota: cooldown_fields(&auth.quota),
             last_error: auth.last_error.clone(),
             updated_at: record::nonzero(auth.updated_at),
+            quota_check: None,
         });
     }
     for (model, state) in &auth.model_states {
@@ -568,6 +582,7 @@ fn collect_records(settings: &Settings, auth: &Auth, now: Timestamp, out: &mut V
             quota: cooldown_fields(&state.quota),
             last_error: state.last_error.clone(),
             updated_at: record::nonzero(state.updated_at),
+            quota_check: None,
         });
     }
 }
@@ -617,9 +632,22 @@ fn apply(manager: &Manager, records: &[Record]) -> usize {
         })
         .collect();
     let mut changed = BTreeSet::new();
+    let mut checks = Vec::new();
     for record in model_records.into_iter().chain(auth_records) {
         if let Some(id) = restore_record(&settings, &mut state.auths, &held, record, now) {
+            if let Some(check) = &record.quota_check {
+                checks.push((id.clone(), record.model.trim(), check));
+            }
             changed.insert(id);
+        }
+    }
+    // open-ferry's capped quota rests, once their cooldowns are all back.
+    for (id, model, check) in checks {
+        if let Some(entry) = state.auths.get_mut(&id) {
+            let auth = Arc::make_mut(&mut entry.auth);
+            state
+                .quota_checks
+                .restore(&settings, auth, model, check, now);
         }
     }
     for id in &changed {

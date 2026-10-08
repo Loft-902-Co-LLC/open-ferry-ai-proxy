@@ -280,6 +280,7 @@ fn file_cooldown_state_store_save_load_and_clean_stale() {
             ..AuthError::default()
         }),
         updated_at: Some(at(0, 0, 0)),
+        quota_check: None,
     };
 
     store
