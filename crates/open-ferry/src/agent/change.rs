@@ -472,15 +472,15 @@ pub(crate) fn config_changed() -> Failure {
     .hint("run it again to work it out from the file as it is now")
 }
 
-/// The SHA-256 `text` gives, as `name` takes one: 64 hex digits, in
-/// lowercase.
-pub(crate) fn parse_sha256(text: &str, name: &str) -> Result<String, Failure> {
+/// The SHA-256 `text` gives, as `name` takes one, the `field` a result
+/// gave: 64 hex digits, in lowercase.
+pub(crate) fn parse_sha256(text: &str, name: &str, field: &str) -> Result<String, Failure> {
     let text = text.trim();
     if text.len() == 64 && text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         Ok(text.to_ascii_lowercase())
     } else {
         Err(Failure::usage(format!(
-            "{name} takes the config_sha256 a result gave: 64 hex digits"
+            "{name} takes the {field} a result gave: 64 hex digits"
         )))
     }
 }

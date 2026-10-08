@@ -217,17 +217,25 @@ pub(crate) fn confirm(
 /// from when `would` has one, so it is made only to that file.
 pub(crate) fn go_ahead(ctx: &Context, would: &Value) -> String {
     let flag = ctx.confirm_flag();
+    let backup = would.get("backup_sha256").and_then(Value::as_str);
     match (
         ctx.caller,
         would.get("config_sha256").and_then(Value::as_str),
+        backup,
     ) {
-        (Caller::Cli, Some(sha256)) => {
+        (Caller::Cli, Some(sha256), None) => {
             format!("run it again with {flag} --expect-sha256 {sha256}")
         }
-        (Caller::Mcp, Some(sha256)) => {
+        (Caller::Cli, Some(sha256), Some(backup)) => format!(
+            "run it again with {flag} --expect-sha256 {sha256} --expect-backup-sha256 {backup}"
+        ),
+        (Caller::Mcp, Some(sha256), None) => {
             format!("run it again with {flag} and expect_sha256: \"{sha256}\"")
         }
-        (_, None) => format!("run it again with {flag}"),
+        (Caller::Mcp, Some(sha256), Some(backup)) => format!(
+            "run it again with {flag}, expect_sha256: \"{sha256}\" and expect_backup_sha256: \"{backup}\""
+        ),
+        (_, None, _) => format!("run it again with {flag}"),
     }
 }
 

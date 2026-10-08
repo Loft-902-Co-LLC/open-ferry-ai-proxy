@@ -26,9 +26,10 @@ use super::{Caller, Command, Context, Failure, exit, perform};
 const STDIN_LIMIT: u64 = 1024 * 1024;
 
 /// The flags that take a value.
-const VALUE_FLAGS: [&str; 10] = [
+const VALUE_FLAGS: [&str; 11] = [
     "config",
     "expect-sha256",
+    "expect-backup-sha256",
     "management-key-file",
     "from-file",
     "to-file",
@@ -185,6 +186,8 @@ pub(crate) fn usage(program: &str) -> String {
          \x20 config show                     the whole config, masked\n\
          \x20 config diff                     what the last change made, against <config>.bak\n\
          \x20 config undo                     reverses the last change; run again to redo it\n\
+         \x20     [--expect-backup-sha256 <hash>]   with --yes: only if the backup's SHA-256 is <hash>,\n\
+         \x20                                 the backup_sha256 the undo gave when it needed --yes\n\
          \x20 config replace --from-stdin | --from-file <file>   replaces the whole config\n\
          \x20 keys list [--reveal]            the client keys, masked (in full with --reveal --yes)\n\
          \x20 keys add --generate [--to-file <file>] | --from-stdin | --from-file <file>\n\
@@ -284,7 +287,15 @@ pub(crate) fn main(program: &str, args: Vec<String>) -> ExitCode {
     };
     let expect_sha256 = match parsed
         .value("expect-sha256")
-        .map(|text| super::change::parse_sha256(&text, "--expect-sha256"))
+        .map(|text| super::change::parse_sha256(&text, "--expect-sha256", "config_sha256"))
+        .transpose()
+    {
+        Ok(expected) => expected,
+        Err(failure) => return fail(&failure, json),
+    };
+    let expect_backup_sha256 = match parsed
+        .value("expect-backup-sha256")
+        .map(|text| super::change::parse_sha256(&text, "--expect-backup-sha256", "backup_sha256"))
         .transpose()
     {
         Ok(expected) => expected,
@@ -300,6 +311,7 @@ pub(crate) fn main(program: &str, args: Vec<String>) -> ExitCode {
         key_file,
         yes: parsed.has("yes"),
         expect_sha256,
+        expect_backup_sha256,
         ask,
         say: Some(Box::new(|text: &str| {
             eprint!("{text}");
@@ -473,7 +485,7 @@ fn build(command: &str, parsed: &Args) -> Result<Command, Failure> {
         }
         ("config", Some(name @ ("show" | "diff" | "undo"))) => {
             let extra: &[&str] = if name == "undo" {
-                &["expect-sha256"]
+                &["expect-sha256", "expect-backup-sha256"]
             } else {
                 &[]
             };

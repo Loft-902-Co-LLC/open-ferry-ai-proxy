@@ -122,6 +122,11 @@ pub(crate) struct Context {
     /// must have for a change to be made, as the `config_sha256` a result
     /// that needed a confirmation gave, in lowercase hex.
     pub(crate) expect_sha256: Option<String>,
+    /// `--expect-backup-sha256`, or `expect_backup_sha256`, for an undo:
+    /// the SHA-256 the backup must have for it to be put back, as the
+    /// `backup_sha256` a result that needed a confirmation gave, in
+    /// lowercase hex.
+    pub(crate) expect_backup_sha256: Option<String>,
     /// How to ask for a confirmation, when there is a terminal to ask on.
     pub(crate) ask: Option<Ask>,
     /// How to tell how a command is getting on, while it runs.
