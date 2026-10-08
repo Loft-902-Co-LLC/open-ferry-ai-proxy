@@ -38,13 +38,16 @@
 //! and wording) before anything is written; it is atomic, refuses a
 //! symbolic link, keeps the file's previous contents as `<file name>.bak`,
 //! and records the SHA-256 of what it wrote as `<file name>.sha256` (see
-//! `write`). A refused write leaves the file as it was and returns a
-//! [`SaveError`] that says why.
+//! `write`). It holds an exclusive OS lock on `<file name>.lock`, which
+//! stays beside the file, from the read it works from to that record, so
+//! writes in this process and in others never interleave; it waits up to
+//! five seconds for another to let go. A refused write leaves the file as
+//! it was and returns a [`SaveError`] that says why.
 //!
 //! Deviations from upstream:
-//! - The check, the backup, the record, the atomic replacement and the
-//!   symbolic link refusal are this port's; upstream writes the file in
-//!   place.
+//! - The check, the backup, the record, the lock, the atomic replacement
+//!   and the symbolic link refusal are this port's; upstream writes the
+//!   file in place.
 //! - A file that isn't UTF-8 is refused (`yaml: input is not valid
 //!   UTF-8`); yaml.v3 also reads UTF-16.
 //! - After a save that moves the file to the v8 layout, upstream updates
@@ -82,12 +85,14 @@ pub(crate) use tree::{
 pub(crate) use v8::{
     flatten_v8, is_v8_config_layout, normalize_config_layout, project_v8_config_aliases, v8_aliases,
 };
+pub(crate) use write::WriteLock;
 
 /// Why a config write was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SaveErrorKind {
-    /// Reading or writing a file failed.
+    /// Reading or writing a file failed, or another write held the file's
+    /// lock for too long.
     Io,
     /// The file isn't YAML yaml.v3 reads, or the tree can't be written.
     Yaml,
@@ -192,24 +197,27 @@ pub(crate) fn check_layout(data: &[u8]) -> Result<(), SaveError> {
 /// Writes `cfg`'s settings into the config file at `path`, keeping the
 /// file's comments, order, layout and the settings `cfg` doesn't type
 /// (upstream's `SaveConfigPreserveComments`). With `migrate_v8`, or when
-/// the file uses the v8 layout, the file is written in the v8 layout.
+/// the file uses the v8 layout, the file is written in the v8 layout. The
+/// file's lock is held from the read to the write.
 pub fn save_preserving_comments(
     path: &Path,
     cfg: &Config,
     migrate_v8: bool,
 ) -> Result<(), SaveError> {
+    let lock = WriteLock::acquire(path)?;
     let data = write::read(path)?;
     let out = render_preserving_comments(&data, cfg, migrate_v8)?;
-    write::commit(path, &out)
+    write::commit_locked(&lock, path, &out, None)
 }
 
 /// Sets the string at the path of mapping `keys` in the config file at
 /// `path`, creating the mappings on the way and keeping everything else
 /// (upstream's `SaveConfigPreserveCommentsUpdateNestedScalar`).
 pub fn update_nested_scalar(path: &Path, keys: &[&str], value: &str) -> Result<(), SaveError> {
+    let lock = WriteLock::acquire(path)?;
     let data = write::read(path)?;
     let out = render_nested_scalar(&data, keys, value)?;
-    write::commit(path, &out)
+    write::commit_locked(&lock, path, &out, None)
 }
 
 /// Writes `bytes` as the config file at `path`, as the management API's
@@ -231,6 +239,17 @@ pub fn write_file_expecting(path: &Path, bytes: &[u8], expected: &[u8]) -> Resul
     write::refuse_link(path)?;
     let out = render_write_file(bytes)?;
     write::commit_expecting(path, &out, Some(expected))
+}
+
+/// [`write_file`] under `lock`, the caller's lock of the file at `path`,
+/// taken before it read what it worked `bytes` out from.
+pub(crate) fn write_file_locked(
+    lock: &WriteLock,
+    path: &Path,
+    bytes: &[u8],
+) -> Result<(), SaveError> {
+    let out = render_write_file(bytes)?;
+    write::commit_locked(lock, path, &out, None)
 }
 
 /// Writes `bytes` as the config file at `path` unchanged, with the checks,
@@ -284,14 +303,19 @@ pub struct UndoCheck {
 /// new backup, so undoing again puts it back. Returns the config the file
 /// now holds. Not upstream's: `open-ferry config undo` uses it.
 ///
+/// The file's lock is held from the reads of the file and the backup to
+/// the write, so another write never lands between them.
+///
 /// It is refused, and nothing is written:
 /// - with [`SaveErrorKind::Stale`] when `check` gives a SHA-256 the file
-///   or the backup doesn't have, or the file changes while it runs;
+///   or the backup doesn't have, or the file changes while it runs (by a
+///   writer that takes no lock, as an editor);
 /// - with [`SaveErrorKind::ChangedSince`] when the file isn't what the
 ///   last write here wrote (by its record, see [`recorded_sha256`]), as
 ///   after a hand edit, unless `check.force`: the backup is from before
 ///   that write, so putting it back would lose the edit too.
 pub fn undo(path: &Path, check: &UndoCheck) -> Result<Config, SaveError> {
+    let lock = WriteLock::acquire(path)?;
     let backup = write::backup_path(path);
     let data = match write::read(&backup) {
         Ok(data) => data,
@@ -328,7 +352,7 @@ pub fn undo(path: &Path, check: &UndoCheck) -> Result<Config, SaveError> {
             "the config file was changed since the last change that kept a backup, so undoing would lose that change too; nothing was undone",
         ));
     }
-    write::commit_expecting(path, &data, Some(&current))?;
+    write::commit_locked(&lock, path, &data, Some(&current))?;
     Config::load_bytes(&data)
         .map_err(|error| SaveError::new(SaveErrorKind::Check, error.to_string()))
 }
@@ -1292,6 +1316,130 @@ mod tests {
             undo(&path, &UndoCheck::default()).unwrap_err().kind(),
             SaveErrorKind::ChangedSince
         );
+    }
+
+    // Not upstream's: every writer of the config takes the file's lock,
+    // the server's (the management API's saves, its v8 edits and its undo)
+    // and the commands' alike, before it reads the file. While another
+    // holds the lock none writes; each waits, then works from the file as
+    // the holder left it: a change made from the file keeps a comment the
+    // holder added, an undo puts back what the holder replaced, and a
+    // write that expected the bytes from before is refused as stale.
+    #[test]
+    fn every_writer_takes_the_lock() {
+        use crate::config::v8_edit::{V8Edit, V8Method, edit_v8};
+        type Writer = Box<dyn FnOnce(&Path) -> Result<(), SaveError> + Send>;
+        fn boxed(writer: impl FnOnce(&Path) -> Result<(), SaveError> + Send + 'static) -> Writer {
+            Box::new(writer)
+        }
+        /// What the file holds after a writer, once the holder added a
+        /// comment of its own while it waited.
+        enum Then {
+            Replaced,
+            Kept,
+            Stale,
+            PutBack,
+        }
+        let dir = TempDir::new();
+        let path = dir.join("config.yaml");
+        write_as_is(&path, b"port: 1\n").unwrap();
+        write_as_is(&path, b"port: 2\n").unwrap();
+        let writers: Vec<(&str, Writer, Then)> = vec![
+            (
+                "write_as_is",
+                boxed(|path| write_as_is(path, b"port: 3\n")),
+                Then::Replaced,
+            ),
+            (
+                "write_file",
+                boxed(|path| write_file(path, b"port: 4\n")),
+                Then::Replaced,
+            ),
+            (
+                "write_file_expecting",
+                boxed(|path| {
+                    let read = fs::read(path).unwrap();
+                    write_file_expecting(path, b"port: 5\n", &read)
+                }),
+                Then::Stale,
+            ),
+            (
+                "save_preserving_comments",
+                boxed(|path| {
+                    let config = Config::load_bytes(b"port: 6\n").unwrap();
+                    save_preserving_comments(path, &config, false)
+                }),
+                Then::Kept,
+            ),
+            (
+                "update_nested_scalar",
+                boxed(|path| update_nested_scalar(path, &["remote-management", "secret-key"], "x")),
+                Then::Kept,
+            ),
+            (
+                "edit_v8",
+                boxed(|path| {
+                    let edit = V8Edit {
+                        method: V8Method::Put,
+                        path: vec!["server".to_owned(), "port".to_owned()],
+                        body: b"7".to_vec(),
+                        yaml: false,
+                    };
+                    edit_v8(path, &edit)
+                        .map(|_| ())
+                        .map_err(|error| SaveError::new(SaveErrorKind::Io, error.to_string()))
+                }),
+                Then::Kept,
+            ),
+            (
+                "undo",
+                boxed(|path| undo(path, &UndoCheck::default()).map(|_| ())),
+                Then::PutBack,
+            ),
+        ];
+        for (name, writer, then) in writers {
+            let before = fs::read(&path).unwrap();
+            let held = WriteLock::acquire(&path).unwrap();
+            let handle = {
+                let path = path.clone();
+                std::thread::spawn(move || writer(&path))
+            };
+            let start = std::time::Instant::now();
+            while !write::waited(&path) {
+                assert!(!handle.is_finished(), "{name} didn't wait for the lock");
+                assert!(start.elapsed() < write::LOCK_WAIT, "{name} never waited");
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            assert_eq!(fs::read(&path).unwrap(), before, "{name}");
+            // Another write, while it waits.
+            let mark = format!("# added while {name} waited");
+            let marked = [before.as_slice(), mark.as_bytes(), b"\n"].concat();
+            write::commit_locked(&held, &path, &marked, None).unwrap();
+            drop(held);
+            let result = handle.join().unwrap();
+            let now = fs::read(&path).unwrap();
+            let text = String::from_utf8_lossy(&now).into_owned();
+            match then {
+                Then::Stale => {
+                    let error = result.expect_err(name);
+                    assert_eq!(error.kind(), SaveErrorKind::Stale, "{name}: {error}");
+                    assert_eq!(now, marked, "{name}");
+                    continue;
+                }
+                _ => {
+                    result.unwrap_or_else(|error| panic!("{name}: {error}"));
+                }
+            }
+            match then {
+                Then::Replaced => assert!(!text.contains(&mark), "{name}: {text}"),
+                Then::Kept => {
+                    assert!(text.contains(&mark), "{name}: {text}");
+                    assert_ne!(now, marked, "{name}");
+                }
+                Then::PutBack => assert_eq!(now, before, "{name}"),
+                Then::Stale => {}
+            }
+        }
     }
 
     // Not upstream's: a write that expects the bytes it was worked out
