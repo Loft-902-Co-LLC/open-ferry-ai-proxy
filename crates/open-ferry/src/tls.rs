@@ -102,6 +102,7 @@ async fn accept_loop(
                 continue;
             }
         };
+        crate::service::send_at_once(&stream);
         let (acceptor, sender) = (acceptor.clone(), sender.clone());
         tokio::spawn(async move {
             match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {

@@ -12,7 +12,7 @@ Nothing has been released yet. This is what is in place today, ported from CLIPr
 
 - **CLIProxyAPI's `config.yaml` and auth directory, read as they are**, in both the legacy and the v8 layout. Changes to either are picked up without a restart.
 - **Sign-ins** to Codex (`-codex-login`, or `-codex-device-login` with a device code) and to Claude (`-claude-login`).
-- **The client APIs**, over HTTP and WebSocket:
+- **The client APIs**, over HTTP and WebSocket, sending each part of a streamed answer as soon as it's ready, as CLIProxyAPI does:
   - OpenAI Chat Completions, legacy Completions and Responses;
   - Claude Messages;
   - the Gemini API's `/v1beta/models` routes, and Gemini Interactions;

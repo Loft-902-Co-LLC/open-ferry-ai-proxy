@@ -140,6 +140,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::serve::ListenerExt;
 use chrono::Utc;
 use open_ferry_core::auth::compat::OPENAI_COMPATIBILITY;
 use open_ferry_core::auth::synthesizer::file::{
@@ -1410,12 +1411,23 @@ async fn serve(
         }
         None => {
             axum::serve(
-                listener,
+                listener.tap_io(|tcp| send_at_once(tcp)),
                 app.into_make_service_with_connect_info::<SocketAddr>(),
             )
             .with_graceful_shutdown(stop)
             .await
         }
+    }
+}
+
+/// Turns Nagle's algorithm off on a client's connection, as Go does on
+/// every connection upstream's server accepts, so that each part of a
+/// streamed answer is sent as soon as it's written. With it on, each part
+/// after the first waits for the client to acknowledge the one before,
+/// which Linux delays for 40 ms when the client has nothing to send.
+pub(crate) fn send_at_once(tcp: &tokio::net::TcpStream) {
+    if let Err(error) = tcp.set_nodelay(true) {
+        tracing::debug!("couldn't turn Nagle's algorithm off on a connection: {error}");
     }
 }
 
@@ -1464,6 +1476,19 @@ mod tests {
         );
         service.register_executors();
         service
+    }
+
+    // Not upstream's: a client's connection has Nagle's algorithm off, as
+    // Go's net package has it on every connection upstream's server accepts.
+    #[tokio::test]
+    async fn sends_at_once() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (tcp, _) = listener.accept().await.unwrap();
+        tcp.set_nodelay(false).unwrap();
+        send_at_once(&tcp);
+        assert!(tcp.nodelay().unwrap());
     }
 
     /// What the watcher reports for `path` with its current contents.
