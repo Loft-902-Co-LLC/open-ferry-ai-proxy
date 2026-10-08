@@ -520,8 +520,8 @@ pub(crate) fn file_note(reach: &Reach) -> String {
         Reach::NotRunning(why) => format!(
             "No server answers for this config ({why}), so the file was changed; a server running for it loads the change when it sees the file change, and one started later reads it."
         ),
-        Reach::NoKey => "A server is running, but there is no management key to call it with, so the file was changed; the server loads the change when it sees the file change. Until it has, a save of its own settings (from the dashboard or the management API) writes the settings it holds over the file and can undo this change; `config get` reads what the file holds.".to_owned(),
-        Reach::ManagementOff => "A server is running with its management API off, so the file was changed; the server loads the change when it sees the file change.".to_owned(),
+        Reach::NoKey => "A server is running, but there is no management key to call it with, so the file was changed; if it runs this config, it loads the change when it sees the file change. Until it has, a save of its own settings (from the dashboard or the management API) writes the settings it holds over the file and can undo this change; `config get` reads what the file holds.".to_owned(),
+        Reach::ManagementOff => "A server is running with its management API off, so the file was changed; if it runs this config, it loads the change when it sees the file change.".to_owned(),
         Reach::Running(_) | Reach::Refused(_) | Reach::OtherConfig(_) => String::new(),
     }
 }

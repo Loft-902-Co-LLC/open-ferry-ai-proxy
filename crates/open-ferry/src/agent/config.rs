@@ -572,7 +572,7 @@ pub(crate) async fn undo(ctx: &Context) -> Result<Outcome, Failure> {
                 200..=299 => "server",
                 404 => {
                     undo_in_file(ctx, &backup, &check)?;
-                    note = Some("The running server has no dashboard API to undo through, so the file was changed; the server loads the change when it sees the file change.".to_owned());
+                    note = Some("The running server has no dashboard API to undo through, so the file was changed; if it runs this config, it loads the change when it sees the file change.".to_owned());
                     "file"
                 }
                 409 => {

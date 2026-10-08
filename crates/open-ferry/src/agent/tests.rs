@@ -2505,6 +2505,12 @@ async fn the_key_is_found_in_order() {
     // A save by the server of what it holds can write over it, and the
     // note says so.
     assert!(note.contains("can undo this change"), "{note}");
+    // The server may run another config: the note doesn't say it loads
+    // this one's change, only that it does if it runs this config.
+    assert!(note.contains("if it runs this config"), "{note}");
+    assert!(!note.contains("the server loads"), "{note}");
+    let off = super::change::file_note(&super::target::Reach::ManagementOff);
+    assert!(off.contains("if it runs this config"), "{off}");
     let failure = fails(&ctx, Command::CredentialsList(CredentialsList::default())).await;
     assert_eq!(failure.error, "no_management_key");
     assert!(failure.hint.unwrap().contains("MANAGEMENT_PASSWORD"));
