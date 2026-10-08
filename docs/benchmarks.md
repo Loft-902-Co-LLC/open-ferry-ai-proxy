@@ -11,6 +11,7 @@
 
 - checks that each request is in its own provider's format, as a proxy that translates has to send it, and refuses one that isn't with a 400 in that provider's error format, saying why: for Chat Completions, no `system`, `input` or `instructions` field, messages with the roles and parts Chat Completions has, and tools and tool calls as functions; for Claude Messages, a `max_tokens`, only user and assistant messages, Claude's content blocks, and tools with an `input_schema`;
 - measures its own time for each request, from having read it whole to handing over the last of its answer, so that the report can say what each proxy adds;
+- sends each write at once, with Nagle's algorithm off, as Go does on every connection. With it on, each streamed event after the first would wait for the proxy to acknowledge the one before, which Linux delays for 40 ms, and every streamed answer would take 40 ms more there;
 - counts the connections each proxy opens to it, any request it refuses, and any request to another path, which neither proxy should make. The report says so if there was one.
 
 **The proxies** run with the same config, written fresh for each run:

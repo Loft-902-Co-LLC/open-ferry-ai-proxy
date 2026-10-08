@@ -174,7 +174,7 @@ pub async fn start(delay: Duration, window: Duration) -> io::Result<FakeUpstream
         .with_state(shared);
     let listener = {
         let counts = Arc::clone(&counts);
-        listener.tap_io(move |_| counts.accepted())
+        listener.tap_io(move |tcp| accepted(tcp, &counts))
     };
     tokio::spawn(async move {
         if let Err(err) = axum::serve(listener, app).await {
@@ -182,6 +182,20 @@ pub async fn start(delay: Duration, window: Duration) -> io::Result<FakeUpstream
         }
     });
     Ok(FakeUpstream { addr, counts })
+}
+
+/// Counts a connection the fake upstream accepted, and sends each write on
+/// it at once. axum leaves Nagle's algorithm on, which holds back each of a
+/// stream's events after the first until the proxy acknowledges that one;
+/// Linux delays the acknowledgement for 40 ms when it has nothing to send,
+/// so every streamed answer would take 40 ms more there, for both proxies
+/// alike, and the time they add would be lost in it. Go turns Nagle's
+/// algorithm off on every connection.
+fn accepted(tcp: &mut tokio::net::TcpStream, counts: &Counts) {
+    if let Err(err) = tcp.set_nodelay(true) {
+        eprintln!("fake upstream: couldn't turn Nagle's algorithm off: {err}");
+    }
+    counts.accepted();
 }
 
 /// One request being served: records the fake upstream's own time for it
@@ -687,6 +701,24 @@ mod tests {
         // Each request came from a client of its own.
         assert_eq!(fake.counts.connections.load(Ordering::Relaxed), 5);
         assert_eq!(fake.counts.recent_connections(), 5);
+    }
+
+    // Not upstream's: each connection the fake upstream accepts is counted
+    // and has Nagle's algorithm off, as a Go server's would.
+    #[tokio::test]
+    async fn sends_at_once() {
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (mut tcp, _) = listener.accept().await.unwrap();
+        tcp.set_nodelay(false).unwrap();
+        let counts = Counts::new(Duration::from_secs(60));
+        accepted(&mut tcp, &counts);
+        assert!(tcp.nodelay().unwrap());
+        assert_eq!(counts.connections.load(Ordering::Relaxed), 1);
+        assert_eq!(counts.recent_connections(), 1);
     }
 
     // Not upstream's: a request in another format is refused in the
