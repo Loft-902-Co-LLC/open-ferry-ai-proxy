@@ -15,6 +15,8 @@ export const CHART_METRICS: readonly { value: ChartMetric; label: string }[] = [
 /** How many group colours index.css has, as --of-chart-1 and on. */
 const GROUP_COLOUR_COUNT = 5;
 const FAILED_COLOUR = "var(--of-danger)";
+/** The least height, in pixels, a count of failed requests above zero is drawn at. */
+export const FAILED_MIN_HEIGHT = 3;
 
 /**
  * A group's colour, from the tokens: each keeps 3:1 with the surface in both
@@ -71,6 +73,8 @@ export interface ChartSeries {
   key: string;
   name: string;
   colour: string;
+  /** Failed requests of all calls, in red, at the top of their stack. */
+  failed: boolean;
 }
 
 /** What the chart draws and its table lists: the series, and a row per bucket. */
@@ -96,8 +100,8 @@ export function chartData(data: UsageSeries, metric: ChartMetric): ChartData {
   if (ungrouped && metric === "requests") {
     return {
       series: [
-        { key: "succeeded", name: "Succeeded", colour: groupColour(0) },
-        { key: "failed", name: "Failed", colour: FAILED_COLOUR },
+        { key: "succeeded", name: "Succeeded", colour: groupColour(0), failed: false },
+        { key: "failed", name: "Failed", colour: FAILED_COLOUR, failed: true },
       ],
       rows: first.points.map((point) => ({
         start: point.start,
@@ -106,11 +110,13 @@ export function chartData(data: UsageSeries, metric: ChartMetric): ChartData {
       })),
     };
   }
+  const failed = ungrouped && metric === "errors";
   return {
     series: data.series.map((series, index) => ({
       key: series.key ?? "all",
       name: seriesName(series.label, data.group_by),
-      colour: ungrouped && metric === "errors" ? FAILED_COLOUR : groupColour(index),
+      colour: failed ? FAILED_COLOUR : groupColour(index),
+      failed,
     })),
     rows: first.points.map((point, index) => ({
       start: point.start,
@@ -121,6 +127,18 @@ export function chartData(data: UsageSeries, metric: ChartMetric): ChartData {
       }),
     })),
   };
+}
+
+/**
+ * The least height, in pixels, series `series` is drawn at in row `row`: a
+ * few pixels for failed requests above zero, so a handful among many still
+ * shows; nothing for the rest, which are drawn to scale. Failures top their
+ * stack, so this lifts a bar's top by a pixel or two at most and changes no
+ * other segment.
+ */
+export function minHeight(chart: ChartData, series: number, row: number): number {
+  const failed = chart.series[series]?.failed === true;
+  return failed && (chart.rows[row]?.values[series] ?? 0) > 0 ? FAILED_MIN_HEIGHT : 0;
 }
 
 /**
@@ -202,9 +220,11 @@ export function UsageChart({ data, metric }: UsageChartProps) {
               name={series.name}
               stackId="usage"
               fill={series.colour}
-              // A line of the surface between segments keeps them apart.
-              stroke="var(--of-surface)"
-              strokeWidth={1}
+              // A line of the surface between segments keeps them apart. The
+              // failures go without one, which would cover a thin red top.
+              stroke={series.failed ? "none" : "var(--of-surface)"}
+              strokeWidth={series.failed ? 0 : 1}
+              minPointSize={(_value, row) => minHeight(chart, index, row)}
               isAnimationActive={false}
             />
           ))}
