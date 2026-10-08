@@ -1751,3 +1751,45 @@ async fn a_failed_write_changes_nothing() {
     .await;
     assert_eq!(loaded(&api, &dir).request_retry, 2);
 }
+
+// Not upstream's: undo puts the backup the last write kept back, makes it
+// the config the handlers read, and keeps what it replaced as the backup,
+// so the undo can be undone.
+#[tokio::test]
+async fn undo_puts_the_backup_back() {
+    let raw = "config-version: 8\nserver:\n  port: 8318\n";
+    let (dir, api) = over(raw);
+    assert_eq!(
+        crate::undo_config(&api.state).await,
+        Err(crate::UndoError::NoBackup)
+    );
+    request(
+        &api,
+        Method::PUT,
+        &at("server/port"),
+        "8319",
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(loaded(&api, &dir).port, 8319);
+    let written = read(&dir);
+
+    crate::undo_config(&api.state).await.unwrap();
+    assert_eq!(read(&dir), raw);
+    assert_eq!(loaded(&api, &dir).port, 8318);
+
+    crate::undo_config(&api.state).await.unwrap();
+    assert_eq!(read(&dir), written);
+    assert_eq!(loaded(&api, &dir).port, 8319);
+
+    // A state without a writer, and a writer that keeps no backup, have
+    // nothing to undo.
+    assert_eq!(
+        crate::undo_config(&Api::new().state).await,
+        Err(crate::UndoError::Unavailable)
+    );
+    assert_eq!(
+        crate::undo_config(&Api::writing(Config::default()).state).await,
+        Err(crate::UndoError::NoBackup)
+    );
+}

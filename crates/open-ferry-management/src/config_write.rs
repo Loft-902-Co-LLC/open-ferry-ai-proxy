@@ -44,6 +44,9 @@
 //!   as upstream's hook goes through `ReloadConfigIfChanged`, and the
 //!   watcher's changes are applied in the order it read them, so there is
 //!   nothing to skip.
+//! - [`undo_config`] puts back the backup the last write kept, keeping the
+//!   file it replaces as the new backup, for the dashboard API's
+//!   `config/undo` route. Upstream has no undo.
 
 use std::fmt;
 use std::future::Future;
@@ -55,6 +58,7 @@ use axum::body::{Body, Bytes};
 use axum::response::Response;
 use http::StatusCode;
 use open_ferry_core::config::Config;
+use open_ferry_core::config::save::SaveErrorKind;
 pub use open_ferry_core::config::v8_edit::{V8Edit, V8EditError, V8Method};
 use open_ferry_core::config::{save, v8_edit};
 
@@ -86,7 +90,43 @@ pub trait ConfigWriter: Send + Sync {
     /// result and saves it, and returns the config the file now holds
     /// (upstream's `ConfigV8` for `PUT`, `PATCH` and `DELETE`).
     fn edit_v8(&self, edit: &V8Edit) -> Result<Config, V8EditError>;
+
+    /// Puts the backup the last write kept in place of the file, keeping
+    /// the file it replaces as the new backup so the undo can itself be
+    /// undone, and returns the config the file now holds. Not upstream's:
+    /// the dashboard API's `config/undo` route uses it, through
+    /// [`undo_config`]. A writer that keeps no backup has nothing to undo,
+    /// which is what this answers unless the writer says otherwise.
+    fn undo(&self) -> Result<Config, UndoError> {
+        Err(UndoError::NoBackup)
+    }
 }
+
+/// Why [`undo_config`] or [`ConfigWriter::undo`] didn't put the backup
+/// back. Nothing was changed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum UndoError {
+    /// The state has no [`ConfigWriter`].
+    Unavailable,
+    /// There is no backup to put back.
+    NoBackup,
+    /// The backup couldn't be put back. The text says why, and holds no
+    /// secret from the config.
+    Failed(String),
+}
+
+impl fmt::Display for UndoError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unavailable => f.write_str(WRITER_UNAVAILABLE),
+            Self::NoBackup => f.write_str("there is no backup to undo to"),
+            Self::Failed(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for UndoError {}
 
 /// Why a [`ConfigWriter`] didn't save. Its text follows `failed to save
 /// config: ` in the answer, so it must not hold a secret from the config.
@@ -147,6 +187,17 @@ impl ConfigWriter for FileConfigWriter {
 
     fn edit_v8(&self, edit: &V8Edit) -> Result<Config, V8EditError> {
         v8_edit::edit_v8(&self.path, edit)
+    }
+
+    fn undo(&self) -> Result<Config, UndoError> {
+        save::undo(&self.path).map_err(|error| match error.kind() {
+            SaveErrorKind::NoBackup => UndoError::NoBackup,
+            // The loader's message may quote the file; say only what failed.
+            SaveErrorKind::Check => {
+                UndoError::Failed("the backup doesn't load as a config".to_owned())
+            }
+            _ => UndoError::Failed(error.to_string()),
+        })
     }
 }
 
@@ -302,6 +353,29 @@ where
                 )
             })?;
         state.set_config(config);
+        Ok(())
+    })
+    .await
+}
+
+/// Puts the config file's backup in its place with the state's writer
+/// ([`ConfigWriter::undo`]), under the write lock every change takes, makes
+/// the config it holds the one the handlers read, and has the service load
+/// the file again. Not upstream's: the dashboard API's `config/undo` route
+/// calls it. On an error nothing was changed.
+pub async fn undo_config(state: &ManagementState) -> Result<(), UndoError> {
+    let writer = state
+        .config_writer()
+        .cloned()
+        .ok_or(UndoError::Unavailable)?;
+    let state = state.clone();
+    run_task(async move {
+        {
+            let _guard = state.config_write_lock().lock().await;
+            let config = run_blocking(move || writer.undo()).await?;
+            state.set_config(Arc::new(config));
+        }
+        reload(&state).await;
         Ok(())
     })
     .await
