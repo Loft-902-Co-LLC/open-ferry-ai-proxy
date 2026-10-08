@@ -40,10 +40,20 @@ describe("the request log search", () => {
     renderApp("/logs");
     expect(await screen.findByRole("heading", { name: "Logs", level: 1 })).toBeVisible();
     const table = await screen.findByRole("table", { name: "Request logs, newest first" });
+    // Status comes right after Time, so a phone shows it without scrolling.
+    expect(within(table).getAllByRole("columnheader").map((cell) => cell.textContent)).toEqual([
+      "Time",
+      "Status",
+      "Kind",
+      "Request",
+      "Model",
+      "Size",
+      "Open",
+    ]);
+    expect(within(table).getAllByRole("cell")[1]).toHaveTextContent("502");
     const rows = within(table).getAllByRole("row");
     expect(rows[1]).toHaveTextContent("/v1/messages");
     expect(rows[1]).toHaveTextContent("Error");
-    expect(rows[1]).toHaveTextContent("502");
     expect(rows[2]).toHaveTextContent("gpt-5.1-codex");
     expect(
       within(table).getByRole("link", { name: "Open v1-chat-completions-2026-10-05T115802-1234abcd.log" }),

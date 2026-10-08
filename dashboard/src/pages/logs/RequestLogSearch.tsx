@@ -129,6 +129,7 @@ function LogRow({ log }: { log: LogEntry }) {
   return (
     <tr>
       <Td className="whitespace-nowrap">{formatDateTime(log.time)}</Td>
+      <Td>{log.status ?? "–"}</Td>
       <Td>
         <Badge tone={log.kind === "error" ? "danger" : "neutral"}>
           {log.kind === "error" ? "Error" : "Request"}
@@ -142,7 +143,6 @@ function LogRow({ log }: { log: LogEntry }) {
           <BreakableText text={log.url} />
         )}
       </Td>
-      <Td>{log.status ?? "–"}</Td>
       <Td className="font-mono">
         {log.model === null ? (
           "–"
@@ -246,10 +246,12 @@ export function RequestLogSearch() {
           <Table caption="Request logs, newest first">
             <thead>
               <tr>
+                {/* Status next to Time: on a phone, whether a request failed
+                    shows without scrolling sideways. */}
                 <Th>Time</Th>
+                <Th>Status</Th>
                 <Th>Kind</Th>
                 <Th>Request</Th>
-                <Th>Status</Th>
                 <Th>Model</Th>
                 <Th className="text-right">Size</Th>
                 <Th>

@@ -158,6 +158,11 @@ function CallRow({
     <tr>
       <Td className="whitespace-nowrap">{formatDateTime(row.time)}</Td>
       <Td>
+        <Badge tone={row.failed ? "danger" : "ok"}>
+          {row.failed ? `Failed ${String(row.status)}` : String(row.status)}
+        </Badge>
+      </Td>
+      <Td>
         <span className={`${NAME_IN_TABLE} font-mono`}>
           <BreakableText text={row.model} kind="name" />
         </span>
@@ -174,11 +179,6 @@ function CallRow({
         )}
       </Td>
       <Td className="font-mono whitespace-nowrap">{row.client_key?.masked ?? "none"}</Td>
-      <Td>
-        <Badge tone={row.failed ? "danger" : "ok"}>
-          {row.failed ? `Failed ${String(row.status)}` : String(row.status)}
-        </Badge>
-      </Td>
       <Td className="text-right whitespace-nowrap">
         {formatMillis(row.latency_ms)}
         {row.ttft_ms !== null && (
@@ -291,11 +291,13 @@ export function RecentCalls({
         <Table caption="Calls to providers, newest first">
           <thead>
             <tr>
+              {/* Status next to Time: on a phone, whether a call failed shows
+                  without scrolling sideways. */}
               <Th>Time</Th>
+              <Th>Status</Th>
               <Th>Model</Th>
               <Th>Provider</Th>
               <Th>Client key</Th>
-              <Th>Status</Th>
               <Th className="text-right">Latency</Th>
               <Th className="text-right">Tokens</Th>
               <Th className="text-right">Cost</Th>

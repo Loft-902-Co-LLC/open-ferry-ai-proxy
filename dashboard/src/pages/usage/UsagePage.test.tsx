@@ -72,6 +72,19 @@ describe("the Usage page", () => {
     expect(within(numbers).getAllByRole("cell", { name: "12" })).toHaveLength(2);
 
     const calls = await screen.findByRole("table", { name: "Calls to providers, newest first" });
+    // Status comes right after Time, so a phone shows it without scrolling.
+    expect(within(calls).getAllByRole("columnheader").map((cell) => cell.textContent)).toEqual([
+      "Time",
+      "Status",
+      "Model",
+      "Provider",
+      "Client key",
+      "Latency",
+      "Tokens",
+      "Cost",
+      "Log",
+    ]);
+    expect(within(calls).getAllByRole("cell")[1]).toHaveTextContent("200");
     expect(within(calls).getByText("gpt-5.1-codex")).toBeVisible();
     expect(within(calls).getByText("sk-...9f3k")).toBeVisible();
 
