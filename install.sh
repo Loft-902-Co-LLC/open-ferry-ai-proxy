@@ -372,7 +372,9 @@ if [ -n "$receipt" ] && mkdir -p "${receipt%/*}" 2>/dev/null &&
   receipt_ok=1
 else
   receipt_ok=0
-  [ -z "$receipt" ] || rm -f "$receipt.$$"
+  # rm -f fails where the path can't exist (a file where a directory
+  # should be) with BSD and busybox rm.
+  [ -z "$receipt" ] || rm -f "$receipt.$$" 2>/dev/null || :
   say "Couldn't write the install receipt ${receipt:-as HOME is unset}, so open-ferry won't update itself; it will say when a release is out."
 fi
 
