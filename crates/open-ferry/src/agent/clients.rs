@@ -556,6 +556,7 @@ pub(crate) async fn setup(ctx: &Context, input: &SetupInput) -> Result<Outcome, 
             "Showing the client key in full",
             &["it prints a secret".to_owned()],
             json!({}),
+            &[],
         )?;
     }
     let shown = match &key {

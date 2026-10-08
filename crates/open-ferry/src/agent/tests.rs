@@ -1593,6 +1593,70 @@ async fn output_is_masked() {
     }
 }
 
+// Not upstream's: the question at the terminal, and what a change would
+// do, are scrubbed of every secret of the configs it goes from and to, so
+// a key that shows where no key names it, as in a URL's path, doesn't
+// show: one removed from the config, and one only the new config holds.
+#[tokio::test]
+async fn the_question_is_scrubbed() {
+    const OLD: &str = "sk-placeholder-path-key-0123456789";
+    const NEW: &str = "sk-placeholder-new-path-key-456789";
+    let offline = offline(Some(KEY));
+    let setup = &offline.setup;
+    let provider = |key: &str| {
+        format!(
+            "api-keys:\n  codex:\n    - name: \"placeholder\"\n      base-url: \"https://api.example.com/v1/{key}/\"\n      keys:\n        - api-key: \"{key}\"\n"
+        )
+    };
+    let base = setup.text();
+    std::fs::write(&setup.path, format!("{base}{}", provider(OLD))).unwrap();
+    let before = setup.text();
+    let replacement = setup.file("replacement.yaml", &format!("{base}{}", provider(NEW)));
+    let replace = || {
+        Command::ConfigReplace(ReplaceInput {
+            source: Source::File(replacement.clone()),
+        })
+    };
+
+    let question = Arc::new(std::sync::Mutex::new(String::new()));
+    let seen = Arc::clone(&question);
+    let ctx = Context {
+        ask: Some(Box::new(move |text: &str| {
+            *seen.lock().unwrap() = text.to_owned();
+            false
+        })),
+        ..cli(&setup.path)
+    };
+    assert_eq!(fails(&ctx, replace()).await.error, "declined");
+    let asked = question.lock().unwrap().clone();
+    assert!(asked.contains("api-keys.codex"), "{asked}");
+    assert!(asked.contains("https://api.example.com/v1/"), "{asked}");
+    for key in [OLD, NEW] {
+        assert!(!asked.contains(key), "{key}: {asked}");
+    }
+
+    // Without a terminal, and over MCP, what it would change.
+    let failure = fails(&cli(&setup.path), replace()).await;
+    assert_eq!(failure.error, "needs_confirmation");
+    for key in [OLD, NEW] {
+        assert!(!failure_shows(&failure, key), "{key}: {failure:?}");
+    }
+    let server = Server::new(Ok(setup.path.clone()), Env::default(), None);
+    let mut session = server_session(server).await;
+    let result = session
+        .call("config_replace", json!({"from_file": replacement}))
+        .await;
+    assert_eq!(
+        result["structuredContent"]["error"],
+        json!("needs_confirmation"),
+        "{result}"
+    );
+    for key in [OLD, NEW] {
+        assert!(!result.to_string().contains(key), "{key}: {result}");
+    }
+    assert_eq!(setup.text(), before);
+}
+
 // Not upstream's: a number or a boolean under a secret's key, which the
 // loader reads as a string key, is masked as a string is, by get, show and
 // the config resource, and isn't taken inline; a switch elsewhere shows.
@@ -2255,6 +2319,35 @@ async fn a_change_through_a_copy_says_the_copy_is_unchanged() {
     assert!(!undone.json["changes"].as_array().unwrap().is_empty());
     assert_eq!(copy.text(), ours);
     assert!(!live.setup.text().contains("fill-first"));
+
+    // A replacement through a copy: its secrets are in no file read here,
+    // but what it changed is scrubbed of them, a key in a URL's path too.
+    const PATH_KEY: &str = "sk-placeholder-path-key-0123456789";
+    std::fs::write(&copy.path, live.setup.text()).unwrap();
+    let replacement = copy.file(
+        "replacement.yaml",
+        &format!(
+            "{}api-keys:\n  codex:\n    - name: \"placeholder\"\n      base-url: \"https://api.example.com/v1/{PATH_KEY}/\"\n      keys:\n        - api-key: \"{PATH_KEY}\"\n",
+            config_text(live.port, Some(KEY), &live.setup.auth_dir)
+        ),
+    );
+    let replaced = ok(
+        &confirmed(&copy.path, Caller::Cli),
+        Command::ConfigReplace(ReplaceInput {
+            source: Source::File(replacement),
+        }),
+    )
+    .await;
+    assert_eq!(replaced.json["via"], json!("server"));
+    assert!(
+        replaced.json["changes"]
+            .to_string()
+            .contains("https://api.example.com/v1/"),
+        "{}",
+        replaced.json
+    );
+    assert!(!shows(&replaced, PATH_KEY), "{}", replaced.text);
+    assert!(live.setup.text().contains(PATH_KEY));
 
     // The server's own file is still changed as itself, with no such note.
     let changed = ok(

@@ -38,7 +38,7 @@ use serde_json::{Map, Value, json};
 
 use super::api::{Body, path_segments};
 use super::guard::{confirm, sensitive_reasons_of};
-use super::mask::{FROM_A_FILE, mask_at};
+use super::mask::{FROM_A_FILE, Scrub, mask_at};
 use super::target::{Reach, Server, probe};
 use super::values::{Change, diff, get, placed, tree_of};
 use super::{Caller, Context, Failure, Report};
@@ -384,6 +384,7 @@ async fn attempt(
                 "changes": shown(request, &changes, &before, &after),
                 "config_sha256": save::sha256_hex(data),
             }),
+            &[&before, &after],
         )?;
     }
     let target = probe(ctx).await?;
@@ -434,12 +435,18 @@ async fn attempt(
             "The server's write also put settings it was using at their defaults into the file; that doesn't change what it does.".to_owned()
         })
     });
+    // Scrubbed of the secrets of the configs it went from and to: through
+    // a copy, the config it made is in no file read here.
+    let scrub = Scrub::of_trees(&[&before, &after, &now]);
     Ok(Attempt::Done(Changed {
         action: request.action,
         path: request.path.clone(),
         changed: !changes.is_empty(),
         via: Some(via),
-        changes: shown(request, &changes, &before, &now),
+        changes: shown(request, &changes, &before, &now)
+            .into_iter()
+            .map(|change| scrub.json(change))
+            .collect(),
         note,
         undo: Some(undo_hint(ctx)),
         extra: Map::new(),
