@@ -336,7 +336,7 @@ With `--json`, the same is `{"error": "needs_confirmation", "message": ..., "hin
 
 ### Secrets in what they print
 
-Nothing they print holds a secret they weren't asked to show. Client keys, the management key, provider API keys, tokens and passwords are masked as the dashboard masks a client key (`sk-...mnop`: the last few characters, and the first three of a long one); a URL's user and password become `***`; email addresses are masked (`s***@e***.com`). Then every secret of the config, `MANAGEMENT_PASSWORD`, the key file and the credential files in the auth directory (their tokens and keys) is replaced by `[redacted]` wherever it still appears.
+Nothing they print holds a secret they weren't asked to show. Client keys, the management key, provider API keys, tokens and passwords are masked as the dashboard masks a client key (`sk-...mnop`: the last few characters, and the first three of a long one); a URL's user and password become `***`; email addresses are masked (`s***@e***.com`). Then every secret of the config, `MANAGEMENT_PASSWORD`, the key file and the credential files in the auth directory (their tokens and keys) is replaced by `[redacted]` wherever it still appears. A config or a value that doesn't load is said not to, with the kind of problem and where it is (a line, a setting), never in the loader's words, which can quote a value.
 
 A secret is never taken as an argument: `config set` reads one from standard input (`--from-stdin`) or a file (`--from-file`), and refuses one given inline with exit code 2. A value is a secret when its key names one (`secret-key`, `api-key`, `token`, `password` and the like), or when it holds one, as a provider's list of keys does.
 

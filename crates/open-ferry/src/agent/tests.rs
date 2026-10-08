@@ -324,6 +324,112 @@ async fn unknown_paths_are_refused() {
     assert!(!open_ferry_core::config::save::backup_path(&setup.path).exists());
 }
 
+// Not upstream's: a config or a value that doesn't load is said not to,
+// and where (a line, a setting), never in the loader's or writer's words,
+// which can quote a value: a secret put where it doesn't belong never
+// shows.
+#[tokio::test]
+async fn load_errors_say_only_where() {
+    const MISPLACED: &str = "sk-misplaced-secret-0123456789abcdef";
+    let offline = offline(Some(KEY));
+    let setup = &offline.setup;
+    let before = setup.text();
+    let ctx = confirmed(&setup.path, Caller::Cli);
+
+    // A value the writer refuses, as its message quotes the entry.
+    let failure = fails(
+        &ctx,
+        set("server.trusted-proxies", &format!(r#"["{MISPLACED}"]"#)),
+    )
+    .await;
+    assert_eq!(failure.error, "invalid_value", "{failure:?}");
+    assert!(
+        failure
+            .message
+            .starts_with("that would make the config invalid"),
+        "{failure:?}"
+    );
+    assert!(!failure_shows(&failure, MISPLACED));
+    // A value that isn't YAML, with its line.
+    let failure = fails(
+        &ctx,
+        set("routing.strategy", &format!("\n[{MISPLACED}, {{")),
+    )
+    .await;
+    assert_eq!(failure.error, "usage", "{failure:?}");
+    assert!(failure.message.starts_with("the value isn't YAML or JSON"));
+    assert!(!failure_shows(&failure, MISPLACED));
+    assert_eq!(setup.text(), before);
+
+    // A config that doesn't load: status says so, and get and set say where.
+    let broken = before.replace(
+        "server:\n",
+        &format!("server:\n  trusted-proxies: [\"{MISPLACED}\"]\n"),
+    );
+    std::fs::write(&setup.path, &broken).unwrap();
+    let status = ok(&cli(&setup.path), Command::Status).await;
+    assert!(
+        status.text.contains("the config doesn't load"),
+        "{}",
+        status.text
+    );
+    assert!(!shows(&status, MISPLACED));
+    let unloadable = format!("{before}{MISPLACED}: [\n");
+    std::fs::write(&setup.path, &unloadable).unwrap();
+    let status = ok(&cli(&setup.path), Command::Status).await;
+    assert!(
+        status
+            .text
+            .contains("the config doesn't load: it isn't YAML"),
+        "{}",
+        status.text
+    );
+    assert!(status.text.contains("line "), "{}", status.text);
+    assert!(!shows(&status, MISPLACED));
+    for command in [
+        get("routing.strategy"),
+        set("routing.strategy", "fill-first"),
+    ] {
+        let failure = fails(&ctx, command).await;
+        assert_eq!(failure.error, "invalid_config", "{failure:?}");
+        assert!(failure.message.contains("line "), "{failure:?}");
+        assert!(!failure_shows(&failure, MISPLACED));
+    }
+    assert_eq!(setup.text(), unloadable);
+}
+
+// Not upstream's: where a loader's message places a problem is kept, and
+// nothing else of it.
+#[test]
+fn a_load_message_is_cut_to_where() {
+    use super::values::placed;
+    assert_eq!(
+        placed(
+            "it doesn't load",
+            "yaml: unmarshal errors:\n  line 7: field sk-abc-0123 not found in type config.Routing"
+        ),
+        "it doesn't load (line 7)"
+    );
+    assert_eq!(
+        placed(
+            "it doesn't load",
+            "invalid trusted-proxies entry \"sk-abc-0123\" in server.trusted-proxies[2]"
+        ),
+        "it doesn't load (server.trusted-proxies)"
+    );
+    assert_eq!(
+        placed(
+            "it doesn't load",
+            "legacy field host is not accepted by v8; use server.host"
+        ),
+        "it doesn't load (server.host)"
+    );
+    assert_eq!(
+        placed("it doesn't load", "sk-abc-0123 routing"),
+        "it doesn't load"
+    );
+}
+
 // Not upstream's: undo puts the last change back, and an undo of the undo
 // redoes it; diff shows what the last change made.
 #[tokio::test]

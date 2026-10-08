@@ -126,7 +126,7 @@ For example, `config_set` with `{"path": "routing.strategy", "value": "fill-firs
 
 ## Secrets
 
-- **No tool returns a secret already in the setup.** `keys_list` and `clients_setup` mask the client keys, and no tool reveals one: `open-ferry keys list --reveal --yes`, in a terminal, does. The management key, provider API keys, tokens and email addresses are masked wherever they appear, and every secret of the config, and every token of the credential files in the auth directory, is then replaced by `[redacted]` wherever it still shows.
+- **No tool returns a secret already in the setup.** `keys_list` and `clients_setup` mask the client keys, and no tool reveals one: `open-ferry keys list --reveal --yes`, in a terminal, does. The management key, provider API keys, tokens and email addresses are masked wherever they appear, and every secret of the config, and every token of the credential files in the auth directory, is then replaced by `[redacted]` wherever it still shows. A config or a value that doesn't load is said not to, and where (a line, a setting), without quoting it.
 - **A secret never comes in a call.** `config_set` refuses one as `value`, and `keys_add` and `keys_remove` take a key only from a file. The agent should ask the user to put a secret in a file and give its path, never to paste it into the conversation.
 - **`keys_add` with `generate: true`** writes the new key to the new file `to_file` names (one that doesn't exist yet; on Linux and macOS only the user can read it) and returns its path as `key_file`. With `confirm: true` and no `to_file`, it returns the key itself as `key`, once. With `from_file`, the key is in a file already, and only its masked form is returned.
 

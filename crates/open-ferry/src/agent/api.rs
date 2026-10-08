@@ -9,6 +9,16 @@ use open_ferry_tui::{ManagementClient, Reply};
 use serde_json::Value;
 
 use super::Failure;
+use super::values::placed;
+
+/// The error codes of answers whose message can quote the config or the
+/// body sent: their text is only where the problem is.
+const QUOTING: [&str; 4] = [
+    "invalid_config",
+    "invalid_yaml",
+    "invalid_body",
+    "invalid_json",
+];
 
 /// The running server's APIs, called with the management key.
 #[derive(Clone)]
@@ -94,7 +104,9 @@ impl Remote {
 }
 
 /// What an error answer's body says: its `message` and `error`, or the
-/// body's text when it isn't JSON.
+/// body's text when it isn't JSON. For a config or a body that doesn't
+/// load, the message is cut to where the problem is ([`placed`]), as it can
+/// quote a value.
 pub(crate) fn error_text(body: &[u8]) -> Option<String> {
     let parsed: Option<Value> = serde_json::from_slice(body).ok();
     let field = |name: &str| {
@@ -107,6 +119,9 @@ pub(crate) fn error_text(body: &[u8]) -> Option<String> {
             .map(str::to_owned)
     };
     match (field("message"), field("error")) {
+        (Some(message), Some(error)) if QUOTING.contains(&error.as_str()) => {
+            Some(placed(&error, &message))
+        }
         (Some(message), Some(error)) => Some(format!("{message} ({error})")),
         (Some(text), None) | (None, Some(text)) => Some(text),
         (None, None) if parsed.is_none() => {
@@ -179,6 +194,18 @@ mod tests {
             "not_found"
         );
         assert_eq!(error_text(b"plain words").unwrap(), "plain words");
+        // Not upstream's: a config error's message is cut to where it is.
+        assert_eq!(
+            error_text(
+                br#"{"error":"invalid_config","message":"yaml: unmarshal errors:\n  line 4: field sk-live-abc not found in type config.Routing (routing.strategy)"}"#
+            )
+            .unwrap(),
+            "invalid_config (line 4, routing.strategy)"
+        );
+        assert_eq!(
+            error_text(br#"{"error":"invalid_yaml","message":"sk-live-abc"}"#).unwrap(),
+            "invalid_yaml"
+        );
         assert_eq!(error_text(b""), None);
         assert_eq!(answer_failure(401, b"").error, "unauthorized");
         assert_eq!(answer_failure(404, b"").error, "not_found");

@@ -10,7 +10,7 @@
 use std::path::Path;
 
 use open_ferry_core::config::v8_edit::{KnownKind, KnownPath, is_known_v8_path, known_v8_paths};
-use open_ferry_core::config::{AnyValue, V8Document};
+use open_ferry_core::config::{AnyValue, ConfigError, ConfigErrorKind, V8Document};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
@@ -39,25 +39,98 @@ pub(crate) fn any_to_json(value: &AnyValue) -> Value {
     }
 }
 
+/// Why a config doesn't load, as the commands say it: the kind of problem
+/// and where it is ([`placed`]), never the loader's own words, which can
+/// quote a key or a value of the config (a secret put in the wrong place,
+/// say).
+pub(crate) fn load_error(error: &ConfigError) -> String {
+    let what = match error.kind() {
+        ConfigErrorKind::Read => "it can't be read",
+        ConfigErrorKind::Empty => "it is empty",
+        ConfigErrorKind::Syntax => "it isn't YAML",
+        ConfigErrorKind::Decode => "a value has the wrong type, or a key is repeated",
+        ConfigErrorKind::Invalid => "a setting isn't valid",
+        ConfigErrorKind::NoHomeDir => {
+            "its auth directory starts with ~, and there's no home directory"
+        }
+        _ => "it doesn't load",
+    };
+    placed(what, &error.to_string())
+}
+
+/// `what`, with where `message` (a loader's, the config writer's or a
+/// server's) places the problem, in brackets: the first line it names, and
+/// the most specific setting it names that a v8 config may hold. Nothing
+/// else of `message` is kept.
+pub(crate) fn placed(what: &str, message: &str) -> String {
+    let mut place = Vec::new();
+    if let Some(line) = line_in(message) {
+        place.push(format!("line {line}"));
+    }
+    if let Some(setting) = setting_in(message) {
+        place.push(setting);
+    }
+    if place.is_empty() {
+        what.to_owned()
+    } else {
+        format!("{what} ({})", place.join(", "))
+    }
+}
+
+/// The first line number `message` names, as `line 3`.
+fn line_in(message: &str) -> Option<u64> {
+    message.match_indices("line ").find_map(|(at, word)| {
+        let rest = message.get(at + word.len()..)?;
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        if digits.is_empty() || digits.len() > 9 {
+            return None;
+        }
+        digits.parse().ok()
+    })
+}
+
+/// The longest dotted path `message` names, with any list index dropped,
+/// that is exactly a setting or section a v8 config may hold. A single key
+/// isn't taken, as it may be just a word.
+fn setting_in(message: &str) -> Option<String> {
+    let known = known_v8_paths();
+    message
+        .split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '[' | ']')))
+        .filter_map(|word| {
+            let mut path = String::with_capacity(word.len());
+            let mut index = false;
+            for c in word.trim_matches('.').chars() {
+                match c {
+                    '[' => index = true,
+                    ']' => index = false,
+                    c if !index => path.push(c),
+                    _ => {}
+                }
+            }
+            (path.contains('.') && known.iter().any(|entry| entry.path == path)).then_some(path)
+        })
+        .max_by_key(|path| (path.matches('.').count(), path.len()))
+}
+
 /// The config `data` holds, in the v8 layout, as JSON.
 pub(crate) fn tree_of(data: &[u8]) -> Result<Value, Failure> {
-    let document = V8Document::migrate(data).map_err(|error| {
-        Failure::new(
-            "invalid_config",
-            format!("the config doesn't load: {error}"),
-        )
-    })?;
+    let document = V8Document::migrate(data).map_err(|error| doesnt_load(&error))?;
     document_tree(&document)
+}
+
+/// The failure for a config that doesn't load.
+fn doesnt_load(error: &ConfigError) -> Failure {
+    Failure::new(
+        "invalid_config",
+        format!("the config doesn't load: {}", load_error(error)),
+    )
 }
 
 /// `document` as JSON.
 pub(crate) fn document_tree(document: &V8Document) -> Result<Value, Failure> {
     match document.value(&[]) {
         Some(Ok(value)) => Ok(any_to_json(&value)),
-        Some(Err(error)) => Err(Failure::new(
-            "invalid_config",
-            format!("the config doesn't load: {error}"),
-        )),
+        Some(Err(error)) => Err(doesnt_load(&error)),
         None => Ok(Value::Object(Map::new())),
     }
 }
@@ -77,7 +150,7 @@ pub(crate) fn read_tree(path: &Path) -> Result<Value, Failure> {
 pub(crate) fn parse_value(text: &str) -> Result<Value, Failure> {
     AnyValue::parse_yaml(text)
         .map(|value| any_to_json(&value))
-        .map_err(|error| Failure::usage(format!("the value isn't YAML or JSON: {error}")))
+        .map_err(|error| Failure::usage(placed("the value isn't YAML or JSON", &error.to_string())))
 }
 
 /// `text` as a path: split on `/` when it has one, else on `.`.
