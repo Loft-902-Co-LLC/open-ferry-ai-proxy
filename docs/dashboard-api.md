@@ -52,8 +52,8 @@ Every error is a status and a body:
 | 401 | `invalid_management_key` | The key is wrong. Counts as a failed attempt. |
 | 403 | `remote_management_disabled` | The client isn't local and remote management isn't allowed. |
 | 403 | `ip_banned` | Too many failed attempts from this address. The message says how long the ban lasts. |
-| 404 | `management_disabled` | No management key is set, so neither API serves anything. The management API answers an empty 404 then, or, while a local management password turns it on (until the first config reload), 403 `{"error": "remote management key not set"}`. Also the answer on the proxy's port while `management.separate-address` is set, as the dashboard API is served only there. |
-| 404 | `not_found` | No such route, no such log, or no such `claude-cli` entry. |
+| 404 | `management_disabled` | No management key is set, so neither API serves anything. The management API answers an empty 404 then, or, while a local management password turns it on (until the first config reload), 403 `{"error": "remote management key not set"}`. |
+| 404 | `not_found` | No such route, no such log, or no such `claude-cli` entry. On the proxy's port while `management.separate-address` is set, every path answers it, whatever the method, as the dashboard API is served only at that address. |
 | 405 | `method_not_allowed` | The route exists, the method doesn't. |
 | 413 | `body_too_large` | The body is over 64 KiB. |
 | 500 | `internal_error` | Something failed on the server; the message says what, without secrets. |
@@ -551,6 +551,6 @@ Not routes the app calls, but what it can count on:
   - `X-Frame-Options: DENY`
 - **A binary built without the app** (no `dashboard/dist` at build time) serves a short page at `/dashboard/` saying so and how to build it. The dashboard API works either way.
 - **With `management.separate-address` set** (open-ferry's own setting), the app, `/management.html`, the dashboard API and the management API are served at that address and nowhere else, with the access rules above unchanged. A change to it takes a restart.
-  - **The proxy's port** answers their paths as it does while the management API is off: `/dashboard/` and below, `/dashboard` and `/management.html` an empty 404, the dashboard API's routes 404 `management_disabled`, and every path under `/v0/management/` and `/v8/management/` an empty 404. Everything else there is as before, the sign-in callback pages (`/anthropic/callback`, `/codex/callback`) among it: the management API's callback forwarders send the browser to them on the proxy's port.
+  - **The proxy's port** doesn't have their routes: `/dashboard/` and below, `/dashboard` and `/management.html` answer an empty 404, as while `management.disable-control-panel` is set; every path under `/open-ferry/`, the dashboard API's routes among them, 404 `not_found` ("no such route"), whatever the method, as a path that isn't a route does; and every path under `/v0/management/` and `/v8/management/` an empty 404, as while no management key is set. Everything else there is as before, the sign-in callback pages (`/anthropic/callback`, `/codex/callback`) among it: the management API's callback forwarders send the browser to them on the proxy's port.
   - **The management address** answers every other path, the proxy's routes, `/` and `/healthz` among them, with a 404, `404 page not found` in plain text. The link in safe mode's message, `/management.html?safe-mode=configure`, is then at the management address, not on the proxy's port that gives the message.
   - Both use `server.tls`, the same certificate and key.

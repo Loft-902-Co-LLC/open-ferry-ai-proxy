@@ -11,7 +11,8 @@
 //!   an empty 404, as while no management key is set; the dashboard app
 //!   and `/management.html` an empty 404, as while
 //!   `management.disable-control-panel` is set; and the dashboard API's
-//!   routes `management_disabled`, as while no management key is set.
+//!   paths, whatever the method, its `not_found`, as a path that isn't
+//!   one of its routes does.
 //! - The management address serves the management API, the dashboard and
 //!   the dashboard API alone, with the same checks: the management key,
 //!   `allow-remote` for a client that isn't local, and the bans, which the

@@ -1,9 +1,10 @@
 //! Not upstream's: the dashboard on each listener while
 //! `management.separate-address` is set. On the proxy's listener
-//! ([`Listener::Closed`]) every path answers exactly as it does while the
-//! control panel is disabled and no management key is set; on the
-//! management address's own ([`Listener::Separate`]) everything is served
-//! as usual, with the same access rules.
+//! ([`Listener::Closed`]) the app's paths answer exactly as they do while
+//! the control panel is disabled and no management key is set, and every
+//! path under `/open-ferry/` as a path that isn't one of the API's routes
+//! does; on the management address's own ([`Listener::Separate`])
+//! everything is served as usual, with the same access rules.
 
 use http::{Method, StatusCode};
 use serde_json::json;
@@ -51,20 +52,21 @@ fn requests() -> Vec<(Method, &'static str)> {
 }
 
 #[tokio::test]
-async fn the_proxys_listener_answers_as_with_management_disabled() {
+async fn the_proxys_listener_has_neither_the_app_nor_the_api() {
     // A key is set, and allow-remote, so nothing but the listener refuses.
     let mut config = keyed_config();
     config.remote_management.allow_remote = true;
-    let closed = Dash::on(config, Listener::Closed);
+    let closed = Dash::on(config.clone(), Listener::Closed);
     let mut disabled = keyed_config();
     disabled.remote_management.secret_key.clear();
     disabled.remote_management.disable_control_panel = true;
     let disabled = Dash::with_config(disabled);
+    let shared = Dash::with_config(config);
 
     for (method, path) in requests() {
         for peer in [LOCAL, REMOTE] {
             for with_key in [false, true] {
-                let make = || {
+                let make = |path: &str| {
                     let mut request = request(peer, method.clone(), path, "{}");
                     if with_key {
                         let value = format!("Bearer {KEY}").parse().unwrap();
@@ -74,14 +76,31 @@ async fn the_proxys_listener_answers_as_with_management_disabled() {
                     }
                     request
                 };
-                let want = disabled.send(make()).await;
-                let got = closed.send(make()).await;
+                // The app's paths as while the control panel is disabled;
+                // the API's as a path that isn't one of its routes.
+                let want = if path.starts_with("/open-ferry") {
+                    shared.send(make("/open-ferry/api/v1/nothing")).await
+                } else {
+                    disabled.send(make(path)).await
+                };
+                let got = closed.send(make(path)).await;
                 let what = format!("{method} {path} from {peer}, key {with_key}");
                 assert_eq!(got.status, want.status, "{what}: {}", got.body);
                 assert_eq!(got.body, want.body, "{what}");
                 assert_eq!(got.headers, want.headers, "{what}");
             }
         }
+    }
+    for (method, path) in [
+        (Method::GET, "/open-ferry/api/v1/usage/summary"),
+        (Method::PATCH, "/open-ferry/api/v1/usage/ledger"),
+        (Method::POST, "/open-ferry/api/v1/client-setup"),
+    ] {
+        let message = closed
+            .send(keyed(method, path, "{}"))
+            .await
+            .error(StatusCode::NOT_FOUND, "not_found");
+        assert_eq!(message, "no such route", "{path}");
     }
 
     // Wrong keys there aren't checked, so they don't count toward a ban on

@@ -10,8 +10,9 @@
 //!
 //! With `management.separate-address` set, the server serves the dashboard
 //! on that address alone ([`Listener::Separate`]), and the proxy's address
-//! answers its paths as if the control panel were disabled and no
-//! management key set ([`Listener::Closed`]); see [`router_for`].
+//! answers the app's paths as if the control panel were disabled and the
+//! API's as paths that aren't routes ([`Listener::Closed`]); see
+//! [`router_for`].
 //!
 //! The dashboard API checks access with the management API's own code
 //! ([`check_key`](open_ferry_management::check_key)): the key in the same
@@ -104,9 +105,9 @@ pub enum Listener {
     Shared,
     /// The proxy's, while a management address is set: the app and
     /// `/management.html` answer an empty 404, as while
-    /// `management.disable-control-panel` is set, and the dashboard API
-    /// `management_disabled`, as while no management key is set. Nothing
-    /// is checked or counted toward a ban.
+    /// `management.disable-control-panel` is set, and the dashboard API's
+    /// paths `not_found`, as a path that isn't a route does, whatever the
+    /// method. Nothing is checked or counted toward a ban.
     Closed,
     /// The management address's own, which doesn't serve the proxy: the
     /// client setup says so (`separate_management`) and leaves out

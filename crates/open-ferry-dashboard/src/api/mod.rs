@@ -10,8 +10,9 @@
 //! A path under `/open-ferry/` that isn't a route answers `not_found`, and
 //! a method a route doesn't serve `method_not_allowed`, before any check.
 //! On the proxy's listener while `management.separate-address` is set
-//! ([`Listener::Closed`](crate::Listener::Closed)), every route answers
-//! `management_disabled`, as while no key is set, without a check.
+//! ([`Listener::Closed`](crate::Listener::Closed)), the API has no routes:
+//! every path under `/open-ferry/` answers `not_found`, whatever the
+//! method, without a check.
 //!
 //! Every answer is JSON with `Cache-Control: no-store`, but a log's
 //! download, which is the log's bytes, also not to be stored.
@@ -50,6 +51,14 @@ const MAX_QUERY: usize = 8 * 1024;
 /// The API's routes, and its answer to the other paths under
 /// `/open-ferry/`.
 pub(crate) fn routes(state: &DashboardState) -> Router<DashboardState> {
+    let other_paths = Router::new()
+        .route("/open-ferry", any(not_found))
+        .route("/open-ferry/", any(not_found))
+        .route("/open-ferry/{*rest}", any(not_found));
+    if state.listener == Listener::Closed {
+        // The API isn't served here: its paths are like any other.
+        return other_paths.layer(middleware::map_response(no_store));
+    }
     // The key is checked on the methods a route serves; the others are
     // answered by the fallback, without a check.
     let route = |handler: MethodRouter<DashboardState>| {
@@ -107,18 +116,13 @@ pub(crate) fn routes(state: &DashboardState) -> Router<DashboardState> {
             &format!("{PREFIX}/claude-cli/auth-status"),
             route(get(claude_cli::auth_status_route)),
         );
-    api.route("/open-ferry", any(not_found))
-        .route("/open-ferry/", any(not_found))
-        .route("/open-ferry/{*rest}", any(not_found))
+    api.merge(other_paths)
         .layer(middleware::map_response(no_store))
 }
 
 /// Checks the management key as the management API does, and answers a
 /// refusal with the contract's error.
 async fn guard(State(state): State<DashboardState>, request: Request, next: Next) -> Response {
-    if state.listener == Listener::Closed {
-        return refused(&Refusal::Unavailable).into_response();
-    }
     let peer = request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()

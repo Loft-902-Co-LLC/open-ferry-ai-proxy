@@ -123,8 +123,8 @@ enum Want {
     /// The empty 404 of the management paths, the dashboard app and
     /// `/management.html` while management is off.
     Empty404,
-    /// The dashboard API's 404 while no management key is set.
-    Disabled,
+    /// The dashboard API's 404 for a path that isn't one of its routes.
+    NotFound,
     /// Gin's 404: no route.
     Gin404,
 }
@@ -134,14 +134,11 @@ fn check(want: Want, answer: &Answer, what: &str) {
         Want::Is(status) => assert_eq!(answer.status, status, "{what}: {}", answer.body),
         Want::Served => assert_ne!(answer.status, 404, "{what}: {}", answer.body),
         Want::Empty404 => assert_eq!((answer.status, answer.body.as_str()), (404, ""), "{what}"),
-        Want::Disabled => {
-            assert_eq!(answer.status, 404, "{what}");
-            assert!(
-                answer.body.contains("management_disabled"),
-                "{what}: {}",
-                answer.body
-            );
-        }
+        Want::NotFound => assert_eq!(
+            (answer.status, answer.body.as_str()),
+            (404, r#"{"error":"not_found","message":"no such route"}"#),
+            "{what}"
+        ),
         Want::Gin404 => assert_eq!(
             (answer.status, answer.body.as_str()),
             (404, GIN_404),
@@ -156,7 +153,7 @@ type Route<'a> = (&'a str, &'a str, &'a [(&'a str, &'a str)], Want, Want);
 
 #[tokio::test]
 async fn each_listener_serves_exactly_its_routes() {
-    use Want::{Disabled, Empty404, Gin404, Is, Served};
+    use Want::{Empty404, Gin404, Is, NotFound, Served};
     let dir = tempfile::tempdir().unwrap();
     let service = service(dir.path(), KEYED);
     let served = start(&service, None).await;
@@ -208,22 +205,36 @@ async fn each_listener_serves_exactly_its_routes() {
             "GET",
             "/open-ferry/api/v1/client-setup",
             &[KEY],
-            Disabled,
+            NotFound,
             Is(200),
         ),
         (
             "GET",
             "/open-ferry/api/v1/usage/summary",
             &[KEY],
-            Disabled,
+            NotFound,
             Served,
         ),
         (
             "GET",
             "/open-ferry/api/v1/usage/summary",
             &[],
-            Disabled,
+            NotFound,
             Is(401),
+        ),
+        (
+            "POST",
+            "/open-ferry/api/v1/client-setup",
+            &[KEY],
+            NotFound,
+            Is(405),
+        ),
+        (
+            "GET",
+            "/open-ferry/api/v1/nothing",
+            &[KEY],
+            NotFound,
+            NotFound,
         ),
         // Neither.
         ("GET", "/nothing", &[], Gin404, Gin404),
@@ -246,7 +257,9 @@ async fn each_listener_serves_exactly_its_routes() {
 }
 
 // The proxy's listener answers every management and dashboard path as a
-// server with no management key and the control panel turned off does.
+// server with no management key and the control panel turned off does, but
+// the dashboard API's, which it answers as that server answers a path that
+// isn't one of the API's routes.
 #[tokio::test]
 async fn the_proxys_listener_answers_as_with_management_off() {
     let dir = tempfile::tempdir().unwrap();
@@ -290,7 +303,12 @@ async fn the_proxys_listener_answers_as_with_management_off() {
     ] {
         for method in ["GET", "POST", "PUT", "DELETE"] {
             for headers in [&[][..], &[KEY][..]] {
-                let want = fetch(off_addr, method, path, headers).await;
+                let off_path = if path.starts_with("/open-ferry/") {
+                    "/open-ferry/api/v1/nothing"
+                } else {
+                    path
+                };
+                let want = fetch(off_addr, method, off_path, headers).await;
                 let got = fetch(served.main, method, path, headers).await;
                 assert_eq!(got, want, "{method} {path} {headers:?}");
             }
