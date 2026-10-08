@@ -685,13 +685,12 @@ describe("today's calls", () => {
         .map((definition) => definition.textContent),
     ).toEqual([
       "1,520",
-      "12 (0.8% of requests) See the failed calls",
+      "12 (0.8% of requests) See failed calls from the last 24 hours",
       "4.18 USD, an estimate from the prices you set",
     ]);
-    expect(within(today).getByRole("link", { name: "See the failed calls" })).toHaveAttribute(
-      "href",
-      FAILED_CALLS_LINK,
-    );
+    expect(
+      within(today).getByRole("link", { name: "See failed calls from the last 24 hours" }),
+    ).toHaveAttribute("href", FAILED_CALLS_LINK);
     expect(within(today).getByRole("link", { name: "Open Usage" })).toHaveAttribute(
       "href",
       "/usage",
@@ -712,7 +711,9 @@ describe("today's calls", () => {
     expect(await within(today).findByText(/an estimate from the prices you set/)).toHaveTextContent(
       "4.18 USD, an estimate from the prices you set; 3 calls have no price",
     );
-    expect(within(today).queryByRole("link", { name: "See the failed calls" })).toBeNull();
+    expect(
+      within(today).queryByRole("link", { name: "See failed calls from the last 24 hours" }),
+    ).toBeNull();
   });
 
   it("leaves the cost out while no price is set", async () => {
