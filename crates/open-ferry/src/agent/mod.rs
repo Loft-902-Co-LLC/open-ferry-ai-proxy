@@ -169,6 +169,10 @@ pub(crate) struct Failure {
     /// masked.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) would: Option<Value>,
+    /// Whether `hint` is how to go ahead with a confirmation, which
+    /// [`perform`] shows as it is ([`Failure::go_ahead_hint`]).
+    #[serde(skip)]
+    pub(crate) exact_hint: bool,
     /// The exit code.
     #[serde(skip)]
     pub(crate) code: u8,
@@ -188,6 +192,7 @@ impl Failure {
             message: message.into(),
             hint: None,
             would: None,
+            exact_hint: false,
             code,
         }
     }
@@ -200,6 +205,18 @@ impl Failure {
     /// With `hint`.
     pub(crate) fn hint(mut self, hint: impl Into<String>) -> Self {
         self.hint = Some(hint.into());
+        self.exact_hint = false;
+        self
+    }
+
+    /// With `hint`, how to go ahead with a confirmation, which [`perform`]
+    /// shows as it is, unscrubbed (not upstream's): it holds only fixed
+    /// words, the confirmation's flags and SHA-256 hashes, nothing of the
+    /// setup, and the scrub of a short secret that is one of its words, as
+    /// `yes`, `true` or `sha256` can be, would only break it.
+    pub(crate) fn go_ahead_hint(mut self, hint: impl Into<String>) -> Self {
+        self.hint = Some(hint.into());
+        self.exact_hint = true;
         self
     }
 
@@ -298,7 +315,8 @@ pub(crate) enum Command {
 
 /// Runs `command` and scrubs what it gives back: of the secrets in the
 /// config before and after it, `MANAGEMENT_PASSWORD` and the key file,
-/// all but those the report was asked to show.
+/// all but those the report was asked to show. A hint that says how to go
+/// ahead with a confirmation is left as it is ([`Failure::go_ahead_hint`]).
 pub(crate) async fn perform(ctx: &Context, command: Command) -> Result<Outcome, Failure> {
     let mut secrets = mask::known_secrets(ctx);
     let result = run(ctx, command).await;
@@ -313,7 +331,9 @@ pub(crate) async fn perform(ctx: &Context, command: Command) -> Result<Outcome, 
         Err(mut failure) => {
             let scrub = mask::Scrub::new(&secrets, &[]);
             failure.message = scrub.text(failure.message);
-            failure.hint = failure.hint.map(|hint| scrub.text(hint));
+            if !failure.exact_hint {
+                failure.hint = failure.hint.map(|hint| scrub.text(hint));
+            }
             failure.would = failure.would.map(|would| scrub.json(would));
             Err(failure)
         }

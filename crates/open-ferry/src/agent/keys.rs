@@ -228,7 +228,7 @@ pub(crate) async fn add(ctx: &Context, input: AddInput) -> Result<Outcome, Failu
             "needs_confirmation",
             "keys_add returns a new key only with confirm: true, as the key then sits in the transcript; nothing was changed",
         )
-        .hint(format!("call it again with confirm: true and expect_sha256: \"{sha256}\", or with to_file naming a new file to write the key to"))
+        .go_ahead_hint(format!("call it again with confirm: true and expect_sha256: \"{sha256}\", or with to_file naming a new file to write the key to"))
         .would(json!({"config_sha256": sha256})));
     }
     if keys_of(&tree_of(&data)?).contains(&key) {
