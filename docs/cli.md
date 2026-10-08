@@ -452,6 +452,7 @@ The client keys in `access.api-keys`, which clients send as their API key.
 - **`list`** prints them masked, with their indexes. `--reveal --yes` prints them in full.
 - **`add --generate`** makes a new key as `init` does (`sk-` and 32 random bytes in URL-safe base64), adds it, and prints it once, since you need it to set up a client. `--to-file FILE` writes it to `FILE` instead, which mustn't exist and which, on Linux and macOS, only you can read. `--from-stdin` and `--from-file` add a key you have.
 - **`remove`** removes a key by its index from `list`, or the key read from standard input or a file. It needs `--yes`. Through a running server it removes the key by its place in the server's list, as the management API takes it (the key itself never goes in a URL), and reads the list again after: when another write moved the keys meanwhile, so that the keys gone aren't just this one, it says so (`key_list_changed`, exit code 1) with the keys gone, masked.
+- In the file, `add` and `remove` change the list the file holds when the change is written, not the one read first: a key another write added or removed meanwhile stays so. A key to remove that is gone by then is `not_found`, and one to add that is there by then is `exists`, nothing changed.
 
 ```
 $ open-ferry keys list
@@ -465,7 +466,7 @@ The new client key, shown this once, so keep it now:
   sk-<the new key>
 ```
 
-With `--json`, `list` prints `{"count": 1, "keys": [{"index": 0, "key": "sk-...mnop"}], "revealed": false}`, and `add` adds `index`, `masked` and `key` (or `key_file`) to a change's fields.
+With `--json`, `list` prints `{"count": 1, "keys": [{"index": 0, "key": "sk-...mnop"}], "revealed": false}`, and `add` adds `index` (its place in the file after the change), `masked` and `key` (or `key_file`) to a change's fields.
 
 The first change a running server saves can also write the settings it was using at their defaults into the file, which `changes` lists, with a note; that doesn't change what the server does.
 

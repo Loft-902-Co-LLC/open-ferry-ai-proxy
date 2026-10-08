@@ -1987,6 +1987,99 @@ async fn a_change_worked_out_again_gets_no_confirmation() {
     assert!(text.contains("fill-first"), "{text}");
 }
 
+// Not upstream's: `keys add` and `keys remove` work the key list out from
+// the file each time the change is worked out, from the bytes the key was
+// looked up in, so a key revoked or added between the read and the write
+// is kept so.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn keys_are_worked_out_from_the_file_as_it_is() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.yaml");
+    let config = |keys: &[&str]| {
+        let mut text = format!(
+            "config-version: 8\nserver:\n  host: \"127.0.0.1\"\n  port: {port}\nmanagement:\n  secret-key: \"{KEY}\"\naccess:\n  api-keys:\n"
+        );
+        for key in keys {
+            text.push_str(&format!("    - \"{key}\"\n"));
+        }
+        text
+    };
+    let revoked = "sk-test-revoked-client-key-0123";
+    let added = "sk-test-added-meanwhile-key-4567";
+    let new = "sk-test-new-client-key-89abcdef";
+    let written = Arc::new(Mutex::new(config(&[CLIENT_KEY])));
+    let task = edit_on_probe(listener, path.clone(), Arc::clone(&written));
+    let read = || std::fs::read_to_string(&path).unwrap();
+    let key_file = dir.path().join("key.txt");
+    std::fs::write(&key_file, format!("{new}\n")).unwrap();
+
+    // Adding: a key is revoked while the server is probed; the new key is
+    // added to the list without it, and the revoked one stays out.
+    std::fs::write(&path, config(&[CLIENT_KEY, revoked])).unwrap();
+    let changed = ok(
+        &cli(&path),
+        Command::KeysAdd(AddInput {
+            source: Some(Source::File(key_file.clone())),
+            ..AddInput::default()
+        }),
+    )
+    .await;
+    assert_eq!(changed.json["via"], json!("file"));
+    assert_eq!(changed.json["index"], json!(1));
+    let text = read();
+    assert!(!text.contains(revoked), "{text}");
+    assert!(text.contains(CLIENT_KEY) && text.contains(new), "{text}");
+
+    // Removing by index with --yes: a key is added while the server is
+    // probed, and the removal worked out again needs a confirmation it
+    // wasn't given, so the file is left as the other write made it.
+    std::fs::write(&path, config(&[CLIENT_KEY, revoked])).unwrap();
+    *written.lock().unwrap() = config(&[CLIENT_KEY, revoked, added]);
+    let ctx = confirmed(&path, Caller::Cli);
+    let failure = fails(
+        &ctx,
+        Command::KeysRemove(RemoveInput {
+            index: Some(1),
+            ..RemoveInput::default()
+        }),
+    )
+    .await;
+    assert_eq!(failure.error, "config_changed", "{failure:?}");
+    assert_eq!(read(), config(&[CLIENT_KEY, revoked, added]));
+
+    // Removing a key that is revoked meanwhile: it isn't there to remove.
+    std::fs::write(&path, config(&[CLIENT_KEY, revoked])).unwrap();
+    *written.lock().unwrap() = config(&[CLIENT_KEY]);
+    let failure = fails(
+        &ctx,
+        Command::KeysRemove(RemoveInput {
+            index: Some(1),
+            ..RemoveInput::default()
+        }),
+    )
+    .await;
+    assert_eq!(failure.error, "not_found", "{failure:?}");
+    assert!(!failure_shows(&failure, revoked));
+    assert_eq!(read(), config(&[CLIENT_KEY]));
+
+    // Adding a key another write adds meanwhile: it is there already.
+    std::fs::write(&path, config(&[CLIENT_KEY])).unwrap();
+    *written.lock().unwrap() = config(&[CLIENT_KEY, new]);
+    let failure = fails(
+        &cli(&path),
+        Command::KeysAdd(AddInput {
+            source: Some(Source::File(key_file)),
+            ..AddInput::default()
+        }),
+    )
+    .await;
+    task.abort();
+    assert_eq!(failure.error, "exists", "{failure:?}");
+    assert_eq!(read(), config(&[CLIENT_KEY, new]));
+}
+
 // Not upstream's: the management key is the config's plain one, else
 // MANAGEMENT_PASSWORD, else the key file; with none the change goes to the
 // file; a key the server refuses stops the change.

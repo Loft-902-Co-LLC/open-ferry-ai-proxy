@@ -46,6 +46,13 @@ pub(crate) enum Content {
     Json(Value),
     /// The whole config, as YAML.
     Yaml(Vec<u8>),
+    /// The list of client keys the config holds at the path, with this
+    /// key added at its end: worked out from the config each time the
+    /// change is, so a key added or removed meanwhile is kept so.
+    KeyAdded(String),
+    /// The list of client keys the config holds at the path, without this
+    /// key (its first listing), worked out the same way.
+    KeyRemoved(String),
 }
 
 /// A change to the config, as the v8 management API takes one.
@@ -58,19 +65,61 @@ pub(crate) struct Edit {
 }
 
 impl Edit {
-    /// The edit as the config writer takes it.
-    fn v8(&self) -> V8Edit {
+    /// The edit as the config writer takes it, made to the config whose
+    /// settings are `before`.
+    fn v8(&self, before: &Value) -> Result<V8Edit, Failure> {
         let (body, yaml) = match &self.content {
             Content::None => (Vec::new(), false),
             Content::Json(value) => (value.to_string().into_bytes(), false),
             Content::Yaml(data) => (data.clone(), true),
+            Content::KeyAdded(key) => {
+                let mut keys = listed_keys(before, &self.parts);
+                if keys.iter().any(|listed| key_text(listed) == *key) {
+                    return Err(Failure::new(
+                        "exists",
+                        "that key is in access.api-keys already; nothing was changed",
+                    ));
+                }
+                keys.push(Value::String(key.clone()));
+                (Value::Array(keys).to_string().into_bytes(), false)
+            }
+            Content::KeyRemoved(key) => {
+                let mut keys = listed_keys(before, &self.parts);
+                let index = keys
+                    .iter()
+                    .position(|listed| key_text(listed) == *key)
+                    .ok_or_else(|| {
+                        Failure::new(
+                            "not_found",
+                            "that key isn't in access.api-keys any more, so nothing was changed",
+                        )
+                    })?;
+                keys.remove(index);
+                (Value::Array(keys).to_string().into_bytes(), false)
+            }
         };
-        V8Edit {
+        Ok(V8Edit {
             method: self.method,
             path: self.parts.clone(),
             body,
             yaml,
-        }
+        })
+    }
+}
+
+/// The items of the list at `parts` in `root`: none when it isn't a list.
+fn listed_keys(root: &Value, parts: &[String]) -> Vec<Value> {
+    super::values::get(root, parts)
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// A listed client key, as text: a key that isn't a string, as JSON.
+pub(crate) fn key_text(key: &Value) -> String {
+    match key {
+        Value::String(key) => key.clone(),
+        other => other.to_string(),
     }
 }
 
@@ -221,7 +270,18 @@ const WORK_OUT_TRIES: usize = 3;
 /// its checks, a few times; but one that then needs a confirmation is
 /// refused, whatever confirmation the first was given.
 pub(crate) async fn make(ctx: &Context, request: Request) -> Result<Changed, Failure> {
-    let mut data = read_config(&ctx.path)?;
+    make_from(ctx, request, read_config(&ctx.path)?).await
+}
+
+/// [`make`], worked out first from `data`, the config file's bytes as
+/// the caller read them: a change since is found as one since `make` read
+/// them would be.
+pub(crate) async fn make_from(
+    ctx: &Context,
+    request: Request,
+    data: Vec<u8>,
+) -> Result<Changed, Failure> {
+    let mut data = data;
     for tries in 0..WORK_OUT_TRIES {
         match attempt(ctx, &request, &data, tries > 0).await? {
             Attempt::Done(changed) => return Ok(changed),
@@ -251,7 +311,8 @@ async fn attempt(
     again: bool,
 ) -> Result<Attempt, Failure> {
     let before = tree_of(data)?;
-    let planned = preview_v8(data, &request.edit.v8()).map_err(edit_failure)?;
+    let edit = request.edit.v8(&before)?;
+    let planned = preview_v8(data, &edit).map_err(edit_failure)?;
     let after = tree_of(&planned)?;
     let changes = diff(&before, &after);
     if changes.is_empty() {
