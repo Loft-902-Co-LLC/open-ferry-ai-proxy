@@ -40,6 +40,14 @@ export function providerName(provider: string): string {
   }
 }
 
+/**
+ * The account a sign-in with `provider` is for, as its button names it:
+ * a Codex sign-in is with a ChatGPT account.
+ */
+export function signInName(provider: SignInProvider): string {
+  return provider === "codex" ? "ChatGPT" : providerName(provider);
+}
+
 // ------------------------------------------------------------- reasons
 
 export interface ReasonText {
@@ -276,6 +284,9 @@ export function credentialHealth(credential: Credential): Health {
 
 // ------------------------------------------------------------ sign-ins
 
+/** What the server says when a sign-in's five minutes run out. */
+export const SIGN_IN_TIMED_OUT = "Timeout waiting for OAuth callback";
+
 /** Why a sign-in failed, as `get-auth-status` says it, in plain words. */
 export function explainSignInError(error: string): ReasonText {
   const message = error.trim();
@@ -287,7 +298,7 @@ export function explainSignInError(error: string): ReasonText {
       action: "Start the sign-in again.",
     };
   }
-  if (message === "Timeout waiting for OAuth callback") {
+  if (message === SIGN_IN_TIMED_OUT) {
     return {
       title: "The sign-in waited too long",
       meaning: "The server waits five minutes for the provider to send you back, and that time ran out.",
@@ -385,7 +396,7 @@ export function explainStartError(
   status: number,
   error: string | null,
 ): StartProblem | null {
-  const name = providerName(provider);
+  const name = signInName(provider);
   if (error === "failed to start callback server" || error === "callback server unavailable") {
     return {
       pasteOnly: true,

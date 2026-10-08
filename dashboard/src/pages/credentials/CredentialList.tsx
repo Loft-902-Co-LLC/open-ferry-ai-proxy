@@ -134,8 +134,8 @@ export function CredentialList() {
           if (files.length === 0) {
             return (
               <p className="text-muted">
-                None yet. Sign in with Claude or Codex, upload a credential file, or add a provider
-                API key below.
+                None yet. Sign in with Claude or ChatGPT, upload a credential file, or add a
+                provider API key below.
               </p>
             );
           }

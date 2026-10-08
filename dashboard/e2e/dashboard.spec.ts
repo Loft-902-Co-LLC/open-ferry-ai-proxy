@@ -339,8 +339,8 @@ test("shows a first run the ways to connect a provider", async ({ page }) => {
   await expect(connect).toBeVisible();
   await shot(page, "18-overview-first-run");
   // Each opens its dialog on Credentials, which starts nothing by itself.
-  await connect.getByRole("link", { name: "Sign in with Codex" }).click();
-  const signInDialog = page.getByRole("dialog", { name: "Sign in with Codex" });
+  await connect.getByRole("link", { name: "Sign in with ChatGPT" }).click();
+  const signInDialog = page.getByRole("dialog", { name: "Sign in with ChatGPT" });
   await expect(signInDialog.getByRole("button", { name: "Start", exact: true })).toBeFocused();
   await signInDialog.getByRole("button", { name: "Cancel" }).click();
   await expect(signInDialog).toBeHidden();

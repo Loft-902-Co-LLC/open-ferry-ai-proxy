@@ -29,7 +29,7 @@ function ConnectLinks() {
       </Link>
       <Link to="/credentials?start=codex" className={buttonClasses("secondary")}>
         <LogIn aria-hidden="true" className="size-4" />
-        Sign in with Codex
+        Sign in with ChatGPT
       </Link>
       <Link to="/credentials?start=key" className={buttonClasses("secondary")}>
         <KeyRound aria-hidden="true" className="size-4" />

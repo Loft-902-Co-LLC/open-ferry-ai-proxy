@@ -8,7 +8,7 @@ import { ClaudeCliEntries } from "./ClaudeCliEntries";
 import { CredentialList } from "./CredentialList";
 import { ProviderKeys } from "./ProviderKeys";
 import { SignInDialog } from "./SignInDialog";
-import { providerName } from "./credentialStates";
+import { signInName } from "./credentialStates";
 
 /** What `?start=` opens: a sign-in, or the add-a-key dialog. */
 export type StartParam = SignInProvider | "key";
@@ -57,7 +57,7 @@ export function CredentialsPage() {
             }}
           >
             <LogIn aria-hidden="true" className="size-4" />
-            Sign in with {providerName(provider)}
+            Sign in with {signInName(provider)}
           </Button>
         ))}
       />

@@ -14,6 +14,7 @@ import {
   pastedAddressProblem,
   providerName,
   reasonOfMessage,
+  signInName,
   timeLeft,
 } from "./credentialStates";
 
@@ -258,6 +259,14 @@ describe("the small words", () => {
     expect(providerName("vertex")).toBe("Vertex AI");
     expect(providerName("")).toBe("Unknown provider");
     expect(providerName("openrouter")).toBe("openrouter");
+  });
+
+  it("name a sign-in by the account it uses", () => {
+    expect(signInName("claude")).toBe("Claude");
+    expect(signInName("codex")).toBe("ChatGPT");
+    expect(explainStartError("codex", 500, "callback server unavailable")?.reason.meaning).toMatch(
+      /^When you finish signing in, ChatGPT sends your browser to port 1455/,
+    );
   });
 
   it("round the time left to whole minutes", () => {

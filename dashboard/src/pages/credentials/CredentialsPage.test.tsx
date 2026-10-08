@@ -1,5 +1,5 @@
-import { screen, waitFor, within } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { act, screen, waitFor, within } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   AUTH_FILES,
@@ -28,6 +28,7 @@ import {
 import { loadFirst } from "../../test/loadFirst";
 import { mockApi, route, type MockApi } from "../../test/mockApi";
 import { renderApp } from "../../test/renderApp";
+import { SIGN_IN_LIMIT_MS } from "./SignInDialog";
 
 const NAME = "claude-ada@example.com.json";
 const STATE = "test-state-0001";
@@ -256,7 +257,7 @@ describe("the credential list", () => {
     server([]);
     renderApp("/credentials");
     expect(
-      await screen.findByText(/^None yet\. Sign in with Claude or Codex, upload a credential file/),
+      await screen.findByText(/^None yet\. Sign in with Claude or ChatGPT, upload a credential file/),
     ).toBeVisible();
   });
 
@@ -433,7 +434,7 @@ describe("uploading credential files", () => {
   });
 });
 
-describe("signing in with Claude or Codex", () => {
+describe("signing in with Claude or ChatGPT", () => {
   it("opens from a link without starting anything, and starts when asked", async () => {
     const state = server();
     state.api.use(
@@ -441,16 +442,22 @@ describe("signing in with Claude or Codex", () => {
       route("GET", SIGN_IN_STATUS, { json: { status: "wait" } }),
     );
     const { user } = renderApp("/credentials?start=codex");
-    const dialog = await screen.findByRole("dialog", { name: "Sign in with Codex" });
+    const dialog = await screen.findByRole("dialog", { name: "Sign in with ChatGPT" });
+    expect(screen.getByRole("button", { name: "Sign in with ChatGPT" })).toBeVisible();
+    expect(screen.queryByText(/Sign in with Codex/)).toBeNull();
+    expect(dialog).toHaveTextContent(
+      "The server starts a sign-in with your ChatGPT account (for Codex). You sign in on ChatGPT's site",
+    );
     expect(state.api.callsTo("GET", SIGN_IN_START.codex)).toEqual([]);
     expect(within(dialog).getByRole("button", { name: "Start" })).toHaveFocus();
 
     await user.click(within(dialog).getByRole("button", { name: "Start" }));
-    const link = await within(dialog).findByRole("link", { name: /^Open Codex's sign-in page/ });
+    const link = await within(dialog).findByRole("link", { name: /^Open ChatGPT's sign-in page/ });
     expect(link).toHaveAttribute("href", SIGN_IN_URL);
     expect(link).toHaveAttribute("target", "_blank");
     expect(link).toHaveAttribute("rel", "noopener noreferrer");
     expect(dialog).toHaveTextContent("Finish within five minutes of starting");
+    expect(within(dialog).getByText("Time left: 5:00")).toBeVisible();
     await waitFor(() => {
       expect(link).toHaveFocus();
     });
@@ -495,8 +502,14 @@ describe("signing in with Claude or Codex", () => {
     await user.click(within(dialog).getByRole("button", { name: "Start" }));
     expect(await within(dialog).findByText("Waiting for you to sign in…")).toBeVisible();
 
+    // It shows, so you can check what you pasted, and hides when asked.
     const field = within(dialog).getByLabelText("Address of the page it sent you to");
+    expect(field).toHaveAttribute("type", "text");
+    expect(field).toHaveAttribute("autocomplete", "off");
+    await user.click(within(dialog).getByRole("button", { name: "Hide the address" }));
     expect(field).toHaveAttribute("type", "password");
+    await user.click(within(dialog).getByRole("button", { name: "Show the address" }));
+    expect(field).toHaveAttribute("type", "text");
     await user.click(field);
     await user.paste("http://localhost:54545/callback?code=c&state=another");
     await user.click(within(dialog).getByRole("button", { name: "Finish signing in" }));
@@ -549,6 +562,69 @@ describe("signing in with Claude or Codex", () => {
     await waitFor(() => {
       expect(state.api.callsTo("GET", SIGN_IN_START.claude)).toHaveLength(2);
     });
+  });
+
+  it("counts the five minutes down, says when one is left, and offers to start again", async () => {
+    // Only the clock and the countdown's tick: fetches and waits run as usual.
+    vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+    try {
+      const state = server([]);
+      claudeSignIn(state, [{ status: "wait" }]);
+      state.api.use(route("DELETE", SIGN_IN_SESSION, { json: { status: "ok", cancelled: true } }));
+      const { user } = renderApp("/credentials?start=claude");
+      const dialog = await screen.findByRole("dialog", { name: "Sign in with Claude" });
+      await user.click(within(dialog).getByRole("button", { name: "Start" }));
+      const said = () =>
+        within(dialog)
+          .getAllByRole("status")
+          .map((region) => region.textContent)
+          .join(" | ");
+
+      const left = await within(dialog).findByText("Time left: 5:00");
+      // Not read out as it changes, each second.
+      expect(left.closest("[role=status], [role=alert], [aria-live]")).toBeNull();
+      expect(said()).not.toContain("minute");
+      act(() => {
+        vi.advanceTimersByTime(SIGN_IN_LIMIT_MS - 61_000);
+      });
+      expect(left).toHaveTextContent("Time left: 1:01");
+      expect(said()).not.toContain("minute");
+      expect(within(dialog).queryByRole("button", { name: "Start again" })).toBeNull();
+
+      act(() => {
+        vi.advanceTimersByTime(1000);
+      });
+      expect(left).toHaveTextContent("Time left: 1:00");
+      expect(said()).toContain("One minute left to finish signing in.");
+      expect(within(dialog).getByText("Time is nearly up")).toBeVisible();
+      expect(within(dialog).getByRole("button", { name: "Start again" })).toBeVisible();
+      const once = said();
+      act(() => {
+        vi.advanceTimersByTime(30_000);
+      });
+      expect(left).toHaveTextContent("Time left: 0:30");
+      expect(said()).toBe(once);
+
+      // Time's up: it says so, and starting again is the next step.
+      act(() => {
+        vi.advanceTimersByTime(30_000);
+      });
+      expect(within(dialog).getByRole("alert")).toHaveTextContent("The sign-in waited too long");
+      expect(within(dialog).queryByText(/^Time left/)).toBeNull();
+      const again = within(dialog).getByRole("button", { name: "Start again" });
+      await waitFor(() => {
+        expect(again).toHaveFocus();
+      });
+      await user.click(again);
+      expect(await within(dialog).findByText("Time left: 5:00")).toBeVisible();
+      expect(state.api.callsTo("GET", SIGN_IN_START.claude)).toHaveLength(2);
+      // The server may still have been waiting for the first: it is given up.
+      expect(state.api.callsTo("DELETE", SIGN_IN_SESSION)[0]?.url.searchParams.get("state")).toBe(
+        STATE,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("gives a waiting sign-in up when closed", async () => {

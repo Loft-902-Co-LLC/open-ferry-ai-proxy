@@ -341,7 +341,7 @@ describe("the providers card", () => {
       "href",
       "/credentials?start=claude",
     );
-    expect(within(card).getByRole("link", { name: "Sign in with Codex" })).toHaveAttribute(
+    expect(within(card).getByRole("link", { name: "Sign in with ChatGPT" })).toHaveAttribute(
       "href",
       "/credentials?start=codex",
     );
