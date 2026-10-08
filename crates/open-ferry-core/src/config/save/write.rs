@@ -127,7 +127,7 @@ impl WriteLock {
         refuse_link(path)?;
         let target = lock_path(path);
         refuse_link(&target)?;
-        let file = open_lock(&target).map_err(|error| io_error("open", &target, error))?;
+        let file = open_lock(&target)?;
         let deadline = Instant::now() + wait;
         loop {
             match file.try_lock() {
@@ -159,16 +159,59 @@ impl WriteLock {
     }
 }
 
-/// Opens the lock file `target`, creating it empty when it isn't there.
-fn open_lock(target: &Path) -> io::Result<fs::File> {
+/// Opens the lock file `target`, creating it empty when it isn't there,
+/// in one step that doesn't follow a symbolic link there: `O_NOFOLLOW` on
+/// Unix, and on Windows `FILE_FLAG_OPEN_REPARSE_POINT`, which opens a link
+/// or another reparse point itself. So a link put there after
+/// [`refuse_link`] looked is refused, never followed to a file elsewhere,
+/// which would be made or locked instead. What it opened must be a
+/// regular file, not a link, a directory or a device.
+fn open_lock(target: &Path) -> Result<fs::File, SaveError> {
     let mut options = fs::OpenOptions::new();
     options.read(true).write(true).create(true).truncate(false);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
-    options.open(target)
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        /// Opens a reparse point, such as a symbolic link, itself.
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let link = || {
+        SaveError::new(
+            SaveErrorKind::Symlink,
+            format!(
+                "refusing to lock {}: it is a symbolic link",
+                target.display()
+            ),
+        )
+    };
+    let file = match options.open(target) {
+        Ok(file) => file,
+        #[cfg(unix)]
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => return Err(link()),
+        Err(error) => return Err(io_error("open", target, error)),
+    };
+    let metadata = file
+        .metadata()
+        .map_err(|error| io_error("open", target, error))?;
+    if metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
+        return Err(link());
+    }
+    if !metadata.is_file() {
+        return Err(SaveError::new(
+            SaveErrorKind::Io,
+            format!(
+                "refusing to lock {}: it isn't a regular file",
+                target.display()
+            ),
+        ));
+    }
+    Ok(file)
 }
 
 /// The config files a write waited for the lock of, for the tests.
@@ -539,6 +582,55 @@ mod tests {
             assert!(!other.exists());
             assert_eq!(fs::read_to_string(&path).expect("read"), "port: 1\n");
         }
+    }
+
+    /// Makes `link` a symbolic link to the file `target`; false, after
+    /// saying so, when the system won't let the tests make one (Windows
+    /// without the privilege or developer mode).
+    fn symlink_file(target: &Path, link: &Path) -> bool {
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_file(target, link);
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(target, link);
+        match made {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("skipped: can't make a symbolic link: {error}");
+                false
+            }
+        }
+    }
+
+    // Not upstream's: the lock file is opened in one step that doesn't
+    // follow a symbolic link, so one put there after the check before it
+    // is refused, not followed: the file it points to is neither made nor
+    // changed. What is opened must be a regular file: a directory is
+    // refused, and a file, made or there already, is opened.
+    #[test]
+    fn the_lock_file_is_opened_without_following_a_link() {
+        let dir = TempDir::new();
+        let path = dir.path().join("config.yaml");
+        let target = lock_path(&path);
+        let missing = dir.path().join("missing");
+        let existing = dir.path().join("existing");
+        fs::write(&existing, "kept").expect("seed");
+        for pointed in [&missing, &existing] {
+            if !symlink_file(pointed, &target) {
+                return;
+            }
+            let error = open_lock(&target).expect_err("a link");
+            assert_eq!(error.kind(), SaveErrorKind::Symlink, "{error}");
+            assert!(error.to_string().contains("symbolic link"), "{error}");
+            assert!(!missing.exists());
+            assert_eq!(fs::read_to_string(&existing).expect("read"), "kept");
+            fs::remove_file(&target).expect("unlink");
+        }
+        fs::create_dir(&target).expect("mkdir");
+        assert!(open_lock(&target).is_err());
+        fs::remove_dir(&target).expect("rmdir");
+        drop(open_lock(&target).expect("made"));
+        drop(open_lock(&target).expect("there"));
+        assert_eq!(fs::read(&target).expect("lock file"), b"");
     }
 
     // Not upstream's: each write records the SHA-256 of what it wrote, in
