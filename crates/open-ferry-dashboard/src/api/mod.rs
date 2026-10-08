@@ -1,8 +1,8 @@
 //! The dashboard API, under `/open-ferry/api/v1/`, as
 //! `docs/dashboard-api.md` describes it: usage from the ledger, the request
 //! logs, client setup, the config's `claude-cli` entries, with their
-//! state and whether each is signed in, and undoing the last config
-//! change.
+//! state and whether each is signed in, undoing the last config change, and
+//! open-ferry's own updates.
 //!
 //! Every route checks access as the management API does, with its code
 //! ([`check_key`]): a key must be set, the request must carry it, from an
@@ -22,6 +22,7 @@ mod claude_cli;
 mod client_setup;
 mod config;
 mod request_logs;
+mod update;
 mod usage;
 
 use std::net::SocketAddr;
@@ -121,6 +122,11 @@ pub(crate) fn routes(state: &DashboardState) -> Router<DashboardState> {
         .route(
             &format!("{PREFIX}/config/undo"),
             route(axum::routing::post(config::undo)),
+        )
+        .route(&format!("{PREFIX}/update"), route(get(update::status)))
+        .route(
+            &format!("{PREFIX}/update/check"),
+            route(axum::routing::post(update::check)),
         );
     api.merge(other_paths)
         .layer(middleware::map_response(no_store))

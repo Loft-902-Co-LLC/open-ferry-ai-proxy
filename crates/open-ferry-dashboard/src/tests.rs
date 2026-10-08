@@ -14,6 +14,7 @@ mod config;
 mod listener;
 mod request_logs;
 mod serve;
+mod update;
 mod usage;
 
 use std::net::SocketAddr;
@@ -153,6 +154,15 @@ impl Dash {
     pub(crate) fn with_local_password(config: Config, password: &str) -> Self {
         let mut dash = Self::with_config(config);
         dash.state.management = dash.state.management.clone().with_local_password(password);
+        dash.router = router_from(dash.state.clone());
+        dash
+    }
+
+    /// With `config`, the test app, an open ledger, and `updates` as the
+    /// server's update checks.
+    pub(crate) fn with_updates(config: Config, updates: open_ferry_update::UpdateService) -> Self {
+        let mut dash = Self::with_config(config);
+        dash.state.management = dash.state.management.clone().with_updates(updates);
         dash.router = router_from(dash.state.clone());
         dash
     }
