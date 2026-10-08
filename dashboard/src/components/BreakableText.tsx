@@ -8,6 +8,14 @@ const BREAK_AFTER = {
   name: "-/",
 } as const;
 
+/**
+ * Classes for the element holding a name in a table column. A table that
+ * scrolls sideways shrinks each column to its narrowest, which would break a
+ * name at every joint ("gpt-" / "5.1-" / "codex"). At 18 characters wide the
+ * usual model names stay whole, and only longer ones wrap.
+ */
+export const NAME_IN_TABLE = "inline-block min-w-[18ch]";
+
 export interface BreakableTextProps {
   text: string;
   /** What the text is, which says where it may wrap. */

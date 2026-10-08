@@ -19,7 +19,7 @@ import {
 } from "../../api/dashboard";
 import { useApiCall, useApiQuery } from "../../api/hooks";
 import { Alert } from "../../components/Alert";
-import { BreakableText } from "../../components/BreakableText";
+import { BreakableText, NAME_IN_TABLE } from "../../components/BreakableText";
 import { Button } from "../../components/Button";
 import { Card } from "../../components/Card";
 import { Code } from "../../components/Code";
@@ -462,7 +462,9 @@ function PriceTable({
           {prices.prices.map((entry) => (
             <tr key={entry.model}>
               <Td className="font-mono">
-                <BreakableText text={entry.model} kind="name" />
+                <span className={NAME_IN_TABLE}>
+                  <BreakableText text={entry.model} kind="name" />
+                </span>
               </Td>
               <Td className="text-right">{String(entry.input)}</Td>
               <Td className="text-right">{price(entry.cache_read)}</Td>

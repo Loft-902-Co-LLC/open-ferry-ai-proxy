@@ -16,7 +16,7 @@ import {
   type UsageSummary,
 } from "../../api/dashboard";
 import { useApiQuery } from "../../api/hooks";
-import { BreakableText } from "../../components/BreakableText";
+import { BreakableText, NAME_IN_TABLE } from "../../components/BreakableText";
 import { buttonClasses, Button } from "../../components/Button";
 import { Card } from "../../components/Card";
 import { PageHeader } from "../../components/PageHeader";
@@ -146,7 +146,11 @@ function Groups({
             return (
               <tr key={group.key}>
                 <Td>
-                  <span className={groupBy === "client_key" ? "font-mono" : undefined}>
+                  <span
+                    className={
+                      groupBy === "client_key" ? `${NAME_IN_TABLE} font-mono` : NAME_IN_TABLE
+                    }
+                  >
                     <BreakableText text={name} kind="name" />
                   </span>
                   {group.credential !== undefined && group.credential.label !== group.credential.id && (

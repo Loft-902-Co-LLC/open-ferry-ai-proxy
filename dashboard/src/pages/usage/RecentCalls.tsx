@@ -18,7 +18,7 @@ import { useApiCall, useApiQuery } from "../../api/hooks";
 import { REQUEST_LOG_SETTING } from "../../api/management";
 import { Alert } from "../../components/Alert";
 import { Badge } from "../../components/Badge";
-import { BreakableText } from "../../components/BreakableText";
+import { BreakableText, NAME_IN_TABLE } from "../../components/BreakableText";
 import { Button } from "../../components/Button";
 import { Card } from "../../components/Card";
 import { Checkbox } from "../../components/CheckboxField";
@@ -158,7 +158,7 @@ function CallRow({
     <tr>
       <Td className="whitespace-nowrap">{formatDateTime(row.time)}</Td>
       <Td>
-        <span className="font-mono">
+        <span className={`${NAME_IN_TABLE} font-mono`}>
           <BreakableText text={row.model} kind="name" />
         </span>
         {row.alias !== row.model && (

@@ -11,7 +11,7 @@ import { useApiCall } from "../../api/hooks";
 import { REQUEST_LOG_SETTING } from "../../api/management";
 import { Alert } from "../../components/Alert";
 import { Badge } from "../../components/Badge";
-import { BreakableText } from "../../components/BreakableText";
+import { BreakableText, NAME_IN_TABLE } from "../../components/BreakableText";
 import { Button } from "../../components/Button";
 import { Card } from "../../components/Card";
 import { Code } from "../../components/Code";
@@ -144,7 +144,13 @@ function LogRow({ log }: { log: LogEntry }) {
       </Td>
       <Td>{log.status ?? "–"}</Td>
       <Td className="font-mono">
-        {log.model === null ? "–" : <BreakableText text={log.model} kind="name" />}
+        {log.model === null ? (
+          "–"
+        ) : (
+          <span className={NAME_IN_TABLE}>
+            <BreakableText text={log.model} kind="name" />
+          </span>
+        )}
       </Td>
       <Td className="text-right whitespace-nowrap">{formatBytes(log.size)}</Td>
       <Td>
