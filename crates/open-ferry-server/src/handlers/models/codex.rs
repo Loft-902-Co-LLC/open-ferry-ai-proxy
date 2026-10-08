@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI sdk/api/handlers/openai/codex_client_models.go
 // (codexClientModelsResponse), sdk/api/handlers/apply_patch_capability.go
 // (SupportsApplyPatchModel) and sdk/cliproxy/auth/apply_patch_capability.go
-// (SupportsApplyPatchForProviders) (v8.0.15, MIT).
+// (SupportsApplyPatchForProviders) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The model list Codex clients fetch, `GET /v1/models?client_version=…`,

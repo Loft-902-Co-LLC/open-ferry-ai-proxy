@@ -6,7 +6,7 @@
 // authFileHeadersStringMap, syncAuthFileMetadataFields and the attribute
 // syncs it calls, authFileIntValue, authFileBoolValue),
 // auth_files_refresh.go (RefreshAuthFiles) and auth_files.go
-// (lookupAuthFile, matchesAuthFileLookup) (v8.0.15, MIT).
+// (lookupAuthFile, matchesAuthFileLookup) (v8.0.20, MIT).
 // The config API key branch of PatchAuthFileStatus is ported with
 // config_apikey_disable.go (configAPIKeyDisablePattern).
 // https://github.com/router-for-me/CLIProxyAPI

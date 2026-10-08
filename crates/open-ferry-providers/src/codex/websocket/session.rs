@@ -9,7 +9,7 @@
 // ensureUpstreamConn, readUpstreamLoop, invalidateUpstreamConn,
 // CloseExecutionSession, closeAllExecutionSessions,
 // closeCodexWebsocketSession, isTerminalEvent) and codex_websockets_connection.go
-// (readCodexWebsocketMessage) (v8.0.15, MIT).
+// (readCodexWebsocketMessage) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Sessions, their connection, and the reader that hands its messages to

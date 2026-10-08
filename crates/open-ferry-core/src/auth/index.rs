@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/types.go (EnsureIndex,
-// indexSeed and stableAuthIndex) (v8.0.15, MIT).
+// indexSeed and stableAuthIndex) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A credential's index: a short stable ID, the `auth_index` the management

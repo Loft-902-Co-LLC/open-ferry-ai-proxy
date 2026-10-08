@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/translator/openai/interactions/responses/interactions_openai_responses_response_test.go (v8.0.15, MIT).
+// Ported from CLIProxyAPI internal/translator/openai/interactions/responses/interactions_openai_responses_response_test.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Both directions, streamed and whole: event order, text and arguments

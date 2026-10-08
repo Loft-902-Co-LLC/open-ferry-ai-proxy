@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/util/gemini_schema.go (CleanJSONSchemaForGeminiJSONSchema and the
-// passes it runs) and internal/util/translator.go (Walk) (v8.0.15, MIT), with v8.0.20's
-// sanitizeObjectProperties and object type for nodes with properties (v8.0.20, MIT).
+// passes it runs, sanitizeObjectProperties among them) and internal/util/translator.go
+// (Walk) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Making a JSON Schema fit for a Gemini function declaration's

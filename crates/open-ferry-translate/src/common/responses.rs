@@ -2,7 +2,7 @@
 // request handling the Responses response translators repeat
 // (pickRequestJSON and the fields buildResponsesCompletedEvent echoes, in
 // internal/translator/claude/openai/responses and
-// internal/translator/openai/openai/responses) (v8.0.15, MIT).
+// internal/translator/openai/openai/responses) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Helpers for reading OpenAI Responses requests, shared by translators that

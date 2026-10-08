@@ -8,7 +8,7 @@
 // TestOpenAICompatSignature_EmptyReturnsEmpty,
 // TestOpenAICompatSignature_StableAndNormalized,
 // TestCountOpenAIModelsSkipsBlanks,
-// TestOpenAICompatKeyUsesModelNameWhenAliasEmpty) (v8.0.15, MIT).
+// TestOpenAICompatKeyUsesModelNameWhenAliasEmpty) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The `openai-compatibility` change lines and how providers are matched.

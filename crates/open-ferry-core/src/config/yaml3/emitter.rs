@@ -8,7 +8,7 @@
 // yaml_emitter_set_indent, yaml_emitter_set_width, yaml_emitter_set_unicode,
 // yaml_emitter_set_break) and yamlh.go (yaml_emitter_t,
 // yaml_emitter_state_t) (MIT, from libyaml), the YAML library CLIProxyAPI
-// v8.0.15 (MIT) reads and writes its config with.
+// v8.0.20 (MIT) reads and writes its config with.
 // https://github.com/router-for-me/CLIProxyAPI
 // https://github.com/go-yaml/yaml
 //

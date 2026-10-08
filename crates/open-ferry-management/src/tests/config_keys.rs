@@ -3,7 +3,7 @@
 // config_disable_cooling_test.go, config_codex_alpha_search_test.go,
 // config_lists_delete_keys_test.go, config_meta_key_test.go,
 // config_xai_key_test.go and config_claude_key_test.go
-// (TestPatchClaudeKeyPriority) (v8.0.15, MIT).
+// (TestPatchClaudeKeyPriority) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The routes of `crate::config_keys`, which change the providers' API

@@ -1,7 +1,7 @@
 // Ported from tidwall/gjson v1.18.0 gjson.go (Parse, Get, Result.Exists,
 // Result.IsObject, Result.IsArray, Result.String, Result.Int, Result.Array,
 // parseInt, safeInt) (MIT), as CLIProxyAPI's usage helpers read upstream
-// responses with it (v8.0.15, MIT).
+// responses with it (v8.0.20, MIT).
 // https://github.com/tidwall/gjson
 // https://github.com/router-for-me/CLIProxyAPI
 

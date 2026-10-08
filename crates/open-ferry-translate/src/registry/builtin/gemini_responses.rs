@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/translator/gemini/openai/responses/init.go (v8.0.15, MIT).
+// Ported from CLIProxyAPI internal/translator/gemini/openai/responses/init.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The Responses → Gemini translator's registration.

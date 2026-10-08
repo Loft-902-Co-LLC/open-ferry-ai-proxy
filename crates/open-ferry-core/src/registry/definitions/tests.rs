@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/registry/model_definitions_test.go and
-// model_updater_test.go (v8.0.15, MIT).
+// model_updater_test.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Tests for the static catalog.

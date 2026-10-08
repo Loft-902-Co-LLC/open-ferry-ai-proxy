@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/client/codex/models/models.go
 // (BuildResponseForClientWithToolCapabilities, MarshalCompact,
 // buildCodexClientModelsWithToolCapabilities and what they call) and
-// apply_patch.go (applyCodexClientApplyPatchCapability) (v8.0.15, MIT).
+// apply_patch.go (applyCodexClientApplyPatchCapability) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The model list Codex clients fetch: `GET /v1/models?client_version=…`.

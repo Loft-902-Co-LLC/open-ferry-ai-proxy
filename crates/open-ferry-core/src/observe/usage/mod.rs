@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/redisqueue/usage_toggle.go
 // (SetUsageStatisticsEnabled, UsageStatisticsEnabled) and the usage
 // queue's wiring in internal/api/server.go (managementRoutesEnabled) and
-// sdk/cliproxy/service.go (v8.0.15, MIT).
+// sdk/cliproxy/service.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Usage statistics: a record of each executor call's tokens, latency and

@@ -1,6 +1,6 @@
 // Ported from ChatCompletions, Completions, their response handlers and
 // chunkHasFinishReason in CLIProxyAPI
-// sdk/api/handlers/openai/openai_handlers.go (v8.0.15, MIT).
+// sdk/api/handlers/openai/openai_handlers.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! `POST /v1/chat/completions` and `POST /v1/completions`.

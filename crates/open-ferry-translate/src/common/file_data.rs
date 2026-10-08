@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/common/file_data.go (NormalizeOpenAIFileData)
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Reads the file data OpenAI clients send, either a `data:` URL or bare

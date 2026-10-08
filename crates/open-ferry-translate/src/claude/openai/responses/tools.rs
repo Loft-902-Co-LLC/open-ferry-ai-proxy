@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/claude/openai/responses/claude_openai-responses_tool_names.go
-// and the tool declaration code in claude_openai-responses_request.go (v8.0.15, MIT).
+// and the tool declaration code in claude_openai-responses_request.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The tools a Responses request declares, and the names Claude knows them

@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI
 // internal/runtime/executor/codex_executor_imagegen_test.go
-// (TestEnsureImageGenerationTool_*) (v8.0.15, MIT).
+// (TestEnsureImageGenerationTool_*) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The built-in `image_generation` tool a Codex call's tools gain

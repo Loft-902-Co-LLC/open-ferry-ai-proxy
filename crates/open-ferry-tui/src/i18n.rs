@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/tui/i18n.go (ToggleLocale, T, TabNames)
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The TUI's text in English and Chinese, upstream's strings word for word.

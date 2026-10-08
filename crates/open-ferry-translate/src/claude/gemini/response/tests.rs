@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/claude/gemini/claude_gemini_response_test.go
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use serde_json::{Value, json};

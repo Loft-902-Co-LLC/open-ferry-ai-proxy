@@ -3,7 +3,7 @@
 // executeStreamWithServiceAccount and executeStreamWithAPIKey),
 // helps/apply_patch.go (EndApplyPatchStream, StopApplyPatchStream) and
 // helps/claude_input_tokens.go (TranslateStreamWithClaudeInputTokens)
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A Gemini or Vertex AI SSE stream, read a line at a time and translated

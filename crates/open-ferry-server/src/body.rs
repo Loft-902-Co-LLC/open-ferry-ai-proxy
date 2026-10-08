@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI sdk/api/handlers/request_body.go (v8.0.15, MIT).
+// Ported from CLIProxyAPI sdk/api/handlers/request_body.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Request bodies.

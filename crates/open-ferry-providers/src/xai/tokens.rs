@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/runtime/executor/xai_executor_tokens.go
 // (countXAIInputTokens, xaiCollectInputTokenSegments,
 // xaiCollectContentTokenSegments, xaiCollectToolTokenSegments,
-// xaiAppendTokenString, xaiAppendTokenJSON) (v8.0.15, MIT).
+// xaiAppendTokenString, xaiAppendTokenJSON) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Estimates a prepared xAI request's input tokens with `o200k_base`.

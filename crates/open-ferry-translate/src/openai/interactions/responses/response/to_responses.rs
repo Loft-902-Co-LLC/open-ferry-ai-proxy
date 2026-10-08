@@ -11,7 +11,7 @@
 // recordResponsesTextOutput, setResponsesCompletedOutput,
 // responsesFunctionCallArguments, responsesCompletedOutputItem,
 // responsesReasoningItem, setResponsesUsageFromInteractions, FinalizeToolInput)
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Interactions responses → OpenAI Responses events and responses.

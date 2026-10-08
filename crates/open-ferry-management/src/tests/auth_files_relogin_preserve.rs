@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI
 // internal/api/handlers/management/auth_files_relogin_preserve_test.go
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Saving a login's credential over the file of a past login, as

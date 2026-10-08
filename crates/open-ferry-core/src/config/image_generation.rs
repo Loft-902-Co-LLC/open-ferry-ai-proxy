@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/config/disable_image_generation_mode.go
 // (DisableImageGenerationMode, String, UnmarshalYAML,
 // parseDisableImageGenerationNode, parseDisableImageGenerationString)
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The `disable-image-generation` setting: whether the built-in

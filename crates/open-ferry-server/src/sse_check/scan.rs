@@ -1,7 +1,7 @@
 // Ported from sseJSONValidationDataPayload in CLIProxyAPI
 // sdk/api/handlers/handlers_stream.go, responsesSSEDataLinesValid and
 // responsesSSEHasField in sdk/api/handlers/openai/openai_responses_handlers.go,
-// and Go's json.Valid (v8.0.15, MIT).
+// and Go's json.Valid (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! What an event that is still arriving says so far, read a byte at a time.

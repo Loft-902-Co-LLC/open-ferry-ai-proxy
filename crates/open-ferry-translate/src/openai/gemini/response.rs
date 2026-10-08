@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/translator/openai/gemini/openai_gemini_response.go (v8.0.15, MIT).
+// Ported from CLIProxyAPI internal/translator/openai/gemini/openai_gemini_response.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! OpenAI Chat Completions responses → Gemini `generateContent` responses.

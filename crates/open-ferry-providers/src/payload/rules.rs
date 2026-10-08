@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/runtime/executor/helps/payload_helpers.go
 // (payloadRawValue, and the value encoding setPayloadValueIfDifferentTracked
-// and sjson.SetBytesOptions give each kind of value) (v8.0.15, MIT).
+// and sjson.SetBytesOptions give each kind of value) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The config's payload rules compiled once per config load: names and

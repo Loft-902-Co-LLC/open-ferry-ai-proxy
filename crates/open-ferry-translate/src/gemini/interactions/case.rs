@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/translator/gemini/interactions/interactions_gemini_common.go
 // (convertSnakeCaseKeysToCamelCase, copySnakeCaseValueToCamelCase, joinJSONPath,
 // toCamelCase, convertCamelCaseKeysToSnakeCase, copyCamelCaseValueToSnakeCase,
-// toSnakeCase) (v8.0.15, MIT), and the parts of sjson v1.2.5's `SetRawBytes`
+// toSnakeCase) (v8.0.20, MIT), and the parts of sjson v1.2.5's `SetRawBytes`
 // they rely on.
 // https://github.com/router-for-me/CLIProxyAPI
 

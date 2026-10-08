@@ -1,7 +1,7 @@
 // Ported from tidwall/gjson v1.18.0 gjson.go and tidwall/sjson v1.2.5
 // sjson.go (MIT), as CLIProxyAPI uses them in
 // sdk/api/handlers/openai/openai_responses_handlers.go and
-// openai_responses_websocket*.go (v8.0.15, MIT): Get, Parse, Result's
+// openai_responses_websocket*.go (v8.0.20, MIT): Get, Parse, Result's
 // String, Int, Bool, Array and ForEach, unescape, SetBytes, SetRawBytes,
 // DeleteBytes, appendRawPaths, appendBuild, appendStringify and
 // deleteTailItem.

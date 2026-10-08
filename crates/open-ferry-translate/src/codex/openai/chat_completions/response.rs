@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/codex/openai/chat-completions/codex_openai_response.go
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Codex events → OpenAI Chat Completions responses.

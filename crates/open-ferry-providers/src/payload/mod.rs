@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/runtime/executor/helps/payload_helpers.go
 // (ApplyPayloadConfigWithTrackedPathsForExecutor, isCodexTargetExecutor,
 // PayloadRequestedModel, PayloadRequestPath) and helps/payload_finalizer.go
-// (NewPayloadFinalizer) (v8.0.15, MIT).
+// (NewPayloadFinalizer) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The config's payload rules applied to the bodies sent upstream:

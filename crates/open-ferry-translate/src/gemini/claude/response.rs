@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/translator/gemini/claude/gemini_claude_response.go
 // (ConvertGeminiResponseToClaude, ConvertGeminiResponseToClaudeNonStream and
-// ClaudeTokenCount) (v8.0.15, MIT).
+// ClaudeTokenCount) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Gemini responses → Claude Messages responses.

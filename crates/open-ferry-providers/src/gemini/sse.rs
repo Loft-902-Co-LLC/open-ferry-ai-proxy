@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/runtime/executor/helps/usage_helpers.go
 // (FilterSSEUsageMetadata, StripUsageMetadataFromJSON, JSONPayload)
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The lines of Gemini's SSE stream, before they are translated.

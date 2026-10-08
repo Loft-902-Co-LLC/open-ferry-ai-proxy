@@ -2,7 +2,7 @@
 // (prepareOpenAICompatImagesPayload, cloneOpenAICompatMIMEHeader,
 // rewriteOpenAICompatImagesMultipartPayload and the stream forwarding of
 // executeImagesStream) and internal/runtime/executor/codex_openai_images.go
-// (the stream forwarding of executeDirectOpenAIImageStream) (v8.0.15, MIT).
+// (the stream forwarding of executeDirectOpenAIImageStream) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! What the executors that call an Image API (`/images/generations` and

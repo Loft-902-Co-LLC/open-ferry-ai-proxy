@@ -5,7 +5,7 @@
 // stripAPIKeysAuthIndexesFromGroups, stripAPIKeysAuthIndexesFromProvidersMap,
 // stripAPIKeysAuthIndexesFromRoot, stripAPIKeysAuthIndexesFromUpdate),
 // config_basic.go (WriteConfig, as ConfigV8 calls it) and
-// internal/config/config_v8_api.go (NormalizeV8ConfigAliases) (v8.0.15, MIT).
+// internal/config/config_v8_api.go (NormalizeV8ConfigAliases) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Editing the config file in the v8 layout, as the v8 management API's

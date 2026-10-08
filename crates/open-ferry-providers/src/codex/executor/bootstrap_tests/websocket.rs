@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/runtime/executor/codex_stream_bootstrap_buffering_test.go
-// (the TestCodexWebsocketsExecutor_* tests) (v8.0.15, MIT).
+// (the TestCodexWebsocketsExecutor_* tests) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Stream bootstrap buffering over the Responses WebSocket, against a mock

@@ -9,7 +9,7 @@
 // GetOAuthModelAlias, GetOAuthRequestScopedErrors),
 // config_auth_index.go (liveAuthIndexByID and the `*WithAuthIndex`
 // lists) and config_v8.go (ConfigV8's reads, with the `auth_index` of
-// config_auth_index.go's injectV8APIKeyAuthIndexesLocked) (v8.0.15, MIT).
+// config_auth_index.go's injectV8APIKeyAuthIndexesLocked) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Reading the config: as JSON, as the file it was loaded from, one

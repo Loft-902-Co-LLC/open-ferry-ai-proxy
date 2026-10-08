@@ -3,7 +3,7 @@
 // executeStreamMixedOnce and their helpers), conductor_stream.go,
 // sanitizeDownstreamWebsocketFallbackRequest in conductor_home_execution.go,
 // and filterExecutionModels, nextModelPoolOffset and the force-mapped
-// response rewrites in conductor_models.go (v8.0.15, MIT).
+// response rewrites in conductor_models.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Running a call: pick a credential, call its executor, record the outcome,

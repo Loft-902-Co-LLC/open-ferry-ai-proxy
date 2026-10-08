@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/translator/claude/openai/responses/claude_openai-responses_response_test.go
 // and the response half of TestBuildClaudeToolNames_CustomToolCollision in
-// claude_openai-responses_tool_names_test.go (v8.0.15, MIT).
+// claude_openai-responses_tool_names_test.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use serde_json::{Value, json};

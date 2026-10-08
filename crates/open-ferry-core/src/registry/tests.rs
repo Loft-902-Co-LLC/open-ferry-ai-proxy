@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/registry/model_registry_safety_test.go,
 // model_registry_cache_test.go, model_registry_grok_test.go,
 // model_registry_credential_quota_regression_test.go and
-// model_registry_quota_refresh_regression_test.go (v8.0.15, MIT).
+// model_registry_quota_refresh_regression_test.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Tests for the model registry.

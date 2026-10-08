@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_scheduler_cooldown_rebuild_test.go (v8.0.15, MIT).
+// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_scheduler_cooldown_rebuild_test.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Picks while credentials cool down: a cooling model answers with a model

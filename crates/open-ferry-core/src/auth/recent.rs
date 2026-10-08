@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/types.go (recentRequestRing,
-// recordRecentRequest and RecentRequestsSnapshot) (v8.0.15, MIT).
+// recordRecentRequest and RecentRequestsSnapshot) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A credential's recent calls: how many succeeded and how many failed in

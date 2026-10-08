@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/logging/global_logger.go (LogFormatter,
 // logFieldOrder, quotedLogFields, pluginPathFieldOrder, formatLogFieldValue)
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The log lines, as upstream's `LogFormatter` writes them:

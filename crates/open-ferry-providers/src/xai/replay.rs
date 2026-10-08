@@ -3,7 +3,7 @@
 // xaiReasoningReplayIsolateSessionKey, filterXAIReasoningReplayItemsForInput,
 // cacheXAIReasoningReplayFromCompleted,
 // clearXAIReasoningReplayAfterCompaction and their helpers), and from
-// insertCodexReasoningReplayItems in codex_executor_reasoning.go (v8.0.15,
+// insertCodexReasoningReplayItems in codex_executor_reasoning.go (v8.0.20,
 // MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 

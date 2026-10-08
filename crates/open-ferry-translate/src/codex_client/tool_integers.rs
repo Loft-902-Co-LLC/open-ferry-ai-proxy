@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/client/codex/tool-schema/tool_schema.go
 // (IsCodexUserAgent, NormalizeCodexToolIntegerTypes, matchCodexTargetTool,
 // normalizeCodexToolFieldTypes, normalizeToolIntegerTypesInArray,
-// normalizeToolIntegerTypesInElement) (v8.0.15, MIT).
+// normalizeToolIntegerTypesInElement) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Integer parameter types for Codex's own tools, when a Codex client's

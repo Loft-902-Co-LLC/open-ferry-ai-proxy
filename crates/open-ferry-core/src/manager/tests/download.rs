@@ -1,5 +1,5 @@
 // Modelled on CLIProxyAPI sdk/api/handlers/openai/openai_videos_handlers.go
-// (videoContentHTTPClient, videoContentDownloadAuth) (v8.0.15, MIT).
+// (videoContentHTTPClient, videoContentDownloadAuth) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The manager's downloads: the provider's executor fetches the file with

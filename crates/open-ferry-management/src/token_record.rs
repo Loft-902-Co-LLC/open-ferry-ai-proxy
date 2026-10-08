@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/api/handlers/management/
 // auth_files_fields.go (mergeExistingAuthFileMetadata, saveTokenRecord)
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Saving the credential a login or an import made, and serving it at

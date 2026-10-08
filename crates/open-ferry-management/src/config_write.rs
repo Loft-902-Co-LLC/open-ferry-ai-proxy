@@ -4,7 +4,7 @@
 // SetConfigReloadHook), config_basic.go (WriteConfig, as PutConfigYAML
 // uses it) and config_v8.go (ConfigV8's writes, as the writer makes them),
 // and sdk/cliproxy/builder.go (the reload hook the service sets, which
-// reloads the file) (v8.0.15, MIT).
+// reloads the file) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Writing the config: the [`ConfigWriter`] that saves it, the

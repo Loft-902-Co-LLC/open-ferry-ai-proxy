@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/runtime/executor/claude_executor_stream.go
 // (the stream loops and validateClaudeStreamingResponse),
 // claude_executor_diagnostics.go (observeClaudeStreamLine) and
-// helps/apply_patch.go (the stream failure helpers) (v8.0.15, MIT).
+// helps/apply_patch.go (the stream failure helpers) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Claude's SSE stream, read a line at a time.

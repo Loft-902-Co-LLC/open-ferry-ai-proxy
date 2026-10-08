@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/watcher/synthesizer/config.go
 // (synthesizeVertexCompat), ComputeVertexCompatModelsHash in
 // internal/modelconfig/model_hash.go and the vertex-api-key part of
-// ValidateCredentialWeights in internal/config/weight.go (v8.0.15, MIT).
+// ValidateCredentialWeights in internal/config/weight.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Records for the config's `vertex-api-key` list: API keys for Vertex AI's

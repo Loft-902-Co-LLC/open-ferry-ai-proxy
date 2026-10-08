@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/claude/interactions/interactions_claude_test.go
-// (the request tests) (v8.0.15, MIT), and interactions_claude_user_turn_test.go and
+// (the request tests) (v8.0.20, MIT), and interactions_claude_user_turn_test.go and
 // interactions_claude_instruction_test.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 //

@@ -3,7 +3,7 @@
 // cancelOAuthSession, submitCallback, pollOAuthStatus,
 // shouldAcceptOAuthStart, shouldAcceptOAuthPoll, shouldFailOAuthStatusPoll,
 // SetSize, View, renderContent, renderRemoteMode, renderDeviceMode,
-// wrapText) (v8.0.15, MIT).
+// wrapText) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The OAuth tab: signs the server in to a provider. It asks the server for

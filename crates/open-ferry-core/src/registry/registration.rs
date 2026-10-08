@@ -7,7 +7,7 @@
 // internal/config/config_normalization.go, internal/modelconfig/model_info.go,
 // ParseSuffix in internal/thinking/suffix.go, the per-account settings read
 // in internal/watcher/synthesizer/file.go and helpers.go, and the plan claim
-// in internal/auth/codex/jwt_parser.go (v8.0.15, MIT).
+// in internal/auth/codex/jwt_parser.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Which models a credential serves, and registering them.

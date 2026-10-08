@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI cmd/server/main.go (main's -tui branch,
-// resolveManagementBaseURL) (v8.0.15, MIT).
+// resolveManagementBaseURL) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The terminal management UI (`-tui`, see [`open_ferry_tui`]).

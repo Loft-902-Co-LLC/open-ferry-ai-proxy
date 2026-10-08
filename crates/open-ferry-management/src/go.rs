@@ -2,7 +2,7 @@
 // unicode/utf8 (DecodeRune), net/textproto (CanonicalMIMEHeaderKey,
 // validHeaderFieldByte) and time (Duration.String, Time.IsZero) (go1.27,
 // BSD-3-Clause), as CLIProxyAPI internal/api/handlers/management uses them
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 // https://github.com/golang/go
 

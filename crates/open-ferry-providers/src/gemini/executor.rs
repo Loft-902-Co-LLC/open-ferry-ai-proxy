@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/runtime/executor/gemini_executor.go
 // (GeminiExecutor: Execute, ExecuteStream, CountTokens, Refresh,
 // geminiAPIKey, resolveGeminiBaseURL, capGeminiMaxOutputTokens)
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! [`GeminiExecutor`]: calls the Gemini API with the credential's API key.

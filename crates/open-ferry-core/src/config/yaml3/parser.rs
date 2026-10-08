@@ -7,7 +7,7 @@
 // yaml_parser_append_tag_directive), apic.go (yaml_parser_initialize,
 // yaml_parser_set_input_string) and yamlh.go (yaml_parser_t,
 // yaml_parser_state_t) (MIT, from libyaml), the YAML library CLIProxyAPI
-// v8.0.15 (MIT) reads and writes its config with.
+// v8.0.20 (MIT) reads and writes its config with.
 // https://github.com/router-for-me/CLIProxyAPI
 // https://github.com/go-yaml/yaml
 //

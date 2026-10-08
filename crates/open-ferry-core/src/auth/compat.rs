@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/util/provider.go
 // (OpenAICompatibleProviderKey) and sdk/cliproxy/service_auth.go
-// (openAICompatInfoFromAuth) (v8.0.15, MIT).
+// (openAICompatInfoFromAuth) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! How OpenAI-compatible providers are named: the key their executor,

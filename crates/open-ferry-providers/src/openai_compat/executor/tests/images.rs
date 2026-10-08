@@ -5,7 +5,7 @@
 // and openai_compat_executor_compact_test.go
 // (TestOpenAICompatExecutorImagesGenerationsPassthrough,
 // TestOpenAICompatExecutorImagesGenerationsStreamsUpstream,
-// TestOpenAICompatExecutorImagesEditsMultipartRewritesModel) (v8.0.15, MIT).
+// TestOpenAICompatExecutorImagesEditsMultipartRewritesModel) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The executor's calls from the OpenAI Images endpoints, with checks of

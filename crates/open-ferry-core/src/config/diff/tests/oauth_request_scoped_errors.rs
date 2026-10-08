@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI
 // internal/watcher/diff/oauth_request_scoped_errors_test.go
 // (TestSummarizeOAuthRequestScopedErrors_NormalizesKeys,
-// TestDiffOAuthRequestScopedErrorsChanges) (v8.0.15, MIT).
+// TestDiffOAuthRequestScopedErrorsChanges) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The `oauth-request-scoped-errors` summaries and change lines.

@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_subsecond_cooldown_test.go (v8.0.15, MIT).
+// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_subsecond_cooldown_test.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The ten-second floor on a provider's 429 retry hint, for model and

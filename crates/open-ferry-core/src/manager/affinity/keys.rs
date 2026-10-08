@@ -2,7 +2,7 @@
 // (extractConversationAlias, extractExplicitSessionIDs, extractSessionIDs,
 // extractMessageHashIDs, computeSessionHash, truncateString,
 // extractMessageContent, extractResponsesAPIContent and isSubagentSession)
-// and isHierarchyParent in home_session_alias.go (v8.0.15, MIT).
+// and isHierarchyParent in home_session_alias.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The session a call binds under: the one the client named, else the one

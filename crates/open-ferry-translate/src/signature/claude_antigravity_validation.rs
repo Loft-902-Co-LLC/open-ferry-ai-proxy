@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/signature/claude_antigravity_validation.go
-// (v8.0.15, MIT). https://github.com/router-for-me/CLIProxyAPI
+// (v8.0.20, MIT). https://github.com/router-for-me/CLIProxyAPI
 
 //! Antigravity's Claude thinking signatures in Q form.
 //!

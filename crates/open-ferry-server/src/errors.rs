@@ -2,7 +2,7 @@
 // sdk/api/handlers/handlers.go (BuildErrorResponseBodyWithError),
 // sdk/api/handlers/handlers_errors.go, executionErrorMessage in
 // sdk/api/handlers/handlers_execution.go and the error helpers in
-// sdk/api/handlers/claude/code_handlers.go (v8.0.15, MIT).
+// sdk/api/handlers/claude/code_handlers.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Errors as clients see them: [`ErrorMessage`], and the OpenAI and Claude

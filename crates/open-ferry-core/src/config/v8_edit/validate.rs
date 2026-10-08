@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/config/config_v8.go (ValidateV8Config,
 // v8AllowedRoots) and internal/registry/catalog_config.go
-// (CatalogSources.Validate) (v8.0.15, MIT), with the key checks of yaml.v3
+// (CatalogSources.Validate) (v8.0.20, MIT), with the key checks of yaml.v3
 // v3.0.1's strict decode (decode.go's mapping and mappingStruct with
 // KnownFields).
 // https://github.com/router-for-me/CLIProxyAPI

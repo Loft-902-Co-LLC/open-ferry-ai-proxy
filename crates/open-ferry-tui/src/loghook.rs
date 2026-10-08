@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/tui/loghook.go (NewLogHook, Fire, Chan)
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The log lines the standalone mode's embedded server writes, held for the

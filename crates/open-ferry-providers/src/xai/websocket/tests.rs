@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/runtime/executor/xai_websockets_executor_test.go,
 // the WebSocket mode of xai_executor_test.go's
 // TestXAIApplyPatchDispatcherEvidenceLifecycle and payload_barrier_test.go's
-// TestPayloadBarrierXAIWebsocketRetry (v8.0.15, MIT).
+// TestPayloadBarrierXAIWebsocketRetry (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The Responses WebSocket upstream against a mock xAI on 127.0.0.1 (Codex's

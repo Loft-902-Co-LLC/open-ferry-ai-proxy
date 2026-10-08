@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/codex/claude/codex_claude_request_test.go,
-// codex_claude_compat_test.go and noop_optimization_test.go (v8.0.15, MIT), and
+// codex_claude_compat_test.go and noop_optimization_test.go (v8.0.20, MIT), and
 // codex_claude_user_turn_test.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 

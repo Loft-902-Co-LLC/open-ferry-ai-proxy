@@ -6,11 +6,31 @@ open-ferry-ai-proxy is a port of [router-for-me/CLIProxyAPI](https://github.com/
 
 | | |
 |---|---|
-| Version | `v8.0.15` |
-| Commit | `a4acc9f752bd46571f737a10c04bf413656ab06b` (2026-10-05) |
+| Version | `v8.0.20` |
+| Commit | `0f96f568e4dbf6f84ad7399a74b78344c5eac7e6` (2026-10-08) |
 | Location | `reference/cliproxyapi` (git submodule) |
 
 When we move the pin, we update this table, bring every ported file's header to the new version, and note behaviour changes in the commit or PR. Every upstream commit between the old and the new pin is ported, unless it is listed under the move below with the reason.
+
+### What moving from v8.0.15 to v8.0.20 left out
+
+| Upstream commits | What isn't ported | Why |
+|---|---|---|
+| 13da3cee, 3e83083b, 30700d44, 7dc25a7e, abe54e85, 061001f8, f3703e82, 7cd8f7ba, 298649f6 | Nothing | Merges, with no changes of their own |
+| 980c3bc3, 6d06098d, dfd7c638, d2e3a77e | All | Upstream's README |
+| 17dc1b81, 40f4df07 | All | Antigravity's context hash logging, replay phases and batch retries. Antigravity isn't ported |
+| 01e28567, da5f109f | All | The Devin catalog in Home builds, and a test that restores it. Neither Devin nor Home is ported |
+| 611ebba4 | Antigravity's replay log | Antigravity isn't ported. The model reporting changes are ported |
+| eb6a768d | The cloaking parts: moving system blocks, and the probe and subagent cache TTLs | This project doesn't cloak Claude requests. The explicit prompt cache options are ported |
+| 14dc4e05, eca1d113, 39632e52 | All | Where the caller's system prompt goes in a cloaked Claude OAuth request. This project doesn't cloak |
+| a2976eb8 | All | The store of Claude's OAuth tool aliases, which this project doesn't make |
+| e7b22260 | The executor's tool-name remapping of response bodies | Part of Claude's OAuth tool aliasing. The missing-thread error checks are ported |
+| 90654da5, 34e73c75 | All | They fetch Grok CLI's latest version from npm to send as the client's version, which is client impersonation |
+| c7b4d573 | All | It records a call's reasoning effort after the payload rules; usage records here carry no reasoning effort (see [Usage statistics](#usage-statistics)) |
+| 7c41cd05 | The token's use by the management asset updater and the plugin store (`TokenForURL`) | Neither is ported: the dashboard is built in, and there is no plugin host. The setting and the latest-version check are ported |
+| f51624aa, 3b69068e, 0f96f568 | Their Antigravity, Devin, AI Studio, Kimi and plugin host parts | Not ported. The translator and executor parts for the ported providers are |
+| 6a853dce | Speech with xAI's OAuth credentials, and a Home-only comment in `apply_patch.go` | xAI is served with API keys only, and Home isn't ported |
+| 306c9bd8 | The speech-only check in the model router's and plugins' route decisions, and its tests through `ExecuteModel` and `ExecuteProtocol*` | There is no model router or plugin host. The same checks are tested through `routing`, `exec` and `entry_protocol` |
 
 ### What moving from v8.0.10 to v8.0.15 left out
 
@@ -36,7 +56,7 @@ When we move the pin, we update this table, bring every ported file's header to 
 - **Every ported file gets a header** naming its source, for example:
 
   ```rust
-  // Ported from CLIProxyAPI internal/translator/codex/claude (v8.0.15, MIT).
+  // Ported from CLIProxyAPI internal/translator/codex/claude (v8.0.20, MIT).
   // https://github.com/router-for-me/CLIProxyAPI
   ```
 
@@ -830,7 +850,7 @@ The OpenAI translators share helpers with upstream's other translators, ported a
 
 The Claude translators use more of upstream's shared code:
 
-- `models` from `internal/registry`: the static model catalog, with each model's thinking settings and output token limit. `models/models.json` is upstream's `internal/registry/models/models.json` as of v8.0.15, copied unchanged.
+- `models` from `internal/registry`: the static model catalog, with each model's thinking settings and output token limit. `models/models.json` is upstream's `internal/registry/models/models.json` as of v8.0.20, copied unchanged.
 - `thinking` from `internal/thinking`: thinking budgets and levels, model-name suffixes, and whether a client asked to see reasoning summaries.
 - `common::cache_control` and `common::claude` from `internal/translator/common` and `internal/util`: `cache_control` markers, grouping messages into turns, structured output instructions, and tool name and ID sanitizing. Lining up a user message's tool results with the preceding `tool_use` IDs queues the results by ID instead of scanning them again for each ID as upstream does, so it takes linear time rather than quadratic; the output is the same.
 - `schema` from `internal/util/claude_schema.go`: making a tool's JSON Schema fit for Claude.

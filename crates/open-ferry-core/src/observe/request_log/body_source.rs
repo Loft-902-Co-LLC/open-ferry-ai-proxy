@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/api/middleware/request_logging.go
 // (deferredRequestBodyCapture, its Read and statusMarker) and
 // internal/logging/request_logger_body_source.go (FileBodySource's role)
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! What the request log keeps of the bodies that pass by: the part of the

@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/watcher/diff/openai_compat.go
 // (DiffOpenAICompatibility, uniqueOpenAICompatKey,
 // describeOpenAICompatibilityUpdate, countAPIKeys, countOpenAIModels,
-// openAICompatKey, openAICompatSignature) (v8.0.15, MIT).
+// openAICompatKey, openAICompatSignature) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The change lines of `openai-compatibility`: providers added, removed or

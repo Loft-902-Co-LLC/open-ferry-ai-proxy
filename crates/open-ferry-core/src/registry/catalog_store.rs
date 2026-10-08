@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/registry/model_updater.go (modelStore,
 // getModels), internal/registry/catalog_sources.go (publishCatalogBytes)
 // and internal/registry/codex_client_models.go (codexClientCatalogStore,
-// loadCodexClientModelsFromBytes) (v8.0.15, MIT).
+// loadCodexClientModelsFromBytes) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The model catalogs in use, and publishing new ones.

@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI sdk/api/handlers/openai/openai_responses_websocket_session.go
 // (responsesWebsocketAvailableAuthsForModel, responsesWebsocketUsesUpstreamWebsocketPassthrough,
 // websocketUpstreamSupportsCompactionReplayForModel, responsesWebsocketPinnedAuthMatchesModel,
-// responsesWebsocketAuthAvailableForModel) (v8.0.15, MIT).
+// responsesWebsocketAuthAvailableForModel) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The manager's answer to [`Dispatcher::websocket_support`]: which of its

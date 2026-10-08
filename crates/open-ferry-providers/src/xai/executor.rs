@@ -2,7 +2,7 @@
 // (XAIExecutor, Identifier), xai_executor_execute.go (Execute,
 // executeCompact, executeCompactRequest, executeCompactionTriggerStream),
 // xai_executor_stream.go (ExecuteStream) and xai_executor_tokens.go
-// (CountTokens) (v8.0.15, MIT). The image calls are in the `images` module,
+// (CountTokens) (v8.0.20, MIT). The image calls are in the `images` module,
 // the video calls in the `videos` module and the speech calls in the
 // `speech` module.
 // https://github.com/router-for-me/CLIProxyAPI

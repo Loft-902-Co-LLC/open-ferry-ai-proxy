@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/logging/log_dir_cleaner.go
 // (configureLogDirCleanerLocked, stopLogDirCleanerLocked, runLogDirCleaner,
-// enforceLogDirSizeLimit, isLogFileName) (v8.0.15, MIT).
+// enforceLogDirSizeLimit, isLogFileName) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The log directory's cleaner: with `logs-max-total-size-mb` positive, a

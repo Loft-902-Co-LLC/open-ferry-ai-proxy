@@ -4,9 +4,9 @@
 // interactionsContentPartToGeminiPart, geminiTextPartJSON, geminiInlineDataPartJSON,
 // geminiFileDataPartJSON, geminiInlineDataPartFromDataURL,
 // interactionsInputAudioMimeType, geminiInlineDataToInteractionsContent and
-// geminiThoughtStepJSON) (v8.0.15, MIT), with v8.0.20's user turn refusals,
-// geminiPartFileData, geminiFileDataToInteractionsContent and
-// geminiInteractionsMediaType (v8.0.20, MIT).
+// geminiThoughtStepJSON; with the user turn refusals, geminiPartFileData,
+// geminiFileDataToInteractionsContent and geminiInteractionsMediaType)
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Gemini Interactions request → Gemini request, and Gemini request →

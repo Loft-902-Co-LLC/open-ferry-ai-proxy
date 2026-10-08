@@ -2,7 +2,7 @@
 // internal/thinking/strip.go (the OpenAI case of StripThinkingConfig),
 // internal/thinking/summary.go (applyOpenAIChatSummaryConfig,
 // isOpenRouterProvider) and internal/thinking/apply.go
-// (ApplyThinkingWithModelInfo) (v8.0.15, MIT).
+// (ApplyThinkingWithModelInfo) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Thinking settings on a request going to an OpenAI-compatible provider

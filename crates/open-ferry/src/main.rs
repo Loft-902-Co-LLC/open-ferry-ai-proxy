@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI cmd/server/main.go (v8.0.15, MIT).
+// Ported from CLIProxyAPI cmd/server/main.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The `open-ferry` command: serves the proxy, runs a login, or runs the

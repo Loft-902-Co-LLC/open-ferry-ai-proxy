@@ -6,7 +6,7 @@
 // GetInteractionsKeys, GetClaudeKeys, GetCodexKeys, GetXAIKeys,
 // GetVertexKeys, GetOpenAICompat, getWrappedKeyList, extractList,
 // GetAuthStatus, CancelAuthSession, PutBoolField, PutIntField,
-// PutStringField) (v8.0.15, MIT), with how Go's net/url escapes a query
+// PutStringField) (v8.0.20, MIT), with how Go's net/url escapes a query
 // (QueryEscape, Values.Encode; go1.26.4, BSD-3-Clause, see
 // licenses/Go-LICENSE).
 // https://github.com/router-for-me/CLIProxyAPI

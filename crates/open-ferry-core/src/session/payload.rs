@@ -1,7 +1,7 @@
 // Ported from tidwall/gjson v1.18.0 gjson.go (Parse, Get) (MIT), and Go's
 // encoding/json (Unmarshal) (BSD-3-Clause, see licenses/Go-LICENSE), as
 // CLIProxyAPI's sdk/cliproxy/session reads a request body with them
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/tidwall/gjson
 // https://github.com/router-for-me/CLIProxyAPI
 

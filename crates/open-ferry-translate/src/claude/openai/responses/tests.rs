@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/translator/claude/openai/responses/ (v8.0.15, MIT):
+// Ported from CLIProxyAPI internal/translator/claude/openai/responses/ (v8.0.20, MIT):
 // - claude_openai-responses_server_tool_test.go → `server_tool`
 // - claude_openai-responses_reasoning_order_test.go → `reasoning_order`
 // - claude_openai-responses_citations_test.go → `citations`

@@ -6,7 +6,7 @@ Where open-ferry differs from CLIProxyAPI, which it ports, is in [UPSTREAM.md](U
 
 ## [Unreleased]
 
-Nothing has been released yet. This is what is in place today, ported from CLIProxyAPI v8.0.15.
+Nothing has been released yet. This is what is in place today, ported from CLIProxyAPI v8.0.20.
 
 ### Added
 
@@ -19,6 +19,7 @@ Nothing has been released yet. This is what is in place today, ported from CLIPr
   - the model list Codex clients fetch.
 - **The images endpoints**, `/v1/images/generations` and `/v1/images/edits`: the Codex image generation tool's models (`gpt-image-1.5`, `gpt-image-2` and the `gpt-image-2.5` ones) through Codex credentials, on `gpt-5.4-mini` or the model `gpt-image-2-base-model` names; xAI's Grok Imagine image models through `xai-api-key` credentials, which now list them; and the image models of `openai-compatibility` providers. An edit can be a `multipart/form-data` form, read in memory up to the body limit and never written to disk. `disable-image-generation: true` turns both endpoints away.
 - **The video endpoints**, served by xAI's Grok Imagine Video for `xai-api-key` credentials: xAI's own `/v1/videos` routes, and OpenAI's `/openai/v1/videos` with a video's status and its content. Later calls about a video go to the key that made it, remembered in memory for `video-result-auth-cache-ttl` (three hours by default). The video is streamed to the client, never written to disk.
+- **The speech endpoints**, OpenAI's `/v1/audio/speech` and xAI's `/v1/tts`, served by xAI's Grok TTS models (`grok-tts`, `grok-voice-tts-1.0`) for `xai-api-key` credentials. Either takes OpenAI's request or xAI's; OpenAI's voices and speech models stand for Grok's, and the audio comes back as MP3, WAV or PCM. The other routes refuse the speech-only models with a 400.
 - **The providers**: Codex, Claude, Gemini, Gemini Interactions, Vertex AI, Meta (API keys and access tokens), xAI (API keys) and any OpenAI-compatible upstream. Requests are translated between the client's format and the provider's.
 - **`claude-cli`**: Claude models through your own installed Claude Code, which open-ferry runs for each request. Claude Code signs itself in to your subscription and makes the requests to Anthropic; open-ferry stores no token for it. Each entry of the config's `claude-cli` list is one Claude Code account. The dashboard's Credentials page shows each entry with its state, cooldown, last error and quota windows, and checks whether it is signed in when asked to (the dashboard API's `claude-cli/entries` and `claude-cli/auth-status` routes). The Claude sign-in (`-claude-login`), by contrast, goes against Anthropic's terms, gets only the Haiku models in our testing and puts the account at risk, so the docs now warn about it. See [docs/claude-subscription.md](docs/claude-subscription.md).
 - **CLIProxyAPI's credential manager**: it picks an account for each request, retries on another, handles cooldowns and quota, applies model aliases, and refreshes tokens in the background.
@@ -42,5 +43,16 @@ Nothing has been released yet. This is what is in place today, ported from CLIPr
 - **Parity results in the README**, written by `tools/parity` with its new `--summary` option: CLIProxyAPI's version, and each suite's cases and outcomes.
 - **A benchmark**, `tools/bench`, which runs open-ferry and CLIProxyAPI in front of the same fake upstream on loopback and measures start time, throughput, latency, CPU time and memory ([docs/benchmarks.md](docs/benchmarks.md)). It sends each provider requests in its own format and translated ones (Chat Completions to Claude, Claude Messages and Responses to an OpenAI-compatible provider), checks that the fake upstream gets each in its own format, and says how much time each proxy adds to the upstream's. `--machine-note` describes the machine in the report, which also gives the kernel and the Rust and Go toolchains, and `tools/bench/cloud/run-ubuntu.sh` sets up a fresh Ubuntu 24.04 machine and runs it there.
 - **A setup page for coding agents**, [docs/agents.md](docs/agents.md), and an [`llms.txt`](llms.txt) that points to it.
+
+### Changed
+
+- **Ported from CLIProxyAPI v8.0.20**, up from v8.0.15. What the move left out, and why, is in [UPSTREAM.md](UPSTREAM.md#what-moving-from-v8015-to-v8020-left-out). Besides the speech endpoints, it brings:
+  - **`server.github-token`** (or `github-token` in the legacy layout), a token for requests to GitHub's API: the management API's latest-version check sends it ahead of `GITHUB_TOKEN`. The management API never shows it.
+  - **Compact error bodies**: an upstream error body that is already JSON is compacted to one line, so a stream's `data:` line carries it whole.
+  - **No more silently dropped attachments**: a file, audio or other part a provider can't take gets a 400 before anything is sent, and a turn left with nothing in it isn't sent.
+  - **Credential manager fixes**: a credential whose access token the provider refused (401) stays out of rotation while it refreshes, without ending a model's quota cooldown; a call's outcome from before a credential's tokens changed no longer cools it or counts against it; and a refresh that started before the tokens were replaced doesn't put the old ones back. The management API's credential JSON shows `credential_version`.
+  - **Claude**: `prompt_cache_options.mode: "explicit"` keeps only the client's own cache breakpoints, and `prompt_cache_options` is never sent to Claude.
+  - **Translation fixes**: Claude document blocks for Gemini, Gemini's camelCase `systemInstruction`, refusal finish reasons and signed visible text for Claude clients, object types in Gemini schemas, a Codex web search's sources for Claude clients, encrypted reasoning of an unknown format kept in Codex compat mode, and a Responses stream that ends cleanly after its finish reason completed without `[DONE]`.
+  - **Usage**: an answer whose `apply_patch` call fails keeps the usage it read, and a Vertex AI stream that ends after its last chunk counts as a success.
 
 [Unreleased]: https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/commits/main

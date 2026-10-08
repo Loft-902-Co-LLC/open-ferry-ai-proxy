@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/common/bytes.go (GeminiTokenCountJSON)
-// (v8.0.15, MIT), and Go's `time.Unix(sec, 0).Format(time.RFC3339Nano)` as the
+// (v8.0.20, MIT), and Go's `time.Unix(sec, 0).Format(time.RFC3339Nano)` as the
 // translators to Gemini use it, from Go 1.26's `time/time.go` and
 // `time/format_rfc3339.go` (BSD-3-Clause, see licenses/Go-LICENSE).
 // https://github.com/router-for-me/CLIProxyAPI

@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/runtime/executor/openai_compat_executor.go
 // (executeImages, executeImagesStream, openAICompatImageEndpointPath and the
-// image dispatch of Execute and ExecuteStream) (v8.0.15, MIT).
+// image dispatch of Execute and ExecuteStream) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The OpenAI Images endpoints through an OpenAI-compatible provider.

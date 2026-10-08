@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/util/claude_schema.go (v8.0.15, MIT).
+// Ported from CLIProxyAPI internal/util/claude_schema.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! JSON Schema keyword tables and checks shared by tool-schema cleaners, and

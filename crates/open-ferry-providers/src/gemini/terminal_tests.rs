@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/runtime/executor/issue6258_terminal_test.go
 // (TestIssue6258ExecutorResponsesSplitUsage,
 // TestIssue6258ExecutorReadErrorHasNoTerminal,
-// TestIssue6258ExecutorCleanEOFControl) (v8.0.15, MIT).
+// TestIssue6258ExecutorCleanEOFControl) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Issue 6258: a Gemini or Vertex AI stream whose connection fails gives the

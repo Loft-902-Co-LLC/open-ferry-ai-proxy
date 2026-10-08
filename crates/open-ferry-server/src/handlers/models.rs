@@ -4,7 +4,7 @@
 // detail selection of WriteModelListResponse in
 // sdk/api/handlers/handlers_interceptors.go, BuildResponse in
 // internal/client/claude/models/models.go and convertModelToMap in
-// internal/registry/model_registry.go (v8.0.15, MIT).
+// internal/registry/model_registry.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! `GET /v1/models`, in the OpenAI or the Anthropic format, as the Grok

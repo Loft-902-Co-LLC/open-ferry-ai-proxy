@@ -17,7 +17,7 @@
 // openAIResponsesTextKeys, openAIResponsesUnkeyedTextKeys, markTextSent,
 // hasSentText, hasSentUnkeyedText, markFunctionArgsSent,
 // hasSentFunctionArgs), and Go's time.Time.Format with the RFC 3339 layout
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! OpenAI Responses responses → Interactions events and responses.

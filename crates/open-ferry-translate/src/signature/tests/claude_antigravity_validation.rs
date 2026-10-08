@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/signature/claude_antigravity_validation_test.go
-// (v8.0.15, MIT). https://github.com/router-for-me/CLIProxyAPI
+// (v8.0.20, MIT). https://github.com/router-for-me/CLIProxyAPI
 
 use base64::engine::general_purpose::STANDARD;
 

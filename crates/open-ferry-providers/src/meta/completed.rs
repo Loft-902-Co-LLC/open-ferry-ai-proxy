@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/runtime/executor/meta_executor_execute.go
-// (translateMetaCompleted, metaAsCompletedEvent) (v8.0.15, MIT).
+// (translateMetaCompleted, metaAsCompletedEvent) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Reading Meta's answer to a call that didn't ask for a stream.

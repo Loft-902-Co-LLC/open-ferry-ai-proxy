@@ -2,7 +2,7 @@
 // (FileCooldownStateStore: Load, readCooldownStateFile, Save,
 // writeCooldownStateGroup, removeStaleStateFiles, statePath,
 // stateRelativePath, cdsPathForRel and sanitizeCooldownFileName)
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The `.cds` files in the auth directory: one per credential, beside its

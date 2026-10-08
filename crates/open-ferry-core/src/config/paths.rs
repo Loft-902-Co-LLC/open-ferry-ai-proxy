@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/util/util.go (ResolveAuthDir) (v8.0.15, MIT),
+// Ported from CLIProxyAPI internal/util/util.go (ResolveAuthDir) (v8.0.20, MIT),
 // and from Go's path/filepath (path.go, path_windows.go, path_unix.go;
 // go1.27, BSD-3-Clause) and os.UserHomeDir, which it calls.
 // https://github.com/router-for-me/CLIProxyAPI

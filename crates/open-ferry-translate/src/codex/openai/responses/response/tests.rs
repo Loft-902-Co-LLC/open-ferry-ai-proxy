@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/codex/openai/responses/codex_openai-responses_response_test.go
-// (v8.0.15, MIT). https://github.com/router-for-me/CLIProxyAPI
+// (v8.0.20, MIT). https://github.com/router-for-me/CLIProxyAPI
 //
 // TestApplyPatchResponsesActualRequestGatesNativeCodex is split in two:
 // apply_patch_call_passes_through and only_an_executor_bridge_converts.

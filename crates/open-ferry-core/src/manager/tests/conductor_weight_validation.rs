@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_weight_validation_test.go (v8.0.15, MIT).
+// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_weight_validation_test.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Loading, registering and updating credentials whose explicit weight is

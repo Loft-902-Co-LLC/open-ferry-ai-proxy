@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/watcher/synthesizer/context.go,
 // helpers.go and config.go (Synthesize), ComputeExcludedModelsHash in
 // internal/watcher/diff/model_hash.go and FormatSortedHeaders in
-// internal/config/config_normalization.go (v8.0.15, MIT).
+// internal/config/config_normalization.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Synthesizers: build [`Auth`] records from credential files

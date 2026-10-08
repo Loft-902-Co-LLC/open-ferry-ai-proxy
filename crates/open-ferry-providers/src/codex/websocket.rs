@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/runtime/executor/codex_websockets_executor.go
-// (CodexAutoExecutor, codexWebsocketsEnabled) (v8.0.15, MIT).
+// (CodexAutoExecutor, codexWebsocketsEnabled) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The Responses WebSocket upstream: Codex calls over a WebSocket to

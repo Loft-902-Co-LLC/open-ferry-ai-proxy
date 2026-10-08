@@ -4,7 +4,7 @@
 // parseArrayPath, isDotPiperChar, parseObjectPath, parseSquash, parseObject,
 // parseArray, parseSubSelectors, execStatic, execModifier, parseUint,
 // runeit, unescape) (MIT), as CLIProxyAPI
-// internal/api/handlers/management/plugin_quota.go uses it (v8.0.15, MIT).
+// internal/api/handlers/management/plugin_quota.go uses it (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 // https://github.com/tidwall/gjson
 

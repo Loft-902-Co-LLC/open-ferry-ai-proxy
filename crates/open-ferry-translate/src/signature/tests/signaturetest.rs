@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/signature/signaturetest/claude.go
-// (AntigravityCAQS) (v8.0.15, MIT). https://github.com/router-for-me/CLIProxyAPI
+// (AntigravityCAQS) (v8.0.20, MIT). https://github.com/router-for-me/CLIProxyAPI
 
 //! Synthetic envelopes for signature tests.
 

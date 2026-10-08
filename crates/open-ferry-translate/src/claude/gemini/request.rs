@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/translator/claude/gemini/claude_gemini_request.go (v8.0.15, MIT).
+// Ported from CLIProxyAPI internal/translator/claude/gemini/claude_gemini_request.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Gemini `generateContent` request → Claude Messages request.

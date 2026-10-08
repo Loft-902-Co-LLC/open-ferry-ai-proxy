@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/api/handlers/management/oauth_callback.go
 // (oauthCallbackRequest, PostOAuthCallback, GetOAuthCallback,
 // handleOAuthCallback, firstNonEmpty) and internal/api/server_routes.go
-// (the /anthropic/callback and /codex/callback handlers) (v8.0.15, MIT).
+// (the /anthropic/callback and /codex/callback handlers) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The routes that take a login's callback, which need no key: the

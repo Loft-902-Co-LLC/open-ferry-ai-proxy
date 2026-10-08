@@ -3,7 +3,7 @@
 // websocket_session_target_test.go, websocket_lifecycle_bind_test.go,
 // websocket_upstream_disconnect_test.go, codex_websockets_spawn_agent_test.go
 // and the WebSocket half of payload_barrier_test.go's
-// TestPayloadBarrierCodexImageFilter (v8.0.15, MIT).
+// TestPayloadBarrierCodexImageFilter (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The Responses WebSocket upstream against a mock Codex on 127.0.0.1 (see

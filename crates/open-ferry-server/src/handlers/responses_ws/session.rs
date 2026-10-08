@@ -6,7 +6,7 @@
 // sdk/api/handlers/openai/openai_responses_websocket.go,
 // responsesWebsocketProviderSetForModel in
 // sdk/api/handlers/openai/openai_responses_websocket_session.go, and
-// IsCodexResponsesLiteRequest in internal/util/codex.go (v8.0.15, MIT).
+// IsCodexResponsesLiteRequest in internal/util/codex.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A socket's session: each request in turn, made whole from what the

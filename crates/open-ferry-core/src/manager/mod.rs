@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/conductor.go (the Manager type,
-// NewManager, SetConfig and CloseExecutionSession) (v8.0.15, MIT).
+// NewManager, SetConfig and CloseExecutionSession) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The credential manager: the [`Dispatcher`] that picks a credential for

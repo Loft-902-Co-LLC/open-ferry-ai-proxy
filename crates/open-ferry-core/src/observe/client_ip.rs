@@ -4,7 +4,7 @@
 // IP.To4, IP.Mask, IP.String, networkNumberAndMask, IPNet.Contains, dtoi)
 // (go1.27, BSD-3-Clause), as CLIProxyAPI internal/api/server.go (NewServer)
 // and internal/api/handlers/management/handler.go (Middleware) use them,
-// and CLIProxyAPI sdk/api/handlers/handlers.go (requestClientIP) (v8.0.15,
+// and CLIProxyAPI sdk/api/handlers/handlers.go (requestClientIP) (v8.0.20,
 // MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 // https://github.com/gin-gonic/gin

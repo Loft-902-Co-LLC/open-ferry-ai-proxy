@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_refresh.go and
-// sdk/cliproxy/auth/auto_refresh_loop.go (v8.0.15, MIT).
+// sdk/cliproxy/auth/auto_refresh_loop.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Token refresh: the background loop that refreshes OAuth credentials

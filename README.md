@@ -218,11 +218,11 @@ When a model fails on a credential with an overload or another error that should
 
 <!-- parity-summary:start -->
 <!-- Written by tools/parity's --summary option. Don't edit it by hand: rerun the tool. -->
-Against CLIProxyAPI v8.0.15 (commit `a4acc9f752bd`), built with go1.26.4, with `--random 1000 --seed 13`: 6,424 hand-written and 110,650 random cases in all.
+Against CLIProxyAPI v8.0.20 (commit `0f96f568e4db`), built with go1.26.4, with `--random 1000 --seed 13`: 6,424 hand-written and 110,650 random cases in all.
 
 | Suites | Cases | Identical | Equivalent | Known | Different |
 |---:|---:|---:|---:|---:|---:|
-| 108 | 117,074 | 106,120 | 10,852 | 102 | 0 |
+| 108 | 117,074 | 106,124 | 10,848 | 102 | 0 |
 
 <details>
 <summary>Each suite</summary>
@@ -249,7 +249,7 @@ Against CLIProxyAPI v8.0.15 (commit `a4acc9f752bd`), built with go1.26.4, with `
 | Claude → Responses response, non-streaming | 1,527 | 1,515 | 12 | 0 | 0 |
 | Responses → Chat Completions request | 1,165 | 729 | 428 | 8 | 0 |
 | Chat Completions → Responses response, streaming | 1,078 | 1,074 | 4 | 0 | 0 |
-| Chat Completions → Responses response, non-streaming | 1,040 | 1,029 | 11 | 0 | 0 |
+| Chat Completions → Responses response, non-streaming | 1,040 | 1,030 | 10 | 0 | 0 |
 | Claude → Chat Completions request | 1,058 | 564 | 490 | 4 | 0 |
 | Claude → Chat Completions request, compatibility mode | 1,058 | 564 | 490 | 4 | 0 |
 | Chat Completions → Claude response, streaming | 1,072 | 1,072 | 0 | 0 | 0 |
@@ -279,11 +279,11 @@ Against CLIProxyAPI v8.0.15 (commit `a4acc9f752bd`), built with go1.26.4, with `
 | Gemini → Gemini request | 1,026 | 1,025 | 1 | 0 | 0 |
 | Gemini passthrough response, streaming | 1,023 | 1,023 | 0 | 0 | 0 |
 | Gemini passthrough response, non-streaming | 1,028 | 1,028 | 0 | 0 | 0 |
-| Claude → Gemini request | 1,039 | 990 | 48 | 1 | 0 |
-| Claude → Gemini request, compatibility mode | 1,039 | 990 | 48 | 1 | 0 |
+| Claude → Gemini request | 1,039 | 991 | 47 | 1 | 0 |
+| Claude → Gemini request, compatibility mode | 1,039 | 991 | 47 | 1 | 0 |
 | Gemini → Claude response, streaming | 1,034 | 1,012 | 22 | 0 | 0 |
 | Gemini → Claude response, non-streaming | 1,028 | 1,028 | 0 | 0 | 0 |
-| Chat Completions → Gemini request | 1,059 | 1,011 | 47 | 1 | 0 |
+| Chat Completions → Gemini request | 1,059 | 1,012 | 46 | 1 | 0 |
 | Gemini → Chat Completions response, streaming | 1,030 | 1,005 | 25 | 0 | 0 |
 | Gemini → Chat Completions response, non-streaming | 1,027 | 959 | 68 | 0 | 0 |
 | Thinking settings for Codex and Responses | 1,031 | 1,030 | 0 | 1 | 0 |
@@ -344,7 +344,7 @@ Against CLIProxyAPI v8.0.15 (commit `a4acc9f752bd`), built with go1.26.4, with `
 To rerun it and update the summary above, use Go 1.26 ([UPSTREAM.md](UPSTREAM.md#checking-parity) says how to get it) and a CLIProxyAPI checkout at the pinned tag beside this one:
 
 ```sh
-git clone --branch v8.0.15 https://github.com/router-for-me/CLIProxyAPI ../CLIProxyAPI
+git clone --branch v8.0.20 https://github.com/router-for-me/CLIProxyAPI ../CLIProxyAPI
 cargo run --release -p open-ferry-parity -- --upstream ../CLIProxyAPI --go go1.26.4 --random 1000 --seed 13 --summary README.md
 ```
 

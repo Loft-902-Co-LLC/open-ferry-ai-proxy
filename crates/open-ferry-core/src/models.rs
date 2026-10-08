@@ -1,5 +1,5 @@
 // Modelled on the parts of CLIProxyAPI internal/registry/model_registry.go
-// that the HTTP handlers use (v8.0.15, MIT).
+// that the HTTP handlers use (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Which models the configured credentials serve, and through which

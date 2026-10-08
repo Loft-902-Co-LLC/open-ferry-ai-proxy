@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_load_persistence_test.go
-// and sdk/cliproxy/auth/conductor_saved_fields_test.go (v8.0.15, MIT).
+// and sdk/cliproxy/auth/conductor_saved_fields_test.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A reload and a change being saved never overlap: a reload waits for a

@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/thinking/convert.go, suffix.go, text.go and types.go
-// (v8.0.15, MIT). https://github.com/router-for-me/CLIProxyAPI
+// (v8.0.20, MIT). https://github.com/router-for-me/CLIProxyAPI
 
 //! Thinking settings: model-name suffixes, mapping between token budgets and
 //! named reasoning levels, and whether reasoning summaries are shown.

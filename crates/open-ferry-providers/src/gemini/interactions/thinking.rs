@@ -5,7 +5,7 @@
 // originalInteractionsIncludeThoughts, normalizeInteractionsLevel),
 // internal/thinking/strip.go (the Interactions case of StripThinkingConfig)
 // and internal/runtime/executor/gemini_executor.go
-// (applyGeminiInteractionsThinking) (v8.0.15, MIT).
+// (applyGeminiInteractionsThinking) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Thinking settings on a request going to Gemini's Interactions API, as

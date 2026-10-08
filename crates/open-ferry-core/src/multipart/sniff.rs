@@ -4,7 +4,7 @@
 // as multipartFileToDataURL in
 // sdk/api/handlers/openai/openai_images_handlers.go and
 // codexMultipartFileToDataURL in
-// internal/runtime/executor/codex_openai_images.go call it (v8.0.15, MIT).
+// internal/runtime/executor/codex_openai_images.go call it (v8.0.20, MIT).
 // Copyright 2011 The Go Authors. All rights reserved.
 // https://github.com/router-for-me/CLIProxyAPI
 // https://github.com/golang/go

@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI sdk/api/handlers/stream_forwarder.go and
-// StartNonStreamingKeepAlive in sdk/api/handlers/handlers.go (v8.0.15, MIT).
+// StartNonStreamingKeepAlive in sdk/api/handlers/handlers.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Writing results to clients: streams, with keep-alives and a terminal

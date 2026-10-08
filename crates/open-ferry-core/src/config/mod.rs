@@ -2,7 +2,7 @@
 // config_types.go, config_load.go, config_v8.go, config_normalization.go,
 // parse.go, config_defaults.go and what they call), internal/safemode,
 // internal/watcher (watcher.go, config_reload.go, events.go, dispatcher.go)
-// and internal/registry/catalog_config.go (CatalogSources) (v8.0.15, MIT).
+// and internal/registry/catalog_config.go (CatalogSources) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The proxy's configuration: loading it and watching it for changes.

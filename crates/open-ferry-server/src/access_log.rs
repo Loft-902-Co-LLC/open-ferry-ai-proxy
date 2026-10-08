@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/logging/gin_logger.go (GinLogrusLogger,
-// isAIAPIPath, aiAPIPrefixes) (v8.0.15, MIT).
+// isAIAPIPath, aiAPIPrefixes) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The access log: a line for each request once it is answered (upstream's

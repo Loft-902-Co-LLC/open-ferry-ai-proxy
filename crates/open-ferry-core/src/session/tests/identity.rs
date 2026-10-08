@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI sdk/cliproxy/session/identity_test.go
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Tests of the explicit session checks and the derived identity. Not

@@ -1,6 +1,6 @@
 //! Tests of the request log's capture layer: the ports of CLIProxyAPI
 //! internal/api/middleware/request_logging_test.go, response_writer_test.go
-//! and internal/logging/cpa_trace_test.go (v8.0.15, MIT), and the redaction
+//! and internal/logging/cpa_trace_test.go (v8.0.20, MIT), and the redaction
 //! and failed-attempt tests of the port's own.
 //!
 //! Each test serves its routes behind the request context and the capture

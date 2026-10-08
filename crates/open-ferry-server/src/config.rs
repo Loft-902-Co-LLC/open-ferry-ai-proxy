@@ -1,6 +1,6 @@
 // Modelled on the keys of CLIProxyAPI sdk/config's SDKConfig that the HTTP
 // handlers read, as internal/api/server_options.go (effectiveSDKConfig) fills
-// them (v8.0.15, MIT).
+// them (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Settings for the HTTP layer.

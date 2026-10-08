@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/runtime/executor/gemini_executor.go
 // (fixGeminiImageAspectRatio) and internal/util/image.go
-// (CreateWhiteImageBase64) (v8.0.15, MIT).
+// (CreateWhiteImageBase64) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The aspect ratio of an image from `gemini-2.5-flash-image-preview`.

@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/logging/global_logger.go
 // (ConfigureLogOutput's lumberjack.Logger) and gopkg.in/natefinch/lumberjack.v2
 // lumberjack.go (Write, openExistingOrNew, openNew, rotate, backupName)
-// (v8.0.15 and lumberjack v2.2.1, MIT).
+// (v8.0.20 and lumberjack v2.2.1, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Where the lines go: standard output, or `main.log`, rotated once it

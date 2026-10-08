@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/translator/openai/openai/responses/shell_tool.go
 // (convertResponsesShellToolToOpenAIChat, shellHistory, shellCallItem,
-// shellCallPlaceholder, responsesToolInputFailure) (v8.0.15, MIT).
+// shellCallPlaceholder, responsesToolInputFailure) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The client's local shell, offered to a Chat Completions model as a

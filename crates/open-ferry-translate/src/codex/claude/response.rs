@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/codex/claude/codex_claude_response.go and
-// codex_claude_response_web_search.go (v8.0.15, MIT).
+// codex_claude_response_web_search.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Codex (OpenAI Responses) events → Claude Messages responses.

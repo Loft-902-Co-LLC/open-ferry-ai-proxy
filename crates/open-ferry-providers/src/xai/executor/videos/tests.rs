@@ -4,7 +4,7 @@
 // TestXAIExecutorExecuteVideosPublishesRequestBuildFailureUsage,
 // TestXAIExecutorExecuteVideosRetrieve,
 // TestXAIExecutorExecuteVideosUsesNativeEndpointFromRequestPath,
-// TestXAIExecutorExecuteVideosOAuthBaseURLResolution) (v8.0.15, MIT).
+// TestXAIExecutorExecuteVideosOAuthBaseURLResolution) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Video calls and downloads against a mock xAI server on 127.0.0.1. The

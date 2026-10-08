@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI sdk/cliproxy/auth/response_model_rewriter_test.go (v8.0.15, MIT).
+// Ported from CLIProxyAPI sdk/cliproxy/auth/response_model_rewriter_test.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The force-mapping response rewriter: SSE `data:` lines with and without

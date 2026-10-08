@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_alias_cooldown_test.go (v8.0.15, MIT).
+// Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_alias_cooldown_test.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! An OAuth model alias is checked against its target model's cooldown: a

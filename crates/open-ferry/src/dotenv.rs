@@ -2,7 +2,7 @@
 // locateKeyName, extractVarValue, expandEscapes, indexOfNonSpaceChar,
 // hasQuotePrefix, isSpace, isLineEnd, expandVariables) and godotenv.go
 // (Load, loadFile, readFile, Parse) (MIT), as CLIProxyAPI's
-// cmd/server/main.go loads `.env` with it (v8.0.15, MIT).
+// cmd/server/main.go loads `.env` with it (v8.0.20, MIT).
 // https://github.com/joho/godotenv
 // https://github.com/router-for-me/CLIProxyAPI
 

@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/runtime/executor/xai_executor_media.go
 // (executeImages), xai_executor_request.go (xaiImageEndpointPath) and the
-// image dispatch of xai_executor_execute.go (Execute) (v8.0.15, MIT).
+// image dispatch of xai_executor_execute.go (Execute) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! [`XaiExecutor`]'s image calls (upstream's `executeImages`).

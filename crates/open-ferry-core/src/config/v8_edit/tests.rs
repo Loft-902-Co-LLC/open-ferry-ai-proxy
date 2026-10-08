@@ -3,7 +3,7 @@
 // model_catalogs_test.go (TestModelCatalogConfigValidation),
 // client_test.go (TestClientCodexEnableApplyPatch) and
 // client_optimize_test.go (TestClientCodexOptimizeMultiAgentV2,
-// TestClientCodexOptimizeMultiAgentV2Migration) (v8.0.15, MIT).
+// TestClientCodexOptimizeMultiAgentV2Migration) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 //
 // The routes' tests, with upstream's expected files, are in

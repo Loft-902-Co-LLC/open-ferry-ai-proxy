@@ -3,7 +3,7 @@
 // and a json.RawMessage; foldName) and fmt's scan.go (Sscanf with %d into
 // an int) (go1.27, BSD-3-Clause), as CLIProxyAPI
 // internal/api/handlers/management/config_lists.go and config_basic.go
-// read request bodies and the `index` query (v8.0.15, MIT).
+// read request bodies and the `index` query (v8.0.20, MIT).
 // https://github.com/golang/go
 // https://github.com/router-for-me/CLIProxyAPI
 

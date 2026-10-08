@@ -1,5 +1,5 @@
 // Ported from the flag definitions in CLIProxyAPI cmd/server/main.go, read
-// the way Go's flag package reads them (v8.0.15, MIT).
+// the way Go's flag package reads them (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The command line.

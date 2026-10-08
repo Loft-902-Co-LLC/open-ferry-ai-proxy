@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/runtime/executor/openai_compat_executor.go
 // (openAICompatErrorEvent, openAICompatStreamDataError,
-// newOpenAICompatStatusError, openAICompatRetryAfter) (v8.0.15, MIT).
+// newOpenAICompatStatusError, openAICompatRetryAfter) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! An OpenAI-compatible provider's failures as errors: a response with an

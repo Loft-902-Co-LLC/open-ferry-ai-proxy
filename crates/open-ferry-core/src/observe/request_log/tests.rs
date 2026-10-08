@@ -1,7 +1,7 @@
 //! Tests of the request log, end to end from a request's taps to the file
 //! on disk. The ports of CLIProxyAPI
 //! internal/logging/request_logger_collision_test.go and
-//! internal/runtime/executor/helps/logging_helpers_test.go (v8.0.15, MIT)
+//! internal/runtime/executor/helps/logging_helpers_test.go (v8.0.20, MIT)
 //! are in `tests/`; the middleware's tests are in open-ferry-server's
 //! `request_log/tests`.
 //!

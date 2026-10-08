@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/selector_test.go,
 // selector_lcp_test.go, selector_subagent_affinity_test.go,
 // session_affinity_priority_test.go, session_affinity_metadata_test.go and
-// conductor_session_affinity_alias_test.go (v8.0.15, MIT).
+// conductor_session_affinity_alias_test.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Picking with session affinity: a session keeps the credential it is

@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/conductor_force_mapping_test.go
-// and the fixtures in force_mapping_live_fixtures_test.go (v8.0.15, MIT).
+// and the fixtures in force_mapping_live_fixtures_test.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Force-mapped aliases end to end: the executor is asked for the upstream

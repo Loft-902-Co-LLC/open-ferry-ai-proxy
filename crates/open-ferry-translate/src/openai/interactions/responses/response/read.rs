@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/openai/interactions/responses/interactions_openai_responses_response.go
-// (interactionsSSEPayload) (v8.0.15, MIT), and how tidwall/gjson v1.18.0's
+// (interactionsSSEPayload) (v8.0.20, MIT), and how tidwall/gjson v1.18.0's
 // Parse and Get read text (MIT, see licenses/gjson-LICENSE).
 // https://github.com/router-for-me/CLIProxyAPI
 

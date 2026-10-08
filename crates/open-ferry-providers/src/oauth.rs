@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/auth/codex/pkce.go and oauth_server.go,
-// which internal/auth/claude repeats (v8.0.15, MIT).
+// which internal/auth/claude repeats (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! What every OAuth login needs: PKCE codes, a `state` value, and a local

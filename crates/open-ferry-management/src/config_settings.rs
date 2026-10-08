@@ -6,7 +6,7 @@
 // PutProxyURL, DeleteProxyURL), quota.go (PutSwitchProject,
 // PutSwitchPreviewModel), handler.go (updateBoolField, updateIntField,
 // updateStringField) and internal/api/server_management.go (their routes)
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Changing one setting: `PUT` or `PATCH /v0/management/<setting>` with

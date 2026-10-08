@@ -1,5 +1,5 @@
 //! Ports CLIProxyAPI internal/runtime/executor/helps/logging_helpers_test.go
-//! (v8.0.15, MIT): what the taps record of the upstream attempts.
+//! (v8.0.20, MIT): what the taps record of the upstream attempts.
 //!
 //! Upstream's helpers (`RecordAPIRequest`, `AppendAPIResponseChunk`,
 //! `RecordAPIResponseError`) are the request log's tap here, fed as an

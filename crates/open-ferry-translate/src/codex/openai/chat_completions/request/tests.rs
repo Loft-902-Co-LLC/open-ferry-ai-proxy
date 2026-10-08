@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/codex/openai/chat-completions/codex_openai_request_test.go
-// (v8.0.15, MIT), and codex_openai_user_turn_test.go (v8.0.20, MIT).
+// (v8.0.20, MIT), and codex_openai_user_turn_test.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use serde_json::{Value, json};

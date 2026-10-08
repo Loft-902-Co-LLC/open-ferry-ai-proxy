@@ -1,8 +1,8 @@
 // Ported from CLIProxyAPI internal/translator/openai/openai/responses/openai_openai-responses_response.go
 // (ConvertOpenAIChatCompletionsResponseToOpenAIResponses,
-// ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream, FinalizeToolInput)
-// and shell_tool.go (responsesToolInputFailure) (v8.0.15, MIT), with v8.0.20's
-// CanFinalizeResponseStream (v8.0.20, MIT).
+// ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream, FinalizeToolInput,
+// CanFinalizeResponseStream) and shell_tool.go (responsesToolInputFailure)
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! OpenAI Chat Completions responses → OpenAI Responses responses.

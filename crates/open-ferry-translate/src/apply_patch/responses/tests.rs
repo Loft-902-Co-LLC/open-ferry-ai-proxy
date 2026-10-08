@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/common/apply_patch_responses_test.go
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use std::collections::HashMap;

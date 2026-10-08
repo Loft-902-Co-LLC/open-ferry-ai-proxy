@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/auth/claude/anthropic_auth.go, errors.go
-// and oauth_response.go, and sdk/auth/claude.go (v8.0.15, MIT).
+// and oauth_response.go, and sdk/auth/claude.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Claude's OAuth: the browser login with PKCE, the code exchange and the

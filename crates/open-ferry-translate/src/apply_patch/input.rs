@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/common/apply_patch_input.go and
-// apply_patch_events.go (v8.0.15, MIT).
+// apply_patch_events.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Decoding `apply_patch` function arguments as they stream in.

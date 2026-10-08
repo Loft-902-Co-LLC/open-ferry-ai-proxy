@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/api/handlers/management/
 // vertex_import.go (ImportVertexCredential, valueAsString,
 // sanitizeVertexFilePart, labelForVertex) and auth_files_v8.go
-// (ImportOAuthV8) (v8.0.15, MIT), with Go's fmt print.go (Sprint of a
+// (ImportOAuthV8) (v8.0.20, MIT), with Go's fmt print.go (Sprint of a
 // decoded JSON value) (go1.26, BSD-3-Clause); a float64's `%v` is
 // `open_ferry_translate::go::format_float_g`.
 // https://github.com/router-for-me/CLIProxyAPI

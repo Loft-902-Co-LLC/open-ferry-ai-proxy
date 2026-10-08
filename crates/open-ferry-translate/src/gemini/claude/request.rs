@@ -1,8 +1,8 @@
 // Ported from CLIProxyAPI internal/translator/gemini/claude/gemini_claude_request.go
 // (ConvertClaudeRequestToGemini, ConvertClaudeRequestToGeminiWithCompat,
 // geminiContentWithParts and toolNameFromClaudeToolUseID) and
-// internal/util/claude_tool_result.go (ConvertClaudeToolResultContent) (v8.0.15, MIT),
-// with the v8.0.20 document blocks and user turn checks (claudeBase64InlineData).
+// internal/util/claude_tool_result.go (ConvertClaudeToolResultContent), with the
+// document blocks and user turn checks (claudeBase64InlineData) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Claude Messages request → Gemini request.

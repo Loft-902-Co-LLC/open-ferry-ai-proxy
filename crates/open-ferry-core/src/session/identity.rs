@@ -5,7 +5,7 @@
 // interactionsRoot, flattenInteractionEntries, appendInstruction,
 // canonicalParts, appendCanonicalParts, appendMediaPart, contentValue,
 // normalizeJSONValue, hashRoot, firstField, stringField, normalizedString,
-// truncateRunes, sourceFormatEqual) (v8.0.15, MIT).
+// truncateRunes, sourceFormatEqual) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Explicit session IDs, Claude Code's metadata, and the identity derived

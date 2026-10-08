@@ -1,5 +1,5 @@
 //! Ports CLIProxyAPI internal/api/middleware/request_logging_test.go
-//! (v8.0.15, MIT).
+//! (v8.0.20, MIT).
 //!
 //! Upstream's executor helpers (`helps.RecordAPIRequest`,
 //! `helps.AppendAPIResponseChunk`) are the request's taps here, fed as an

@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/tui/logs_tab.go (newLogsTabModel, Init,
 // fetchLogs, waitForNextPoll, waitForLog, Update, SetSize, View,
-// renderLogs, matchLevel, styleLine) (v8.0.15, MIT).
+// renderLogs, matchLevel, styleLine) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The logs tab: the server's log lines as they come, filtered by level.

@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/openai/claude/openai_claude_request_test.go
-// and openai_claude_compat_test.go (v8.0.15, MIT), and openai_claude_user_turn_test.go
+// and openai_claude_compat_test.go (v8.0.20, MIT), and openai_claude_user_turn_test.go
 // (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 

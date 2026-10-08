@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/runtime/executor/xai_executor.go
-// (XAIExecutor) (v8.0.15, MIT).
+// (XAIExecutor) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! xAI: Grok's Responses API, called with an API key.

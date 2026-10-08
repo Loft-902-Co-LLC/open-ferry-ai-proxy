@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/api/handlers/management/plugin_quota.go
 // (credentialQuotaRequest, resolveAuthIndex, FetchCredentialQuota,
 // executeQuotaProbe, filterUsableQuotaSummary, parseNumericFraction,
-// mapProbeResponse) (v8.0.15, MIT), with golang.org/x/text currency
+// mapProbeResponse) (v8.0.20, MIT), with golang.org/x/text currency
 // (ParseISO) (v0.40.0, BSD-3-Clause) and Go net/http transport.go
 // (Transport.roundTrip, validateHeaders) and httpguts
 // (ValidHeaderFieldName, ValidHeaderFieldValue) (go1.26, BSD-3-Clause).

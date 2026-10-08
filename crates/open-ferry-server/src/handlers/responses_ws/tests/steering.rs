@@ -4,7 +4,7 @@
 // sdk/api/handlers/openai/openai_responses_steering_error_test.go,
 // sdk/api/handlers/openai/openai_responses_steering_integration_test.go and
 // sdk/api/handlers/openai/openai_responses_steering_validation_test.go
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Response steering through the whole router: a client's Responses

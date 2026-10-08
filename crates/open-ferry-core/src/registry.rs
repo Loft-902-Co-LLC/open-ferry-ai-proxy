@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/registry/model_registry.go (v8.0.15, MIT).
+// Ported from CLIProxyAPI internal/registry/model_registry.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The model registry: which models each credential serves, and which of

@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/runtime/executor/claude_executor.go,
 // claude_executor_execute.go, claude_executor_stream.go,
-// claude_executor_tokens.go and claude_executor_auth.go (v8.0.15, MIT).
+// claude_executor_tokens.go and claude_executor_auth.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! [`ClaudeExecutor`], which calls Anthropic's Messages API with an API key

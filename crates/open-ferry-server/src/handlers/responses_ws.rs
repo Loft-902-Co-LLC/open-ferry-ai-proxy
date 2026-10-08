@@ -1,6 +1,6 @@
 // Ported from ResponsesWebsocket's upgrade, responsesWebsocketUpgrader and
 // websocketUpgradeHeaders in CLIProxyAPI
-// sdk/api/handlers/openai/openai_responses_websocket.go (v8.0.15, MIT), with
+// sdk/api/handlers/openai/openai_responses_websocket.go (v8.0.20, MIT), with
 // the handshake checks of gorilla/websocket's Upgrader.Upgrade (v1.5.3,
 // BSD-2-Clause).
 // https://github.com/router-for-me/CLIProxyAPI

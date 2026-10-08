@@ -2,7 +2,7 @@
 // (NormalizeCommentIndentation, getOrCreateMapValue, findMapKeyIndex,
 // removeMapKey, deepCopyNode) and config_v8.go (yamlPath, setYAMLPath,
 // setYAMLPathWithComments, copyYAMLPathValue, deleteYAMLPath, legacyPath,
-// expandConfigAliases) (v8.0.15, MIT).
+// expandConfigAliases) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Editing a [`Node`] tree by dotted paths, as upstream's config writer

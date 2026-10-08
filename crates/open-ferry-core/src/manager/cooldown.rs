@@ -3,7 +3,7 @@
 // clearCooldownStateForAuth and ResetQuota), clientModelProjectionForAuth in
 // sdk/cliproxy/auth/conductor_models.go, ReconcileRegistryModelStates in
 // sdk/cliproxy/auth/conductor_selection.go and applyCooldownFields in
-// sdk/cliproxy/auth/quota_signals.go (v8.0.15, MIT).
+// sdk/cliproxy/auth/quota_signals.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! What a call's outcome does to a credential: the cooldowns that keep a

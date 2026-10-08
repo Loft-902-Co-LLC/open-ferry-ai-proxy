@@ -7,7 +7,7 @@
 // byteOffsetToRuneOffset, GeminiPartMapping, MessageRuneRange,
 // mapByteOffsetsToRuneRanges, BuildResponsesURLCitationsForMessages,
 // BuildResponsesURLCitations), and the parts of internal/registry it calls
-// (LookupModelInfo, AntigravityWebSearchModelFor) (v8.0.15, MIT).
+// (LookupModelInfo, AntigravityWebSearchModelFor) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Web search for a Responses client on Gemini.

@@ -1,5 +1,4 @@
-//! Ports internal/util/gemini_schema_test.go (v8.0.15, with v8.0.20's
-//! TestCleanJSONSchema_EnforcesObjectTypeForProperties_Issue6394).
+//! Ports internal/util/gemini_schema_test.go (v8.0.20).
 //!
 //! Upstream runs most of these tests against several of its cleaners. Only
 //! `CleanJSONSchemaForGeminiJSONSchema` is ported, so they run against it. A

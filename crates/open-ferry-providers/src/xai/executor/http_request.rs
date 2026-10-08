@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/runtime/executor/xai_executor.go
-// (PrepareRequest, HttpRequest) (v8.0.15, MIT).
+// (PrepareRequest, HttpRequest) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! [`XaiExecutor`]'s plain HTTP requests (upstream's `HttpRequest`).

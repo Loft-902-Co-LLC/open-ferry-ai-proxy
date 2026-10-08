@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI
 // sdk/api/handlers/openai/openai_responses_websocket_test.go and
 // sdk/api/handlers/openai/openai_responses_websocket_requests_memory_test.go
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The Responses WebSocket's parts against upstream's cases, then whole

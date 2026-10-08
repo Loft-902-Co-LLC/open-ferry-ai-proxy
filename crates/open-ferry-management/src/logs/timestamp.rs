@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/api/handlers/management/logs.go
-// (parseTimestamp, and timestampRotationOrder's parse) (v8.0.15, MIT), with
+// (parseTimestamp, and timestampRotationOrder's parse) (v8.0.20, MIT), with
 // Go's time/format.go (Parse, for the two layouts upstream uses) and
 // time.go (Date's zone offset) (go1.27, BSD-3-Clause).
 // https://github.com/router-for-me/CLIProxyAPI

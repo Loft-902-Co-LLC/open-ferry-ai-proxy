@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/util/responses_tools.go (v8.0.15, MIT).
+// Ported from CLIProxyAPI internal/util/responses_tools.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Which declaration a tool name refers to in a Responses-style request, and

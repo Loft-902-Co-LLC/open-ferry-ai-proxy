@@ -2,7 +2,7 @@
 // (TestExtractSessionID*, TestExtractExplicitSessionIDs_EnhancedHarnesses
 // and TestSessionAffinitySelector_LongCompositeIDBoundConsistency) and
 // selector_lcp_test.go (TestSessionAffinitySelectorPromptCacheKeyCamelCase
-// and TestSessionAffinitySelectorNestedAntigravityPayload) (v8.0.15, MIT).
+// and TestSessionAffinitySelectorNestedAntigravityPayload) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Tests of the session a call binds under, and the session it may fall

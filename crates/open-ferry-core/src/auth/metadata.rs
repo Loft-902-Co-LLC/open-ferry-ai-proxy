@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/metadata_keys.go, priority.go,
 // custom_headers.go, MergeExistingAuthMetadata and IsAuthTokenPayloadKey in
-// metadata_merge.go, and the metadata overrides in types.go (v8.0.15, MIT).
+// metadata_merge.go, and the metadata overrides in types.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Settings a credential file carries next to its tokens: legacy key names,

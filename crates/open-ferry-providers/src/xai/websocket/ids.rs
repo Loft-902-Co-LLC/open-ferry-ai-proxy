@@ -2,7 +2,7 @@
 // (xaiWebsocketIDStateStore, xaiWebsocketIDState, xaiWebsocketRequestIDMapper,
 // getXAIWebsocketIDState, deleteXAIWebsocketIDState,
 // newXAIWebsocketRequestIDMapper, rewriteXAIWebsocketDownstreamIDs)
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! What a session remembers between its calls: the response IDs the client

@@ -10,8 +10,8 @@
 // (RewriteCodexOrphanDelegationInputForConfig,
 // TranslateRequestEnvelopeWithCodexMultiAgentV2), and
 // sdk/cliproxy/auth/api_key_model_capabilities.go (CodexAPIKeyModelIsCompat)
-// with conductor_models.go (resolveAPIKeyConfig) (v8.0.15, MIT), with
-// v8.0.20's translation errors.
+// with conductor_models.go (resolveAPIKeyConfig), and the translation errors
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Codex clients' requests, and compatibility models, around translation.

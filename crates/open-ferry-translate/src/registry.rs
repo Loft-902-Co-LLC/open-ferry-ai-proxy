@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI sdk/translator (v8.0.15, MIT).
+// Ported from CLIProxyAPI sdk/translator (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The translator registry: which translators convert requests and responses

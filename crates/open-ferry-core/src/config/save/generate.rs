@@ -3,7 +3,7 @@
 // fields), disable_image_generation_mode.go (MarshalYAML),
 // credential_concurrency.go (WithDefaults), credential_in_flight.go
 // (DefaultCredentialInFlightConfig) and config_load.go (the defaults
-// LoadConfig sets) (v8.0.15, MIT)
+// LoadConfig sets) (v8.0.20, MIT)
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The settings as upstream writes them: `yaml.Marshal(legacyConfig(cfg))`.

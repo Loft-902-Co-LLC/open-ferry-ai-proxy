@@ -2,7 +2,7 @@
 // (injectV8APIKeyAuthIndexesLocked, yamlMapScalar, setMapScalar,
 // yamlMapScalarPresent, yamlMapHeadersPresent, resolveInheritedScalar,
 // resolveInheritedHeaders, normalizeModelPrefixHelper and
-// formatCredentialDedupKey) (v8.0.15, MIT).
+// formatCredentialDedupKey) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The `auth_index` a v8 config read shows on each API key.

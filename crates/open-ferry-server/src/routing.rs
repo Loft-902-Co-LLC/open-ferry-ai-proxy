@@ -5,7 +5,7 @@
 // responsesWebsocketResolvedModelName in
 // sdk/api/handlers/openai/openai_responses_websocket_session.go,
 // GetProviderName and ResolveAutoModel in internal/util/provider.go, and
-// ParseSuffix in internal/thinking/suffix.go (v8.0.15, MIT).
+// ParseSuffix in internal/thinking/suffix.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Which providers serve the model a client asks for.

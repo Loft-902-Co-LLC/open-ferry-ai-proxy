@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/codex/interactions/interactions_codex_request.go
-// (v8.0.15, MIT), with the v8.0.20 user turn checks.
+// (v8.0.20, MIT), with the user turn checks.
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Gemini Interactions request → Codex (OpenAI Responses) request.

@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI sdk/cliproxy/executor/websocket_input.go
 // (WebsocketInput, WithWebsocketInput, WebsocketInputFromContext,
-// WithWebsocketAuthCheck, WebsocketAuthEnabled) (v8.0.15, MIT).
+// WithWebsocketAuthCheck, WebsocketAuthEnabled) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The client's frames on a Responses WebSocket with response steering on,

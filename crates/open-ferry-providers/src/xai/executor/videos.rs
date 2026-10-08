@@ -1,11 +1,11 @@
 // Ported from CLIProxyAPI internal/runtime/executor/xai_executor_media.go
 // (executeVideos) and xai_executor_request.go (xaiIsVideoRequest,
-// xaiVideoEndpointPath, xaiMetadataString) (v8.0.15, MIT).
+// xaiVideoEndpointPath, xaiMetadataString) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 //
 // The download is modelled on CLIProxyAPI
 // sdk/api/handlers/openai/openai_videos_handlers.go (writeVideoContentFromURL,
-// videoContentHTTPClient) (v8.0.15, MIT).
+// videoContentHTTPClient) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! [`XaiExecutor`]'s video calls (upstream's `executeVideos`), and the

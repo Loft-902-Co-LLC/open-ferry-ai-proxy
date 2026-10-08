@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/scheduler_test.go
 // (TestManagerCodexAlphaSearchPolicyFiltersBeforePluginScheduler,
-// TestManagerCodexAlphaSearchPolicyRejectsOrdinaryAPIKey) (v8.0.15, MIT).
+// TestManagerCodexAlphaSearchPolicyRejectsOrdinaryAPIKey) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The `codex_alpha_search_v1` credential policy, the pick that honours

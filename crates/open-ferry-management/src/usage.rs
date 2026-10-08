@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/api/handlers/management/usage.go
 // (usageQueueRecord.MarshalJSON, GetUsageQueue, parseUsageQueueCount) and
 // api_key_usage.go (mergeRecentRequestBuckets, apiKeyUsageProviderKey,
-// GetAPIKeyUsage) (v8.0.15, MIT), with Go's encoding/json (appendCompact)
+// GetAPIKeyUsage) (v8.0.20, MIT), with Go's encoding/json (appendCompact)
 // (go1.27, BSD-3-Clause) as gin writes a `Marshaler`'s output.
 // https://github.com/router-for-me/CLIProxyAPI
 // https://github.com/golang/go

@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/api/handlers/management/
-// config_basic_weight_test.go (v8.0.15, MIT).
+// config_basic_weight_test.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The routes of `crate::config_settings`, which change one setting.

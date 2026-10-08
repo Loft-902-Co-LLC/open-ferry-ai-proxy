@@ -4,7 +4,7 @@
 // and ExecuteImageStreamWithAuthManager in sdk/api/handlers/handlers_stream.go,
 // enrichAuthSelectionError in sdk/api/handlers/handlers_errors.go, and
 // requestExecutionMetadata, requestCallerScope and GetAlt in
-// sdk/api/handlers/handlers.go (v8.0.15, MIT).
+// sdk/api/handlers/handlers.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Calls to providers, as the handlers make them.

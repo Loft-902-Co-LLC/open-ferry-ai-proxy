@@ -1,7 +1,7 @@
 // Ported from gopkg.in/yaml.v3 v3.0.1 yaml.go (Kind, Style, Node,
 // Node.IsZero, Node.LongTag, Node.ShortTag, Node.indicatedString,
 // Node.SetString) and resolve.go (shortTag, longTag) (Apache-2.0), the YAML
-// library CLIProxyAPI v8.0.15 (MIT) reads and writes its config with.
+// library CLIProxyAPI v8.0.20 (MIT) reads and writes its config with.
 // https://github.com/router-for-me/CLIProxyAPI
 // https://github.com/go-yaml/yaml
 //

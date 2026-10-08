@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/*_test.go (the fake executors,
-// stores and registry setup the tests share) (v8.0.15, MIT).
+// stores and registry setup the tests share) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Fakes for the manager tests.

@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI sdk/cliproxy/session/info.go (SessionInfo,
 // sessionObject, ExtractSessionInfo, isBodyForkCandidate,
 // BoundSessionIdentity, finalizeSessionInfo, sessionHeaderValue,
-// normalizedSessionCandidate) (v8.0.15, MIT).
+// normalizedSessionCandidate) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The session a client named, and the parent it came from.

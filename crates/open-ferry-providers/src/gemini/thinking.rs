@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/thinking/provider/gemini/apply.go,
 // internal/thinking/strip.go (the Gemini case of StripThinkingConfig) and
-// internal/registry/model_registry.go (LookupModelInfo) (v8.0.15, MIT).
+// internal/registry/model_registry.go (LookupModelInfo) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Thinking settings on a request going to Gemini or Vertex AI, under

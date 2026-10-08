@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/signature/provider_compatibility_test.go
-// (v8.0.15, MIT). https://github.com/router-for-me/CLIProxyAPI
+// (v8.0.20, MIT). https://github.com/router-for-me/CLIProxyAPI
 
 use super::*;
 

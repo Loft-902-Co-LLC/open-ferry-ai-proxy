@@ -4,7 +4,7 @@
 // shouldCaptureRequestBody, captureRequestInfo, shouldLogRequest),
 // internal/api/middleware/response_writer.go (ResponseWriterWrapper's
 // Write, WriteHeader and Finalize) and internal/logging/cpa_trace.go
-// (CPATraceIDMiddleware) (v8.0.15, MIT).
+// (CPATraceIDMiddleware) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The request log's capture layer: what the client sent and what it was

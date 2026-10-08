@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/api/handlers/management/config_basic.go
 // (GetUsageStatisticsEnabled, GetLogsMaxTotalSizeMB, GetErrorLogsMaxFiles)
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The observability settings' reads, each answering `{"<name>":<value>}`:

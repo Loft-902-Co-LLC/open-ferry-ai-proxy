@@ -3,7 +3,7 @@
 // sdk/cliproxy/auth/oauth_model_alias.go, SanitizeOAuthModelAlias in
 // internal/config/config_normalization.go, and the plan-type read of
 // ParseJWTToken and GetPlanType in internal/auth/codex/jwt_parser.go
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Records from the credential files at the top of the auth directory, as

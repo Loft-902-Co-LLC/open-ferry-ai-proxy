@@ -23,7 +23,7 @@ pub enum GoResult {
 
 pub struct Upstream {
     pub dir: PathBuf,
-    /// `git describe` output for the checkout, such as `v8.0.15`.
+    /// `git describe` output for the checkout, such as `v8.0.20`.
     pub version: String,
     pub commit: String,
     harness: PathBuf,

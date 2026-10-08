@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/signature/claude_test.go (v8.0.15, MIT).
+// Ported from CLIProxyAPI internal/signature/claude_test.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use serde_json::Value;

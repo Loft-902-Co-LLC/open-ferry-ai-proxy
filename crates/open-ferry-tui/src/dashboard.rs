@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/tui/dashboard.go (newDashboardModel, Init,
 // fetchData, Update, SetSize, View, renderDashboard, getFloat, getBool,
-// boolEmoji, minInt) (v8.0.15, MIT).
+// boolEmoji, minInt) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The dashboard tab: the server's address, the number of management keys

@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/config/config_load.go (LoadConfig),
 // parse.go (ParseConfigBytes), config_v8.go (Config.UnmarshalYAML) and
-// weight.go (validateCredentialWeightYAML) (v8.0.15, MIT).
+// weight.go (validateCredentialWeightYAML) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Loading a config file or parsing a config payload.

@@ -1,7 +1,7 @@
 // Ported from gopkg.in/yaml.v3 v3.0.1 yamlh.go (yaml_mark_t, yaml_encoding_t,
 // yaml_break_t, yaml_error_type_t, the style, token and event types and the
 // tag constants) and apic.go (the yaml_*_event_initialize functions) (MIT,
-// from libyaml), the YAML library CLIProxyAPI v8.0.15 (MIT) reads and writes
+// from libyaml), the YAML library CLIProxyAPI v8.0.20 (MIT) reads and writes
 // its config with.
 // https://github.com/router-for-me/CLIProxyAPI
 // https://github.com/go-yaml/yaml

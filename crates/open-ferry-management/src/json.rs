@@ -2,7 +2,7 @@
 // WriteJSON) (MIT) and Go's encoding/json encode.go (Marshal of maps,
 // structs, strings and float64s) and time's Time.MarshalJSON (go1.27,
 // BSD-3-Clause), as CLIProxyAPI internal/api/handlers/management uses them
-// through c.JSON (v8.0.15, MIT). Float64s are written with
+// through c.JSON (v8.0.20, MIT). Float64s are written with
 // open_ferry_translate::go::json_float.
 // https://github.com/router-for-me/CLIProxyAPI
 // https://github.com/gin-gonic/gin

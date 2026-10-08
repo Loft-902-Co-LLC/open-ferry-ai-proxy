@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/runtime/executor/xai_executor_response.go
-// (xaiStatusErr, isXAIBadCredentialsBody) (v8.0.15, MIT).
+// (xaiStatusErr, isXAIBadCredentialsBody) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The error for xAI's error status and body.

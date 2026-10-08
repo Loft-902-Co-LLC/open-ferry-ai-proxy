@@ -4,7 +4,7 @@
 // PatchOAuthExcludedModels, DeleteOAuthExcludedModels, PutOAuthModelAlias,
 // PatchOAuthModelAlias, DeleteOAuthModelAlias, PutOAuthRequestScopedErrors,
 // PatchOAuthRequestScopedErrors, DeleteOAuthRequestScopedErrors) and
-// internal/api/server_management.go (their routes) (v8.0.15, MIT).
+// internal/api/server_management.go (their routes) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Changing the client API keys and the OAuth channels' lists. Each change

@@ -4,7 +4,7 @@
 // TestXAIVideosNativeRejectsUnsupportedModel,
 // TestXAIVideosNativeRejectsInvalidJSON,
 // TestWriteVideoContentFromURLUsesPinnedAuthProxy,
-// TestWriteVideoContentFromURLFallsBackToGlobalProxy) (v8.0.15, MIT).
+// TestWriteVideoContentFromURLFallsBackToGlobalProxy) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The video routes end to end over a fake dispatcher, which records the

@@ -10,7 +10,7 @@
 // streamRoutedImages, forwardRawImageStream, handleOpenAICompatImages,
 // streamOpenAICompatImages, handleXAIImages, collectXAIImages,
 // collectImagesWithModel, streamXAIImages and streamImagesWithModel)
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! `POST /v1/images/generations` and `POST /v1/images/edits`.

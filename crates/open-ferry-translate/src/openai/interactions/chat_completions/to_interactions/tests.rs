@@ -1,7 +1,7 @@
 //! Ported from openai_interactions_file_data_test.go, and the tests of
 //! `ConvertOpenAIRequestToInteractions` and `ConvertOpenAIResponseToInteractions`
 //! in interactions_openai_request_test.go and interactions_openai_response_test.go,
-//! and from v8.0.20's openai_interactions_user_turn_test.go.
+//! and from openai_interactions_user_turn_test.go.
 //!
 //! Dropped or changed tests, as the Antigravity branches are not ported:
 //! - `TestConvertOpenAIRequestToInteractions_AntigravitySanitizesGenerationConfigAndSetsAgentConfig`

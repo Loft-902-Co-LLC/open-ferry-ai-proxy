@@ -2,7 +2,7 @@
 // (catalogUpdater, configure, refresh, readCatalogSource, catalogFetcher,
 // StartModelCatalogUpdaters, UpdateModelCatalogSources, configureCatalogs)
 // and internal/registry/model_updater.go (SetModelRefreshCallback,
-// notifyModelRefresh, mergeProviderNames) (v8.0.15, MIT).
+// notifyModelRefresh, mergeProviderNames) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Reading the model catalogs from the files the `models` section names.

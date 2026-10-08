@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/tui/app.go (NewApp, NewAppWithBaseURL,
 // Init, Update, refreshTabs, initTabIfNeeded, View, renderAuthView,
 // renderTabBar, renderStatusBar, fitStringWidth, isLogsEnabledFromConfig,
-// setAuthInputPrompt, connectWithPassword, broadcastToAllTabs) (v8.0.15,
+// setAuthInputPrompt, connectWithPassword, broadcastToAllTabs) (v8.0.20,
 // MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 

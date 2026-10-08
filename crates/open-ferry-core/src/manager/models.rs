@@ -2,7 +2,7 @@
 // sdk/cliproxy/auth/oauth_model_alias.go, isConfiguredModelRoutingAuth in
 // sdk/cliproxy/auth/api_key_model_capabilities.go, OpenAICompatibleProviderKey
 // in internal/util/provider.go and SanitizeOAuthModelAlias in
-// internal/config/config_normalization.go (v8.0.15, MIT).
+// internal/config/config_normalization.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Which upstream model a credential is asked for: the route model with the

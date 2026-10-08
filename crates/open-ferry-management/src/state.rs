@@ -3,7 +3,7 @@
 // SetLocalPassword), internal/api/server.go (NewServer's
 // MANAGEMENT_PASSWORD lookup and hasManagementSecret) and
 // internal/api/server_reload.go (UpdateClients' managementRoutesEnabled)
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! What the management handlers share: the current config, the credential

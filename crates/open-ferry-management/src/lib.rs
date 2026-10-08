@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/api/server_management.go
 // (registerManagementRoutes, managementAvailabilityMiddleware,
 // pluginManagementNoRoute) and internal/api/server_management_v8.go
-// (registerManagementV8Routes) (v8.0.15, MIT).
+// (registerManagementV8Routes) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! CLIProxyAPI-compatible management API, under `/v0/management` and its

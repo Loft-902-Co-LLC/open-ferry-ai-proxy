@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/runtime/executor/helps/payload_finalizer_test.go
 // (TestPayloadFinalizerDefaultsUseOriginalAndNormalizeBeforeRules,
-// TestPayloadRulesMatchFinalBodyAndTrackPaths) (v8.0.15, MIT).
+// TestPayloadRulesMatchFinalBodyAndTrackPaths) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The rules as upstream's final barrier applies them, to a body every

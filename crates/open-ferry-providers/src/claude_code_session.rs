@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/runtime/executor/helps/claude_code_session.go
 // (ExtractClaudeCodeSessionID, ExtractClaudeCodeAgentID,
-// ClaudeCodeExecutionScope, headerValueCaseInsensitive) (v8.0.15, MIT).
+// ClaudeCodeExecutionScope, headerValueCaseInsensitive) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The Claude Code session and agent a request belongs to, as Claude Code

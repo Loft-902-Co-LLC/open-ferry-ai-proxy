@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/claude/openai/responses/claude_openai-responses_request_test.go
-// (v8.0.15, MIT) and claude_openai-responses_user_turn_test.go (v8.0.20, MIT).
+// (v8.0.20, MIT) and claude_openai-responses_user_turn_test.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use std::collections::HashMap;

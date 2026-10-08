@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/api/handlers/management/logs.go
-// (logDirectory, isAllowedLogCursorFile, safeLogFilePath) (v8.0.15, MIT).
+// (logDirectory, isAllowedLogCursorFile, safeLogFilePath) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Where the log routes find their files: the log directory, a file in it

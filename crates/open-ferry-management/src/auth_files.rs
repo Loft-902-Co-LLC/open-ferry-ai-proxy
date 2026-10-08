@@ -5,7 +5,7 @@
 // isPersistentAuthFailure, isModelStateBlocked,
 // reconcileAuthFileCooldownState, quotaObservationPayloadForProvider,
 // quotaObservationPayload, modelQuotaObservationPayload, authWeightValue, authWebsocketsValue, authProjectID,
-// extractCodexIDTokenClaims, authEmail, isRuntimeOnlyAuth) (v8.0.15, MIT).
+// extractCodexIDTokenClaims, authEmail, isRuntimeOnlyAuth) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! `GET /v0/management/auth-files` (also `/v8/management/credentials`):

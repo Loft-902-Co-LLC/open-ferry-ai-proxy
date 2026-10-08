@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/signature/gemini_sanitize.go (v8.0.15, MIT).
+// Ported from CLIProxyAPI internal/signature/gemini_sanitize.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Gemini replay policy for thought signatures.

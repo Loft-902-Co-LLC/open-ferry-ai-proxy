@@ -2,7 +2,7 @@
 // config_types.go and vertex_compat.go: the JSON layouts of `Config` and the
 // types it holds), internal/registry/catalog_config.go (CatalogSources) and
 // internal/api/handlers/management/config_auth_index.go
-// (the `*WithAuthIndex` types) (v8.0.15, MIT).
+// (the `*WithAuthIndex` types) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The config as Go's JSON encoder writes upstream's `Config`: struct

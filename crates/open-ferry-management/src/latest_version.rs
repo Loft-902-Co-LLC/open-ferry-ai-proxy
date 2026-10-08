@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/api/handlers/management/config_basic.go
 // (GetLatestVersion, setLatestReleaseRequestHeaders, releaseInfo),
 // internal/util/github.go (ResolveGitHubToken) and
-// internal/githubauth/token.go (ResolveToken) (v8.0.15, MIT).
+// internal/githubauth/token.go (ResolveToken) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! `GET /v0/management/latest-version` (also

@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI sdk/cliproxy/session/info_test.go (v8.0.15, MIT).
+// Ported from CLIProxyAPI sdk/cliproxy/session/info_test.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Tests of reading the session a request names. All of upstream's are

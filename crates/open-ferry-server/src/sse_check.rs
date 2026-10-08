@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI sseJSONValidationState in
 // sdk/api/handlers/handlers_stream.go, and responsesSSEDataPayload and
 // responsesSSEDataLinesValid in
-// sdk/api/handlers/openai/openai_responses_handlers.go (v8.0.15, MIT).
+// sdk/api/handlers/openai/openai_responses_handlers.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Checks that each `data:` payload of a Responses event stream is JSON

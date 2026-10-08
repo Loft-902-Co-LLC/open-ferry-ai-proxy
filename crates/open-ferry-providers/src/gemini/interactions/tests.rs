@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/runtime/executor/gemini_executor_test.go (v8.0.15, MIT).
+// Ported from CLIProxyAPI internal/runtime/executor/gemini_executor_test.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The Interactions executor against a mock Gemini API on 127.0.0.1, ported

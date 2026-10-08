@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/registry/catalog_config.go
 // (CatalogSources, Validate) and internal/config/model_catalogs.go
-// (ModelCatalogs) (v8.0.15, MIT).
+// (ModelCatalogs) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The `models` section: where each model catalog is read from.

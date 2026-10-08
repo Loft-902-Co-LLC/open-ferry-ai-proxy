@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/watcher/diff/oauth_model_alias_test.go
-// (TestDiffOAuthModelAliasChanges_IncludesDisplayName) (v8.0.15, MIT).
+// (TestDiffOAuthModelAliasChanges_IncludesDisplayName) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The `oauth-model-alias` change lines.

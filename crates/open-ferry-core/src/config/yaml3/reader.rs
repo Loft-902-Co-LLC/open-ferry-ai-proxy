@@ -1,7 +1,7 @@
 // Ported from gopkg.in/yaml.v3 v3.0.1 readerc.go (yaml_parser_set_reader_error,
 // yaml_parser_determine_encoding, yaml_parser_update_raw_buffer,
 // yaml_parser_update_buffer) and apic.go (yaml_string_read_handler) (MIT,
-// from libyaml), the YAML library CLIProxyAPI v8.0.15 (MIT) reads and writes
+// from libyaml), the YAML library CLIProxyAPI v8.0.20 (MIT) reads and writes
 // its config with.
 // https://github.com/router-for-me/CLIProxyAPI
 // https://github.com/go-yaml/yaml

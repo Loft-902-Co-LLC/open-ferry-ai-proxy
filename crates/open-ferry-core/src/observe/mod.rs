@@ -3,7 +3,7 @@
 // WithEndpoint), sdk/api/handlers/handlers.go (GetContextWithCancel's
 // endpoint and client metadata) and
 // sdk/cliproxy/auth/conductor_execution.go (publishSelectedAuthMetadata's
-// selected index) (v8.0.15, MIT).
+// selected index) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! What the request log, the usage statistics and the access log see of a

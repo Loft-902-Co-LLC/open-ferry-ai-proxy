@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/signature/gemini_validation_test.go (v8.0.15,
+// Ported from CLIProxyAPI internal/signature/gemini_validation_test.go (v8.0.20,
 // MIT). https://github.com/router-for-me/CLIProxyAPI
 
 use super::*;

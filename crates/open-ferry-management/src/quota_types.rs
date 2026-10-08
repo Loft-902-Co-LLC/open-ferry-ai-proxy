@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI sdk/pluginapi/types.go (QuotaFetchResponse,
 // QuotaSubscription, QuotaMetric, QuotaGroup, QuotaBucket and their
 // UnmarshalJSON) and internal/api/handlers/management/plugin_quota.go
-// (the normalized decode in executeQuotaProbe) (v8.0.15, MIT), with Go
+// (the normalized decode in executeQuotaProbe) (v8.0.20, MIT), with Go
 // encoding/json decode.go (array, object, literalStore, indirect,
 // unquoteBytes, getu4) and fold.go (foldName) (go1.26, BSD-3-Clause).
 // https://github.com/router-for-me/CLIProxyAPI

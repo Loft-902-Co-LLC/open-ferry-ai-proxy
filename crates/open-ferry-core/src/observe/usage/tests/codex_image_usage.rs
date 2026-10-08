@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI
 // internal/runtime/executor/codex_executor_execute_usage_test.go and
 // internal/runtime/executor/codex_response_model_test.go
-// (TestCodexUsageRecordsCarryResponseModelPerModel) (v8.0.15, MIT).
+// (TestCodexUsageRecordsCarryResponseModelPerModel) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Tests of the image generation tool's record, which a Codex call over

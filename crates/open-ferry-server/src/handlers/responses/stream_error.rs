@@ -5,7 +5,7 @@
 // sdk/api/handlers/openai/openai_responses_handlers.go, and from
 // BuildOpenAIResponsesStreamErrorChunk, BuildOpenAIResponsesStreamFailedChunk
 // and the error classes in sdk/api/handlers/openai_responses_stream_error.go
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Errors in a Responses stream: their text with secrets taken out, and the

@@ -1,6 +1,6 @@
 # Moving from CLIProxyAPI
 
-open-ferry reads CLIProxyAPI's config and auth directory as they are, so for most setups switching means running a different binary. This guide covers what you might notice when you do. It follows CLIProxyAPI v8.0.15, the version open-ferry is ported from. Every difference, down to the details, is listed in [UPSTREAM.md](../UPSTREAM.md).
+open-ferry reads CLIProxyAPI's config and auth directory as they are, so for most setups switching means running a different binary. This guide covers what you might notice when you do. It follows CLIProxyAPI v8.0.20, the version open-ferry is ported from. Every difference, down to the details, is listed in [UPSTREAM.md](../UPSTREAM.md).
 
 ## Switching over
 

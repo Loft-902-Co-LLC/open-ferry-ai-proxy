@@ -2,7 +2,7 @@
 // (executeInteractionsStream's reader, geminiInteractionsSSEPayload,
 // geminiInteractionsSSEDone), helps/apply_patch.go (EndApplyPatchStream,
 // StopApplyPatchStream) and helps/claude_input_tokens.go
-// (TranslateStreamWithClaudeInputTokens) (v8.0.15, MIT).
+// (TranslateStreamWithClaudeInputTokens) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! An Interactions SSE stream, read a frame at a time and translated to the

@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/error_events.go
 // (publishErrorEvent, buildErrorEventPayload, buildErrorEventAuthStatus,
 // errorEventModelStatusFrom, errorEventQuotaStatusFrom,
-// errorEventStatusCode, errorEventBody, timePtrIfSet) (v8.0.15, MIT).
+// errorEventStatusCode, errorEventBody, timePtrIfSet) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The error events of failed calls, for the usage queue's error

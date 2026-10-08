@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/api/handlers/management/
 // auth_files_oauth_callback.go (callbackForwarder, startCallbackForwarder,
-// stopCallbackForwarderInstance, stopForwarderInstance) (v8.0.15, MIT),
+// stopCallbackForwarderInstance, stopForwarderInstance) (v8.0.20, MIT),
 // and Go's net/http/server.go (Redirect, htmlEscape) (go1.26.4,
 // BSD-3-Clause), as the forwarder uses them.
 // https://github.com/router-for-me/CLIProxyAPI

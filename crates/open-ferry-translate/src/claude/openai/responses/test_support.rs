@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/claude/openai/responses/claude_openai-responses_testsupport_test.go
-// and helpers in its other test files (v8.0.15, MIT).
+// and helpers in its other test files (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Fixtures shared by this translator's tests.

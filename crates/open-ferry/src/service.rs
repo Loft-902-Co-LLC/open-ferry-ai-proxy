@@ -11,7 +11,7 @@
 // builder.go (runtimeAuthSyncHook), the
 // order of internal/watcher/synthesizer/config.go (Synthesize), and the
 // auth dispatch of internal/watcher's clients.go and config_reload.go
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Serving the proxy.
@@ -2434,7 +2434,7 @@ mod tests {
     }
 
     /// Ports `TestRegisterAvailableExecutors` of CLIProxyAPI
-    /// sdk/cliproxy/service_executor_registration_test.go (v8.0.15, MIT)
+    /// sdk/cliproxy/service_executor_registration_test.go (v8.0.20, MIT)
     /// for the executors ported: Codex, Meta, Claude, Gemini, Gemini
     /// Interactions, Vertex AI, xAI and the baseline OpenAI-compatible one,
     /// with open-ferry's claude-cli. The plugin executor and the other
@@ -3056,7 +3056,7 @@ mod tests {
     /// The management API as the binary serves it, over TCP.
     ///
     /// Ports the management parts of CLIProxyAPI
-    /// internal/api/server_test.go (v8.0.15, MIT):
+    /// internal/api/server_test.go (v8.0.20, MIT):
     /// - `TestManagementResponseExposesPluginSupportHeaderForCORS`, without
     ///   its `X-CPA-SUPPORT-PLUGIN` check: the plugin host isn't ported and
     ///   the header isn't sent.

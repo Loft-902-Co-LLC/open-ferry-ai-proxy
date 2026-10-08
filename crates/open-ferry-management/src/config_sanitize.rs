@@ -4,7 +4,7 @@
 // sanitizedOAuthRequestScopedErrors), config_apikey_disable.go
 // (setConfigAPIKeyExcludedAll, toggleConfigAPIKeyExcludedAll) and
 // config_basic.go (normalizeRoutingStrategy), and the tests from
-// config_apikey_disable_test.go (v8.0.15, MIT).
+// config_apikey_disable_test.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The clean-ups a management write applies to what it changes, as

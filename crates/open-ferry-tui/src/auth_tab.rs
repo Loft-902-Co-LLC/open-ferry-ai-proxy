@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/tui/auth_tab.go (newAuthTabModel, Init,
 // fetchFiles, Update, startEdit, SetSize, View, renderContent, renderDetail,
 // getAnyString, handleEditInput, handleConfirmInput, handleNormalInput)
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The auth files tab: the server's credential files, each shown in detail,

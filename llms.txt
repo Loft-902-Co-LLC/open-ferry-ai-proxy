@@ -15,7 +15,7 @@ Setting it up takes four steps, each in docs/agents.md: install it (the install 
 ## APIs
 
 - [The dashboard API](https://raw.githubusercontent.com/Loft-902-Co-LLC/open-ferry-ai-proxy/main/docs/dashboard-api.md): `/open-ferry/api/v1/`, for usage, request-log search and ready-made client setups, and how both it and the management API check the management key
-- [UPSTREAM.md](https://raw.githubusercontent.com/Loft-902-Co-LLC/open-ferry-ai-proxy/main/UPSTREAM.md): what was ported from CLIProxyAPI v8.0.15, including the management API routes, and every deliberate difference
+- [UPSTREAM.md](https://raw.githubusercontent.com/Loft-902-Co-LLC/open-ferry-ai-proxy/main/UPSTREAM.md): what was ported from CLIProxyAPI v8.0.20, including the management API routes, and every deliberate difference
 
 ## Optional
 

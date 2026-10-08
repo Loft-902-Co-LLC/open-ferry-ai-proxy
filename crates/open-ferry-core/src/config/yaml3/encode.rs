@@ -3,7 +3,7 @@
 // slicev, isBase60Float, isOldBool, stringv, boolv, intv, uintv, floatv,
 // nilv, emitScalar, nodev, node), sorter.go (keyList.Less, keyFloat,
 // numLess), yaml.go (Marshal, Encoder.Encode, Encoder.SetIndent,
-// Encoder.Close, isZero) (Apache-2.0), the YAML library CLIProxyAPI v8.0.15
+// Encoder.Close, isZero) (Apache-2.0), the YAML library CLIProxyAPI v8.0.20
 // (MIT) reads and writes its config with, and Go's time.Duration.String
 // (BSD-3-Clause) and strconv.FormatFloat(f, 'g', -1, 64), which it calls.
 // https://github.com/router-for-me/CLIProxyAPI

@@ -2,7 +2,7 @@
 // (OpenAICompatExecutor: Execute, ExecuteStream, CountTokens, Refresh,
 // applyPromptCacheKey, resolveCredentials, resolveCompatConfig),
 // helps/payload_helpers.go (PayloadRequestedModel) and
-// helps/model_capabilities.go (ApplyRequestThinking) (v8.0.15, MIT).
+// helps/model_capabilities.go (ApplyRequestThinking) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! [`OpenAiCompatExecutor`], which calls a provider configured under

@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/translator/openai/interactions/responses/apply_patch_source_stop_test.go (v8.0.15, MIT).
+// Ported from CLIProxyAPI internal/translator/openai/interactions/responses/apply_patch_source_stop_test.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Upstream's `step.stop` ends an `apply_patch` call's arguments, even

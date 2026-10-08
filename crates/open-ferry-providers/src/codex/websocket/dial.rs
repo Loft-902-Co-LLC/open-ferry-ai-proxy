@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/runtime/executor/codex_websockets_connection.go
 // (dialCodexWebsocket, newProxyAwareWebsocketDialer, executionProxyURL)
-// (v8.0.15, MIT), with the client handshake of gorilla/websocket's client.go
+// (v8.0.20, MIT), with the client handshake of gorilla/websocket's client.go
 // (Dialer.DialContext, hostPortNoPort), util.go (tokenListContainsValue) and
 // proxy.go (httpProxyDialer, proxy_FromURL) (v1.5.3, BSD-2-Clause), and the
 // environment's proxy as Go's vendor/golang.org/x/net/http/httpproxy/proxy.go

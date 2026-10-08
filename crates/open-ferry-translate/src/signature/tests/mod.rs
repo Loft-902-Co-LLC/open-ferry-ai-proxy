@@ -1,4 +1,4 @@
-// Ported from the tests in CLIProxyAPI internal/signature (v8.0.15, MIT).
+// Ported from the tests in CLIProxyAPI internal/signature (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Each submodule ports the upstream test file of the same name. This module

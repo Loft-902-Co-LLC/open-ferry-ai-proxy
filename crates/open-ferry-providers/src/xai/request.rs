@@ -3,11 +3,11 @@
 // applyXAIDefaultHeaders, applyXAICustomHeaders, xaiExecutionSessionID,
 // normalizeXAIImageRefs, preserveXAIResponsesOutputControls) and the
 // image/video routing of xai_executor_execute.go and xai_executor_media.go
-// (v8.0.15, MIT), with v8.0.20's translation errors.
+// (v8.0.20, MIT), with the translation errors.
 // https://github.com/router-for-me/CLIProxyAPI
 //
 // Also ported from CLIProxyAPI internal/runtime/executor/helps/payload_finalizer.go
-// (NewPayloadFinalizer, for xAI) (v8.0.15, MIT).
+// (NewPayloadFinalizer, for xAI) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The body, headers and URL of an xAI request.

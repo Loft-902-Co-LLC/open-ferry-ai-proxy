@@ -3,7 +3,7 @@
 // xaiRemoveInputItemsByType, xaiBuildCompactionTriggerStreamChunks,
 // xaiBuildCompactionBaseResponse, xaiCompactionOutputItem,
 // xaiCompactionResponseID, xaiCompactionItemID, xaiBuildSSEFrame)
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Compact calls: the body sent to `/responses/compact`, and the stream a

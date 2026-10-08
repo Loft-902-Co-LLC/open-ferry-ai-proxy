@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/signature/claude_messages_sanitize.go
-// (v8.0.15, MIT). https://github.com/router-for-me/CLIProxyAPI
+// (v8.0.20, MIT). https://github.com/router-for-me/CLIProxyAPI
 
 //! Replaying Claude Messages history to another provider.
 

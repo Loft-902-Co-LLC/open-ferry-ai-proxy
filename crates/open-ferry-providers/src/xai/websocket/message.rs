@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/runtime/executor/xai_websockets_executor.go
 // (buildXAIWebsocketRequestBody, xaiWebsocketGenerateFalse,
 // buildXAIWebsocketWarmupCompletedPayload, buildXAIWebsocketCompactionPayload,
-// validateXAIWebsocketCompactionResponse) (v8.0.15, MIT).
+// validateXAIWebsocketCompactionResponse) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The `response.create` message, and what is made up for the client: the

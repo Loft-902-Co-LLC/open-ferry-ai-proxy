@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/api/server_keepalive.go (enableKeepAlive,
 // handleKeepAlive, signalKeepAlive, watchKeepAlive) and internal/cmd/run.go
-// (StartService's keep-alive) (v8.0.15, MIT).
+// (StartService's keep-alive) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The keep-alive endpoint of a server started with a local management

@@ -5,7 +5,7 @@
 // helps/payload_mutations.go, internal/util/codex.go,
 // internal/util/header_helpers.go, internal/misc/header_utils.go,
 // internal/thinking/suffix.go and helps/model_capabilities.go
-// (ApplyRequestThinking) (v8.0.15, MIT).
+// (ApplyRequestThinking) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The body, headers and URL of a Codex request.

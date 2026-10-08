@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/config/config_v8.go (expandConfigAliases,
-// yamlPath, findMapKeyIndex, setYAMLPath, deleteYAMLPath) (v8.0.15, MIT),
+// yamlPath, findMapKeyIndex, setYAMLPath, deleteYAMLPath) (v8.0.20, MIT),
 // with the decoding rules of gopkg.in/yaml.v3 v3.0.1 (resolve.go, decode.go,
 // yaml.go) and its scalar styles (encode.go encoder.node, emitterc.go
 // yaml_emitter_select_scalar_style, yaml_emitter_analyze_scalar;

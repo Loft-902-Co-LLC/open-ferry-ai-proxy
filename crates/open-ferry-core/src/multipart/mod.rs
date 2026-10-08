@@ -2,7 +2,7 @@
 // mime/quotedprintable/reader.go, mime/mediatype.go (ParseMediaType,
 // FormatMediaType), net/textproto/reader.go (readMIMEHeader,
 // readContinuedLineSlice, CanonicalMIMEHeaderKey) and path/filepath (Base)
-// (go1.26, BSD-3-Clause, see licenses/Go-LICENSE), as CLIProxyAPI v8.0.15
+// (go1.26, BSD-3-Clause, see licenses/Go-LICENSE), as CLIProxyAPI v8.0.20
 // (MIT) reads and writes the forms of its image and video endpoints
 // (sdk/api/handlers/openai/openai_images_handlers.go,
 // internal/runtime/executor/helps/payload_media.go,

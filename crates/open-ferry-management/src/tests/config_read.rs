@@ -9,7 +9,7 @@
 // config_v8_compatibility_test.go (TestConfigV8HistoricalFieldPaths,
 // TestConfigV8HistoricalProviderSubtrees) and
 // config_v8_auth_index_test.go
-// (TestConfigV8APIKeysExposeAuthIndex_Issue6287) (v8.0.15, MIT).
+// (TestConfigV8APIKeysExposeAuthIndex_Issue6287) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Tests of the routes of `crate::config_read`.

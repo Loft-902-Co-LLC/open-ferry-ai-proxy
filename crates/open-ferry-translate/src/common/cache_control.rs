@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/translator/common/cache_control.go (v8.0.15, MIT).
+// Ported from CLIProxyAPI internal/translator/common/cache_control.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Carrying a client's `cache_control` markers onto Claude content blocks.

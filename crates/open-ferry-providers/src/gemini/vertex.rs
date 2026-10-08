@@ -2,7 +2,7 @@
 // (GeminiVertexExecutor: Execute, ExecuteStream, CountTokens, Refresh and
 // their service-account and API-key variants, isImagenModel,
 // getVertexAction, convertImagenToGeminiResponse, convertToImagenRequest,
-// vertexCreds, vertexAPICreds, vertexBaseURL) (v8.0.15, MIT).
+// vertexCreds, vertexAPICreds, vertexBaseURL) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! [`VertexExecutor`]: calls Gemini models on Vertex AI.

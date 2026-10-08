@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/runtime/executor/codex_executor_request.go
-// (PrepareRequest, HttpRequest) (v8.0.15, MIT).
+// (PrepareRequest, HttpRequest) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! [`CodexExecutor`]'s plain HTTP requests (upstream's `HttpRequest`), which

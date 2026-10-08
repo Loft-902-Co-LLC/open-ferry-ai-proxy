@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/clienterror/client_error.go (IsRequestFault,
-// IsItemNotPersisted, IsClaudeThreadNotFound and the body checks) (v8.0.15,
+// IsItemNotPersisted, IsClaudeThreadNotFound and the body checks) (v8.0.20,
 // MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 

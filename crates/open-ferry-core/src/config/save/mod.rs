@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/config/config_yaml.go
 // (SaveConfigPreserveComments, SaveConfigPreserveCommentsUpdateNestedScalar)
 // and internal/api/handlers/management/config_basic.go (WriteConfig)
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Writing the config file back with its comments, its layout and the

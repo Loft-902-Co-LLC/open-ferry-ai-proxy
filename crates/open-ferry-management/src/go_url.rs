@@ -3,7 +3,7 @@
 // stringContainsCTLByte) and net/netip/netip.go (ParseAddr) (go1.27,
 // BSD-3-Clause), as CLIProxyAPI internal/api/handlers/management/
 // api_tools.go (APICall) and sdk/proxyutil/proxy.go (Parse) use them
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 // https://github.com/golang/go
 

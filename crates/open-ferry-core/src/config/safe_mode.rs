@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/safemode/example_api_keys.go (v8.0.15, MIT).
+// Ported from CLIProxyAPI internal/safemode/example_api_keys.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Safe mode: refusing service while `api-keys` still holds the values from

@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/session_cache_test.go, and the
 // session cache tests of selector_test.go, selector_lcp_test.go and
-// session_affinity_metadata_test.go (v8.0.15, MIT).
+// session_affinity_metadata_test.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Tests of the session cache: binding, refreshing, unbinding, expiry, the

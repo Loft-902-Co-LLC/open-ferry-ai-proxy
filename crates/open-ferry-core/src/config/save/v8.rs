@@ -3,7 +3,7 @@
 // commentUnknownV8Sections, commentUnknownV8Fields,
 // warnUnrecognizedV8Section, normalizeV8PrivateIPAlias, restoreV8Layout,
 // preserveV8Comments) and config_v8_api.go (ProjectV8ConfigAliases)
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The v8 layout on a [`Node`] tree with its comments, as upstream's
@@ -21,7 +21,7 @@
 //!
 //! Deviations from upstream:
 //! - The tables of v8 paths are the loader's fixed tables, checked against
-//!   v8.0.15's; upstream builds them by reflecting over its `Config` struct.
+//!   v8.0.20's; upstream builds them by reflecting over its `Config` struct.
 //! - [`is_v8_config_layout`] fails on a document whose aliases can't be
 //!   expanded, where upstream recurses until its stack overflows on a
 //!   cyclic alias.

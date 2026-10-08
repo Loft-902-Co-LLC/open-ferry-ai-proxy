@@ -2,7 +2,7 @@
 // auth_files_provider_oauth.go (RequestAnthropicToken, RequestCodexToken,
 // CancelAuthSession, GetAuthStatus), auth_files_v8.go (StartOAuthV8) and
 // auth_files_oauth_callback.go (isWebUIRequest, managementCallbackURL)
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Starting a Claude or Codex login, and following it: the routes that

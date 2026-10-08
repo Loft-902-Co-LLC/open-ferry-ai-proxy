@@ -9,7 +9,7 @@
 // buildVideosFailedAPIResponse, buildVideosRetrieveAPIResponseFromXAI,
 // setOpenAIVideoErrorFromXAI, markOpenAIVideoFailed,
 // xaiVideoContentURLFromPayload, openAIVideoStatus) and
-// openai_images_handlers.go (imagesModelParts) (v8.0.15, MIT).
+// openai_images_handlers.go (imagesModelParts) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 //
 // The form is read as gin-gonic/gin v1.10.1 context.go (ContentType,

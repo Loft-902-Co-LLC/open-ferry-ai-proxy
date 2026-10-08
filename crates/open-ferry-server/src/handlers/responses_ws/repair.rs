@@ -9,7 +9,7 @@
 // sdk/api/handlers/openai/openai_responses_websocket_toolcall_repair.go, and
 // parseResponsesWebsocketInputItem, responsesWebsocketMetadataString and
 // dedupeResponsesWebsocketInputItems in
-// sdk/api/handlers/openai/openai_responses_websocket_requests.go (v8.0.15,
+// sdk/api/handlers/openai/openai_responses_websocket_requests.go (v8.0.20,
 // MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 

@@ -2,7 +2,7 @@
 // the character classes: is_alpha, is_digit, as_digit, is_hex, as_hex,
 // is_ascii, is_printable, is_z, is_bom, is_space, is_tab, is_blank, is_break,
 // is_crlf, is_breakz, is_blankz, width) (MIT, from libyaml), the
-// YAML library CLIProxyAPI v8.0.15 (MIT) reads and writes its config with.
+// YAML library CLIProxyAPI v8.0.20 (MIT) reads and writes its config with.
 // https://github.com/router-for-me/CLIProxyAPI
 // https://github.com/go-yaml/yaml
 //

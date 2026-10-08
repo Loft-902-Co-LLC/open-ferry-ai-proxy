@@ -4,7 +4,7 @@
 // cooldownStateRecordsForAuthLocked, authCooldownStateRecord,
 // modelCooldownStateRecord and ApplyConfigWithCooldownStateStore),
 // sdk/cliproxy/auth/cooldown_state.go (cooldownAuthFile) and
-// sdk/cliproxy/service_auth.go (resolveCooldownStateStore) (v8.0.15, MIT).
+// sdk/cliproxy/service_auth.go (resolveCooldownStateStore) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The cooldown state store: while `save-cooldown-status` is on, the

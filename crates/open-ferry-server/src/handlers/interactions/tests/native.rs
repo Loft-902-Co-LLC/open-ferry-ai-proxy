@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI sdk/api/handlers/gemini/interactions_handlers_test.go
-// (TestInteractionsAgentUsesNativeInteractionsEndpoint) (v8.0.15, MIT).
+// (TestInteractionsAgentUsesNativeInteractionsEndpoint) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! `POST /v1beta/interactions` through the credential manager and the real

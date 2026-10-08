@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/api/handlers/management/quota_test.go
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! `POST /v0/management/reset-quota`.

@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI sdk/api/handlers/openai/openai_responses_websocket_test.go
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! [`Dispatcher::websocket_support`] as the manager answers it: which

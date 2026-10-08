@@ -2,7 +2,7 @@
 // Go's encoding/json decode.go and fold.go (Decoder.Decode into a struct,
 // foldName) and scanner.go (maxNestingDepth) (go1.27, BSD-3-Clause), as
 // CLIProxyAPI internal/api/handlers/management/api_tools.go (APICall) and
-// quota.go (ResetQuota) use them through ShouldBindJSON (v8.0.15, MIT).
+// quota.go (ResetQuota) use them through ShouldBindJSON (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 // https://github.com/gin-gonic/gin
 // https://github.com/golang/go

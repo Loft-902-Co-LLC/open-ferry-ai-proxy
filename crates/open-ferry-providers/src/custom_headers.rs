@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/util/header_helpers.go
-// (ApplyCustomHeadersFromAttrs) (v8.0.15, MIT).
+// (ApplyCustomHeadersFromAttrs) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! A credential's `header:<Name>` attributes: headers added to every request

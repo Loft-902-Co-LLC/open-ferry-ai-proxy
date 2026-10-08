@@ -18,7 +18,7 @@
 // codexBuildImagePartialFrame, codexBuildImageCompletedFrame,
 // codexBuildSSEFrame and codexMimeTypeFromOutputFormat), the image dispatch
 // of codex_executor_execute.go and codex_executor_stream.go, and
-// applyCodexDirectImageHeaders in codex_executor_request.go (v8.0.15, MIT).
+// applyCodexDirectImageHeaders in codex_executor_request.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The OpenAI Images endpoints served through Codex: a call whose client

@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/translator/gemini/openai/responses/issue6258_terminal_test.go (v8.0.15, MIT).
+// Ported from CLIProxyAPI internal/translator/gemini/openai/responses/issue6258_terminal_test.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! When a stream ends: a finish reason waits for a chunk with usage, or for

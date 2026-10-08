@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/translator/gemini/openai/responses/signature_carrier_test.go (v8.0.15, MIT).
+// Ported from CLIProxyAPI internal/translator/gemini/openai/responses/signature_carrier_test.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Tests for signature carriers: encoding and decoding them, dropping bad

@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI sdk/auth/manager.go (Manager.Login's save) and
 // internal/api/handlers/management/auth_files_fields.go (saveTokenRecord's
-// legacy Claude migration) (v8.0.15, MIT).
+// legacy Claude migration) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Saving a credential from a login, as the `-codex-login` and

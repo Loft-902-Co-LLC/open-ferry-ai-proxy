@@ -1,5 +1,5 @@
 // Ported from the routes in CLIProxyAPI internal/api/server_routes.go and the
-// middleware in internal/api/server_middleware.go (v8.0.15, MIT).
+// middleware in internal/api/server_middleware.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The router, and the middleware every request passes through: from the

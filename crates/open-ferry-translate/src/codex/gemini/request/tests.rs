@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/codex/gemini/codex_gemini_request_test.go
-// and noop_optimization_test.go (v8.0.15, MIT).
+// and noop_optimization_test.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 //
 // Changed: TestSetCodexToolChoiceFromGeminiToolConfigReusesAutoChoice checks

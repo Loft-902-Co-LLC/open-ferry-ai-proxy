@@ -4,7 +4,7 @@
 // functions, yaml_parser_scan_to_next_token, the scan_* functions,
 // yaml_parser_scan_line_comment and yaml_parser_scan_comments), apic.go
 // (yaml_insert_token) and yamlh.go (yaml_simple_key_t, yaml_comment_t) (MIT,
-// from libyaml), the YAML library CLIProxyAPI v8.0.15 (MIT) reads and writes
+// from libyaml), the YAML library CLIProxyAPI v8.0.20 (MIT) reads and writes
 // its config with.
 // https://github.com/router-for-me/CLIProxyAPI
 // https://github.com/go-yaml/yaml

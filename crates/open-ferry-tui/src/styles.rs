@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/tui/styles.go (the colours and styles)
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The TUI's colours and styles, as upstream defines them. Upstream also

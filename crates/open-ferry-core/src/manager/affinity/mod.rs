@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI sdk/cliproxy/auth/selector.go
 // (SessionAffinitySelector, NewSessionAffinitySelectorWithConfig, Pick,
 // OnResult, InvalidateAuth and highestPriorityAuths) and
-// sdk/cliproxy/service_config.go (newRoutingSelector) (v8.0.15, MIT).
+// sdk/cliproxy/service_config.go (newRoutingSelector) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Session affinity (`routing.session-affinity`): a conversation stays on

@@ -2,7 +2,7 @@
 // (applyClaudeHeadersWithNativeProfile on its caller-owned path, the beta
 // helpers and copyClaudeCallerFingerprintHeaders), internal/util/header_helpers.go,
 // internal/misc/header_utils.go and helps/claude_code_session.go
-// (HeaderValuesCaseInsensitive) (v8.0.15, MIT).
+// (HeaderValuesCaseInsensitive) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The headers of a request to Claude.

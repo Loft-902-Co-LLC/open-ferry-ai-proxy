@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/tui/config_tab.go (newConfigTabModel, Init,
 // fetchConfig, Update, handleNormalKey, handleEditingKey, toggleBool,
 // submitEdit, configFieldEditValue, SetSize, ensureCursorVisible, View,
-// renderContent, parseConfig, fieldSection, getBoolNested) (v8.0.15, MIT).
+// renderContent, parseConfig, fieldSection, getBoolNested) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The config tab: the settings the management API can change, each

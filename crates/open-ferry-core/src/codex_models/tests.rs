@@ -1,5 +1,5 @@
 //! Ports CLIProxyAPI internal/client/codex/models/models_test.go and
-//! web_search_capability_test.go (v8.0.15, MIT).
+//! web_search_capability_test.go (v8.0.20, MIT).
 //!
 //! Upstream's model maps become [`ModelInfo`]s, and tests that register
 //! models in upstream's global registry register them in a registry of their

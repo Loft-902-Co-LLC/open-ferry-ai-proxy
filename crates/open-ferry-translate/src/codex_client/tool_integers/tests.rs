@@ -1,6 +1,6 @@
 //! Ported from CLIProxyAPI internal/client/codex/tool-schema/
 //! tool_schema_test.go, tool_schema_integer_fields_test.go and
-//! testdata/history_notes_tools.json (v8.0.15, MIT).
+//! testdata/history_notes_tools.json (v8.0.20, MIT).
 //!
 //! `TestNormalizeCodexToolIntegerTypes` is ported case by case. Its "nil or
 //! empty headers" case passes an empty user agent, as callers take the

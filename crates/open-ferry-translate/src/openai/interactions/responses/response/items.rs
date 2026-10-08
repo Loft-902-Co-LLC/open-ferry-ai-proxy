@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/translator/openai/interactions/responses/interactions_openai_responses_response.go
 // (interactionsToolIdentityMap, responseModel, firstUsageInt,
 // interactionsThoughtSignature, interactionsReasoningEncryptedContent)
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! What both directions share: reading values as gjson does, and the small

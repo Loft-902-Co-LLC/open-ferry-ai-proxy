@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI sdk/api/handlers/openai/openai_videos_handlers.go
 // (videoAuthBindingStore: setWithModel, getBinding, cleanupExpiredLocked)
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Which credential made each video, so the calls about it go back to that

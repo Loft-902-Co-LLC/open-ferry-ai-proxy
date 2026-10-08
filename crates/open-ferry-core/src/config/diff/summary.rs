@@ -2,7 +2,7 @@
 // (SummarizeGeminiModels, SummarizeClaudeModels, SummarizeCodexModels,
 // SummarizeVertexModels), oauth_excluded.go (SummarizeExcludedModels) and
 // model_hash.go (ComputeExcludedModelsHash, thinkingHashSuffix,
-// normalizeModelPairs, hashJoined) (v8.0.15, MIT).
+// normalizeModelPairs, hashJoined) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Hashes of a key's model lists, so a change line can say a list changed

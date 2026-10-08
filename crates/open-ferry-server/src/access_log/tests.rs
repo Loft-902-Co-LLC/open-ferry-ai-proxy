@@ -3,7 +3,7 @@
 // TestIsAIAPIPathIncludesCodexBackend,
 // TestGinLogrusLoggerAddsRequestIDForCodexBackend,
 // TestGinLogrusLoggerHealthProbeStatus) and the healthy case of
-// TestHealthzAccessLogging in internal/api/server_test.go (v8.0.15, MIT).
+// TestHealthzAccessLogging in internal/api/server_test.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The access log.

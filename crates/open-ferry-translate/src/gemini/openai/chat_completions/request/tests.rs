@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI
 // internal/translator/gemini/openai/chat-completions/gemini_openai_request_test.go,
 // gemini_openai_file_data_test.go, gemini_openai_signature_test.go and the
-// request test in noop_optimization_test.go (v8.0.15, MIT), and
+// request test in noop_optimization_test.go (v8.0.20, MIT), and
 // gemini_openai_file_id_test.go, gemini_openai_media_url_test.go and
 // gemini_openai_user_turn_test.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI

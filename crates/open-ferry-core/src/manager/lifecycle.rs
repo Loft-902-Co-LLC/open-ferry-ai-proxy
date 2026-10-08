@@ -6,7 +6,7 @@
 // sdk/cliproxy/auth/conductor_cooldown.go,
 // ReconcileRegistryModelStates in sdk/cliproxy/auth/conductor_selection.go,
 // and lockAuthMutation in sdk/cliproxy/auth/conductor_persistence.go
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Adding, changing and removing credentials and executors, recording call

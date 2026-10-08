@@ -2,7 +2,7 @@
 // codex_websockets_duplex_bootstrap_input_test.go, codex_websockets_duplex_credential_failure_test.go,
 // codex_websockets_duplex_health_test.go, codex_websockets_duplex_initial_failure_test.go,
 // codex_websockets_duplex_rejection_test.go and codex_websockets_duplex_successor_metadata_test.go
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Response steering: a streaming call that keeps its connection for the

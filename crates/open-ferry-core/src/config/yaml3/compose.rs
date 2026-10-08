@@ -1,7 +1,7 @@
 // Ported from gopkg.in/yaml.v3 v3.0.1 decode.go (parser: newParser, init,
 // expect, peek, fail, anchor, parse, node, parseChild, document, alias,
 // scalar, sequence, mapping) and yaml.go (Unmarshal into a yaml.Node)
-// (Apache-2.0), the YAML library CLIProxyAPI v8.0.15 (MIT) reads and writes
+// (Apache-2.0), the YAML library CLIProxyAPI v8.0.20 (MIT) reads and writes
 // its config with.
 // https://github.com/router-for-me/CLIProxyAPI
 // https://github.com/go-yaml/yaml

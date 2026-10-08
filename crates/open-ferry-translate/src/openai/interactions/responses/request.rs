@@ -1,9 +1,8 @@
 // Ported from CLIProxyAPI internal/translator/openai/interactions/responses/interactions_openai_responses_request.go
 // (ConvertOpenAIResponsesRequestToInteractions, ConvertInteractionsRequestToOpenAIResponses)
-// (v8.0.15, MIT), with v8.0.20's user turn refusal and file and audio parts
-// (responsesUserTurnDrops, isResponsesUnsendableAttachmentType,
-// responsesFilePartToInteractions, responsesAudioPartToInteractions,
-// responsesInputAudioMIMEType) (v8.0.20, MIT).
+// and the user turn refusal and file and audio parts (responsesUserTurnDrops,
+// isResponsesUnsendableAttachmentType, responsesFilePartToInteractions,
+// responsesAudioPartToInteractions, responsesInputAudioMIMEType) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! OpenAI Responses requests to Gemini Interactions requests, and back.

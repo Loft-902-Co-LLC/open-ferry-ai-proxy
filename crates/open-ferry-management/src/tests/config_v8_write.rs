@@ -18,7 +18,7 @@
 // (TestConfigV8SharedUpstreamRoundTrip), config_v8_auth_index_test.go
 // (TestConfigV8APIKeysExposeAuthIndex_Issue6287, cases 5, 6 and 10),
 // config_priority_test.go and config_claude_key_test.go
-// (TestPatchClaudeKeyPriority) (v8.0.15, MIT).
+// (TestPatchClaudeKeyPriority) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The routes that write the config, over a config file in a temporary

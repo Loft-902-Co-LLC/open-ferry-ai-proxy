@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/translator/openai/openai/responses/responses_tool_index.go
 // and the index methods in openai_openai-responses_tools.go and shell_tool.go
-// (isShell, shellName) (v8.0.15, MIT).
+// (isShell, shellName) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The Chat Completions names of a request's tools: for naming the calls and

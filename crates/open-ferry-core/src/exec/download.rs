@@ -1,6 +1,6 @@
 // Modelled on CLIProxyAPI sdk/api/handlers/openai/openai_videos_handlers.go
 // (writeVideoContentFromURL, videoContentHTTPClient,
-// videoContentDownloadAuth) (v8.0.15, MIT).
+// videoContentDownloadAuth) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Fetching a file a provider made, such as a finished video, from the URL

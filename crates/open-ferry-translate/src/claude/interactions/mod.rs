@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/translator/claude/interactions
 // (ConvertInteractionsRequestToClaude, ConvertClaudeResponseToInteractions,
-// ConvertClaudeResponseToInteractionsNonStream) (v8.0.15, MIT).
+// ConvertClaudeResponseToInteractionsNonStream) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Gemini Interactions clients talking to a Claude upstream.

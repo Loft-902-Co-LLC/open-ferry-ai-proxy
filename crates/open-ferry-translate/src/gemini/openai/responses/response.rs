@@ -4,7 +4,7 @@
 // geminiRecordFunctionEvidence, geminiPendingIdentityError, determineWebSearchStreamMode,
 // hasEffectiveGoogleSearchTool, isUpstreamGeminiRequest, pickRequestJSON, unwrapRequestRoot,
 // unwrapGeminiResponseRoot) and internal/util/translator.go (SanitizedToolNameMap,
-// RestoreSanitizedToolName) (v8.0.15, MIT), and Go's time.Parse with the RFC 3339
+// RestoreSanitizedToolName) (v8.0.20, MIT), and Go's time.Parse with the RFC 3339
 // layout.
 // https://github.com/router-for-me/CLIProxyAPI
 

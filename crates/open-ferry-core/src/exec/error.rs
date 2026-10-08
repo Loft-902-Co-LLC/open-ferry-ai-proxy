@@ -3,8 +3,8 @@
 // sdk/cliproxy/auth/home_concurrency.go, HTTPStatusFromError in
 // internal/clienterror/client_error.go and
 // sdk/cliproxy/executor/websocket.go (UpstreamWebsocketReplayRequiredError,
-// NewUpstreamWebsocketReplayRequiredError) (v8.0.15, MIT), with v8.0.20's
-// UnsupportedPartError conversion and an error that keeps the answer's usage.
+// NewUpstreamWebsocketReplayRequiredError), with the UnsupportedPartError
+// conversion and an error that keeps the answer's usage (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 use std::fmt;

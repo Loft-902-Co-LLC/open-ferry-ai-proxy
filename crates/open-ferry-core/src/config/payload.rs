@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/config/config_types.go (PayloadConfig,
 // PayloadFilterRule, PayloadRule, PayloadModelRule) and config_validation.go
 // (SanitizePayloadRules, sanitizePayloadRawRules, payloadRawString)
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The `payload` section: rules that set or remove JSON paths in the

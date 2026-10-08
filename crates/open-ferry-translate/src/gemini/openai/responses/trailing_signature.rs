@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/translator/gemini/openai/responses/trailing_signature.go
 // (cacheGeminiResponsesTextSignatures, restoreGeminiResponsesTextSignatures)
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Signatures Gemini sends after a message's text, kept out of the client's

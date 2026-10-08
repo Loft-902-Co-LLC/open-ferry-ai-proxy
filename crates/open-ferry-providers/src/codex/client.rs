@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI sdk/proxyutil/proxy.go (Parse, BuildHTTPTransport,
-// Redact) and internal/runtime/executor/helps/proxy_helpers.go (v8.0.15, MIT).
+// Redact) and internal/runtime/executor/helps/proxy_helpers.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! HTTP clients for Codex calls, one per proxy, and bounded body reads. The

@@ -3,7 +3,7 @@
 // steps of config_load.go and parse.go, config_validation.go
 // (SanitizePayloadRules), internal/util/util.go
 // (ResolveAuthDir), and internal/config/oauth_scope.go
-// (ForAPIKey) (v8.0.15, MIT).
+// (ForAPIKey) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The checks and clean-ups upstream applies after decoding.

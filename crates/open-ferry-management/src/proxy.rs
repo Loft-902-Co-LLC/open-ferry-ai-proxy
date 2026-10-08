@@ -2,7 +2,7 @@
 // (apiCallTransport, directAPICallTransport, resolveAPIKeyConfig,
 // proxyURLFromAPIKeyConfig, resolveOpenAICompatAPIKeyProxyURL,
 // buildProxyTransport) and sdk/proxyutil/proxy.go (Parse,
-// BuildHTTPTransport, NewDirectTransport) (v8.0.15, MIT).
+// BuildHTTPTransport, NewDirectTransport) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Which proxy an `api-call` goes through, and the HTTP clients that send

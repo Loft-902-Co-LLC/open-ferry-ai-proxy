@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/translator/gemini/gemini/gemini_gemini_request.go
 // (ConvertGeminiRequestToGemini, backfillEmptyFunctionResponseNames,
 // geminiFunctionResponseNamesNeedBackfill, backfillEmptyFunctionResponseNamesLegacy and
-// nextGeminiRole) and internal/util/translator.go (RenameKey) (v8.0.15, MIT).
+// nextGeminiRole) and internal/util/translator.go (RenameKey) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Gemini request → Gemini request.

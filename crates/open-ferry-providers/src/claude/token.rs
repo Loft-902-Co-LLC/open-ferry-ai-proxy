@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/auth/claude/token.go, anthropic.go and
 // filename.go, and CreateTokenStorage and UpdateTokenStorage in
-// anthropic_auth.go (v8.0.15, MIT).
+// anthropic_auth.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Claude tokens, the credential file that keeps them, and its name.

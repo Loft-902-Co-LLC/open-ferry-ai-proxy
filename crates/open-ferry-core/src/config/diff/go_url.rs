@@ -4,7 +4,7 @@
 // net/netip/netip.go (ParseAddr) (go1.26, BSD-3-Clause), as CLIProxyAPI
 // internal/watcher/diff/config_diff.go (formatURL) and
 // internal/registry/catalog_config.go (CatalogSources.Validate) use them
-// (v8.0.15, MIT).
+// (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 // https://github.com/golang/go
 

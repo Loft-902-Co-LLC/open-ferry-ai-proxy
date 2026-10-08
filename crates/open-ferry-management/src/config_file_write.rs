@@ -1,7 +1,7 @@
 // Ported from CLIProxyAPI internal/api/handlers/management/config_basic.go
 // (PutConfigYAML), config_v8.go (ConfigV8's PUT, PATCH and DELETE, as the
 // route hands them to the writer) and internal/api/server_management.go
-// (their routes) (v8.0.15, MIT).
+// (their routes) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Writing the config file whole, or a part of it in the v8 layout.

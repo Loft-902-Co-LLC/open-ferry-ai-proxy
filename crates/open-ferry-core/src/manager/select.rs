@@ -2,7 +2,7 @@
 // round-robin, fill-first and weighted selectors and the availability
 // checks, across priorities too), conductor_selection.go (pickNextMixed and
 // its legacy path, and availableAuthsForSelector) and the unavailable
-// errors in errors.go (v8.0.15, MIT).
+// errors in errors.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Picking a credential for a call.

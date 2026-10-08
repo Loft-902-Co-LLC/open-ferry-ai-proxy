@@ -1,4 +1,4 @@
-// Ported from CLIProxyAPI internal/translator/codex/interactions/init.go (v8.0.15, MIT).
+// Ported from CLIProxyAPI internal/translator/codex/interactions/init.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The Interactions → Codex translators' registration: Interactions clients

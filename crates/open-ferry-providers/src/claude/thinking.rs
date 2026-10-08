@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/thinking/strip.go and
-// provider/claude/apply.go (v8.0.15, MIT).
+// provider/claude/apply.go (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Thinking settings on a request going to Claude: a token budget, or an

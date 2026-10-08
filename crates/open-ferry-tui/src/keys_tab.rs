@@ -1,6 +1,6 @@
 // Ported from CLIProxyAPI internal/tui/keys_tab.go (newKeysTabModel, Init,
 // fetchKeys, Update, SetSize, View, renderContent, renderSection,
-// renderProviderKeys, maskKey) (v8.0.15, MIT).
+// renderProviderKeys, maskKey) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The API keys tab: the server's access keys, which can be added, edited,

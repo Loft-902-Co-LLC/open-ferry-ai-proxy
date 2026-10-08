@@ -2,7 +2,7 @@
 // catalog loading, checks and change detection in
 // internal/registry/model_updater.go (loadModelsFromBytes,
 // validateModelsCatalog, validateModelSection, detectChangedProviders,
-// modelSectionChanged) (v8.0.15, MIT).
+// modelSectionChanged) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! The static model catalog: upstream's `models.json`, which lists the

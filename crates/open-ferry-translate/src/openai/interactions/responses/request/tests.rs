@@ -1,5 +1,5 @@
 // Ported from CLIProxyAPI internal/translator/openai/interactions/responses/interactions_openai_responses_request_test.go
-// (v8.0.15, MIT), and interactions_openai_responses_user_turn_test.go
+// (v8.0.20, MIT), and interactions_openai_responses_user_turn_test.go
 // (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 

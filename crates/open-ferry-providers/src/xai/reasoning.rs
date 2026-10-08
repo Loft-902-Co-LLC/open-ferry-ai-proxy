@@ -5,7 +5,7 @@
 // xaiNormalizeReasoningSummaryEventName, xaiNormalizeReasoningSummaryData,
 // xaiNormalizeReasoningSummaryDataEvents, xaiNormalizeReasoningSummaryIndex,
 // xaiNormalizeReasoningOutputItems, xaiNormalizeReasoningOutputItem,
-// xaiNormalizeReasoningSummaryItems) (v8.0.15, MIT).
+// xaiNormalizeReasoningSummaryItems) (v8.0.20, MIT).
 // https://github.com/router-for-me/CLIProxyAPI
 
 //! Reasoning, both ways.

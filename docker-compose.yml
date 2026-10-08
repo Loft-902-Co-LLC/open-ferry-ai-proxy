@@ -1,4 +1,4 @@
-# Ported from CLIProxyAPI docker-compose.yml (v8.0.15, MIT).
+# Ported from CLIProxyAPI docker-compose.yml (v8.0.20, MIT).
 # https://github.com/router-for-me/CLIProxyAPI
 #
 # Runs open-ferry's image with its config, auth directory and logs in this
