@@ -134,6 +134,7 @@ In this order, with the name each finding has:
 | `dashboard` | The dashboard app is built into this binary. A binary built without it is a warning. With `management.disable-control-panel` on, it is fine either way. With `management.separate-address` set, the URL it gives is on that address |
 | `clock` | The system time, without the network: a time before this binary's build date (release binaries know it), a credential last refreshed more than 10 minutes after the system time, or one that expires more than 400 days after it, is a warning |
 | `claude-cli <names>` | Each enabled `claude-cli` entry's Claude Code, once for each command, with `claude --version`, as the proxy checks it at start. A Claude Code older than 2.1.259, or one that can't be run, is an error. It never runs `claude auth status` |
+| `self-update` | Whether open-ferry looks for releases of itself, as `self-update` in the config and `OPEN_FERRY_SELF_UPDATE` say, what set that, how often it looks, and whether this install [updates itself](updates.md#which-installs-update-themselves). Off is fine. On or notify-only in a build that trusts no release key is a warning, as such a build can't check a release and never updates. An `OPEN_FERRY_SELF_UPDATE` that isn't a mode is a warning of its own. It makes no request |
 
 `check` writes nothing, and never prints a key or a credential. Its only connections are those to loopback. It reads the files it checks, and runs each `claude-cli` command with `--version`.
 

@@ -448,9 +448,10 @@ fn stop_update_checks(management: &ManagementState) {
     }
 }
 
-/// Stops the update checks, following the catalog files, refresh, the management API's OAuth
-/// logins and the server, giving open requests up to [`SHUTDOWN_TIMEOUT`],
-/// then the usage ledger, and saves the cooldowns.
+/// Stops the update checks, following the catalog files, refresh, the
+/// management API's OAuth logins and the server, giving open requests up
+/// to [`SHUTDOWN_TIMEOUT`], then the usage ledger, and saves the
+/// cooldowns.
 async fn shut_down(service: &Service, stop: &watch::Sender<bool>, mut server: Server) -> ExitCode {
     stop_update_checks(&service.management);
     service.stop_catalogs();
