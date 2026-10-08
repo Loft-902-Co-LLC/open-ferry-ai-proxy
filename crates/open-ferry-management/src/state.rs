@@ -14,7 +14,9 @@
 //! [`CredentialSync`] that reaches the service, the config file's path,
 //! the OAuth login sessions, the credential lock, the [`Observability`]
 //! handles the log and usage routes read, and the [`ConfigWriter`] and
-//! [`ConfigReload`] the routes that change the config use.
+//! [`ConfigReload`] the routes that change the config use, and
+//! open-ferry's own [`UpdateService`], which the dashboard API's update
+//! routes read.
 //!
 //! A handler that writes credentials takes the store and the sync together
 //! with `credential_store`; without them, as in a state made only with
@@ -42,6 +44,7 @@ use open_ferry_core::manager::Manager;
 use open_ferry_core::observe::Observability;
 use open_ferry_core::registry::ModelRegistry;
 use open_ferry_translate::go::trim_space;
+use open_ferry_update::UpdateService;
 
 use crate::access::Attempts;
 use crate::client_ip::TrustedProxies;
@@ -98,6 +101,8 @@ struct Parts {
     /// Whether the local management password turns the API on, as it does
     /// until the first config reload.
     local_enables: Arc<AtomicBool>,
+    /// open-ferry's own update checks, when the server runs them.
+    updates: Option<UpdateService>,
     #[cfg(test)]
     latest_release_url: Option<String>,
 }
@@ -195,6 +200,19 @@ impl ManagementState {
     pub fn with_config_reload(mut self, reload: Arc<dyn ConfigReload>) -> Self {
         Arc::make_mut(&mut self.parts).config_reload = Some(reload);
         self
+    }
+
+    /// Gives the dashboard API's update routes `updates`, the server's
+    /// update checks. Not upstream's: open-ferry's own updates.
+    #[must_use]
+    pub fn with_updates(mut self, updates: UpdateService) -> Self {
+        Arc::make_mut(&mut self.parts).updates = Some(updates);
+        self
+    }
+
+    /// The server's update checks, if it runs them.
+    pub fn updates(&self) -> Option<&UpdateService> {
+        self.parts.updates.as_ref()
     }
 
     /// Serves the logs, request logs and usage statistics of

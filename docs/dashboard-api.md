@@ -3,7 +3,7 @@
 The dashboard is a web app built into the binary and served at `/dashboard/`. It uses two APIs on its own origin:
 
 - **The management API**, at `/v0/management/` (and `/v8/management/`), exactly as CLIProxyAPI has it: settings, credentials, client keys, sign-ins, logs.
-- **The dashboard API**, described here, at `/open-ferry/api/v1/`, for what CLIProxyAPI has no route for: usage from the usage ledger, request-log search, client setup, the config's `claude-cli` entries, with their state and whether each is signed in, and undoing the last config change. The prefix is open-ferry's own, so the management namespace stays exactly upstream's.
+- **The dashboard API**, described here, at `/open-ferry/api/v1/`, for what CLIProxyAPI has no route for: usage from the usage ledger, request-log search, client setup, the config's `claude-cli` entries, with their state and whether each is signed in, undoing the last config change, and open-ferry's own updates. The prefix is open-ferry's own, so the management namespace stays exactly upstream's.
 
 By default all of these are served on the proxy's port, beside the proxy's routes. With open-ferry's `management.separate-address` set, such as `127.0.0.1:8318`, the app, the management API and the dashboard API are served at that address alone, so they still share one origin, and the proxy's port has none of them (see [Serving the app](#serving-the-app)).
 
@@ -58,11 +58,13 @@ Every error is a status and a body:
 | 409 | `no_backup` | `POST /config/undo`: there is no backup of the config file to undo to. |
 | 409 | `changed_since` | `POST /config/undo`: the config file was changed since the last write that kept a backup (as by a hand edit), so the undo would lose that change too, and the body didn't send `force`. |
 | 409 | `config_changed` | `POST /config/undo`: the config file or its backup isn't the one the body's `config_sha256` or `backup_sha256` names. |
+| 409 | `updates_off` | `POST /update/check` while updates are off. |
 | 413 | `body_too_large` | The body is over 64 KiB. |
 | 500 | `internal_error` | Something failed on the server; the message says what, without secrets. |
 | 502 | `claude_cli_failed` | A `claude-cli` entry's Claude Code couldn't be run, or its answer wasn't what was expected. |
 | 503 | `config_writer_unavailable` | `POST /config/undo`: the server can't write its config file. |
 | 503 | `ledger_unavailable` | The usage ledger couldn't be opened. `GET /usage/ledger` says why. |
+| 503 | `updates_unavailable` | The server runs no update checks, as the server `open-ferry -tui` starts doesn't. |
 | 504 | `claude_cli_timeout` | A `claude-cli` entry's Claude Code didn't answer within 30 seconds. |
 
 The management API's own errors keep upstream's shape, `{"error": "<text>"}`, but for one of open-ferry's: a save through `/v0/management` (a setting, a list, or a config API key's status) made after the config file changed on disk since the server loaded it, as by `open-ferry config` or a hand edit, answers 409 `{"error": "config_changed", "message": "..."}` and writes nothing. The server loads the file again, so the same save made again keeps that change. A file it can't load, such as an empty one or one with a YAML error, is left out, so the server and the management API keep the config they had, and each such save answers 409, its message saying to fix the file, until it is fixed.
@@ -536,6 +538,8 @@ Whether the Claude Code of the `claude-cli` entry `name` is signed in, and how. 
 - `name` is required, and matched without regard to case or surrounding spaces, as entry names are unique. An entry that isn't in the config is `404 not_found`, and a disabled one is checked all the same.
 - Claude Code may take a few seconds. One that can't be run, or whose answer isn't the JSON expected, is `502 claude_cli_failed`; one that takes over 30 seconds is stopped, and the answer is `504 claude_cli_timeout`.
 
+---
+
 ## Config
 
 ### `POST /open-ferry/api/v1/config/undo`
@@ -565,6 +569,64 @@ The body is optional. A JSON object with any of these fields says what the calle
 - With no backup the answer is `409 no_backup`; a server that can't write its config file (one embedded without a config writer) answers `503 config_writer_unavailable`. No refused undo changes anything.
 - A backup that no longer loads as a config isn't put back: the answer is `500 internal_error`, and nothing changes.
 - `open-ferry config undo` calls this route while a server is running for the config (see [docs/cli.md](cli.md#open-ferry-config)).
+
+---
+
+## Updates
+
+open-ferry's own updates, which [docs/updates.md](updates.md) describes. CLIProxyAPI's `GET /v0/management/latest-version` is unchanged and still names upstream's latest release. Turning updates off or on is a config change: `PUT /v8/management/config/self-update/mode` with `{"value": "off"}`, `"notify"` or `"auto"`, which the server follows at once.
+
+### `GET /open-ferry/api/v1/update`
+
+What updates are doing. It reads the update state on disk and makes no request.
+
+```json
+{
+  "mode": "auto",
+  "mode_source": "config",
+  "updates": "on",
+  "check_every_seconds": 21600,
+  "running_version": "0.1.0",
+  "installed_version": "0.1.0",
+  "restart_needed": false,
+  "target": "x86_64-unknown-linux-gnu",
+  "latest_version": "0.1.1",
+  "update_available": true,
+  "staged_version": "0.1.1",
+  "previous_version": null,
+  "failed_versions": [],
+  "rolled_back_version": null,
+  "last_check": "2026-10-08T09:12:44Z",
+  "last_result": "staged",
+  "last_error": null,
+  "next_check": "2026-10-08T15:20:02Z",
+  "checking": false,
+  "can_update_itself": true,
+  "why_not": null,
+  "why_not_code": null,
+  "trusts_release_key": true,
+  "notes": []
+}
+```
+
+- **`mode`** is `auto`, `notify` or `off`, and **`updates`** says it as people do: `on`, `notify-only` or `off`. **`mode_source`** is what set it: `default`, `config` (`self-update.mode`) or `environment` (`OPEN_FERRY_SELF_UPDATE`, which can only lower the config's mode).
+- **`installed_version`** is the version a restart runs: after `open-ferry update` has switched the binary, it differs from **`running_version`**, and **`restart_needed`** is `true`.
+- **`latest_version`** and **`update_available`** are from the last check. **`staged_version`** is a release downloaded and checked, ready for `open-ferry update` to switch to; the server never switches by itself. **`previous_version`** is kept for `open-ferry update -rollback`.
+- **`failed_versions`** failed their check here and are skipped until a newer release; **`rolled_back_version`** was rolled back from and is skipped too. `open-ferry update` run by hand tries either again.
+- **`last_result`** is `up-to-date`, `update-available`, `cannot-update` (newer, but this install doesn't update itself), `staged`, `skipped` (a failed or rolled-back version) or `error`, with **`last_error`** saying what went wrong. **`next_check`** is `null` while updates are off; **`checking`** is whether a check runs now.
+- **`can_update_itself`** is whether this install replaces its own binary. When it doesn't (a container, a binary the install scripts didn't put there, or one in a folder it can't write), the server only says when a release is out, **`why_not`** says why, and **`why_not_code`** is one of `container`, `no-receipt`, `bad-receipt`, `unknown-binary`, `other-name`, `other-binary` or `read-only`.
+- **`trusts_release_key`** is `false` for a build with no release key, which checks nothing and never updates.
+- **`notes`** are problems with the settings, such as an `OPEN_FERRY_SELF_UPDATE` or `self-update.check-every` that couldn't be used.
+
+### `POST /open-ferry/api/v1/update/check`
+
+Starts a check now, in the background, as the server's own checks run: in `auto` it downloads and checks a newer release and stages it; in `notify` it only looks. No body. The answer is `202`:
+
+```json
+{"check": "started"}
+```
+
+`"running"` instead of `"started"` means a check was running already, and no other started. `GET /update` shows how it went once `checking` is `false` again. While updates are off nothing is checked and the answer is `409 updates_off`; `open-ferry update -check` still checks by hand.
 
 ---
 

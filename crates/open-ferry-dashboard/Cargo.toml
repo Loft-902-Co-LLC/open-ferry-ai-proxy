@@ -17,6 +17,7 @@ open-ferry-core.workspace = true
 open-ferry-management.workspace = true
 open-ferry-providers.workspace = true
 open-ferry-server.workspace = true
+open-ferry-update.workspace = true
 rand = "0.10.3"
 rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
