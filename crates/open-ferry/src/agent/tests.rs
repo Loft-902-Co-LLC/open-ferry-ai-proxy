@@ -1301,6 +1301,61 @@ async fn credential_files_are_refused_in_any_shape() {
     assert_eq!(setup.text(), before);
 }
 
+// Not upstream's: a YAML file with a mapping key that isn't text (a
+// number, say) can't be checked, as such a mapping has no JSON form: one
+// with a credential's field in it, or nested too deeply to check below it,
+// is refused, for a setting and as a whole config, and neither the config
+// nor its backup changes.
+#[tokio::test]
+async fn a_file_with_a_key_that_isnt_text_is_refused() {
+    const VALUE: &str = "placeholder-credential-value-0123456789";
+    let offline = offline(Some(KEY));
+    let setup = &offline.setup;
+    ok(&cli(&setup.path), set("routing.strategy", "fill-first")).await;
+    let backup = setup.dir.path().join("config.yaml.bak");
+    let (before, backup_before) = (setup.text(), std::fs::read(&backup).unwrap());
+    let deep = format!("{}\"{VALUE}\"{}", "[".repeat(40), "]".repeat(40));
+    for (name, text) in [
+        (
+            "mixed-config.yaml",
+            format!("{before}payload:\n  7: seven\n  refresh_token: {VALUE}\n"),
+        ),
+        (
+            "mixed.yaml",
+            format!("1: one\nclaudeAiOauth:\n  accessToken: {VALUE}\n"),
+        ),
+        ("mixed-deep.yaml", format!("1: one\nnested: {deep}\n")),
+        (
+            "mixed-deep-config.yaml",
+            format!("{before}payload: {{1: one, nested: {deep}}}\n"),
+        ),
+    ] {
+        let file = setup.file(name, &text);
+        for caller in [Caller::Cli, Caller::Mcp] {
+            let ctx = confirmed(&setup.path, caller);
+            for command in [
+                Command::ConfigReplace(ReplaceInput {
+                    source: Source::File(file.clone()),
+                }),
+                set_from("management.secret-key", Source::File(file.clone())),
+            ] {
+                let failure = match perform(&ctx, command).await {
+                    Ok(outcome) => panic!("{name} was read: {}", outcome.json),
+                    Err(failure) => failure,
+                };
+                assert_eq!(failure.error, "unsafe_file", "{name}: {failure:?}");
+                assert!(
+                    failure.message.contains("a mapping key that isn't text"),
+                    "{name}: {failure:?}"
+                );
+                assert!(!failure_shows(&failure, VALUE), "{failure:?}");
+                assert_eq!(setup.text(), before, "{name}");
+                assert_eq!(std::fs::read(&backup).unwrap(), backup_before, "{name}");
+            }
+        }
+    }
+}
+
 // Not upstream's: over MCP, a call that reads a file into the config needs
 // confirm: true, with that reason, even when what it changes needs none; on
 // the command line, naming the file is the user's own doing.
