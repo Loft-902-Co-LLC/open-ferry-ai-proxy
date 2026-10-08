@@ -254,7 +254,11 @@ pub(crate) async fn set(ctx: &Context, input: SetInput) -> Result<Outcome, Failu
             } else {
                 text.trim_end_matches(['\r', '\n']).to_owned()
             };
-            if input.string || (secret_key && !list && !text.contains('\n')) {
+            // A secret's one line is taken as a string, so a key isn't read
+            // as YAML; but not a JSON list or object, as a list of keys is.
+            let structured = serde_json::from_str::<Value>(text.trim())
+                .is_ok_and(|value| value.is_array() || value.is_object());
+            if input.string || (secret_key && !list && !structured && !text.contains('\n')) {
                 Value::String(if input.string {
                     text
                 } else {

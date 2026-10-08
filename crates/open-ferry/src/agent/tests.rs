@@ -401,7 +401,15 @@ async fn sensitive_settings_need_a_confirmation() {
             set("management.separate-address", "127.0.0.1:9999"),
         ),
         ("server.host", unset("server.host")),
+        (
+            "server.trusted-proxies",
+            set("server.trusted-proxies", r#"["10.0.0.0/8"]"#),
+        ),
         ("last client key", unset("access.api-keys")),
+        ("last client key", set("access.api-keys", r#"[""]"#)),
+        ("last client key", set("access.api-keys", r#"["  ", ""]"#)),
+        ("last client key", set("access", "{}")),
+        ("last client key", unset("access")),
     ];
     for (reason, command) in cases {
         let before = setup.text();
@@ -466,6 +474,82 @@ async fn sensitive_settings_need_a_confirmation() {
     ok(&ctx, set("server.host", "localhost")).await;
     ok(&ctx, set("server.host", "::1")).await;
     ok(&ctx, set("routing.strategy", "fill-first")).await;
+}
+
+// Not upstream's: client keys are counted as the server counts them, so a
+// list of blank keys is no key: making the list blank needs a
+// confirmation, by `config set` or `config replace`, from the command line
+// or as a tool over MCP, while a key given twice is still a key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn blank_client_keys_count_as_none() {
+    let offline = offline(Some(KEY));
+    let setup = &offline.setup;
+    let port = u16::try_from(offline_port(setup)).unwrap();
+    let before = setup.text();
+    let blank = setup.file(
+        "blank.yaml",
+        &config_text(port, Some(KEY), &setup.auth_dir).replace(CLIENT_KEY, "  "),
+    );
+    for caller in [Caller::Cli, Caller::Mcp] {
+        let failure = fails(
+            &context(&setup.path, caller),
+            Command::ConfigReplace(ReplaceInput {
+                source: Source::File(blank.clone()),
+            }),
+        )
+        .await;
+        assert_eq!(failure.error, "needs_confirmation");
+        let reasons = failure.would.clone().unwrap()["reasons"].to_string();
+        assert!(reasons.contains("last client key"), "{reasons}");
+        assert_eq!(setup.text(), before);
+    }
+
+    let server = Server::new(Ok(setup.path.clone()), Env::default(), None);
+    let mut session = server_session(server).await;
+    for value in [json!([""]), json!(["   "]), json!([])] {
+        let result = session
+            .call(
+                "config_set",
+                json!({"path": "access.api-keys", "value": value}),
+            )
+            .await;
+        assert_eq!(result["isError"], json!(true), "{value}");
+        assert_eq!(
+            result["structuredContent"]["error"],
+            json!("needs_confirmation")
+        );
+        assert!(
+            result["structuredContent"]["would"]["reasons"]
+                .to_string()
+                .contains("last client key")
+        );
+    }
+    let result = session
+        .call("config_set", json!({"path": "access", "value": {}}))
+        .await;
+    assert_eq!(
+        result["structuredContent"]["error"],
+        json!("needs_confirmation")
+    );
+    let result = session
+        .call("config_unset", json!({"path": "access"}))
+        .await;
+    assert_eq!(
+        result["structuredContent"]["error"],
+        json!("needs_confirmation")
+    );
+    assert_eq!(setup.text(), before);
+
+    // A key given twice is still a key, so the list keeps one.
+    let twice = setup.file("twice.json", &json!([CLIENT_KEY, CLIENT_KEY]).to_string());
+    let changed = ok(
+        &cli(&setup.path),
+        set_from("access.api-keys", Source::File(twice)),
+    )
+    .await;
+    assert_eq!(changed.json["changed"], json!(true));
+    let status = ok(&cli(&setup.path), Command::Status).await;
+    assert_eq!(status.json["client_keys"], json!(1));
 }
 
 // Not upstream's: a secret is never taken in the call itself, as an

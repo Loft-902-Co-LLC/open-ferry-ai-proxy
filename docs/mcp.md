@@ -103,8 +103,8 @@ Without it, these change nothing, and the result is a tool error with `"error": 
 - `config_set`, `config_unset`, `config_replace`, `config_undo` and `keys_remove`, when they change a sensitive setting:
   - `management.allow-remote`, `management.secret-key` and `management.separate-address`;
   - `server.host`, set to anything but `localhost` or a loopback address, or unset;
-  - anything under `server.tls`;
-  - the last client key in `access.api-keys`, removed.
+  - anything under `server.tls` or `server.trusted-proxies`;
+  - the last client key in `access.api-keys`, removed (blank and repeated keys don't count, as the server ignores them).
 
 ## Results
 

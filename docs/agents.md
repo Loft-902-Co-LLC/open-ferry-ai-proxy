@@ -164,7 +164,8 @@ These change nothing without `--yes` (`confirm: true` for a tool):
   - `management.allow-remote`, `management.secret-key` and `management.separate-address`, which decide who can reach the management API;
   - `server.host` set to anything but `localhost` or a loopback address, or unset, which opens the proxy to other machines;
   - anything under `server.tls`, which decides how clients connect;
-  - removing the last client key in `access.api-keys`.
+  - anything under `server.trusted-proxies`, which decides whose forwarded addresses are believed, and so which clients count as local;
+  - removing the last client key in `access.api-keys`. Blank and repeated keys don't count, as the server ignores them, so `[""]` counts as no key.
 
 At a terminal such a command asks first. Without a terminal, as in an agent's shell, it changes nothing, exits with `3`, and its answer says what it would change (`would.changes`, masked) and why (`would.reasons`). Show that to the user, and run it again with `--yes` only when they agree.
 
