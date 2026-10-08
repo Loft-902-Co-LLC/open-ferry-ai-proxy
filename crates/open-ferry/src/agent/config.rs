@@ -6,6 +6,12 @@
 //! refused with the nearest known one. A value is YAML or JSON. A value
 //! that holds a secret (by its key, as [`super::mask`] tells one) is never
 //! taken as an argument: it is read from standard input or a file.
+//!
+//! A file is read only for a secret, which is never shown: `config set`
+//! refuses a file's value for a setting that doesn't hold one. And a file
+//! is never read from the auth directory, nor when it is a credential file
+//! (a JSON object with a sign-in's tokens or a service account's key), so
+//! a sign-in's tokens can't be copied into the config.
 
 use std::fmt;
 use std::io::Read as _;
@@ -22,7 +28,9 @@ use super::change::{
     Call, Changed, Content, Edit, Request, config_changed, file_note, make, masked, read_config,
 };
 use super::guard::{confirm, sensitive_reasons};
-use super::mask::{holds_secret, is_secret_name, mask_at, mask_tree};
+use super::mask::{
+    auth_dirs, holds_secret, is_secret_name, looks_like_credential, mask_at, mask_tree,
+};
 use super::target::{Reach, probe};
 use super::values::{
     check_path, diff as diff_trees, dotted, get as get_value, parse_value, read_tree,
@@ -63,28 +71,71 @@ impl Source {
         matches!(self, Self::Argument(_) | Self::Json(_))
     }
 
-    /// The value's text, as given.
-    pub(crate) fn text(&self) -> Result<String, Failure> {
+    /// The value's text, as given; a file's, unless it is one a value
+    /// isn't read from (see [`read_value_file`]).
+    pub(crate) fn text(&self, ctx: &Context) -> Result<String, Failure> {
         match self {
             Self::Argument(text) | Self::Stdin(text) => Ok(text.clone()),
             Self::Json(value) => Ok(match value {
                 Value::String(text) => text.clone(),
                 other => other.to_string(),
             }),
-            Self::File(path) => read_file(path),
+            Self::File(path) => read_value_file(ctx, path),
         }
     }
 
     /// The value's text, as given, as bytes.
-    fn bytes(&self) -> Result<Vec<u8>, Failure> {
-        self.text().map(String::into_bytes)
+    fn bytes(&self, ctx: &Context) -> Result<Vec<u8>, Failure> {
+        self.text(ctx).map(String::into_bytes)
     }
 }
 
-/// The text of the file at `path`, of up to [`FILE_LIMIT`] bytes.
-pub(crate) fn read_file(path: &Path) -> Result<String, Failure> {
-    let unreadable =
-        |why: String| Failure::new("not_found", format!("can't read {}: {why}", path.display()));
+/// The text of the file at `path` a value comes from. A file in the auth
+/// directory, or a credential file, is refused (`unsafe_file`): a value is
+/// never a copy of a sign-in's tokens.
+pub(crate) fn read_value_file(ctx: &Context, path: &Path) -> Result<String, Failure> {
+    let refused = |why: &str| {
+        Failure::new(
+            "unsafe_file",
+            format!(
+                "{} {why}, so a value isn't read from it; nothing was changed",
+                path.display()
+            ),
+        )
+        .hint("put just the value in a file of its own, outside the auth directory")
+    };
+    let real = std::fs::canonicalize(path).map_err(|error| {
+        Failure::new(
+            "not_found",
+            format!("can't read {}: {error}", path.display()),
+        )
+    })?;
+    for dir in auth_dirs(ctx) {
+        let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
+        if real.starts_with(&dir) {
+            return Err(refused(
+                "is in the auth directory, where the credentials are kept",
+            ));
+        }
+    }
+    let text = read_limited(&real, path)?;
+    if looks_like_credential(&text) {
+        return Err(refused(
+            "is a credential file: it holds a sign-in's tokens or a private key",
+        ));
+    }
+    Ok(text)
+}
+
+/// The text of the file at `path`, of up to [`FILE_LIMIT`] bytes, named
+/// `shown` in a failure.
+fn read_limited(path: &Path, shown: &Path) -> Result<String, Failure> {
+    let unreadable = |why: String| {
+        Failure::new(
+            "not_found",
+            format!("can't read {}: {why}", shown.display()),
+        )
+    };
     let file = std::fs::File::open(path).map_err(|error| unreadable(error.to_string()))?;
     let mut data = Vec::new();
     file.take(FILE_LIMIT + 1)
@@ -250,7 +301,7 @@ pub(crate) async fn set(ctx: &Context, input: SetInput) -> Result<Outcome, Failu
     let value = match &input.value {
         Source::Json(value) if !input.string => value.clone(),
         source => {
-            let text = source.text()?;
+            let text = source.text(ctx)?;
             let text = if source.is_inline() {
                 text
             } else {
@@ -273,6 +324,15 @@ pub(crate) async fn set(ctx: &Context, input: SetInput) -> Result<Outcome, Failu
     };
     if input.value.is_inline() && holds_secret(&parts, &value) {
         return Err(secret_in_argument(ctx, &path));
+    }
+    if matches!(input.value, Source::File(_)) && !holds_secret(&parts, &value) {
+        return Err(Failure::usage(format!(
+            "{path} doesn't hold a secret, and a file is read only for a secret, which is never shown; nothing was changed"
+        ))
+        .hint(match ctx.caller {
+            Caller::Cli => "give the value as an argument, or with --from-stdin",
+            Caller::Mcp => "give the value as `value`",
+        }));
     }
     let changed = make(
         ctx,
@@ -577,7 +637,7 @@ pub(crate) async fn replace(ctx: &Context, input: ReplaceInput) -> Result<Outcom
         )
         .hint(secret_hint(ctx)));
     }
-    let data = input.source.bytes()?;
+    let data = input.source.bytes(ctx)?;
     let changed = make(
         ctx,
         Request {
