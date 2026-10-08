@@ -15,10 +15,10 @@ use open_ferry_dashboard::mask_client_key;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use super::change::{Call, Content, Edit, Request, make};
+use super::change::{Call, Content, Edit, Request, key_text, make_from, read_config};
 use super::config::{Source, secret_in_argument};
 use super::guard::confirm;
-use super::values::{get, read_tree};
+use super::values::{get, read_tree, tree_of};
 use super::{Caller, Context, Failure, Outcome, Report};
 
 /// Where the client keys are.
@@ -57,18 +57,15 @@ fn path() -> Vec<String> {
 
 /// The client keys in the config file.
 fn current(ctx: &Context) -> Result<Vec<String>, Failure> {
-    let tree = read_tree(&ctx.path)?;
-    Ok(get(&tree, &path())
+    Ok(keys_of(&read_tree(&ctx.path)?))
+}
+
+/// The client keys in the config whose settings are `tree`.
+fn keys_of(tree: &Value) -> Vec<String> {
+    get(tree, &path())
         .and_then(Value::as_array)
-        .map(|keys| {
-            keys.iter()
-                .map(|key| match key {
-                    Value::String(key) => key.clone(),
-                    other => other.to_string(),
-                })
-                .collect()
-        })
-        .unwrap_or_default())
+        .map(|keys| keys.iter().map(key_text).collect())
+        .unwrap_or_default()
 }
 
 /// A listed key.
@@ -223,8 +220,11 @@ pub(crate) async fn add(ctx: &Context, input: AddInput) -> Result<Outcome, Failu
         )
         .hint("call it again with confirm: true, or with to_file naming a new file to write the key to"));
     }
-    let mut keys = current(ctx)?;
-    if keys.contains(&key) {
+    // The change is worked out from these bytes, and the list from the
+    // file as it is each time it is worked out, so a key added or removed
+    // since isn't undone.
+    let data = read_config(&ctx.path)?;
+    if keys_of(&tree_of(&data)?).contains(&key) {
         return Err(Failure::new(
             "exists",
             "that key is in access.api-keys already; nothing was changed",
@@ -233,15 +233,13 @@ pub(crate) async fn add(ctx: &Context, input: AddInput) -> Result<Outcome, Failu
     if let Some(file) = &input.to_file {
         write_key_file(file, &key)?;
     }
-    keys.push(key.clone());
-    let index = keys.len() - 1;
-    let result = make(
+    let result = make_from(
         ctx,
         Request {
             edit: Edit {
                 method: V8Method::Put,
                 parts: path(),
-                content: Content::Json(json!(keys)),
+                content: Content::KeyAdded(key.clone()),
             },
             call: Call::AddKey(key.clone()),
             action: "add_key",
@@ -249,6 +247,7 @@ pub(crate) async fn add(ctx: &Context, input: AddInput) -> Result<Outcome, Failu
             path: Some("access.api-keys".to_owned()),
             always: None,
         },
+        data,
     )
     .await;
     let mut changed = match result {
@@ -260,7 +259,14 @@ pub(crate) async fn add(ctx: &Context, input: AddInput) -> Result<Outcome, Failu
             return Err(failure);
         }
     };
-    changed.extra.insert("index".to_owned(), json!(index));
+    // Where it landed in the file as it is now; another write since can
+    // have moved it, or the file can be unreadable, and then it is left out.
+    if let Some(index) = current(ctx)
+        .ok()
+        .and_then(|keys| keys.iter().position(|listed| *listed == key))
+    {
+        changed.extra.insert("index".to_owned(), json!(index));
+    }
     changed
         .extra
         .insert("masked".to_owned(), json!(mask_client_key(&key)));
@@ -286,7 +292,10 @@ pub(crate) async fn add(ctx: &Context, input: AddInput) -> Result<Outcome, Failu
 
 /// `keys remove`.
 pub(crate) async fn remove(ctx: &Context, input: RemoveInput) -> Result<Outcome, Failure> {
-    let mut keys = current(ctx)?;
+    // As for `add`: the key is found in these bytes, and removed by its
+    // value from the list the file holds each time it is worked out.
+    let data = read_config(&ctx.path)?;
+    let keys = keys_of(&tree_of(&data)?);
     let index = match (input.index, &input.source) {
         (Some(index), None) => {
             if index >= keys.len() {
@@ -322,15 +331,15 @@ pub(crate) async fn remove(ctx: &Context, input: RemoveInput) -> Result<Outcome,
             }));
         }
     };
-    let key = keys.remove(index);
+    let key = keys.get(index).cloned().unwrap_or_default();
     let masked = mask_client_key(&key);
-    let mut changed = make(
+    let mut changed = make_from(
         ctx,
         Request {
             edit: Edit {
                 method: V8Method::Put,
                 parts: path(),
-                content: Content::Json(json!(keys)),
+                content: Content::KeyRemoved(key.clone()),
             },
             call: Call::RemoveKey(key),
             action: "remove_key",
@@ -340,6 +349,7 @@ pub(crate) async fn remove(ctx: &Context, input: RemoveInput) -> Result<Outcome,
                 "it deletes client key {index} ({masked}), and a client using it is refused"
             )),
         },
+        data,
     )
     .await?;
     changed.extra.insert("index".to_owned(), json!(index));
