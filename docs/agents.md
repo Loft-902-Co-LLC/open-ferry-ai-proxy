@@ -137,7 +137,7 @@ Each command takes `--config PATH` (else `config.yaml` in the working directory,
 ### Where a change goes
 
 - **While a server runs for the config**, and the command has its management key, a change goes through the server's management API. The server checks it, writes it with its config writer (the old file kept, comments kept) and applies it at once, as it does a change made in the dashboard. The server is then the only writer, so the commands and the dashboard don't lose each other's changes.
-- **Otherwise** the change is written to the file, with the same checks and the same writer. A running server loads it when it sees the file change; one started later reads it.
+- **Otherwise** the change is written to the file, with the same checks and the same writer. A running server loads it when it sees the file change; one started later reads it. Until a running server has loaded it, a save of the server's own settings (from the dashboard or the management API) can write over it, so give the commands the management key when a server runs.
 - **A server that runs another config**, one on the same port started from another file, is never changed: a server counts only when the file it runs holds the same bytes as this config. Commands stop with `other_config` and say to pass `--config` with the path of the config it runs.
 - A change is made only to the file it was worked out from: when the file changes meanwhile, one confirmed at a terminal is refused with `config_changed` (run it again), and any other is worked out again from the file as it is.
 - The report says which way it went (`"via": "server"` or `"file"`), lists each setting it changed with its old and new value, masked, and says that `open-ferry config undo` reverses it.
