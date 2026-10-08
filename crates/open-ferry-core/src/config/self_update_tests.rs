@@ -189,7 +189,7 @@ fn v8_edits_set_and_check_the_section() {
     assert!(error.to_string().contains("often"), "{error}");
 }
 
-/// `open-ferry update --mode` sets the mode with the nested-scalar writer,
+/// `open-ferry update -mode` sets the mode with the nested-scalar writer,
 /// in a file with or without the section, keeping the rest.
 #[test]
 fn the_nested_scalar_writer_sets_the_mode() {

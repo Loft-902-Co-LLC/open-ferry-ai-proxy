@@ -890,7 +890,8 @@ pub enum SelfUpdateMode {
     Off,
     /// Looks for a newer release and says when there is one.
     Notify,
-    /// Looks for a newer release and gets it ready for the next restart.
+    /// Looks for a newer release, and downloads, checks and stages it for
+    /// `open-ferry update` to switch to.
     #[default]
     Auto,
 }
