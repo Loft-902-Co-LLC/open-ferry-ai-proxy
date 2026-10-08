@@ -299,7 +299,7 @@ const TOOLS: [Spec; 18] = [
         name: "credentials_login",
         command: "credentials login",
         title: "Sign in to a provider",
-        description: "Starts a sign-in through the running server: `provider` is codex (ChatGPT) or claude. It returns a `url` for the user to open in a browser and a `state`, with `status` \"wait\". Show the user the URL, then call again with the same `provider` and `state` to wait for the sign-in to finish: `status` becomes \"ok\" or \"error\", or stays \"wait\" when it is still going. A Claude sign-in needs `confirm: true`, as Anthropic's terms may not allow it (see docs/claude-subscription.md).",
+        description: "Starts a sign-in through the running server: `provider` is codex (ChatGPT) or claude. It returns a `url` for the user to open in a browser and a `state`, with `status` \"wait\". Show the user the URL, then call again with the same `provider` and `state` to wait for the sign-in to finish: `status` becomes \"ok\" or \"error\", or stays \"wait\" when it is still going: not an error, so call again with the same `state`. A Claude sign-in needs `confirm: true`, as Anthropic's terms may not allow it (see docs/claude-subscription.md).",
         read_only: false,
         destructive: false,
         idempotent: false,
