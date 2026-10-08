@@ -1,6 +1,7 @@
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
+import { readStoredKey } from "../../api/keyStorage";
 import { API_KEYS, CONFIG, CONFIG_YAML, MANAGEMENT } from "../../api/management";
 import { loadFirst } from "../../test/loadFirst";
 import { mockApi, route, type MockApi } from "../../test/mockApi";
@@ -883,5 +884,43 @@ describe("leaving with unsaved changes", () => {
     await waitFor(() => {
       expect(router.state.location.pathname).toBe("/");
     });
+  });
+
+  // Signing out swaps the whole frame for the sign-in page, with no move the
+  // page's own guard sees, so the frame asks instead.
+  it("asks before signing out, and stays when asked to", async () => {
+    server();
+    const { user, router } = await openSettings();
+    await user.click(screen.getByRole("checkbox", { name: "Debug logging" }));
+    await user.click(screen.getByRole("button", { name: "Sign out" }));
+    const dialog = await screen.findByRole("dialog", { name: "Sign out without saving?" });
+    expect(within(dialog).getByRole("button", { name: "Stay" })).toHaveFocus();
+    await user.click(within(dialog).getByRole("button", { name: "Stay" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(router.state.location.pathname).toBe("/settings");
+    expect(readStoredKey()).not.toBeNull();
+    expect(screen.getByText("1 unsaved change.")).toBeVisible();
+  });
+
+  it("signs out without saving when confirmed", async () => {
+    const state = server();
+    const { user } = await openSettings();
+    await addKey(user);
+    await user.click(screen.getByRole("button", { name: "Sign out" }));
+    const dialog = await screen.findByRole("dialog", { name: "Sign out without saving?" });
+    await user.click(within(dialog).getByRole("button", { name: "Sign out without saving" }));
+    expect(await screen.findByText("You signed out.")).toBeVisible();
+    expect(readStoredKey()).toBeNull();
+    expect(keyWrites(state.api)).toEqual([]);
+  });
+
+  it("signs out at once with nothing unsaved", async () => {
+    server();
+    const { user } = await openSettings();
+    await user.click(screen.getByRole("button", { name: "Sign out" }));
+    expect(await screen.findByText("You signed out.")).toBeVisible();
+    expect(
+      screen.queryByRole("dialog", { name: "Sign out without saving?" }),
+    ).not.toBeInTheDocument();
   });
 });

@@ -3,6 +3,7 @@ import { useBlocker } from "react-router";
 
 import { Button } from "../../components/Button";
 import { Dialog } from "../../components/Dialog";
+import { useReportUnsaved } from "../../layout/unsavedChanges";
 
 export interface LeaveGuardProps {
   /** Whether anything on the page is unsaved. */
@@ -12,10 +13,11 @@ export interface LeaveGuardProps {
 /**
  * Asks before leaving a page with unsaved changes: for a link in the
  * dashboard, here; for a reload, a closed tab or another site, the
- * browser's own question. Moving within the page, as between its tabs,
- * doesn't ask.
+ * browser's own question; for signing out, the frame's. Moving within the
+ * page, as between its tabs, doesn't ask.
  */
 export function LeaveGuard({ unsaved }: LeaveGuardProps) {
+  useReportUnsaved(unsaved);
   const blocker = useBlocker(
     ({ currentLocation, nextLocation }) =>
       unsaved && currentLocation.pathname !== nextLocation.pathname,
