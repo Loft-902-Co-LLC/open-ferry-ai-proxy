@@ -7,13 +7,13 @@
 //! cooldowns and token refreshes.
 //!
 //! A call names the providers that serve its model. The manager picks a
-//! ready credential among them (round-robin, fill-first or weighted, within
-//! the highest priority), calls the executor, and records the outcome: a
-//! failure cools the model or the credential down for a while, a success
-//! clears it. When a credential fails, the next one is tried; when every
-//! one has failed with an error a later round could fix, the manager waits
-//! for the nearest cooldown (up to `max_retry_interval`) and goes round
-//! again, up to `request_retry` times.
+//! ready credential among them (round-robin, fill-first, weighted, or by
+//! the quota the providers report, within the highest priority), calls the
+//! executor, and records the outcome: a failure cools the model or the
+//! credential down for a while, a success clears it. When a credential
+//! fails, the next one is tried; when every one has failed with an error a
+//! later round could fix, the manager waits for the nearest cooldown (up to
+//! `max_retry_interval`) and goes round again, up to `request_retry` times.
 //!
 //! Credentials live in memory as [`Arc<Auth>`] snapshots: a change makes a
 //! new snapshot, and saves it through the [`AuthStore`] when there is one.
@@ -24,6 +24,10 @@
 //! With `routing.session-affinity` on, a conversation stays on the
 //! credential that served it while that one is ready, whatever its priority
 //! (see `affinity`).
+//!
+//! With `routing.quota.check-after` set, a quota rest longer than that is
+//! cut to it, and then one call is let through to check (see
+//! `quota_check`).
 //!
 //! Deviations from upstream:
 //! - The plugin scheduler, the Home dispatcher and fingerprints aren't
@@ -58,6 +62,8 @@
 //!   statistics set, where upstream's manager queues the event itself.
 //! - The cooldown state store saves on a background thread, debounced
 //!   (see [`cooldown_store`]).
+//! - open-ferry's own `quota` routing strategy (see `quota_rank`) and cap
+//!   on long quota rests (see `quota_check`) aren't upstream's.
 //! - Not ported: hooks, result policies, request preparation and
 //!   interceptors, the round tripper, the Antigravity credits fallback and
 //!   API-key capability metadata.
@@ -77,6 +83,7 @@ mod lifecycle;
 mod merge;
 mod models;
 mod policy;
+mod quota_check;
 mod quota_rank;
 mod quota_signals;
 mod refresh;
@@ -98,6 +105,7 @@ pub use cooldown_view::{CooldownView, cooldown_snapshot_for_auth};
 pub use credential::last_refresh_timestamp;
 pub use error_events::ErrorEvents;
 pub use lifecycle::QuotaReset;
+pub use quota_check::QuotaCheck;
 pub use quota_rank::{QuotaPreference, QuotaPrefs};
 pub use quota_signals::provider_supports_quota_observation;
 pub use refresh::ForceRefreshResult;
@@ -157,6 +165,8 @@ pub(crate) struct State {
     pub(crate) affinity: Option<Affinity>,
     pub(crate) pool_offsets: HashMap<String, usize>,
     pub(crate) refresh_jobs: HashMap<String, RefreshJob>,
+    /// The quota rests capped by `routing.quota.check-after`.
+    pub(crate) quota_checks: quota_check::QuotaChecks,
 }
 
 pub(crate) struct Shared {
@@ -280,6 +290,7 @@ impl Manager {
             affinity,
             pool_offsets: HashMap::new(),
             refresh_jobs: HashMap::new(),
+            quota_checks: quota_check::QuotaChecks::default(),
         };
         let shared = Arc::new(Shared {
             state: Mutex::new(state),

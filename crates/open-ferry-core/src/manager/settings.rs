@@ -17,6 +17,8 @@
 //!   (`routing.quota`), is a strategy upstream doesn't have; it runs a
 //!   `quota` strategy as round-robin. A change of the preferences alone
 //!   keeps the selector's cursors and bindings, since each pick reads them.
+//! - open-ferry's own cap on long quota rests (`routing.quota.check-after`)
+//!   is a setting upstream doesn't have; it ignores the key.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -204,6 +206,10 @@ pub struct Settings {
     /// yes; read only with session affinity on
     /// (`routing.session-affinity-subagents`).
     pub session_affinity_subagents: Option<bool>,
+    /// The longest a quota rest lasts before one request is let through to
+    /// check, or zero to rest until the provider's reset, as upstream does
+    /// (`routing.quota.check-after`, open-ferry's own; see `quota_check`).
+    pub quota_check_after: Duration,
     /// How many credentials refresh at once, or 0 for 16
     /// (`auth-auto-refresh-workers`).
     pub refresh_workers: usize,
@@ -224,8 +230,9 @@ pub struct Settings {
     pub openai_compatibility: Vec<OpenAiCompat>,
 }
 
-/// The binding TTL `text` gives: a positive Go duration, or zero (an hour)
-/// for anything else (upstream's `normalizedRoutingRuntimeState`).
+/// The duration `text` gives: a positive Go duration, or zero for anything
+/// else. For the binding TTL, zero is an hour (upstream's
+/// `normalizedRoutingRuntimeState`); for the quota check, off.
 fn affinity_ttl(text: &str) -> Duration {
     config::parse_go_duration(text.trim())
         .and_then(|nanos| u64::try_from(nanos).ok())
@@ -370,6 +377,7 @@ impl From<&Config> for Settings {
             session_affinity: config.routing.session_affinity,
             session_affinity_ttl: affinity_ttl(&config.routing.session_affinity_ttl),
             session_affinity_subagents: config.routing.session_affinity_subagents,
+            quota_check_after: affinity_ttl(&config.routing.quota.check_after),
             refresh_workers: count(config.auth_auto_refresh_workers),
             oauth_model_alias: config
                 .oauth_model_alias
@@ -468,11 +476,7 @@ mod tests {
             quota(QuotaPreference::SoonestReset, 0)
         );
         let strategy = |routing: &str| {
-            let config = Config::parse(format!(
-                "routing: {routing}
-"
-            ))
-            .expect("config");
+            let config = Config::parse(format!("routing: {routing}\n")).expect("config");
             Settings::from(&config).routing_strategy
         };
         for (routing, want) in [
@@ -503,6 +507,33 @@ mod tests {
             routing("{strategy: quota}"),
             routing("{strategy: round-robin}")
         );
+    }
+
+    // Not upstream's: open-ferry's cap on long quota rests is a positive Go
+    // duration, and anything else leaves it off.
+    #[test]
+    fn quota_check_after_is_a_duration_or_off() {
+        let check_after = |routing: &str| {
+            let config = Config::parse(format!("routing: {routing}\n")).expect("config");
+            Settings::from(&config).quota_check_after
+        };
+        assert_eq!(
+            check_after("{quota: {check-after: 1h30m}}"),
+            Duration::from_secs(5400)
+        );
+        assert_eq!(
+            check_after("{strategy: round-robin, quota: {check-after: ' 45s '}}"),
+            Duration::from_secs(45)
+        );
+        for off in [
+            "{}",
+            "{quota: {check-after: 0}}",
+            "{quota: {check-after: -1h}}",
+        ] {
+            assert_eq!(check_after(off), Duration::ZERO, "{off}");
+        }
+        assert_eq!(check_after("{quota: {check-after: soon}}"), Duration::ZERO);
+        assert_eq!(Settings::default().quota_check_after, Duration::ZERO);
     }
 
     #[test]

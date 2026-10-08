@@ -58,6 +58,9 @@
 //!   call as canceled, where upstream's reader, if it is waiting on the body
 //!   at that moment, reads a failed body, finalizes the translator and
 //!   records the patch 502.
+//! - With open-ferry's `routing.quota.check-after` set, a pick may let the
+//!   call check a capped quota rest; the call holds that check until its
+//!   outcome is recorded, a stream until its task ends (see `quota_check`).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -82,6 +85,7 @@ use super::cooldown::CallResult;
 use super::credential::websockets_enabled;
 use super::models::{AliasResult, OAuthAliasTable, Resolver};
 use super::policy::Eligibility;
+use super::quota_check::{self, CheckClaim};
 use super::retry::{
     RetryQuery, request_retry_round_exclusions, should_retry_after_error, wait_for_cooldown,
 };
@@ -444,6 +448,10 @@ struct Prepared {
     models: Vec<String>,
     pooled: bool,
     alias: AliasResult,
+    /// The quota check this call makes, if it was let through to make one
+    /// (open-ferry's; see `quota_check`). Held until the outcome is
+    /// recorded.
+    check: Option<Arc<CheckClaim>>,
 }
 
 /// How a stream began (upstream's `readStreamBootstrap`).
@@ -587,7 +595,7 @@ impl Manager {
             route_model,
             |key, size| next_model_pool_offset(offsets, key, size),
         );
-        let models = candidates
+        let models: Vec<String> = candidates
             .into_iter()
             .filter(|model| {
                 let state_model =
@@ -595,6 +603,17 @@ impl Manager {
                 !is_auth_blocked_for_model(&picked.auth, &state_model, now).0
             })
             .collect();
+        let check = if models.is_empty() {
+            None
+        } else {
+            let keys: Vec<String> = models
+                .iter()
+                .map(|model| {
+                    resolver.state_model_for_execution(&picked.auth, route_model, model, pooled)
+                })
+                .collect();
+            quota_check::claim(state, &self.shared, &picked.auth.id, keys, now)
+        };
         Ok(Prepared {
             auth: picked.auth,
             executor: picked.executor,
@@ -602,6 +621,7 @@ impl Manager {
             models,
             pooled,
             alias,
+            check,
         })
     }
 
@@ -863,6 +883,7 @@ impl Manager {
                 models,
                 pooled,
                 alias,
+                check: _check,
             } = prepared;
             let mut auth_err: Option<ExecError> = None;
             let mut did_refresh = false;
@@ -1302,6 +1323,7 @@ impl Manager {
                         None,
                         Box::pin(futures_util::stream::empty()),
                         &alias,
+                        prepared.check.clone(),
                     ));
                 }
                 Bootstrap::Open { first, rest } => {
@@ -1313,6 +1335,7 @@ impl Manager {
                         Some(first),
                         rest,
                         &alias,
+                        prepared.check.clone(),
                     ));
                 }
             }
@@ -1328,7 +1351,9 @@ impl Manager {
 
     /// Hands the stream on from its first chunk, rewriting the model when the
     /// alias says so, and records its outcome when it ends (upstream's
-    /// `wrapStreamResult`).
+    /// `wrapStreamResult`). A quota check the call makes is held until the
+    /// stream's outcome is recorded.
+    #[allow(clippy::too_many_arguments)]
     fn wrap_stream(
         &self,
         auth: Arc<Auth>,
@@ -1337,6 +1362,7 @@ impl Manager {
         first: Option<Bytes>,
         mut rest: ChunkStream,
         alias: &AliasResult,
+        check: Option<Arc<CheckClaim>>,
     ) -> StreamResponse {
         let (tx, rx) = mpsc::channel(1);
         let rewriter = (alias.force_mapping && !alias.original_alias.trim().is_empty())
@@ -1352,6 +1378,7 @@ impl Manager {
             rewriter,
             failed: false,
             tx,
+            _check: check,
         };
         // The task keeps the request's span, so what the provider's stream
         // logs shows the request's ID.
@@ -1426,6 +1453,8 @@ struct Forwarder {
     rewriter: Option<StreamRewriter>,
     failed: bool,
     tx: mpsc::Sender<Result<Bytes, ExecError>>,
+    /// The quota check the stream makes, released when the task ends.
+    _check: Option<Arc<CheckClaim>>,
 }
 
 impl Forwarder {

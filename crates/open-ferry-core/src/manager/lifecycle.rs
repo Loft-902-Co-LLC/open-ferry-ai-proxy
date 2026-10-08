@@ -61,6 +61,8 @@
 //! - The cooldown state store is told after every change that may move a
 //!   cooldown, where upstream saves only when the records changed; the
 //!   store compares (see [`super::cooldown_store`]).
+//! - A recorded outcome also moves open-ferry's capped quota rests, and
+//!   `reset_quota` forgets them (see `super::quota_check`).
 //! - Not ported: hooks, the scheduler index, API-key model alias rebuilds,
 //!   plugin virtual credentials, the Meta key mint save inside the lock
 //!   and result policies.
@@ -654,7 +656,13 @@ impl Manager {
             }
             let auth = Arc::make_mut(&mut entry.auth);
             count_result(auth, result, now);
+            // open-ferry's cap on long quota rests (see `quota_check`).
+            state.quota_checks.before_result(auth);
             apply_result(&state.settings, auth, result, &model_key, now);
+            let cap = state.settings.quota_check_after;
+            state
+                .quota_checks
+                .after_result(cap, auth, result, &model_key, now);
             auth.updated_at = Some(now);
             auth.generation = auth.generation.saturating_add(1);
             let committed = (
@@ -725,12 +733,14 @@ impl Manager {
             .collect();
         let gate = self.mutation_gate();
         let (snapshot, models, epoch, generation) = {
-            let mut state = self.lock();
+            let mut guard = self.lock();
+            let state = &mut *guard;
             let Some(entry) = state.auths.get_mut(id) else {
                 return Ok(None);
             };
             let auth = Arc::make_mut(&mut entry.auth);
             let (models, cleared) = reset_quota(auth, &registered, now);
+            state.quota_checks.forget(id);
             let bumps = if cleared { 2 } else { 1 };
             auth.generation = auth.generation.saturating_add(bumps);
             let committed = (
