@@ -808,6 +808,23 @@ Where it differs from upstream:
 
 Tests: none are upstream's. The subcommands' tests use temporary directories and ports on 127.0.0.1 that nothing listens on, and check the keys' shape without printing them. `service`'s tests run every command and file change through a recording fake, so none reaches a real service manager, and check the definitions it writes against their text.
 
+## Added in open-ferry: commands and an MCP server for agents
+
+Upstream has no counterpart. `open-ferry status`, `config`, `keys`, `credentials` and `clients` look at and change a setup, and `open-ferry mcp` serves the same commands as the tools of a Model Context Protocol server ([docs/cli.md](docs/cli.md#looking-at-and-changing-a-setup), [docs/mcp.md](docs/mcp.md)). They are `open-ferry`'s `agent` module: one action per command, which the command line and the MCP server both call, with the same inputs and the same JSON.
+
+- **The server** (`agent::target`): the config's management address, `management.separate-address`, else `server.host` and `server.port`, tried on loopback only. The management key is the config's `management.secret-key` when it is plain, else `MANAGEMENT_PASSWORD`, else a key file's first line, never an argument. They call the management API with the TUI's client (`open_ferry_tui::ManagementClient`), and check it with `GET /v0/management/debug`.
+- **Changes** (`agent::change`): with a server reached, through its routes: `PUT`, `PATCH` and `DELETE` of `/v8/management/config/<path>` and `PUT /v8/management/config.yaml` for settings, and `/v0/management/api-keys` for a client key, which the server saves under its write lock. With none, in the file, with `open_ferry_core::config::v8_edit::edit_v8`, the v8 routes' writer. Either way the change is first made on a copy (`v8_edit::preview_v8`, open-ferry's own) and compared with the file, to report it and to see whether it needs a confirmation. Paths are checked against `v8_edit::known_v8_paths`.
+- **Undo**: the dashboard API's `POST /open-ferry/api/v1/config/undo`, open-ferry's own, swaps the config and its `.bak` under the management write lock and reloads the config ([docs/dashboard-api.md](docs/dashboard-api.md#post-open-ferryapiv1configundo)). With no server, the command swaps them itself.
+- **Credentials** go through upstream's routes: `auth-files`, `auth-files/status`, `reset-quota`, the deletion of an `auth-files` entry, and the logins, `codex-auth-url`, `anthropic-auth-url`, `get-auth-status` and `oauth-session`; and the dashboard API's `claude-cli/entries`.
+- **Guardrails** (`agent::guard`) and **masking** (`agent::mask`): deleting, revealing, replacing the whole config and changing a sensitive setting need a confirmation; client keys are masked as the dashboard's usage masks them (`open_ferry_dashboard::mask_client_key`), headers, URLs and email addresses as the request log masks them, and every secret of the setup is then scrubbed from the output.
+- **The MCP server** (`agent::mcp`) uses `rmcp`, the official Rust SDK, on standard input and output: one tool per command, with annotations, the command's JSON as structured content, and `docs/agents.md` and the masked config as resources.
+
+Where it differs from upstream:
+
+- **More subcommands.** As with `init`, `check` and `service`, each of these as the first argument runs that command, where upstream would serve. With a flag first, the command line is read as upstream reads it.
+
+Tests: none are upstream's. They write configs in temporary directories, serve the management and dashboard APIs in-process on 127.0.0.1 ports the system picks with dummy keys, make a closed port with a bound `TcpSocket` that doesn't listen, and talk to the MCP server over in-memory pipes and to `open-ferry mcp` as a child process.
+
 ## Added in open-ferry: a management address of its own
 
 Upstream has no counterpart: its management API and control panel are served on the proxy's port, beside the proxy's routes. open-ferry's `management.separate-address` (`remote-management.separate-address` in the legacy layout) serves the management API, the dashboard and the dashboard API on a listener of their own, so the proxy's port doesn't have those routes at all. It is a `host:port` string, empty by default, which leaves everything on the proxy's port as before: `127.0.0.1:8318`, `[::1]:8318`, `localhost:8318`, or `:8318` for every interface. Loading trims it and refuses a config whose value has no port, a port of 0 or `server.port`'s, an IPv6 address without brackets, or a URL (`config::management_address` in `open-ferry-core`). open-ferry's config writer keeps it, moving it with the other `management` settings when it moves a file to the v8 layout, the v8 edits take it, and a reload logs its change.

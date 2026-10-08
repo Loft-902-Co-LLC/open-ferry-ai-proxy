@@ -1,10 +1,11 @@
 # Setting up from the command line: `init`, `check` and `service`
 
-open-ferry takes CLIProxyAPI's flags ([migration guide](migrating-from-cliproxyapi.md#the-command-line)), and adds three subcommands of its own:
+open-ferry takes CLIProxyAPI's flags ([migration guide](migrating-from-cliproxyapi.md#the-command-line)), and adds subcommands of its own:
 
 - **`open-ferry init`** writes a starting config, with new keys.
 - **`open-ferry check`** looks over a setup before you start the proxy, and says how to fix what it finds.
 - **`open-ferry service`** installs open-ferry as a background service, started when you log in or at boot and again when it fails, and removes it.
+- **`open-ferry status`, `config`, `keys`, `credentials`, `clients` and `mcp`** look at a setup and change it, for you or a coding agent ([below](#looking-at-and-changing-a-setup)).
 
 A subcommand is read only as the first argument, and the flags after it are its own; `open-ferry init -h`, `open-ferry check -h` and `open-ferry service -h` list them. With a flag first, the command line is read as before: `open-ferry -h init` prints the server's usage. CLIProxyAPI has no subcommands: it ignores a first argument that isn't a flag, and serves.
 
@@ -257,6 +258,253 @@ A service doesn't start from your shell, so it doesn't get your shell's environm
 | 0 | It did what was asked: the service was installed, removed or shown, or a dry run printed its plan. Also for `-h` |
 | 1 | It didn't: the config is missing or doesn't load, the service is already installed (for `install`) or isn't (for `uninstall` and `status`), it needs root or an administrator, a path or the auth directory is refused for `-system`, or a command failed. A line on standard error starting `service:` says why |
 | 2 | Bad usage: no action or an unknown one, a flag the action doesn't take, or an argument after the flags. The usage follows on standard error |
+
+## Looking at and changing a setup
+
+These commands look at a setup and change it, for you or for a coding agent, without editing the YAML or calling the management API by hand: `status`, `config`, `keys`, `credentials` and `clients`, and `mcp`, which serves the same actions as MCP tools ([docs/mcp.md](mcp.md)). CLIProxyAPI has none of them. [docs/agents.md](agents.md#look-at-it-and-change-it-the-commands-and-the-mcp-server) is the short version.
+
+```
+open-ferry status
+open-ferry config get|set|unset|show|diff|undo|replace ...
+open-ferry keys list|add|remove ...
+open-ferry credentials list|enable|disable|reset-quota|remove|login ...
+open-ferry clients setup <client> ...
+open-ferry mcp
+```
+
+`open-ferry <command> --help` lists them all with their flags. A flag takes one dash or two (`-json`, `--json`), with its value after `=` or as the next argument; `--` ends the flags.
+
+### Flags every command takes
+
+| Flag | What it does |
+|---|---|
+| `--config PATH` | The config to work on. By default `config.yaml` in the working directory, else the installed config path (see [`init`](#open-ferry-init)) |
+| `--management-key-file PATH` | A file whose first line is the management key (see [The management key](#the-management-key)) |
+| `--json` | Print one JSON object on standard output, the same one the MCP tool returns, instead of text. A failure is printed as JSON on standard output too |
+| `--yes`, `-y` | Go ahead with a change that needs a confirmation (see [What needs `--yes`](#what-needs---yes)) |
+| `--help`, `-h` | Print the usage |
+
+Like the proxy, they first load the `.env` file in the working directory, so a `MANAGEMENT_PASSWORD` there counts.
+
+### How they reach the server
+
+- **A server running for the config** is looked for at its management address: `management.separate-address` when it is set, else `server.host` and `server.port`, with `https` while `server.tls.enable` is on. Only loopback is tried: an empty host, `0.0.0.0` and `::` are reached on loopback, `localhost` on `127.0.0.1` and `::1`. A host name isn't looked up and an address that isn't loopback isn't tried, so the management key is never sent off the machine.
+- **While one runs and takes the key**, a change goes through its management API: the server checks it, saves it with its config writer and applies it at once, as it does one made in the dashboard. The server is the only writer then, so a change here and one in the dashboard don't lose each other.
+- **With no server**, with its management API off, or with no key to call it with, `config` and `keys` change the file with the same checks and the same writer. A server watching the file loads the change; one started later reads it. `credentials` needs the server, and says so with exit code 4 and how to start it.
+- **A server that refuses the key** stops the command, with nothing changed: each refusal counts towards the server's ban of an address after five failed attempts in thirty minutes.
+- `config get`, `show` and `diff`, and `keys list`, read the file, which is what the server runs once it has loaded it.
+
+Every write of the config keeps the file it replaces as `<config>.bak`, by these commands, the dashboard or the management API alike. Every change prints each setting it changed, with its old and new value masked, and that `open-ferry config undo` reverses it.
+
+### The management key
+
+A command that calls the server looks for the management key in this order:
+
+1. the config's `management.secret-key`, when it is stored plain, not as the bcrypt hash the server makes of it when `management.secret-key-hashing` is on;
+2. `MANAGEMENT_PASSWORD`, from the environment or `.env`;
+3. the first line of the file `--management-key-file` names, else of the file `OPEN_FERRY_MANAGEMENT_KEY_FILE` names.
+
+The key is never taken from the command line, where process lists, shell history and agent transcripts would keep it: `--management-key`, `--management-password`, `--password`, `--secret-key` and `--api-key` are refused with exit code 2. With a hashed key in the config and no other, the settings commands change the file and the others say there is no key.
+
+### What needs `--yes`
+
+- deleting a credential (`credentials remove`) or a client key (`keys remove`);
+- showing a secret in full (`keys list --reveal`, `clients setup --reveal`);
+- replacing the whole config (`config replace`);
+- a Claude sign-in (`credentials login claude`), which goes against Anthropic's terms ([why](claude-subscription.md#the-claude-sign-in));
+- a change to a sensitive setting, by `config set`, `unset`, `replace` or `undo`, or `keys remove`:
+  - `management.allow-remote`, `management.secret-key` and `management.separate-address`;
+  - `server.host`, set to anything but `localhost` or a loopback address, or unset;
+  - anything under `server.tls`;
+  - removing the last client key in `access.api-keys`.
+
+At a terminal, such a command asks, and goes ahead on `y`. When standard input or standard error isn't a terminal, as in a script or an agent's shell, or with `--from-stdin`, it changes nothing, exits with 3, and says what it would change:
+
+```
+Setting server.host needs --yes: server.host would be 0.0.0.0, which isn't loopback, so the proxy listens beyond this machine. Nothing was changed.
+It would change:
+  server.host: "127.0.0.1" -> "0.0.0.0"
+to go ahead, run it again with --yes
+```
+
+With `--json`, the same is `{"error": "needs_confirmation", "message": ..., "hint": ..., "would": {"changes": [{"path": "server.host", "old": "127.0.0.1", "new": "0.0.0.0"}], "reasons": [...]}}`.
+
+### Secrets in what they print
+
+Nothing they print holds a secret they weren't asked to show. Client keys, the management key, provider API keys, tokens and passwords are masked as the dashboard masks a client key (`sk-...mnop`: the last few characters, and the first three of a long one); a URL's user and password become `***`; email addresses are masked (`s***@e***.com`). Then every secret of the config, `MANAGEMENT_PASSWORD` and the key file is replaced by `[redacted]` wherever it still appears.
+
+A secret is never taken as an argument: `config set` reads one from standard input (`--from-stdin`) or a file (`--from-file`), and refuses one given inline with exit code 2. A value is a secret when its key names one (`secret-key`, `api-key`, `token`, `password` and the like), or when it holds one, as a provider's list of keys does.
+
+### Exit codes
+
+| Code | When |
+|---|---|
+| 0 | Done, or nothing needed changing. Also for `--help` |
+| 1 | It failed or was refused: the server or the writer refused the change (`invalid_value`), the key was refused (`unauthorized`), a credential or key wasn't found, the file couldn't be read or written. Nothing was changed unless the output says so |
+| 2 | Bad usage (`usage`): an unknown command or flag, or an unknown setting (`unknown_path`, with the nearest known one), or a secret given as an argument (`secret_in_argument`) |
+| 3 | It needs `--yes` and didn't get it (`needs_confirmation`), or you answered no (`declined`). Nothing was changed |
+| 4 | It needs the server, which isn't running (`not_running`); `status` exits with 4 when no server runs |
+
+A failure prints its message and a hint on standard error; with `--json`, `{"error": <code>, "message": ..., "hint": ...}` on standard output.
+
+### `open-ferry status`
+
+```
+open-ferry status [--config PATH] [--json]
+```
+
+Whether a server runs for the config, and how it is: its version, addresses, whether the management API took the key and where the key came from, its credentials by state, today's calls and errors (from the usage ledger), and the number of client keys. With no server, it says why and what the config holds, and exits with 4.
+
+```
+Config: /home/you/.config/open-ferry/config.yaml
+Server: running, version 0.1.0
+Proxy address: http://127.0.0.1:8317
+Management API: reached with the key from the config's management.secret-key
+Credentials: 3 (2 ready, 1 resting)
+Calls today: 412 (3 errors)
+Client keys: 1
+```
+
+```json
+{
+  "config": "/home/you/.config/open-ferry/config.yaml",
+  "running": true,
+  "version": "0.1.0",
+  "address": "http://127.0.0.1:8317",
+  "management_address": "http://127.0.0.1:8317",
+  "management": "ok",
+  "key_source": "config",
+  "credentials": {"ready": 2, "resting": 1},
+  "calls_today": {"requests": 412, "errors": 3},
+  "client_keys": 1
+}
+```
+
+`management` is `ok`, `no_key` (no key to call it with), `off` (the server has no management key) or `refused`; `key_source` is `config`, `MANAGEMENT_PASSWORD` or `key-file`. What it couldn't find out, such as today's calls when the usage ledger is off, is under `notes`. With no server, it prints `"running": false` and a `reason`, such as `nothing answers at http://127.0.0.1:8317`.
+
+### `open-ferry config`
+
+```
+open-ferry config get <path>
+open-ferry config set <path> <value> | --from-stdin | --from-file FILE [--string]
+open-ferry config unset <path>
+open-ferry config show
+open-ferry config diff
+open-ferry config undo
+open-ferry config replace --from-stdin | --from-file FILE
+```
+
+A path is the v8 config's, as the `/v8/management/config/` route and the dashboard's Settings page take it: keys joined by dots, such as `routing.strategy`, `server.port`, `routing.quota.prefer` or `access.api-keys`, or by `/` when a key holds a dot. CLIProxyAPI's settings and open-ferry's own are reached the same way. An unknown path is refused with exit code 2 and the nearest known one (`did you mean routing.strategy?`). A list is set whole, not one item at a time.
+
+- **`get`** prints a setting, masked; a mapping as YAML. When it isn't set, it says so, with the default the server uses when it has one (`"set": false` and `"default"` in the JSON).
+- **`set`** takes the value as YAML or JSON (`true`, `5`, `[a, b]`, `{"x": 1}`), or as a string, as it is, with `--string`. The server checks it as it checks a change from the dashboard; a value it would refuse is refused before anything is written. A secret must come with `--from-stdin` or `--from-file`.
+- **`unset`** removes a setting, so its default applies.
+- **`show`** prints the whole config, masked, as YAML (as JSON under `settings` with `--json`).
+- **`diff`** prints what the last change made: each setting that differs between `<config>.bak` and the config.
+- **`undo`** puts `<config>.bak` back, and keeps the config it replaces as the new `.bak`, so running it again redoes the change. With a server running, it goes through the dashboard API's `POST /open-ferry/api/v1/config/undo`, under the lock every management write takes. There is one backup, so it goes back one write.
+- **`replace`** replaces the whole config with the YAML read from standard input or a file, after the same checks. It always needs `--yes`.
+
+```
+$ open-ferry config set routing.strategy fill-first
+Setting routing.strategy: done, through the running server.
+  routing.strategy: (not set) -> "fill-first"
+Undo it with `open-ferry config undo`.
+$ open-ferry config undo
+Undid the last change: through the running server.
+  routing.strategy: "fill-first" -> (not set)
+Run `open-ferry config undo` again to redo it.
+```
+
+With `--json`, a change prints:
+
+```json
+{
+  "action": "set",
+  "path": "routing.strategy",
+  "changed": true,
+  "via": "server",
+  "changes": [{"path": "routing.strategy", "new": "fill-first"}],
+  "undo": "Undo it with `open-ferry config undo`."
+}
+```
+
+`via` is `server` or `file`; a change made in the file has a `note` that says why. `changes` lists each setting it changed, with `old` and `new` masked, and leaves `old` or `new` out when the setting wasn't or isn't set. A change to what the config already holds prints `Nothing to change: the config already holds that.`, with `"changed": false`.
+
+### `open-ferry keys`
+
+```
+open-ferry keys list [--reveal]
+open-ferry keys add --generate [--to-file FILE] | --from-stdin | --from-file FILE
+open-ferry keys remove <index> | --from-stdin | --from-file FILE
+```
+
+The client keys in `access.api-keys`, which clients send as their API key.
+
+- **`list`** prints them masked, with their indexes. `--reveal --yes` prints them in full.
+- **`add --generate`** makes a new key as `init` does (`sk-` and 32 random bytes in URL-safe base64), adds it, and prints it once, since you need it to set up a client. `--to-file FILE` writes it to `FILE` instead, which mustn't exist and which, on Linux and macOS, only you can read. `--from-stdin` and `--from-file` add a key you have.
+- **`remove`** removes a key by its index from `list`, or the key read from standard input or a file. It needs `--yes`.
+
+```
+$ open-ferry keys list
+1 client key in access.api-keys, masked:
+  0  sk-...mnop
+$ open-ferry keys add --generate
+Adding a client key: done, through the running server.
+  access.api-keys: ["sk-...mnop"] -> ["sk-...mnop","sk-...ghmE"]
+Undo it with `open-ferry config undo`.
+The new client key, shown this once, so keep it now:
+  sk-<the new key>
+```
+
+With `--json`, `list` prints `{"count": 1, "keys": [{"index": 0, "key": "sk-...mnop"}], "revealed": false}`, and `add` adds `index`, `masked` and `key` (or `key_file`) to a change's fields.
+
+The first change a running server saves can also write the settings it was using at their defaults into the file, which `changes` lists, with a note; that doesn't change what the server does.
+
+### `open-ferry credentials`
+
+```
+open-ferry credentials list [--state STATE] [--provider PROVIDER]
+open-ferry credentials enable <credential>
+open-ferry credentials disable <credential>
+open-ferry credentials reset-quota <credential>
+open-ferry credentials remove <credential>
+open-ferry credentials login codex|claude [--no-wait] [--state STATE]
+```
+
+The running server's credentials: its sign-ins and its API keys. Each needs the server. `<credential>` is a credential's `auth_index` from `list`, or its name.
+
+- **`list`** prints, as the dashboard's Credentials page shows them, each credential's state, provider, `auth_index`, name and account (masked), cooldowns, quota and priority. A state is `ready`, `resting` (cooling down), `failing`, `refreshing`, `waiting`, `off` (disabled) or `unknown`.
+- **`enable`** and **`disable`** turn a credential on or off; it is kept, and `disable` is reversed by `enable`.
+- **`reset-quota`** clears a credential's cooldowns and quota state, so it can be picked again at once.
+- **`remove`** deletes the credential's file. It needs `--yes`, and `config undo` doesn't bring it back.
+- **`login codex`** starts a ChatGPT sign-in through the server, prints the address to open in a browser, and waits for it to finish, for up to five minutes; Ctrl-C cancels it. `--no-wait` prints the address and a `state` and returns; `--state STATE` waits for that sign-in. A sign-in still going when the wait ends exits with 1 and says how to wait again. `login claude` needs `--yes`, as signing in to Claude that way goes against Anthropic's terms; use [`claude-cli`](claude-subscription.md) instead, which signs in with your own Claude Code, never from here.
+
+```
+$ open-ferry credentials list
+ready      codex        870dd779bc223fa9   codex-s***@e***.com.json  s***@e***.com
+1 credential(s): 1 ready
+$ open-ferry credentials disable 870dd779bc223fa9
+codex-s***@e***.com.json is disabled.
+Reverse it with `open-ferry credentials enable 870dd779bc223fa9`.
+```
+
+With `--json`, `list` prints `{"count": 1, "counts": {"ready": 1}, "credentials": [{"name": ..., "auth_index": ..., "provider": "codex", "account": "s***@e***.com", "state": "ready", "disabled": false, "source": "file", ...}]}`, and `disable` prints `{"action": "disable", "credential": ..., "auth_index": ..., "changed": true, "disabled": true, "undo": ...}`.
+
+### `open-ferry clients setup`
+
+```
+open-ferry clients setup <client> [--model MODEL] [--shell posix|powershell] [--key-index N] [--reveal]
+```
+
+Prints what the dashboard's client setups give for `<client>`, one of `openai-python`, `openai-node`, `codex`, `claude-code` and `curl`: the base URL, the environment variables, and the config snippet or sample request, with a model the server serves (else `--model`, else `<model>`) and the client key masked. `--reveal --yes` fills the key in. It only prints: it never writes another program's config, such as `~/.codex` or `~/.claude`. With no server running, it works from the config alone.
+
+### `open-ferry mcp`
+
+```
+open-ferry mcp [--config PATH] [--management-key-file PATH]
+```
+
+Serves these commands as tools to an agent's app over the Model Context Protocol, on standard input and output; see [docs/mcp.md](mcp.md). It logs nothing on standard output, which carries the protocol, and ends when its input does.
 
 ## The terminal UI
 
