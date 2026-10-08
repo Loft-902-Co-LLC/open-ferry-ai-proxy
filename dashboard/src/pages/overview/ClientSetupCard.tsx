@@ -192,6 +192,11 @@ const DESCRIPTION =
 export interface ClientSetupCardProps {
   /** Opened from CLIProxyAPI's safe-mode page: bring the key setup into view. */
   focusKeys?: boolean;
+  /**
+   * Start closed, behind its title, for a proxy that is set up. It opens by
+   * itself for `focusKeys`, and stays open in safe mode.
+   */
+  collapsible?: boolean;
 }
 
 /**
@@ -199,7 +204,7 @@ export interface ClientSetupCardProps {
  * client key, a tab per client, and its setup to copy. The address, model
  * and shell are already chosen, and wait behind their own disclosure.
  */
-export function ClientSetupCard({ focusKeys = false }: ClientSetupCardProps) {
+export function ClientSetupCard({ focusKeys = false, collapsible = false }: ClientSetupCardProps) {
   const call = useApiCall();
   const client = useQueryClient();
   const [address, setAddress] = useState<string | null>(null);
@@ -209,7 +214,9 @@ export function ClientSetupCard({ focusKeys = false }: ClientSetupCardProps) {
   const [shell, setShell] = useState<Shell>(defaultShell);
   const [reveal, setReveal] = useState(false);
   const [tab, setTab] = useState("openai-python");
+  const [opened, setOpened] = useState(focusKeys);
   const [choicesOpen, setChoicesOpen] = useState(false);
+  const bodyId = useId();
   const choicesId = useId();
   const makeHintId = useId();
 
@@ -302,6 +309,10 @@ export function ClientSetupCard({ focusKeys = false }: ClientSetupCardProps) {
 
   const loaded = setup.data !== undefined;
   const safeMode = setup.data?.safe_mode === true;
+  // Safe mode, and the news that it has lifted, stay in view: there's
+  // nothing to close while the proxy refuses every request.
+  const collapsed = collapsible && !safeMode && !replaceExamples.isSuccess;
+  const open = !collapsed || opened;
   // Opened from the safe-mode page: once the setup shows, take the user to it.
   const focused = useRef(false);
   useEffect(() => {
@@ -315,8 +326,30 @@ export function ClientSetupCard({ focusKeys = false }: ClientSetupCardProps) {
 
   const frame = (content: ReactNode) => (
     <div ref={card} className="scroll-mt-4">
-      <Card title={TITLE} description={DESCRIPTION}>
-        {content}
+      <Card
+        title={
+          collapsed ? (
+            <DisclosureButton
+              open={open}
+              controls={bodyId}
+              onToggle={() => {
+                setOpened(!open);
+              }}
+            >
+              {TITLE}
+            </DisclosureButton>
+          ) : (
+            TITLE
+          )
+        }
+        description={DESCRIPTION}
+        className={open ? undefined : "[&>header]:border-b-0"}
+      >
+        {open ? (
+          <div id={bodyId} className="space-y-4">
+            {content}
+          </div>
+        ) : undefined}
       </Card>
     </div>
   );

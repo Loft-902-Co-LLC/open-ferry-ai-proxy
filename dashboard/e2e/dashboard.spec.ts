@@ -115,6 +115,7 @@ test("renders every screen under the policy", async ({ page }) => {
   await shot(page, "01-sign-in");
   await signIn(page);
 
+  await page.getByRole("button", { name: "Connect a client" }).click();
   await expect(page.getByLabel("The OpenAI SDK (Python) setup", { exact: true })).toContainText(
     `base_url="${APP_ORIGIN}/v1"`,
   );
@@ -229,6 +230,7 @@ test("renders the screens in dark mode under the policy too", async ({ page }) =
   await page.emulateMedia({ colorScheme: "dark" });
   const watched = await watch(page);
   await signIn(page);
+  await page.getByRole("button", { name: "Connect a client" }).click();
   await expect(page.getByLabel("The OpenAI SDK (Python) setup", { exact: true })).toBeVisible();
   await shot(page, "11-overview-dark");
   await page.goto("usage");

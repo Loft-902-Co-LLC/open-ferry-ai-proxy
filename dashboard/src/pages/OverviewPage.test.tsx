@@ -2,8 +2,14 @@ import { screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import { AUTH_FILES, KEY_LISTS, type Credential } from "../api/credentials";
-import { CLAUDE_CLI_ENTRIES, CLIENT_SETUP, type ClientSetup } from "../api/dashboard";
-import { API_KEYS } from "../api/management";
+import {
+  CLAUDE_CLI_ENTRIES,
+  CLIENT_SETUP,
+  USAGE_LEDGER,
+  USAGE_SUMMARY,
+  type ClientSetup,
+} from "../api/dashboard";
+import { API_KEYS, USAGE_STATISTICS_ENABLED } from "../api/management";
 import { EXAMPLE_API_KEYS } from "../app/safeMode";
 import {
   claudeCliCredential,
@@ -12,14 +18,23 @@ import {
   cooldown,
   credential,
   credentialList,
+  ledger,
+  metrics,
+  summary,
+  unavailableLedger,
 } from "../test/fixtures";
 import { mockApi, route, type MockApi } from "../test/mockApi";
 import { renderApp } from "../test/renderApp";
+import { FAILED_CALLS_LINK, startOfDay } from "./overview/TodayCard";
 
 const KEY = "sk-test-client-key-0001";
 const OTHER_KEY = "sk-test-client-key-0002";
 const PYTHON = "The OpenAI SDK (Python) setup";
 const NEW_KEY = /^sk-[A-Za-z0-9_-]{43}$/;
+/** A ledger that records, and holds no call yet: the proxy isn't set up. */
+const NO_CALLS = ledger({ rows: 0, oldest: null, newest: null });
+/** A ledger with calls in it: the proxy is set up. */
+const SOME_CALLS = ledger();
 
 /** The key list routes, as GET answers them when they are empty. */
 const NO_PROVIDER_KEYS = Object.values(KEY_LISTS).map(({ list, path }) =>
@@ -36,6 +51,7 @@ interface Server {
 /**
  * A server with `keys` and `setup`, whose key list changes as PATCH, DELETE
  * and PUT change it, and which leaves safe mode once no example key is left.
+ * Its usage ledger holds no call, so the page shows the setup first.
  */
 function server(
   keys: string[],
@@ -47,6 +63,8 @@ function server(
     route("GET", AUTH_FILES, { json: credentialList(credentials) }),
     ...NO_PROVIDER_KEYS,
     route("GET", CLAUDE_CLI_ENTRIES, { json: { entries: [] } }),
+    route("GET", USAGE_LEDGER, { json: NO_CALLS }),
+    route("GET", USAGE_SUMMARY, { json: summary() }),
     route("GET", CLIENT_SETUP, () => ({
       json: {
         ...state.setup,
@@ -76,6 +94,13 @@ function server(
   return state;
 }
 
+/** The same server, set up: a client has called it. */
+function setUpServer(keys: string[] = [KEY], setup: Partial<ClientSetup> = {}): Server {
+  const state = server(keys, setup);
+  state.api.use(route("GET", USAGE_LEDGER, { json: SOME_CALLS }));
+  return state;
+}
+
 async function setupCode(name = PYTHON): Promise<HTMLElement> {
   return screen.findByLabelText(name);
 }
@@ -83,6 +108,11 @@ async function setupCode(name = PYTHON): Promise<HTMLElement> {
 /** Shows the address, model and shell, which start hidden. */
 async function openChoices(user: ReturnType<typeof renderApp>["user"]): Promise<void> {
   await user.click(screen.getByRole("button", { name: "Address, model and shell", expanded: false }));
+}
+
+/** The names of the page's cards, in order. */
+function cardTitles(): string[] {
+  return screen.getAllByRole("heading", { level: 2 }).map((heading) => heading.textContent);
 }
 
 describe("connecting a client", () => {
@@ -293,6 +323,7 @@ describe("making a client key", () => {
         API_KEYS,
         AUTH_FILES,
         CLAUDE_CLI_ENTRIES,
+        USAGE_LEDGER,
         ...Object.values(KEY_LISTS).map(({ path }) => path),
       ]),
     );
@@ -516,5 +547,279 @@ describe("safe mode", () => {
     await waitFor(() => {
       expect(screen.getByLabelText("Client key")).toHaveFocus();
     });
+  });
+});
+
+describe("the page's layout", () => {
+  it("leads with the setup, open, while no client has called", async () => {
+    const { api } = server([KEY]);
+    renderApp("/");
+    await setupCode();
+    expect(screen.getByText("Connect providers and clients to this proxy.")).toBeVisible();
+    const titles = cardTitles();
+    expect(titles).not.toContain("Today");
+    expect(titles.at(-1)).toBe("Connect a client");
+    // Open, with nothing to close it with.
+    expect(screen.queryByRole("button", { name: "Connect a client" })).toBeNull();
+    expect(api.callsTo("GET", USAGE_SUMMARY)).toEqual([]);
+  });
+
+  it("leads with the setup on a first run, whatever the ledger holds", async () => {
+    const { api } = server([KEY], {}, []);
+    api.use(route("GET", USAGE_LEDGER, { json: SOME_CALLS }));
+    renderApp("/");
+    await setupCode();
+    expect(cardTitles()).not.toContain("Today");
+  });
+
+  it("leads with today's calls once a client has called, the setup closed", async () => {
+    const { api } = setUpServer();
+    renderApp("/");
+    expect(await screen.findByText("How the proxy is doing today.")).toBeVisible();
+    const titles = cardTitles();
+    expect(titles[0]).toBe("Today");
+    expect(titles.at(-1)).toBe("Connect a client");
+    const toggle = screen.getByRole("button", { name: "Connect a client", expanded: false });
+    expect(toggle).not.toHaveAttribute("aria-controls");
+    expect(screen.getByRole("region", { name: "Connect a client" })).toHaveTextContent(
+      "Ready-made setups for common clients",
+    );
+    expect(screen.queryByLabelText(PYTHON)).toBeNull();
+    await screen.findByText("1,520");
+    expect(api.unhandled).toEqual([]);
+  });
+
+  it("opens the client setup from its title, and closes it again", async () => {
+    setUpServer();
+    const { user } = renderApp("/");
+    const toggle = await screen.findByRole("button", { name: "Connect a client", expanded: false });
+    toggle.focus();
+    await user.keyboard("{Enter}");
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    const python = await setupCode();
+    expect(document.getElementById(toggle.getAttribute("aria-controls") ?? "")).toContainElement(
+      python,
+    );
+    expect(screen.getByRole("button", { name: "Make a new key" })).toBeVisible();
+
+    await user.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByLabelText(PYTHON)).toBeNull();
+  });
+
+  it("leads with the setup in safe mode, whatever the ledger holds", async () => {
+    setUpServer([...EXAMPLE_API_KEYS], { safe_mode: true });
+    renderApp("/");
+    expect(await screen.findByText("The proxy is in safe mode")).toBeVisible();
+    expect(cardTitles()).not.toContain("Today");
+  });
+
+  it("opens the setup and takes the user to the key when sent from the safe-mode page", async () => {
+    setUpServer();
+    renderApp("/?safe-mode=configure");
+    expect(await screen.findByText("The proxy isn't in safe mode")).toBeVisible();
+    expect(cardTitles()[0]).toBe("Today");
+    expect(screen.getByRole("button", { name: "Connect a client", expanded: true })).toBeVisible();
+    await waitFor(() => {
+      expect(screen.getByLabelText("Client key")).toHaveFocus();
+    });
+  });
+
+  it("goes by the client keys when the server keeps no usage", async () => {
+    const { api } = server([KEY]);
+    api.use(route("GET", USAGE_LEDGER, { status: 404 }));
+    renderApp("/");
+    expect(await screen.findByText("How the proxy is doing today.")).toBeVisible();
+    expect(
+      screen.getByText("This server doesn't keep usage, so there's none to show."),
+    ).toBeVisible();
+    expect(api.callsTo("GET", USAGE_SUMMARY)).toEqual([]);
+  });
+
+  it("goes by the client keys while recording is off", async () => {
+    const { api } = server([KEY]);
+    api.use(
+      route("GET", USAGE_LEDGER, {
+        json: ledger({
+          rows: 0,
+          oldest: null,
+          newest: null,
+          recording: false,
+          usage_statistics_enabled: false,
+        }),
+      }),
+    );
+    renderApp("/");
+    expect(await screen.findByText("How the proxy is doing today.")).toBeVisible();
+    expect(screen.getByText("Usage isn't being recorded")).toBeVisible();
+  });
+
+  it("stays as it is while the user makes the first client key", async () => {
+    const { api } = server([]);
+    api.use(route("GET", USAGE_LEDGER, { status: 404 }));
+    const { user } = renderApp("/");
+    await setupCode();
+    expect(screen.getByText("Connect providers and clients to this proxy.")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Make a new key" }));
+    expect(await screen.findByText(/^Added a client key\./)).toBeVisible();
+    // With a key, the next visit leads with health; this one doesn't move.
+    expect(cardTitles()).not.toContain("Today");
+    expect(screen.getByLabelText(PYTHON)).toBeVisible();
+  });
+});
+
+describe("today's calls", () => {
+  it("counts the calls since midnight, the failed ones and their cost", async () => {
+    const { api } = setUpServer();
+    renderApp("/");
+    const today = await screen.findByRole("region", { name: "Today" });
+    await within(today).findByText("1,520");
+    expect(
+      within(today)
+        .getAllByRole("term")
+        .map((term) => term.textContent),
+    ).toEqual(["Requests", "Failed", "Cost"]);
+    expect(
+      within(today)
+        .getAllByRole("definition")
+        .map((definition) => definition.textContent),
+    ).toEqual([
+      "1,520",
+      "12 (0.8% of requests) See the failed calls",
+      "4.18 USD, an estimate from the prices you set",
+    ]);
+    expect(within(today).getByRole("link", { name: "See the failed calls" })).toHaveAttribute(
+      "href",
+      FAILED_CALLS_LINK,
+    );
+    expect(within(today).getByRole("link", { name: "Open Usage" })).toHaveAttribute(
+      "href",
+      "/usage",
+    );
+    const from = api.callsTo("GET", USAGE_SUMMARY)[0]?.url.searchParams.get("from");
+    expect(from).toBe(startOfDay(Date.now()));
+  });
+
+  it("says how many calls have no price", async () => {
+    const { api } = setUpServer();
+    api.use(
+      route("GET", USAGE_SUMMARY, {
+        json: summary({ totals: metrics({ errors: 0, unpriced_requests: 3 }) }),
+      }),
+    );
+    renderApp("/");
+    const today = await screen.findByRole("region", { name: "Today" });
+    expect(await within(today).findByText(/an estimate from the prices you set/)).toHaveTextContent(
+      "4.18 USD, an estimate from the prices you set; 3 calls have no price",
+    );
+    expect(within(today).queryByRole("link", { name: "See the failed calls" })).toBeNull();
+  });
+
+  it("leaves the cost out while no price is set", async () => {
+    const { api } = setUpServer();
+    api.use(route("GET", USAGE_SUMMARY, { json: summary({ totals: metrics({ cost: null }) }) }));
+    renderApp("/");
+    const today = await screen.findByRole("region", { name: "Today" });
+    await within(today).findByText("1,520");
+    expect(
+      within(today)
+        .getAllByRole("term")
+        .map((term) => term.textContent),
+    ).toEqual(["Requests", "Failed"]);
+  });
+
+  it("says when there have been no calls yet today", async () => {
+    const { api } = setUpServer();
+    api.use(
+      route("GET", USAGE_SUMMARY, {
+        json: summary({ totals: metrics({ requests: 0, errors: 0, cost: 0 }) }),
+      }),
+    );
+    renderApp("/");
+    const today = await screen.findByRole("region", { name: "Today" });
+    expect(await within(today).findByText(/^No calls yet today\. The last was /)).toBeVisible();
+    expect(within(today).queryByRole("term")).toBeNull();
+  });
+
+  it("says it's loading today's numbers", async () => {
+    const { api } = setUpServer();
+    api.use(
+      route(
+        "GET",
+        USAGE_SUMMARY,
+        () =>
+          new Promise<never>(() => {
+            // The answer never comes.
+          }),
+      ),
+    );
+    renderApp("/");
+    const today = await screen.findByRole("region", { name: "Today" });
+    expect(within(today).getByRole("status")).toHaveTextContent("Loading today's usage…");
+  });
+
+  it("says when today's numbers can't be read, and tries again", async () => {
+    const { api } = setUpServer();
+    api.use(route("GET", USAGE_SUMMARY, { status: 500, json: { error: "disk full" } }));
+    const { user } = renderApp("/");
+    const today = await screen.findByRole("region", { name: "Today" });
+    expect(await within(today).findByText("The server failed (HTTP 500)")).toBeVisible();
+
+    api.use(route("GET", USAGE_SUMMARY, { json: summary() }));
+    await user.click(within(today).getByRole("button", { name: "Try again" }));
+    expect(await within(today).findByText("1,520")).toBeVisible();
+  });
+
+  it("says when the ledger can't be read, and tries again", async () => {
+    const { api } = setUpServer();
+    api.use(route("GET", USAGE_LEDGER, { status: 500, json: { error: "disk full" } }));
+    const { user } = renderApp("/");
+    // The client key stands in for a call: there's a key to call with.
+    const today = await screen.findByRole("region", { name: "Today" });
+    expect(await within(today).findByText("The server failed (HTTP 500)")).toBeVisible();
+    expect(api.callsTo("GET", USAGE_SUMMARY)).toEqual([]);
+
+    api.use(route("GET", USAGE_LEDGER, { json: SOME_CALLS }));
+    await user.click(within(today).getByRole("button", { name: "Try again" }));
+    expect(await within(today).findByText("1,520")).toBeVisible();
+  });
+
+  it("says when the ledger couldn't be opened", async () => {
+    const { api } = setUpServer();
+    api.use(route("GET", USAGE_LEDGER, { json: unavailableLedger("disk full") }));
+    renderApp("/");
+    const today = await screen.findByRole("region", { name: "Today" });
+    expect(within(today).getByText("The usage ledger couldn't be opened")).toBeVisible();
+    expect(api.callsTo("GET", USAGE_SUMMARY)).toEqual([]);
+  });
+
+  it("says when usage isn't recorded, and turns recording on", async () => {
+    const { api } = setUpServer();
+    let enabled = false;
+    api.use(
+      route("GET", USAGE_LEDGER, () => ({
+        json: ledger({ recording: enabled, usage_statistics_enabled: enabled }),
+      })),
+      route("PUT", USAGE_STATISTICS_ENABLED, () => {
+        enabled = true;
+        return { json: { status: "ok" } };
+      }),
+    );
+    const { user } = renderApp("/");
+    const today = await screen.findByRole("region", { name: "Today" });
+    const notice = (await within(today).findByText("Usage isn't being recorded")).parentElement;
+    expect(notice).toHaveTextContent("Usage statistics is off, so new calls aren't counted.");
+    expect(within(today).getByRole("link", { name: "Settings" })).toHaveAttribute(
+      "href",
+      "/settings",
+    );
+    // Calls recorded before it went off still count.
+    expect(await within(today).findByText("1,520")).toBeVisible();
+
+    await user.click(within(today).getByRole("button", { name: "Start recording" }));
+    await waitFor(() => {
+      expect(within(today).queryByText("Usage isn't being recorded")).not.toBeInTheDocument();
+    });
+    expect(api.callsTo("PUT", USAGE_STATISTICS_ENABLED)[0]?.json()).toEqual({ value: true });
   });
 });
