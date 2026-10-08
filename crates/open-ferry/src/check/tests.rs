@@ -8,6 +8,8 @@ use tokio::net::{TcpListener, TcpSocket};
 
 use super::*;
 
+mod separate_address;
+
 /// The time the tests take as now.
 fn now() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 10, 7, 12, 0, 0).unwrap()

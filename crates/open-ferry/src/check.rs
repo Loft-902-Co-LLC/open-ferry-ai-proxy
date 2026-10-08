@@ -22,6 +22,9 @@
 //!   found by connecting to loopback, never by binding. A host name or an
 //!   address that isn't loopback isn't checked, as that would be a network
 //!   call;
+//! - the management address, when `management.separate-address` sets one:
+//!   its port, as for the address, and whether `management.allow-remote`
+//!   fits it (see [`management`]);
 //! - the dashboard app is built into this binary, unless it is turned off;
 //! - the clock, with no network: the system time against this binary's
 //!   build date (release builds know it), and against each credential's
@@ -52,6 +55,8 @@ use open_ferry_providers::claude_cli::{self, MIN_VERSION, VersionCheck};
 use serde_json::{Map, Value, json};
 
 use crate::flags::{self, Definition, FlagError, Kind};
+
+mod management;
 
 /// The subcommand's name: the first argument that runs it.
 pub const NAME: &str = "check";
@@ -272,6 +277,7 @@ async fn run(path: &Path, env: &Environment) -> Vec<Finding> {
     let auths = check_auth_dir(&config, env.now, &mut findings);
     check_tls(&config, &mut findings);
     check_address(&config, &mut findings).await;
+    management::check_management_address(&config, env, &mut findings).await;
     check_dashboard(&config, env, &mut findings);
     check_clock(env, &auths, &mut findings);
     check_claude_cli(&config, &mut findings).await;
@@ -570,6 +576,55 @@ async fn check_address(config: &Config, findings: &mut Vec<Finding>) {
         return;
     }
     let host = config.host.trim();
+    findings.push(match check_port(host, port).await {
+        PortCheck::NotChecked(what) => Finding::warning(
+            CHECK,
+            format!(
+                "server.host {host} {what}, so whether port {port} is free there isn't checked (check makes no network call)"
+            ),
+            format!(
+                "if the proxy fails to start because the address is in use, free port {port} or set server.port"
+            ),
+        ),
+        PortCheck::Listening(address) => Finding::error(
+            CHECK,
+            format!("something already listens on {address}"),
+            "stop it (if it is this proxy, it is already running), or set server.port to a free port",
+        ),
+        PortCheck::Unknown(unknown) => Finding::warning(
+            CHECK,
+            format!(
+                "couldn't tell whether something listens on {}",
+                unknown.join("; ")
+            ),
+            format!(
+                "run check again; if the proxy fails to start because the address is in use, free port {port} or set server.port"
+            ),
+        ),
+        PortCheck::Free(shown) => Finding::ok(CHECK, format!("nothing listens on {shown}")),
+    });
+}
+
+/// What connecting to loopback says of `port` on `host`.
+#[derive(Debug, PartialEq)]
+enum PortCheck {
+    /// The host isn't checked, as that would be a network call: `what`
+    /// says why ("isn't a loopback address" or "is a host name").
+    NotChecked(&'static str),
+    /// Something listens on the address.
+    Listening(SocketAddr),
+    /// Some connections said nothing of the port: each address and its
+    /// error, sorted.
+    Unknown(Vec<String>),
+    /// Nothing listens on the addresses checked, joined with "or".
+    Free(String),
+}
+
+/// Whether something listens on `host`:`port`, found by connecting to the
+/// loopback addresses it covers: both for every interface and
+/// `localhost`. A host name or an address that isn't loopback isn't
+/// checked.
+async fn check_port(host: &str, port: u16) -> PortCheck {
     let bare = host
         .strip_prefix('[')
         .and_then(|host| host.strip_suffix(']'))
@@ -582,23 +637,8 @@ async fn check_address(config: &Config, findings: &mut Vec<Finding>) {
             Ok(IpAddr::V4(ip)) if ip.is_unspecified() => vec![v4],
             Ok(IpAddr::V6(ip)) if ip.is_unspecified() => vec![v6, v4],
             Ok(ip) if ip.is_loopback() => vec![ip],
-            parsed => {
-                let what = if parsed.is_ok() {
-                    "isn't a loopback address"
-                } else {
-                    "is a host name"
-                };
-                findings.push(Finding::warning(
-                    CHECK,
-                    format!(
-                        "server.host {host} {what}, so whether port {port} is free there isn't checked (check makes no network call)"
-                    ),
-                    format!(
-                        "if the proxy fails to start because the address is in use, free port {port} or set server.port"
-                    ),
-                ));
-                return;
-            }
+            Ok(_) => return PortCheck::NotChecked("isn't a loopback address"),
+            Err(_) => return PortCheck::NotChecked("is a host name"),
         },
     };
     let addresses: Vec<SocketAddr> = targets
@@ -621,37 +661,17 @@ async fn check_address(config: &Config, findings: &mut Vec<Finding>) {
     let mut unknown = Vec::new();
     while let Some(connected) = connects.join_next().await {
         match connected {
-            Ok((address, Probe::Listening)) => {
-                findings.push(Finding::error(
-                    CHECK,
-                    format!("something already listens on {address}"),
-                    "stop it (if it is this proxy, it is already running), or set server.port to a free port",
-                ));
-                return;
-            }
+            Ok((address, Probe::Listening)) => return PortCheck::Listening(address),
             Ok((address, Probe::Unknown(error))) => unknown.push(format!("{address}: {error}")),
             Ok((_, Probe::Free)) | Err(_) => {}
         }
     }
     if !unknown.is_empty() {
         unknown.sort();
-        findings.push(Finding::warning(
-            CHECK,
-            format!(
-                "couldn't tell whether something listens on {}",
-                unknown.join("; ")
-            ),
-            format!(
-                "run check again; if the proxy fails to start because the address is in use, free port {port} or set server.port"
-            ),
-        ));
-        return;
+        return PortCheck::Unknown(unknown);
     }
     let shown: Vec<String> = addresses.iter().map(SocketAddr::to_string).collect();
-    findings.push(Finding::ok(
-        CHECK,
-        format!("nothing listens on {}", shown.join(" or ")),
-    ));
+    PortCheck::Free(shown.join(" or "))
 }
 
 /// What a connection to a loopback address says of its port.
@@ -702,7 +722,8 @@ const EAFNOSUPPORT: i32 = if cfg!(windows) {
     47
 };
 
-/// The dashboard app is built in, unless the config turns it off.
+/// The dashboard app is built in, unless the config turns it off. Its URL
+/// is the management address's when there is one.
 fn check_dashboard(config: &Config, env: &Environment, findings: &mut Vec<Finding>) {
     const CHECK: &str = "dashboard";
     findings.push(if config.remote_management.disable_control_panel {
@@ -713,10 +734,13 @@ fn check_dashboard(config: &Config, env: &Environment, findings: &mut Vec<Findin
     } else if env.dashboard_built {
         Finding::ok(
             CHECK,
-            format!(
-                "built in, at {}",
-                crate::init::dashboard_url(&config.host, config.port, config.tls.enable)
-            ),
+            match management::dashboard_url(config) {
+                Some(url) => format!("built in, at {url}, on the management address alone"),
+                None => format!(
+                    "built in, at {}",
+                    crate::init::dashboard_url(&config.host, config.port, config.tls.enable)
+                ),
+            },
         )
     } else {
         Finding::warning(
