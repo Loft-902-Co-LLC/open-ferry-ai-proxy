@@ -1,0 +1,14 @@
+# open-ferry's release signing keys: the minisign public keys that sign each
+# release's SHA256SUMS (as SHA256SUMS.minisig).
+#
+# At most two keys: the current one and, while a rotation is under way, the
+# next. One key per line, as the base64 line of a minisign.pub file; blank
+# lines, lines starting with # and "untrusted comment:" lines are skipped.
+#
+# The open-ferry binary reads this file when it is built and trusts exactly
+# these keys when it updates itself; the release workflow reads it to check
+# the signature it makes. See RELEASING.md for making a key and rotating it,
+# and docs/updates.md for how open-ferry uses it.
+#
+# There is no key yet: a build from this file trusts no release key, so it
+# refuses to update itself.
