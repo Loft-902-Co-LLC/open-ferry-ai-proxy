@@ -38,6 +38,13 @@
 //! credential's entry whatever its source, for the dashboard API to show
 //! the config's `claude-cli` entries, which the list hides.
 //!
+//! `quota_checks`, also not upstream's, lists the quota rests open-ferry's
+//! `routing.quota.check-after` capped: for each, its `scope` (`credential`
+//! or `model`, with its `model_key`), its `state` (`resting` until
+//! `next_check_at`, then `due`, and `checking` while the one call let
+//! through is in flight), `next_check_at`, `provider_reset_at` and the
+//! current `wait_seconds`. An entry without any has no `quota_checks`.
+//!
 //! Deviations from upstream:
 //! - The plugin host isn't ported: `supports_quota` and `quota_provider`
 //!   come only from a `quota_probe` in the metadata.
@@ -51,6 +58,8 @@
 //!   again for each credential's state and recent requests.
 //! - Without paging, credentials whose names differ only in case keep the
 //!   manager's order (by ID); upstream's sort isn't stable.
+//! - An entry has open-ferry's `quota_checks` while the cap on quota rests
+//!   holds one of its rests; upstream's entries have no such field.
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -65,7 +74,7 @@ use http::StatusCode;
 use open_ferry_core::auth::weight::{parse_weight_str, parse_weight_value};
 use open_ferry_core::auth::{Auth, ModelState, QuotaState, Status, Timestamp};
 use open_ferry_core::manager::{
-    CooldownView, Manager, cooldown_snapshot_for_auth, has_unauthorized_auth_failure,
+    CooldownView, Manager, QuotaCheck, cooldown_snapshot_for_auth, has_unauthorized_auth_failure,
     provider_supports_quota_observation,
 };
 use open_ferry_providers::codex::jwt::parse_jwt_token;
@@ -221,7 +230,7 @@ fn list_body(manager: &Manager, filter: &Filter, pagination: Pagination, now: Ti
         let (start, end) = pagination.bounds(total);
         let files = matching[start..end]
             .iter()
-            .filter_map(|auth| listed_entry(auth, now))
+            .filter_map(|auth| listed_entry(manager, auth, now))
             .collect();
         let has_more = end < total;
         return Json::map([
@@ -237,7 +246,7 @@ fn list_body(manager: &Manager, filter: &Filter, pagination: Pagination, now: Ti
         .iter()
         .filter(|auth| filter.matches(auth))
         .filter_map(|auth| {
-            let entry = listed_entry(auth, now)?;
+            let entry = listed_entry(manager, auth, now)?;
             Some((to_lower(&entry_name(auth)), entry))
         })
         .collect();
@@ -252,8 +261,8 @@ fn list_body(manager: &Manager, filter: &Filter, pagination: Pagination, now: Ti
 }
 
 /// A credential's entry with its cooldowns, or `None` when it is hidden.
-fn listed_entry(auth: &Auth, now: Timestamp) -> Option<Json> {
-    Some(with_cooldowns(build_entry(auth, now)?, auth, now))
+fn listed_entry(manager: &Manager, auth: &Auth, now: Timestamp) -> Option<Json> {
+    Some(with_cooldowns(manager, build_entry(auth, now)?, auth, now))
 }
 
 /// The credential with ID `id`, and the entry the listing would show for
@@ -269,20 +278,54 @@ pub fn credential_entry(
     id: &str,
     now: Timestamp,
 ) -> Option<(Arc<Auth>, Value)> {
-    let auth = state.manager().get(id)?;
-    let entry = with_cooldowns(entry_fields(&auth, now)?, &auth, now);
+    let manager = state.manager();
+    let auth = manager.get(id)?;
+    let entry = with_cooldowns(manager, entry_fields(&auth, now)?, &auth, now);
     let value = serde_json::from_str(&entry.encode()).ok()?;
     Some((auth, value))
 }
 
-/// `entry` with the credential's cooldowns at `now`.
-fn with_cooldowns(mut entry: Entry, auth: &Auth, now: Timestamp) -> Json {
+/// `entry` with the credential's cooldowns at `now`, and its capped quota
+/// rests if it has any.
+fn with_cooldowns(manager: &Manager, mut entry: Entry, auth: &Auth, now: Timestamp) -> Json {
     let cooldowns = cooldown_snapshot_for_auth(auth, now)
         .iter()
         .map(cooldown_json)
         .collect();
     entry.insert("cooldowns".into(), Json::Array(cooldowns));
+    let checks = manager.quota_checks(&auth.id);
+    if !checks.is_empty() {
+        let checks = checks
+            .iter()
+            .map(|check| quota_check_json(check, now))
+            .collect();
+        entry.insert("quota_checks".into(), Json::Array(checks));
+    }
     Json::Map(entry)
+}
+
+/// A capped quota rest at `now` (open-ferry's `quota_checks`).
+pub(crate) fn quota_check_json(check: &QuotaCheck, now: Timestamp) -> Json {
+    let mut fields = Vec::new();
+    if check.model_key.is_empty() {
+        fields.push(("scope", Json::Str("credential".into())));
+    } else {
+        fields.push(("scope", Json::Str("model".into())));
+        fields.push(("model_key", Json::Str(check.model_key.clone())));
+    }
+    let state = if check.checking {
+        "checking"
+    } else if check.next_check_at <= now {
+        "due"
+    } else {
+        "resting"
+    };
+    fields.push(("state", Json::Str(state.into())));
+    fields.push(("next_check_at", Json::Time(check.next_check_at)));
+    fields.push(("provider_reset_at", Json::Time(check.provider_reset_at)));
+    let wait = i64::try_from(check.wait.as_secs()).unwrap_or(i64::MAX);
+    fields.push(("wait_seconds", Json::Int(wait)));
+    Json::Struct(fields)
 }
 
 /// A cooldown as upstream's `CooldownView` struct writes it.

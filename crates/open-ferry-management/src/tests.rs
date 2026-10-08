@@ -27,6 +27,7 @@ mod auth_files_filter;
 mod auth_files_pagination;
 mod auth_files_project_id;
 mod auth_files_quota;
+mod auth_files_quota_checks;
 mod auth_files_recent_requests;
 mod auth_files_relogin_preserve;
 mod config_file_write;
