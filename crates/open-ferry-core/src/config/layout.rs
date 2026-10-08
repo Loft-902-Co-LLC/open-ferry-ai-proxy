@@ -61,8 +61,8 @@ use super::v8::{
 };
 use super::yaml::{
     AliasBudget, Kind, Node, Scalar, Text, Timestamp, delete_yaml_path, expand_merges,
-    find_map_key_index, parse_document, parse_timestamp, resolve_node, scalar_string,
-    set_yaml_path, write_and_read_back, yaml_path,
+    find_map_key_index, has_more_documents, parse_document, parse_timestamp, resolve_node,
+    scalar_string, set_yaml_path, write_and_read_back, yaml_path,
 };
 use super::{ConfigError, ConfigErrorKind};
 
@@ -495,6 +495,61 @@ impl AnyValue {
             Err(error) => Err(ConfigError::new(ConfigErrorKind::Syntax, error.message())),
         }
     }
+
+    /// [`parse_yaml`](Self::parse_yaml), and what of `text` the value
+    /// doesn't show as it is written ([`YamlExtras`]). Not upstream's:
+    /// `open-ferry config set` refuses a file a secret would be read from
+    /// with any, as what it holds can't be checked for credentials.
+    pub fn parse_yaml_with_extras(text: &str) -> Result<(Self, YamlExtras), ConfigError> {
+        let root = match parse_document(text) {
+            Ok(root) => root,
+            Err(error) => {
+                return Err(ConfigError::new(ConfigErrorKind::Syntax, error.message()));
+            }
+        };
+        let value = match &root {
+            Some(root) => decode_any_value(root)
+                .map_err(|message| ConfigError::new(ConfigErrorKind::Decode, message))?,
+            None => Self::Null,
+        };
+        let extras = YamlExtras {
+            tagged: root.as_ref().is_some_and(has_tag),
+            more_documents: has_more_documents(text),
+        };
+        Ok((value, extras))
+    }
+}
+
+/// What of a YAML text [`AnyValue::parse_yaml_with_extras`] read that its
+/// value doesn't show as it is written (not upstream's).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct YamlExtras {
+    /// A tag is written out somewhere (`!!str 1`, `!!float .nan`, `!x a`),
+    /// which says how a value is read, rather than leaving it to its text.
+    /// A collection's tag counts when it isn't its own kind's: `!!map`
+    /// written on a mapping, or `!!seq` on a sequence, changes nothing, and
+    /// isn't told apart from no tag.
+    pub tagged: bool,
+    /// Another document follows the first, which is the only one read, or
+    /// the text can't be read far enough to tell.
+    pub more_documents: bool,
+}
+
+/// Whether `node`, or a node in it, has a tag written out, as
+/// [`YamlExtras::tagged`] counts one. An alias's expansion isn't looked in:
+/// the node it names is, where that is written. (A document is read to a
+/// bounded depth, so this recursion is too.)
+fn has_tag(node: &Node) -> bool {
+    if node.alias.is_some() {
+        return false;
+    }
+    let tagged = match node.kind {
+        Kind::Scalar => node.tagged,
+        Kind::Sequence => node.tag != "!!seq",
+        Kind::Mapping => node.tag != "!!map",
+        Kind::Poison => false,
+    };
+    tagged || node.content.iter().any(has_tag)
 }
 
 /// The `time.Time` yaml.v3 decodes a timestamp to, as `reflect.DeepEqual`
@@ -1221,6 +1276,57 @@ mod tests {
             ]))
         );
         assert!(AnyValue::parse_yaml("[").is_err());
+    }
+
+    /// Not upstream's: a value read with its extras is the one read
+    /// without, and a tag written out anywhere, or a document after the
+    /// first, is told; an alias of a node with a tag counts once, where
+    /// that is written, and `!!map` on a mapping changes nothing.
+    #[test]
+    fn values_parse_with_their_extras() {
+        let plain = YamlExtras::default();
+        let tagged = YamlExtras {
+            tagged: true,
+            ..plain
+        };
+        let more = YamlExtras {
+            more_documents: true,
+            ..plain
+        };
+        for (text, extras) in [
+            ("", plain),
+            ("# a comment\n", plain),
+            ("fill-first", plain),
+            ("a: 1\nb: [x, {c: d}]\n", plain),
+            ("---\na: 1\n...\n", plain),
+            ("'q': 1\n<<: {b: 2}\n", plain),
+            ("a: &x 1\nb: *x\n", plain),
+            ("!!map {a: 1}", plain),
+            ("!!seq [a]", plain),
+            ("a: !!str 1\n", tagged),
+            ("a: !!float .inf\n", tagged),
+            ("[!x a]", tagged),
+            ("!!str 1: a\n", tagged),
+            ("a: !!seq {b: 1}\n", tagged),
+            ("a: !x [1]\n", tagged),
+            ("a: &x !!str 1\nb: *x\n", tagged),
+            ("a: 1\n---\nb: 2\n", more),
+            ("a: 1\n---\n", more),
+            ("a: 1\n...\nb: 2\n", more),
+            ("a: 1\n---\n[\n", more),
+        ] {
+            let (value, read) = AnyValue::parse_yaml_with_extras(text).expect(text);
+            assert_eq!(read, extras, "{text}");
+            assert_eq!(Ok(value), AnyValue::parse_yaml(text), "{text}");
+        }
+        for text in ["[", "{? [a, b] : x}", "a: 1\na: 2\n"] {
+            assert_eq!(
+                AnyValue::parse_yaml_with_extras(text).map(|(value, _)| value),
+                AnyValue::parse_yaml(text),
+                "{text}"
+            );
+            assert!(AnyValue::parse_yaml_with_extras(text).is_err(), "{text}");
+        }
     }
 
     /// Not upstream's: a plain management key is found wherever it was

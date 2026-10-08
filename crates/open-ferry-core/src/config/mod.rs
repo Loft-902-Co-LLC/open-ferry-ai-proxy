@@ -107,7 +107,7 @@ use std::fmt;
 
 pub(crate) use duration::parse_go_duration;
 pub use image_generation::DisableImageGeneration;
-pub use layout::{AnyValue, V8Document, YamlTime};
+pub use layout::{AnyValue, V8Document, YamlExtras, YamlTime};
 pub use management_address::{ManagementAddress, ManagementReach, SEPARATE_ADDRESS};
 pub use model_catalogs::{CatalogSourceError, CatalogSources, is_url_source};
 pub use payload::{PayloadConfig, PayloadFilterRule, PayloadModelRule, PayloadRule};

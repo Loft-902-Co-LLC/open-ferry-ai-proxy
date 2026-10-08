@@ -861,6 +861,27 @@ pub(crate) fn parse_document(text: &str) -> Result<Option<Node>, YamlError> {
     if confirmed { result } else { Err(error) }
 }
 
+/// Whether `text` holds more than the first document, which is all
+/// [`parse_document`] reads (not upstream's): another document after it,
+/// even an empty one, or text that can't be read as far as that, where
+/// whether one follows can't be told.
+pub(crate) fn has_more_documents(text: &str) -> bool {
+    let text = text
+        .strip_prefix(|c: char| c as u32 == 0xFEFF)
+        .unwrap_or(text);
+    let mut started = false;
+    for item in Parser::new_from_str(text) {
+        match item {
+            Ok((Event::DocumentStart(_), _)) if started => return true,
+            Ok((Event::DocumentStart(_), _)) => started = true,
+            Ok((Event::StreamEnd, _)) => return false,
+            Ok(_) => {}
+            Err(_) => return true,
+        }
+    }
+    false
+}
+
 /// Reads the first document of `text`, noting the character index of each
 /// alias saphyr reads in `aliases`, known or not.
 fn read_document(text: &str, aliases: &mut HashSet<usize>) -> Result<Option<Node>, YamlError> {
