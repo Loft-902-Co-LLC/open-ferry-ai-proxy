@@ -8,7 +8,7 @@
 
 import type { Cooldown, CooldownReason, Credential, SignInProvider } from "../../api/credentials";
 import type { BadgeTone } from "../../components/Badge";
-import { formatSeconds } from "../../lib/format";
+import { formatInteger, formatSeconds } from "../../lib/format";
 import { limitUsedUp, quotaReadings } from "./quotaReadings";
 
 /** A provider's name as people know it. */
@@ -65,14 +65,14 @@ const REASONS: Record<CooldownReason, ReasonText> = {
     meaning:
       "The provider says this account has used its whole allowance, so the server rests it for every model until the allowance comes back.",
     action:
-      "Wait until then, or add another account to share the load. If you know the allowance is back, reset the cooldown.",
+      "Wait until then, or add another account to share the load. If you know the allowance is back, stop it resting.",
   },
   quota: {
     title: "Rate-limited",
     meaning:
       "The provider answered 429 Too Many Requests: a rate limit or a quota ran out. The server rests the credential, longer each time it happens again.",
     action:
-      "Wait, or add another credential to share the load. Reset the cooldown if you know the limit has lifted.",
+      "Wait, or add another credential to share the load. Stop it resting if you know the limit has lifted.",
   },
   cloudflare_challenge: {
     title: "Stopped by a Cloudflare check",
@@ -103,13 +103,13 @@ const REASONS: Record<CooldownReason, ReasonText> = {
     title: "The account needs payment or permission",
     meaning:
       "The provider answered 402 or 403: the account may be out of credit, its plan may have lapsed, or it may not be allowed this request.",
-    action: "Check the account's billing and plan with the provider, then reset the cooldown.",
+    action: "Check the account's billing and plan with the provider, then stop it resting.",
   },
   not_found: {
     title: "The provider couldn't find what was asked for",
     meaning:
       "The provider answered 404 Not Found, often for a model or an endpoint it doesn't have. The server rests the credential for up to 12 hours.",
-    action: "Check the model's name and the credential's base URL, then reset the cooldown.",
+    action: "Check the model's name and the credential's base URL, then stop it resting.",
   },
   transient_error: {
     title: "The provider failed for a moment",
@@ -121,7 +121,7 @@ const REASONS: Record<CooldownReason, ReasonText> = {
     title: "Resting after a failure",
     meaning: "The server is resting the credential after a failure it doesn't name.",
     action:
-      "The server log around the time it started says more. Reset the cooldown to try it again now.",
+      "The server log around the time it started says more. Stop it resting to try it again now.",
   },
 };
 
@@ -179,6 +179,12 @@ export function reasonOfMessage(message: string): CooldownReason | null {
 
 // -------------------------------------------------------------- health
 
+/**
+ * Where a credential goes in a list: failing and resting ones need you and
+ * come first; the rest are folded away, the ready ones last.
+ */
+export type Triage = "failing" | "resting" | "off" | "other" | "ready";
+
 export interface Health {
   tone: BadgeTone;
   /** One or two words for the badge. */
@@ -187,6 +193,67 @@ export interface Health {
   summary: string;
   /** What to do, when there is something to do. */
   action: string | null;
+  triage: Triage;
+}
+
+const TRIAGE_ORDER: Record<Triage, number> = { failing: 0, resting: 1, off: 2, other: 3, ready: 4 };
+
+/** Whether a credential in this state needs you: it is failing or resting. */
+export function needsAttention(health: Health): boolean {
+  return health.triage === "failing" || health.triage === "resting";
+}
+
+/** What a list sorts by. */
+export interface HealthOrder {
+  health: Health;
+  /** The name it shows under. */
+  name: string;
+  /** Seconds until a resting one is back; Infinity when unknown. */
+  backIn: number;
+}
+
+/**
+ * Failing first, then resting (soonest back first), then off, then the
+ * other states, then ready; by name within each.
+ */
+export function compareHealth(a: HealthOrder, b: HealthOrder): number {
+  const group = TRIAGE_ORDER[a.health.triage] - TRIAGE_ORDER[b.health.triage];
+  if (group !== 0) {
+    return group;
+  }
+  if (a.health.triage === "resting") {
+    const sooner = a.backIn - b.backIn;
+    // Two unknowns make NaN: they sort by name.
+    if (sooner !== 0 && !Number.isNaN(sooner)) {
+      return sooner;
+    }
+  }
+  return a.name.localeCompare(b.name);
+}
+
+/**
+ * How many are in each state, the ready ones first, then as they sort:
+ * "9 ready, 1 off".
+ */
+export function healthTally(healths: readonly Health[]): string {
+  const tally = new Map<string, { triage: Triage; count: number }>();
+  for (const health of healths) {
+    const entry = tally.get(health.label) ?? { triage: health.triage, count: 0 };
+    entry.count += 1;
+    tally.set(health.label, entry);
+  }
+  const rank = (triage: Triage) => (triage === "ready" ? -1 : TRIAGE_ORDER[triage]);
+  return [...tally]
+    .sort(([, a], [, b]) => rank(a.triage) - rank(b.triage))
+    .map(([label, { count }]) => `${formatInteger(count)} ${label.toLowerCase()}`)
+    .join(", ");
+}
+
+/** Seconds until `credential`'s rest ends, when the list was read; Infinity when not resting. */
+export function secondsUntilBack(credential: Credential | null): number {
+  const seconds =
+    credential === null ? undefined : credentialCooldowns(credential)[0]?.remaining_seconds;
+  return seconds !== undefined && Number.isFinite(seconds) ? seconds : Number.POSITIVE_INFINITY;
 }
 
 /** The cooldowns on the whole credential, soonest over first. */
@@ -218,12 +285,19 @@ export function credentialHealth(credential: Credential): Health {
       label: "Off",
       summary: "Turned off: the server sends it no requests.",
       action: "Turn it on to use it again.",
+      triage: "off",
     };
   }
   const resting = credentialCooldowns(credential)[0];
   if (resting !== undefined) {
     const reason = explainCooldown(resting, credential);
-    return { tone: "warn", label: "Resting", summary: reason.title, action: reason.action };
+    return {
+      tone: "warn",
+      label: "Resting",
+      summary: reason.title,
+      action: reason.action,
+      triage: "resting",
+    };
   }
   const message = credential.status_message?.trim() ?? "";
   switch (credential.status) {
@@ -231,13 +305,20 @@ export function credentialHealth(credential: Credential): Health {
       const known = reasonOfMessage(message);
       if (known !== null) {
         const reason = REASONS[known];
-        return { tone: "danger", label: "Failing", summary: reason.title, action: reason.action };
+        return {
+          tone: "danger",
+          label: "Failing",
+          summary: reason.title,
+          action: reason.action,
+          triage: "failing",
+        };
       }
       return {
         tone: "danger",
         label: "Failing",
         summary: message === "" ? "Its last request failed." : `Its last request failed: ${message}`,
-        action: "The server log says more. Reset it to try it again now.",
+        action: "The server log says more. Stop it resting to try it again now.",
+        triage: "failing",
       };
     }
     case "refreshing":
@@ -246,6 +327,7 @@ export function credentialHealth(credential: Credential): Health {
         label: "Refreshing",
         summary: "Getting a new access token from the provider.",
         action: null,
+        triage: "other",
       };
     case "pending":
       return {
@@ -253,6 +335,7 @@ export function credentialHealth(credential: Credential): Health {
         label: "Waiting",
         summary: "Loaded, and waiting for its first use.",
         action: null,
+        triage: "other",
       };
     case "active":
       if (credential.unavailable) {
@@ -260,7 +343,8 @@ export function credentialHealth(credential: Credential): Health {
           tone: "warn",
           label: "Resting",
           summary: "The server is resting it after a failure.",
-          action: "It is tried again when the time is up. Reset it to try it again now.",
+          action: "It's tried again when the time is up. Stop it resting to try it again now.",
+          triage: "resting",
         };
       }
       return {
@@ -271,6 +355,7 @@ export function credentialHealth(credential: Credential): Health {
             ? "In use, with some models resting: see below."
             : "In use.",
         action: null,
+        triage: "ready",
       };
     default:
       return {
@@ -278,6 +363,7 @@ export function credentialHealth(credential: Credential): Health {
         label: "Unknown",
         summary: "The server hasn't said what state it is in.",
         action: null,
+        triage: "other",
       };
   }
 }

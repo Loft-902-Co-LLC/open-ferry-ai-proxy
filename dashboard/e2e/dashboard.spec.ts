@@ -129,17 +129,17 @@ test("renders every screen under the policy", async ({ page }) => {
 
   await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Credentials" }).click();
   await expect(page.getByRole("heading", { name: "Credentials", level: 1 })).toBeVisible();
-  await expect(page.getByRole("article", { name: "codex-grace@example.com-pro.json" })).toContainText(
-    "Resting",
-  );
-  await expect(page.getByRole("article", { name: "claude-lin@example.com.json" })).toContainText("Failing");
+  await expect(page.getByRole("article", { name: "grace@example.com" })).toContainText("Resting");
+  await expect(page.getByRole("article", { name: "lin@example.com" })).toContainText("Failing");
   await shot(page, "13-credentials");
 
-  await page
-    .getByRole("article", { name: "claude-ada@example.com.json" })
-    .getByRole("button", { name: "Check quota" })
-    .click();
-  const quota = page.getByRole("dialog", { name: "Quota of claude-ada@example.com.json" });
+  // The ready one is folded away until asked for.
+  const files = page.getByRole("region", { name: "Sign-ins and credential files" });
+  await files.getByRole("button", { name: "1 ready" }).click();
+  const ada = files.getByRole("article", { name: "ada@example.com" });
+  await ada.getByRole("button", { name: "Details ada@example.com" }).click();
+  await ada.getByRole("button", { name: "Check quota of ada@example.com" }).click();
+  const quota = page.getByRole("dialog", { name: "Quota of ada@example.com" });
   await expect(quota).toContainText("5 hours: 62% left");
   await shot(page, "14-credentials-quota");
   await quota.getByRole("button", { name: "Close" }).click();
@@ -147,12 +147,15 @@ test("renders every screen under the policy", async ({ page }) => {
 
   // The config's Claude Code accounts, checked only when asked.
   const accounts = page.getByRole("region", { name: "Claude Code accounts" });
-  await expect(accounts.getByRole("article", { name: "claude-max-1" })).toContainText("31% used");
   const signedOut = accounts.getByRole("article", { name: "claude-max-2" });
   await expect(signedOut).toContainText("Resting");
   await expect(signedOut).toContainText("Claude Code isn't signed in (HTTP 401)");
-  await signedOut.getByRole("button", { name: "Check sign-in" }).click();
+  await signedOut.getByRole("button", { name: "Check sign-in claude-max-2" }).click();
   await expect(signedOut.getByText("CLAUDE_CONFIG_DIR=~/.claude-max-2 claude auth login")).toBeVisible();
+  await accounts.getByRole("button", { name: "1 ready" }).click();
+  const inUse = accounts.getByRole("article", { name: "claude-max-1" });
+  await inUse.getByRole("button", { name: "Details claude-max-1" }).click();
+  await expect(inUse).toContainText("31% used");
   await accounts.scrollIntoViewIfNeeded();
   await shot(page, "27-credentials-claude-code");
 
@@ -237,7 +240,7 @@ test("renders the screens in dark mode under the policy too", async ({ page }) =
   await expect(page.locator("svg.recharts-surface").first()).toBeVisible();
   await shot(page, "12-usage-dark");
   await page.goto("credentials");
-  await expect(page.getByRole("article", { name: "claude-lin@example.com.json" })).toContainText("Failing");
+  await expect(page.getByRole("article", { name: "lin@example.com" })).toContainText("Failing");
   await shot(page, "17-credentials-dark");
   await page.goto("settings");
   await expect(page.getByRole("textbox", { name: "Retries" })).toHaveValue("3");

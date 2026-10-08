@@ -1,4 +1,5 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
+import type { UserEvent } from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -28,6 +29,7 @@ import {
 import { loadFirst } from "../../test/loadFirst";
 import { mockApi, route, type MockApi } from "../../test/mockApi";
 import { renderApp } from "../../test/renderApp";
+import { claudeCliAnchor, credentialAnchor, providerKeyAnchor } from "./anchors";
 import { SIGN_IN_LIMIT_MS } from "./SignInDialog";
 
 const NAME = "claude-ada@example.com.json";
@@ -35,6 +37,8 @@ const STATE = "test-state-0001";
 const SIGN_IN_URL = `https://sign-in.example/oauth/authorize?state=${STATE}`;
 const CALLBACK = `http://localhost:54545/callback?code=test-code&state=${STATE}`;
 const CLAUDE_KEY = "sk-ant-test-provider-key-0001";
+const CREDENTIALS = "Sign-ins and credential files";
+const CLAUDE_CLI = "Claude Code accounts";
 
 interface Server {
   api: MockApi;
@@ -127,11 +131,43 @@ function claudeSignIn(state: Server, statuses: SignInStatus[]) {
       const status = statuses[Math.min(polls, statuses.length - 1)] ?? { status: "wait" };
       polls += 1;
       if (status.status === "ok") {
-        state.files.push(credential({ name: "claude-new@example.com.json", id: "new" }));
+        state.files.push(
+          credential({
+            name: "claude-new@example.com.json",
+            id: "new",
+            account: "new@example.com",
+            label: "new@example.com",
+          }),
+        );
       }
       return { json: status };
     }),
   );
+}
+
+/** The text an element shows, without what only screen readers hear. */
+function shownText(element: HTMLElement): string {
+  const copy = element.cloneNode(true) as HTMLElement;
+  for (const hidden of copy.querySelectorAll(".sr-only")) {
+    hidden.remove();
+  }
+  return copy.textContent;
+}
+
+/**
+ * Opens the folded group of `region`, named by its tally, then the details
+ * of the entry named `name` in it; returns the entry.
+ */
+async function openFolded(
+  user: UserEvent,
+  region: HTMLElement,
+  tally: string,
+  name: string,
+): Promise<HTMLElement> {
+  await user.click(await within(region).findByRole("button", { name: tally }));
+  const entry = within(region).getByRole("article", { name });
+  await user.click(within(entry).getByRole("button", { name: `Details ${name}` }));
+  return entry;
 }
 
 loadFirst(() => import("./CredentialsPage"));
@@ -145,6 +181,7 @@ describe("the credential list", () => {
         id: "codex-bob.json",
         provider: "codex",
         account: "bob@example.com",
+        label: "bob@example.com",
         id_token: { plan_type: "plus" },
         cooldowns: [
           cooldown("credential_quota", 300),
@@ -161,7 +198,7 @@ describe("the credential list", () => {
         runtime_only: true,
       }),
     ]);
-    renderApp("/credentials");
+    const { user } = renderApp("/credentials");
     expect(await screen.findByRole("heading", { name: "Credentials", level: 1 })).toBeVisible();
     expect(
       within(screen.getByRole("navigation", { name: "Main" })).getByRole("link", {
@@ -169,33 +206,82 @@ describe("the credential list", () => {
       }),
     ).toHaveAttribute("aria-current", "page");
 
-    const ada = await screen.findByRole("article", { name: NAME });
-    expect(within(ada).getByText("Ready")).toBeVisible();
-    expect(ada).toHaveTextContent("Claude sign-in");
-    expect(ada).toHaveTextContent("ada@example.com");
-    expect(ada).toHaveTextContent("1,520 succeeded, 12 failed");
-    expect(ada).toHaveTextContent("In the last 20 min42 succeeded, 1 failed");
-    expect(within(ada).getByRole("button", { name: "Delete" })).toBeVisible();
-    expect(within(ada).queryByRole("button", { name: "Reset cooldown" })).toBeNull();
-    expect(within(ada).queryByRole("button", { name: "Check quota" })).toBeNull();
-
-    const bob = screen.getByRole("article", { name: "codex-bob.json" });
+    // The resting one comes first, in full.
+    const card = await screen.findByRole("region", { name: CREDENTIALS });
+    const bob = await within(card).findByRole("article", { name: "bob@example.com" });
     expect(within(bob).getByText("Resting")).toBeVisible();
+    expect(bob).toHaveTextContent("Codex sign-in · Plus plan · Last used 11:50–12:00");
     expect(bob).toHaveTextContent("The account's quota is used up");
     expect(bob).toHaveTextContent("Back in about 5 min");
     expect(bob).toHaveTextContent("What to do: Wait until then");
     expect(within(bob).getByRole("heading", { name: "Models resting" })).toBeVisible();
     expect(bob).toHaveTextContent("gpt-5.1-codex: Back in less than a minute");
     expect(bob).toHaveTextContent("Rate-limited");
-    expect(within(bob).getByText("plus")).toBeVisible();
-    expect(within(bob).getByRole("button", { name: "Reset cooldown" })).toBeVisible();
+    expect(within(bob).getByRole("button", { name: "Stop resting bob@example.com" })).toBeVisible();
+    expect(card).toHaveTextContent(/Checked at \d\d:\d\d:\d\d\./);
+    expect(
+      within(card)
+        .getByText(/^Checked at/)
+        .closest("[role=status], [role=alert], [aria-live]"),
+    ).toBeNull();
 
-    const key = screen.getByRole("article", { name: "openai-compat-1" });
+    // The ready ones fold into one row, named by how many.
+    expect(within(card).queryByRole("article", { name: "ada@example.com" })).toBeNull();
+    const group = within(card).getByRole("button", { name: "2 ready" });
+    expect(group).toHaveAttribute("aria-expanded", "false");
+    await user.click(group);
+    expect(group).toHaveAttribute("aria-expanded", "true");
+    expect(
+      within(card)
+        .getAllByRole("heading", { level: 3 })
+        .map((heading) => heading.textContent),
+    ).toEqual(["bob@example.com", "ada@example.com", "openai-compat-1"]);
+
+    const ada = within(card).getByRole("article", { name: "ada@example.com" });
+    expect(within(ada).getByText("Ready")).toBeVisible();
+    expect(ada).toHaveTextContent("Claude sign-in · Last used 11:50–12:00");
+    expect(within(ada).queryByRole("button", { name: "Delete ada@example.com" })).toBeNull();
+    const details = within(ada).getByRole("button", { name: "Details ada@example.com" });
+    expect(details).toHaveAttribute("aria-expanded", "false");
+    await user.click(details);
+    expect(details).toHaveAttribute("aria-expanded", "true");
+    expect(ada).toHaveTextContent("1,520 succeeded, 12 failed");
+    expect(ada).toHaveTextContent("In the last 20 min42 succeeded, 1 failed");
+    expect(within(ada).getByRole("button", { name: "Turn off ada@example.com" })).toBeVisible();
+    expect(within(ada).getByRole("button", { name: "Delete ada@example.com" })).toBeVisible();
+    expect(within(ada).queryByRole("button", { name: /^Stop resting/ })).toBeNull();
+    expect(within(ada).queryByRole("button", { name: /^Check quota/ })).toBeNull();
+    // Its heading names the account, and nothing shown repeats it.
+    expect(shownText(ada).split("ada@example.com")).toHaveLength(2);
+
+    const key = within(card).getByRole("article", { name: "openai-compat-1" });
     expect(key).toHaveTextContent("openai-compatibility API key, kept in memory only");
+    await user.click(within(key).getByRole("button", { name: "Details openai-compat-1" }));
     expect(key).toHaveTextContent("sk-...0001");
     expect(key).not.toHaveTextContent("sk-test-provider-key-0001");
-    expect(within(key).queryByRole("button", { name: "Delete" })).toBeNull();
+    expect(within(key).queryByRole("button", { name: /^Delete/ })).toBeNull();
     expect(api.unhandled).toEqual([]);
+  });
+
+  it("says so in one line when nothing needs attention", async () => {
+    server([credential(), credential({ name: "claude-bo.json", account: "bo@example.com" })]);
+    renderApp("/credentials");
+    const card = await screen.findByRole("region", { name: CREDENTIALS });
+    expect(await within(card).findByText("Nothing needs attention.")).toBeVisible();
+    expect(within(card).getByRole("button", { name: "2 ready" })).toBeVisible();
+    expect(within(card).queryByRole("article")).toBeNull();
+  });
+
+  it("names two sign-ins to one account by their providers", async () => {
+    server([credential(), credential({ name: "codex-ada.json", provider: "codex" })]);
+    const { user } = renderApp("/credentials");
+    const card = await screen.findByRole("region", { name: CREDENTIALS });
+    await user.click(await within(card).findByRole("button", { name: "2 ready" }));
+    expect(
+      within(card)
+        .getAllByRole("heading", { level: 3 })
+        .map((heading) => heading.textContent),
+    ).toEqual(["ada@example.com (Claude)", "ada@example.com (Codex)"]);
   });
 
   it("shows a Claude or Codex credential's quota windows, and which one stops it", async () => {
@@ -214,6 +300,7 @@ describe("the credential list", () => {
         name: "codex-bob.json",
         id: "codex-bob.json",
         provider: "codex",
+        account: "bob@example.com",
         cooldowns: [cooldown("credential_quota", 300)],
         quota: {
           observed_at: "2026-10-05T11:58:00.000Z",
@@ -225,29 +312,37 @@ describe("the credential list", () => {
           },
         },
       }),
-      credential({ name: "codex-new.json", id: "codex-new.json", provider: "codex", quota: { signals: {} } }),
+      credential({
+        name: "codex-new.json",
+        id: "codex-new.json",
+        provider: "codex",
+        account: "cy@example.com",
+        quota: { signals: {} },
+      }),
     ]);
-    renderApp("/credentials");
-    const ada = await screen.findByRole("article", { name: NAME });
+    const { user } = renderApp("/credentials");
+    const card = await screen.findByRole("region", { name: CREDENTIALS });
+    const ada = await openFolded(user, card, "2 ready", "ada@example.com");
     expect(within(ada).getByRole("heading", { name: "Quota" })).toBeVisible();
     expect(ada).toHaveTextContent("5-hour25% used.");
     expect(ada).toHaveTextContent("WeeklyNo reading.");
     expect(ada).not.toHaveTextContent("0.5");
     expect(ada.querySelector("b")).toBeNull();
 
-    const bob = screen.getByRole("article", { name: "codex-bob.json" });
+    const bob = within(card).getByRole("article", { name: "bob@example.com" });
     expect(bob).toHaveTextContent("The weekly limit is used up");
     expect(bob).toHaveTextContent("5-hour40% used.");
     expect(bob).toHaveTextContent("WeeklyUsed up. This is the limit that stops it.");
 
-    const fresh = screen.getByRole("article", { name: "codex-new.json" });
+    const fresh = within(card).getByRole("article", { name: "cy@example.com" });
+    await user.click(within(fresh).getByRole("button", { name: "Details cy@example.com" }));
     expect(within(fresh).queryByRole("heading", { name: "Quota" })).toBeNull();
   });
 
   it("explains a failing credential in plain words", async () => {
     server([credential({ status: "error", status_message: "invalid_grant" })]);
     renderApp("/credentials");
-    const item = await screen.findByRole("article", { name: NAME });
+    const item = await screen.findByRole("article", { name: "ada@example.com" });
     expect(within(item).getByText("Failing")).toBeVisible();
     expect(item).toHaveTextContent("The sign-in has expired or was revoked");
     expect(item).toHaveTextContent("What to do: Sign in again with the same account");
@@ -257,32 +352,43 @@ describe("the credential list", () => {
     server([]);
     renderApp("/credentials");
     expect(
-      await screen.findByText(/^None yet\. Sign in with Claude or ChatGPT, upload a credential file/),
+      await screen.findByText(/^None yet\. Sign in with Claude or ChatGPT, upload credential files/),
     ).toBeVisible();
   });
 
   it("turns a credential off and on again", async () => {
     const state = server();
     const { user } = renderApp("/credentials");
-    const item = await screen.findByRole("article", { name: NAME });
-    await user.click(within(item).getByRole("button", { name: "Turn off" }));
-    expect(await within(item).findByText("Turned off.")).toBeVisible();
+    const card = await screen.findByRole("region", { name: CREDENTIALS });
+    const item = await openFolded(user, card, "1 ready", "ada@example.com");
+    await user.click(within(item).getByRole("button", { name: "Turn off ada@example.com" }));
+    expect(await within(card).findByRole("status")).toHaveTextContent(
+      "Turned off ada@example.com.",
+    );
     expect(await within(item).findByText("Off")).toBeVisible();
+    expect(within(card).getByRole("button", { name: "1 off" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
     expect(state.api.callsTo("PATCH", AUTH_FILE_STATUS)[0]?.json()).toEqual({
       name: NAME,
       auth_index: "a1b2c3d4e5f60718",
       disabled: true,
     });
 
-    await user.click(await within(item).findByRole("button", { name: "Turn on" }));
-    expect(await within(item).findByText("Turned on: the server uses it again.")).toBeVisible();
+    await user.click(await within(item).findByRole("button", { name: "Turn on ada@example.com" }));
+    await waitFor(() => {
+      expect(within(card).getByRole("status")).toHaveTextContent(
+        "Turned on ada@example.com: the server uses it again.",
+      );
+    });
     expect(await within(item).findByText("Ready")).toBeVisible();
     expect(state.api.callsTo("PATCH", AUTH_FILE_STATUS)[1]?.json()).toMatchObject({
       disabled: false,
     });
   });
 
-  it("resets a credential's cooldowns", async () => {
+  it("stops a credential resting, and keeps saying so as it folds away", async () => {
     const state = server([
       credential({
         cooldowns: [
@@ -292,35 +398,39 @@ describe("the credential list", () => {
       }),
     ]);
     const { user } = renderApp("/credentials");
-    const item = await screen.findByRole("article", { name: NAME });
-    await user.click(within(item).getByRole("button", { name: "Reset cooldown" }));
-    expect(
-      await within(item).findByText(
-        "Cooldown reset for it and 1 model: the server tries it again with the next request.",
-      ),
-    ).toBeVisible();
+    const card = await screen.findByRole("region", { name: CREDENTIALS });
+    const item = await within(card).findByRole("article", { name: "ada@example.com" });
+    await user.click(within(item).getByRole("button", { name: "Stop resting ada@example.com" }));
+    const said =
+      "ada@example.com and 1 model are no longer resting: the server tries them again with the next request.";
+    expect(await within(card).findByRole("status")).toHaveTextContent(said);
     expect(state.api.callsTo("POST", RESET_COOLDOWN)[0]?.json()).toEqual({
       auth_index: "a1b2c3d4e5f60718",
     });
-    expect(await within(item).findByText("Ready")).toBeVisible();
-    expect(within(item).queryByRole("button", { name: "Reset cooldown" })).toBeNull();
+    // Ready now, it folds away with the rest, and the notice stays.
+    expect(await within(card).findByRole("button", { name: "1 ready" })).toBeVisible();
+    expect(within(card).queryByRole("article", { name: "ada@example.com" })).toBeNull();
+    expect(within(card).getByRole("status")).toHaveTextContent(said);
   });
 
   it("deletes a credential file once confirmed", async () => {
-    const state = server([credential(), credential({ name: "codex-bob.json", id: "bob" })]);
+    const state = server([
+      credential(),
+      credential({ name: "codex-bob.json", id: "bob", account: "bob@example.com" }),
+    ]);
     const { user } = renderApp("/credentials");
-    const item = await screen.findByRole("article", { name: NAME });
-    await user.click(within(item).getByRole("button", { name: "Delete" }));
+    const card = await screen.findByRole("region", { name: CREDENTIALS });
+    const item = await openFolded(user, card, "2 ready", "ada@example.com");
+    await user.click(within(item).getByRole("button", { name: "Delete ada@example.com" }));
     const dialog = screen.getByRole("dialog", { name: `Delete ${NAME}?` });
     expect(within(dialog).getByRole("button", { name: "Cancel" })).toHaveFocus();
-    await user.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await user.click(within(dialog).getByRole("button", { name: "Delete file" }));
 
-    expect(await screen.findByText(NAME, { selector: "span" })).toBeVisible();
-    expect(screen.getByRole("status", { name: "" })).toHaveTextContent(`Deleted ${NAME}.`);
+    expect(await within(card).findByRole("status")).toHaveTextContent(`Deleted ${NAME}.`);
     await waitFor(() => {
-      expect(screen.queryByRole("article", { name: NAME })).toBeNull();
+      expect(within(card).queryByRole("article", { name: "ada@example.com" })).toBeNull();
     });
-    expect(screen.getByRole("article", { name: "codex-bob.json" })).toBeVisible();
+    expect(within(card).getByRole("article", { name: "bob@example.com" })).toBeVisible();
     expect(state.api.callsTo("DELETE", AUTH_FILES)[0]?.url.searchParams.get("name")).toBe(NAME);
   });
 
@@ -343,9 +453,10 @@ describe("the credential list", () => {
       }),
     );
     const { user } = renderApp("/credentials");
-    const item = await screen.findByRole("article", { name: NAME });
-    await user.click(within(item).getByRole("button", { name: "Check quota" }));
-    const dialog = screen.getByRole("dialog", { name: `Quota of ${NAME}` });
+    const card = await screen.findByRole("region", { name: CREDENTIALS });
+    const item = await openFolded(user, card, "1 ready", "ada@example.com");
+    await user.click(within(item).getByRole("button", { name: "Check quota of ada@example.com" }));
+    const dialog = screen.getByRole("dialog", { name: "Quota of ada@example.com" });
     expect(await within(dialog).findByText("Plan:")).toBeVisible();
     expect(dialog).toHaveTextContent("Plan: Max, 20x");
     expect(dialog).toHaveTextContent("5 hours: 62% left");
@@ -364,11 +475,106 @@ describe("the credential list", () => {
       }),
     );
     const { user } = renderApp("/credentials");
-    const item = await screen.findByRole("article", { name: NAME });
-    await user.click(within(item).getByRole("button", { name: "Check quota" }));
-    const dialog = screen.getByRole("dialog", { name: `Quota of ${NAME}` });
+    const card = await screen.findByRole("region", { name: CREDENTIALS });
+    const item = await openFolded(user, card, "1 ready", "ada@example.com");
+    await user.click(within(item).getByRole("button", { name: "Check quota of ada@example.com" }));
+    const dialog = screen.getByRole("dialog", { name: "Quota of ada@example.com" });
     expect(await within(dialog).findByText("The server failed (HTTP 502)")).toBeVisible();
     expect(dialog).toHaveTextContent("quota probe failed: provider answered 401");
+  });
+
+  it("keeps showing what it has when a later read fails, and says so once", async () => {
+    const state = server([credential({ cooldowns: [cooldown("quota", 120)] })]);
+    let down = false;
+    state.api.use(
+      route("GET", AUTH_FILES, () =>
+        down ? { status: 500, json: { error: "boom" } } : { json: credentialList(state.files) },
+      ),
+    );
+    const { user } = renderApp("/credentials");
+    const card = await screen.findByRole("region", { name: CREDENTIALS });
+    const item = await within(card).findByRole("article", { name: "ada@example.com" });
+    down = true;
+    await user.click(within(item).getByRole("button", { name: "Stop resting ada@example.com" }));
+    expect(await within(card).findByText("Couldn't check again")).toBeVisible();
+    expect(card).toHaveTextContent(
+      /The server failed \(HTTP 500\)\. This shows what the server said at \d\d:\d\d:\d\d, and the page keeps trying\./,
+    );
+    expect(within(card).getAllByText("Couldn't check again")).toHaveLength(1);
+    // What it read before still shows.
+    expect(within(card).getByRole("article", { name: "ada@example.com" })).toBeVisible();
+    expect(within(item).getByText("Resting")).toBeVisible();
+  });
+});
+
+describe("an address that points at one", () => {
+  it("opens a folded credential, scrolls to it and focuses its heading", async () => {
+    const scrolled = vi.spyOn(window.Element.prototype, "scrollIntoView");
+    try {
+      server([
+        credential(),
+        credential({
+          name: "codex-bob.json",
+          provider: "codex",
+          account: "bob@example.com",
+          cooldowns: [cooldown("quota", 300)],
+        }),
+      ]);
+      renderApp(`/credentials#${credentialAnchor(NAME)}`);
+      const card = await screen.findByRole("region", { name: CREDENTIALS });
+      const heading = await within(card).findByRole("heading", {
+        name: "ada@example.com",
+        level: 3,
+      });
+      await waitFor(() => {
+        expect(heading).toHaveFocus();
+      });
+      expect(within(card).getByRole("button", { name: "1 ready" })).toHaveAttribute(
+        "aria-expanded",
+        "true",
+      );
+      const ada = within(card).getByRole("article", { name: "ada@example.com" });
+      expect(ada).toHaveAttribute("id", credentialAnchor(NAME));
+      expect(within(ada).getByRole("button", { name: "Details ada@example.com" })).toHaveAttribute(
+        "aria-expanded",
+        "true",
+      );
+      expect(within(ada).getByRole("button", { name: "Turn off ada@example.com" })).toBeVisible();
+      expect(scrolled.mock.contexts).toContain(ada);
+    } finally {
+      scrolled.mockRestore();
+    }
+  });
+
+  it("opens a claude-cli entry", async () => {
+    server([], {}, [
+      claudeCliEntry({
+        credential: claudeCliCredential({ unavailable: true, cooldowns: [cooldown("quota", 120)] }),
+      }),
+      claudeCliEntry({ name: "claude-max-2" }),
+    ]);
+    renderApp(`/credentials#${claudeCliAnchor("claude-max-2")}`);
+    const card = await screen.findByRole("region", { name: CLAUDE_CLI });
+    const heading = await within(card).findByRole("heading", { name: "claude-max-2", level: 3 });
+    await waitFor(() => {
+      expect(heading).toHaveFocus();
+    });
+    expect(
+      within(card).getByRole("button", { name: "Check sign-in claude-max-2" }),
+    ).toBeVisible();
+  });
+
+  it("focuses a provider API key", async () => {
+    server([], {
+      claude: [{ "api-key": CLAUDE_KEY, "auth-index": "0123abcd" }],
+    });
+    renderApp(`/credentials#${providerKeyAnchor("claude", "0123abcd")}`);
+    const claude = await screen.findByRole("region", { name: "Claude" });
+    await within(claude).findByText("sk-...0001");
+    await waitFor(() => {
+      expect(document.activeElement).toHaveAttribute("id", providerKeyAnchor("claude", "0123abcd"));
+    });
+    expect(document.activeElement).toHaveTextContent("sk-...0001");
   });
 });
 
@@ -388,10 +594,12 @@ describe("uploading credential files", () => {
     const { user } = renderApp("/credentials");
     await screen.findByText(/^None yet\./);
     const file = new File(['{"type":"claude"}'], "claude-new.json", { type: "application/json" });
-    await user.upload(screen.getByLabelText("Upload files"), file);
+    await user.upload(screen.getByLabelText("Upload credential files"), file);
 
     expect(await screen.findByText(/^claude-new\.json\. The server uses it from now on\.$/)).toBeVisible();
-    expect(await screen.findByRole("article", { name: "claude-new.json" })).toBeVisible();
+    const card = screen.getByRole("region", { name: CREDENTIALS });
+    const added = await openFolded(user, card, "1 ready", "ada@example.com");
+    expect(added).toHaveTextContent("File: claude-new.json");
     const sent = state.api.callsTo("POST", AUTH_FILES)[0];
     expect(sent?.form?.getAll("file").map((part) => (part as File).name)).toEqual(["claude-new.json"]);
     expect(sent?.headers.get("content-type")).toBeNull();
@@ -412,7 +620,7 @@ describe("uploading credential files", () => {
     );
     const { user } = renderApp("/credentials");
     await screen.findByText(/^None yet\./);
-    await user.upload(screen.getByLabelText("Upload files"), [
+    await user.upload(screen.getByLabelText("Upload credential files"), [
       new File(["{}"], "a.json", { type: "application/json" }),
       new File(["{}"], "b.json", { type: "application/json" }),
     ]);
@@ -426,7 +634,7 @@ describe("uploading credential files", () => {
     const { user } = renderApp("/credentials");
     await screen.findByText(/^None yet\./);
     await user.upload(
-      screen.getByLabelText("Upload files"),
+      screen.getByLabelText("Upload credential files"),
       new File(["{}"], "a.json", { type: "application/json" }),
     );
     expect(await screen.findByText("The server refused the request")).toBeVisible();
@@ -477,7 +685,8 @@ describe("signing in with Claude or ChatGPT", () => {
     await user.click(within(dialog).getByRole("button", { name: "Start" }));
     expect(await within(dialog).findByText("Signed in with Claude")).toBeVisible();
     expect(within(dialog).getByRole("button", { name: "Done" })).toHaveFocus();
-    expect(await screen.findByRole("article", { name: "claude-new@example.com.json" })).toBeVisible();
+    const card = screen.getByRole("region", { name: CREDENTIALS });
+    expect(await within(card).findByRole("button", { name: "1 ready" })).toBeVisible();
 
     await user.click(within(dialog).getByRole("button", { name: "Done" }));
     await waitFor(() => {
@@ -711,11 +920,12 @@ describe("the Claude Code accounts", () => {
         }),
       ],
     );
-    renderApp("/credentials");
-    const card = await screen.findByRole("region", { name: "Claude Code accounts" });
+    const { user } = renderApp("/credentials");
+    const card = await screen.findByRole("region", { name: CLAUDE_CLI });
     expect(card).toHaveTextContent("The claude-cli entries in config.yaml");
+    expect(card).toHaveTextContent(/Checked at \d\d:\d\d:\d\d\./);
 
-    const first = within(card).getByRole("article", { name: "claude-max-1" });
+    const first = await within(card).findByRole("article", { name: "claude-max-1" });
     expect(within(first).getByText("Resting")).toBeVisible();
     expect(first).toHaveTextContent("Prefixmax1: calls to max1/<model> go to it");
     expect(first).toHaveTextContent("Config directory~/.claude-second");
@@ -730,9 +940,9 @@ describe("the Claude Code accounts", () => {
     expect(first).toHaveTextContent("5-hour40% used.");
     expect(first).toHaveTextContent("WeeklyUsed up. This is the limit that stops it.");
     expect(first).toHaveTextContent("214 succeeded, 3 failed");
-    expect(within(first).getByRole("button", { name: "Reset cooldown" })).toBeVisible();
+    expect(within(first).getByRole("button", { name: "Stop resting claude-max-1" })).toBeVisible();
 
-    const second = within(card).getByRole("article", { name: "claude-max-2" });
+    const second = await openFolded(user, card, "1 ready, 1 off", "claude-max-2");
     expect(within(second).getByText("Ready")).toBeVisible();
     expect(second).toHaveTextContent("PrefixNone");
     expect(second).toHaveTextContent(
@@ -740,14 +950,21 @@ describe("the Claude Code accounts", () => {
     );
     expect(within(second).queryByRole("heading", { name: "Last error" })).toBeNull();
     expect(within(second).queryByRole("heading", { name: "Quota" })).toBeNull();
-    expect(within(second).queryByRole("button", { name: "Reset cooldown" })).toBeNull();
+    expect(within(second).queryByRole("button", { name: /^Stop resting/ })).toBeNull();
 
     const spare = within(card).getByRole("article", { name: "spare" });
+    await user.click(within(spare).getByRole("button", { name: "Details spare" }));
     expect(within(spare).getByText("Off")).toBeVisible();
     expect(spare).toHaveTextContent("Turned off in config.yaml: the server sends it no requests.");
     expect(spare).toHaveTextContent("Config directory/srv/claude/spare");
     expect(spare).not.toHaveTextContent("succeeded");
-    expect(within(spare).getByRole("button", { name: "Check sign-in" })).toBeVisible();
+    expect(within(spare).getByRole("button", { name: "Check sign-in spare" })).toBeVisible();
+    // Off sorts before ready.
+    expect(
+      within(card)
+        .getAllByRole("heading", { level: 3 })
+        .map((heading) => heading.textContent),
+    ).toEqual(["claude-max-1", "spare", "claude-max-2"]);
 
     // A check runs Claude Code on the server, so nothing checks by itself.
     expect(api.callsTo("GET", CLAUDE_CLI_AUTH_STATUS)).toEqual([]);
@@ -760,8 +977,9 @@ describe("the Claude Code accounts", () => {
       route("GET", CLAUDE_CLI_AUTH_STATUS, { json: { loggedIn: true, authMethod: "claude.ai" } }),
     );
     const { user } = renderApp("/credentials");
-    const item = await screen.findByRole("article", { name: "claude-max-1" });
-    await user.click(within(item).getByRole("button", { name: "Check sign-in" }));
+    const card = await screen.findByRole("region", { name: CLAUDE_CLI });
+    const item = await openFolded(user, card, "1 ready", "claude-max-1");
+    await user.click(within(item).getByRole("button", { name: "Check sign-in claude-max-1" }));
     expect(await within(item).findByText("Signed in")).toBeVisible();
     expect(item).toHaveTextContent("Claude Code is signed in. Sign-in method: claude.ai.");
     const calls = state.api.callsTo("GET", CLAUDE_CLI_AUTH_STATUS);
@@ -778,8 +996,9 @@ describe("the Claude Code accounts", () => {
       route("GET", CLAUDE_CLI_AUTH_STATUS, { json: { loggedIn: false, authMethod: "" } }),
     );
     const { user } = renderApp("/credentials");
-    const first = await screen.findByRole("article", { name: "claude-max-1" });
-    await user.click(within(first).getByRole("button", { name: "Check sign-in" }));
+    const card = await screen.findByRole("region", { name: CLAUDE_CLI });
+    const first = await openFolded(user, card, "2 ready", "claude-max-1");
+    await user.click(within(first).getByRole("button", { name: "Check sign-in claude-max-1" }));
     expect(await within(first).findByText("Not signed in")).toBeVisible();
     expect(first).toHaveTextContent("Claude Code isn't signed in");
     expect(first).not.toHaveTextContent("Sign-in method");
@@ -790,8 +1009,9 @@ describe("the Claude Code accounts", () => {
       within(first).getByRole("button", { name: "Copy the sign-in command of claude-max-1" }),
     ).toBeVisible();
 
-    const second = screen.getByRole("article", { name: "claude-max-2" });
-    await user.click(within(second).getByRole("button", { name: "Check sign-in" }));
+    const second = within(card).getByRole("article", { name: "claude-max-2" });
+    await user.click(within(second).getByRole("button", { name: "Details claude-max-2" }));
+    await user.click(within(second).getByRole("button", { name: "Check sign-in claude-max-2" }));
     expect(await within(second).findByText("Not signed in")).toBeVisible();
     expect(within(second).getByText("claude auth login")).toBeVisible();
     expect(second).not.toHaveTextContent("CLAUDE_CONFIG_DIR=");
@@ -810,8 +1030,9 @@ describe("the Claude Code accounts", () => {
     };
     state.api.use(route("GET", CLAUDE_CLI_AUTH_STATUS, () => answer));
     const { user } = renderApp("/credentials");
-    const item = await screen.findByRole("article", { name: "claude-max-1" });
-    const check = within(item).getByRole("button", { name: "Check sign-in" });
+    const card = await screen.findByRole("region", { name: CLAUDE_CLI });
+    const item = await openFolded(user, card, "1 ready", "claude-max-1");
+    const check = within(item).getByRole("button", { name: "Check sign-in claude-max-1" });
     await user.click(check);
     expect(await within(item).findByText("Claude Code couldn't be checked")).toBeVisible();
     expect(item).toHaveTextContent("claude-cli claude-max-1: could not run claude");
@@ -828,25 +1049,24 @@ describe("the Claude Code accounts", () => {
     expect(within(item).queryByText("Claude Code couldn't be checked")).toBeNull();
   });
 
-  it("resets an entry's cooldown", async () => {
+  it("stops an entry resting", async () => {
     const state = server([], {}, [
       claudeCliEntry({
         credential: claudeCliCredential({ unavailable: true, cooldowns: [cooldown("quota", 120)] }),
       }),
     ]);
     const { user } = renderApp("/credentials");
-    const item = await screen.findByRole("article", { name: "claude-max-1" });
+    const card = await screen.findByRole("region", { name: CLAUDE_CLI });
+    const item = await within(card).findByRole("article", { name: "claude-max-1" });
     expect(within(item).getByText("Resting")).toBeVisible();
-    await user.click(within(item).getByRole("button", { name: "Reset cooldown" }));
-    expect(
-      await within(item).findByText(
-        "Cooldown reset: the server tries it again with the next request.",
-      ),
-    ).toBeVisible();
+    await user.click(within(item).getByRole("button", { name: "Stop resting claude-max-1" }));
+    expect(await within(card).findByRole("status")).toHaveTextContent(
+      "claude-max-1 is no longer resting: the server tries it again with the next request.",
+    );
     expect(state.api.callsTo("POST", RESET_COOLDOWN)[0]?.json()).toEqual({
       auth_index: "3734a62b508f0029",
     });
-    expect(await within(item).findByText("Ready")).toBeVisible();
+    expect(await within(card).findByRole("button", { name: "1 ready" })).toBeVisible();
     expect(state.api.callsTo("GET", CLAUDE_CLI_ENTRIES).length).toBeGreaterThan(1);
   });
 
@@ -858,7 +1078,7 @@ describe("the Claude Code accounts", () => {
       expect(api.callsTo("GET", CLAUDE_CLI_ENTRIES)).toHaveLength(1);
     });
     await screen.findByText(/^None yet\./);
-    expect(screen.queryByRole("region", { name: "Claude Code accounts" })).toBeNull();
+    expect(screen.queryByRole("region", { name: CLAUDE_CLI })).toBeNull();
     expect(screen.queryByText("This server can't do that yet")).toBeNull();
   }
 
@@ -946,15 +1166,15 @@ describe("the provider API keys", () => {
     expect(state.api.callsTo("PUT", KEY_LISTS.codex.path)).toEqual([]);
   });
 
-  it("removes a key by its place in the list, never putting it in an address", async () => {
+  it("deletes a key by its place in the list, never putting it in an address", async () => {
     const state = server([], {
       claude: [{ "api-key": "sk-ant-test-provider-key-0009" }, existing],
     });
     const { user } = renderApp("/credentials");
-    const remove = await screen.findByRole("button", { name: "Remove the Claude key sk-...0001" });
+    const remove = await screen.findByRole("button", { name: "Delete the Claude key sk-...0001" });
     await user.click(remove);
-    const dialog = screen.getByRole("dialog", { name: "Remove this Claude key?" });
-    await user.click(within(dialog).getByRole("button", { name: "Remove" }));
+    const dialog = screen.getByRole("dialog", { name: "Delete this Claude key?" });
+    await user.click(within(dialog).getByRole("button", { name: "Delete key" }));
     await waitFor(() => {
       expect(screen.queryByText("sk-...0001")).toBeNull();
     });
@@ -997,7 +1217,7 @@ describe("the provider API keys", () => {
     expect(card).toHaveTextContent("This server has no way to save config.yaml from here.");
     // The keys still show, but nothing offers to change them.
     expect(within(card).getByText("sk-...0001")).toBeVisible();
-    expect(within(card).queryByRole("button", { name: /^Remove/ })).toBeNull();
+    expect(within(card).queryByRole("button", { name: /^Delete/ })).toBeNull();
     expect(screen.queryByRole("button", { name: "Add an API key" })).toBeNull();
   });
 });

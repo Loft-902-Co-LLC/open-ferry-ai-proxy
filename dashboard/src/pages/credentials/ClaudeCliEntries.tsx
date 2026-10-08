@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { RotateCcw, UserCheck } from "lucide-react";
-import { useId, useState } from "react";
+import { useId, useState, type ReactNode } from "react";
 
 import { callProblem, type CallProblem } from "../../api/access";
 import { isApiError } from "../../api/client";
@@ -20,14 +20,22 @@ import { Card } from "../../components/Card";
 import { Code } from "../../components/Code";
 import { CopyButton } from "../../components/CopyButton";
 import { ProblemNotice } from "../../components/ProblemNotice";
-import { QueryState } from "../../components/QueryState";
 import { Spinner } from "../../components/Spinner";
 import { formatInteger } from "../../lib/format";
+import { claudeCliAnchor } from "./anchors";
 import { claudeCommand, entriesUnserved, entryHealth } from "./claudeCli";
-import { CREDENTIALS_REFRESH_MS } from "./CredentialList";
-import { backIn, ModelCooldowns, QuotaWindows, Requests } from "./CredentialItem";
-import { canReset, credentialCooldowns, explainReason, modelCooldowns } from "./credentialStates";
+import { pollWhileRead } from "./CredentialList";
+import { backIn, lastUsed, ModelCooldowns, QuotaWindows, Requests } from "./CredentialItem";
+import {
+  canReset,
+  credentialCooldowns,
+  explainReason,
+  modelCooldowns,
+  secondsUntilBack,
+} from "./credentialStates";
+import { CheckedAt, PolledState } from "./PolledState";
 import { quotaReadings } from "./quotaReadings";
+import { DetailsButton, TriageList, useOpenWhenTargeted, type TriageEntry } from "./TriageList";
 
 /** A command to run, with a button that copies it. */
 function Command({ command, label }: { command: string; label: string }) {
@@ -112,14 +120,26 @@ function CheckFailed({ entry, error }: { entry: ClaudeCliEntry; error: unknown }
   return <ProblemNotice problem={callProblem(error)} live />;
 }
 
-type Notice = { tone: "ok"; text: string } | { tone: "problem"; problem: CallProblem };
+interface EntryItemProps {
+  entry: ClaudeCliEntry;
+  /** Its element's id, which the address can point at. */
+  anchor: string;
+  /** In the folded group: a row whose details open on request. */
+  compact: boolean;
+  /** The address points at it: its details show. */
+  targeted: boolean;
+  /** Called with what an action did, for the list to say. */
+  onDone: (notice: ReactNode) => void;
+}
 
 /** One entry: its state, why, what to do, and its actions. */
-function EntryItem({ entry }: { entry: ClaudeCliEntry }) {
+function EntryItem({ entry, anchor, compact, targeted, onDone }: EntryItemProps) {
   const titleId = useId();
+  const detailsId = useId();
   const call = useApiCall();
   const client = useQueryClient();
-  const [notice, setNotice] = useState<Notice | null>(null);
+  const [problem, setProblem] = useState<CallProblem | null>(null);
+  const [open, setOpen] = useOpenWhenTargeted(targeted);
   const credential = entry.credential;
   const health = entryHealth(entry);
   const resting = credential === null ? [] : credentialCooldowns(credential);
@@ -132,16 +152,20 @@ function EntryItem({ entry }: { entry: ClaudeCliEntry }) {
       call<ResetAnswer>(RESET_COOLDOWN, { method: "POST", json: { auth_index: authIndex } }),
     onSuccess: (answer) => {
       const count = answer.models?.length ?? 0;
-      setNotice({
-        tone: "ok",
-        text:
-          count === 0
-            ? "Cooldown reset: the server tries it again with the next request."
-            : `Cooldown reset for it and ${formatInteger(count)} ${count === 1 ? "model" : "models"}: the server tries it again with the next request.`,
-      });
+      const named = <span className="font-medium break-all">{entry.name}</span>;
+      onDone(
+        count === 0 ? (
+          <>{named} is no longer resting: the server tries it again with the next request.</>
+        ) : (
+          <>
+            {named} and {formatInteger(count)} {count === 1 ? "model" : "models"} are no longer
+            resting: the server tries them again with the next request.
+          </>
+        ),
+      );
     },
     onError: (failure) => {
-      setNotice({ tone: "problem", problem: callProblem(failure) });
+      setProblem(callProblem(failure));
     },
     onSettled: () => client.invalidateQueries({ queryKey: [CLAUDE_CLI_ENTRIES] }),
   });
@@ -152,105 +176,141 @@ function EntryItem({ entry }: { entry: ClaudeCliEntry }) {
       call<ClaudeCliAuthStatus>(CLAUDE_CLI_AUTH_STATUS, { query: { name: entry.name } }),
   });
 
+  const used = credential === null ? null : lastUsed(credential);
+  const itemName = (
+    <>
+      {" "}
+      <span className="sr-only">{entry.name}</span>
+    </>
+  );
+
   return (
-    <article aria-labelledby={titleId} className="space-y-3 rounded-md border border-line p-4">
-      <header className="flex flex-wrap items-start justify-between gap-2">
-        <div className="min-w-0 space-y-0.5">
-          <h3 id={titleId} className="font-semibold break-all">
+    <article id={anchor} aria-labelledby={titleId} className="scroll-mt-4 space-y-3">
+      <header className="flex items-start justify-between gap-2">
+        <div className="min-w-0 flex-1 space-y-0.5">
+          <h3 id={titleId} tabIndex={-1} data-anchor-heading className="font-semibold break-all">
             {entry.name}
           </h3>
-          <p className="text-muted">Claude Code, run by the server</p>
+          <p className="text-muted">
+            Claude Code, run by the server{used === null ? "" : ` · Last used ${used}`}
+          </p>
         </div>
-        <Badge tone={health.tone}>{health.label}</Badge>
+        <div className="flex shrink-0 items-center gap-2">
+          <Badge tone={health.tone}>{health.label}</Badge>
+          {compact && (
+            <DetailsButton
+              open={open}
+              controls={detailsId}
+              name={entry.name}
+              onToggle={() => {
+                setOpen(!open);
+              }}
+            />
+          )}
+        </div>
       </header>
 
-      <dl className="grid gap-x-6 gap-y-0.5 sm:grid-cols-[max-content_1fr]">
-        <dt className="text-muted">Prefix</dt>
-        <dd>
-          {entry.prefix === "" ? (
-            "None"
-          ) : (
-            <>
-              <Code>{entry.prefix}</Code>: calls to <Code>{`${entry.prefix}/<model>`}</Code> go
-              to it
-            </>
-          )}
-        </dd>
-        <dt className="text-muted">Config directory</dt>
-        <dd>
-          {entry.config_dir === "" ? (
-            "None: the server's CLAUDE_CONFIG_DIR, else Claude Code's default"
-          ) : (
-            <Code>{entry.config_dir}</Code>
-          )}
-        </dd>
-      </dl>
-
-      <div className="space-y-1">
-        <p>{health.summary}</p>
-        {resting[0] !== undefined && (
-          <p className="text-muted">
-            {explainReason(resting[0].reason).meaning} {backIn(resting[0])}
-          </p>
-        )}
-        {health.action !== null && (
-          <p>
-            <span className="font-medium">What to do:</span> {health.action}
-          </p>
-        )}
-      </div>
-
-      {error !== null && (
-        <div className="space-y-0.5">
-          <h4 className="font-medium">Last error</h4>
-          <p className="break-words">
-            {error.message}
-            {error.http_status !== null && (
-              <span className="text-muted"> (HTTP {error.http_status})</span>
+      <div id={detailsId} hidden={compact && !open} className="space-y-3">
+        <dl className="grid gap-x-6 gap-y-0.5 sm:grid-cols-[max-content_1fr]">
+          <dt className="text-muted">Prefix</dt>
+          <dd>
+            {entry.prefix === "" ? (
+              "None"
+            ) : (
+              <>
+                <Code>{entry.prefix}</Code>: calls to <Code>{`${entry.prefix}/<model>`}</Code> go
+                to it
+              </>
             )}
-          </p>
-        </div>
-      )}
-      {readings !== null && <QuotaWindows readings={readings} />}
-      {models.length > 0 && <ModelCooldowns cooldowns={models} />}
-      {credential !== null && <Requests credential={credential} />}
+          </dd>
+          <dt className="text-muted">Config directory</dt>
+          <dd>
+            {entry.config_dir === "" ? (
+              "None: the server's CLAUDE_CONFIG_DIR, else Claude Code's default"
+            ) : (
+              <Code>{entry.config_dir}</Code>
+            )}
+          </dd>
+        </dl>
 
-      <div className="flex flex-wrap gap-2">
-        <Button
-          size="sm"
-          disabled={check.isPending}
-          onClick={() => {
-            check.mutate();
-          }}
-        >
-          {check.isPending ? <Spinner /> : <UserCheck aria-hidden="true" className="size-4" />}
-          Check sign-in
-        </Button>
-        {credential !== null && canReset(credential) && (
+        <div className="space-y-1">
+          <p>{health.summary}</p>
+          {resting[0] !== undefined && (
+            <p className="text-muted">
+              {explainReason(resting[0].reason).meaning} {backIn(resting[0])}
+            </p>
+          )}
+          {health.action !== null && (
+            <p>
+              <span className="font-medium">What to do:</span> {health.action}
+            </p>
+          )}
+        </div>
+
+        {error !== null && (
+          <div className="space-y-0.5">
+            <h4 className="font-medium">Last error</h4>
+            <p className="break-words">
+              {error.message}
+              {error.http_status !== null && (
+                <span className="text-muted"> (HTTP {error.http_status})</span>
+              )}
+            </p>
+          </div>
+        )}
+        {readings !== null && <QuotaWindows readings={readings} />}
+        {models.length > 0 && <ModelCooldowns cooldowns={models} />}
+        {credential !== null && <Requests credential={credential} />}
+
+        <div className="flex flex-wrap gap-2">
           <Button
             size="sm"
-            disabled={reset.isPending}
+            disabled={check.isPending}
             onClick={() => {
-              setNotice(null);
-              reset.mutate(credential.auth_index);
+              check.mutate();
             }}
           >
-            {reset.isPending ? <Spinner /> : <RotateCcw aria-hidden="true" className="size-4" />}
-            Reset cooldown
+            {check.isPending ? <Spinner /> : <UserCheck aria-hidden="true" className="size-4" />}
+            Check sign-in
+            {itemName}
           </Button>
-        )}
-      </div>
+          {credential !== null && canReset(credential) && (
+            <Button
+              size="sm"
+              disabled={reset.isPending}
+              onClick={() => {
+                setProblem(null);
+                reset.mutate(credential.auth_index);
+              }}
+            >
+              {reset.isPending ? <Spinner /> : <RotateCcw aria-hidden="true" className="size-4" />}
+              Stop resting
+              {itemName}
+            </Button>
+          )}
+        </div>
 
-      {check.isSuccess && <SignInStatus entry={entry} status={check.data} />}
-      {check.isError && <CheckFailed entry={entry} error={check.error} />}
-      {notice?.tone === "ok" && (
-        <Alert tone="ok" live>
-          <p>{notice.text}</p>
-        </Alert>
-      )}
-      {notice?.tone === "problem" && <ProblemNotice problem={notice.problem} live />}
+        {check.isSuccess && <SignInStatus entry={entry} status={check.data} />}
+        {check.isError && <CheckFailed entry={entry} error={check.error} />}
+        {problem !== null && <ProblemNotice problem={problem} live />}
+      </div>
     </article>
   );
+}
+
+interface Entry extends TriageEntry {
+  entry: ClaudeCliEntry;
+}
+
+function entryOf(entry: ClaudeCliEntry): Entry {
+  return {
+    key: entry.name,
+    anchor: claudeCliAnchor(entry.name),
+    name: entry.name,
+    health: entryHealth(entry),
+    backIn: secondsUntilBack(entry.credential),
+    entry,
+  };
 }
 
 /**
@@ -260,8 +320,9 @@ function EntryItem({ entry }: { entry: ClaudeCliEntry }) {
  */
 export function ClaudeCliEntries() {
   const query = useApiQuery<Entries>(CLAUDE_CLI_ENTRIES, undefined, {
-    refetchInterval: CREDENTIALS_REFRESH_MS,
+    refetchInterval: pollWhileRead,
   });
+  const [notice, setNotice] = useState<ReactNode>(null);
   if (
     query.isPending ||
     (query.isError && entriesUnserved(query.error)) ||
@@ -272,17 +333,35 @@ export function ClaudeCliEntries() {
   return (
     <Card
       title="Claude Code accounts"
-      description="The claude-cli entries in config.yaml: each runs Claude Code, signed in with its own subscription. Add, change and remove them in config.yaml."
+      description={
+        <>
+          The claude-cli entries in config.yaml: each runs Claude Code, signed in with its own
+          subscription. Add, change and delete them in config.yaml.
+          <CheckedAt at={query.dataUpdatedAt} />
+        </>
+      }
     >
-      <QueryState query={query}>
+      {notice !== null && (
+        <Alert tone="ok" live>
+          <p>{notice}</p>
+        </Alert>
+      )}
+      <PolledState query={query}>
         {(data) => (
-          <div className="space-y-3">
-            {data.entries.map((entry) => (
-              <EntryItem key={entry.name} entry={entry} />
-            ))}
-          </div>
+          <TriageList
+            entries={data.entries.map(entryOf)}
+            render={(entry, view) => (
+              <EntryItem
+                entry={entry.entry}
+                anchor={entry.anchor}
+                compact={view.compact}
+                targeted={view.targeted}
+                onDone={setNotice}
+              />
+            )}
+          />
         )}
-      </QueryState>
+      </PolledState>
     </Card>
   );
 }

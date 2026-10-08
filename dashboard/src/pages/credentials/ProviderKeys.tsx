@@ -28,6 +28,7 @@ import { Spinner } from "../../components/Spinner";
 import { TextField } from "../../components/TextField";
 import { maskKey } from "../../lib/mask";
 import { z } from "../../lib/zod";
+import { providerKeyAnchor, useAddressAnchor, useFocusAnchor } from "./anchors";
 import { providerName } from "./credentialStates";
 
 /** Whether two entries are the same key: the same key and base URL. */
@@ -215,16 +216,24 @@ function AddKeyDialog({
   );
 }
 
+/** A key's anchor: by the index of the credential it makes, else its place in the list. */
+function keyAnchor(provider: KeyProvider, entry: ProviderKey, index: number): string {
+  const authIndex = entry["auth-index"]?.trim() ?? "";
+  return providerKeyAnchor(provider, authIndex === "" ? String(index) : authIndex);
+}
+
 interface KeyEntryProps {
   provider: KeyProvider;
   entry: ProviderKey;
-  /** Whether the server can save config.yaml, so the key can be removed. */
+  /** Its element's id, which the address can point at. */
+  anchor: string;
+  /** Whether the server can save config.yaml, so the key can be deleted. */
   writable: boolean;
   onReadOnly: () => void;
 }
 
-/** One key in a list, with a button to remove it. */
-function KeyEntry({ provider, entry, writable, onReadOnly }: KeyEntryProps) {
+/** One key in a list, with a button to delete it. */
+function KeyEntry({ provider, entry, anchor, writable, onReadOnly }: KeyEntryProps) {
   const call = useApiCall();
   const client = useQueryClient();
   const name = providerName(provider);
@@ -256,21 +265,28 @@ function KeyEntry({ provider, entry, writable, onReadOnly }: KeyEntryProps) {
   });
 
   return (
-    <li className="space-y-2 rounded-md border border-line px-3 py-2">
+    <li
+      id={anchor}
+      tabIndex={-1}
+      data-anchor-heading
+      className="scroll-mt-4 space-y-2 py-3 first:pt-0 last:pb-0"
+    >
       <div className="flex flex-wrap items-center justify-between gap-2">
         <SecretText value={key} label={`the ${name} key ${maskKey(key)}`} />
         {writable && (
           <Button
             size="sm"
             variant="ghost"
-            aria-label={`Remove the ${name} key ${maskKey(key)}`}
             onClick={() => {
               remove.reset();
               setConfirm(true);
             }}
           >
             <Trash2 aria-hidden="true" className="size-4" />
-            Remove
+            Delete{" "}
+            <span className="sr-only">
+              the {name} key {maskKey(key)}
+            </span>
           </Button>
         )}
       </div>
@@ -292,15 +308,15 @@ function KeyEntry({ provider, entry, writable, onReadOnly }: KeyEntryProps) {
       {remove.isError &&
         (remove.error instanceof KeyGoneError ? (
           <Alert tone="info" live>
-            <p>That key was already removed.</p>
+            <p>That key was already deleted.</p>
           </Alert>
         ) : (
           <ProblemNotice problem={saveProblem(remove.error)} live />
         ))}
       <ConfirmDialog
         open={confirm}
-        title={`Remove this ${name} key?`}
-        confirmLabel="Remove"
+        title={`Delete this ${name} key?`}
+        confirmLabel="Delete key"
         pending={remove.isPending}
         onConfirm={() => {
           remove.mutate();
@@ -310,7 +326,7 @@ function KeyEntry({ provider, entry, writable, onReadOnly }: KeyEntryProps) {
         }}
       >
         <p>
-          The server stops using <Code>{maskKey(key)}</Code> and removes it from config.yaml. The
+          The server stops using <Code>{maskKey(key)}</Code> and deletes it from config.yaml. The
           key stays valid with {name}: revoke it there if it should stop working altogether.
         </p>
       </ConfirmDialog>
@@ -329,6 +345,10 @@ interface KeyListProps {
 function KeyList({ provider, query, writable, onReadOnly }: KeyListProps) {
   const titleId = useId();
   const name = providerName(provider);
+  const address = useAddressAnchor();
+  const shown = query.isSuccess ? keysOf(query.data, KEY_LISTS[provider].list) : [];
+  const targeted = shown.some((entry, index) => keyAnchor(provider, entry, index) === address);
+  useFocusAnchor(targeted ? address : null);
   return (
     <section aria-labelledby={titleId} className="space-y-2">
       <h3 id={titleId} className="font-semibold">
@@ -340,12 +360,13 @@ function KeyList({ provider, query, writable, onReadOnly }: KeyListProps) {
           return entries.length === 0 ? (
             <p className="text-muted">None.</p>
           ) : (
-            <ul className="space-y-2">
+            <ul className="divide-y divide-line">
               {entries.map((entry, index) => (
                 <KeyEntry
                   key={`${entry["api-key"]}-${entry["base-url"] ?? ""}-${String(index)}`}
                   provider={provider}
                   entry={entry}
+                  anchor={keyAnchor(provider, entry, index)}
                   writable={writable}
                   onReadOnly={onReadOnly}
                 />
@@ -412,7 +433,7 @@ export function ProviderKeys({ adding, onAdd, onAddClosed }: ProviderKeysProps) 
             {unsupported
               ? "This server doesn't serve its provider keys to the dashboard. "
               : "This server has no way to save config.yaml from here. "}
-            Add and remove them in config.yaml itself, under <Code>claude-api-key</Code>,{" "}
+            Add and delete them in config.yaml itself, under <Code>claude-api-key</Code>,{" "}
             <Code>codex-api-key</Code> or <Code>gemini-api-key</Code>, and the server picks them up
             when it reloads the file.
           </p>

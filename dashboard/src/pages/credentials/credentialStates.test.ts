@@ -4,18 +4,23 @@ import type { CooldownReason } from "../../api/credentials";
 import { cooldown, credential } from "../../test/fixtures";
 import {
   canReset,
+  compareHealth,
   credentialCooldowns,
   credentialHealth,
   explainCooldown,
   explainReason,
   explainSignInError,
   explainStartError,
+  healthTally,
   modelCooldowns,
+  needsAttention,
   pastedAddressProblem,
   providerName,
   reasonOfMessage,
+  secondsUntilBack,
   signInName,
   timeLeft,
+  type HealthOrder,
 } from "./credentialStates";
 
 const REASONS: CooldownReason[] = [
@@ -121,6 +126,7 @@ describe("a credential's health", () => {
       label: "Ready",
       summary: "In use.",
       action: null,
+      triage: "ready",
     });
     expect(
       credentialHealth(
@@ -180,6 +186,70 @@ describe("a credential's health", () => {
     expect(canReset(credential({ cooldowns: null }))).toBe(false);
     expect(canReset(credential({ unavailable: true }))).toBe(true);
     expect(canReset(credential({ next_retry_after: "2026-10-05T12:30:00Z" }))).toBe(true);
+  });
+});
+
+describe("the triage", () => {
+  const ready = credential();
+  const off = credential({ name: "off.json", disabled: true, status: "disabled" });
+  const failing = credential({ name: "failing.json", status: "error", status_message: "boom" });
+  const soon = credential({ name: "z-soon.json", cooldowns: [cooldown("quota", 60)] });
+  const later = credential({ name: "a-later.json", cooldowns: [cooldown("quota", 3600)] });
+  const unknownRest = credential({ name: "b-rest.json", unavailable: true });
+  const waiting = credential({ name: "waiting.json", status: "pending" });
+
+  function order(item: ReturnType<typeof credential>, name = item.name): HealthOrder {
+    return { health: credentialHealth(item), name, backIn: secondsUntilBack(item) };
+  }
+
+  it("puts each state in its group, and the failing and resting ones need attention", () => {
+    expect(
+      [ready, off, failing, soon, unknownRest, waiting].map(
+        (item) => credentialHealth(item).triage,
+      ),
+    ).toEqual(["ready", "off", "failing", "resting", "resting", "other"]);
+    expect(credentialHealth(credential({ status: "refreshing" })).triage).toBe("other");
+    expect(credentialHealth(credential({ status: "unknown" })).triage).toBe("other");
+    expect(needsAttention(credentialHealth(failing))).toBe(true);
+    expect(needsAttention(credentialHealth(soon))).toBe(true);
+    expect(needsAttention(credentialHealth(off))).toBe(false);
+    expect(needsAttention(credentialHealth(ready))).toBe(false);
+  });
+
+  it("sorts failing, resting soonest back first, off, the rest, then ready, by name in each", () => {
+    const sorted = [
+      order(ready, "b-ready"),
+      order(ready, "a-ready"),
+      order(waiting),
+      order(off),
+      order(unknownRest),
+      order(later),
+      order(soon),
+      order(failing),
+    ].sort(compareHealth);
+    expect(sorted.map((item) => item.name)).toEqual([
+      "failing.json",
+      "z-soon.json",
+      "a-later.json",
+      "b-rest.json",
+      "off.json",
+      "waiting.json",
+      "a-ready",
+      "b-ready",
+    ]);
+  });
+
+  it("knows when a rest ends, as the list was read", () => {
+    expect(secondsUntilBack(soon)).toBe(60);
+    expect(secondsUntilBack(unknownRest)).toBe(Number.POSITIVE_INFINITY);
+    expect(secondsUntilBack(null)).toBe(Number.POSITIVE_INFINITY);
+  });
+
+  it("tallies the states, the ready ones first", () => {
+    expect(
+      healthTally([off, ready, waiting, ready, failing].map((item) => credentialHealth(item))),
+    ).toBe("2 ready, 1 failing, 1 off, 1 waiting");
+    expect(healthTally([])).toBe("");
   });
 });
 

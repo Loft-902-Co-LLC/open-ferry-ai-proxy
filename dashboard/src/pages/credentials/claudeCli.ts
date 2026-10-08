@@ -45,6 +45,7 @@ export function entryHealth(entry: ClaudeCliEntry): Health {
       label: "Off",
       summary: "Turned off in config.yaml: the server sends it no requests.",
       action: "To use it again, take disabled: true off its entry in config.yaml.",
+      triage: "off",
     };
   }
   if (entry.credential === null) {
@@ -53,6 +54,7 @@ export function entryHealth(entry: ClaudeCliEntry): Health {
       label: "Not loaded",
       summary: "The server hasn't loaded it yet.",
       action: "It loads with config.yaml. If it stays like this, the server's log says why.",
+      triage: "other",
     };
   }
   const health = credentialHealth(entry.credential);
@@ -62,7 +64,7 @@ export function entryHealth(entry: ClaudeCliEntry): Health {
   return {
     ...health,
     action:
-      "Check its sign-in. If Claude Code isn't signed in, sign it in again on the server's computer, then reset the cooldown.",
+      "Check its sign-in. If Claude Code isn't signed in, sign it in again on the server's computer, then stop it resting.",
   };
 }
 

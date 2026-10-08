@@ -452,10 +452,10 @@ test("adds and removes provider keys on the Credentials page", async () => {
   expectFile(/^gemini-api-key:$/m, "a gemini-api-key list");
   expectFile(GEMINI_KEY, "the Gemini key");
 
-  await page.getByRole("button", { name: /^Remove the Claude key / }).click();
-  const confirm = page.getByRole("dialog", { name: "Remove this Claude key?" });
-  await confirm.getByRole("button", { name: "Remove" }).click();
-  await expect(page.getByRole("button", { name: /^Remove the Claude key / })).toHaveCount(0);
+  await page.getByRole("button", { name: /^Delete the Claude key / }).click();
+  const confirm = page.getByRole("dialog", { name: "Delete this Claude key?" });
+  await confirm.getByRole("button", { name: "Delete key" }).click();
+  await expect(page.getByRole("button", { name: /^Delete the Claude key / })).toHaveCount(0);
   expectFile(CLAUDE_KEY, "the removed Claude key", false);
   expectFile(GEMINI_KEY, "the Gemini key still");
   expectCommentsKept();

@@ -72,7 +72,7 @@ export function QuotaView({ quota }: { quota: QuotaAnswer }) {
 }
 
 /** A button that asks the provider for a credential's quota, and shows it. */
-export function QuotaButton({ credential }: { credential: Credential }) {
+export function QuotaButton({ credential, name }: { credential: Credential; name: string }) {
   const call = useApiCall();
   const [open, setOpen] = useState(false);
   const fetchQuota = useMutation({
@@ -93,11 +93,11 @@ export function QuotaButton({ credential }: { credential: Credential }) {
         }}
       >
         {fetchQuota.isPending ? <Spinner /> : <Gauge aria-hidden="true" className="size-4" />}
-        Check quota
+        Check quota <span className="sr-only">of {name}</span>
       </Button>
       <Dialog
         open={open}
-        title={`Quota of ${credential.name}`}
+        title={`Quota of ${name}`}
         onClose={() => {
           setOpen(false);
         }}
