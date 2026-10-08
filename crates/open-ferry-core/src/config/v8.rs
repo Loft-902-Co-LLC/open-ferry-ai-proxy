@@ -24,6 +24,8 @@
 //!   as upstream does when it writes the file back.
 //! - The deprecated `codex.live-media-relay.allow-private-remote-ips` is still
 //!   converted and checked, though the section it converts into is ignored.
+//! - open-ferry's `management.separate-address` moves as the other
+//!   `management` settings do.
 
 use std::collections::BTreeSet;
 
@@ -174,6 +176,11 @@ pub(crate) const V8_PATHS: &[(&str, &str)] = &[
         "management.panel-github-repository",
     ),
     ("remote-management.base-url", "management.base-url"),
+    // open-ferry's own.
+    (
+        "remote-management.separate-address",
+        "management.separate-address",
+    ),
     ("auth-dir", "oauth.auth-dir"),
     ("debug", "observability.logs.debug"),
     ("pprof.enable", "observability.pprof.enable"),
@@ -829,7 +836,8 @@ mod tests {
 
     #[test]
     fn paths_table_matches_upstream_shape() {
-        assert_eq!(V8_PATHS.len(), 114);
+        // Upstream's, and open-ferry's management.separate-address.
+        assert_eq!(V8_PATHS.len(), 114 + 1);
         let olds: BTreeSet<&str> = V8_PATHS.iter().map(|(old, _)| *old).collect();
         assert_eq!(olds.len(), V8_PATHS.len());
         let scoped: Vec<&str> = oauth_scoped_paths().collect();

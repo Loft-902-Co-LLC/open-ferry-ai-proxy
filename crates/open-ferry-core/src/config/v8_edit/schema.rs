@@ -431,6 +431,8 @@ static CONFIG_REMOTE_MANAGEMENT: Type = Type {
         ("disable-control-panel", Field::Leaf),
         ("panel-github-repository", Field::Leaf),
         ("secret-key", Field::Leaf),
+        // open-ferry's own, which upstream doesn't have.
+        ("separate-address", Field::Leaf),
     ],
 };
 

@@ -99,6 +99,7 @@ pub(crate) const V8_STRUCT_PATHS: &[(&str, &str)] = &[
 
 /// The top-level keys of the v8 layout (upstream's `v8AllowedRoots`), with
 /// open-ferry's `claude-cli`, which stays at the top level in both layouts.
+/// [`V8_CHILDREN`] has open-ferry's `management.separate-address` too.
 pub(crate) const V8_ROOTS: &[&str] = &[
     "access",
     "api-keys",
@@ -169,6 +170,8 @@ pub(crate) const V8_CHILDREN: &[(&str, &[&str])] = &[
             "disable-control-panel",
             "panel-github-repository",
             "secret-key",
+            // open-ferry's own.
+            "separate-address",
         ],
     ),
     ("models", &["catalog", "codex-catalog", "devin-catalog"]),

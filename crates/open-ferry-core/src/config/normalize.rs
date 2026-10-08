@@ -24,6 +24,8 @@
 //! - open-ferry's own `claude-cli` list is cleaned up and checked here too
 //!   ([`sanitize_claude_cli`]): a bad entry fails the load, as a bad weight
 //!   does.
+//! - So is open-ferry's own `management.separate-address`
+//!   ([`super::management_address`]): a bad address fails the load.
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
@@ -120,6 +122,7 @@ pub(crate) fn post_process(config: &mut Config) -> Result<(), ConfigError> {
     sanitize_claude_keys(&mut config.claude_api_key);
     sanitize_claude_cli(&mut config.claude_cli);
     validate_claude_cli(&config.claude_cli)?;
+    super::management_address::clean_up(config)?;
     sanitize_openai_compatibility(&mut config.openai_compatibility);
     config.oauth_excluded_models = normalize_oauth_excluded_models(&config.oauth_excluded_models);
     config.oauth_model_alias = sanitize_oauth_model_alias(&config.oauth_model_alias);

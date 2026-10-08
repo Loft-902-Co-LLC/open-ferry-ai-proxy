@@ -435,6 +435,12 @@ pub struct RemoteManagement {
     pub panel_github_repository: String,
     /// The management API's base URL, for a remote client.
     pub base_url: String,
+    /// open-ferry's own: the `host:port` the management API, the dashboard
+    /// and the dashboard API are served on instead of the proxy's address,
+    /// or empty to serve them beside the proxy (see
+    /// [`RemoteManagement::separate_address`]). Upstream has no such
+    /// setting.
+    pub separate_address: String,
 }
 
 impl Default for RemoteManagement {
@@ -446,6 +452,7 @@ impl Default for RemoteManagement {
             disable_auto_update_panel: false,
             panel_github_repository: DEFAULT_PANEL_GITHUB_REPOSITORY.to_owned(),
             base_url: String::new(),
+            separate_address: String::new(),
         }
     }
 }
@@ -459,6 +466,7 @@ impl fmt::Debug for RemoteManagement {
             .field("disable_auto_update_panel", &self.disable_auto_update_panel)
             .field("panel_github_repository", &self.panel_github_repository)
             .field("base_url", &RedactedUrl(&self.base_url))
+            .field("separate_address", &self.separate_address)
             .finish()
     }
 }

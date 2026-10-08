@@ -32,6 +32,9 @@
 //! - open-ferry's `claude-cli` list follows `claude-api-key`. It is always
 //!   listed, so emptying it empties the file's list, and the merge doesn't
 //!   add an empty one to a file without it.
+//! - open-ferry's `remote-management.separate-address` follows `base-url`.
+//!   Like `secret-key`, an empty one isn't added to a file without it, and
+//!   clears the file's.
 
 use std::collections::BTreeMap;
 
@@ -205,6 +208,10 @@ pub(crate) fn legacy_config(cfg: &Config) -> Result<Value, Unwritable> {
                     s(&cfg.remote_management.panel_github_repository),
                 )
                 .omit_empty("base-url", s(&cfg.remote_management.base_url))
+                .put(
+                    "separate-address",
+                    s(&cfg.remote_management.separate_address),
+                )
                 .done(),
         )
         .put(

@@ -49,7 +49,10 @@
 //! `api-keys.vertex` and so on).
 //!
 //! open-ferry adds `claude-cli` ([`ClaudeCli`]), a top-level list in both
-//! layouts that upstream doesn't have.
+//! layouts that upstream doesn't have, and `management.separate-address`
+//! (`remote-management.separate-address` in the legacy layout), an address
+//! of their own for the management API and the dashboard
+//! ([`ManagementAddress`]).
 //!
 //! Read and ignored, so they never fail a load except where upstream checks
 //! their layout or weights before decoding:
@@ -81,6 +84,7 @@ mod duration;
 mod image_generation;
 mod layout;
 mod load;
+mod management_address;
 mod model_catalogs;
 mod normalize;
 pub(crate) mod paths;
@@ -101,6 +105,7 @@ use std::fmt;
 pub(crate) use duration::parse_go_duration;
 pub use image_generation::DisableImageGeneration;
 pub use layout::{AnyValue, V8Document, YamlTime};
+pub use management_address::{ManagementAddress, ManagementReach, SEPARATE_ADDRESS};
 pub use model_catalogs::{CatalogSourceError, CatalogSources, is_url_source};
 pub use payload::{PayloadConfig, PayloadFilterRule, PayloadModelRule, PayloadRule};
 pub use safe_mode::example_api_key_warning_page;
@@ -148,7 +153,7 @@ pub enum ConfigErrorKind {
 
 /// A config that couldn't be loaded. The message is upstream's wording. It
 /// names keys and paths but doesn't quote values, apart from a rejected
-/// `trusted-proxies` entry.
+/// `trusted-proxies` entry and open-ferry's `management.separate-address`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConfigError {
     kind: ConfigErrorKind,

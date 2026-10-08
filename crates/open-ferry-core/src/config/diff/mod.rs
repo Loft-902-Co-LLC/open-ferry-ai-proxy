@@ -24,6 +24,8 @@
 //! - open-ferry's `claude-cli` list, which upstream doesn't have, gets
 //!   lines in the style of the key lists: its count, or each entry's
 //!   changed settings as `claude-cli[0].timeout: 5m -> 10m`.
+//! - open-ferry's `remote-management.separate-address`, which upstream
+//!   doesn't have, gets a line with both values.
 //! - Go tells a list or map that is missing from one that is empty, and
 //!   reports `payload.default: []` against no `payload.default` as an
 //!   update (0 -> 0 rules); the typed config can't tell them apart, so no
@@ -512,6 +514,11 @@ pub fn build_change_details(old: &Config, new: &Config) -> Vec<String> {
         "remote-management.base-url",
         &old_remote.base_url,
         &new_remote.base_url,
+    );
+    changes.text(
+        "remote-management.separate-address",
+        &old_remote.separate_address,
+        &new_remote.separate_address,
     );
     if old_remote.secret_key != new_remote.secret_key {
         let what = match (
