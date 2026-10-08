@@ -14,11 +14,13 @@ Already in place:
 - CLIProxyAPI's terminal UI (`open-ferry -tui`), as a client of the management API.
 - Management writes: the routes that change the config and the credentials. A config write is checked before it lands, replaces the file in one step, keeps the previous one as `config.yaml.bak` and the file's comments, and takes effect before it is answered.
 - A web dashboard at `/dashboard/`, built into the binary in place of CLIProxyAPI's downloaded panel, and much easier to use than CLIProxyAPI's management center:
-  - each credential's state at a glance (health, cooldowns and quota, with the reason and what to do about it), with sign-ins and uploads;
+  - each credential's state at a glance (health, cooldowns and quota, with the reason and what to do about it), the failing and resting ones first and the healthy ones folded away, with sign-ins and uploads;
+  - once a client has connected, an Overview that leads with today's calls and each account's health;
   - usage, latency and estimated cost per request, model, credential and client key from a local SQLite ledger;
   - a search of the request logs;
   - **no YAML for the basics:** a first run gets you from nothing to a working client in a few steps: replace the example client keys with a new one, add a provider key or sign in, then copy a ready-made client setup;
-  - **settings in forms:** every common setting is checked as you type and reviewed against the server before saving. The raw YAML is still there, with a diff before saving.
+  - **settings in forms:** every common setting is checked as you type and reviewed against the server before saving, client key changes included, and the page asks before you leave with changes unsaved. The raw YAML is still there, with a diff before saving;
+  - a layout that works on a phone as well as on a desktop.
 - Each Claude and Codex credential's quota as the provider's last response gave it: the management API lists it, and the dashboard shows how much of each window is used, when it starts over, and which one stopped the account.
 - Codex's response steering on the Responses WebSocket (`upstream.codex.response-steering`, experimental and off by default, as upstream).
 - Session affinity (`routing.session-affinity`, off by default as upstream): a conversation stays on the credential that served it, so its prompt cache stays warm, and moves only when that credential can't serve. Session IDs are only routing keys: none is sent upstream, logged or saved.
@@ -52,8 +54,7 @@ Worth having, but not needed for v1:
 - **In the dashboard:**
   - credential states and new requests shown as they happen, without reloading;
   - a switch that hides emails and keys, for sharing the screen;
-  - each request saying why its credential was picked;
-  - a layout that works on a phone.
+  - each request saying why its credential was picked.
 - **A management port of its own:** an option to serve the management API and the dashboard only on a second address, such as loopback, so the public port doesn't have those routes at all.
 - **`open-ferry-translate` on crates.io,** once its API is stable, for anyone who only wants the translation between the API formats.
 - **For teams:** groups of credentials, client keys limited to a group, and limits on each key's requests and spending. The usage ledger already counts each key's use.
