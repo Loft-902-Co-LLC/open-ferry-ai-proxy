@@ -500,7 +500,7 @@ fn changed_since(ctx: &Context, would: Option<Value>) -> Failure {
         "changed_since",
         format!("{CHANGED_SINCE}, so nothing was undone"),
     )
-    .hint(format!(
+    .go_ahead_hint(format!(
         "look at what it would change, then {} to undo anyway",
         go_ahead(ctx, would.as_ref().unwrap_or(&Value::Null))
     ));

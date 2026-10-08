@@ -1818,6 +1818,201 @@ async fn short_secrets_are_scrubbed_as_whole_words() {
     assert_eq!(setup.text(), before);
 }
 
+// Not upstream's: secrets that are words of the answers' field names, as
+// `value`, `path`, `error`, `changes`, `sha256` and `true` can be, leave the
+// field names as they are, in the JSON on the command line and in a tool's
+// answer, which stay valid JSON, and the hint still gives the SHA-256 to go
+// ahead with. The keys of a setting's value are scrubbed, and two scrubbed
+// into the same one are both kept.
+#[tokio::test]
+async fn short_secrets_leave_the_field_names_alone() {
+    const WORDS: [&str; 6] = ["value", "path", "error", "changes", "sha256", "true"];
+    let offline = offline(Some(KEY));
+    let setup = &offline.setup;
+    let keys: String = WORDS
+        .iter()
+        .map(|word| format!("    - '{word}'\n"))
+        .collect();
+    let text = setup
+        .text()
+        .replacen("  api-keys:\n", &format!("  api-keys:\n{keys}"), 1);
+    std::fs::write(
+        &setup.path,
+        format!(
+            "{text}routing:\n  strategy: fill-first\napi-keys:\n  codex:\n    - name: 'placeholder'\n      base-url: 'https://api.example.com/v1'\n      keys:\n        - api-key: 'sk-test-provider-key-0123456789'\n          headers:\n            value: 'a'\n            path: 'b'\n            X-Plain: 'c'\n"
+        ),
+    )
+    .unwrap();
+    let before = setup.text();
+    let sha256 = |text: &str| open_ferry_core::config::save::sha256_hex(text.as_bytes());
+    let shown = sha256(&before);
+    let fields = |value: &Value| -> Vec<String> {
+        let mut fields: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
+        fields.sort();
+        fields
+    };
+    let valid = |value: &Value| {
+        let printed = serde_json::to_string_pretty(value).unwrap();
+        assert_eq!(&serde_json::from_str::<Value>(&printed).unwrap(), value);
+    };
+    let printed = |failure: &Failure| -> Value {
+        serde_json::from_str(&serde_json::to_string(failure).unwrap()).unwrap()
+    };
+
+    // The JSON on the command line: a setting.
+    let got = ok(&cli(&setup.path), get("routing.strategy")).await;
+    valid(&got.json);
+    assert_eq!(fields(&got.json), ["path", "set", "value"], "{}", got.json);
+    assert_eq!(got.json["path"], json!("routing.strategy"));
+    assert_eq!(got.json["value"], json!("fill-first"));
+
+    // A mapping in a setting: its keys scrubbed, and all kept.
+    let got = ok(&cli(&setup.path), get("api-keys")).await;
+    valid(&got.json);
+    let headers = &got.json["value"]["codex"][0]["keys"][0]["headers"];
+    assert_eq!(
+        fields(headers),
+        ["X-Plain", "[redacted]", "[redacted] (2)"],
+        "{headers}"
+    );
+    let mut values: Vec<&str> = headers
+        .as_object()
+        .unwrap()
+        .values()
+        .map(|value| value.as_str().unwrap())
+        .collect();
+    values.sort_unstable();
+    assert_eq!(values, ["a", "b", "c"]);
+
+    // A change that needs a confirmation: its fields, and the hash in the
+    // hint.
+    let allow = || set("management.allow-remote", "true");
+    let failure = fails(&cli(&setup.path), allow()).await;
+    assert_eq!(failure.error, "needs_confirmation");
+    let answer = printed(&failure);
+    assert_eq!(fields(&answer), ["error", "hint", "message", "would"]);
+    let would = &answer["would"];
+    assert_eq!(
+        fields(would),
+        ["changes", "config_sha256", "reasons"],
+        "{would}"
+    );
+    assert_eq!(would["config_sha256"], json!(shown));
+    assert_eq!(fields(&would["changes"][0]), ["new", "path"], "{would}");
+    assert_eq!(would["changes"][0]["new"], json!(true));
+    let hint = answer["hint"].as_str().unwrap();
+    assert!(
+        hint.contains(&format!("--yes --expect-sha256 {shown}")),
+        "{hint}"
+    );
+    assert!(failure.text().contains("It would change:"), "{answer}");
+
+    // Made with it.
+    let ctx = Context {
+        yes: true,
+        expect_sha256: Some(shown.clone()),
+        ..cli(&setup.path)
+    };
+    let changed = ok(&ctx, allow()).await;
+    valid(&changed.json);
+    assert_eq!(
+        fields(&changed.json),
+        [
+            "action", "changed", "changes", "note", "path", "undo", "via"
+        ],
+        "{}",
+        changed.json
+    );
+    assert_eq!(
+        changed.json["changes"][0]["path"],
+        json!("management.allow-remote")
+    );
+    assert_eq!(changed.json["changes"][0]["new"], json!(true));
+
+    // An undo over a hand edit: both hashes in the hint.
+    let edited = format!("{before}# edited by hand\n");
+    std::fs::write(&setup.path, &edited).unwrap();
+    let failure = fails(&cli(&setup.path), Command::ConfigUndo).await;
+    assert_eq!(failure.error, "changed_since");
+    let answer = printed(&failure);
+    assert_eq!(
+        fields(&answer["would"]),
+        ["backup_sha256", "changes", "config_sha256", "reasons"],
+        "{answer}"
+    );
+    let hint = answer["hint"].as_str().unwrap();
+    let both = format!(
+        "--yes --expect-sha256 {} --expect-backup-sha256 {shown}",
+        sha256(&edited)
+    );
+    assert!(hint.contains(&both), "{hint}");
+
+    // A tool's answers.
+    let server = Server::new(Ok(setup.path.clone()), Env::default(), None);
+    let mut session = server_session(server).await;
+    let texts = |result: &Value| -> Vec<String> {
+        result["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|content| content["text"].as_str().map(str::to_owned))
+            .collect()
+    };
+    let result = session
+        .call("config_get", json!({"path": "routing.strategy"}))
+        .await;
+    let answer = &result["structuredContent"];
+    assert_eq!(fields(answer), ["path", "set", "value"], "{result}");
+    assert_eq!(answer["value"], json!("fill-first"));
+    assert_eq!(
+        &serde_json::from_str::<Value>(&texts(&result)[0]).unwrap(),
+        answer
+    );
+    let result = session
+        .call(
+            "config_set",
+            json!({"path": "management.allow-remote", "value": true}),
+        )
+        .await;
+    let answer = &result["structuredContent"];
+    assert_eq!(answer["error"], json!("needs_confirmation"), "{result}");
+    assert_eq!(
+        fields(&answer["would"]),
+        ["changes", "config_sha256", "reasons"],
+        "{result}"
+    );
+    let now = sha256(&edited);
+    assert_eq!(answer["would"]["config_sha256"], json!(now));
+    let hint = answer["hint"].as_str().unwrap();
+    assert!(
+        hint.contains(&format!("confirm: true and expect_sha256: {now:?}")),
+        "{hint}"
+    );
+    let texts = texts(&result);
+    assert_eq!(&serde_json::from_str::<Value>(&texts[0]).unwrap(), answer);
+    assert!(
+        texts.iter().any(|text| text.contains("It would change:")),
+        "{result}"
+    );
+    let result = session.call("config_undo", json!({})).await;
+    let answer = &result["structuredContent"];
+    assert_eq!(answer["error"], json!("changed_since"), "{result}");
+    let hint = answer["hint"].as_str().unwrap();
+    assert!(
+        hint.contains(&format!(
+            "confirm: true, expect_sha256: {now:?} and expect_backup_sha256: {shown:?}"
+        )),
+        "{hint}"
+    );
+    let result = session.call("keys_add", json!({"generate": true})).await;
+    let hint = result["structuredContent"]["hint"].as_str().unwrap();
+    assert!(
+        hint.contains(&format!("confirm: true and expect_sha256: {now:?}")),
+        "{result}"
+    );
+    assert_eq!(setup.text(), edited);
+}
+
 // Not upstream's: a number or a boolean under a secret's key, which the
 // loader reads as a string key, is masked as a string is, by get, show and
 // the config resource, and isn't taken inline; a switch elsewhere shows.

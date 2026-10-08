@@ -22,9 +22,12 @@
 //!   eight characters is replaced only as a whole word, with no letter or
 //!   digit just before or after it, so it doesn't break up the words it
 //!   is part of (a weak key can still hide a word that matches it). Only
-//!   text is scrubbed: in JSON, its strings and keys, never a number, a
-//!   boolean or its shape, so it stays valid JSON.
+//!   text is scrubbed: in JSON, its strings, and the mapping keys of the
+//!   content it shows, such as a setting's value ([`Scrub::json`]), never
+//!   a number, a boolean, its shape or the report's own field names, so it
+//!   stays valid JSON with the fields it has.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use open_ferry_core::config::save::backup_path;
@@ -533,6 +536,16 @@ pub(crate) fn known_secrets(ctx: &Context) -> Secrets {
 /// whole word ([`hide_words`]).
 const WHOLE_WORD_BELOW: usize = 8;
 
+/// The fields of a command's report, and of what a change that needs a
+/// confirmation would make, that hold content: a setting's value or
+/// default, the config shown, a change's old and new value, and what the
+/// server reported of a credential. [`Scrub::json`] scrubs the mapping keys
+/// under them, as a secret can be one, as in a header's name, and leaves
+/// every other key, the reports' own field names, as it is (not upstream's).
+const CONTENT_FIELDS: [&str; 9] = [
+    "value", "default", "settings", "old", "new", "priority", "cooldown", "quota", "models",
+];
+
 /// Replaces the secrets in what a command prints.
 pub(crate) struct Scrub {
     secrets: Secrets,
@@ -595,20 +608,77 @@ impl Scrub {
         }
     }
 
-    /// Each string and key of `value`, scrubbed.
+    /// `value`, a command's report or what a change would make, scrubbed:
+    /// each string, and the mapping keys of the content under one of
+    /// [`CONTENT_FIELDS`] ([`keys`](Self::keys)). The report's own field
+    /// names are left as they are, whatever the secrets, so a short one
+    /// that is one of their words, such as `value` or `sha256`, renames no
+    /// field (not upstream's).
     pub(crate) fn json(&self, value: Value) -> Value {
+        self.walk(value, false)
+    }
+
+    /// `value` scrubbed: as [`json`](Self::json) does, or, as `content`,
+    /// its mapping keys too.
+    fn walk(&self, value: Value, content: bool) -> Value {
         match value {
             Value::String(text) => Value::String(self.text(text)),
-            Value::Array(items) => {
-                Value::Array(items.into_iter().map(|item| self.json(item)).collect())
-            }
+            Value::Array(items) => Value::Array(
+                items
+                    .into_iter()
+                    .map(|item| self.walk(item, content))
+                    .collect(),
+            ),
+            Value::Object(map) if content => Value::Object(self.keys(map)),
             Value::Object(map) => Value::Object(
                 map.into_iter()
-                    .map(|(key, value)| (self.text(key), self.json(value)))
-                    .collect::<Map<String, Value>>(),
+                    .map(|(key, value)| {
+                        let content = CONTENT_FIELDS.contains(&key.as_str());
+                        (key, self.walk(value, content))
+                    })
+                    .collect(),
             ),
             other => other,
         }
+    }
+
+    /// `map`, content, with each key and value scrubbed. Keys scrubbed into
+    /// the same one are all kept, in their order (not upstream's): one the
+    /// scrub left as it was keeps its name, and each other takes the first
+    /// of its scrubbed form, then that form followed by ` (2)`, ` (3)` and
+    /// so on, that no other key has.
+    fn keys(&self, map: Map<String, Value>) -> Map<String, Value> {
+        let entries: Vec<(String, String, Value)> = map
+            .into_iter()
+            .map(|(key, value)| {
+                let scrubbed = self.text(key.clone());
+                (key, scrubbed, value)
+            })
+            .collect();
+        let kept: HashSet<String> = entries
+            .iter()
+            .filter(|(key, scrubbed, _)| key == scrubbed)
+            .map(|(key, _, _)| key.clone())
+            .collect();
+        let mut out = Map::new();
+        for (key, scrubbed, value) in entries {
+            let value = self.walk(value, true);
+            if key == scrubbed {
+                out.insert(key, value);
+                continue;
+            }
+            let taken = |name: &str| kept.contains(name) || out.contains_key(name);
+            let name = if taken(&scrubbed) {
+                let free = (2_usize..)
+                    .map(|n| format!("{scrubbed} ({n})"))
+                    .find(|name| !taken(name));
+                free.unwrap_or(scrubbed)
+            } else {
+                scrubbed
+            };
+            out.insert(name, value);
+        }
+        out
     }
 }
 
@@ -920,9 +990,9 @@ mod tests {
     // number or a boolean as its text, is scrubbed where it is a whole
     // word, as in a URL's path or in free text, and its JSON-escaped form
     // too; a word it is only part of is left as it is. In JSON only the
-    // strings and keys are scrubbed, so the numbers and booleans, and the
-    // shape, stay as they were. A secret the command was asked to show is
-    // left alone.
+    // strings, and the keys of content, are scrubbed, so the numbers and
+    // booleans, and the shape, stay as they were. A secret the command was
+    // asked to show is left alone.
     #[test]
     fn scrubs_short_secrets_as_whole_words() {
         let tree = json!({
@@ -950,20 +1020,20 @@ mod tests {
         ] {
             assert_eq!(scrub.text(text.to_owned()), scrubbed, "{text}");
         }
-        let out = scrub.json(json!({
+        let out = scrub.json(json!({"value": {
             "k3y9": [true, 4242, "true", "4242", false],
             "url": "https://api.example.com/v1/k3y9/",
             "port": 4242,
             "on": true,
-        }));
+        }}));
         assert_eq!(
             out,
-            json!({
+            json!({"value": {
                 "[redacted]": [true, 4242, "[redacted]", "[redacted]", false],
                 "url": "https://api.example.com/v1/[redacted]/",
                 "port": 4242,
                 "on": true,
-            })
+            }})
         );
         let printed = serde_json::to_string(&out).unwrap();
         assert_eq!(serde_json::from_str::<Value>(&printed).unwrap(), out);
@@ -973,5 +1043,81 @@ mod tests {
             shown.text("k3y9 and 4242".to_owned()),
             "k3y9 and [redacted]"
         );
+    }
+
+    // Not upstream's: in JSON the report's own field names stay as they
+    // are, whatever the secrets, and the mapping keys of the content under
+    // a field such as `value` or `old` are scrubbed; keys scrubbed into the
+    // same one are all kept, one the scrub left as it was keeping its name
+    // and the others numbered, in their order. Scrubbed again, it stays as
+    // it is.
+    #[test]
+    fn scrubs_content_keys_but_not_field_names() {
+        let words = [
+            "value", "path", "error", "changes", "sha256", "true", "k3y9",
+        ];
+        let mut secrets = Secrets::new();
+        collect_secrets(&json!({"access": {"api-keys": words}}), &mut secrets);
+        let scrub = Scrub::new(&secrets, &[]);
+        let out = scrub.json(json!({
+            "path": "value",
+            "value": {
+                "path": "a",
+                "value": "b",
+                "[redacted]": "c",
+                "[redacted] (2)": "d",
+                "x": {"k3y9": "e", "plain": "f"},
+            },
+            "error": "true",
+            "changes": [{"path": "a.k3y9", "old": {"sha256": 1}, "new": [{"true": true}]}],
+            "config_sha256": "0123abcd",
+            "settings": {"true": {"changes": 2}},
+            "default": null,
+        }));
+        assert_eq!(
+            out,
+            json!({
+                "path": "[redacted]",
+                "value": {
+                    "[redacted] (3)": "a",
+                    "[redacted] (4)": "b",
+                    "[redacted]": "c",
+                    "[redacted] (2)": "d",
+                    "x": {"[redacted]": "e", "plain": "f"},
+                },
+                "error": "[redacted]",
+                "changes": [{"path": "a.[redacted]", "old": {"[redacted]": 1}, "new": [{"[redacted]": true}]}],
+                "config_sha256": "0123abcd",
+                "settings": {"[redacted]": {"[redacted]": 2}},
+                "default": null,
+            })
+        );
+        let fields: Vec<&String> = out.as_object().unwrap().keys().collect();
+        assert_eq!(
+            fields,
+            [
+                "path",
+                "value",
+                "error",
+                "changes",
+                "config_sha256",
+                "settings",
+                "default"
+            ]
+        );
+        let keys: Vec<&String> = out["value"].as_object().unwrap().keys().collect();
+        assert_eq!(
+            keys,
+            [
+                "[redacted] (3)",
+                "[redacted] (4)",
+                "[redacted]",
+                "[redacted] (2)",
+                "x"
+            ]
+        );
+        assert_eq!(scrub.json(out.clone()), out);
+        let printed = serde_json::to_string(&out).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&printed).unwrap(), out);
     }
 }

@@ -160,7 +160,9 @@ pub(crate) fn is_loopback_host(host: &str) -> bool {
 /// setup ([`known_secrets`]) and of those in `trees`, the configs the
 /// change goes from and to, as JSON: masking misses a secret that shows
 /// where no key names it, as a key in a URL's path, and one only in the
-/// config a change would make is known nowhere else.
+/// config a change would make is known nowhere else. The hint, how to go
+/// ahead, is built from the hashes in `would` before that, and isn't
+/// scrubbed ([`Failure::go_ahead_hint`]).
 pub(crate) fn confirm(
     ctx: &Context,
     what: &str,
@@ -199,16 +201,16 @@ pub(crate) fn confirm(
         };
     }
     let flag = ctx.confirm_flag();
+    let hint = format!("to go ahead, {}", go_ahead(ctx, &would));
     let mut would = scrub.json(would);
     if let Value::Object(map) = &mut would {
         map.insert("reasons".to_owned(), scrub.json(json!(reasons)));
     }
-    let hint = format!("to go ahead, {}", go_ahead(ctx, &would));
     Err(Failure::new(
         "needs_confirmation",
         scrub.text(format!("{what} needs {flag}{why}. Nothing was changed.")),
     )
-    .hint(hint)
+    .go_ahead_hint(hint)
     .would(would))
 }
 
