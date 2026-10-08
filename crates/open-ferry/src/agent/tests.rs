@@ -1593,6 +1593,79 @@ async fn output_is_masked() {
     }
 }
 
+// Not upstream's: a number or a boolean under a secret's key, which the
+// loader reads as a string key, is masked as a string is, by get, show and
+// the config resource, and isn't taken inline; a switch elsewhere shows.
+#[tokio::test]
+async fn numbers_and_booleans_under_secrets_are_masked() {
+    const NUMBER: &str = "1234567890123";
+    const SECRET_NUMBER: &str = "98765432109";
+    let offline = offline(None);
+    let setup = &offline.setup;
+    let text = setup
+        .text()
+        .replace(
+            &format!("    - \"{CLIENT_KEY}\"\n"),
+            &format!("    - true\n    - {NUMBER}\n"),
+        )
+        .replace(
+            "access:\n",
+            &format!(
+                "management:\n  secret-key: {SECRET_NUMBER}\n  allow-remote: false\naccess:\n"
+            ),
+        );
+    std::fs::write(&setup.path, &text).unwrap();
+    let keys = json!(["...", "...23"]);
+    let ctx = cli(&setup.path);
+
+    let got = ok(&ctx, get("access.api-keys")).await;
+    assert_eq!(got.json["value"], keys, "{}", got.json);
+    assert!(
+        !got.text.contains("true") && !got.text.contains(NUMBER),
+        "{}",
+        got.text
+    );
+    let secret = ok(&ctx, get("management.secret-key")).await;
+    assert_eq!(secret.json["value"], json!("...09"));
+    assert!(!shows(&secret, SECRET_NUMBER));
+    let shown = ok(&ctx, Command::ConfigShow).await;
+    assert_eq!(shown.json["settings"]["access"]["api-keys"], keys);
+    assert_eq!(
+        shown.json["settings"]["management"]["allow-remote"],
+        json!(false)
+    );
+    for hidden in ["- true", NUMBER, SECRET_NUMBER] {
+        assert!(!shown.text.contains(hidden), "{hidden}: {}", shown.text);
+    }
+
+    // The config resource, and the tools.
+    let server = Server::new(Ok(setup.path.clone()), Env::default(), None);
+    let mut session = server_session(server.clone()).await;
+    let read = session
+        .request("resources/read", json!({"uri": CONFIG_URI}))
+        .await;
+    let resource = read["result"]["contents"][0]["text"].as_str().unwrap();
+    assert!(resource.contains("allow-remote: false"), "{resource}");
+    for hidden in ["- true", NUMBER, SECRET_NUMBER] {
+        assert!(!resource.contains(hidden), "{hidden}: {resource}");
+    }
+    let result = session
+        .call("config_get", json!({"path": "access.api-keys"}))
+        .await;
+    assert_eq!(result["structuredContent"]["value"], keys, "{result}");
+
+    // Given inline, either is a secret, and refused.
+    for value in ["[true]", "[12345]"] {
+        let failure = fails(
+            &confirmed(&setup.path, Caller::Cli),
+            set("access.api-keys", value),
+        )
+        .await;
+        assert_eq!(failure.error, "secret_in_argument", "{failure:?}");
+    }
+    assert_eq!(setup.text(), text);
+}
+
 // Not upstream's: client keys are listed masked, added (made here, or
 // from a file) and removed by index or from a file; a tool returns a
 // new key only with confirm: true, else writes it to a new file.
