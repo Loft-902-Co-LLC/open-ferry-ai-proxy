@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { KeyRound, RotateCw } from "lucide-react";
-import { useEffect, useRef, useState, type Ref } from "react";
+import { ChevronRight, KeyRound, RotateCw } from "lucide-react";
+import { useEffect, useId, useRef, useState, type ReactNode, type Ref } from "react";
 
 import { callProblem, saveProblem } from "../../api/access";
 import { isUnsupportedRoute } from "../../api/client";
@@ -18,6 +18,7 @@ import { Loading } from "../../components/QueryState";
 import { SelectField } from "../../components/SelectField";
 import { Spinner } from "../../components/Spinner";
 import { Tabs } from "../../components/Tabs";
+import { cn } from "../../lib/cn";
 import {
   generateClientKey,
   isExampleKey,
@@ -146,14 +147,57 @@ function SnippetPanel({ shown, copied }: { shown: Snippet; copied: Snippet }) {
   );
 }
 
+/** A button that shows and hides what it names; its chevron points down while open. */
+function DisclosureButton({
+  open,
+  controls,
+  onToggle,
+  className,
+  children,
+}: {
+  open: boolean;
+  /** The id of what it shows, there only while open. */
+  controls: string;
+  onToggle: () => void;
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      aria-expanded={open}
+      aria-controls={open ? controls : undefined}
+      onClick={onToggle}
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-sm pr-1 text-left pointer-coarse:min-h-11",
+        className,
+      )}
+    >
+      <ChevronRight
+        aria-hidden="true"
+        className={cn(
+          "size-4 shrink-0 transition-transform motion-reduce:transition-none",
+          open && "rotate-90",
+        )}
+      />
+      {children}
+    </button>
+  );
+}
+
+const TITLE = "Connect a client";
+const DESCRIPTION =
+  "Ready-made setups for common clients, with the proxy's address and a client key filled in.";
+
 export interface ClientSetupCardProps {
   /** Opened from CLIProxyAPI's safe-mode page: bring the key setup into view. */
   focusKeys?: boolean;
 }
 
 /**
- * Ready-made setups for clients of the proxy: the address to reach it at,
- * a client key, a model, and a few lines for each common client.
+ * Ready-made setups for clients of the proxy. The main path shows: a
+ * client key, a tab per client, and its setup to copy. The address, model
+ * and shell are already chosen, and wait behind their own disclosure.
  */
 export function ClientSetupCard({ focusKeys = false }: ClientSetupCardProps) {
   const call = useApiCall();
@@ -165,6 +209,9 @@ export function ClientSetupCard({ focusKeys = false }: ClientSetupCardProps) {
   const [shell, setShell] = useState<Shell>(defaultShell);
   const [reveal, setReveal] = useState(false);
   const [tab, setTab] = useState("openai-python");
+  const [choicesOpen, setChoicesOpen] = useState(false);
+  const choicesId = useId();
+  const makeHintId = useId();
 
   const refresh = () =>
     Promise.all([
@@ -266,31 +313,33 @@ export function ClientSetupCard({ focusKeys = false }: ClientSetupCardProps) {
     (safeMode ? safeModeAction.current : keySelect.current)?.focus();
   }, [focusKeys, loaded, safeMode]);
 
-  if (setup.isPending) {
-    return (
-      <Card title="Connect a client">
-        <Loading>Reading the proxy&apos;s setup…</Loading>
+  const frame = (content: ReactNode) => (
+    <div ref={card} className="scroll-mt-4">
+      <Card title={TITLE} description={DESCRIPTION}>
+        {content}
       </Card>
-    );
+    </div>
+  );
+
+  if (setup.isPending) {
+    return frame(<Loading>Reading the proxy&apos;s setup…</Loading>);
   }
   if (setup.isError) {
-    return (
-      <Card title="Connect a client">
-        <ProblemNotice
-          problem={callProblem(setup.error)}
-          action={
-            <Button
-              size="sm"
-              onClick={() => {
-                void setup.refetch();
-              }}
-            >
-              <RotateCw aria-hidden="true" className="size-4" />
-              Try again
-            </Button>
-          }
-        />
-      </Card>
+    return frame(
+      <ProblemNotice
+        problem={callProblem(setup.error)}
+        action={
+          <Button
+            size="sm"
+            onClick={() => {
+              void setup.refetch();
+            }}
+          >
+            <RotateCw aria-hidden="true" className="size-4" />
+            Try again
+          </Button>
+        }
+      />,
     );
   }
 
@@ -328,170 +377,191 @@ export function ClientSetupCard({ focusKeys = false }: ClientSetupCardProps) {
               : maskKey(key),
         }));
 
-  return (
-    <div ref={card} className="scroll-mt-4">
-      <Card
-        title="Connect a client"
-        description="Pick where clients reach the proxy, a client key and a model, then copy a setup."
-      >
-        {safeMode && (
-          <SafeModeNotice
-            examples={examples}
-            replaceLabel={
-              usable.length > 0 ? "Delete the example keys" : "Replace the example keys with a new key"
-            }
-            pending={replaceExamples.isPending}
-            waiting={replaceExamples.isSuccess}
-            onReplace={replace}
-            actionRef={safeModeAction}
-          />
-        )}
-        {replaceExamples.isSuccess && !safeMode && (
-          <Alert tone="ok" live title="The proxy is out of safe mode">
-            <p>
-              {replaceExamples.variables === null
-                ? "The example keys are gone from config.yaml, so it serves proxy requests again."
-                : "A new key took the example keys' place in config.yaml, so it serves proxy requests again. The setups below use the new key."}
-            </p>
-          </Alert>
-        )}
-        {focusKeys && !safeMode && !replaceExamples.isSuccess && (
-          <Alert tone="ok" title="The proxy isn't in safe mode">
-            <p>Its client keys are no longer the examples, so it serves proxy requests.</p>
-          </Alert>
-        )}
-        {writeError !== null && <ProblemNotice problem={saveProblem(writeError)} live />}
-        {keysUnsupported && (
-          <Alert tone="info" title="This server doesn't list its client keys">
-            <p>
-              The setups below show where the key goes. Make one here and add it to{" "}
-              <Code>api-keys</Code> in config.yaml, or use one already there.
-            </p>
-          </Alert>
-        )}
-        {keys.isError && !keysUnsupported && <ProblemNotice problem={callProblem(keys.error)} />}
-        {addKey.isSuccess && made?.saved === true && (
-          <Alert tone="ok" live>
-            <p>
-              Added a client key. The setups below use it; show it or copy it from them at any
-              time.
-            </p>
-          </Alert>
-        )}
-        {models.length === 0 && (
-          <Alert tone="info" title="No models yet">
-            <p>
-              The proxy has no credentials that can serve a model. Add a provider&apos;s API key
-              to config.yaml, or sign in to Claude or Codex, and its models show here.
-            </p>
-          </Alert>
-        )}
-
-        <div className="grid gap-4 sm:grid-cols-2">
-          <SelectField
-            label="Address"
-            value={root}
-            options={addresses.map((option) => ({ value: option.root, label: option.label }))}
-            onChange={(event) => {
-              setAddress(event.target.value);
-            }}
-            hint={
-              isLoopback(root)
-                ? "This address works only on the computer the proxy runs on."
-                : undefined
-            }
-          />
-          <div className="space-y-1.5">
-            <SelectField
-              ref={keySelect}
-              label="Client key"
-              value={String(Math.min(keyIndex, Math.max(choices.length - 1, 0)))}
-              options={keyOptions}
-              disabled={choices.length === 0}
-              onChange={(event) => {
-                setKeyIndex(Number(event.target.value));
-              }}
-            />
-            <Button size="sm" disabled={addKey.isPending} onClick={makeKey}>
-              {addKey.isPending ? <Spinner /> : <KeyRound aria-hidden="true" className="size-4" />}
-              Make a new key
-            </Button>
-          </div>
-          <SelectField
-            label="Model"
-            value={picked ?? SUGGESTED}
-            disabled={models.length === 0}
-            options={
-              models.length === 0
-                ? [{ value: SUGGESTED, label: "No models yet" }]
-                : [
-                    { value: SUGGESTED, label: "Suggested for each setup" },
-                    ...models.map((info) => ({
-                      value: info.id,
-                      label:
-                        info.display_name === null || info.display_name === info.id
-                          ? info.id
-                          : `${info.display_name} (${info.id})`,
-                    })),
-                  ]
-            }
-            onChange={(event) => {
-              setModel(event.target.value === SUGGESTED ? null : event.target.value);
-            }}
-            hint={
-              picked === null && models.length > 0
-                ? "Each setup names the newest chat model the proxy serves. Claude Code gets the newest Claude model and Codex CLI the newest OpenAI model, if the proxy has one."
-                : undefined
-            }
-          />
-          <SelectField
-            label="Shell"
-            value={shell}
-            options={(Object.keys(SHELL_LABELS) as Shell[]).map((value) => ({
-              value,
-              label: SHELL_LABELS[value],
-            }))}
-            onChange={(event) => {
-              setShell(event.target.value as Shell);
-            }}
-            hint="For the setups run in a terminal."
-          />
-        </div>
-        <label className="flex items-start gap-2">
-          <input
-            type="checkbox"
-            checked={reveal}
-            disabled={chosenKey === null}
-            onChange={(event) => {
-              setReveal(event.target.checked);
-            }}
-            className="mt-1 size-4 shrink-0 accent-accent"
-          />
-          <span>
-            Show the key in the setups{" "}
-            <span className="text-muted">(Copy always copies it whole.)</span>
-          </span>
-        </label>
-
-        {selected === undefined || copied === undefined ? (
-          <p className="text-muted">The proxy lists none of the routes these setups call.</p>
-        ) : (
-          <Tabs
-            label="Client setups"
-            items={shownSnippets.map((snippet) => ({ id: snippet.id, label: snippet.label }))}
-            selected={selected.id}
-            onSelect={setTab}
-          >
-            <SnippetPanel shown={selected} copied={copied} />
-          </Tabs>
-        )}
-        {chosenKey === null && !keys.isPending && (
-          <p className="flex items-center gap-2 text-muted">
-            <Badge tone="warn">No key</Badge> The setups show where a client key goes. Make one
-            above.
+  return frame(
+    <>
+      {safeMode && (
+        <SafeModeNotice
+          examples={examples}
+          replaceLabel={
+            usable.length > 0 ? "Delete the example keys" : "Replace the example keys with a new key"
+          }
+          pending={replaceExamples.isPending}
+          waiting={replaceExamples.isSuccess}
+          onReplace={replace}
+          actionRef={safeModeAction}
+        />
+      )}
+      {replaceExamples.isSuccess && !safeMode && (
+        <Alert tone="ok" live title="The proxy is out of safe mode">
+          <p>
+            {replaceExamples.variables === null
+              ? "The example keys are gone from config.yaml, so it serves proxy requests again."
+              : "A new key took the example keys' place in config.yaml, so it serves proxy requests again. The setups below use the new key."}
           </p>
+        </Alert>
+      )}
+      {focusKeys && !safeMode && !replaceExamples.isSuccess && (
+        <Alert tone="ok" title="The proxy isn't in safe mode">
+          <p>Its client keys are no longer the examples, so it serves proxy requests.</p>
+        </Alert>
+      )}
+      {writeError !== null && <ProblemNotice problem={saveProblem(writeError)} live />}
+      {keysUnsupported && (
+        <Alert tone="info" title="This server doesn't list its client keys">
+          <p>
+            The setups below show where the key goes. Make one here and add it to{" "}
+            <Code>api-keys</Code> in config.yaml, or use one already there.
+          </p>
+        </Alert>
+      )}
+      {keys.isError && !keysUnsupported && <ProblemNotice problem={callProblem(keys.error)} />}
+      {addKey.isSuccess && made?.saved === true && (
+        <Alert tone="ok" live>
+          <p>
+            Added a client key. It&apos;s in config.yaml now, and the setups below use it; show it
+            or copy it from them at any time.
+          </p>
+        </Alert>
+      )}
+      {models.length === 0 && (
+        <Alert tone="info" title="No models yet">
+          <p>
+            The proxy has no credentials that can serve a model. Add a provider&apos;s API key to
+            config.yaml, or sign in to Claude or Codex, and its models show here.
+          </p>
+        </Alert>
+      )}
+
+      <div className="space-y-1.5">
+        <SelectField
+          ref={keySelect}
+          label="Client key"
+          className="max-w-md"
+          value={String(Math.min(keyIndex, Math.max(choices.length - 1, 0)))}
+          options={keyOptions}
+          disabled={choices.length === 0}
+          onChange={(event) => {
+            setKeyIndex(Number(event.target.value));
+          }}
+        />
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+          <Button
+            size="sm"
+            disabled={addKey.isPending}
+            aria-describedby={makeHintId}
+            onClick={makeKey}
+          >
+            {addKey.isPending ? <Spinner /> : <KeyRound aria-hidden="true" className="size-4" />}
+            Make a new key
+          </Button>
+          <p id={makeHintId} className="text-muted">
+            A new key is saved to config.yaml as soon as it&apos;s made.
+          </p>
+        </div>
+      </div>
+      <label className="flex items-start gap-2">
+        <input
+          type="checkbox"
+          checked={reveal}
+          disabled={chosenKey === null}
+          onChange={(event) => {
+            setReveal(event.target.checked);
+          }}
+          className="mt-1 size-4 shrink-0 accent-accent"
+        />
+        <span>
+          Show the key in the setups{" "}
+          <span className="text-muted">(Copy always copies it whole.)</span>
+        </span>
+      </label>
+
+      {selected === undefined || copied === undefined ? (
+        <p className="text-muted">The proxy lists none of the routes these setups call.</p>
+      ) : (
+        <Tabs
+          label="Client setups"
+          items={shownSnippets.map((snippet) => ({ id: snippet.id, label: snippet.label }))}
+          selected={selected.id}
+          onSelect={setTab}
+        >
+          <SnippetPanel shown={selected} copied={copied} />
+        </Tabs>
+      )}
+      {chosenKey === null && !keys.isPending && (
+        <p className="flex items-center gap-2 text-muted">
+          <Badge tone="warn">No key</Badge> The setups show where a client key goes. Make one
+          above.
+        </p>
+      )}
+
+      <div className="space-y-4 border-t border-line pt-4">
+        <DisclosureButton
+          open={choicesOpen}
+          controls={choicesId}
+          onToggle={() => {
+            setChoicesOpen(!choicesOpen);
+          }}
+          className="font-medium"
+        >
+          Address, model and shell
+        </DisclosureButton>
+        {choicesOpen && (
+          <div id={choicesId} className="grid gap-4 sm:grid-cols-2">
+            <SelectField
+              label="Address"
+              value={root}
+              options={addresses.map((option) => ({ value: option.root, label: option.label }))}
+              onChange={(event) => {
+                setAddress(event.target.value);
+              }}
+              hint={
+                isLoopback(root)
+                  ? "This address works only on the computer the proxy runs on."
+                  : undefined
+              }
+            />
+            <SelectField
+              label="Model"
+              value={picked ?? SUGGESTED}
+              disabled={models.length === 0}
+              options={
+                models.length === 0
+                  ? [{ value: SUGGESTED, label: "No models yet" }]
+                  : [
+                      { value: SUGGESTED, label: "Suggested for each setup" },
+                      ...models.map((info) => ({
+                        value: info.id,
+                        label:
+                          info.display_name === null || info.display_name === info.id
+                            ? info.id
+                            : `${info.display_name} (${info.id})`,
+                      })),
+                    ]
+              }
+              onChange={(event) => {
+                setModel(event.target.value === SUGGESTED ? null : event.target.value);
+              }}
+              hint={
+                picked === null && models.length > 0
+                  ? "Each setup names the newest chat model the proxy serves. Claude Code gets the newest Claude model and Codex CLI the newest OpenAI model, if the proxy has one."
+                  : undefined
+              }
+            />
+            <SelectField
+              label="Shell"
+              value={shell}
+              options={(Object.keys(SHELL_LABELS) as Shell[]).map((value) => ({
+                value,
+                label: SHELL_LABELS[value],
+              }))}
+              onChange={(event) => {
+                setShell(event.target.value as Shell);
+              }}
+              hint="For the setups run in a terminal."
+            />
+          </div>
         )}
-      </Card>
-    </div>
+      </div>
+    </>,
   );
 }

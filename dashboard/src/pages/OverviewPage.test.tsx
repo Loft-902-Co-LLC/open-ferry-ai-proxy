@@ -80,6 +80,11 @@ async function setupCode(name = PYTHON): Promise<HTMLElement> {
   return screen.findByLabelText(name);
 }
 
+/** Shows the address, model and shell, which start hidden. */
+async function openChoices(user: ReturnType<typeof renderApp>["user"]): Promise<void> {
+  await user.click(screen.getByRole("button", { name: "Address, model and shell", expanded: false }));
+}
+
 describe("connecting a client", () => {
   it("fills the setups in with this page's address, the key masked and a model", async () => {
     const { api } = server([KEY]);
@@ -111,6 +116,7 @@ describe("connecting a client", () => {
     server([KEY]);
     const { user } = renderApp("/");
     await setupCode();
+    await openChoices(user);
     const address = screen.getByLabelText("Address");
     expect(
       within(address)
@@ -136,6 +142,7 @@ describe("connecting a client", () => {
     const { user } = renderApp("/");
     await setupCode();
     await user.click(screen.getByRole("tab", { name: "Claude Code" }));
+    await openChoices(user);
 
     await user.selectOptions(screen.getByLabelText("Shell"), "powershell");
     const claude = screen.getByLabelText("The Claude Code setup");
@@ -157,6 +164,7 @@ describe("connecting a client", () => {
     });
     const { user } = renderApp("/");
     await setupCode();
+    await openChoices(user);
     await user.selectOptions(screen.getByLabelText("Model"), "gpt-5.1-codex");
     expect(screen.getByLabelText(PYTHON)).toHaveTextContent(`model="gpt-5.1-codex"`);
 
@@ -177,6 +185,7 @@ describe("connecting a client", () => {
     server([KEY]);
     const { user } = renderApp("/");
     const python = await setupCode();
+    await openChoices(user);
     const model = screen.getByLabelText("Model");
     expect(model).toHaveValue("");
     expect(model).toHaveAccessibleDescription(/newest chat model/);
@@ -214,9 +223,10 @@ describe("connecting a client", () => {
       models: [],
       routes: clientSetup().routes.map((proxyRoute) => ({ ...proxyRoute, models: [] })),
     });
-    renderApp("/");
+    const { user } = renderApp("/");
     expect(await screen.findByText("No models yet", { selector: "p" })).toBeVisible();
     expect(screen.getByLabelText(PYTHON)).toHaveTextContent(`model="<model>"`);
+    await openChoices(user);
     expect(screen.getByLabelText("Model")).toBeDisabled();
   });
 });
@@ -226,7 +236,11 @@ describe("making a client key", () => {
     const state = server([KEY]);
     const { user } = renderApp("/");
     await setupCode();
-    await user.click(screen.getByRole("button", { name: "Make a new key" }));
+    const make = screen.getByRole("button", { name: "Make a new key" });
+    expect(make).toHaveAccessibleDescription(
+      "A new key is saved to config.yaml as soon as it's made.",
+    );
+    await user.click(make);
 
     expect(await screen.findByText(/^Added a client key\./)).toBeVisible();
     const patch = state.api.callsTo("PATCH", API_KEYS);
