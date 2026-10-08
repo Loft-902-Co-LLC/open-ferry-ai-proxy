@@ -59,7 +59,7 @@ mod testing;
 #[cfg(test)]
 mod tests;
 
-pub use app::{router, router_with};
+pub use app::{router, router_with, router_without_proxy};
 pub use config::{DEFAULT_BODY_LIMIT, ServerConfig, StreamingConfig};
 pub use errors::ErrorMessage;
 pub use state::AppState;

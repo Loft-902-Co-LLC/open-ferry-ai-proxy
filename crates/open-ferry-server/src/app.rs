@@ -6,6 +6,10 @@
 //! outside in, the request context, which makes the request's
 //! `RequestContext`, the access log, the request log, CORS, panic handling
 //! and safe mode.
+//!
+//! open-ferry's own: [`router_without_proxy`] serves routes without the
+//! proxy's, for the management address's listener
+//! (`management.separate-address`).
 
 use std::any::Any;
 
@@ -156,6 +160,28 @@ pub fn router_with(state: AppState, extra: Router) -> Router {
         .merge(extra)
         .fallback(not_found)
         .layer(middleware::from_fn_with_state(state.clone(), safe_mode))
+        .layer(CatchPanicLayer::custom(panicked))
+        .layer(middleware::from_fn(cors))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            request_log::layer,
+        ))
+        .layer(middleware::from_fn(access_log::layer))
+        .layer(middleware::from_fn_with_state(
+            state,
+            request_context::layer,
+        ))
+}
+
+/// `routes` alone, without the proxy's: for open-ferry's management
+/// address (`management.separate-address`). They pass through the same
+/// request context, logging, CORS and panic handling as [`router_with`]'s
+/// extra routes, and any other path, the proxy's included, answers gin's
+/// 404. Safe mode, which only shuts proxy paths, isn't applied, so those
+/// paths answer the 404 here too. `routes` must not set a fallback.
+pub fn router_without_proxy(state: AppState, routes: Router) -> Router {
+    routes
+        .fallback(not_found)
         .layer(CatchPanicLayer::custom(panicked))
         .layer(middleware::from_fn(cors))
         .layer(middleware::from_fn_with_state(

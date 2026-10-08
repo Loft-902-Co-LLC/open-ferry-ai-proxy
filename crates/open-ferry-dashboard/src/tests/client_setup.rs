@@ -219,6 +219,7 @@ async fn the_config_gives_the_roots_and_safe_mode() {
             ],
             "tls": false,
             "safe_mode": false,
+            "separate_management": false,
             "routes": routes(&[]),
             "models": [],
         })

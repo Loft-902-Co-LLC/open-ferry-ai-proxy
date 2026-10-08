@@ -646,3 +646,46 @@ async fn the_shared_checks_refuse_as_the_routes_do() {
         "MANAGEMENT_PASSWORD allows remote clients"
     );
 }
+
+// Not upstream's: for open-ferry's management.separate-address, the
+// management address's router has every route but the main server's OAuth
+// callback pages, and the proxy's has those pages and the empty 404 for
+// every other management path, keyed or not.
+#[tokio::test]
+async fn the_split_routers_serve_their_halves() {
+    let mut pages = Api::new();
+    pages.router = crate::pages_router(pages.state.clone());
+    let mut api = Api::new();
+    api.router = crate::api_router(api.state.clone());
+    let whole = Api::new();
+
+    for path in ["/v0/management/config", LIST, "/v8/management/credentials"] {
+        assert_unported(&pages.get(path).await, path);
+        let want = whole.get(path).await;
+        let got = api.get(path).await;
+        assert_eq!(got.status, StatusCode::OK, "{path}: {}", got.body);
+        assert_eq!(got.status, want.status, "{path}");
+    }
+    for path in [
+        "/v0/management",
+        "/v8/management/",
+        "/v0/management/nothing",
+    ] {
+        assert_unported(&pages.get(path).await, path);
+        assert_unported(&api.get(path).await, path);
+    }
+
+    for path in ["/anthropic/callback", "/codex/callback"] {
+        let want = whole
+            .send(request_from(REMOTE, Method::GET, path, ""))
+            .await;
+        let got = pages
+            .send(request_from(REMOTE, Method::GET, path, ""))
+            .await;
+        assert_ne!(got.status, StatusCode::NOT_FOUND, "{path}");
+        assert_eq!((got.status, got.body), (want.status, want.body), "{path}");
+        // Not a route there: the server's fallback answers.
+        let answer = api.send(request_from(REMOTE, Method::GET, path, "")).await;
+        assert_eq!(answer.status, StatusCode::NOT_FOUND, "{path}");
+    }
+}

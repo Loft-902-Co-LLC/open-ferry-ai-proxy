@@ -27,6 +27,13 @@
 //! Errors are `{"error":"..."}` with the status upstream uses, and bodies
 //! are written as gin writes them, byte for byte.
 //!
+//! open-ferry's `management.separate-address` splits the router in two:
+//! [`api_router`] for the management address, with every route but the
+//! main server's OAuth callback pages, and [`pages_router`] for the
+//! proxy's address, with those pages and the empty 404 for every other
+//! path under the prefixes, as while no key is set. Upstream has no such
+//! setting.
+//!
 //! Deviations from upstream, besides those noted on each module:
 //! - Upstream's management routes that aren't listed by a module, the
 //!   management control panel, the plugin host and its routes, the local
@@ -114,6 +121,28 @@ const PREFIXES: [&str; 2] = ["/v0/management", "/v8/management"];
 /// The management routes, for merging into the server's router.
 pub fn router(state: ManagementState) -> Router {
     router_from(state, routes())
+}
+
+/// The management routes for the management address's own listener
+/// (`management.separate-address`): [`router`]'s, without the main
+/// server's OAuth callback pages, which the callback forwarders send the
+/// browser to on the proxy's address.
+pub fn api_router(state: ManagementState) -> Router {
+    let routes = routes()
+        .into_iter()
+        .filter(|route| route.access != Access::Open);
+    router_from(state, routes.collect())
+}
+
+/// The management routes for the proxy's listener while
+/// `management.separate-address` is set: the main server's OAuth callback
+/// pages, and an empty 404 for every path under the management prefixes,
+/// as [`router`] answers them while no key is set.
+pub fn pages_router(state: ManagementState) -> Router {
+    let routes = routes()
+        .into_iter()
+        .filter(|route| route.access == Access::Open);
+    router_from(state, routes.collect())
 }
 
 /// Every module's routes.

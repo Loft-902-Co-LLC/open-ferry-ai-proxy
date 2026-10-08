@@ -9,6 +9,9 @@
 //! refusals are the contract's errors rather than the management API's.
 //! A path under `/open-ferry/` that isn't a route answers `not_found`, and
 //! a method a route doesn't serve `method_not_allowed`, before any check.
+//! On the proxy's listener while `management.separate-address` is set
+//! ([`Listener::Closed`](crate::Listener::Closed)), every route answers
+//! `management_disabled`, as while no key is set, without a check.
 //!
 //! Every answer is JSON with `Cache-Control: no-store`, but a log's
 //! download, which is the log's bytes, also not to be stored.
@@ -32,8 +35,8 @@ use open_ferry_management::{Refusal, check_key};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::DashboardState;
 use crate::ledger::LedgerError;
+use crate::{DashboardState, Listener};
 
 /// The API's prefix.
 pub(crate) const PREFIX: &str = "/open-ferry/api/v1";
@@ -113,6 +116,9 @@ pub(crate) fn routes(state: &DashboardState) -> Router<DashboardState> {
 /// Checks the management key as the management API does, and answers a
 /// refusal with the contract's error.
 async fn guard(State(state): State<DashboardState>, request: Request, next: Next) -> Response {
+    if state.listener == Listener::Closed {
+        return refused(&Refusal::Unavailable).into_response();
+    }
     let peer = request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()

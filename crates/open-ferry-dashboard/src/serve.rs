@@ -16,7 +16,9 @@
 //! `management.disable-control-panel` is set, as upstream's
 //! `/management.html` does, then refuses an address as the management API
 //! does (see [`check_address`]). No key is asked for: the app asks for it,
-//! and its API calls carry it.
+//! and its API calls carry it. On the proxy's listener while
+//! `management.separate-address` is set ([`Listener::Closed`]), each
+//! answers the empty 404 too.
 //!
 //! The files under `assets/` are named by their content, so they may be
 //! cached for good; every other file, `index.html` first, is checked with
@@ -47,8 +49,8 @@ use http::request::Parts;
 use http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 use open_ferry_management::check_address;
 
-use crate::DashboardState;
 use crate::assets::{Assets, content_type};
+use crate::{DashboardState, Listener};
 
 /// The client's address, when the server knows it.
 pub(crate) struct Peer(pub(crate) Option<SocketAddr>);
@@ -130,18 +132,19 @@ async fn app(
 }
 
 /// The answer that stops a request before the app: an empty 404 while the
-/// control panel is disabled, then the management API's refusal of the
-/// client's address.
+/// control panel is disabled or served on another listener, then the
+/// management API's refusal of the client's address.
 fn refuse(
     state: &DashboardState,
     peer: Option<SocketAddr>,
     headers: &HeaderMap,
 ) -> Option<Response> {
-    if state
-        .management
-        .config()
-        .remote_management
-        .disable_control_panel
+    if state.listener == Listener::Closed
+        || state
+            .management
+            .config()
+            .remote_management
+            .disable_control_panel
     {
         return Some(StatusCode::NOT_FOUND.into_response());
     }

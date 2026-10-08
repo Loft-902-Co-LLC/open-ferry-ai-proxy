@@ -8,6 +8,11 @@
 //! handling. The app is embedded at build time from `dashboard/dist` when
 //! it was built, else a page says it wasn't (see `build.rs`).
 //!
+//! With `management.separate-address` set, the server serves the dashboard
+//! on that address alone ([`Listener::Separate`]), and the proxy's address
+//! answers its paths as if the control panel were disabled and no
+//! management key set ([`Listener::Closed`]); see [`router_for`].
+//!
 //! The dashboard API checks access with the management API's own code
 //! ([`check_key`](open_ferry_management::check_key)): the key in the same
 //! header forms, the local management password from 127.0.0.1 and ::1,
@@ -74,12 +79,39 @@ const SECURITY_HEADERS: [(&str, &str); 4] = [
 /// `ledger`'s usage. Merge them into the server's router; they set no
 /// fallback.
 pub fn router(management: ManagementState, ledger: Ledger) -> Router {
+    router_for(management, ledger, Listener::Shared)
+}
+
+/// The dashboard's routes as [`router`] gives them, for the listener
+/// `listener`. The paths are the same on each; only the answers differ.
+pub fn router_for(management: ManagementState, ledger: Ledger, listener: Listener) -> Router {
     router_from(DashboardState {
         management,
         ledger,
         assets: Assets::embedded(),
         claude_cli_root: open_ferry_providers::claude_cli::default_work_root(),
+        listener,
     })
+}
+
+/// Which listener the dashboard is served on: open-ferry's own, for
+/// `management.separate-address`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Listener {
+    /// The proxy's, which serves everything while no management address
+    /// is set.
+    #[default]
+    Shared,
+    /// The proxy's, while a management address is set: the app and
+    /// `/management.html` answer an empty 404, as while
+    /// `management.disable-control-panel` is set, and the dashboard API
+    /// `management_disabled`, as while no management key is set. Nothing
+    /// is checked or counted toward a ban.
+    Closed,
+    /// The management address's own, which doesn't serve the proxy: the
+    /// client setup says so (`separate_management`) and leaves out
+    /// `management.base-url`.
+    Separate,
 }
 
 /// What the dashboard's handlers share.
@@ -95,6 +127,8 @@ pub(crate) struct DashboardState {
     /// Where `claude-cli` entries keep their working directories, as the
     /// executor does.
     pub(crate) claude_cli_root: PathBuf,
+    /// The listener the routes are served on.
+    pub(crate) listener: Listener,
 }
 
 /// The router for `state`.

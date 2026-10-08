@@ -10,6 +10,7 @@
 mod api;
 mod claude_cli;
 mod client_setup;
+mod listener;
 mod request_logs;
 mod serve;
 mod usage;
@@ -37,7 +38,7 @@ use serde_json::Value;
 use tower::ServiceExt as _;
 
 use crate::assets::Assets;
-use crate::{DashboardState, Ledger, router_from};
+use crate::{DashboardState, Ledger, Listener, router_from};
 
 /// The management key the tests set.
 pub(crate) const KEY: &str = "test-secret";
@@ -155,6 +156,15 @@ impl Dash {
         dash
     }
 
+    /// With `config`, the test app and an open ledger, served on
+    /// `listener`.
+    pub(crate) fn on(config: Config, listener: Listener) -> Self {
+        let mut dash = Self::with_config(config);
+        dash.state.listener = listener;
+        dash.router = router_from(dash.state.clone());
+        dash
+    }
+
     /// With `config`, `assets`, and an open ledger if `ledger`, else one
     /// that is unavailable.
     pub(crate) fn build(config: Config, assets: Assets, ledger: bool) -> Self {
@@ -182,6 +192,7 @@ impl Dash {
             ledger,
             assets,
             claude_cli_root: logs.path().join("claude-cli"),
+            listener: Listener::Shared,
         };
         Self {
             router: router_from(state.clone()),

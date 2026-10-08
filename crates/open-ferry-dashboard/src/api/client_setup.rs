@@ -21,7 +21,7 @@ use open_ferry_server::entry_providers;
 use serde::Serialize;
 
 use super::ok;
-use crate::DashboardState;
+use crate::{DashboardState, Listener};
 
 /// A root URL the server can be reached at.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -60,6 +60,7 @@ pub(crate) struct ClientSetup {
     base_urls: Vec<BaseUrl>,
     tls: bool,
     safe_mode: bool,
+    separate_management: bool,
     routes: Vec<Route>,
     models: Vec<Model>,
 }
@@ -116,11 +117,13 @@ const ENTRY_POINTS: [EntryPoint; 5] = [
 /// `GET /client-setup`.
 pub(super) async fn client_setup(State(state): State<DashboardState>) -> Response {
     let config = state.management.config();
-    ok(&setup(&config, state.management.registry()))
+    let separate = state.listener == Listener::Separate;
+    ok(&setup(&config, state.management.registry(), separate))
 }
 
-/// The client setup for `config` and the models in `registry`.
-pub(crate) fn setup(config: &Config, registry: &ModelRegistry) -> ClientSetup {
+/// The client setup for `config` and the models in `registry`, served on
+/// the management address's own listener if `separate`.
+pub(crate) fn setup(config: &Config, registry: &ModelRegistry, separate: bool) -> ClientSetup {
     let infos = registry.available_model_infos();
     let mut on_any = BTreeSet::new();
     let mut models = Vec::new();
@@ -149,9 +152,10 @@ pub(crate) fn setup(config: &Config, registry: &ModelRegistry) -> ClientSetup {
         }
     }
     ClientSetup {
-        base_urls: base_urls(config),
+        base_urls: base_urls(config, separate),
         tls: config.tls.enable,
         safe_mode: config.has_example_api_keys(),
+        separate_management: separate,
         routes,
         models,
     }
@@ -213,8 +217,9 @@ fn is_chat(info: &ModelInfo) -> bool {
 }
 
 /// The roots the server can be reached at: from where it listens, then the
-/// configured base URL.
-pub(crate) fn base_urls(config: &Config) -> Vec<BaseUrl> {
+/// configured base URL, unless `separate`: then `management.base-url` is
+/// the management address's, which doesn't serve the proxy.
+pub(crate) fn base_urls(config: &Config, separate: bool) -> Vec<BaseUrl> {
     let scheme = if config.tls.enable { "https" } else { "http" };
     let host = config.host.trim();
     let hosts: Vec<String> = match host {
@@ -232,7 +237,8 @@ pub(crate) fn base_urls(config: &Config) -> Vec<BaseUrl> {
             source: "listen",
         })
         .collect();
-    if let Some(url) = configured_base_url(&config.remote_management.base_url)
+    if !separate
+        && let Some(url) = configured_base_url(&config.remote_management.base_url)
         && !urls.iter().any(|known| known.url == url)
     {
         urls.push(BaseUrl {
@@ -276,7 +282,7 @@ mod tests {
     }
 
     fn urls(config: &Config) -> Vec<(String, &'static str)> {
-        base_urls(config)
+        base_urls(config, false)
             .into_iter()
             .map(|url| (url.url, url.source))
             .collect()
@@ -322,5 +328,18 @@ mod tests {
             urls(&config("127.0.0.1", 8317, false, "http://127.0.0.1:8317/")),
             vec![("http://127.0.0.1:8317".to_owned(), "listen")]
         );
+    }
+
+    /// Not upstream's: served on the management address's own listener,
+    /// `management.base-url` isn't offered, as it is the management
+    /// address's.
+    #[test]
+    fn a_separate_listener_leaves_out_the_base_url() {
+        let config = config("::1", 8317, false, "http://127.0.0.1:8318");
+        let urls: Vec<(String, &str)> = base_urls(&config, true)
+            .into_iter()
+            .map(|url| (url.url, url.source))
+            .collect();
+        assert_eq!(urls, vec![("http://[::1]:8317".to_owned(), "listen")]);
     }
 }
