@@ -393,6 +393,8 @@ fn json(found: &Found, assessment: &Assessment, plan: &Plan, blockers: &[String]
             Kind::DropIn | Kind::Container => Value::Null,
         },
     );
+    // How a drop-in puts open-ferry in place: `symlink` or `copy`.
+    put("drop_in", text(plan.drop_in));
     put(
         "process",
         found.process.as_ref().map_or(Value::Null, |process| {
@@ -611,7 +613,32 @@ fn run_undo(
                 &format!("there is no switch to undo: {path} doesn't exist.{sudo}"),
             );
         }
-        Err(error) => return fail(request, out, err, &error),
+        Err(error) => match record::recover(machine, platform, &path) {
+            Ok(copy) => {
+                line(
+                    out,
+                    &format!(
+                        "{} The copy in the backup, {}, is read instead.",
+                        sentence(&error),
+                        platform.join(
+                            copy.backup
+                                .as_ref()
+                                .map_or("", |backup| backup.dir.as_str()),
+                            record::FILE
+                        )
+                    ),
+                );
+                copy
+            }
+            Err(why) => {
+                return fail(
+                    request,
+                    out,
+                    err,
+                    &format!("{error}. The backup's copy can't be used either: {why}"),
+                );
+            }
+        },
     };
     if record.platform != record::platform_name(platform) {
         return fail(
