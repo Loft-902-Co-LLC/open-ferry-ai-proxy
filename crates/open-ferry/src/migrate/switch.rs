@@ -1378,14 +1378,15 @@ fn wait_service_ended(
     context: &Context,
     target: Target,
     runners: &[Proc],
+    exe: &str,
     config: &str,
     listen: Option<&Listen>,
 ) -> Result<(), String> {
     wait_ended(machine, context, &Ending::Service(target, runners), listen)?;
     let mut known = runners.to_vec();
     for _ in 0..3 {
-        let found =
-            service_runners(machine, context, config).map_err(|error| unknown_runners(&error))?;
+        let found = service_runners(machine, context, exe, config)
+            .map_err(|error| unknown_runners(&error))?;
         let fresh: Vec<Proc> = found
             .into_iter()
             .filter(|process| {
@@ -1418,7 +1419,15 @@ fn turn_theirs_on(
     out: &mut dyn Write,
 ) -> Vec<String> {
     let (context, config) = (base.context, base.config);
-    if let Err(error) = wait_service_ended(machine, context, target, runners, config, listen) {
+    if let Err(error) = wait_service_ended(
+        machine,
+        context,
+        target,
+        runners,
+        &context.exe,
+        config,
+        listen,
+    ) {
         say(out, format_args!("{error}"));
         return vec![error];
     }
@@ -1448,13 +1457,20 @@ fn runs_with_config(platform: Platform, args: &[String], config: &str) -> bool {
 fn service_runners(
     machine: &mut dyn Machine,
     context: &Context,
+    exe: &str,
     config: &str,
 ) -> Result<Vec<Proc>, String> {
     let platform = context.platform;
-    let name = discover::file_name(platform, &context.exe);
+    // `exe` is the service's open-ferry; this one may be another copy.
+    let name = discover::file_name(platform, exe);
+    let mut names = vec![name.as_str()];
+    let mine = discover::file_name(platform, &context.exe);
+    if !mine.eq_ignore_ascii_case(&name) {
+        names.push(mine.as_str());
+    }
     let own = std::process::id();
     let all: Vec<Proc> = machine
-        .processes(&[name.as_str()])
+        .processes(&names)
         .map_err(|error| format!("failed to list the {name} processes: {error}"))?
         .into_iter()
         .filter(|process| process.pid != own)
@@ -1489,7 +1505,7 @@ fn service_runners(
             let installed = process
                 .exe
                 .as_deref()
-                .is_none_or(|exe| discover::same_path(platform, exe, &context.exe))
+                .is_none_or(|found| discover::same_path(platform, found, exe))
                 && runs_with_config(platform, &process.args, config);
             supervisor || child || installed
         })
@@ -1663,6 +1679,7 @@ fn execute_service(
         Switch::Service {
             theirs: theirs.clone(),
             ours: record::target_name(target).to_owned(),
+            ours_exe: context.exe.clone(),
         },
     );
     record::save(machine, platform, base.record_path, &record)
@@ -1701,7 +1718,7 @@ fn execute_service(
             ),
         );
         let mut failures = Vec::new();
-        let runners = match service_runners(machine, context, base.config) {
+        let runners = match service_runners(machine, context, &context.exe, base.config) {
             Ok(runners) => runners,
             Err(error) => {
                 failures.push(unknown_runners(&error));
@@ -1763,7 +1780,7 @@ fn execute_service(
                 format_args!("open-ferry didn't answer: {why}. Undoing the switch."),
             );
             let mut failures = Vec::new();
-            let runners = match service_runners(machine, context, base.config) {
+            let runners = match service_runners(machine, context, &context.exe, base.config) {
                 Ok(runners) => runners,
                 Err(error) => {
                     failures.push(unknown_runners(&error));
@@ -2630,7 +2647,7 @@ fn execute_drop_in(
 pub(crate) fn undo_steps(context: &Context, record: &Record, restore: bool) -> Vec<String> {
     let mut steps = Vec::new();
     match &record.switch {
-        Switch::Service { theirs, ours } => {
+        Switch::Service { theirs, ours, .. } => {
             let ours = record::target_of(ours).map_or_else(
                 || ours.clone(),
                 |target| {
@@ -3164,12 +3181,16 @@ pub(crate) fn undo(
         Switch::DropIn { .. } => true,
     };
     match record.switch.clone() {
-        Switch::Service { theirs, ours } => {
+        Switch::Service {
+            theirs,
+            ours,
+            ours_exe,
+        } => {
             let target = record::target_of(&ours)
                 .ok_or_else(|| format!("the record names an unknown service, {ours}"))?;
             // Taken before anything is removed, and nothing is changed when
             // they can't be told.
-            let runners = service_runners(machine, context, &record.cliproxyapi.config)
+            let runners = service_runners(machine, context, &ours_exe, &record.cliproxyapi.config)
                 .map_err(|error| format!("{}. Nothing was changed", unknown_runners(&error)))?;
             if target.installed(machine, context)? {
                 os_service::uninstall(machine, context, target, false, out)?;
@@ -3186,6 +3207,7 @@ pub(crate) fn undo(
                 context,
                 target,
                 &runners,
+                &ours_exe,
                 &record.cliproxyapi.config,
                 listen.as_ref(),
             ) {
