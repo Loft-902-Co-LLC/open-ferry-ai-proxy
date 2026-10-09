@@ -15,11 +15,12 @@
 //! As the first argument, `init` writes a starting config (see [`init`]),
 //! `check` looks over a setup (see [`check`]), `service` installs,
 //! removes or shows open-ferry as a background service (see
-//! [`os_service`]), and `update` checks for, installs or rolls back a
-//! release, or sets whether updates are automatic (see [`update`]); the
-//! arguments after it are theirs. `status`, `config`, `keys`,
-//! `credentials`, `clients` and `mcp` look at and change a setup, for
-//! people and agents (see [`agent`]). `-version` prints the version.
+//! [`os_service`]), `update` checks for, installs or rolls back a release,
+//! or sets whether updates are automatic (see [`update`]), and `migrate`
+//! switches from CLIProxyAPI and back (see [`migrate`]); the arguments
+//! after it are theirs. `status`, `config`, `keys`, `credentials`,
+//! `clients` and `mcp` look at and change a setup, for people and agents
+//! (see [`agent`]). `-version` prints the version.
 //!
 //! Deviations from upstream:
 //! - The cloud-deploy, home, Postgres, object-store and git-store modes,
@@ -45,6 +46,7 @@ mod installed;
 mod keep_alive;
 mod logging;
 mod login;
+mod migrate;
 mod observability;
 mod os_service;
 mod service;
@@ -76,6 +78,7 @@ fn main() -> ExitCode {
         Some(check::NAME) => return check::main(&program, args.skip(1)),
         Some(os_service::NAME) => return os_service::main(&program, args.skip(1)),
         Some(update::NAME) => return update::main(&program, args.skip(1)),
+        Some(migrate::NAME) => return migrate::main(&program, args.skip(1)),
         Some(name) if agent::is_command(name) => return agent::main(&program, args),
         _ => {}
     }

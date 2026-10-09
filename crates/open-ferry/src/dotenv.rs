@@ -161,7 +161,7 @@ fn os_string(bytes: Vec<u8>) -> OsString {
 type Stop<'a> = (&'a [u8], Problem);
 
 /// Parses a file's bytes, as godotenv's `parseBytes` does.
-fn parse(src: &[u8]) -> Result<Vars, Error> {
+pub(crate) fn parse(src: &[u8]) -> Result<Vars, Error> {
     let src = replace_crlf(src.strip_prefix(BOM).unwrap_or(src));
     let mut out = Vars::new();
     let mut cutset: &[u8] = &src;

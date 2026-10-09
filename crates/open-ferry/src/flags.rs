@@ -11,15 +11,16 @@
 //! The usage leaves out `-password`, as upstream's does.
 //!
 //! A subcommand (`open-ferry init`, `open-ferry check`, `open-ferry
-//! service`, `open-ferry update`) is recognized only as the first argument; `main` sends the
-//! arguments after it to the subcommand, which reads its own flags with
-//! the same parser ([`parse_with`]) and has its own `-h`. Without one, or
-//! with a flag first, the command line is read as above.
+//! service`, `open-ferry update`, `open-ferry migrate`) is recognized only
+//! as the first argument; `main` sends the arguments after it to the
+//! subcommand, which reads its own flags with the same parser
+//! ([`parse_with`]) and has its own `-h`. Without one, or with a flag
+//! first, the command line is read as above.
 //!
 //! Deviations from upstream:
 //! - Upstream has no subcommands: it ignores a first argument that isn't a
-//!   flag, and serves. Here `init`, `check`, `service` and `update` as the
-//!   first argument run those subcommands.
+//!   flag, and serves. Here `init`, `check`, `service`, `update` and
+//!   `migrate` as the first argument run those subcommands.
 //! - `-version` prints the version and exits; upstream has no such flag.
 //! - Only the flags of the ported features are defined: `-config`, the Codex
 //!   and Claude logins, `-no-browser`, `-oauth-callback-port`,
@@ -102,6 +103,11 @@ pub struct Definition<T> {
     pub usage: &'static str,
     /// What it takes.
     pub kind: Kind<T>,
+}
+
+/// Whether the server takes the flag `name`, without its leading dashes.
+pub(crate) fn takes(name: &str) -> bool {
+    DEFINITIONS.iter().any(|definition| definition.name == name)
 }
 
 /// The flags, sorted by name as Go's usage lists them.

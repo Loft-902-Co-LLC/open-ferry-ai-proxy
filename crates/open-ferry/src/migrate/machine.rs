@@ -1,0 +1,730 @@
+//! The machine `migrate` works on, behind [`Machine`]: its processes, its
+//! files, its service managers (through [`System`], as `service` runs
+//! them), the proxy's port and the person at the terminal. [`Host`] is the
+//! real one; the tests drive `migrate` with a fake.
+//!
+//! [`Host`] reads processes with `sysinfo`: first every process's name and
+//! parent, then the command line, working directory and environment of
+//! those named as CLIProxyAPI's binaries only. Those three can hold
+//! secrets, such as upstream's `-password`: they are kept in memory, read
+//! for the flags and variables `migrate` needs, and never printed, logged
+//! or saved ([`Proc`]'s `Debug` leaves them out).
+
+use std::fmt;
+use std::io::{self, BufRead as _, IsTerminal as _, Write as _};
+use std::net::{IpAddr, SocketAddr};
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
+
+use chrono::{DateTime, Utc};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
+
+use crate::check::{self, Finding};
+use crate::os_service::{self, Cmd, Output, Owner, System};
+
+/// A running process, as far as `migrate` reads it. Its `Debug` leaves out
+/// its arguments and environment, which can hold secrets.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct Proc {
+    pub(crate) pid: u32,
+    /// Its executable's file name, as the system names the process.
+    pub(crate) name: String,
+    /// Its executable's full path, when it can be read.
+    pub(crate) exe: Option<String>,
+    /// Its arguments, without the program's own name.
+    pub(crate) args: Vec<String>,
+    /// Its working directory, when it can be read.
+    pub(crate) cwd: Option<String>,
+    /// Its environment, when it can be read.
+    pub(crate) env: Option<Vec<(String, String)>>,
+    /// The process that started it, when it is known.
+    pub(crate) parent: Option<Parent>,
+}
+
+impl fmt::Debug for Proc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Proc")
+            .field("pid", &self.pid)
+            .field("name", &self.name)
+            .field("exe", &self.exe)
+            .field("args", &self.args.len())
+            .field("cwd", &self.cwd)
+            .field("env", &self.env.as_ref().map(Vec::len))
+            .field("parent", &self.parent)
+            .finish()
+    }
+}
+
+/// A process's parent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Parent {
+    pub(crate) pid: u32,
+    /// Its name, or `None` when it no longer runs.
+    pub(crate) name: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EntryKind {
+    File,
+    Dir,
+    /// A symbolic link, or anything else that is neither.
+    Other,
+}
+
+/// An entry of a directory.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Entry {
+    pub(crate) name: String,
+    pub(crate) kind: EntryKind,
+}
+
+/// A program to start in the background, apart from `migrate`. Its `Debug`
+/// leaves out its arguments and environment.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct Launch {
+    pub(crate) exe: String,
+    pub(crate) args: Vec<String>,
+    pub(crate) cwd: String,
+    /// Its whole environment, or `None` for `migrate`'s own.
+    pub(crate) env: Option<Vec<(String, String)>>,
+    /// Where what it prints goes.
+    pub(crate) log: String,
+}
+
+impl fmt::Debug for Launch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Launch")
+            .field("exe", &self.exe)
+            .field("args", &self.args.len())
+            .field("cwd", &self.cwd)
+            .field("env", &self.env.as_ref().map(Vec::len))
+            .field("log", &self.log)
+            .finish()
+    }
+}
+
+/// What answered on the proxy's port.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Answer {
+    OpenFerry,
+    /// Something else, described.
+    Other(String),
+    /// Nothing, and why.
+    Nothing(String),
+}
+
+/// Everything `migrate` does to the machine, besides running commands and
+/// reading and writing files through [`System`].
+pub(crate) trait Machine: System {
+    /// The running processes whose name is one of `names`, in any case,
+    /// but for this one.
+    fn processes(&mut self, names: &[&str]) -> io::Result<Vec<Proc>>;
+    /// Whether process `pid` runs.
+    fn running(&mut self, pid: u32) -> bool;
+    /// Stops process `pid`, if it is still named `name`: asks it to stop
+    /// (on Windows, ends it at once), and waits for it, ending it after a
+    /// while.
+    fn stop(&mut self, pid: u32, name: &str) -> io::Result<()>;
+    /// Starts `launch` in the background, apart from this process, and
+    /// gives its process ID.
+    fn spawn(&mut self, launch: &Launch) -> io::Result<u32>;
+    fn list_dir(&self, path: &str) -> io::Result<Vec<Entry>>;
+    fn copy(&mut self, from: &str, to: &str) -> io::Result<()>;
+    fn rename(&mut self, from: &str, to: &str) -> io::Result<()>;
+    /// Creates `path`, which only its owner can open on Unix.
+    fn create_private_dir(&mut self, path: &str) -> io::Result<()>;
+    /// What answers `GET /` on `ip`, a loopback address, and `port`.
+    fn probe(&mut self, ip: IpAddr, port: u16, tls: bool) -> Answer;
+    /// `open-ferry check`'s findings for `config`, run in `working_dir`.
+    fn check(
+        &mut self,
+        config: &str,
+        working_dir: Option<&str>,
+        management_password: bool,
+    ) -> Vec<Finding>;
+    fn sleep(&mut self, duration: Duration);
+    fn now(&self) -> DateTime<Utc>;
+    /// Whether a person can answer questions: the standard input and output
+    /// are a terminal.
+    fn terminal(&self) -> bool;
+    /// Asks `question`, which ends with `[y/N]`, and whether the answer is
+    /// yes.
+    fn ask(&mut self, question: &str) -> bool;
+}
+
+/// How long a stopped process has to exit before it is ended.
+const STOP_WAIT: Duration = Duration::from_secs(15);
+
+/// How long one probe may take.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// The most of an answer a probe reads.
+const PROBE_LIMIT: usize = 64 * 1024;
+
+/// The real machine.
+pub(crate) struct Host {
+    system: os_service::Host,
+    runtime: Option<tokio::runtime::Runtime>,
+}
+
+impl Host {
+    pub(crate) fn new() -> Host {
+        Host {
+            system: os_service::Host,
+            runtime: None,
+        }
+    }
+
+    fn block_on<F: Future>(&mut self, future: F) -> io::Result<F::Output> {
+        if self.runtime.is_none() {
+            self.runtime = Some(
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?,
+            );
+        }
+        match &self.runtime {
+            Some(runtime) => Ok(runtime.block_on(future)),
+            None => Err(io::Error::other("no async runtime")),
+        }
+    }
+}
+
+impl System for Host {
+    fn run(&mut self, cmd: &Cmd) -> io::Result<Output> {
+        self.system.run(cmd)
+    }
+
+    fn show(&mut self, cmd: &Cmd) -> io::Result<Option<i32>> {
+        self.system.show(cmd)
+    }
+
+    fn exists(&self, path: &str) -> bool {
+        self.system.exists(path)
+    }
+
+    fn read(&self, path: &str) -> io::Result<Vec<u8>> {
+        self.system.read(path)
+    }
+
+    fn real_path(&self, path: &str) -> io::Result<String> {
+        self.system.real_path(path)
+    }
+
+    fn owner(&self, path: &str) -> io::Result<Owner> {
+        self.system.owner(path)
+    }
+
+    fn create_dir_all(&mut self, path: &str) -> io::Result<()> {
+        self.system.create_dir_all(path)
+    }
+
+    fn write(&mut self, path: &str, data: &[u8]) -> io::Result<()> {
+        self.system.write(path, data)
+    }
+
+    fn remove(&mut self, path: &str) -> io::Result<()> {
+        self.system.remove(path)
+    }
+}
+
+fn lossy(text: &std::ffi::OsStr) -> String {
+    text.to_string_lossy().into_owned()
+}
+
+fn path_string(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+/// The process `pid`, refreshed with `kind`, if it runs and isn't a zombie.
+fn one_process(pid: u32, kind: sysinfo::ProcessRefreshKind) -> Option<(sysinfo::System, String)> {
+    let pid = sysinfo::Pid::from_u32(pid);
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&[pid]), true, kind);
+    let name = sys
+        .process(pid)
+        .filter(|process| process.status() != sysinfo::ProcessStatus::Zombie)
+        .map(|process| lossy(process.name()))?;
+    Some((sys, name))
+}
+
+impl Machine for Host {
+    fn processes(&mut self, names: &[&str]) -> io::Result<Vec<Proc>> {
+        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, UpdateKind};
+        let mut sys = sysinfo::System::new();
+        // Names and parents only, of every process.
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing(),
+        );
+        // Never this process: open-ferry run under CLIProxyAPI's name, as a
+        // drop-in is, isn't CLIProxyAPI.
+        let own = sysinfo::Pid::from_u32(std::process::id());
+        let pids: Vec<sysinfo::Pid> = sys
+            .processes()
+            .iter()
+            .filter(|(pid, process)| {
+                let name = lossy(process.name());
+                **pid != own && names.iter().any(|want| name.eq_ignore_ascii_case(want))
+            })
+            .map(|(pid, _)| *pid)
+            .collect();
+        if pids.is_empty() {
+            return Ok(Vec::new());
+        }
+        // The rest, of those only.
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&pids),
+            false,
+            ProcessRefreshKind::nothing()
+                .with_exe(UpdateKind::Always)
+                .with_cmd(UpdateKind::Always)
+                .with_cwd(UpdateKind::Always)
+                .with_environ(UpdateKind::Always),
+        );
+        let mut found = Vec::new();
+        for pid in pids {
+            let Some(process) = sys.process(pid) else {
+                continue;
+            };
+            if process.status() == sysinfo::ProcessStatus::Zombie {
+                continue;
+            }
+            let env: Vec<(String, String)> = process
+                .environ()
+                .iter()
+                .filter_map(|entry| {
+                    let entry = lossy(entry);
+                    let (name, value) = entry.split_once('=')?;
+                    (!name.is_empty()).then(|| (name.to_owned(), value.to_owned()))
+                })
+                .collect();
+            let parent = process.parent().map(|parent| Parent {
+                pid: parent.as_u32(),
+                name: sys.process(parent).map(|process| lossy(process.name())),
+            });
+            found.push(Proc {
+                pid: pid.as_u32(),
+                name: lossy(process.name()),
+                exe: process.exe().map(path_string),
+                args: process.cmd().iter().skip(1).map(|arg| lossy(arg)).collect(),
+                cwd: process.cwd().map(path_string),
+                env: (!env.is_empty()).then_some(env),
+                parent,
+            });
+        }
+        found.sort_by_key(|proc| proc.pid);
+        Ok(found)
+    }
+
+    fn running(&mut self, pid: u32) -> bool {
+        one_process(pid, sysinfo::ProcessRefreshKind::nothing()).is_some()
+    }
+
+    fn stop(&mut self, pid: u32, name: &str) -> io::Result<()> {
+        let Some((sys, found)) = one_process(pid, sysinfo::ProcessRefreshKind::nothing()) else {
+            return Ok(());
+        };
+        if !found.eq_ignore_ascii_case(name) {
+            return Err(io::Error::other(format!(
+                "process {pid} is now {found}, not {name}, so it was left alone"
+            )));
+        }
+        let Some(process) = sys.process(sysinfo::Pid::from_u32(pid)) else {
+            return Ok(());
+        };
+        // On Unix, SIGTERM, which CLIProxyAPI and open-ferry both stop
+        // gracefully on. Windows has no such signal for a program without a
+        // window: it is ended at once.
+        #[cfg(unix)]
+        let asked = process.kill_with(sysinfo::Signal::Term).unwrap_or(false);
+        #[cfg(not(unix))]
+        let asked = process.kill();
+        if !asked && self.running(pid) {
+            return Err(io::Error::other(format!("failed to stop process {pid}")));
+        }
+        let mut waited = Duration::ZERO;
+        let step = Duration::from_millis(200);
+        while waited < STOP_WAIT {
+            if !self.running(pid) {
+                return Ok(());
+            }
+            std::thread::sleep(step);
+            waited += step;
+        }
+        // It didn't stop when asked: end it.
+        if let Some((sys, _)) = one_process(pid, sysinfo::ProcessRefreshKind::nothing())
+            && let Some(process) = sys.process(sysinfo::Pid::from_u32(pid))
+        {
+            process.kill();
+        }
+        for _ in 0..25 {
+            if !self.running(pid) {
+                return Ok(());
+            }
+            std::thread::sleep(step);
+        }
+        Err(io::Error::other(format!(
+            "process {pid} still runs after it was asked to stop"
+        )))
+    }
+
+    fn spawn(&mut self, launch: &Launch) -> io::Result<u32> {
+        let log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&launch.log)?;
+        let command = || -> io::Result<std::process::Command> {
+            let mut command = std::process::Command::new(&launch.exe);
+            command
+                .args(&launch.args)
+                .current_dir(&launch.cwd)
+                .stdin(std::process::Stdio::null())
+                .stdout(log.try_clone()?)
+                .stderr(log.try_clone()?);
+            if let Some(env) = &launch.env {
+                command.env_clear();
+                command.envs(env.iter().map(|(name, value)| (name, value)));
+            }
+            Ok(command)
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt as _;
+            // Its own process group, so that a signal to the terminal's
+            // doesn't reach it.
+            let child = command()?.process_group(0).spawn()?;
+            Ok(child.id())
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt as _;
+            use windows_sys::Win32::System::Threading::{
+                CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW,
+            };
+            let flags = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP;
+            // Out of this process's job, if it is in one that allows it, so
+            // that it outlives a terminal that ends the job as it closes.
+            match command()?
+                .creation_flags(flags | CREATE_BREAKAWAY_FROM_JOB)
+                .spawn()
+            {
+                Ok(child) => Ok(child.id()),
+                Err(_) => Ok(command()?.creation_flags(flags).spawn()?.id()),
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            Ok(command()?.spawn()?.id())
+        }
+    }
+
+    fn list_dir(&self, path: &str) -> io::Result<Vec<Entry>> {
+        let mut entries = Vec::new();
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            let kind = match entry.file_type() {
+                Ok(kind) if kind.is_file() => EntryKind::File,
+                Ok(kind) if kind.is_dir() => EntryKind::Dir,
+                _ => EntryKind::Other,
+            };
+            entries.push(Entry {
+                name: lossy(&entry.file_name()),
+                kind,
+            });
+        }
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(entries)
+    }
+
+    fn copy(&mut self, from: &str, to: &str) -> io::Result<()> {
+        std::fs::copy(from, to).map(|_| ())
+    }
+
+    fn rename(&mut self, from: &str, to: &str) -> io::Result<()> {
+        std::fs::rename(from, to)
+    }
+
+    fn create_private_dir(&mut self, path: &str) -> io::Result<()> {
+        let mut builder = std::fs::DirBuilder::new();
+        // A new directory: one already there is an error.
+        builder.recursive(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt as _;
+            builder.mode(0o700);
+        }
+        builder.create(path)
+    }
+
+    fn probe(&mut self, ip: IpAddr, port: u16, tls: bool) -> Answer {
+        let address = SocketAddr::new(ip, port);
+        match self.block_on(probe(address, tls, PROBE_TIMEOUT)) {
+            Ok(answer) => answer,
+            Err(error) => Answer::Nothing(format!("failed to start the async runtime: {error}")),
+        }
+    }
+
+    fn check(
+        &mut self,
+        config: &str,
+        working_dir: Option<&str>,
+        management_password: bool,
+    ) -> Vec<Finding> {
+        // The checks read relative paths from the working directory, as the
+        // proxy does: CLIProxyAPI's, which open-ferry keeps.
+        let previous = std::env::current_dir().ok();
+        if let Some(dir) = working_dir {
+            let _ = std::env::set_current_dir(dir);
+        }
+        let env = check::Environment {
+            management_password,
+            ..check::Environment::current()
+        };
+        let findings = self
+            .block_on(check::run(Path::new(config), &env))
+            .unwrap_or_default();
+        if let Some(dir) = previous {
+            let _ = std::env::set_current_dir(dir);
+        }
+        findings
+    }
+
+    fn sleep(&mut self, duration: Duration) {
+        std::thread::sleep(duration);
+    }
+
+    fn now(&self) -> DateTime<Utc> {
+        Utc::now()
+    }
+
+    fn terminal(&self) -> bool {
+        io::stdin().is_terminal() && io::stdout().is_terminal()
+    }
+
+    fn ask(&mut self, question: &str) -> bool {
+        let mut out = io::stdout().lock();
+        let _ = write!(out, "{question} ");
+        let _ = out.flush();
+        let mut answer = String::new();
+        if io::stdin().lock().read_line(&mut answer).is_err() {
+            return false;
+        }
+        matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+    }
+}
+
+/// What answers `GET /` at `address`, over TLS when `tls`, within
+/// `timeout`. open-ferry answers it with `"message":"open-ferry-ai-proxy"`,
+/// upstream with `"message":"CLI Proxy API Server"`. The route needs no
+/// key, calls no provider, and is open in safe mode. Over TLS the
+/// certificate isn't checked: the address is loopback, and nothing secret
+/// is sent.
+pub(crate) async fn probe(address: SocketAddr, tls: bool, timeout: Duration) -> Answer {
+    match tokio::time::timeout(timeout, fetch_root(address, tls)).await {
+        Ok(Ok(response)) => read_answer(&response),
+        Ok(Err(error)) => Answer::Nothing(error.to_string()),
+        Err(_) => Answer::Nothing(format!("no answer within {} seconds", timeout.as_secs())),
+    }
+}
+
+async fn fetch_root(address: SocketAddr, tls: bool) -> io::Result<Vec<u8>> {
+    let stream = tokio::net::TcpStream::connect(address).await?;
+    if !tls {
+        return exchange(stream, address).await;
+    }
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .map_err(io::Error::other)?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(AnyCertificate(provider)))
+        .with_no_client_auth();
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+    let name = rustls::pki_types::ServerName::IpAddress(address.ip().into());
+    let stream = connector.connect(name, stream).await?;
+    exchange(stream, address).await
+}
+
+async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
+    mut stream: S,
+    address: SocketAddr,
+) -> io::Result<Vec<u8>> {
+    let request = format!(
+        "GET / HTTP/1.1\r\nHost: {address}\r\nUser-Agent: open-ferry-migrate\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(request.as_bytes()).await?;
+    stream.flush().await?;
+    let mut response = Vec::new();
+    let mut chunk = [0u8; 4096];
+    while response.len() < PROBE_LIMIT {
+        let read = stream.read(&mut chunk).await;
+        match read {
+            Ok(0) => break,
+            Ok(n) => response.extend_from_slice(chunk.get(..n).unwrap_or_default()),
+            // A TLS peer that closes without a close_notify still sent its
+            // answer.
+            Err(_) if !response.is_empty() => break,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(response)
+}
+
+/// Who `response` says it is.
+fn read_answer(response: &[u8]) -> Answer {
+    let text = String::from_utf8_lossy(response);
+    let status = text
+        .lines()
+        .next()
+        .filter(|line| line.starts_with("HTTP/"))
+        .and_then(|line| line.split_whitespace().nth(1))
+        .map(str::to_owned);
+    let Some(status) = status else {
+        return Answer::Other("something that doesn't speak HTTP".to_owned());
+    };
+    let body = text.split_once("\r\n\r\n").map_or("", |(_, body)| body);
+    let compact: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+    if status == "200" && compact.contains(r#""message":"open-ferry-ai-proxy""#) {
+        Answer::OpenFerry
+    } else if compact.contains(r#""message":"CLIProxyAPIServer""#) {
+        Answer::Other("CLIProxyAPI".to_owned())
+    } else {
+        Answer::Other(format!(
+            "a server that isn't open-ferry (HTTP status {status})"
+        ))
+    }
+}
+
+/// Takes any certificate: for a probe of loopback that sends nothing
+/// secret.
+#[derive(Debug)]
+struct AnyCertificate(Arc<rustls::crypto::CryptoProvider>);
+
+impl rustls::client::danger::ServerCertVerifier for AnyCertificate {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.0.signature_verification_algorithms.supported_schemes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Serves `answer` once on loopback, and gives the address.
+    async fn serve_once(answer: &'static str) -> SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request).await;
+            let _ = stream.write_all(answer.as_bytes()).await;
+        });
+        address
+    }
+
+    // Not upstream's: the probe tells open-ferry from CLIProxyAPI by `GET
+    // /`, against servers on loopback.
+    #[tokio::test]
+    async fn probe_tells_open_ferry_from_cli_proxy_api() {
+        let open_ferry = serve_once(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"endpoints\":[],\"message\":\"open-ferry-ai-proxy\"}",
+        )
+        .await;
+        assert_eq!(
+            probe(open_ferry, false, Duration::from_secs(5)).await,
+            Answer::OpenFerry
+        );
+        let upstream = serve_once(
+            "HTTP/1.1 200 OK\r\n\r\n{\"message\": \"CLI Proxy API Server\", \"endpoints\": []}",
+        )
+        .await;
+        assert_eq!(
+            probe(upstream, false, Duration::from_secs(5)).await,
+            Answer::Other("CLIProxyAPI".to_owned())
+        );
+        let other = serve_once("HTTP/1.1 404 Not Found\r\n\r\nnope").await;
+        assert_eq!(
+            probe(other, false, Duration::from_secs(5)).await,
+            Answer::Other("a server that isn't open-ferry (HTTP status 404)".to_owned())
+        );
+    }
+
+    // Not upstream's: a closed port is nothing.
+    #[tokio::test]
+    async fn probe_of_a_closed_port_is_nothing() {
+        // Bound but not listening, so nothing else takes the port.
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let address = socket.local_addr().unwrap();
+        assert!(matches!(
+            probe(address, false, Duration::from_secs(5)).await,
+            Answer::Nothing(_)
+        ));
+    }
+
+    // Not upstream's: the backup's directory is new, and on Unix only its
+    // owner can open it.
+    #[test]
+    fn the_backup_directory_is_new_and_private() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("open-ferry-migrate-20261008T120000Z");
+        let path = dir.to_str().unwrap();
+        let mut host = Host::new();
+        host.create_private_dir(path).unwrap();
+        assert!(dir.is_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+        let again = host.create_private_dir(path).unwrap_err();
+        assert_eq!(again.kind(), io::ErrorKind::AlreadyExists);
+        // Its parent isn't made for it.
+        let deeper = temp.path().join("missing").join("backup");
+        assert!(host.create_private_dir(deeper.to_str().unwrap()).is_err());
+    }
+}

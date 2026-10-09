@@ -31,6 +31,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json.workspace = true
 socket2 = "0.6.5"
 subtle = "2.6.1"
+sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
 tokio-rustls = { version = "0.26.6", default-features = false }
 tracing = "0.1.44"
