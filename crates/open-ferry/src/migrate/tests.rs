@@ -3421,11 +3421,12 @@ fn a_rollback_that_fails_keeps_the_record_open() {
     assert_eq!(saved(&fake, LINUX_RECORD)["status"], "switching");
 }
 
-// Not upstream's: the auth directory is followed once, so that a backup
-// inside the real auth directory (the config is there) isn't copied into
-// itself.
+// Not upstream's: the backup is placed by where the config and the auth
+// directory really are: with the config in the real directory a link leads
+// to, it goes beside that directory, not into it, and the copy of the auth
+// directory is made from its real path, once.
 #[test]
-fn a_backup_inside_a_linked_auth_directory_is_not_copied_into_itself() {
+fn a_backup_is_placed_by_where_a_linked_auth_directory_really_is() {
     let (mut fake, context) = systemd_user_config("/data/auths/config.yaml");
     fake.files
         .retain(|path, _| !path.starts_with("/home/me/.cli-proxy-api/"));
@@ -3437,7 +3438,8 @@ fn a_backup_inside_a_linked_auth_directory_is_not_copied_into_itself() {
     );
     let ran = migrate(&mut fake, &context, &["-yes"]);
     assert_eq!(ran.code, 0, "{}", ran.all());
-    let backup = "/data/auths/open-ferry-migrate-20261008T120000Z";
+    let backup = format!("/data/open-ferry-migrate-{STAMP}");
+    has(&ran.out, &format!("into {backup}"));
     assert!(fake.exists(&format!("{backup}/auth/claude.json")));
     assert!(fake.exists(&format!("{backup}/config/config.yaml")));
     assert!(
@@ -3445,8 +3447,8 @@ fn a_backup_inside_a_linked_auth_directory_is_not_copied_into_itself() {
             .files
             .keys()
             .chain(fake.dirs.iter())
-            .any(|path| path.starts_with(&format!("{backup}/auth/open-ferry-migrate"))),
-        "the backup holds itself:\n{:#?}",
+            .any(|path| path.starts_with("/data/auths/open-ferry-migrate")),
+        "the backup is inside the auth directory:\n{:#?}",
         fake.files.keys().collect::<Vec<_>>()
     );
     let record = saved(&fake, LINUX_RECORD);

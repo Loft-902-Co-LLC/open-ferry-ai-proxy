@@ -669,6 +669,22 @@ pub(crate) fn decode_output(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+/// Windows gives a real path in the verbatim form, `\\?\C:\dir` or
+/// `\\?\UNC\server\share`; this is the usual form of it. Any other path is
+/// returned as it is.
+fn plain_windows_path(path: String) -> String {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    if let Some(rest) = path.strip_prefix(r"\\?\") {
+        let mut chars = rest.chars();
+        if chars.next().is_some_and(|c| c.is_ascii_alphabetic()) && chars.next() == Some(':') {
+            return rest.to_owned();
+        }
+    }
+    path
+}
+
 /// The real system.
 pub(crate) struct Host;
 
@@ -702,10 +718,11 @@ impl System for Host {
     }
 
     fn real_path(&self, path: &str) -> io::Result<String> {
-        std::fs::canonicalize(path)?
+        let real = std::fs::canonicalize(path)?
             .into_os_string()
             .into_string()
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "not valid UTF-8"))
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "not valid UTF-8"))?;
+        Ok(plain_windows_path(real))
     }
 
     #[cfg(unix)]
