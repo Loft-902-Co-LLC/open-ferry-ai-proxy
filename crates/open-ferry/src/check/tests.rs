@@ -22,6 +22,7 @@ fn env() -> Environment {
         build_date: None,
         dashboard_built: true,
         management_password: false,
+        run_config_programs: true,
         updates: super::self_update::Updates {
             mode_env: None,
             trusts_key: true,
@@ -545,6 +546,41 @@ async fn reports_each_claude_cli_entry() {
     assert_eq!(entries[0].check, "claude-cli max");
     assert_eq!(entries[0].level, Level::Error);
     assert!(entries[0].message.starts_with("couldn't run Claude Code"));
+}
+
+// Not upstream's: with `run_config_programs` off, as `open-ferry migrate`
+// has it, a claude-cli entry's command isn't run: a command that doesn't
+// exist would be an error if it were, and the finding says it wasn't
+// checked.
+#[tokio::test]
+async fn does_not_run_a_claude_cli_command_when_told_not_to() {
+    let setup = Setup::new();
+    let missing = setup.dir.path().join("no-such-claude");
+    setup.write(
+        "",
+        "[\"k\"]",
+        "  secret-key: \"m\"\n",
+        &format!(
+            "claude-cli:\n  - name: max\n    command: '{}'\n  - name: also\n    command: '{}'\n  - name: off\n    command: '{}'\n    disabled: true\n",
+            missing.display(),
+            missing.display(),
+            missing.display()
+        ),
+    );
+    let env = Environment {
+        run_config_programs: false,
+        ..env()
+    };
+    let findings = run(&setup.path(), &env).await;
+    let entries: Vec<&Finding> = findings
+        .iter()
+        .filter(|finding| finding.check.starts_with("claude-cli"))
+        .collect();
+    assert_eq!(entries.len(), 1, "{findings:#?}");
+    assert_eq!(entries[0].check, "claude-cli max, also");
+    assert_eq!(entries[0].level, Level::Warning);
+    assert!(entries[0].message.starts_with("not checked"));
+    assert!(!entries[0].message.contains("couldn't run"));
 }
 
 // Not upstream's: a line for each finding and a count, or one JSON

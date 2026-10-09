@@ -481,6 +481,9 @@ impl Machine for Host {
         }
         let mut env = check::Environment::current();
         env.management_password = management_password;
+        // The config may not be ours, and this may run as root: it must not
+        // run a program the config names.
+        env.run_config_programs = false;
         let findings = self
             .block_on(check::run(Path::new(config), &env))
             .unwrap_or_default();
