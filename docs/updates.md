@@ -88,6 +88,8 @@ Any other install, such as the container image, a package manager's copy, a buil
 
 When the install script can't write the receipt, it says so, and that open-ferry won't update itself.
 
+**A drop-in made by `open-ferry migrate`.** On Linux and macOS, [`migrate`](migrating-from-cliproxyapi.md#the-drop-in-switch) puts a symbolic link under CLIProxyAPI's file name that leads to the installed open-ferry, so `open-ferry update` replaces the binary the link leads to, and the next start runs the new version. On Windows it puts a copy there. The copy is another path than the receipt names, so it reports a new release but doesn't install it. To update it, run `open-ferry migrate -undo`, then `open-ferry migrate` again, after `open-ferry update` has updated the installed one.
+
 ## Installing an update
 
 ```sh
