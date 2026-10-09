@@ -671,7 +671,14 @@ pub(crate) fn assess(
         ));
     }
     let mut stores: Vec<String> = Vec::new();
+    let mut seen: Vec<&str> = Vec::new();
     for (name, value, source) in &env.vars {
+        // The first of a name is the one in effect; a value it shadows,
+        // such as an earlier file's, doesn't count.
+        if seen.iter().any(|known| same_name(platform, known, name)) {
+            continue;
+        }
+        seen.push(name);
         let upper = name.to_ascii_uppercase();
         let store = STORE_PREFIXES
             .iter()

@@ -629,9 +629,9 @@ pub(crate) trait System {
 
 /// A command's output as text. Windows tools such as `schtasks /xml` may
 /// print UTF-16: with a byte order mark (little- or big-endian), or
-/// little-endian without one, which shows as a NUL after almost every
-/// character. Anything else is read as UTF-8, with replacement characters
-/// for what isn't.
+/// little-endian without one, which is told by the start of the output.
+/// Anything else is read as UTF-8, with replacement characters for what
+/// isn't.
 pub(crate) fn decode_output(bytes: &[u8]) -> String {
     let units = |data: &[u8], big: bool| -> String {
         let units: Vec<u16> = data
@@ -657,15 +657,21 @@ pub(crate) fn decode_output(bytes: &[u8]) -> String {
     if let Some(rest) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
         return String::from_utf8_lossy(rest).into_owned();
     }
-    // No mark: mostly-ASCII UTF-16LE has a NUL as every second byte.
-    let pairs = bytes.len() / 2;
-    let nul_high = bytes
-        .as_chunks::<2>()
-        .0
+    // No mark: UTF-16LE is told by its start, whatever the text after it
+    // (a task's description may be all CJK). XML starts with `<?xml` or
+    // `<Tag`, an ASCII character and a NUL, each; failing that, the first
+    // bytes have NULs, all at odd offsets, which UTF-8 text never has.
+    let head = bytes.get(..bytes.len().min(64) & !1).unwrap_or_default();
+    let xml = matches!(head, [b'<', 0, ascii, 0, ..] if ascii.is_ascii() && *ascii != 0);
+    let nuls = head.iter().filter(|byte| **byte == 0).count();
+    let odd_nuls = head
         .iter()
-        .filter(|pair| pair[1] == 0 && pair[0] != 0)
+        .skip(1)
+        .step_by(2)
+        .filter(|byte| **byte == 0)
         .count();
-    if pairs >= 2 && bytes.len().is_multiple_of(2) && nul_high * 10 >= pairs * 9 {
+    let utf16 = xml || (nuls >= 2 && nuls == odd_nuls && head.first().is_some_and(|b| *b != 0));
+    if utf16 && bytes.len().is_multiple_of(2) {
         return units(bytes, false);
     }
     String::from_utf8_lossy(bytes).into_owned()
