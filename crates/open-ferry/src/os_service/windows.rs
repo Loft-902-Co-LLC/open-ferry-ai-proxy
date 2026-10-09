@@ -189,6 +189,41 @@ pub(super) fn query_task() -> Cmd {
     schtasks(&["/query", "/tn", SERVICE_NAME])
 }
 
+/// Lists every task, one CSV line each. Its output says a task is not
+/// there where a failed query by name does not: that failure reads the same
+/// for a task that is not there and for one the scheduler wouldn't say.
+pub(super) fn list_tasks() -> Cmd {
+    schtasks(&["/query", "/fo", "csv", "/nh"])
+}
+
+/// Whether the output of [`list_tasks`] has open-ferry's task.
+pub(crate) fn task_listed(stdout: &str) -> bool {
+    stdout.lines().any(|line| {
+        let name = line.split(',').next().unwrap_or_default();
+        let name = name.trim().trim_matches('"').trim_start_matches('\\');
+        name.eq_ignore_ascii_case(SERVICE_NAME)
+    })
+}
+
+/// The number on the `STATE` line of `sc query`'s output (1 is stopped, 4
+/// is running), and nothing from a service's name or any other line.
+pub(crate) fn service_state_number(stdout: &str) -> Option<u32> {
+    stdout.lines().find_map(|line| {
+        let rest = line.trim().strip_prefix("STATE")?.trim_start();
+        rest.strip_prefix(':')?
+            .split_whitespace()
+            .next()?
+            .parse()
+            .ok()
+    })
+}
+
+/// `sc query`'s state number for a stopped service.
+pub(crate) const SERVICE_STOPPED: u32 = 1;
+
+/// `sc query`'s state number for a running service.
+pub(crate) const SERVICE_RUNNING: u32 = 4;
+
 pub(super) fn task_status() -> Cmd {
     schtasks(&["/query", "/tn", SERVICE_NAME, "/fo", "list", "/v"])
 }
