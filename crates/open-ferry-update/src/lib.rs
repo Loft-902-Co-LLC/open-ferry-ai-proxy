@@ -24,13 +24,21 @@ pub mod background;
 pub mod data_dir;
 pub mod fetch;
 pub mod install;
+pub mod installed_file;
+pub mod journal;
 pub mod keys;
+pub mod pins;
+mod publication;
 pub mod receipt;
+pub mod recovery;
 pub mod release;
 pub mod runner;
 pub mod settings;
+pub mod staging;
 pub mod state;
 pub mod switch;
+#[doc(hidden)]
+pub mod test_seams;
 pub mod updater;
 
 #[cfg(test)]
@@ -44,7 +52,7 @@ pub use keys::{ReleaseKeys, VerifyError};
 pub use open_ferry_core::config::{SelfUpdate, SelfUpdateMode};
 pub use settings::{ModeSource, Settings};
 pub use state::State;
-pub use switch::{ReplaceOnDisk, Switch, SwitchPlan};
+pub use switch::{KeepPolicy, ReplaceOnDisk, Switch, SwitchPlan};
 pub use updater::{CheckResult, Report, Status, UpdateError, Updater};
 
 /// The version of this binary.

@@ -2030,6 +2030,7 @@ dependencies = [
  "axum",
  "chrono",
  "flate2",
+ "libc",
  "minisign",
  "minisign-verify",
  "open-ferry-core",
@@ -2043,6 +2044,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "windows-sys 0.61.2",
  "zip",
 ]
 

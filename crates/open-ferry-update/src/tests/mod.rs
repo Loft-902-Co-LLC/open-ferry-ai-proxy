@@ -2,6 +2,7 @@
 
 mod archive;
 mod background;
+mod blue_green;
 mod fetch;
 mod support;
 mod units;

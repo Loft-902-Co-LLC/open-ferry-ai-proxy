@@ -23,7 +23,13 @@
 //! Everything that writes holds the update lock; the state file records
 //! the outcome (see [`crate::state`]).
 
+use std::collections::BTreeSet;
 use std::fmt;
+use std::io::Write;
+
+use crate::journal::{JournalView, add_newest_other};
+use crate::pins::PinStore;
+use crate::staging::{StagingDir, hash_file, rename_directory_exclusive, sync_directory};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -45,7 +51,7 @@ use crate::release::{self, ArchiveKind, Release, ReleaseError, Verdict};
 use crate::runner::{ProcessRunner, Runner};
 use crate::settings::Settings;
 use crate::state::{State, SwitchRecord};
-use crate::switch::{ReplaceOnDisk, Switch, SwitchError, SwitchPlan};
+use crate::switch::{KeepPolicy, ReplaceOnDisk, Switch, SwitchError, SwitchPlan};
 
 /// How large and how long downloads and checks may be.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,6 +97,10 @@ pub enum UpdateError {
     },
     /// Another update holds the lock.
     Busy,
+    /// The journal or a pin prevents this mutation.
+    Journal(String),
+    /// An immutable version is in use with different bytes.
+    VersionInUse(String),
     /// A download failed.
     Fetch {
         /// What was downloaded.
@@ -137,6 +147,8 @@ impl fmt::Display for UpdateError {
             Self::NoDataDir(error) => write!(f, "updates have no data directory: {error}"),
             Self::Io { what, error } => write!(f, "{what}: {error}"),
             Self::Busy => f.write_str("another update is running"),
+            Self::Journal(error) => f.write_str(error),
+            Self::VersionInUse(version) => write!(f, "version {version} is in use and differs"),
             Self::Fetch { what, error } => write!(f, "downloading {what}: {error}"),
             Self::Verify(error) => error.fmt(f),
             Self::Release(error) => error.fmt(f),
@@ -150,7 +162,7 @@ impl fmt::Display for UpdateError {
             ),
             Self::StagedChanged { version } => write!(
                 f,
-                "the staged open-ferry {version} changed since it was checked; it was removed"
+                "the staged open-ferry {version} changed since it was checked"
             ),
             Self::NotSelfUpdating(why) => why.fmt(f),
             Self::NothingStaged => f.write_str("no version is staged"),
@@ -383,6 +395,142 @@ impl Updater {
             .map_err(io_error("write the update state"))
     }
 
+    /// Atomically mutate fresh reporting state while holding the update lock.
+    /// Callers must not already hold that lock, or wait on an endpoint here.
+    pub fn mutate_state<T>(&self, change: impl FnOnce(&mut State) -> T) -> Result<T, UpdateError> {
+        let _lock = self.lock()?;
+        self.mutate_state_locked("mutation", change)
+    }
+
+    /// Like `mutate_state`, with the state-write name used by fault tests.
+    pub fn mutate_state_named<T>(
+        &self,
+        write: &str,
+        change: impl FnOnce(&mut State) -> T,
+    ) -> Result<T, UpdateError> {
+        let _lock = self.lock()?;
+        self.mutate_state_locked(write, change)
+    }
+
+    fn mutate_state_locked<T>(
+        &self,
+        write: &str,
+        change: impl FnOnce(&mut State) -> T,
+    ) -> Result<T, UpdateError> {
+        let mut state = self.state();
+        let result = change(&mut state);
+        state
+            .save_named(&self.data.state_file(), write)
+            .map_err(io_error("write the update state"))?;
+        Ok(result)
+    }
+
+    /// Only after a binary replacement has committed: a landed reporting
+    /// write is success even if its final durability acknowledgement fails.
+    fn mutate_state_committed_locked<T>(
+        &self,
+        write: &str,
+        change: impl FnOnce(&mut State) -> T,
+    ) -> Result<T, UpdateError> {
+        let mut state = self.state();
+        let result = change(&mut state);
+        state
+            .save_committed_named(&self.data.state_file(), write)
+            .map_err(io_error("write the committed switch state"))?;
+        Ok(result)
+    }
+
+    /// The same freshly computed retention policy guards every destructive
+    /// staging site and pruning. The caller holds the update lock.
+    fn retention_keep(&self, state: &State) -> Result<BTreeSet<String>, UpdateError> {
+        let fresh = self.state();
+        let mut extra = vec![
+            self.running.clone(),
+            self.installed_version(state),
+            self.installed_version(&fresh),
+        ];
+        extra.extend(state.previous.iter().cloned());
+        extra.extend(state.staged.iter().cloned());
+        retention_keep(&self.data, extra)
+    }
+
+    /// Cleanup under the update lock, only after journal/pin preflight.
+    fn cleanup_stale_artifacts(&self, keep: &BTreeSet<String>) -> Result<(), UpdateError> {
+        let view = JournalView::load(&self.data.root().join(crate::journal::JOURNAL_FILE))
+            .map_err(|error| UpdateError::Journal(error.to_string()))?;
+        view.ensure_supported()
+            .map_err(|error| UpdateError::Journal(error.to_string()))?;
+        let pins = PinStore::new(&self.data.versions())
+            .live(Utc::now())
+            .map_err(|error| UpdateError::Journal(error.to_string()))?;
+        let fresh = self.state();
+        let mut recorded = Vec::new();
+        if let (Some(version), Some(hash)) = (&fresh.staged, &fresh.staged_sha256) {
+            recorded.push((version.clone(), hash.clone()));
+        }
+        for record in fresh.last_switch.iter().chain(fresh.history.iter()) {
+            recorded.push((record.to.clone(), record.sha256.clone()));
+        }
+        for pin in pins {
+            recorded.push((pin.version, pin.sha256));
+        }
+        if let Some(journal) = view.journal() {
+            for artifact in
+                [&journal.active, &journal.confirmed]
+                    .into_iter()
+                    .chain(journal.previous.iter())
+                    .chain(
+                        journal
+                            .install_pending
+                            .iter()
+                            .map(|pending| &pending.target),
+                    )
+                    .chain(
+                        journal
+                            .switch
+                            .iter()
+                            .flat_map(|switch| [&switch.from, &switch.to]),
+                    )
+                    .chain(journal.switch.iter().filter_map(|switch| {
+                        switch.return_.as_ref().map(|return_| &return_.target)
+                    }))
+            {
+                recorded.push((artifact.version.clone(), artifact.sha256.clone()));
+            }
+            if let Some(installed) = &journal.installed {
+                recorded.push((installed.version.clone(), installed.sha256.clone()));
+            }
+        }
+        let verified: Vec<_> = recorded
+            .into_iter()
+            .filter_map(|(version, hash)| {
+                (keep.contains(&version)
+                    && semver::Version::parse(&version).is_ok()
+                    && hash_file(&self.data.binary(&version, self.binary_name()))
+                        .ok()
+                        .as_deref()
+                        == Some(hash.as_str()))
+                .then_some(hash)
+            })
+            .collect();
+        if let Err(error) = crate::staging::cleanup_stale_staging(&self.data.versions()) {
+            tracing::warn!(%error, path = %self.data.versions().display(), "could not finish stale staging cleanup; continuing");
+        }
+        if let Ok(Some(receipt)) = Receipt::load(&self.data.receipt_file()) {
+            match crate::switch::cleanup_stale_prev(Path::new(&receipt.binary), &verified) {
+                Ok(cleanup) => {
+                    for path in cleanup.removed {
+                        tracing::info!(path = %path.display(), "removed a stale installed link");
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, path = %receipt.binary, "could not finish stale installed-link cleanup; continuing");
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Whether this install updates itself.
     pub fn install(&self) -> Install {
         install::assess(
@@ -487,6 +635,8 @@ impl Updater {
         if let Some(path) = self.staged_binary(state, version) {
             return Ok(path);
         }
+        let keep = self.retention_keep(state)?;
+        self.cleanup_stale_artifacts(&keep)?;
         let archive = self
             .fetch
             .get(
@@ -513,34 +663,92 @@ impl Updater {
         )?;
         drop(archive);
 
+        let sha256 = release::sha256_hex(&binary);
+        let fresh = self.state();
+        if fresh.staged.as_deref() == Some(version) {
+            if fresh.staged_sha256.as_deref() == Some(sha256.as_str())
+                && let Some(path) = self.staged_binary(&fresh, version)
+            {
+                *state = fresh;
+                return Ok(path);
+            }
+            // A staged pointer cannot protect its own replacement. Retire it
+            // durably first on this restaging path; the independent previous,
+            // pin and journal protections remain intact.
+            self.mutate_state_locked("staged-changed", |fresh| {
+                fresh.staged = None;
+                fresh.staged_sha256 = None;
+            })?;
+            *state = self.state();
+        } else if state.staged.as_deref() == Some(version) {
+            // A stale caller snapshot must not restore the retired protection.
+            *state = fresh;
+        }
+        let keep = self.retention_keep(state)?;
         let dir = self.data.version_dir(version);
         let path = self.data.binary(version, self.binary_name());
-        if dir.exists() {
-            fs::remove_dir_all(&dir).map_err(io_error("clear the staging directory"))?;
+        // A version in the keep set is immutable, even if its current bytes
+        // are corrupt: only recovery may decide what is safe to run instead.
+        if dir.exists()
+            && keep.contains(version)
+            && hash_file(&path).ok().as_deref() != Some(sha256.as_str())
+        {
+            return Err(UpdateError::VersionInUse(version.to_owned()));
         }
-        fs::create_dir_all(&dir).map_err(io_error("make the staging directory"))?;
-        let partial = dir.join(format!("{}.partial", self.binary_name()));
-        fs::write(&partial, &binary).map_err(io_error("write the staged binary"))?;
-        make_executable(&partial).map_err(io_error("make the staged binary executable"))?;
-        fs::rename(&partial, &path).map_err(io_error("write the staged binary"))?;
+        let staging = StagingDir::create(&self.data.versions())
+            .map_err(io_error("make the staging directory"))?;
+        let staged = staging.0.join(self.binary_name());
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staged)
+            .map_err(io_error("write the staged binary"))?;
+        file.write_all(&binary)
+            .map_err(io_error("write the staged binary"))?;
+        make_executable(&staged).map_err(io_error("make the staged binary executable"))?;
+        file.sync_all()
+            .map_err(io_error("sync the staged binary"))?;
+        drop(file);
+        sync_directory(&staging.0).map_err(io_error("sync the staging directory"))?;
 
-        if let Err(reason) = self.try_binary(&path, version).await {
-            let _ = fs::remove_dir_all(&dir);
-            state.mark_failed(version);
-            if state.staged.as_deref() == Some(version) {
-                state.staged = None;
-                state.staged_sha256 = None;
-            }
-            self.save(state)?;
+        if let Err(reason) = self.try_binary(&staged, version).await {
+            self.mutate_state_locked("stage-failed", |fresh| {
+                fresh.mark_failed(version);
+                if fresh.staged.as_deref() == Some(version) {
+                    fresh.staged = None;
+                    fresh.staged_sha256 = None;
+                }
+            })?;
+            *state = self.state();
             return Err(UpdateError::StagedBinaryFailed {
                 version: version.to_owned(),
                 reason,
             });
         }
-        state.staged = Some(version.to_owned());
-        state.staged_sha256 = Some(release::sha256_hex(&binary));
-        self.prune(state);
-        self.save(state)?;
+        if dir.exists() {
+            if hash_file(&path).ok().as_deref() != Some(sha256.as_str()) {
+                // Recompute under the caller's lock immediately before deletion.
+                if self.retention_keep(state)?.contains(version) {
+                    return Err(UpdateError::VersionInUse(version.to_owned()));
+                }
+                fs::remove_dir_all(&dir).map_err(io_error("clear an unused version directory"))?;
+                rename_directory_exclusive(&staging.0, &dir)
+                    .map_err(io_error("publish the staged binary"))?;
+            }
+        } else {
+            rename_directory_exclusive(&staging.0, &dir)
+                .map_err(io_error("publish the staged binary"))?;
+        }
+        sync_directory(&self.data.versions()).map_err(io_error("sync the versions directory"))?;
+        self.mutate_state_locked("stage", |fresh| {
+            fresh.latest = Some(version.to_owned());
+            fresh.staged = Some(version.to_owned());
+            fresh.staged_sha256 = Some(sha256);
+        })?;
+        *state = self.state();
+        if let Err(error) = self.prune(state) {
+            tracing::warn!(%error, "the update committed, but version cleanup was refused");
+        }
         Ok(path)
     }
 
@@ -562,7 +770,13 @@ impl Updater {
                 state.last_error = Some(error.to_string());
             }
         }
-        self.save(&state)?;
+        self.mutate_state_locked("check", |fresh| {
+            fresh.last_check = state.last_check;
+            fresh.last_result = state.last_result;
+            fresh.last_error = state.last_error;
+            fresh.latest = state.latest;
+            fresh.notified = state.notified;
+        })?;
         outcome
     }
 
@@ -583,7 +797,9 @@ impl Updater {
         } else {
             match (mode, self.install()) {
                 (SelfUpdateMode::Auto, Install::SelfUpdating { .. }) => {
-                    self.stage(&found, state).await?;
+                    let staged = self.stage(&found, state).await;
+                    state.latest = Some(version.clone());
+                    staged?;
                     Report::Staged { version }
                 }
                 (_, install) => Report::Available {
@@ -606,39 +822,101 @@ impl Updater {
         Ok(CheckResult { report, news })
     }
 
+    /// Validate a supervised request without changing state or deleting files.
+    /// The caller holds the update lock and supplies the requested hash.
+    pub fn validate_staged(&self, version: &str, sha256: &str) -> Result<PathBuf, UpdateError> {
+        self.retention_keep(&self.state())?;
+        let state = self.state();
+        if state.staged.as_deref() != Some(version)
+            || state.staged_sha256.as_deref() != Some(sha256)
+        {
+            return Err(UpdateError::NothingStaged);
+        }
+        self.staged_binary(&state, version)
+            .ok_or_else(|| UpdateError::StagedChanged {
+                version: version.to_owned(),
+            })
+    }
+
+    /// Hash-check and version-check the journal's rollback artifact.
+    /// The caller holds the update lock; this does not change the state.
+    pub async fn validate_previous(
+        &self,
+        artifact: &crate::journal::Artifact,
+    ) -> Result<PathBuf, UpdateError> {
+        self.retention_keep(&self.state())?;
+        let binary = self.data.binary(&artifact.version, self.binary_name());
+        if hash_file(&binary).ok().as_deref() != Some(artifact.sha256.as_str()) {
+            return Err(UpdateError::StagedChanged {
+                version: artifact.version.clone(),
+            });
+        }
+        self.try_binary(&binary, &artifact.version)
+            .await
+            .map_err(|reason| UpdateError::StagedBinaryFailed {
+                version: artifact.version.clone(),
+                reason,
+            })?;
+        Ok(binary)
+    }
+
+    /// Protect a staged artifact before releasing the update lock. Never call
+    /// the supervisor endpoint until the caller's lock has been dropped.
+    pub fn pin_staged(&self, version: &str, sha256: &str) -> Result<crate::pins::Pin, UpdateError> {
+        self.validate_staged(version, sha256)?;
+        PinStore::new(&self.data.versions())
+            .create(version, sha256, Utc::now())
+            .map_err(io_error("pin the staged binary"))
+    }
+
     /// Switches the installed binary to the staged version. The caller
     /// holds the lock.
     pub fn switch_to_staged(&self, state: &mut State) -> Result<SwitchRecord, UpdateError> {
+        self.retention_keep(state)?;
+        *state = self.state();
         let installed = match self.install() {
             Install::SelfUpdating { binary } => binary,
             Install::NotifyOnly(why) => return Err(UpdateError::NotSelfUpdating(why)),
         };
         let version = state.staged.clone().ok_or(UpdateError::NothingStaged)?;
         let Some(staged) = self.staged_binary(state, &version) else {
-            let _ = fs::remove_dir_all(self.data.version_dir(&version));
-            state.staged = None;
-            state.staged_sha256 = None;
-            self.save(state)?;
+            // Retire the corrupt staging reference durably before evaluating
+            // deletion. Other state retention, pins and journal references
+            // still protect it through the same policy used by prune.
+            self.mutate_state_locked("staged-changed", |fresh| {
+                fresh.staged = None;
+                fresh.staged_sha256 = None;
+            })?;
+            *state = self.state();
+            if !self.retention_keep(state)?.contains(&version) {
+                let _ = fs::remove_dir_all(self.data.version_dir(&version));
+            }
             return Err(UpdateError::StagedChanged { version });
         };
         let sha256 = state.staged_sha256.clone().unwrap_or_default();
         let from = self.installed_version(state);
         let record = self.switch(&from, &version, &staged, &installed, &sha256, "update")?;
-        state.previous = Some(from);
-        state.staged = None;
-        state.staged_sha256 = None;
-        if state.rolled_back.as_deref() == Some(version.as_str()) {
-            state.rolled_back = None;
+        self.mutate_state_committed_locked("unsupervised-switch", |fresh| {
+            fresh.previous = Some(from);
+            fresh.staged = None;
+            fresh.staged_sha256 = None;
+            if fresh.rolled_back.as_deref() == Some(version.as_str()) {
+                fresh.rolled_back = None;
+            }
+            fresh.upsert_record(record.clone());
+        })?;
+        *state = self.state();
+        if let Err(error) = self.prune(state) {
+            tracing::warn!(%error, "the update committed, but version cleanup was refused");
         }
-        state.last_switch = Some(record.clone());
-        self.prune(state);
-        self.save(state)?;
         Ok(record)
     }
 
     /// Switches back to the version before the last switch, from its copy
     /// in the data directory. The caller holds the lock.
     pub async fn rollback(&self, state: &mut State) -> Result<SwitchRecord, UpdateError> {
+        self.retention_keep(&self.state())?;
+        *state = self.state();
         let installed = match self.install() {
             Install::SelfUpdating { binary } => binary,
             Install::NotifyOnly(why) => return Err(UpdateError::NotSelfUpdating(why)),
@@ -658,15 +936,19 @@ impl Updater {
         let sha256 = release::sha256_hex(&data);
         let from = self.installed_version(state);
         let record = self.switch(&from, &previous, &binary, &installed, &sha256, "rollback")?;
-        state.previous = Some(from.clone());
-        state.rolled_back = Some(from.clone());
-        if state.staged.as_deref() == Some(from.as_str()) {
-            state.staged = None;
-            state.staged_sha256 = None;
+        self.mutate_state_committed_locked("unsupervised-rollback", |fresh| {
+            fresh.previous = Some(from.clone());
+            fresh.rolled_back = Some(from.clone());
+            if fresh.staged.as_deref() == Some(from.as_str()) {
+                fresh.staged = None;
+                fresh.staged_sha256 = None;
+            }
+            fresh.upsert_record(record.clone());
+        })?;
+        *state = self.state();
+        if let Err(error) = self.prune(state) {
+            tracing::warn!(%error, "the update committed, but version cleanup was refused");
         }
-        state.last_switch = Some(record.clone());
-        self.prune(state);
-        self.save(state)?;
         Ok(record)
     }
 
@@ -679,12 +961,64 @@ impl Updater {
         sha256: &str,
         how: &str,
     ) -> Result<SwitchRecord, UpdateError> {
+        let state = self.state();
+        self.retention_keep(&state)?;
+        let kept = self.data.binary(from, self.binary_name());
+        let journal_present = self
+            .data
+            .root()
+            .join(crate::journal::JOURNAL_FILE)
+            .try_exists()
+            .map_err(|error| UpdateError::Journal(error.to_string()))?;
+        if !journal_present {
+            let pins = PinStore::new(&self.data.versions())
+                .live(Utc::now())
+                .map_err(|error| UpdateError::Journal(error.to_string()))?;
+            if from == to
+                || state.previous.as_deref() == Some(from)
+                || state.staged.as_deref() == Some(from)
+                || pins.iter().any(|pin| pin.version == from)
+            {
+                return Err(UpdateError::VersionInUse(from.to_owned()));
+            }
+            let new_path = fs::canonicalize(new_binary)
+                .map_err(io_error("resolve the new binary before switching"))?;
+            match fs::canonicalize(&kept) {
+                Ok(kept_path) if kept_path == new_path => {
+                    return Err(UpdateError::VersionInUse(from.to_owned()));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(io_error("resolve the kept binary before switching")(error));
+                }
+            }
+        }
+        let installed_hash = crate::installed_file::hash_installed(installed)
+            .map_err(io_error("hash the installed binary"))?;
+        if journal_present
+            && kept.exists()
+            && let Some(installed_hash) = &installed_hash
+            && hash_file(&kept).ok().as_deref() != Some(installed_hash.as_str())
+        {
+            return Err(UpdateError::VersionInUse(from.to_owned()));
+        }
+        // Even an existing immutable copy needs durability acknowledged again.
+        let keep_installed_at = Some(kept);
         let plan = SwitchPlan {
             from: from.to_owned(),
             to: to.to_owned(),
             new_binary: new_binary.to_path_buf(),
             installed: installed.to_path_buf(),
-            keep_installed_at: Some(self.data.binary(from, self.binary_name())),
+            keep_installed_at,
+            keep_root: Some(self.data.root().to_path_buf()),
+            keep_policy: if journal_present {
+                KeepPolicy::Immutable
+            } else {
+                KeepPolicy::ReplaceMismatched
+            },
+            preferred_aside: None,
+            expected_installed_sha256: installed_hash,
         };
         self.switch.switch(&plan).map_err(UpdateError::Switch)?;
         let metadata = fs::metadata(installed).ok();
@@ -698,24 +1032,29 @@ impl Updater {
             size: metadata.as_ref().map_or(0, fs::Metadata::len),
             modified_ms: metadata.as_ref().and_then(modified_ms).unwrap_or(0),
             restart_needed: to != self.running,
+            ..SwitchRecord::default()
         })
     }
 
-    /// Removes the kept versions but the installed one, the one before it
-    /// and the staged one.
-    fn prune(&self, state: &State) {
-        let installed = self.installed_version(state);
-        let keep = [
-            Some(installed.as_str()),
-            Some(self.running.as_str()),
-            state.previous.as_deref(),
-            state.staged.as_deref(),
-        ];
-        for version in self.data.kept_versions() {
-            if !keep.contains(&Some(version.as_str())) {
+    /// Prune under the caller's update lock, retaining journal, pins, running,
+    /// installed, staged and previous versions from both the caller and fresh state.
+    /// An unreadable journal or pin refuses cleanup without deleting a version.
+    pub fn prune(&self, state: &State) -> Result<(), UpdateError> {
+        let keep = self.retention_keep(state)?;
+        self.cleanup_stale_artifacts(&keep)?;
+        let on_disk = self.data.kept_versions();
+        for version in on_disk {
+            if !keep.contains(&version) {
                 let _ = fs::remove_dir_all(self.data.version_dir(&version));
             }
         }
+        // Review3 T3 names the supervisor as the expiry cleaner. Any prune
+        // may do it too: the update lock is held and expired pins are outside
+        // every keep set, so removing them cannot release a live protection.
+        PinStore::new(&self.data.versions())
+            .remove_expired(Utc::now())
+            .map_err(|error| UpdateError::Journal(error.to_string()))?;
+        Ok(())
     }
 
     /// The status, for `settings`.
@@ -753,6 +1092,44 @@ impl Updater {
             notes: settings.notes.clone(),
         }
     }
+}
+
+/// One retention policy for staging, adoption and pruning. The caller holds
+/// the update lock; unreadable journal or pins fail closed. Extra versions
+/// include the caller's running/installed identity and earlier state snapshot.
+pub(crate) fn retention_keep(
+    data: &DataDir,
+    extra: impl IntoIterator<Item = String>,
+) -> Result<BTreeSet<String>, UpdateError> {
+    let view = JournalView::load(&data.root().join(crate::journal::JOURNAL_FILE))
+        .map_err(|error| UpdateError::Journal(error.to_string()))?;
+    view.ensure_supported()
+        .map_err(|error| UpdateError::Journal(error.to_string()))?;
+    let now = Utc::now();
+    let pins = PinStore::new(&data.versions())
+        .live(now)
+        .map_err(|error| UpdateError::Journal(error.to_string()))?;
+    // Phase 2 injects pid/start-time liveness. Until then every recorded
+    // worker, including draining workers, is conservatively retained.
+    let mut keep = view.keep_set(&pins, now, |_, _| true);
+    keep.extend(extra);
+    let fresh = State::load(&data.state_file());
+    keep.extend(fresh.previous);
+    keep.extend(fresh.staged);
+    if view.journal().is_some() {
+        // A positively empty directory may be a crashed publication claim,
+        // not an artifact. Unreadable and non-empty candidates remain protected.
+        let candidates: Vec<_> = data
+            .kept_versions()
+            .into_iter()
+            .filter(|version| {
+                fs::read_dir(data.version_dir(version))
+                    .map_or(true, |mut entries| entries.next().is_some())
+            })
+            .collect();
+        add_newest_other(&mut keep, &candidates);
+    }
+    Ok(keep)
 }
 
 /// A file's modification time, in milliseconds since the epoch.

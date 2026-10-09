@@ -576,6 +576,10 @@ fn a_switch_replaces_the_binary_and_keeps_the_old_one() {
         new_binary: new.clone(),
         installed: installed.clone(),
         keep_installed_at: Some(keep.clone()),
+        keep_root: Some(temp.path().to_path_buf()),
+        keep_policy: Default::default(),
+        preferred_aside: None,
+        expected_installed_sha256: None,
     };
     ReplaceOnDisk.switch(&plan).unwrap();
     assert_eq!(fs::read_to_string(&installed).unwrap(), "new");
