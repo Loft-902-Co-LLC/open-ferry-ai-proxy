@@ -17,7 +17,7 @@ A Rust port of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) with 
 
 ## Install
 
-Coming from CLIProxyAPI? Read the [migration guide](docs/migrating-from-cliproxyapi.md) first: it covers what carries over and what doesn't.
+Coming from CLIProxyAPI? Install open-ferry, then run `open-ferry migrate`, which switches your setup over on its config and credentials, and `open-ferry migrate -undo` switches back. The install scripts offer to run it when they find CLIProxyAPI. The [migration guide](docs/migrating-from-cliproxyapi.md) covers what carries over and what doesn't.
 
 No release has been published yet. Until the first one, [build from source](#build-from-source): the install scripts, the container image and the archives below all come from a release.
 
@@ -40,8 +40,9 @@ The script:
 - downloads the release's archive for your system, and refuses it unless it matches the release's `SHA256SUMS`. On Linux it picks the static (musl) build on Alpine, on systems without glibc and on those with a glibc older than 2.31, and the glibc build everywhere else;
 - if the [GitHub CLI](https://cli.github.com/) is installed, checks the archive's build provenance attestation with `gh attestation verify`, and refuses an archive that fails it. Without `gh`, it says that the attestation wasn't checked;
 - installs the binary as `~/.local/bin/open-ferry` (`%LOCALAPPDATA%\Programs\open-ferry\open-ferry.exe` on Windows), replacing an older one;
-- if there's no config where `open-ferry init` writes one by default ([below](#download-a-release)), runs `open-ferry init`, which prints the new keys once. A config that's already there is kept as it is;
-- prints how to start open-ferry with that config, run it at login with `open-ferry service install`, open the dashboard, and check the setup with `open-ferry check`.
+- looks for CLIProxyAPI with `open-ferry migrate -json`, which changes nothing. When it finds it, it says so and asks `Switch to open-ferry now? [y/N]`; on yes, it runs `open-ferry migrate -yes`, which switches CLIProxyAPI's setup to open-ferry on its own config and credentials ([migration guide](docs/migrating-from-cliproxyapi.md#switching-over)). With no one at a terminal to ask, it prints the command to run instead. `install.sh` asks when its output is a terminal and it can open `/dev/tty`, so piped from `curl` too; `install.ps1` asks unless PowerShell runs `-NonInteractive`;
+- if there's no config where `open-ferry init` writes one by default ([below](#download-a-release)), and it didn't find CLIProxyAPI, runs `open-ferry init`, which prints the new keys once. A config that's already there is kept as it is. When it found CLIProxyAPI, it writes no config, as one would compete with CLIProxyAPI's for its port;
+- prints how to start open-ferry with that config, run it at login with `open-ferry service install`, open the dashboard, and check the setup with `open-ferry check`. After a switch, it prints how to check the setup and open the dashboard on CLIProxyAPI's config, and how to switch back.
 
 It changes no shell profile and no `PATH`. When the install directory isn't on your `PATH`, it says how to add it.
 
@@ -79,6 +80,10 @@ curl -fsSL https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases/lates
 | `--target TARGET` | | Install the build for this target rather than this system's, such as `x86_64-unknown-linux-musl` |
 | `--no-attestation` | `-NoAttestation` | Don't check the attestation, even when `gh` is installed. The `SHA256SUMS` check still runs |
 | `--no-auto-update` | `-NoAutoUpdate` | Install with automatic updates off (`self-update.mode: off` in the config). Otherwise open-ferry keeps itself up to date; [docs/updates.md](docs/updates.md) says how, and every way to turn that off |
+| `--migrate` | `-Migrate` | When CLIProxyAPI is found, switch it to open-ferry without asking, as for an unattended install. The script fails (exit code 1) when it can't be switched, or the switch fails; with no CLIProxyAPI, it only says so |
+| `--no-migrate` | `-NoMigrate` | Don't look for CLIProxyAPI |
+
+`OPEN_FERRY_INSTALL_MIGRATE=yes` does what `--migrate` and `-Migrate` do, and `OPEN_FERRY_INSTALL_MIGRATE=no` what `--no-migrate` and `-NoMigrate` do; an option given wins over it.
 
 To download from a mirror instead of GitHub, set `OPEN_FERRY_INSTALL_BASE_URL` to its address, in place of `https://github.com/Loft-902-Co-LLC/open-ferry-ai-proxy/releases`. The mirror needs GitHub's layout: `<base>/download/v<version>/<file>` for each release, and `<base>/latest/download/<file>` for the latest. The top of each script lists the rest of its settings.
 
