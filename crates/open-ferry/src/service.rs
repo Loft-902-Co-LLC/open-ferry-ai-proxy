@@ -149,7 +149,6 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::serve::ListenerExt;
 use chrono::Utc;
 use open_ferry_core::auth::compat::OPENAI_COMPATIBILITY;
 use open_ferry_core::auth::synthesizer::file::{
@@ -185,9 +184,10 @@ use tokio::sync::{mpsc, oneshot, watch};
 use crate::keep_alive::{self, KeepAlive};
 use crate::logging::LogLevel;
 use crate::observability;
-use crate::tls::{self, TlsListener, TlsPeer};
+use crate::tls;
 
 mod management_listener;
+pub(crate) mod serve_loop;
 
 /// How often background refresh looks for tokens to renew.
 const AUTO_REFRESH_INTERVAL: Duration = Duration::from_secs(15 * 60);
@@ -1548,35 +1548,36 @@ fn bind_any(port: u16) -> io::Result<TcpListener> {
     TcpListener::from_std(socket.into())
 }
 
-/// Serves `app` until `stopped` turns true.
+/// Serves `app` until `stopped` turns true, on the serve loop, which gives
+/// the connections graceful shutdown then, as `axum::serve` does. If this
+/// is dropped before it ends, the connections are closed.
 async fn serve(
     listener: TcpListener,
     tls_config: Option<Arc<rustls::ServerConfig>>,
     app: axum::Router,
     mut stopped: watch::Receiver<bool>,
 ) -> io::Result<()> {
+    let control = serve_loop::ServeControl::new();
+    let mut cut_on_drop = serve_loop::CutOnDrop::new(&control);
+    let mut serving = std::pin::pin!(serve_loop::run(
+        listener.into_std()?,
+        tls_config,
+        app,
+        &control
+    ));
     let stop = async move {
         let _ = stopped.wait_for(|stop| *stop).await;
     };
-    match tls_config {
-        Some(tls_config) => {
-            let listener = TlsListener::new(listener, tls_config)?;
-            axum::serve(
-                listener,
-                tls::with_peer_addr(app).into_make_service_with_connect_info::<TlsPeer>(),
-            )
-            .with_graceful_shutdown(stop)
-            .await
+    tokio::select! {
+        result = &mut serving => {
+            cut_on_drop.disarm();
+            return result;
         }
-        None => {
-            axum::serve(
-                listener.tap_io(|tcp| send_at_once(tcp)),
-                app.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .with_graceful_shutdown(stop)
-            .await
-        }
+        () = stop => control.stop(),
     }
+    let result = serving.await;
+    cut_on_drop.disarm();
+    result
 }
 
 /// Turns Nagle's algorithm off on a client's connection, as Go does on

@@ -876,6 +876,18 @@ Upstream has no counterpart: its management API and control panel are served on 
 
 Tests: none are upstream's. They bind 127.0.0.1 on ports the system picks, and make a closed port with a bound `TcpSocket` that doesn't listen. They check each listener's answer for each route against the set above, the proxy's port against a server with management off (its dashboard API paths against that server's answer to a path that isn't a route), the bind failures' messages, both listeners stopping together and both using TLS, the TUI's default and readiness check, and each `check` finding.
 
+## Added in open-ferry: the serve loop
+
+Upstream serves with Go's `net/http`. open-ferry's one loop for every listener (`service::serve_loop`) replaces `axum::serve`: plain and TLS, the proxy's address and the management address's. It accepts as axum 0.8.9 does (hyper-util's auto builder with HTTP/2's extended CONNECT enabled, `ConnectInfo<SocketAddr>`, TCP_NODELAY, a connection error on accept ignored and any other logged and followed by a second's wait) and adds what a supervised worker needs for a blue-green update:
+
+- **Pause and resume.** The loop accepts on a tokio listener made from a duplicate of the std socket; pausing drops that listener and keeps the socket, so the backlog persists, and resuming makes a new one. Pauses and resumes take turns (a lock held across each wait), a loop reads the mode again after making a listener and a change of mode wins over an accept, so no connection is accepted after a pause returns. A pause ends if the loops are released meanwhile, and a resume then fails.
+- **Release and drain.** Releasing stops accepting for good and gives every connection hyper's graceful shutdown: HTTP/1 answers with `Connection: close` and closes an idle connection, HTTP/2 sends GOAWAY and lets its streams finish. A connection that has carried no request (one still in its TLS handshake included) is served until its first request, which gets `Connection: close` or GOAWAY, and is closed 10 seconds after the release (`FIRST_REQUEST_DEADLINE`, one instant for every connection, a late TLS handshake included, and enforced by the loop, since hyper's header-read timeout needs a timer) without one. A request that has reached the service before the deadline is answered, not cancelled by it. Over HTTP/2, a release can admit more than one further stream: h2 0.4.19 (`server.rs` :538-549) sends two GOAWAYs and takes the streams in flight between them. They are served.
+- **Counting.** A connection is counted from the TCP accept, a handshake in progress included, and an upgraded one (a WebSocket over HTTP/1, or over HTTP/2 by extended CONNECT) until its IO closes. A cut shuts the socket down through a duplicate of it kept from the accept (socket2), so it closes even when the handler holds the IO and never polls it; the connection leaves the count at once and once. A cut also finishes the control: a connection that registers later is cut as it does, and a resume fails.
+
+Deviations: the stop on shutdown is `axum::serve`'s graceful shutdown and doesn't wait for upgraded connections, as before; the TLS accept loop waits a second after a failed accept, where the old one waited 100 ms (`TlsListener`, kept for the TLS test only, does not serve any more).
+
+Tests: none are upstream's. They bind 127.0.0.1 on ports the system picks and check the pause and resume (the backlog kept across cycles), the release of keep-alive, in-flight, HTTP/2, WebSocket (both versions) and TLS-handshake connections, the first-request deadline, the cut and the stop.
+
 ## Added in open-ferry: routing by quota
 
 Upstream has no counterpart. Two routing settings are open-ferry's own ([docs/routing.md](docs/routing.md)):
