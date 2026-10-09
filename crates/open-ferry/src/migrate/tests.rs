@@ -5462,6 +5462,67 @@ fn undo_from_another_binary_finds_the_orphan_server_of_the_installed_one() {
     assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "undone");
 }
 
+// Not upstream's: a process names the file it runs, after links, while the
+// service is given open-ferry's path, which may be a link (Homebrew's, say).
+// -undo still finds the orphan server of the linked binary and waits for it.
+#[test]
+fn undo_finds_the_orphan_server_of_a_linked_open_ferry() {
+    const REAL: &str = "/opt/homebrew/Cellar/open-ferry/1.0.0/bin/open-ferry";
+    const RECORD: &str = "/Users/me/.config/open-ferry/migration.json";
+    let (mut fake, context) = brew_services();
+    fake.files.remove(&context.exe);
+    fake.file(REAL, OPEN_FERRY);
+    fake.links.insert(context.exe.clone(), REAL.to_owned());
+    let ran = migrate(&mut fake, &context, &["-yes"]);
+    assert_eq!(ran.code, 0, "{}", ran.all());
+    assert_eq!(saved(&fake, RECORD)["switch"]["ours_exe"], context.exe);
+    // The agent's server names the file the link leads to; its bootout ends it.
+    let agent = fake
+        .procs
+        .values()
+        .find(|process| process.exe.as_deref() == Some(REAL))
+        .map(|process| process.pid)
+        .unwrap();
+    fake.on(
+        "launchctl bootout gui/501/io.github.loft-902-co-llc.open-ferry",
+        Effect::End(agent),
+    );
+    // A server of CLIProxyAPI's config that the agent's bootout leaves.
+    fake.procs.insert(
+        9300,
+        Proc {
+            pid: 9300,
+            started: Some(13000),
+            name: "open-ferry".to_owned(),
+            exe: Some(REAL.to_owned()),
+            args: strings(&["-config", "/opt/homebrew/etc/cliproxyapi.conf"]),
+            cwd: Some("/".to_owned()),
+            env: None,
+            parent: None,
+        },
+    );
+    let events = fake.events.len();
+    let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(undo.code, 1, "{}", undo.all());
+    has(&undo.all(), "process 9300 still runs");
+    assert!(!happened_since(
+        &fake,
+        events,
+        &format!("run launchctl bootstrap gui/501 {BREW_PLIST}")
+    ));
+    assert_eq!(saved(&fake, RECORD)["status"], "switched");
+
+    fake.end(9300);
+    let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(undo.code, 0, "{}", undo.all());
+    assert!(happened_since(
+        &fake,
+        events,
+        &format!("run launchctl bootstrap gui/501 {BREW_PLIST}")
+    ));
+    assert_eq!(saved(&fake, RECORD)["status"], "undone");
+}
+
 // Not upstream's: an open-ferry process whose arguments can't be read could
 // be the service's, so nothing is known and -undo changes nothing.
 #[test]

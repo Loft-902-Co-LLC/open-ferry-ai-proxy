@@ -1489,6 +1489,15 @@ fn service_runners(
         })
         .map(|process| (process.pid, process.started))
         .collect();
+    // A process names the file it runs, after links; `exe` may be a link
+    // (Homebrew's, say).
+    let real = machine.real_path(exe).ok();
+    let runs_exe = |found: &str| {
+        discover::same_path(platform, found, exe)
+            || real
+                .as_deref()
+                .is_some_and(|real| discover::same_path(platform, found, real))
+    };
     Ok(all
         .into_iter()
         .filter(|process| {
@@ -1502,10 +1511,7 @@ fn service_runners(
                         }
                 })
             });
-            let installed = process
-                .exe
-                .as_deref()
-                .is_none_or(|found| discover::same_path(platform, found, exe))
+            let installed = process.exe.as_deref().is_none_or(runs_exe)
                 && runs_with_config(platform, &process.args, config);
             supervisor || child || installed
         })
@@ -1679,7 +1685,8 @@ fn execute_service(
         Switch::Service {
             theirs: theirs.clone(),
             ours: record::target_name(target).to_owned(),
-            ours_exe: context.exe.clone(),
+            // The path the service is given (a system service's, after links).
+            ours_exe: prepared.definition.exe.clone(),
         },
     );
     record::save(machine, platform, base.record_path, &record)
