@@ -120,6 +120,7 @@ impl DataDir {
             .filter_map(Result::ok)
             .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
             .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter(|name| semver::Version::parse(name).is_ok())
             .collect();
         versions.sort();
         versions

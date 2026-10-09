@@ -176,6 +176,28 @@ impl fmt::Display for NotSelfUpdating {
 
 /// Whether the running binary updates itself, given its receipt.
 pub fn assess(system: &dyn System, receipt: Result<Option<Receipt>, ReceiptError>) -> Install {
+    assess_with(system, receipt, || system.current_exe())
+}
+
+/// Whether the install updates itself, taking `binary` as the running
+/// binary instead of [`System::current_exe`]. A supervised worker runs from
+/// `versions/<v>/`, so its own path would never match the receipt; the
+/// installed path stands for it, and every other check applies to that.
+///
+/// Not upstream's: nothing here is a port.
+pub fn assess_for(
+    system: &dyn System,
+    receipt: Result<Option<Receipt>, ReceiptError>,
+    binary: &Path,
+) -> Install {
+    assess_with(system, receipt, || Ok(binary.to_path_buf()))
+}
+
+fn assess_with(
+    system: &dyn System,
+    receipt: Result<Option<Receipt>, ReceiptError>,
+    running: impl FnOnce() -> io::Result<PathBuf>,
+) -> Install {
     let not = Install::NotifyOnly;
     if system.in_container() {
         return not(NotSelfUpdating::Container);
@@ -185,10 +207,7 @@ pub fn assess(system: &dyn System, receipt: Result<Option<Receipt>, ReceiptError
         Ok(None) => return not(NotSelfUpdating::NoReceipt),
         Err(error) => return not(NotSelfUpdating::BadReceipt(error.to_string())),
     };
-    let running = match system
-        .current_exe()
-        .and_then(|exe| system.canonicalize(&exe))
-    {
+    let running = match running().and_then(|exe| system.canonicalize(&exe)) {
         Ok(running) => running,
         Err(error) => return not(NotSelfUpdating::UnknownBinary(error.to_string())),
     };
@@ -216,4 +235,123 @@ pub fn assess(system: &dyn System, receipt: Result<Option<Receipt>, ReceiptError
     }
     // The file itself, so a link to it stays a link.
     Install::SelfUpdating { binary: running }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A machine whose running binary is somewhere that matches nothing.
+    struct Fake {
+        exe: PathBuf,
+        container: bool,
+        writable: bool,
+    }
+
+    impl System for Fake {
+        fn current_exe(&self) -> io::Result<PathBuf> {
+            Ok(self.exe.clone())
+        }
+        fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+            if path.file_name().is_some_and(|name| name == "gone") {
+                return Err(io::Error::from(io::ErrorKind::NotFound));
+            }
+            Ok(path.to_path_buf())
+        }
+        fn in_container(&self) -> bool {
+            self.container
+        }
+        fn dir_writable(&self, _dir: &Path) -> bool {
+            self.writable
+        }
+    }
+
+    fn receipt(binary: &str) -> Result<Option<Receipt>, ReceiptError> {
+        Ok(Some(Receipt {
+            format: 1,
+            binary: binary.into(),
+            ..Receipt::default()
+        }))
+    }
+
+    fn fake(exe: &str) -> Fake {
+        Fake {
+            exe: PathBuf::from(exe),
+            container: false,
+            writable: true,
+        }
+    }
+
+    // Not upstream's: a worker runs from versions/<v>/, so it is judged by
+    // the installed path, not by `current_exe`.
+    #[test]
+    fn assess_for_judges_the_given_binary_not_the_running_one() {
+        let worker = fake("/data/versions/0.2.0/open-ferry");
+        let installed = Path::new("/bin/open-ferry");
+        assert_eq!(
+            assess(&worker, receipt("/bin/open-ferry")),
+            Install::NotifyOnly(NotSelfUpdating::OtherBinary {
+                installed: "/bin/open-ferry".into(),
+                running: "/data/versions/0.2.0/open-ferry".into(),
+            })
+        );
+        assert_eq!(
+            assess_for(&worker, receipt("/bin/open-ferry"), installed),
+            Install::SelfUpdating {
+                binary: installed.to_path_buf()
+            }
+        );
+    }
+
+    // Not upstream's: every other check applies to the given binary.
+    #[test]
+    fn assess_for_applies_the_other_checks() {
+        let installed = Path::new("/bin/open-ferry");
+        let not = |system: Fake, receipt, binary: &Path| {
+            assess_for(&system, receipt, binary)
+                .why_not()
+                .map(NotSelfUpdating::code)
+        };
+        let mut container = fake("/x");
+        container.container = true;
+        assert_eq!(
+            not(container, receipt("/bin/open-ferry"), installed),
+            Some("container")
+        );
+        assert_eq!(not(fake("/x"), Ok(None), installed), Some("no-receipt"));
+        assert_eq!(
+            not(
+                fake("/x"),
+                Err(ReceiptError::Malformed("bad".into())),
+                installed
+            ),
+            Some("bad-receipt")
+        );
+        assert_eq!(
+            not(
+                fake("/x"),
+                receipt("/bin/open-ferry"),
+                Path::new("/bin/gone")
+            ),
+            Some("unknown-binary")
+        );
+        assert_eq!(
+            not(
+                fake("/x"),
+                receipt("/bin/other"),
+                Path::new("/bin/ferry-copy")
+            ),
+            Some("other-name")
+        );
+        assert_eq!(
+            not(fake("/x"), receipt("/bin/other"), installed),
+            Some("other-binary")
+        );
+        let mut read_only = fake("/x");
+        read_only.writable = false;
+        assert_eq!(
+            not(read_only, receipt("/bin/open-ferry"), installed),
+            Some("read-only")
+        );
+    }
 }
