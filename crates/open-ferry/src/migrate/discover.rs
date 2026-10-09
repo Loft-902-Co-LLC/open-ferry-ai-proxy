@@ -16,11 +16,13 @@
 //!   `/Library/LaunchAgents` and `/Library/LaunchDaemons` whose program is
 //!   the binary, Homebrew's `homebrew.mxcl.cliproxyapi` (`brew services`)
 //!   among them, when `launchctl` says the job runs the process.
-//! - **Windows:** a service that the process, or its parent (a wrapper
-//!   such as NSSM), runs; else a scheduled task whose program is the binary,
-//!   or a task whose arguments or script mention it, which is a launcher.
-//!   With no process, the services `cliproxyapi`, `CLIProxyAPI` and
-//!   `cli-proxy-api`, and the tasks.
+//! - **Windows:** a service that the process, or its parent when that is
+//!   NSSM, runs; else a scheduled task whose program, arguments and working
+//!   directory are the process's (more than one is a blocker), or a task
+//!   whose arguments or script mention it, which is a launcher. With no
+//!   process, the services `cliproxyapi`, `CLIProxyAPI` and `cli-proxy-api`
+//!   (an NSSM service's command line is read from its parameters), and the
+//!   tasks.
 //! - **A container** from CLIProxyAPI's image (`eceasy/cli-proxy-api`),
 //!   asked of Docker when no process is found, or when the process is in a
 //!   container.
@@ -35,7 +37,7 @@ use std::collections::BTreeMap;
 use serde_json::Value;
 
 use super::machine::{Machine, Proc};
-use crate::os_service::{Cmd, Context, Platform, run_checked};
+use crate::os_service::{Cmd, Context, Platform, decode_output, run_checked, user_identity};
 
 /// The file names of CLIProxyAPI's binary, compared in any case.
 pub(crate) const BINARY_NAMES: [&str; 4] = [
@@ -58,17 +60,14 @@ pub(crate) const BREW_LABEL: &str = "homebrew.mxcl.cliproxyapi";
 /// The Windows service names looked up when nothing runs.
 const KNOWN_SERVICES: [&str; 3] = ["cliproxyapi", "CLIProxyAPI", "cli-proxy-api"];
 
-/// Windows' own programs, which start processes but aren't a service's
-/// wrapper.
-const NOT_WRAPPERS: [&str; 7] = [
-    "svchost.exe",
-    "services.exe",
-    "wininit.exe",
-    "explorer.exe",
-    "taskhostw.exe",
-    "taskeng.exe",
-    "cmd.exe",
-];
+/// The one service wrapper `migrate` knows: NSSM, by its image name or the
+/// binary of its service.
+const NSSM: &str = "nssm.exe";
+
+/// Whether `name` is NSSM's file name.
+fn is_nssm(name: &str) -> bool {
+    name.eq_ignore_ascii_case(NSSM)
+}
 
 /// The scripts a launcher task may run.
 const SCRIPT_EXTENSIONS: [&str; 8] = [".ps1", ".psm1", ".bat", ".cmd", ".vbs", ".js", ".sh", ".py"];
@@ -625,18 +624,158 @@ impl Shown {
             .collect()
     }
 
-    /// `EnvironmentFiles`: one per line, each `path (ignore_errors=...)`.
+    /// `EnvironmentFiles`, in the order systemd reads them: one per line,
+    /// each `path (ignore_errors=...)`. Older systemd calls the property
+    /// `EnvironmentFile`. A `-` before a file in the unit (a file that may
+    /// be missing) shows as `ignore_errors=yes`, and is dropped from the
+    /// path if it is there.
     fn environment_files(&self) -> Vec<String> {
-        self.all("EnvironmentFiles")
-            .iter()
+        ["EnvironmentFiles", "EnvironmentFile"]
+            .into_iter()
+            .flat_map(|key| self.all(key))
             .filter_map(|line| {
-                let path = line.split(" (").next()?.trim();
-                // A leading `-` lets a file be missing.
-                let path = path.strip_prefix('-').unwrap_or(path);
+                let line = line.trim();
+                let path = match line.rsplit_once(" (ignore_errors=") {
+                    Some((path, _)) => path,
+                    None => line,
+                };
+                let path = path.strip_prefix('-').unwrap_or(path).trim();
                 (!path.is_empty()).then(|| path.to_owned())
             })
             .collect()
     }
+}
+
+/// The words of a systemd command line, split as systemd splits them:
+/// double and single quotes keep spaces in a word, and a backslash escapes
+/// (`\n`, `\s` for a space, `\xNN`, `\NNN` octal, and a quote or backslash
+/// itself). `None` when the line is malformed. A word of `;` ends the
+/// command.
+fn systemd_words(line: &str) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut in_word = false;
+    let mut quote: Option<char> = None;
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            let escaped = chars.next()?;
+            let value = match escaped {
+                'a' => '\u{7}',
+                'b' => '\u{8}',
+                'f' => '\u{c}',
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                'v' => '\u{b}',
+                's' => ' ',
+                '\\' | '"' | '\'' => escaped,
+                'x' => {
+                    let high = chars.next()?.to_digit(16)?;
+                    let low = chars.next()?.to_digit(16)?;
+                    char::from(u8::try_from(high * 16 + low).ok()?)
+                }
+                '0'..='7' => {
+                    let first = escaped.to_digit(8)?;
+                    let second = chars.next()?.to_digit(8)?;
+                    let third = chars.next()?.to_digit(8)?;
+                    char::from(u8::try_from(first * 64 + second * 8 + third).ok()?)
+                }
+                _ => return None,
+            };
+            current.push(value);
+            in_word = true;
+            continue;
+        }
+        match quote {
+            Some(open) if c == open => quote = None,
+            Some(_) => current.push(c),
+            None if c == '"' || c == '\'' => {
+                quote = Some(c);
+                in_word = true;
+            }
+            None if c.is_whitespace() => {
+                if in_word {
+                    words.push(std::mem::take(&mut current));
+                    in_word = false;
+                }
+            }
+            None => {
+                current.push(c);
+                in_word = true;
+            }
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    if in_word {
+        words.push(current);
+    }
+    if let Some(end) = words.iter().position(|word| word == ";") {
+        words.truncate(end);
+    }
+    Some(words)
+}
+
+/// The arguments (argv, program first) of the first `ExecStart=` command of
+/// the `[Service]` section of a unit file, with the prefixes `@`, `-`, `:`,
+/// `+` and `!` taken off the program. A later empty `ExecStart=` resets the
+/// list, as in systemd. Variables (`$X`) and specifiers (`%n`) are left
+/// as written.
+fn unit_exec_start(text: &str) -> Option<Vec<String>> {
+    let mut lines = Vec::new();
+    let mut joined = String::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if joined.is_empty() && (line.starts_with('#') || line.starts_with(';')) {
+            continue;
+        }
+        match line.strip_suffix('\\') {
+            Some(start) => {
+                joined.push_str(start);
+                joined.push(' ');
+            }
+            None => {
+                joined.push_str(line);
+                lines.push(std::mem::take(&mut joined));
+            }
+        }
+    }
+    let mut in_service = false;
+    let mut commands: Vec<String> = Vec::new();
+    for line in &lines {
+        if line.starts_with('[') {
+            in_service = line == "[Service]";
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if in_service && key.trim() == "ExecStart" {
+            let value = value.trim();
+            if value.is_empty() {
+                commands.clear();
+            } else {
+                commands.push(value.to_owned());
+            }
+        }
+    }
+    let command = commands.first()?;
+    let mut rest = command.as_str();
+    let mut names_argv0 = false;
+    while let Some(first) = rest.chars().next()
+        && "@-:+!".contains(first)
+    {
+        names_argv0 |= first == '@';
+        rest = rest.get(first.len_utf8()..)?;
+    }
+    let mut words = systemd_words(rest)?;
+    if names_argv0 && !words.is_empty() {
+        // `@program argv0 args...`: argv starts at the second word.
+        words.remove(0);
+    }
+    Some(words)
 }
 
 const SHOW_PROPERTIES: &str = "LoadState,MainPID,FragmentPath,UnitFileState,ActiveState,ExecStart,WorkingDirectory,Environment,EnvironmentFiles,User";
@@ -738,6 +877,23 @@ fn systemd_details(context: &Context, shown: &Shown, user: bool, found: &mut Fou
     }
 }
 
+/// A unit's command line. `systemctl show` joins the words with spaces
+/// and drops their quotes, so a word with a space in it can't be told
+/// apart: the unit file is read and split as systemd splits it, and used
+/// when it gives the words `systemctl show` printed (it may not: a drop-in
+/// or a specifier changes them).
+fn exec_argv(machine: &mut dyn Machine, shown: &Shown) -> Vec<String> {
+    let printed = shown.exec_start();
+    let parsed = machine
+        .read(shown.get("FragmentPath"))
+        .ok()
+        .and_then(|data| unit_exec_start(&String::from_utf8_lossy(&data)));
+    match parsed {
+        Some(words) if words.join(" ") == printed.join(" ") => words,
+        _ => printed,
+    }
+}
+
 fn linux_not_running(
     machine: &mut dyn Machine,
     context: &Context,
@@ -750,7 +906,7 @@ fn linux_not_running(
             if shown.get("LoadState") != "loaded" {
                 continue;
             }
-            let argv = shown.exec_start();
+            let argv = exec_argv(machine, &shown);
             let Some(exe) = argv.first() else {
                 continue;
             };
@@ -1183,16 +1339,21 @@ pub(crate) struct Task {
     pub(crate) command: String,
     pub(crate) arguments: String,
     pub(crate) working_dir: Option<String>,
+    /// Who it runs as: its principal's `UserId`, a name or a SID.
+    pub(crate) user_id: Option<String>,
+    /// The principal's `LogonType`, such as `InteractiveToken`.
+    pub(crate) logon_type: Option<String>,
 }
 
 /// Reads `schtasks /query /xml ONE`'s output: each task's name, from the
 /// comment before it or its `URI`, whether it is enabled, and its first
 /// program.
 pub(crate) fn read_tasks(xml: &str) -> Vec<Task> {
-    // Its output may be UTF-16, read as UTF-8: drop the NULs.
-    let xml = xml.replace('\0', "");
+    // `Host::run` has decoded UTF-16 output; a byte order mark that came
+    // through as text is dropped.
+    let xml = xml.trim_start_matches('\u{feff}');
     let mut tasks = Vec::new();
-    let mut rest = xml.as_str();
+    let mut rest = xml;
     let mut comment = None;
     loop {
         let next_comment = rest.find("<!--");
@@ -1229,7 +1390,13 @@ fn read_task(block: &str, comment: Option<String>) -> Task {
         .and_then(|(settings, _)| text(settings, "Enabled"))
         .is_none_or(|enabled| enabled != "false");
     let exec = element(block, "Exec").map_or("", |(exec, _)| exec);
+    // `<Principal id="...">` has an attribute, so the first `UserId` and
+    // `LogonType` inside `Principals` are read, which are the first
+    // principal's.
+    let principal = element(block, "Principals").map_or("", |(principals, _)| principals);
     Task {
+        user_id: text(principal, "UserId").filter(|id| !id.is_empty()),
+        logon_type: text(principal, "LogonType").filter(|kind| !kind.is_empty()),
         name,
         enabled,
         command: text(exec, "Command")
@@ -1325,9 +1492,9 @@ fn task_runs(
         // Read for the binary's name only; never shown.
         if let Ok(data) = machine.read(&path) {
             let data = data.get(..SCRIPT_LIMIT.min(data.len())).unwrap_or_default();
-            // A script saved as UTF-16 reads as UTF-8 with NULs.
+            // A script may be saved as UTF-16.
             text.push('\n');
-            text.push_str(&String::from_utf8_lossy(data).replace('\0', ""));
+            text.push_str(&decode_output(data));
         }
     }
     if !mentions(&text) {
@@ -1349,17 +1516,15 @@ fn scheduled_tasks(machine: &mut dyn Machine) -> Result<Vec<Task>, String> {
     Ok(read_tasks(&output.stdout))
 }
 
-/// The Windows service that runs `process`, itself or as its parent, a
-/// wrapper.
+/// The Windows service that runs `process`, itself or through its parent
+/// when that is NSSM: by its image name, or by the binary of the service it
+/// hosts. Any other parent is not a wrapper.
 fn windows_service_of(machine: &mut dyn Machine, process: &Proc) -> Option<Starter> {
     let mut hosts = vec![(process.pid, None)];
     if let Some(super::machine::Parent {
         pid,
         name: Some(name),
     }) = &process.parent
-        && !NOT_WRAPPERS
-            .iter()
-            .any(|known| name.eq_ignore_ascii_case(known))
     {
         hosts.push((*pid, Some(name.clone())));
     }
@@ -1369,7 +1534,14 @@ fn windows_service_of(machine: &mut dyn Machine, process: &Proc) -> Option<Start
                 continue;
             };
             let (program, _) = split_service_command(&config.command);
-            if file_name(Platform::Windows, &program).eq_ignore_ascii_case("svchost.exe") {
+            let program = file_name(Platform::Windows, &program);
+            if program.eq_ignore_ascii_case("svchost.exe") {
+                continue;
+            }
+            if let Some(image) = &wrapper
+                && !is_nssm(image)
+                && !is_nssm(&program)
+            {
                 continue;
             }
             return Some(Starter::WindowsService {
@@ -1381,6 +1553,68 @@ fn windows_service_of(machine: &mut dyn Machine, process: &Proc) -> Option<Start
         }
     }
     None
+}
+
+/// Whether `task` is the one that started `process`: it runs the same
+/// program (see [`task_runs`]) with the same arguments, which carry the
+/// config, and in the same working directory when both are known.
+fn task_started(context: &Context, task: &Task, process: &Proc) -> bool {
+    let arguments = split_windows(&expand(context, &task.arguments));
+    if arguments != process.args {
+        return false;
+    }
+    match (task.working_dir.as_deref(), process.cwd.as_deref()) {
+        (Some(dir), Some(cwd)) => same_path(Platform::Windows, &expand(context, dir), cwd),
+        _ => true,
+    }
+}
+
+/// What `migrate` says of the scheduled tasks that run the binary: the one
+/// starter, or all of them by name with a blocker when there is more than
+/// one. The principal is kept: open-ferry's task runs as the user who runs
+/// `migrate`, so a task of another user can't be switched.
+fn task_starter(
+    machine: &mut dyn Machine,
+    tasks: &[&Task],
+    blockers: &mut Vec<String>,
+    notes: &mut Vec<String>,
+) -> Starter {
+    let names: Vec<&str> = tasks.iter().map(|task| task.name.as_str()).collect();
+    let starter = Starter::Task {
+        name: names.join(", "),
+        enabled: tasks.iter().any(|task| task.enabled),
+    };
+    let [task] = tasks else {
+        blockers.push(format!(
+            "more than one scheduled task runs CLIProxyAPI this way ({}): disable all but the one that starts it, then run `open-ferry migrate` again",
+            names.join(", ")
+        ));
+        return starter;
+    };
+    if matches!(task.logon_type.as_deref(), Some("Password" | "S4U")) {
+        notes.push(format!(
+            "the scheduled task {} runs whether or not you are logged on, and open-ferry's task runs only while you are",
+            task.name
+        ));
+    }
+    let Some(user) = &task.user_id else {
+        return starter;
+    };
+    match user_identity(machine) {
+        Ok((name, sid)) => {
+            if !user.eq_ignore_ascii_case(&sid) && !user.eq_ignore_ascii_case(&name) {
+                blockers.push(format!(
+                    "the scheduled task {} runs as {user}, and open-ferry's task would run as you ({name}): run `open-ferry migrate` as that user, or switch by hand, as docs/migrating-from-cliproxyapi.md says",
+                    task.name
+                ));
+            }
+        }
+        Err(error) => blockers.push(format!(
+            "the scheduled task {} runs as {user}, and who you are can't be told ({error}), so it can't be seen that open-ferry's task would run as the same user",
+            task.name
+        )),
+    }
+    starter
 }
 
 fn windows_process(
@@ -1397,25 +1631,28 @@ fn windows_process(
         Vec::new()
     });
     let exe = process.exe.clone();
+    let mut direct: Vec<&Task> = Vec::new();
     let mut launchers = Vec::new();
     for task in &tasks {
         match task_runs(machine, context, task, exe.as_deref()) {
             Some(TaskRuns::Binary) => {
-                let mut found = Found::from_process(
-                    process,
-                    Starter::Task {
-                        name: task.name.clone(),
-                        enabled: task.enabled,
-                    },
-                );
-                found.notes = notes;
-                return Ok(found);
+                if task_started(context, task, &process) {
+                    direct.push(task);
+                }
             }
             Some(TaskRuns::Launcher { program, names_exe }) => {
                 launchers.push((!names_exe, !task.enabled, task.name.clone(), program));
             }
             None => {}
         }
+    }
+    if !direct.is_empty() {
+        let mut blockers = Vec::new();
+        let starter = task_starter(machine, &direct, &mut blockers, &mut notes);
+        let mut found = Found::from_process(process, starter);
+        found.blockers = blockers;
+        found.notes = notes;
+        return Ok(found);
     }
     // The task that names the binary's path first, then an enabled one.
     launchers.sort();
@@ -1428,6 +1665,45 @@ fn windows_process(
     Ok(found)
 }
 
+/// What an NSSM service's parameters (in the registry) say it runs.
+struct NssmParameters {
+    application: String,
+    arguments: String,
+    directory: Option<String>,
+}
+
+/// The parameters of the NSSM service `name`, from the registry
+/// (`reg query`, a read of a key named by the service's name).
+fn nssm_parameters(
+    machine: &mut dyn Machine,
+    context: &Context,
+    name: &str,
+) -> Option<NssmParameters> {
+    let key = format!(r"HKLM\SYSTEM\CurrentControlSet\Services\{name}\Parameters");
+    let output = machine
+        .run(&Cmd::new("reg.exe", &["query"]).arg(key))
+        .ok()
+        .filter(|output| output.success())?;
+    // `    Application    REG_SZ    C:\cpa\cli-proxy-api.exe`
+    let value = |wanted: &str| {
+        output.stdout.lines().find_map(|line| {
+            let (key, rest) = line.trim().split_once(char::is_whitespace)?;
+            if !key.eq_ignore_ascii_case(wanted) {
+                return None;
+            }
+            let rest = rest.trim_start();
+            let (kind, value) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+            kind.starts_with("REG_")
+                .then(|| expand(context, value.trim()))
+        })
+    };
+    Some(NssmParameters {
+        application: value("Application")?,
+        arguments: value("AppParameters").unwrap_or_default(),
+        directory: value("AppDirectory").filter(|dir| !dir.is_empty()),
+    })
+}
+
 fn windows_not_running(
     machine: &mut dyn Machine,
     context: &Context,
@@ -1437,54 +1713,77 @@ fn windows_not_running(
             continue;
         };
         let (exe, args) = split_service_command(&config.command);
-        if !is_binary_name(&file_name(Platform::Windows, &exe)) {
+        let program = file_name(Platform::Windows, &exe);
+        let (exe, args, cwd, wrapper, source) = if is_binary_name(&program) {
+            (exe, args, None, None, format!("the service {name}"))
+        } else if is_nssm(&program) {
+            match nssm_parameters(machine, context, name) {
+                Some(nssm) if is_binary_name(&file_name(Platform::Windows, &nssm.application)) => (
+                    nssm.application,
+                    split_windows(&nssm.arguments),
+                    nssm.directory,
+                    Some(program),
+                    format!("the NSSM parameters of the service {name}"),
+                ),
+                _ => continue,
+            }
+        } else {
             continue;
-        }
+        };
         let mut found = Found::new(Starter::WindowsService {
             name: name.to_owned(),
             start: config.start,
             running: false,
-            wrapper: None,
+            wrapper,
         });
         found.exe = Some(exe);
         found.args = args;
+        found.cwd = cwd;
         found.notes.push(format!(
-            "CLIProxyAPI isn't running: its command line is read from the service {name}"
+            "CLIProxyAPI isn't running: its command line is read from {source}"
         ));
         return Ok(Some(found));
     }
     let tasks = scheduled_tasks(machine).unwrap_or_default();
+    let mut direct: Vec<&Task> = Vec::new();
+    let mut launcher = None;
     for task in &tasks {
         match task_runs(machine, context, task, None) {
-            Some(TaskRuns::Binary) => {
-                let mut found = Found::new(Starter::Task {
-                    name: task.name.clone(),
-                    enabled: task.enabled,
-                });
-                found.exe = Some(expand(context, &task.command));
-                // The task scheduler expands the variables in the
-                // arguments too, before the program splits them.
-                found.args = split_windows(&expand(context, &task.arguments));
-                found.cwd = task.working_dir.as_deref().map(|dir| expand(context, dir));
-                found.notes.push(format!(
-                    "CLIProxyAPI isn't running: its command line is read from the task {}",
-                    task.name
-                ));
-                return Ok(Some(found));
-            }
+            Some(TaskRuns::Binary) => direct.push(task),
             Some(TaskRuns::Launcher { program, .. }) => {
-                let mut found = Found::new(Starter::Launcher(Launcher::Task {
-                    name: task.name.clone(),
-                    program,
-                }));
-                found.blockers.push(format!(
-                    "the scheduled task {} starts CLIProxyAPI through a launcher, and CLIProxyAPI isn't running: start it, then run `open-ferry migrate` again",
-                    task.name
-                ));
-                return Ok(Some(found));
+                launcher.get_or_insert((task, program));
             }
             None => {}
         }
+    }
+    if let Some(first) = direct.first() {
+        let mut blockers = Vec::new();
+        let mut notes = Vec::new();
+        let starter = task_starter(machine, &direct, &mut blockers, &mut notes);
+        let mut found = Found::new(starter);
+        found.blockers = blockers;
+        found.notes = notes;
+        found.exe = Some(expand(context, &first.command));
+        // The task scheduler expands the variables in the arguments too,
+        // before the program splits them.
+        found.args = split_windows(&expand(context, &first.arguments));
+        found.cwd = first.working_dir.as_deref().map(|dir| expand(context, dir));
+        found.notes.push(format!(
+            "CLIProxyAPI isn't running: its command line is read from the task {}",
+            first.name
+        ));
+        return Ok(Some(found));
+    }
+    if let Some((task, program)) = launcher {
+        let mut found = Found::new(Starter::Launcher(Launcher::Task {
+            name: task.name.clone(),
+            program,
+        }));
+        found.blockers.push(format!(
+            "the scheduled task {} starts CLIProxyAPI through a launcher, and CLIProxyAPI isn't running: start it, then run `open-ferry migrate` again",
+            task.name
+        ));
+        return Ok(Some(found));
     }
     Ok(None)
 }
@@ -1731,7 +2030,7 @@ mod tests {
     // comment before it.
     #[test]
     fn reads_scheduled_tasks() {
-        let xml = "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\r\n<Tasks>\r\n  <!-- \\CLIProxyAPI -->\r\n  <Task version=\"1.2\">\r\n    <Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>\r\n    <Settings><Enabled>false</Enabled></Settings>\r\n    <Actions Context=\"Author\"><Exec><Command>\"C:\\cpa\\cli-proxy-api.exe\"</Command><Arguments>--config &quot;C:\\cpa\\config.yaml&quot;</Arguments><WorkingDirectory>C:\\cpa</WorkingDirectory></Exec></Actions>\r\n  </Task>\r\n  <!-- \\Other -->\r\n  <Task version=\"1.2\"><RegistrationInfo><URI>\\Other</URI></RegistrationInfo><Actions><Exec><Command>notepad.exe</Command></Exec></Actions></Task>\r\n</Tasks>\r\n";
+        let xml = "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\r\n<Tasks>\r\n  <!-- \\CLIProxyAPI -->\r\n  <Task version=\"1.2\">\r\n    <Triggers><LogonTrigger><Enabled>true</Enabled><UserId>S-1-5-18</UserId></LogonTrigger></Triggers>\r\n    <Principals><Principal id=\"Author\"><UserId>S-1-5-21-1-2-3-1001</UserId><LogonType>InteractiveToken</LogonType></Principal></Principals>\r\n    <Settings><Enabled>false</Enabled></Settings>\r\n    <Actions Context=\"Author\"><Exec><Command>\"C:\\cpa\\cli-proxy-api.exe\"</Command><Arguments>--config &quot;C:\\cpa\\config.yaml&quot;</Arguments><WorkingDirectory>C:\\cpa</WorkingDirectory></Exec></Actions>\r\n  </Task>\r\n  <!-- \\Other -->\r\n  <Task version=\"1.2\"><RegistrationInfo><URI>\\Other</URI></RegistrationInfo><Actions><Exec><Command>notepad.exe</Command></Exec></Actions></Task>\r\n</Tasks>\r\n";
         let tasks = read_tasks(xml);
         assert_eq!(
             tasks,
@@ -1742,6 +2041,8 @@ mod tests {
                     command: r"C:\cpa\cli-proxy-api.exe".to_owned(),
                     arguments: r#"--config "C:\cpa\config.yaml""#.to_owned(),
                     working_dir: Some(r"C:\cpa".to_owned()),
+                    user_id: Some("S-1-5-21-1-2-3-1001".to_owned()),
+                    logon_type: Some("InteractiveToken".to_owned()),
                 },
                 Task {
                     name: r"\Other".to_owned(),
@@ -1749,11 +2050,78 @@ mod tests {
                     command: "notepad.exe".to_owned(),
                     arguments: String::new(),
                     working_dir: None,
+                    user_id: None,
+                    logon_type: None,
                 },
             ]
         );
-        // As UTF-16, read as UTF-8.
-        let utf16: String = xml.chars().flat_map(|c| [c, '\0']).collect();
-        assert_eq!(read_tasks(&utf16), tasks);
+    }
+
+    // Not upstream's: `schtasks` prints UTF-16, which is decoded by its
+    // byte order mark, or as little-endian when there is none, and the
+    // tasks read the same as from UTF-8.
+    #[test]
+    fn reads_scheduled_tasks_from_utf16() {
+        let xml = "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\r\n<Tasks>\r\n  <!-- \\Caf\u{e9} \u{20ac} -->\r\n  <Task version=\"1.2\"><Actions><Exec><Command>C:\\cpa\\cli-proxy-api.exe</Command></Exec></Actions></Task>\r\n</Tasks>\r\n";
+        let expected = read_tasks(xml);
+        assert_eq!(expected[0].name, "\\Caf\u{e9} \u{20ac}");
+        let le: Vec<u8> = xml.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let be: Vec<u8> = xml.encode_utf16().flat_map(u16::to_be_bytes).collect();
+        let with = |mark: &[u8], body: &[u8]| [mark, body].concat();
+        for bytes in [
+            with(&[0xFF, 0xFE], &le),
+            with(&[0xFE, 0xFF], &be),
+            le.clone(),
+            with(&[0xEF, 0xBB, 0xBF], xml.as_bytes()),
+            xml.as_bytes().to_vec(),
+        ] {
+            assert_eq!(read_tasks(&decode_output(&bytes)), expected);
+        }
+    }
+
+    // Not upstream's: plain output isn't taken for UTF-16.
+    #[test]
+    fn decodes_plain_output_as_utf8() {
+        assert_eq!(decode_output(b"ok\n"), "ok\n");
+        assert_eq!(decode_output(b""), "");
+        assert_eq!(decode_output("caf\u{e9}".as_bytes()), "caf\u{e9}");
+        assert_eq!(decode_output(b"a\xffb"), "a\u{fffd}b");
+    }
+
+    // Not upstream's: a command line is split as systemd splits it, with
+    // quotes and escapes, and the prefixes on the program are taken off.
+    #[test]
+    fn splits_systemd_command_lines() {
+        assert_eq!(
+            systemd_words(r#"/opt/x -config "/srv/my cpa/c.yaml" 'a b' c\sd \x41\101"#),
+            Some(strings(&[
+                "/opt/x",
+                "-config",
+                "/srv/my cpa/c.yaml",
+                "a b",
+                "c d",
+                "AA"
+            ]))
+        );
+        assert_eq!(systemd_words(r#"a "b c"#), None);
+        assert_eq!(systemd_words(r"a \q"), None);
+        assert_eq!(
+            systemd_words("/bin/x one ; /bin/y"),
+            Some(strings(&["/bin/x", "one"]))
+        );
+        let unit = "[Unit]\nDescription=x\n[Service]\nExecStart=/bin/old\nExecStart=\n# a comment\nExecStart=-@+!/opt/c/cli-proxy-api argv0 \\\n  -config \"/srv/a b/c.yaml\"\nExecStart=/bin/second\n[Install]\nExecStart=/bin/not-this\n";
+        assert_eq!(
+            unit_exec_start(unit),
+            Some(strings(&["argv0", "-config", "/srv/a b/c.yaml"]))
+        );
+        assert_eq!(
+            unit_exec_start("[Service]\nExecStart=:/bin/x -a\n"),
+            Some(strings(&["/bin/x", "-a"]))
+        );
+        assert_eq!(unit_exec_start("[Service]\nExecStart=\n"), None);
+    }
+
+    fn strings(words: &[&str]) -> Vec<String> {
+        words.iter().map(|word| (*word).to_owned()).collect()
     }
 }

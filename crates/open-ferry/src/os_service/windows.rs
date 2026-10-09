@@ -55,23 +55,25 @@ pub(super) fn elevated(system: &mut dyn System) -> Result<bool, String> {
 
 /// The SID of the user running this, which the task runs as.
 pub(super) fn user_sid(system: &mut dyn System) -> Result<String, String> {
+    user_identity(system).map(|(_, sid)| sid)
+}
+
+/// The name (`machine\user`) and the SID of the user running this.
+pub(crate) fn user_identity(system: &mut dyn System) -> Result<(String, String), String> {
     let cmd = Cmd::new("whoami.exe", &["/user", "/fo", "csv", "/nh"]);
     let output = run_checked(system, &cmd)?;
     // `"machine\user","S-1-5-21-..."`
-    let sid = output
-        .stdout
-        .trim()
-        .rsplit(',')
-        .next()
-        .map(|field| field.trim().trim_matches('"'))
-        .unwrap_or_default();
+    let line = output.stdout.trim();
+    let (name, sid) = line.rsplit_once(',').unwrap_or(("", line));
+    let name = name.trim().trim_matches('"');
+    let sid = sid.trim().trim_matches('"');
     let valid = sid.strip_prefix("S-1-").is_some_and(|rest| {
         !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit() || c == '-')
     });
     if !valid {
         return Err(format!("`{cmd}` didn't print a user's SID"));
     }
-    Ok(sid.to_owned())
+    Ok((name.to_owned(), sid.to_owned()))
 }
 
 /// `word` as one argument of a Windows command line, in double quotes, as

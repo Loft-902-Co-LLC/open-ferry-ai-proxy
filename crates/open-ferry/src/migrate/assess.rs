@@ -221,15 +221,20 @@ fn environment(
         push(&mut env, vars, "its environment");
         env.known = true;
     } else if let Some(vars) = &found.definition_env {
-        push(&mut env, vars, "its service definition");
         env.known = true;
-        for file in &found.env_files {
+        // The first of a name is the one that counts. systemd lets a later
+        // `EnvironmentFile=` override an earlier one, and the files override
+        // `Environment=`: so the last file comes first, and the definition's
+        // own variables last. A file that is missing is skipped, as with the
+        // `-` prefix.
+        for file in found.env_files.iter().rev() {
             match read_env_file(machine, file) {
                 Ok(vars) => push(&mut env, &vars, file),
                 Err(_) if !machine.exists(file) => {}
                 Err(error) => env.unreadable.push(format!("{file} ({error})")),
             }
         }
+        push(&mut env, vars, "its service definition");
     }
     if let Some(dir) = working_dir {
         let file = platform.join(dir, ".env");
@@ -258,7 +263,9 @@ fn home_of(context: &Context, found: &Found, env: &Environment) -> Option<String
     let set = env
         .vars
         .iter()
-        .filter(|(_, _, source)| !source.ends_with(".env"))
+        // CLIProxyAPI's own `.env` files don't set the home it resolves
+        // `~` with; a service's `EnvironmentFile=` named `x.env` does.
+        .filter(|(_, _, source)| !source.ends_with("/.env") && !source.ends_with("\\.env"))
         .find(|(known, _, _)| same_name(platform, known, name))
         .map(|(_, value, _)| value.clone())
         .filter(|value| !value.is_empty());
