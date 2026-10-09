@@ -336,11 +336,14 @@ pub(crate) fn plan(
         steps: Vec::new(),
         blockers: Vec::new(),
         good_to_know: Vec::new(),
+        // Placed by where the config and the auth directory really are, so
+        // that a link can't put the backup inside the auth directory.
         backup_dir: assessment.config.as_deref().and_then(|config| {
+            let real = |path: &str| machine.real_path(path).unwrap_or_else(|_| path.to_owned());
             backup_dir(
                 platform,
-                config,
-                assessment.auth_dir.as_deref(),
+                &real(config),
+                assessment.auth_dir.as_deref().map(real).as_deref(),
                 machine.now(),
             )
         }),

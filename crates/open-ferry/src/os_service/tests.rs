@@ -1535,3 +1535,25 @@ fn quotes_windows_arguments_as_the_c_runtime_reads_them() {
         r#""C:\Program Files\open-ferry\open-ferry.exe" service run -system -config "D:\weird dir\\" -dir "D:\weird dir""#
     );
 }
+
+// Not upstream's: Windows gives a real path in its verbatim form; it is
+// shown and compared in the usual one.
+#[test]
+fn real_paths_lose_the_verbatim_prefix() {
+    assert_eq!(
+        plain_windows_path(r"\\?\C:\Users\me\cpa".to_owned()),
+        r"C:\Users\me\cpa"
+    );
+    assert_eq!(
+        plain_windows_path(r"\\?\UNC\server\share\cpa".to_owned()),
+        r"\\server\share\cpa"
+    );
+    assert_eq!(
+        plain_windows_path("/home/me/cpa".to_owned()),
+        "/home/me/cpa"
+    );
+    assert_eq!(
+        plain_windows_path(r"\\?\Volume{1}\cpa".to_owned()),
+        r"\\?\Volume{1}\cpa"
+    );
+}
