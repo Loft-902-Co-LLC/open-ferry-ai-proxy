@@ -1223,10 +1223,13 @@ fn installs_a_scheduled_task() {
     let mut fake = windows_user();
     let (result, out) = execute_with(&mut fake, &windows(), &["install"]);
     assert_eq!(result, Ok(()));
+    // A failed query by name reads the same for a task that isn't there and
+    // for one the scheduler wouldn't say: the list tells them apart.
     assert_eq!(
         events(&fake),
         [
             "run schtasks.exe /query /tn open-ferry",
+            "run schtasks.exe /query /fo csv /nh",
             "run whoami.exe /user /fo csv /nh",
             &format!("write {TASK_FILE}"),
             &format!("run schtasks.exe /create /tn open-ferry /xml {TASK_FILE}"),

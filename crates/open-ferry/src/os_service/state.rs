@@ -100,25 +100,29 @@ pub(crate) fn service_state(
                 ServiceState::Unknown(format!("`{cmd}` failed with {}", output.failure()))
             }
         }
-        // The task scheduler says only that the query failed.
+        // The task scheduler says only that the query failed. The list of
+        // tasks says whether the task is there: when it can't be had
+        // either, the state is not known, which is never "ended".
         Target::ScheduledTask => {
             if output.success() {
-                ServiceState::Running("registered".to_owned())
-            } else {
-                ServiceState::Gone
+                return ServiceState::Running("registered".to_owned());
+            }
+            match system.run(&windows::list_tasks()) {
+                Ok(listed) if listed.success() && !windows::task_listed(&listed.stdout) => {
+                    ServiceState::Gone
+                }
+                Ok(listed) if listed.success() => ServiceState::Running("registered".to_owned()),
+                _ => ServiceState::Unknown(format!("`{cmd}` failed with {}", output.failure())),
             }
         }
         Target::WindowsService => match output.code {
             Some(windows::SERVICE_DOES_NOT_EXIST) => ServiceState::Gone,
-            Some(0) if output.stdout.contains("STOPPED") => ServiceState::Stopped,
-            Some(0) => ServiceState::Running(
-                output
-                    .stdout
-                    .lines()
-                    .find(|line| line.contains("STATE"))
-                    .map_or("running", str::trim)
-                    .to_owned(),
-            ),
+            Some(0) => match windows::service_state_number(&output.stdout) {
+                Some(windows::SERVICE_STOPPED) => ServiceState::Stopped,
+                Some(windows::SERVICE_RUNNING) => ServiceState::Running("running".to_owned()),
+                Some(other) => ServiceState::Running(format!("in state {other}")),
+                None => ServiceState::Unknown(format!("`{cmd}` didn't print a STATE")),
+            },
             _ => ServiceState::Unknown(format!("`{cmd}` failed with {}", output.failure())),
         },
     }

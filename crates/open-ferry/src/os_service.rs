@@ -48,7 +48,7 @@ mod systemd;
 mod tests;
 mod windows;
 pub(crate) use state::service_state;
-pub(crate) use windows::user_identity;
+pub(crate) use windows::{SERVICE_RUNNING, service_state_number, user_identity};
 
 use std::collections::BTreeMap;
 use std::fmt::{self, Write as _};
@@ -1014,9 +1014,16 @@ impl Target {
             .map_err(|error| format!("failed to run `{cmd}`: {error}"))?;
         match output.code {
             Some(0) => Ok(true),
-            // The task scheduler says only that it failed; the service
-            // manager that the service doesn't exist.
-            _ if self == Target::ScheduledTask => Ok(false),
+            // The task scheduler says only that the query failed; its list
+            // of tasks says whether the task is there. Any other failure
+            // is not "no such task".
+            _ if self == Target::ScheduledTask => {
+                let list = windows::list_tasks();
+                match system.run(&list) {
+                    Ok(listed) if listed.success() => Ok(windows::task_listed(&listed.stdout)),
+                    _ => Err(format!("`{cmd}` failed with {}", output.failure())),
+                }
+            }
             Some(windows::SERVICE_DOES_NOT_EXIST) => Ok(false),
             _ => Err(format!("`{cmd}` failed with {}", output.failure())),
         }
