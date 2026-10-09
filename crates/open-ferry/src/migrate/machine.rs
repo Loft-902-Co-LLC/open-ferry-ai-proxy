@@ -1283,6 +1283,12 @@ mod tests {
                 .permissions()
                 .mode();
             assert_eq!(mode & 0o777, 0o755);
+
+            // A copy that fails after it made its file (a directory opens,
+            // but can't be read) removes that file.
+            std::fs::create_dir(path("dir")).unwrap();
+            assert!(host.copy_new(&text("dir"), &text("failed")).is_err());
+            assert!(!path("failed").exists());
         }
     }
 }
