@@ -2003,6 +2003,24 @@ fn system_unit(context: Context, running: bool) -> (Fake, Context) {
     (fake, context)
 }
 
+// Not upstream's: a system service is given open-ferry's path after links,
+// and the record names that path, the one its processes report.
+#[test]
+fn a_system_service_records_open_ferrys_path_after_links() {
+    const REAL: &str = "/opt/open-ferry/bin/open-ferry";
+    let (mut fake, context) = system_unit(linux_root(), false);
+    fake.answer("id -u", 0, "0\n");
+    fake.files.remove(&context.exe);
+    fake.file(REAL, OPEN_FERRY);
+    fake.links.insert(context.exe.clone(), REAL.to_owned());
+    let ran = migrate(&mut fake, &context, &["-yes"]);
+    assert_eq!(ran.code, 0, "{}", ran.all());
+    assert_eq!(
+        saved(&fake, "/root/.config/open-ferry/migration.json")["switch"]["ours_exe"],
+        REAL
+    );
+}
+
 // Not upstream's: a system service that isn't running is switched from its
 // unit's command line, and only enabled again by -undo.
 #[test]
