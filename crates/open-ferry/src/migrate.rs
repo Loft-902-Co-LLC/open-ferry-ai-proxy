@@ -674,7 +674,7 @@ fn run_undo(
                 ),
             );
         }
-        Status::Switching | Status::Switched => {}
+        Status::Switching | Status::Switched | Status::UndoneNotStarted => {}
     }
     line(
         out,
@@ -688,6 +688,12 @@ fn run_undo(
         .enumerate()
     {
         line(out, &format!("  {}. {}", number + 1, sentence(step)));
+    }
+    if record.status == Status::UndoneNotStarted {
+        line(
+            out,
+            "An earlier -undo put CLIProxyAPI's files back but couldn't start CLIProxyAPI: -undo looks again, and closes the record once CLIProxyAPI is found running.",
+        );
     }
     if record.status == Status::Switching {
         line(
@@ -720,7 +726,15 @@ fn run_undo(
             return 0;
         }
     }
-    match switch::undo(machine, context, &path, &mut record, request.restore, out) {
+    match switch::undo(
+        machine,
+        context,
+        &path,
+        &mut record,
+        request.restore,
+        request.yes,
+        out,
+    ) {
         Ok(()) => 0,
         Err(message) => {
             let _ = out.flush();

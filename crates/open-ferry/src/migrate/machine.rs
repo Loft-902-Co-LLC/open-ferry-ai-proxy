@@ -134,6 +134,10 @@ pub(crate) trait Machine: System {
     /// is given, started then: asks it to stop (on Windows, ends it at
     /// once), and waits for it, ending it after a while.
     fn stop(&mut self, pid: u32, name: &str, started: Option<u64>) -> io::Result<()>;
+    /// The name process `pid` was started under (its first argument), if it
+    /// runs and it can be read. Not the file it runs: a process started
+    /// through a symbolic link names the link.
+    fn argv0(&mut self, pid: u32) -> Option<String>;
     /// Starts `launch` in the background, apart from this process, and
     /// gives its process ID.
     fn spawn(&mut self, launch: &Launch) -> io::Result<u32>;
@@ -149,6 +153,10 @@ pub(crate) trait Machine: System {
     fn installed_binary(&mut self) -> Option<String>;
     /// Creates `path`, which only its owner can open on Unix.
     fn create_private_dir(&mut self, path: &str) -> io::Result<()>;
+    /// Makes the new file `path` hold `data`. It fails if anything is at
+    /// `path`, a symbolic link too, which is never followed; on Unix only its
+    /// owner can open the file.
+    fn write_new(&mut self, path: &str, data: &[u8]) -> io::Result<()>;
     /// What answers `GET /` on `ip`, a loopback address, and `port`.
     fn probe(&mut self, ip: IpAddr, port: u16, tls: bool) -> Answer;
     /// `open-ferry check`'s findings for `config`, run in `working_dir`.
@@ -170,6 +178,9 @@ pub(crate) trait Machine: System {
 
 /// How long a stopped process has to exit before it is ended.
 const STOP_WAIT: Duration = Duration::from_secs(15);
+
+/// How often a stopped process is looked at.
+const STOP_STEP: Duration = Duration::from_millis(200);
 
 /// How long one probe may take.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -262,6 +273,52 @@ fn one_process(pid: u32, kind: sysinfo::ProcessRefreshKind) -> Option<(sysinfo::
         .filter(|process| process.status() != sysinfo::ProcessStatus::Zombie)
         .map(|process| lossy(process.name()))?;
     Some((sys, name))
+}
+
+/// Whether process `pid` runs and is still the process named `name` that
+/// started at `started`: an ID that is used again is another process.
+fn same_process_now(pid: u32, name: &str, started: u64) -> bool {
+    let kind = sysinfo::ProcessRefreshKind::nothing();
+    let Some((sys, found)) = one_process(pid, kind) else {
+        return false;
+    };
+    found.eq_ignore_ascii_case(name)
+        && sys
+            .process(sysinfo::Pid::from_u32(pid))
+            .is_some_and(|process| process.start_time() == started)
+}
+
+/// Waits for the process to exit, as `same` tells it still runs, then ends
+/// it. `same` is asked again just before `end`, and after every nap: once it
+/// says no, the process asked to stop has exited, and whatever has its ID
+/// now is left alone.
+fn wait_then_end(
+    pid: u32,
+    mut same: impl FnMut() -> bool,
+    mut end: impl FnMut(),
+    mut nap: impl FnMut(),
+) -> io::Result<()> {
+    let waits = STOP_WAIT.as_millis() / STOP_STEP.as_millis();
+    for _ in 0..waits {
+        if !same() {
+            return Ok(());
+        }
+        nap();
+    }
+    // It didn't stop when asked: end it, if it is still the same.
+    if !same() {
+        return Ok(());
+    }
+    end();
+    for _ in 0..25 {
+        if !same() {
+            return Ok(());
+        }
+        nap();
+    }
+    Err(io::Error::other(format!(
+        "process {pid} still runs after it was asked to stop"
+    )))
 }
 
 impl Machine for Host {
@@ -364,6 +421,10 @@ impl Machine for Host {
                 "process {pid} started at a different time than the one that was seen, so it is another process and was left alone"
             )));
         }
+        // What every later look at the ID is held to: the same name and the
+        // same start time, else the process asked to stop has exited, and
+        // the ID is another's.
+        let start = started.unwrap_or_else(|| process.start_time());
         // On Unix, SIGTERM, which CLIProxyAPI and open-ferry both stop
         // gracefully on. Windows has no such signal for a program without a
         // window: it is ended at once.
@@ -371,33 +432,36 @@ impl Machine for Host {
         let asked = process.kill_with(sysinfo::Signal::Term).unwrap_or(false);
         #[cfg(not(unix))]
         let asked = process.kill();
-        if !asked && self.running(pid) {
+        if !asked && same_process_now(pid, name, start) {
             return Err(io::Error::other(format!("failed to stop process {pid}")));
         }
-        let mut waited = Duration::ZERO;
-        let step = Duration::from_millis(200);
-        while waited < STOP_WAIT {
-            if !self.running(pid) {
-                return Ok(());
-            }
-            std::thread::sleep(step);
-            waited += step;
-        }
-        // It didn't stop when asked: end it.
-        if let Some((sys, _)) = one_process(pid, sysinfo::ProcessRefreshKind::nothing())
-            && let Some(process) = sys.process(sysinfo::Pid::from_u32(pid))
-        {
-            process.kill();
-        }
-        for _ in 0..25 {
-            if !self.running(pid) {
-                return Ok(());
-            }
-            std::thread::sleep(step);
-        }
-        Err(io::Error::other(format!(
-            "process {pid} still runs after it was asked to stop"
-        )))
+        wait_then_end(
+            pid,
+            || same_process_now(pid, name, start),
+            // Looks again at the moment it ends it. A stable handle (a
+            // Windows process handle, a Linux pidfd) would close the gap
+            // that is left between this look and the kill; sysinfo has
+            // none.
+            || {
+                if let Some((sys, found)) = one_process(pid, sysinfo::ProcessRefreshKind::nothing())
+                    && found.eq_ignore_ascii_case(name)
+                    && let Some(process) = sys.process(sysinfo::Pid::from_u32(pid))
+                    && process.start_time() == start
+                {
+                    process.kill();
+                }
+            },
+            || std::thread::sleep(STOP_STEP),
+        )
+    }
+
+    fn argv0(&mut self, pid: u32) -> Option<String> {
+        let kind = sysinfo::ProcessRefreshKind::nothing().with_cmd(sysinfo::UpdateKind::Always);
+        let (sys, _) = one_process(pid, kind)?;
+        sys.process(sysinfo::Pid::from_u32(pid))?
+            .cmd()
+            .first()
+            .map(|arg| lossy(arg))
     }
 
     fn spawn(&mut self, launch: &Launch) -> io::Result<u32> {
@@ -516,6 +580,21 @@ impl Machine for Host {
             builder.mode(0o700);
         }
         builder.create(path)
+    }
+
+    fn write_new(&mut self, path: &str, data: &[u8]) -> io::Result<()> {
+        let mut options = std::fs::OpenOptions::new();
+        // `create_new` fails on anything at the path, and never follows a
+        // link there.
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options.open(path)?;
+        file.write_all(data)?;
+        file.sync_all()
     }
 
     fn probe(&mut self, ip: IpAddr, port: u16, tls: bool) -> Answer {
@@ -786,5 +865,92 @@ mod tests {
         // Its parent isn't made for it.
         let deeper = temp.path().join("missing").join("backup");
         assert!(host.create_private_dir(deeper.to_str().unwrap()).is_err());
+    }
+
+    // Not upstream's: a process ID that another process takes while one is
+    // waited on is never ended: the identity is asked on every poll and again
+    // just before the kill.
+    #[test]
+    fn a_reused_process_id_is_never_ended() {
+        use std::cell::Cell;
+        // The process exits during the wait, and its ID is reused: the same
+        // question then says no, and nothing is ended.
+        let asked = Cell::new(0);
+        let ended = Cell::new(false);
+        let result = wait_then_end(
+            4242,
+            || {
+                asked.set(asked.get() + 1);
+                asked.get() < 4
+            },
+            || ended.set(true),
+            || {},
+        );
+        assert!(result.is_ok());
+        assert!(!ended.get());
+
+        // It was another process already by the time the wait ran out: the
+        // check before the kill says no, and nothing is ended.
+        let waits = STOP_WAIT.as_millis() / STOP_STEP.as_millis();
+        let asked: Cell<u128> = Cell::new(0);
+        let result = wait_then_end(
+            4242,
+            || {
+                asked.set(asked.get() + 1);
+                asked.get() <= waits
+            },
+            || ended.set(true),
+            || {},
+        );
+        assert!(result.is_ok());
+        assert!(!ended.get());
+
+        // One that stays is ended, and then it must be gone.
+        let result = wait_then_end(4242, || true, || ended.set(true), || {});
+        assert!(ended.get());
+        assert!(result.is_err());
+        let gone = Cell::new(false);
+        let result = wait_then_end(4242, || !gone.get(), || gone.set(true), || {});
+        assert!(result.is_ok());
+    }
+
+    // Not upstream's: a new file is created and nothing else: an existing
+    // file, or a link (even to nothing), is an error and is not written
+    // through; on Unix only its owner can open it.
+    #[test]
+    fn write_new_never_follows_or_replaces() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut host = Host::new();
+        let file = temp.path().join("migration.json.1.2.3.tmp");
+        host.write_new(file.to_str().unwrap(), b"record").unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"record");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        let again = host
+            .write_new(file.to_str().unwrap(), b"other")
+            .unwrap_err();
+        assert_eq!(again.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&file).unwrap(), b"record");
+
+        #[cfg(unix)]
+        {
+            let target = temp.path().join("target");
+            std::fs::write(&target, b"somebody else's").unwrap();
+            let link = temp.path().join("link.tmp");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            assert!(host.write_new(link.to_str().unwrap(), b"record").is_err());
+            assert_eq!(std::fs::read(&target).unwrap(), b"somebody else's");
+            let dangling = temp.path().join("dangling.tmp");
+            std::os::unix::fs::symlink(temp.path().join("nowhere"), &dangling).unwrap();
+            assert!(
+                host.write_new(dangling.to_str().unwrap(), b"record")
+                    .is_err()
+            );
+            assert!(!temp.path().join("nowhere").exists());
+        }
     }
 }
