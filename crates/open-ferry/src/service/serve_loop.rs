@@ -144,8 +144,9 @@ struct Shared {
     stats: watch::Sender<Stats>,
     connections: Mutex<Connections>,
     /// Serializes `pause_accept` and `resume_accept`, which hold it across
-    /// their waits. Nothing else takes it.
-    gate: tokio::sync::Mutex<()>,
+    /// their waits. Nothing else takes it. It holds how many loop failures
+    /// a resume has reported.
+    gate: tokio::sync::Mutex<usize>,
     next_id: AtomicU64,
     first_request_deadline: Duration,
     /// When the release came. A connection with no request yet must have its
@@ -215,7 +216,7 @@ impl ServeControl {
                 mode: watch::channel(Mode::Running).0,
                 stats: watch::channel(Stats::default()).0,
                 connections: Mutex::new(Connections::default()),
-                gate: tokio::sync::Mutex::new(()),
+                gate: tokio::sync::Mutex::new(0),
                 next_id: AtomicU64::new(0),
                 first_request_deadline,
                 released_at: OnceLock::new(),
@@ -276,22 +277,25 @@ impl ServeControl {
     }
 
     /// Accepts again, once every loop has made a listener from its socket
-    /// again. An error if a loop couldn't, if the loops were released or
-    /// stopped meanwhile, or if the control was cut, which finishes it.
+    /// again. An error if a loop couldn't since a resume last said so, if
+    /// the loops were released or stopped meanwhile, or if the control was
+    /// cut, which finishes it.
     pub(crate) async fn resume_accept(&self) -> io::Result<()> {
-        let _turn = self.shared.gate.lock().await;
+        let mut reported = self.shared.gate.lock().await;
         if self.shared.connections().cut {
             return Err(io::Error::other("the control was cut"));
         }
+        // A loop that can't make its listener leaves the counts, which then
+        // look settled, so its failure is counted apart. One that no resume
+        // has reported counts, so a failure while a resume that was dropped
+        // waited, or while this one finishes a pause, isn't missed.
+        let failed = *reported;
         // A pause that was dropped is finished first. A loop still holding
         // the listener it is about to drop would otherwise look settled, and
         // a failure to make it again would come after the resume returned.
         if *self.shared.mode.borrow() == Mode::Paused {
             self.wait_for(|stats| stats.accepting == 0).await;
         }
-        // A loop that can't make its listener leaves the counts, which then
-        // look settled, so its failure is counted apart.
-        let failed = self.stats().failed;
         self.shared.move_mode(&[Mode::Paused], Mode::Running);
         if *self.shared.mode.borrow() != Mode::Running {
             return Err(io::Error::other("the listeners were released"));
@@ -316,6 +320,7 @@ impl ServeControl {
             return Err(io::Error::other("the listeners were released"));
         }
         if settled.failed > failed {
+            *reported = settled.failed;
             return Err(io::Error::other("a listener couldn't accept again"));
         }
         Ok(())
