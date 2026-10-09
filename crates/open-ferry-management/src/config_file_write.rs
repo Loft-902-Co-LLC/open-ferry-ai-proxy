@@ -243,14 +243,20 @@ async fn put_config_yaml(State(state): State<ManagementState>, body: Body) -> Re
     config_write::run_task(async move {
         {
             let _guard = state.config_write_lock().lock().await;
-            let Ok(sha256) = run_blocking(move || writer.write_file(&body)).await else {
-                return json::response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &Json::map([
-                        ("error", Json::Str("write_failed".into())),
-                        ("message", Json::Str("failed to write config".into())),
-                    ]),
-                );
+            let sha256 = match run_blocking(move || writer.write_file(&body)).await {
+                Ok(sha256) => sha256,
+                Err(error) if error.is_switching() => {
+                    return json::error(StatusCode::SERVICE_UNAVAILABLE, config_write::SWITCHING);
+                }
+                Err(_) => {
+                    return json::response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &Json::map([
+                            ("error", Json::Str("write_failed".into())),
+                            ("message", Json::Str("failed to write config".into())),
+                        ]),
+                    );
+                }
             };
             state.set_loaded_config(Arc::new(config), sha256);
         }

@@ -79,6 +79,7 @@ use open_ferry_core::config::save::SaveErrorKind;
 pub use open_ferry_core::config::save::UndoCheck;
 pub use open_ferry_core::config::v8_edit::{V8Edit, V8EditError, V8Method};
 use open_ferry_core::config::{save, v8_edit};
+use open_ferry_core::gate::{ActiveGate, Operation};
 
 use crate::auth_files::run_blocking;
 use crate::bind;
@@ -87,6 +88,10 @@ use crate::state::ManagementState;
 
 /// What a route answers when the state has no [`ConfigWriter`].
 const WRITER_UNAVAILABLE: &str = "config writer unavailable";
+
+/// What a route that writes answers with 503 while open-ferry switches
+/// versions: the write was refused, and nothing was changed.
+pub(crate) const SWITCHING: &str = "open-ferry is switching versions; try again in a minute";
 
 /// What a save answers when the file changed since the config the handlers
 /// read was loaded or written, once the service has loaded it again.
@@ -159,6 +164,9 @@ pub enum UndoError {
     /// The file or the backup isn't the one the caller expected: it
     /// changed since the caller read it.
     Stale,
+    /// The writer is not the active one, as while open-ferry switches
+    /// versions. Nothing was changed.
+    Switching,
     /// The backup couldn't be put back. The text says why, and holds no
     /// secret from the config.
     Failed(String),
@@ -173,6 +181,7 @@ impl fmt::Display for UndoError {
                 f.write_str("the config file was changed since the last change that kept a backup")
             }
             Self::Stale => f.write_str("the config file or its backup changed since it was read"),
+            Self::Switching => f.write_str(SWITCHING),
             Self::Failed(message) => f.write_str(message),
         }
     }
@@ -186,6 +195,7 @@ impl std::error::Error for UndoError {}
 pub struct WriteError {
     message: String,
     config_changed: bool,
+    switching: bool,
 }
 
 impl WriteError {
@@ -194,7 +204,23 @@ impl WriteError {
         Self {
             message: message.into(),
             config_changed: false,
+            switching: false,
         }
+    }
+
+    /// The writer is not the active one, as while open-ferry switches
+    /// versions. Nothing was written; the route answers 503.
+    pub fn switching() -> Self {
+        Self {
+            message: SWITCHING.to_owned(),
+            config_changed: false,
+            switching: true,
+        }
+    }
+
+    /// Whether this is [`WriteError::switching`].
+    pub fn is_switching(&self) -> bool {
+        self.switching
     }
 
     /// The file doesn't hold the contents the save expected: it changed
@@ -204,6 +230,7 @@ impl WriteError {
         Self {
             message: "the config file changed since it was loaded".to_owned(),
             config_changed: true,
+            switching: false,
         }
     }
 
@@ -230,12 +257,26 @@ impl std::error::Error for WriteError {}
 #[derive(Clone, Debug)]
 pub struct FileConfigWriter {
     path: PathBuf,
+    gate: ActiveGate,
 }
 
 impl FileConfigWriter {
-    /// A writer for the config file at `path`.
+    /// A writer for the config file at `path`, always allowed to write.
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            gate: ActiveGate::open(),
+        }
+    }
+
+    /// Writes only while `gate` allows it: each of the four writes takes
+    /// the gate's write permit first and holds it until the file is
+    /// written, and is refused with [`WriteError::switching`] (or the
+    /// matching error of its kind) when the gate gives none.
+    #[must_use]
+    pub fn with_gate(mut self, gate: ActiveGate) -> Self {
+        self.gate = gate;
+        self
     }
 
     /// The file it writes.
@@ -251,6 +292,10 @@ impl ConfigWriter for FileConfigWriter {
         migrate_v8: bool,
         expected_sha256: Option<&str>,
     ) -> Result<Option<String>, WriteError> {
+        let _permit = self
+            .gate
+            .write_permit()
+            .map_err(|_| WriteError::switching())?;
         save::save_preserving_comments_expecting(&self.path, config, migrate_v8, expected_sha256)
             .map(Some)
             .map_err(|error| match error.kind() {
@@ -260,17 +305,26 @@ impl ConfigWriter for FileConfigWriter {
     }
 
     fn write_file(&self, data: &[u8]) -> Result<Option<String>, WriteError> {
+        let _permit = self
+            .gate
+            .write_permit()
+            .map_err(|_| WriteError::switching())?;
         save::write_file_with_sha256(&self.path, data)
             .map(Some)
             .map_err(|error| WriteError::new(error.to_string()))
     }
 
     fn edit_v8(&self, edit: &V8Edit) -> Result<(Config, Option<String>), V8EditError> {
+        let _permit = self
+            .gate
+            .write_permit()
+            .map_err(|_| V8EditError::Switching)?;
         v8_edit::edit_v8_with_sha256(&self.path, edit)
             .map(|(config, sha256)| (config, Some(sha256)))
     }
 
     fn undo(&self, check: &UndoCheck) -> Result<(Config, Option<String>), UndoError> {
+        let _permit = self.gate.write_permit().map_err(|_| UndoError::Switching)?;
         save::undo_with_sha256(&self.path, check)
             .map(|(config, sha256)| (config, Some(sha256)))
             .map_err(|error| match error.kind() {
@@ -323,6 +377,7 @@ pub(crate) fn v8_error_response(error: &V8EditError) -> Response {
             "write_failed",
             Some(("message", message)),
         ),
+        E::Switching => return json::error(StatusCode::SERVICE_UNAVAILABLE, SWITCHING),
         // A refusal core adds later, until it has its own answer.
         _ => (StatusCode::INTERNAL_SERVER_ERROR, "write_failed", None),
     };
@@ -474,6 +529,9 @@ where
                 let loaded = catch_up(&state, stale).await;
                 Err(config_changed(loaded))
             }
+            Err(error) if error.is_switching() => {
+                Err(json::error(StatusCode::SERVICE_UNAVAILABLE, SWITCHING))
+            }
             Err(error) => Err(json::error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 &format!("failed to save config: {error}"),
@@ -538,11 +596,22 @@ async fn reload_with(state: &ManagementState, force: bool) {
 }
 
 /// Runs `future` on its own task, so it finishes even when the request is
-/// dropped, and passes a panic on.
+/// dropped, and passes a panic on. Called inside an
+/// [`Operation`](open_ferry_core::gate::Operation), the task is that
+/// operation's too (as `ActiveGate::spawn` makes it), so its writes find the
+/// operation's permit and a switch waits for it.
 pub(crate) async fn run_task<T: Send + 'static>(
     future: impl Future<Output = T> + Send + 'static,
 ) -> T {
-    match tokio::spawn(future).await {
+    let future: Pin<Box<dyn Future<Output = T> + Send>> = match Operation::current() {
+        Some(operation) => Box::pin(operation.scope(future)),
+        None => Box::pin(future),
+    };
+    // The one spawn of a config write: it carries the caller's operation
+    // above, as `ActiveGate::spawn` does.
+    #[allow(clippy::disallowed_methods)]
+    let task = tokio::spawn(future);
+    match task.await {
         Ok(value) => value,
         Err(error) => match error.try_into_panic() {
             Ok(panic) => std::panic::resume_unwind(panic),

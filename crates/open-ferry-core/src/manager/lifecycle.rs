@@ -69,6 +69,7 @@
 
 use std::sync::Arc;
 
+use super::Shared;
 use super::affinity::Session;
 use super::classify::{ErrView, has_unauthorized_auth_failure, is_unauthorized_error};
 use super::cooldown::{
@@ -85,7 +86,7 @@ use super::models::Resolver;
 use super::refresh::clear_unauthorized_model_states;
 use super::select::{executor_key_from_auth, lookup_executor};
 use super::text::{canonical_model_key, equal_fold, go_lower};
-use super::{Entry, Manager, ManagerError, State, lock};
+use super::{EditError, Entry, Manager, ManagerError, State, lock};
 use crate::auth::{Auth, Status, Timestamp};
 use crate::executor::ProviderExecutor;
 
@@ -161,9 +162,58 @@ pub(crate) enum Save {
     No,
 }
 
+/// A published snapshot whose save hasn't returned: while it lives, the
+/// credential's entry in [`State::pending_saves`] is raised.
+pub(crate) struct PendingSave {
+    shared: Arc<Shared>,
+    id: String,
+}
+
+impl Drop for PendingSave {
+    fn drop(&mut self) {
+        let mut state = lock(&self.shared.state);
+        if let Some(count) = state.pending_saves.get_mut(&self.id) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                state.pending_saves.remove(&self.id);
+            }
+        }
+    }
+}
+
+impl Manager {
+    /// Counts the snapshot of `id` the caller just published, to be saved
+    /// with `save`, as pending until the returned guard drops. Called under
+    /// the state lock, in the critical section that publishes, and dropped
+    /// with the lock released. Every publication that is saved is counted,
+    /// whether or not the save could be admitted later.
+    pub(crate) fn pending_save(
+        &self,
+        state: &mut State,
+        id: &str,
+        save: Save,
+    ) -> Option<PendingSave> {
+        if save == Save::No {
+            return None;
+        }
+        *state.pending_saves.entry(id.to_owned()).or_insert(0) += 1;
+        state.save_publications += 1;
+        let sequence = state.save_publications;
+        state.save_sequence.insert(id.to_owned(), sequence);
+        Some(PendingSave {
+            shared: Arc::clone(&self.shared),
+            id: id.to_owned(),
+        })
+    }
+}
+
 /// Whether an update is a plain replacement or a refresh result to merge.
 enum UpdateMode<'a> {
     Replace,
+    /// An edit of the live credential, made under the state lock. The
+    /// closure fails with `Err(())` after it kept its own error, and says
+    /// with `Ok(false)` that nothing changed.
+    Edit(&'a mut dyn FnMut(&mut Auth) -> Result<bool, ()>),
     /// The credential the refresh started from, and its epoch then.
     Refresh {
         base: &'a Auth,
@@ -274,17 +324,16 @@ impl Manager {
                 },
             );
             state.sync_scheduler(self.models(), &snapshot.id, now);
-            snapshot
+            let pending = self.pending_save(state, &snapshot.id, save);
+            (snapshot, pending)
         };
+        let (snapshot, pending) = snapshot;
         self.queue_refresh_reschedule(&snapshot.id);
         cooldown_store::changed(self);
         if let Err(err) = self.persist(&snapshot, snapshot.registration_epoch, 1, save) {
-            tracing::warn!(
-                auth_id = %snapshot.id,
-                provider = %snapshot.provider,
-                "failed to persist registered auth: {err}"
-            );
+            log_persist_failure(&snapshot, "failed to persist registered auth", &err);
         }
+        drop(pending);
         drop(gate);
         Ok(snapshot)
     }
@@ -301,6 +350,70 @@ impl Manager {
         Ok(self
             .update_internal(UpdateMode::Replace, auth, Save::Yes)?
             .map(|(snapshot, _)| snapshot))
+    }
+
+    /// Changes the live credential `id` with `edit` and saves it (what
+    /// [`update`](Self::update) does, but from the credential as it is when
+    /// the change is made rather than from a copy the caller took earlier).
+    /// `edit` runs under the manager's state lock, on a copy of the live
+    /// entry: it returns `Ok(true)` to publish the copy, `Ok(false)` when
+    /// nothing changed (nothing is published or saved), or `Err` to refuse
+    /// (nothing is published). The result is `Ok(None)` when no credential
+    /// has the ID.
+    ///
+    /// The copy is published as `update` publishes a replacement, so it
+    /// keeps the call counts, and a refresh or adoption that landed first is
+    /// never undone: an edit that leaves the tokens and API key alone can
+    /// never change them, and doesn't bump the credential version. Keep
+    /// `edit` short and free of calls into the manager, as it holds the
+    /// lock.
+    ///
+    /// `edit` must not change the credential's ID: an edit whose result has
+    /// another ID (an empty one included) is refused with
+    /// `EditError::Manager`, and nothing is published. The registration
+    /// epoch, generation, call counts and update time are the manager's own
+    /// and are overwritten whatever `edit` sets.
+    pub fn edit<E>(
+        &self,
+        id: &str,
+        edit: impl FnOnce(&mut Auth) -> Result<bool, E>,
+    ) -> Result<Option<Arc<Auth>>, EditError<E>> {
+        self.edit_with(id, edit, Save::Yes)
+    }
+
+    /// [`edit`](Self::edit) without saving, for a change that came from the
+    /// store (or whatever else already holds it).
+    pub fn edit_unsaved<E>(
+        &self,
+        id: &str,
+        edit: impl FnOnce(&mut Auth) -> Result<bool, E>,
+    ) -> Result<Option<Arc<Auth>>, EditError<E>> {
+        self.edit_with(id, edit, Save::No)
+    }
+
+    fn edit_with<E>(
+        &self,
+        id: &str,
+        edit: impl FnOnce(&mut Auth) -> Result<bool, E>,
+        save: Save,
+    ) -> Result<Option<Arc<Auth>>, EditError<E>> {
+        let mut edit = Some(edit);
+        let mut rejected = None;
+        let mut apply = |auth: &mut Auth| -> Result<bool, ()> {
+            let edit = edit.take().ok_or(())?;
+            edit(auth).map_err(|err| rejected = Some(err))
+        };
+        let placeholder = Auth {
+            id: id.to_owned(),
+            ..Auth::default()
+        };
+        let result = self.update_internal(UpdateMode::Edit(&mut apply), placeholder, save);
+        if let Some(err) = rejected {
+            return Err(EditError::Rejected(err));
+        }
+        result
+            .map(|published| published.map(|(snapshot, _)| snapshot))
+            .map_err(EditError::Manager)
     }
 
     /// [`update`](Self::update) without saving.
@@ -339,7 +452,7 @@ impl Manager {
         let gate = self.mutation_gate();
         let now = self.now();
         let is_refresh = matches!(mode, UpdateMode::Refresh { .. });
-        let (snapshot, epoch, generation) = {
+        let (snapshot, epoch, generation, pending) = {
             let mut guard = self.lock();
             let state = &mut *guard;
             let Some(existing) = state.auths.get(&auth.id) else {
@@ -354,6 +467,28 @@ impl Manager {
             let live_epoch = *slot;
             let refresh_failures = match mode {
                 UpdateMode::Replace => 0,
+                UpdateMode::Edit(edit) => {
+                    let mut edited = Auth::clone(&existing_auth);
+                    match edit(&mut edited) {
+                        Err(()) => return Err(ManagerError::Other("edit refused".to_owned())),
+                        Ok(false) => return Ok(Some((existing_auth, existing_generation))),
+                        Ok(true) => {}
+                    }
+                    // The ID is the registration's key: an edit that moved
+                    // it would publish this credential under another ID.
+                    if edited.id != existing_auth.id {
+                        return Err(ManagerError::Other(format!(
+                            "edit auth {}: the edit changed the ID to {:?}",
+                            existing_auth.id, edited.id
+                        )));
+                    }
+                    normalize_credential_metadata(&mut edited.metadata);
+                    validate_weight(&edited).map_err(|err| {
+                        ManagerError::InvalidWeight(format!("update auth: {err}"))
+                    })?;
+                    auth = edited;
+                    0
+                }
                 UpdateMode::Refresh { base, base_epoch } => {
                     if existing_epoch != base_epoch {
                         return Err(ManagerError::Other(format!(
@@ -447,17 +582,15 @@ impl Manager {
                 },
             );
             state.sync_scheduler(self.models(), &snapshot.id, now);
-            (snapshot, live_epoch, generation)
+            let pending = self.pending_save(state, &snapshot.id, save);
+            (snapshot, live_epoch, generation, pending)
         };
         self.queue_refresh_reschedule(&snapshot.id);
         cooldown_store::changed(self);
         if let Err(err) = self.persist(&snapshot, epoch, generation, save) {
-            tracing::warn!(
-                auth_id = %snapshot.id,
-                provider = %snapshot.provider,
-                "failed to persist updated auth: {err}"
-            );
+            log_persist_failure(&snapshot, "failed to persist updated auth", &err);
         }
+        drop(pending);
         drop(gate);
         Ok(Some((snapshot, generation)))
     }
@@ -474,6 +607,7 @@ impl Manager {
         let provider = {
             let mut guard = self.lock();
             let state = &mut *guard;
+            state.save_sequence.remove(id);
             let Some(existing) = state.auths.remove(id) else {
                 return;
             };
@@ -589,6 +723,13 @@ impl Manager {
         if auth.metadata.is_empty() {
             return Ok(());
         }
+        #[cfg(test)]
+        {
+            let hook = lock(&self.shared.persist_hook).clone();
+            if let Some(hook) = hook {
+                hook(auth);
+            }
+        }
         let id_lock = lock(&self.shared.persist_locks)
             .entry(auth.id.clone())
             .or_default()
@@ -598,11 +739,18 @@ impl Manager {
         if epoch < last_epoch || (epoch == last_epoch && generation < last_generation) {
             return Ok(());
         }
-        *last = (epoch, generation);
         if save == Save::No {
+            // Disk-originated state: an older save in flight mustn't
+            // overwrite it.
+            *last = (epoch, generation);
             return Ok(());
         }
-        store.save(auth).map(drop).map_err(ManagerError::Store)
+        // The mark moves only once the save has succeeded: a save the gate
+        // refused, or one that failed, must not make an older one that could
+        // still be written look stale.
+        store.save(auth).map(drop).map_err(ManagerError::Store)?;
+        *last = (epoch, generation);
+        Ok(())
     }
 
     /// Records a call's outcome on its credential: counts it, cools the
@@ -642,7 +790,7 @@ impl Manager {
         let gate = self.mutation_gate();
         let now = self.now();
         let mut model_key = canonical_model_key(&result.model);
-        let (snapshot, epoch, generation) = {
+        let (snapshot, epoch, generation, pending) = {
             let mut guard = self.lock();
             let state = &mut *guard;
             let Some(entry) = state.auths.get_mut(&result.auth_id) else {
@@ -678,9 +826,11 @@ impl Manager {
                 entry.auth.generation,
             );
             state.sync_scheduler(self.models(), &result.auth_id, now);
-            committed
+            let pending = self.pending_save(state, &result.auth_id, Save::Yes);
+            (committed.0, committed.1, committed.2, pending)
         };
         let _ = self.persist(&snapshot, epoch, generation, Save::Yes);
+        drop(pending);
         drop(gate);
         cooldown_store::changed(self);
         self.publish_projections(&snapshot, generation, now, true);
@@ -698,8 +848,9 @@ impl Manager {
         }
         let gate = self.mutation_gate();
         let now = self.now();
-        let (snapshot, epoch, generation) = {
-            let mut state = self.lock();
+        let (snapshot, epoch, generation, pending) = {
+            let mut guard = self.lock();
+            let state = &mut *guard;
             let Some(entry) = state.auths.get_mut(&result.auth_id) else {
                 return;
             };
@@ -710,13 +861,16 @@ impl Manager {
             count_result(auth, result, now);
             auth.updated_at = Some(now);
             auth.generation = auth.generation.saturating_add(1);
-            (
+            let committed = (
                 entry.auth.clone(),
                 entry.auth.registration_epoch,
                 entry.auth.generation,
-            )
+            );
+            let pending = self.pending_save(state, &result.auth_id, Save::Yes);
+            (committed.0, committed.1, committed.2, pending)
         };
         let _ = self.persist(&snapshot, epoch, generation, Save::Yes);
+        drop(pending);
         drop(gate);
         self.publish_error_event(result, &snapshot);
     }
@@ -739,7 +893,7 @@ impl Manager {
             .map(|model| canonical_model_key(model))
             .collect();
         let gate = self.mutation_gate();
-        let (snapshot, models, epoch, generation) = {
+        let (snapshot, models, epoch, generation, pending) = {
             let mut guard = self.lock();
             let state = &mut *guard;
             let Some(entry) = state.auths.get_mut(id) else {
@@ -757,9 +911,11 @@ impl Manager {
                 entry.auth.generation,
             );
             state.sync_scheduler(self.models(), id, now);
-            committed
+            let pending = self.pending_save(state, id, Save::Yes);
+            (committed.0, committed.1, committed.2, committed.3, pending)
         };
         let persisted = self.persist(&snapshot, epoch, generation, Save::Yes);
+        drop(pending);
         drop(gate);
         cooldown_store::changed(self);
         self.publish_projections(&snapshot, generation, now, false);
@@ -783,6 +939,7 @@ impl Manager {
         let now = self.now();
         let models = self.models();
         let mut committed = None;
+        let mut pending = None;
         {
             let mut guard = self.lock();
             let state = &mut *guard;
@@ -822,19 +979,24 @@ impl Manager {
                 ));
                 break;
             }
-            if committed.is_some() {
+            if let Some((.., changed, _, _)) = &committed {
                 state.sync_scheduler(models, id, now);
+                if *changed {
+                    pending = self.pending_save(state, id, Save::Yes);
+                }
             }
         }
         let Some((snapshot, epoch, generation, changed, supported, reg_epoch)) = committed else {
             return;
         };
         if changed && let Err(err) = self.persist(&snapshot, epoch, generation, Save::Yes) {
-            tracing::warn!(
-                auth_id = %snapshot.id,
-                "failed to persist auth changes during model state reconciliation: {err}"
+            log_persist_failure(
+                &snapshot,
+                "failed to persist auth changes during model state reconciliation",
+                &err,
             );
         }
+        drop(pending);
         drop(gate);
         cooldown_store::changed(self);
         let (settings, oauth) = self.resolver_parts();
@@ -873,6 +1035,24 @@ impl Manager {
     /// The executor that serves `auth`, under the state lock.
     pub(crate) fn executor_for(state: &State, auth: &Auth) -> Option<Arc<dyn ProviderExecutor>> {
         lookup_executor(&state.executors, &executor_key_from_auth(auth))
+    }
+}
+
+/// Logs a credential save that failed. A save the gate refused is expected
+/// while a switch is under way, and every request's outcome would log one, so
+/// it is logged at debug.
+fn log_persist_failure(auth: &Auth, what: &str, err: &ManagerError) {
+    let refused = matches!(err, ManagerError::NotActive(_))
+        || matches!(err, ManagerError::Store(io)
+            if io.get_ref().is_some_and(|inner| inner.is::<crate::gate::NotActive>()));
+    if refused {
+        tracing::debug!(auth_id = %auth.id, "{what} refused: the gate is not open");
+    } else {
+        tracing::warn!(
+            auth_id = %auth.id,
+            provider = %auth.provider,
+            "{what}: {err}"
+        );
     }
 }
 

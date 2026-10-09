@@ -53,10 +53,13 @@ use super::credential::{
     KIND_API_KEY, access_token, auth_kind, has_refresh_credential, is_zero, last_refresh_timestamp,
     preferred_interval,
 };
+use super::merge::normalize_credential_metadata;
 use super::text::{equal_fold, go_lower};
 use super::{Manager, ManagerError, Shared, State, lock};
+use crate::auth::classification::ATTRIBUTE_PATH;
 use crate::auth::{Auth, AuthError, Status, Timestamp};
 use crate::exec::{ErrorKind, ExecError};
+use crate::gate::{GateState, NotActive};
 
 /// How often the loop checks when no interval is given
 /// (upstream's `refreshCheckInterval`).
@@ -114,6 +117,8 @@ pub struct ForceRefreshResult {
     pub success: bool,
     /// Why it didn't.
     pub error: Option<String>,
+    /// Not upstream's: whether it wasn't tried because the gate isn't open.
+    pub not_active: bool,
 }
 
 /// The loop's queue: credentials by when they are next due.
@@ -447,12 +452,23 @@ pub(super) async fn run_loop(
     jobs: mpsc::Sender<RefreshJob>,
 ) {
     loop {
-        let wait = {
+        let (wait, gate) = {
             let Some(manager) = upgrade(&weak) else {
                 return;
             };
-            shared.next_wait(manager.now())
+            (shared.next_wait(manager.now()), manager.gate())
         };
+        // Not upstream's: a process that isn't the active one doesn't refresh,
+        // so the loop pops no due credential while the gate isn't open, and
+        // parks until it opens or the loop stops.
+        if gate.state() != GateState::Open {
+            tokio::select! {
+                biased;
+                () = stopped(&mut stop) => break,
+                () = gate.wait_open() => {}
+            }
+            continue;
+        }
         tokio::select! {
             biased;
             () = stopped(&mut stop) => break,
@@ -499,10 +515,16 @@ pub(super) async fn run_worker(
         let Some(manager) = upgrade(&weak) else {
             return;
         };
-        if manager.begin_refresh_job(&job, &stop) {
-            let _ = manager.refresh_at_epoch(&job.id, "", job.epoch).await;
+        let mut retry_at = None;
+        if manager.begin_refresh_job(&job, &stop)
+            && let Err(ManagerError::NotActive(_)) =
+                manager.refresh_at_epoch(&job.id, "", job.epoch).await
+        {
+            // Refused by a gate that closed since the job was queued: try
+            // again after a pause, not at once.
+            retry_at = Some(add(manager.now(), REFRESH_CHECK_INTERVAL));
         }
-        manager.finish_refresh_job(&job, None, false);
+        manager.finish_refresh_job(&job, retry_at, false);
     }
 }
 
@@ -532,13 +554,18 @@ impl Manager {
         });
         self.rebuild_refresh_queue(&shared, self.now());
         let jobs_rx = Arc::new(tokio::sync::Mutex::new(jobs_rx));
+        // The workers and the loop write nothing: they only queue and pick
+        // credentials, and each refresh they start begins its own operation
+        // (`refresh_with`).
         for _ in 0..workers {
+            #[allow(clippy::disallowed_methods)]
             runtime.spawn(run_worker(
                 Arc::downgrade(&self.shared),
                 jobs_rx.clone(),
                 stop_rx.clone(),
             ));
         }
+        #[allow(clippy::disallowed_methods)]
         runtime.spawn(run_loop(
             Arc::downgrade(&self.shared),
             shared,
@@ -844,11 +871,159 @@ impl Manager {
             .await
         {
             Ok(refreshed) => Some(refreshed),
+            Err(ManagerError::NotActive(_)) => self.adopt_from_store(auth),
             Err(_) => {
                 tracing::debug!(auth_id = %auth.id, "credential refresh before fallback failed");
                 None
             }
         }
+    }
+
+    /// Not upstream's (D3): after a 401 on a worker whose gate isn't open,
+    /// reads the credential's record from the store again (a read, never
+    /// gated). When the token there differs from the one that failed, the
+    /// active process refreshed it: the credential takes it in memory only,
+    /// nothing is saved, and the call tries again. Otherwise `None`. Never
+    /// refreshes, so a rotated refresh token is never spent twice.
+    ///
+    /// It adopts only while memory still holds the token that failed, and
+    /// applies the disk copy as one step under the state lock, and only when
+    /// nothing of the credential is in flight: no refresh holds its refresh
+    /// lock (a forced or request-path refresh, which has no job), no refresh
+    /// job runs, no published snapshot of it waits to be saved, none was
+    /// published (so none can have been saved) between the read and the swap
+    /// (its save-publication sequence is as it was before the read), and its
+    /// registration is the one that was read. A credential whose token moved
+    /// on (a refresh of this process published a newer one) is returned as
+    /// it is. With nothing in flight every later snapshot is built on the
+    /// adopted state, so adopting never advances the persist watermark.
+    ///
+    /// The refresh lock is taken first, as `refresh_owned` takes it, with
+    /// `try_lock` since this isn't async, and held through the disk read and
+    /// the swap; the state lock is taken only inside it.
+    fn adopt_from_store(&self, failed: &Arc<Auth>) -> Option<Arc<Auth>> {
+        let store = self.shared.store.as_ref()?;
+        let failed_token = access_token(failed);
+        let current = self.get(&failed.id)?;
+        if access_token(&current) != failed_token {
+            return Some(current);
+        }
+        let id_lock = lock(&self.shared.refresh_locks)
+            .entry(failed.id.clone())
+            .or_default()
+            .clone();
+        let Ok(_refreshing) = id_lock.try_lock() else {
+            // A refresh is under way; it may publish a newer token, and
+            // adopting now would drop it.
+            return None;
+        };
+        // Before it reads: nothing of the credential may be in flight, and
+        // what a save of it could have changed is noted, to be seen again at
+        // the swap.
+        let (live, epoch, sequence) = {
+            let guard = self.lock();
+            if guard
+                .refresh_jobs
+                .get(&failed.id)
+                .is_some_and(|job| job.running)
+                || guard.pending_saves.contains_key(&failed.id)
+            {
+                return None;
+            }
+            let entry = guard.auths.get(&failed.id)?;
+            if access_token(&entry.auth) != failed_token {
+                return Some(entry.auth.clone());
+            }
+            if entry.auth.registration_epoch != failed.registration_epoch {
+                // Removed and registered again since the request's snapshot.
+                return None;
+            }
+            (
+                entry.auth.clone(),
+                entry.auth.registration_epoch,
+                guard.save_sequence.get(&failed.id).copied(),
+            )
+        };
+        // Read the file of the registration just checked, not the failed
+        // snapshot's: the path comes from the `Auth` it is given.
+        // Sampled before the read: the path it resolves uses the directory
+        // bound then, and a rebind since changes where `live` points with no
+        // change to the credential. Compared at the swap.
+        let binding = store.binding_generation();
+        let read = store.read_back(&live);
+        #[cfg(test)]
+        {
+            let hook = lock(&self.shared.adopt_hook).clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        let disk = match read {
+            Ok(Some(disk)) => disk,
+            Ok(None) => return None,
+            Err(err) => {
+                tracing::debug!(auth_id = %failed.id, "reading the credential again failed: {err}");
+                return None;
+            }
+        };
+        let fresh = access_token(&disk);
+        if fresh.is_empty() || fresh == failed_token {
+            return None;
+        }
+        let mut metadata = disk.metadata;
+        normalize_credential_metadata(&mut metadata);
+        let now = self.now();
+        let adopted = {
+            let mut guard = self.lock();
+            let state = &mut *guard;
+            if state
+                .refresh_jobs
+                .get(&failed.id)
+                .is_some_and(|job| job.running)
+                || state.pending_saves.contains_key(&failed.id)
+                || state.save_sequence.get(&failed.id).copied() != sequence
+            {
+                // A save of the credential began, and may have finished,
+                // since the record was read: the record may be older than
+                // what it saved.
+                return None;
+            }
+            let entry = state.auths.get_mut(&failed.id)?;
+            if entry.auth.registration_epoch != epoch {
+                return None;
+            }
+            // The store was rebound since the read: the directory a relative
+            // `file_name` resolves against may have changed.
+            if store.binding_generation() != binding {
+                return None;
+            }
+            // The record was read from where `live` pointed. An edit or
+            // update may have moved the registration to another file since,
+            // with no save, so the epoch and the save sequence are unmoved.
+            // Compared are the inputs of `resolve_auth_path` (the `path`
+            // attribute and `file_name`), not the whole generation: request
+            // outcomes publish new snapshots all the time.
+            if entry.auth.trimmed_attribute(ATTRIBUTE_PATH)
+                != live.trimmed_attribute(ATTRIBUTE_PATH)
+                || entry.auth.file_name.trim() != live.file_name.trim()
+            {
+                return None;
+            }
+            if access_token(&entry.auth) != failed_token {
+                return Some(entry.auth.clone());
+            }
+            let auth = Arc::make_mut(&mut entry.auth);
+            auth.metadata = metadata;
+            auth.rejected_access_token.clear();
+            auth.credential_version = auth.credential_version.saturating_add(1);
+            auth.generation = auth.generation.saturating_add(1);
+            auth.updated_at = Some(now);
+            let snapshot = entry.auth.clone();
+            state.sync_scheduler(self.models(), &failed.id, now);
+            snapshot
+        };
+        self.queue_refresh_reschedule(&failed.id);
+        Some(adopted)
     }
 
     /// Refreshes a credential now, whether or not it is due (upstream's
@@ -883,6 +1058,7 @@ impl Manager {
                 let result = self.force_refresh(&id).await;
                 ForceRefreshResult {
                     success: result.is_ok(),
+                    not_active: matches!(result, Err(ManagerError::NotActive(_))),
                     error: result.err().map(|err| err.to_string()),
                     id,
                 }
@@ -907,6 +1083,13 @@ impl Manager {
 
     /// [`refresh_at_epoch`](Self::refresh_at_epoch); with `force`, as a
     /// forced refresh (upstream's `withForceRefresh` context).
+    ///
+    /// Not upstream's: the refresh is one task that owns an
+    /// [`Operation`](crate::gate::Operation) of the manager's gate. It keeps
+    /// the `refresh_locks` lock through the provider call, the save and the
+    /// publication, and runs on when the caller is dropped, so a token the
+    /// provider rotated is never lost to a hand-over. A gate that isn't open
+    /// refuses with [`ManagerError::NotActive`] before any provider call.
     async fn refresh_with(
         &self,
         id: &str,
@@ -918,6 +1101,38 @@ impl Manager {
         if id.is_empty() {
             return Err(ManagerError::Other("auth id is empty".into()));
         }
+        let gate = self.gate();
+        let operation = gate.begin_operation().map_err(ManagerError::NotActive)?;
+        let manager = self.clone();
+        let id = id.to_owned();
+        let failed_token = failed_token.to_owned();
+        let work = async move {
+            manager
+                .refresh_owned(&id, &failed_token, epoch, force)
+                .await
+        };
+        if tokio::runtime::Handle::try_current().is_err() {
+            // No runtime to own the task: run it here, still as the
+            // operation.
+            return operation.scope(work).await;
+        }
+        let task = gate
+            .spawn(&operation, work)
+            .map_err(ManagerError::NotActive)?;
+        drop(operation);
+        task.await
+            .map_err(|err| ManagerError::Other(format!("refresh task failed: {err}")))?
+    }
+
+    /// The body of [`refresh_with`](Self::refresh_with), running as its
+    /// operation.
+    async fn refresh_owned(
+        &self,
+        id: &str,
+        failed_token: &str,
+        epoch: u64,
+        force: bool,
+    ) -> Result<Arc<Auth>, ManagerError> {
         if !failed_token.is_empty() {
             self.mark_rejected_access_token(id, failed_token);
         }
@@ -958,6 +1173,12 @@ impl Manager {
             }
         }
 
+        // A waiter that got the lock after the switch began declines before
+        // it calls the provider.
+        let state = self.gate().state();
+        if state != GateState::Open {
+            return Err(ManagerError::NotActive(NotActive { state }));
+        }
         let outcome = executor.refresh(auth.clone()).await;
         let now = self.now();
         let mut updated = match outcome {

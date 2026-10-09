@@ -12,11 +12,16 @@
 //! statistics see of each request and its upstream calls. [`multipart`]
 //! reads and writes the forms of the image and video endpoints.
 
+// The tests start tasks of their own to drive the code under test; the lint
+// in clippy.toml is for the code they test.
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 pub mod auth;
 pub mod codex_models;
 pub mod config;
 pub mod exec;
 pub mod executor;
+pub mod gate;
 pub mod manager;
 pub mod models;
 pub mod multipart;

@@ -85,6 +85,13 @@ pub(super) async fn undo(
             "config_writer_unavailable",
             "this server can't write its config file",
         )),
+        // The same answer the management writers give while the gate is not
+        // open.
+        Err(UndoError::Switching) => Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "switching",
+            "open-ferry is switching versions; try again in a minute",
+        )),
         Err(error) => Err(ApiError::internal(format!("failed to undo: {error}"))),
     }
 }

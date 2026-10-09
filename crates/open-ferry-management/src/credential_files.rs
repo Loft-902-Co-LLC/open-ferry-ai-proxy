@@ -134,6 +134,7 @@ use crate::auth_files::run_blocking;
 use crate::bind::{self, GoStruct, Nullable, set_string};
 use crate::go::{decode_rune, equal_fold, lossy};
 use crate::json::{self, Json};
+use crate::owned::owned;
 use crate::query::Query;
 use crate::state::{CredentialStore, ManagementState, StoreUnavailable};
 
@@ -248,24 +249,91 @@ async fn upload(
     RawQuery(raw): RawQuery,
     request: Request,
 ) -> Response {
+    if let Err(unavailable) = state.credential_store() {
+        return unavailable.into_response();
+    }
+    // The body is read before the gate admits the upload, so a client that
+    // is slow to send it doesn't hold up a switch.
+    let upload = match read_upload(raw.as_deref(), request).await {
+        Ok(upload) => upload,
+        Err(response) => return response,
+    };
+    // What the upload holds alone decides whether it is a bad request, so it
+    // is checked before the gate admits it. A form without a file is one.
+    if matches!(&upload, Upload::Files(files) if files.is_empty()) {
+        return json::error(StatusCode::BAD_REQUEST, "no files uploaded");
+    }
+    // A form of several files answers
+    // for each file, and is checked file by file inside.
+    let checked = match &upload {
+        Upload::Body { name, data } => Some((name.as_str(), data)),
+        Upload::Files(files) => match files.as_slice() {
+            [file] => match file_to_store(file) {
+                Some(name) => Some((name, &file.data)),
+                None => return Failure::bad_request("file must be .json").response(),
+            },
+            _ => None,
+        },
+    };
+    if let Some((name, data)) = checked
+        && let Err(failure) = check_upload(&state, name, data.clone()).await
+    {
+        return failure.response();
+    }
+    let gated = state.clone();
+    owned(&gated, upload_owned(state, upload)).await
+}
+
+/// What an upload sent: one file named by `?name=`, or a form's files.
+enum Upload {
+    Body { name: String, data: Bytes },
+    Files(Vec<FormFile>),
+}
+
+/// Reads the upload `request` sends, or answers why it can't be.
+async fn read_upload(raw: Option<&str>, request: Request) -> Result<Upload, Response> {
+    if !is_multipart(request.headers()) {
+        let name = query_name(raw).map_err(|failure| failure.response())?;
+        // Read with the route's body limit.
+        let data = match Bytes::from_request(request, &()).await {
+            Ok(data) => data,
+            Err(rejection) if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE => {
+                return Err(json::error(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "request body too large",
+                ));
+            }
+            Err(_) => return Err(json::error(StatusCode::BAD_REQUEST, "failed to read body")),
+        };
+        return Ok(Upload::Body { name, data });
+    }
+    match read_form(request).await {
+        Ok(form) => Ok(Upload::Files(form.files)),
+        Err(FormError::TooLarge) => Err(json::error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "request body too large",
+        )),
+        Err(FormError::Invalid(reason)) => Err(json::error(
+            StatusCode::BAD_REQUEST,
+            &format!("invalid multipart form: {reason}"),
+        )),
+    }
+}
+
+/// [`upload`], as a task the active gate owns.
+async fn upload_owned(state: ManagementState, upload: Upload) -> Response {
     let store = match state.credential_store() {
         Ok(store) => store,
         Err(unavailable) => return unavailable.into_response(),
     };
-    if !is_multipart(request.headers()) {
-        return upload_body(&state, &store, raw.as_deref(), request).await;
-    }
-    let files = match read_form(request).await {
-        Ok(form) => form.files,
-        Err(FormError::TooLarge) => {
-            return json::error(StatusCode::PAYLOAD_TOO_LARGE, "request body too large");
+    let files = match upload {
+        Upload::Body { name, data } => {
+            return match write_auth_file(&state, &store, &name, data).await {
+                Ok(()) => ok(),
+                Err(failure) => failure.response(),
+            };
         }
-        Err(FormError::Invalid(reason)) => {
-            return json::error(
-                StatusCode::BAD_REQUEST,
-                &format!("invalid multipart form: {reason}"),
-            );
-        }
+        Upload::Files(files) => files,
     };
     match files.as_slice() {
         [] => json::error(StatusCode::BAD_REQUEST, "no files uploaded"),
@@ -290,31 +358,6 @@ async fn upload(
     }
 }
 
-/// An upload sent as the body, named by `?name=`.
-async fn upload_body(
-    state: &ManagementState,
-    store: &CredentialStore,
-    raw: Option<&str>,
-    request: Request,
-) -> Response {
-    let name = match query_name(raw) {
-        Ok(name) => name,
-        Err(failure) => return failure.response(),
-    };
-    // Read with the route's body limit.
-    let data = match Bytes::from_request(request, &()).await {
-        Ok(data) => data,
-        Err(rejection) if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE => {
-            return json::error(StatusCode::PAYLOAD_TOO_LARGE, "request body too large");
-        }
-        Err(_) => return json::error(StatusCode::BAD_REQUEST, "failed to read body"),
-    };
-    match write_auth_file(state, store, &name, data).await {
-        Ok(()) => ok(),
-        Err(failure) => failure.response(),
-    }
-}
-
 /// `storeUploadedAuthFile`: writes an uploaded file, and returns its name.
 async fn store_uploaded(
     state: &ManagementState,
@@ -323,12 +366,53 @@ async fn store_uploaded(
 ) -> Result<String, Failure> {
     // The form's file name is already a base name, as Go's; upstream trims
     // it and takes the base name again.
-    let name = base_name(trim_str(&file.file_name));
-    if !has_json_suffix(name) {
+    let Some(name) = file_to_store(file) else {
         return Err(Failure::bad_request("file must be .json"));
-    }
+    };
     write_auth_file(state, store, name, file.data.clone()).await?;
     Ok(name.to_owned())
+}
+
+/// The name an uploaded file is stored as, or `None` when it isn't `.json`.
+fn file_to_store(file: &FormFile) -> Option<&str> {
+    let name = base_name(trim_str(&file.file_name));
+    has_json_suffix(name).then_some(name)
+}
+
+/// The checks of [`write_auth_file`] that need nothing but the upload and the
+/// auth directory's place: the name, the size, and that the service would
+/// read a credential from the data. Made before the gate admits the upload;
+/// [`write_auth_file`] makes them again, for it is also the way in for a
+/// form of several files.
+async fn check_upload(state: &ManagementState, name: &str, data: Bytes) -> Result<(), Failure> {
+    let Ok(store) = state.credential_store() else {
+        // Answered by the upload itself.
+        return Ok(());
+    };
+    check_name_and_size(name, &data)?;
+    let files = Arc::clone(&store.files);
+    let file = name.to_owned();
+    run_blocking(move || {
+        let path = files
+            .file_path(&file)
+            .map_err(|error| Failure::internal(format!("failed to write file: {error}")))?;
+        check_credential(&files.base_dir(), &path, &data)
+    })
+    .await
+}
+
+/// The name and size checks of [`write_auth_file`].
+fn check_name_and_size(name: &str, data: &[u8]) -> Result<(), Failure> {
+    if is_unsafe_name(name) {
+        return Err(Failure::bad_request("invalid name"));
+    }
+    if data.len() as u64 > MAX_AUTH_FILE_SIZE {
+        return Err(Failure::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "auth file too large",
+        ));
+    }
+    Ok(())
 }
 
 /// `writeAuthFile`: writes `data` as file `name` of the auth directory if
@@ -339,15 +423,7 @@ async fn write_auth_file(
     name: &str,
     data: Bytes,
 ) -> Result<(), Failure> {
-    if is_unsafe_name(name) {
-        return Err(Failure::bad_request("invalid name"));
-    }
-    if data.len() as u64 > MAX_AUTH_FILE_SIZE {
-        return Err(Failure::new(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "auth file too large",
-        ));
-    }
+    check_name_and_size(name, &data)?;
     let files = Arc::clone(&store.files);
     let file = name.to_owned();
     let contents = data.clone();
@@ -417,25 +493,50 @@ async fn delete(
     RawQuery(raw): RawQuery,
     body: Body,
 ) -> Response {
+    if let Err(unavailable) = state.credential_store() {
+        return unavailable.into_response();
+    }
+    let query = Query::parse(raw.as_deref());
+    let target = if matches!(query.value("all"), b"true" | b"1" | b"*") {
+        DeleteTarget::All
+    } else {
+        let mut names = unique_names(query_values(raw.as_deref(), "name"));
+        if names.is_empty() {
+            // Read before the gate admits the delete, so a client that is
+            // slow to send its body doesn't hold up a switch.
+            let body = match bind::read_body(body).await {
+                Ok(body) => body,
+                Err(response) => return response,
+            };
+            match body_names(&body) {
+                Some(listed) => names = unique_names(listed),
+                None => return json::error(StatusCode::BAD_REQUEST, "invalid request body"),
+            }
+        }
+        DeleteTarget::Names(names)
+    };
+    let gated = state.clone();
+    owned(&gated, delete_owned(state, target)).await
+}
+
+/// What a delete removes.
+enum DeleteTarget {
+    /// `?all=true`: every file of the auth directory.
+    All,
+    /// These names, already read from the query or the body.
+    Names(Vec<Vec<u8>>),
+}
+
+/// [`delete`], as a task the active gate owns; it covers `?all=true` too.
+async fn delete_owned(state: ManagementState, target: DeleteTarget) -> Response {
     let store = match state.credential_store() {
         Ok(store) => store,
         Err(unavailable) => return unavailable.into_response(),
     };
-    let query = Query::parse(raw.as_deref());
-    if matches!(query.value("all"), b"true" | b"1" | b"*") {
-        return delete_all(&state, &store).await;
-    }
-    let mut names = unique_names(query_values(raw.as_deref(), "name"));
-    if names.is_empty() {
-        let body = match bind::read_body(body).await {
-            Ok(body) => body,
-            Err(response) => return response,
-        };
-        match body_names(&body) {
-            Some(listed) => names = unique_names(listed),
-            None => return json::error(StatusCode::BAD_REQUEST, "invalid request body"),
-        }
-    }
+    let names = match target {
+        DeleteTarget::All => return delete_all(&state, &store).await,
+        DeleteTarget::Names(names) => names,
+    };
     match names.as_slice() {
         [] => json::error(StatusCode::BAD_REQUEST, "invalid name"),
         [name] => match delete_one(&state, &store, name).await {

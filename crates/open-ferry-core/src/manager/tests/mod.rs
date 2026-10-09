@@ -13,6 +13,7 @@ mod affinity;
 mod api_key_model_alias;
 mod auto_refresh_issue6199;
 mod auto_refresh_loop;
+mod blue_green;
 mod catalog_credential_quota_regression;
 mod classification;
 mod claude_ratelimit_cooldown;

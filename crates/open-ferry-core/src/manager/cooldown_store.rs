@@ -80,6 +80,12 @@
 //!   quota's `reason` and the error's `code` and `message` as they came, and
 //!   an upstream that quotes a key or cookie it was sent ("Bad cookie:
 //!   session=...") would leave it in the file.
+//! - Not upstream's: [`freeze`] makes a last save and turns saving off while
+//!   the process hands its credentials over, and [`thaw`] turns it back on,
+//!   restoring from the file again only when the lease was given up. A save
+//!   needs a write permit of the manager's gate; the last save of a freeze
+//!   runs once the gate is closed, so it takes none (the cooldown file
+//!   isn't a credential or the config).
 //! - A save that fails is not forgotten: the store stays dirty, the worker
 //!   tries again after the debounce doubled for each failure in a row (up to
 //!   a minute), and [`flush`] at shutdown tries once more. Upstream saves
@@ -145,6 +151,7 @@ impl Default for CooldownStore {
             signal: Arc::new(Signal {
                 control: Mutex::new(Control {
                     enabled: false,
+                    frozen: false,
                     dirty: false,
                     shutdown: false,
                     worker: false,
@@ -185,6 +192,9 @@ struct Signal {
 struct Control {
     /// Whether changes are saved: a store is installed and restored.
     enabled: bool,
+    /// Saving is held off for a hand-over: nothing is saved, enabled or
+    /// restored until [`thaw`].
+    frozen: bool,
     /// A change, or a save that failed, hasn't been saved yet.
     dirty: bool,
     /// The manager is gone.
@@ -265,7 +275,7 @@ fn flush_once(manager: &Manager) -> bool {
     }
     {
         let mut control = lock(&signal.control);
-        if !control.dirty {
+        if control.frozen || !control.dirty {
             return true;
         }
         // Cleared before the snapshot, so a change made while it is written
@@ -287,6 +297,99 @@ pub(crate) fn changed(manager: &Manager) {
     control.dirty = true;
     drop(control);
     signal.wake.notify_all();
+}
+
+/// Why [`freeze`] couldn't make its last save.
+#[derive(Debug)]
+pub struct FreezeError(String);
+
+impl fmt::Display for FreezeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "the cooldown state could not be saved: {}", self.0)
+    }
+}
+
+impl std::error::Error for FreezeError {}
+
+/// How [`thaw`] turns saving back on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Thaw {
+    /// The lease was kept: the file is what this process wrote, so nothing
+    /// is read from it.
+    Keep,
+    /// The lease was given up and taken again, so the other process may
+    /// have written the file: restore from it first.
+    Restore,
+}
+
+/// Not upstream's: makes a last save and turns saving off. The gate is
+/// closed by now, so the save takes no permit. A save that fails returns
+/// the error and leaves the store enabled, as it was.
+///
+/// # Errors
+/// [`FreezeError`] when the last save failed.
+pub fn freeze(manager: &Manager) -> Result<(), FreezeError> {
+    let signal = &manager.shared.cooldown_store.signal;
+    let mut io = lock(&signal.io);
+    // A change made while the last save is written marks the store again;
+    // a few rounds catch it, and the store goes off in the same step that
+    // sees it clean.
+    for _ in 0..4 {
+        if io.pending_restore || io.target.is_none() {
+            break;
+        }
+        lock(&signal.control).dirty = false;
+        if !save_ungated(manager, &mut io) {
+            return Err(FreezeError("the target did not take the save".into()));
+        }
+        let mut control = lock(&signal.control);
+        if !control.dirty {
+            control.enabled = false;
+            control.frozen = true;
+            return Ok(());
+        }
+    }
+    let mut control = lock(&signal.control);
+    control.enabled = false;
+    control.dirty = false;
+    control.frozen = true;
+    Ok(())
+}
+
+/// Not upstream's: a standby process starts with saving held off, so it
+/// neither restores nor writes the cooldown file until [`thaw`].
+pub fn standby(manager: &Manager) {
+    let signal = &manager.shared.cooldown_store.signal;
+    let _io = lock(&signal.io);
+    let mut control = lock(&signal.control);
+    control.enabled = false;
+    control.dirty = false;
+    control.frozen = true;
+}
+
+/// Not upstream's: turns saving back on after [`freeze`] or [`standby`].
+/// With [`Thaw::Restore`] the saved cooldowns are put back first, as at
+/// start; with [`Thaw::Keep`] nothing is read and the changes made while
+/// frozen are saved.
+pub fn thaw(manager: &Manager, kind: Thaw) {
+    let signal = &manager.shared.cooldown_store.signal;
+    {
+        let mut io = lock(&signal.io);
+        lock(&signal.control).frozen = false;
+        if kind == Thaw::Restore && io.target.is_some() {
+            io.pending_restore = true;
+            io.last_written = None;
+        }
+    }
+    if lock(&signal.io).pending_restore {
+        restore_pending(manager);
+        return;
+    }
+    let installed = lock(&signal.io).target.is_some();
+    if installed {
+        enable(manager);
+        changed(manager);
+    }
 }
 
 /// Installs `target`, or turns the store off (upstream's
@@ -321,7 +424,7 @@ fn install(manager: &Manager, target: Option<Target>) {
 fn restore_pending(manager: &Manager) {
     let signal = &manager.shared.cooldown_store.signal;
     let mut io = lock(&signal.io);
-    if !io.pending_restore {
+    if !io.pending_restore || lock(&signal.control).frozen {
         return;
     }
     io.pending_restore = false;
@@ -351,6 +454,9 @@ fn enable(manager: &Manager) {
     let signal = &manager.shared.cooldown_store.signal;
     let start = {
         let mut control = lock(&signal.control);
+        if control.frozen {
+            return;
+        }
         control.enabled = true;
         !std::mem::replace(&mut control.worker, true)
     };
@@ -433,6 +539,25 @@ fn run_worker(signal: &Signal, shared: &Weak<Shared>) {
 /// Returns whether the target is up to date; if it isn't, the store is
 /// marked dirty again, so the worker and the next [`flush`] try once more.
 fn save_locked(manager: &Manager, io: &mut Io) -> bool {
+    // A refusal is a failed save: the store stays dirty and the worker
+    // tries again.
+    let permit = manager.gate().write_permit();
+    match permit {
+        Ok(_permit) => save_ungated(manager, io),
+        Err(err) => {
+            tracing::debug!("cooldown state not saved: {err}");
+            let signal = &manager.shared.cooldown_store.signal;
+            let mut control = lock(&signal.control);
+            if control.enabled {
+                control.dirty = true;
+            }
+            false
+        }
+    }
+}
+
+/// [`save_locked`] without the gate's permit.
+fn save_ungated(manager: &Manager, io: &mut Io) -> bool {
     let Some(target) = &io.target else {
         return true;
     };
