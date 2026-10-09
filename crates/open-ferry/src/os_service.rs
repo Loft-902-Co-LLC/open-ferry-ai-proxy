@@ -469,7 +469,7 @@ pub(crate) struct Context {
 }
 
 /// The environment variables `service` and `migrate` read.
-const ENV_VARS: [&str; 9] = [
+const ENV_VARS: [&str; 15] = [
     "HOME",
     "USERPROFILE",
     "XDG_CONFIG_HOME",
@@ -479,6 +479,12 @@ const ENV_VARS: [&str; 9] = [
     "ProgramFiles(x86)",
     "ProgramW6432",
     "SystemRoot",
+    "windir",
+    "LOCALAPPDATA",
+    "APPDATA",
+    "ProgramData",
+    "USERNAME",
+    "PUBLIC",
 ];
 
 impl Context {

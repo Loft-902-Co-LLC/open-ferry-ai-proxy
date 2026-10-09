@@ -758,9 +758,9 @@ fn exec_command(command: &str) -> Option<ExecCommand> {
 }
 
 /// Adds the `ExecStart=` values of the `[Service]` section of a unit file
-/// (or drop-in) to `commands`, as systemd does: an empty `ExecStart=`
-/// resets the list.
-fn add_exec_starts(text: &str, commands: &mut Vec<String>) {
+/// (or drop-in) `source` to `commands`, each with its file, as systemd does:
+/// an empty `ExecStart=` resets the list.
+fn add_exec_starts(text: &str, source: &str, commands: &mut Vec<(String, String)>) {
     let mut lines = Vec::new();
     let mut joined = String::new();
     for line in text.lines() {
@@ -793,13 +793,13 @@ fn add_exec_starts(text: &str, commands: &mut Vec<String>) {
             if value.is_empty() {
                 commands.clear();
             } else {
-                commands.push(value.to_owned());
+                commands.push((value.to_owned(), source.to_owned()));
             }
         }
     }
 }
 
-const SHOW_PROPERTIES: &str = "LoadState,MainPID,FragmentPath,DropInPaths,Type,UnitFileState,ActiveState,ExecStart,WorkingDirectory,Environment,EnvironmentFiles,User";
+const SHOW_PROPERTIES: &str = "LoadState,MainPID,FragmentPath,DropInPaths,Type,UnitFileState,ActiveState,ExecStart,WorkingDirectory,Environment,EnvironmentFiles,User,NeedDaemonReload";
 
 /// `systemctl show`'s command for `unit`.
 pub(crate) fn systemctl(user: bool, args: &[&str]) -> Cmd {
@@ -906,10 +906,13 @@ struct UnitExec {
     problem: Option<String>,
 }
 
-/// The `ExecStart=` commands in effect, as systemd takes them: the unit
-/// file's, then each drop-in's in order, an empty `ExecStart=` clearing
-/// those before it.
-fn effective_exec_starts(machine: &mut dyn Machine, shown: &Shown) -> Result<Vec<String>, String> {
+/// The `ExecStart=` commands in effect, as systemd takes them, each with
+/// the file it is in: the unit file's, then each drop-in's in order, an
+/// empty `ExecStart=` clearing those before it.
+fn effective_exec_starts(
+    machine: &mut dyn Machine,
+    shown: &Shown,
+) -> Result<Vec<(String, String)>, String> {
     let fragment = shown.get("FragmentPath");
     if fragment.is_empty() {
         return Err("it has no unit file".to_owned());
@@ -920,18 +923,33 @@ fn effective_exec_starts(machine: &mut dyn Machine, shown: &Shown) -> Result<Vec
         let data = machine
             .read(path)
             .map_err(|error| format!("{path} can't be read: {error}"))?;
-        add_exec_starts(&String::from_utf8_lossy(&data), &mut commands);
+        add_exec_starts(&String::from_utf8_lossy(&data), path, &mut commands);
     }
     Ok(commands)
+}
+
+/// Whether a word of a command line has a `$` variable or a `%` specifier,
+/// which systemd expands when it starts the unit. `$$` and `%%` are a
+/// literal `$` and `%`.
+fn expands(word: &str) -> bool {
+    let mut chars = word.chars();
+    while let Some(c) = chars.next() {
+        if (c == '$' || c == '%') && chars.next() != Some(c) {
+            return true;
+        }
+    }
+    false
 }
 
 /// A unit's command line. `systemctl show` joins the words with spaces
 /// and drops their quotes, so a word with a space in it can't be told
 /// apart: the unit file and its drop-ins are read and split as systemd
-/// splits them, and used when they give the program and words `systemctl
-/// show` printed. When they don't (a specifier changes them, or the file
-/// is odd), the command is marked as one that can't be relied on, and
-/// `systemctl show`'s words are not split any further.
+/// splits them, and that is the command line, when `systemctl show` prints
+/// the same program and words. When it doesn't, or the files aren't what
+/// systemd runs (changed since it loaded them, or using `$` variables or
+/// `%` specifiers, which it expands and `migrate` doesn't), the command is
+/// marked as one that can't be relied on. The problem says what kind it is,
+/// and names the file, but never shows the command: it may hold a secret.
 fn unit_exec(machine: &mut dyn Machine, shown: &Shown) -> Option<UnitExec> {
     let path = shown.exec_path();
     if path.is_empty() {
@@ -944,11 +962,17 @@ fn unit_exec(machine: &mut dyn Machine, shown: &Shown) -> Option<UnitExec> {
         args: Vec::new(),
         problem: Some(problem),
     };
+    if shown.get("NeedDaemonReload") == "yes" {
+        return Some(unreliable(
+            "its files have changed since systemd loaded them, so they aren't what it runs"
+                .to_owned(),
+        ));
+    }
     let commands = match effective_exec_starts(machine, shown) {
         Ok(commands) => commands,
         Err(error) => return Some(unreliable(error)),
     };
-    let Some(first) = commands.first() else {
+    let Some((first, file)) = commands.first() else {
         return Some(unreliable("no ExecStart= is found in its files".to_owned()));
     };
     if commands.len() > 1 && shown.get("Type") != "oneshot" {
@@ -958,24 +982,52 @@ fn unit_exec(machine: &mut dyn Machine, shown: &Shown) -> Option<UnitExec> {
         )));
     }
     let Some(command) = exec_command(first) else {
-        return Some(unreliable(format!("`ExecStart={first}` can't be split")));
-    };
-    let agrees = command.exe == path
-        && command
-            .argv
-            .join(" ")
-            .split_whitespace()
-            .eq(printed.iter().map(String::as_str));
-    if !agrees {
         return Some(unreliable(format!(
-            "its files give `{}` where systemctl shows `{}`",
-            command.argv.join(" "),
-            printed.join(" ")
+            "the ExecStart= in {file} can't be split into words"
+        )));
+    };
+    if std::iter::once(&command.exe)
+        .chain(&command.argv)
+        .any(|word| expands(word))
+    {
+        return Some(unreliable(format!(
+            "the ExecStart= in {file} uses a $ variable or a % specifier, which systemd expands when it starts the unit"
+        )));
+    }
+    // `%%` and `$$` are one `%` and `$` to systemd. A file that `systemctl
+    // show` prints differently from this is blocked below, not guessed at.
+    let exe = command.exe.replace("%%", "%");
+    let argv: Vec<String> = command
+        .argv
+        .iter()
+        .map(|word| word.replace("%%", "%"))
+        .collect();
+    let words: Vec<&str> = argv
+        .iter()
+        .flat_map(|word| word.split_whitespace())
+        .collect();
+    let difference = if exe != path {
+        Some("the program differs")
+    } else if words.len() != printed.len() {
+        Some("the number of words differs")
+    } else if !words.iter().eq(printed.iter()) {
+        Some("a word differs")
+    } else {
+        None
+    };
+    if let Some(difference) = difference {
+        return Some(unreliable(format!(
+            "the ExecStart= in {file} and what systemctl show prints for it don't agree: {difference}"
         )));
     }
     Some(UnitExec {
-        exe: command.exe,
-        args: command.argv.get(1..).unwrap_or_default().to_vec(),
+        exe: exe.replace("$$", "$"),
+        args: argv
+            .get(1..)
+            .unwrap_or_default()
+            .iter()
+            .map(|word| word.replace("$$", "$"))
+            .collect(),
         problem: None,
     })
 }
@@ -1574,7 +1626,11 @@ fn task_runs(
     let command = expand(context, &task.command);
     if is_binary_name(&file_name(platform, &command)) {
         let matches = match exe {
-            Some(exe) if platform.is_absolute(&command) => same_path(platform, &command, exe),
+            // With a variable not known, the path can't be compared; the
+            // task is then blocked, not skipped.
+            Some(exe) if platform.is_absolute(&command) && !has_unknown_variable(&command) => {
+                same_path(platform, &command, exe)
+            }
             _ => true,
         };
         return matches.then_some(TaskRuns::Binary);
@@ -1668,22 +1724,76 @@ fn task_dir(context: &Context, task: &Task) -> Option<String> {
     (!dir.contains('%')).then_some(dir)
 }
 
+/// Whether `text` still has a `%NAME%` that [`expand`] didn't know.
+fn has_unknown_variable(text: &str) -> bool {
+    let mut rest = text;
+    while let Some(start) = rest.find('%') {
+        let after = rest.get(start + 1..).unwrap_or_default();
+        let Some(end) = after.find('%') else {
+            return false;
+        };
+        let name = after.get(..end).unwrap_or_default();
+        if !name.is_empty() && !name.contains(char::is_whitespace) {
+            return true;
+        }
+        rest = after.get(end..).unwrap_or_default();
+    }
+    false
+}
+
+/// What a task's command, arguments and directory leave unsaid: a variable
+/// in them that `migrate` doesn't know, so what the task runs can't be
+/// told. Names the task and the part, never its value.
+fn task_unknown(context: &Context, task: &Task) -> Option<String> {
+    let part = if has_unknown_variable(&expand(context, &task.command)) {
+        "command"
+    } else if has_unknown_variable(&expand(context, &task.arguments)) {
+        "arguments"
+    } else if task_dir(context, task).is_none() {
+        "working directory"
+    } else {
+        return None;
+    };
+    Some(format!(
+        "the {part} of the scheduled task {} uses a variable that migrate doesn't know, so where and how it starts CLIProxyAPI can't be told: switch by hand, as docs/migrating-from-cliproxyapi.md says",
+        task.name
+    ))
+}
+
+/// Whether a task started a process.
+#[derive(Debug, PartialEq, Eq)]
+enum Started {
+    Yes,
+    No,
+    /// It runs the same command, but whether it started this process can't
+    /// be told: why.
+    Unknown(String),
+}
+
 /// Whether `task` is the one that started `process`: it runs the same
 /// program (see [`task_runs`]) with the same arguments, which carry the
-/// config, and in the same working directory when that is known. A task
-/// with no working directory runs in `%windir%\System32`; one whose
-/// directory can't be told isn't taken for it.
-fn task_started(context: &Context, task: &Task, process: &Proc) -> bool {
+/// config, and in the same working directory. A task with no working
+/// directory runs in `%windir%\System32`. When the task's command line or
+/// directory can't be told, or the process's directory can't be read, it
+/// isn't known.
+fn task_started(context: &Context, task: &Task, process: &Proc) -> Started {
+    if let Some(why) = task_unknown(context, task) {
+        return Started::Unknown(why);
+    }
     let arguments = split_windows(&expand(context, &task.arguments));
     if arguments != process.args {
-        return false;
+        return Started::No;
     }
     let Some(dir) = task_dir(context, task) else {
-        return false;
+        return Started::No;
     };
     match process.cwd.as_deref() {
-        Some(cwd) => same_path(Platform::Windows, &dir, cwd),
-        None => true,
+        Some(cwd) if same_path(Platform::Windows, &dir, cwd) => Started::Yes,
+        Some(_) => Started::No,
+        None => Started::Unknown(format!(
+            "the scheduled task {} runs the same command, but CLIProxyAPI's working directory can't be read to tell whether that task started it: switch by hand, as docs/migrating-from-cliproxyapi.md says",
+            task.name
+        )),
     }
 }
 
@@ -1766,14 +1876,18 @@ fn windows_process(
     });
     let exe = process.exe.clone();
     let mut direct: Vec<&Task> = Vec::new();
+    let mut unknown = Vec::new();
     let mut launchers = Vec::new();
     for task in &tasks {
         match task_runs(machine, context, task, exe.as_deref()) {
-            Some(TaskRuns::Binary) => {
-                if task_started(context, task, &process) {
+            Some(TaskRuns::Binary) => match task_started(context, task, &process) {
+                Started::Yes => direct.push(task),
+                Started::No => {}
+                Started::Unknown(why) => {
                     direct.push(task);
+                    unknown.push(why);
                 }
-            }
+            },
             Some(TaskRuns::Launcher { program, names_exe }) => {
                 launchers.push((!names_exe, !task.enabled, task.name.clone(), program));
             }
@@ -1783,6 +1897,7 @@ fn windows_process(
     if !direct.is_empty() {
         let mut blockers = Vec::new();
         let starter = task_starter(machine, &direct, &mut blockers);
+        blockers.extend(unknown);
         let mut found = Found::from_process(process, starter);
         found.blockers = blockers;
         found.notes = notes;
@@ -1893,6 +2008,7 @@ fn windows_not_running(
     if let Some(first) = direct.first() {
         let mut blockers = Vec::new();
         let starter = task_starter(machine, &direct, &mut blockers);
+        blockers.extend(task_unknown(context, first));
         let mut found = Found::new(starter);
         found.blockers = blockers;
         found.exe = Some(expand(context, &first.command));
@@ -2275,9 +2391,12 @@ mod tests {
         let starts = |texts: &[&str]| {
             let mut commands = Vec::new();
             for text in texts {
-                add_exec_starts(text, &mut commands);
+                add_exec_starts(text, "unit", &mut commands);
             }
             commands
+                .into_iter()
+                .map(|(command, _)| command)
+                .collect::<Vec<_>>()
         };
         // `@` makes the first word the program and the second argv[0].
         let commands = starts(&[unit]);
@@ -2307,6 +2426,20 @@ mod tests {
             ]),
             ["/bin/new -config \"/etc/cpa new.yaml\""]
         );
+    }
+
+    #[test]
+    fn finds_variables_and_specifiers() {
+        for word in ["$X", "${X}", "a$", "%h", "x%n", "%%%h", "$$$X"] {
+            assert!(expands(word), "{word}");
+        }
+        for word in ["abc", "$$", "a$$b", "%%", "100%%"] {
+            assert!(!expands(word), "{word}");
+        }
+        assert!(has_unknown_variable(r"C:\%NOSUCH%\x"));
+        assert!(!has_unknown_variable(r"C:\x"));
+        assert!(!has_unknown_variable("100% sure, 5% more"));
+        assert!(!has_unknown_variable("50%"));
     }
 
     fn strings(words: &[&str]) -> Vec<String> {
