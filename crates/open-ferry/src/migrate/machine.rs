@@ -1266,5 +1266,18 @@ mod tests {
         let error = host.copy_new(&text("from"), &text("other")).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::AlreadyExists, "{error}");
         assert_eq!(std::fs::read(path("other")).unwrap(), b"theirs");
+
+        // On Unix the copy keeps the source's mode, so the binary runs.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(path("from"), std::fs::Permissions::from_mode(0o755)).unwrap();
+            host.copy_new(&text("from"), &text("runs")).unwrap();
+            let mode = std::fs::metadata(path("runs"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o755);
+        }
     }
 }
