@@ -15,7 +15,7 @@
 //! [`record`]). After it, `migrate` waits for open-ferry to answer on the
 //! config's address, and undoes the switch when it doesn't.
 
-use std::io::Write;
+use std::io::{self, Write};
 use std::time::Duration;
 
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -1369,18 +1369,56 @@ fn start_theirs(machine: &mut dyn Machine, theirs: &Theirs, out: &mut dyn Write)
     run_all(machine, &commands_to_start(theirs, on), out)
 }
 
+/// Waits for open-ferry's service and the `runners` taken before it was
+/// removed to end, then looks for runners again: a supervisor in its restart
+/// pause may have started a server since, which outlives it if its job
+/// failed. What is found is waited for too.
+fn wait_service_ended(
+    machine: &mut dyn Machine,
+    context: &Context,
+    target: Target,
+    runners: &[Proc],
+    config: &str,
+    listen: Option<&Listen>,
+) -> Result<(), String> {
+    wait_ended(machine, context, &Ending::Service(target, runners), listen)?;
+    let mut known = runners.to_vec();
+    for _ in 0..3 {
+        let found =
+            service_runners(machine, context, config).map_err(|error| unknown_runners(&error))?;
+        let fresh: Vec<Proc> = found
+            .into_iter()
+            .filter(|process| {
+                !known
+                    .iter()
+                    .any(|old| old.pid == process.pid && old.started == process.started)
+            })
+            .collect();
+        if fresh.is_empty() {
+            return Ok(());
+        }
+        wait_ended(machine, context, &Ending::Processes(&fresh), listen)?;
+        known.extend(fresh);
+    }
+    Err(format!(
+        "open-ferry's processes keep starting, so CLIProxyAPI is not started beside them. The record stays open: run `open-ferry {} -undo` again once open-ferry has stopped",
+        super::NAME
+    ))
+}
+
 /// Turns CLIProxyAPI's service back on once open-ferry's has ended; the
 /// failures are returned.
 fn turn_theirs_on(
     machine: &mut dyn Machine,
-    context: &Context,
+    base: &Base<'_>,
     target: Target,
     runners: &[Proc],
     theirs: &Theirs,
     listen: Option<&Listen>,
     out: &mut dyn Write,
 ) -> Vec<String> {
-    if let Err(error) = wait_ended(machine, context, &Ending::Service(target, runners), listen) {
+    let (context, config) = (base.context, base.config);
+    if let Err(error) = wait_service_ended(machine, context, target, runners, config, listen) {
         say(out, format_args!("{error}"));
         return vec![error];
     }
@@ -1678,7 +1716,7 @@ fn execute_service(
         // CLIProxyAPI's service isn't turned on beside one that stays.
         if failures.is_empty() {
             failures.extend(turn_theirs_on(
-                machine, context, target, &runners, &theirs, listen, out,
+                machine, base, target, &runners, &theirs, listen, out,
             ));
         }
         if failures.is_empty() && was_running(&theirs) {
@@ -1737,7 +1775,7 @@ fn execute_service(
             }
             if failures.is_empty() {
                 failures.extend(turn_theirs_on(
-                    machine, context, target, &runners, &theirs, listen, out,
+                    machine, base, target, &runners, &theirs, listen, out,
                 ));
             }
             if failures.is_empty() && was_running(&theirs) {
@@ -2289,6 +2327,33 @@ fn start_like(
         .map_err(|error| format!("failed to start {binary}: {error}"))
 }
 
+/// Where the copy of open-ferry is made before it is moved to `binary`: a
+/// name that is neither `<binary>.open-ferry*` (the set-aside scan) nor
+/// `<binary>.cliproxyapi`.
+fn staging_path(binary: &str) -> String {
+    format!("{binary}.new-{}", std::process::id())
+}
+
+/// Puts a copy of `from` at `binary`, which must not exist: the copy is made
+/// in a file this run creates (`copy_new` fails if it is there), then moved to
+/// `binary` without replacing anything. On a failure only that file is
+/// removed, never `binary`.
+fn copy_into_place(machine: &mut dyn Machine, from: &str, binary: &str) -> io::Result<()> {
+    let staged = staging_path(binary);
+    if let Err(error) = machine.copy_new(from, &staged) {
+        // A file that was there already is another run's: left alone.
+        if error.kind() != io::ErrorKind::AlreadyExists {
+            let _ = machine.remove(&staged);
+        }
+        return Err(error);
+    }
+    if let Err(error) = machine.rename_new(&staged, binary) {
+        let _ = machine.remove(&staged);
+        return Err(error);
+    }
+    Ok(())
+}
+
 fn execute_drop_in(
     machine: &mut dyn Machine,
     base: &Base<'_>,
@@ -2371,29 +2436,16 @@ fn execute_drop_in(
         Some(target) => machine
             .symlink(target, binary)
             .map(|()| format!("Linked {binary} to {target}, the installed open-ferry")),
-        None => machine
-            .copy(&context.exe, binary)
+        None => copy_into_place(machine, &context.exe, binary)
             .map(|()| format!("Copied open-ferry to {binary}")),
     };
     match put {
         Ok(done) => say(out, format_args!("{done}")),
         Err(error) => {
+            // Whatever is at `binary` now isn't this run's: the move back
+            // never replaces it, and fails if it is there.
             let mut failures = Vec::new();
-            // A copy that failed part way leaves its start; a link leaves
-            // nothing. The move back never replaces a file, so the start is
-            // removed first.
-            if link.is_none()
-                && machine.link_target(binary).is_none()
-                && machine.exists(binary)
-                && let Err(error) = machine.remove(binary)
-            {
-                failures.push(format!(
-                    "failed to remove the part of open-ferry that was copied to {binary}: {error}"
-                ));
-            }
-            if failures.is_empty()
-                && let Err(error) = machine.rename_new(&moved, binary)
-            {
+            if let Err(error) = machine.rename_new(&moved, binary) {
                 failures.push(format!("failed to move {moved} back to {binary}: {error}"));
             }
             settle(
@@ -2900,9 +2952,12 @@ fn restore_safely(
 /// is stopped is not killed. The manager is asked whether or not a process
 /// is seen. Running: it is stopped through the manager, with the person's
 /// yes. Unknown, or still not stopped after the wait: nothing is copied. A
-/// scheduled task has no state to read: it is disabled first, ended, and
-/// counts as stopped once no process of it runs. What still runs from the
-/// binary once the manager says stopped is stopped by its identity.
+/// scheduled task has no state to read: it is disabled first (which needs no
+/// question, as it only keeps the task from starting), the processes are
+/// read after that, and it is ended and counts as stopped once none of them
+/// runs. What still runs from the binary once the manager says stopped is
+/// stopped by its identity, and the processes are read once more just before
+/// the copy: anything running then blocks it.
 fn restore_service(
     machine: &mut dyn Machine,
     context: &Context,
@@ -2916,8 +2971,8 @@ fn restore_service(
         return Restored::nothing(None);
     };
     let paths: Vec<String> = record.cliproxyapi.exe.iter().cloned().collect();
-    let users = running_theirs(machine, platform, &paths, None);
-    // A task could start CLIProxyAPI again during the copy: it is off first.
+    // A task could start CLIProxyAPI again during the copy: it is off first,
+    // and what runs is read after that, since a task can start in between.
     if let Theirs::Task { name, .. } = theirs {
         let cmd = Cmd::new("schtasks.exe", &["/change", "/tn", name, "/disable"]);
         match run_checked(machine, &cmd) {
@@ -2930,6 +2985,7 @@ fn restore_service(
             }
         }
     }
+    let users = running_theirs(machine, platform, &paths, None);
     let state = theirs_state(machine, theirs);
     if let Some(os_service::ServiceState::Unknown(why)) = &state {
         return Restored::nothing(Some(format!(
@@ -3018,6 +3074,20 @@ fn restore_service(
             stopped,
             manager_stopped,
             failure: Some(error),
+        };
+    }
+    // Just before the copy: nothing of CLIProxyAPI's may run on the files.
+    let late = running_theirs(machine, platform, &paths, None);
+    if !late.is_empty() {
+        let list: Vec<String> = late.iter().map(|process| process.pid.to_string()).collect();
+        return Restored {
+            stopped,
+            manager_stopped,
+            failure: Some(format!(
+                "CLIProxyAPI runs again (process {}) just before the copy, so nothing was restored. {}",
+                list.join(", "),
+                stop_by_hand()
+            )),
         };
     }
     let failure = restore(machine, platform, backup, out).err();
@@ -3111,10 +3181,12 @@ pub(crate) fn undo(
             }
             // CLIProxyAPI's service isn't turned on while open-ferry's
             // service or process is there.
-            match wait_ended(
+            match wait_service_ended(
                 machine,
                 context,
-                &Ending::Service(target, &runners),
+                target,
+                &runners,
+                &record.cliproxyapi.config,
                 listen.as_ref(),
             ) {
                 Err(error) => {
