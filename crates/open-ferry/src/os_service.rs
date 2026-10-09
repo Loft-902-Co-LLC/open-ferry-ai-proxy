@@ -113,7 +113,7 @@ fn run_for_service_manager(request: &Request) -> ExitCode {
         eprintln!("service run needs -config");
         return ExitCode::from(2);
     };
-    run::main(config, request.system)
+    run::main(config, request.dir.as_deref(), request.system)
 }
 
 /// `open-ferry service run`, which only the service definitions start.
@@ -141,7 +141,7 @@ impl Action {
             Action::Install => &DEFINITIONS,
             Action::Uninstall => &[DRY_RUN, SYSTEM],
             Action::Status => &[SYSTEM],
-            Action::Run => &[CONFIG, SYSTEM],
+            Action::Run => &[CONFIG, DIR, SYSTEM],
         }
     }
 }
@@ -152,6 +152,8 @@ struct Request {
     action: Action,
     /// `-config`, as given.
     config: Option<String>,
+    /// `-dir`, which only `run` takes: the directory to run in.
+    dir: Option<String>,
     /// `-system`.
     system: bool,
     /// `-dry-run`.
@@ -162,6 +164,7 @@ struct Request {
 #[derive(Default)]
 struct Options {
     config: String,
+    dir: String,
     system: bool,
     dry_run: bool,
 }
@@ -170,6 +173,12 @@ const CONFIG: flags::Definition<Options> = flags::Definition {
     name: "config",
     usage: "The config the service runs with (default: the installed config path, shown below)",
     kind: Kind::String(|options, value| options.config = value),
+};
+
+const DIR: flags::Definition<Options> = flags::Definition {
+    name: "dir",
+    usage: "The directory the server runs in (default: the config's directory)",
+    kind: Kind::String(|options, value| options.dir = value),
 };
 
 const DRY_RUN: flags::Definition<Options> = flags::Definition {
@@ -224,6 +233,7 @@ where
     Ok(Request {
         action,
         config: Some(options.config).filter(|config| !config.is_empty()),
+        dir: Some(options.dir).filter(|dir| !dir.is_empty()),
         system: options.system,
         dry_run: options.dry_run,
     })
@@ -623,16 +633,14 @@ pub(crate) trait System {
 pub(crate) fn decode_output(bytes: &[u8]) -> String {
     let units = |data: &[u8], big: bool| -> String {
         let units: Vec<u16> = data
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
-                let pair = [
-                    pair.first().copied().unwrap_or(0),
-                    pair.get(1).copied().unwrap_or(0),
-                ];
                 if big {
-                    u16::from_be_bytes(pair)
+                    u16::from_be_bytes(*pair)
                 } else {
-                    u16::from_le_bytes(pair)
+                    u16::from_le_bytes(*pair)
                 }
             })
             .collect();
@@ -650,10 +658,12 @@ pub(crate) fn decode_output(bytes: &[u8]) -> String {
     // No mark: mostly-ASCII UTF-16LE has a NUL as every second byte.
     let pairs = bytes.len() / 2;
     let nul_high = bytes
-        .chunks_exact(2)
-        .filter(|pair| pair.get(1) == Some(&0) && pair.first() != Some(&0))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .filter(|pair| pair[1] == 0 && pair[0] != 0)
         .count();
-    if pairs >= 2 && bytes.len() % 2 == 0 && nul_high * 10 >= pairs * 9 {
+    if pairs >= 2 && bytes.len().is_multiple_of(2) && nul_high * 10 >= pairs * 9 {
         return units(bytes, false);
     }
     String::from_utf8_lossy(bytes).into_owned()

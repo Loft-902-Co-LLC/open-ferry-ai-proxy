@@ -17,8 +17,10 @@
 //!   failed, and the service manager starts it again.
 //!
 //! Both run in the config's directory, as the systemd unit and the launchd
-//! job do, so the server reads the `.env` file there, and `service.log` is
-//! kept under 10 MiB by moving it to `service.log.1` as the server starts.
+//! job do, or in the directory `-dir` names (`migrate` gives it the
+//! directory CLIProxyAPI ran in), so the server reads the `.env` file there,
+//! and `service.log` is kept there under 10 MiB by moving it to
+//! `service.log.1` as the server starts.
 
 use std::ffi::OsString;
 use std::fmt::Display;
@@ -67,16 +69,26 @@ const MAX_DELAY: Duration = Duration::from_secs(60);
 const STOP_WAIT: Duration = Duration::from_secs(30);
 
 /// Runs the server for the task, or with `system` for the Windows service,
-/// with the config at the full path `config`.
-pub(super) fn main(config: &str, system: bool) -> ExitCode {
+/// with the config at the full path `config`, in `dir` or else the config's
+/// directory.
+pub(super) fn main(config: &str, dir: Option<&str>, system: bool) -> ExitCode {
     let config = PathBuf::from(config);
-    let dir = match config.parent() {
-        Some(dir) if config.is_absolute() => dir.to_path_buf(),
+    let dir = match (dir, config.parent()) {
+        (Some(dir), _) if Path::new(dir).is_absolute() => PathBuf::from(dir),
+        (Some(_), _) => {
+            eprintln!("service run needs -dir to be a full path");
+            return ExitCode::from(2);
+        }
+        (None, Some(dir)) if config.is_absolute() => dir.to_path_buf(),
         _ => {
             eprintln!("service run needs the config's full path");
             return ExitCode::from(2);
         }
     };
+    if !config.is_absolute() {
+        eprintln!("service run needs the config's full path");
+        return ExitCode::from(2);
+    }
     if let Err(error) = std::env::set_current_dir(&dir) {
         eprintln!("failed to go to {}: {error}", dir.display());
         return ExitCode::FAILURE;

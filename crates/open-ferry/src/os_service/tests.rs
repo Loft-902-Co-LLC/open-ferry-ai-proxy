@@ -259,6 +259,7 @@ fn parses_an_action_and_its_flags_as_go_does() {
             config: Some("c.yaml".to_owned()),
             system: true,
             dry_run: true,
+            dir: None,
         })
     );
     assert_eq!(
@@ -268,6 +269,7 @@ fn parses_an_action_and_its_flags_as_go_does() {
             config: None,
             system: false,
             dry_run: false,
+            dir: None,
         })
     );
     assert_eq!(
@@ -277,6 +279,7 @@ fn parses_an_action_and_its_flags_as_go_does() {
             config: None,
             system: true,
             dry_run: false,
+            dir: None,
         })
     );
     assert_eq!(
@@ -290,6 +293,7 @@ fn parses_an_action_and_its_flags_as_go_does() {
             config: Some(r"C:\x\config.yaml".to_owned()),
             system: true,
             dry_run: false,
+            dir: None,
         })
     );
 }
@@ -635,6 +639,51 @@ fn writes_a_scheduled_task() {
 </Task>
 "#
     );
+}
+
+#[test]
+fn a_task_runs_in_the_directory_it_was_given() {
+    // Not upstream's: CLIProxyAPI ran in a directory of its own, and
+    // `service run` goes there as the Windows service and task do not.
+    let definition = Definition {
+        exe: r"C:\Users\me\AppData\Local\Programs\open-ferry\open-ferry.exe".to_owned(),
+        config: WINDOWS_CONFIG.to_owned(),
+        dir: r"C:\CLIProxyAPI".to_owned(),
+    };
+    let xml = windows::task_xml(&definition, SID);
+    assert!(
+        xml.contains(r"service run -config &quot;C:\Users\me\AppData\Roaming\open-ferry\config.yaml&quot; -dir &quot;C:\CLIProxyAPI&quot;</Arguments>"),
+        "{xml}"
+    );
+    assert!(
+        xml.contains(r"<WorkingDirectory>C:\CLIProxyAPI</WorkingDirectory>"),
+        "{xml}"
+    );
+}
+
+#[test]
+fn run_takes_a_directory() {
+    // Not upstream's: `service run -dir`, and only `run` takes it.
+    assert_eq!(
+        parse(args(&[
+            "run",
+            "-config",
+            r"C:\x\config.yaml",
+            "-dir",
+            r"C:\cpa"
+        ])),
+        Ok(Request {
+            action: Action::Run,
+            config: Some(r"C:\x\config.yaml".to_owned()),
+            system: false,
+            dry_run: false,
+            dir: Some(r"C:\cpa".to_owned()),
+        })
+    );
+    assert!(matches!(
+        parse(args(&["install", "-dir", r"C:\cpa"])),
+        Err(FlagError::Invalid(message)) if message == "flag provided but not defined: -dir"
+    ));
 }
 
 #[test]
@@ -1483,6 +1532,6 @@ fn quotes_windows_arguments_as_the_c_runtime_reads_them() {
     };
     assert_eq!(
         windows::service_command(&definition),
-        r#""C:\Program Files\open-ferry\open-ferry.exe" service run -system -config "D:\weird dir\\""#
+        r#""C:\Program Files\open-ferry\open-ferry.exe" service run -system -config "D:\weird dir\\" -dir "D:\weird dir""#
     );
 }
