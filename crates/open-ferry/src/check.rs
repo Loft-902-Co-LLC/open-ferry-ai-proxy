@@ -249,6 +249,10 @@ pub(crate) struct Environment {
     pub(crate) dashboard_built: bool,
     /// Whether `MANAGEMENT_PASSWORD` sets a management key.
     pub(crate) management_password: bool,
+    /// Whether the checks may run a program the config names (a
+    /// `claude-cli` entry's command). `open-ferry migrate` sets it false:
+    /// it reads configs it didn't write, maybe as another user's root.
+    pub(crate) run_config_programs: bool,
     /// What the `self-update` finding reads.
     updates: self_update::Updates,
 }
@@ -265,6 +269,7 @@ impl Environment {
             dashboard_built: open_ferry_dashboard::app_built(),
             management_password: open_ferry_management::management_password_from_env()
                 .is_some_and(|password| !password.is_empty()),
+            run_config_programs: true,
             updates: self_update::Updates::current(),
         }
     }
@@ -285,7 +290,11 @@ pub(crate) async fn run(path: &Path, env: &Environment) -> Vec<Finding> {
     management::check_management_address(&config, env, &mut findings).await;
     check_dashboard(&config, env, &mut findings);
     check_clock(env, &auths, &mut findings);
-    check_claude_cli(&config, &mut findings).await;
+    if env.run_config_programs {
+        check_claude_cli(&config, &mut findings).await;
+    } else {
+        skip_claude_cli(&config, &mut findings);
+    }
     self_update::check_self_update(&config, env, &mut findings);
     findings
 }
@@ -822,6 +831,18 @@ fn check_clock(env: &Environment, auths: &[(String, Auth)], findings: &mut Vec<F
 async fn check_claude_cli(config: &Config, findings: &mut Vec<Finding>) {
     for (names, check) in claude_cli::check_versions(&config.claude_cli).await {
         findings.push(claude_cli_finding(&names, check));
+    }
+}
+
+/// Says the `claude-cli` entries weren't checked, without running their
+/// commands.
+fn skip_claude_cli(config: &Config, findings: &mut Vec<Finding>) {
+    for (_, names) in claude_cli::by_command(&config.claude_cli) {
+        findings.push(Finding::warning(
+            format!("claude-cli {}", names.join(", ")),
+            "not checked: this check doesn't run the program a config names",
+            "run `open-ferry check` once open-ferry is running",
+        ));
     }
 }
 
