@@ -809,7 +809,7 @@ Upstream has no counterpart. `open-ferry init` writes a starting config, `open-f
 
 Where it differs from upstream:
 
-- **Subcommands.** Upstream has no subcommands: it parses its flags, ignores the arguments after them, and serves, so `cli-proxy-api init` starts the server. Here `init`, `check`, `service` or `migrate` as the first argument runs that subcommand, with its own flags. With a flag first, the command line is read as upstream reads it, so `open-ferry -config x.yaml init` still serves.
+- **Subcommands.** Upstream has no subcommands: it parses its flags, ignores the arguments after them, and serves, so `cli-proxy-api init` starts the server. Here `init`, `check`, `service`, `update` or `migrate` as the first argument runs that subcommand, with its own flags, and so do `status`, `config`, `keys`, `credentials`, `clients` and `mcp`, the commands for agents. With a flag first, the command line is read as upstream reads it, so `open-ferry -config x.yaml init` still serves.
 
 Tests: none are upstream's. The subcommands' tests use temporary directories and ports on 127.0.0.1 that nothing listens on, and check the keys' shape without printing them. `service`'s tests run every command and file change through a recording fake, so none reaches a real service manager, and check the definitions it writes against their text.
 
