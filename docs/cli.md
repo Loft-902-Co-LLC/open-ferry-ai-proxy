@@ -222,7 +222,7 @@ Every service runs open-ferry in the config's directory, so the `.env` file ther
 - **A service that runs as you needs your password**, stored with the service manager, and changed there each time you change it.
 - **A scheduled task runs as you** when you log on, with no password stored, and needs no administrator to register.
 
-The task runs `open-ferry service run -config <config>`, which starts open-ferry with no window, its output going to `service.log` in the config's directory, and starts it again when it fails. `service.log` is moved to `service.log.1` as open-ferry starts, once it is past 10 MiB. Ending the task, or logging off, ends open-ferry with it. A console window may flash as the task starts. `service run` is only for the task and the Windows service to start; it isn't in the usage.
+The task runs `open-ferry service run -config <config>`, which starts open-ferry with no window, its output going to `service.log` in the config's directory, and starts it again when it fails. `service.log` is moved to `service.log.1` as open-ferry starts, once it is past 10 MiB. Ending the task, or logging off, ends open-ferry with it. A console window may flash as the task starts. `service run` is only for the task and the Windows service to start; it isn't in the usage. It takes `-dir DIR`, the directory to start open-ferry in, which [`migrate`](#open-ferry-migrate) adds when CLIProxyAPI's working directory isn't the config's directory, so that open-ferry finds the `.env` file and the relative paths CLIProxyAPI did. `service install` itself takes no such flag and is unchanged.
 
 ### A service for the whole machine
 
@@ -337,7 +337,11 @@ Without `-yes`, `migrate` shows its plan and asks `Switch to open-ferry now? [y/
 
 ### The record
 
-Each switch writes `migration.json` beside the installed config: `$XDG_CONFIG_HOME/open-ferry/` or `~/.config/open-ferry/` on Linux and macOS, root's when `migrate` runs under `sudo`, and `%APPDATA%\open-ferry\` on Windows. A copy goes in the backup. It holds paths, names and states, and no secrets: no command line, no environment and no file contents. `-undo` reads it, and a second switch is refused until the first is undone.
+Each switch writes `migration.json` beside the installed config: `$XDG_CONFIG_HOME/open-ferry/` or `~/.config/open-ferry/` on Linux and macOS, root's when `migrate` runs under `sudo`, and `%APPDATA%\open-ferry\` on Windows. A copy goes in the backup, as `migration.json` there. It holds paths, names and states, and no secrets: no command line, no environment and no file contents. `-undo` reads it, and a second switch is refused until the first is undone.
+
+The record, and its copy, are written to a file beside them (`migration.json.tmp`) that is then renamed into place, so a failed write leaves the old record whole. If the record can't be read, `-undo` reads the copy in the backup, whose directory it takes from what is left of the record, and says so.
+
+The backup keeps each kind of file in a folder of its own, so that no name takes another's place: `config/<the config's name>`, `env/.env` and `env/working-dir.env`, `auth/`, and `migration.json`.
 
 ```json
 {
@@ -357,7 +361,7 @@ Each switch writes `migration.json` beside the installed config: `$XDG_CONFIG_HO
   "backup": {
     "dir": "/home/me/cpa/open-ferry-migrate-20261008T120000Z",
     "files": [
-      { "from": "/home/me/cpa/config.yaml", "to": "/home/me/cpa/open-ferry-migrate-20261008T120000Z/config.yaml", "dir": false },
+      { "from": "/home/me/cpa/config.yaml", "to": "/home/me/cpa/open-ferry-migrate-20261008T120000Z/config/config.yaml", "dir": false },
       { "from": "/home/me/.cli-proxy-api", "to": "/home/me/cpa/open-ferry-migrate-20261008T120000Z/auth", "dir": true }
     ]
   },
@@ -369,8 +373,10 @@ Each switch writes `migration.json` beside the installed config: `$XDG_CONFIG_HO
 }
 ```
 
-- **`status`** is `switching` while the switch runs, or when it failed in a way that couldn't be undone; `switched`; `rolled-back`, when open-ferry didn't answer and the switch was undone; or `undone`, after `-undo`.
-- **`switch`** is a service switch (`"kind": "service"`), with CLIProxyAPI's service as it was (`theirs`: systemd's unit, launchd's label, plist and domain, a Windows service's name and start type, or a scheduled task's name, with whether it was enabled or running) and open-ferry's (`ours`: `systemd-user`, `systemd-system`, `launch-agent`, `launch-daemon`, `scheduled-task` or `windows-service`); or a drop-in switch (`"kind": "drop-in"`), with CLIProxyAPI's `binary`, where it was moved to (`moved_to`), whether `migrate` restarted it (`restarted`), and its process ID then (`pid`).
+- **`status`** is `switching` while the switch runs, or when it failed and a step of undoing it failed too (`-undo` finishes it); `switched`; `rolled-back`, when open-ferry didn't answer and the switch was undone; or `undone`, after `-undo`.
+- **`switch`** is a service switch (`"kind": "service"`), with CLIProxyAPI's service as it was (`theirs`: systemd's unit, launchd's label, plist and domain, a Windows service's name and start type, or a scheduled task's name, with whether it was enabled or running) and open-ferry's (`ours`: `systemd-user`, `systemd-system`, `launch-agent`, `launch-daemon`, `scheduled-task` or `windows-service`); or a drop-in switch (`"kind": "drop-in"`), with CLIProxyAPI's `binary`, where it was moved to (`moved_to`), whether `migrate` restarted it (`restarted`), its process ID then (`pid`) and when that process started (`started`, so that a process ID another program has taken since isn't mistaken for it), and, on Linux and macOS, the installed open-ferry the symbolic link leads to (`link`).
+
+`-undo` marks the switch `undone` only when every step worked; else it says what failed, and the record stays open for another `-undo`. It doesn't start CLIProxyAPI while open-ferry still answers on the config's address, and waits up to 20 seconds for it to stop.
 
 ### Exit codes
 
@@ -380,7 +386,7 @@ Each switch writes `migration.json` beside the installed config: `$XDG_CONFIG_HO
 | 1 | It didn't: CLIProxyAPI wasn't found, the switch is blocked, there is no one at a terminal to ask, there is no switch to undo, or the switch or the undo failed. A line on standard error starting `migrate:` says why, except for what the output already says |
 | 2 | Bad usage: an unknown flag, an argument after the flags, `-restore` without `-undo`, or `-undo` with `-json` or `-config`. The usage follows on standard error |
 
-With `-json`, it prints `{"found":false}` when it finds no CLIProxyAPI, and `{"found":false,"error":"..."}` when it couldn't look, and exits with 1; when it finds one, it prints what it found, what carries over, the blockers and the plan, and exits with 0. The install scripts read it.
+With `-json`, it prints `{"found":false}` when it finds no CLIProxyAPI, and `{"found":false,"error":"..."}` when it couldn't look, and exits with 1; when it finds one, it prints what it found, what carries over, the blockers and the plan, and exits with 0. The install scripts read it. `switch` says what kind of switch it is (`service`, `drop-in` or `container`), and `target` the service it would install. `drop_in` says how a drop-in puts open-ferry in CLIProxyAPI's place: `"symlink"` on Linux and macOS, a link to the installed open-ferry that `open-ferry update` keeps current, or `"copy"` on Windows, which reports a release but doesn't install it (to update it, `open-ferry migrate -undo`, then `open-ferry migrate` again). It is `null` for any other switch.
 
 ## Looking at and changing a setup
 
