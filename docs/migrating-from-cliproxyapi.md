@@ -4,11 +4,70 @@ open-ferry reads CLIProxyAPI's config and auth directory as they are, so for mos
 
 ## Switching over
 
+Install open-ferry as the [README](../README.md#install) says, then run:
+
+```sh
+open-ferry migrate
+```
+
+The install scripts look for CLIProxyAPI too, and offer to run it when they find it.
+
+`migrate` finds CLIProxyAPI, running or set up to run, and what starts it. It lists what carries over and what doesn't, anything that stops the switch, and each step it would take, then asks before it changes anything. `open-ferry migrate -dry-run` shows the same and changes nothing. If it can't tell which config CLIProxyAPI uses, name it with `-config`. The flags and the exit codes are in [docs/cli.md](cli.md#open-ferry-migrate).
+
+open-ferry uses CLIProxyAPI's config and auth directory in place: nothing is copied into a new layout, and the config isn't rewritten. Each sign-in keeps a single refresh token, which both proxies can use, so switching back keeps working. With your yes, `migrate`:
+
+1. **Backs up** the config, the `.env` files beside it and in CLIProxyAPI's working directory, and the whole auth directory, into a new folder, `open-ferry-migrate-<UTC time>`, beside the config, or beside the auth directory when the config is inside it. The backup is never inside the auth directory, where open-ferry would read its files as credentials. On Linux and macOS only you can open it (0700); on Windows it has the permissions of the folder it is in.
+2. **Writes a record** of the switch, `migration.json`, beside open-ferry's installed config: `~/.config/open-ferry/` on Linux and macOS (root's, under `sudo`), `%APPDATA%\open-ferry\` on Windows. A copy goes in the backup. It holds paths, names and states, and no secrets: no command line, no environment and no file contents. [`migrate -undo`](#switching-back) reads it.
+3. **Switches**, by what starts CLIProxyAPI:
+   - **A service:** a systemd unit, yours or the system's; a launchd job, Homebrew's `brew services` job among them; a Windows service, a wrapper such as NSSM's included; or a scheduled task that runs CLIProxyAPI's binary itself. CLIProxyAPI's service is stopped and disabled, and its definition kept. open-ferry's is installed as [`open-ferry service install`](cli.md#open-ferry-service) installs it, with the same config and working directory, and started. A system service needs root or an administrator; without them, `migrate` says what to run.
+   - **Anything else:** a launcher script or app, a scheduled task that runs a script, cron, or a process started by hand. These get the [drop-in switch](#the-drop-in-switch).
+   - **A container** from CLIProxyAPI's image: `migrate` changes nothing, and prints the [Docker Compose](#docker-compose) steps for it.
+4. **Checks that open-ferry answers** on the config's address and port, within 30 seconds, and undoes the switch when it doesn't, saying why. It asks `GET /`, which calls no provider and needs no key, and checks that open-ferry, not CLIProxyAPI, is the one answering.
+
+**What stops it.** `migrate` changes nothing while any of these is so, and says what to do:
+
+- CLIProxyAPI uses remote storage, cloud mode or Home mode (`PGSTORE_*`, `GITSTORE_*`, `OBJECTSTORE_*`, `DEPLOY=cloud`, `HOME_JWT` or `-home-jwt`). open-ferry needs the config and credentials as local files.
+- Its config can't be read, or doesn't load in open-ferry; or its auth directory, or a file in it, can't be read, and so can't be backed up.
+- For the drop-in switch: its start command has a flag open-ferry doesn't take, or CLIProxyAPI isn't running.
+- A system service, without root or an administrator.
+- An earlier switch that hasn't been undone.
+
+**Claude sign-ins.** If the auth directory holds credentials from CLIProxyAPI's Claude sign-in, `migrate` says how many. open-ferry serves them, but in our testing they get only the Haiku models, because open-ferry doesn't pose as Claude Code. If your clients use Claude Opus or Sonnet through them, they will lose those models. For the rest, use [`claude-cli`](claude-subscription.md), which runs your own Claude Code.
+
+Read on if you use a sign-in other than Codex's or Claude's, a command-line flag other than the login ones, the management panel, or storage other than local files.
+
+### The drop-in switch
+
+When what starts CLIProxyAPI isn't a service open-ferry knows, `migrate` puts open-ferry in CLIProxyAPI's place. It renames CLIProxyAPI's binary to `<name>.cliproxyapi`, such as `cli-proxy-api.exe.cliproxyapi`, and copies open-ferry under the binary's name, so that whatever starts CLIProxyAPI starts open-ferry, with the same command line. Windows lets a running program be renamed but not replaced, so CLIProxyAPI runs on until it stops.
+
+Then `migrate` asks whether to stop CLIProxyAPI now. With your yes, or `-yes`, it is stopped: with SIGTERM on Linux and macOS, which CLIProxyAPI handles gracefully, and at once on Windows. If its launcher doesn't start it again within 3 seconds, `migrate` starts open-ferry in its place, with the same command line, in the same working directory, its output going to `open-ferry.log` in the backup. Without your yes, nothing is stopped: restart CLIProxyAPI through its launcher, and open-ferry starts in its place.
+
+- **Updates put CLIProxyAPI back.** Anything that updates or reinstalls CLIProxyAPI's binary in place puts CLIProxyAPI back over open-ferry: a launcher's or tray app's updater, such as EasyCLIProxyAPI's; a package manager, such as Homebrew, Scoop or the AUR; or an install script. Turn its updates off, or run `open-ferry migrate` again after one.
+- **open-ferry runs under CLIProxyAPI's file name.** It works the same under any name. To tell which one is running: open-ferry logs `open-ferry Version: ...` as it starts, and answers `GET /` with `open-ferry-ai-proxy`.
+- **The start command has to suit open-ferry.** open-ferry reads CLIProxyAPI's command line as CLIProxyAPI does, but stops with its usage at a flag it doesn't take ([The command line](#the-command-line)), so `migrate` refuses until you take such a flag out of what starts CLIProxyAPI.
+
+### Switching back
+
+```sh
+open-ferry migrate -undo
+```
+
+`-undo` reverses the switch its record describes. For a service, it stops and removes open-ferry's service, and turns CLIProxyAPI's back on as it was. For the drop-in switch, it moves CLIProxyAPI's binary back, removes open-ferry's copy, stops open-ferry, and starts CLIProxyAPI with the same command line, unless its launcher does. As the switch does, it shows its steps and asks first, unless `-yes` is given; `-dry-run` only shows them.
+
+It leaves the config and the auth directory as they are: a token open-ferry refreshed works for CLIProxyAPI too. `-undo -restore` also copies the backed-up config, `.env` files and credentials back. A sign-in whose token was refreshed after the backup may then need to be made again, as the old refresh token in the backup may be refused. Files added since the backup are left as they are.
+
+**CLIProxyAPI comments out open-ferry's own settings when it saves the config.** Back on CLIProxyAPI, a save from its management panel or API turns the sections only open-ferry reads, such as `routing.quota` and `management.separate-address`, into comments at the end of the file. If you switch to open-ferry again, set them again.
+
+### By hand
+
+To switch without `migrate`:
+
 1. **Back up** your `config.yaml` and auth directory. open-ferry changes the config only when you save a change through the management API or the dashboard, and it saves credential files, as CLIProxyAPI does, when it refreshes a token or you sign in.
 2. **Stop CLIProxyAPI.** Don't run both against the same auth directory at once. Each refreshes tokens on its own, and a refresh token one of them has used may then be refused to the other.
 3. **Install open-ferry** as the [README](../README.md#install) says.
-4. **Start it** where you started CLIProxyAPI, so that it finds `config.yaml` in the working directory, or pass the file with `-config`. It listens on the config's `port`, as before.
-5. **Read on** if you use a sign-in other than Codex's or Claude's, a command-line flag other than the login ones, the management panel, or storage other than local files. If you run CLIProxyAPI's image with Docker Compose, see [Docker Compose](#docker-compose) instead of steps 3 and 4.
+4. **Start it** where you started CLIProxyAPI, so that it finds `config.yaml` in the working directory, or pass the file with `-config`. It listens on the config's `port`, as before. To run it in the background, use [`open-ferry service install`](cli.md#open-ferry-service) in place of CLIProxyAPI's service.
+
+If you run CLIProxyAPI's image with Docker Compose, see [Docker Compose](#docker-compose) instead of steps 3 and 4.
 
 ## Docker Compose
 

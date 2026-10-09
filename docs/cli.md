@@ -6,9 +6,10 @@ open-ferry takes CLIProxyAPI's flags ([migration guide](migrating-from-cliproxya
 - **`open-ferry check`** looks over a setup before you start the proxy, and says how to fix what it finds.
 - **`open-ferry service`** installs open-ferry as a background service, started when you log in or at boot and again when it fails, and removes it.
 - **`open-ferry update`** checks for a new release and installs it, rolls back to the one before, and turns automatic updates off or on ([below](#open-ferry-update)).
+- **`open-ferry migrate`** switches a CLIProxyAPI setup to open-ferry, on its config and credentials, and back ([below](#open-ferry-migrate)).
 - **`open-ferry status`, `config`, `keys`, `credentials`, `clients` and `mcp`** look at a setup and change it, for you or a coding agent ([below](#looking-at-and-changing-a-setup)).
 
-A subcommand is read only as the first argument, and the flags after it are its own; `open-ferry init -h`, `open-ferry check -h`, `open-ferry service -h` and `open-ferry update -h` list them. With a flag first, the command line is read as before: `open-ferry -h init` prints the server's usage. CLIProxyAPI has no subcommands: it ignores a first argument that isn't a flag, and serves.
+A subcommand is read only as the first argument, and the flags after it are its own; `open-ferry init -h`, `open-ferry check -h`, `open-ferry service -h`, `open-ferry update -h` and `open-ferry migrate -h` list them. With a flag first, the command line is read as before: `open-ferry -h init` prints the server's usage. CLIProxyAPI has no subcommands: it ignores a first argument that isn't a flag, and serves.
 
 ## A first setup
 
@@ -311,6 +312,75 @@ So a script can run `open-ferry update -check` and act on 3.
 ### `-version`
 
 `open-ferry -version` prints `open-ferry <version>` and exits. `update` runs a downloaded binary with it, and installs it only when it prints the version expected. CLIProxyAPI has no such flag.
+
+## `open-ferry migrate`
+
+```
+open-ferry migrate [-config PATH] [-yes] [-dry-run] [-json]
+open-ferry migrate -undo [-restore] [-yes] [-dry-run]
+```
+
+`migrate` finds CLIProxyAPI, running or set up to run, and what starts it; says what carries over to open-ferry and what doesn't, and what stops the switch; and switches it: CLIProxyAPI's service is replaced by open-ferry's, or its binary by open-ferry's. It backs up the config, the `.env` files and the auth directory first, and after the switch it checks that open-ferry answers on the config's address, undoing the switch when it doesn't. `migrate -undo` switches back. What each switch does, and what stops one, is in the [migration guide](migrating-from-cliproxyapi.md#switching-over).
+
+| Flag | What it does |
+|---|---|
+| `-config PATH` | The config CLIProxyAPI runs with, when `migrate` can't tell it from CLIProxyAPI's command line. Otherwise it is the command line's `-config`, else Homebrew's `etc/cliproxyapi.conf` for Homebrew's build, else `config.yaml` in CLIProxyAPI's working directory, as CLIProxyAPI finds it |
+| `-yes` | Switch without asking, and stop CLIProxyAPI when the switch needs it |
+| `-dry-run` | Show what would be switched, and change nothing |
+| `-json` | Show what would be switched as one line of JSON, and change nothing. Not with `-undo` |
+| `-undo` | Switch back to CLIProxyAPI, as the switch's record says. Not with `-config` |
+| `-restore` | With `-undo`, also copy the backed-up config, `.env` files and credentials back |
+
+Without `-yes`, `migrate` shows its plan and asks `Switch to open-ferry now? [y/N]` before it changes anything. With no one at a terminal to answer, it shows the plan, changes nothing, and prints the command to run with `-yes`. It never stops a process without your yes, or `-yes`.
+
+`migrate` reads processes, services and scheduled tasks to find CLIProxyAPI, and runs the service manager's own commands (`systemctl`, `launchctl`, `sc.exe`, `schtasks.exe`, `docker`) to read them and, for a switch, to change them. From CLIProxyAPI's command line it reads only `-config` and the names of the other flags; their values aren't kept, printed or written. It makes no network call beyond the config's address and port.
+
+### The record
+
+Each switch writes `migration.json` beside the installed config: `$XDG_CONFIG_HOME/open-ferry/` or `~/.config/open-ferry/` on Linux and macOS, root's when `migrate` runs under `sudo`, and `%APPDATA%\open-ferry\` on Windows. A copy goes in the backup. It holds paths, names and states, and no secrets: no command line, no environment and no file contents. `-undo` reads it, and a second switch is refused until the first is undone.
+
+```json
+{
+  "version": 1,
+  "created": "2026-10-08T12:00:00Z",
+  "updated": "2026-10-08T12:00:09Z",
+  "status": "switched",
+  "platform": "linux",
+  "cliproxyapi": {
+    "exe": "/home/me/cpa/cli-proxy-api",
+    "config": "/home/me/cpa/config.yaml",
+    "working_dir": "/home/me/cpa",
+    "auth_dir": "/home/me/.cli-proxy-api",
+    "listen": { "host": "127.0.0.1", "port": 8317, "tls": false },
+    "started_by": "the systemd user service cliproxyapi.service"
+  },
+  "backup": {
+    "dir": "/home/me/cpa/open-ferry-migrate-20261008T120000Z",
+    "files": [
+      { "from": "/home/me/cpa/config.yaml", "to": "/home/me/cpa/open-ferry-migrate-20261008T120000Z/config.yaml", "dir": false },
+      { "from": "/home/me/.cli-proxy-api", "to": "/home/me/cpa/open-ferry-migrate-20261008T120000Z/auth", "dir": true }
+    ]
+  },
+  "switch": {
+    "kind": "service",
+    "theirs": { "manager": "systemd", "unit": "cliproxyapi.service", "user": true, "was_enabled": true, "was_active": true },
+    "ours": "systemd-user"
+  }
+}
+```
+
+- **`status`** is `switching` while the switch runs, or when it failed in a way that couldn't be undone; `switched`; `rolled-back`, when open-ferry didn't answer and the switch was undone; or `undone`, after `-undo`.
+- **`switch`** is a service switch (`"kind": "service"`), with CLIProxyAPI's service as it was (`theirs`: systemd's unit, launchd's label, plist and domain, a Windows service's name and start type, or a scheduled task's name, with whether it was enabled or running) and open-ferry's (`ours`: `systemd-user`, `systemd-system`, `launch-agent`, `launch-daemon`, `scheduled-task` or `windows-service`); or a drop-in switch (`"kind": "drop-in"`), with CLIProxyAPI's `binary`, where it was moved to (`moved_to`), whether `migrate` restarted it (`restarted`), and its process ID then (`pid`).
+
+### Exit codes
+
+| Code | When |
+|---|---|
+| 0 | It did what was asked: it switched, or switched back; it showed the plan (`-dry-run`, `-json` when CLIProxyAPI was found, or a container's steps); or you answered no. Also for `-h` |
+| 1 | It didn't: CLIProxyAPI wasn't found, the switch is blocked, there is no one at a terminal to ask, there is no switch to undo, or the switch or the undo failed. A line on standard error starting `migrate:` says why, except for what the output already says |
+| 2 | Bad usage: an unknown flag, an argument after the flags, `-restore` without `-undo`, or `-undo` with `-json` or `-config`. The usage follows on standard error |
+
+With `-json`, it prints `{"found":false}` when it finds no CLIProxyAPI, and `{"found":false,"error":"..."}` when it couldn't look, and exits with 1; when it finds one, it prints what it found, what carries over, the blockers and the plan, and exits with 0. The install scripts read it.
 
 ## Looking at and changing a setup
 
