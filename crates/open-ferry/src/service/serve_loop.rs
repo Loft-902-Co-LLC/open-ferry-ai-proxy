@@ -264,15 +264,15 @@ impl ServeControl {
     /// Stops accepting once the loops have dropped their listeners, which
     /// are the std sockets' duplicates: the sockets and their backlogs
     /// persist, so a client that connects meanwhile waits. Connections
-    /// already accepted are served on. Does nothing once released. It
-    /// returns only when no loop holds a listener or the mode has moved on,
-    /// and none accepts after it returns. Pauses and resumes take turns.
+    /// already accepted are served on. It returns only when no loop holds a
+    /// listener, so none accepts after it returns, a release or stop that
+    /// came first or meanwhile included. Pauses and resumes take turns.
     pub(crate) async fn pause_accept(&self) {
         let _turn = self.shared.gate.lock().await;
         self.shared.move_mode(&[Mode::Running], Mode::Paused);
-        let _ = self
-            .wait_settled(Mode::Paused, |stats| stats.accepting == 0)
-            .await;
+        // Not until the mode moves on: a loop that hasn't seen the move yet
+        // may still accept once. Every mode but `Running` drops listeners.
+        self.wait_for(|stats| stats.accepting == 0).await;
     }
 
     /// Accepts again, once every loop has made a listener from its socket
@@ -282,6 +282,12 @@ impl ServeControl {
         let _turn = self.shared.gate.lock().await;
         if self.shared.connections().cut {
             return Err(io::Error::other("the control was cut"));
+        }
+        // A pause that was dropped is finished first. A loop still holding
+        // the listener it is about to drop would otherwise look settled, and
+        // a failure to make it again would come after the resume returned.
+        if *self.shared.mode.borrow() == Mode::Paused {
+            self.wait_for(|stats| stats.accepting == 0).await;
         }
         // A loop that can't make its listener leaves the counts, which then
         // look settled, so its failure is counted apart.
@@ -740,7 +746,11 @@ pub(crate) fn run(
     let acceptor = tls.map(TlsAcceptor::from);
     async move {
         registration.start();
-        listener.set_nonblocking(true)?;
+        // Counted as started, a loop that leaves must be counted as failed.
+        if let Err(error) = listener.set_nonblocking(true) {
+            registration.fail();
+            return Err(error);
+        }
         let mut mode = shared.mode.subscribe();
         let mut accepting: Option<TcpListener> = None;
         let outcome = loop {

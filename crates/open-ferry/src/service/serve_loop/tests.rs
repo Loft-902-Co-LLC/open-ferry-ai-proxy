@@ -797,6 +797,47 @@ fn a_listener_made_during_a_pause_is_not_counted() {
     assert_eq!(control.stats().accepting, 0);
 }
 
+// Not upstream's: a resume after a pause that was dropped finishes the
+// pause first. A loop that saw the pause but has yet to drop its listener
+// would otherwise look settled, and its failure to make one again would
+// come after the resume returned. The registration stands in for that loop.
+#[tokio::test]
+async fn a_resume_after_a_dropped_pause_waits_for_the_listeners_to_go() {
+    let control = ServeControl::new();
+    let mut registration = control.register_loop();
+    registration.start();
+    assert!(registration.count_listener());
+    assert!(stays_pending(control.pause_accept()).await);
+    let mut resume = std::pin::pin!(control.resume_accept());
+    assert!(stays_pending(&mut resume).await);
+    assert_eq!(*control.shared.mode.borrow(), Mode::Paused);
+    registration.set_accepting(false);
+    assert!(stays_pending(&mut resume).await);
+    assert_eq!(*control.shared.mode.borrow(), Mode::Running);
+    registration.fail();
+    drop(registration);
+    let error = within(resume).await.unwrap_err();
+    assert_eq!(error.to_string(), "a listener couldn't accept again");
+}
+
+// Not upstream's: a pause that a release supersedes still waits for the
+// loops to drop their listeners, since one that hasn't seen the release
+// may accept once more. The registration stands in for that loop.
+#[tokio::test]
+async fn a_pause_superseded_by_a_release_waits_for_the_listeners_to_go() {
+    let control = ServeControl::new();
+    let mut registration = control.register_loop();
+    registration.start();
+    assert!(registration.count_listener());
+    let mut pause = std::pin::pin!(control.pause_accept());
+    assert!(stays_pending(&mut pause).await);
+    drop(control.release());
+    assert_eq!(*control.shared.mode.borrow(), Mode::Released);
+    assert!(stays_pending(&mut pause).await);
+    drop(registration);
+    within(pause).await;
+}
+
 // Not upstream's: a connection queued while the loop is paused is not
 // accepted before the resume, however the pause came about.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
