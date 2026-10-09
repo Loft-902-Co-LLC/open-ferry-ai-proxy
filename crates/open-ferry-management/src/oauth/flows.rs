@@ -87,7 +87,7 @@ use open_ferry_translate::go::{to_lower, trim_space};
 
 use super::Provider;
 use super::forwarder::Started;
-use super::sessions::{Registration, error_with_cause, is_valid_state};
+use super::sessions::{Callback, Lifeline, Registration, error_with_cause, is_valid_state};
 use crate::go::lossy;
 use crate::json::{self, Json};
 use crate::query::Query;
@@ -333,9 +333,7 @@ async fn run(
 ) {
     let _forwarder = forwarder;
     let Registration {
-        callback,
-        mut lifeline,
-        ..
+        callback, lifeline, ..
     } = registration;
     let sessions = state.oauth_sessions();
     let store = sessions.store();
@@ -357,6 +355,49 @@ async fn run(
         store.set_error(&login.state, provider.callback_error());
         return;
     }
+    // The wait above holds nothing of the gate. From the callback on, the
+    // login is one operation of it: asked for here, so a switch that has
+    // begun refuses it and the session says so, and run as a task the gate
+    // owns, so a switch waits for the exchange and the save.
+    let gate = state.gate();
+    let Ok(operation) = gate.begin_operation() else {
+        store.set_error(&login.state, crate::config_write::SWITCHING);
+        return;
+    };
+    let work = complete(state.clone(), login, callback, lifeline);
+    let Ok(task) = gate.spawn(&operation, work) else {
+        return;
+    };
+    drop(operation);
+    // A login stopped here (shut down, or its session replaced) stops its
+    // task, as when the exchange and the save ran in this one.
+    let mut task = StopOnDrop(task);
+    if let Err(error) = (&mut task.0).await {
+        tracing::error!("The {provider} login's task failed: {error}");
+    }
+}
+
+/// A task that is aborted when this is dropped.
+struct StopOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Exchanges `callback`'s code for tokens, saves the credential and
+/// completes the session, or sets the session's status saying why not: the
+/// part of a login that is an operation of the active gate.
+async fn complete(
+    state: ManagementState,
+    login: Login,
+    callback: Callback,
+    mut lifeline: Lifeline,
+) {
+    let sessions = state.oauth_sessions();
+    let store = sessions.store();
+    let provider = login.client.provider();
     let exchange = tokio::time::timeout(
         sessions.exchange_timeout(),
         login

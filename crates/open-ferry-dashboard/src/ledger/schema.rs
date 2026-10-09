@@ -164,8 +164,36 @@ impl From<rusqlite::Error> for MigrateError {
     }
 }
 
+/// The setting that says the lowest schema version a binary may read this
+/// ledger with. A binary opens a ledger of a newer schema when this is at
+/// most its own [`SCHEMA_VERSION`]; with none, or a higher one, it leaves
+/// the ledger alone. A migration that stays readable by older binaries
+/// leaves it; one that does not raises it.
+const MIN_READER_SCHEMA: &str = "min_reader_schema";
+
+/// The floor a ledger of a newer schema declares, or `None` when it
+/// declares none, or none that can be read (no settings table, no value or
+/// a value that isn't a number).
+fn reader_floor(transaction: &rusqlite::Transaction<'_>) -> Option<i64> {
+    transaction
+        .query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            params![MIN_READER_SCHEMA],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+}
+
 /// Brings the schema up to [`SCHEMA_VERSION`] and fills in the settings
 /// that are missing, the client-key secret among them.
+///
+/// A ledger of a newer schema is opened as it is when its floor
+/// ([`MIN_READER_SCHEMA`]) is at most [`SCHEMA_VERSION`]: nothing is
+/// written. Otherwise it is [`MigrateError::Newer`]. A ledger of this
+/// schema, new or not, gets the floor if it has none, in the transaction
+/// that stamps its version or fills in its settings; an existing floor is
+/// never lowered.
 fn migrate(connection: &mut Connection) -> Result<(), MigrateError> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     transaction
@@ -183,9 +211,15 @@ fn migrate(connection: &mut Connection) -> Result<(), MigrateError> {
             )?;
         }
         SCHEMA_VERSION => {}
-        newer => return Err(MigrateError::Newer(newer)),
+        newer => {
+            return match reader_floor(&transaction) {
+                Some(floor) if floor <= SCHEMA_VERSION => Ok(()),
+                _ => Err(MigrateError::Newer(newer)),
+            };
+        }
     }
     let defaults = [
+        (MIN_READER_SCHEMA, SCHEMA_VERSION.to_string()),
         (RETENTION_DAYS, DEFAULT_RETENTION_DAYS.to_string()),
         (MAX_ROWS, DEFAULT_MAX_ROWS.to_string()),
         (CURRENCY, DEFAULT_CURRENCY.to_owned()),

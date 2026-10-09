@@ -67,6 +67,7 @@ use subtle::ConstantTimeEq as _;
 
 use crate::client_ip::client_ip;
 use crate::go::duration_string;
+use crate::handover::{Ban, millis};
 use crate::json;
 use crate::state::ManagementState;
 
@@ -115,24 +116,118 @@ struct Attempt {
 pub(crate) struct Attempts {
     entries: HashMap<String, Attempt>,
     last_purge: Option<Instant>,
+    /// Set by [`Attempts::freeze_and_snapshot`]: the record no longer
+    /// changes, so what the snapshot holds is all there is.
+    frozen: bool,
 }
 
 impl Attempts {
     /// How long `ip` stays banned at `now`, if it is. A ban that has run
-    /// out is lifted and the address's count reset.
+    /// out is lifted and the address's count reset, unless the record is
+    /// frozen.
     fn ban_remaining(&mut self, ip: &str, now: Instant) -> Option<Duration> {
+        let frozen = self.frozen;
         let attempt = self.entries.get_mut(ip)?;
         let blocked_until = attempt.blocked_until?;
         if now < blocked_until {
             return Some(blocked_until - now);
         }
-        attempt.blocked_until = None;
-        attempt.count = 0;
+        if !frozen {
+            attempt.blocked_until = None;
+            attempt.count = 0;
+        }
         None
+    }
+
+    /// Stops recording, and returns what the record holds: an address with
+    /// failures counted or a ban still running, as how long the ban has
+    /// left and how long the address has been idle, both at `now`. A failure
+    /// or a success counted after this is not recorded (v3 12.3).
+    pub(crate) fn freeze_and_snapshot(&mut self, now: Instant) -> Vec<Ban> {
+        self.frozen = true;
+        let mut bans: Vec<Ban> = self
+            .entries
+            .iter()
+            .filter_map(|(ip, attempt)| {
+                let blocked_for = attempt
+                    .blocked_until
+                    .map_or(Duration::ZERO, |until| until.saturating_duration_since(now));
+                if attempt.count == 0 && blocked_for.is_zero() {
+                    return None;
+                }
+                Some(Ban {
+                    ip: ip.clone(),
+                    count: attempt.count,
+                    blocked_for_ms: millis(blocked_for),
+                    idle_ms: millis(now.saturating_duration_since(attempt.last_activity)),
+                })
+            })
+            .collect();
+        bans.sort_by(|a, b| a.ip.cmp(&b.ip));
+        bans
+    }
+
+    /// Records again after a [`freeze_and_snapshot`](Self::freeze_and_snapshot),
+    /// with the record as it was: the hand over did not happen.
+    pub(crate) fn unfreeze(&mut self) {
+        self.frozen = false;
+    }
+
+    /// Takes in what another worker's snapshot held, `elapsed_ms` after it
+    /// was taken. A ban has that much less left, saturating at none; an
+    /// address has been idle that much longer, so it is added. The
+    /// `Instant`s are rebuilt with `checked_sub`: an address idle for
+    /// longer than the clock has run is dropped unless it is banned, and a
+    /// banned one is then taken as idle since `now`. At most `MAX_ENTRIES`
+    /// are taken in.
+    pub(crate) fn restore(&mut self, bans: &[Ban], elapsed_ms: u64, now: Instant) {
+        for ban in bans {
+            if self.entries.len() >= MAX_ENTRIES && !self.entries.contains_key(&ban.ip) {
+                break;
+            }
+            // A count is always below the limit: it goes back to 0 when a ban
+            // starts. One at or above it came from a record that wasn't made
+            // here, and would ban an address on its next failure.
+            if ban.count >= MAX_FAILURES {
+                tracing::warn!(
+                    count = ban.count,
+                    "skipping a handed-over failure count at or above the limit"
+                );
+                continue;
+            }
+            let blocked_for = Duration::from_millis(ban.blocked_for_ms.saturating_sub(elapsed_ms));
+            let blocked_until = if blocked_for.is_zero() {
+                None
+            } else {
+                now.checked_add(blocked_for)
+            };
+            let idle = Duration::from_millis(ban.idle_ms.saturating_add(elapsed_ms));
+            let last_activity = match now.checked_sub(idle) {
+                Some(last_activity) => last_activity,
+                None if blocked_until.is_some() => now,
+                None => continue,
+            };
+            // A count that no ban holds and that sat idle past the limit
+            // would be purged anyway.
+            if blocked_until.is_none() && (ban.count == 0 || idle > MAX_IDLE) {
+                continue;
+            }
+            self.entries.insert(
+                ban.ip.clone(),
+                Attempt {
+                    count: ban.count,
+                    blocked_until,
+                    last_activity,
+                },
+            );
+        }
     }
 
     /// Records a failed attempt from `ip`; the fifth bans it.
     fn fail(&mut self, ip: &str, now: Instant) {
+        if self.frozen {
+            return;
+        }
         if self
             .last_purge
             .is_none_or(|last| now.duration_since(last) >= PURGE_INTERVAL)
@@ -150,7 +245,7 @@ impl Attempts {
             blocked_until: None,
             last_activity: now,
         });
-        attempt.count += 1;
+        attempt.count = attempt.count.saturating_add(1);
         attempt.last_activity = now;
         if attempt.count >= MAX_FAILURES {
             attempt.blocked_until = Some(now + BAN_DURATION);
@@ -160,6 +255,9 @@ impl Attempts {
 
     /// Clears `ip`'s count and ban after a success.
     fn reset(&mut self, ip: &str) {
+        if self.frozen {
+            return;
+        }
         if let Some(attempt) = self.entries.get_mut(ip) {
             attempt.count = 0;
             attempt.blocked_until = None;
@@ -418,6 +516,8 @@ async fn key_matches(secret: &str, provided: &[u8]) -> bool {
     }
     let hash = secret.as_bytes().to_vec();
     let provided = provided.to_vec();
+    // Writes nothing, so it needs no operation.
+    #[allow(clippy::disallowed_methods)]
     tokio::task::spawn_blocking(move || bcrypt_matches(&hash, &provided))
         .await
         .unwrap_or(false)
@@ -584,6 +684,167 @@ mod tests {
         assert!(!attempts.entries.contains_key("10.0.0.0"));
         assert!(attempts.entries.contains_key("10.0.0.1"));
         assert!(attempts.entries.contains_key("192.0.2.1"));
+    }
+
+    // v3 12.3 (R21): a ban that reaches its limit just before the snapshot
+    // is in it; a failure after it is not recorded at all.
+    #[test]
+    fn a_ban_reached_just_before_the_snapshot_is_in_it_and_one_after_is_not_recorded() {
+        let start = Instant::now();
+        let mut attempts = Attempts::default();
+        for _ in 0..MAX_FAILURES {
+            attempts.fail("before", start);
+        }
+        attempts.fail("counting", start);
+        attempts.fail("counting", start);
+
+        let at = start + Duration::from_secs(10);
+        let bans = attempts.freeze_and_snapshot(at);
+
+        assert_eq!(
+            bans,
+            vec![
+                Ban {
+                    ip: "before".to_owned(),
+                    count: 0,
+                    blocked_for_ms: millis(BAN_DURATION - Duration::from_secs(10)),
+                    idle_ms: 10_000,
+                },
+                Ban {
+                    ip: "counting".to_owned(),
+                    count: 2,
+                    blocked_for_ms: 0,
+                    idle_ms: 10_000,
+                },
+            ]
+        );
+
+        // The fifth failure of "after" comes too late: nothing is recorded.
+        for _ in 0..MAX_FAILURES {
+            attempts.fail("after", at);
+        }
+        assert_eq!(attempts.ban_remaining("after", at), None);
+        assert!(!attempts.entries.contains_key("after"));
+        // Nor does a success clear a count, nor does a ban that ran out lift.
+        attempts.reset("counting");
+        assert_eq!(attempts.entries["counting"].count, 2);
+        let over = start + BAN_DURATION + Duration::from_secs(1);
+        assert_eq!(attempts.ban_remaining("before", over), None);
+        assert!(attempts.entries["before"].blocked_until.is_some());
+
+        // A hand over that didn't happen: the record works again as it was.
+        attempts.unfreeze();
+        for _ in 0..MAX_FAILURES {
+            attempts.fail("after", at);
+        }
+        assert!(attempts.ban_remaining("after", at).is_some());
+        assert_eq!(attempts.entries["counting"].count, 2);
+    }
+
+    #[test]
+    fn restore_adds_the_time_since_the_snapshot_to_the_idle_time() {
+        let now = Instant::now() + Duration::from_secs(10_000);
+        let mut attempts = Attempts::default();
+        let bans = [
+            Ban {
+                ip: "banned".to_owned(),
+                count: 0,
+                blocked_for_ms: 600_000,
+                idle_ms: 5_000,
+            },
+            Ban {
+                ip: "counting".to_owned(),
+                count: 3,
+                blocked_for_ms: 0,
+                idle_ms: 60_000,
+            },
+            Ban {
+                ip: "ended".to_owned(),
+                count: 0,
+                blocked_for_ms: 20_000,
+                idle_ms: 1_000,
+            },
+        ];
+
+        attempts.restore(&bans, 30_000, now);
+
+        // 30 s have passed: the ban has that much less, the idle time that
+        // much more, never less.
+        let banned = attempts.entries["banned"];
+        assert_eq!(
+            banned.blocked_until,
+            Some(now + Duration::from_millis(570_000))
+        );
+        assert_eq!(banned.last_activity, now - Duration::from_millis(35_000));
+        let counting = attempts.entries["counting"];
+        assert_eq!(counting.count, 3);
+        assert_eq!(counting.blocked_until, None);
+        assert_eq!(counting.last_activity, now - Duration::from_millis(90_000));
+        // A ban that ran out, with no count, is not carried.
+        assert!(!attempts.entries.contains_key("ended"));
+        assert_eq!(
+            attempts.ban_remaining("banned", now),
+            Some(Duration::from_millis(570_000))
+        );
+    }
+
+    #[test]
+    fn restore_does_not_underflow_the_clock() {
+        // An entry idle for longer than the clock has run: `checked_sub`
+        // gives nothing, and that must not panic.
+        let now = Instant::now();
+        let mut attempts = Attempts::default();
+        let huge = u64::MAX / 2;
+        let bans = [
+            Ban {
+                ip: "banned".to_owned(),
+                count: 0,
+                blocked_for_ms: 60_000,
+                idle_ms: huge,
+            },
+            Ban {
+                ip: "counting".to_owned(),
+                count: 4,
+                blocked_for_ms: 0,
+                idle_ms: huge,
+            },
+            Ban {
+                ip: "saturated".to_owned(),
+                count: 4,
+                blocked_for_ms: u64::MAX,
+                idle_ms: u64::MAX,
+            },
+        ];
+
+        attempts.restore(&bans, u64::MAX, now);
+
+        // Idle for ages and not banned: dropped. The ban that ran out with
+        // the elapsed time too.
+        assert!(attempts.entries.is_empty());
+
+        attempts.restore(&bans, 0, now);
+        // Still banned: kept. Idle since now where the clock can't go back
+        // that far, else since as long ago as it can be told (Linux's
+        // Instant reaches back further than Windows's).
+        assert!(attempts.entries["banned"].last_activity <= now);
+        assert!(attempts.entries["banned"].blocked_until.is_some());
+        assert!(!attempts.entries.contains_key("counting"));
+    }
+
+    #[test]
+    fn restore_takes_in_no_more_than_the_record_holds() {
+        let now = Instant::now() + Duration::from_secs(10_000);
+        let bans: Vec<Ban> = (0..MAX_ENTRIES + 10)
+            .map(|i| Ban {
+                ip: format!("10.1.{}.{}", i / 256, i % 256),
+                count: 1,
+                blocked_for_ms: 0,
+                idle_ms: 0,
+            })
+            .collect();
+        let mut attempts = Attempts::default();
+        attempts.restore(&bans, 0, now);
+        assert_eq!(attempts.len(), MAX_ENTRIES);
     }
 
     #[test]

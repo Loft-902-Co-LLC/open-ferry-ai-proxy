@@ -130,6 +130,7 @@ use crate::exec::{
     Request, Response, StreamResponse, WebsocketSupport,
 };
 use crate::executor::ProviderExecutor;
+use crate::gate::{ActiveGate, NotActive};
 use affinity::Affinity;
 use models::OAuthAliasTable;
 use refresh::{RefreshJob, RefreshLoopHandle};
@@ -165,6 +166,23 @@ pub(crate) struct State {
     pub(crate) affinity: Option<Affinity>,
     pub(crate) pool_offsets: HashMap<String, usize>,
     pub(crate) refresh_jobs: HashMap<String, RefreshJob>,
+    /// For each credential, how many published snapshots are still to be
+    /// saved: raised with the publication, lowered when its save returns,
+    /// whatever the result (see `PendingSave`). Adopting a credential from
+    /// the store waits for it to be zero, so an older save can't land on top
+    /// of what was adopted.
+    pub(crate) pending_saves: HashMap<String, u32>,
+    /// Counts the publications of a snapshot to be saved, over all
+    /// credentials, and never goes back, so a number it gave is never given
+    /// again.
+    pub(crate) save_publications: u64,
+    /// For each credential, the number [`save_publications`](Self) gave its
+    /// latest publication of a snapshot to be saved: the credential's
+    /// save-publication sequence, which only rises. Unlike `pending_saves`
+    /// it is not dropped when its saves return, for adopting from the store
+    /// must see a save that began and finished while it read. Dropped with
+    /// the credential.
+    pub(crate) save_sequence: HashMap<String, u64>,
     /// The quota rests capped by `routing.quota.check-after`.
     pub(crate) quota_checks: quota_check::QuotaChecks,
 }
@@ -190,7 +208,26 @@ pub(crate) struct Shared {
     error_events: OnceLock<Arc<dyn ErrorEvents>>,
     /// The cooldown state store.
     cooldown_store: cooldown_store::CooldownStore,
+    /// Not upstream's: whether this process may write; always open until a
+    /// switch sets one.
+    gate: RwLock<ActiveGate>,
+    /// Test seam: called with a credential's snapshot before its save takes
+    /// the persist lock.
+    #[cfg(test)]
+    persist_hook: Mutex<Option<PersistHook>>,
+    /// Test seam: called after adopting from the store has read the record
+    /// and before it takes the state lock to apply it.
+    #[cfg(test)]
+    adopt_hook: Mutex<Option<AdoptHook>>,
 }
+
+/// What a test runs before a save takes the persist lock.
+#[cfg(test)]
+pub(crate) type PersistHook = Arc<dyn Fn(&Auth) + Send + Sync>;
+
+/// What a test runs between adopting's read and its swap.
+#[cfg(test)]
+pub(crate) type AdoptHook = Arc<dyn Fn() + Send + Sync>;
 
 /// The credential manager. Cloning it gives another handle to the same
 /// manager.
@@ -234,6 +271,9 @@ pub enum ManagerError {
     Store(io::Error),
     /// The executor's refresh failed.
     Refresh(ExecError),
+    /// Not upstream's: this process isn't the active version, so it didn't
+    /// refresh or write.
+    NotActive(NotActive),
     /// Anything else, in upstream's words.
     Other(String),
 }
@@ -244,6 +284,7 @@ impl fmt::Display for ManagerError {
             Self::InvalidWeight(message) | Self::Other(message) => f.write_str(message),
             Self::Store(err) => err.fmt(f),
             Self::Refresh(err) => err.fmt(f),
+            Self::NotActive(err) => err.fmt(f),
         }
     }
 }
@@ -253,9 +294,19 @@ impl std::error::Error for ManagerError {
         match self {
             Self::Store(err) => Some(err),
             Self::Refresh(err) => Some(err),
+            Self::NotActive(err) => Some(err),
             Self::InvalidWeight(_) | Self::Other(_) => None,
         }
     }
+}
+
+/// Why [`Manager::edit`] failed.
+#[derive(Debug)]
+pub enum EditError<E> {
+    /// The closure refused the change; nothing was published.
+    Rejected(E),
+    /// The manager failed, as [`Manager::update`] can.
+    Manager(ManagerError),
 }
 
 impl Manager {
@@ -290,6 +341,9 @@ impl Manager {
             affinity,
             pool_offsets: HashMap::new(),
             refresh_jobs: HashMap::new(),
+            pending_saves: HashMap::new(),
+            save_publications: 0,
+            save_sequence: HashMap::new(),
             quota_checks: quota_check::QuotaChecks::default(),
         };
         let shared = Arc::new(Shared {
@@ -303,12 +357,36 @@ impl Manager {
             refresh_loop: Mutex::new(None),
             error_events: OnceLock::new(),
             cooldown_store: cooldown_store::CooldownStore::default(),
+            gate: RwLock::new(ActiveGate::open()),
+            #[cfg(test)]
+            persist_hook: Mutex::new(None),
+            #[cfg(test)]
+            adopt_hook: Mutex::new(None),
         });
         let owner = Some(Arc::new(Owner(Arc::downgrade(&shared))));
         Self {
             shared,
             _owner: owner,
         }
+    }
+
+    /// Not upstream's: puts the manager under `gate`. Refreshes are
+    /// operations of it, and a worker whose gate isn't open never refreshes.
+    pub fn set_gate(&self, gate: ActiveGate) {
+        *self
+            .shared
+            .gate
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = gate;
+    }
+
+    /// The gate the manager runs under.
+    pub fn gate(&self) -> ActiveGate {
+        self.shared
+            .gate
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     pub(crate) fn lock(&self) -> MutexGuard<'_, State> {

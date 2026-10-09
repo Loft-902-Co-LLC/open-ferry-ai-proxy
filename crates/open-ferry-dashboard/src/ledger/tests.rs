@@ -124,6 +124,125 @@ fn a_newer_schema_is_left_alone() {
     );
 }
 
+/// A ledger of schema version `version` that declares `floor` (none when
+/// `None`), as a newer open-ferry would leave it.
+fn newer_ledger(path: &std::path::Path, version: i64, floor: Option<&str>) {
+    let newer = Connection::open(path).unwrap();
+    newer
+        .execute_batch(&format!(
+            "CREATE TABLE schema_version (version INTEGER NOT NULL);
+             INSERT INTO schema_version (version) VALUES ({version});
+             CREATE TABLE settings (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL) \
+                 WITHOUT ROWID;
+             CREATE TABLE future (x INTEGER);"
+        ))
+        .unwrap();
+    if let Some(floor) = floor {
+        newer
+            .execute(
+                "INSERT INTO settings (key, value) VALUES ('min_reader_schema', ?1)",
+                [floor],
+            )
+            .unwrap();
+    }
+}
+
+/// The ledger's floor, if it has one.
+fn floor(connection: &Connection) -> Option<String> {
+    column::<String>(
+        connection,
+        "SELECT value FROM settings WHERE key = 'min_reader_schema'",
+    )
+    .into_iter()
+    .next()
+}
+
+/// Not upstream's: a new ledger declares the lowest schema a binary may
+/// read it with, and opening it again changes nothing.
+#[test]
+fn a_new_ledger_gets_the_reader_floor() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(LEDGER_FILE);
+    let connection = schema::open(&path).unwrap();
+    assert_eq!(floor(&connection).as_deref(), Some("1"));
+    let secret = client_key_secret(&connection).unwrap();
+    drop(connection);
+
+    let again = schema::open(&path).unwrap();
+    assert_eq!(floor(&again).as_deref(), Some("1"));
+    assert_eq!(client_key_secret(&again).unwrap(), secret);
+    assert_eq!(
+        column::<i64>(&again, "SELECT version FROM schema_version"),
+        [1]
+    );
+    assert_eq!(
+        column::<i64>(
+            &again,
+            "SELECT COUNT(*) FROM settings WHERE key = 'min_reader_schema'"
+        ),
+        [1]
+    );
+}
+
+/// Not upstream's: a ledger made before the floor existed gets it on its
+/// first open, and one that has a higher floor keeps it.
+#[test]
+fn an_existing_ledger_gets_the_floor_and_keeps_a_higher_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(LEDGER_FILE);
+    drop(schema::open(&path).unwrap());
+    let raw = Connection::open(&path).unwrap();
+    raw.execute("DELETE FROM settings WHERE key = 'min_reader_schema'", [])
+        .unwrap();
+    assert_eq!(floor(&raw), None);
+    drop(raw);
+
+    let connection = schema::open(&path).unwrap();
+    assert_eq!(floor(&connection).as_deref(), Some("1"));
+    connection
+        .execute(
+            "UPDATE settings SET value = '3' WHERE key = 'min_reader_schema'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    let again = schema::open(&path).unwrap();
+    assert_eq!(floor(&again).as_deref(), Some("3"), "never lowered");
+}
+
+/// Not upstream's: a ledger of a newer schema opens when its floor is at
+/// most this binary's schema, and is left alone when the floor is higher or
+/// absent.
+#[test]
+fn a_newer_ledger_opens_only_when_its_floor_allows() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let readable = dir.path().join("readable.db");
+    newer_ledger(&readable, 2, Some("1"));
+    let connection = schema::open(&readable).unwrap();
+    assert_eq!(
+        column::<i64>(&connection, "SELECT version FROM schema_version"),
+        [2]
+    );
+    assert_eq!(floor(&connection).as_deref(), Some("1"));
+    drop(connection);
+
+    let unreadable = dir.path().join("unreadable.db");
+    newer_ledger(&unreadable, 2, Some("2"));
+    let error = schema::open(&unreadable).unwrap_err();
+    assert!(error.contains("version 2"), "{error}");
+
+    let unmarked = dir.path().join("unmarked.db");
+    newer_ledger(&unmarked, 2, None);
+    let error = schema::open(&unmarked).unwrap_err();
+    assert!(error.contains("version 2"), "{error}");
+
+    let garbled = dir.path().join("garbled.db");
+    newer_ledger(&garbled, 2, Some("soon"));
+    assert!(schema::open(&garbled).is_err());
+}
+
 /// Not upstream's: a ledger that can't be made is unavailable, and the
 /// server runs on.
 #[test]
@@ -205,7 +324,9 @@ async fn the_file_is_opened_in_the_background() {
 
     go.send(()).unwrap();
     opened.await.unwrap();
-    assert_eq!(count.await.unwrap().unwrap(), 4);
+    // The four settings the user may change or the ledger keeps, and the
+    // reader floor (see `schema::MIN_READER_SCHEMA`).
+    assert_eq!(count.await.unwrap().unwrap(), 5);
     assert_eq!(ledger.unavailable_reason(), None);
     assert!(ledger.recording());
     drop(sender);

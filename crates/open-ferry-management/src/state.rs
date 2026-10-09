@@ -40,6 +40,7 @@ use axum::response::{IntoResponse, Response};
 use http::StatusCode;
 use open_ferry_core::auth::FileStore;
 use open_ferry_core::config::Config;
+use open_ferry_core::gate::ActiveGate;
 use open_ferry_core::manager::Manager;
 use open_ferry_core::observe::Observability;
 use open_ferry_core::registry::ModelRegistry;
@@ -50,6 +51,7 @@ use crate::access::Attempts;
 use crate::client_ip::TrustedProxies;
 use crate::config_write::{ConfigReload, ConfigWriter};
 use crate::credential_sync::CredentialSync;
+use crate::handover::Updating;
 use crate::proxy::Clients;
 use crate::{json, oauth};
 
@@ -71,6 +73,7 @@ struct Inner {
     env_secret: Vec<u8>,
     trusted_proxies: TrustedProxies,
     attempts: Mutex<Attempts>,
+    updating: Updating,
     clients: Clients,
     oauth_sessions: oauth::Sessions,
     /// Upstream's `authStatusMu`.
@@ -103,8 +106,15 @@ struct Parts {
     local_enables: Arc<AtomicBool>,
     /// open-ferry's own update checks, when the server runs them.
     updates: Option<UpdateService>,
+    /// The gate the handlers that change credentials are owned by; always
+    /// open unless the service sets one.
+    gate: ActiveGate,
     #[cfg(test)]
     latest_release_url: Option<String>,
+    /// Run by a test between a status or fields handler's lookup and its
+    /// change, to hold the handler there.
+    #[cfg(test)]
+    before_edit: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl ManagementState {
@@ -134,6 +144,7 @@ impl ManagementState {
                 env_secret,
                 trusted_proxies,
                 attempts: Mutex::new(Attempts::default()),
+                updating: Updating::default(),
                 clients: Clients::default(),
                 oauth_sessions: oauth::Sessions::default(),
                 credential_lock: tokio::sync::Mutex::new(()),
@@ -150,6 +161,20 @@ impl ManagementState {
     pub fn with_store(mut self, store: Arc<FileStore>) -> Self {
         Arc::make_mut(&mut self.parts).store = Some(store);
         self
+    }
+
+    /// Has the handlers that change credentials run as tasks `gate` owns,
+    /// and refuse with 503 while it isn't open (see the `owned` module).
+    /// Pass the gate the store and the manager use.
+    #[must_use]
+    pub fn with_gate(mut self, gate: ActiveGate) -> Self {
+        Arc::make_mut(&mut self.parts).gate = gate;
+        self
+    }
+
+    /// The gate the handlers are owned by.
+    pub fn gate(&self) -> ActiveGate {
+        self.parts.gate.clone()
     }
 
     /// Tells the running service about the credentials the handlers change
@@ -247,6 +272,22 @@ impl ManagementState {
         self
     }
 
+    /// Holds a status or fields change after its lookup, until `hook` returns.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_before_edit(mut self, hook: impl Fn() + Send + Sync + 'static) -> Self {
+        Arc::make_mut(&mut self.parts).before_edit = Some(Arc::new(hook));
+        self
+    }
+
+    /// Runs what a test set with [`with_before_edit`](Self::with_before_edit).
+    pub(crate) fn before_edit(&self) {
+        #[cfg(test)]
+        if let Some(hook) = &self.parts.before_edit {
+            hook();
+        }
+    }
+
     /// Applies a reloaded config (upstream's `SetConfig`). The management
     /// key, `allow-remote` and the proxies take effect on the next request;
     /// `trusted-proxies` takes a restart, as upstream. The local management
@@ -342,6 +383,10 @@ impl ManagementState {
             .attempts
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(crate) fn updating(&self) -> &Updating {
+        &self.inner.updating
     }
 
     pub(crate) fn clients(&self) -> &Clients {

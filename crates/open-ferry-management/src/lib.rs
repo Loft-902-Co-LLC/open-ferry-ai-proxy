@@ -46,6 +46,10 @@
 //!   it (301 for `GET`, else 307), before any key check, and matches a
 //!   percent-encoded path decoded; both get the empty 404 here.
 
+// The tests start tasks of their own to drive the code under test; the lint
+// in clippy.toml is for the code they test.
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 mod access;
 mod api_call;
 mod auth_files;
@@ -63,6 +67,7 @@ mod credential_sync;
 mod go;
 mod go_json;
 mod go_url;
+mod handover;
 mod json;
 mod latest_version;
 mod log_dir;
@@ -70,6 +75,7 @@ mod logs;
 mod model_definitions;
 mod oauth;
 mod observability_settings;
+mod owned;
 mod proxy;
 mod query;
 mod quota;
@@ -93,6 +99,7 @@ pub use config_write::{
     V8EditError, V8Method, WriteError, undo_config,
 };
 pub use credential_sync::{CredentialSync, SyncError, SyncFuture};
+pub use handover::{Ban, Handover};
 pub use log_dir::is_refused as is_refused_log_file;
 pub use state::{ManagementState, management_password_from_env};
 
@@ -271,15 +278,31 @@ pub(crate) fn router_from(state: ManagementState, routes: Vec<Route>) -> Router 
         } else {
             merged.head(not_found).fallback(not_found)
         };
-        router = router.route(&path, merged);
+        router = router.route(&path, outermost(&state, merged));
     }
     for prefix in PREFIXES {
         router = router
-            .route(prefix, any(unported))
-            .route(&format!("{prefix}/"), any(unported))
-            .route(&format!("{prefix}/{{*rest}}"), any(unported));
+            .route(prefix, outermost(&state, any(unported)))
+            .route(&format!("{prefix}/"), outermost(&state, any(unported)))
+            .route(
+                &format!("{prefix}/{{*rest}}"),
+                outermost(&state, any(unported)),
+            );
     }
     router.with_state(state)
+}
+
+/// `handler` with the layer that answers 503 while open-ferry switches
+/// versions (see the `handover` module), outside the availability and key
+/// checks, so a refused request is not a failed attempt.
+fn outermost(
+    state: &ManagementState,
+    handler: MethodRouter<ManagementState>,
+) -> MethodRouter<ManagementState> {
+    handler.layer(middleware::from_fn_with_state(
+        state.clone(),
+        handover::updating,
+    ))
 }
 
 /// `handler` with the checks of `access`: for [`Access::Key`] the

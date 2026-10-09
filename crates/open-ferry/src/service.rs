@@ -668,6 +668,10 @@ struct Service {
     catalog_sender: mpsc::UnboundedSender<Vec<String>>,
     /// The providers whose catalog models changed, waiting for the loop.
     catalog_changes: mpsc::UnboundedReceiver<Vec<String>>,
+    /// Runs where `upsert` decides between a stale credential and a
+    /// replacement.
+    #[cfg(test)]
+    upsert_hook: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl Service {
@@ -731,6 +735,8 @@ impl Service {
             catalogs: CatalogRuntime::global().clone(),
             catalog_sender,
             catalog_changes,
+            #[cfg(test)]
+            upsert_hook: None,
         }
     }
 
@@ -1020,42 +1026,58 @@ impl Service {
     ///
     /// A stale `auth` (see [`is_stale`]) leaves the registered credential as
     /// it is, and registers its models again.
-    fn upsert(&mut self, mut auth: Auth, rules: &RegistrationRules) -> bool {
+    fn upsert(&mut self, auth: Auth, rules: &RegistrationRules) -> bool {
         self.ensure_executor(&auth);
-        let existing = self.manager.get(&auth.id);
-        if let Some(existing) = existing.as_deref()
-            && is_stale(existing, &auth)
-        {
-            tracing::debug!(
-                "skipping stale auth update for {}: incoming gen={}, existing gen={}",
-                auth.id,
-                auth.generation,
-                existing.generation
-            );
-            self.registry
-                .register_auth_with(existing, rules, &self.catalogs.general());
-            self.manager.reconcile_registry_model_states(&existing.id);
-            return true;
-        }
-        let (op, result) = match existing {
-            Some(existing) => {
-                auth.created_at = existing.created_at;
-                if !is_disabled(&existing) && !is_disabled(&auth) {
-                    auth.last_refreshed_at = existing.last_refreshed_at;
-                    auth.next_refresh_after = existing.next_refresh_after;
-                    if auth.model_states.is_empty() && !existing.model_states.is_empty() {
-                        auth.model_states = existing.model_states.clone();
+        // The stale check and the replacement are one step under the
+        // manager's state lock: a refresh that publishes after a separate
+        // read would be overwritten with this older credential.
+        let mut stale = false;
+        let incoming = auth.clone();
+        let edited = self
+            .manager
+            .edit_unsaved::<std::convert::Infallible>(&auth.id, |live| {
+                #[cfg(test)]
+                if let Some(hook) = &self.upsert_hook {
+                    hook();
+                }
+                if is_stale(live, &incoming) {
+                    stale = true;
+                    return Ok(false);
+                }
+                let mut auth = incoming;
+                auth.created_at = live.created_at;
+                if !is_disabled(live) && !is_disabled(&auth) {
+                    auth.last_refreshed_at = live.last_refreshed_at;
+                    auth.next_refresh_after = live.next_refresh_after;
+                    if auth.model_states.is_empty() && !live.model_states.is_empty() {
+                        auth.model_states = live.model_states.clone();
                     }
                 }
-                (
-                    "update",
-                    self.manager.update_unsaved(auth.clone()).map(|_| ()),
-                )
+                *live = auth;
+                Ok(true)
+            });
+        let (op, result) = match edited {
+            Ok(Some(_)) if stale => {
+                if let Some(existing) = self.manager.get(&auth.id) {
+                    tracing::debug!(
+                        "skipping stale auth update for {}: incoming gen={}, existing gen={}",
+                        auth.id,
+                        auth.generation,
+                        existing.generation
+                    );
+                    self.registry
+                        .register_auth_with(&existing, rules, &self.catalogs.general());
+                    self.manager.reconcile_registry_model_states(&existing.id);
+                }
+                return true;
             }
-            None => (
+            Ok(Some(_)) => ("update", Ok(())),
+            Ok(None) => (
                 "register",
                 self.manager.register_unsaved(auth.clone()).map(|_| ()),
             ),
+            Err(open_ferry_core::manager::EditError::Manager(error)) => ("update", Err(error)),
+            Err(open_ferry_core::manager::EditError::Rejected(never)) => match never {},
         };
         let auth = match result {
             Ok(()) => self.manager.get(&auth.id).unwrap_or_else(|| Arc::new(auth)),
@@ -2741,6 +2763,81 @@ self-update:
                 "{compat_first}"
             );
         }
+    }
+
+    // Not upstream's: C4-2. A refresh publishes while `upsert` is deciding
+    // whether its credential is stale. With the check and the replacement
+    // under one hold of the manager's lock, the refresh lands after them and
+    // keeps its token; a check made before a separate replacement let the
+    // older token overwrite it.
+    #[tokio::test]
+    async fn a_refresh_during_an_upsert_is_not_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut service = service(dir.path(), "");
+        let token = |auth: &Auth| auth.metadata["access_token"].as_str().unwrap().to_owned();
+        let base = Auth {
+            id: "codex-race.json".into(),
+            provider: "codex".into(),
+            metadata: serde_json::json!({"type": "codex", "access_token": "t0"})
+                .as_object()
+                .unwrap()
+                .clone()
+                .into_iter()
+                .collect(),
+            ..Auth::default()
+        };
+        let rules = service.rules();
+        assert!(service.upsert(base, &rules));
+        let live = service.manager.get("codex-race.json").unwrap();
+
+        // What a PATCH queued: the live credential with a note.
+        let mut incoming = Auth::clone(&live);
+        incoming
+            .metadata
+            .insert("note".into(), serde_json::json!("patched"));
+
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread = Arc::new(std::sync::Mutex::new(None));
+        {
+            let manager = service.manager.clone();
+            let done = Arc::clone(&done);
+            let thread = Arc::clone(&thread);
+            let armed = std::sync::atomic::AtomicBool::new(true);
+            service.upsert_hook = Some(Arc::new(move || {
+                if !armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    return;
+                }
+                let manager = manager.clone();
+                let finished = Arc::clone(&done);
+                let mut refreshed = Auth::clone(&live);
+                refreshed
+                    .metadata
+                    .insert("access_token".into(), serde_json::json!("t1"));
+                let (started_tx, started_rx) = std::sync::mpsc::channel();
+                *thread.lock().unwrap() = Some(std::thread::spawn(move || {
+                    started_tx.send(()).unwrap();
+                    manager.update_unsaved(refreshed).unwrap();
+                    finished.store(true, std::sync::atomic::Ordering::SeqCst);
+                }));
+                // The thread is certain to start, so wait for it without a
+                // limit; then give its publish a bound. With the lock held it
+                // can't finish, so the fixed code waits out the bound; code
+                // that read before replacing lets it finish at once, so a
+                // false pass needs the thread descheduled for all of it.
+                started_rx.recv().unwrap();
+                for _ in 0..200 {
+                    if done.load(std::sync::atomic::Ordering::SeqCst) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }));
+        }
+        assert!(service.upsert(incoming, &rules));
+        thread.lock().unwrap().take().unwrap().join().unwrap();
+
+        let now = service.manager.get("codex-race.json").unwrap();
+        assert_eq!(token(&now), "t1", "the refresh's token survives");
     }
 
     #[tokio::test]

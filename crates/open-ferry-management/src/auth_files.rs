@@ -123,9 +123,18 @@ pub(crate) async fn list(
     json::response(StatusCode::OK, &body)
 }
 
-/// Runs `f` on the blocking pool, passing a panic on.
+/// Runs `f` on the blocking pool, passing a panic on. Inside an
+/// [`open_ferry_core::gate::Operation`], `f` runs as that operation, so the
+/// writes it makes find the operation's permit.
 pub(crate) async fn run_blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
-    match tokio::task::spawn_blocking(f).await {
+    let handle = match open_ferry_core::gate::Operation::current() {
+        Some(operation) => operation.run_blocking(f),
+        // Outside an operation the work holds none, and a write it makes is
+        // refused while the gate isn't open.
+        #[allow(clippy::disallowed_methods)]
+        None => tokio::task::spawn_blocking(f),
+    };
+    match handle.await {
         Ok(value) => value,
         Err(error) => match error.try_into_panic() {
             Ok(panic) => std::panic::resume_unwind(panic),

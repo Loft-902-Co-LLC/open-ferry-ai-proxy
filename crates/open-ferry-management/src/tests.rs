@@ -30,6 +30,7 @@ mod auth_files_quota;
 mod auth_files_quota_checks;
 mod auth_files_recent_requests;
 mod auth_files_relogin_preserve;
+mod blue_green;
 mod config_file_write;
 mod config_keys;
 mod config_lists;

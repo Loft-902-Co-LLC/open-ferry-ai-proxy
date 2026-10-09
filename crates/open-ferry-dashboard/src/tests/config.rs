@@ -6,6 +6,7 @@ use std::sync::Arc;
 use http::{Method, StatusCode};
 use open_ferry_core::config::Config;
 use open_ferry_core::config::save::{backup_path, sha256_hex, write_as_is};
+use open_ferry_core::gate::ActiveGate;
 use open_ferry_management::FileConfigWriter;
 
 use super::{Dash, KEY, request};
@@ -131,6 +132,40 @@ async fn undo_refuses_a_file_changed_since() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
     assert_eq!(std::fs::read_to_string(backup_path(&path)).unwrap(), edited);
     assert_eq!(dash.state.management.config().port, 8319);
+}
+
+/// Not upstream's: while the gate is not open the undo is refused with the
+/// same 503 the management writers give, not a 500, and the file and its
+/// backup stay as they were; it works again once the gate opens.
+#[tokio::test]
+async fn undo_is_refused_while_the_server_switches() {
+    let mut dash = Dash::new();
+    let path = dash.logs().join("config.yaml");
+    let gate = ActiveGate::open();
+    dash.state.management = dash.state.management.clone().with_config_writer(Arc::new(
+        FileConfigWriter::new(path.clone()).with_gate(gate.clone()),
+    ));
+    dash.router = router_from(dash.state.clone());
+    let before = config_at(8319);
+    let current = config_at(8318);
+    write_as_is(&path, before.as_bytes()).unwrap();
+    write_as_is(&path, current.as_bytes()).unwrap();
+
+    gate.close(gate.epoch()).await.expect("closes");
+    let message = dash
+        .call(Method::POST, UNDO, "")
+        .await
+        .error(StatusCode::SERVICE_UNAVAILABLE, "switching");
+    assert_eq!(
+        message,
+        "open-ferry is switching versions; try again in a minute"
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), current);
+    assert_eq!(std::fs::read_to_string(backup_path(&path)).unwrap(), before);
+
+    gate.reopen();
+    dash.call(Method::POST, UNDO, "").await.json(StatusCode::OK);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
 }
 
 /// Not upstream's: a body that isn't a JSON object of the known fields,

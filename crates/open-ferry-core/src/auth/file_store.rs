@@ -67,7 +67,10 @@
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError, RwLock};
+
+use crate::gate::{Activation, ActiveGate, WritePermit};
 
 use serde_json::{Map, Value};
 
@@ -91,25 +94,92 @@ pub const MAX_AUTH_FILE_SIZE: u64 = 8 << 20;
 #[derive(Debug, Default)]
 pub struct FileStore {
     base_dir: RwLock<PathBuf>,
+    /// Counts the binds of `base_dir`; see `binding_generation`.
+    binding_generation: AtomicU64,
     save_lock: Mutex<()>,
+    /// Whether this process may write; always open until a switch sets one.
+    gate: RwLock<ActiveGate>,
 }
 
 impl FileStore {
     /// A store over `base_dir`. An empty directory leaves the store
     /// unconfigured: it can then only save to absolute paths.
     pub fn new(base_dir: impl AsRef<Path>) -> Self {
+        // The initializer is private and needs no permit: a store that is
+        // being made has written nothing.
         let store = Self::default();
-        store.set_base_dir(base_dir);
+        store.bind_base_dir(base_dir.as_ref());
         store
     }
 
-    /// Changes the auth directory. Surrounding whitespace is ignored.
-    pub fn set_base_dir(&self, base_dir: impl AsRef<Path>) {
-        let dir = trim_path(base_dir.as_ref());
-        *self
+    /// Not upstream's: puts the store under `gate`, which every writer of
+    /// the store then asks for a permit.
+    pub fn set_gate(&self, gate: ActiveGate) {
+        *self.gate.write().unwrap_or_else(PoisonError::into_inner) = gate;
+    }
+
+    /// The gate this store's writers ask.
+    pub fn gate(&self) -> ActiveGate {
+        self.gate
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn permit(&self) -> io::Result<WritePermit> {
+        Ok(self.gate().write_permit()?)
+    }
+
+    fn bind_base_dir(&self, base_dir: &Path) {
+        let dir = trim_path(base_dir);
+        let mut bound = self
             .base_dir
             .write()
-            .unwrap_or_else(PoisonError::into_inner) = dir;
+            .unwrap_or_else(PoisonError::into_inner);
+        // Counted while the write lock is held, so a reader that resolved a
+        // path under the old directory sees the count move.
+        self.binding_generation.fetch_add(1, Ordering::SeqCst);
+        *bound = dir;
+    }
+
+    /// Changes the auth directory. Surrounding whitespace is ignored. A
+    /// store whose gate is not open keeps its directory, and this logs
+    /// why; use [`try_set_base_dir`](Self::try_set_base_dir) to see the
+    /// refusal, or [`set_base_dir_under`](Self::set_base_dir_under) to bind
+    /// while the gate is closed.
+    pub fn set_base_dir(&self, base_dir: impl AsRef<Path>) {
+        if let Err(error) = self.try_set_base_dir(base_dir) {
+            tracing::warn!(%error, "auth directory not changed");
+        }
+    }
+
+    /// As [`set_base_dir`](Self::set_base_dir), returning the gate's refusal.
+    ///
+    /// # Errors
+    /// [`NotActive`](crate::gate::NotActive), as an [`io::Error`], when the
+    /// gate refuses a write.
+    pub fn try_set_base_dir(&self, base_dir: impl AsRef<Path>) -> io::Result<()> {
+        let _permit = self.permit()?;
+        self.bind_base_dir(base_dir.as_ref());
+        Ok(())
+    }
+
+    /// Binds the auth directory with an [`Activation`], which the take-over
+    /// path holds while the gate is closed.
+    ///
+    /// # Errors
+    /// [`NotActive`](crate::gate::NotActive), as an [`io::Error`], when the
+    /// activation is not for this store's gate, or that gate has opened
+    /// since it was made.
+    pub fn set_base_dir_under(
+        &self,
+        activation: &Activation,
+        base_dir: impl AsRef<Path>,
+    ) -> io::Result<()> {
+        // The check and the binding are one step under the gate's mutex, so
+        // the gate can't reopen between them.
+        activation.bind(&self.gate(), || self.bind_base_dir(base_dir.as_ref()))?;
+        Ok(())
     }
 
     /// The auth directory, empty when unconfigured.
@@ -217,6 +287,7 @@ impl FileStore {
     /// and saves of this store take turns.
     pub fn write_file(&self, name: &str, data: &[u8]) -> io::Result<PathBuf> {
         let path = self.file_path(name)?;
+        let _permit = self.permit()?;
         let _guard = self
             .save_lock
             .lock()
@@ -236,6 +307,7 @@ impl FileStore {
     /// target.
     pub fn remove_file(&self, name: &str) -> io::Result<PathBuf> {
         let path = self.file_path(name)?;
+        let _permit = self.permit()?;
         let _guard = self
             .save_lock
             .lock()
@@ -269,6 +341,7 @@ impl FileStore {
             return Ok(String::new());
         }
 
+        let _permit = self.permit()?;
         let _guard = self
             .save_lock
             .lock()
@@ -414,6 +487,7 @@ impl FileStore {
             return Err(invalid("auth filestore: id is empty"));
         }
         let path = self.resolve_delete_path(id)?;
+        let _permit = self.permit()?;
         match fs::remove_file(&path) {
             Err(err) if err.kind() != io::ErrorKind::NotFound => {
                 Err(wrap(&err, "auth filestore: delete failed"))
@@ -438,6 +512,19 @@ impl AuthStore for FileStore {
 
     fn delete(&self, id: &str) -> io::Result<()> {
         self.delete_auth(id)
+    }
+
+    fn binding_generation(&self) -> u64 {
+        self.binding_generation.load(Ordering::SeqCst)
+    }
+
+    fn read_back(&self, auth: &Auth) -> io::Result<Option<Auth>> {
+        let path = self.resolve_auth_path(auth)?;
+        let base_dir = self.base_dir();
+        match read_auth_file(&path, &base_dir) {
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+            other => other,
+        }
     }
 }
 
@@ -698,6 +785,109 @@ mod tests {
 
     fn path_string(path: &Path) -> String {
         path.to_str().unwrap().to_owned()
+    }
+
+    // Not upstream's: a store under a closed gate refuses every mutator and
+    // changes no file, and reading still works.
+    #[tokio::test]
+    async fn closed_gate_refuses_every_mutator() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.json");
+        write(&path, r#"{"type":"codex","disabled":false}"#);
+        let store = FileStore::new(dir.path());
+        let (gate, key) = ActiveGate::standby();
+        store.set_gate(gate);
+        let mut auth = Auth {
+            id: "a.json".into(),
+            file_name: "a.json".into(),
+            metadata: meta(json!({"type": "codex", "n": 1})),
+            ..Auth::default()
+        };
+        assert!(store.save_auth(&mut auth).is_err());
+        assert!(store.save_new_auth(&mut auth).is_err());
+        assert!(store.write_file("b.json", b"{}").is_err());
+        assert!(store.remove_file("a.json").is_err());
+        assert!(AuthStore::delete(&store, "a.json").is_err());
+        assert!(store.try_set_base_dir(dir.path().join("x")).is_err());
+        store.set_base_dir(dir.path().join("x"));
+        assert_eq!(store.base_dir(), dir.path());
+        assert!(!dir.path().join("b.json").exists());
+        assert_eq!(
+            read_json(&path),
+            json!({"type": "codex", "disabled": false})
+        );
+        assert_eq!(AuthStore::list(&store).unwrap().len(), 1);
+
+        // The take-over path binds the directory with its activation.
+        let activation = key.activate(&store.gate()).unwrap();
+        store
+            .set_base_dir_under(&activation, dir.path().join("x"))
+            .unwrap();
+        assert_eq!(store.base_dir(), dir.path().join("x"));
+        store.gate().reopen();
+        assert!(
+            store
+                .set_base_dir_under(&activation, dir.path().join("y"))
+                .is_err()
+        );
+        assert_eq!(store.base_dir(), dir.path().join("x"));
+        store.try_set_base_dir(dir.path()).unwrap();
+        assert!(store.save_auth(&mut auth).is_ok());
+    }
+
+    // Not upstream's: a quiescing store lets a save through only inside an
+    // operation, so a refresh that began before the switch still saves.
+    #[tokio::test]
+    async fn quiescing_store_saves_only_inside_an_operation() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileStore::new(dir.path());
+        let gate = ActiveGate::open();
+        store.set_gate(gate.clone());
+        let op = gate.begin_operation().unwrap();
+        let closing = {
+            let gate = gate.clone();
+            tokio::spawn(async move { gate.close(0).await })
+        };
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(store.write_file("a.json", b"{}").is_err());
+        op.clone()
+            .scope(async {
+                store.write_file("a.json", b"{}").unwrap();
+            })
+            .await;
+        drop(op);
+        closing.await.unwrap().unwrap();
+        assert!(dir.path().join("a.json").exists());
+    }
+
+    // Not upstream's: every physical write or removal sits in a function
+    // that takes a permit first, so a new writer can't skip the gate.
+    #[test]
+    fn every_physical_write_follows_a_permit() {
+        let source = include_str!("file_store.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap();
+        let marks = ["write_atomic(&path", "fs::remove_file(&path)"];
+        for mark in marks {
+            for (at, _) in code.match_indices(mark) {
+                let before = &code[..at];
+                let start = before
+                    .rfind(
+                        "
+    pub fn ",
+                    )
+                    .or_else(|| {
+                        before.rfind(
+                            "
+    fn ",
+                        )
+                    })
+                    .unwrap();
+                assert!(
+                    before[start..].contains("self.permit()?"),
+                    "{mark} at byte {at} has no permit in its function"
+                );
+            }
+        }
     }
 
     #[test]

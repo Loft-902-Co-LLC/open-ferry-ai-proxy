@@ -1,0 +1,27 @@
+# Clippy reads only the nearest clippy.toml, so the two thresholds of the
+# workspace file are repeated here.
+#
+# Errors carry a provider's status, body and headers. They are built after a
+# network call has failed, so moving them is cheap next to what came before;
+# boxing every one would only add noise.
+large-error-threshold = 512
+enum-variant-size-threshold = 512
+
+# Work on a credential's files starts inside an operation of the active gate,
+# or a hand-over can neither wait for it nor let it write while it quiesces.
+# A task that is none of that, such as a log writer, is marked
+# `#[allow(clippy::disallowed_methods)]` with the reason.
+disallowed-methods = [
+    { path = "tokio::spawn", reason = "start the task with `ActiveGate::spawn` so it carries the operation" },
+    { path = "tokio::task::spawn", reason = "start the task with `ActiveGate::spawn` so it carries the operation" },
+    { path = "tokio::task::spawn_blocking", reason = "use `Operation::run_blocking` so the blocking work carries the operation" },
+    { path = "tokio::task::spawn_local", reason = "start the task with `ActiveGate::spawn` so it carries the operation" },
+    { path = "tokio::task::JoinSet::spawn", reason = "start the task with `ActiveGate::spawn` so it carries the operation" },
+    { path = "tokio::task::JoinSet::spawn_blocking", reason = "use `Operation::run_blocking` so the blocking work carries the operation" },
+    { path = "tokio::task::JoinSet::spawn_local", reason = "start the task with `ActiveGate::spawn` so it carries the operation" },
+    { path = "tokio::runtime::Handle::spawn", reason = "start the task with `ActiveGate::spawn` so it carries the operation" },
+    { path = "tokio::runtime::Handle::spawn_blocking", reason = "use `Operation::run_blocking` so the blocking work carries the operation" },
+    { path = "tokio::runtime::Runtime::spawn", reason = "start the task with `ActiveGate::spawn` so it carries the operation" },
+    { path = "tokio::runtime::Runtime::spawn_blocking", reason = "use `Operation::run_blocking` so the blocking work carries the operation" },
+    { path = "std::thread::spawn", reason = "run the work with `Operation::run_blocking` so it carries the operation" },
+]

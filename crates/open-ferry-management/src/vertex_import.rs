@@ -71,9 +71,10 @@ use open_ferry_translate::go::{format_float_g, to_lower, trim_space};
 use serde_json::{Map, Value};
 
 use crate::Route;
-use crate::credential_files::{FormError, MAX_FORM, is_unsafe_name, read_form};
+use crate::credential_files::{Form, FormError, MAX_FORM, is_unsafe_name, read_form};
 use crate::go::lossy;
 use crate::json::{self, Json};
+use crate::owned::owned;
 use crate::query::Query;
 use crate::state::ManagementState;
 use crate::token_record::save_token_record;
@@ -121,7 +122,8 @@ async fn import_vertex(
     import(&state, raw.as_deref(), request).await
 }
 
-/// Imports the service account `request` sends.
+/// Imports the service account `request` sends, as a task the active gate
+/// owns.
 async fn import(state: &ManagementState, raw: Option<&str>, request: Request) -> Response {
     let store = match state.credential_store() {
         Ok(store) => store,
@@ -148,18 +150,37 @@ async fn import(state: &ManagementState, raw: Option<&str>, request: Request) ->
     if file.data.len() as u64 > MAX_AUTH_FILE_SIZE {
         return json::error(StatusCode::PAYLOAD_TOO_LARGE, "auth file too large");
     }
-    let account = match parse_account(&file.data) {
-        Ok(account) => account,
+    // The form is read, and the account in it checked, before the gate
+    // admits the import: a client that is slow to send it doesn't hold up a
+    // switch, and a malformed one is answered whatever the gate is.
+    let prepared = match prepare(&form, raw) {
+        Ok(prepared) => prepared,
         Err(response) => return response,
     };
-    let account = match normalize_service_account(&account) {
-        Ok(account) => account,
-        Err(reason) => return failure("invalid service account", &reason),
+    owned(state, import_owned(state.clone(), prepared)).await
+}
+
+/// What an import saves and answers, once its form is checked.
+struct Prepared {
+    record: Auth,
+    email: String,
+    location: String,
+    project_id: String,
+}
+
+/// Checks the form's service account, and builds the credential it makes.
+/// Everything here depends on the form and the query alone.
+fn prepare(form: &Form, raw: Option<&str>) -> Result<Prepared, Response> {
+    let Some(file) = form.file("file") else {
+        return Err(json::error(StatusCode::BAD_REQUEST, "file required"));
     };
+    let account = parse_account(&file.data)?;
+    let account = normalize_service_account(&account)
+        .map_err(|reason| failure("invalid service account", &reason))?;
 
     let project_id = trimmed(&value_as_string(account.get("project_id")));
     if project_id.is_empty() {
-        return json::error(StatusCode::BAD_REQUEST, "project_id missing");
+        return Err(json::error(StatusCode::BAD_REQUEST, "project_id missing"));
     }
     let email = trimmed(&value_as_string(account.get("client_email")));
     let location = [
@@ -173,10 +194,10 @@ async fn import(state: &ManagementState, raw: Option<&str>, request: Request) ->
 
     let file_name = format!("vertex-{}.json", sanitize_file_part(&project_id));
     if is_unsafe_name(&file_name) {
-        return failure(
+        return Err(failure(
             "invalid service account",
             "project_id holds characters a file name can't",
-        );
+        ));
     }
     let label = label_for_vertex(&project_id, &email);
     let metadata = Map::from_iter([
@@ -195,7 +216,23 @@ async fn import(state: &ManagementState, raw: Option<&str>, request: Request) ->
         metadata,
         ..Auth::default()
     };
-    let saved = match save_token_record(state, record).await {
+    Ok(Prepared {
+        record,
+        email,
+        location,
+        project_id,
+    })
+}
+
+/// [`import`]'s work: saves the credential `prepared` holds.
+async fn import_owned(state: ManagementState, prepared: Prepared) -> Response {
+    let Prepared {
+        record,
+        email,
+        location,
+        project_id,
+    } = prepared;
+    let saved = match save_token_record(&state, record).await {
         Ok(path) => path,
         Err(error) => {
             return json::response(

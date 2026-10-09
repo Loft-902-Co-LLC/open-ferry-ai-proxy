@@ -29,6 +29,7 @@ use crate::Route;
 use crate::auth_files::{auth_index, run_blocking};
 use crate::bind::{self, GoStruct, set_string};
 use crate::json::{self, Json};
+use crate::owned::owned;
 use crate::state::ManagementState;
 
 /// The body of a reset.
@@ -75,15 +76,23 @@ pub(crate) async fn reset(State(state): State<ManagementState>, body: Body) -> R
     let Some(request) = bind::decode::<ResetQuotaRequest>(&body) else {
         return json::error(StatusCode::BAD_REQUEST, "invalid request body");
     };
-    let index = request.auth_index.trim();
+    let index = request.auth_index.trim().to_owned();
     if index.is_empty() {
         return json::error(StatusCode::BAD_REQUEST, "auth_index is required");
     }
+    // The body is read and checked before the gate admits the reset, so a
+    // slow client or a bad request doesn't hold up a switch. The reset saves
+    // the credential's file, so it runs as an operation of the gate.
+    let gated = state.clone();
+    owned(&gated, reset_owned(state, index)).await
+}
+
+/// The reset of the credential with index `index`, run as an operation.
+async fn reset_owned(state: ManagementState, index: String) -> Response {
     let manager = state.manager().clone();
-    let Some(auth) = auth_by_index(&manager, index) else {
+    let Some(auth) = auth_by_index(&manager, &index) else {
         return json::error(StatusCode::NOT_FOUND, "auth not found");
     };
-    // The reset saves the credential to its file.
     let id = auth.id.clone();
     let result = run_blocking(move || manager.reset_quota(&id)).await;
     match result {

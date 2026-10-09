@@ -174,6 +174,10 @@ pub enum V8EditError {
     Unprocessable(String),
     /// The file couldn't be written: 500 `write_failed` with the message.
     WriteFailed(String),
+    /// The writer is not the active one, as while open-ferry switches
+    /// versions, and nothing was written: 503. Never made here; a writer
+    /// that holds a gate answers it.
+    Switching,
 }
 
 impl fmt::Display for V8EditError {
@@ -192,6 +196,7 @@ impl fmt::Display for V8EditError {
             }
             Self::ReadOnlyField(field) => write!(f, "read_only_field: {field}"),
             Self::WriteFailed(message) => write!(f, "write_failed: {message}"),
+            Self::Switching => f.write_str("open-ferry is switching versions"),
         }
     }
 }

@@ -1429,6 +1429,9 @@ impl Manager {
                 );
             }
         };
+        // A request's own stream, not a unit of work the gate waits for: the
+        // outcome it records is saved only while the gate allows it.
+        #[allow(clippy::disallowed_methods)]
         tokio::spawn(forward.in_current_span());
         let chunks = futures_util::stream::unfold(rx, |mut rx| async move {
             rx.recv().await.map(|item| (item, rx))

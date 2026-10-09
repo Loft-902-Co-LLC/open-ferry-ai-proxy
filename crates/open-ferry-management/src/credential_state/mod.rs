@@ -100,7 +100,8 @@ use open_ferry_core::auth::metadata::{
 };
 use open_ferry_core::auth::weight::{parse_weight_str, parse_weight_value};
 use open_ferry_core::auth::{Auth, AuthKind, AuthSource, Status};
-use open_ferry_core::manager::Manager;
+use open_ferry_core::gate::GateState;
+use open_ferry_core::manager::{EditError, Manager, ManagerError};
 use open_ferry_providers::codex::jwt::{parse_jwt_token, plan_type_or_default};
 use open_ferry_translate::go::quote;
 use serde::Deserialize as _;
@@ -112,9 +113,10 @@ use crate::Route;
 use crate::auth_files::{auth_index, run_blocking};
 use crate::bind::{self, GoStruct, set_string};
 use crate::config_sanitize::{DISABLE_PATTERN, ToggleError, toggle_excluded_all};
-use crate::config_write;
+use crate::config_write::{self, SWITCHING};
 use crate::go::{atoi, equal_fold, lossy, parse_bool};
 use crate::json::{self, Json};
+use crate::owned::{owned, switching};
 use crate::query::Query;
 use crate::state::ManagementState;
 
@@ -240,10 +242,11 @@ fn apply_disabled_state(auth: &mut Auth, disabled: bool) {
 /// `PatchAuthFileStatus`). A config saved from the v8 route
 /// (`migrate_v8`) is saved in the v8 layout.
 async fn status(State(state): State<ManagementState>, body: Body, migrate_v8: bool) -> Response {
-    let store = match state.credential_store() {
-        Ok(store) => store,
-        Err(unavailable) => return unavailable.into_response(),
-    };
+    if let Err(unavailable) = state.credential_store() {
+        return unavailable.into_response();
+    }
+    // The body is read and checked before the gate admits the change, so a
+    // client that is slow to send it doesn't hold up a switch.
     let body = match bind::read_body(body).await {
         Ok(body) => body,
         Err(response) => return response,
@@ -257,7 +260,22 @@ async fn status(State(state): State<ManagementState>, body: Body, migrate_v8: bo
     let Some(disabled) = request.disabled else {
         return json::error(StatusCode::BAD_REQUEST, "disabled is required");
     };
+    let gated = state.clone();
+    owned(&gated, status_owned(state, request, disabled, migrate_v8)).await
+}
 
+/// [`status`], as a task the active gate owns: the change, its save and its
+/// sync finish even through a switch that has begun.
+async fn status_owned(
+    state: ManagementState,
+    request: StatusRequest,
+    disabled: bool,
+    migrate_v8: bool,
+) -> Response {
+    let store = match state.credential_store() {
+        Ok(store) => store,
+        Err(unavailable) => return unavailable.into_response(),
+    };
     let guard = state.credential_lock().lock().await;
     let manager = state.manager().clone();
     let Some(target) = lookup(&manager, &request.name, &request.auth_index) else {
@@ -269,16 +287,21 @@ async fn status(State(state): State<ManagementState>, body: Body, migrate_v8: bo
         drop(guard);
         return response;
     }
-    let mut auth = Auth::clone(&target);
-    apply_disabled_state(&mut auth, disabled);
-    // The update saves the credential to its file.
-    let updated = match run_blocking(move || manager.update(auth)).await {
-        Err(error) => {
-            return json::error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("failed to update auth: {error}"),
-            );
-        }
+    // The change is made on the credential as it is then, not on the copy
+    // read here: a refresh or an adoption that lands between is kept. The
+    // edit saves the credential to its file.
+    let id = target.id.clone();
+    let held = state.clone();
+    let updated = match run_blocking(move || {
+        held.before_edit();
+        manager.edit(&id, |auth| {
+            apply_disabled_state(auth, disabled);
+            Ok::<_, String>(true)
+        })
+    })
+    .await
+    {
+        Err(error) => return edit_failed(error),
         Ok(None) => return json::error(StatusCode::NOT_FOUND, "auth file not found"),
         Ok(Some(updated)) => updated,
     };
@@ -300,6 +323,28 @@ async fn status(State(state): State<ManagementState>, body: Body, migrate_v8: bo
             ("disabled", Json::Bool(disabled)),
         ]),
     )
+}
+
+/// The answer for a change [`Manager::edit`] did not make: 400 with the
+/// edit's message, or 500.
+fn edit_failed(error: EditError<String>) -> Response {
+    match error {
+        EditError::Rejected(message) => json::error(StatusCode::BAD_REQUEST, &message),
+        EditError::Manager(error) => json::error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("failed to update auth: {error}"),
+        ),
+    }
+}
+
+/// The credential a fields change names, by ID or by file name.
+fn fields_target(manager: &Manager, name: &str) -> Option<Arc<Auth>> {
+    manager.get(name).or_else(|| {
+        manager
+            .list()
+            .into_iter()
+            .find(|auth| auth.file_name == name)
+    })
 }
 
 /// Turns the config API key whose credential has `id` off or on, saves the
@@ -340,6 +385,7 @@ async fn toggle_config_api_key(
 }
 
 /// One field of a field change: its path, as normalized, and its value.
+#[derive(Clone)]
 struct Field {
     path: String,
     value: Value,
@@ -752,10 +798,11 @@ fn apply_fields(
 /// `PATCH /v0/management/auth-files/fields` (upstream's
 /// `PatchAuthFileFields`).
 async fn fields(State(state): State<ManagementState>, body: Body) -> Response {
-    let store = match state.credential_store() {
-        Ok(store) => store,
-        Err(unavailable) => return unavailable.into_response(),
-    };
+    if let Err(unavailable) = state.credential_store() {
+        return unavailable.into_response();
+    }
+    // The body is read and checked before the gate admits the change, so a
+    // client that is slow to send it doesn't hold up a switch.
     let body = match bind::read_body(body).await {
         Ok(body) => body,
         Err(response) => return response,
@@ -777,34 +824,62 @@ async fn fields(State(state): State<ManagementState>, body: Body) -> Response {
         Ok(request_retry) => request_retry,
         Err(message) => return json::error(StatusCode::BAD_REQUEST, message),
     };
-
-    let guard = state.credential_lock().lock().await;
-    let manager = state.manager().clone();
-    let target = manager.get(&name).or_else(|| {
-        manager
-            .list()
-            .into_iter()
-            .find(|auth| auth.file_name == name)
-    });
-    let Some(target) = target else {
+    // Upstream's order: the credential is looked up (404) before the fields
+    // are checked (400). Both are read-only, so they are answered whatever
+    // the gate is, and the gate admits the change only after them. There are
+    // no plugin virtual credentials here, so there is no 409 between them.
+    if fields_target(state.manager(), &name).is_none() {
         return json::error(StatusCode::NOT_FOUND, "auth file not found");
-    };
-    let mut auth = Auth::clone(&target);
-    normalize_credential_metadata(&mut auth.metadata);
-    match apply_fields(&mut auth, fields, request_retry) {
+    }
+    // The fields are checked on a credential holding nothing, so a bad
+    // weight or field is answered 400 whatever the gate is. What depends on
+    // the live credential (a nested path through a value it holds) is
+    // checked inside, and the credential is looked up again there.
+    match apply_fields(&mut Auth::default(), fields.clone(), request_retry) {
         Err(message) => return json::error(StatusCode::BAD_REQUEST, &message),
         Ok(false) => return json::error(StatusCode::BAD_REQUEST, "no fields to update"),
         Ok(true) => {}
     }
-    auth.updated_at = Some(Utc::now());
-    // The update saves the credential to its file.
-    let updated = match run_blocking(move || manager.update(auth)).await {
-        Err(error) => {
-            return json::error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("failed to update auth: {error}"),
-            );
-        }
+    let gated = state.clone();
+    owned(&gated, fields_owned(state, name, fields, request_retry)).await
+}
+
+/// [`fields`], as a task the active gate owns: the change, its save and its
+/// sync finish even through a switch that has begun.
+async fn fields_owned(
+    state: ManagementState,
+    name: String,
+    fields: Vec<Field>,
+    request_retry: Option<Option<i64>>,
+) -> Response {
+    let store = match state.credential_store() {
+        Ok(store) => store,
+        Err(unavailable) => return unavailable.into_response(),
+    };
+    let guard = state.credential_lock().lock().await;
+    let manager = state.manager().clone();
+    let Some(target) = fields_target(&manager, &name) else {
+        return json::error(StatusCode::NOT_FOUND, "auth file not found");
+    };
+    // The change is made on the credential as it is then, not on the copy
+    // read here: a refresh or an adoption that lands between is kept. The
+    // edit saves the credential to its file.
+    let id = target.id.clone();
+    let held = state.clone();
+    let updated = match run_blocking(move || {
+        held.before_edit();
+        manager.edit(&id, |auth| {
+            normalize_credential_metadata(&mut auth.metadata);
+            if !apply_fields(auth, fields, request_retry)? {
+                return Err("no fields to update".to_owned());
+            }
+            auth.updated_at = Some(Utc::now());
+            Ok(true)
+        })
+    })
+    .await
+    {
+        Err(error) => return edit_failed(error),
         Ok(None) => return json::error(StatusCode::NOT_FOUND, "auth file not found"),
         Ok(Some(updated)) => updated,
     };
@@ -863,9 +938,14 @@ async fn refresh(
 
     let manager = state.manager();
     if request.all {
-        let results = manager
-            .force_refresh_all()
-            .await
+        // Not upstream's: a switch that has begun refuses the refreshes, so
+        // none is started.
+        if state.gate().state() != GateState::Open {
+            return switching();
+        }
+        let results = manager.force_refresh_all().await;
+        let refused = results.iter().any(|result| result.not_active);
+        let results = results
             .into_iter()
             .map(|result| {
                 let mut fields = vec![
@@ -878,6 +958,17 @@ async fn refresh(
                 Json::Struct(fields)
             })
             .collect();
+        if refused {
+            // A switch began meanwhile: the results say what did refresh.
+            return json::response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &Json::map([
+                    ("error", Json::Str(SWITCHING.into())),
+                    ("ok", Json::Bool(false)),
+                    ("results", Json::Array(results)),
+                ]),
+            );
+        }
         return json::response(
             StatusCode::OK,
             &Json::map([("ok", Json::Bool(true)), ("results", Json::Array(results))]),
@@ -891,6 +982,7 @@ async fn refresh(
         return json::error(StatusCode::NOT_FOUND, "auth file not found");
     };
     match manager.force_refresh(&target.id).await {
+        Err(ManagerError::NotActive(_)) => switching(),
         Err(error) => json::error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
         Ok(refreshed) => json::response(
             StatusCode::OK,

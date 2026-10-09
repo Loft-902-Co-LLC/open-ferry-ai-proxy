@@ -277,6 +277,22 @@ pub trait AuthStore: Send + Sync + 'static {
     /// Removes the credential with `id`. Removing one that isn't there is
     /// not an error.
     fn delete(&self, id: &str) -> io::Result<()>;
+
+    /// Not upstream's: reads `auth`'s own record again from the store, and
+    /// changes nothing there. `None` when the store can't tell, or holds no
+    /// such record. A worker whose gate isn't open uses it to pick up the
+    /// token the active process refreshed.
+    fn read_back(&self, _auth: &Auth) -> io::Result<Option<Auth>> {
+        Ok(None)
+    }
+
+    /// Not upstream's: a counter that changes whenever the store's mapping
+    /// from an `Auth` to its record changes (a directory rebind, for a file
+    /// store). A reader samples it before `read_back` and compares after, to
+    /// tell that the record it read may no longer be the `Auth`'s own.
+    fn binding_generation(&self) -> u64 {
+        0
+    }
 }
 
 #[cfg(test)]

@@ -100,6 +100,8 @@ impl Forwarders {
         let app = Router::new()
             .fallback(redirect)
             .with_state(Arc::<str>::from(target));
+        // A listener that only redirects a browser, and writes nothing.
+        #[allow(clippy::disallowed_methods)]
         let task = tokio::spawn(async move {
             let listener = TimedListener { inner: listener };
             if let Err(error) = axum::serve(listener, app).await {

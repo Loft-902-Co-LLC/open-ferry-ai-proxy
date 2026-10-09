@@ -53,6 +53,8 @@ type Piece = io::Result<(Bytes, bool)>;
 /// otherwise.
 pub(super) async fn respond(page: Page) -> Response {
     let (sender, mut receiver) = mpsc::channel::<Piece>(QUEUE);
+    // Reads the logs and writes nothing, so it needs no operation.
+    #[allow(clippy::disallowed_methods)]
     let task = tokio::task::spawn_blocking(move || {
         let mut out = Out {
             sender,

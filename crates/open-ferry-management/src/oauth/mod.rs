@@ -175,6 +175,10 @@ impl Sessions {
         }
         // Forget the logins that have ended.
         while logins.tasks.try_join_next().is_some() {}
+        // The wait for a callback holds nothing of the gate and writes
+        // nothing; once a callback came, the login that saves a credential
+        // begins an operation of its own (`flows`).
+        #[allow(clippy::disallowed_methods)]
         logins.tasks.spawn(login);
         true
     }
