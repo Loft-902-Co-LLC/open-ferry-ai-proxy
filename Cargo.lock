@@ -1986,6 +1986,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "open-ferry-supervisor"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "open-ferry-translate"
 version = "0.0.0"
 dependencies = [
