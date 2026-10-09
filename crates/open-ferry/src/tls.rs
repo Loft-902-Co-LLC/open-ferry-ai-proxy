@@ -10,31 +10,46 @@
 //! Handlers see a client's address as `ConnectInfo<SocketAddr>`, as over
 //! plain HTTP.
 //!
+//! The handshake is run by the serve loop (`service::serve_loop`), which
+//! serves plain and TLS connections alike. [`TlsListener`] and
+//! [`TlsPeer`], which fed finished handshakes to `axum::serve` before that
+//! loop, are kept for the test of that path.
+//!
 //! Deviations from upstream:
 //! - Handshakes run on their own tasks and one that takes over ten seconds
 //!   is dropped; upstream's server has no handshake timeout.
 
+#[cfg(test)]
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(test)]
 use axum::Router;
+#[cfg(test)]
 use axum::extract::Request;
+#[cfg(test)]
 use axum::extract::connect_info::{ConnectInfo, Connected};
+#[cfg(test)]
 use axum::middleware::{self, Next};
+#[cfg(test)]
 use axum::response::Response;
+#[cfg(test)]
 use axum::serve::IncomingStream;
 use rustls::ServerConfig;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use tokio::net::{TcpListener, TcpStream};
+#[cfg(test)]
+use tokio::net::TcpListener;
+use tokio::net::TcpStream;
+#[cfg(test)]
 use tokio::sync::mpsc;
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::server::TlsStream;
 
 /// How long a client gets to finish its handshake.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Reads the certificate chain and key for `tls.cert` and `tls.key`.
 pub fn load(cert: &str, key: &str) -> Result<Arc<ServerConfig>, String> {
@@ -62,13 +77,36 @@ pub fn load(cert: &str, key: &str) -> Result<Arc<ServerConfig>, String> {
     Ok(Arc::new(config))
 }
 
+/// Runs the TLS handshake with the client at `addr` on `stream`, giving it
+/// [`HANDSHAKE_TIMEOUT`]. A handshake that fails or times out is logged
+/// and gives `None`.
+pub(crate) async fn handshake(
+    acceptor: &TlsAcceptor,
+    stream: TcpStream,
+    addr: SocketAddr,
+) -> Option<TlsStream<TcpStream>> {
+    match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
+        Ok(Ok(stream)) => Some(stream),
+        Ok(Err(error)) => {
+            tracing::debug!("TLS handshake from {addr} failed: {error}");
+            None
+        }
+        Err(_) => {
+            tracing::debug!("TLS handshake from {addr} timed out");
+            None
+        }
+    }
+}
+
 /// A listener that hands the server connections whose TLS handshake has
 /// finished.
+#[cfg(test)]
 pub struct TlsListener {
     connections: mpsc::Receiver<(TlsStream<TcpStream>, SocketAddr)>,
     local_addr: SocketAddr,
 }
 
+#[cfg(test)]
 impl TlsListener {
     /// Accepts on `listener` with `config`.
     pub fn new(listener: TcpListener, config: Arc<ServerConfig>) -> io::Result<Self> {
@@ -82,6 +120,7 @@ impl TlsListener {
     }
 }
 
+#[cfg(test)]
 async fn accept_loop(
     listener: TcpListener,
     acceptor: TlsAcceptor,
@@ -105,17 +144,14 @@ async fn accept_loop(
         crate::service::send_at_once(&stream);
         let (acceptor, sender) = (acceptor.clone(), sender.clone());
         tokio::spawn(async move {
-            match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
-                Ok(Ok(stream)) => {
-                    let _ = sender.send((stream, addr)).await;
-                }
-                Ok(Err(error)) => tracing::debug!("TLS handshake from {addr} failed: {error}"),
-                Err(_) => tracing::debug!("TLS handshake from {addr} timed out"),
+            if let Some(stream) = handshake(&acceptor, stream, addr).await {
+                let _ = sender.send((stream, addr)).await;
             }
         });
     }
 }
 
+#[cfg(test)]
 impl axum::serve::Listener for TlsListener {
     type Io = TlsStream<TcpStream>;
     type Addr = SocketAddr;
@@ -135,9 +171,11 @@ impl axum::serve::Listener for TlsListener {
 
 /// A TLS client's address, which axum hands to handlers as
 /// `ConnectInfo<TlsPeer>`.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug)]
 pub struct TlsPeer(SocketAddr);
 
+#[cfg(test)]
 impl Connected<IncomingStream<'_, TlsListener>> for TlsPeer {
     fn connect_info(stream: IncomingStream<'_, TlsListener>) -> Self {
         Self(*stream.remote_addr())
@@ -147,10 +185,12 @@ impl Connected<IncomingStream<'_, TlsListener>> for TlsPeer {
 /// `app`, with a TLS client's address also given to handlers as
 /// `ConnectInfo<SocketAddr>`. Serve it with
 /// `into_make_service_with_connect_info::<TlsPeer>()`.
+#[cfg(test)]
 pub fn with_peer_addr(app: Router) -> Router {
     app.layer(middleware::from_fn(copy_peer_addr))
 }
 
+#[cfg(test)]
 async fn copy_peer_addr(mut request: Request, next: Next) -> Response {
     if let Some(&ConnectInfo(TlsPeer(addr))) = request.extensions().get::<ConnectInfo<TlsPeer>>() {
         request.extensions_mut().insert(ConnectInfo(addr));
@@ -223,5 +263,69 @@ mod tests {
         stream.read_to_string(&mut response).await.unwrap();
         assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
         assert!(response.ends_with("hello 127.0.0.1"), "{response}");
+    }
+
+    // Not upstream's: the same exchange through the production serve loop,
+    // which serves TLS itself rather than through `TlsListener`.
+    #[tokio::test]
+    async fn serves_over_tls_through_the_serve_loop() {
+        use crate::service::serve_loop::{ServeControl, run};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let generated = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let (cert, key) = (dir.path().join("cert.pem"), dir.path().join("key.pem"));
+        std::fs::write(&cert, generated.cert.pem()).unwrap();
+        std::fs::write(&key, generated.signing_key.serialize_pem()).unwrap();
+        let config = load(cert.to_str().unwrap(), key.to_str().unwrap()).unwrap();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/",
+            axum::routing::get(|ConnectInfo(peer): ConnectInfo<SocketAddr>| async move {
+                format!("hello {}", peer.ip())
+            }),
+        );
+        let control = ServeControl::new();
+        let serving = control.clone();
+        let server = tokio::spawn(async move { run(listener, Some(config), app, &serving).await });
+
+        // A client that stalls its handshake holds up no one.
+        let _stalled = TcpStream::connect(addr).await.unwrap();
+
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(generated.cert.der().clone()).unwrap();
+        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        let client = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(client));
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
+        let mut stream = connector.connect(name, stream).await.unwrap();
+        stream
+            .write_all(
+                b"GET / HTTP/1.1
+Host: localhost
+Connection: close
+
+",
+            )
+            .await
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await.unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+        assert!(response.ends_with("hello 127.0.0.1"), "{response}");
+
+        control.stop();
+        tokio::time::timeout(Duration::from_secs(10), server)
+            .await
+            .expect("the loop didn't stop")
+            .unwrap()
+            .unwrap();
     }
 }
