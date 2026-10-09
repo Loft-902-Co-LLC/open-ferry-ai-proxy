@@ -479,10 +479,8 @@ impl Machine for Host {
         if let Some(dir) = working_dir {
             let _ = std::env::set_current_dir(dir);
         }
-        let env = check::Environment {
-            management_password,
-            ..check::Environment::current()
-        };
+        let mut env = check::Environment::current();
+        env.management_password = management_password;
         let findings = self
             .block_on(check::run(Path::new(config), &env))
             .unwrap_or_default();
