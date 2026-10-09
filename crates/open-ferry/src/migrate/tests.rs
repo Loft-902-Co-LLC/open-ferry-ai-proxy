@@ -4113,6 +4113,35 @@ fn a_backup_is_placed_by_where_a_linked_auth_directory_really_is() {
     assert_eq!(record["backup"]["files"][1]["from"], "/data/auths");
 }
 
+// Not upstream's: a record directory that is a link into the auth directory
+// would put the record among the credentials, so migrate refuses before it
+// changes anything.
+#[test]
+fn a_record_directory_linked_into_the_auth_directory_blocks() {
+    let (mut fake, context) = systemd_user();
+    fake.links.insert(
+        "/home/me/.config/open-ferry".to_owned(),
+        "/home/me/.cli-proxy-api".to_owned(),
+    );
+    let ran = migrate(&mut fake, &context, &["-yes"]);
+    assert_eq!(ran.code, 1, "{}", ran.all());
+    has(&ran.all(), "The auth directory (/home/me/.cli-proxy-api)");
+    has(&ran.all(), "Nothing was changed.");
+    assert!(fake.procs.contains_key(&4242));
+    assert!(
+        !fake
+            .files
+            .keys()
+            .any(|path| path.ends_with("migration.json")),
+        "{:#?}",
+        fake.files.keys().collect::<Vec<_>>()
+    );
+    assert!(!happened(
+        &fake,
+        "run systemctl --user stop cliproxyapi.service"
+    ));
+}
+
 // Not upstream's: the record is written to a temporary file that is moved
 // into place, so a failed move leaves no half-written record, and migrate
 // stops before it changes anything.
@@ -4656,7 +4685,7 @@ fn restore_stops_through_the_manager_when_no_process_is_seen() {
     let (mut fake, context) = systemd_user();
     assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
     running_unit(&mut fake);
-    assert!(fake.procs.get(&4242).is_none());
+    assert!(!fake.procs.contains_key(&4242));
 
     let before = fake.events.len();
     let undo = migrate(&mut fake, &context, &["-undo", "-restore", "-yes"]);
