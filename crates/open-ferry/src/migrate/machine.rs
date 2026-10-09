@@ -114,11 +114,16 @@ impl fmt::Debug for Launch {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Answer {
     OpenFerry,
+    /// CLIProxyAPI, by the message it answers `/` with.
+    CliProxyApi,
     /// Something else, described.
     Other(String),
     /// Nothing, and why.
     Nothing(String),
 }
+
+/// A lock that is held until this is dropped.
+pub(crate) type Held = Box<dyn std::any::Any>;
 
 /// Everything `migrate` does to the machine, besides running commands and
 /// reading and writing files through [`System`].
@@ -134,6 +139,13 @@ pub(crate) trait Machine: System {
     /// is given, started then: asks it to stop (on Windows, ends it at
     /// once), and waits for it, ending it after a while.
     fn stop(&mut self, pid: u32, name: &str, started: Option<u64>) -> io::Result<()>;
+    /// Stops process `pid` if it started at `started`, whatever its name or
+    /// the file it runs: for a process whose identity was taken before its
+    /// file was moved.
+    fn stop_exact(&mut self, pid: u32, started: u64) -> io::Result<()>;
+    /// Takes the lock file `path`, made if it is not there, for as long as
+    /// the answer is held. `None` when another process holds it.
+    fn lock(&mut self, path: &str) -> io::Result<Option<Held>>;
     /// The name process `pid` was started under (its first argument), if it
     /// runs and it can be read. Not the file it runs: a process started
     /// through a symbolic link names the link.
@@ -275,14 +287,15 @@ fn one_process(pid: u32, kind: sysinfo::ProcessRefreshKind) -> Option<(sysinfo::
     Some((sys, name))
 }
 
-/// Whether process `pid` runs and is still the process named `name` that
-/// started at `started`: an ID that is used again is another process.
-fn same_process_now(pid: u32, name: &str, started: u64) -> bool {
+/// Whether process `pid` runs and is still the process named `name` (any
+/// name when `None`) that started at `started`: an ID that is used again is
+/// another process.
+fn same_process_now(pid: u32, name: Option<&str>, started: u64) -> bool {
     let kind = sysinfo::ProcessRefreshKind::nothing();
     let Some((sys, found)) = one_process(pid, kind) else {
         return false;
     };
-    found.eq_ignore_ascii_case(name)
+    name.is_none_or(|name| found.eq_ignore_ascii_case(name))
         && sys
             .process(sysinfo::Pid::from_u32(pid))
             .is_some_and(|process| process.start_time() == started)
@@ -319,6 +332,114 @@ fn wait_then_end(
     Err(io::Error::other(format!(
         "process {pid} still runs after it was asked to stop"
     )))
+}
+
+/// Ends process `pid` at once, if it started at `started`. On Windows the
+/// start time is read from the handle that is then ended, so the ID can't
+/// be used again in between.
+#[cfg(windows)]
+fn end_exact(pid: u32, started: u64) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+        TerminateProcess,
+    };
+    // SAFETY: the call takes plain values, and gives a handle or null.
+    let handle = unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
+            0,
+            pid,
+        )
+    };
+    if handle.is_null() {
+        return false;
+    }
+    let zero = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let (mut created, mut exited, mut kernel, mut user) = (zero, zero, zero, zero);
+    // SAFETY: the handle is open, and the four structures are valid for
+    // writes.
+    let read =
+        unsafe { GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) };
+    // The same count of seconds since 1970 that sysinfo reports.
+    let ticks = (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
+    let start = (ticks / 10_000_000).saturating_sub(11_644_473_600);
+    // SAFETY: the handle is open, and is closed once, here.
+    let ended = read != 0 && start == started && unsafe { TerminateProcess(handle, 1) } != 0;
+    // SAFETY: as above.
+    unsafe { CloseHandle(handle) };
+    ended
+}
+
+/// Asks process `pid` to stop, if it is the process named `name` (any name
+/// when `None`) that started at `started` (any time when `None`), waits for
+/// it, and ends it after a while.
+fn stop_process(pid: u32, name: Option<&str>, started: Option<u64>) -> io::Result<()> {
+    let Some((sys, found)) = one_process(pid, sysinfo::ProcessRefreshKind::nothing()) else {
+        return Ok(());
+    };
+    if let Some(name) = name
+        && !found.eq_ignore_ascii_case(name)
+    {
+        return Err(io::Error::other(format!(
+            "process {pid} is now {found}, not {name}, so it was left alone"
+        )));
+    }
+    let Some(process) = sys.process(sysinfo::Pid::from_u32(pid)) else {
+        return Ok(());
+    };
+    if let Some(want) = started
+        && process.start_time() != want
+    {
+        return Err(io::Error::other(format!(
+            "process {pid} started at a different time than the one that was seen, so it is another process and was left alone"
+        )));
+    }
+    // What every later look at the ID is held to: the same name and the
+    // same start time, else the process asked to stop has exited, and
+    // the ID is another's.
+    let start = started.unwrap_or_else(|| process.start_time());
+    // On Unix, SIGTERM, which CLIProxyAPI and open-ferry both stop
+    // gracefully on. Windows has no such signal for a program without a
+    // window: it is ended at once, through a handle that checks the start
+    // time.
+    #[cfg(unix)]
+    let asked = process.kill_with(sysinfo::Signal::Term).unwrap_or(false);
+    #[cfg(windows)]
+    let asked = end_exact(pid, start);
+    #[cfg(not(any(unix, windows)))]
+    let asked = process.kill();
+    if !asked && same_process_now(pid, name, start) {
+        return Err(io::Error::other(format!("failed to stop process {pid}")));
+    }
+    wait_then_end(
+        pid,
+        || same_process_now(pid, name, start),
+        // Looks again at the moment it ends it. On Windows the handle
+        // that checks the start time is the one that ends the process. On
+        // Unix a gap is left between this look and the signal: a pidfd
+        // would close it, and sysinfo has none.
+        || {
+            #[cfg(windows)]
+            {
+                if name.is_none_or(|name| same_process_now(pid, Some(name), start)) {
+                    end_exact(pid, start);
+                }
+            }
+            #[cfg(not(windows))]
+            if let Some((sys, found)) = one_process(pid, sysinfo::ProcessRefreshKind::nothing())
+                && name.is_none_or(|name| found.eq_ignore_ascii_case(name))
+                && let Some(process) = sys.process(sysinfo::Pid::from_u32(pid))
+                && process.start_time() == start
+            {
+                process.kill();
+            }
+        },
+        || std::thread::sleep(STOP_STEP),
+    )
 }
 
 impl Machine for Host {
@@ -403,56 +524,24 @@ impl Machine for Host {
     }
 
     fn stop(&mut self, pid: u32, name: &str, started: Option<u64>) -> io::Result<()> {
-        let Some((sys, found)) = one_process(pid, sysinfo::ProcessRefreshKind::nothing()) else {
-            return Ok(());
-        };
-        if !found.eq_ignore_ascii_case(name) {
-            return Err(io::Error::other(format!(
-                "process {pid} is now {found}, not {name}, so it was left alone"
-            )));
+        stop_process(pid, Some(name), started)
+    }
+
+    fn stop_exact(&mut self, pid: u32, started: u64) -> io::Result<()> {
+        stop_process(pid, None, Some(started))
+    }
+
+    fn lock(&mut self, path: &str) -> io::Result<Option<Held>> {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(path)?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Box::new(file))),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(error)) => Err(error),
         }
-        let Some(process) = sys.process(sysinfo::Pid::from_u32(pid)) else {
-            return Ok(());
-        };
-        if let Some(want) = started
-            && process.start_time() != want
-        {
-            return Err(io::Error::other(format!(
-                "process {pid} started at a different time than the one that was seen, so it is another process and was left alone"
-            )));
-        }
-        // What every later look at the ID is held to: the same name and the
-        // same start time, else the process asked to stop has exited, and
-        // the ID is another's.
-        let start = started.unwrap_or_else(|| process.start_time());
-        // On Unix, SIGTERM, which CLIProxyAPI and open-ferry both stop
-        // gracefully on. Windows has no such signal for a program without a
-        // window: it is ended at once.
-        #[cfg(unix)]
-        let asked = process.kill_with(sysinfo::Signal::Term).unwrap_or(false);
-        #[cfg(not(unix))]
-        let asked = process.kill();
-        if !asked && same_process_now(pid, name, start) {
-            return Err(io::Error::other(format!("failed to stop process {pid}")));
-        }
-        wait_then_end(
-            pid,
-            || same_process_now(pid, name, start),
-            // Looks again at the moment it ends it. A stable handle (a
-            // Windows process handle, a Linux pidfd) would close the gap
-            // that is left between this look and the kill; sysinfo has
-            // none.
-            || {
-                if let Some((sys, found)) = one_process(pid, sysinfo::ProcessRefreshKind::nothing())
-                    && found.eq_ignore_ascii_case(name)
-                    && let Some(process) = sys.process(sysinfo::Pid::from_u32(pid))
-                    && process.start_time() == start
-                {
-                    process.kill();
-                }
-            },
-            || std::thread::sleep(STOP_STEP),
-        )
     }
 
     fn argv0(&mut self, pid: u32) -> Option<String> {
@@ -729,7 +818,7 @@ fn read_answer(response: &[u8]) -> Answer {
     if status == "200" && compact.contains(r#""message":"open-ferry-ai-proxy""#) {
         Answer::OpenFerry
     } else if compact.contains(r#""message":"CLIProxyAPIServer""#) {
-        Answer::Other("CLIProxyAPI".to_owned())
+        Answer::CliProxyApi
     } else {
         Answer::Other(format!(
             "a server that isn't open-ferry (HTTP status {status})"
@@ -822,7 +911,7 @@ mod tests {
         .await;
         assert_eq!(
             probe(upstream, false, Duration::from_secs(5)).await,
-            Answer::Other("CLIProxyAPI".to_owned())
+            Answer::CliProxyApi
         );
         let other = serve_once("HTTP/1.1 404 Not Found\r\n\r\nnope").await;
         assert_eq!(
@@ -952,5 +1041,15 @@ mod tests {
             );
             assert!(!temp.path().join("nowhere").exists());
         }
+    }
+
+    // Not upstream's: a process whose start time is not the one asked for is
+    // left alone, on the one handle that would have ended it. (The test's own
+    // process stands in: it must still be here after the call.)
+    #[cfg(windows)]
+    #[test]
+    fn end_exact_leaves_a_process_with_another_start_time() {
+        assert!(!end_exact(std::process::id(), 1));
+        assert!(!end_exact(u32::MAX - 1, 1));
     }
 }

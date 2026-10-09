@@ -7,7 +7,7 @@ use chrono::{DateTime, TimeZone as _, Utc};
 use serde_json::Value;
 
 use super::discover::file_name;
-use super::machine::{Answer, Entry, EntryKind, Launch, Machine, Parent, Proc};
+use super::machine::{Answer, Entry, EntryKind, Held, Launch, Machine, Parent, Proc};
 use super::switch::backup_dir;
 use super::*;
 use crate::check::{Finding, Level};
@@ -16,9 +16,6 @@ use crate::os_service::{Cmd, Context, Output, Owner, Platform, System};
 /// What the fake's binaries hold: open-ferry's, and CLIProxyAPI's.
 const OPEN_FERRY: &[u8] = b"open-ferry binary";
 const CLIPROXYAPI: &[u8] = b"CLIProxyAPI binary";
-
-/// What the probe says of CLIProxyAPI.
-const THEIRS: &str = "CLIProxyAPI";
 
 /// The fake's clock: every switch is made at this time.
 const NOW: &str = "2026-10-08T12:00:00Z";
@@ -36,6 +33,8 @@ enum Effect {
     /// The process with this ID is gone, and another has its ID: its start
     /// time is not the one it had.
     Reuse(u32),
+    /// A symbolic link is made at this path, to this target.
+    Link(String, String),
 }
 
 /// A machine in memory: files, processes, a service manager that answers
@@ -79,6 +78,10 @@ struct Fake {
     argv0s: BTreeMap<u32, String>,
     /// What `launchctl print` said of the jobs `bootout` unloaded.
     unloaded: BTreeMap<String, Output>,
+    /// Lock files another run holds.
+    held: BTreeSet<String>,
+    /// Paths whose real path can't be found.
+    no_real: BTreeSet<String>,
 }
 
 impl Fake {
@@ -110,6 +113,8 @@ impl Fake {
             launches: Vec::new(),
             argv0s: BTreeMap::new(),
             unloaded: BTreeMap::new(),
+            held: BTreeSet::new(),
+            no_real: BTreeSet::new(),
         };
         fake.file(&context.exe, OPEN_FERRY);
         fake.dir(&context.cwd);
@@ -201,8 +206,7 @@ impl Fake {
 
     /// A running CLIProxyAPI, which holds the port.
     fn process(&mut self, process: Proc) {
-        self.serving
-            .push((process.pid, Answer::Other(THEIRS.to_owned())));
+        self.serving.push((process.pid, Answer::CliProxyApi));
         self.procs.insert(process.pid, process);
     }
 
@@ -286,6 +290,9 @@ impl Fake {
                     }
                 }
                 Effect::Serve(pid) => self.serving.insert(0, (pid, Answer::OpenFerry)),
+                Effect::Link(path, target) => {
+                    self.links.insert(path, target);
+                }
                 Effect::Reuse(pid) => {
                     if let Some(process) = self.procs.get_mut(&pid) {
                         process.started = Some(9_999_999);
@@ -340,7 +347,7 @@ impl Fake {
                 self.serving.push((pid, Answer::OpenFerry));
             }
         } else {
-            self.serving.push((pid, Answer::Other(THEIRS.to_owned())));
+            self.serving.push((pid, Answer::CliProxyApi));
         }
         Ok(pid)
     }
@@ -462,6 +469,9 @@ impl System for Fake {
     }
 
     fn real_path(&self, path: &str) -> io::Result<String> {
+        if self.no_real.contains(path) {
+            return Err(not_found());
+        }
         Ok(self.resolve(path))
     }
 
@@ -546,6 +556,30 @@ impl Machine for Fake {
         Ok(())
     }
 
+    fn stop_exact(&mut self, pid: u32, started: u64) -> io::Result<()> {
+        self.events.push(format!("stop {pid}"));
+        let Some(process) = self.procs.get(&pid) else {
+            return Ok(());
+        };
+        if self.unstoppable.contains(&pid) {
+            return Err(denied());
+        }
+        if process.started != Some(started) {
+            return Ok(());
+        }
+        self.end(pid);
+        self.fire(&format!("stop {pid}"));
+        Ok(())
+    }
+
+    fn lock(&mut self, path: &str) -> io::Result<Option<Held>> {
+        if self.held.contains(path) {
+            return Ok(None);
+        }
+        self.events.push(format!("lock {path}"));
+        Ok(Some(Box::new(())))
+    }
+
     fn spawn(&mut self, launch: &Launch) -> io::Result<u32> {
         self.events.push(format!("spawn {}", launch.exe));
         self.launches.push(launch.clone());
@@ -590,12 +624,14 @@ impl Machine for Fake {
     }
 
     fn copy(&mut self, from: &str, to: &str) -> io::Result<()> {
-        self.step(format!("copy {from} -> {to}"))?;
+        let event = format!("copy {from} -> {to}");
+        self.step(event.clone())?;
         let data = self.read(from)?;
         self.need_parent(to)?;
         // Like the real copy, it writes through a link at `to`.
         let to = self.resolve(to);
         self.files.insert(to, data);
+        self.fire(&event);
         Ok(())
     }
 
@@ -609,10 +645,13 @@ impl Machine for Fake {
         }
         let data = self.files.remove(from).ok_or_else(not_found)?;
         self.files.insert(to.to_owned(), data);
-        // A process keeps running the file it was started from, now at `to`.
-        for process in self.procs.values_mut() {
-            if process.exe.as_deref() == Some(from) {
-                process.exe = Some(to.to_owned());
+        // A process keeps running the file it was started from. Linux
+        // follows the file to `to`; Windows goes on naming the old path.
+        if self.platform != Platform::Windows {
+            for process in self.procs.values_mut() {
+                if process.exe.as_deref() == Some(from) {
+                    process.exe = Some(to.to_owned());
+                }
             }
         }
         self.fire(&event);
@@ -3663,8 +3702,8 @@ fn restore_replaces_a_symbolic_link_at_a_file() {
     );
     assert_eq!(saved(&fake, LINUX_RECORD)["status"], "switched");
 
-    // A record from before the places were noted still replaces the link,
-    // and leaves what the link led to as it was.
+    // A record without the places noted is not written through: the file
+    // is skipped and said, with where to copy it from.
     let mut record = saved(&fake, LINUX_RECORD);
     for file in record["backup"]["files"].as_array_mut().unwrap() {
         let file = file.as_object_mut().unwrap();
@@ -3673,22 +3712,22 @@ fn restore_replaces_a_symbolic_link_at_a_file() {
     }
     fake.file(LINUX_RECORD, record.to_string());
     let undo = migrate(&mut fake, &context, &["-undo", "-restore", "-yes"]);
-    assert_eq!(undo.code, 0, "{}", undo.all());
+    assert_eq!(undo.code, 1, "{}", undo.all());
     has(
         &undo.out,
         &format!(
-            "Replaced the symbolic link {SYSTEMD_CONFIG} (to /home/me/elsewhere.yaml) with the file"
+            "{SYSTEMD_CONFIG} wasn't restored: the record doesn't say where it and its directory really were at the switch, so the write could change another place. Copy the file by hand from "
         ),
     );
-    assert_eq!(fake.link_target(SYSTEMD_CONFIG), None);
     assert_eq!(
-        fake.data(SYSTEMD_CONFIG),
-        config_text("~/.cli-proxy-api").as_bytes()
+        fake.link_target(SYSTEMD_CONFIG).as_deref(),
+        Some("/home/me/elsewhere.yaml")
     );
     assert_eq!(
         fake.data("/home/me/elsewhere.yaml"),
         b"somebody else's file\n"
     );
+    assert_eq!(saved(&fake, LINUX_RECORD)["status"], "switched");
 }
 
 // Not upstream's: a symbolic link where the auth directory was is not
@@ -4234,18 +4273,30 @@ fn restore_stops_a_running_proxy_with_a_yes_and_restores_before_it_starts() {
     ));
     assert_eq!(saved(&fake, LINUX_RECORD)["status"], "switched");
 
+    let before = fake.events.len();
     let undo = migrate(&mut fake, &context, &["-undo", "-restore", "-yes"]);
     assert_eq!(undo.code, 0, "{}", undo.all());
-    has(&undo.out, "Stopped CLIProxyAPI (process 4242)");
+    // CLIProxyAPI is under its service manager: it is stopped through the
+    // manager, not killed by its process ID.
+    has(&undo.out, "Ran: systemctl --user stop cliproxyapi.service");
     assert!(!fake.procs.contains_key(&4242));
     assert_eq!(
         fake.data(SYSTEMD_CONFIG),
         config_text("~/.cli-proxy-api").as_bytes()
     );
+    let events = &fake.events[before..];
+    assert!(
+        !events.iter().any(|event| event == "stop 4242"),
+        "{events:#?}"
+    );
     in_order(
-        &fake.events,
+        events,
         &[
-            "stop 4242",
+            "run systemctl --user stop cliproxyapi.service",
+            &format!(
+                "copy {}/config/config.yaml -> {SYSTEMD_CONFIG}",
+                systemd_backup()
+            ),
             "run systemctl --user start cliproxyapi.service",
         ],
     );
@@ -4496,4 +4547,309 @@ fn undo_stops_only_the_process_started_through_the_drop_in() {
     assert!(fake.procs.contains_key(&6002));
     assert!(!fake.procs.contains_key(&6003));
     assert!(!fake.procs.contains_key(&9001));
+}
+
+// --- Round 4: one run at a time, who is stopped, and where things go ---
+
+/// The lock file beside the Linux record.
+const LINUX_LOCK: &str = "/home/me/.config/open-ferry/migration.json.lock";
+
+/// Whether any event from `from` on is `event`.
+fn happened_since(fake: &Fake, from: usize, event: &str) -> bool {
+    fake.events[from..].iter().any(|known| known == event)
+}
+
+/// The renames of real files from `from` on (the record's temporary files
+/// don't count).
+fn renames_since(fake: &Fake, from: usize) -> Vec<String> {
+    fake.events[from..]
+        .iter()
+        .filter(|event| event.starts_with("rename ") && !event.contains(".tmp"))
+        .cloned()
+        .collect()
+}
+
+// Not upstream's: two `migrate` runs don't work at once. The second finds the
+// lock held, says so, exits 1, and changes nothing: no rename, no stopped
+// process. Once the first lets go, it can run.
+#[test]
+fn only_one_migrate_runs_at_a_time() {
+    let (mut fake, context) = bare_process();
+    fake.held.insert(LINUX_LOCK.to_owned());
+    let ran = migrate(&mut fake, &context, &["-yes"]);
+    assert_eq!(ran.code, 1, "{}", ran.all());
+    has(
+        &ran.all(),
+        &format!("another `open-ferry migrate` is running (it holds {LINUX_LOCK})"),
+    );
+    assert!(renames_since(&fake, 0).is_empty(), "{:#?}", fake.events);
+    assert!(!fake.events.iter().any(|event| event.starts_with("stop ")));
+    assert_eq!(fake.data(OPT_CPA), CLIPROXYAPI);
+
+    fake.held.clear();
+    assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
+    assert_eq!(fake.data(OPT_MOVED), CLIPROXYAPI);
+
+    // -undo takes the same lock.
+    fake.held.insert(LINUX_LOCK.to_owned());
+    let events = fake.events.len();
+    let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(undo.code, 1, "{}", undo.all());
+    has(&undo.all(), "another `open-ferry migrate` is running");
+    assert!(renames_since(&fake, events).is_empty());
+    assert_eq!(fake.data(OPT_MOVED), CLIPROXYAPI);
+    assert_eq!(saved(&fake, LINUX_RECORD)["status"], "switched");
+    fake.held.clear();
+    assert_eq!(migrate(&mut fake, &context, &["-undo", "-yes"]).code, 0);
+    assert_eq!(fake.data(OPT_CPA), CLIPROXYAPI);
+}
+
+// Not upstream's: only an answer that says it is CLIProxyAPI closes
+// `undone-not-started`. Another server's HTTP answer on the port does not.
+#[test]
+fn a_stray_http_answer_does_not_close_undone_not_started() {
+    let (mut fake, context) = launcher_task();
+    fake.terminal = true;
+    fake.replies.extend([true, false]);
+    assert_eq!(migrate(&mut fake, &context, &[]).code, 0);
+    // CLIProxyAPI's process is gone, and another server answers (a 404).
+    fake.procs.remove(&6060);
+    fake.serving.clear();
+    fake.serving.push((
+        1,
+        Answer::Other("a server that isn't open-ferry (HTTP status 404)".to_owned()),
+    ));
+    let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(undo.code, 1, "{}", undo.all());
+    assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "undone-not-started");
+
+    // An answer that says it is CLIProxyAPI does close it.
+    fake.serving.clear();
+    fake.serving.push((1, Answer::CliProxyApi));
+    let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(undo.code, 0, "{}", undo.all());
+    assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "undone");
+}
+
+// Not upstream's: a task that is deleted reads as gone, but the process it
+// ran may go on. -undo waits for that process, and CLIProxyAPI's task is not
+// run beside it.
+#[test]
+fn a_deleted_task_is_not_an_ended_one() {
+    let (mut fake, context) = binary_task(true);
+    assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
+    // Ending the task does not end its process.
+    fake.effects.remove("schtasks.exe /end /tn open-ferry");
+    fake.procs.get_mut(&9001).unwrap().args =
+        strings(&["service", "run", "-config", r"C:\Users\me\cpa\config.yaml"]);
+    let events = fake.events.len();
+    let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(undo.code, 1, "{}", undo.all());
+    has(&undo.all(), "process 9001 still runs");
+    assert!(!happened_since(
+        &fake,
+        events,
+        r"run schtasks.exe /run /tn \CLIProxyAPI"
+    ));
+    assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "switched");
+
+    // Once the process has ended, the retry finishes.
+    fake.end(9001);
+    let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(undo.code, 0, "{}", undo.all());
+    assert!(happened_since(
+        &fake,
+        events,
+        r"run schtasks.exe /run /tn \CLIProxyAPI"
+    ));
+    assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "undone");
+}
+
+// Not upstream's: a query of the task that fails for some reason other than
+// "no such task" is not taken for a task that is gone.
+#[test]
+fn a_failed_task_query_is_not_a_gone_task() {
+    let (mut fake, context) = binary_task(true);
+    assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
+    fake.fail(
+        "schtasks.exe /query /tn open-ferry",
+        1,
+        "ERROR: Access is denied.",
+    );
+    fake.fail(
+        "schtasks.exe /query /fo csv /nh",
+        1,
+        "ERROR: Access is denied.",
+    );
+    let events = fake.events.len();
+    let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(undo.code, 1, "{}", undo.all());
+    has(&undo.all(), "failed with");
+    assert!(!happened_since(
+        &fake,
+        events,
+        r"run schtasks.exe /run /tn \CLIProxyAPI"
+    ));
+    assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "switched");
+}
+
+// Not upstream's: on Windows a running file that was renamed keeps its old
+// path, which then names CLIProxyAPI's binary. -undo takes the open-ferry
+// processes by identity before it renames anything, writes them to the
+// record, and stops exactly those. Where the copy was set aside is recorded
+// too, so a retry finds it.
+#[test]
+fn undo_stops_the_open_ferry_whose_path_now_reads_as_cliproxyapis() {
+    let (mut fake, context) = launcher_task();
+    fake.terminal = true;
+    fake.replies.extend([true, true]);
+    assert_eq!(migrate(&mut fake, &context, &[]).code, 0);
+    let aside = format!("{TASK_CPA}.open-ferry");
+
+    fake.unstoppable.insert(9001);
+    let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(undo.code, 1, "{}", undo.all());
+    has(&undo.all(), "failed to stop open-ferry (process 9001)");
+    let record = saved(&fake, WINDOWS_RECORD);
+    assert_eq!(record["status"], "switched");
+    assert_eq!(
+        record["switch"]["identities"],
+        serde_json::json!([{ "pid": 9001, "started": 11001 }])
+    );
+    assert_eq!(record["switch"]["aside"], aside);
+    assert_eq!(fake.data(TASK_CPA), CLIPROXYAPI);
+
+    // The retry stops that process, whatever its path now says, and removes
+    // the copy it set aside. The task then starts CLIProxyAPI.
+    fake.unstoppable.clear();
+    fake.on("stop 9001", Effect::Launch(TASK_CPA.to_owned()));
+    let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(undo.code, 0, "{}", undo.all());
+    has(&undo.out, "Stopped open-ferry (process 9001)");
+    assert!(!fake.procs.contains_key(&9001));
+    assert!(!fake.exists(&aside));
+    assert_eq!(fake.data(TASK_CPA), CLIPROXYAPI);
+    assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "undone");
+}
+
+// Not upstream's: open-ferry's copy is set aside where nothing is; a file at
+// the plain name is never renamed onto and is left alone. Where it went is
+// written to the record before it is moved, so a retry cleans it up.
+#[test]
+fn the_aside_is_where_nothing_is_and_a_retry_finds_it() {
+    let (mut fake, context) = bare_process();
+    fake.installed = None;
+    let plain = format!("{OPT_CPA}.open-ferry");
+    let stamped = format!("{plain}-{STAMP}");
+    fake.file(&plain, "somebody else's file\n");
+    assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
+    assert_eq!(fake.data(OPT_CPA), OPEN_FERRY);
+
+    fake.unstoppable.insert(9001);
+    let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(undo.code, 1, "{}", undo.all());
+    assert_eq!(saved(&fake, LINUX_RECORD)["switch"]["aside"], stamped);
+    assert_eq!(fake.data(&plain), b"somebody else's file\n");
+    assert!(
+        !fake
+            .events
+            .iter()
+            .any(|event| event.ends_with(&format!("-> {plain}")))
+    );
+
+    fake.unstoppable.clear();
+    let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(undo.code, 0, "{}", undo.all());
+    assert!(!fake.exists(&stamped));
+    assert_eq!(fake.data(&plain), b"somebody else's file\n");
+    assert_eq!(fake.data(OPT_CPA), CLIPROXYAPI);
+    assert_eq!(saved(&fake, LINUX_RECORD)["status"], "undone");
+}
+
+// Not upstream's: a file whose real path can't be found stops the switch
+// before anything is changed, since -restore couldn't check where it goes.
+#[test]
+fn a_file_with_no_real_path_blocks_the_switch() {
+    let (mut fake, context) = systemd_user();
+    fake.no_real.insert(SYSTEMD_CONFIG.to_owned());
+    let ran = migrate(&mut fake, &context, &["-yes"]);
+    assert_eq!(ran.code, 1, "{}", ran.all());
+    has(
+        &ran.all(),
+        &format!("ailed to find where {SYSTEMD_CONFIG} really is"),
+    );
+    has(&ran.all(), "Nothing was changed");
+    assert!(renames_since(&fake, 0).is_empty());
+    assert!(!fake.events.iter().any(|event| event.starts_with("stop ")));
+    assert!(!fake.events.iter().any(|event| event.starts_with("copy ")));
+}
+
+// Not upstream's: -restore looks again at where a file goes just before it
+// writes it: a directory made a link by the copy before is not written
+// through. (A swap between that look and the write is not caught; see
+// `restore`.)
+#[test]
+fn restore_looks_again_before_each_write() {
+    let (mut fake, context) = systemd_user();
+    assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
+    fake.dir("/home/me/other-auth");
+    fake.on(
+        &format!(
+            "copy {}/config/config.yaml -> {SYSTEMD_CONFIG}",
+            systemd_backup()
+        ),
+        Effect::Link(
+            "/home/me/.cli-proxy-api".to_owned(),
+            "/home/me/other-auth".to_owned(),
+        ),
+    );
+    let undo = migrate(&mut fake, &context, &["-undo", "-restore", "-yes"]);
+    assert_eq!(undo.code, 1, "{}", undo.all());
+    has(&undo.out, "wasn't restored");
+    assert!(
+        !fake
+            .events
+            .iter()
+            .any(|event| event.contains("-> /home/me/.cli-proxy-api/")),
+        "{:#?}",
+        fake.events
+    );
+}
+
+// Not upstream's: a stopped Windows service whose name has RUNNING in it is
+// stopped: only the number on the STATE line says how it stands.
+#[test]
+fn a_stopped_service_named_running_is_stopped() {
+    let text = "SERVICE_NAME: CLIProxyAPI_RUNNING\r\n        TYPE               : 10  WIN32_OWN_PROCESS\r\n        STATE              : 1  STOPPED\r\n";
+    assert_eq!(crate::os_service::service_state_number(text), Some(1));
+    assert_eq!(crate::os_service::service_state_number("RUNNING\r\n"), None);
+
+    let (mut fake, context) = nssm_service(windows_program_files(), true);
+    assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
+    fake.answer("sc.exe query CLIProxyAPI", 0, text);
+    let events = fake.events.len();
+    let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(undo.code, 0, "{}", undo.all());
+    lacks(&undo.out, "is on already");
+    assert!(happened_since(
+        &fake,
+        events,
+        "run sc.exe start CLIProxyAPI"
+    ));
+}
+
+// Not upstream's: the switch's own files are compared by where they really
+// are: a config that is a link to the record is the record.
+#[test]
+fn the_overlap_check_follows_links() {
+    let (mut fake, context) = systemd_user();
+    let text = fake.files.remove(SYSTEMD_CONFIG).unwrap();
+    fake.file(LINUX_RECORD, text);
+    fake.links
+        .insert(SYSTEMD_CONFIG.to_owned(), LINUX_RECORD.to_owned());
+    let ran = migrate(&mut fake, &context, &["-yes"]);
+    assert_eq!(ran.code, 1, "{}", ran.all());
+    has(&ran.all(), "or inside it or holds it");
+    has(&ran.all(), "Nothing was changed");
+    assert!(renames_since(&fake, 0).is_empty());
 }

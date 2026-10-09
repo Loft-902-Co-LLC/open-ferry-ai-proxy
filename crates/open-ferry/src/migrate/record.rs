@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::machine::Machine;
+use super::machine::{Held, Machine};
 use crate::os_service::{Context, Platform, Target};
 
 /// The record's file name.
@@ -65,7 +65,7 @@ pub(crate) struct Copied {
     /// What `from` resolved to when it was copied (its real path), and what
     /// its parent directory did. `-restore` only writes to `from` while its
     /// parent still resolves to `parent`: a directory that has since become
-    /// a link would redirect the write.
+    /// a link would redirect the write. A copy without them is not restored.
     #[serde(default)]
     pub(crate) real: Option<String>,
     #[serde(default)]
@@ -136,7 +136,26 @@ pub(crate) enum Switch {
         /// switch: `-undo` only puts back a file with this digest.
         #[serde(default)]
         sha256: String,
+        /// The processes that ran open-ferry from `binary`, taken before
+        /// anything is moved at `-undo` and kept here, so that a retry stops
+        /// exactly these. A running file's path can still read as `binary`
+        /// after it was moved (on Windows), so no process is told from the
+        /// file now at its path.
+        #[serde(default)]
+        identities: Vec<Identity>,
+        /// Where open-ferry's copy was set aside when CLIProxyAPI's binary
+        /// was put back, written before it is moved so that a retry finds it.
+        #[serde(default)]
+        aside: Option<String>,
     },
+}
+
+/// A process, as the ID it had and when it started: nothing else of it is
+/// kept.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Identity {
+    pub(crate) pid: u32,
+    pub(crate) started: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -298,6 +317,28 @@ fn make_dir(machine: &mut dyn Machine, platform: Platform, dir: &str) -> Result<
     match machine.create_private_dir(dir) {
         Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => Err(failed(error)),
         _ => Ok(()),
+    }
+}
+
+/// Takes the lock that keeps two `migrate` runs apart, for as long as the
+/// answer is held: the file beside the record at `path`. A second run gets
+/// an error saying so.
+pub(crate) fn lock(
+    machine: &mut dyn Machine,
+    platform: Platform,
+    path: &str,
+) -> Result<Held, String> {
+    let lock = format!("{path}.lock");
+    if let Some(dir) = platform.parent(path) {
+        make_dir(machine, platform, &dir)?;
+    }
+    match machine.lock(&lock) {
+        Ok(Some(held)) => Ok(held),
+        Ok(None) => Err(format!(
+            "another `open-ferry {}` is running (it holds {lock}): wait for it to finish, then run this again. Nothing was changed",
+            super::NAME
+        )),
+        Err(error) => Err(format!("failed to take the lock {lock}: {error}")),
     }
 }
 
