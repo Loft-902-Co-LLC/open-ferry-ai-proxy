@@ -744,7 +744,11 @@ pub(crate) struct Failed {
 }
 
 /// Carries out `plan`, saying what it did.
-pub(crate) fn apply(system: &mut dyn System, plan: &Plan, out: &mut dyn Write) -> Result<(), Failed> {
+pub(crate) fn apply(
+    system: &mut dyn System,
+    plan: &Plan,
+    out: &mut dyn Write,
+) -> Result<(), Failed> {
     let mut changed = false;
     let mut result = Ok(());
     for step in &plan.steps {
@@ -913,7 +917,11 @@ impl Target {
     }
 
     /// Whether the service is installed.
-    pub(crate) fn installed(self, system: &mut dyn System, context: &Context) -> Result<bool, String> {
+    pub(crate) fn installed(
+        self,
+        system: &mut dyn System,
+        context: &Context,
+    ) -> Result<bool, String> {
         if let Some(path) = self.definition_path(context)? {
             return Ok(system.exists(&path));
         }
@@ -1357,7 +1365,11 @@ fn install_plan(
 }
 
 /// What to say once `install` is done.
-pub(crate) fn installed_notes(context: &Context, target: Target, definition: &Definition) -> String {
+pub(crate) fn installed_notes(
+    context: &Context,
+    target: Target,
+    definition: &Definition,
+) -> String {
     let windows_log = || context.platform.join(&definition.dir, windows::LOG_FILE);
     match target {
         Target::SystemdUser | Target::SystemdSystem => systemd::notes(target.system()),

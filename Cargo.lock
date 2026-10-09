@@ -1782,6 +1782,7 @@ dependencies = [
  "serde_json",
  "socket2",
  "subtle",
+ "sysinfo",
  "tempfile",
  "tokio",
  "tokio-rustls",
