@@ -1387,19 +1387,83 @@ fn turn_theirs_on(
     start_theirs(machine, theirs, out)
 }
 
-/// The processes that run open-ferry's service (`service run`), which a
-/// removed service or task leaves running until they are told to stop.
-fn service_runners(machine: &mut dyn Machine, context: &Context) -> Vec<Proc> {
-    let name = discover::file_name(context.platform, &context.exe);
-    machine
+/// Whether `args` give `-config` the value `config`.
+fn runs_with_config(platform: Platform, args: &[String], config: &str) -> bool {
+    args.iter().enumerate().any(|(at, arg)| {
+        let value = match arg.as_str() {
+            "-config" | "--config" => args.get(at + 1).map(String::as_str),
+            _ => arg
+                .strip_prefix("-config=")
+                .or_else(|| arg.strip_prefix("--config=")),
+        };
+        value.is_some_and(|value| discover::same_path(platform, value, config))
+    })
+}
+
+/// The processes that run open-ferry's service, which a removed service or
+/// task leaves running until they are told to stop: the supervisors
+/// (`service run`), the servers they started (a task's supervisor ends at
+/// `/end` and may leave its server), and any open-ferry that runs with the
+/// installed `config`. This process is left out. An open-ferry process whose
+/// arguments can't be read could be any of them: then nothing is known, and
+/// the error says so.
+fn service_runners(
+    machine: &mut dyn Machine,
+    context: &Context,
+    config: &str,
+) -> Result<Vec<Proc>, String> {
+    let platform = context.platform;
+    let name = discover::file_name(platform, &context.exe);
+    let own = std::process::id();
+    let all: Vec<Proc> = machine
         .processes(&[name.as_str()])
-        .unwrap_or_default()
+        .map_err(|error| format!("failed to list the {name} processes: {error}"))?
         .into_iter()
+        .filter(|process| process.pid != own)
+        .collect();
+    if let Some(process) = all.iter().find(|process| process.args.is_empty()) {
+        return Err(format!(
+            "the arguments of {name} (process {}) can't be read, so it isn't known whether it runs open-ferry's service",
+            process.pid
+        ));
+    }
+    let supervisors: Vec<(u32, Option<u64>)> = all
+        .iter()
         .filter(|process| {
             process.args.first().map(String::as_str) == Some("service")
                 && process.args.get(1).map(String::as_str) == Some("run")
         })
-        .collect()
+        .map(|process| (process.pid, process.started))
+        .collect();
+    Ok(all
+        .into_iter()
+        .filter(|process| {
+            let supervisor = supervisors.iter().any(|(pid, _)| *pid == process.pid);
+            let child = process.parent.as_ref().is_some_and(|parent| {
+                supervisors.iter().any(|(pid, started)| {
+                    *pid == parent.pid
+                        && match (started, process.started) {
+                            (Some(started), Some(mine)) => mine >= *started,
+                            _ => true,
+                        }
+                })
+            });
+            let installed = process
+                .exe
+                .as_deref()
+                .is_none_or(|exe| discover::same_path(platform, exe, &context.exe))
+                && runs_with_config(platform, &process.args, config);
+            supervisor || child || installed
+        })
+        .collect())
+}
+
+/// The message of runners that can't be told: nothing is turned on.
+fn unknown_runners(error: &str) -> String {
+    format!(
+        "{error}. Stop open-ferry's service and its processes by hand, then run `open-ferry {} -undo` again",
+        super::NAME
+    )
 }
 
 /// Runs `cmds`, saying each; the failures are returned, and don't stop the
@@ -1599,7 +1663,13 @@ fn execute_service(
             ),
         );
         let mut failures = Vec::new();
-        let runners = service_runners(machine, context);
+        let runners = match service_runners(machine, context, base.config) {
+            Ok(runners) => runners,
+            Err(error) => {
+                failures.push(unknown_runners(&error));
+                Vec::new()
+            }
+        };
         if failed.changed
             && let Err(error) = os_service::uninstall(machine, context, target, false, out)
         {
@@ -1655,7 +1725,13 @@ fn execute_service(
                 format_args!("open-ferry didn't answer: {why}. Undoing the switch."),
             );
             let mut failures = Vec::new();
-            let runners = service_runners(machine, context);
+            let runners = match service_runners(machine, context, base.config) {
+                Ok(runners) => runners,
+                Err(error) => {
+                    failures.push(unknown_runners(&error));
+                    Vec::new()
+                }
+            };
             if let Err(error) = os_service::uninstall(machine, context, target, false, out) {
                 failures.push(error);
             }
@@ -3021,7 +3097,10 @@ pub(crate) fn undo(
         Switch::Service { theirs, ours } => {
             let target = record::target_of(&ours)
                 .ok_or_else(|| format!("the record names an unknown service, {ours}"))?;
-            let runners = service_runners(machine, context);
+            // Taken before anything is removed, and nothing is changed when
+            // they can't be told.
+            let runners = service_runners(machine, context, &record.cliproxyapi.config)
+                .map_err(|error| format!("{}. Nothing was changed", unknown_runners(&error)))?;
             if target.installed(machine, context)? {
                 os_service::uninstall(machine, context, target, false, out)?;
             } else {

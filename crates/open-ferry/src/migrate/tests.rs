@@ -38,6 +38,8 @@ enum Effect {
     /// A file with this content is put at this path (a file that another
     /// process makes while a step runs).
     Place(String, Vec<u8>),
+    /// This process ends, and no other.
+    End(u32),
 }
 
 /// A machine in memory: files, processes, a service manager that answers
@@ -88,6 +90,8 @@ struct Fake {
     /// Commands that succeed and change nothing in a manager's answers: a
     /// service that stays as it is when asked to stop.
     stuck: BTreeSet<String>,
+    /// open-ferry's own binary.
+    own: String,
 }
 
 impl Fake {
@@ -122,6 +126,7 @@ impl Fake {
             held: BTreeSet::new(),
             no_real: BTreeSet::new(),
             stuck: BTreeSet::new(),
+            own: context.exe.clone(),
         };
         fake.file(&context.exe, OPEN_FERRY);
         fake.dir(&context.cwd);
@@ -337,7 +342,13 @@ impl Fake {
                         .values()
                         .any(|process| process.exe.as_deref() == Some(exe.as_str()))
                     {
-                        self.start(&exe, Vec::new(), None, None).unwrap();
+                        // open-ferry's server reads its arguments.
+                        let args = if exe == self.own {
+                            vec!["-config".to_owned(), "/fake/config.yaml".to_owned()]
+                        } else {
+                            Vec::new()
+                        };
+                        self.start(&exe, args, None, None).unwrap();
                     }
                 }
                 Effect::Serve(pid) => self.serving.insert(0, (pid, Answer::OpenFerry)),
@@ -347,6 +358,7 @@ impl Fake {
                 Effect::Place(path, data) => {
                     self.files.insert(path, data);
                 }
+                Effect::End(pid) => self.end(pid),
                 Effect::Reuse(pid) => {
                     if let Some(process) = self.procs.get_mut(&pid) {
                         process.started = Some(9_999_999);
@@ -5145,6 +5157,101 @@ fn a_deleted_task_is_not_an_ended_one() {
         r"run schtasks.exe /run /tn \CLIProxyAPI"
     ));
     assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "undone");
+}
+
+/// Makes the task's process 9001 a supervisor that ends at `/end`, and gives
+/// it a server (process 9100) that lives on.
+fn supervisor_with_a_server(fake: &mut Fake) {
+    let config = r"C:\Users\me\cpa\config.yaml";
+    let supervisor = fake.procs.get_mut(&9001).unwrap();
+    supervisor.args = strings(&["service", "run", "-config", config]);
+    let child = Proc {
+        pid: 9100,
+        started: Some(12000),
+        args: strings(&["-config", config]),
+        parent: Some(Parent {
+            pid: 9001,
+            name: Some(supervisor.name.clone()),
+        }),
+        ..supervisor.clone()
+    };
+    fake.procs.insert(9100, child);
+    fake.effects.remove("schtasks.exe /end /tn open-ferry");
+    fake.on("schtasks.exe /end /tn open-ferry", Effect::End(9001));
+}
+
+// Not upstream's: a task's supervisor ends at /end, but its server may live
+// on, with nothing to probe on the address. -undo takes the server too,
+// before the task is deleted, so CLIProxyAPI is not started beside it, and
+// a retry finds it by the installed config when the supervisor is gone.
+#[test]
+fn undo_waits_for_the_server_of_a_task_supervisor() {
+    let (mut fake, context) = binary_task(true);
+    assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
+    supervisor_with_a_server(&mut fake);
+    let events = fake.events.len();
+    let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(undo.code, 1, "{}", undo.all());
+    has(&undo.all(), "process 9100 still runs");
+    assert!(!fake.procs.contains_key(&9001));
+    assert!(fake.procs.contains_key(&9100));
+    assert!(!happened_since(
+        &fake,
+        events,
+        r"run schtasks.exe /run /tn \CLIProxyAPI"
+    ));
+    assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "switched");
+
+    // The supervisor is gone now: the server is found by its config.
+    let events = fake.events.len();
+    let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(undo.code, 1, "{}", undo.all());
+    has(&undo.all(), "process 9100 still runs");
+    assert!(!happened_since(
+        &fake,
+        events,
+        r"run schtasks.exe /run /tn \CLIProxyAPI"
+    ));
+    assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "switched");
+
+    fake.end(9100);
+    let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(undo.code, 0, "{}", undo.all());
+    assert!(happened_since(
+        &fake,
+        events,
+        r"run schtasks.exe /run /tn \CLIProxyAPI"
+    ));
+    assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "undone");
+}
+
+// Not upstream's: an open-ferry process whose arguments can't be read could
+// be the service's, so nothing is known and -undo changes nothing.
+#[test]
+fn undo_blocks_on_an_open_ferry_process_it_cannot_read() {
+    let (mut fake, context) = binary_task(true);
+    assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
+    let mut unread = fake.procs.get(&9001).unwrap().clone();
+    unread.pid = 9200;
+    unread.args = Vec::new();
+    unread.parent = None;
+    fake.procs.insert(9200, unread);
+    let events = fake.events.len();
+    let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(undo.code, 1, "{}", undo.all());
+    has(&undo.all(), "(process 9200) can't be read");
+    has(&undo.all(), "Nothing was changed");
+    assert!(!happened_since(
+        &fake,
+        events,
+        "run schtasks.exe /delete /tn open-ferry /f"
+    ));
+    assert!(!happened_since(
+        &fake,
+        events,
+        r"run schtasks.exe /run /tn \CLIProxyAPI"
+    ));
+    assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "switched");
 }
 
 // Not upstream's: a query of the task that fails for some reason other than
