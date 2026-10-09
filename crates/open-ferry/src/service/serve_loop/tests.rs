@@ -817,6 +817,48 @@ async fn a_resume_after_a_cut_fails() {
     within(served.server).await.unwrap().unwrap();
 }
 
+// Not upstream's: a loop that can't make its listener again ends and leaves
+// the counts, which then look settled, and the resume still fails.
+#[tokio::test]
+async fn a_resume_fails_when_a_loop_cannot_make_its_listener_again() {
+    let served = start(None, FIRST_REQUEST_DEADLINE);
+    within(served.control.pause_accept()).await;
+    served
+        .control
+        .shared
+        .fail_next_listener
+        .store(true, Ordering::Release);
+    let resumed = within(served.control.resume_accept()).await;
+    assert!(
+        resumed
+            .as_ref()
+            .is_err_and(|error| error.to_string().contains("couldn't accept again")),
+        "{resumed:?}"
+    );
+    assert!(within(served.server).await.unwrap().is_err());
+}
+
+// Not upstream's: a loop polled for the first time just after a resume's
+// wait settled counts itself as started before it has its listener. The
+// resume judges the counts that settled it, so it succeeds, and the loop
+// makes its listener on its own.
+#[tokio::test]
+async fn a_loop_started_after_the_resume_settled_does_not_fail_it() {
+    let served = start(None, FIRST_REQUEST_DEADLINE);
+    within(served.control.pause_accept()).await;
+    served
+        .control
+        .shared
+        .start_a_loop_after_the_resume_settles
+        .store(true, Ordering::Release);
+    within(served.control.resume_accept()).await.unwrap();
+    let mut client = connect(served.addr).await;
+    get_request(&mut client, "/", true).await;
+    assert!(is_ok(&read_response(&mut client).await));
+    served.control.stop();
+    within(served.server).await.unwrap().unwrap();
+}
+
 // Not upstream's: WebSockets that a release can't retire connect while the
 // control is released and cut. None can escape the cut: afterwards every
 // one is closed (EOF or a reset for its client) and the count is 0.

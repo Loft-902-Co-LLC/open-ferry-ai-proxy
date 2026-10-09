@@ -18,6 +18,13 @@ mod unix {
 
     static NEXT: AtomicU32 = AtomicU32::new(0);
 
+    /// Taken exclusively by the one test here that forks, around the fork, and shared by every
+    /// other test for its whole run. A forked child holds a copy of every descriptor open at the
+    /// fork until it execs (`spawn` returns after the exec), so without this a stale socket's
+    /// listener or a dropped lock could live on in it and make another test's socket look live
+    /// or its lock look held.
+    static FORKS: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
+
     /// A fresh endpoint name under `/tmp`, removed again on drop. `/tmp` is the one sticky root
     /// the policy accepts for an endpoint's ancestry.
     struct Fixture {
@@ -78,6 +85,7 @@ mod unix {
     #[tokio::test]
     async fn a_client_and_server_talk_over_a_private_socket() {
         // Not upstream's: one round trip, and the modes the policy demands.
+        let _forks = FORKS.read().await;
         let fx = Fixture::new();
         let mut server = fx.bind().expect("bind");
         assert_eq!(mode_of(&fx.dir), 0o700);
@@ -104,6 +112,7 @@ mod unix {
     #[tokio::test]
     async fn the_socket_is_removed_when_the_server_is_dropped() {
         // Not upstream's: a clean exit leaves no socket behind.
+        let _forks = FORKS.read().await;
         let fx = Fixture::new();
         let server = fx.bind().expect("bind");
         let socket = server.socket_path().to_path_buf();
@@ -115,6 +124,7 @@ mod unix {
     #[tokio::test]
     async fn the_location_survives_the_record() {
         // Not upstream's: supervisor.json's endpoint field.
+        let _forks = FORKS.read().await;
         let fx = Fixture::new();
         let again = Location::from_record(&fx.location.to_record()).expect("record");
         assert_eq!(again, fx.location);
@@ -124,6 +134,7 @@ mod unix {
     #[tokio::test]
     async fn a_stale_socket_is_replaced_after_the_connection_is_refused() {
         // Not upstream's: a crashed supervisor's socket file doesn't block the next one.
+        let _forks = FORKS.read().await;
         let fx = Fixture::new();
         fx.make_dir(0o700);
         let socket = fx.location.socket_path();
@@ -138,6 +149,7 @@ mod unix {
     #[tokio::test]
     async fn a_live_socket_is_taken_and_stays_untouched() {
         // Not upstream's: a second server never removes a live one's socket.
+        let _forks = FORKS.read().await;
         let fx = Fixture::new();
         let _first = fx.bind().expect("first");
         let other_data = tempfile::tempdir().expect("data dir");
@@ -155,6 +167,7 @@ mod unix {
     #[tokio::test]
     async fn a_regular_file_at_the_socket_path_is_unsafe_and_survives() {
         // Not upstream's: only a verified own socket may be removed.
+        let _forks = FORKS.read().await;
         let fx = Fixture::new();
         fx.make_dir(0o700);
         let socket = fx.location.socket_path();
@@ -169,6 +182,7 @@ mod unix {
     #[tokio::test]
     async fn a_directory_that_is_not_0700_is_unsafe() {
         // Not upstream's: the final directory is strictly 0700.
+        let _forks = FORKS.read().await;
         for mode in [0o755, 0o770, 0o777, 0o750] {
             let fx = Fixture::new();
             fx.make_dir(mode);
@@ -192,6 +206,7 @@ mod unix {
     #[tokio::test]
     async fn a_symlink_at_the_endpoint_name_is_unsafe() {
         // Not upstream's: nothing below the runtime root may be a link.
+        let _forks = FORKS.read().await;
         let fx = Fixture::new();
         let target = tempfile::tempdir().expect("target");
         fs::set_permissions(target.path(), fs::Permissions::from_mode(0o700)).expect("chmod");
@@ -207,6 +222,7 @@ mod unix {
     #[tokio::test]
     async fn the_client_refuses_a_socket_that_is_not_0600() {
         // Not upstream's: a looser socket mode is refused by the client.
+        let _forks = FORKS.read().await;
         let fx = Fixture::new();
         fx.make_dir(0o700);
         let socket = fx.location.socket_path();
@@ -221,6 +237,7 @@ mod unix {
     #[tokio::test]
     async fn the_client_refuses_a_regular_file_where_the_socket_should_be() {
         // Not upstream's: the client checks the entry's type before connecting.
+        let _forks = FORKS.read().await;
         let fx = Fixture::new();
         fx.make_dir(0o700);
         fs::write(fx.location.socket_path(), b"x").expect("write");
@@ -230,6 +247,7 @@ mod unix {
     #[tokio::test]
     async fn connecting_with_no_server_fails() {
         // Not upstream's: nothing listening is an error, not a hang.
+        let _forks = FORKS.read().await;
         let fx = Fixture::new();
         assert!(connect(&fx.location, &fx.identity).await.is_err());
     }
@@ -237,6 +255,7 @@ mod unix {
     #[tokio::test]
     async fn a_name_with_a_trailing_slash_is_rejected_before_anything_follows_a_link() {
         // Not upstream's: `link/` would make openat follow a symlink named `link`.
+        let _forks = FORKS.read().await;
         let target = tempfile::tempdir().expect("target");
         let name = format!(
             "ofp-endpoint-test-slash-{}-{}",
@@ -255,6 +274,7 @@ mod unix {
     async fn a_held_namespace_lock_stops_a_second_data_dir_from_touching_the_socket() {
         // Not upstream's: two supervisors of different data directories share one endpoint
         // directory. While one holds the namespace lock, the other neither probes nor removes.
+        let _forks = FORKS.read().await;
         use std::os::fd::AsRawFd;
         let fx = Fixture::new();
         fx.make_dir(0o700);
@@ -291,6 +311,7 @@ mod unix {
     #[tokio::test]
     async fn the_namespace_lock_is_released_when_the_server_is_dropped() {
         // Not upstream's: guard cleanup, another data directory can bind right after.
+        let _forks = FORKS.read().await;
         let fx = Fixture::new();
         let first = fx.bind().expect("first");
         let other_data = tempfile::tempdir().expect("data dir");
@@ -308,6 +329,7 @@ mod unix {
     #[tokio::test]
     async fn a_replacement_socket_survives_the_drop_of_the_server_it_replaced() {
         // Not upstream's: Drop unlinks only the inode it bound.
+        let _forks = FORKS.read().await;
         let fx = Fixture::new();
         let server = fx.bind().expect("bind");
         let socket = server.socket_path().to_path_buf();
@@ -378,6 +400,8 @@ mod unix {
         let Ok(exe) = std::env::current_exe() else {
             return;
         };
+        // Exclusive, so no other test's descriptor is open in the child.
+        let fork = FORKS.write().await;
         let child = Command::new(exe)
             .args([
                 "--exact",
@@ -390,6 +414,7 @@ mod unix {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn();
+        drop(fork);
         let mut helper = match child {
             Ok(child) => Helper(child),
             Err(e) => {
@@ -437,6 +462,7 @@ mod unix {
     async fn a_client_refuses_a_server_whose_actual_uid_differs_though_the_files_look_right() {
         // Not upstream's: needs root. The directory and socket are handed to OTHER_UID so the
         // metadata checks pass, and only the peer-credential check can refuse the root server.
+        let _forks = FORKS.read().await;
         // SAFETY: geteuid has no preconditions.
         if unsafe { libc::geteuid() } != 0 {
             eprintln!("skipped: not root");

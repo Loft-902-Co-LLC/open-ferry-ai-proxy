@@ -33,7 +33,7 @@ impl TrustRules {
 
     /// A user service. Like the system rules, except that group write is tolerated on a
     /// directory whose group is the user's private group (its name equals the user's name and
-    /// no other account is a member of it). See [`private_group`].
+    /// no other account is a member of it). See `private_group` in this module.
     pub fn user(uid: u32) -> Self {
         Self::new(ServiceKind::User, uid)
     }

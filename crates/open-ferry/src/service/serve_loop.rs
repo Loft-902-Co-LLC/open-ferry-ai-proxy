@@ -118,6 +118,9 @@ struct Stats {
     started: usize,
     /// Loops that hold a listener.
     accepting: usize,
+    /// Loops that ended because they couldn't make a listener from their
+    /// socket. Never decreases.
+    failed: usize,
     /// Connections whose IO is alive, from the TCP accept.
     live: usize,
     /// Of those, the upgraded ones.
@@ -151,6 +154,13 @@ struct Shared {
     /// Makes the next duplicate of an accepted socket fail.
     #[cfg(test)]
     fail_next_duplicate: AtomicBool,
+    /// Makes the next listener a loop makes from its socket fail.
+    #[cfg(test)]
+    fail_next_listener: AtomicBool,
+    /// Makes the next resume count a loop as started once its wait has
+    /// settled, as a loop polled for the first time just then would be.
+    #[cfg(test)]
+    start_a_loop_after_the_resume_settles: AtomicBool,
 }
 
 impl Shared {
@@ -211,6 +221,10 @@ impl ServeControl {
                 released_at: OnceLock::new(),
                 #[cfg(test)]
                 fail_next_duplicate: AtomicBool::new(false),
+                #[cfg(test)]
+                fail_next_listener: AtomicBool::new(false),
+                #[cfg(test)]
+                start_a_loop_after_the_resume_settles: AtomicBool::new(false),
             }),
         }
     }
@@ -227,14 +241,17 @@ impl ServeControl {
 
     /// Waits until `done` holds of the stats or the mode is no longer
     /// `expected`, so a call that something else superseded still ends.
-    async fn wait_settled(&self, expected: Mode, done: impl Fn(&Stats) -> bool) {
+    /// Returns the stats it saw last. A caller judges those rather than
+    /// reading them again: a loop polled since may have counted itself as
+    /// started and not have its listener yet.
+    async fn wait_settled(&self, expected: Mode, done: impl Fn(&Stats) -> bool) -> Stats {
         let mut stats = self.shared.stats.subscribe();
         let mut mode = self.shared.mode.subscribe();
         loop {
             let moved = *mode.borrow_and_update() != expected;
-            let finished = done(&stats.borrow_and_update());
-            if moved || finished {
-                return;
+            let seen = *stats.borrow_and_update();
+            if moved || done(&seen) {
+                return seen;
             }
             // The senders are in `shared`, which this handle keeps.
             tokio::select! {
@@ -253,7 +270,8 @@ impl ServeControl {
     pub(crate) async fn pause_accept(&self) {
         let _turn = self.shared.gate.lock().await;
         self.shared.move_mode(&[Mode::Running], Mode::Paused);
-        self.wait_settled(Mode::Paused, |stats| stats.accepting == 0)
+        let _ = self
+            .wait_settled(Mode::Paused, |stats| stats.accepting == 0)
             .await;
     }
 
@@ -265,20 +283,33 @@ impl ServeControl {
         if self.shared.connections().cut {
             return Err(io::Error::other("the control was cut"));
         }
+        // A loop that can't make its listener leaves the counts, which then
+        // look settled, so its failure is counted apart.
+        let failed = self.stats().failed;
         self.shared.move_mode(&[Mode::Paused], Mode::Running);
         if *self.shared.mode.borrow() != Mode::Running {
             return Err(io::Error::other("the listeners were released"));
         }
-        self.wait_settled(Mode::Running, |stats| stats.accepting >= stats.started)
+        let settled = self
+            .wait_settled(Mode::Running, |stats| {
+                stats.failed > failed || stats.accepting >= stats.started
+            })
             .await;
+        #[cfg(test)]
+        if self
+            .shared
+            .start_a_loop_after_the_resume_settles
+            .swap(false, Ordering::AcqRel)
+        {
+            self.shared.update(|stats| stats.started += 1);
+        }
         if self.shared.connections().cut {
             return Err(io::Error::other("the control was cut"));
         }
         if *self.shared.mode.borrow() != Mode::Running {
             return Err(io::Error::other("the listeners were released"));
         }
-        let stats = self.stats();
-        if stats.accepting < stats.started {
+        if settled.failed > failed {
             return Err(io::Error::other("a listener couldn't accept again"));
         }
         Ok(())
@@ -401,6 +432,12 @@ impl LoopRegistration {
                 stats.accepting = stats.accepting.saturating_sub(1);
             }
         });
+    }
+
+    /// Counts the loop as failed. It is called before the registration is
+    /// dropped, so whoever sees the loop leave the counts sees why.
+    fn fail(&mut self) {
+        self.shared.update(|stats| stats.failed += 1);
     }
 }
 
@@ -701,6 +738,12 @@ pub(crate) fn run(
                             duplicate.set_nonblocking(true)?;
                             TcpListener::from_std(duplicate)
                         });
+                        #[cfg(test)]
+                        let duplicate = if shared.fail_next_listener.swap(false, Ordering::AcqRel) {
+                            Err(io::Error::other("a listener that fails, for a test"))
+                        } else {
+                            duplicate
+                        };
                         match duplicate {
                             Ok(tokio_listener) => {
                                 accepting = Some(tokio_listener);
@@ -712,7 +755,10 @@ pub(crate) fn run(
                                     continue;
                                 }
                             }
-                            Err(error) => break Err(error),
+                            Err(error) => {
+                                registration.fail();
+                                break Err(error);
+                            }
                         }
                     }
                 }
