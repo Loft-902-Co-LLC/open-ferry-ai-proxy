@@ -2095,11 +2095,11 @@ fn put_back_binary(
         } else if machine.exists(binary) {
             // Renaming works while it runs, on Windows too.
             machine
-                .rename(binary, &replaced)
+                .rename_new(binary, &replaced)
                 .map_err(|error| format!("failed to move {binary} to {replaced}: {error}"))?;
         }
         machine
-            .rename(moved, binary)
+            .rename_new(moved, binary)
             .map_err(|error| format!("failed to move {moved} back to {binary}: {error}"))?;
         say(
             out,
@@ -2275,8 +2275,9 @@ fn execute_drop_in(
     record::save(machine, platform, base.record_path, &record)
         .map_err(|error| format!("{error}\nNothing but the backup was made."))?;
 
-    // The binaries swapped.
-    if let Err(error) = machine.rename(binary, &moved) {
+    // The binaries swapped. The move never replaces: a run with another
+    // record location that got here first has saved a binary at `moved`.
+    if let Err(error) = machine.rename_new(binary, &moved) {
         finish(
             machine,
             platform,
@@ -2302,7 +2303,21 @@ fn execute_drop_in(
         Ok(done) => say(out, format_args!("{done}")),
         Err(error) => {
             let mut failures = Vec::new();
-            if let Err(error) = machine.rename(&moved, binary) {
+            // A copy that failed part way leaves its start; a link leaves
+            // nothing. The move back never replaces a file, so the start is
+            // removed first.
+            if link.is_none()
+                && machine.link_target(binary).is_none()
+                && machine.exists(binary)
+                && let Err(error) = machine.remove(binary)
+            {
+                failures.push(format!(
+                    "failed to remove the part of open-ferry that was copied to {binary}: {error}"
+                ));
+            }
+            if failures.is_empty()
+                && let Err(error) = machine.rename_new(&moved, binary)
+            {
                 failures.push(format!("failed to move {moved} back to {binary}: {error}"));
             }
             settle(

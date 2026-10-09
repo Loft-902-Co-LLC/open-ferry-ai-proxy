@@ -35,6 +35,9 @@ enum Effect {
     Reuse(u32),
     /// A symbolic link is made at this path, to this target.
     Link(String, String),
+    /// A file with this content is put at this path (a file that another
+    /// process makes while a step runs).
+    Place(String, Vec<u8>),
 }
 
 /// A machine in memory: files, processes, a service manager that answers
@@ -292,6 +295,9 @@ impl Fake {
                 Effect::Serve(pid) => self.serving.insert(0, (pid, Answer::OpenFerry)),
                 Effect::Link(path, target) => {
                     self.links.insert(path, target);
+                }
+                Effect::Place(path, data) => {
+                    self.files.insert(path, data);
                 }
                 Effect::Reuse(pid) => {
                     if let Some(process) = self.procs.get_mut(&pid) {
@@ -658,6 +664,14 @@ impl Machine for Fake {
         Ok(())
     }
 
+    fn rename_new(&mut self, from: &str, to: &str) -> io::Result<()> {
+        // Nothing is replaced, a link or a directory included.
+        if self.files.contains_key(to) || self.links.contains_key(to) || self.dirs.contains(to) {
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, "it exists"));
+        }
+        self.rename(from, to)
+    }
+
     fn link_target(&self, path: &str) -> Option<String> {
         self.links.get(path).cloned()
     }
@@ -684,6 +698,7 @@ impl Machine for Fake {
         self.need_parent(path)?;
         self.dirs.insert(path.to_owned());
         self.private.insert(path.to_owned());
+        self.fire(&format!("mkdir {path}"));
         Ok(())
     }
 
@@ -5040,4 +5055,104 @@ fn the_overlap_check_follows_links() {
     has(&ran.all(), "or inside it or holds it");
     has(&ran.all(), "Nothing was changed");
     assert!(renames_since(&fake, 0).is_empty());
+}
+
+// Not upstream's: with the `:` prefix systemd leaves `$$` as written, so
+// migrate can't read the config path from it and the unit is blocked.
+#[test]
+fn a_dollar_after_the_colon_prefix_blocks() {
+    let program = "/opt/cpa/cli-proxy-api";
+    let argv = format!("{program} -config /etc/cpa$$x.yaml");
+    let (mut fake, context) = stopped_unit(
+        &format!("[Service]\nExecStart=:{argv}\n"),
+        None,
+        program,
+        &argv,
+    );
+    let (_, blockers) = blockers_of(&mut fake, &context);
+    has(&blockers, "starts with : and has a $");
+    has(&blockers, "/etc/systemd/system/cliproxyapi.service");
+    // The same line without the prefix is a literal `$`, as before.
+    let (mut fake, context) = stopped_unit(
+        &format!("[Service]\nExecStart={argv}\n"),
+        None,
+        program,
+        &argv,
+    );
+    let (_, blockers) = blockers_of(&mut fake, &context);
+    lacks(&blockers, "starts with : and has a $");
+}
+
+// Not upstream's: two drop-ins on one binary with record places of their own
+// (another XDG_CONFIG_HOME, or sudo) both pass the first check. The one that
+// moves second finds CLIProxyAPI's binary already saved, fails at the move,
+// rolls back, and leaves the saved binary and the first run's open-ferry as
+// they are.
+#[test]
+fn a_second_drop_in_never_replaces_the_first_ones_saved_binary() {
+    let (mut fake, context) = bare_process();
+    // The first run gets as far as its copy of open-ferry while this one
+    // makes its backup directory, after this one looked for `moved`.
+    let backup = format!("mkdir {}", opt_backup());
+    fake.on(
+        &backup,
+        Effect::Place(OPT_MOVED.to_owned(), b"saved by the first run".to_vec()),
+    );
+    fake.on(&backup, Effect::Place(OPT_CPA.to_owned(), OPEN_FERRY.to_vec()));
+    let ran = migrate(&mut fake, &context, &["-yes"]);
+    assert_eq!(ran.code, 1, "{}", ran.all());
+    has(
+        &ran.err,
+        "Failed to move /opt/cpa/cli-proxy-api to /opt/cpa/cli-proxy-api.cliproxyapi",
+    );
+    assert_eq!(fake.data(OPT_MOVED), b"saved by the first run");
+    assert_eq!(fake.data(OPT_CPA), OPEN_FERRY);
+    assert!(renames_since(&fake, 0).is_empty(), "{:#?}", fake.events);
+    assert!(fake.procs.contains_key(&5151));
+    assert_eq!(saved(&fake, LINUX_RECORD)["status"], "rolled-back");
+}
+
+// Not upstream's: a copy of open-ferry that failed part way is removed
+// before CLIProxyAPI's binary is moved back, which never replaces a file.
+#[test]
+fn a_drop_in_that_fails_part_way_through_the_copy_puts_the_binary_back() {
+    let (mut fake, context) = bare_process();
+    fake.installed = None;
+    fake.failing
+        .insert(format!("copy {} -> {OPT_CPA}", context.exe));
+    // The start of the copy is what the failed copy leaves.
+    fake.on(
+        &format!("rename {OPT_CPA} -> {OPT_MOVED}"),
+        Effect::Place(OPT_CPA.to_owned(), b"open-ferry, cut off".to_vec()),
+    );
+    let ran = migrate(&mut fake, &context, &["-yes"]);
+    assert_eq!(ran.code, 1, "{}", ran.all());
+    has(&ran.err, "failed to put open-ferry at /opt/cpa/cli-proxy-api");
+    assert_eq!(fake.data(OPT_CPA), CLIPROXYAPI);
+    assert!(!fake.exists(OPT_MOVED));
+    assert_eq!(saved(&fake, LINUX_RECORD)["status"], "rolled-back");
+}
+
+// Not upstream's: -undo never replaces a file at the binary's path. One that
+// appears after open-ferry's was set aside stays, CLIProxyAPI's saved binary
+// stays where it is, and the record stays open.
+#[test]
+fn undo_never_replaces_a_file_that_appears_at_the_binary() {
+    let (mut fake, context) = bare_process();
+    assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
+    fake.links.remove(OPT_CPA);
+    fake.file(OPT_CPA, OPEN_FERRY);
+    fake.on(
+        &format!("rename {OPT_CPA} -> /opt/cpa/cli-proxy-api.open-ferry"),
+        Effect::Place(OPT_CPA.to_owned(), b"put there by someone".to_vec()),
+    );
+    let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(undo.code, 1, "{}", undo.all());
+    has(
+        &undo.err,
+        "failed to move /opt/cpa/cli-proxy-api.cliproxyapi back to /opt/cpa/cli-proxy-api",
+    );
+    assert_eq!(fake.data(OPT_CPA), b"put there by someone");
+    assert_eq!(fake.data(OPT_MOVED), CLIPROXYAPI);
+    assert_eq!(saved(&fake, LINUX_RECORD)["status"], "switched");
 }

@@ -156,6 +156,10 @@ pub(crate) trait Machine: System {
     fn list_dir(&self, path: &str) -> io::Result<Vec<Entry>>;
     fn copy(&mut self, from: &str, to: &str) -> io::Result<()>;
     fn rename(&mut self, from: &str, to: &str) -> io::Result<()>;
+    /// Like `rename`, but fails when anything is at `to` (a link too), and
+    /// never replaces it, even when another process puts it there at the
+    /// same moment.
+    fn rename_new(&mut self, from: &str, to: &str) -> io::Result<()>;
     /// Where the symbolic link `path` points, as it is written; `None` when
     /// `path` is not a symbolic link.
     fn link_target(&self, path: &str) -> Option<String>;
@@ -372,6 +376,48 @@ fn end_exact(pid: u32, started: u64) -> bool {
     // SAFETY: as above.
     unsafe { CloseHandle(handle) };
     ended
+}
+
+/// Moves `from` to `to`, which must not exist: on Windows `MoveFileExW`
+/// without `MOVEFILE_REPLACE_EXISTING`.
+#[cfg(windows)]
+fn rename_no_replace(from: &str, to: &str) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+    let wide = |path: &str| -> Vec<u16> {
+        std::ffi::OsStr::new(path)
+            .encode_wide()
+            .chain(Some(0))
+            .collect()
+    };
+    let (from, to) = (wide(from), wide(to));
+    // SAFETY: both paths end in NUL and outlive the call.
+    if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0) } == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+/// Moves `from` to `to`, which must not exist: a hard link fails when `to`
+/// is there, and `from` is removed once the link is made. A file system
+/// without hard links fails, and is not worked around with a plain rename.
+#[cfg(unix)]
+fn rename_no_replace(from: &str, to: &str) -> io::Result<()> {
+    std::fs::hard_link(from, to)?;
+    if let Err(error) = std::fs::remove_file(from) {
+        let _ = std::fs::remove_file(to);
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn rename_no_replace(from: &str, to: &str) -> io::Result<()> {
+    if Path::new(to).symlink_metadata().is_ok() {
+        return Err(io::ErrorKind::AlreadyExists.into());
+    }
+    std::fs::rename(from, to)
 }
 
 /// Asks process `pid` to stop, if it is the process named `name` (any name
@@ -628,6 +674,10 @@ impl Machine for Host {
 
     fn rename(&mut self, from: &str, to: &str) -> io::Result<()> {
         std::fs::rename(from, to)
+    }
+
+    fn rename_new(&mut self, from: &str, to: &str) -> io::Result<()> {
+        rename_no_replace(from, to)
     }
 
     fn link_target(&self, path: &str) -> Option<String> {
@@ -1051,5 +1101,135 @@ mod tests {
     fn end_exact_leaves_a_process_with_another_start_time() {
         assert!(!end_exact(std::process::id(), 1));
         assert!(!end_exact(u32::MAX - 1, 1));
+    }
+
+    /// A child that waits a minute, and the start time sysinfo reports for
+    /// it, which is how production takes the time of a process it ends.
+    #[cfg(any(unix, windows))]
+    fn waiting_child() -> (std::process::Child, u32, u64) {
+        use std::process::{Command, Stdio};
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = Command::new("ping");
+            // Loopback only.
+            command.args(["-n", "60", "127.0.0.1"]);
+            command
+        };
+        #[cfg(unix)]
+        let mut command = {
+            let mut command = Command::new("sleep");
+            command.arg("60");
+            command
+        };
+        let child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let started = one_process(pid, sysinfo::ProcessRefreshKind::nothing())
+            .and_then(|(sys, _)| {
+                sys.process(sysinfo::Pid::from_u32(pid))
+                    .map(sysinfo::Process::start_time)
+            })
+            .unwrap_or(0);
+        (child, pid, started)
+    }
+
+    /// Whether `child` has exited within a few seconds.
+    #[cfg(any(unix, windows))]
+    fn exits(child: &mut std::process::Child) -> bool {
+        for _ in 0..50 {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        false
+    }
+
+    // Not upstream's: `end_exact` really ends a child whose start time is
+    // the one asked for, and leaves one whose start time is not.
+    #[cfg(windows)]
+    #[test]
+    fn end_exact_ends_a_real_process_with_its_start_time() {
+        let (mut child, pid, started) = waiting_child();
+        let wrong = end_exact(pid, started + 1000);
+        let alive = matches!(child.try_wait(), Ok(None));
+        let ended = end_exact(pid, started);
+        let exited = exits(&mut child);
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(started > 0);
+        assert!(!wrong);
+        assert!(alive);
+        assert!(ended);
+        assert!(exited);
+    }
+
+    // Not upstream's: the stop path of Unix asks a real process to stop with
+    // its start time, and it exits.
+    #[cfg(unix)]
+    #[test]
+    fn stop_exact_ends_a_real_process() {
+        let (mut child, pid, started) = waiting_child();
+        let mut host = Host::new();
+        // Another start time is another process, and is left alone.
+        let other = host.stop_exact(pid, started + 1000);
+        let alive = matches!(child.try_wait(), Ok(None));
+        let stopped = host.stop_exact(pid, started);
+        let exited = exits(&mut child);
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(started > 0);
+        assert!(other.is_err());
+        assert!(alive);
+        assert!(stopped.is_ok(), "{stopped:?}");
+        assert!(exited);
+    }
+
+    // Not upstream's: the real lock is taken by one handle at a time, in
+    // one process too (both platforms lock per open file), and is free again
+    // when the guard is dropped.
+    #[test]
+    fn the_real_lock_is_held_by_one_handle_at_a_time() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("migration.json.lock");
+        let path = file.to_str().unwrap();
+        let first = Host::new().lock(path).unwrap();
+        assert!(first.is_some());
+        let mut second = Host::new();
+        assert!(second.lock(path).unwrap().is_none());
+        drop(first);
+        assert!(second.lock(path).unwrap().is_some());
+    }
+
+    // Not upstream's: the no-replace rename moves a file to a new name, and
+    // fails, changing neither file, when anything is at the new name.
+    #[test]
+    fn rename_new_never_replaces() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut host = Host::new();
+        let path = |name: &str| temp.path().join(name);
+        let text = |name: &str| path(name).to_str().unwrap().to_owned();
+        std::fs::write(path("binary"), b"theirs").unwrap();
+        host.rename_new(&text("binary"), &text("saved")).unwrap();
+        assert!(!path("binary").exists());
+        assert_eq!(std::fs::read(path("saved")).unwrap(), b"theirs");
+
+        std::fs::write(path("binary"), b"ours").unwrap();
+        let error = host
+            .rename_new(&text("binary"), &text("saved"))
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists, "{error}");
+        assert_eq!(std::fs::read(path("binary")).unwrap(), b"ours");
+        assert_eq!(std::fs::read(path("saved")).unwrap(), b"theirs");
+
+        // A directory at the new name is not replaced either.
+        std::fs::create_dir(path("dir")).unwrap();
+        assert!(host.rename_new(&text("binary"), &text("dir")).is_err());
+        assert_eq!(std::fs::read(path("binary")).unwrap(), b"ours");
+        assert!(path("dir").is_dir());
     }
 }

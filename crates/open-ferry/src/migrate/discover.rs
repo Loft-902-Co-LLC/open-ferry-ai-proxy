@@ -734,6 +734,8 @@ fn systemd_words(line: &str) -> Option<Vec<String>> {
 struct ExecCommand {
     exe: String,
     argv: Vec<String>,
+    /// The `:` prefix was given: systemd leaves `$` alone, so `$$` stays `$$`.
+    plain_dollars: bool,
 }
 
 /// `ExecStart=`'s value split as systemd splits it, with the prefixes `@`,
@@ -743,10 +745,12 @@ struct ExecCommand {
 fn exec_command(command: &str) -> Option<ExecCommand> {
     let mut rest = command;
     let mut names_argv0 = false;
+    let mut plain_dollars = false;
     while let Some(first) = rest.chars().next()
         && "@-:+!".contains(first)
     {
         names_argv0 |= first == '@';
+        plain_dollars |= first == ':';
         rest = rest.get(first.len_utf8()..)?;
     }
     let mut words = systemd_words(rest)?;
@@ -754,7 +758,11 @@ fn exec_command(command: &str) -> Option<ExecCommand> {
     if names_argv0 {
         words.remove(0);
     }
-    (!words.is_empty()).then_some(ExecCommand { exe, argv: words })
+    (!words.is_empty()).then_some(ExecCommand {
+        exe,
+        argv: words,
+        plain_dollars,
+    })
 }
 
 /// Adds the `ExecStart=` values of the `[Service]` section of a unit file
@@ -992,6 +1000,17 @@ fn unit_exec(machine: &mut dyn Machine, shown: &Shown) -> Option<UnitExec> {
     {
         return Some(unreliable(format!(
             "the ExecStart= in {file} uses a $ variable or a % specifier, which systemd expands when it starts the unit"
+        )));
+    }
+    // With the `:` prefix, `$$` is not turned into `$`, and migrate can't
+    // tell what the program reads, so any `$` blocks.
+    if command.plain_dollars
+        && std::iter::once(&command.exe)
+            .chain(&command.argv)
+            .any(|word| word.contains('$'))
+    {
+        return Some(unreliable(format!(
+            "the ExecStart= in {file} starts with : and has a $, which systemd leaves as written"
         )));
     }
     // `%%` and `$$` are one `%` and `$` to systemd. A file that `systemctl
@@ -2406,6 +2425,7 @@ mod tests {
             Some(ExecCommand {
                 exe: "/opt/c/cli-proxy-api".to_owned(),
                 argv: strings(&["argv0", "-config", "/srv/a b/c.yaml"]),
+                plain_dollars: false,
             })
         );
         assert_eq!(
@@ -2413,6 +2433,7 @@ mod tests {
             Some(ExecCommand {
                 exe: "/bin/x".to_owned(),
                 argv: strings(&["/bin/x", "-a"]),
+                plain_dollars: true,
             })
         );
         assert_eq!(exec_command("@/bin/x"), None);
