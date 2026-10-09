@@ -40,6 +40,8 @@ enum Effect {
     Place(String, Vec<u8>),
     /// This process ends, and no other.
     End(u32),
+    /// A process starts.
+    Spawn(Box<Proc>),
 }
 
 /// A machine in memory: files, processes, a service manager that answers
@@ -359,6 +361,9 @@ impl Fake {
                     self.files.insert(path, data);
                 }
                 Effect::End(pid) => self.end(pid),
+                Effect::Spawn(process) => {
+                    self.procs.insert(process.pid, (*process).clone());
+                }
                 Effect::Reuse(pid) => {
                     if let Some(process) = self.procs.get_mut(&pid) {
                         process.started = Some(9_999_999);
@@ -697,6 +702,25 @@ impl Machine for Fake {
         // Like the real copy, it writes through a link at `to`.
         let to = self.resolve(to);
         self.files.insert(to, data);
+        self.fire(&event);
+        Ok(())
+    }
+
+    fn copy_new(&mut self, from: &str, to: &str) -> io::Result<()> {
+        let event = format!("copy {from} -> {to}");
+        self.events.push(event.clone());
+        if self.files.contains_key(to) || self.links.contains_key(to) || self.dirs.contains(to) {
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, "it exists"));
+        }
+        let data = self.read(from)?;
+        self.need_parent(to)?;
+        // A copy that fails leaves the start of its file.
+        if self.failing.contains(&event) {
+            self.files
+                .insert(to.to_owned(), data[..data.len() / 2].to_vec());
+            return Err(io::Error::other(format!("{event} failed")));
+        }
+        self.files.insert(to.to_owned(), data);
         self.fire(&event);
         Ok(())
     }
@@ -4790,6 +4814,71 @@ fn restore_blocks_when_the_task_cannot_be_disabled() {
     assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "switched");
 }
 
+// Not upstream's: what runs is read after the task is disabled, not before.
+// A task that starts between the two is ended, and nothing is copied until
+// it has ended.
+#[test]
+fn restore_reads_the_task_after_disabling_it() {
+    let (mut fake, context) = binary_task(true);
+    assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
+    assert!(fake.procs.keys().all(|pid| *pid != 8080));
+    // The task starts CLIProxyAPI as it is disabled, and /end ends it.
+    fake.on(
+        r"schtasks.exe /change /tn \CLIProxyAPI /disable",
+        Effect::Launch(BINARY_TASK_CPA.to_owned()),
+    );
+    fake.on(
+        r"schtasks.exe /end /tn \CLIProxyAPI",
+        Effect::Exit(BINARY_TASK_CPA.to_owned()),
+    );
+
+    let before = fake.events.len();
+    let undo = migrate(&mut fake, &context, &["-undo", "-restore", "-yes"]);
+    assert_eq!(undo.code, 0, "{}", undo.all());
+    let events = &fake.events[before..];
+    let copy = events
+        .iter()
+        .find(|event| event.starts_with("copy "))
+        .cloned()
+        .unwrap();
+    in_order(
+        events,
+        &[
+            r"run schtasks.exe /change /tn \CLIProxyAPI /disable",
+            r"run schtasks.exe /end /tn \CLIProxyAPI",
+            &copy,
+        ],
+    );
+    assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "undone");
+}
+
+// Not upstream's: CLIProxyAPI that runs again just before the copy blocks it.
+#[test]
+fn restore_blocks_when_the_proxy_runs_again_just_before_the_copy() {
+    let (mut fake, context) = binary_task(true);
+    assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
+    fake.on(
+        r"schtasks.exe /change /tn \CLIProxyAPI /disable",
+        Effect::Launch(BINARY_TASK_CPA.to_owned()),
+    );
+    // Ending it starts it again, as a restart policy would.
+    fake.on(
+        r"schtasks.exe /end /tn \CLIProxyAPI",
+        Effect::Exit(BINARY_TASK_CPA.to_owned()),
+    );
+    fake.on(
+        r"schtasks.exe /end /tn \CLIProxyAPI",
+        Effect::Launch(BINARY_TASK_CPA.to_owned()),
+    );
+
+    let before = fake.events.len();
+    let undo = migrate(&mut fake, &context, &["-undo", "-restore", "-yes"]);
+    assert_eq!(undo.code, 1, "{}", undo.all());
+    has(&undo.out, "runs again");
+    assert!(!copied_since(&fake, before));
+    assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "switched");
+}
+
 /// The first `-undo -restore` after a switch, with the service still off as
 /// `migrate` left it: the copy is made and the record is closed.
 fn first_restore(mut fake: Fake, context: Context, record: &str) {
@@ -5254,6 +5343,90 @@ fn undo_waits_for_the_server_of_a_task_supervisor() {
     assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "undone");
 }
 
+/// Makes the task's process 9001 a supervisor that ends at `/end`, and gives
+/// it back.
+fn task_supervisor(fake: &mut Fake) -> Proc {
+    let config = r"C:\Users\me\cpa\config.yaml";
+    let supervisor = fake.procs.get_mut(&9001).unwrap();
+    supervisor.args = strings(&["service", "run", "-config", config]);
+    let supervisor = supervisor.clone();
+    fake.effects.remove("schtasks.exe /end /tn open-ferry");
+    fake.on("schtasks.exe /end /tn open-ferry", Effect::End(9001));
+    supervisor
+}
+
+// Not upstream's: a supervisor in its restart pause starts a server after the
+// processes were taken and before /end. The server outlives the supervisor
+// and nothing can be probed on the address: it is found again once the
+// captured processes have ended, and waited for.
+#[test]
+fn undo_waits_for_a_server_started_after_the_capture() {
+    let (mut fake, context) = binary_task(true);
+    assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
+    let supervisor = task_supervisor(&mut fake);
+    let server = Proc {
+        pid: 9100,
+        started: Some(12000),
+        args: strings(&["-config", r"C:\Users\me\cpa\config.yaml"]),
+        parent: Some(Parent {
+            pid: 9001,
+            name: Some(supervisor.name.clone()),
+        }),
+        ..supervisor
+    };
+    fake.on(
+        "schtasks.exe /end /tn open-ferry",
+        Effect::Spawn(Box::new(server)),
+    );
+    let events = fake.events.len();
+    let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(undo.code, 1, "{}", undo.all());
+    has(&undo.all(), "process 9100 still runs");
+    assert!(!fake.procs.contains_key(&9001));
+    assert!(!happened_since(
+        &fake,
+        events,
+        r"run schtasks.exe /run /tn \CLIProxyAPI"
+    ));
+    assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "switched");
+}
+
+// Not upstream's: a server found only through its supervisor (another
+// executable path, and no -config) is taken with it and waited for.
+#[test]
+fn undo_takes_a_server_found_only_through_its_supervisor() {
+    let (mut fake, context) = binary_task(true);
+    assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
+    let supervisor = task_supervisor(&mut fake);
+    let server = Proc {
+        pid: 9100,
+        started: Some(12000),
+        exe: Some(r"C:\Downloads\open-ferry.exe".to_owned()),
+        args: strings(&["-serve"]),
+        parent: Some(Parent {
+            pid: 9001,
+            name: Some(supervisor.name.clone()),
+        }),
+        ..supervisor
+    };
+    fake.procs.insert(9100, server);
+    let events = fake.events.len();
+    let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(undo.code, 1, "{}", undo.all());
+    has(&undo.all(), "process 9100 still runs");
+    assert!(!happened_since(
+        &fake,
+        events,
+        r"run schtasks.exe /run /tn \CLIProxyAPI"
+    ));
+    assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "switched");
+
+    fake.end(9100);
+    let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(undo.code, 0, "{}", undo.all());
+    assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "undone");
+}
+
 // Not upstream's: an open-ferry process whose arguments can't be read could
 // be the service's, so nothing is known and -undo changes nothing.
 #[test]
@@ -5530,19 +5703,20 @@ fn a_second_drop_in_never_replaces_the_first_ones_saved_binary() {
     assert_eq!(saved(&fake, LINUX_RECORD)["status"], "rolled-back");
 }
 
-// Not upstream's: a copy of open-ferry that failed part way is removed
-// before CLIProxyAPI's binary is moved back, which never replaces a file.
+/// Where the drop-in's copy of open-ferry is made before it is moved.
+fn staged() -> String {
+    format!("{OPT_CPA}.new-{}", std::process::id())
+}
+
+// Not upstream's: open-ferry is copied to a file of this run's own and moved
+// to the binary's path, so a copy that fails part way removes only that file:
+// the binary's path is never touched, and CLIProxyAPI's binary is moved back.
 #[test]
 fn a_drop_in_that_fails_part_way_through_the_copy_puts_the_binary_back() {
     let (mut fake, context) = bare_process();
     fake.installed = None;
     fake.failing
-        .insert(format!("copy {} -> {OPT_CPA}", context.exe));
-    // The start of the copy is what the failed copy leaves.
-    fake.on(
-        &format!("rename {OPT_CPA} -> {OPT_MOVED}"),
-        Effect::Place(OPT_CPA.to_owned(), b"open-ferry, cut off".to_vec()),
-    );
+        .insert(format!("copy {} -> {}", context.exe, staged()));
     let ran = migrate(&mut fake, &context, &["-yes"]);
     assert_eq!(ran.code, 1, "{}", ran.all());
     has(
@@ -5551,7 +5725,33 @@ fn a_drop_in_that_fails_part_way_through_the_copy_puts_the_binary_back() {
     );
     assert_eq!(fake.data(OPT_CPA), CLIPROXYAPI);
     assert!(!fake.exists(OPT_MOVED));
+    assert!(!fake.exists(&staged()));
+    assert!(!happened(&fake, &format!("remove {OPT_CPA}")));
     assert_eq!(saved(&fake, LINUX_RECORD)["status"], "rolled-back");
+}
+
+// Not upstream's: another run puts CLIProxyAPI's binary back at the binary's
+// path between this run's move and its copy. Nothing removes or replaces it:
+// the copy's file is removed, the move back fails, and the record says so.
+#[test]
+fn a_binary_put_back_by_another_run_is_never_removed_or_replaced() {
+    let (mut fake, context) = bare_process();
+    fake.installed = None;
+    fake.on(
+        &format!("rename {OPT_CPA} -> {OPT_MOVED}"),
+        Effect::Place(OPT_CPA.to_owned(), b"put back by another run".to_vec()),
+    );
+    let ran = migrate(&mut fake, &context, &["-yes"]);
+    assert_eq!(ran.code, 1, "{}", ran.all());
+    has(
+        &ran.err,
+        "failed to move /opt/cpa/cli-proxy-api.cliproxyapi back to /opt/cpa/cli-proxy-api",
+    );
+    assert_eq!(fake.data(OPT_CPA), b"put back by another run");
+    assert_eq!(fake.data(OPT_MOVED), CLIPROXYAPI);
+    assert!(!fake.exists(&staged()));
+    assert!(!happened(&fake, &format!("remove {OPT_CPA}")));
+    assert_eq!(saved(&fake, LINUX_RECORD)["status"], "switching");
 }
 
 // Not upstream's: -undo never replaces a file at the binary's path. One that

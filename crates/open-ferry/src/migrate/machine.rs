@@ -155,6 +155,10 @@ pub(crate) trait Machine: System {
     fn spawn(&mut self, launch: &Launch) -> io::Result<u32>;
     fn list_dir(&self, path: &str) -> io::Result<Vec<Entry>>;
     fn copy(&mut self, from: &str, to: &str) -> io::Result<()>;
+    /// Copies `from` to a file this call creates at `to`, with `from`'s
+    /// permissions. Fails with `AlreadyExists`, touching nothing, when
+    /// anything is at `to`. A copy that fails after that leaves its start.
+    fn copy_new(&mut self, from: &str, to: &str) -> io::Result<()>;
     fn rename(&mut self, from: &str, to: &str) -> io::Result<()>;
     /// Like `rename`, but fails when anything is at `to` (a link too), and
     /// never replaces it, even when another process puts it there at the
@@ -670,6 +674,19 @@ impl Machine for Host {
 
     fn copy(&mut self, from: &str, to: &str) -> io::Result<()> {
         std::fs::copy(from, to).map(|_| ())
+    }
+
+    fn copy_new(&mut self, from: &str, to: &str) -> io::Result<()> {
+        let mut source = std::fs::File::open(from)?;
+        let permissions = source.metadata()?.permissions();
+        let mut target = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(to)?;
+        io::copy(&mut source, &mut target)?;
+        target.sync_all()?;
+        drop(target);
+        std::fs::set_permissions(to, permissions)
     }
 
     fn rename(&mut self, from: &str, to: &str) -> io::Result<()> {
@@ -1231,5 +1248,23 @@ mod tests {
         assert!(host.rename_new(&text("binary"), &text("dir")).is_err());
         assert_eq!(std::fs::read(path("binary")).unwrap(), b"ours");
         assert!(path("dir").is_dir());
+    }
+
+    // Not upstream's: the exclusive copy makes its file, and fails, touching
+    // nothing, when anything is there.
+    #[test]
+    fn copy_new_never_overwrites() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut host = Host::new();
+        let path = |name: &str| temp.path().join(name);
+        let text = |name: &str| path(name).to_str().unwrap().to_owned();
+        std::fs::write(path("from"), b"ours").unwrap();
+        host.copy_new(&text("from"), &text("to")).unwrap();
+        assert_eq!(std::fs::read(path("to")).unwrap(), b"ours");
+
+        std::fs::write(path("other"), b"theirs").unwrap();
+        let error = host.copy_new(&text("from"), &text("other")).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists, "{error}");
+        assert_eq!(std::fs::read(path("other")).unwrap(), b"theirs");
     }
 }
