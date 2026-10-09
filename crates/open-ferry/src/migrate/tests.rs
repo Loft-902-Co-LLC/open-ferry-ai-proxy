@@ -85,6 +85,9 @@ struct Fake {
     held: BTreeSet<String>,
     /// Paths whose real path can't be found.
     no_real: BTreeSet<String>,
+    /// Commands that succeed and change nothing in a manager's answers: a
+    /// service that stays as it is when asked to stop.
+    stuck: BTreeSet<String>,
 }
 
 impl Fake {
@@ -118,6 +121,7 @@ impl Fake {
             unloaded: BTreeMap::new(),
             held: BTreeSet::new(),
             no_real: BTreeSet::new(),
+            stuck: BTreeSet::new(),
         };
         fake.file(&context.exe, OPEN_FERRY);
         fake.dir(&context.cwd);
@@ -233,6 +237,7 @@ impl Fake {
 
     /// What a command changes in the service managers' answers.
     fn changed(&mut self, line: &str) {
+        self.manager_changed(line);
         if line.starts_with("schtasks.exe /create /tn open-ferry ") {
             self.answer("schtasks.exe /query /tn open-ferry", 0, "");
         }
@@ -263,6 +268,49 @@ impl Fake {
             if let Some(output) = self.unloaded.remove(&key) {
                 self.answers.insert(key, output);
             }
+        }
+    }
+
+    /// What `stop` and `start` do to the answers about a service of
+    /// CLIProxyAPI's (open-ferry's own are set by `create` and `delete`).
+    fn manager_changed(&mut self, line: &str) {
+        if self.stuck.contains(line) {
+            return;
+        }
+        let words: Vec<&str> = line.split(' ').collect();
+        let (action, unit, query) = match words.as_slice() {
+            ["systemctl", "--user", action, unit] => {
+                (*action, *unit, format!("systemctl --user show {unit}"))
+            }
+            ["systemctl", action, unit] => (*action, *unit, format!("systemctl show {unit}")),
+            ["sc.exe", action, name] => (*action, *name, format!("sc.exe query {name}")),
+            _ => return,
+        };
+        if unit == "open-ferry.service" || unit == "open-ferry" {
+            return;
+        }
+        let up = match action {
+            "start" => true,
+            "stop" => false,
+            _ => return,
+        };
+        if line.starts_with("sc.exe") {
+            let state = if up { "4  RUNNING" } else { "1  STOPPED" };
+            self.answer(
+                &query,
+                0,
+                &format!("SERVICE_NAME: {unit}\r\n        STATE              : {state}\r\n"),
+            );
+        } else if let Some(output) = self.answers.get_mut(&query) {
+            output.stdout = if up {
+                output
+                    .stdout
+                    .replace("ActiveState=inactive", "ActiveState=active")
+            } else {
+                output
+                    .stdout
+                    .replace("ActiveState=active", "ActiveState=inactive")
+            };
         }
     }
 
@@ -4448,6 +4496,22 @@ fn proxy_at(pid: u32, exe: &str) -> Proc {
     }
 }
 
+/// The manager of `systemd_user()`'s unit says it runs.
+fn running_unit(fake: &mut Fake) {
+    fake.answer(
+        "systemctl --user show cliproxyapi.service",
+        0,
+        &shown_unit(
+            4242,
+            "/home/me/cpa/cli-proxy-api -config /home/me/cpa/config.yaml",
+            "/home/me/cpa",
+            true,
+            "",
+            "",
+        ),
+    );
+}
+
 // Not upstream's: -restore doesn't write under a running proxy. It stops it
 // with the plan showing it and a yes (-yes is the yes), restores, and only
 // then starts CLIProxyAPI.
@@ -4457,6 +4521,7 @@ fn restore_stops_a_running_proxy_with_a_yes_and_restores_before_it_starts() {
     assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
     fake.file(SYSTEMD_CONFIG, "changed: by open-ferry\n");
     fake.process(proxy_at(4242, SYSTEMD_CPA));
+    running_unit(&mut fake);
 
     // Without the yes, nothing is stopped or written, and CLIProxyAPI's
     // service is not started over it.
@@ -4504,6 +4569,220 @@ fn restore_stops_a_running_proxy_with_a_yes_and_restores_before_it_starts() {
         ],
     );
     assert_eq!(saved(&fake, LINUX_RECORD)["status"], "undone");
+}
+
+/// Whether a file was copied after event `before`.
+fn copied_since(fake: &Fake, before: usize) -> bool {
+    fake.events[before..]
+        .iter()
+        .any(|event| event.starts_with("copy "))
+}
+
+/// A systemd unit that runs again after the switch (someone started it, or
+/// its manager did), with CLIProxyAPI's process in it.
+fn running_again(fake: &mut Fake) {
+    fake.process(proxy_at(4242, SYSTEMD_CPA));
+    running_unit(fake);
+}
+
+// Not upstream's: when the manager can't stop the service, no process is
+// killed under it, nothing is restored, and the record stays open.
+#[test]
+fn restore_blocks_when_the_manager_cannot_stop_the_service() {
+    let (mut fake, context) = systemd_user();
+    assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
+    fake.file(SYSTEMD_CONFIG, "changed: by open-ferry\n");
+    running_again(&mut fake);
+    fake.fail(
+        "systemctl --user stop cliproxyapi.service",
+        1,
+        "Access denied",
+    );
+
+    let before = fake.events.len();
+    let undo = migrate(&mut fake, &context, &["-undo", "-restore", "-yes"]);
+    assert_eq!(undo.code, 1, "{}", undo.all());
+    has(&undo.out, "so nothing was restored");
+    has(&undo.out, "no process is killed under its manager");
+    assert_eq!(fake.data(SYSTEMD_CONFIG), b"changed: by open-ferry\n");
+    assert!(fake.procs.contains_key(&4242));
+    assert!(!fake.events[before..].iter().any(|e| e.starts_with("stop ")));
+    assert!(!copied_since(&fake, before));
+    assert!(!happened(
+        &fake,
+        "run systemctl --user start cliproxyapi.service"
+    ));
+    assert_eq!(saved(&fake, LINUX_RECORD)["status"], "switched");
+}
+
+// Not upstream's: a stop that succeeds but leaves the service running is
+// waited for, then blocks, and no process is killed.
+#[test]
+fn restore_blocks_when_the_service_stays_running_after_the_stop() {
+    let (mut fake, context) = systemd_user();
+    assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
+    fake.file(SYSTEMD_CONFIG, "changed: by open-ferry\n");
+    running_again(&mut fake);
+    fake.stuck
+        .insert("systemctl --user stop cliproxyapi.service".to_owned());
+
+    let before = fake.events.len();
+    let undo = migrate(&mut fake, &context, &["-undo", "-restore", "-yes"]);
+    assert_eq!(undo.code, 1, "{}", undo.all());
+    has(&undo.out, "hasn't stopped");
+    has(&undo.out, "so nothing was restored");
+    assert_eq!(fake.data(SYSTEMD_CONFIG), b"changed: by open-ferry\n");
+    assert!(!fake.events[before..].iter().any(|e| e.starts_with("stop ")));
+    assert!(!copied_since(&fake, before));
+    assert_eq!(saved(&fake, LINUX_RECORD)["status"], "switched");
+}
+
+// Not upstream's: a service its manager says runs is stopped through the
+// manager first, even when no process of it is seen.
+#[test]
+fn restore_stops_through_the_manager_when_no_process_is_seen() {
+    let (mut fake, context) = systemd_user();
+    assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
+    running_unit(&mut fake);
+    assert!(fake.procs.get(&4242).is_none());
+
+    let before = fake.events.len();
+    let undo = migrate(&mut fake, &context, &["-undo", "-restore", "-yes"]);
+    assert_eq!(undo.code, 0, "{}", undo.all());
+    in_order(
+        &fake.events[before..],
+        &[
+            "run systemctl --user stop cliproxyapi.service",
+            &format!(
+                "copy {}/config/config.yaml -> {SYSTEMD_CONFIG}",
+                systemd_backup()
+            ),
+            "run systemctl --user start cliproxyapi.service",
+        ],
+    );
+    assert_eq!(saved(&fake, LINUX_RECORD)["status"], "undone");
+}
+
+// Not upstream's: when it isn't known whether the service has stopped,
+// nothing is restored.
+#[test]
+fn restore_blocks_when_the_state_of_the_service_is_unknown() {
+    let (mut fake, context) = systemd_user();
+    assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
+    fake.file(SYSTEMD_CONFIG, "changed: by open-ferry\n");
+    fake.fail("systemctl --user show cliproxyapi.service", 1, "Failed");
+
+    let before = fake.events.len();
+    let undo = migrate(&mut fake, &context, &["-undo", "-restore", "-yes"]);
+    assert_eq!(undo.code, 1, "{}", undo.all());
+    has(
+        &undo.out,
+        "it isn't known whether CLIProxyAPI's service has stopped",
+    );
+    assert_eq!(fake.data(SYSTEMD_CONFIG), b"changed: by open-ferry\n");
+    assert!(!copied_since(&fake, before));
+    assert_eq!(saved(&fake, LINUX_RECORD)["status"], "switched");
+}
+
+// Not upstream's: a task is disabled before it is ended, so that nothing
+// starts it during the copy, and enabled and run again after the copy.
+#[test]
+fn restore_disables_a_task_before_it_ends_it_and_enables_it_after_the_copy() {
+    let (mut fake, context) = binary_task(true);
+    fake.on(
+        r"schtasks.exe /end /tn \CLIProxyAPI",
+        Effect::Exit(BINARY_TASK_CPA.to_owned()),
+    );
+    assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
+    // The task ran CLIProxyAPI again after the switch.
+    fake.process(Proc {
+        pid: 8181,
+        started: Some(2000),
+        name: "cli-proxy-api.exe".to_owned(),
+        exe: Some(BINARY_TASK_CPA.to_owned()),
+        args: strings(&["-config", r"C:\Users\me\cpa\config.yaml"]),
+        cwd: Some(r"C:\Users\me\cpa".to_owned()),
+        env: None,
+        parent: None,
+    });
+
+    let before = fake.events.len();
+    let undo = migrate(&mut fake, &context, &["-undo", "-restore", "-yes"]);
+    assert_eq!(undo.code, 0, "{}", undo.all());
+    let events = &fake.events[before..];
+    let copy = events
+        .iter()
+        .find(|event| event.starts_with("copy "))
+        .cloned()
+        .unwrap();
+    in_order(
+        events,
+        &[
+            r"run schtasks.exe /change /tn \CLIProxyAPI /disable",
+            r"run schtasks.exe /end /tn \CLIProxyAPI",
+            &copy,
+            r"run schtasks.exe /change /tn \CLIProxyAPI /enable",
+            r"run schtasks.exe /run /tn \CLIProxyAPI",
+        ],
+    );
+    assert!(!events.iter().any(|event| event == "stop 8181"));
+    assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "undone");
+}
+
+// Not upstream's: a task that can't be disabled could start CLIProxyAPI
+// during the copy, so nothing is restored.
+#[test]
+fn restore_blocks_when_the_task_cannot_be_disabled() {
+    let (mut fake, context) = binary_task(true);
+    assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
+    fake.fail(
+        r"schtasks.exe /change /tn \CLIProxyAPI /disable",
+        1,
+        "ERROR: Access is denied.",
+    );
+
+    let before = fake.events.len();
+    let undo = migrate(&mut fake, &context, &["-undo", "-restore", "-yes"]);
+    assert_eq!(undo.code, 1, "{}", undo.all());
+    has(&undo.out, "so nothing was restored");
+    assert!(!copied_since(&fake, before));
+    assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "switched");
+}
+
+/// The first `-undo -restore` after a switch, with the service still off as
+/// `migrate` left it: the copy is made and the record is closed.
+fn first_restore(mut fake: Fake, context: Context, record: &str) {
+    assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
+    let before = fake.events.len();
+    let undo = migrate(&mut fake, &context, &["-undo", "-restore", "-yes"]);
+    assert_eq!(undo.code, 0, "{}", undo.all());
+    assert!(copied_since(&fake, before), "{:#?}", &fake.events[before..]);
+    assert_eq!(saved(&fake, record)["status"], "undone");
+}
+
+// Not upstream's: the first -undo -restore works for each manager.
+#[test]
+fn the_first_restore_works_after_a_systemd_switch() {
+    let (fake, context) = systemd_user();
+    first_restore(fake, context, LINUX_RECORD);
+}
+
+#[test]
+fn the_first_restore_works_after_a_launchd_switch() {
+    let (fake, context) = brew_services();
+    first_restore(fake, context, "/Users/me/.config/open-ferry/migration.json");
+}
+
+#[test]
+fn the_first_restore_works_after_a_windows_service_switch() {
+    let (fake, context) = nssm_service(windows_program_files(), true);
+    first_restore(fake, context, WINDOWS_RECORD);
+}
+
+#[test]
+fn the_first_restore_works_after_a_task_switch() {
+    let (fake, context) = binary_task(true);
+    first_restore(fake, context, WINDOWS_RECORD);
 }
 
 // Not upstream's: the plan of -undo -restore says that a proxy is stopped,
@@ -5098,7 +5377,10 @@ fn a_second_drop_in_never_replaces_the_first_ones_saved_binary() {
         &backup,
         Effect::Place(OPT_MOVED.to_owned(), b"saved by the first run".to_vec()),
     );
-    fake.on(&backup, Effect::Place(OPT_CPA.to_owned(), OPEN_FERRY.to_vec()));
+    fake.on(
+        &backup,
+        Effect::Place(OPT_CPA.to_owned(), OPEN_FERRY.to_vec()),
+    );
     let ran = migrate(&mut fake, &context, &["-yes"]);
     assert_eq!(ran.code, 1, "{}", ran.all());
     has(
@@ -5127,7 +5409,10 @@ fn a_drop_in_that_fails_part_way_through_the_copy_puts_the_binary_back() {
     );
     let ran = migrate(&mut fake, &context, &["-yes"]);
     assert_eq!(ran.code, 1, "{}", ran.all());
-    has(&ran.err, "failed to put open-ferry at /opt/cpa/cli-proxy-api");
+    has(
+        &ran.err,
+        "failed to put open-ferry at /opt/cpa/cli-proxy-api",
+    );
     assert_eq!(fake.data(OPT_CPA), CLIPROXYAPI);
     assert!(!fake.exists(OPT_MOVED));
     assert_eq!(saved(&fake, LINUX_RECORD)["status"], "rolled-back");

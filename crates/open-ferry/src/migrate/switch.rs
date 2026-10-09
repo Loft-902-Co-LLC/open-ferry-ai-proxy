@@ -2518,7 +2518,7 @@ pub(crate) fn undo_steps(context: &Context, record: &Record, restore: bool) -> V
             ));
             if restore {
                 steps.push(restore_step(record));
-                steps.push(restore_guard());
+                steps.push(restore_guard_service());
             }
             steps.push(format!(
                 "Turn {} back on as it was, once open-ferry has stopped: {}.",
@@ -2562,6 +2562,11 @@ pub(crate) fn undo_steps(context: &Context, record: &Record, restore: bool) -> V
 /// The plan's line for stopping a proxy that uses the files.
 fn restore_guard() -> String {
     "Before the copy, if CLIProxyAPI or open-ferry runs on those files, ask whether to stop it (-yes is the yes); nothing is stopped without it, and nothing is copied while it runs. A file whose directory now leads somewhere else than at the switch is skipped. If the copy fails, CLIProxyAPI isn't started and the record stays open: run -undo -restore again.".to_owned()
+}
+
+/// The plan's line for stopping a service that uses the files.
+fn restore_guard_service() -> String {
+    "Before the copy, CLIProxyAPI's manager must say its service is stopped (a scheduled task is disabled first, so that nothing starts it during the copy). If the service, or CLIProxyAPI or open-ferry, runs on those files, ask whether to stop it (-yes is the yes); nothing is stopped without it, and nothing is copied while it runs. The service is stopped through its manager and no process is killed under it: if the manager doesn't say it has stopped, nothing is copied and the record stays open; stop it by hand, then run -undo -restore again. A file whose directory now leads somewhere else than at the switch is skipped. If the copy fails, CLIProxyAPI isn't started and the record stays open: run -undo -restore again.".to_owned()
 }
 
 fn restore_step(record: &Record) -> String {
@@ -2619,14 +2624,108 @@ fn running_theirs(
 struct Restored {
     /// CLIProxyAPI's processes stopped for the copy.
     stopped: Vec<Proc>,
+    /// Whether CLIProxyAPI's service was stopped through its manager.
+    manager_stopped: bool,
     /// Why the copy didn't finish, if it didn't.
     failure: Option<String>,
 }
 
-/// Copies the backed-up files back, but not under a proxy that runs: a
-/// CLIProxyAPI still running (or restarted) is stopped first, with the
-/// person's yes (`yes` is `-yes`), and if something else still answers on
-/// the address, nothing is copied.
+impl Restored {
+    /// Nothing was stopped.
+    fn nothing(failure: Option<String>) -> Restored {
+        Restored {
+            stopped: Vec::new(),
+            manager_stopped: false,
+            failure,
+        }
+    }
+}
+
+/// What to do by hand when CLIProxyAPI's service can't be had stopped.
+fn stop_by_hand() -> String {
+    format!(
+        "Stop CLIProxyAPI's service by hand, then run `open-ferry {} -undo -restore` again",
+        super::NAME
+    )
+}
+
+/// The failure to give when something answers on the address, so that the
+/// files may be in use.
+fn answers_on_address(machine: &mut dyn Machine, listen: Option<&Listen>) -> Option<String> {
+    let listen = listen?;
+    let ip = listen.probe?;
+    let answer = machine.probe(ip, listen.port, listen.tls);
+    if matches!(answer, Answer::Nothing(_)) {
+        return None;
+    }
+    Some(format!(
+        "something still answers on {} ({}), so the files may be in use: nothing was restored. Stop it, then run `open-ferry {} -undo -restore` again",
+        address(listen),
+        match answer {
+            Answer::Other(what) => what,
+            Answer::CliProxyApi => "CLIProxyAPI".to_owned(),
+            _ => "open-ferry".to_owned(),
+        },
+        super::NAME
+    ))
+}
+
+/// How CLIProxyAPI's service stands, as its manager says. `None` for a
+/// scheduled task: the scheduler's status is translated, so it isn't read.
+fn theirs_state(machine: &mut dyn Machine, theirs: &Theirs) -> Option<os_service::ServiceState> {
+    let cmd = match theirs {
+        Theirs::Systemd { unit, user, .. } => {
+            discover::systemctl(*user, &["show", unit, "--property=LoadState,ActiveState"])
+        }
+        Theirs::Launchd { label, domain, .. } => {
+            Cmd::new("launchctl", &["print"]).arg(format!("{domain}/{label}"))
+        }
+        Theirs::WindowsService { name, .. } => Cmd::new("sc.exe", &["query", name]),
+        Theirs::Task { .. } => return None,
+    };
+    let output = match machine.run(&cmd) {
+        Ok(output) => output,
+        Err(error) => {
+            return Some(os_service::ServiceState::Unknown(format!(
+                "failed to run `{cmd}`: {error}"
+            )));
+        }
+    };
+    Some(match theirs {
+        Theirs::Systemd { .. } => os_service::systemd_state(&cmd, &output),
+        Theirs::Launchd { .. } => os_service::launchd_state(&cmd, &output),
+        Theirs::WindowsService { .. } | Theirs::Task { .. } => {
+            os_service::windows_service_state(&cmd, &output)
+        }
+    })
+}
+
+/// Waits for CLIProxyAPI's manager to say its service has stopped.
+fn wait_theirs_stopped(machine: &mut dyn Machine, theirs: &Theirs) -> Result<(), String> {
+    let tries = (EXIT_WAIT.as_millis() / POLL.as_millis()).max(1);
+    let mut last = String::new();
+    for attempt in 0..tries {
+        if attempt > 0 {
+            machine.sleep(POLL);
+        }
+        match theirs_state(machine, theirs) {
+            Some(state) if state.ended() => return Ok(()),
+            Some(state) => last = state.describe(),
+            None => return Ok(()),
+        }
+    }
+    Err(format!(
+        "CLIProxyAPI's service hasn't stopped {} seconds after it was asked to ({last}), so nothing was restored. {}",
+        EXIT_WAIT.as_secs(),
+        stop_by_hand()
+    ))
+}
+
+/// Copies the backed-up files back, but not under a proxy that runs. For a
+/// service switch, see [`restore_service`]. After a drop-in, a CLIProxyAPI
+/// still running (or restarted) is stopped first, with the person's yes
+/// (`yes` is `-yes`), and if something else still answers on the address,
+/// nothing is copied.
 fn restore_safely(
     machine: &mut dyn Machine,
     context: &Context,
@@ -2636,16 +2735,12 @@ fn restore_safely(
     out: &mut dyn Write,
 ) -> Restored {
     let platform = context.platform;
-    let fail = |failure: String| Restored {
-        stopped: Vec::new(),
-        failure: Some(failure),
-    };
     let Some(backup) = &record.backup else {
-        return Restored {
-            stopped: Vec::new(),
-            failure: None,
-        };
+        return Restored::nothing(None);
     };
+    if matches!(record.switch, Switch::Service { .. }) {
+        return restore_service(machine, context, record, listen, yes, out);
+    }
     let mut paths = Vec::new();
     let mut keep = None;
     if let Some(exe) = &record.cliproxyapi.exe {
@@ -2666,116 +2761,194 @@ fn restore_safely(
     }
     let users = running_theirs(machine, platform, &paths, keep);
     if users.is_empty() {
-        if let Some(listen) = listen
-            && let Some(ip) = listen.probe
-        {
-            let answer = machine.probe(ip, listen.port, listen.tls);
-            if !matches!(answer, Answer::Nothing(_)) {
-                return fail(format!(
-                    "something still answers on {} ({}), so the files may be in use: nothing was restored. Stop it, then run `open-ferry {} -undo -restore` again",
-                    address(listen),
-                    match answer {
-                        Answer::Other(what) => what,
-                        Answer::CliProxyApi => "CLIProxyAPI".to_owned(),
-                        _ => "open-ferry".to_owned(),
-                    },
-                    super::NAME
-                ));
-            }
-        }
-    } else {
-        let list: Vec<String> = users
-            .iter()
-            .map(|process| process.pid.to_string())
-            .collect();
-        let list = list.join(", ");
-        let question = format!(
-            "CLIProxyAPI runs (process {list}) on the files -restore replaces. Stop it now? It is started again once they are back. [y/N]"
+        return Restored::nothing(
+            answers_on_address(machine, listen)
+                .or_else(|| restore(machine, platform, backup, out).err()),
         );
-        if !(yes || (machine.terminal() && machine.ask(&question))) {
-            return fail(format!(
-                "CLIProxyAPI runs (process {list}), and -restore doesn't write under a running proxy: nothing was restored. Stop it yourself, or run `open-ferry {} -undo -restore -yes` to have it stopped",
-                super::NAME
-            ));
-        }
-        // CLIProxyAPI's service is stopped through its manager, which
-        // would start a process killed by its ID again. What is left after
-        // that is stopped by its ID.
-        let mut users = users;
-        if let Switch::Service { theirs, .. } = &record.switch {
-            let cmd = manager_stop(theirs);
-            match machine.run(&cmd) {
-                Ok(output) if output.success() => say(out, format_args!("Ran: {cmd}")),
-                // A service that is stopped already fails to stop.
-                Ok(output) => say(
-                    out,
-                    format_args!("`{cmd}` failed with {}; going on.", output.failure()),
-                ),
-                Err(error) => say(
-                    out,
-                    format_args!("failed to run `{cmd}`: {error}; going on."),
-                ),
-            }
-            let all = users.clone();
-            users.retain(|process| !wait_exit(machine, process.pid, process.started, EXIT_WAIT));
-            let stopped = all;
-            for process in users {
-                if let Err(error) = machine.stop(process.pid, &process.name, process.started) {
-                    return Restored {
-                        stopped,
-                        failure: Some(format!(
-                            "failed to stop CLIProxyAPI (process {}): {error}. Nothing was restored",
-                            process.pid
-                        )),
-                    };
-                }
+    }
+    let list: Vec<String> = users
+        .iter()
+        .map(|process| process.pid.to_string())
+        .collect();
+    let list = list.join(", ");
+    let question = format!(
+        "CLIProxyAPI runs (process {list}) on the files -restore replaces. Stop it now? It is started again once they are back. [y/N]"
+    );
+    if !(yes || (machine.terminal() && machine.ask(&question))) {
+        return Restored::nothing(Some(format!(
+            "CLIProxyAPI runs (process {list}), and -restore doesn't write under a running proxy: nothing was restored. Stop it yourself, or run `open-ferry {} -undo -restore -yes` to have it stopped",
+            super::NAME
+        )));
+    }
+    let mut stopped = Vec::new();
+    for process in users {
+        match machine.stop(process.pid, &process.name, process.started) {
+            Ok(()) => {
                 say(
                     out,
                     format_args!("Stopped CLIProxyAPI (process {})", process.pid),
                 );
+                stopped.push(process);
             }
-            if let Err(error) = wait_ended(machine, context, &Ending::Processes(&stopped), None) {
+            Err(error) => {
                 return Restored {
                     stopped,
-                    failure: Some(error),
+                    manager_stopped: false,
+                    failure: Some(format!(
+                        "failed to stop CLIProxyAPI (process {}): {error}. Nothing was restored",
+                        process.pid
+                    )),
                 };
             }
-            let failure = restore(machine, platform, backup, out).err();
-            return Restored { stopped, failure };
         }
-        let mut stopped = Vec::new();
-        for process in users {
-            match machine.stop(process.pid, &process.name, process.started) {
-                Ok(()) => {
-                    say(
-                        out,
-                        format_args!("Stopped CLIProxyAPI (process {})", process.pid),
-                    );
-                    stopped.push(process);
-                }
-                Err(error) => {
-                    return Restored {
-                        stopped,
-                        failure: Some(format!(
-                            "failed to stop CLIProxyAPI (process {}): {error}. Nothing was restored",
-                            process.pid
-                        )),
-                    };
-                }
+    }
+    if let Err(error) = wait_ended(machine, context, &Ending::Processes(&stopped), None) {
+        return Restored {
+            stopped,
+            manager_stopped: false,
+            failure: Some(error),
+        };
+    }
+    let failure = restore(machine, platform, backup, out).err();
+    Restored {
+        stopped,
+        manager_stopped: false,
+        failure,
+    }
+}
+
+/// `-restore` after a service switch. The files are copied only once the
+/// manager of CLIProxyAPI's service says it is stopped: a process killed by
+/// its ID could be started again by the manager (`Restart=`, a service's
+/// recovery, a task's restart settings) into the copy, and a service that
+/// is stopped is not killed. The manager is asked whether or not a process
+/// is seen. Running: it is stopped through the manager, with the person's
+/// yes. Unknown, or still not stopped after the wait: nothing is copied. A
+/// scheduled task has no state to read: it is disabled first, ended, and
+/// counts as stopped once no process of it runs. What still runs from the
+/// binary once the manager says stopped is stopped by its identity.
+fn restore_service(
+    machine: &mut dyn Machine,
+    context: &Context,
+    record: &Record,
+    listen: Option<&Listen>,
+    yes: bool,
+    out: &mut dyn Write,
+) -> Restored {
+    let platform = context.platform;
+    let (Switch::Service { theirs, .. }, Some(backup)) = (&record.switch, &record.backup) else {
+        return Restored::nothing(None);
+    };
+    let paths: Vec<String> = record.cliproxyapi.exe.iter().cloned().collect();
+    let users = running_theirs(machine, platform, &paths, None);
+    // A task could start CLIProxyAPI again during the copy: it is off first.
+    if let Theirs::Task { name, .. } = theirs {
+        let cmd = Cmd::new("schtasks.exe", &["/change", "/tn", name, "/disable"]);
+        match run_checked(machine, &cmd) {
+            Ok(_) => say(out, format_args!("Ran: {cmd}")),
+            Err(error) => {
+                return Restored::nothing(Some(format!(
+                    "{error}. The task could start CLIProxyAPI during the copy, so nothing was restored. {}",
+                    stop_by_hand()
+                )));
             }
         }
-        if let Err(error) = wait_ended(machine, context, &Ending::Processes(&stopped), None) {
+    }
+    let state = theirs_state(machine, theirs);
+    if let Some(os_service::ServiceState::Unknown(why)) = &state {
+        return Restored::nothing(Some(format!(
+            "it isn't known whether CLIProxyAPI's service has stopped ({why}), so nothing was restored. {}",
+            stop_by_hand()
+        )));
+    }
+    let service_runs = matches!(&state, Some(os_service::ServiceState::Running(_)));
+    // A task's manager can't say, so its processes do.
+    let to_end = service_runs || (state.is_none() && !users.is_empty());
+    if service_runs || !users.is_empty() {
+        let list: Vec<String> = users
+            .iter()
+            .map(|process| process.pid.to_string())
+            .collect();
+        let reason = match &state {
+            Some(state) if users.is_empty() => {
+                format!("CLIProxyAPI's service is {}", state.describe())
+            }
+            _ => format!("CLIProxyAPI runs (process {})", list.join(", ")),
+        };
+        let question = format!(
+            "{reason} on the files -restore replaces. Stop it now? It is started again once they are back. [y/N]"
+        );
+        if !(yes || (machine.terminal() && machine.ask(&question))) {
+            return Restored::nothing(Some(format!(
+                "{reason}, and -restore doesn't write under a running proxy: nothing was restored. Stop it yourself, or run `open-ferry {} -undo -restore -yes` to have it stopped",
+                super::NAME
+            )));
+        }
+    }
+    let mut manager_stopped = false;
+    if to_end {
+        let cmd = manager_stop(theirs);
+        match run_checked(machine, &cmd) {
+            Ok(_) => say(out, format_args!("Ran: {cmd}")),
+            Err(error) => {
+                return Restored::nothing(Some(format!(
+                    "{error}. CLIProxyAPI's service isn't stopped, and no process is killed under its manager, so nothing was restored. {}",
+                    stop_by_hand()
+                )));
+            }
+        }
+        manager_stopped = true;
+        if let Err(error) = wait_theirs_stopped(machine, theirs) {
             return Restored {
-                stopped,
+                stopped: Vec::new(),
+                manager_stopped,
                 failure: Some(error),
             };
         }
-        let failure = restore(machine, platform, backup, out).err();
-        return Restored { stopped, failure };
     }
+    // The manager has said stopped: what still runs from the binary
+    // (`KillMode=none` and the like) is stopped by its identity.
+    let stopped = users.clone();
+    let mut left = users;
+    if manager_stopped {
+        left.retain(|process| !wait_exit(machine, process.pid, process.started, EXIT_WAIT));
+    }
+    for process in left {
+        if let Err(error) = machine.stop(process.pid, &process.name, process.started) {
+            return Restored {
+                stopped,
+                manager_stopped,
+                failure: Some(format!(
+                    "failed to stop CLIProxyAPI (process {}): {error}. Nothing was restored",
+                    process.pid
+                )),
+            };
+        }
+        say(
+            out,
+            format_args!("Stopped CLIProxyAPI (process {})", process.pid),
+        );
+    }
+    if stopped.is_empty() {
+        if let Some(failure) = answers_on_address(machine, listen) {
+            return Restored {
+                stopped,
+                manager_stopped,
+                failure: Some(failure),
+            };
+        }
+    } else if let Err(error) = wait_ended(machine, context, &Ending::Processes(&stopped), None) {
+        return Restored {
+            stopped,
+            manager_stopped,
+            failure: Some(error),
+        };
+    }
+    let failure = restore(machine, platform, backup, out).err();
     Restored {
-        stopped: Vec::new(),
-        failure: restore(machine, platform, backup, out).err(),
+        stopped,
+        manager_stopped,
+        failure,
     }
 }
 
@@ -2879,7 +3052,9 @@ pub(crate) fn undo(
                             failures.push(error);
                             copied = false;
                         }
-                        if !done.stopped.is_empty() && !was_running(&theirs) {
+                        if (!done.stopped.is_empty() || done.manager_stopped)
+                            && !was_running(&theirs)
+                        {
                             say(
                                 out,
                                 format_args!(
