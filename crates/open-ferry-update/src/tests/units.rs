@@ -512,6 +512,26 @@ fn migrates_drop_in_copy_doesnt_update_itself() {
     );
 }
 
+// Not upstream's: migrate's drop-in on Linux and macOS is a symbolic link to
+// the installed open-ferry. The running path is resolved, so it is the
+// installed binary and updates itself.
+#[cfg(unix)]
+#[test]
+fn migrates_drop_in_symlink_updates_the_installed_binary() {
+    let m = machine("open-ferry");
+    write_receipt(&m.data, &m.binary);
+    let other = m.binary.with_file_name("elsewhere");
+    fs::create_dir_all(&other).unwrap();
+    let link = other.join("cli-proxy-api");
+    std::os::unix::fs::symlink(&m.binary, &link).unwrap();
+    assert_eq!(
+        assess(&m, &link, false, true),
+        Install::SelfUpdating {
+            binary: fs::canonicalize(&m.binary).unwrap()
+        }
+    );
+}
+
 #[test]
 fn a_container_is_recognized_by_its_files_and_variables() {
     let none = |_: &Path| false;

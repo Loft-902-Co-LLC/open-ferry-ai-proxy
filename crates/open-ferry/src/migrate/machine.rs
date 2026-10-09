@@ -40,6 +40,9 @@ pub(crate) struct Proc {
     pub(crate) env: Option<Vec<(String, String)>>,
     /// The process that started it, when it is known.
     pub(crate) parent: Option<Parent>,
+    /// When it started, in seconds since 1970: a process ID that is used
+    /// again is a different process, with a different start time.
+    pub(crate) started: Option<u64>,
 }
 
 impl fmt::Debug for Proc {
@@ -52,6 +55,7 @@ impl fmt::Debug for Proc {
             .field("cwd", &self.cwd)
             .field("env", &self.env.as_ref().map(Vec::len))
             .field("parent", &self.parent)
+            .field("started", &self.started)
             .finish()
     }
 }
@@ -68,7 +72,9 @@ pub(crate) struct Parent {
 pub(crate) enum EntryKind {
     File,
     Dir,
-    /// A symbolic link, or anything else that is neither.
+    /// A symbolic link.
+    Link,
+    /// Anything else that is neither.
     Other,
 }
 
@@ -122,16 +128,25 @@ pub(crate) trait Machine: System {
     fn processes(&mut self, names: &[&str]) -> io::Result<Vec<Proc>>;
     /// Whether process `pid` runs.
     fn running(&mut self, pid: u32) -> bool;
-    /// Stops process `pid`, if it is still named `name`: asks it to stop
-    /// (on Windows, ends it at once), and waits for it, ending it after a
-    /// while.
-    fn stop(&mut self, pid: u32, name: &str) -> io::Result<()>;
+    /// When process `pid` started (see [`Proc::started`]), if it runs.
+    fn started(&mut self, pid: u32) -> Option<u64>;
+    /// Stops process `pid`, if it is still named `name` and, when `started`
+    /// is given, started then: asks it to stop (on Windows, ends it at
+    /// once), and waits for it, ending it after a while.
+    fn stop(&mut self, pid: u32, name: &str, started: Option<u64>) -> io::Result<()>;
     /// Starts `launch` in the background, apart from this process, and
     /// gives its process ID.
     fn spawn(&mut self, launch: &Launch) -> io::Result<u32>;
     fn list_dir(&self, path: &str) -> io::Result<Vec<Entry>>;
     fn copy(&mut self, from: &str, to: &str) -> io::Result<()>;
     fn rename(&mut self, from: &str, to: &str) -> io::Result<()>;
+    /// Where the symbolic link `path` points, as it is written; `None` when
+    /// `path` is not a symbolic link.
+    fn link_target(&self, path: &str) -> Option<String>;
+    /// Makes `link` a symbolic link to `target`. Only on Unix.
+    fn symlink(&mut self, target: &str, link: &str) -> io::Result<()>;
+    /// The binary the install receipt names, if there is a receipt.
+    fn installed_binary(&mut self) -> Option<String>;
     /// Creates `path`, which only its owner can open on Unix.
     fn create_private_dir(&mut self, path: &str) -> io::Result<()>;
     /// What answers `GET /` on `ip`, a loopback address, and `port`.
@@ -313,6 +328,7 @@ impl Machine for Host {
                 cwd: process.cwd().map(path_string),
                 env: (!env.is_empty()).then_some(env),
                 parent,
+                started: Some(process.start_time()),
             });
         }
         found.sort_by_key(|proc| proc.pid);
@@ -323,7 +339,13 @@ impl Machine for Host {
         one_process(pid, sysinfo::ProcessRefreshKind::nothing()).is_some()
     }
 
-    fn stop(&mut self, pid: u32, name: &str) -> io::Result<()> {
+    fn started(&mut self, pid: u32) -> Option<u64> {
+        let (sys, _) = one_process(pid, sysinfo::ProcessRefreshKind::nothing())?;
+        sys.process(sysinfo::Pid::from_u32(pid))
+            .map(sysinfo::Process::start_time)
+    }
+
+    fn stop(&mut self, pid: u32, name: &str, started: Option<u64>) -> io::Result<()> {
         let Some((sys, found)) = one_process(pid, sysinfo::ProcessRefreshKind::nothing()) else {
             return Ok(());
         };
@@ -335,6 +357,13 @@ impl Machine for Host {
         let Some(process) = sys.process(sysinfo::Pid::from_u32(pid)) else {
             return Ok(());
         };
+        if let Some(want) = started
+            && process.start_time() != want
+        {
+            return Err(io::Error::other(format!(
+                "process {pid} started at a different time than the one that was seen, so it is another process and was left alone"
+            )));
+        }
         // On Unix, SIGTERM, which CLIProxyAPI and open-ferry both stop
         // gracefully on. Windows has no such signal for a program without a
         // window: it is ended at once.
@@ -428,6 +457,7 @@ impl Machine for Host {
             let kind = match entry.file_type() {
                 Ok(kind) if kind.is_file() => EntryKind::File,
                 Ok(kind) if kind.is_dir() => EntryKind::Dir,
+                Ok(kind) if kind.is_symlink() => EntryKind::Link,
                 _ => EntryKind::Other,
             };
             entries.push(Entry {
@@ -445,6 +475,35 @@ impl Machine for Host {
 
     fn rename(&mut self, from: &str, to: &str) -> io::Result<()> {
         std::fs::rename(from, to)
+    }
+
+    fn link_target(&self, path: &str) -> Option<String> {
+        std::fs::read_link(path)
+            .ok()
+            .map(|target| path_string(&target))
+    }
+
+    fn symlink(&mut self, target: &str, link: &str) -> io::Result<()> {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, link)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (target, link);
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "symbolic links are made on Linux and macOS only",
+            ))
+        }
+    }
+
+    fn installed_binary(&mut self) -> Option<String> {
+        let data = open_ferry_update::DataDir::for_this_user().ok()?;
+        match open_ferry_update::receipt::Receipt::load(&data.receipt_file()) {
+            Ok(Some(receipt)) => Some(receipt.binary),
+            _ => None,
+        }
     }
 
     fn create_private_dir(&mut self, path: &str) -> io::Result<()> {

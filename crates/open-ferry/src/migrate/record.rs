@@ -112,6 +112,14 @@ pub(crate) enum Switch {
         /// CLIProxyAPI's process at the switch: `-undo` leaves it running
         /// when it wasn't restarted.
         pid: u32,
+        /// When `pid` started: a process ID can be used again, and `-undo`
+        /// only treats the process as CLIProxyAPI's if it started then.
+        #[serde(default)]
+        started: Option<u64>,
+        /// Where `binary` is a symbolic link to (open-ferry's installed
+        /// binary), on Linux and macOS; `None` when it is a copy.
+        #[serde(default)]
+        link: Option<String>,
     },
 }
 
@@ -195,7 +203,48 @@ pub(crate) fn load(machine: &dyn Machine, path: &str) -> Result<Option<Record>, 
     Ok(Some(record))
 }
 
-/// Writes `record` to `path`, and to its copy in the backup.
+/// Reads the record's copy in the backup, for a record at `path` that
+/// can't be read: the backup's directory is read from what is left of the
+/// record. The error says why there is no copy to read.
+pub(crate) fn recover(
+    machine: &dyn Machine,
+    platform: Platform,
+    path: &str,
+) -> Result<Record, String> {
+    let data = machine.read(path).map_err(|error| {
+        format!("{path} can't be read ({error}), so the backup's directory isn't known")
+    })?;
+    let value: serde_json::Value = serde_json::from_slice(&data)
+        .map_err(|_| format!("{path} isn't JSON, so the backup's directory isn't known"))?;
+    let dir = value
+        .get("backup")
+        .and_then(|backup| backup.get("dir"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("{path} names no backup"))?;
+    let copy = platform.join(dir, FILE);
+    match load(machine, &copy) {
+        Ok(Some(record)) => Ok(record),
+        Ok(None) => Err(format!("the backup holds no copy of the record ({copy})")),
+        Err(error) => Err(error),
+    }
+}
+
+/// Writes `text` to `path` through a temporary file beside it that is then
+/// renamed into place, so that a failure leaves the old file whole.
+fn replace(machine: &mut dyn Machine, path: &str, text: &str) -> Result<(), String> {
+    let temp = format!("{path}.tmp");
+    machine
+        .write(&temp, text.as_bytes())
+        .map_err(|error| format!("failed to write {temp}: {error}"))?;
+    if let Err(error) = machine.rename(&temp, path) {
+        let _ = machine.remove(&temp);
+        return Err(format!("failed to move {temp} to {path}: {error}"));
+    }
+    Ok(())
+}
+
+/// Writes `record` to `path`, and to its copy in the backup, each through a
+/// temporary file renamed into place.
 pub(crate) fn save(
     machine: &mut dyn Machine,
     platform: Platform,
@@ -212,14 +261,11 @@ pub(crate) fn save(
             .create_dir_all(&dir)
             .map_err(|error| format!("failed to create {dir}: {error}"))?;
     }
-    machine
-        .write(path, text.as_bytes())
-        .map_err(|error| format!("failed to write the switch's record, {path}: {error}"))?;
+    replace(machine, path, &text)
+        .map_err(|error| format!("failed to write the switch's record: {error}"))?;
     if let Some(backup) = &record.backup {
         let copy = platform.join(&backup.dir, FILE);
-        machine
-            .write(&copy, text.as_bytes())
-            .map_err(|error| format!("failed to write {copy}: {error}"))?;
+        replace(machine, &copy, &text)?;
     }
     Ok(())
 }
