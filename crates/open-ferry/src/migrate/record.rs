@@ -113,7 +113,14 @@ pub(crate) enum Theirs {
 pub(crate) enum Switch {
     /// CLIProxyAPI's service stopped and disabled, open-ferry's installed
     /// as `ours` (see [`target_name`]).
-    Service { theirs: Theirs, ours: String },
+    Service {
+        theirs: Theirs,
+        ours: String,
+        /// The open-ferry binary that open-ferry's service runs, as its
+        /// definition names it. `-undo` may be run from another copy, so it
+        /// looks for the service's processes by this path.
+        ours_exe: String,
+    },
     /// open-ferry's binary put in place of CLIProxyAPI's, `binary`, which
     /// was moved to `moved_to`.
     DropIn {
@@ -400,6 +407,7 @@ mod tests {
                     was_active: true,
                 },
                 ours: target_name(Target::SystemdUser).to_owned(),
+                ours_exe: "/home/me/.local/bin/open-ferry".to_owned(),
             },
         };
         let text = serde_json::to_string(&record).unwrap_or_default();

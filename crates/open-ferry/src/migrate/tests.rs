@@ -5427,6 +5427,42 @@ fn undo_takes_a_server_found_only_through_its_supervisor() {
     assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "undone");
 }
 
+// Not upstream's: -undo may be run from another copy of open-ferry (a
+// download, under another name) than the one the service runs. It looks for
+// the service's processes by the path the record names, so the orphan server
+// of the installed binary is still found and waited for.
+#[test]
+fn undo_from_another_binary_finds_the_orphan_server_of_the_installed_one() {
+    let (mut fake, context) = binary_task(true);
+    assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
+    assert_eq!(
+        saved(&fake, WINDOWS_RECORD)["switch"]["ours_exe"],
+        context.exe
+    );
+    // The server outlives the task's end.
+    fake.effects.remove("schtasks.exe /end /tn open-ferry");
+    fake.procs.get_mut(&9001).unwrap().args = strings(&["-config", r"C:\Users\me\cpa\config.yaml"]);
+    let mut other = context.clone();
+    other.exe = r"C:\Users\me\Downloads\open-ferry-new.exe".to_owned();
+    fake.file(&other.exe, OPEN_FERRY);
+
+    let events = fake.events.len();
+    let undo = migrate(&mut fake, &other, &["-undo", "-yes"]);
+    assert_eq!(undo.code, 1, "{}", undo.all());
+    has(&undo.all(), "process 9001 still runs");
+    assert!(!happened_since(
+        &fake,
+        events,
+        r"run schtasks.exe /run /tn \CLIProxyAPI"
+    ));
+    assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "switched");
+
+    fake.end(9001);
+    let undo = migrate(&mut fake, &other, &["-undo", "-yes"]);
+    assert_eq!(undo.code, 0, "{}", undo.all());
+    assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "undone");
+}
+
 // Not upstream's: an open-ferry process whose arguments can't be read could
 // be the service's, so nothing is known and -undo changes nothing.
 #[test]
