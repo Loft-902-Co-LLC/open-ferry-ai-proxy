@@ -3081,6 +3081,194 @@ fn a_task_with_no_working_directory_runs_in_system32() {
     assert_eq!(json["starter"]["kind"], "scheduled-task");
 }
 
+// --- Fix round 4: discovery ---
+
+/// `stopped_unit`'s plan, as printed.
+fn plan_of(fake: &mut Fake, context: &Context) -> String {
+    migrate(fake, context, &["-dry-run"]).all()
+}
+
+// Not upstream's: a systemd blocker names the unit's file and the kind of
+// trouble, but shows no argument and no raw command, in the plan or in
+// -json.
+#[test]
+fn a_systemd_blocker_shows_no_argument_values() {
+    let secret = "hunter2-secret";
+    let program = "/usr/local/bin/cli-proxy-api";
+    for (fragment, argv, what) in [
+        // The files and `systemctl show` disagree.
+        (
+            format!("[Service]\nExecStart={program} -config /etc/old.yaml -password {secret}\n"),
+            format!("{program} -config /etc/old.yaml"),
+            "don't agree",
+        ),
+        // The line can't be split.
+        (
+            format!("[Service]\nExecStart={program} -config /etc/old.yaml -password \"{secret}\n"),
+            format!("{program} -config /etc/old.yaml"),
+            "can't be split",
+        ),
+        // A variable.
+        (
+            format!("[Service]\nExecStart={program} -config /etc/old.yaml -password {secret}$X\n"),
+            format!("{program} -config /etc/old.yaml -password {secret}"),
+            "uses a $ variable",
+        ),
+    ] {
+        let (mut fake, context) = stopped_unit(&fragment, None, program, &argv);
+        let (json, blockers) = blockers_of(&mut fake, &context);
+        has(&blockers, what);
+        has(&blockers, "/etc/systemd/system/cliproxyapi.service");
+        assert!(!json.to_string().contains(secret), "{what}: {json}");
+        let plan = plan_of(&mut fake, &context);
+        has(&plan, what);
+        lacks(&plan, secret);
+    }
+}
+
+// Not upstream's: a unit whose files changed since systemd loaded them is
+// not what systemd runs.
+#[test]
+fn a_unit_that_needs_a_daemon_reload_blocks() {
+    let program = "/usr/local/bin/cli-proxy-api";
+    let argv = format!("{program} -config /etc/old.yaml");
+    let (mut fake, context) = stopped_unit(
+        &format!("[Service]\nExecStart={argv}\n"),
+        None,
+        program,
+        &argv,
+    );
+    let shown = fake.answers["systemctl show cliproxyapi.service"]
+        .stdout
+        .clone();
+    let (_, blockers) = blockers_of(&mut fake, &context);
+    assert_eq!(blockers, "[]");
+    for (state, blocks) in [("no", false), ("yes", true)] {
+        fake.answer(
+            "systemctl show cliproxyapi.service",
+            0,
+            &format!("{shown}NeedDaemonReload={state}\n"),
+        );
+        let (_, blockers) = blockers_of(&mut fake, &context);
+        if blocks {
+            has(&blockers, "changed since systemd loaded them");
+        } else {
+            assert_eq!(blockers, "[]");
+        }
+    }
+}
+
+// Not upstream's: a `$` variable or a `%` specifier in ExecStart is
+// expanded by systemd and not by migrate, so the unit is blocked; `$$` and
+// `%%` are literal.
+#[test]
+fn a_variable_or_specifier_in_exec_start_blocks() {
+    let program = "/usr/local/bin/cli-proxy-api";
+    for word in ["$CONFIG", "${CONFIG}", "%h/cpa.yaml", "%n", "a$", "x%"] {
+        let argv = format!("{program} -config {word}");
+        let (mut fake, context) = stopped_unit(
+            &format!("[Service]\nExecStart={argv}\n"),
+            None,
+            program,
+            &argv,
+        );
+        let (_, blockers) = blockers_of(&mut fake, &context);
+        has(&blockers, "uses a $ variable or a % specifier");
+    }
+    for word in ["a$$b", "100%%"] {
+        let argv = format!("{program} -config {word}");
+        let (mut fake, context) = stopped_unit(
+            &format!("[Service]\nExecStart={argv}\n"),
+            None,
+            program,
+            &argv,
+        );
+        let (_, blockers) = blockers_of(&mut fake, &context);
+        lacks(&blockers, "uses a $ variable or a % specifier");
+    }
+}
+
+// Not upstream's: a process whose directory can't be read doesn't make a
+// task with the same command its starter.
+#[test]
+fn an_unreadable_process_directory_blocks_a_matching_task() {
+    let (mut fake, context) = binary_task(true);
+    if let Some(process) = fake.procs.get_mut(&8080) {
+        process.cwd = None;
+    }
+    let (json, blockers) = blockers_of(&mut fake, &context);
+    assert_eq!(json["starter"]["kind"], "scheduled-task");
+    has(&blockers, "working directory can't be read");
+    has(&blockers, "switch by hand");
+}
+
+/// A Windows context that knows `windir`, which `windows()` doesn't.
+fn windows_with_windir() -> Context {
+    let mut context = windows();
+    context
+        .env
+        .insert("windir".to_owned(), r"C:\Windows".to_owned());
+    context
+}
+
+// Not upstream's: `%windir%` and the other variables a task commonly uses
+// are known, so a stopped task's directory is found, not dropped.
+#[test]
+fn a_stopped_task_with_a_windir_directory_keeps_it() {
+    let (mut fake, _) = changed_task(
+        |xml| {
+            xml.replace(
+                r"%USERPROFILE%\cpa</WorkingDirectory>",
+                r"%windir%\System32</WorkingDirectory>",
+            )
+        },
+        r"C:\Users\me\cpa",
+    );
+    fake.procs.remove(&8080);
+    let context = windows_with_windir();
+    let (json, blockers) = blockers_of(&mut fake, &context);
+    assert_eq!(json["working_dir"], r"C:\Windows\System32", "{blockers}");
+    assert_eq!(blockers, "[]");
+}
+
+// Not upstream's: a variable that is still unknown in a task's directory,
+// command or arguments blocks, whether CLIProxyAPI runs or not.
+#[test]
+fn an_unknown_variable_in_a_task_blocks() {
+    let cases: [(&str, &str, &str); 3] = [
+        (
+            r"%USERPROFILE%\cpa</WorkingDirectory>",
+            r"%NOSUCH%\cpa</WorkingDirectory>",
+            "working directory",
+        ),
+        (
+            r"<Command>%USERPROFILE%\cpa\cli-proxy-api.exe",
+            r"<Command>%USERPROFILE%\%NOSUCH%\cli-proxy-api.exe",
+            "command",
+        ),
+        (
+            r#"-config "%USERPROFILE%\cpa\config.yaml""#,
+            r#"-config "%NOSUCH%\config.yaml""#,
+            "arguments",
+        ),
+    ];
+    for running in [false, true] {
+        for (from, to, part) in cases {
+            let (mut fake, context) = binary_task(running);
+            let xml = fake.answers["schtasks.exe /query /xml ONE"].stdout.clone();
+            assert!(xml.contains(from), "{part}");
+            fake.answer("schtasks.exe /query /xml ONE", 0, &xml.replace(from, to));
+            let (_, blockers) = blockers_of(&mut fake, &context);
+            // A blocker starts a sentence, so its first letter is a capital.
+            has(
+                &blockers.to_lowercase(),
+                &format!("{part} of the scheduled task"),
+            );
+            has(&blockers, "uses a variable that migrate doesn't know");
+        }
+    }
+}
+
 // --- Windows: a service through NSSM ---
 
 const NSSM_CPA: &str = r"C:\Program Files\CLIProxyAPI\cli-proxy-api.exe";
