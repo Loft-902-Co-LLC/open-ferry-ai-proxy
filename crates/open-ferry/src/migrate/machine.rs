@@ -156,8 +156,9 @@ pub(crate) trait Machine: System {
     fn list_dir(&self, path: &str) -> io::Result<Vec<Entry>>;
     fn copy(&mut self, from: &str, to: &str) -> io::Result<()>;
     /// Copies `from` to a file this call creates at `to`, with `from`'s
-    /// permissions. Fails with `AlreadyExists`, touching nothing, when
-    /// anything is at `to`. A copy that fails after that leaves its start.
+    /// permissions. Fails with `AlreadyExists` when anything is at `to`. A
+    /// failure removes `to` only if this call made it, so it never leaves a
+    /// part copy, and never touches a file that was there.
     fn copy_new(&mut self, from: &str, to: &str) -> io::Result<()>;
     fn rename(&mut self, from: &str, to: &str) -> io::Result<()>;
     /// Like `rename`, but fails when anything is at `to` (a link too), and
@@ -683,10 +684,14 @@ impl Machine for Host {
             .write(true)
             .create_new(true)
             .open(to)?;
-        io::copy(&mut source, &mut target)?;
-        target.sync_all()?;
+        // The file is this call's from here: a failure removes it.
+        let copied = io::copy(&mut source, &mut target).and_then(|_| target.sync_all());
         drop(target);
-        std::fs::set_permissions(to, permissions)
+        let copied = copied.and_then(|()| std::fs::set_permissions(to, permissions));
+        if copied.is_err() {
+            let _ = std::fs::remove_file(to);
+        }
+        copied
     }
 
     fn rename(&mut self, from: &str, to: &str) -> io::Result<()> {

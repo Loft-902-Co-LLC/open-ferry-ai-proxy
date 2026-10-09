@@ -709,15 +709,14 @@ impl Machine for Fake {
     fn copy_new(&mut self, from: &str, to: &str) -> io::Result<()> {
         let event = format!("copy {from} -> {to}");
         self.events.push(event.clone());
+        // Like the real copy, it opens `from` before it makes `to`.
+        let data = self.read(from)?;
         if self.files.contains_key(to) || self.links.contains_key(to) || self.dirs.contains(to) {
             return Err(io::Error::new(io::ErrorKind::AlreadyExists, "it exists"));
         }
-        let data = self.read(from)?;
         self.need_parent(to)?;
-        // A copy that fails leaves the start of its file.
+        // A copy that fails part way removes the file it made.
         if self.failing.contains(&event) {
-            self.files
-                .insert(to.to_owned(), data[..data.len() / 2].to_vec());
             return Err(io::Error::other(format!("{event} failed")));
         }
         self.files.insert(to.to_owned(), data);
@@ -5763,6 +5762,26 @@ fn a_drop_in_that_fails_part_way_through_the_copy_puts_the_binary_back() {
     assert!(!fake.exists(OPT_MOVED));
     assert!(!fake.exists(&staged()));
     assert!(!happened(&fake, &format!("remove {OPT_CPA}")));
+    assert_eq!(saved(&fake, LINUX_RECORD)["status"], "rolled-back");
+}
+
+// Not upstream's: a copy that fails before it makes its file (open-ferry can't
+// be read) leaves a file a crashed run left at the same name alone.
+#[test]
+fn a_copy_that_fails_before_its_file_leaves_a_crashed_runs_file_alone() {
+    let (mut fake, context) = bare_process();
+    fake.installed = None;
+    fake.file(&staged(), b"a crashed run's copy");
+    fake.unreadable.insert(context.exe.clone());
+    let ran = migrate(&mut fake, &context, &["-yes"]);
+    assert_eq!(ran.code, 1, "{}", ran.all());
+    has(
+        &ran.err,
+        "failed to put open-ferry at /opt/cpa/cli-proxy-api",
+    );
+    assert_eq!(fake.data(&staged()), b"a crashed run's copy");
+    assert!(!happened(&fake, &format!("remove {}", staged())));
+    assert_eq!(fake.data(OPT_CPA), CLIPROXYAPI);
     assert_eq!(saved(&fake, LINUX_RECORD)["status"], "rolled-back");
 }
 
