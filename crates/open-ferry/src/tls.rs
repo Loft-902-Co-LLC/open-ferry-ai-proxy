@@ -11,9 +11,9 @@
 //! plain HTTP.
 //!
 //! The handshake is run by the serve loop (`service::serve_loop`), which
-//! serves plain and TLS connections alike. [`TlsListener`] and
-//! [`TlsPeer`], which fed finished handshakes to `axum::serve` before that
-//! loop, are kept for the test of that path.
+//! serves plain and TLS connections alike. `TlsListener` and `TlsPeer`,
+//! which fed finished handshakes to `axum::serve` before that loop, are
+//! kept, in test builds only, for the test of that path.
 //!
 //! Deviations from upstream:
 //! - Handshakes run on their own tasks and one that takes over ten seconds
