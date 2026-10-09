@@ -23,7 +23,9 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use super::assess::{Assessment, Kind, Listen};
 use super::discover::{self, Found, Launcher, Starter};
 use super::machine::{Answer, EntryKind, Launch, Machine, Proc};
-use super::record::{self, Address, Backup, Before, Copied, Record, Status, Switch, Theirs};
+use super::record::{
+    self, Address, Backup, Before, Copied, Identity, Record, Status, Switch, Theirs,
+};
 use crate::os_service::{self, Cmd, Context, Platform, Target, run_checked, say};
 
 /// How long open-ferry has to answer after the switch.
@@ -111,6 +113,25 @@ fn overlapping(
     assessment: &Assessment,
 ) -> Vec<String> {
     let copy = platform.join(backup, record::FILE);
+    // Where the record, the backup and its copy of the record really go: a
+    // link in their directory leads somewhere else. A file that isn't made
+    // yet is where its directory really is.
+    let resolved = |path: &str| -> String {
+        if let Ok(real) = machine.real_path(path) {
+            return real;
+        }
+        let separators: &[char] = match platform {
+            Platform::Windows => &['/', '\\'],
+            Platform::Linux | Platform::MacOs => &['/'],
+        };
+        let name = path.rsplit(separators).next().unwrap_or_default();
+        platform
+            .parent(path)
+            .and_then(|parent| machine.real_path(&parent).ok())
+            .map_or_else(|| path.to_owned(), |parent| platform.join(&parent, name))
+    };
+    let (record_real, backup_real) = (resolved(record), resolved(backup));
+    let copy_real = platform.join(&backup_real, record::FILE);
     let mut protected = Vec::new();
     if let Some(config) = &assessment.config {
         protected.push(("the config", config.as_str()));
@@ -127,16 +148,34 @@ fn overlapping(
         let hit = [path, real.as_str()].into_iter().find_map(|spot| {
             let lower = spot.to_lowercase();
             // The temporary files are `<file>.<unique>.tmp`.
-            let mine = [record, copy.as_str()].into_iter().find(|mine| {
-                (lower.starts_with(&format!("{}.", mine.to_lowercase())) && lower.ends_with(".tmp"))
-                    || discover::same_path(platform, spot, mine)
-            });
-            mine.or_else(|| platform.is_within(record, spot).then_some(record))
-                .or_else(|| {
-                    (discover::same_path(platform, spot, backup)
-                        || platform.is_within(spot, backup))
+            let mine = [
+                (record, record),
+                (copy.as_str(), copy.as_str()),
+                (record_real.as_str(), record),
+                (copy_real.as_str(), copy.as_str()),
+            ]
+            .into_iter()
+            .find(|(place, _)| {
+                (lower.starts_with(&format!("{}.", place.to_lowercase()))
+                    && lower.ends_with(".tmp"))
+                    || discover::same_path(platform, spot, place)
+            })
+            .map(|(_, shown)| shown);
+            mine.or_else(|| {
+                [record, record_real.as_str()]
+                    .into_iter()
+                    .any(|place| platform.is_within(place, spot))
+                    .then_some(record)
+            })
+            .or_else(|| {
+                [backup, backup_real.as_str()]
+                    .into_iter()
+                    .any(|place| {
+                        discover::same_path(platform, spot, place)
+                            || platform.is_within(spot, place)
+                    })
                     .then_some(backup)
-                })
+            })
         });
         if let Some(mine) = hit {
             found.push(format!(
@@ -246,6 +285,19 @@ pub(crate) fn stop_commands(theirs: &Theirs) -> Vec<Cmd> {
         }
     }
     cmds
+}
+
+/// The command that stops CLIProxyAPI's service through its manager, and
+/// nothing else of it.
+fn manager_stop(theirs: &Theirs) -> Cmd {
+    match theirs {
+        Theirs::Systemd { unit, user, .. } => discover::systemctl(*user, &["stop", unit]),
+        Theirs::Launchd { label, domain, .. } => {
+            Cmd::new("launchctl", &["bootout"]).arg(format!("{domain}/{label}"))
+        }
+        Theirs::WindowsService { name, .. } => Cmd::new("sc.exe", &["stop", name]),
+        Theirs::Task { name, .. } => Cmd::new("schtasks.exe", &["/end", "/tn", name]),
+    }
 }
 
 /// Whether CLIProxyAPI's service ran before the switch, so that turning
@@ -432,6 +484,12 @@ pub(crate) fn plan(
     {
         let clash = overlapping(machine, platform, &record, &backup, assessment);
         plan.blockers.extend(clash);
+    }
+    if kind != Kind::Container
+        && let Some(config) = &assessment.config
+    {
+        let lost = unplaceable(machine, platform, assessment, config);
+        plan.blockers.extend(lost);
     }
     let backup = match &plan.backup_dir {
         Some(dir) => {
@@ -857,12 +915,58 @@ fn copy_file(
 
 /// Notes where `copied.from` really is, and where its directory, for
 /// `-restore` to check before it writes there.
-fn located(machine: &dyn Machine, platform: Platform, mut copied: Copied) -> Copied {
-    copied.real = machine.real_path(&copied.from).ok();
-    copied.parent = platform
-        .parent(&copied.from)
-        .and_then(|parent| machine.real_path(&parent).ok());
-    copied
+fn located(
+    machine: &dyn Machine,
+    platform: Platform,
+    mut copied: Copied,
+) -> Result<Copied, String> {
+    let (real, parent) = places(machine, platform, &copied.from)?;
+    copied.real = Some(real);
+    copied.parent = Some(parent);
+    Ok(copied)
+}
+
+/// Where `path` really is, and where its directory: both are needed to
+/// check, at `-restore`, that a write goes where the file was.
+fn places(
+    machine: &dyn Machine,
+    platform: Platform,
+    path: &str,
+) -> Result<(String, String), String> {
+    let real = machine
+        .real_path(path)
+        .map_err(|error| format!("failed to find where {path} really is: {error}"))?;
+    let parent = platform
+        .parent(path)
+        .ok_or_else(|| format!("{path} has no directory"))?;
+    let parent = machine
+        .real_path(&parent)
+        .map_err(|error| format!("failed to find where {parent} really is: {error}"))?;
+    Ok((real, parent))
+}
+
+/// Why a file the backup keeps can't be placed, so that `-restore` couldn't
+/// check where it goes. Looked at before anything is changed.
+fn unplaceable(
+    machine: &dyn Machine,
+    platform: Platform,
+    assessment: &Assessment,
+    config: &str,
+) -> Vec<String> {
+    let mut paths = vec![config.to_owned()];
+    paths.extend(assessment.env_files.iter().cloned());
+    if let Some(auth) = &assessment.auth_dir
+        && machine.exists(auth)
+    {
+        paths.push(machine.real_path(auth).unwrap_or_else(|_| auth.clone()));
+    }
+    paths
+        .iter()
+        .filter_map(|path| places(machine, platform, path).err())
+        .map(|error| {
+            format!("{error}, so a backup of it couldn't be restored. Nothing was changed.")
+        })
+        .collect()
 }
 
 /// A directory of the backup, made when it is first needed.
@@ -905,7 +1009,7 @@ fn back_up(
         platform.join(&config_to, &discover::file_name(platform, config)),
         out,
     )?;
-    files.push(located(machine, platform, config_copy));
+    files.push(located(machine, platform, config_copy)?);
     let config_dir = platform.parent(config);
     for file in &assessment.env_files {
         let beside = platform
@@ -915,7 +1019,7 @@ fn back_up(
         let name = if beside { ".env" } else { "working-dir.env" };
         let env_to = backup_subdir(machine, platform, dir, "env")?;
         let copied = copy_file(machine, file, platform.join(&env_to, name), out)?;
-        files.push(located(machine, platform, copied));
+        files.push(located(machine, platform, copied)?);
     }
     if let Some(auth) = &assessment.auth_dir
         && machine.exists(auth)
@@ -938,7 +1042,7 @@ fn back_up(
                 real: None,
                 parent: None,
             },
-        ));
+        )?);
     }
     say(
         out,
@@ -959,25 +1063,29 @@ fn same_place(platform: Platform, now: Option<&str>, then: &str) -> bool {
 /// else than it did at the switch, so the write would change another place.
 fn moved_since(machine: &dyn Machine, platform: Platform, copied: &Copied) -> Option<String> {
     let from = &copied.from;
-    if let Some(then) = &copied.parent {
-        let now = platform
-            .parent(from)
-            .and_then(|parent| machine.real_path(&parent).ok());
-        if !same_place(platform, now.as_deref(), then) {
-            return Some(format!(
-                "{from} wasn't restored: its directory led to {then} at the switch and now leads to {}, so the write would change another place. Put the directory back, or copy the file by hand from {}",
-                now.as_deref().unwrap_or("nowhere"),
-                copied.to
-            ));
-        }
+    // Without where it and its directory really were, the write can't be
+    // checked: it isn't made.
+    let (Some(then_parent), Some(then_real)) = (&copied.parent, &copied.real) else {
+        return Some(format!(
+            "{from} wasn't restored: the record doesn't say where it and its directory really were at the switch, so the write could change another place. Copy the file by hand from {}",
+            copied.to
+        ));
+    };
+    let now = platform
+        .parent(from)
+        .and_then(|parent| machine.real_path(&parent).ok());
+    if !same_place(platform, now.as_deref(), then_parent) {
+        return Some(format!(
+            "{from} wasn't restored: its directory led to {then_parent} at the switch and now leads to {}, so the write would change another place. Put the directory back, or copy the file by hand from {}",
+            now.as_deref().unwrap_or("nowhere"),
+            copied.to
+        ));
     }
-    if let Some(then) = &copied.real
-        && machine.exists(from)
-    {
+    if machine.exists(from) {
         let now = machine.real_path(from).ok();
-        if !same_place(platform, now.as_deref(), then) {
+        if !same_place(platform, now.as_deref(), then_real) {
             return Some(format!(
-                "{from} wasn't restored: it led to {then} at the switch and now leads to {}, so the write would change another place. Put it back, or copy the file by hand from {}",
+                "{from} wasn't restored: it led to {then_real} at the switch and now leads to {}, so the write would change another place. Put it back, or copy the file by hand from {}",
                 now.as_deref().unwrap_or("nowhere"),
                 copied.to
             ));
@@ -988,7 +1096,14 @@ fn moved_since(machine: &dyn Machine, platform: Platform, copied: &Copied) -> Op
 
 /// Copies the backed-up files back. Each is tried, and the failures are
 /// said and returned together. A file whose place has moved since the
-/// switch is skipped, and said.
+/// switch, or isn't known, is skipped, and said.
+///
+/// The place is looked at just before each write. A directory swapped for a
+/// link between that look and the write is not caught: the copy follows the
+/// link in the directory (std has no `O_NOFOLLOW` open without a `libc`
+/// dependency, so the final file is checked for a link before it is
+/// opened, and not at the open). Nothing else should change these folders
+/// while `-restore` runs.
 fn restore(
     machine: &mut dyn Machine,
     platform: Platform,
@@ -1063,6 +1178,9 @@ fn wait_for_open_ferry(
     }
     Err(match last {
         Answer::Other(what) => format!("something else answers on {}: {what}", address(listen)),
+        Answer::CliProxyApi => {
+            format!("something else answers on {}: CLIProxyAPI", address(listen))
+        }
         Answer::Nothing(why) => format!(
             "nothing answered on {} within {} seconds ({why})",
             address(listen),
@@ -1101,7 +1219,15 @@ fn say_back(machine: &mut dyn Machine, listen: Option<&Listen>, out: &mut dyn Wr
         return;
     };
     match wait_for_any(machine, listen, BACK_WAIT) {
-        Some(Answer::Other(_)) => say(out, format_args!("CLIProxyAPI answers on {shown} again.")),
+        Some(Answer::CliProxyApi) => {
+            say(out, format_args!("CLIProxyAPI answers on {shown} again."));
+        }
+        Some(Answer::Other(what)) => say(
+            out,
+            format_args!(
+                "Something answers on {shown}, but not as CLIProxyAPI ({what}): check what runs there."
+            ),
+        ),
         Some(Answer::OpenFerry) => say(
             out,
             format_args!("open-ferry still answers on {shown}: check what runs there."),
@@ -1139,8 +1265,10 @@ fn wait_exit(machine: &mut dyn Machine, pid: u32, started: Option<u64>, timeout:
 
 /// What `migrate` waits to have ended.
 enum Ending<'a> {
-    /// open-ferry's service, as its manager says.
-    Service(Target),
+    /// open-ferry's service, as its manager says, and the processes it ran
+    /// (taken before the service was removed: a removed task or service
+    /// reads as ended while its process runs on).
+    Service(Target, &'a [Proc]),
     /// These processes of open-ferry.
     Processes(&'a [Proc]),
 }
@@ -1163,9 +1291,16 @@ fn wait_ended(
             machine.sleep(POLL);
         }
         let mut why = match ending {
-            Ending::Service(target) => {
+            Ending::Service(target, processes) => {
                 let state = os_service::service_state(machine, context, *target);
-                (!state.ended()).then(|| format!("its service is {}", state.describe()))
+                if state.ended() {
+                    processes
+                        .iter()
+                        .find(|process| same_process(machine, process.pid, process.started))
+                        .map(|process| format!("process {} still runs", process.pid))
+                } else {
+                    Some(format!("its service is {}", state.describe()))
+                }
             }
             Ending::Processes(processes) => processes
                 .iter()
@@ -1210,7 +1345,10 @@ fn is_on(machine: &mut dyn Machine, theirs: &Theirs) -> bool {
     machine.run(&cmd).is_ok_and(|output| {
         output.success()
             && match theirs {
-                Theirs::WindowsService { .. } => output.stdout.contains("RUNNING"),
+                Theirs::WindowsService { .. } => {
+                    os_service::service_state_number(&output.stdout)
+                        == Some(os_service::SERVICE_RUNNING)
+                }
                 _ => true,
             }
     })
@@ -1237,15 +1375,31 @@ fn turn_theirs_on(
     machine: &mut dyn Machine,
     context: &Context,
     target: Target,
+    runners: &[Proc],
     theirs: &Theirs,
     listen: Option<&Listen>,
     out: &mut dyn Write,
 ) -> Vec<String> {
-    if let Err(error) = wait_ended(machine, context, &Ending::Service(target), listen) {
+    if let Err(error) = wait_ended(machine, context, &Ending::Service(target, runners), listen) {
         say(out, format_args!("{error}"));
         return vec![error];
     }
     start_theirs(machine, theirs, out)
+}
+
+/// The processes that run open-ferry's service (`service run`), which a
+/// removed service or task leaves running until they are told to stop.
+fn service_runners(machine: &mut dyn Machine, context: &Context) -> Vec<Proc> {
+    let name = discover::file_name(context.platform, &context.exe);
+    machine
+        .processes(&[name.as_str()])
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|process| {
+            process.args.first().map(String::as_str) == Some("service")
+                && process.args.get(1).map(String::as_str) == Some("run")
+        })
+        .collect()
 }
 
 /// Runs `cmds`, saying each; the failures are returned, and don't stop the
@@ -1279,6 +1433,45 @@ pub(crate) fn execute(
         .clone()
         .ok_or("the config isn't known, so nothing was changed")?;
     let record_path = plan.record.clone()?;
+    let answers = |machine: &mut dyn Machine| {
+        assessment
+            .listen
+            .as_ref()
+            .and_then(|listen| {
+                listen
+                    .probe
+                    .map(|ip| machine.probe(ip, listen.port, listen.tls))
+            })
+            .is_some_and(|answer| answer == Answer::OpenFerry)
+    };
+    let already = |listen: &Listen| {
+        format!(
+            "open-ferry already answers on {}, so nothing was changed. Is CLIProxyAPI already switched?",
+            address(listen)
+        )
+    };
+    // Before the lock, which makes the record's directory.
+    if let Some(listen) = &assessment.listen
+        && answers(machine)
+    {
+        return Err(already(listen));
+    }
+    // One `migrate` at a time, for the whole switch. What the plan assumed
+    // is looked at again under the lock: another run may have switched
+    // since.
+    let _lock = record::lock(machine, context.platform, &record_path)?;
+    if let Some(existing) = record::load(machine, &record_path)?
+        && matches!(
+            existing.status,
+            Status::Switched | Status::Switching | Status::UndoneNotStarted
+        )
+    {
+        return Err(format!(
+            "A switch made at {} isn't undone ({record_path}). Run `open-ferry {} -undo` before switching again. Nothing was changed.",
+            existing.created,
+            super::NAME
+        ));
+    }
     let backup_dir = plan
         .backup_dir
         .clone()
@@ -1293,14 +1486,14 @@ pub(crate) fn execute(
     if !clash.is_empty() {
         return Err(clash.join("\n"));
     }
+    let lost = unplaceable(machine, context.platform, assessment, &config);
+    if !lost.is_empty() {
+        return Err(lost.join("\n"));
+    }
     if let Some(listen) = &assessment.listen
-        && let Some(ip) = listen.probe
-        && machine.probe(ip, listen.port, listen.tls) == Answer::OpenFerry
+        && answers(machine)
     {
-        return Err(format!(
-            "open-ferry already answers on {}, so nothing was changed. Is CLIProxyAPI already switched?",
-            address(listen)
-        ));
+        return Err(already(listen));
     }
     let base = Base {
         context,
@@ -1406,6 +1599,7 @@ fn execute_service(
             ),
         );
         let mut failures = Vec::new();
+        let runners = service_runners(machine, context);
         if failed.changed
             && let Err(error) = os_service::uninstall(machine, context, target, false, out)
         {
@@ -1414,7 +1608,7 @@ fn execute_service(
         // CLIProxyAPI's service isn't turned on beside one that stays.
         if failures.is_empty() {
             failures.extend(turn_theirs_on(
-                machine, context, target, &theirs, listen, out,
+                machine, context, target, &runners, &theirs, listen, out,
             ));
         }
         if failures.is_empty() && was_running(&theirs) {
@@ -1461,12 +1655,13 @@ fn execute_service(
                 format_args!("open-ferry didn't answer: {why}. Undoing the switch."),
             );
             let mut failures = Vec::new();
+            let runners = service_runners(machine, context);
             if let Err(error) = os_service::uninstall(machine, context, target, false, out) {
                 failures.push(error);
             }
             if failures.is_empty() {
                 failures.extend(turn_theirs_on(
-                    machine, context, target, &theirs, listen, out,
+                    machine, context, target, &runners, &theirs, listen, out,
                 ));
             }
             if failures.is_empty() && was_running(&theirs) {
@@ -1593,14 +1788,40 @@ fn stop_theirs(
 }
 
 /// Where a binary that `migrate` takes out of the way goes: `<binary><suffix>`,
-/// or with the time when that is taken.
+/// or with the time when that is taken, and a number when that is too. Never
+/// a path that is taken.
 fn aside(machine: &dyn Machine, binary: &str, suffix: &str) -> String {
+    let taken = |path: &str| machine.exists(path) || machine.link_target(path).is_some();
     let plain = format!("{binary}{suffix}");
-    if machine.exists(&plain) {
-        format!("{plain}-{}", machine.now().format("%Y%m%dT%H%M%SZ"))
-    } else {
-        plain
+    if !taken(&plain) {
+        return plain;
     }
+    let stamped = format!("{plain}-{}", machine.now().format("%Y%m%dT%H%M%SZ"));
+    if !taken(&stamped) {
+        return stamped;
+    }
+    (2..)
+        .map(|n| format!("{stamped}-{n}"))
+        .find(|path| !taken(path))
+        .unwrap_or(stamped)
+}
+
+/// The files beside `binary` named `<binary>.open-ferry*`: the copies an
+/// earlier try set aside, under whatever name it found free.
+fn aside_siblings(machine: &dyn Machine, platform: Platform, binary: &str) -> Vec<String> {
+    let Some(dir) = platform.parent(binary) else {
+        return Vec::new();
+    };
+    let prefix = format!("{}{ASIDE}", discover::file_name(platform, binary));
+    let mut found: Vec<String> = machine
+        .list_dir(&dir)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|entry| entry.name.starts_with(&prefix) && entry.kind != EntryKind::Dir)
+        .map(|entry| platform.join(&dir, &entry.name))
+        .collect();
+    found.sort();
+    found
 }
 
 /// Where a drop-in's symbolic link points, on Linux and macOS: the binary
@@ -1760,11 +1981,19 @@ struct Placed<'a> {
 /// for CLIProxyAPI's: anything else, such as an older open-ferry, is left
 /// as it is, and said. Each step looks at what is there, so that doing it
 /// again after one failed finishes it.
+///
+/// The processes of the drop-in are taken before anything is moved, and
+/// written to the record with the place open-ferry's copy is set aside at:
+/// a retry stops exactly those, and finds the copy. They are stopped by
+/// their identity, never by the file now at their path (a running file's
+/// path can still read as `binary` after it was moved, on Windows).
 fn put_back_binary(
     machine: &mut dyn Machine,
     context: &Context,
     placed: &Placed<'_>,
     keep: Option<Running>,
+    record: &mut Record,
+    record_path: &str,
     out: &mut dyn Write,
 ) -> Result<Vec<Proc>, String> {
     let platform = context.platform;
@@ -1775,13 +2004,80 @@ fn put_back_binary(
         link,
     } = *placed;
     let plain = format!("{binary}{ASIDE}");
-    let replaced = aside(machine, binary, ASIDE);
+    let (mut identities, recorded) = match &record.switch {
+        Switch::DropIn {
+            identities, aside, ..
+        } => (identities.clone(), aside.clone()),
+        Switch::Service { .. } => (Vec::new(), None),
+    };
+    // Where open-ferry's copy goes: where an earlier try put it, else a name
+    // that nothing has. Never onto a path that is taken.
+    let mut replaced = recorded.unwrap_or_else(|| aside(machine, binary, ASIDE));
+    let siblings = aside_siblings(machine, platform, binary);
     let manual = |machine: &dyn Machine, what: String| {
         format!(
             "{what}. CLIProxyAPI's binary (SHA-256 {sha256}) wasn't put back, and the record stays open: put it at {binary} by hand (from the release you installed, or your package manager), then run `open-ferry {} -undo` again.",
             super::NAME
         ) + &format!(" At {binary} there is {}.", found_at(machine, binary))
     };
+    // Before anything is moved: which processes run open-ferry from here.
+    // With CLIProxyAPI's binary at `binary` already, a process is not taken
+    // for open-ferry's by the file at its path.
+    let theirs_at_binary =
+        machine.link_target(binary).is_none() && has_digest(machine, binary, sha256);
+    let mut others: Vec<String> = vec![plain.clone(), replaced.clone()];
+    others.extend(siblings.iter().cloned());
+    let other_paths: Vec<&str> = others.iter().map(String::as_str).collect();
+    let mut changed = false;
+    let mut taken: Vec<Proc> = Vec::new();
+    for process in running_binary(
+        machine,
+        platform,
+        binary,
+        &other_paths,
+        link,
+        theirs_at_binary,
+    )
+    .into_iter()
+    .filter(|process| !is_kept(process, keep))
+    {
+        taken.push(process.clone());
+        if let Some(started) = process.started {
+            let identity = Identity {
+                pid: process.pid,
+                started,
+            };
+            if !identities.contains(&identity) {
+                identities.push(identity);
+                changed = true;
+            }
+        }
+    }
+    // The copy is set aside where nothing is: a path that is taken is
+    // never renamed onto.
+    if machine.exists(moved)
+        && !theirs_at_binary
+        && machine.link_target(binary).is_none()
+        && machine.exists(binary)
+        && (machine.exists(&replaced) || machine.link_target(&replaced).is_some())
+    {
+        replaced = aside(machine, binary, ASIDE);
+    }
+    let aside_now = Some(replaced.clone());
+    if let Switch::DropIn {
+        identities: saved,
+        aside: saved_aside,
+        ..
+    } = &mut record.switch
+        && (changed || *saved_aside != aside_now)
+    {
+        *saved = identities.clone();
+        *saved_aside = aside_now;
+        record.updated = timestamp(machine.now());
+        record::save(machine, platform, record_path, record).map_err(|error| {
+            format!("{error}. Nothing was moved: the record has to say what is stopped and where the copy goes first")
+        })?;
+    }
     if machine.exists(moved) {
         if !has_digest(machine, moved, sha256) {
             return Err(manual(
@@ -1825,17 +2121,30 @@ fn put_back_binary(
             format!("CLIProxyAPI's binary isn't at {moved}, and what is at {binary} isn't it"),
         ));
     }
-    let places = [plain.as_str(), replaced.as_str()];
-    let theirs_at_binary =
-        machine.link_target(binary).is_none() && has_digest(machine, binary, sha256);
-    let stopped: Vec<Proc> =
-        running_binary(machine, platform, binary, &places, link, theirs_at_binary)
-            .into_iter()
-            .filter(|process| !is_kept(process, keep))
-            .collect();
-    for process in &stopped {
+    // Stopped by identity: what was taken before the move, and what an
+    // earlier try wrote to the record. The file at a process's path says
+    // nothing now.
+    for identity in &identities {
+        if machine.started(identity.pid) != Some(identity.started) {
+            continue;
+        }
         machine
-            .stop(process.pid, &process.name, process.started)
+            .stop_exact(identity.pid, identity.started)
+            .map_err(|error| {
+                format!(
+                    "failed to stop open-ferry (process {}): {error}",
+                    identity.pid
+                )
+            })?;
+        say(
+            out,
+            format_args!("Stopped open-ferry (process {})", identity.pid),
+        );
+    }
+    // A process whose start time can't be read has no identity to keep.
+    for process in taken.iter().filter(|process| process.started.is_none()) {
+        machine
+            .stop(process.pid, &process.name, None)
             .map_err(|error| {
                 format!(
                     "failed to stop open-ferry (process {}): {error}",
@@ -1847,10 +2156,19 @@ fn put_back_binary(
             format_args!("Stopped open-ferry (process {})", process.pid),
         );
     }
+    let stopped = taken;
     let mut leftovers = vec![plain.clone()];
     if replaced != plain {
         leftovers.push(replaced);
     }
+    leftovers.extend(siblings);
+    leftovers.dedup();
+    let mut seen = Vec::new();
+    leftovers.retain(|left| {
+        let new = !seen.contains(left);
+        seen.push(left.clone());
+        new
+    });
     for left in leftovers {
         if !machine.exists(&left) {
             continue;
@@ -1944,6 +2262,8 @@ fn execute_drop_in(
             started: process.started,
             link: link.clone(),
             sha256: sha256.clone(),
+            identities: Vec::new(),
+            aside: None,
         },
     );
     let placed = Placed {
@@ -2043,6 +2363,8 @@ fn execute_drop_in(
             context,
             &placed,
             Some((process.pid, process.started)),
+            &mut record,
+            base.record_path,
             out,
         ) {
             Ok(_) => Vec::new(),
@@ -2104,7 +2426,15 @@ fn execute_drop_in(
                 format_args!("open-ferry didn't answer: {why}. Undoing the switch."),
             );
             let mut failures = Vec::new();
-            match put_back_binary(machine, context, &placed, None, out) {
+            match put_back_binary(
+                machine,
+                context,
+                &placed,
+                None,
+                &mut record,
+                base.record_path,
+                out,
+            ) {
                 Ok(stopped) => {
                     match wait_ended(machine, context, &Ending::Processes(&stopped), listen) {
                         Err(error) => {
@@ -2114,10 +2444,9 @@ fn execute_drop_in(
                         // The launcher may start it again; else it is started
                         // as it was.
                         Ok(()) => {
-                            if !matches!(
-                                wait_for_any(machine, listen, LAUNCHER_WAIT),
-                                Some(Answer::Other(_))
-                            ) {
+                            if wait_for_any(machine, listen, LAUNCHER_WAIT)
+                                != Some(Answer::CliProxyApi)
+                            {
                                 let log = platform.join(base.backup_dir, "cliproxyapi.log");
                                 match start_like(machine, platform, binary, process, &log) {
                                     Ok(pid) => say(
@@ -2332,6 +2661,7 @@ fn restore_safely(
                     address(listen),
                     match answer {
                         Answer::Other(what) => what,
+                        Answer::CliProxyApi => "CLIProxyAPI".to_owned(),
                         _ => "open-ferry".to_owned(),
                     },
                     super::NAME
@@ -2352,6 +2682,51 @@ fn restore_safely(
                 "CLIProxyAPI runs (process {list}), and -restore doesn't write under a running proxy: nothing was restored. Stop it yourself, or run `open-ferry {} -undo -restore -yes` to have it stopped",
                 super::NAME
             ));
+        }
+        // CLIProxyAPI's service is stopped through its manager, which
+        // would start a process killed by its ID again. What is left after
+        // that is stopped by its ID.
+        let mut users = users;
+        if let Switch::Service { theirs, .. } = &record.switch {
+            let cmd = manager_stop(theirs);
+            match machine.run(&cmd) {
+                Ok(output) if output.success() => say(out, format_args!("Ran: {cmd}")),
+                // A service that is stopped already fails to stop.
+                Ok(output) => say(
+                    out,
+                    format_args!("`{cmd}` failed with {}; going on.", output.failure()),
+                ),
+                Err(error) => say(
+                    out,
+                    format_args!("failed to run `{cmd}`: {error}; going on."),
+                ),
+            }
+            let all = users.clone();
+            users.retain(|process| !wait_exit(machine, process.pid, process.started, EXIT_WAIT));
+            let stopped = all;
+            for process in users {
+                if let Err(error) = machine.stop(process.pid, &process.name, process.started) {
+                    return Restored {
+                        stopped,
+                        failure: Some(format!(
+                            "failed to stop CLIProxyAPI (process {}): {error}. Nothing was restored",
+                            process.pid
+                        )),
+                    };
+                }
+                say(
+                    out,
+                    format_args!("Stopped CLIProxyAPI (process {})", process.pid),
+                );
+            }
+            if let Err(error) = wait_ended(machine, context, &Ending::Processes(&stopped), None) {
+                return Restored {
+                    stopped,
+                    failure: Some(error),
+                };
+            }
+            let failure = restore(machine, platform, backup, out).err();
+            return Restored { stopped, failure };
         }
         let mut stopped = Vec::new();
         for process in users {
@@ -2390,7 +2765,8 @@ fn restore_safely(
 }
 
 /// Whether CLIProxyAPI is found running: its binary runs as a process, or
-/// something other than open-ferry answers on its address.
+/// what answers on its address says it is CLIProxyAPI. Any other answer,
+/// such as a 404 from another server on the port, is not CLIProxyAPI.
 fn theirs_runs(
     machine: &mut dyn Machine,
     platform: Platform,
@@ -2406,7 +2782,7 @@ fn theirs_runs(
                 .probe
                 .map(|ip| machine.probe(ip, listen.port, listen.tls))
         })
-        .is_some_and(|answer| matches!(answer, Answer::Other(_)))
+        .is_some_and(|answer| answer == Answer::CliProxyApi)
 }
 
 /// Switches back to CLIProxyAPI as `record` says. The record is marked
@@ -2422,6 +2798,18 @@ pub(crate) fn undo(
     out: &mut dyn Write,
 ) -> Result<(), String> {
     let platform = context.platform;
+    // One `migrate` at a time, for the whole undo. The record is read again
+    // under the lock: another run may have changed it since it was read.
+    let _lock = record::lock(machine, platform, record_path)?;
+    if let Ok(Some(fresh)) = record::load(machine, record_path) {
+        if matches!(fresh.status, Status::RolledBack | Status::Undone) {
+            return Err(format!(
+                "the switch made at {} was undone while this waited (at {}): there is nothing to undo",
+                fresh.created, fresh.updated
+            ));
+        }
+        *record = fresh;
+    }
     let listen = record.cliproxyapi.listen.as_ref().map(|address| {
         let probe = super::assess::probe_address(&address.host);
         Listen {
@@ -2445,6 +2833,7 @@ pub(crate) fn undo(
         Switch::Service { theirs, ours } => {
             let target = record::target_of(&ours)
                 .ok_or_else(|| format!("the record names an unknown service, {ours}"))?;
+            let runners = service_runners(machine, context);
             if target.installed(machine, context)? {
                 os_service::uninstall(machine, context, target, false, out)?;
             } else {
@@ -2455,7 +2844,12 @@ pub(crate) fn undo(
             }
             // CLIProxyAPI's service isn't turned on while open-ferry's
             // service or process is there.
-            match wait_ended(machine, context, &Ending::Service(target), listen.as_ref()) {
+            match wait_ended(
+                machine,
+                context,
+                &Ending::Service(target, &runners),
+                listen.as_ref(),
+            ) {
                 Err(error) => {
                     say(out, format_args!("{error}"));
                     failures.push(error);
@@ -2500,6 +2894,7 @@ pub(crate) fn undo(
             started,
             link,
             sha256,
+            ..
         } => {
             // Unless it was restarted, CLIProxyAPI's process may still run.
             let keep = (!restarted).then_some((pid, started));
@@ -2509,7 +2904,8 @@ pub(crate) fn undo(
                 sha256: &sha256,
                 link: link.as_deref(),
             };
-            let mut stopped = put_back_binary(machine, context, &placed, keep, out)?;
+            let mut stopped =
+                put_back_binary(machine, context, &placed, keep, record, record_path, out)?;
             let mut copied = true;
             if restore_files {
                 let done = restore_safely(machine, context, record, listen.as_ref(), yes, out);
@@ -2542,10 +2938,9 @@ pub(crate) fn undo(
                         failures.push(error);
                     }
                     Ok(()) => {
-                        if !matches!(
-                            wait_for_any(machine, listen.as_ref(), LAUNCHER_WAIT),
-                            Some(Answer::Other(_))
-                        ) {
+                        if wait_for_any(machine, listen.as_ref(), LAUNCHER_WAIT)
+                            != Some(Answer::CliProxyApi)
+                        {
                             let log = record.backup.as_ref().map_or_else(
                                 || platform.join(&context.cwd, "cliproxyapi.log"),
                                 |backup| platform.join(&backup.dir, "cliproxyapi.log"),
