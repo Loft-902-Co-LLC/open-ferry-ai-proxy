@@ -820,6 +820,47 @@ async fn a_resume_after_a_dropped_pause_waits_for_the_listeners_to_go() {
     assert_eq!(error.to_string(), "a listener couldn't accept again");
 }
 
+// Not upstream's: a loop that fails while a resume finishes a pause that
+// was dropped fails that resume, though the loop has left the counts by the
+// time the resume moves to `Running`. The registrations stand in for a loop
+// still holding its listener and one making it again.
+#[tokio::test]
+async fn a_failure_while_a_resume_finishes_a_dropped_pause_fails_it() {
+    let control = ServeControl::new();
+    let mut holding = control.register_loop();
+    holding.start();
+    assert!(holding.count_listener());
+    let mut remaking = control.register_loop();
+    remaking.start();
+    assert!(stays_pending(control.pause_accept()).await);
+    let mut resume = std::pin::pin!(control.resume_accept());
+    assert!(stays_pending(&mut resume).await);
+    remaking.fail();
+    drop(remaking);
+    assert!(stays_pending(&mut resume).await);
+    holding.set_accepting(false);
+    let error = within(resume).await.unwrap_err();
+    assert_eq!(error.to_string(), "a listener couldn't accept again");
+}
+
+// Not upstream's: a loop that fails while a resume that was dropped waited
+// for it fails the next resume, and only that one.
+#[tokio::test]
+async fn a_failure_during_a_dropped_resume_fails_the_next() {
+    let control = ServeControl::new();
+    let mut registration = control.register_loop();
+    registration.start();
+    within(control.pause_accept()).await;
+    assert!(stays_pending(control.resume_accept()).await);
+    registration.fail();
+    drop(registration);
+    within(control.pause_accept()).await;
+    let error = within(control.resume_accept()).await.unwrap_err();
+    assert_eq!(error.to_string(), "a listener couldn't accept again");
+    within(control.pause_accept()).await;
+    within(control.resume_accept()).await.unwrap();
+}
+
 // Not upstream's: a pause that a release supersedes still waits for the
 // loops to drop their listeners, since one that hasn't seen the release
 // may accept once more. The registration stands in for that loop.
