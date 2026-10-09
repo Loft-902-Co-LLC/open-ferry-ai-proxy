@@ -668,7 +668,8 @@ fn happened(fake: &Fake, event: &str) -> bool {
 /// Checks that only reading commands were run, and nothing was written,
 /// stopped or started.
 fn read_only(fake: &Fake) {
-    const READS: [&str; 11] = [
+    const READS: [&str; 12] = [
+        "reg.exe query ",
         "id -u",
         "systemctl --user show ",
         "systemctl show ",
@@ -2404,6 +2405,185 @@ fn reads_a_task_that_is_not_running() {
         r"run schtasks.exe /change /tn \CLIProxyAPI /enable"
     ));
     assert!(!happened(&fake, r"run schtasks.exe /run /tn \CLIProxyAPI"));
+}
+
+/// One scheduled task, as `schtasks /query /xml` prints it.
+fn task_block(name: &str, arguments: &str, user: &str) -> String {
+    format!(
+        "  <!-- {name} -->\r\n  <Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\r\n    <RegistrationInfo><URI>{name}</URI></RegistrationInfo>\r\n    <Principals><Principal id=\"Author\"><UserId>{user}</UserId><LogonType>InteractiveToken</LogonType></Principal></Principals>\r\n    <Settings><Enabled>true</Enabled></Settings>\r\n    <Actions Context=\"Author\"><Exec><Command>%USERPROFILE%\\cpa\\cli-proxy-api.exe</Command><Arguments>{arguments}</Arguments><WorkingDirectory>%USERPROFILE%\\cpa</WorkingDirectory></Exec></Actions>\r\n  </Task>\r\n"
+    )
+}
+
+fn tasks_of(blocks: &[String]) -> String {
+    format!("<Tasks>\r\n{}</Tasks>\r\n", blocks.concat())
+}
+
+const CPA_ARGUMENTS: &str = r#"-config "%USERPROFILE%\cpa\config.yaml""#;
+
+// Not upstream's: two scheduled tasks that run the running CLIProxyAPI the
+// same way block the switch, by name, and a task with other arguments is
+// not one of them.
+#[test]
+fn blocks_when_more_than_one_task_starts_cliproxyapi() {
+    let (mut fake, context) = binary_task(true);
+    fake.answer(
+        "schtasks.exe /query /xml ONE",
+        0,
+        &tasks_of(&[
+            task_block(r"\CLIProxyAPI", CPA_ARGUMENTS, "pc\\me"),
+            task_block(r"\CLIProxyAPI copy", CPA_ARGUMENTS, "pc\\me"),
+            task_block(r"\Other config", r#"-config "D:\other.yaml""#, "pc\\me"),
+        ]),
+    );
+    let ran = migrate(&mut fake, &context, &["-json"]);
+    assert_eq!(ran.code, 0, "{}", ran.all());
+    let json: Value = serde_json::from_str(ran.out.trim()).unwrap();
+    assert_eq!(json["can_switch"], false);
+    let blockers = json["blockers"].to_string();
+    has(
+        json["blockers"][0].as_str().unwrap(),
+        r"More than one scheduled task runs CLIProxyAPI this way (\CLIProxyAPI, \CLIProxyAPI copy)",
+    );
+    lacks(&blockers, "Other config");
+    read_only(&fake);
+}
+
+// Not upstream's: a task of another user can't be switched, because
+// open-ferry's task would run as the user running migrate; the same user
+// by name or by SID can.
+#[test]
+fn blocks_when_the_task_runs_as_another_user() {
+    let (mut fake, context) = binary_task(true);
+    fake.answer(
+        "schtasks.exe /query /xml ONE",
+        0,
+        &tasks_of(&[task_block(r"\CLIProxyAPI", CPA_ARGUMENTS, "pc\\svc")]),
+    );
+    let ran = migrate(&mut fake, &context, &["-json"]);
+    let json: Value = serde_json::from_str(ran.out.trim()).unwrap();
+    assert_eq!(json["can_switch"], false);
+    has(
+        &json["blockers"].to_string(),
+        r"runs as pc\\svc, and open-ferry's task would run as you (pc\\me)",
+    );
+
+    for user in ["pc\\me", "S-1-5-21-1-2-3-1001"] {
+        let (mut fake, context) = binary_task(true);
+        fake.answer(
+            "schtasks.exe /query /xml ONE",
+            0,
+            &tasks_of(&[task_block(r"\CLIProxyAPI", CPA_ARGUMENTS, user)]),
+        );
+        let ran = migrate(&mut fake, &context, &["-json"]);
+        let json: Value = serde_json::from_str(ran.out.trim()).unwrap();
+        assert_eq!(json["can_switch"], true, "{user}: {}", ran.all());
+    }
+}
+
+// Not upstream's: a parent that isn't NSSM doesn't make the process a
+// service's wrapper.
+#[test]
+fn a_parent_that_is_not_nssm_is_not_a_wrapper() {
+    let (mut fake, context) = nssm_service(windows_program_files(), true);
+    fake.procs.get_mut(&7070).unwrap().parent = Some(Parent {
+        pid: 7000,
+        name: Some("runner.exe".to_owned()),
+    });
+    fake.answer(
+        "sc.exe qc CLIProxyAPI",
+        0,
+        "SERVICE_NAME: CLIProxyAPI\r\n        BINARY_PATH_NAME   : \"C:\\tools\\runner.exe\"\r\n        START_TYPE         : 2   AUTO_START\r\n",
+    );
+    fake.fail("schtasks.exe /query /xml ONE", 1, "no tasks");
+    let ran = migrate(&mut fake, &context, &["-json"]);
+    let json: Value = serde_json::from_str(ran.out.trim()).unwrap();
+    assert_ne!(json["starter"]["kind"], "windows-service", "{}", ran.all());
+}
+
+// Not upstream's: a stopped NSSM service's command line is read from the
+// service's NSSM parameters in the registry.
+#[test]
+fn reads_a_stopped_nssm_service_from_its_parameters() {
+    let (mut fake, context) = nssm_service(windows_program_files(), true);
+    fake.procs.clear();
+    fake.serving.clear();
+    fake.answer(
+        r"reg.exe query HKLM\SYSTEM\CurrentControlSet\Services\CLIProxyAPI\Parameters",
+        0,
+        "\r\nHKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\CLIProxyAPI\\Parameters\r\n    Application    REG_SZ    C:\\Program Files\\CLIProxyAPI\\cli-proxy-api.exe\r\n    AppParameters    REG_SZ    -config \"C:\\Program Files\\CLIProxyAPI\\config.yaml\"\r\n    AppDirectory    REG_SZ    C:\\Program Files\\CLIProxyAPI\r\n",
+    );
+    let ran = migrate(&mut fake, &context, &["-json"]);
+    assert_eq!(ran.code, 0, "{}", ran.all());
+    let json: Value = serde_json::from_str(ran.out.trim()).unwrap();
+    assert_eq!(json["starter"]["kind"], "windows-service");
+    assert_eq!(json["exe"], NSSM_CPA);
+    assert_eq!(json["config"], r"C:\Program Files\CLIProxyAPI\config.yaml");
+    assert_eq!(json["working_dir"], r"C:\Program Files\CLIProxyAPI");
+    has(
+        &json["warnings"].to_string(),
+        "the NSSM parameters of the service CLIProxyAPI",
+    );
+    read_only(&fake);
+}
+
+// Not upstream's: a stopped systemd unit whose ExecStart quotes a path with
+// a space is read from the unit file, as systemd reads it.
+#[test]
+fn reads_a_quoted_exec_start_of_a_stopped_unit() {
+    let (mut fake, context) = system_unit(linux_root(), false);
+    fake.file("/opt/my dir/cli-proxy-api", CLIPROXYAPI);
+    fake.file(
+        "/etc/systemd/system/cliproxyapi.service",
+        "[Service]\nExecStart=\"/opt/my dir/cli-proxy-api\" -config /etc/cliproxyapi/config.yaml\n",
+    );
+    fake.answer(
+        "systemctl show cliproxyapi.service",
+        0,
+        &shown_unit(
+            0,
+            "/opt/my dir/cli-proxy-api -config /etc/cliproxyapi/config.yaml",
+            "/etc/cliproxyapi",
+            false,
+            "",
+            "",
+        ),
+    );
+    let ran = migrate(&mut fake, &context, &["-json"]);
+    assert_eq!(ran.code, 0, "{}", ran.all());
+    let json: Value = serde_json::from_str(ran.out.trim()).unwrap();
+    assert_eq!(json["exe"], "/opt/my dir/cli-proxy-api");
+    assert_eq!(json["config"], "/etc/cliproxyapi/config.yaml");
+}
+
+// Not upstream's: a later EnvironmentFiles entry overrides an earlier one,
+// and a file that is missing is skipped.
+#[test]
+fn a_later_environment_file_overrides_an_earlier_one() {
+    for key in ["EnvironmentFiles", "EnvironmentFile"] {
+        let (mut fake, context) = system_unit(linux_root(), false);
+        fake.file("/etc/cliproxyapi/config.yaml", config_text("~/auths"));
+        fake.file("/etc/a.env", "HOME=/srv/a\n");
+        fake.file("/etc/b.env", "HOME=/srv/b\n");
+        let shown = shown_unit(
+            0,
+            "/usr/local/bin/cli-proxy-api -config /etc/cliproxyapi/config.yaml",
+            "/etc/cliproxyapi",
+            false,
+            "",
+            "",
+        )
+        .replace(
+            "EnvironmentFiles=\n",
+            &format!(
+                "{key}=/etc/a.env (ignore_errors=no)\n{key}=/etc/b.env (ignore_errors=no)\n{key}=/etc/missing.env (ignore_errors=yes)\n"
+            ),
+        );
+        fake.answer("systemctl show cliproxyapi.service", 0, &shown);
+        let ran = migrate(&mut fake, &context, &["-json"]);
+        assert_eq!(ran.code, 0, "{key}: {}", ran.all());
+        let json: Value = serde_json::from_str(ran.out.trim()).unwrap();
+        assert_eq!(json["auth_dir"], "/srv/b/auths", "{key}: {}", ran.all());
+    }
 }
 
 // --- Windows: a service through NSSM ---

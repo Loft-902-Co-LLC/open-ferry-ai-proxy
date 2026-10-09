@@ -46,6 +46,7 @@ mod systemd;
 #[cfg(test)]
 mod tests;
 mod windows;
+pub(crate) use windows::user_identity;
 
 use std::collections::BTreeMap;
 use std::fmt::{self, Write as _};
@@ -614,6 +615,50 @@ pub(crate) trait System {
     fn remove(&mut self, path: &str) -> io::Result<()>;
 }
 
+/// A command's output as text. Windows tools such as `schtasks /xml` may
+/// print UTF-16: with a byte order mark (little- or big-endian), or
+/// little-endian without one, which shows as a NUL after almost every
+/// character. Anything else is read as UTF-8, with replacement characters
+/// for what isn't.
+pub(crate) fn decode_output(bytes: &[u8]) -> String {
+    let units = |data: &[u8], big: bool| -> String {
+        let units: Vec<u16> = data
+            .chunks_exact(2)
+            .map(|pair| {
+                let pair = [
+                    pair.first().copied().unwrap_or(0),
+                    pair.get(1).copied().unwrap_or(0),
+                ];
+                if big {
+                    u16::from_be_bytes(pair)
+                } else {
+                    u16::from_le_bytes(pair)
+                }
+            })
+            .collect();
+        String::from_utf16_lossy(&units)
+    };
+    if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
+        return units(rest, false);
+    }
+    if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
+        return units(rest, true);
+    }
+    if let Some(rest) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
+        return String::from_utf8_lossy(rest).into_owned();
+    }
+    // No mark: mostly-ASCII UTF-16LE has a NUL as every second byte.
+    let pairs = bytes.len() / 2;
+    let nul_high = bytes
+        .chunks_exact(2)
+        .filter(|pair| pair.get(1) == Some(&0) && pair.first() != Some(&0))
+        .count();
+    if pairs >= 2 && bytes.len() % 2 == 0 && nul_high * 10 >= pairs * 9 {
+        return units(bytes, false);
+    }
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
 /// The real system.
 pub(crate) struct Host;
 
@@ -625,8 +670,8 @@ impl System for Host {
             .output()?;
         Ok(Output {
             code: output.status.code(),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            stdout: decode_output(&output.stdout),
+            stderr: decode_output(&output.stderr),
         })
     }
 
