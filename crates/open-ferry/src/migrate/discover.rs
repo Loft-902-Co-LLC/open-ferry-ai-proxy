@@ -613,6 +613,16 @@ impl Shown {
             .collect()
     }
 
+    /// The program of `ExecStart`'s first command, as `systemctl show`
+    /// prints it.
+    fn exec_path(&self) -> &str {
+        self.get("ExecStart")
+            .split_once("path=")
+            .map(|(_, rest)| rest.split(" ;").next().unwrap_or_default())
+            .unwrap_or_default()
+            .trim()
+    }
+
     fn environment(&self) -> Vec<(String, String)> {
         self.all("Environment")
             .iter()
@@ -718,12 +728,39 @@ fn systemd_words(line: &str) -> Option<Vec<String>> {
     Some(words)
 }
 
-/// The arguments (argv, program first) of the first `ExecStart=` command of
-/// the `[Service]` section of a unit file, with the prefixes `@`, `-`, `:`,
-/// `+` and `!` taken off the program. A later empty `ExecStart=` resets the
-/// list, as in systemd. Variables (`$X`) and specifiers (`%n`) are left
-/// as written.
-fn unit_exec_start(text: &str) -> Option<Vec<String>> {
+/// A command of `ExecStart=`: the program, and argv (`argv[0]` first, which
+/// is the program unless the command starts with `@`).
+#[derive(Debug, PartialEq, Eq)]
+struct ExecCommand {
+    exe: String,
+    argv: Vec<String>,
+}
+
+/// `ExecStart=`'s value split as systemd splits it, with the prefixes `@`,
+/// `-`, `:`, `+` and `!` taken off the program. After `@`, the first word
+/// is the program and the second `argv[0]`. Variables (`$X`) and specifiers
+/// (`%n`) are left as written.
+fn exec_command(command: &str) -> Option<ExecCommand> {
+    let mut rest = command;
+    let mut names_argv0 = false;
+    while let Some(first) = rest.chars().next()
+        && "@-:+!".contains(first)
+    {
+        names_argv0 |= first == '@';
+        rest = rest.get(first.len_utf8()..)?;
+    }
+    let mut words = systemd_words(rest)?;
+    let exe = words.first()?.clone();
+    if names_argv0 {
+        words.remove(0);
+    }
+    (!words.is_empty()).then_some(ExecCommand { exe, argv: words })
+}
+
+/// Adds the `ExecStart=` values of the `[Service]` section of a unit file
+/// (or drop-in) to `commands`, as systemd does: an empty `ExecStart=`
+/// resets the list.
+fn add_exec_starts(text: &str, commands: &mut Vec<String>) {
     let mut lines = Vec::new();
     let mut joined = String::new();
     for line in text.lines() {
@@ -743,7 +780,6 @@ fn unit_exec_start(text: &str) -> Option<Vec<String>> {
         }
     }
     let mut in_service = false;
-    let mut commands: Vec<String> = Vec::new();
     for line in &lines {
         if line.starts_with('[') {
             in_service = line == "[Service]";
@@ -761,24 +797,9 @@ fn unit_exec_start(text: &str) -> Option<Vec<String>> {
             }
         }
     }
-    let command = commands.first()?;
-    let mut rest = command.as_str();
-    let mut names_argv0 = false;
-    while let Some(first) = rest.chars().next()
-        && "@-:+!".contains(first)
-    {
-        names_argv0 |= first == '@';
-        rest = rest.get(first.len_utf8()..)?;
-    }
-    let mut words = systemd_words(rest)?;
-    if names_argv0 && !words.is_empty() {
-        // `@program argv0 args...`: argv starts at the second word.
-        words.remove(0);
-    }
-    Some(words)
 }
 
-const SHOW_PROPERTIES: &str = "LoadState,MainPID,FragmentPath,UnitFileState,ActiveState,ExecStart,WorkingDirectory,Environment,EnvironmentFiles,User";
+const SHOW_PROPERTIES: &str = "LoadState,MainPID,FragmentPath,DropInPaths,Type,UnitFileState,ActiveState,ExecStart,WorkingDirectory,Environment,EnvironmentFiles,User";
 
 /// `systemctl show`'s command for `unit`.
 pub(crate) fn systemctl(user: bool, args: &[&str]) -> Cmd {
@@ -877,21 +898,86 @@ fn systemd_details(context: &Context, shown: &Shown, user: bool, found: &mut Fou
     }
 }
 
+/// A stopped unit's command: the program, its arguments, and why the
+/// command can't be relied on, if it can't.
+struct UnitExec {
+    exe: String,
+    args: Vec<String>,
+    problem: Option<String>,
+}
+
+/// The `ExecStart=` commands in effect, as systemd takes them: the unit
+/// file's, then each drop-in's in order, an empty `ExecStart=` clearing
+/// those before it.
+fn effective_exec_starts(machine: &mut dyn Machine, shown: &Shown) -> Result<Vec<String>, String> {
+    let fragment = shown.get("FragmentPath");
+    if fragment.is_empty() {
+        return Err("it has no unit file".to_owned());
+    }
+    let mut commands = Vec::new();
+    let drop_ins = shown.get("DropInPaths").split_whitespace();
+    for path in std::iter::once(fragment).chain(drop_ins) {
+        let data = machine
+            .read(path)
+            .map_err(|error| format!("{path} can't be read: {error}"))?;
+        add_exec_starts(&String::from_utf8_lossy(&data), &mut commands);
+    }
+    Ok(commands)
+}
+
 /// A unit's command line. `systemctl show` joins the words with spaces
 /// and drops their quotes, so a word with a space in it can't be told
-/// apart: the unit file is read and split as systemd splits it, and used
-/// when it gives the words `systemctl show` printed (it may not: a drop-in
-/// or a specifier changes them).
-fn exec_argv(machine: &mut dyn Machine, shown: &Shown) -> Vec<String> {
-    let printed = shown.exec_start();
-    let parsed = machine
-        .read(shown.get("FragmentPath"))
-        .ok()
-        .and_then(|data| unit_exec_start(&String::from_utf8_lossy(&data)));
-    match parsed {
-        Some(words) if words.join(" ") == printed.join(" ") => words,
-        _ => printed,
+/// apart: the unit file and its drop-ins are read and split as systemd
+/// splits them, and used when they give the program and words `systemctl
+/// show` printed. When they don't (a specifier changes them, or the file
+/// is odd), the command is marked as one that can't be relied on, and
+/// `systemctl show`'s words are not split any further.
+fn unit_exec(machine: &mut dyn Machine, shown: &Shown) -> Option<UnitExec> {
+    let path = shown.exec_path();
+    if path.is_empty() {
+        return None;
     }
+    let printed = shown.exec_start();
+    let unreliable = |problem: String| UnitExec {
+        exe: path.to_owned(),
+        // The words can't be told, so none are guessed.
+        args: Vec::new(),
+        problem: Some(problem),
+    };
+    let commands = match effective_exec_starts(machine, shown) {
+        Ok(commands) => commands,
+        Err(error) => return Some(unreliable(error)),
+    };
+    let Some(first) = commands.first() else {
+        return Some(unreliable("no ExecStart= is found in its files".to_owned()));
+    };
+    if commands.len() > 1 && shown.get("Type") != "oneshot" {
+        return Some(unreliable(format!(
+            "it has {} ExecStart= commands, which only a oneshot unit may have",
+            commands.len()
+        )));
+    }
+    let Some(command) = exec_command(first) else {
+        return Some(unreliable(format!("`ExecStart={first}` can't be split")));
+    };
+    let agrees = command.exe == path
+        && command
+            .argv
+            .join(" ")
+            .split_whitespace()
+            .eq(printed.iter().map(String::as_str));
+    if !agrees {
+        return Some(unreliable(format!(
+            "its files give `{}` where systemctl shows `{}`",
+            command.argv.join(" "),
+            printed.join(" ")
+        )));
+    }
+    Some(UnitExec {
+        exe: command.exe,
+        args: command.argv.get(1..).unwrap_or_default().to_vec(),
+        problem: None,
+    })
 }
 
 fn linux_not_running(
@@ -906,11 +992,10 @@ fn linux_not_running(
             if shown.get("LoadState") != "loaded" {
                 continue;
             }
-            let argv = exec_argv(machine, &shown);
-            let Some(exe) = argv.first() else {
+            let Some(exec) = unit_exec(machine, &shown) else {
                 continue;
             };
-            if !is_binary_name(&file_name(Platform::Linux, exe)) {
+            if !is_binary_name(&file_name(Platform::Linux, shown.exec_path())) {
                 continue;
             }
             let mut found = Found::new(Starter::Systemd {
@@ -919,8 +1004,13 @@ fn linux_not_running(
                 enabled: shown.get("UnitFileState") == "enabled",
                 active: shown.get("ActiveState") == "active",
             });
-            found.exe = Some(exe.clone());
-            found.args = argv.get(1..).unwrap_or_default().to_vec();
+            found.exe = Some(exec.exe);
+            found.args = exec.args;
+            if let Some(problem) = exec.problem {
+                found.blockers.push(format!(
+                    "the command line of the systemd unit {unit} can't be told reliably ({problem}): switch by hand, as docs/migrating-from-cliproxyapi.md says"
+                ));
+            }
             systemd_details(context, &shown, user, &mut found);
             found.notes.push(format!(
                 "CLIProxyAPI isn't running: its command line is read from {unit}"
@@ -1343,6 +1433,12 @@ pub(crate) struct Task {
     pub(crate) user_id: Option<String>,
     /// The principal's `LogonType`, such as `InteractiveToken`.
     pub(crate) logon_type: Option<String>,
+    /// The principal's `RunLevel`; none means `LeastPrivilege`.
+    pub(crate) run_level: Option<String>,
+    /// The principal's `GroupId`, when it runs as a group.
+    pub(crate) group_id: Option<String>,
+    /// How many `Principal` elements the task has.
+    pub(crate) principals: usize,
 }
 
 /// Reads `schtasks /query /xml ONE`'s output: each task's name, from the
@@ -1394,9 +1490,13 @@ fn read_task(block: &str, comment: Option<String>) -> Task {
     // `LogonType` inside `Principals` are read, which are the first
     // principal's.
     let principal = element(block, "Principals").map_or("", |(principals, _)| principals);
+    let count = principal.matches("<Principal ").count() + principal.matches("<Principal>").count();
     Task {
         user_id: text(principal, "UserId").filter(|id| !id.is_empty()),
         logon_type: text(principal, "LogonType").filter(|kind| !kind.is_empty()),
+        run_level: text(principal, "RunLevel").filter(|level| !level.is_empty()),
+        group_id: text(principal, "GroupId").filter(|id| !id.is_empty()),
+        principals: count,
         name,
         enabled,
         command: text(exec, "Command")
@@ -1555,17 +1655,35 @@ fn windows_service_of(machine: &mut dyn Machine, process: &Proc) -> Option<Start
     None
 }
 
+/// The directory a task runs in: its `WorkingDirectory`, or, with none,
+/// `%windir%\System32`. `None` when a variable in it isn't known.
+fn task_dir(context: &Context, task: &Task) -> Option<String> {
+    let dir = match task.working_dir.as_deref().filter(|dir| !dir.is_empty()) {
+        Some(dir) => expand(context, dir),
+        None => [r"%windir%\System32", r"%SystemRoot%\System32"]
+            .iter()
+            .map(|dir| expand(context, dir))
+            .find(|dir| !dir.contains('%'))?,
+    };
+    (!dir.contains('%')).then_some(dir)
+}
+
 /// Whether `task` is the one that started `process`: it runs the same
 /// program (see [`task_runs`]) with the same arguments, which carry the
-/// config, and in the same working directory when both are known.
+/// config, and in the same working directory when that is known. A task
+/// with no working directory runs in `%windir%\System32`; one whose
+/// directory can't be told isn't taken for it.
 fn task_started(context: &Context, task: &Task, process: &Proc) -> bool {
     let arguments = split_windows(&expand(context, &task.arguments));
     if arguments != process.args {
         return false;
     }
-    match (task.working_dir.as_deref(), process.cwd.as_deref()) {
-        (Some(dir), Some(cwd)) => same_path(Platform::Windows, &expand(context, dir), cwd),
-        _ => true,
+    let Some(dir) = task_dir(context, task) else {
+        return false;
+    };
+    match process.cwd.as_deref() {
+        Some(cwd) => same_path(Platform::Windows, &dir, cwd),
+        None => true,
     }
 }
 
@@ -1573,12 +1691,7 @@ fn task_started(context: &Context, task: &Task, process: &Proc) -> bool {
 /// starter, or all of them by name with a blocker when there is more than
 /// one. The principal is kept: open-ferry's task runs as the user who runs
 /// `migrate`, so a task of another user can't be switched.
-fn task_starter(
-    machine: &mut dyn Machine,
-    tasks: &[&Task],
-    blockers: &mut Vec<String>,
-    notes: &mut Vec<String>,
-) -> Starter {
+fn task_starter(machine: &mut dyn Machine, tasks: &[&Task], blockers: &mut Vec<String>) -> Starter {
     let names: Vec<&str> = tasks.iter().map(|task| task.name.as_str()).collect();
     let starter = Starter::Task {
         name: names.join(", "),
@@ -1591,13 +1704,34 @@ fn task_starter(
         ));
         return starter;
     };
-    if matches!(task.logon_type.as_deref(), Some("Password" | "S4U")) {
-        notes.push(format!(
-            "the scheduled task {} runs whether or not you are logged on, and open-ferry's task runs only while you are",
-            task.name
+    // open-ferry's task is made with one principal: the user who runs
+    // `migrate`, `InteractiveToken`, `LeastPrivilege`. A task that runs any
+    // other way can't be replaced by it.
+    let name = &task.name;
+    let mut differs = |what: String| {
+        blockers.push(format!(
+            "the scheduled task {name} {what}, and open-ferry's task runs as you, only while you are logged on, without elevated rights: switch by hand, as docs/migrating-from-cliproxyapi.md says"
         ));
+    };
+    if task.principals != 1 {
+        differs("doesn't have the one principal that says who it runs as".to_owned());
+        return starter;
+    }
+    if let Some(group) = &task.group_id {
+        differs(format!("runs as the group {group}"));
+        return starter;
+    }
+    match task.logon_type.as_deref() {
+        Some("InteractiveToken") => {}
+        Some(kind) => differs(format!("has the logon type {kind}")),
+        None => differs("has no logon type, so how it logs on can't be told".to_owned()),
+    }
+    match task.run_level.as_deref() {
+        None | Some("LeastPrivilege") => {}
+        Some(level) => differs(format!("runs with the run level {level}")),
     }
     let Some(user) = &task.user_id else {
+        differs("doesn't say which user it runs as".to_owned());
         return starter;
     };
     match user_identity(machine) {
@@ -1648,7 +1782,7 @@ fn windows_process(
     }
     if !direct.is_empty() {
         let mut blockers = Vec::new();
-        let starter = task_starter(machine, &direct, &mut blockers, &mut notes);
+        let starter = task_starter(machine, &direct, &mut blockers);
         let mut found = Found::from_process(process, starter);
         found.blockers = blockers;
         found.notes = notes;
@@ -1758,16 +1892,14 @@ fn windows_not_running(
     }
     if let Some(first) = direct.first() {
         let mut blockers = Vec::new();
-        let mut notes = Vec::new();
-        let starter = task_starter(machine, &direct, &mut blockers, &mut notes);
+        let starter = task_starter(machine, &direct, &mut blockers);
         let mut found = Found::new(starter);
         found.blockers = blockers;
-        found.notes = notes;
         found.exe = Some(expand(context, &first.command));
         // The task scheduler expands the variables in the arguments too,
         // before the program splits them.
         found.args = split_windows(&expand(context, &first.arguments));
-        found.cwd = first.working_dir.as_deref().map(|dir| expand(context, dir));
+        found.cwd = task_dir(context, first);
         found.notes.push(format!(
             "CLIProxyAPI isn't running: its command line is read from the task {}",
             first.name
@@ -2043,6 +2175,9 @@ mod tests {
                     working_dir: Some(r"C:\cpa".to_owned()),
                     user_id: Some("S-1-5-21-1-2-3-1001".to_owned()),
                     logon_type: Some("InteractiveToken".to_owned()),
+                    run_level: None,
+                    group_id: None,
+                    principals: 1,
                 },
                 Task {
                     name: r"\Other".to_owned(),
@@ -2052,6 +2187,9 @@ mod tests {
                     working_dir: None,
                     user_id: None,
                     logon_type: None,
+                    run_level: None,
+                    group_id: None,
+                    principals: 0,
                 },
             ]
         );
@@ -2079,6 +2217,29 @@ mod tests {
         }
     }
 
+    // Not upstream's: UTF-16LE without a byte order mark is told by the
+    // start of the XML, so a task whose description is nearly all CJK text
+    // reads like any other, and so does the same with the mark.
+    #[test]
+    fn reads_cjk_tasks_from_utf16_with_and_without_a_mark() {
+        let description =
+            "\u{30d7}\u{30ed}\u{30ad}\u{30b7}\u{3092}\u{8d77}\u{52d5}\u{3059}\u{308b}".repeat(40);
+        let xml = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\r\n<Tasks>\r\n  <!-- \\CLIProxyAPI -->\r\n  <Task version=\"1.2\"><RegistrationInfo><Description>{description}</Description></RegistrationInfo><Actions><Exec><Command>C:\\cpa\\cli-proxy-api.exe</Command></Exec></Actions></Task>\r\n</Tasks>\r\n"
+        );
+        let le: Vec<u8> = xml.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let marked = [&[0xFF, 0xFE][..], &le].concat();
+        for bytes in [&le, &marked] {
+            let tasks = read_tasks(&decode_output(bytes));
+            assert_eq!(tasks.len(), 1);
+            assert_eq!(tasks[0].name, r"\CLIProxyAPI");
+            assert_eq!(tasks[0].command, r"C:\cpa\cli-proxy-api.exe");
+        }
+        // Short text that isn't XML, with NULs at odd offsets only.
+        let text: Vec<u8> = "ok\n".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        assert_eq!(decode_output(&text), "ok\n");
+    }
+
     // Not upstream's: plain output isn't taken for UTF-16.
     #[test]
     fn decodes_plain_output_as_utf8() {
@@ -2086,6 +2247,7 @@ mod tests {
         assert_eq!(decode_output(b""), "");
         assert_eq!(decode_output("caf\u{e9}".as_bytes()), "caf\u{e9}");
         assert_eq!(decode_output(b"a\xffb"), "a\u{fffd}b");
+        assert_eq!(decode_output(b"ab\0"), "ab\0");
     }
 
     // Not upstream's: a command line is split as systemd splits it, with
@@ -2110,15 +2272,41 @@ mod tests {
             Some(strings(&["/bin/x", "one"]))
         );
         let unit = "[Unit]\nDescription=x\n[Service]\nExecStart=/bin/old\nExecStart=\n# a comment\nExecStart=-@+!/opt/c/cli-proxy-api argv0 \\\n  -config \"/srv/a b/c.yaml\"\nExecStart=/bin/second\n[Install]\nExecStart=/bin/not-this\n";
+        let starts = |texts: &[&str]| {
+            let mut commands = Vec::new();
+            for text in texts {
+                add_exec_starts(text, &mut commands);
+            }
+            commands
+        };
+        // `@` makes the first word the program and the second argv[0].
+        let commands = starts(&[unit]);
+        assert_eq!(commands.len(), 2);
         assert_eq!(
-            unit_exec_start(unit),
-            Some(strings(&["argv0", "-config", "/srv/a b/c.yaml"]))
+            exec_command(&commands[0]),
+            Some(ExecCommand {
+                exe: "/opt/c/cli-proxy-api".to_owned(),
+                argv: strings(&["argv0", "-config", "/srv/a b/c.yaml"]),
+            })
         );
         assert_eq!(
-            unit_exec_start("[Service]\nExecStart=:/bin/x -a\n"),
-            Some(strings(&["/bin/x", "-a"]))
+            exec_command(":/bin/x -a"),
+            Some(ExecCommand {
+                exe: "/bin/x".to_owned(),
+                argv: strings(&["/bin/x", "-a"]),
+            })
         );
-        assert_eq!(unit_exec_start("[Service]\nExecStart=\n"), None);
+        assert_eq!(exec_command("@/bin/x"), None);
+        assert!(starts(&["[Service]\nExecStart=\n"]).is_empty());
+        // A drop-in's empty `ExecStart=` resets the unit's, and its own
+        // follows.
+        assert_eq!(
+            starts(&[
+                "[Service]\nExecStart=/bin/old -config /etc/old.yaml\n",
+                "[Service]\nExecStart=\nExecStart=/bin/new -config \"/etc/cpa new.yaml\"\n",
+            ]),
+            ["/bin/new -config \"/etc/cpa new.yaml\""]
+        );
     }
 
     fn strings(words: &[&str]) -> Vec<String> {

@@ -943,7 +943,7 @@ fn plist(label: &str, args: &[&str], working_dir: Option<&str>, env: &[(&str, &s
 /// nothing to do with CLIProxyAPI.
 fn tasks_xml(name: &str, enabled: bool, command: &str, arguments: &str, dir: &str) -> String {
     format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\r\n<Tasks>\r\n  <!-- \\Microsoft\\Windows\\Defrag\\ScheduledDefrag -->\r\n  <Task version=\"1.6\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\r\n    <Settings><Enabled>true</Enabled></Settings>\r\n    <Actions Context=\"LocalSystem\"><Exec><Command>%windir%\\system32\\defrag.exe</Command><Arguments>-c -h -o</Arguments></Exec></Actions>\r\n  </Task>\r\n  <!-- {name} -->\r\n  <Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\r\n    <RegistrationInfo><URI>{name}</URI></RegistrationInfo>\r\n    <Settings><Enabled>{enabled}</Enabled></Settings>\r\n    <Actions Context=\"Author\">\r\n      <Exec>\r\n        <Command>{command}</Command>\r\n        <Arguments>{arguments}</Arguments>\r\n        <WorkingDirectory>{dir}</WorkingDirectory>\r\n      </Exec>\r\n    </Actions>\r\n  </Task>\r\n</Tasks>\r\n"
+        "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\r\n<Tasks>\r\n  <!-- \\Microsoft\\Windows\\Defrag\\ScheduledDefrag -->\r\n  <Task version=\"1.6\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\r\n    <Settings><Enabled>true</Enabled></Settings>\r\n    <Actions Context=\"LocalSystem\"><Exec><Command>%windir%\\system32\\defrag.exe</Command><Arguments>-c -h -o</Arguments></Exec></Actions>\r\n  </Task>\r\n  <!-- {name} -->\r\n  <Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\r\n    <RegistrationInfo><URI>{name}</URI></RegistrationInfo>\r\n    <Principals><Principal id=\"Author\"><UserId>S-1-5-21-1-2-3-1001</UserId><LogonType>InteractiveToken</LogonType></Principal></Principals>\r\n    <Settings><Enabled>{enabled}</Enabled></Settings>\r\n    <Actions Context=\"Author\">\r\n      <Exec>\r\n        <Command>{command}</Command>\r\n        <Arguments>{arguments}</Arguments>\r\n        <WorkingDirectory>{dir}</WorkingDirectory>\r\n      </Exec>\r\n    </Actions>\r\n  </Task>\r\n</Tasks>\r\n"
     )
 }
 
@@ -1819,6 +1819,10 @@ fn system_unit(context: Context, running: bool) -> (Fake, Context) {
         config_text("/etc/cliproxyapi/auths"),
     );
     credentials(&mut fake, "/etc/cliproxyapi/auths");
+    fake.file(
+        "/etc/systemd/system/cliproxyapi.service",
+        "[Service]\nExecStart=/usr/local/bin/cli-proxy-api -config /etc/cliproxyapi/config.yaml\n",
+    );
     let pid = if running { 4343 } else { 0 };
     fake.answer(
         "systemctl show cliproxyapi.service",
@@ -2761,7 +2765,8 @@ fn reads_a_quoted_exec_start_of_a_stopped_unit() {
             false,
             "",
             "",
-        ),
+        )
+        .replace("path=/opt/my ", "path=/opt/my dir/cli-proxy-api "),
     );
     let ran = migrate(&mut fake, &context, &["-json"]);
     assert_eq!(ran.code, 0, "{}", ran.all());
@@ -2799,6 +2804,242 @@ fn a_later_environment_file_overrides_an_earlier_one() {
         let json: Value = serde_json::from_str(ran.out.trim()).unwrap();
         assert_eq!(json["auth_dir"], "/srv/b/auths", "{key}: {}", ran.all());
     }
+}
+
+/// A stopped system unit whose files are `fragment` and, when given,
+/// `drop_in`, and for which `systemctl show` prints `path` and `argv`.
+fn stopped_unit(fragment: &str, drop_in: Option<&str>, path: &str, argv: &str) -> (Fake, Context) {
+    let (mut fake, context) = system_unit(linux_root(), false);
+    fake.file("/etc/systemd/system/cliproxyapi.service", fragment);
+    fake.file("/etc/old.yaml", config_text("/etc/cliproxyapi/auths"));
+    fake.file("/etc/cpa new.yaml", config_text("/etc/cliproxyapi/auths"));
+    let mut shown = shown_unit(0, "a", "/etc/cliproxyapi", false, "", "").replace(
+        "path=a ; argv[]=a ;",
+        &format!("path={path} ; argv[]={argv} ;"),
+    );
+    if let Some(text) = drop_in {
+        let dir = "/etc/systemd/system/cliproxyapi.service.d";
+        fake.file(&format!("{dir}/override.conf"), text);
+        shown.push_str(&format!("DropInPaths={dir}/override.conf\n"));
+    }
+    fake.answer("systemctl show cliproxyapi.service", 0, &shown);
+    (fake, context)
+}
+
+fn blockers_of(fake: &mut Fake, context: &Context) -> (Value, String) {
+    let ran = migrate(fake, context, &["-json"]);
+    let json: Value = serde_json::from_str(ran.out.trim()).unwrap_or_else(|e| {
+        panic!("{e}: {}", ran.all());
+    });
+    // This fake isn't root; that isn't what these tests look at.
+    let blockers: Vec<&Value> = json["blockers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|blocker| !blocker.as_str().unwrap_or_default().contains("needs root"))
+        .collect();
+    let blockers = serde_json::to_string(&blockers).unwrap();
+    (json, blockers)
+}
+
+// Not upstream's: a drop-in that replaces ExecStart is the command, and a
+// quoted path with a space in it is one word.
+#[test]
+fn a_drop_in_replaces_the_exec_start_of_a_stopped_unit() {
+    let (mut fake, context) = stopped_unit(
+        "[Service]\nExecStart=/usr/local/bin/cli-proxy-api -config /etc/old.yaml\n",
+        Some(
+            "[Service]\nExecStart=\nExecStart=/usr/local/bin/cli-proxy-api -config \"/etc/cpa new.yaml\"\n",
+        ),
+        "/usr/local/bin/cli-proxy-api",
+        "/usr/local/bin/cli-proxy-api -config /etc/cpa new.yaml",
+    );
+    let (json, blockers) = blockers_of(&mut fake, &context);
+    assert_eq!(json["config"], "/etc/cpa new.yaml", "{blockers}");
+    assert_eq!(blockers, "[]");
+}
+
+// Not upstream's: when the files and `systemctl show` give another command
+// (here a drop-in `systemctl show` doesn't list), the unit is blocked, and
+// its command line is not split on whitespace.
+#[test]
+fn a_command_line_that_differs_from_systemctl_blocks_a_stopped_unit() {
+    let (mut fake, context) = stopped_unit(
+        "[Service]\nExecStart=/usr/local/bin/cli-proxy-api -config /etc/old.yaml\n",
+        None,
+        "/usr/local/bin/cli-proxy-api",
+        "/usr/local/bin/cli-proxy-api -config /etc/cpa new.yaml",
+    );
+    let (json, blockers) = blockers_of(&mut fake, &context);
+    has(&blockers, "can't be told reliably");
+    assert_ne!(json["config"], "/etc/cpa");
+    assert_ne!(json["config"], "/etc/cpa new.yaml");
+}
+
+// Not upstream's: after `@`, the program is the first word and argv[0] the
+// second.
+#[test]
+fn an_at_sign_exec_start_keeps_the_program_apart_from_argv0() {
+    let (mut fake, context) = stopped_unit(
+        "[Service]\nExecStart=@/usr/local/bin/cli-proxy-api custom-argv0 -config /etc/old.yaml\n",
+        None,
+        "/usr/local/bin/cli-proxy-api",
+        "custom-argv0 -config /etc/old.yaml",
+    );
+    let (json, blockers) = blockers_of(&mut fake, &context);
+    assert_eq!(json["exe"], "/usr/local/bin/cli-proxy-api", "{blockers}");
+    assert_eq!(json["config"], "/etc/old.yaml");
+    assert_eq!(blockers, "[]");
+}
+
+// Not upstream's: more than one ExecStart blocks a unit that isn't
+// oneshot.
+#[test]
+fn several_exec_starts_block_a_unit_that_is_not_oneshot() {
+    let fragment = "[Service]\nExecStart=/usr/local/bin/cli-proxy-api -config /etc/old.yaml\nExecStart=/bin/true\n";
+    let (mut fake, context) = stopped_unit(
+        fragment,
+        None,
+        "/usr/local/bin/cli-proxy-api",
+        "/usr/local/bin/cli-proxy-api -config /etc/old.yaml",
+    );
+    let (_, blockers) = blockers_of(&mut fake, &context);
+    has(&blockers, "ExecStart= commands");
+
+    let (mut fake, context) = stopped_unit(
+        &format!("{fragment}Type=oneshot\n"),
+        None,
+        "/usr/local/bin/cli-proxy-api",
+        "/usr/local/bin/cli-proxy-api -config /etc/old.yaml",
+    );
+    let shown = fake.answers["systemctl show cliproxyapi.service"]
+        .stdout
+        .clone();
+    fake.answer(
+        "systemctl show cliproxyapi.service",
+        0,
+        &format!("{shown}Type=oneshot\n"),
+    );
+    let (_, blockers) = blockers_of(&mut fake, &context);
+    assert_eq!(blockers, "[]");
+}
+
+// Not upstream's: a value an earlier EnvironmentFile sets and a later one
+// overrides doesn't make a remote store; an effective one does.
+#[test]
+fn only_the_effective_environment_values_make_a_remote_store() {
+    let run = |first: &str, second: &str| {
+        let (mut fake, context) = system_unit(linux_root(), false);
+        fake.file("/etc/a.env", first);
+        fake.file("/etc/b.env", second);
+        let shown = shown_unit(
+            0,
+            "/usr/local/bin/cli-proxy-api -config /etc/cliproxyapi/config.yaml",
+            "/etc/cliproxyapi",
+            false,
+            "",
+            "",
+        )
+        .replace(
+            "EnvironmentFiles=\n",
+            "EnvironmentFiles=/etc/a.env (ignore_errors=no)\nEnvironmentFiles=/etc/b.env (ignore_errors=no)\n",
+        );
+        fake.answer("systemctl show cliproxyapi.service", 0, &shown);
+        blockers_of(&mut fake, &context).1
+    };
+    // The later file empties what the earlier one set.
+    assert_eq!(run("PGSTORE_DSN=postgres://x\n", "PGSTORE_DSN=\n"), "[]");
+    // The later file's value is the one in effect.
+    has(
+        &run("PGSTORE_DSN=\n", "PGSTORE_DSN=postgres://x\n"),
+        "PGSTORE_DSN (in /etc/b.env)",
+    );
+}
+
+/// `binary_task` with its task's XML changed by `change`, and its process
+/// as `cwd` says.
+fn changed_task(change: impl Fn(String) -> String, cwd: &str) -> (Fake, Context) {
+    let (mut fake, context) = binary_task(true);
+    let xml = fake.answers["schtasks.exe /query /xml ONE"].stdout.clone();
+    fake.answer("schtasks.exe /query /xml ONE", 0, &change(xml));
+    if let Some(process) = fake.procs.get_mut(&8080) {
+        process.cwd = Some(cwd.to_owned());
+    }
+    (fake, context)
+}
+
+const PRINCIPAL: &str = "<Principals><Principal id=\"Author\"><UserId>S-1-5-21-1-2-3-1001</UserId><LogonType>InteractiveToken</LogonType></Principal></Principals>";
+
+// Not upstream's: a task whose principal is a group, is missing, or has a
+// run level or logon type open-ferry's task doesn't have, can't be
+// replaced by it.
+#[test]
+fn a_task_that_runs_otherwise_than_open_ferrys_blocks() {
+    let principals = |xml: String, now: &str| xml.replace(PRINCIPAL, now);
+    for (now, reason) in [
+        (
+            "<Principals><Principal id=\"Author\"><GroupId>S-1-5-32-544</GroupId><LogonType>Group</LogonType></Principal></Principals>",
+            "runs as the group S-1-5-32-544",
+        ),
+        ("", "doesn't have the one principal"),
+        (
+            "<Principals><Principal id=\"Author\"><LogonType>InteractiveToken</LogonType></Principal></Principals>",
+            "doesn't say which user",
+        ),
+        (
+            "<Principals><Principal id=\"Author\"><UserId>S-1-5-21-1-2-3-1001</UserId><LogonType>InteractiveToken</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>",
+            "run level HighestAvailable",
+        ),
+        (
+            "<Principals><Principal id=\"Author\"><UserId>S-1-5-21-1-2-3-1001</UserId><LogonType>Password</LogonType></Principal></Principals>",
+            "logon type Password",
+        ),
+        (
+            "<Principals><Principal id=\"Author\"><UserId>S-1-5-21-1-2-3-1001</UserId><LogonType>S4U</LogonType></Principal></Principals>",
+            "logon type S4U",
+        ),
+        (
+            "<Principals><Principal id=\"Author\"><UserId>S-1-5-21-1-2-3-1001</UserId></Principal></Principals>",
+            "no logon type",
+        ),
+    ] {
+        let (mut fake, context) = changed_task(|xml| principals(xml, now), r"C:\Users\me\cpa");
+        let (json, blockers) = blockers_of(&mut fake, &context);
+        assert_eq!(json["starter"]["kind"], "scheduled-task", "{reason}");
+        has(&blockers, reason);
+    }
+    // The same user, `LeastPrivilege` said outright, passes.
+    let (mut fake, context) = changed_task(
+        |xml| {
+            xml.replace(
+                "</LogonType>",
+                "</LogonType><RunLevel>LeastPrivilege</RunLevel>",
+            )
+        },
+        r"C:\Users\me\cpa",
+    );
+    let (json, blockers) = blockers_of(&mut fake, &context);
+    assert_eq!(json["starter"]["kind"], "scheduled-task");
+    assert_eq!(blockers, "[]");
+}
+
+// Not upstream's: a task with no working directory runs in System32, so it
+// isn't the task of a process started by hand in another directory.
+#[test]
+fn a_task_with_no_working_directory_runs_in_system32() {
+    let without = |xml: String| {
+        xml.replace(
+            "<WorkingDirectory>%USERPROFILE%\\cpa</WorkingDirectory>",
+            "",
+        )
+    };
+    let (mut fake, context) = changed_task(without, r"C:\Users\me\cpa");
+    let (json, _) = blockers_of(&mut fake, &context);
+    assert_ne!(json["starter"]["kind"], "scheduled-task");
+
+    let (mut fake, context) = changed_task(without, r"C:\Windows\System32");
+    let (json, _) = blockers_of(&mut fake, &context);
+    assert_eq!(json["starter"]["kind"], "scheduled-task");
 }
 
 // --- Windows: a service through NSSM ---
