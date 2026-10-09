@@ -28,6 +28,10 @@ pub(crate) enum Status {
     RolledBack,
     /// `-undo` switched back.
     Undone,
+    /// `-undo` put CLIProxyAPI's files back, but couldn't start CLIProxyAPI:
+    /// the record stays open, and `-undo` again closes it once CLIProxyAPI
+    /// runs.
+    UndoneNotStarted,
 }
 
 /// Where CLIProxyAPI listened.
@@ -58,6 +62,14 @@ pub(crate) struct Copied {
     /// Whether it is a directory, copied with what it holds.
     #[serde(default)]
     pub(crate) dir: bool,
+    /// What `from` resolved to when it was copied (its real path), and what
+    /// its parent directory did. `-restore` only writes to `from` while its
+    /// parent still resolves to `parent`: a directory that has since become
+    /// a link would redirect the write.
+    #[serde(default)]
+    pub(crate) real: Option<String>,
+    #[serde(default)]
+    pub(crate) parent: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,6 +132,10 @@ pub(crate) enum Switch {
         /// binary), on Linux and macOS; `None` when it is a copy.
         #[serde(default)]
         link: Option<String>,
+        /// The SHA-256 of CLIProxyAPI's binary, in hex, as it was at the
+        /// switch: `-undo` only puts back a file with this digest.
+        #[serde(default)]
+        sha256: String,
     },
 }
 
@@ -229,18 +245,60 @@ pub(crate) fn recover(
     }
 }
 
-/// Writes `text` to `path` through a temporary file beside it that is then
-/// renamed into place, so that a failure leaves the old file whole.
+/// Counts the temporary files made, so two in one instant differ.
+static TEMPS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// A name for a temporary file beside `path` that nothing else has: the
+/// process, the time and a count.
+fn temp_name(path: &str) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    let count = TEMPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{path}.{}.{nanos:x}.{count}.tmp", std::process::id())
+}
+
+/// Writes `text` to `path` through a new temporary file beside it that is
+/// then renamed into place, so that a failure leaves the old file whole. The
+/// temporary file is made with `create_new`, so it never follows a link or
+/// reuses a file, and only its owner can open it on Unix.
 fn replace(machine: &mut dyn Machine, path: &str, text: &str) -> Result<(), String> {
-    let temp = format!("{path}.tmp");
-    machine
-        .write(&temp, text.as_bytes())
-        .map_err(|error| format!("failed to write {temp}: {error}"))?;
+    let mut tries = 0;
+    let temp = loop {
+        let temp = temp_name(path);
+        match machine.write_new(&temp, text.as_bytes()) {
+            Ok(()) => break temp,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && tries < 8 => {
+                tries += 1;
+            }
+            Err(error) => return Err(format!("failed to write {temp}: {error}")),
+        }
+    };
     if let Err(error) = machine.rename(&temp, path) {
         let _ = machine.remove(&temp);
         return Err(format!("failed to move {temp} to {path}: {error}"));
     }
     Ok(())
+}
+
+/// Makes the record's directory `dir` if it is missing, readable only by
+/// its owner on Unix. On Windows the directory is under the user's
+/// `%APPDATA%`, which only that user (and administrators) can read, so
+/// nothing more is set.
+fn make_dir(machine: &mut dyn Machine, platform: Platform, dir: &str) -> Result<(), String> {
+    if machine.exists(dir) {
+        return Ok(());
+    }
+    let failed = |error: std::io::Error| format!("failed to create {dir}: {error}");
+    if let Some(parent) = platform.parent(dir)
+        && !machine.exists(&parent)
+    {
+        machine.create_dir_all(&parent).map_err(failed)?;
+    }
+    match machine.create_private_dir(dir) {
+        Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => Err(failed(error)),
+        _ => Ok(()),
+    }
 }
 
 /// Writes `record` to `path`, and to its copy in the backup, each through a
@@ -254,12 +312,8 @@ pub(crate) fn save(
     let mut text = serde_json::to_string_pretty(record)
         .map_err(|error| format!("failed to write the switch's record: {error}"))?;
     text.push('\n');
-    if let Some(dir) = platform.parent(path)
-        && !machine.exists(&dir)
-    {
-        machine
-            .create_dir_all(&dir)
-            .map_err(|error| format!("failed to create {dir}: {error}"))?;
+    if let Some(dir) = platform.parent(path) {
+        make_dir(machine, platform, &dir)?;
     }
     replace(machine, path, &text)
         .map_err(|error| format!("failed to write the switch's record: {error}"))?;

@@ -75,6 +75,10 @@ struct Fake {
     replies: VecDeque<bool>,
     questions: Vec<String>,
     launches: Vec<Launch>,
+    /// The first word of each started process's command line.
+    argv0s: BTreeMap<u32, String>,
+    /// What `launchctl print` said of the jobs `bootout` unloaded.
+    unloaded: BTreeMap<String, Output>,
 }
 
 impl Fake {
@@ -104,6 +108,8 @@ impl Fake {
             replies: VecDeque::new(),
             questions: Vec::new(),
             launches: Vec::new(),
+            argv0s: BTreeMap::new(),
+            unloaded: BTreeMap::new(),
         };
         fake.file(&context.exe, OPEN_FERRY);
         fake.dir(&context.cwd);
@@ -232,6 +238,25 @@ impl Fake {
         if line == "sc.exe delete open-ferry" {
             self.fail("sc.exe query open-ferry", 1060, "");
         }
+        // A job `bootout` unloads is not loaded until `bootstrap` loads it.
+        if let Some(job) = line.strip_prefix("launchctl bootout ") {
+            let key = format!("launchctl print {job}");
+            if let Some(output) = self.answers.remove(&key) {
+                self.unloaded.insert(key.clone(), output);
+                self.fail(&key, 113, "Could not find service");
+            }
+        }
+        if let Some((domain, plist)) = line
+            .strip_prefix("launchctl bootstrap ")
+            .and_then(|rest| rest.split_once(' '))
+        {
+            let label = file_name(self.platform, plist);
+            let label = label.strip_suffix(".plist").unwrap_or(&label);
+            let key = format!("launchctl print {domain}/{label}");
+            if let Some(output) = self.unloaded.remove(&key) {
+                self.answers.insert(key, output);
+            }
+        }
     }
 
     fn fire(&mut self, key: &str) {
@@ -296,6 +321,7 @@ impl Fake {
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such file"))?;
         let pid = self.next_pid;
         self.next_pid += 1;
+        self.argv0s.insert(pid, exe.to_owned());
         self.procs.insert(
             pid,
             Proc {
@@ -358,6 +384,25 @@ impl Fake {
                 format!("{path}'s directory doesn't exist"),
             )),
         }
+    }
+}
+
+/// A record's temporary file named without what makes it unique, as the
+/// events name it: `<file>.<pid>.<time>.<count>.tmp` is `<file>.tmp`.
+fn plain(path: &str) -> String {
+    let parts: Vec<&str> = path.rsplitn(5, '.').collect();
+    let unique = parts.len() == 5
+        && parts[0] == "tmp"
+        && !parts[1].is_empty()
+        && parts[1].bytes().all(|b| b.is_ascii_digit())
+        && !parts[2].is_empty()
+        && parts[2].bytes().all(|b| b.is_ascii_hexdigit())
+        && !parts[3].is_empty()
+        && parts[3].bytes().all(|b| b.is_ascii_digit());
+    if unique {
+        format!("{}.tmp", parts[4])
+    } else {
+        path.to_owned()
     }
 }
 
@@ -447,7 +492,14 @@ impl System for Fake {
         if self.links.remove(path).is_some() {
             return Ok(());
         }
-        self.files.remove(path).map(|_| ()).ok_or_else(not_found)
+        self.files.remove(path).ok_or_else(not_found)?;
+        // Linux names what a process runs from a removed file so.
+        for process in self.procs.values_mut() {
+            if process.exe.as_deref() == Some(path) {
+                process.exe = Some(format!("{path} (deleted)"));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -548,7 +600,8 @@ impl Machine for Fake {
     }
 
     fn rename(&mut self, from: &str, to: &str) -> io::Result<()> {
-        self.step(format!("rename {from} -> {to}"))?;
+        let event = format!("rename {} -> {}", plain(from), plain(to));
+        self.step(event.clone())?;
         self.need_parent(to)?;
         if let Some(target) = self.links.remove(from) {
             self.links.insert(to.to_owned(), target);
@@ -556,7 +609,13 @@ impl Machine for Fake {
         }
         let data = self.files.remove(from).ok_or_else(not_found)?;
         self.files.insert(to.to_owned(), data);
-        self.fire(&format!("rename {from} -> {to}"));
+        // A process keeps running the file it was started from, now at `to`.
+        for process in self.procs.values_mut() {
+            if process.exe.as_deref() == Some(from) {
+                process.exe = Some(to.to_owned());
+            }
+        }
+        self.fire(&event);
         Ok(())
     }
 
@@ -586,6 +645,21 @@ impl Machine for Fake {
         self.need_parent(path)?;
         self.dirs.insert(path.to_owned());
         self.private.insert(path.to_owned());
+        Ok(())
+    }
+
+    fn argv0(&mut self, pid: u32) -> Option<String> {
+        self.procs.get(&pid)?;
+        self.argv0s.get(&pid).cloned()
+    }
+
+    fn write_new(&mut self, path: &str, data: &[u8]) -> io::Result<()> {
+        self.events.push(format!("write {}", plain(path)));
+        self.need_parent(path)?;
+        if self.files.contains_key(path) || self.links.contains_key(path) {
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, "it exists"));
+        }
+        self.files.insert(path.to_owned(), data.to_vec());
         Ok(())
     }
 
@@ -1871,6 +1945,8 @@ fn opt_backup() -> String {
 fn bare_process() -> (Fake, Context) {
     let context = linux();
     let mut fake = Fake::new(&context);
+    // An install receipt names the installed open-ferry, which the link follows.
+    fake.installed = Some(context.exe.clone());
     fake.file(OPT_CPA, CLIPROXYAPI);
     fake.file("/opt/cpa/config.yaml", config_text("/opt/cpa/auths"));
     credentials(&mut fake, "/opt/cpa/auths");
@@ -2096,8 +2172,13 @@ fn undo_of_a_drop_in_keeps_what_it_did_not_put_there() {
     assert_eq!(undo.code, 1);
     has(
         &undo.err,
-        "migrate: CLIProxyAPI's binary isn't at /opt/cpa/cli-proxy-api.cliproxyapi, and /opt/cpa/cli-proxy-api isn't it, so it wasn't put back. Put it back at /opt/cpa/cli-proxy-api by hand.",
+        "migrate: CLIProxyAPI's binary isn't at /opt/cpa/cli-proxy-api.cliproxyapi, and what is at /opt/cpa/cli-proxy-api isn't it.",
     );
+    has(
+        &undo.err,
+        "wasn't put back, and the record stays open: put it at /opt/cpa/cli-proxy-api by hand",
+    );
+    assert_eq!(saved(&fake, LINUX_RECORD)["status"], "switched");
 }
 
 // Not upstream's: what blocks a drop-in: flags open-ferry doesn't take, a
@@ -3321,6 +3402,35 @@ fn restore_replaces_a_symbolic_link_at_a_file() {
         "/home/me/elsewhere.yaml".to_owned(),
     );
     fake.file("/home/me/elsewhere.yaml", "somebody else's file\n");
+    // A link where the config was a file at the switch leads somewhere else
+    // now: nothing is written there, and it is said.
+    let undo = migrate(&mut fake, &context, &["-undo", "-restore", "-yes"]);
+    assert_eq!(undo.code, 1, "{}", undo.all());
+    has(
+        &undo.out,
+        &format!(
+            "{SYSTEMD_CONFIG} wasn't restored: it led to {SYSTEMD_CONFIG} at the switch and now leads to /home/me/elsewhere.yaml, so the write would change another place."
+        ),
+    );
+    assert_eq!(
+        fake.link_target(SYSTEMD_CONFIG).as_deref(),
+        Some("/home/me/elsewhere.yaml")
+    );
+    assert_eq!(
+        fake.data("/home/me/elsewhere.yaml"),
+        b"somebody else's file\n"
+    );
+    assert_eq!(saved(&fake, LINUX_RECORD)["status"], "switched");
+
+    // A record from before the places were noted still replaces the link,
+    // and leaves what the link led to as it was.
+    let mut record = saved(&fake, LINUX_RECORD);
+    for file in record["backup"]["files"].as_array_mut().unwrap() {
+        let file = file.as_object_mut().unwrap();
+        file.remove("real");
+        file.remove("parent");
+    }
+    fake.file(LINUX_RECORD, record.to_string());
     let undo = migrate(&mut fake, &context, &["-undo", "-restore", "-yes"]);
     assert_eq!(undo.code, 0, "{}", undo.all());
     has(
@@ -3356,15 +3466,15 @@ fn restore_refuses_a_linked_auth_directory_and_can_be_run_again() {
     assert_eq!(undo.code, 1, "{}", undo.all());
     has(
         &undo.out,
-        "/home/me/.cli-proxy-api is a symbolic link (to /home/me/other-auth), and is not written through: remove it or put a directory there, then try again",
+        "/home/me/.cli-proxy-api wasn't restored: it led to /home/me/.cli-proxy-api at the switch and now leads to /home/me/other-auth, so the write would change another place.",
     );
     has(&undo.err, "Switching back failed at: ");
     has(
         &undo.err,
         "The record stays open: run `open-ferry migrate -undo` again",
     );
-    // CLIProxyAPI's service was still turned back on.
-    assert!(happened(
+    // CLIProxyAPI's service is not turned on over files that weren't put back.
+    assert!(!happened(
         &fake,
         "run systemctl --user start cliproxyapi.service"
     ));
@@ -3374,6 +3484,11 @@ fn restore_refuses_a_linked_auth_directory_and_can_be_run_again() {
     fake.links.remove("/home/me/.cli-proxy-api");
     let undo = migrate(&mut fake, &context, &["-undo", "-restore", "-yes"]);
     assert_eq!(undo.code, 0, "{}", undo.all());
+    // On the retry: restore, then start.
+    assert!(happened(
+        &fake,
+        "run systemctl --user start cliproxyapi.service"
+    ));
     assert_eq!(saved(&fake, LINUX_RECORD)["status"], "undone");
 }
 
@@ -3554,13 +3669,19 @@ fn a_reused_process_id_is_not_stopped() {
             parent: None,
         },
     );
+    // Nothing answers now, so CLIProxyAPI is not found running.
+    fake.serving.clear();
     let events = fake.events.len();
     let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
-    assert_eq!(undo.code, 0, "{}", undo.all());
+    assert_eq!(undo.code, 1, "{}", undo.all());
     has(
         &undo.out,
-        &format!("open-ferry wasn't running from {TASK_CPA}. Start CLIProxyAPI as you do: "),
+        &format!(
+            "open-ferry wasn't running from {TASK_CPA}, and CLIProxyAPI isn't running. Start CLIProxyAPI as you do: "
+        ),
     );
+    has(&undo.err, "then run `open-ferry migrate -undo` again");
+    assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "undone-not-started");
     lacks(&undo.out, "still runs, as it did before the switch");
     assert!(fake.procs.contains_key(&6060));
     assert!(!fake.events[events..].iter().any(|e| e == "stop 6060"));
@@ -3630,7 +3751,7 @@ fn does_not_start_cliproxyapi_beside_an_open_ferry_that_stays() {
     assert_eq!(undo.code, 1, "{}", undo.all());
     has(
         &undo.err,
-        "open-ferry still answers on http://127.0.0.1:8317 20 seconds after it was stopped, so CLIProxyAPI is not started beside it",
+        "open-ferry hasn't ended 20 seconds after it was stopped (open-ferry still answers on http://127.0.0.1:8317), so CLIProxyAPI is not started beside it",
     );
     assert!(
         !fake.events[events..]
@@ -3682,15 +3803,33 @@ fn a_drop_in_does_not_start_cliproxyapi_beside_an_open_ferry_that_stays() {
     assert_eq!(fake.launches.len(), 1);
     assert_eq!(saved(&fake, LINUX_RECORD)["status"], "switched");
 
-    // With it gone, the retry puts nothing back twice, and says what to do
-    // about the process.
+    // With it gone, the retry puts nothing back twice. It has no command line
+    // to start CLIProxyAPI with, so it says what to do and keeps the record
+    // open, in a status of its own.
     fake.serving.retain(|(pid, _)| *pid != 7777);
     let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
-    assert_eq!(undo.code, 0, "{}", undo.all());
+    assert_eq!(undo.code, 1, "{}", undo.all());
     has(
         &undo.out,
-        "open-ferry wasn't running from /opt/cpa/cli-proxy-api. Start CLIProxyAPI as you do: ",
+        "open-ferry wasn't running from /opt/cpa/cli-proxy-api, and CLIProxyAPI isn't running. Start CLIProxyAPI as you do: ",
     );
+    has(&undo.err, "then run `open-ferry migrate -undo` again");
+    assert_eq!(saved(&fake, LINUX_RECORD)["status"], "undone-not-started");
+
+    // Once CLIProxyAPI is started as the person does it, -undo closes.
+    fake.process(Proc {
+        pid: 8123,
+        started: Some(2000),
+        name: "cli-proxy-api".to_owned(),
+        exe: Some(OPT_CPA.to_owned()),
+        args: strings(&["-password", "s3cret-password"]),
+        cwd: Some("/opt/cpa".to_owned()),
+        env: None,
+        parent: None,
+    });
+    let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(undo.code, 0, "{}", undo.all());
+    has(&undo.out, "CLIProxyAPI is running.");
     assert_eq!(saved(&fake, LINUX_RECORD)["status"], "undone");
 }
 
@@ -3708,30 +3847,55 @@ fn the_drop_in_links_to_the_installed_open_ferry() {
     assert_eq!(fake.link_target(OPT_CPA).as_deref(), Some(installed));
     assert_eq!(saved(&fake, LINUX_RECORD)["switch"]["link"], installed);
 
-    // A receipt that names a binary that isn't there is not followed.
+    // A receipt that names a binary that isn't there is not followed: the
+    // drop-in is a copy.
     let (mut fake, context) = bare_process();
     fake.installed = Some("/gone/open-ferry".to_owned());
     let ran = migrate(&mut fake, &context, &["-yes"]);
     assert_eq!(ran.code, 0, "{}", ran.all());
-    assert_eq!(
-        fake.link_target(OPT_CPA).as_deref(),
-        Some("/home/me/.local/bin/open-ferry")
-    );
+    assert_eq!(fake.link_target(OPT_CPA), None);
+    assert_eq!(fake.data(OPT_CPA), OPEN_FERRY);
+}
 
-    // With no receipt, a link to open-ferry is followed to the file.
+// Not upstream's: with no install receipt there is nothing for a link to
+// follow, so the drop-in is a copy; the plan and -json say so.
+#[test]
+fn a_drop_in_without_a_receipt_is_a_copy() {
     let (mut fake, context) = bare_process();
-    fake.files.remove("/home/me/.local/bin/open-ferry");
-    fake.file("/opt/open-ferry/1.2/open-ferry", OPEN_FERRY);
-    fake.links.insert(
-        "/home/me/.local/bin/open-ferry".to_owned(),
-        "/opt/open-ferry/1.2/open-ferry".to_owned(),
+    fake.installed = None;
+    let ran = migrate(&mut fake, &context, &["-dry-run"]);
+    assert_eq!(ran.code, 0, "{}", ran.all());
+    has(
+        &ran.out,
+        "copy open-ferry (/home/me/.local/bin/open-ferry) to /opt/cpa/cli-proxy-api",
     );
+    has(
+        &ran.out,
+        "There is no install receipt for this open-ferry (the install script writes one), so there is nothing for a link to follow: the drop-in is a copy.",
+    );
+    has(&ran.out, "reports a new release");
+    lacks(&ran.out, "The link follows the installed open-ferry");
+
+    let json = migrate(&mut fake, &context, &["-json"]);
+    let json = serde_json::from_str::<Value>(json.out.trim()).unwrap();
+    assert_eq!(json["drop_in"], "copy");
+
     let ran = migrate(&mut fake, &context, &["-yes"]);
     assert_eq!(ran.code, 0, "{}", ran.all());
+    assert_eq!(fake.link_target(OPT_CPA), None);
+    assert_eq!(fake.data(OPT_CPA), OPEN_FERRY);
+    assert!(saved(&fake, LINUX_RECORD)["switch"]["link"].is_null());
     assert_eq!(
-        fake.link_target(OPT_CPA).as_deref(),
-        Some("/opt/open-ferry/1.2/open-ferry")
+        saved(&fake, LINUX_RECORD)["switch"]["sha256"]
+            .as_str()
+            .map(str::len),
+        Some(64)
     );
+
+    // And -undo puts CLIProxyAPI's binary back, by its digest.
+    let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(undo.code, 0, "{}", undo.all());
+    assert_eq!(fake.data(OPT_CPA), CLIPROXYAPI);
 }
 
 // Not upstream's: -json says how a drop-in is made: a symbolic link on
@@ -3747,6 +3911,12 @@ fn json_says_how_a_drop_in_is_made() {
     let json = drop_in(&mut fake, &context);
     assert_eq!(json["switch"], "drop-in");
     assert_eq!(json["drop_in"], "symlink");
+
+    // Without an install receipt there is nothing to link to.
+    let (mut fake, context) = bare_process();
+    fake.installed = None;
+    let json = drop_in(&mut fake, &context);
+    assert_eq!(json["drop_in"], "copy");
 
     let (mut fake, context) = launcher_task();
     let json = drop_in(&mut fake, &context);
@@ -3777,4 +3947,312 @@ fn a_windows_copy_says_it_does_not_update() {
     let (mut fake, context) = bare_process();
     let ran = migrate(&mut fake, &context, &["-dry-run"]);
     lacks(&ran.out, "reports a new release");
+}
+
+// --- Fix round 3 ---
+
+/// A running CLIProxyAPI, as `bare_process` runs it, started like a service's.
+fn proxy_at(pid: u32, exe: &str) -> Proc {
+    Proc {
+        pid,
+        started: Some(3000),
+        name: "cli-proxy-api".to_owned(),
+        exe: Some(exe.to_owned()),
+        args: Vec::new(),
+        cwd: Some("/opt/cpa".to_owned()),
+        env: None,
+        parent: None,
+    }
+}
+
+// Not upstream's: -restore doesn't write under a running proxy. It stops it
+// with the plan showing it and a yes (-yes is the yes), restores, and only
+// then starts CLIProxyAPI.
+#[test]
+fn restore_stops_a_running_proxy_with_a_yes_and_restores_before_it_starts() {
+    let (mut fake, context) = systemd_user();
+    assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
+    fake.file(SYSTEMD_CONFIG, "changed: by open-ferry\n");
+    fake.process(proxy_at(4242, SYSTEMD_CPA));
+
+    // Without the yes, nothing is stopped or written, and CLIProxyAPI's
+    // service is not started over it.
+    fake.terminal = true;
+    fake.replies.extend([true, false]);
+    let undo = migrate(&mut fake, &context, &["-undo", "-restore"]);
+    assert_eq!(undo.code, 1, "{}", undo.all());
+    has(
+        &undo.out,
+        "CLIProxyAPI runs (process 4242), and -restore doesn't write under a running proxy: nothing was restored.",
+    );
+    assert_eq!(fake.data(SYSTEMD_CONFIG), b"changed: by open-ferry\n");
+    assert!(fake.procs.contains_key(&4242));
+    assert!(!happened(
+        &fake,
+        "run systemctl --user start cliproxyapi.service"
+    ));
+    assert_eq!(saved(&fake, LINUX_RECORD)["status"], "switched");
+
+    let undo = migrate(&mut fake, &context, &["-undo", "-restore", "-yes"]);
+    assert_eq!(undo.code, 0, "{}", undo.all());
+    has(&undo.out, "Stopped CLIProxyAPI (process 4242)");
+    assert!(!fake.procs.contains_key(&4242));
+    assert_eq!(
+        fake.data(SYSTEMD_CONFIG),
+        config_text("~/.cli-proxy-api").as_bytes()
+    );
+    in_order(
+        &fake.events,
+        &[
+            "stop 4242",
+            "run systemctl --user start cliproxyapi.service",
+        ],
+    );
+    assert_eq!(saved(&fake, LINUX_RECORD)["status"], "undone");
+}
+
+// Not upstream's: the plan of -undo -restore says that a proxy is stopped,
+// that the credentials come back as they were, and that a failed copy keeps
+// the record open.
+#[test]
+fn the_restore_plan_says_what_it_does() {
+    let (mut fake, context) = systemd_user();
+    assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
+    let undo = migrate(&mut fake, &context, &["-undo", "-restore", "-dry-run"]);
+    assert_eq!(undo.code, 0, "{}", undo.all());
+    has(
+        &undo.out,
+        "ask whether to stop it (-yes is the yes); nothing is stopped without it, and nothing is copied while it runs.",
+    );
+    has(
+        &undo.out,
+        "If the copy fails, CLIProxyAPI isn't started and the record stays open: run -undo -restore again.",
+    );
+    has(
+        &undo.out,
+        "The credentials come back as they were at the switch, so a token refreshed since then is replaced by the older one.",
+    );
+}
+
+// Not upstream's: a file whose directory is a link to somewhere else now
+// than at the switch is not written, and the copy is reported.
+#[test]
+fn restore_skips_a_directory_that_leads_elsewhere_now() {
+    let (mut fake, context) = systemd_user_config("/data/cfg/config.yaml");
+    assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
+    assert_eq!(
+        saved(&fake, LINUX_RECORD)["backup"]["files"][0]["parent"],
+        "/data/cfg"
+    );
+    fake.links
+        .insert("/data/cfg".to_owned(), "/data/other".to_owned());
+    fake.dir("/data/other");
+    let undo = migrate(&mut fake, &context, &["-undo", "-restore", "-yes"]);
+    assert_eq!(undo.code, 1, "{}", undo.all());
+    has(
+        &undo.out,
+        "/data/cfg/config.yaml wasn't restored: its directory led to /data/cfg at the switch and now leads to /data/other",
+    );
+    assert!(!fake.exists("/data/other/config.yaml"));
+    assert!(!happened(
+        &fake,
+        "run systemctl --user start cliproxyapi.service"
+    ));
+    assert_eq!(saved(&fake, LINUX_RECORD)["status"], "switched");
+}
+
+// Not upstream's: -undo waits for open-ferry's service itself to have ended,
+// not for the port to be quiet, and says what it saw when it doesn't.
+#[test]
+fn undo_waits_for_the_service_and_times_out_clearly() {
+    let (mut fake, context) = systemd_user();
+    assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
+    // Nothing answers on the port, but the manager says it is stopping.
+    fake.answer(
+        "systemctl --user show open-ferry.service",
+        0,
+        "LoadState=loaded\nActiveState=deactivating\n",
+    );
+    let events = fake.events.len();
+    let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(undo.code, 1, "{}", undo.all());
+    has(
+        &undo.err,
+        "open-ferry hasn't ended 20 seconds after it was stopped (its service is still deactivating), so CLIProxyAPI is not started beside it.",
+    );
+    has(&undo.err, "The record stays open");
+    assert!(
+        !fake.events[events..]
+            .iter()
+            .any(|event| event == "run systemctl --user start cliproxyapi.service")
+    );
+    assert_eq!(saved(&fake, LINUX_RECORD)["status"], "switched");
+
+    // Once the manager says it has ended, the retry finishes.
+    fake.answer(
+        "systemctl --user show open-ferry.service",
+        0,
+        "LoadState=loaded\nActiveState=inactive\n",
+    );
+    let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(undo.code, 0, "{}", undo.all());
+    assert_eq!(saved(&fake, LINUX_RECORD)["status"], "undone");
+}
+
+// Not upstream's: a launchd job that is loaded already is not loaded again.
+#[test]
+fn undo_goes_on_when_the_launchd_job_is_loaded_already() {
+    let (mut fake, context) = brew_services();
+    assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
+    // The job is loaded already (an earlier -undo got that far).
+    fake.answer(
+        "launchctl print gui/501/homebrew.mxcl.cliproxyapi",
+        0,
+        "gui/501/homebrew.mxcl.cliproxyapi = {\n\tstate = running\n}\n",
+    );
+    let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(undo.code, 0, "{}", undo.all());
+    has(&undo.out, "CLIProxyAPI's service is on already; going on.");
+    assert!(happened(
+        &fake,
+        "run launchctl enable gui/501/homebrew.mxcl.cliproxyapi"
+    ));
+    assert!(!happened(
+        &fake,
+        &format!("run launchctl bootstrap gui/501 {BREW_PLIST}")
+    ));
+    assert_eq!(
+        saved(&fake, "/Users/me/.config/open-ferry/migration.json")["status"],
+        "undone"
+    );
+}
+
+// Not upstream's: a Windows service that runs already is not started again.
+#[test]
+fn undo_goes_on_when_the_windows_service_runs_already() {
+    let (mut fake, context) = nssm_service(windows_program_files(), true);
+    assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
+    fake.answer(
+        "sc.exe query CLIProxyAPI",
+        0,
+        "SERVICE_NAME: CLIProxyAPI\r\n        TYPE               : 10  WIN32_OWN_PROCESS\r\n        STATE              : 4  RUNNING\r\n",
+    );
+    let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(undo.code, 0, "{}", undo.all());
+    has(&undo.out, "CLIProxyAPI's service is on already; going on.");
+    assert!(happened(&fake, "run sc.exe config CLIProxyAPI start= auto"));
+    assert!(!happened(&fake, "run sc.exe start CLIProxyAPI"));
+    assert_eq!(saved(&fake, WINDOWS_RECORD)["status"], "undone");
+}
+
+// Not upstream's: the switch refuses when its own files are the config, a
+// .env file or the auth directory, and a leftover temporary file of an older
+// name is neither used nor written through.
+#[test]
+fn refuses_when_the_record_is_the_config_and_never_reuses_a_temp_name() {
+    let (mut fake, context) = systemd_user_config(LINUX_RECORD);
+    let ran = migrate(&mut fake, &context, &["-yes"]);
+    assert_eq!(ran.code, 1, "{}", ran.all());
+    has(
+        &ran.out,
+        &format!(
+            "The config ({LINUX_RECORD}) is {LINUX_RECORD} or inside it or holds it, and the switch writes there: move one of them. Nothing was changed."
+        ),
+    );
+    read_only(&fake);
+
+    let (mut fake, context) = systemd_user();
+    let stale = format!("{LINUX_RECORD}.tmp");
+    fake.file(&stale, "somebody else's file\n");
+    let ran = migrate(&mut fake, &context, &["-yes"]);
+    assert_eq!(ran.code, 0, "{}", ran.all());
+    assert_eq!(fake.data(&stale), b"somebody else's file\n");
+    assert_eq!(saved(&fake, LINUX_RECORD)["status"], "switched");
+    // The temporary files were moved into place, none left.
+    assert!(
+        !fake
+            .files
+            .keys()
+            .any(|path| path.starts_with(LINUX_RECORD) && path != LINUX_RECORD && path != &stale),
+        "{:#?}",
+        fake.files.keys().collect::<Vec<_>>()
+    );
+}
+
+// Not upstream's: the record's directory is made private where it is new.
+#[test]
+fn the_records_directory_is_made_private() {
+    let (mut fake, context) = systemd_user();
+    fake.dirs.remove("/home/me/.config/open-ferry");
+    let ran = migrate(&mut fake, &context, &["-yes"]);
+    assert_eq!(ran.code, 0, "{}", ran.all());
+    assert!(fake.private.contains("/home/me/.config/open-ferry"));
+}
+
+// Not upstream's: only a file with the digest recorded at the switch is put
+// back as CLIProxyAPI's; anything else is recovered by hand, with the record
+// kept open, and nothing is moved.
+#[test]
+fn undo_puts_back_only_a_binary_with_the_recorded_digest() {
+    let (mut fake, context) = bare_process();
+    assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
+    let sha = saved(&fake, LINUX_RECORD)["switch"]["sha256"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(sha.len(), 64);
+    // Something else was put where CLIProxyAPI's binary was moved.
+    fake.file(OPT_MOVED, "not CLIProxyAPI");
+    let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(undo.code, 1, "{}", undo.all());
+    has(
+        &undo.err,
+        &format!(
+            "{OPT_MOVED} isn't CLIProxyAPI's binary: its SHA-256 isn't the one recorded at the switch. CLIProxyAPI's binary (SHA-256 {sha}) wasn't put back, and the record stays open"
+        ),
+    );
+    assert_eq!(fake.data(OPT_MOVED), b"not CLIProxyAPI");
+    assert_eq!(
+        fake.link_target(OPT_CPA).as_deref(),
+        Some("/home/me/.local/bin/open-ferry")
+    );
+    assert_eq!(saved(&fake, LINUX_RECORD)["status"], "switched");
+
+    // With the right file back where it was moved, it finishes.
+    fake.file(OPT_MOVED, CLIPROXYAPI);
+    let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(undo.code, 0, "{}", undo.all());
+    assert_eq!(fake.data(OPT_CPA), CLIPROXYAPI);
+}
+
+// Not upstream's: the drop-in's process is the one started through the
+// drop-in's path. An open-ferry that was not, or only has the name, is never
+// stopped for it. (macOS: UNVERIFIED how the command line is read.)
+#[test]
+fn undo_stops_only_the_process_started_through_the_drop_in() {
+    let (mut fake, context) = bare_process();
+    assert_eq!(migrate(&mut fake, &context, &["-yes"]).code, 0);
+    let open_ferry = |pid: u32, name: &str, argv0: &str, cwd: &str| {
+        let mut process = proxy_at(pid, "/home/me/.local/bin/open-ferry");
+        process.name = name.to_owned();
+        process.cwd = Some(cwd.to_owned());
+        (process, argv0.to_owned())
+    };
+    // The installed open-ferry, run by its own path; the same by a bare name;
+    // and one started in /opt/cpa as ./cli-proxy-api.
+    let cases = [
+        open_ferry(6001, "open-ferry", "/home/me/.local/bin/open-ferry", "/"),
+        open_ferry(6002, "cli-proxy-api", "cli-proxy-api", "/opt/cpa"),
+        open_ferry(6003, "cli-proxy-api", "./cli-proxy-api", "/opt/cpa"),
+    ];
+    for (process, argv0) in cases {
+        fake.argv0s.insert(process.pid, argv0);
+        fake.procs.insert(process.pid, process);
+    }
+    let undo = migrate(&mut fake, &context, &["-undo", "-yes"]);
+    assert_eq!(undo.code, 0, "{}", undo.all());
+    assert!(fake.procs.contains_key(&6001));
+    assert!(fake.procs.contains_key(&6002));
+    assert!(!fake.procs.contains_key(&6003));
+    assert!(!fake.procs.contains_key(&9001));
 }
