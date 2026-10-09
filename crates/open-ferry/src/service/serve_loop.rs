@@ -420,6 +420,24 @@ impl LoopRegistration {
         }
     }
 
+    /// Counts the loop's new listener if the mode is still `Running`, read
+    /// while the counts are locked. Whether it did. A pause returns while a
+    /// loop makes a listener, since it holds none yet. Counted regardless,
+    /// that listener would look settled to a resume that came next, though
+    /// the loop, having seen the pause, would drop it.
+    fn count_listener(&mut self) -> bool {
+        let shared = &self.shared;
+        self.accepting = shared.stats.send_if_modified(|stats| {
+            if *shared.mode.borrow() == Mode::Running {
+                stats.accepting += 1;
+                true
+            } else {
+                false
+            }
+        });
+        self.accepting
+    }
+
     fn set_accepting(&mut self, accepting: bool) {
         if self.accepting == accepting {
             return;
@@ -746,14 +764,14 @@ pub(crate) fn run(
                         };
                         match duplicate {
                             Ok(tokio_listener) => {
-                                accepting = Some(tokio_listener);
-                                registration.set_accepting(true);
                                 // A pause that came while this was built
                                 // has been told no loop holds a listener, so
-                                // the mode is read again before any accept.
-                                if *mode.borrow() != Mode::Running {
+                                // it is kept only if the mode is still
+                                // `Running` once it is counted.
+                                if !registration.count_listener() {
                                     continue;
                                 }
+                                accepting = Some(tokio_listener);
                             }
                             Err(error) => {
                                 registration.fail();

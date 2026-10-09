@@ -753,6 +753,9 @@ async fn a_cut_closes_an_http2_websocket_whose_handler_is_not_polling_it() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_pauses_and_resumes_settle() {
     let served = start(None, FIRST_REQUEST_DEADLINE);
+    // A resume doesn't wait for a loop not yet polled, which would leave
+    // the first round running with no listener yet.
+    until(|| served.control.stats().accepting == 1).await;
     for _ in 0..300 {
         let (pause, resume) = (served.control.clone(), served.control.clone());
         let pausing = tokio::spawn(async move { pause.pause_accept().await });
@@ -773,6 +776,25 @@ async fn concurrent_pauses_and_resumes_settle() {
     assert_eq!(served.control.stats().accepting, 1);
     served.control.stop();
     within(served.server).await.unwrap().unwrap();
+}
+
+// Not upstream's: a loop counts a listener it made only while the mode is
+// `Running`. A pause can return while a loop makes its first listener;
+// counted anyway, that listener would satisfy a resume that came next,
+// though the loop would drop it on seeing the pause.
+#[test]
+fn a_listener_made_during_a_pause_is_not_counted() {
+    let control = ServeControl::new();
+    let mut registration = control.register_loop();
+    registration.start();
+    assert!(control.shared.move_mode(&[Mode::Running], Mode::Paused));
+    assert!(!registration.count_listener());
+    assert_eq!(control.stats().accepting, 0);
+    assert!(control.shared.move_mode(&[Mode::Paused], Mode::Running));
+    assert!(registration.count_listener());
+    assert_eq!(control.stats().accepting, 1);
+    drop(registration);
+    assert_eq!(control.stats().accepting, 0);
 }
 
 // Not upstream's: a connection queued while the loop is paused is not
@@ -822,6 +844,9 @@ async fn a_resume_after_a_cut_fails() {
 #[tokio::test]
 async fn a_resume_fails_when_a_loop_cannot_make_its_listener_again() {
     let served = start(None, FIRST_REQUEST_DEADLINE);
+    // The loop has to hold its listener first: one not yet polled has no
+    // listener to drop or remake, and a resume doesn't wait for it.
+    until(|| served.control.stats().accepting == 1).await;
     within(served.control.pause_accept()).await;
     served
         .control
@@ -845,6 +870,7 @@ async fn a_resume_fails_when_a_loop_cannot_make_its_listener_again() {
 #[tokio::test]
 async fn a_loop_started_after_the_resume_settled_does_not_fail_it() {
     let served = start(None, FIRST_REQUEST_DEADLINE);
+    until(|| served.control.stats().accepting == 1).await;
     within(served.control.pause_accept()).await;
     served
         .control
