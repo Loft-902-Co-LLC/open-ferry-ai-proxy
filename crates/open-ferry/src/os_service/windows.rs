@@ -27,7 +27,7 @@
 use std::fmt::Write as _;
 
 use super::launchd::escape;
-use super::{Cmd, Definition, SERVICE_NAME, Step, System, run_checked};
+use super::{Cmd, Definition, Platform, SERVICE_NAME, Step, System, run_checked};
 
 /// Where the server's output goes, in the config's directory.
 pub(super) const LOG_FILE: &str = "service.log";
@@ -106,7 +106,14 @@ fn quote(word: &str) -> String {
 /// `service run`'s arguments for `definition`.
 fn run_arguments(definition: &Definition, system: bool) -> String {
     let flag = if system { " -system" } else { "" };
-    format!("service run{flag} -config {}", quote(&definition.config))
+    let mut arguments = format!("service run{flag} -config {}", quote(&definition.config));
+    // `service run` goes to the config's directory unless it is told
+    // another, such as the directory CLIProxyAPI ran in.
+    let own = Platform::Windows.parent(&definition.config);
+    if own.as_deref() != Some(definition.dir.as_str()) {
+        arguments.push_str(&format!(" -dir {}", quote(&definition.dir)));
+    }
+    arguments
 }
 
 /// The task's definition: at the logon of the user whose SID is `sid`, as
