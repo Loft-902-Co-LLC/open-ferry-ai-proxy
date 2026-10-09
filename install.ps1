@@ -534,6 +534,10 @@ function Install-OpenFerry {
         $off = "To turn that off: $command update -mode off -config $quotedMode"
         if ($selfUpdate -eq 'off') {
             Write-Host "Automatic updates are off. To turn them on: $command update -mode auto -config $quotedMode"
+        } elseif ($switched -and $cpa.switch -eq 'drop-in') {
+            # A drop-in is a copy of open-ferry, and the updater only updates
+            # the installed binary.
+            Write-Host "The copy of open-ferry in CLIProxyAPI's place says when a release is out, but doesn't install it. To update it, run $command update, then $command migrate -undo, then $command migrate. $off"
         } elseif ($selfUpdate -eq 'notify') {
             Write-Host "open-ferry says when a release is out, but doesn't install it. $off"
         } elseif (-not $receiptOk) {

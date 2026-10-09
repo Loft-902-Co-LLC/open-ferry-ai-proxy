@@ -133,7 +133,8 @@ FAKE_OPEN_FERRY_SH = r"""#!/bin/sh
 # `migrate` is recorded in FAKE_OPEN_FERRY_MIGRATE_LOG instead: `migrate
 # -json` prints FAKE_OPEN_FERRY_MIGRATE_JSON, or {"found":false} and exits
 # with 1 when it's empty, and `migrate -yes` exits with
-# FAKE_OPEN_FERRY_MIGRATE_EXIT (default 0).
+# FAKE_OPEN_FERRY_MIGRATE_EXIT (default 0), or, with FAKE_OPEN_FERRY_MIGRATE_FAIL
+# set, prints it to stderr and exits with 1.
 log=$FAKE_OPEN_FERRY_LOG
 if [ "${1:-}" = migrate ]; then
   log=${FAKE_OPEN_FERRY_MIGRATE_LOG:-/dev/null}
@@ -160,6 +161,10 @@ if [ "${1:-}" = migrate ]; then
       exit 0
       ;;
     "migrate -yes")
+      if [ -n "${FAKE_OPEN_FERRY_MIGRATE_FAIL:-}" ]; then
+        echo "$FAKE_OPEN_FERRY_MIGRATE_FAIL" >&2
+        exit 1
+      fi
       echo "fake open-ferry: switched"
       exit "${FAKE_OPEN_FERRY_MIGRATE_EXIT:-0}"
       ;;
@@ -189,7 +194,8 @@ FAKE_OPEN_FERRY_CS = r"""
 // `migrate` is recorded in FAKE_OPEN_FERRY_MIGRATE_LOG instead: `migrate
 // -json` prints FAKE_OPEN_FERRY_MIGRATE_JSON, or {"found":false} and exits
 // with 1 when it's empty, and `migrate -yes` exits with
-// FAKE_OPEN_FERRY_MIGRATE_EXIT (default 0).
+// FAKE_OPEN_FERRY_MIGRATE_EXIT (default 0), or, with FAKE_OPEN_FERRY_MIGRATE_FAIL
+// set, prints it to stderr and exits with 1.
 using System;
 using System.IO;
 using System.Text;
@@ -227,6 +233,12 @@ public static class FakeOpenFerry
             }
             if (args.Length == 2 && args[1] == "-yes")
             {
+                string fail = Environment.GetEnvironmentVariable("FAKE_OPEN_FERRY_MIGRATE_FAIL");
+                if (!String.IsNullOrEmpty(fail))
+                {
+                    Console.Error.WriteLine(fail);
+                    return 1;
+                }
                 Console.WriteLine("fake open-ferry: switched");
                 string exit = Environment.GetEnvironmentVariable("FAKE_OPEN_FERRY_MIGRATE_EXIT");
                 return String.IsNullOrEmpty(exit) ? 0 : Int32.Parse(exit);
@@ -508,7 +520,7 @@ CPA_SUMMARY_WINDOWS = r"CLIProxyAPI (process 6060), started by the scheduled tas
 CPA_CONFIG_WINDOWS = r"C:\Users\me\Matt's cpa\config.yaml"
 
 
-def found_json(can_switch=True, summary=CPA_SUMMARY, config=CPA_CONFIG, host="", port=8317, tls=False):
+def found_json(can_switch=True, summary=CPA_SUMMARY, config=CPA_CONFIG, host="", port=8317, tls=False, switch="service"):
     """What `open-ferry migrate -json` prints when it finds CLIProxyAPI: one
     line, with the keys in the order open-ferry writes them. A finding's
     message holds what looks like the keys the scripts read, as a JSON
@@ -517,7 +529,7 @@ def found_json(can_switch=True, summary=CPA_SUMMARY, config=CPA_CONFIG, host="",
         "found": True,
         "summary": summary,
         "can_switch": can_switch,
-        "switch": "service",
+        "switch": switch,
         "target": "systemd-user",
         "process": {"pid": 4242, "exe": "/home/me/cpa/cli-proxy-api"},
         "exe": "/home/me/cpa/cli-proxy-api",
@@ -1201,6 +1213,56 @@ class InstallShTests(Case):
             result.output,
         )
         self.assertIn(f"  Switch over:         {self.command()} migrate", lines_of(result.output))
+
+    def test_sets_the_update_mode_in_cliproxyapis_config_after_a_switch(self):
+        cases = (
+            ("--no-auto-update", ["--no-auto-update"], {}, "off"),
+            ("notify", [], {"OPEN_FERRY_INSTALL_SELF_UPDATE": "notify"}, "notify"),
+        )
+        for label, flags, extra, mode in cases:
+            with self.subTest(label):
+                self.reset()
+                result = self.run_sh(
+                    "--target", GNU, *self.install_args("--migrate", *flags),
+                    FAKE_OPEN_FERRY_MIGRATE_JSON=found_json(), **extra
+                )
+                self.assertExit(result, 0)
+                name = self.assertInstalled(LATEST, GNU)
+                self.assertEqual(read_log(self.log), [[name, "update", "-mode", mode, "-config", CPA_CONFIG]])
+                other = "auto" if mode == "off" else "off"
+                self.assertIn(f'update -mode {other} -config "{CPA_CONFIG}"', lines_of(result.output)[-1])
+
+    def test_a_failed_switch_leaves_cliproxyapis_config_alone(self):
+        failed = dict(
+            FAKE_OPEN_FERRY_MIGRATE_JSON=found_json(),
+            FAKE_OPEN_FERRY_MIGRATE_FAIL="fake open-ferry: couldn't stop CLIProxyAPI",
+        )
+        # With no config of ours, there is none to set the mode in.
+        result = self.run_sh("--target", GNU, *self.install_args("--migrate", "--no-auto-update"), **failed)
+        self.assertExit(result, 1)
+        name = self.assertInstalled(LATEST, GNU)
+        self.assertEqual(read_log(self.migrate_log), self.migrate_calls(name, True))
+        self.assertEqual(read_log(self.log), [])
+        lines = lines_of(result.output)
+        self.assertIn("fake open-ferry: couldn't stop CLIProxyAPI", lines)
+        self.assertIn(
+            "There's no config yet to set self-update.mode to off in."
+            f" Once open-ferry runs on one, run: {self.command()} update -mode off -config <config>",
+            lines,
+        )
+        self.assertIn(f"  Switch over:         {self.command()} migrate", lines)
+        self.assertLess(
+            result.output.index("Next steps:"),
+            result.output.index("install.sh: error: the switch from CLIProxyAPI didn't finish"),
+        )
+
+        # With a config of ours, the mode goes in that one.
+        self.reset()
+        write_file(self.config, "mine: true\n", mode=0o600)
+        result = self.run_sh("--target", GNU, *self.install_args("--migrate", "--no-auto-update"), **failed)
+        self.assertExit(result, 1)
+        name = self.assertInstalled(LATEST, GNU)
+        self.assertEqual(read_log(self.log), [[name, "update", "-mode", "off", "-config", sh_path(self.config)]])
 
     def test_says_when_it_cannot_switch(self):
         command = self.command()
@@ -1925,6 +1987,92 @@ class InstallPs1Cases:
             result.output,
         )
         self.assertIn(f"  Switch over:         {self.command()} migrate", lines_of(result.output))
+
+    def test_sets_the_update_mode_in_cliproxyapis_config_after_a_switch(self):
+        cases = (
+            ("-NoAutoUpdate", ["-NoAutoUpdate"], {}, "off"),
+            ("notify", [], {"OPEN_FERRY_INSTALL_SELF_UPDATE": "notify"}, "notify"),
+        )
+        for label, flags, extra, mode in cases:
+            with self.subTest(label):
+                shutil.rmtree(self.install_dir, ignore_errors=True)
+                if os.path.exists(self.log):
+                    os.remove(self.log)
+                result = self.run_file(
+                    *self.install_args("-Migrate", *flags), FAKE_OPEN_FERRY_MIGRATE_JSON=self.found(), **extra
+                )
+                self.assertExit(result, 0)
+                name = self.assertInstalled(LATEST)
+                self.assertEqual(read_log(self.log), [[name, "update", "-mode", mode, "-config", CPA_CONFIG_WINDOWS]])
+                other = "auto" if mode == "off" else "off"
+                self.assertIn(
+                    f"update -mode {other} -config {ps_quote(CPA_CONFIG_WINDOWS)}", lines_of(result.output)[-1]
+                )
+
+    def test_says_a_drop_in_does_not_update_itself(self):
+        command = self.command()
+        cases = (
+            ("default", {}),
+            ("auto", {"OPEN_FERRY_INSTALL_SELF_UPDATE": "auto"}),
+            ("notify", {"OPEN_FERRY_INSTALL_SELF_UPDATE": "notify"}),
+        )
+        for label, extra in cases:
+            with self.subTest(label):
+                shutil.rmtree(self.install_dir, ignore_errors=True)
+                result = self.run_file(
+                    *self.install_args("-Migrate"),
+                    FAKE_OPEN_FERRY_MIGRATE_JSON=found_json(
+                        summary=CPA_SUMMARY_WINDOWS, config=CPA_CONFIG_WINDOWS, switch="drop-in"
+                    ),
+                    **extra,
+                )
+                self.assertExit(result, 0)
+                self.assertNotIn("keeps itself up to date", result.output)
+                self.assertIn(
+                    "The copy of open-ferry in CLIProxyAPI's place says when a release is out, but doesn't install it."
+                    f" To update it, run {command} update, then {command} migrate -undo, then {command} migrate.",
+                    lines_of(result.output)[-1],
+                )
+        # A service switch runs the installed binary, which does update.
+        shutil.rmtree(self.install_dir, ignore_errors=True)
+        result = self.run_file(*self.install_args("-Migrate"), FAKE_OPEN_FERRY_MIGRATE_JSON=self.found())
+        self.assertExit(result, 0)
+        self.assertNotIn("The copy of open-ferry", result.output)
+        self.assertTrue(lines_of(result.output)[-1].startswith("open-ferry keeps itself up to date"))
+
+    def test_a_failed_switch_leaves_cliproxyapis_config_alone(self):
+        failed = dict(
+            FAKE_OPEN_FERRY_MIGRATE_JSON=self.found(),
+            FAKE_OPEN_FERRY_MIGRATE_FAIL="fake open-ferry: couldn't stop CLIProxyAPI",
+        )
+        # With no config of ours, there is none to set the mode in.
+        result = self.run_file(*self.install_args("-Migrate", "-NoAutoUpdate"), **failed)
+        self.assertExit(result, 1)
+        name = self.assertInstalled(LATEST)
+        self.assertEqual(read_log(self.migrate_log), self.migrate_calls(name, True))
+        self.assertEqual(read_log(self.log), [])
+        lines = lines_of(result.output)
+        self.assertIn("fake open-ferry: couldn't stop CLIProxyAPI", lines)
+        self.assertIn(
+            "There's no config yet to set self-update.mode to off in."
+            f" Once open-ferry runs on one, run: {self.command()} update -mode off -config <config>",
+            lines,
+        )
+        self.assertIn(f"  Switch over:         {self.command()} migrate", lines)
+        self.assertLess(
+            result.output.index("Next steps:"),
+            result.output.index("install.ps1: error: The switch from CLIProxyAPI didn't finish"),
+        )
+
+        # With a config of ours, the mode goes in that one.
+        shutil.rmtree(self.install_dir, ignore_errors=True)
+        if os.path.exists(self.log):
+            os.remove(self.log)
+        write_file(self.config, "mine: true\n", mode=0o600)
+        result = self.run_file(*self.install_args("-Migrate", "-NoAutoUpdate"), **failed)
+        self.assertExit(result, 1)
+        name = self.assertInstalled(LATEST)
+        self.assertEqual(read_log(self.log), [[name, "update", "-mode", "off", "-config", self.config]])
 
     def test_says_when_it_cannot_switch(self):
         command = self.command()
