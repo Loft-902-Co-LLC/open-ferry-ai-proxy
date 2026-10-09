@@ -1451,6 +1451,10 @@ mod tests {
         for (name, writer, then) in writers {
             let before = fs::read(&path).unwrap();
             let held = WriteLock::acquire(&path).unwrap();
+            // The writer before this one noted a wait on every retry, so
+            // notes can be left over. Drop them, or `waited` says this
+            // writer waited before it has even read the file.
+            write::waited(&path);
             let handle = {
                 let path = path.clone();
                 std::thread::spawn(move || writer(&path))
