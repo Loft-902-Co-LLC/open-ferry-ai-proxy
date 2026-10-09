@@ -2357,13 +2357,9 @@ fn staging_path(binary: &str) -> String {
 /// removed, never `binary`.
 fn copy_into_place(machine: &mut dyn Machine, from: &str, binary: &str) -> io::Result<()> {
     let staged = staging_path(binary);
-    if let Err(error) = machine.copy_new(from, &staged) {
-        // A file that was there already is another run's: left alone.
-        if error.kind() != io::ErrorKind::AlreadyExists {
-            let _ = machine.remove(&staged);
-        }
-        return Err(error);
-    }
+    // A failed copy removes only a file it made: one that was there already
+    // (another run's, or a crash's) is left alone.
+    machine.copy_new(from, &staged)?;
     if let Err(error) = machine.rename_new(&staged, binary) {
         let _ = machine.remove(&staged);
         return Err(error);
