@@ -5,9 +5,13 @@
 # It downloads the release's Windows archive and checks it against the
 # release's SHA256SUMS, and, when the GitHub CLI (gh) is installed, against
 # the archive's build provenance attestation. It installs open-ferry.exe in
-# %LOCALAPPDATA%\Programs\open-ferry, and, when there is no config at
-# %APPDATA%\open-ferry\config.yaml, writes one with `open-ferry init`. It
-# changes neither PATH nor any profile.
+# %LOCALAPPDATA%\Programs\open-ferry. Then it looks for CLIProxyAPI with
+# `open-ferry migrate -json`, which changes nothing. When it finds it, it
+# asks whether to switch it to open-ferry, which then runs on CLIProxyAPI's
+# config and credentials (`open-ferry migrate -yes`; see
+# docs/migrating-from-cliproxyapi.md). When it doesn't, and there is no
+# config at %APPDATA%\open-ferry\config.yaml, it writes one with
+# `open-ferry init`. It changes neither PATH nor any profile.
 #
 # Runs in Windows PowerShell 5.1 and PowerShell 7. To pass options through
 # irm, make the script a script block:
@@ -25,12 +29,22 @@
 #                      when gh is installed; the SHA256SUMS check still runs
 #   -NoAutoUpdate      turn automatic updates off (self-update.mode: off in
 #                      the config); open-ferry update -mode auto turns them on
+#   -Migrate           when CLIProxyAPI is found, switch it to open-ferry
+#                      without asking, as for an unattended install; fails
+#                      when it can't be switched
+#   -NoMigrate         don't look for CLIProxyAPI
+#
+# It asks before it switches unless PowerShell runs -NonInteractive, where
+# it can't; with its input redirected, it reads the answer from it, and the
+# end of the input is no answer.
 #
 # Environment:
 #   OPEN_FERRY_INSTALL_DIR       the install directory, when -InstallDir
 #                                isn't given
 #   OPEN_FERRY_INSTALL_CONFIG    the config path, when -ConfigPath isn't
 #                                given
+#   OPEN_FERRY_INSTALL_MIGRATE   yes: as -Migrate; no: as -NoMigrate, when
+#                                neither is given
 #   OPEN_FERRY_INSTALL_BASE_URL  where releases are downloaded from, in
 #                                place of the GitHub repository's releases
 #                                URL (for a mirror, or a test server)
@@ -48,7 +62,9 @@ param(
     [string]$InstallDir,
     [string]$ConfigPath,
     [switch]$NoAttestation,
-    [switch]$NoAutoUpdate
+    [switch]$NoAutoUpdate,
+    [switch]$Migrate,
+    [switch]$NoMigrate
 )
 
 # Everything runs in this function, which ends by returning or throwing,
@@ -60,7 +76,9 @@ function Install-OpenFerry {
         [string]$InstallDir,
         [string]$ConfigPath,
         [bool]$NoAttestation,
-        [bool]$NoAutoUpdate
+        [bool]$NoAutoUpdate,
+        [bool]$Migrate,
+        [bool]$NoMigrate
     )
 
     $ErrorActionPreference = 'Stop'
@@ -109,6 +127,26 @@ function Install-OpenFerry {
     # commands to run from anywhere.
     $InstallDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($InstallDir)
     $ConfigPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ConfigPath)
+
+    # yes: switch from CLIProxyAPI without asking; no: don't look for it;
+    # ask: ask, when someone can be asked.
+    if ($Migrate -and $NoMigrate) { throw '-Migrate and -NoMigrate don''t go together' }
+    $migrateWhy = '-Migrate'
+    if ($Migrate) {
+        $migrateMode = 'yes'
+    } elseif ($NoMigrate) {
+        $migrateMode = 'no'
+    } else {
+        switch ("$env:OPEN_FERRY_INSTALL_MIGRATE") {
+            '' { $migrateMode = 'ask' }
+            { $_ -in '1', 'yes', 'true' } {
+                $migrateMode = 'yes'
+                $migrateWhy = "OPEN_FERRY_INSTALL_MIGRATE=$env:OPEN_FERRY_INSTALL_MIGRATE"
+            }
+            { $_ -in '0', 'no', 'false' } { $migrateMode = 'no' }
+            default { throw "OPEN_FERRY_INSTALL_MIGRATE is yes or no, not $env:OPEN_FERRY_INSTALL_MIGRATE" }
+        }
+    }
 
     # MAJOR.MINOR.PATCH with an optional pre-release part, as the release
     # workflow requires; a leading v is allowed.
@@ -291,9 +329,130 @@ function Install-OpenFerry {
         Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
     }
 
+    # How to run open-ferry in the commands printed from here on.
+    $trimmed = $InstallDir.TrimEnd('\')
+    $onPath = $false
+    foreach ($entry in ($env:Path -split ';')) {
+        if ($entry -and $entry.TrimEnd('\') -ieq $trimmed) { $onPath = $true }
+    }
+    $command = 'open-ferry'
+    if (-not $onPath) { $command = "& '" + $exe.Replace("'", "''") + "'" }
+    $quotedConfig = "'" + $ConfigPath.Replace("'", "''") + "'"
+
+    # --- CLIProxyAPI ---------------------------------------------------------
+
+    # open-ferry's standard output for $Arguments, read as the UTF-8 it
+    # writes, whatever the console's code page.
+    function Get-NativeOutput([string]$Exe, [string[]]$Arguments) {
+        $ErrorActionPreference = 'Continue'
+        $saved = $null
+        try {
+            $saved = [Console]::OutputEncoding
+            [Console]::OutputEncoding = New-Object Text.UTF8Encoding $false
+        } catch { }
+        try {
+            $lines = & $Exe @Arguments 2>$null
+            return (@($lines) -join "`n").Trim()
+        } catch {
+            return ''
+        } finally {
+            if ($null -ne $saved) {
+                try { [Console]::OutputEncoding = $saved } catch { }
+            }
+        }
+    }
+
+    # Whether someone can be asked: not when PowerShell runs
+    # -NonInteractive, where Read-Host fails.
+    function Test-CanAsk {
+        foreach ($arg in [Environment]::GetCommandLineArgs()) {
+            if ($arg -match '^(-|/)+noni') { return $false }
+        }
+        return $true
+    }
+
+    # `open-ferry migrate -json` only looks, and changes nothing. It prints
+    # one line of JSON: {"found":false} when there is no CLIProxyAPI.
+    $cpa = $null
+    $switched = $false
+    $switchFailed = $null
+    if ($migrateMode -ne 'no') {
+        $search = Get-NativeOutput $exe @('migrate', '-json')
+        $answer = $null
+        if ($search) {
+            try { $answer = $search | ConvertFrom-Json } catch { $answer = $null }
+        }
+        if ($null -ne $answer -and $answer.found -eq $true) {
+            $cpa = $answer
+        } elseif ($null -ne $answer -and $answer.found -eq $false -and -not $answer.error) {
+            if ($migrateMode -eq 'yes') {
+                Write-Host "CLIProxyAPI wasn't found, so there is nothing to switch ($migrateWhy)."
+            }
+        } else {
+            $why = ''
+            if ($null -ne $answer -and $answer.error) { $why = ": $($answer.error)" }
+            Write-Host "open-ferry couldn't look for CLIProxyAPI$why."
+            if ($migrateMode -eq 'yes') {
+                $switchFailed = "$migrateWhy was given, but open-ferry couldn't look for CLIProxyAPI. To look again: $command migrate -dry-run"
+            }
+        }
+    }
+    if ($null -ne $cpa) {
+        Write-Host ''
+        Write-Host "Found $($cpa.summary)."
+        $switchNow = $false
+        if ($cpa.can_switch -eq $true) {
+            Write-Host "open-ferry can take its place, on its config and credentials. To see how first, run: $command migrate -dry-run"
+            if ($migrateMode -eq 'yes') {
+                Write-Host "Switching to open-ferry ($migrateWhy)..."
+                $switchNow = $true
+            } else {
+                $reply = $null
+                if (Test-CanAsk) {
+                    Write-Host -NoNewline 'Switch to open-ferry now? [y/N] '
+                    try { $reply = Read-Host } catch { $reply = $null }
+                    if ($null -eq $reply) { Write-Host '' }
+                }
+                if ($null -eq $reply) {
+                    Write-Host "There is no one at a terminal to ask, so it isn't switched. To switch to open-ferry, run: $command migrate"
+                } elseif ($reply.Trim() -in 'y', 'yes') {
+                    $switchNow = $true
+                } else {
+                    Write-Host 'Not switching.'
+                }
+            }
+        } else {
+            Write-Host "open-ferry can't switch it as things are. To see why, and what to do, run: $command migrate -dry-run"
+            if ($migrateMode -eq 'yes') {
+                $switchFailed = "$migrateWhy was given, but CLIProxyAPI can't be switched as things are. To see why: $command migrate -dry-run"
+            }
+        }
+        if ($switchNow) {
+            Write-Host ''
+            if ((Invoke-Native { & $exe migrate -yes }) -eq 0) {
+                $switched = $true
+            } else {
+                $switchFailed = "The switch from CLIProxyAPI didn't finish: see what open-ferry migrate said above"
+            }
+        }
+        Write-Host ''
+    }
+
+    # --- The config ----------------------------------------------------------
+
     $wroteConfig = $false
+    $skippedInit = $false
     if (Test-Path -LiteralPath $ConfigPath) {
         Write-Host "Keeping your config at $ConfigPath."
+    } elseif ($null -ne $cpa) {
+        # A switch runs open-ferry on CLIProxyAPI's config: a starting
+        # config here would compete with it, on the same port.
+        $skippedInit = $true
+        if ($switched) {
+            Write-Host 'Not writing a starting config: open-ferry runs on CLIProxyAPI''s.'
+        } else {
+            Write-Host 'Not writing a starting config: switching keeps CLIProxyAPI''s.'
+        }
     } else {
         $wroteConfig = $true
         Write-Host 'Writing a starting config with open-ferry init...'
@@ -303,20 +462,28 @@ function Install-OpenFerry {
         }
         Write-Host ''
     }
-    if ($selfUpdate -and (Invoke-Native { & $exe update -mode $selfUpdate -config $ConfigPath }) -ne 0) {
-        throw "open-ferry update couldn't set self-update.mode to $selfUpdate in $ConfigPath"
+
+    # The config the update mode goes in: CLIProxyAPI's once open-ferry runs
+    # on it, else open-ferry's own, unless there is none yet. The server's
+    # first update check comes minutes after it starts, and it follows a
+    # change to its config at once.
+    $modeConfig = $ConfigPath
+    if ($switched) {
+        $modeConfig = [string]$cpa.config
+    } elseif ($skippedInit) {
+        $modeConfig = $null
+    }
+    if ($selfUpdate) {
+        if ($modeConfig) {
+            if ((Invoke-Native { & $exe update -mode $selfUpdate -config $modeConfig }) -ne 0) {
+                throw "open-ferry update couldn't set self-update.mode to $selfUpdate in $modeConfig"
+            }
+        } else {
+            Write-Host "There's no config yet to set self-update.mode to $selfUpdate in. Once open-ferry runs on one, run: $command update -mode $selfUpdate -config <config>"
+        }
     }
 
     # --- Next steps ----------------------------------------------------------
-
-    $trimmed = $InstallDir.TrimEnd('\')
-    $onPath = $false
-    foreach ($entry in ($env:Path -split ';')) {
-        if ($entry -and $entry.TrimEnd('\') -ieq $trimmed) { $onPath = $true }
-    }
-    $command = 'open-ferry'
-    if (-not $onPath) { $command = "& '" + $exe.Replace("'", "''") + "'" }
-    $quotedConfig = "'" + $ConfigPath.Replace("'", "''") + "'"
 
     Write-Host "open-ferry $Version is installed."
     if (-not $onPath) {
@@ -328,31 +495,60 @@ function Install-OpenFerry {
     }
     Write-Host ''
     Write-Host 'Next steps:'
-    Write-Host "  Start it:            $command -config $quotedConfig"
-    Write-Host "  Or run it at login:  $command service install -config $quotedConfig"
-    if ($wroteConfig) {
-        Write-Host '  Open the dashboard:  http://127.0.0.1:8317/dashboard/ and sign in with the management key above'
+    if ($switched) {
+        if ($cpa.config) {
+            Write-Host "  Check the setup:     $command check -config '$(([string]$cpa.config).Replace("'", "''"))'"
+        }
+        if ($null -ne $cpa.listen -and $cpa.listen.port) {
+            $scheme = 'http'
+            if ($cpa.listen.tls -eq $true) { $scheme = 'https' }
+            $hostName = [string]$cpa.listen.host
+            if ($hostName -in '', '0.0.0.0', '::') {
+                $hostName = '127.0.0.1'
+            } elseif ($hostName.Contains(':')) {
+                $hostName = "[$hostName]"
+            }
+            Write-Host "  Open the dashboard:  ${scheme}://${hostName}:$($cpa.listen.port)/dashboard/ and sign in with CLIProxyAPI's management key"
+        }
+        Write-Host "  Switch back:         $command migrate -undo"
     } else {
-        Write-Host "  Open the dashboard:  http://127.0.0.1:<port>/dashboard/, with your config's port (8317 by default)"
+        if ($null -ne $cpa) {
+            Write-Host "  Switch over:         $command migrate"
+        }
+        if (-not $skippedInit) {
+            Write-Host "  Start it:            $command -config $quotedConfig"
+            Write-Host "  Or run it at login:  $command service install -config $quotedConfig"
+            if ($wroteConfig) {
+                Write-Host '  Open the dashboard:  http://127.0.0.1:8317/dashboard/ and sign in with the management key above'
+            } else {
+                Write-Host "  Open the dashboard:  http://127.0.0.1:<port>/dashboard/, with your config's port (8317 by default)"
+            }
+            Write-Host "  Check the setup:     $command check -config $quotedConfig"
+        } else {
+            Write-Host "  Or start afresh:     $command init -config $quotedConfig"
+        }
     }
-    Write-Host "  Check the setup:     $command check -config $quotedConfig"
-    Write-Host ''
-    $off = "To turn that off: $command update -mode off -config $quotedConfig"
-    if ($selfUpdate -eq 'off') {
-        Write-Host "Automatic updates are off. To turn them on: $command update -mode auto -config $quotedConfig"
-    } elseif ($selfUpdate -eq 'notify') {
-        Write-Host "open-ferry says when a release is out, but doesn't install it. $off"
-    } elseif (-not $receiptOk) {
-        Write-Host "open-ferry says when a release is out. $off"
-    } elseif ($selfUpdate -or $wroteConfig) {
-        Write-Host "open-ferry keeps itself up to date. $off"
-    } else {
-        Write-Host "open-ferry keeps itself up to date, unless your config says otherwise. $off"
+    if ($modeConfig) {
+        $quotedMode = "'" + $modeConfig.Replace("'", "''") + "'"
+        Write-Host ''
+        $off = "To turn that off: $command update -mode off -config $quotedMode"
+        if ($selfUpdate -eq 'off') {
+            Write-Host "Automatic updates are off. To turn them on: $command update -mode auto -config $quotedMode"
+        } elseif ($selfUpdate -eq 'notify') {
+            Write-Host "open-ferry says when a release is out, but doesn't install it. $off"
+        } elseif (-not $receiptOk) {
+            Write-Host "open-ferry says when a release is out. $off"
+        } elseif ($selfUpdate -or $wroteConfig) {
+            Write-Host "open-ferry keeps itself up to date. $off"
+        } else {
+            Write-Host "open-ferry keeps itself up to date, unless your config says otherwise. $off"
+        }
     }
+    if ($switchFailed) { throw $switchFailed }
 }
 
 try {
-    Install-OpenFerry -Version $Version -InstallDir $InstallDir -ConfigPath $ConfigPath -NoAttestation $NoAttestation.IsPresent -NoAutoUpdate $NoAutoUpdate.IsPresent
+    Install-OpenFerry -Version $Version -InstallDir $InstallDir -ConfigPath $ConfigPath -NoAttestation $NoAttestation.IsPresent -NoAutoUpdate $NoAutoUpdate.IsPresent -Migrate $Migrate.IsPresent -NoMigrate $NoMigrate.IsPresent
 } catch {
     Write-Host "install.ps1: error: $($_.Exception.Message)" -ForegroundColor Red
     # Run as a file, the script exits with 1. Run from irm, it only returns,

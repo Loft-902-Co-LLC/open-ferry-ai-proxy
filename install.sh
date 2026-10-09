@@ -6,10 +6,15 @@
 # It downloads the release's archive for this system and checks it against
 # the release's SHA256SUMS, and, when the GitHub CLI (gh) is installed,
 # against the archive's build provenance attestation. It installs the
-# binary as ~/.local/bin/open-ferry, and, when there is no config at
-# $XDG_CONFIG_HOME/open-ferry/config.yaml (~/.config/open-ferry/config.yaml
-# when XDG_CONFIG_HOME isn't an absolute path), writes one with
-# `open-ferry init`. It edits no shell profile and no PATH.
+# binary as ~/.local/bin/open-ferry. Then it looks for CLIProxyAPI with
+# `open-ferry migrate -json`, which changes nothing. When it finds it, it
+# asks whether to switch it to open-ferry, which then runs on CLIProxyAPI's
+# config and credentials (`open-ferry migrate -yes`; see
+# docs/migrating-from-cliproxyapi.md). When it doesn't, and there is no
+# config at $XDG_CONFIG_HOME/open-ferry/config.yaml
+# (~/.config/open-ferry/config.yaml when XDG_CONFIG_HOME isn't an absolute
+# path), it writes one with `open-ferry init`. It edits no shell profile
+# and no PATH.
 #
 # Run `sh install.sh --help` for the options. Environment:
 #   OPEN_FERRY_INSTALL_BASE_URL  where releases are downloaded from, in
@@ -18,6 +23,7 @@
 #   OPEN_FERRY_INSTALL_GH        the GitHub CLI command (default: gh)
 #   OPEN_FERRY_INSTALL_SELF_UPDATE  off, notify or auto: set self-update.mode
 #                                in the config (--no-auto-update is off)
+#   OPEN_FERRY_INSTALL_MIGRATE   yes: as --migrate; no: as --no-migrate
 #
 # It writes install-receipt.json in open-ferry's data directory
 # ($XDG_DATA_HOME/open-ferry, or ~/.local/share/open-ferry), which lets the
@@ -49,7 +55,14 @@ Options:
                      when gh is installed; the SHA256SUMS check still runs
   --no-auto-update   turn automatic updates off (self-update.mode: off in
                      the config); open-ferry update -mode auto turns them on
+  --migrate          when CLIProxyAPI is found, switch it to open-ferry
+                     without asking, as for an unattended install; exits
+                     with 1 when it can't be switched
+  --no-migrate       don't look for CLIProxyAPI
   -h, --help         show this help
+
+Environment: OPEN_FERRY_INSTALL_MIGRATE=yes is --migrate, and
+OPEN_FERRY_INSTALL_MIGRATE=no is --no-migrate; the options win over it.
 EOF
 }
 
@@ -80,6 +93,8 @@ bin_dir=
 config=
 attestation=1
 self_update=${OPEN_FERRY_INSTALL_SELF_UPDATE:-}
+migrate=
+migrate_why=--migrate
 while [ "$#" -gt 0 ]; do
   case $1 in
     --version | --target | --bin-dir | --config)
@@ -115,6 +130,14 @@ while [ "$#" -gt 0 ]; do
       self_update=off
       shift
       ;;
+    --migrate)
+      migrate=yes
+      shift
+      ;;
+    --no-migrate)
+      migrate=no
+      shift
+      ;;
     -h | --help)
       usage
       exit 0
@@ -129,6 +152,17 @@ case $self_update in
   '' | off | notify | auto) ;;
   *) usage_error "OPEN_FERRY_INSTALL_SELF_UPDATE is \"$self_update\": use off, notify or auto" ;;
 esac
+if [ -z "$migrate" ]; then
+  case ${OPEN_FERRY_INSTALL_MIGRATE:-} in
+    '') migrate=ask ;;
+    1 | yes | true)
+      migrate=yes
+      migrate_why=OPEN_FERRY_INSTALL_MIGRATE=$OPEN_FERRY_INSTALL_MIGRATE
+      ;;
+    0 | no | false) migrate=no ;;
+    *) usage_error "OPEN_FERRY_INSTALL_MIGRATE is yes or no, not $OPEN_FERRY_INSTALL_MIGRATE" ;;
+  esac
+fi
 
 if [ -z "$bin_dir" ] || [ -z "$config" ]; then
   if [ -z "${HOME:-}" ]; then
@@ -378,23 +412,7 @@ else
   say "Couldn't write the install receipt ${receipt:-as HOME is unset}, so open-ferry won't update itself; it will say when a release is out."
 fi
 
-if [ -e "$config" ]; then
-  wrote_config=0
-  say "Keeping your config at $config."
-else
-  wrote_config=1
-  say "Writing a starting config with open-ferry init..."
-  say ""
-  "$installed" init -config "$config" || die "open-ferry init couldn't write $config"
-  say ""
-fi
-if [ -n "$self_update" ]; then
-  "$installed" update -mode "$self_update" -config "$config" ||
-    die "open-ferry update couldn't set self-update.mode to $self_update in $config"
-fi
-
-# --- Next steps --------------------------------------------------------------
-
+# How to run open-ferry in the commands printed from here on.
 command=open-ferry
 on_path=0
 case ":${PATH:-}:" in
@@ -406,6 +424,142 @@ if [ "$on_path" = 0 ]; then
     *) command=$installed ;;
   esac
 fi
+
+# --- CLIProxyAPI -------------------------------------------------------------
+
+# The string under the key $1 in $search, the one line of JSON that
+# `open-ferry migrate -json` prints, or nothing when it's null or missing.
+# The keys read here appear once, and a string's own quotes are escaped,
+# so a key can't be found inside a string.
+json_string() {
+  printf '%s\n' "$search" |
+    sed -n -E 's/^.*"'"$1"'":"(([^"\\]|\\.)*)".*$/\1/p' |
+    sed -e 's/\\"/"/g' -e 's/\\\\/\\/g'
+}
+
+# Whether someone at a terminal can answer: the output is a terminal and
+# /dev/tty opens. (Under `curl | sh`, the standard input is the script.)
+is_terminal() {
+  [ -t 1 ] && (: </dev/tty) 2>/dev/null
+}
+
+# `open-ferry migrate -json` only looks, and changes nothing. It answers
+# {"found":false} when there is no CLIProxyAPI.
+found_cpa=0
+switched=0
+switch_failed=
+if [ "$migrate" != no ]; then
+  search=$("$installed" migrate -json </dev/null 2>/dev/null || true)
+  case $search in
+    '{"found":true,'*) found_cpa=1 ;;
+    '{"found":false}')
+      if [ "$migrate" = yes ]; then
+        say "CLIProxyAPI wasn't found, so there is nothing to switch ($migrate_why)."
+      fi
+      ;;
+    *)
+      error=$(json_string error)
+      say "open-ferry couldn't look for CLIProxyAPI${error:+: $error}."
+      if [ "$migrate" = yes ]; then
+        switch_failed="$migrate_why was given, but open-ferry couldn't look for CLIProxyAPI. To look again: $command migrate -dry-run"
+      fi
+      ;;
+  esac
+fi
+if [ "$found_cpa" = 1 ]; then
+  cpa_config=$(json_string config)
+  cpa_host=$(json_string host)
+  case $cpa_host in
+    '' | 0.0.0.0 | ::) cpa_host=127.0.0.1 ;;
+    *:*) cpa_host="[$cpa_host]" ;;
+  esac
+  cpa_port=$(printf '%s\n' "$search" | sed -n -E 's/^.*"port":([0-9]+).*$/\1/p')
+  cpa_scheme=http
+  case $search in
+    *'"tls":true'*) cpa_scheme=https ;;
+  esac
+  say ""
+  say "Found $(json_string summary)."
+  switch_now=0
+  case $search in
+    *'"can_switch":true'*)
+      say "open-ferry can take its place, on its config and credentials. To see how first, run: $command migrate -dry-run"
+      if [ "$migrate" = yes ]; then
+        say "Switching to open-ferry ($migrate_why)..."
+        switch_now=1
+      elif is_terminal; then
+        printf '%s' "Switch to open-ferry now? [y/N] "
+        answer=
+        read -r answer </dev/tty || answer=
+        case $answer in
+          y | Y | yes | Yes | YES) switch_now=1 ;;
+          *) say "Not switching." ;;
+        esac
+      else
+        say "There is no one at a terminal to ask, so it isn't switched. To switch to open-ferry, run: $command migrate"
+      fi
+      ;;
+    *)
+      say "open-ferry can't switch it as things are. To see why, and what to do, run: $command migrate -dry-run"
+      if [ "$migrate" = yes ]; then
+        switch_failed="$migrate_why was given, but CLIProxyAPI can't be switched as things are. To see why: $command migrate -dry-run"
+      fi
+      ;;
+  esac
+  if [ "$switch_now" = 1 ]; then
+    say ""
+    if "$installed" migrate -yes </dev/null; then
+      switched=1
+    else
+      switch_failed="the switch from CLIProxyAPI didn't finish: see what open-ferry migrate said above"
+    fi
+  fi
+  say ""
+fi
+
+# --- The config --------------------------------------------------------------
+
+wrote_config=0
+skipped_init=0
+if [ -e "$config" ]; then
+  say "Keeping your config at $config."
+elif [ "$found_cpa" = 1 ]; then
+  # A switch runs open-ferry on CLIProxyAPI's config: a starting config
+  # here would compete with it, on the same port.
+  skipped_init=1
+  if [ "$switched" = 1 ]; then
+    say "Not writing a starting config: open-ferry runs on CLIProxyAPI's."
+  else
+    say "Not writing a starting config: switching keeps CLIProxyAPI's."
+  fi
+else
+  wrote_config=1
+  say "Writing a starting config with open-ferry init..."
+  say ""
+  "$installed" init -config "$config" || die "open-ferry init couldn't write $config"
+  say ""
+fi
+
+# The config the update mode goes in: CLIProxyAPI's once open-ferry runs on
+# it, else open-ferry's own, unless there is none yet. The server's first
+# update check comes minutes after it starts, and it follows a change to its
+# config at once.
+mode_config=$config
+if [ "$switched" = 1 ]; then
+  mode_config=$cpa_config
+elif [ "$skipped_init" = 1 ]; then
+  mode_config=
+fi
+if [ -n "$self_update" ]; then
+  if [ -n "$mode_config" ]; then
+    "$installed" update -mode "$self_update" -config "$mode_config" ||
+      die "open-ferry update couldn't set self-update.mode to $self_update in $mode_config"
+  else
+    say "There's no config yet to set self-update.mode to $self_update in. Once open-ferry runs on one, run: $command update -mode $self_update -config <config>"
+  fi
+fi
+
+# --- Next steps --------------------------------------------------------------
 
 say "open-ferry $version is installed."
 if [ "$on_path" = 0 ]; then
@@ -422,20 +576,42 @@ else
 fi
 say ""
 say "Next steps:"
-say "  Start it:            $command -config \"$config\""
-say "  Or run it at login:  $command service install -config \"$config\""
-if [ "$wrote_config" = 1 ]; then
-  say "  Open the dashboard:  http://127.0.0.1:8317/dashboard/ and sign in with the management key above"
+if [ "$switched" = 1 ]; then
+  if [ -n "$cpa_config" ]; then
+    say "  Check the setup:     $command check -config \"$cpa_config\""
+  fi
+  if [ -n "$cpa_port" ]; then
+    say "  Open the dashboard:  $cpa_scheme://$cpa_host:$cpa_port/dashboard/ and sign in with CLIProxyAPI's management key"
+  fi
+  say "  Switch back:         $command migrate -undo"
 else
-  say "  Open the dashboard:  http://127.0.0.1:<port>/dashboard/, with your config's port (8317 by default)"
+  if [ "$found_cpa" = 1 ]; then
+    say "  Switch over:         $command migrate"
+  fi
+  if [ "$skipped_init" = 0 ]; then
+    say "  Start it:            $command -config \"$config\""
+    say "  Or run it at login:  $command service install -config \"$config\""
+    if [ "$wrote_config" = 1 ]; then
+      say "  Open the dashboard:  http://127.0.0.1:8317/dashboard/ and sign in with the management key above"
+    else
+      say "  Open the dashboard:  http://127.0.0.1:<port>/dashboard/, with your config's port (8317 by default)"
+    fi
+    say "  Check the setup:     $command check -config \"$config\""
+  else
+    say "  Or start afresh:     $command init -config \"$config\""
+  fi
 fi
-say "  Check the setup:     $command check -config \"$config\""
-say ""
-off="To turn that off: $command update -mode off -config \"$config\""
-case $self_update:$receipt_ok:$wrote_config in
-  off:*) say "Automatic updates are off. To turn them on: $command update -mode auto -config \"$config\"" ;;
-  notify:*) say "open-ferry says when a release is out, but doesn't install it. $off" ;;
-  *:0:*) say "open-ferry says when a release is out. $off" ;;
-  auto:* | *:1) say "open-ferry keeps itself up to date. $off" ;;
-  *) say "open-ferry keeps itself up to date, unless your config says otherwise. $off" ;;
-esac
+if [ -n "$mode_config" ]; then
+  say ""
+  off="To turn that off: $command update -mode off -config \"$mode_config\""
+  case $self_update:$receipt_ok:$wrote_config in
+    off:*) say "Automatic updates are off. To turn them on: $command update -mode auto -config \"$mode_config\"" ;;
+    notify:*) say "open-ferry says when a release is out, but doesn't install it. $off" ;;
+    *:0:*) say "open-ferry says when a release is out. $off" ;;
+    auto:* | *:1) say "open-ferry keeps itself up to date. $off" ;;
+    *) say "open-ferry keeps itself up to date, unless your config says otherwise. $off" ;;
+  esac
+fi
+if [ -n "$switch_failed" ]; then
+  die "$switch_failed"
+fi

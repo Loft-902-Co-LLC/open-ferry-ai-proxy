@@ -7,7 +7,10 @@ A server on 127.0.0.1 serves fake releases in GitHub's layout:
 <base>/download/v<version>/<file>, and <base>/latest/download/<file>, which
 redirects to the latest release's, as GitHub's does. Their archives hold a
 fake open-ferry that records its arguments in a file and, for `init`, writes
-a config. One release's SHA256SUMS doesn't match its archives. The scripts'
+a config. For `migrate`, the search for CLIProxyAPI, it records its
+arguments in another file and answers as the test says: no test reads the
+system's processes, services or scheduled tasks, and none switches
+anything. One release's SHA256SUMS doesn't match its archives. The scripts'
 base URL (OPEN_FERRY_INSTALL_BASE_URL) is that server, and their GitHub CLI
 (OPEN_FERRY_INSTALL_GH) is a fake that records its arguments, or a name that
 isn't installed: nothing contacts GitHub.
@@ -51,6 +54,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import tarfile
 import tempfile
@@ -126,16 +130,42 @@ FAKE_OPEN_FERRY_SH = r"""#!/bin/sh
 # in FAKE_OPEN_FERRY_LOG, as a line of tab-separated fields after its name;
 # for `init -config PATH` writes a config, or fails if FAKE_OPEN_FERRY_FAIL
 # is set; and fails `update` if FAKE_OPEN_FERRY_UPDATE_FAIL is set.
+# `migrate` is recorded in FAKE_OPEN_FERRY_MIGRATE_LOG instead: `migrate
+# -json` prints FAKE_OPEN_FERRY_MIGRATE_JSON, or {"found":false} and exits
+# with 1 when it's empty, and `migrate -yes` exits with
+# FAKE_OPEN_FERRY_MIGRATE_EXIT (default 0).
+log=$FAKE_OPEN_FERRY_LOG
+if [ "${1:-}" = migrate ]; then
+  log=${FAKE_OPEN_FERRY_MIGRATE_LOG:-/dev/null}
+fi
 {
   printf '%s' '@NAME@'
   for arg in "$@"; do
     printf '\t%s' "$arg"
   done
   printf '\n'
-} >> "$FAKE_OPEN_FERRY_LOG"
+} >> "$log"
 if [ "${1:-}" = update ] && [ -n "${FAKE_OPEN_FERRY_UPDATE_FAIL:-}" ]; then
   echo "fake open-ferry: update failed" >&2
   exit 4
+fi
+if [ "${1:-}" = migrate ]; then
+  case "$*" in
+    "migrate -json")
+      if [ -z "${FAKE_OPEN_FERRY_MIGRATE_JSON:-}" ]; then
+        echo '{"found":false}'
+        exit 1
+      fi
+      printf '%s\n' "$FAKE_OPEN_FERRY_MIGRATE_JSON"
+      exit 0
+      ;;
+    "migrate -yes")
+      echo "fake open-ferry: switched"
+      exit "${FAKE_OPEN_FERRY_MIGRATE_EXIT:-0}"
+      ;;
+  esac
+  echo "fake open-ferry: unexpected arguments: $*" >&2
+  exit 2
 fi
 if [ "${1:-}" = init ]; then
   if [ -n "${FAKE_OPEN_FERRY_FAIL:-}" ]; then
@@ -156,6 +186,10 @@ FAKE_OPEN_FERRY_CS = r"""
 // its name; for `init -config PATH` writes a config, or fails if
 // FAKE_OPEN_FERRY_FAIL is set; fails `update` if FAKE_OPEN_FERRY_UPDATE_FAIL
 // is set; and for `sleep MS` sleeps, to stand for a running open-ferry.
+// `migrate` is recorded in FAKE_OPEN_FERRY_MIGRATE_LOG instead: `migrate
+// -json` prints FAKE_OPEN_FERRY_MIGRATE_JSON, or {"found":false} and exits
+// with 1 when it's empty, and `migrate -yes` exits with
+// FAKE_OPEN_FERRY_MIGRATE_EXIT (default 0).
 using System;
 using System.IO;
 using System.Text;
@@ -166,7 +200,8 @@ public static class FakeOpenFerry
     public static int Main(string[] args)
     {
         string name = "@NAME@";
-        string log = Environment.GetEnvironmentVariable("FAKE_OPEN_FERRY_LOG");
+        bool migrate = args.Length >= 1 && args[0] == "migrate";
+        string log = Environment.GetEnvironmentVariable(migrate ? "FAKE_OPEN_FERRY_MIGRATE_LOG" : "FAKE_OPEN_FERRY_LOG");
         if (!String.IsNullOrEmpty(log))
         {
             StringBuilder line = new StringBuilder(name);
@@ -176,6 +211,28 @@ public static class FakeOpenFerry
             }
             line.Append('\n');
             File.AppendAllText(log, line.ToString());
+        }
+        if (migrate)
+        {
+            if (args.Length == 2 && args[1] == "-json")
+            {
+                string json = Environment.GetEnvironmentVariable("FAKE_OPEN_FERRY_MIGRATE_JSON");
+                if (String.IsNullOrEmpty(json))
+                {
+                    Console.WriteLine("{\"found\":false}");
+                    return 1;
+                }
+                Console.WriteLine(json);
+                return 0;
+            }
+            if (args.Length == 2 && args[1] == "-yes")
+            {
+                Console.WriteLine("fake open-ferry: switched");
+                string exit = Environment.GetEnvironmentVariable("FAKE_OPEN_FERRY_MIGRATE_EXIT");
+                return String.IsNullOrEmpty(exit) ? 0 : Int32.Parse(exit);
+            }
+            Console.Error.WriteLine("fake open-ferry: unexpected arguments: " + String.Join(" ", args));
+            return 2;
         }
         if (args.Length == 2 && args[0] == "sleep")
         {
@@ -370,10 +427,59 @@ def clean_env():
     return env
 
 
-def run(command, env, timeout=180):
-    process = subprocess.run(command, env=env, stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout)
+def run(command, env, timeout=180, input=None):
+    """Runs command with input (bytes) as its standard input, or none."""
+    stdin = subprocess.DEVNULL if input is None else None
+    process = subprocess.run(command, env=env, stdin=stdin, input=input, capture_output=True, timeout=timeout)
     output = process.stdout.decode("utf-8", "replace") + process.stderr.decode("utf-8", "replace")
     return Result(process.returncode, output)
+
+
+def run_in_terminal(command, env, reply, timeout=180):
+    """Runs command on a new pseudo-terminal, which is its controlling
+    terminal and its standard input, output and error, and types reply when
+    it asks "[y/N]". Gives the Result, its output as the terminal showed
+    it, and whether it asked. POSIX only."""
+    import pty
+    import select
+    import warnings
+
+    with warnings.catch_warnings():
+        # The release server's thread runs in this process, and Python warns
+        # of a fork then; the child only runs exec.
+        warnings.simplefilter("ignore", DeprecationWarning)
+        pid, fd = pty.fork()
+    if pid == 0:
+        try:
+            os.execve(command[0], command, env)
+        finally:
+            os._exit(127)
+    output = b""
+    asked = False
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            if time.monotonic() > deadline:
+                os.kill(pid, signal.SIGKILL)  # the child this test started
+                break
+            ready, _, _ = select.select([fd], [], [], 0.5)
+            if not ready:
+                continue
+            try:
+                data = os.read(fd, 65536)
+            except OSError:  # Linux: the terminal closed as the child exited
+                break
+            if not data:
+                break
+            output += data
+            if not asked and b"[y/N] " in output:
+                os.write(fd, reply.encode() + b"\n")
+                asked = True
+    finally:
+        os.close(fd)
+    _, status = os.waitpid(pid, 0)
+    text = output.decode("utf-8", "replace").replace("\r\n", "\n")
+    return Result(os.waitstatus_to_exitcode(status), text), asked
 
 
 def wait_for(predicate, timeout=30):
@@ -390,6 +496,62 @@ def stop(process):
     if process.poll() is None:
         process.kill()
     process.wait(timeout=30)
+
+
+# --- CLIProxyAPI, as `open-ferry migrate -json` finds it ---------------------
+
+CPA_SUMMARY = "CLIProxyAPI (process 4242), started by the systemd user service cliproxyapi.service"
+CPA_CONFIG = "/home/me/my cpa/config.yaml"
+# On Windows, with a backslash in the summary and a quote in the config's
+# path, to check the JSON's reading and the commands' quoting.
+CPA_SUMMARY_WINDOWS = r"CLIProxyAPI (process 6060), started by the scheduled task \CLIProxyAPI"
+CPA_CONFIG_WINDOWS = r"C:\Users\me\Matt's cpa\config.yaml"
+
+
+def found_json(can_switch=True, summary=CPA_SUMMARY, config=CPA_CONFIG, host="", port=8317, tls=False):
+    """What `open-ferry migrate -json` prints when it finds CLIProxyAPI: one
+    line, with the keys in the order open-ferry writes them. A finding's
+    message holds what looks like the keys the scripts read, as a JSON
+    string may."""
+    found = {
+        "found": True,
+        "summary": summary,
+        "can_switch": can_switch,
+        "switch": "service",
+        "target": "systemd-user",
+        "process": {"pid": 4242, "exe": "/home/me/cpa/cli-proxy-api"},
+        "exe": "/home/me/cpa/cli-proxy-api",
+        "starter": {"kind": "systemd", "description": "the systemd user service cliproxyapi.service"},
+        "config": config,
+        "config_from": "its -config",
+        "working_dir": "/home/me/cpa",
+        "auth_dir": "/home/me/.cli-proxy-api",
+        "listen": {"host": host, "port": port, "tls": tls, "description": f"port {port} on every address (http)"},
+        "credentials": {"served": {"Codex": 1}, "not_served": {}, "other_files": 0, "unreadable": 0},
+        "claude_sign_ins": {"count": 0, "warning": None},
+        "carries_over": ["the config, with its API keys"],
+        "does_not_carry_over": [],
+        "check": [
+            {
+                "level": "warning",
+                "check": "config",
+                "message": 'it reads "port":9 and "config":"/elsewhere", "host":"x"',
+                "fix": "",
+            }
+        ],
+        "blockers": [] if can_switch else ["Switching a system service needs root. Run: sudo open-ferry migrate"],
+        "warnings": [],
+        "plan": ["Back up the config, its .env files and the auth directory."],
+        "good_to_know": [],
+        "backup_dir": "/home/me/cpa/open-ferry-migrate-20261008T120000Z",
+        "record": "/home/me/.config/open-ferry/migration.json",
+        "command": "/home/me/.local/bin/open-ferry migrate",
+    }
+    return json.dumps(found, separators=(",", ":"))
+
+
+SEARCH_ERROR = "couldn't list the processes"
+SEARCH_FAILED_JSON = json.dumps({"found": False, "error": SEARCH_ERROR}, separators=(",", ":"))
 
 
 # --- The fake releases -------------------------------------------------------
@@ -604,6 +766,7 @@ class InstallShTests(Case):
         self.bin_dir = os.path.join(self.work, "bin dir")
         self.config = os.path.join(self.work, "config dir", "open-ferry", "config.yaml")
         self.log = os.path.join(self.work, "open-ferry.log")
+        self.migrate_log = os.path.join(self.work, "migrate.log")
         self.gh_log = os.path.join(self.work, "gh.log")
 
     def env(self, path_first=(), **extra):
@@ -614,6 +777,7 @@ class InstallShTests(Case):
             OPEN_FERRY_INSTALL_BASE_URL=SERVER.url("good"),
             OPEN_FERRY_INSTALL_GH=NO_GH,
             FAKE_OPEN_FERRY_LOG=sh_path(self.log),
+            FAKE_OPEN_FERRY_MIGRATE_LOG=sh_path(self.migrate_log),
             FAKE_GH_LOG=sh_path(self.gh_log),
         )
         for key, value in extra.items():
@@ -664,7 +828,7 @@ class InstallShTests(Case):
     def reset(self):
         for path in (self.bin_dir, os.path.dirname(os.path.dirname(self.config))):
             shutil.rmtree(path, ignore_errors=True)
-        for path in (self.log, self.gh_log):
+        for path in (self.log, self.migrate_log, self.gh_log):
             if os.path.exists(path):
                 os.remove(path)
 
@@ -673,8 +837,10 @@ class InstallShTests(Case):
         self.assertExit(result, 0)
         name = self.assertInstalled(LATEST, GNU)
         self.assertEqual(read_log(self.log), [[name, "init", "-config", sh_path(self.config)]])
+        self.assertEqual(read_log(self.migrate_log), [[name, "migrate", "-json"]])
         self.assertEqual(read_text(self.config), f"fake-config: {name}\n")
         output = result.output
+        self.assertNotIn("CLIProxyAPI", output)
         lines = lines_of(output)
         self.assertIn(f"Downloading open-ferry {LATEST} for {GNU}...", lines)
         self.assertIn(f"Checked {name}.tar.gz against SHA256SUMS.", lines)
@@ -757,7 +923,8 @@ class InstallShTests(Case):
         result = self.run_sh("--help")
         self.assertExit(result, 0)
         self.assertIn("Usage: install.sh [options]", result.output)
-        self.assertIn("--no-attestation", result.output)
+        for option in ("--no-attestation", "--migrate", "--no-migrate", "OPEN_FERRY_INSTALL_MIGRATE=yes"):
+            self.assertIn(option, result.output)
 
     def test_checks_the_attestation_with_gh(self):
         result = self.run_sh("--target", GNU, *self.install_args(), OPEN_FERRY_INSTALL_GH=sh_path(os.path.join(FAKE_GH, "gh")))
@@ -924,6 +1091,223 @@ class InstallShTests(Case):
         self.assertExit(result, 0)
         self.assertInstalled(LATEST, GNU)
 
+    # --- CLIProxyAPI ---
+
+    def command(self):
+        """The installed binary as install.sh prints it, off PATH."""
+        return f'"{sh_path(self.bin_dir)}/open-ferry"'
+
+    def migrate_calls(self, name, switched):
+        return [[name, "migrate", "-json"]] + ([[name, "migrate", "-yes"]] if switched else [])
+
+    def assertSwitched(self, result, name, how):
+        self.assertEqual(read_log(self.migrate_log), self.migrate_calls(name, True))
+        self.assertEqual(read_log(self.log), [], "open-ferry init ran")
+        self.assertFalse(os.path.exists(self.config))
+        lines = lines_of(result.output)
+        self.assertIn(f"Found {CPA_SUMMARY}.", lines)
+        if how:
+            self.assertIn(f"Switching to open-ferry ({how})...", lines)
+        self.assertIn("fake open-ferry: switched", lines)
+        self.assertIn("Not writing a starting config: open-ferry runs on CLIProxyAPI's.", lines)
+        command = self.command()
+        self.assertIn(f'  Check the setup:     {command} check -config "{CPA_CONFIG}"', lines)
+        self.assertIn(
+            "  Open the dashboard:  http://127.0.0.1:8317/dashboard/ and sign in with CLIProxyAPI's management key",
+            lines,
+        )
+        self.assertIn(f"  Switch back:         {command} migrate -undo", lines)
+        self.assertNotIn("Switch over:", result.output)
+        self.assertNotIn("Start it:", result.output)
+
+    def assertNotSwitched(self, result, name):
+        self.assertEqual(read_log(self.migrate_log), self.migrate_calls(name, False))
+        self.assertEqual(read_log(self.log), [], "open-ferry init ran")
+        self.assertFalse(os.path.exists(self.config))
+        lines = lines_of(result.output)
+        self.assertIn(f"Found {CPA_SUMMARY}.", lines)
+        self.assertIn("Not writing a starting config: switching keeps CLIProxyAPI's.", lines)
+        command = self.command()
+        self.assertIn(f"  Switch over:         {command} migrate", lines)
+        self.assertIn(f'  Or start afresh:     {command} init -config "{sh_path(self.config)}"', lines)
+        self.assertNotIn("Start it:", result.output)
+        self.assertNotIn("Switch back:", result.output)
+
+    def test_finds_cliproxyapi_with_no_one_to_ask(self):
+        result = self.run_sh("--target", GNU, *self.install_args(), FAKE_OPEN_FERRY_MIGRATE_JSON=found_json())
+        self.assertExit(result, 0)
+        name = self.assertInstalled(LATEST, GNU)
+        self.assertNotSwitched(result, name)
+        command = self.command()
+        lines = lines_of(result.output)
+        self.assertIn(
+            "open-ferry can take its place, on its config and credentials."
+            f" To see how first, run: {command} migrate -dry-run",
+            lines,
+        )
+        self.assertIn(
+            f"There is no one at a terminal to ask, so it isn't switched. To switch to open-ferry, run: {command} migrate",
+            lines,
+        )
+        self.assertNotIn("[y/N]", result.output)
+
+    def test_switches_when_told_to(self):
+        cases = (
+            ("--migrate", ["--migrate"], {}, "--migrate"),
+            ("yes", [], {"OPEN_FERRY_INSTALL_MIGRATE": "yes"}, "OPEN_FERRY_INSTALL_MIGRATE=yes"),
+            ("1", [], {"OPEN_FERRY_INSTALL_MIGRATE": "1"}, "OPEN_FERRY_INSTALL_MIGRATE=1"),
+            ("--migrate over no", ["--migrate"], {"OPEN_FERRY_INSTALL_MIGRATE": "no"}, "--migrate"),
+        )
+        for label, flags, extra, how in cases:
+            with self.subTest(label):
+                self.reset()
+                result = self.run_sh(
+                    "--target", GNU, *self.install_args(*flags), FAKE_OPEN_FERRY_MIGRATE_JSON=found_json(), **extra
+                )
+                self.assertExit(result, 0)
+                name = self.assertInstalled(LATEST, GNU)
+                self.assertSwitched(result, name, how)
+
+    def test_opens_the_dashboard_where_cliproxyapi_listened(self):
+        cases = (
+            (dict(host="127.0.0.1", port=8318), "http://127.0.0.1:8318/dashboard/"),
+            (dict(host="0.0.0.0", port=9000), "http://127.0.0.1:9000/dashboard/"),
+            (dict(host="::1", port=8317, tls=True), "https://[::1]:8317/dashboard/"),
+            (dict(host="proxy.lan", port=443, tls=True), "https://proxy.lan:443/dashboard/"),
+        )
+        for listen, url in cases:
+            with self.subTest(**listen):
+                self.reset()
+                result = self.run_sh(
+                    "--target", GNU, *self.install_args("--migrate"), FAKE_OPEN_FERRY_MIGRATE_JSON=found_json(**listen)
+                )
+                self.assertExit(result, 0)
+                self.assertIn(
+                    f"  Open the dashboard:  {url} and sign in with CLIProxyAPI's management key",
+                    lines_of(result.output),
+                )
+
+    def test_fails_when_the_switch_fails(self):
+        result = self.run_sh(
+            "--target", GNU, *self.install_args("--migrate"),
+            FAKE_OPEN_FERRY_MIGRATE_JSON=found_json(), FAKE_OPEN_FERRY_MIGRATE_EXIT="1",
+        )
+        self.assertExit(result, 1)
+        name = self.assertInstalled(LATEST, GNU)
+        self.assertEqual(read_log(self.migrate_log), self.migrate_calls(name, True))
+        self.assertEqual(read_log(self.log), [], "open-ferry init ran")
+        self.assertIn(
+            "install.sh: error: the switch from CLIProxyAPI didn't finish: see what open-ferry migrate said above",
+            result.output,
+        )
+        self.assertIn(f"  Switch over:         {self.command()} migrate", lines_of(result.output))
+
+    def test_says_when_it_cannot_switch(self):
+        command = self.command()
+        for flags, code in (([], 0), (["--migrate"], 1)):
+            with self.subTest(flags=flags):
+                self.reset()
+                result = self.run_sh(
+                    "--target", GNU, *self.install_args(*flags), FAKE_OPEN_FERRY_MIGRATE_JSON=found_json(can_switch=False)
+                )
+                self.assertExit(result, code)
+                name = self.assertInstalled(LATEST, GNU)
+                self.assertNotSwitched(result, name)
+                self.assertIn(
+                    f"open-ferry can't switch it as things are. To see why, and what to do, run: {command} migrate -dry-run",
+                    lines_of(result.output),
+                )
+                self.assertNotIn("[y/N]", result.output)
+                if code:
+                    self.assertIn(
+                        "install.sh: error: --migrate was given, but CLIProxyAPI can't be switched as things are."
+                        f" To see why: {command} migrate -dry-run",
+                        result.output,
+                    )
+
+    def test_keeps_an_existing_config_when_it_finds_cliproxyapi(self):
+        write_file(self.config, "mine: true\n", mode=0o600)
+        result = self.run_sh("--target", GNU, *self.install_args(), FAKE_OPEN_FERRY_MIGRATE_JSON=found_json())
+        self.assertExit(result, 0)
+        name = self.assertInstalled(LATEST, GNU)
+        self.assertEqual(read_text(self.config), "mine: true\n")
+        self.assertEqual(read_log(self.migrate_log), self.migrate_calls(name, False))
+        self.assertEqual(read_log(self.log), [], "open-ferry init ran")
+        lines = lines_of(result.output)
+        command = self.command()
+        self.assertIn(f"Keeping your config at {sh_path(self.config)}.", lines)
+        self.assertIn(f"  Switch over:         {command} migrate", lines)
+        self.assertIn(f'  Start it:            {command} -config "{sh_path(self.config)}"', lines)
+
+    def test_does_not_look_when_told_not_to(self):
+        cases = (
+            ("--no-migrate", ["--no-migrate"], {}),
+            ("no", [], {"OPEN_FERRY_INSTALL_MIGRATE": "no"}),
+            ("0", [], {"OPEN_FERRY_INSTALL_MIGRATE": "0"}),
+            ("--no-migrate over yes", ["--no-migrate"], {"OPEN_FERRY_INSTALL_MIGRATE": "yes"}),
+        )
+        for label, flags, extra in cases:
+            with self.subTest(label):
+                self.reset()
+                result = self.run_sh(
+                    "--target", GNU, *self.install_args(*flags), FAKE_OPEN_FERRY_MIGRATE_JSON=found_json(), **extra
+                )
+                self.assertExit(result, 0)
+                name = self.assertInstalled(LATEST, GNU)
+                self.assertEqual(read_log(self.migrate_log), [])
+                self.assertEqual(read_log(self.log), [[name, "init", "-config", sh_path(self.config)]])
+                self.assertNotIn("CLIProxyAPI", result.output)
+
+    def test_says_when_there_is_nothing_to_switch(self):
+        result = self.run_sh("--target", GNU, *self.install_args("--migrate"))
+        self.assertExit(result, 0)
+        name = self.assertInstalled(LATEST, GNU)
+        self.assertEqual(read_log(self.migrate_log), self.migrate_calls(name, False))
+        self.assertEqual(read_log(self.log), [[name, "init", "-config", sh_path(self.config)]])
+        self.assertIn("CLIProxyAPI wasn't found, so there is nothing to switch (--migrate).", lines_of(result.output))
+
+    def test_goes_on_when_the_search_fails(self):
+        for flags, code in (([], 0), (["--migrate"], 1)):
+            with self.subTest(flags=flags):
+                self.reset()
+                result = self.run_sh(
+                    "--target", GNU, *self.install_args(*flags), FAKE_OPEN_FERRY_MIGRATE_JSON=SEARCH_FAILED_JSON
+                )
+                self.assertExit(result, code)
+                name = self.assertInstalled(LATEST, GNU)
+                self.assertEqual(read_log(self.log), [[name, "init", "-config", sh_path(self.config)]])
+                self.assertIn(f"open-ferry couldn't look for CLIProxyAPI: {SEARCH_ERROR}.", lines_of(result.output))
+                if code:
+                    self.assertIn(
+                        "install.sh: error: --migrate was given, but open-ferry couldn't look for CLIProxyAPI.",
+                        result.output,
+                    )
+
+    def test_refuses_a_bad_migrate_setting(self):
+        result = self.run_sh("--target", GNU, *self.install_args(), OPEN_FERRY_INSTALL_MIGRATE="maybe")
+        self.assertExit(result, 2)
+        self.assertIn("OPEN_FERRY_INSTALL_MIGRATE is yes or no, not maybe", result.output)
+        self.assertNothingInstalled()
+
+    @unittest.skipIf(WINDOWS, "a pseudo-terminal is POSIX's")
+    def test_asks_at_a_terminal(self):
+        for reply, switches in (("y", True), ("yes", True), ("n", False), ("", False)):
+            with self.subTest(reply=reply):
+                self.reset()
+                command = [SH, INSTALL_SH, "--target", GNU, *self.install_args()]
+                result, asked = run_in_terminal(command, self.env(FAKE_OPEN_FERRY_MIGRATE_JSON=found_json()), reply)
+                self.assertTrue(asked, result.output)
+                self.assertExit(result, 0)
+                name = self.assertInstalled(LATEST, GNU)
+                self.assertIn(f"Found {CPA_SUMMARY}.\n", result.output)
+                self.assertIn("Switch to open-ferry now? [y/N] ", result.output)
+                self.assertNotIn("no one at a terminal", result.output)
+                if switches:
+                    self.assertSwitched(result, name, None)
+                else:
+                    self.assertNotSwitched(result, name)
+                    self.assertIn("Not switching.", lines_of(result.output))
+
     # uname -s, uname -m, glibc, Rosetta, the target, the note on it
     DETECTIONS = (
         ("Linux", "x86_64", "2.39", "", "x86_64-unknown-linux-gnu", None),
@@ -1035,6 +1419,7 @@ class InstallPs1Cases:
         self.config = os.path.join(self.work, "App Data", "Matt's open-ferry", "config.yaml")
         self.exe = os.path.join(self.install_dir, "open-ferry.exe")
         self.log = os.path.join(self.work, "open-ferry.log")
+        self.migrate_log = os.path.join(self.work, "migrate.log")
         self.gh_log = os.path.join(self.work, "gh.log")
         self.local = os.path.join(self.work, "LocalAppData")
         self.roaming = os.path.join(self.work, "AppData")
@@ -1052,6 +1437,7 @@ class InstallPs1Cases:
             OPEN_FERRY_INSTALL_BASE_URL=SERVER.url("good"),
             OPEN_FERRY_INSTALL_GH=NO_GH,
             FAKE_OPEN_FERRY_LOG=self.log,
+            FAKE_OPEN_FERRY_MIGRATE_LOG=self.migrate_log,
             FAKE_GH_LOG=self.gh_log,
         )
         for key, value in extra.items():
@@ -1113,7 +1499,9 @@ class InstallPs1Cases:
         self.assertExit(result, 0)
         name = self.assertInstalled(LATEST)
         self.assertEqual(read_log(self.log), [[name, "init", "-config", self.config]])
+        self.assertEqual(read_log(self.migrate_log), [[name, "migrate", "-json"]])
         self.assertEqual(read_text(self.config), f"fake-config: {name}\n")
+        self.assertNotIn("CLIProxyAPI", result.output)
         lines = lines_of(result.output)
         self.assertIn(f"Downloading open-ferry {LATEST} for {WINDOWS_TARGET}...", lines)
         self.assertIn(f"Checked {name}.zip against SHA256SUMS.", lines)
@@ -1378,6 +1766,263 @@ class InstallPs1Cases:
         self.assertExit(result, 1)
         self.assertIn("fake open-ferry: init failed", result.output)
         self.assertIn(f"open-ferry init couldn't write {self.config}", result.output)
+
+    # --- CLIProxyAPI ---
+
+    def command(self):
+        """The installed open-ferry.exe as install.ps1 prints it, off PATH."""
+        return "& " + ps_quote(self.exe)
+
+    def found(self, **listen):
+        return found_json(summary=CPA_SUMMARY_WINDOWS, config=CPA_CONFIG_WINDOWS, **listen)
+
+    def run_asking(self, reply, *args, **extra):
+        """Runs install.ps1 in a PowerShell that isn't -NonInteractive, so
+        that it may ask, with reply (bytes) as its input, or none."""
+        command = [self.shell, "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", INSTALL_PS1, *args]
+        return run(command, self.env(**extra), input=reply)
+
+    def migrate_calls(self, name, switched):
+        return [[name, "migrate", "-json"]] + ([[name, "migrate", "-yes"]] if switched else [])
+
+    def assertSwitched(self, result, name, how):
+        self.assertEqual(read_log(self.migrate_log), self.migrate_calls(name, True))
+        self.assertEqual(read_log(self.log), [], "open-ferry init ran")
+        self.assertFalse(os.path.exists(self.config))
+        lines = lines_of(result.output)
+        self.assertIn(f"Found {CPA_SUMMARY_WINDOWS}.", lines)
+        if how:
+            self.assertIn(f"Switching to open-ferry ({how})...", lines)
+        self.assertIn("fake open-ferry: switched", lines)
+        self.assertIn("Not writing a starting config: open-ferry runs on CLIProxyAPI's.", lines)
+        command = self.command()
+        self.assertIn(f"  Check the setup:     {command} check -config {ps_quote(CPA_CONFIG_WINDOWS)}", lines)
+        self.assertIn(
+            "  Open the dashboard:  http://127.0.0.1:8317/dashboard/ and sign in with CLIProxyAPI's management key",
+            lines,
+        )
+        self.assertIn(f"  Switch back:         {command} migrate -undo", lines)
+        self.assertNotIn("Switch over:", result.output)
+        self.assertNotIn("Start it:", result.output)
+
+    def assertNotSwitched(self, result, name):
+        self.assertEqual(read_log(self.migrate_log), self.migrate_calls(name, False))
+        self.assertEqual(read_log(self.log), [], "open-ferry init ran")
+        self.assertFalse(os.path.exists(self.config))
+        lines = lines_of(result.output)
+        self.assertIn(f"Found {CPA_SUMMARY_WINDOWS}.", lines)
+        self.assertIn("Not writing a starting config: switching keeps CLIProxyAPI's.", lines)
+        command = self.command()
+        self.assertIn(f"  Switch over:         {command} migrate", lines)
+        self.assertIn(f"  Or start afresh:     {command} init -config {ps_quote(self.config)}", lines)
+        self.assertNotIn("Start it:", result.output)
+        self.assertNotIn("Switch back:", result.output)
+
+    def test_finds_cliproxyapi_with_no_one_to_ask(self):
+        command = self.command()
+        cases = (
+            ("-NonInteractive", lambda: self.run_file(*self.install_args(), FAKE_OPEN_FERRY_MIGRATE_JSON=self.found())),
+            ("no input", lambda: self.run_asking(None, *self.install_args(), FAKE_OPEN_FERRY_MIGRATE_JSON=self.found())),
+            ("empty input", lambda: self.run_asking(b"", *self.install_args(), FAKE_OPEN_FERRY_MIGRATE_JSON=self.found())),
+        )
+        for label, install in cases:
+            with self.subTest(label):
+                shutil.rmtree(self.install_dir, ignore_errors=True)
+                for path in (self.migrate_log, self.log):
+                    if os.path.exists(path):
+                        os.remove(path)
+                result = install()
+                self.assertExit(result, 0)
+                name = self.assertInstalled(LATEST)
+                self.assertNotSwitched(result, name)
+                lines = lines_of(result.output)
+                self.assertIn(
+                    "open-ferry can take its place, on its config and credentials."
+                    f" To see how first, run: {command} migrate -dry-run",
+                    lines,
+                )
+                self.assertIn(
+                    "There is no one at a terminal to ask, so it isn't switched."
+                    f" To switch to open-ferry, run: {command} migrate",
+                    lines,
+                )
+                if label == "-NonInteractive":
+                    self.assertNotIn("[y/N]", result.output)
+
+    def test_asks_when_it_can(self):
+        for reply, switches in ((b"y\r\n", True), (b"Yes\n", True), (b"n\r\n", False), (b"\r\n", False)):
+            with self.subTest(reply=reply):
+                shutil.rmtree(self.install_dir, ignore_errors=True)
+                for path in (self.migrate_log, self.log):
+                    if os.path.exists(path):
+                        os.remove(path)
+                result = self.run_asking(reply, *self.install_args(), FAKE_OPEN_FERRY_MIGRATE_JSON=self.found())
+                self.assertExit(result, 0)
+                name = self.assertInstalled(LATEST)
+                self.assertIn("Switch to open-ferry now? [y/N] ", result.output)
+                self.assertNotIn("no one at a terminal", result.output)
+                if switches:
+                    self.assertSwitched(result, name, None)
+                else:
+                    self.assertNotSwitched(result, name)
+                    self.assertIn("Not switching.", lines_of(result.output))
+
+    def test_switches_when_told_to(self):
+        cases = (
+            ("-Migrate", ["-Migrate"], {}, "-Migrate"),
+            ("yes", [], {"OPEN_FERRY_INSTALL_MIGRATE": "yes"}, "OPEN_FERRY_INSTALL_MIGRATE=yes"),
+            ("true", [], {"OPEN_FERRY_INSTALL_MIGRATE": "true"}, "OPEN_FERRY_INSTALL_MIGRATE=true"),
+            ("-Migrate over no", ["-Migrate"], {"OPEN_FERRY_INSTALL_MIGRATE": "no"}, "-Migrate"),
+        )
+        for label, flags, extra, how in cases:
+            with self.subTest(label):
+                shutil.rmtree(self.install_dir, ignore_errors=True)
+                if os.path.exists(self.migrate_log):
+                    os.remove(self.migrate_log)
+                result = self.run_file(
+                    *self.install_args(*flags), FAKE_OPEN_FERRY_MIGRATE_JSON=self.found(), **extra
+                )
+                self.assertExit(result, 0)
+                name = self.assertInstalled(LATEST)
+                self.assertSwitched(result, name, how)
+
+    def test_switches_from_irm_as_a_script_block(self):
+        result = self.run_command(
+            f"& ([scriptblock]::Create((irm {self.script_url()})))"
+            f" -InstallDir {ps_quote(self.install_dir)} -ConfigPath {ps_quote(self.config)} -Migrate",
+            FAKE_OPEN_FERRY_MIGRATE_JSON=self.found(),
+        )
+        self.assertExit(result, 0)
+        name = self.assertInstalled(LATEST)
+        self.assertSwitched(result, name, "-Migrate")
+
+    def test_opens_the_dashboard_where_cliproxyapi_listened(self):
+        cases = (
+            (dict(host="127.0.0.1", port=8318), "http://127.0.0.1:8318/dashboard/"),
+            (dict(host="0.0.0.0", port=9000), "http://127.0.0.1:9000/dashboard/"),
+            (dict(host="::1", port=8317, tls=True), "https://[::1]:8317/dashboard/"),
+        )
+        for listen, url in cases:
+            with self.subTest(**listen):
+                shutil.rmtree(self.install_dir, ignore_errors=True)
+                result = self.run_file(*self.install_args("-Migrate"), FAKE_OPEN_FERRY_MIGRATE_JSON=self.found(**listen))
+                self.assertExit(result, 0)
+                self.assertIn(
+                    f"  Open the dashboard:  {url} and sign in with CLIProxyAPI's management key",
+                    lines_of(result.output),
+                )
+
+    def test_fails_when_the_switch_fails(self):
+        result = self.run_file(
+            *self.install_args("-Migrate"), FAKE_OPEN_FERRY_MIGRATE_JSON=self.found(), FAKE_OPEN_FERRY_MIGRATE_EXIT="1"
+        )
+        self.assertExit(result, 1)
+        name = self.assertInstalled(LATEST)
+        self.assertEqual(read_log(self.migrate_log), self.migrate_calls(name, True))
+        self.assertEqual(read_log(self.log), [], "open-ferry init ran")
+        self.assertIn(
+            "install.ps1: error: The switch from CLIProxyAPI didn't finish: see what open-ferry migrate said above",
+            result.output,
+        )
+        self.assertIn(f"  Switch over:         {self.command()} migrate", lines_of(result.output))
+
+    def test_says_when_it_cannot_switch(self):
+        command = self.command()
+        for flags, code in (([], 0), (["-Migrate"], 1)):
+            with self.subTest(flags=flags):
+                shutil.rmtree(self.install_dir, ignore_errors=True)
+                if os.path.exists(self.migrate_log):
+                    os.remove(self.migrate_log)
+                result = self.run_file(
+                    *self.install_args(*flags), FAKE_OPEN_FERRY_MIGRATE_JSON=self.found(can_switch=False)
+                )
+                self.assertExit(result, code)
+                name = self.assertInstalled(LATEST)
+                self.assertNotSwitched(result, name)
+                self.assertIn(
+                    f"open-ferry can't switch it as things are. To see why, and what to do, run: {command} migrate -dry-run",
+                    lines_of(result.output),
+                )
+                if code:
+                    self.assertIn(
+                        "install.ps1: error: -Migrate was given, but CLIProxyAPI can't be switched as things are."
+                        f" To see why: {command} migrate -dry-run",
+                        result.output,
+                    )
+
+    def test_keeps_an_existing_config_when_it_finds_cliproxyapi(self):
+        write_file(self.config, "mine: true\n", mode=0o600)
+        result = self.run_file(*self.install_args(), FAKE_OPEN_FERRY_MIGRATE_JSON=self.found())
+        self.assertExit(result, 0)
+        name = self.assertInstalled(LATEST)
+        self.assertEqual(read_text(self.config), "mine: true\n")
+        self.assertEqual(read_log(self.migrate_log), self.migrate_calls(name, False))
+        self.assertEqual(read_log(self.log), [], "open-ferry init ran")
+        lines = lines_of(result.output)
+        command = self.command()
+        self.assertIn(f"Keeping your config at {self.config}.", lines)
+        self.assertIn(f"  Switch over:         {command} migrate", lines)
+        self.assertIn(f"  Start it:            {command} -config {ps_quote(self.config)}", lines)
+
+    def test_does_not_look_when_told_not_to(self):
+        cases = (
+            ("-NoMigrate", ["-NoMigrate"], {}),
+            ("no", [], {"OPEN_FERRY_INSTALL_MIGRATE": "no"}),
+            ("false", [], {"OPEN_FERRY_INSTALL_MIGRATE": "false"}),
+            ("-NoMigrate over yes", ["-NoMigrate"], {"OPEN_FERRY_INSTALL_MIGRATE": "yes"}),
+        )
+        for label, flags, extra in cases:
+            with self.subTest(label):
+                shutil.rmtree(self.install_dir, ignore_errors=True)
+                shutil.rmtree(os.path.dirname(self.config), ignore_errors=True)
+                if os.path.exists(self.log):
+                    os.remove(self.log)
+                result = self.run_file(
+                    *self.install_args(*flags), FAKE_OPEN_FERRY_MIGRATE_JSON=self.found(), **extra
+                )
+                self.assertExit(result, 0)
+                name = self.assertInstalled(LATEST)
+                self.assertEqual(read_log(self.migrate_log), [])
+                self.assertEqual(read_log(self.log), [[name, "init", "-config", self.config]])
+                self.assertNotIn("CLIProxyAPI", result.output)
+
+    def test_says_when_there_is_nothing_to_switch(self):
+        result = self.run_file(*self.install_args("-Migrate"))
+        self.assertExit(result, 0)
+        name = self.assertInstalled(LATEST)
+        self.assertEqual(read_log(self.migrate_log), self.migrate_calls(name, False))
+        self.assertEqual(read_log(self.log), [[name, "init", "-config", self.config]])
+        self.assertIn("CLIProxyAPI wasn't found, so there is nothing to switch (-Migrate).", lines_of(result.output))
+
+    def test_goes_on_when_the_search_fails(self):
+        for flags, code in (([], 0), (["-Migrate"], 1)):
+            with self.subTest(flags=flags):
+                shutil.rmtree(self.install_dir, ignore_errors=True)
+                shutil.rmtree(os.path.dirname(self.config), ignore_errors=True)
+                if os.path.exists(self.log):
+                    os.remove(self.log)
+                result = self.run_file(*self.install_args(*flags), FAKE_OPEN_FERRY_MIGRATE_JSON=SEARCH_FAILED_JSON)
+                self.assertExit(result, code)
+                name = self.assertInstalled(LATEST)
+                self.assertEqual(read_log(self.log), [[name, "init", "-config", self.config]])
+                self.assertIn(f"open-ferry couldn't look for CLIProxyAPI: {SEARCH_ERROR}.", lines_of(result.output))
+                if code:
+                    self.assertIn(
+                        "install.ps1: error: -Migrate was given, but open-ferry couldn't look for CLIProxyAPI.",
+                        result.output,
+                    )
+
+    def test_refuses_bad_migrate_settings(self):
+        cases = (
+            (["-Migrate", "-NoMigrate"], {}, "-Migrate and -NoMigrate don't go together"),
+            ([], {"OPEN_FERRY_INSTALL_MIGRATE": "maybe"}, "OPEN_FERRY_INSTALL_MIGRATE is yes or no, not maybe"),
+        )
+        for flags, extra, message in cases:
+            with self.subTest(message):
+                result = self.run_file(*self.install_args(*flags), **extra)
+                self.assertExit(result, 1)
+                self.assertIn(f"install.ps1: error: {message}", result.output)
+                self.assertNothingInstalled()
 
     def test_architectures(self):
         cases = (
