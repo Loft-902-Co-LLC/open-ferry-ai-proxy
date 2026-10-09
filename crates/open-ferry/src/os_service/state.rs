@@ -5,7 +5,7 @@
 //!
 //! Not upstream's: upstream has no `service`.
 
-use super::{Account, Cmd, Context, SERVICE_NAME, System, Target, launchd, windows};
+use super::{Account, Cmd, Context, Output, SERVICE_NAME, System, Target, launchd, windows};
 
 /// What `launchctl print` exits with for a job that isn't loaded.
 const LAUNCHD_NOT_FOUND: i32 = 113;
@@ -71,35 +71,8 @@ pub(crate) fn service_state(
         Err(error) => return ServiceState::Unknown(format!("failed to run `{cmd}`: {error}")),
     };
     match target {
-        Target::SystemdUser | Target::SystemdSystem => {
-            if !output.success() {
-                return ServiceState::Unknown(format!("`{cmd}` failed with {}", output.failure()));
-            }
-            let value = |name: &str| {
-                output
-                    .stdout
-                    .lines()
-                    .find_map(|line| line.trim().strip_prefix(name)?.strip_prefix('='))
-                    .map(|value| value.trim().to_owned())
-            };
-            if value("LoadState").as_deref() == Some("not-found") {
-                return ServiceState::Gone;
-            }
-            match value("ActiveState").as_deref() {
-                Some("inactive" | "failed") => ServiceState::Stopped,
-                Some(active) => ServiceState::Running(active.to_owned()),
-                None => ServiceState::Unknown(format!("`{cmd}` didn't print ActiveState")),
-            }
-        }
-        Target::LaunchAgent | Target::LaunchDaemon => {
-            if output.success() {
-                ServiceState::Running("loaded".to_owned())
-            } else if output.code == Some(LAUNCHD_NOT_FOUND) {
-                ServiceState::Gone
-            } else {
-                ServiceState::Unknown(format!("`{cmd}` failed with {}", output.failure()))
-            }
-        }
+        Target::SystemdUser | Target::SystemdSystem => systemd_state(&cmd, &output),
+        Target::LaunchAgent | Target::LaunchDaemon => launchd_state(&cmd, &output),
         // The task scheduler says only that the query failed. The list of
         // tasks says whether the task is there: when it can't be had
         // either, the state is not known, which is never "ended".
@@ -115,15 +88,56 @@ pub(crate) fn service_state(
                 _ => ServiceState::Unknown(format!("`{cmd}` failed with {}", output.failure())),
             }
         }
-        Target::WindowsService => match output.code {
-            Some(windows::SERVICE_DOES_NOT_EXIST) => ServiceState::Gone,
-            Some(0) => match windows::service_state_number(&output.stdout) {
-                Some(windows::SERVICE_STOPPED) => ServiceState::Stopped,
-                Some(windows::SERVICE_RUNNING) => ServiceState::Running("running".to_owned()),
-                Some(other) => ServiceState::Running(format!("in state {other}")),
-                None => ServiceState::Unknown(format!("`{cmd}` didn't print a STATE")),
-            },
-            _ => ServiceState::Unknown(format!("`{cmd}` failed with {}", output.failure())),
+        Target::WindowsService => windows_service_state(&cmd, &output),
+    }
+}
+
+/// How a systemd unit stands, from `output` of `cmd`, which is `systemctl
+/// show <unit> --property=LoadState,ActiveState`.
+pub(crate) fn systemd_state(cmd: &Cmd, output: &Output) -> ServiceState {
+    if !output.success() {
+        return ServiceState::Unknown(format!("`{cmd}` failed with {}", output.failure()));
+    }
+    let value = |name: &str| {
+        output
+            .stdout
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(name)?.strip_prefix('='))
+            .map(|value| value.trim().to_owned())
+    };
+    if value("LoadState").as_deref() == Some("not-found") {
+        return ServiceState::Gone;
+    }
+    match value("ActiveState").as_deref() {
+        Some("inactive" | "failed") => ServiceState::Stopped,
+        Some(active) => ServiceState::Running(active.to_owned()),
+        None => ServiceState::Unknown(format!("`{cmd}` didn't print ActiveState")),
+    }
+}
+
+/// How a launchd job stands, from `output` of `cmd`, which is `launchctl
+/// print <domain>/<label>`: a job that is not loaded is not found.
+pub(crate) fn launchd_state(cmd: &Cmd, output: &Output) -> ServiceState {
+    if output.success() {
+        ServiceState::Running("loaded".to_owned())
+    } else if output.code == Some(LAUNCHD_NOT_FOUND) {
+        ServiceState::Gone
+    } else {
+        ServiceState::Unknown(format!("`{cmd}` failed with {}", output.failure()))
+    }
+}
+
+/// How a Windows service stands, from `output` of `cmd`, which is `sc.exe
+/// query <name>`: only the number on the STATE line says.
+pub(crate) fn windows_service_state(cmd: &Cmd, output: &Output) -> ServiceState {
+    match output.code {
+        Some(windows::SERVICE_DOES_NOT_EXIST) => ServiceState::Gone,
+        Some(0) => match windows::service_state_number(&output.stdout) {
+            Some(windows::SERVICE_STOPPED) => ServiceState::Stopped,
+            Some(windows::SERVICE_RUNNING) => ServiceState::Running("running".to_owned()),
+            Some(other) => ServiceState::Running(format!("in state {other}")),
+            None => ServiceState::Unknown(format!("`{cmd}` didn't print a STATE")),
         },
+        _ => ServiceState::Unknown(format!("`{cmd}` failed with {}", output.failure())),
     }
 }

@@ -47,7 +47,9 @@ mod systemd;
 #[cfg(test)]
 mod tests;
 mod windows;
-pub(crate) use state::service_state;
+pub(crate) use state::{
+    ServiceState, launchd_state, service_state, systemd_state, windows_service_state,
+};
 pub(crate) use windows::{SERVICE_RUNNING, service_state_number, user_identity};
 
 use std::collections::BTreeMap;
