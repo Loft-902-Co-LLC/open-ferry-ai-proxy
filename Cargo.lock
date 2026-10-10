@@ -1772,6 +1772,7 @@ dependencies = [
  "open-ferry-management",
  "open-ferry-providers",
  "open-ferry-server",
+ "open-ferry-supervisor",
  "open-ferry-translate",
  "open-ferry-tui",
  "open-ferry-update",

@@ -64,7 +64,15 @@ async fn start(service: &Service, tls: Option<Arc<rustls::ServerConfig>>) -> Ser
         listener,
     };
     let (stop, stopped) = watch::channel(false);
-    let server = spawn(service, main, separate, tls, Router::new(), stopped);
+    let server = spawn(
+        service,
+        super::super::serve_loop::ServeControl::new(),
+        main,
+        separate,
+        tls,
+        Router::new(),
+        stopped,
+    );
     Served {
         main: main_addr,
         management,
