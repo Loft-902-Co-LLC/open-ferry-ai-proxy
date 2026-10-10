@@ -2069,6 +2069,38 @@ async fn finish_cannot_be_extended_by_a_blocked_flusher() {
 }
 
 #[tokio::test]
+async fn finish_cannot_be_extended_by_a_held_log_writer() {
+    use tracing_subscriber::prelude::*;
+    let dir = tempfile::tempdir().unwrap();
+    let (layer, file_log) = crate::file_log::init();
+    file_log.configure(dir.path(), true, 0);
+    let (release, held) = std::sync::mpsc::channel();
+    file_log.hold(held);
+    let subscriber = tracing_subscriber::registry().with(layer);
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::info!("queued behind the held writer");
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+    let code = tokio::time::timeout_at(
+        deadline + Duration::from_millis(150),
+        super::super::finish(ExitCode::FAILURE, deadline, &file_log),
+    )
+    .await;
+    // finish's own timeout would hide a flush that ignores its time left, so
+    // check that bound too while the writer is still held.
+    let log = file_log.clone();
+    let flushed = tokio::task::spawn_blocking(move || log.flush(Duration::from_millis(50)));
+    let bounded = tokio::time::timeout(Duration::from_secs(2), flushed).await;
+    // Release before assertions so a failure can't leave the writer held.
+    drop(release);
+    assert_eq!(code.unwrap(), 1);
+    assert!(bounded.is_ok(), "a held writer kept flush past its timeout");
+    file_log.flush(WAIT);
+    let text = std::fs::read_to_string(dir.path().join(crate::file_log::MAIN_LOG)).unwrap();
+    assert!(text.contains("queued behind the held writer"), "{text:?}");
+}
+
+#[tokio::test]
 async fn an_unobserved_api_server_error_sets_the_failure_record() {
     use crate::service::worker::{failure_code, record_server};
     let failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
