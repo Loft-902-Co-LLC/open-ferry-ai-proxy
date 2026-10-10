@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+blue-green-test = []
+
 [dependencies]
 aho-corasick = "1.1.5"
 base64 = "0.23.1"

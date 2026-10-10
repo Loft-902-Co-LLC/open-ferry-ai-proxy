@@ -55,10 +55,6 @@
 //! accepts as the plain one does, so a failed accept waits a second where
 //! the old TLS loop waited 100 ms.
 
-// Phase 2 of the blue-green update wires `ServeControl`; until then only
-// `stop` and `run` are used.
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::future::Future;
@@ -146,6 +142,7 @@ struct Shared {
     /// Serializes `pause_accept` and `resume_accept`, which hold it across
     /// their waits. Nothing else takes it. It holds how many loop failures
     /// a resume has reported.
+    #[allow(dead_code)] // W3: a worker's pause and resume take it
     gate: tokio::sync::Mutex<usize>,
     next_id: AtomicU64,
     first_request_deadline: Duration,
@@ -158,6 +155,8 @@ struct Shared {
     /// Makes the next listener a loop makes from its socket fail.
     #[cfg(test)]
     fail_next_listener: AtomicBool,
+    #[cfg(test)]
+    fail_listener_after: Mutex<Option<(u16, Arc<tokio::sync::Notify>)>>,
     /// Makes the next resume count a loop as started once its wait has
     /// settled, as a loop polled for the first time just then would be.
     #[cfg(test)]
@@ -210,7 +209,9 @@ impl ServeControl {
         Self::with_first_request_deadline(FIRST_REQUEST_DEADLINE)
     }
 
-    fn with_first_request_deadline(first_request_deadline: Duration) -> Self {
+    /// As [`ServeControl::new`], with the wait for a first request after a
+    /// release set to `first_request_deadline`.
+    pub(crate) fn with_first_request_deadline(first_request_deadline: Duration) -> Self {
         Self {
             shared: Arc::new(Shared {
                 mode: watch::channel(Mode::Running).0,
@@ -224,6 +225,8 @@ impl ServeControl {
                 fail_next_duplicate: AtomicBool::new(false),
                 #[cfg(test)]
                 fail_next_listener: AtomicBool::new(false),
+                #[cfg(test)]
+                fail_listener_after: Mutex::new(None),
                 #[cfg(test)]
                 start_a_loop_after_the_resume_settles: AtomicBool::new(false),
             }),
@@ -262,12 +265,18 @@ impl ServeControl {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn accepting_is_paused(&self) -> bool {
+        *self.shared.mode.borrow() == Mode::Paused && self.stats().accepting == 0
+    }
+
     /// Stops accepting once the loops have dropped their listeners, which
     /// are the std sockets' duplicates: the sockets and their backlogs
     /// persist, so a client that connects meanwhile waits. Connections
     /// already accepted are served on. It returns only when no loop holds a
     /// listener, so none accepts after it returns, a release or stop that
     /// came first or meanwhile included. Pauses and resumes take turns.
+    #[allow(dead_code)] // W3: a standby that has served pauses on a hand over
     pub(crate) async fn pause_accept(&self) {
         let _turn = self.shared.gate.lock().await;
         self.shared.move_mode(&[Mode::Running], Mode::Paused);
@@ -276,10 +285,16 @@ impl ServeControl {
         self.wait_for(|stats| stats.accepting == 0).await;
     }
 
+    #[cfg(test)]
+    pub(crate) fn fail_listener_after(&self, port: u16, queued: Arc<tokio::sync::Notify>) {
+        *self.shared.fail_listener_after.lock().unwrap() = Some((port, queued));
+    }
+
     /// Accepts again, once every loop has made a listener from its socket
     /// again. An error if a loop couldn't since a resume last said so, if
     /// the loops were released or stopped meanwhile, or if the control was
     /// cut, which finishes it.
+    #[allow(dead_code)] // W3: `resume` accepts again
     pub(crate) async fn resume_accept(&self) -> io::Result<()> {
         let mut reported = self.shared.gate.lock().await;
         if self.shared.connections().cut {
@@ -360,6 +375,7 @@ impl ServeControl {
     }
 
     /// How many of the live connections have been upgraded.
+    #[allow(dead_code)] // W3: the handed-over state counts the upgraded
     pub(crate) fn upgraded_count(&self) -> usize {
         self.stats().upgraded
     }
@@ -774,6 +790,28 @@ pub(crate) fn run(
                         #[cfg(test)]
                         let duplicate = if shared.fail_next_listener.swap(false, Ordering::AcqRel) {
                             Err(io::Error::other("a listener that fails, for a test"))
+                        } else {
+                            duplicate
+                        };
+                        #[cfg(test)]
+                        let delayed_failure = {
+                            let mut failure = shared.fail_listener_after.lock().unwrap();
+                            if failure.as_ref().is_some_and(|(port, _)| {
+                                listener
+                                    .local_addr()
+                                    .is_ok_and(|address| address.port() == *port)
+                            }) {
+                                failure.take().map(|(_, queued)| queued)
+                            } else {
+                                None
+                            }
+                        };
+                        #[cfg(test)]
+                        let duplicate = if let Some(queued) = delayed_failure {
+                            queued.notified().await;
+                            Err(io::Error::other(
+                                "a listener failed after a management write queued",
+                            ))
                         } else {
                             duplicate
                         };

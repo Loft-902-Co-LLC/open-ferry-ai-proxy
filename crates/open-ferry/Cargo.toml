@@ -11,6 +11,15 @@ publish.workspace = true
 name = "open-ferry"
 path = "src/main.rs"
 
+[features]
+# The blue-green switch's test seams: worker faults and named barriers.
+# Off in release builds, which must contain none of their strings.
+blue-green-test = [
+    "open-ferry-core/blue-green-test",
+    "open-ferry-supervisor/blue-green-test",
+    "open-ferry-update/blue-green-test",
+]
+
 [dependencies]
 axum = { version = "0.8.9", features = ["http2"] }
 base64 = "0.23.1"
@@ -22,6 +31,7 @@ open-ferry-dashboard.workspace = true
 open-ferry-management.workspace = true
 open-ferry-providers.workspace = true
 open-ferry-server.workspace = true
+open-ferry-supervisor.workspace = true
 open-ferry-translate.workspace = true
 open-ferry-tui.workspace = true
 open-ferry-update.workspace = true

@@ -36,7 +36,8 @@ use open_ferry_server::{router_with, router_without_proxy};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
-use super::{Server, Service, bind, serve};
+use super::serve_loop::ServeControl;
+use super::{Server, Service, bind, serve_with};
 
 /// The management address, bound.
 pub(super) struct Separate {
@@ -61,10 +62,11 @@ pub(super) fn bind_separate(config: &Config) -> Result<Option<Separate>, String>
 }
 
 /// Serves `service` on `main`, the proxy's listener, and `separate`, each
-/// with `tls` when it is on, until `stopped` turns true. `extra` is served
+/// with `tls` when it is on, both on `control`, until `stopped` turns true. `extra` is served
 /// on the proxy's.
 pub(super) fn spawn(
     service: &Service,
+    control: ServeControl,
     main: TcpListener,
     separate: Separate,
     tls: Option<Arc<rustls::ServerConfig>>,
@@ -73,8 +75,14 @@ pub(super) fn spawn(
 ) -> Server {
     let (main_app, management_app) = apps(service, extra);
     tokio::spawn(serve_both(
-        serve(main, tls.clone(), main_app, stopped.clone()),
-        serve(separate.listener, tls, management_app, stopped),
+        serve_with(
+            control.clone(),
+            main,
+            tls.clone(),
+            main_app,
+            stopped.clone(),
+        ),
+        serve_with(control, separate.listener, tls, management_app, stopped),
     ))
 }
 

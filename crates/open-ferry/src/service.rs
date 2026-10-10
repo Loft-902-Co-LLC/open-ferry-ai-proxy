@@ -159,6 +159,7 @@ use open_ferry_core::auth::synthesizer::{
 };
 use open_ferry_core::auth::{Auth, FileStore, Status};
 use open_ferry_core::config::{AuthFile, Config, ConfigWatcher, WatchEvent, next_revision};
+use open_ferry_core::gate::{ActivationKey, ActiveGate, Operation};
 use open_ferry_core::manager::{Manager, Settings};
 use open_ferry_core::observe::Observability;
 use open_ferry_core::registry::{CatalogRuntime, ModelRegistry, RegistrationRules};
@@ -188,6 +189,7 @@ use crate::tls;
 
 mod management_listener;
 pub(crate) mod serve_loop;
+mod worker;
 
 /// How often background refresh looks for tokens to renew.
 const AUTO_REFRESH_INTERVAL: Duration = Duration::from_secs(15 * 60);
@@ -254,36 +256,28 @@ pub async fn run(
         );
     }
     let config = Arc::new(config);
-    let mut service = Service::new(
+    // Construction is not a write: the service is built on a closed gate,
+    // and the first activation opens it (review 3 T2).
+    let (gate, key) = ActiveGate::standby();
+    let mut service = Service::prepared(
         Arc::clone(&config),
         config_path.clone(),
         auth_dir,
         log_level,
+        &options,
+        gate,
     );
-    service.management = service
-        .management
-        .clone()
-        .with_local_password(&options.local_password);
-    if let Some(sha256) = &options.config_sha256 {
-        service.management = service.management.clone().with_config_sha256(sha256);
+    if options.self_update {
+        service.start_update_checks();
     }
-    if options.self_update
-        && let Some(updates) = start_update_checks(&config)
-    {
-        service.management = service.management.clone().with_updates(updates);
-    }
-    service.register_executors();
     claude_cli::warn_outdated(&config.claude_cli);
-    service.start_catalogs();
-    service.load_file_auths();
-    service.sync_config_auths();
-    service.reconfigure_observability(None);
-    service.start_ledger();
-    if let Err(error) = service.manager.start_auto_refresh(AUTO_REFRESH_INTERVAL) {
-        tracing::warn!("failed to start core auth auto-refresh: {error}");
-    } else {
-        tracing::info!("core auth auto-refresh started (interval=15m0s)");
+    // An unsupervised run activates at once and never closes the gate.
+    if let Err(error) = service.first_activation(&key) {
+        tracing::error!("failed to activate the service: {error}");
+        return ExitCode::FAILURE;
     }
+    service.gate.reopen();
+    service.start_auto_refresh();
 
     let listener = match bind(&config.host, config.port) {
         Ok(listener) => listener,
@@ -319,16 +313,19 @@ pub async fn run(
     let management_address = separate
         .as_ref()
         .map(|separate| separate.address.to_string());
+    // One control for the run's listeners.
+    let control = serve_loop::ServeControl::new();
     let mut server = match separate {
-        None => tokio::spawn(serve(
+        None => tokio::spawn(serve_with(
+            control.clone(),
             listener,
             tls_config,
             service.app_with(extra),
             stopped,
         )),
-        Some(separate) => {
-            management_listener::spawn(&service, listener, separate, tls_config, extra, stopped)
-        }
+        Some(separate) => management_listener::spawn(
+            &service, control, listener, separate, tls_config, extra, stopped,
+        ),
     };
     if options.announce {
         println!(
@@ -380,22 +377,7 @@ pub async fn run(
                 open_ferry_core::manager::cooldown_store::flush(&service.manager);
                 return exit_code(result);
             }
-            event = next_event(&mut events) => match event {
-                Some(event) => {
-                    let watching = service.handle(event, &config_path);
-                    service.follow(watching, &mut events);
-                }
-                None => {
-                    tracing::warn!("file watcher stopped; config and auth changes are no longer followed");
-                    service.follow(Watching::Stopped, &mut events);
-                }
-            },
-            Some(request) = service.sync_requests.recv() => service.apply_sync(request),
-            Some(changed) = service.catalog_changes.recv() => service.refresh_catalog_models(&changed),
-            Some(request) = service.reload_requests.recv() => {
-                let watching = service.request_reload(request, &config_path);
-                service.follow(watching, &mut events);
-            }
+            () = service.work(&config_path, &mut events) => {}
         }
     }
     service.close_sync();
@@ -405,11 +387,20 @@ pub async fn run(
 
 type Server = tokio::task::JoinHandle<io::Result<()>>;
 
-/// Starts open-ferry's own update checks for this binary, the first a few
-/// minutes from now, or warns and returns `None` when they can't run. The
+/// Runs `work` as `operation`, when the request came from one, so what it
+/// writes is admitted by the request's gate.
+async fn in_scope<T>(operation: Option<Operation>, work: impl FnOnce() -> T) -> T {
+    match operation {
+        Some(operation) => operation.scope(async { work() }).await,
+        None => work(),
+    }
+}
+
+/// Builds open-ferry's own updater without starting its timer, or warns
+/// and returns `None` when checks can't run. The
 /// checks follow `config`'s `self-update`; while it is `off` they make no
 /// request.
-fn start_update_checks(config: &Config) -> Option<UpdateService> {
+fn prepare_update_checks(config: &Config) -> Option<UpdateService> {
     let data = match DataDir::for_this_user() {
         Ok(data) => data,
         Err(error) => {
@@ -431,7 +422,6 @@ fn start_update_checks(config: &Config) -> Option<UpdateService> {
     match Updater::for_this_binary(fetch, data) {
         Ok(updater) => {
             let updates = UpdateService::new(updater, make_fetch, config);
-            updates.start(update_settings::between(FIRST_CHECK.0, FIRST_CHECK.1));
             Some(updates)
         }
         Err(error) => {
@@ -452,23 +442,97 @@ fn stop_update_checks(management: &ManagementState) {
 /// management API's OAuth logins and the server, giving open requests up
 /// to [`SHUTDOWN_TIMEOUT`], then the usage ledger, and saves the
 /// cooldowns.
-async fn shut_down(service: &Service, stop: &watch::Sender<bool>, mut server: Server) -> ExitCode {
+async fn shut_down(service: &Service, stop: &watch::Sender<bool>, server: Server) -> ExitCode {
+    shut_down_within(service, stop, Some(server), SHUTDOWN_TIMEOUT).await
+}
+
+/// [`shut_down`], giving open requests up to `timeout`, then closing them
+/// by dropping `server`, which cuts its connections. A worker passes its
+/// stop budget; `None` when the server has ended already.
+async fn shut_down_within(
+    service: &Service,
+    stop: &watch::Sender<bool>,
+    server: Option<Server>,
+    timeout: Duration,
+) -> ExitCode {
     stop_update_checks(&service.management);
     service.stop_catalogs();
     service.manager.stop_auto_refresh();
     service.management.shutdown().await;
     let _ = stop.send(true);
-    let code = match tokio::time::timeout(SHUTDOWN_TIMEOUT, &mut server).await {
-        Ok(result) => exit_code(result),
-        Err(_) => {
-            tracing::warn!("open requests didn't finish within 30s; closing them");
-            server.abort();
-            ExitCode::SUCCESS
-        }
+    let code = match server {
+        None => ExitCode::SUCCESS,
+        Some(mut server) => match tokio::time::timeout(timeout, &mut server).await {
+            Ok(result) => exit_code(result),
+            Err(_) => {
+                tracing::warn!("open requests didn't finish within {timeout:?}; closing them");
+                server.abort();
+                ExitCode::SUCCESS
+            }
+        },
     };
     stop_ledger(&service.ledger).await;
     open_ferry_core::manager::cooldown_store::flush(&service.manager);
     code
+}
+
+/// A supervised stop has one deadline, including management, requests,
+/// ledger and cooldown flush. Blocking flushes may outlive it; the worker
+/// retains its lease and main must exit the process immediately afterward.
+async fn shut_down_by(
+    service: &Service,
+    stop: &watch::Sender<bool>,
+    server: Option<Server>,
+    control: &serve_loop::ServeControl,
+    deadline: tokio::time::Instant,
+    reserve: Duration,
+) -> bool {
+    stop_update_checks(&service.management);
+    service.stop_catalogs();
+    service.manager.stop_auto_refresh();
+    let requests_deadline = deadline
+        .checked_sub(reserve)
+        .unwrap_or_else(tokio::time::Instant::now);
+    let management = async {
+        #[cfg(test)]
+        if let Some((arrived, _)) = &service.shutdown_hooks {
+            arrived.notify_one();
+            std::future::pending::<()>().await;
+        }
+        service.management.shutdown().await;
+    };
+    let _ = tokio::time::timeout_at(requests_deadline, management).await;
+    let _ = stop.send(true);
+    let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+    let requests = left.saturating_sub(reserve);
+    let mut failed = false;
+    if let Some(mut server) = server {
+        match tokio::time::timeout(requests, &mut server).await {
+            Ok(result) => failed = !matches!(result, Ok(Ok(()))),
+            Err(_) => {
+                server.abort();
+                if let Ok(Err(error)) = tokio::time::timeout_at(deadline, &mut server).await {
+                    failed = error.is_panic();
+                }
+            }
+        }
+    }
+    control.cut();
+    let ledger = async {
+        #[cfg(test)]
+        if let Some((_, finished)) = &service.shutdown_hooks {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            finished.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        stop_ledger(&service.ledger).await;
+    };
+    let _ = tokio::time::timeout_at(deadline, ledger).await;
+    let manager = service.manager.clone();
+    let flush = tokio::task::spawn_blocking(move || {
+        open_ferry_core::manager::cooldown_store::flush(&manager);
+    });
+    let _ = tokio::time::timeout_at(deadline, flush).await;
+    failed
 }
 
 /// Stops `ledger` recording, giving it up to [`LEDGER_SHUTDOWN_TIMEOUT`] to
@@ -523,6 +587,8 @@ struct SyncRequest {
     /// Taken once the change was saved (see [`next_revision`]).
     revision: u64,
     applied: oneshot::Sender<()>,
+    /// The operation the call ran in, which the loop applies the change as.
+    operation: Option<Operation>,
 }
 
 /// A credential change from the management API.
@@ -555,6 +621,7 @@ impl SyncSender {
             change,
             revision,
             applied,
+            operation: Operation::current(),
         };
         self.requests
             .send(request)
@@ -598,7 +665,11 @@ impl ReloadSender {
         let (applied, done) = oneshot::channel();
         if self
             .requests
-            .send(ReloadRequest { force, applied })
+            .send(ReloadRequest {
+                force,
+                applied,
+                operation: Operation::current(),
+            })
             .await
             .is_ok()
         {
@@ -624,6 +695,8 @@ impl ConfigReload for ReloadSender {
 struct ReloadRequest {
     force: bool,
     applied: oneshot::Sender<()>,
+    /// The operation the call ran in, which the loop applies the config as.
+    operation: Option<Operation>,
 }
 
 /// The credential manager, the model registry, the server and management
@@ -632,6 +705,13 @@ struct Service {
     config: Arc<Config>,
     auth_dir: PathBuf,
     log_level: LogLevel,
+    /// The gate the store, the manager, the config writer and the
+    /// management state share. Closed until the first activation, then
+    /// open for good for a run with no supervisor.
+    gate: ActiveGate,
+    /// Whether the cooldown store is held off ([`Service::hold_cooldown_store`])
+    /// until the first activation.
+    cooldown_held: bool,
     store: Arc<FileStore>,
     manager: Manager,
     registry: Arc<ModelRegistry>,
@@ -662,6 +742,15 @@ struct Service {
     pending_reloads: VecDeque<(u64, ReloadRequest)>,
     /// The ticket of the last reload asked for.
     last_reload: u64,
+    /// Ignore queued config snapshots until the watcher records a direct apply.
+    /// The fence rechecks disk afterward. A valid state overwritten by an
+    /// invalid file before that recheck is never applied: the direct reload's
+    /// config stays current, just as an invalid file keeps the current config.
+    applied_reload: Option<u64>,
+    /// A directory-changing snapshot refused by the gate, retried on reopen.
+    deferred_config: Option<(Arc<Config>, Option<String>)>,
+    #[cfg(test)]
+    config_applies: usize,
     /// Reads the model catalogs from their sources.
     catalogs: CatalogRuntime,
     /// Where the catalogs say which providers' models changed.
@@ -672,24 +761,44 @@ struct Service {
     /// replacement.
     #[cfg(test)]
     upsert_hook: Option<Arc<dyn Fn() + Send + Sync>>,
+    #[cfg(test)]
+    directory_apply_hook: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+    #[cfg(test)]
+    shutdown_hooks: Option<(Arc<tokio::sync::Notify>, Arc<std::sync::atomic::AtomicBool>)>,
 }
 
 impl Service {
+    /// A service on an open gate, for the tests that don't go through a
+    /// first activation.
+    #[cfg(test)]
     fn new(
         config: Arc<Config>,
         config_path: PathBuf,
         auth_dir: PathBuf,
         log_level: LogLevel,
     ) -> Self {
+        Self::with_gate(config, config_path, auth_dir, log_level, ActiveGate::open())
+    }
+
+    /// As [`Service::new`], with every writer sharing `gate`.
+    fn with_gate(
+        config: Arc<Config>,
+        config_path: PathBuf,
+        auth_dir: PathBuf,
+        log_level: LogLevel,
+        gate: ActiveGate,
+    ) -> Self {
         let auth_dir = absolute_dir(auth_dir);
         let registry = Arc::new(ModelRegistry::new());
         let store = Arc::new(FileStore::new(&auth_dir));
+        store.set_gate(gate.clone());
         let manager = Manager::new(
             Settings::from(&*config),
             Arc::clone(&registry) as _,
             Some(Arc::clone(&store) as _),
         );
         let observability = observability::build(&config, &config_path);
+        manager.set_gate(gate.clone());
         manager.set_error_events(observability.usage.error_events());
         let state = AppState::new(
             ServerConfig::from(&*config),
@@ -708,14 +817,19 @@ impl Service {
         )
         .with_store(Arc::clone(&store))
         .with_sync(Arc::new(SyncSender { requests }))
-        .with_config_writer(Arc::new(FileConfigWriter::new(config_path.clone())))
+        .with_config_writer(Arc::new(
+            FileConfigWriter::new(config_path.clone()).with_gate(gate.clone()),
+        ))
         .with_config_reload(Arc::new(ReloadSender { requests: reloads }))
         .with_config_path(config_path)
-        .with_observability(observability.clone());
+        .with_observability(observability.clone())
+        .with_gate(gate.clone());
         Self {
             config,
             auth_dir,
             log_level,
+            gate,
+            cooldown_held: false,
             store,
             manager,
             registry,
@@ -732,12 +846,170 @@ impl Service {
             reload_requests,
             pending_reloads: VecDeque::new(),
             last_reload: 0,
+            applied_reload: None,
+            deferred_config: None,
+            #[cfg(test)]
+            config_applies: 0,
             catalogs: CatalogRuntime::global().clone(),
             catalog_sender,
             catalog_changes,
             #[cfg(test)]
             upsert_hook: None,
+            #[cfg(test)]
+            directory_apply_hook: None,
+            #[cfg(test)]
+            shutdown_hooks: None,
         }
+    }
+
+    /// A service on `gate` with the run's options applied and the executors
+    /// registered, as an unsupervised run and a worker both start it.
+    fn prepared(
+        config: Arc<Config>,
+        config_path: PathBuf,
+        auth_dir: PathBuf,
+        log_level: LogLevel,
+        options: &Options,
+        gate: ActiveGate,
+    ) -> Self {
+        let mut service = Self::with_gate(config, config_path, auth_dir, log_level, gate);
+        service.management = service
+            .management
+            .clone()
+            .with_local_password(&options.local_password);
+        if let Some(sha256) = &options.config_sha256 {
+            service.management = service.management.clone().with_config_sha256(sha256);
+        }
+        service.register_executors();
+        service
+    }
+
+    /// Starts open-ferry's own update checks, when they can run.
+    fn start_update_checks(&mut self) {
+        self.prepare_update_checks();
+        if let Some(updates) = self.management.updates() {
+            updates.start(update_settings::between(FIRST_CHECK.0, FIRST_CHECK.1));
+        }
+    }
+
+    /// Attaches the updater before any router clones the management state.
+    fn prepare_update_checks(&mut self) {
+        if let Some(updates) = prepare_update_checks(&self.config) {
+            self.management = self.management.clone().with_updates(updates);
+        }
+    }
+
+    /// Starts the credential auto-refresh.
+    fn start_auto_refresh(&self) {
+        if let Err(error) = self.manager.start_auto_refresh(AUTO_REFRESH_INTERVAL) {
+            tracing::warn!("failed to start core auth auto-refresh: {error}");
+        } else {
+            tracing::info!("core auth auto-refresh started (interval=15m0s)");
+        }
+    }
+
+    /// Holds the cooldown store off while the service is a standby: it
+    /// neither reads nor writes the file. The first activation thaws it.
+    // W3 takes over and hands over through the same hold.
+    fn hold_cooldown_store(&mut self) {
+        open_ferry_core::manager::cooldown_store::standby(&self.manager);
+        self.cooldown_held = true;
+    }
+
+    /// One piece of the loop's work: a watcher event, a credential change,
+    /// a catalog change or a config reload, whichever comes first.
+    async fn work(&mut self, config_path: &Path, events: &mut Option<mpsc::Receiver<WatchEvent>>) {
+        let gate = self.gate.clone();
+        tokio::select! {
+            event = next_event(events) => match event {
+                Some(event) => {
+                    // A ticket's snapshot belongs to the work admitted when
+                    // its management request arrived, even after quiescing.
+                    let operation = self.pending_reloads.iter()
+                        .find_map(|(_, request)| request.operation.clone());
+                    let watching = match operation {
+                        Some(operation) => operation.scope(self.handle(event, config_path)).await,
+                        None => self.handle(event, config_path).await,
+                    };
+                    self.follow(watching, events);
+                }
+                None => {
+                    tracing::warn!("file watcher stopped; config and auth changes are no longer followed");
+                    self.follow(Watching::Stopped, events);
+                }
+            },
+            _ = gate.wait_open(), if self.deferred_config.is_some()
+                && events.as_ref().is_none_or(mpsc::Receiver::is_empty) => {
+                let (config, sha256) = self.deferred_config.take().unwrap();
+                let watching = self.apply_config(config, sha256, config_path).await;
+                if self.watcher.is_none()
+                    && self.deferred_config.is_none()
+                    && matches!(watching, Watching::Same)
+                {
+                    // Defensive: unreachable with pending tickets today.
+                    // follow(Stopped) settles them, and request_reload queues
+                    // a ticket only when a watcher exists. Without one, no
+                    // Reloaded can answer; a live watcher settles after its snapshot.
+                    self.settle_reloads();
+                }
+                self.follow(watching, events);
+            }
+            Some(mut request) = self.sync_requests.recv() => {
+                let operation = request.operation.take();
+                in_scope(operation, || self.apply_sync(request)).await;
+            }
+            Some(changed) = self.catalog_changes.recv() => self.refresh_catalog_models(&changed),
+            Some(request) = self.reload_requests.recv() => {
+                let operation = request.operation.clone();
+                let watching = match operation {
+                    Some(operation) => operation.scope(self.request_reload(request, config_path)).await,
+                    None => self.request_reload(request, config_path).await,
+                };
+                self.follow(watching, events);
+            }
+        }
+    }
+
+    /// The first activation, shared by every run: an unsupervised run calls
+    /// it at start, and a supervised active worker after taking the lease.
+    /// While the gate is `Closed` it binds the auth directory under the
+    /// activation, applies the config to the logs, the usage statistics and
+    /// the cooldown store, reads the credentials and starts the catalogs
+    /// and the ledger. It leaves the gate Closed: the caller finishes the
+    /// fallible listener/watcher setup, then explicitly reopens it. W3 can
+    /// reopen, accept and send ready as its final take-over step.
+    ///
+    /// # Errors
+    /// A key for another gate, a gate that is not Closed, failure to create
+    /// the auth directory, or failure to bind the store. Directory IO errors
+    /// retain their own cause rather than being reported as a lease error.
+    // W3 reuses it for take over.
+    fn first_activation(&mut self, key: &ActivationKey) -> Result<(), String> {
+        let activation = key
+            .activate(&self.gate)
+            .map_err(|error| error.to_string())?;
+        ensure_auth_dir(&self.auth_dir).map_err(|error| {
+            format!(
+                "failed to create auth directory {}: {error}",
+                self.auth_dir.display()
+            )
+        })?;
+        self.store
+            .set_base_dir_under(&activation, &self.auth_dir)
+            .map_err(|error| error.to_string())?;
+        self.start_catalogs();
+        self.load_file_auths();
+        self.sync_config_auths();
+        self.reconfigure_observability(None);
+        if std::mem::take(&mut self.cooldown_held) {
+            // A held store restores from the file and takes writes again.
+            open_ferry_core::manager::cooldown_store::thaw(
+                &self.manager,
+                open_ferry_core::manager::cooldown_store::Thaw::Restore,
+            );
+        }
+        self.start_ledger();
+        Ok(())
     }
 
     /// Reads the model catalogs from the sources the config names, and
@@ -1130,10 +1402,12 @@ impl Service {
     }
 
     /// Applies a watcher event.
-    fn handle(&mut self, event: WatchEvent, config_path: &Path) -> Watching {
+    async fn handle(&mut self, event: WatchEvent, config_path: &Path) -> Watching {
         match event {
             WatchEvent::ConfigChanged(config, sha256) => {
-                return self.apply_config(config, Some(sha256), config_path);
+                if self.applied_reload.is_none() {
+                    return self.apply_config(config, Some(sha256), config_path).await;
+                }
             }
             WatchEvent::ConfigInvalid(error) => {
                 tracing::error!("failed to reload config: {error}; keeping the current one");
@@ -1158,12 +1432,16 @@ impl Service {
             Watching::Restarted(next) => {
                 *events = Some(next);
                 if let Some(watcher) = &self.watcher {
+                    // Reconcile disk even when replacing a receiver discarded
+                    // a newer snapshot and no management ticket is waiting.
+                    watcher.reload_config(0);
                     for (ticket, request) in &self.pending_reloads {
                         ask_reload(watcher, *ticket, request.force);
                     }
                 }
             }
             Watching::Stopped => {
+                self.applied_reload = None;
                 *events = None;
                 self.watcher = None;
                 self.settle_reloads();
@@ -1177,16 +1455,31 @@ impl Service {
     /// or here when there is no watcher, forced or not. An empty file is
     /// skipped and one that doesn't load logged, and the current config
     /// kept, as for the watcher's reloads.
-    fn request_reload(&mut self, request: ReloadRequest, config_path: &Path) -> Watching {
-        if let Some(watcher) = &self.watcher {
+    async fn request_reload(&mut self, request: ReloadRequest, config_path: &Path) -> Watching {
+        // Keep main's ticket path whenever the gate is Open. Only work
+        // already admitted before quiescing needs the direct operation scope.
+        if (self.gate.state() == open_ferry_core::gate::GateState::Open
+            || request.operation.is_none())
+            && let Some(watcher) = &self.watcher
+        {
             self.last_reload += 1;
             ask_reload(watcher, self.last_reload, request.force);
             self.pending_reloads.push_back((self.last_reload, request));
             return Watching::Same;
         }
         let watching = match load_config(config_path) {
-            Ok(Some((config, sha256))) => {
-                self.apply_config(Arc::new(config), Some(sha256), config_path)
+            Ok(Some((config, sha256, contents))) => {
+                let watching = self
+                    .apply_config(Arc::new(config), Some(sha256), config_path)
+                    .await;
+                if self.deferred_config.is_none()
+                    && let Some(watcher) = &self.watcher
+                {
+                    self.last_reload += 1;
+                    self.applied_reload = Some(self.last_reload);
+                    watcher.record_applied_config(&contents, self.last_reload);
+                }
+                watching
             }
             Ok(None) => {
                 tracing::debug!("ignoring empty config file");
@@ -1197,26 +1490,37 @@ impl Service {
                 Watching::Same
             }
         };
-        // The config stands even if the handler has gone.
-        let _ = request.applied.send(());
+        // The write-then-watch caller returns when its ticket is released,
+        // whether the snapshot applied or the sender was dropped as deferred.
+        if self.deferred_config.is_none() {
+            let _ = request.applied.send(());
+        }
         watching
     }
 
     /// Answers the reloads up to `ticket`, which the watcher has made.
     fn reloaded(&mut self, ticket: u64) {
+        if self.applied_reload.is_some_and(|applied| ticket >= applied) {
+            self.applied_reload = None;
+        }
         while let Some((next, _)) = self.pending_reloads.front()
             && *next <= ticket
         {
-            if let Some((_, request)) = self.pending_reloads.pop_front() {
+            if let Some((_, request)) = self.pending_reloads.pop_front()
+                && self.deferred_config.is_none()
+            {
                 let _ = request.applied.send(());
             }
+            // Dropping a deferred ticket releases its sender and operation.
         }
     }
 
     /// Answers every reload the watcher was asked for.
     fn settle_reloads(&mut self) {
         for (_, request) in self.pending_reloads.drain(..) {
-            let _ = request.applied.send(());
+            if self.deferred_config.is_none() {
+                let _ = request.applied.send(());
+            }
         }
     }
 
@@ -1347,12 +1651,55 @@ impl Service {
     /// watcher's credential diff), loaded from contents with the SHA-256
     /// `sha256`, which the management API saves it over only while the file
     /// holds them.
-    fn apply_config(
+    async fn apply_config(
         &mut self,
         config: Arc<Config>,
         sha256: Option<String>,
         config_path: &Path,
     ) -> Watching {
+        let directory_changes = config
+            .resolve_auth_dir()
+            .map(absolute_dir)
+            .is_ok_and(|dir| dir != self.auth_dir);
+        let operation = if directory_changes {
+            match Operation::current()
+                .filter(|op| op.gate().same(&self.gate))
+                .map(Ok)
+                .unwrap_or_else(|| self.gate.begin_operation())
+            {
+                Ok(operation) => Some(operation),
+                Err(error) => {
+                    tracing::warn!(%error, "config auth directory change deferred until reopen");
+                    self.deferred_config = Some((config, sha256));
+                    return Watching::Same;
+                }
+            }
+        } else {
+            None
+        };
+        #[cfg(test)]
+        if directory_changes && let Some((arrived, release)) = &self.directory_apply_hook {
+            arrived.notify_one();
+            release.notified().await;
+        }
+        in_scope(operation, || {
+            self.apply_config_authorized(config, sha256, config_path)
+        })
+        .await
+    }
+
+    fn apply_config_authorized(
+        &mut self,
+        config: Arc<Config>,
+        sha256: Option<String>,
+        config_path: &Path,
+    ) -> Watching {
+        #[cfg(test)]
+        {
+            self.config_applies += 1;
+        }
+        self.deferred_config = None;
+        let applied_hash = sha256.clone();
         let previous = std::mem::replace(&mut self.config, config);
         let config = Arc::clone(&self.config);
         self.log_level.set_debug(config.debug);
@@ -1404,28 +1751,41 @@ impl Service {
         match config.resolve_auth_dir().map(absolute_dir) {
             Ok(auth_dir) if auth_dir != self.auth_dir => {
                 tracing::info!("auth directory changed to {}", auth_dir.display());
-                if let Err(error) = ensure_auth_dir(&auth_dir) {
+                let authorized = self.gate.write_permit();
+                if let Err(error) = &authorized {
+                    tracing::warn!(%error, "auth directory not changed");
+                } else if let Err(error) = ensure_auth_dir(&auth_dir) {
                     tracing::error!(
                         "failed to create auth directory {}: {error}",
                         auth_dir.display()
                     );
-                }
-                self.auth_dir = auth_dir;
-                self.store.set_base_dir(&self.auth_dir);
-                for (_, id) in std::mem::take(&mut self.file_auths) {
-                    self.remove(&id);
-                }
-                // The new watcher reports every file in the new directory.
-                self.watcher = None;
-                match ConfigWatcher::start(config_path, &config) {
-                    Ok((watcher, events)) => {
-                        self.watcher = Some(watcher);
-                        watching = Watching::Restarted(events);
+                } else if let Err(error) = self.store.try_set_base_dir(&auth_dir) {
+                    // The store keeps its directory, so the credentials and
+                    // the watcher stay where they were.
+                    tracing::warn!(%error, "auth directory not changed");
+                } else {
+                    self.auth_dir = auth_dir;
+                    for (_, id) in std::mem::take(&mut self.file_auths) {
+                        self.remove(&id);
                     }
-                    Err(error) => {
-                        tracing::error!("failed to restart watcher: {error}");
-                        self.load_file_auths();
-                        watching = Watching::Stopped;
+                    // The new watcher reports every file in the new directory.
+                    self.applied_reload = None;
+                    self.watcher = None;
+                    match ConfigWatcher::start(config_path, &config) {
+                        Ok((watcher, events)) => {
+                            if let Some(hash) = &applied_hash {
+                                // Seed from the applied snapshot, not a fresh
+                                // read which might already contain newer bytes.
+                                watcher.record_applied_config_sha256(hash, 0);
+                            }
+                            self.watcher = Some(watcher);
+                            watching = Watching::Restarted(events);
+                        }
+                        Err(error) => {
+                            tracing::error!("failed to restart watcher: {error}");
+                            self.load_file_auths();
+                            watching = Watching::Stopped;
+                        }
                     }
                 }
             }
@@ -1484,7 +1844,7 @@ fn ask_reload(watcher: &ConfigWatcher, ticket: u64, force: bool) {
 /// The config file at `path`, loaded as the watcher loads it after a
 /// change: with its `auth-dir` resolved, and the SHA-256 of the contents it
 /// loaded from; `None` when the file is empty, which the watcher skips.
-fn load_config(path: &Path) -> Result<Option<(Config, String)>, String> {
+fn load_config(path: &Path) -> Result<Option<(Config, String, Vec<u8>)>, String> {
     let data =
         std::fs::read(path).map_err(|error| format!("failed to read config file: {error}"))?;
     if data.is_empty() {
@@ -1498,6 +1858,7 @@ fn load_config(path: &Path) -> Result<Option<(Config, String)>, String> {
     Ok(Some((
         config,
         open_ferry_core::config::save::sha256_hex(&data),
+        data,
     )))
 }
 
@@ -1573,13 +1934,32 @@ fn bind_any(port: u16) -> io::Result<TcpListener> {
 /// Serves `app` until `stopped` turns true, on the serve loop, which gives
 /// the connections graceful shutdown then, as `axum::serve` does. If this
 /// is dropped before it ends, the connections are closed.
+#[cfg(test)]
 async fn serve(
+    listener: TcpListener,
+    tls_config: Option<Arc<rustls::ServerConfig>>,
+    app: axum::Router,
+    stopped: watch::Receiver<bool>,
+) -> io::Result<()> {
+    serve_with(
+        serve_loop::ServeControl::new(),
+        listener,
+        tls_config,
+        app,
+        stopped,
+    )
+    .await
+}
+
+/// As [`serve`], on `control`, which the run's other listeners share, so
+/// one call pauses, releases or stops them all.
+async fn serve_with(
+    control: serve_loop::ServeControl,
     listener: TcpListener,
     tls_config: Option<Arc<rustls::ServerConfig>>,
     app: axum::Router,
     mut stopped: watch::Receiver<bool>,
 ) -> io::Result<()> {
-    let control = serve_loop::ServeControl::new();
     let mut cut_on_drop = serve_loop::CutOnDrop::new(&control);
     let mut serving = std::pin::pin!(serve_loop::run(
         listener.into_std()?,
@@ -1779,7 +2159,9 @@ mod tests {
         let second = catalog_file(dir.path(), "second.json", "claude-from-second-file");
         let config = format!("auth-dir: '{}'\n{}", dir.path().display(), models(&second));
         let config = Arc::new(Config::parse(config).unwrap());
-        service.apply_config(config, None, &dir.path().join("config.yaml"));
+        service
+            .apply_config(config, None, &dir.path().join("config.yaml"))
+            .await;
         assert!(serves(&service, "claude-from-second-file"));
         assert!(!serves(&service, "claude-from-first-file"));
 
@@ -1825,11 +2207,13 @@ self-update:
 ",
             dir.path().display()
         );
-        service.apply_config(
-            Arc::new(Config::parse(config).unwrap()),
-            None,
-            &dir.path().join("config.yaml"),
-        );
+        service
+            .apply_config(
+                Arc::new(Config::parse(config).unwrap()),
+                None,
+                &dir.path().join("config.yaml"),
+            )
+            .await;
 
         assert_eq!(
             updates.settings().mode,
@@ -1877,10 +2261,12 @@ self-update:
         assert_eq!(service.file_auths.get(&path), Some(&id));
 
         // The watcher reports the same file again, then a change to it.
-        service.handle(added(&path), Path::new(""));
+        service.handle(added(&path), Path::new("")).await;
         codex_file(dir.path(), "codex-a.json", r#","prefix":"team""#);
         let rewritten = std::fs::read(&path).unwrap();
-        service.handle(changed(auth_file(&path)), Path::new(""));
+        service
+            .handle(changed(auth_file(&path)), Path::new(""))
+            .await;
         assert_eq!(service.manager.list().len(), 1);
         assert_eq!(service.manager.get(&id).unwrap().prefix, "team");
         assert_ne!(written, rewritten);
@@ -1890,7 +2276,7 @@ self-update:
             "the file was rewritten"
         );
 
-        service.handle(removed(&path), Path::new(""));
+        service.handle(removed(&path), Path::new("")).await;
         assert!(service.manager.get(&id).is_none());
         assert!(service.registry.models_for_client(&id).is_empty());
         assert!(service.file_auths.is_empty());
@@ -1901,14 +2287,14 @@ self-update:
         let dir = tempfile::tempdir().unwrap();
         let path = codex_file(dir.path(), "codex-a.json", "");
         let mut service = service(dir.path(), "");
-        service.handle(added(&path), Path::new(""));
+        service.handle(added(&path), Path::new("")).await;
         let id = service.manager.list()[0].id.clone();
 
         let broken = AuthFile {
             path: path.clone(),
             data: Arc::from(&b"{not json"[..]),
         };
-        service.handle(changed(broken), Path::new(""));
+        service.handle(changed(broken), Path::new("")).await;
         assert!(service.manager.get(&id).is_none());
         assert!(service.registry.models_for_client(&id).is_empty());
         assert!(service.file_auths.is_empty());
@@ -1922,10 +2308,12 @@ self-update:
         // A write that doesn't parse lands while the event waits.
         std::fs::write(&path, "{not json").unwrap();
         let mut service = service(dir.path(), "");
-        service.handle(
-            WatchEvent::AuthAdded(checked, next_revision()),
-            Path::new(""),
-        );
+        service
+            .handle(
+                WatchEvent::AuthAdded(checked, next_revision()),
+                Path::new(""),
+            )
+            .await;
         let auths = service.manager.list();
         assert_eq!(auths.len(), 1);
         assert_eq!(auths[0].prefix, "team");
@@ -1938,20 +2326,24 @@ self-update:
         let path = codex_file(dir.path(), "codex-a.json", "");
         let mut service = service(dir.path(), "");
         let stale = auth_file(&path);
-        service.handle(
-            WatchEvent::AuthAdded(stale.clone(), next_revision()),
-            Path::new(""),
-        );
+        service
+            .handle(
+                WatchEvent::AuthAdded(stale.clone(), next_revision()),
+                Path::new(""),
+            )
+            .await;
         let id = service.manager.list()[0].id.clone();
 
         // The file is deleted before the watcher's report of a change to it
         // is applied.
         std::fs::remove_file(&path).unwrap();
-        service.handle(changed(stale.clone()), Path::new(""));
+        service.handle(changed(stale.clone()), Path::new("")).await;
         assert!(service.manager.get(&id).is_none());
         assert!(service.registry.models_for_client(&id).is_empty());
         assert!(service.file_auths.is_empty());
-        service.handle(WatchEvent::AuthAdded(stale, next_revision()), Path::new(""));
+        service
+            .handle(WatchEvent::AuthAdded(stale, next_revision()), Path::new(""))
+            .await;
         assert!(service.manager.list().is_empty());
     }
 
@@ -2055,6 +2447,7 @@ self-update:
                 change,
                 revision,
                 applied,
+                operation: None,
             })
             .unwrap_or_else(|_| panic!("the queue is full"));
         service.close_sync();
@@ -2064,6 +2457,722 @@ self-update:
         assert_eq!(error, SyncError::Stopped);
         assert_eq!(error.status().as_u16(), 503);
         assert_eq!(service.manager.list().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_directory_apply_stays_admitted_when_quiescing_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let new_auth = dir.path().join("new-auth");
+        let mut service = service(dir.path(), "");
+        let mut config = Config::clone(&service.config);
+        config.auth_dir = new_auth.to_string_lossy().into_owned();
+        std::fs::write(&path, format!("auth-dir: {}", new_auth.display())).unwrap();
+        let arrived = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        service.directory_apply_hook = Some((arrived.clone(), release.clone()));
+        let gate = service.gate.clone();
+        let changing = tokio::spawn(async move {
+            service
+                .apply_config(Arc::new(config), Some("new-hash".into()), &path)
+                .await;
+            service
+        });
+        arrived.notified().await;
+        let closing_gate = gate.clone();
+        let closing = tokio::spawn(async move { closing_gate.close(closing_gate.epoch()).await });
+        while gate.state() == open_ferry_core::gate::GateState::Open {
+            tokio::task::yield_now().await;
+        }
+        release.notify_one();
+        let service = changing.await.unwrap();
+        assert_eq!(service.config.resolve_auth_dir().unwrap(), new_auth);
+        assert_eq!(service.auth_dir, new_auth);
+        assert_eq!(service.store.base_dir(), new_auth);
+        assert_eq!(service.watcher.as_ref().unwrap().auth_dir(), new_auth);
+        closing.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_pending_ticket_applies_its_directory_under_its_operation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let new_auth = dir.path().join("new-auth");
+        let mut service = service(dir.path(), "");
+        std::fs::write(&path, format!("auth-dir: '{}'", dir.path().display())).unwrap();
+        let (watcher, receiver) = ConfigWatcher::start(&path, &service.config).unwrap();
+        service.watcher = Some(watcher);
+        let mut events = Some(receiver);
+        let (first, _first_done) = oneshot::channel();
+        service.last_reload = 1;
+        service.pending_reloads.push_back((
+            1,
+            ReloadRequest {
+                force: false,
+                applied: first,
+                operation: None,
+            },
+        ));
+        let (applied, done) = oneshot::channel();
+        let operation = service.gate.begin_operation().unwrap();
+        service
+            .request_reload(
+                ReloadRequest {
+                    force: false,
+                    applied,
+                    operation: Some(operation),
+                },
+                &path,
+            )
+            .await;
+        // Consume the initial reload through its marker before rewriting.
+        // A fresh watcher reports the old snapshot first; it is not the
+        // changed directory this mixed-ticket test must apply.
+        let mut saw_old = false;
+        loop {
+            match next_watched(&mut events).await {
+                WatchEvent::ConfigChanged(config, _) => {
+                    assert_eq!(config.resolve_auth_dir().unwrap(), dir.path());
+                    saw_old = true;
+                }
+                WatchEvent::Reloaded(2) => break,
+                _ => {}
+            }
+        }
+        assert!(saw_old);
+        // Hold the new snapshot until after the gate begins closing.
+        let gate = service.gate.clone();
+        let closing_gate = gate.clone();
+        let closing = tokio::spawn(async move { closing_gate.close(closing_gate.epoch()).await });
+        while gate.state() == open_ferry_core::gate::GateState::Open {
+            tokio::task::yield_now().await;
+        }
+        std::fs::write(&path, format!("auth-dir: '{}'", new_auth.display())).unwrap();
+        service.watcher.as_ref().unwrap().force_reload_config(2);
+        // Ignore an earlier unchanged answer; retain the changed snapshot.
+        let snapshot = loop {
+            let event = next_watched(&mut events).await;
+            if matches!(&event, WatchEvent::ConfigChanged(config, _)
+                if config.resolve_auth_dir().unwrap() == new_auth)
+            {
+                break event;
+            }
+        };
+        let (sender, receiver) = mpsc::channel(2);
+        sender.send(snapshot).await.unwrap();
+        events = Some(receiver);
+        service.work(&path, &mut events).await;
+        assert_eq!(service.auth_dir, new_auth);
+        assert_eq!(service.store.base_dir(), new_auth);
+        assert!(service.deferred_config.is_none());
+        service.reloaded(2);
+        done.await.unwrap();
+        closing.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn deferred_mixed_reload_tickets_release_the_closing_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let mut service = service(dir.path(), "");
+        let (first, mut first_done) = oneshot::channel();
+        let (second, mut second_done) = oneshot::channel();
+        service.pending_reloads.push_back((
+            1,
+            ReloadRequest {
+                force: false,
+                applied: first,
+                operation: None,
+            },
+        ));
+        service.pending_reloads.push_back((
+            2,
+            ReloadRequest {
+                force: false,
+                applied: second,
+                operation: Some(service.gate.begin_operation().unwrap()),
+            },
+        ));
+        let gate = service.gate.clone();
+        let closing_gate = gate.clone();
+        let closing = tokio::spawn(async move { closing_gate.close(closing_gate.epoch()).await });
+        while gate.state() == open_ferry_core::gate::GateState::Open {
+            tokio::task::yield_now().await;
+        }
+        let mut config = Config::clone(&service.config);
+        config.auth_dir = dir.path().join("new-auth").to_string_lossy().into_owned();
+        // An answer that arrived outside the owned work scope was deferred.
+        service
+            .handle(
+                WatchEvent::ConfigChanged(Arc::new(config), "new".into()),
+                &path,
+            )
+            .await;
+        assert!(service.deferred_config.is_some());
+        service.handle(WatchEvent::Reloaded(2), &path).await;
+        tokio::time::timeout(Duration::from_secs(1), closing)
+            .await
+            .expect("answered reload tickets kept the gate live")
+            .unwrap()
+            .unwrap();
+        assert!(service.pending_reloads.is_empty());
+        assert_eq!(
+            first_done.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed)
+        );
+        assert_eq!(
+            second_done.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_directory_retry_waits_for_the_live_watchers_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let blocked_dir = dir.path().join("a-file");
+        std::fs::write(&blocked_dir, "not a directory").unwrap();
+        let mut service = service(dir.path(), "");
+        std::fs::write(&path, format!("auth-dir: '{}'", dir.path().display())).unwrap();
+        let (watcher, _receiver) = ConfigWatcher::start(&path, &service.config).unwrap();
+        service.watcher = Some(watcher);
+        // Control event delivery to model the live watcher reading a pending
+        // reload while its event queue is empty and the gate has reopened.
+        let (sender, receiver) = mpsc::channel(1);
+        let mut events = Some(receiver);
+        let mut config = Config::clone(&service.config);
+        config.auth_dir = blocked_dir.to_string_lossy().into_owned();
+        service.deferred_config = Some((Arc::new(config), None));
+        let (applied, mut done) = oneshot::channel();
+        service.pending_reloads.push_back((
+            1,
+            ReloadRequest {
+                force: false,
+                applied,
+                operation: None,
+            },
+        ));
+        service.work(&path, &mut events).await;
+        assert_eq!(service.auth_dir, dir.path());
+        assert!(service.deferred_config.is_none(), "retry did not run");
+        assert!(service.watcher.is_some());
+        assert_eq!(done.try_recv(), Err(oneshot::error::TryRecvError::Empty));
+        assert_eq!(service.pending_reloads.len(), 1);
+        sender.send(WatchEvent::Reloaded(1)).await.unwrap();
+        service.work(&path, &mut events).await;
+        done.await.unwrap();
+        assert!(service.pending_reloads.is_empty());
+    }
+
+    #[tokio::test]
+    async fn queued_watcher_events_do_not_starve_sync_or_management_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let mut service = service(dir.path(), "");
+        std::fs::write(
+            &path,
+            format!("auth-dir: '{}'\nport: 3\n", dir.path().display()),
+        )
+        .unwrap();
+        let sync = sync_sender(&mut service);
+        let (sync_applied, mut sync_done) = oneshot::channel();
+        sync.requests
+            .try_send(SyncRequest {
+                change: SyncChange::FileRemoved(dir.path().join("absent.json")),
+                revision: next_revision(),
+                applied: sync_applied,
+                operation: None,
+            })
+            .unwrap_or_else(|_| panic!("sync queue full"));
+        let (reloads, receiver) = mpsc::channel(1);
+        service.reload_requests = receiver;
+        let (reload_applied, mut reload_done) = oneshot::channel();
+        reloads
+            .try_send(ReloadRequest {
+                force: false,
+                applied: reload_applied,
+                operation: None,
+            })
+            .unwrap_or_else(|_| panic!("reload queue full"));
+        let (watching, receiver) = mpsc::channel(1);
+        let mut events = Some(receiver);
+        let mut synced = false;
+        let mut reloaded = false;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            for _ in 0..128 {
+                // Replenish after each event: the watcher never becomes idle.
+                if watching.capacity() == 1 {
+                    watching.try_send(WatchEvent::Reloaded(0)).unwrap();
+                }
+                service.work(&path, &mut events).await;
+                synced |= sync_done.try_recv().is_ok();
+                reloaded |= reload_done.try_recv().is_ok();
+                if synced && reloaded {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(synced, "watcher events starved credential sync");
+        assert!(reloaded, "watcher events starved management reload");
+        assert_eq!(service.config.port, 3);
+    }
+
+    #[tokio::test]
+    async fn queued_snapshots_win_over_a_deferred_directory_retry() {
+        // Exercise both fair-select starting orders if the retry guard regresses.
+        for _ in 0..32 {
+            directory_retry_keeps_newer_disk_config(false).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_replacement_watcher_reconciles_after_an_older_retry() {
+        directory_retry_keeps_newer_disk_config(true).await;
+    }
+
+    async fn directory_retry_keeps_newer_disk_config(retry_first: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let auth_a = dir.path().join("a");
+        let auth_b = dir.path().join("b");
+        let text_a = format!(
+            "auth-dir: '{}'
+port: 2
+",
+            auth_a.display()
+        );
+        let text_b = format!(
+            "auth-dir: '{}'
+port: 3
+",
+            auth_b.display()
+        );
+        let config_a = Arc::new(Config::parse(&text_a).unwrap());
+        let config_b = Arc::new(Config::parse(&text_b).unwrap());
+        let hash_b = open_ferry_core::config::save::sha256_hex(text_b.as_bytes());
+        let mut service = service(dir.path(), "");
+        std::fs::write(&path, &text_b).unwrap();
+        let (sender, receiver) = mpsc::channel(1);
+        sender
+            .send(WatchEvent::ConfigChanged(config_b, hash_b.clone()))
+            .await
+            .unwrap();
+        let mut events = Some(receiver);
+        service.deferred_config = Some((config_a, Some("a".into())));
+        if retry_first {
+            // Deliberately exercise the old ordering: replacement drops B's
+            // receiver, so only the unconditional reconcile can recover it.
+            let (config, hash) = service.deferred_config.take().unwrap();
+            let watching = service.apply_config(config, hash, &path).await;
+            service.follow(watching, &mut events);
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while service.config.port != 3 {
+                service.work(&path, &mut events).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(service.management.config_sha256(), Some(hash_b));
+        assert_eq!(service.auth_dir, auth_b);
+        assert_eq!(service.store.base_dir(), auth_b);
+        assert_eq!(service.watcher.as_ref().unwrap().auth_dir(), auth_b);
+        if !retry_first {
+            assert!(
+                !auth_a.exists(),
+                "the older directory was published before B"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_directory_change_is_applied_once_after_watcher_replacement() {
+        replacement_watcher_applies_only_new_disk_contents(false).await;
+    }
+
+    #[tokio::test]
+    async fn a_seeded_replacement_watcher_still_applies_different_disk_contents() {
+        replacement_watcher_applies_only_new_disk_contents(true).await;
+    }
+
+    async fn replacement_watcher_applies_only_new_disk_contents(different: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let auth = dir.path().join("new-auth");
+        let applied_text = format!("auth-dir: '{}'\nport: 2\n", auth.display());
+        let disk_text = if different {
+            format!("auth-dir: '{}'\nport: 3\n", auth.display())
+        } else {
+            applied_text.clone()
+        };
+        std::fs::write(&path, &disk_text).unwrap();
+        let mut service = service(dir.path(), "");
+        let applied_config = Arc::new(Config::parse(&applied_text).unwrap());
+        let hash = open_ferry_core::config::save::sha256_hex(applied_text.as_bytes());
+        let watching = service
+            .apply_config(applied_config, Some(hash), &path)
+            .await;
+        let mut events = None;
+        service.follow(watching, &mut events);
+        // A later marker proves both the seed's recheck and follow's reconcile
+        // have run; no sleeps or notify's debounce timing as evidence.
+        service.watcher.as_ref().unwrap().reload_config(99);
+        loop {
+            let event = next_watched(&mut events).await;
+            let finished = event == WatchEvent::Reloaded(99);
+            let watching = service.handle(event, &path).await;
+            service.follow(watching, &mut events);
+            if finished {
+                break;
+            }
+        }
+        assert_eq!(service.config_applies, if different { 2 } else { 1 });
+        assert_eq!(service.config.port, if different { 3 } else { 2 });
+        assert_eq!(
+            service.management.config_sha256(),
+            Some(open_ferry_core::config::save::sha256_hex(
+                disk_text.as_bytes()
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn an_owned_open_reload_uses_the_watcher_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let mut service = service(dir.path(), "port: 1\n");
+        std::fs::write(
+            &path,
+            format!("auth-dir: '{}'\nport: 2\n", dir.path().display()),
+        )
+        .unwrap();
+        let (watcher, events) = ConfigWatcher::start(&path, &service.config).unwrap();
+        service.watcher = Some(watcher);
+        let mut events = Some(events);
+        let (applied, done) = oneshot::channel();
+        let operation = service.gate.begin_operation().unwrap();
+        let watching = service
+            .request_reload(
+                ReloadRequest {
+                    force: false,
+                    applied,
+                    operation: Some(operation),
+                },
+                &path,
+            )
+            .await;
+        service.follow(watching, &mut events);
+        assert_eq!(
+            service.config.port, 1,
+            "Open reloads must use the watcher ticket path"
+        );
+        let mut applies = 0;
+        loop {
+            let event = next_watched(&mut events).await;
+            applies += usize::from(matches!(event, WatchEvent::ConfigChanged(..)));
+            let finished = event == WatchEvent::Reloaded(1);
+            let watching = service.handle(event, &path).await;
+            service.follow(watching, &mut events);
+            if finished {
+                break;
+            }
+        }
+        done.await.unwrap();
+        service.watcher.as_ref().unwrap().reload_config(2);
+        loop {
+            let event = next_watched(&mut events).await;
+            applies += usize::from(matches!(event, WatchEvent::ConfigChanged(..)));
+            if event == WatchEvent::Reloaded(2) {
+                break;
+            }
+            let watching = service.handle(event, &path).await;
+            service.follow(watching, &mut events);
+        }
+        assert_eq!(applies, 1);
+        assert_eq!(service.config.port, 2);
+    }
+
+    #[tokio::test]
+    async fn a_direct_reload_discards_older_snapshots_and_records_its_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let text = |port| format!("auth-dir: '{}'\nport: {port}\n", dir.path().display());
+        std::fs::write(&path, text(1)).unwrap();
+        let mut service = service(dir.path(), "port: 0\n");
+        let (watcher, events) = ConfigWatcher::start(&path, &service.config).unwrap();
+        watcher.force_reload_config(0);
+        service.watcher = Some(watcher);
+        let mut events = Some(events);
+        let stale = next_watched(&mut events).await;
+        assert!(matches!(stale, WatchEvent::ConfigChanged(..)));
+        let operation = service.gate.begin_operation().unwrap();
+        let gate = service.gate.clone();
+        let closing = tokio::spawn(async move { gate.close(gate.epoch()).await });
+        tokio::task::yield_now().await;
+        assert_eq!(
+            service.gate.state(),
+            open_ferry_core::gate::GateState::Quiescing
+        );
+        std::fs::write(&path, text(2)).unwrap();
+        let (applied, done) = oneshot::channel();
+        let watching = operation
+            .clone()
+            .scope(async {
+                service
+                    .request_reload(
+                        ReloadRequest {
+                            force: false,
+                            applied,
+                            operation: Some(operation.clone()),
+                        },
+                        &path,
+                    )
+                    .await
+            })
+            .await;
+        service.follow(watching, &mut events);
+        done.await.unwrap();
+        assert_eq!(service.config.port, 2);
+        let applied_config = Arc::clone(&service.config);
+        service.handle(stale, &path).await;
+        assert!(
+            Arc::ptr_eq(&applied_config, &service.config),
+            "a stale snapshot reverted the direct apply"
+        );
+        service.watcher.as_ref().unwrap().reload_config(2);
+        loop {
+            let event = next_watched(&mut events).await;
+            let finished = event == WatchEvent::Reloaded(2);
+            let watching = service.handle(event, &path).await;
+            service.follow(watching, &mut events);
+            assert!(
+                Arc::ptr_eq(&applied_config, &service.config),
+                "the direct config was applied again"
+            );
+            if finished {
+                break;
+            }
+        }
+        drop(operation);
+        closing.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_direct_reload_fence_applies_a_later_valid_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let text = |port| {
+            format!(
+                "auth-dir: '{}'
+port: {port}
+",
+                dir.path().display()
+            )
+        };
+        let mut service = service(
+            dir.path(),
+            "port: 1
+",
+        );
+        std::fs::write(&path, text(1)).unwrap();
+        let (watcher, receiver) = ConfigWatcher::start(&path, &service.config).unwrap();
+        service.watcher = Some(watcher);
+        let mut events = Some(receiver);
+        let operation = service.gate.begin_operation().unwrap();
+        let gate = service.gate.clone();
+        let closing = tokio::spawn(async move { gate.close(gate.epoch()).await });
+        while service.gate.state() == open_ferry_core::gate::GateState::Open {
+            tokio::task::yield_now().await;
+        }
+        std::fs::write(&path, text(2)).unwrap();
+        let (applied, done) = oneshot::channel();
+        let watching = operation
+            .clone()
+            .scope(service.request_reload(
+                ReloadRequest {
+                    force: false,
+                    applied,
+                    operation: Some(operation.clone()),
+                },
+                &path,
+            ))
+            .await;
+        service.follow(watching, &mut events);
+        done.await.unwrap();
+        assert_eq!(service.config.port, 2);
+        let later = text(3);
+        std::fs::write(&path, &later).unwrap();
+        service.watcher.as_ref().unwrap().reload_config(2);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while service.config.port != 3 {
+                service.work(&path, &mut events).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            service.management.config_sha256(),
+            Some(open_ferry_core::config::save::sha256_hex(later.as_bytes()))
+        );
+        drop(operation);
+        closing.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_admitted_reload_applies_under_quiescing_with_a_watcher() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let new_auth = dir.path().join("new-auth");
+        let mut service = service(dir.path(), "");
+        std::fs::write(&path, format!("auth-dir: '{}'\n", dir.path().display())).unwrap();
+        let (watcher, _events) = ConfigWatcher::start(&path, &service.config).unwrap();
+        service.watcher = Some(watcher);
+        let operation = service.gate.begin_operation().unwrap();
+        let gate = service.gate.clone();
+        let closing = tokio::spawn(async move { gate.close(gate.epoch()).await });
+        tokio::task::yield_now().await;
+        assert_eq!(
+            service.gate.state(),
+            open_ferry_core::gate::GateState::Quiescing
+        );
+        std::fs::write(&path, format!("auth-dir: '{}'\n", new_auth.display())).unwrap();
+        let (applied, done) = oneshot::channel();
+        let (requests, receiver) = mpsc::channel(1);
+        service.reload_requests = receiver;
+        requests
+            .send(ReloadRequest {
+                force: false,
+                applied,
+                operation: Some(operation),
+            })
+            .await
+            .unwrap();
+        // Keep unrelated watcher events out of this interleaving. The
+        // request still has a watcher, so enqueue-only would never apply.
+        service.work(&path, &mut None).await;
+        tokio::time::timeout(Duration::from_secs(1), done)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(service.auth_dir, new_auth);
+        assert_eq!(service.store.base_dir(), new_auth);
+        assert!(new_auth.is_dir());
+        assert_eq!(closing.await.unwrap(), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn a_quiescing_directory_reload_retries_after_reopen_without_a_disk_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let new_auth = dir.path().join("new-auth");
+        let mut service = service(dir.path(), "");
+        let original = Arc::clone(&service.config);
+        std::fs::write(
+            &path,
+            format!(
+                "auth-dir: '{}'
+",
+                new_auth.display()
+            ),
+        )
+        .unwrap();
+        let (watcher, events) = ConfigWatcher::start(&path, &service.config).unwrap();
+        watcher.reload_config(1);
+        service.watcher = Some(watcher);
+        let mut events = Some(events);
+        let snapshot = next_watched(&mut events).await;
+        assert!(matches!(snapshot, WatchEvent::ConfigChanged(..)));
+        let operation = service.gate.begin_operation().unwrap();
+        let gate = service.gate.clone();
+        let closing = tokio::spawn(async move { gate.close(gate.epoch()).await });
+        tokio::task::yield_now().await;
+        assert_eq!(
+            service.gate.state(),
+            open_ferry_core::gate::GateState::Quiescing
+        );
+        service.handle(snapshot, &path).await;
+        assert!(
+            Arc::ptr_eq(&original, &service.config),
+            "refused config was published"
+        );
+        assert!(!new_auth.exists());
+        let answer = next_watched(&mut events).await;
+        assert_eq!(answer, WatchEvent::Reloaded(1));
+        service.handle(answer, &path).await;
+        drop(operation);
+        closing.await.unwrap().unwrap();
+        service.gate.reopen();
+        // No further filesystem event or reload ticket is needed.
+        tokio::time::timeout(Duration::from_secs(1), service.work(&path, &mut events))
+            .await
+            .unwrap();
+        assert_eq!(service.config.resolve_auth_dir().unwrap(), new_auth);
+        assert_eq!(service.auth_dir, new_auth);
+        assert_eq!(service.store.base_dir(), new_auth);
+        assert_eq!(service.watcher.as_ref().unwrap().auth_dir(), new_auth);
+    }
+
+    #[tokio::test]
+    async fn a_stalled_management_shutdown_preserves_the_ledger_reserve() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut service = service(dir.path(), "");
+        let arrived = Arc::new(tokio::sync::Notify::new());
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        service.shutdown_hooks = Some((arrived.clone(), finished.clone()));
+        let (stop, _) = watch::channel(false);
+        let control = serve_loop::ServeControl::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(200);
+        let shutdown = shut_down_by(
+            &service,
+            &stop,
+            None,
+            &control,
+            deadline,
+            Duration::from_millis(50),
+        );
+        let probe = async {
+            arrived.notified().await;
+        };
+        tokio::join!(shutdown, probe);
+        assert!(
+            finished.load(std::sync::atomic::Ordering::SeqCst),
+            "management used up the ledger reserve"
+        );
+        assert!(tokio::time::Instant::now() < deadline + Duration::from_millis(100));
+    }
+
+    #[test]
+    fn an_activation_directory_error_keeps_its_io_cause() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = dir.path().join("not-a-directory");
+        std::fs::write(&blocked, "file").unwrap();
+        let (gate, key) = ActiveGate::standby();
+        let mut service = Service::with_gate(
+            Arc::new(Config::default()),
+            dir.path().join("config.yaml"),
+            blocked.clone(),
+            LogLevel::detached(),
+            gate,
+        );
+        let error = service.first_activation(&key).unwrap_err();
+        assert!(error.contains("failed to create auth directory"), "{error}");
+        assert!(error.contains("not-a-directory"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_closed_reload_does_not_create_the_new_auth_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let new_auth = dir.path().join("must-not-exist");
+        let mut service = service(dir.path(), "");
+        service.gate.close(service.gate.epoch()).await.unwrap();
+        let config = Config::parse(format!("auth-dir: '{}'\n", new_auth.display())).unwrap();
+        service
+            .apply_config(Arc::new(config), None, &dir.path().join("config.yaml"))
+            .await;
+        assert!(!new_auth.exists());
+        assert_ne!(service.store.base_dir(), new_auth);
     }
 
     // Not upstream's: a reload the management API asks for is answered once
@@ -2090,20 +3199,20 @@ self-update:
         });
         let request = service.reload_requests.recv().await.unwrap();
         assert!(!request.force);
-        let watching = service.request_reload(request, &config_path);
+        let watching = service.request_reload(request, &config_path).await;
         service.follow(watching, &mut events);
         let changed = next_watched(&mut events).await;
         assert!(
             matches!(changed, WatchEvent::ConfigChanged(..)),
             "{changed:?}"
         );
-        let watching = service.handle(changed, &config_path);
+        let watching = service.handle(changed, &config_path).await;
         service.follow(watching, &mut events);
         assert_eq!(service.config.port, 2);
         assert!(!reloaded.is_finished());
         let answer = next_watched(&mut events).await;
         assert_eq!(answer, WatchEvent::Reloaded(1));
-        service.handle(answer, &config_path);
+        service.handle(answer, &config_path).await;
         tokio::time::timeout(Duration::from_secs(10), reloaded)
             .await
             .unwrap()
@@ -2114,8 +3223,9 @@ self-update:
         let request = ReloadRequest {
             force: true,
             applied,
+            operation: None,
         };
-        let watching = service.request_reload(request, &config_path);
+        let watching = service.request_reload(request, &config_path).await;
         service.follow(watching, &mut events);
         service.follow(Watching::Stopped, &mut events);
         assert!(service.watcher.is_none() && events.is_none());
@@ -2129,8 +3239,9 @@ self-update:
         let request = ReloadRequest {
             force: false,
             applied,
+            operation: None,
         };
-        let watching = service.request_reload(request, &config_path);
+        let watching = service.request_reload(request, &config_path).await;
         service.follow(watching, &mut events);
         assert_eq!(done.await, Ok(()));
         assert_eq!(service.config.port, 3);
@@ -2138,7 +3249,16 @@ self-update:
         std::fs::write(&config_path, "").unwrap();
         for force in [false, true] {
             let (applied, done) = oneshot::channel();
-            let watching = service.request_reload(ReloadRequest { force, applied }, &config_path);
+            let watching = service
+                .request_reload(
+                    ReloadRequest {
+                        force,
+                        applied,
+                        operation: None,
+                    },
+                    &config_path,
+                )
+                .await;
             service.follow(watching, &mut events);
             assert_eq!(done.await, Ok(()));
             assert_eq!(service.config.port, 3);
@@ -2152,6 +3272,7 @@ self-update:
         let request = ReloadRequest {
             force: false,
             applied,
+            operation: None,
         };
         reload.requests.try_send(request).unwrap();
         service.close_reloads();
@@ -2194,7 +3315,7 @@ self-update:
         let path = codex_file(dir.path(), "codex-a.json", "");
         let mut service = service(dir.path(), "");
         let sync = sync_sender(&mut service);
-        service.handle(added(&path), Path::new(""));
+        service.handle(added(&path), Path::new("")).await;
         let id = service.manager.list()[0].id.clone();
         assert!(!model_ids(&service, &id).is_empty());
 
@@ -2216,12 +3337,14 @@ self-update:
         sent.await.unwrap();
         assert!(model_ids(&service, &id).is_empty());
 
-        service.handle(queued, Path::new(""));
+        service.handle(queued, Path::new("")).await;
         assert!(service.manager.get(&id).unwrap().disabled);
         assert!(model_ids(&service, &id).is_empty());
 
         // A report read after the save is applied.
-        service.handle(changed(auth_file(&path)), Path::new(""));
+        service
+            .handle(changed(auth_file(&path)), Path::new(""))
+            .await;
         assert!(service.manager.get(&id).unwrap().disabled);
         assert_eq!(service.revisions.len(), 1);
     }
@@ -2236,7 +3359,7 @@ self-update:
         let path = codex_file(dir.path(), "codex-a.json", "");
         let mut service = service(dir.path(), "");
         let sync = sync_sender(&mut service);
-        service.handle(added(&path), Path::new(""));
+        service.handle(added(&path), Path::new("")).await;
         let id = service.manager.list()[0].id.clone();
 
         let queued = removed(&path);
@@ -2246,7 +3369,7 @@ self-update:
             sync.file_written(file).await
         });
         sent.await.unwrap();
-        service.handle(queued, Path::new(""));
+        service.handle(queued, Path::new("")).await;
         assert_eq!(service.manager.get(&id).unwrap().prefix, "team");
         assert_eq!(service.file_auths.get(&path), Some(&id));
 
@@ -2259,8 +3382,11 @@ self-update:
             change: SyncChange::Upsert(Box::new(older)),
             revision: next_revision(),
             applied,
+            operation: None,
         };
-        service.handle(changed(auth_file(&path)), Path::new(""));
+        service
+            .handle(changed(auth_file(&path)), Path::new(""))
+            .await;
         service.apply_sync(request);
         assert_eq!(done.await, Ok(()));
         assert_eq!(service.manager.get(&id).unwrap().prefix, "team");
@@ -2326,7 +3452,7 @@ self-update:
         let mut service = service(dir.path(), "");
         service.manager.register_executor(Arc::new(Refresher));
         let sync = sync_sender(&mut service);
-        service.handle(added(&path), Path::new(""));
+        service.handle(added(&path), Path::new("")).await;
         let id = service.manager.list()[0].id.clone();
 
         // The API changes a field, saving the file; its sync waits.
@@ -2461,12 +3587,14 @@ self-update:
             panic!("expected an added auth file, got {event:?}");
         };
         let path = file.path.clone();
-        service.handle(WatchEvent::AuthAdded(file, revision), &config_path);
+        service
+            .handle(WatchEvent::AuthAdded(file, revision), &config_path)
+            .await;
         assert_eq!(service.manager.list().len(), 1);
         assert!(service.manager.get(&id).is_some());
         assert_eq!(service.file_auths.get(&path), Some(&id));
 
-        service.handle(removed(&path), &config_path);
+        service.handle(removed(&path), &config_path).await;
         assert!(service.manager.list().is_empty());
         assert!(service.file_auths.is_empty());
 
@@ -2474,7 +3602,7 @@ self-update:
         let same = Arc::new(Config::parse(std::fs::read_to_string(&config_path).unwrap()).unwrap());
         service.watcher = Some(watcher);
         assert!(matches!(
-            service.handle(config_changed(same), &config_path),
+            service.handle(config_changed(same), &config_path).await,
             Watching::Same
         ));
     }
@@ -2495,14 +3623,18 @@ self-update:
         // An unchanged reload keeps the credential.
         let same = Config::parse(format!("auth-dir: '{}'\n{keys}", dir.path().display())).unwrap();
         assert!(matches!(
-            service.handle(config_changed(Arc::new(same)), Path::new("")),
+            service
+                .handle(config_changed(Arc::new(same)), Path::new(""))
+                .await,
             Watching::Same
         ));
         assert!(service.manager.get(&id).is_some());
 
         // A reload without the key removes it.
         let none = Config::parse(format!("auth-dir: '{}'\n", dir.path().display())).unwrap();
-        service.handle(config_changed(Arc::new(none)), Path::new(""));
+        service
+            .handle(config_changed(Arc::new(none)), Path::new(""))
+            .await;
         assert!(service.manager.get(&id).is_none());
         assert!(service.registry.models_for_client(&id).is_empty());
         assert!(service.config_auths.is_empty());
@@ -2513,9 +3645,11 @@ self-update:
     }
 
     /// Reloads `service` with a config over `dir` holding `extra`.
-    fn reload(service: &mut Service, dir: &Path, extra: &str) {
+    async fn reload(service: &mut Service, dir: &Path, extra: &str) -> Watching {
         let config = Config::parse(format!("auth-dir: '{}'\n{extra}", dir.display())).unwrap();
-        service.handle(config_changed(Arc::new(config)), Path::new(""));
+        service
+            .handle(config_changed(Arc::new(config)), Path::new(""))
+            .await
     }
 
     /// The models a Codex file credential with no exclusions serves.
@@ -2560,7 +3694,7 @@ self-update:
         auth.next_retry_after = Some(retry);
         service.manager.update_unsaved(auth).unwrap();
 
-        reload(&mut service, dir.path(), "");
+        reload(&mut service, dir.path(), "").await;
         let auth = service.manager.get(&id).unwrap();
         assert_eq!(auth.attribute("excluded_models"), Some(own.as_str()));
         let models = model_ids(&service, &id);
@@ -2571,7 +3705,7 @@ self-update:
         assert_eq!(auth.next_retry_after, Some(retry));
         assert_eq!(service.file_auths.get(&path), Some(&id));
 
-        reload(&mut service, dir.path(), excluded);
+        reload(&mut service, dir.path(), excluded).await;
         let auth = service.manager.get(&id).unwrap();
         assert_eq!(auth.attribute("excluded_models"), Some(both.as_str()));
         assert!(model_ids(&service, &id).is_empty());
@@ -2600,14 +3734,14 @@ self-update:
         assert!(!model_ids(&service, &id).contains(&own));
 
         let other = "oauth-excluded-models:\n  claude:\n    - x\n";
-        reload(&mut service, dir.path(), other);
+        reload(&mut service, dir.path(), other).await;
         let auth = service.manager.get(&id).unwrap();
         assert_eq!(auth.attribute("excluded_models"), None);
         assert_eq!(auth.attribute("excluded_models_hash"), None);
         assert!(model_ids(&service, &id).contains(&own));
 
         let another = "oauth-excluded-models:\n  claude:\n    - y\n";
-        reload(&mut service, dir.path(), another);
+        reload(&mut service, dir.path(), another).await;
         let unchanged = service.manager.get(&id).unwrap();
         assert_eq!(unchanged.generation, auth.generation);
     }
@@ -2654,7 +3788,9 @@ self-update:
 
         // A reload without them removes both.
         let none = Config::parse(format!("auth-dir: '{}'\n", dir.path().display())).unwrap();
-        service.handle(config_changed(Arc::new(none)), Path::new(""));
+        service
+            .handle(config_changed(Arc::new(none)), Path::new(""))
+            .await;
         for auth in &auths {
             assert!(service.manager.get(&auth.id).is_none());
             assert!(model_ids(&service, &auth.id).is_empty());
@@ -2858,11 +3994,6 @@ self-update:
     #[tokio::test]
     async fn openai_compat_providers_follow_reloads() {
         let dir = tempfile::tempdir().unwrap();
-        let reload = |service: &mut Service, extra: &str| {
-            let text = format!("auth-dir: '{}'\n{extra}", dir.path().display());
-            let config = Arc::new(Config::parse(text).unwrap());
-            service.handle(config_changed(config), Path::new(""))
-        };
         let alpha = |model: &str, alias: &str| {
             compat_entry("alpha", "https://alpha.example.test/v1", model, alias)
         };
@@ -2888,7 +4019,10 @@ self-update:
         assert_eq!(alpha_executor.id(), "openai-compatible-alpha");
 
         // An unchanged reload keeps the credential and the executor.
-        assert!(matches!(reload(&mut service, &first), Watching::Same));
+        assert!(matches!(
+            reload(&mut service, dir.path(), &first).await,
+            Watching::Same
+        ));
         assert!(service.manager.get(&alpha_id).is_some());
         let same = service.manager.executor("openai-compatible-alpha").unwrap();
         assert!(Arc::ptr_eq(&same, &alpha_executor));
@@ -2896,7 +4030,12 @@ self-update:
         // Changed models keep the credential, register the new models, and
         // make the executor again for the new config; a new entry gets a
         // credential and an executor.
-        reload(&mut service, &compat(&[alpha("up-2", "a2"), beta.clone()]));
+        reload(
+            &mut service,
+            dir.path(),
+            &compat(&[alpha("up-2", "a2"), beta.clone()]),
+        )
+        .await;
         assert!(service.manager.get(&alpha_id).is_some());
         assert_eq!(model_ids(&service, &alpha_id), ["a2"]);
         let remade = service.manager.executor("openai-compatible-alpha").unwrap();
@@ -2915,7 +4054,12 @@ self-update:
         assert_eq!(service.config_auths.len(), 2);
 
         // A removed entry takes its credential, models and executor with it.
-        reload(&mut service, &compat(std::slice::from_ref(&beta)));
+        reload(
+            &mut service,
+            dir.path(),
+            &compat(std::slice::from_ref(&beta)),
+        )
+        .await;
         assert!(service.manager.get(&alpha_id).is_none());
         assert!(model_ids(&service, &alpha_id).is_empty());
         assert_eq!(executor_id(&service, "openai-compatible-alpha"), None);
@@ -2923,7 +4067,7 @@ self-update:
 
         // So does a disabled one; the baseline executor stays.
         let disabled = beta.replace("  - name: beta\n", "  - name: beta\n    disabled: true\n");
-        reload(&mut service, &compat(&[disabled]));
+        reload(&mut service, dir.path(), &compat(&[disabled])).await;
         assert!(service.manager.list().is_empty());
         assert!(service.config_auths.is_empty());
         assert_eq!(executor_id(&service, "openai-compatible-beta"), None);
@@ -2935,13 +4079,20 @@ self-update:
         // An invalid weight anywhere leaves the credentials as they were, as
         // upstream checks every weight before making any. The config's
         // loader rejects one, so it is set after.
-        reload(&mut service, &compat(std::slice::from_ref(&beta)));
+        reload(
+            &mut service,
+            dir.path(),
+            &compat(std::slice::from_ref(&beta)),
+        )
+        .await;
         assert_eq!(service.config_auths.len(), 1);
         let entries = compat(&[alpha("up-1", "a1"), beta.clone()]);
         let text = format!("auth-dir: '{}'\n{entries}", dir.path().display());
         let mut invalid = Config::parse(text).unwrap();
         invalid.openai_compatibility[1].api_key_entries[0].weight = Some(MAX_WEIGHT + 1);
-        service.handle(config_changed(Arc::new(invalid)), Path::new(""));
+        service
+            .handle(config_changed(Arc::new(invalid)), Path::new(""))
+            .await;
         assert_eq!(service.manager.list().len(), 1);
         assert!(service.manager.get(&beta_auth.id).is_some());
         assert!(
@@ -3062,10 +4213,12 @@ self-update:
                 config("up-2", "a2")
             );
             let reloaded = Arc::new(Config::parse(text).unwrap());
-            service.handle(
-                WatchEvent::ConfigChanged(reloaded, String::new()),
-                Path::new(""),
-            );
+            service
+                .handle(
+                    WatchEvent::ConfigChanged(reloaded, String::new()),
+                    Path::new(""),
+                )
+                .await;
             let (status, body) = send(addr, "POST", "/v1/chat/completions", &chat("a2")).await;
             assert_eq!((status, body.as_str()), (200, ANSWER));
             let (status, body) = send(addr, "POST", "/v1/chat/completions", &chat("a1")).await;
@@ -3146,10 +4299,10 @@ self-update:
             let request = r#"{"model":"grok-reload","input":"hello"}"#;
             let (status, body) = send(addr, "POST", "/v1/responses", request).await;
             assert_eq!(status, 200, "{body}");
-            reload(&mut service, dir.path(), &config(&base_url, true));
+            reload(&mut service, dir.path(), &config(&base_url, true)).await;
             let (status, body) = send(addr, "POST", "/v1/responses", request).await;
             assert_eq!(status, 200, "{body}");
-            reload(&mut service, dir.path(), &config(&base_url, false));
+            reload(&mut service, dir.path(), &config(&base_url, false)).await;
             let (status, body) = send(addr, "POST", "/v1/responses", request).await;
             assert_eq!(status, 200, "{body}");
 
@@ -3426,6 +4579,8 @@ self-update:
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
         use tokio::net::{TcpListener, TcpStream};
         use tokio::sync::{mpsc, oneshot, watch};
+
+        use open_ferry_core::gate::{ActivationKey, ActiveGate, GateState};
 
         use super::super::{Options, ReloadRequest, Service, run, serve, shut_down};
         use super::{next_watched, service};
@@ -3778,10 +4933,12 @@ self-update:
             assert_eq!(answer.header("x-cpa-version"), None);
 
             // A trusted proxy speaks for its client, which isn't local.
-            service.handle(
-                config(dir.path(), &format!("{KEYED}{trusted}")),
-                Path::new(""),
-            );
+            service
+                .handle(
+                    config(dir.path(), &format!("{KEYED}{trusted}")),
+                    Path::new(""),
+                )
+                .await;
             let answer = fetch(addr, "GET", LIST, &[key]).await;
             assert_eq!(answer.status, 200, "{}", answer.body);
             let answer = fetch(addr, "GET", LIST, &[key, forwarded]).await;
@@ -3789,17 +4946,21 @@ self-update:
             assert_eq!(answer.body, r#"{"error":"remote management disabled"}"#);
 
             let remote = format!("{KEYED}  allow-remote: true\n{trusted}");
-            service.handle(config(dir.path(), &remote), Path::new(""));
+            service
+                .handle(config(dir.path(), &remote), Path::new(""))
+                .await;
             let answer = fetch(addr, "GET", LIST, &[key, forwarded]).await;
             assert_eq!(answer.status, 200, "{}", answer.body);
 
             // The trusted proxies are read once, at start, as upstream
             // reads them.
-            service.handle(config(dir.path(), KEYED), Path::new(""));
+            service
+                .handle(config(dir.path(), KEYED), Path::new(""))
+                .await;
             let answer = fetch(addr, "GET", LIST, &[key, forwarded]).await;
             assert_eq!(answer.status, 403, "{}", answer.body);
 
-            service.handle(config(dir.path(), ""), Path::new(""));
+            service.handle(config(dir.path(), ""), Path::new("")).await;
             let answer = fetch(addr, "GET", LIST, &[key]).await;
             assert_eq!((answer.status, answer.body.as_str()), (404, ""));
         }
@@ -3839,13 +5000,13 @@ self-update:
             path: &Path,
             request: ReloadRequest,
         ) {
-            let watching = service.request_reload(request, path);
+            let watching = service.request_reload(request, path).await;
             service.follow(watching, events);
             let ticket = service.last_reload;
             loop {
                 let event = next_watched(events).await;
                 let answered = event == WatchEvent::Reloaded(ticket);
-                let watching = service.handle(event, path);
+                let watching = service.handle(event, path).await;
                 service.follow(watching, events);
                 if answered {
                     return;
@@ -4107,6 +5268,7 @@ self-update:
             let request = ReloadRequest {
                 force: false,
                 applied,
+                operation: None,
             };
             apply_reload(&mut service, &mut events, &path, request).await;
             assert_eq!(done.await, Ok(()));
@@ -4191,10 +5353,120 @@ self-update:
             assert_eq!(answer.header("x-cpa-safe-mode"), None);
 
             let real = format!("api-keys: ['real-key']\n{KEYED}");
-            service.handle(config(dir.path(), &real), Path::new(""));
+            service
+                .handle(config(dir.path(), &real), Path::new(""))
+                .await;
             let client = ("Authorization", "Bearer real-key");
             let answer = fetch(addr, "GET", "/v1/models", &[client]).await;
             assert_eq!(answer.status, 200, "{}", answer.body);
+        }
+
+        /// A service on a closed gate over `dir`, and the key to activate
+        /// it, as a supervised run builds it.
+        fn standby_service(dir: &Path) -> (Service, ActivationKey) {
+            let config = Config::parse(format!("auth-dir: '{}'\n", dir.display())).unwrap();
+            let (gate, key) = ActiveGate::standby();
+            let mut service = Service::with_gate(
+                Arc::new(config),
+                dir.join("config.yaml"),
+                dir.to_owned(),
+                LogLevel::detached(),
+                gate,
+            );
+            service.register_executors();
+            (service, key)
+        }
+
+        // Not upstream's (review 3 T2, part 1): a service is built closed,
+        // and a closed store refuses to rebind the auth directory; the first
+        // activation binds it under its `Activation` all the same, and
+        // opens the gate.
+        #[tokio::test]
+        async fn the_first_activation_binds_the_auth_dir_a_closed_store_refuses() {
+            let dir = tempfile::tempdir().unwrap();
+            let other = tempfile::tempdir().unwrap();
+            let (mut service, key) = standby_service(dir.path());
+            assert_eq!(service.gate.state(), GateState::Closed);
+            assert!(service.store.try_set_base_dir(other.path()).is_err());
+            assert_eq!(service.store.base_dir(), service.auth_dir);
+
+            // The directory changed while the service loaded.
+            service.auth_dir = other.path().to_owned();
+            service.first_activation(&key).unwrap();
+            assert_eq!(service.gate.state(), GateState::Closed);
+            service.gate.reopen();
+            assert_eq!(service.gate.state(), GateState::Open);
+            assert_eq!(service.store.base_dir(), service.auth_dir);
+            assert_ne!(service.store.base_dir(), dir.path());
+        }
+
+        // Not upstream's: the first activation reads the credentials before
+        // it opens the gate, a key of another gate starts nothing, and
+        // an open gate can't be activated again.
+        #[tokio::test]
+        async fn the_first_activation_reads_the_credentials_then_opens_once() {
+            let dir = tempfile::tempdir().unwrap();
+            super::codex_file(dir.path(), "codex.json", "");
+            let (mut service, key) = standby_service(dir.path());
+            assert!(service.manager.list().is_empty());
+
+            let (_, wrong) = ActiveGate::standby();
+            assert!(service.first_activation(&wrong).is_err());
+            assert_eq!(service.gate.state(), GateState::Closed);
+            assert!(service.manager.list().is_empty());
+
+            service.first_activation(&key).unwrap();
+            assert_eq!(service.gate.state(), GateState::Closed);
+            service.gate.reopen();
+            assert_eq!(service.manager.list().len(), 1);
+            assert_eq!(service.gate.state(), GateState::Open);
+            assert!(service.first_activation(&key).is_err());
+            assert_eq!(service.manager.list().len(), 1);
+        }
+
+        // Not upstream's: a run with no supervisor goes through the first
+        // activation at start, and serves the credentials of its configured
+        // auth directory with the gate open for good.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn an_unsupervised_run_serves_the_credentials_of_its_auth_dir() {
+            let dir = tempfile::tempdir().unwrap();
+            let auth_dir = dir.path().join("auth");
+            std::fs::create_dir(&auth_dir).unwrap();
+            super::codex_file(&auth_dir, "codex.json", "");
+            let port = std::net::TcpListener::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port();
+            let path = dir.path().join("config.yaml");
+            std::fs::write(
+                &path,
+                format!(
+                    "host: 127.0.0.1\nport: {port}\nauth-dir: '{}'\n{KEYED}",
+                    auth_dir.display()
+                ),
+            )
+            .unwrap();
+            let config = Config::load(&path).unwrap();
+            let (stop, stopped) = oneshot::channel::<()>();
+            let served = tokio::spawn(run(
+                config,
+                path,
+                auth_dir,
+                LogLevel::detached(),
+                Options::default(),
+                async move {
+                    let _ = stopped.await;
+                },
+            ));
+            let addr = SocketAddr::from(([127, 0, 0, 1], port));
+            wait_listening(addr).await;
+            let key = ("Authorization", "Bearer test-secret");
+            let answer = fetch(addr, "GET", LIST, &[key]).await;
+            assert_eq!(answer.status, 200, "{}", answer.body);
+            assert!(answer.body.contains("codex.json"), "{}", answer.body);
+            let _ = stop.send(());
+            assert_eq!(served.await.unwrap(), ExitCode::SUCCESS);
         }
     }
 }

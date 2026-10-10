@@ -18,6 +18,7 @@ open-ferry-providers = { path = "crates/open-ferry-providers" }
 open-ferry-dashboard = { path = "crates/open-ferry-dashboard" }
 open-ferry-tui = { path = "crates/open-ferry-tui" }
 open-ferry-update = { path = "crates/open-ferry-update" }
+open-ferry-supervisor = { path = "crates/open-ferry-supervisor" }
 # preserve_order keeps client key order; arbitrary_precision keeps number text
 # exact (e.g. 64-bit IDs in tool inputs), matching upstream's raw-byte handling.
 serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }

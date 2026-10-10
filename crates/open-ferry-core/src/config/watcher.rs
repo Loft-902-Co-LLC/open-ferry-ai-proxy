@@ -311,6 +311,35 @@ impl ConfigWatcher {
         });
     }
 
+    /// Records a config applied directly by the consumer. Config snapshots
+    /// preceding `Reloaded(ticket)` must be discarded by that consumer.
+    /// Afterwards the disk is checked again, so a newer write is not lost
+    /// while the consumer discards the old snapshots.
+    pub fn record_applied_config(&self, contents: &[u8], ticket: u64) {
+        let _ = self.messages.send(Message::Applied {
+            hash: sha256(contents),
+            ticket,
+        });
+    }
+
+    /// Records an already applied snapshot by its hexadecimal SHA-256, when
+    /// the consumer retained its hash rather than its contents. Invalid hashes
+    /// are ignored. Like `record_applied_config`, the marker precedes a disk
+    /// recheck; a different snapshot already on disk is still reported.
+    pub fn record_applied_config_sha256(&self, sha256: &str, ticket: u64) {
+        if sha256.len() != 64 || !sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return;
+        }
+        let mut hash = [0; 32];
+        for (byte, pair) in hash.iter_mut().zip(sha256.as_bytes().as_chunks::<2>().0) {
+            let Ok(value) = u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16) else {
+                return;
+            };
+            *byte = value;
+        }
+        let _ = self.messages.send(Message::Applied { hash, ticket });
+    }
+
     /// [`reload_config`](Self::reload_config), loading the file even when
     /// its SHA-256 is that of the last config that loaded (not upstream's).
     /// An empty file is still skipped, and one that doesn't load reported
@@ -342,6 +371,10 @@ impl Drop for ConfigWatcher {
 /// What the watcher thread receives.
 enum Message {
     Fs(notify::Result<notify::Event>),
+    Applied {
+        hash: Hash,
+        ticket: u64,
+    },
     /// [`ConfigWatcher::reload_config`] with its ticket, or
     /// [`ConfigWatcher::force_reload_config`] with `force`.
     Reload {
@@ -731,6 +764,14 @@ fn run(
         };
         let event = match message {
             Message::Stop => return,
+            Message::Applied { hash, ticket } => {
+                state.last_config_hash = Some(hash);
+                if !send(events, stopped, WatchEvent::Reloaded(ticket)) {
+                    return;
+                }
+                reload_at = Some(Instant::now());
+                continue;
+            }
             Message::Reload { ticket, force } => {
                 // A debounced reload still waiting finds the hash this one
                 // leaves, as upstream's timer does.
@@ -839,6 +880,32 @@ mod tests {
             fs::write(&path, contents).expect("write auth file");
             path
         }
+    }
+
+    #[test]
+    fn applied_hex_hash_rejects_a_leading_plus_in_a_pair() {
+        let fixture = Fixture::new();
+        let config = Config {
+            auth_dir: fixture.auth_dir.display().to_string(),
+            ..Config::default()
+        };
+        let (mut watcher, _events) = ConfigWatcher::start(&fixture.config_path, &config).unwrap();
+        // Inspect this method's messages directly, independent of the watcher
+        // thread's filesystem events or reload scheduling.
+        let (sender, receiver) = std_mpsc::channel();
+        watcher.messages = sender;
+        watcher.record_applied_config_sha256(&format!("+f{}", "00".repeat(31)), 7);
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(std_mpsc::TryRecvError::Empty)
+        ));
+        watcher.record_applied_config_sha256(&format!("Af{}", "00".repeat(31)), 8);
+        let Message::Applied { hash, ticket } = receiver.try_recv().unwrap() else {
+            panic!("not an applied marker")
+        };
+        assert_eq!(ticket, 8);
+        assert_eq!(hash[0], 0xaf);
+        assert_eq!(&hash[1..], &[0; 31]);
     }
 
     fn known(state: &WatchState, path: &Path) -> Option<Hash> {
