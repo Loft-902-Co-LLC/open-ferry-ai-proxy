@@ -53,6 +53,9 @@ use tracing::Level;
 use super::format::{Entry, Fields, format};
 use super::{file_name, retry_shared};
 
+#[cfg(test)]
+mod blue_green;
+
 /// The size `main.log` is rotated at (lumberjack's `MaxSize` of 10
 /// megabytes).
 pub(super) const MAX_SIZE: u64 = 10 * 1024 * 1024;
@@ -72,6 +75,8 @@ enum Job {
     Line(Vec<u8>),
     /// A request to say once the lines before it are written.
     Sync(mpsc::Sender<()>),
+    /// Not upstream's: resume the current path after a peer's rotation.
+    Reopen(mpsc::Sender<io::Result<()>>),
     /// Tests: wait until told to go on, as a slow disk would.
     #[cfg_attr(not(test), allow(dead_code, reason = "tests hold the writer"))]
     Hold(Receiver<()>),
@@ -84,6 +89,7 @@ pub(crate) type Tap = Arc<dyn Fn(&[u8]) + Send + Sync>;
 #[derive(Debug)]
 pub(super) struct Output {
     state: RwLock<State>,
+    controls: super::LogControls,
     /// Held while the output switches, so one switch ends before the next.
     switching: Mutex<()>,
     /// The lines dropped and not yet reported, by either queue.
@@ -136,6 +142,14 @@ impl Default for Output {
 impl Output {
     /// An output whose standard output is `console`.
     pub(super) fn with_console(console: Box<dyn Write + Send>) -> Self {
+        Self::with_console_controls(console, super::LogControls::process_default())
+    }
+
+    pub(super) fn with_controls(controls: super::LogControls) -> Self {
+        Self::with_console_controls(Box::new(io::stdout()), controls)
+    }
+
+    fn with_console_controls(console: Box<dyn Write + Send>, controls: super::LogControls) -> Self {
         let dropped = Arc::new(AtomicU64::new(0));
         let muted = Arc::new(AtomicBool::new(false));
         let console = Console {
@@ -155,6 +169,7 @@ impl Output {
                 file: None,
                 console,
             }),
+            controls,
             switching: Mutex::new(()),
             dropped,
             muted,
@@ -224,7 +239,7 @@ impl Output {
             return Ok(());
         }
         let (start, gate) = mpsc::channel();
-        let writer = Rotating::new(path.to_path_buf(), MAX_SIZE);
+        let writer = Rotating::with_controls(path.to_path_buf(), MAX_SIZE, self.controls.clone());
         let worker = Worker::spawn("main-log", writer, Arc::clone(&self.dropped), Some(gate))?;
         let old = self
             .state
@@ -281,6 +296,24 @@ impl Output {
         for queue in &queues {
             sync(queue, deadline);
         }
+    }
+
+    /// Not upstream's: serialize reopening with output switches and lines.
+    pub(super) fn reopen(&self) -> io::Result<()> {
+        let _switching = self
+            .switching
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let state = self.state.read().unwrap_or_else(PoisonError::into_inner);
+        let Some(file) = &state.file else {
+            return Ok(());
+        };
+        let (done, wait) = mpsc::channel();
+        file.worker
+            .queue
+            .send(Job::Reopen(done))
+            .map_err(|_| closed())?;
+        wait.recv().map_err(|_| closed())?
     }
 
     /// Tests: makes the thread the lines go to now wait until `go` says.
@@ -351,6 +384,10 @@ trait Sink: Send + 'static {
 
     /// Writes out what is buffered.
     fn flush_quietly(&mut self);
+
+    fn reopen(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Standard output, or what stands in for it in tests. A line that can't
@@ -404,6 +441,9 @@ fn handle(sink: &mut impl Sink, job: Job, dropped: &AtomicU64, reported: &mut Op
             sink.flush_quietly();
             let _ = done.send(());
         }
+        Job::Reopen(done) => {
+            let _ = done.send(sink.reopen());
+        }
         Job::Hold(go) => {
             let _ = go.recv();
         }
@@ -445,41 +485,79 @@ pub(super) struct Rotating {
     file: Option<BufWriter<File>>,
     size: u64,
     retry_rotation_at: Option<Instant>,
+    rotation: Arc<Mutex<bool>>,
+    rotation_epoch: Arc<AtomicU64>,
+    seen_rotation_epoch: u64,
 }
 
 impl Rotating {
     /// The log file at `path`, rotated at `max_size` bytes. Nothing is
     /// opened until the first line.
+    #[cfg(test)]
     pub(super) fn new(path: PathBuf, max_size: u64) -> Self {
+        Self::with_controls(path, max_size, super::LogControls::process_default())
+    }
+
+    pub(super) fn with_controls(
+        path: PathBuf,
+        max_size: u64,
+        controls: super::LogControls,
+    ) -> Self {
         Self {
             path,
             max_size,
             file: None,
             size: 0,
             retry_rotation_at: None,
+            rotation: controls.rotation,
+            seen_rotation_epoch: controls.rotation_epoch.load(Ordering::Relaxed),
+            rotation_epoch: controls.rotation_epoch,
         }
     }
 
     /// Writes a line of the writer's own: why it couldn't rotate.
+    /// Write errors are intentionally dropped: reporting them here would recurse.
     fn write_own(&mut self, level: Level, message: &str) {
         let line = own_line(level, message);
-        self.write_line(line.as_bytes());
+        if let Some(file) = self.file.as_mut()
+            && file.write_all(line.as_bytes()).is_ok()
+        {
+            self.size += line.len() as u64;
+        }
     }
 
     /// Writes `line`, rotating first when it would take the file past the
     /// limit (lumberjack's `Write`).
     pub(super) fn write(&mut self, line: &[u8]) -> io::Result<()> {
+        // Not upstream's: disabling rotation waits for an in-flight write.
+        let rotation = Arc::clone(&self.rotation);
+        let enabled = rotation.lock().unwrap_or_else(PoisonError::into_inner);
+        let epoch = self.rotation_epoch.load(Ordering::Relaxed);
+        if *enabled && epoch != self.seen_rotation_epoch {
+            if let Some(file) = self.file.as_mut() {
+                file.flush()?;
+                self.size = file.get_ref().metadata()?.len();
+            }
+            self.seen_rotation_epoch = epoch;
+        }
         let len = line.len() as u64;
-        if len > self.max_size {
+        if *enabled && len > self.max_size {
             return Err(io::Error::other(format!(
                 "write length {len} exceeds maximum file size {}",
                 self.max_size
             )));
         }
         if self.file.is_none() {
-            self.open_existing_or_new(len)?;
+            if *enabled {
+                self.open_existing_or_new(len)?;
+            } else {
+                if let Some(dir) = self.path.parent() {
+                    fs::create_dir_all(dir)?;
+                }
+                self.open_append()?;
+            }
         }
-        if self.size + len > self.max_size {
+        if *enabled && self.size + len > self.max_size {
             self.rotate(len)?;
         }
         let file = self.file.as_mut().ok_or_else(closed)?;
@@ -593,6 +671,14 @@ impl Rotating {
 }
 
 impl Sink for Rotating {
+    // Not upstream's: resume must append to the current name, not rotate it.
+    fn reopen(&mut self) -> io::Result<()> {
+        self.flush()?;
+        self.file = None;
+        self.retry_rotation_at = None;
+        self.open_append()
+    }
+
     /// Writes `line`, telling standard error when it can't, as logrus
     /// does when its output fails.
     fn write_line(&mut self, line: &[u8]) {

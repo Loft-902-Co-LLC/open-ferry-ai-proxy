@@ -28,5 +28,7 @@ pub mod multipart;
 pub mod observe;
 pub mod registry;
 pub mod session;
+#[cfg(feature = "blue-green-test")]
+pub mod test_hooks;
 #[cfg(test)]
 mod test_tracing;

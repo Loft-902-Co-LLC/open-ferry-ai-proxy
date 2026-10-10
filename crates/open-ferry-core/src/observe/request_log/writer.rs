@@ -29,7 +29,7 @@ use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -42,6 +42,9 @@ use super::format::{self, DECODE_LIMIT, Sections};
 use super::names::{create_unique_log_file, error_filename, filename};
 use super::{Answer, ApiError, Downstream, RequestBody};
 use crate::observe::redact::{Policy, Secrets};
+
+#[cfg(test)]
+mod blue_green;
 
 /// How many finished logs may wait for the writer.
 const QUEUE: usize = 1024;
@@ -88,19 +91,28 @@ enum Job {
 #[derive(Default)]
 pub(crate) struct Writer {
     sender: OnceLock<Option<SyncSender<Job>>>,
+    cleaning: CleaningControls,
     dropped: AtomicU64,
     last_warned: Mutex<Option<Instant>>,
 }
 
 impl Writer {
+    pub(crate) fn with_cleaning(cleaning: CleaningControls) -> Self {
+        Self {
+            cleaning,
+            ..Self::default()
+        }
+    }
+
     /// The queue to the thread, which starts with the first call.
     fn sender(&self) -> Option<&SyncSender<Job>> {
         self.sender
             .get_or_init(|| {
                 let (sender, receiver) = mpsc::sync_channel(QUEUE);
+                let cleaning = self.cleaning.clone();
                 match thread::Builder::new()
                     .name("request-log".to_owned())
-                    .spawn(move || run(&receiver))
+                    .spawn(move || run(&receiver, &cleaning))
                 {
                     Ok(_) => Some(sender),
                     Err(error) => {
@@ -153,10 +165,10 @@ impl Writer {
 }
 
 /// The writer thread's loop; it ends when the logger is dropped.
-fn run(receiver: &Receiver<Job>) {
+fn run(receiver: &Receiver<Job>, cleaning: &CleaningControls) {
     for job in receiver {
         match job {
-            Job::Write(entry) => write(&entry),
+            Job::Write(entry) => write_with_cleaning(&entry, cleaning),
             Job::Flush(done) => {
                 let _ = done.send(());
             }
@@ -165,14 +177,14 @@ fn run(receiver: &Receiver<Job>) {
 }
 
 /// Writes `entry`'s log, and trims the error logs after a forced one.
-fn write(entry: &Entry) {
+fn write_with_cleaning(entry: &Entry, cleaning: &CleaningControls) {
     let (name, content) = render(entry, Local::now());
     if let Err(error) = write_file(&entry.dir, &name, &content) {
         tracing::warn!(error = %error, "failed to write request log");
         return;
     }
     if entry.forced
-        && let Err(error) = cleanup_old_error_logs(&entry.dir, entry.max_error_files)
+        && let Err(error) = cleaning.cleanup(&entry.dir, entry.max_error_files)
     {
         tracing::warn!(error = %error, "failed to clean up old error logs");
     }
@@ -312,9 +324,60 @@ fn push_marker(body: &mut Vec<u8>, marker: &str) {
     body.extend_from_slice(marker.as_bytes());
 }
 
+/// Not upstream's: injectable request-error cleaning, shared by cloned handles.
+#[derive(Clone, Debug)]
+pub struct CleaningControls(Arc<Mutex<bool>>);
+
+impl Default for CleaningControls {
+    fn default() -> Self {
+        Self::process_default()
+    }
+}
+
+impl CleaningControls {
+    /// Creates private controls, initially enabled, for one worker.
+    pub fn new() -> Self {
+        Self(Arc::new(Mutex::new(true)))
+    }
+
+    /// Production's process-wide controls.
+    pub fn process_default() -> Self {
+        static CONTROL: OnceLock<CleaningControls> = OnceLock::new();
+        CONTROL.get_or_init(Self::new).clone()
+    }
+
+    /// Blocking: waits for any in-flight pass. Call off runtime threads.
+    /// Only open-ferry's LogControls owns this setter: worker code must use
+    /// its paired setter, never change this half through request_cleaning().
+    /// Public solely because the pair's owner lives in another crate.
+    pub fn set_cleaning(&self, enabled: bool) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = enabled;
+    }
+
+    /// Runs retention with this handle, or does nothing while disabled.
+    pub fn cleanup(&self, dir: &Path, max: i64) -> io::Result<()> {
+        let enabled = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if !*enabled {
+            return Ok(());
+        }
+        cleanup_enabled(dir, max)
+    }
+}
+
+/// Blocking process-default wrapper used by this module's legacy tests.
+#[cfg(test)]
+pub(crate) fn set_cleaning(enabled: bool) {
+    CleaningControls::process_default().set_cleaning(enabled);
+}
+
 /// Removes the oldest `error-*.log` files in `dir` beyond `max` (upstream's
 /// `cleanupOldErrorLogs`); none when `max` is 0 or less.
+#[cfg(test)]
 pub(crate) fn cleanup_old_error_logs(dir: &Path, max: i64) -> io::Result<()> {
+    CleaningControls::process_default().cleanup(dir, max)
+}
+
+fn cleanup_enabled(dir: &Path, max: i64) -> io::Result<()> {
     let Ok(max) = usize::try_from(max) else {
         return Ok(());
     };

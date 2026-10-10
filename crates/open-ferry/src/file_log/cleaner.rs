@@ -24,7 +24,8 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, PoisonError};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
@@ -39,17 +40,19 @@ const INTERVAL: Duration = Duration::from_secs(60);
 /// A running cleaner. Dropping it stops it.
 #[derive(Debug)]
 pub(super) struct Cleaner {
-    _stop: mpsc::Sender<()>,
+    stop: Arc<AtomicBool>,
+    control: Arc<super::control::Cleaning>,
 }
 
 impl Cleaner {
     /// Starts a cleaner keeping `dir` under `max_total_size_mb` megabytes,
     /// never deleting `protected`, or none when the limit isn't positive or
     /// `dir` is blank (upstream's `configureLogDirCleanerLocked`).
-    pub(super) fn start(
+    pub(super) fn start_with(
         dir: &Path,
         max_total_size_mb: i64,
         protected: Option<PathBuf>,
+        control: Arc<super::control::Cleaning>,
     ) -> Option<Self> {
         let max_bytes = u64::try_from(max_total_size_mb)
             .ok()
@@ -59,23 +62,79 @@ impl Cleaner {
             return None;
         }
         let dir = dir.to_path_buf();
-        let (stop, stopped) = mpsc::channel::<()>();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::clone(&stop);
+        let controls = Arc::clone(&control);
+        #[cfg(test)]
+        let generation = {
+            let _observed = control.observed.lock().unwrap();
+            control.generation.fetch_add(1, Ordering::AcqRel) + 1
+        };
         let spawned = thread::Builder::new()
             .name("log-dir-cleaner".to_owned())
-            .spawn(move || run(&dir, max_bytes, protected.as_deref(), &stopped));
-        if let Err(error) = spawned {
-            tracing::warn!("logging: failed to start the log directory cleaner: {error}");
-            return None;
+            .spawn(move || {
+                run(
+                    &dir,
+                    max_bytes,
+                    protected.as_deref(),
+                    &stopped,
+                    &controls,
+                    #[cfg(test)]
+                    generation,
+                )
+            });
+        match spawned {
+            Ok(_thread) => Some(Self { stop, control }),
+            Err(error) => {
+                tracing::warn!("logging: failed to start the log directory cleaner: {error}");
+                None
+            }
         }
-        Some(Self { _stop: stop })
     }
 }
 
 /// Cleans `dir` now and then every [`INTERVAL`] until the cleaner is
 /// dropped (upstream's `runLogDirCleaner`).
-fn run(dir: &Path, max_bytes: u64, protected: Option<&Path>, stopped: &mpsc::Receiver<()>) {
+fn run(
+    dir: &Path,
+    max_bytes: u64,
+    protected: Option<&Path>,
+    stopped: &AtomicBool,
+    control: &super::control::Cleaning,
+    #[cfg(test)] generation: u64,
+) {
+    let mut enabled = control
+        .enabled
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     loop {
-        match enforce_log_dir_size_limit(dir, max_bytes, protected) {
+        if stopped.load(Ordering::Acquire) {
+            return;
+        }
+        if !*enabled {
+            #[cfg(test)]
+            control.observe(generation, *enabled);
+            // Drop signals without taking the IO lock; a bounded wait also
+            // covers a stop notification racing this wait.
+            (enabled, _) = control
+                .changed
+                .wait_timeout(enabled, INTERVAL)
+                .unwrap_or_else(PoisonError::into_inner);
+            continue;
+        }
+        #[cfg(test)]
+        if let Some(pass) = control.pass.lock().unwrap().take() {
+            pass.arrived.send(()).unwrap();
+            pass.release.lock().unwrap().recv().unwrap();
+        }
+        match enforce_until_stopped(
+            dir,
+            max_bytes,
+            protected,
+            stopped,
+            #[cfg(test)]
+            Some(control),
+        ) {
             Ok(0) => {}
             Ok(deleted) => tracing::debug!(
                 "logging: removed {deleted} old log file(s) to enforce log directory size limit"
@@ -87,10 +146,26 @@ fn run(dir: &Path, max_bytes: u64, protected: Option<&Path>, stopped: &mpsc::Rec
                 );
             }
         }
-        match stopped.recv_timeout(INTERVAL) {
-            Err(RecvTimeoutError::Timeout) => {}
-            Ok(()) | Err(RecvTimeoutError::Disconnected) => return,
+        if stopped.load(Ordering::Acquire) {
+            return;
         }
+        #[cfg(test)]
+        control.observe(generation, *enabled);
+        (enabled, _) = control
+            .changed
+            .wait_timeout(enabled, INTERVAL)
+            .unwrap_or_else(PoisonError::into_inner);
+    }
+}
+
+impl Drop for Cleaner {
+    fn drop(&mut self) {
+        // Not upstream's: config reload must not wait for a pass. Signal it;
+        // at most one deletion already under way can finish after reload.
+        // Explicit set_cleaning(false) still waits for the IO lock and drains
+        // any in-flight pass.
+        self.stop.store(true, Ordering::Release);
+        self.control.changed.notify_all();
     }
 }
 
@@ -105,10 +180,21 @@ struct LogFile {
 /// `max_bytes`, skipping `protected`, and says how many it deleted
 /// (upstream's `enforceLogDirSizeLimit`). A missing directory has nothing
 /// to delete.
+#[cfg(test)]
 pub(super) fn enforce_log_dir_size_limit(
     dir: &Path,
     max_bytes: u64,
     protected: Option<&Path>,
+) -> io::Result<usize> {
+    enforce_until_stopped(dir, max_bytes, protected, &AtomicBool::new(false), None)
+}
+
+fn enforce_until_stopped(
+    dir: &Path,
+    max_bytes: u64,
+    protected: Option<&Path>,
+    stopped: &AtomicBool,
+    #[cfg(test)] control: Option<&super::control::Cleaning>,
 ) -> io::Result<usize> {
     if max_bytes == 0 {
         return Ok(0);
@@ -152,7 +238,7 @@ pub(super) fn enforce_log_dir_size_limit(
     let protected_file = protected.and_then(|protected| Handle::from_path(protected).ok());
     let mut deleted = 0;
     for file in files {
-        if total <= max_bytes {
+        if total <= max_bytes || stopped.load(Ordering::Acquire) {
             break;
         }
         if protected.is_some_and(|protected| protected == file.path)
@@ -162,8 +248,25 @@ pub(super) fn enforce_log_dir_size_limit(
         {
             continue;
         }
-        match retry_shared(|| fs::remove_file(&file.path)) {
+        match retry_shared(|| {
+            if stopped.load(Ordering::Acquire) {
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "cleaner stopped",
+                ));
+            }
+            #[cfg(test)]
+            if let Some(control) = control {
+                let deletion = control.deletion.lock().unwrap().take();
+                if let Some(deletion) = deletion {
+                    deletion.arrived.send(()).unwrap();
+                    deletion.release.lock().unwrap().recv().unwrap();
+                }
+            }
+            fs::remove_file(&file.path)
+        }) {
             Ok(()) => deleted += 1,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => return Ok(deleted),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => {
                 tracing::warn!(

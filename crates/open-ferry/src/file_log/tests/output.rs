@@ -269,6 +269,7 @@ fn standard_output_never_blocks() {
             written: Arc::clone(&written),
         }))),
         cleaner: Arc::default(),
+        controls: crate::file_log::LogControls::process_default(),
     };
     let total = QUEUE + 100;
     let (done, logged) = mpsc::channel();
@@ -315,6 +316,7 @@ fn muting_drops_standard_output_and_the_tap_sees_every_line() {
             written: Arc::clone(&written),
         }))),
         cleaner: Arc::default(),
+        controls: crate::file_log::LogControls::process_default(),
     };
     let seen = Arc::new(Mutex::new(Vec::new()));
     let tap_seen = Arc::clone(&seen);

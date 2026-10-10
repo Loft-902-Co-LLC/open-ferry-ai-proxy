@@ -1211,6 +1211,11 @@ impl Manager {
                 return Err(ManagerError::Refresh(err));
             }
         };
+        // Not upstream's: the provider may have killed the old refresh token.
+        #[cfg(feature = "blue-green-test")]
+        let mut save_failure = crate::test_hooks::barrier("refresh.after_rotate")
+            .await
+            .err();
         updated.last_refreshed_at = Some(now);
         updated.next_refresh_after = None;
         updated.rejected_access_token.clear();
@@ -1225,7 +1230,43 @@ impl Manager {
         if should_refresh(&updated, executor.refresh_lead(), now) {
             updated.next_refresh_after = Some(add(now, REFRESH_INEFFECTIVE_BACKOFF));
         }
-        let (saved, generation) = match self.update_refreshed(&auth, base_epoch, updated) {
+        // Not upstream's: only an installed test hook offloads this save.
+        // run_blocking owns the admitted guard and restores it in its thread
+        // slot, so a dropped await cannot end admission before the write.
+        #[cfg(feature = "blue-green-test")]
+        let save_result = {
+            if save_failure.is_none() {
+                save_failure = crate::test_hooks::barrier("refresh.before_save")
+                    .await
+                    .err();
+            }
+            if save_failure.is_some() {
+                // The common update path logs one generic injected save
+                // failure; the barrier-specific cause is not carried into it.
+                self.update_refreshed_after_save_failure(&auth, base_epoch, updated)
+            } else if crate::test_hooks::is_installed()
+                && tokio::runtime::Handle::try_current().is_ok()
+            {
+                let operation = crate::gate::Operation::current().ok_or_else(|| {
+                    ManagerError::Store(std::io::Error::other("refresh save has no operation"))
+                })?;
+                let manager = self.clone();
+                let base = auth.clone();
+                operation
+                    .run_blocking(move || manager.update_refreshed(&base, base_epoch, updated))
+                    .await
+                    .map_err(|error| {
+                        ManagerError::Store(std::io::Error::other(format!(
+                            "refresh save task failed: {error}"
+                        )))
+                    })?
+            } else {
+                self.update_refreshed(&auth, base_epoch, updated)
+            }
+        };
+        #[cfg(not(feature = "blue-green-test"))]
+        let save_result = self.update_refreshed(&auth, base_epoch, updated);
+        let (saved, generation) = match save_result {
             Ok(Some(saved)) => saved,
             Ok(None) => return Err(ManagerError::Other(format!("auth {id} not found"))),
             Err(err) => {
@@ -1237,6 +1278,9 @@ impl Manager {
                 return Err(err);
             }
         };
+        // Not upstream's: an abort between an offloaded save and publication
+        // can leave the saved credential without these projections. The owned
+        // refresh task keeps running when its external caller is cancelled.
         self.publish_projections(&saved, generation, now, true);
         Ok(saved)
     }
