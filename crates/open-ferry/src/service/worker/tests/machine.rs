@@ -2039,11 +2039,11 @@ async fn finish_calls_flush_before_return_with_only_the_time_left() {
     // a short one would pass before it ran.
     let deadline = tokio::time::Instant::now() + WAIT;
     let result = super::super::finish_with(ExitCode::SUCCESS, deadline, move |timeout| {
-        assert!(
-            timeout
-                <= deadline.saturating_duration_since(tokio::time::Instant::now())
-                    + Duration::from_millis(1)
-        );
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(timeout <= left + Duration::from_millis(1));
+        // All of the time left, measured before this call, and not a fixed
+        // timeout: one that fits this long deadline would overrun a short one.
+        assert!(timeout >= left, "{timeout:?} with {left:?} left");
         assert!(timeout <= WAIT);
         flushed.store(true, std::sync::atomic::Ordering::SeqCst);
     })
