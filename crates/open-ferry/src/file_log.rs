@@ -40,6 +40,8 @@ use tracing_subscriber::Layer;
 use tracing_subscriber::registry::LookupSpan;
 
 mod cleaner;
+mod control;
+pub use control::LogControls;
 mod format;
 mod writer;
 
@@ -57,13 +59,29 @@ pub const MAIN_LOG: &str = "main.log";
 
 /// Where the log lines go, which [`reconfigure`] changes. Cloning gives
 /// another handle to the same output.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct FileLog {
     output: Arc<Output>,
+    controls: LogControls,
     cleaner: Arc<Mutex<Option<Cleaner>>>,
 }
 
+impl Default for FileLog {
+    fn default() -> Self {
+        Self::with_controls(LogControls::process_default())
+    }
+}
+
 impl FileLog {
+    /// Not upstream's: inject a private worker handle before configure.
+    pub fn with_controls(controls: LogControls) -> Self {
+        Self {
+            output: Arc::new(Output::with_controls(controls.clone())),
+            controls,
+            cleaner: Arc::new(Mutex::new(None)),
+        }
+    }
+
     /// Sends the log lines to `main.log` in `dir` when `to_file`, else to
     /// standard output, and keeps `dir` under `max_total_size_mb` when
     /// that is positive (upstream's `ConfigureLogOutput`, with the
@@ -89,7 +107,27 @@ impl FileLog {
         }
         // Stops the previous cleaner, as dropping it does.
         *cleaner = None;
-        *cleaner = Cleaner::start(dir, max_total_size_mb, protected);
+        *cleaner = Cleaner::start_with(
+            dir,
+            max_total_size_mb,
+            protected,
+            self.controls.cleaning.clone(),
+        );
+    }
+
+    /// Not upstream's: blocking; call off runtime threads. At take over, after
+    /// the lease and before ready, reopen by name and re-read its size. Go then
+    /// enables rotation. Both kinds of resume reopen and turn rotation on;
+    /// after handed_over, retake the lease before reopening. Cleaning is turned
+    /// off as hand over's first, infallible step before mgmt 503. That step runs
+    /// to completion outside the continuation resume aborts; resume first awaits
+    /// it if still running. Cleaning still waits for peers_gone after resume.
+    /// Log that event exactly when set_cleaning(true)
+    /// returns false: every first enable after a start or a resumed hand over.
+    /// Queued lines are flushed first.
+    #[allow(dead_code, reason = "the worker's resume wiring follows this API")]
+    pub fn reopen(&self) -> std::io::Result<()> {
+        self.output.reopen()
     }
 
     /// Where the lines go: `main.log`'s path, or `None` for standard
@@ -124,6 +162,21 @@ impl FileLog {
     }
 }
 
+/// Blocking process-default wrapper: legacy, unsupervised only.
+/// Supervised workers use their private LogControls. Call off runtime threads.
+#[allow(dead_code, reason = "the worker's state wiring follows this API")]
+pub fn set_rotation(enabled: bool) {
+    LogControls::process_default().set_rotation(enabled);
+}
+
+/// Blocking process-default wrapper: legacy, unsupervised only.
+/// Sets both cleaners as one step; repeated enable is idempotent. Supervised
+/// workers use their private LogControls. Call off runtime threads.
+#[allow(dead_code, reason = "the worker's state wiring follows this API")]
+pub fn set_cleaning(enabled: bool) {
+    LogControls::process_default().set_cleaning(enabled);
+}
+
 /// The layer that writes every log line, and the handle that changes where
 /// the lines go. They go to standard output until a config says otherwise
 /// (upstream's `SetupBaseLogger`).
@@ -131,7 +184,17 @@ pub fn init<S>() -> (Box<dyn Layer<S> + Send + Sync>, FileLog)
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
-    let file_log = FileLog::default();
+    init_with_controls(LogControls::process_default())
+}
+
+/// Not upstream's: builds the tracing layer and writer with one worker's
+/// controls. Pass this handle to the worker state machine, and its
+/// `request_cleaning()` to `RequestLogger::with_cleaning`.
+pub fn init_with_controls<S>(controls: LogControls) -> (Box<dyn Layer<S> + Send + Sync>, FileLog)
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    let file_log = FileLog::with_controls(controls);
     let layer = FormatLayer::new(Arc::clone(&file_log.output));
     (Box::new(layer), file_log)
 }

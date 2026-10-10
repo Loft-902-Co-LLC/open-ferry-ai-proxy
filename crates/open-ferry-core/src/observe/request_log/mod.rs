@@ -78,6 +78,8 @@ mod format;
 mod names;
 mod writer;
 
+pub use writer::CleaningControls;
+
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -235,6 +237,21 @@ impl RequestLogger {
     /// directory of `config_path` when relative (upstream's
     /// `NewFileRequestLogger`, as `defaultRequestLoggerFactory` calls it).
     pub fn new(config: &Config, log_dir: &Path, config_path: &Path) -> Self {
+        Self::with_cleaning(
+            config,
+            log_dir,
+            config_path,
+            CleaningControls::process_default(),
+        )
+    }
+
+    /// Not upstream's: builds the writer with a worker's private cleaning handle.
+    pub fn with_cleaning(
+        config: &Config,
+        log_dir: &Path,
+        config_path: &Path,
+        cleaning: CleaningControls,
+    ) -> Self {
         let dir = match config_path.parent() {
             Some(parent) if log_dir.is_relative() && !parent.as_os_str().is_empty() => {
                 parent.join(log_dir)
@@ -247,7 +264,7 @@ impl RequestLogger {
                 enabled: AtomicBool::new(config.request_log),
                 commercial: AtomicBool::new(config.commercial_mode),
                 max_error_files: AtomicI64::new(config.error_logs_max_files),
-                writer: writer::Writer::default(),
+                writer: writer::Writer::with_cleaning(cleaning),
             })),
         }
     }

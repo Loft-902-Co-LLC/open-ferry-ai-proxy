@@ -865,3 +865,29 @@ fn traces_the_latest_selection() {
     context.select(crate::observe::SelectedAuth::new(Arc::new(Auth::default())));
     assert_eq!(trace_id(&context), None);
 }
+
+// Not upstream's: each logger's actual writer reads its injected controls.
+#[test]
+fn private_cleaning_handles_follow_their_request_writers() {
+    let a = CleaningControls::new();
+    let b = CleaningControls::new();
+    a.set_cleaning(false);
+    for (control, expected) in [(a, 3), (b, 1)] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = config(false);
+        config.error_logs_max_files = 1;
+        let logger = RequestLogger::with_cleaning(&config, dir.path(), Path::new(""), control);
+        for n in 0..3 {
+            let path = format!("/v1/fail-{n}");
+            let request = context(&path);
+            logger.start(&request);
+            finish(
+                &request,
+                downstream(&path, b"{}"),
+                answer(500, "application/json", b"{}"),
+            );
+            logger.flush();
+        }
+        assert_eq!(files_named(dir.path()).len(), expected);
+    }
+}

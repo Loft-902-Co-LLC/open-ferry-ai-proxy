@@ -386,6 +386,12 @@ impl Operation {
             .or_else(|| BLOCKING.with(|slot| slot.borrow().clone()))
     }
 
+    /// The operation carried by `run_blocking`, excluding task-local scopes.
+    #[must_use]
+    pub fn current_blocking() -> Option<Self> {
+        BLOCKING.with(|slot| slot.borrow().clone())
+    }
+
     /// The gate that admitted this operation.
     #[must_use]
     pub fn gate(&self) -> ActiveGate {

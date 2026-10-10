@@ -160,6 +160,8 @@ pub struct QuotaReset {
 pub(crate) enum Save {
     Yes,
     No,
+    #[cfg(feature = "blue-green-test")]
+    Failed,
 }
 
 /// A published snapshot whose save hasn't returned: while it lives, the
@@ -434,6 +436,22 @@ impl Manager {
         updated: Auth,
     ) -> Result<Option<(Arc<Auth>, u64)>, ManagerError> {
         self.update_internal(UpdateMode::Refresh { base, base_epoch }, updated, Save::Yes)
+    }
+
+    // Not upstream's: a test save failure still publishes the rotated tokens
+    // and reschedules, like update_refreshed when the real store fails.
+    #[cfg(feature = "blue-green-test")]
+    pub(crate) fn update_refreshed_after_save_failure(
+        &self,
+        base: &Auth,
+        base_epoch: u64,
+        updated: Auth,
+    ) -> Result<Option<(Arc<Auth>, u64)>, ManagerError> {
+        self.update_internal(
+            UpdateMode::Refresh { base, base_epoch },
+            updated,
+            Save::Failed,
+        )
     }
 
     /// Upstream's `updateInternal`, for the replace and refresh modes.
@@ -722,6 +740,22 @@ impl Manager {
         }
         if auth.metadata.is_empty() {
             return Ok(());
+        }
+        // Not upstream's: fail like a save, before the per-id persist lock.
+        #[cfg(feature = "blue-green-test")]
+        if save == Save::Yes
+            && (crate::gate::Operation::current_blocking().is_some()
+                || (tokio::runtime::Handle::try_current().is_err()
+                    && crate::gate::Operation::current().is_some()))
+        {
+            crate::test_hooks::barrier_blocking("persist.before").map_err(ManagerError::Store)?;
+        }
+        #[cfg(feature = "blue-green-test")]
+        if save == Save::Failed {
+            // A failed save must not advance the disk-originated watermark.
+            return Err(ManagerError::Store(std::io::Error::other(
+                "injected refresh save failure",
+            )));
         }
         #[cfg(test)]
         {

@@ -49,6 +49,8 @@ mod login;
 mod migrate;
 mod observability;
 mod os_service;
+#[cfg(feature = "blue-green-test")]
+mod seams;
 mod service;
 mod tls;
 mod tui;

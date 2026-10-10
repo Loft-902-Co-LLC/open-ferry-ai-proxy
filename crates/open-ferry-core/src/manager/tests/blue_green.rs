@@ -14,6 +14,9 @@
 //! and flags a refresh token that is presented twice, as a real provider
 //! revokes the whole grant on reuse.
 
+#[cfg(feature = "blue-green-test")]
+mod log_barriers;
+
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
