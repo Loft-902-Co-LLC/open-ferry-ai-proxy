@@ -2088,13 +2088,25 @@ async fn finish_cannot_be_extended_by_a_held_log_writer() {
     .await;
     // finish's own timeout would hide a flush that ignores its time left, so
     // check that bound too while the writer is still held.
+    // The time is taken inside the closure, so a slow blocking pool is not
+    // counted against the flush.
     let log = file_log.clone();
-    let flushed = tokio::task::spawn_blocking(move || log.flush(Duration::from_millis(50)));
+    let flushed = tokio::task::spawn_blocking(move || {
+        let started = std::time::Instant::now();
+        log.flush(Duration::from_millis(50));
+        started.elapsed()
+    });
     let bounded = tokio::time::timeout(Duration::from_secs(2), flushed).await;
     // Release before assertions so a failure can't leave the writer held.
     drop(release);
     assert_eq!(code.unwrap(), 1);
-    assert!(bounded.is_ok(), "a held writer kept flush past its timeout");
+    let took = bounded
+        .expect("a held writer kept flush past its timeout")
+        .expect("the flush task panicked");
+    assert!(
+        took < Duration::from_millis(500),
+        "a 50ms flush took {took:?}"
+    );
     file_log.flush(WAIT);
     let text = std::fs::read_to_string(dir.path().join(crate::file_log::MAIN_LOG)).unwrap();
     assert!(text.contains("queued behind the held writer"), "{text:?}");
