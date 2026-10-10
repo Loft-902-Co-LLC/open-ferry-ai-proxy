@@ -122,9 +122,9 @@ impl FileLog {
     /// off as hand over's first, infallible step before mgmt 503. That step runs
     /// to completion outside the continuation resume aborts; resume first awaits
     /// it if still running. Cleaning still waits for peers_gone after resume.
-    /// Log that event exactly when set_cleaning(true)
-    /// returns false: every first enable after a start or a resumed hand over.
-    /// Queued lines are flushed first.
+    /// Log that event exactly when set_cleaning(true) returns false: every
+    /// first enable after a start or a resumed hand over. Queued lines are
+    /// flushed first.
     #[allow(dead_code, reason = "the worker's resume wiring follows this API")]
     pub fn reopen(&self) -> std::io::Result<()> {
         self.output.reopen()
@@ -159,6 +159,12 @@ impl FileLog {
     #[cfg(test)]
     pub(crate) fn sync(&self) {
         self.output.flush(std::time::Duration::from_secs(60));
+    }
+
+    /// Tests: makes the thread the lines go to now wait until `go` says.
+    #[cfg(test)]
+    pub(crate) fn hold(&self, go: std::sync::mpsc::Receiver<()>) {
+        self.output.hold(go);
     }
 }
 
