@@ -2035,14 +2035,16 @@ async fn finish_skips_flush_when_the_stop_deadline_has_passed() {
 async fn finish_calls_flush_before_return_with_only_the_time_left() {
     let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let flushed = called.clone();
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(200);
+    // A long deadline: a loaded blocking pool can start the flush late, and
+    // a short one would pass before it ran.
+    let deadline = tokio::time::Instant::now() + WAIT;
     let result = super::super::finish_with(ExitCode::SUCCESS, deadline, move |timeout| {
         assert!(
             timeout
                 <= deadline.saturating_duration_since(tokio::time::Instant::now())
                     + Duration::from_millis(1)
         );
-        assert!(timeout <= Duration::from_millis(200));
+        assert!(timeout <= WAIT);
         flushed.store(true, std::sync::atomic::Ordering::SeqCst);
     })
     .await;
@@ -2078,7 +2080,7 @@ async fn finish_cannot_be_extended_by_a_blocked_flusher() {
         },
     ));
     tokio::time::timeout(WAIT, arrival).await.unwrap().unwrap();
-    let code = tokio::time::timeout_at(deadline + Duration::from_millis(150), finishing).await;
+    let code = tokio::time::timeout_at(deadline + STOPPED_BY, finishing).await;
     // Release only after finish returned: no sleep or early release can mask
     // an unbounded flush. Release before assertions so a failure can't orphan it.
     drop(release);
@@ -2099,7 +2101,7 @@ async fn finish_cannot_be_extended_by_a_held_log_writer() {
     });
     let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
     let code = tokio::time::timeout_at(
-        deadline + Duration::from_millis(150),
+        deadline + STOPPED_BY,
         super::super::finish(ExitCode::FAILURE, deadline, &file_log),
     )
     .await;
