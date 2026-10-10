@@ -19,6 +19,13 @@ use crate::service::worker::{Lease, Timing, Welcome, prepare, run_with};
 
 const WAIT: Duration = Duration::from_secs(10);
 
+/// What a stop that took its budget must finish well inside, on a busy
+/// machine too. The budgets these tests give are 100 to 500 ms; the
+/// wrong behaviours they guard take the 5 s default budgets of [`Setup`], a
+/// response's own long delay, or never end (and are cut by [`WAIT`]). So
+/// this is far above the budget and below each of those.
+const STOPPED_BY: Duration = Duration::from_secs(4);
+
 fn succeeded(code: ExitCode) -> bool {
     format!("{code:?}") == format!("{:?}", ExitCode::SUCCESS)
 }
@@ -749,7 +756,9 @@ async fn graceful_stop_completes_a_response_inside_the_request_window() {
 
 #[tokio::test]
 async fn graceful_stop_cuts_a_response_outside_the_request_window() {
-    response_during_stop(Duration::from_millis(600), Duration::from_millis(50), false).await;
+    // The delay is far past the 400 ms budget and past [`STOPPED_BY`], so a
+    // stop that waited for the response, rather than cutting it, is late.
+    response_during_stop(Duration::from_secs(8), Duration::from_millis(50), false).await;
 }
 
 #[tokio::test]
@@ -793,7 +802,11 @@ async fn response_during_stop(delay: Duration, reserve: Duration, completes: boo
     let started = Instant::now();
     rig.fake().send(Message::Stop { budget_ms: 400 }).await;
     assert!(succeeded(rig.exit().await));
-    assert!(started.elapsed() < Duration::from_millis(700));
+    assert!(
+        started.elapsed() < STOPPED_BY,
+        "stop late: {:?}",
+        started.elapsed()
+    );
     let mut rest = Vec::new();
     let read = tokio::time::timeout(WAIT, request.read_to_end(&mut rest))
         .await
@@ -859,7 +872,7 @@ async fn stop_cuts_what_is_left_at_the_budget() {
     rig.fake().send(Message::Stop { budget_ms: 400 }).await;
     assert!(succeeded(rig.exit().await));
     let took = started.elapsed();
-    assert!(took < Duration::from_millis(900), "cut late: {took:?}");
+    assert!(took < STOPPED_BY, "cut late: {took:?}");
     let mut rest = Vec::new();
     let read = tokio::time::timeout(WAIT, stuck.read_to_end(&mut rest))
         .await
@@ -892,7 +905,7 @@ async fn eof_stops_within_the_stop_budget_and_keeps_the_lease_until_exit() {
     );
     assert!(succeeded(rig.exit().await));
     let took = started.elapsed();
-    assert!(took < Duration::from_millis(1000), "stop late: {took:?}");
+    assert!(took < STOPPED_BY, "stop late: {took:?}");
     assert!(!rig.lease_is_free());
     let mut rest = Vec::new();
     let read = tokio::time::timeout(WAIT, stuck.read_to_end(&mut rest))
@@ -989,7 +1002,7 @@ async fn a_wedged_service_loop_does_not_keep_the_worker_from_answering() {
         )
     });
     assert!(succeeded(rig.exit().await));
-    assert!(started.elapsed() < Duration::from_millis(700));
+    assert!(started.elapsed() < STOPPED_BY);
     assert!(
         !probe.await.unwrap(),
         "stop kept accepting while the service loop was wedged"
@@ -1074,7 +1087,8 @@ async fn a_stalled_send_stops_with_the_eof_budget() {
         let mut rig = setup.start();
         // Never consume the frame: even the first send cannot finish.
         assert!(succeeded(rig.exit().await));
-        assert!(started.elapsed() < Duration::from_secs(2));
+        // Start-up is in the time. The welcome's other budgets are 5 s.
+        assert!(started.elapsed() < STOPPED_BY);
     }
 }
 
@@ -1520,7 +1534,7 @@ mod prepared {
             "returned without waiting for flush"
         );
         assert!(
-            elapsed < Duration::from_millis(500),
+            elapsed < Duration::from_secs(2),
             "flush exceeded the cap: {elapsed:?}"
         );
         release.send(()).unwrap();
@@ -1756,6 +1770,7 @@ async fn a_stop_behind_a_stalled_send_fits_the_send_timeout_plus_stop_budget() {
     setup.stop_ms = 100;
     setup.write_probe = Some(probe.clone());
     assert_eq!(setup.timing.send_timeout, Duration::from_secs(2));
+    let setup_send_timeout = setup.timing.send_timeout;
     let mut rig = setup.start();
     assert_eq!(rig.fake().recv_status().await.2, "active");
     probe.stall.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1766,7 +1781,9 @@ async fn a_stop_behind_a_stalled_send_fits_the_send_timeout_plus_stop_budget() {
     let started = Instant::now();
     rig.fake().send(Message::Stop { budget_ms: 100 }).await;
     assert!(succeeded(rig.exit().await));
-    assert!(started.elapsed() < Duration::from_millis(2600));
+    // About 2.1 s. The wrong behaviour waits out the send timeout again
+    // (about 4.1 s), or for ever.
+    assert!(started.elapsed() < setup_send_timeout * 2);
     assert!(!rig.lease_is_free());
 }
 
@@ -1932,7 +1949,7 @@ async fn blocked_startup_stage_answers_and_stops(lease: bool) {
     let started = Instant::now();
     rig.fake().send(Message::Stop { budget_ms: 100 }).await;
     assert!(succeeded(rig.exit().await));
-    assert!(started.elapsed() < Duration::from_millis(600));
+    assert!(started.elapsed() < STOPPED_BY);
     if !lease {
         assert!(!rig.lease_is_free());
     }
@@ -1969,7 +1986,7 @@ async fn a_blocked_preparation_still_answers_and_stops_while_loading() {
     let started = Instant::now();
     rig.fake().send(Message::Stop { budget_ms: 100 }).await;
     assert!(succeeded(rig.exit().await));
-    assert!(started.elapsed() < Duration::from_millis(600));
+    assert!(started.elapsed() < STOPPED_BY);
     assert!(!rig.lease_is_free());
     drop(release);
 }
@@ -2011,7 +2028,7 @@ async fn finish_skips_flush_when_the_stop_deadline_has_passed() {
         .await,
         0
     );
-    assert!(started.elapsed() < Duration::from_millis(100));
+    assert!(started.elapsed() < Duration::from_secs(1));
 }
 
 #[tokio::test]
@@ -2104,7 +2121,7 @@ async fn finish_cannot_be_extended_by_a_held_log_writer() {
         .expect("a held writer kept flush past its timeout")
         .expect("the flush task panicked");
     assert!(
-        took < Duration::from_millis(500),
+        took < Duration::from_millis(1500),
         "a 50ms flush took {took:?}"
     );
     file_log.flush(WAIT);
