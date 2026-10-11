@@ -780,7 +780,7 @@ impl Service {
         Self::with_gate(config, config_path, auth_dir, log_level, ActiveGate::open())
     }
 
-    /// As [`Service::new`], with every writer sharing `gate`.
+    /// As `Service::new` (test-only), with every writer sharing `gate`.
     fn with_gate(
         config: Arc<Config>,
         config_path: PathBuf,
@@ -1951,8 +1951,8 @@ async fn serve(
     .await
 }
 
-/// As [`serve`], on `control`, which the run's other listeners share, so
-/// one call pauses, releases or stops them all.
+/// As `serve` (test-only), on `control`, which the run's other listeners
+/// share, so one call pauses, releases or stops them all.
 async fn serve_with(
     control: serve_loop::ServeControl,
     listener: TcpListener,
