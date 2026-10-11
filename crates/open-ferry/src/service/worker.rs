@@ -5,6 +5,9 @@
 //! in before any switch: loading, standby (loaded and held), active and
 //! draining, and what the supervisor may ask in
 //! them:
+//! - `loaded`, once, in either role: a standby sends it when it has loaded,
+//!   a worker started active once it holds the lease and serves, and both
+//!   before their first `status`. The supervisor counts a start until it.
 //! - `status` and `ping` in every state. The supervisor's `ping` is answered
 //!   with one `status`; the worker never sends `ping`, ignores a `status`
 //!   from the supervisor, and sends `status` every [`STATUS_EVERY`] and when
@@ -779,14 +782,12 @@ where
             Ok(Started { mode, state }) => {
                 self.mode = mode;
                 match state {
-                    Ready::Standby(standby) => {
-                        self.state = State::Standby(standby);
-                        let ms = u64::try_from(self.started_at.elapsed().as_millis())
-                            .unwrap_or(u64::MAX);
-                        self.send(&Message::Loaded { ms }).await;
-                    }
+                    Ready::Standby(standby) => self.state = State::Standby(standby),
                     Ready::Active(active) => self.state = State::Active(active),
                 }
+                // The supervisor counts a start until `loaded`, in either role.
+                let ms = u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+                self.send(&Message::Loaded { ms }).await;
                 self.send_status().await;
                 Flow::Continue
             }
