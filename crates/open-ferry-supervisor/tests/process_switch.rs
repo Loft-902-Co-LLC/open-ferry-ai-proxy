@@ -864,9 +864,51 @@ fn row_i_a_pending_install_is_retried_at_the_next_supervisor_start() {
     fx.stop();
     fx.wait_exit(&mut first);
     fx.unfail(INSTALL_FAILS);
-    let _second = fx.start(&Tm::default());
-    fx.wait_journal("the install to land at the start", |j| {
-        j["install_pending"].is_null()
+    // The second supervisor is held where start-up is about to run the pending
+    // install. Nothing else can land it while it is held (the core's timer does not
+    // run until start-up is over), so reaching the barrier with the install still
+    // pending, and the install landing after the release, is start-up's own run.
+    // Start-up writes the journal once the install is placed (`J6`, in
+    // `execute`, after the placement and before the core is built), so that write's
+    // `journal.after:J6` fence is held too: reaching it, with the install done and
+    // journalled, is start-up's own landing, and no core timer can have run yet.
+    fx.hold("startup.before_install");
+    fx.hold("journal.after:J6");
+    let mut second = fx.spawn(&Tm::default());
+    fx.wait_arrived("startup.before_install");
+    assert!(
+        !fx.journal().unwrap()["install_pending"].is_null(),
+        "the install had landed before start-up ran it"
+    );
+    assert_eq!(std::fs::read(fx.installed()).unwrap(), artifact_bytes(A));
+    fx.release("startup.before_install");
+    fx.wait_arrived("journal.after:J6");
+    assert!(
+        fx.journal().unwrap()["install_pending"].is_null(),
+        "start-up's journal write did not clear the pending install: {}",
+        fx.dump()
+    );
+    assert_eq!(
+        std::fs::read(fx.installed()).unwrap(),
+        artifact_bytes(B),
+        "start-up did not land the install: {}",
+        fx.dump()
+    );
+    fx.release("journal.after:J6");
+    fx.wait_for("the second supervisor's active worker", || {
+        if let Some(status) = second.try_exit() {
+            panic!(
+                "the second supervisor exited early ({status})
+{}",
+                fx.dump()
+            );
+        }
+        let status = fx.status()?;
+        status["workers"]
+            .as_array()?
+            .iter()
+            .any(|w| w["role"] == "active")
+            .then_some(())
     });
     assert_eq!(std::fs::read(fx.installed()).unwrap(), artifact_bytes(B));
     fx.wait_settled();

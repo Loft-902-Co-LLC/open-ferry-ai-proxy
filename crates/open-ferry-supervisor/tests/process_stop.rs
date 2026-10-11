@@ -111,21 +111,44 @@ fn a_killed_supervisor_leaves_no_worker() {
     });
 }
 
+/// Owns a handle to the grandchild and ends it, and waits for it, when it drops:
+/// a test whose assertion fails (a job object that did not take it) must not leave
+/// a process that lives about ten minutes. It acts only on the drop, after the
+/// assertion that tests the behaviour has run, so it rescues nothing.
+#[cfg(windows)]
+struct Grandchild(Option<open_ferry_supervisor::process::windows::ProcessHandle>);
+
+#[cfg(windows)]
+impl Drop for Grandchild {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            let _ = handle.terminate(1);
+            let _ = handle.wait_timeout(Duration::from_secs(10));
+        }
+    }
+}
+
 /// Design 13 item 14, the Windows part: the job object "includes a grandchild".
 /// The fake worker starts one process of its own when it becomes active
 /// (`spawn-grandchild`), and on Windows that process has no way to notice its
 /// parent is gone, so only the job ends it. Returns the grandchild's pid, with
-/// both it and A running.
+/// both it and A running, and the guard that ends it if the test fails (made
+/// before any assertion that can panic).
 #[cfg(windows)]
-fn start_with_a_grandchild(fx: &Fx) -> (Sup, u32, u32) {
+fn start_with_a_grandchild(fx: &Fx) -> (Sup, u32, u32, Grandchild) {
     fx.fault("spawn-grandchild", "");
     let sup = fx.start(&Tm::default());
     let a = fx.pid_of(1).expect("A's pid");
     let grandchild = fx.wait_for("A's grandchild", || fx.grandchildren().first().copied());
+    let guard = Grandchild(
+        open_ferry_supervisor::process::windows::ProcessHandle::open_pid(grandchild)
+            .ok()
+            .flatten(),
+    );
     assert!(alive(a), "A is not running");
     assert!(alive(grandchild), "the grandchild is not running");
     assert_ne!(a, grandchild);
-    (sup, a, grandchild)
+    (sup, a, grandchild, guard)
 }
 
 /// By its handle, with nothing run inside it: no stop, no cleanup. The job
@@ -135,7 +158,7 @@ fn start_with_a_grandchild(fx: &Fx) -> (Sup, u32, u32) {
 #[test]
 fn a_killed_supervisor_leaves_no_grandchild() {
     let fx = Fx::new();
-    let (mut sup, a, grandchild) = start_with_a_grandchild(&fx);
+    let (mut sup, a, grandchild, _guard) = start_with_a_grandchild(&fx);
     sup.kill();
     fx.wait_for("the worker and its grandchild to be gone", || {
         (!alive(a) && !alive(grandchild)).then_some(())
@@ -156,7 +179,7 @@ fn a_killed_supervisor_leaves_no_grandchild() {
 #[test]
 fn a_stopped_supervisor_leaves_no_grandchild() {
     let fx = Fx::new();
-    let (mut sup, a, grandchild) = start_with_a_grandchild(&fx);
+    let (mut sup, a, grandchild, _guard) = start_with_a_grandchild(&fx);
     fx.stop();
     let status = fx.wait_exit(&mut sup);
     assert!(status.success(), "the supervisor exited with {status}");
