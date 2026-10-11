@@ -52,6 +52,18 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+      # The supervisor's tests run binaries from scratch directories, which
+      # its trust check must accept. The runner's D: drive, where the
+      # checkout and the target directory are, is owned by NETWORK SERVICE,
+      # which the check refuses, so they go under the runner's profile.
+      - name: Scratch directory for the trust checks
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:USERPROFILE 'ofp-scratch'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          "OFP_TEST_SCRATCH=$dir" >> $env:GITHUB_ENV
+
       - name: Test
         run: cargo test --workspace --locked --no-fail-fast
 

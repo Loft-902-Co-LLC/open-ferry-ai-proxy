@@ -568,9 +568,14 @@ async fn connect_and_hello_share_one_load_deadline() {
     assert_probe_gone(rig.dir.path()).await;
 }
 
+/// On Windows, under `OFP_TEST_SCRATCH` when set (CI's runner, whose drive
+/// root is owned by NETWORK SERVICE), else the target directory.
 fn trusted_scratch() -> tempfile::TempDir {
     if cfg!(windows) {
-        tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap()
+        match std::env::var_os("OFP_TEST_SCRATCH") {
+            Some(root) => tempfile::tempdir_in(root).unwrap(),
+            None => tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap(),
+        }
     } else {
         tempfile::tempdir_in(std::env::var_os("HOME").unwrap()).unwrap()
     }

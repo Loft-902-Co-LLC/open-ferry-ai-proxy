@@ -1892,6 +1892,8 @@ mod tests {
                 std::env::var_os("HOME").expect("trust checks require a non-/tmp root"),
             )
             .unwrap()
+        } else if let Some(root) = std::env::var_os("OFP_TEST_SCRATCH") {
+            tempfile::tempdir_in(root).unwrap()
         } else {
             tempfile::tempdir_in(".").unwrap()
         };
