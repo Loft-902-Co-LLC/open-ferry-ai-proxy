@@ -341,6 +341,33 @@ impl ServeControl {
         Ok(())
     }
 
+    /// Waits until `expected` loops hold a listener: the first accept of a
+    /// start, which `resume_accept` doesn't wait for, since it leaves out
+    /// the loops that haven't been polled yet. An error if a loop couldn't
+    /// make its listener since a resume or this last said so, or if the
+    /// loops were released, stopped or cut first. It has no timer of its
+    /// own: a caller that must be bounded is, by whoever ends it.
+    pub(crate) async fn await_listeners(&self, expected: usize) -> io::Result<()> {
+        let mut reported = self.shared.gate.lock().await;
+        let failed = *reported;
+        let settled = self
+            .wait_settled(Mode::Running, |stats| {
+                stats.failed > failed || stats.accepting >= expected
+            })
+            .await;
+        if self.shared.connections().cut {
+            return Err(io::Error::other("the control was cut"));
+        }
+        if *self.shared.mode.borrow() != Mode::Running {
+            return Err(io::Error::other("the listeners were released"));
+        }
+        if settled.failed > failed {
+            *reported = settled.failed;
+            return Err(io::Error::other("a listener couldn't be made"));
+        }
+        Ok(())
+    }
+
     /// Stops accepting for good and finishes every connection (see the
     /// module's description). The listeners are dropped before the future
     /// completes, which it does once no connection is left, an upgraded
