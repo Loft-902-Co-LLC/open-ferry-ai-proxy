@@ -163,6 +163,11 @@ fn takeover_reopens_and_go_resumes_at_the_current_size() {
     b.flush().unwrap();
     assert!(fs::read(&path).unwrap().starts_with(b"A\n"));
     assert_eq!(backups(dir.path()).len(), 1);
+    // Backup names stop at the millisecond, so a rotation in A's millisecond
+    // would replace A's backup, as lumberjack's rename would.
+    while backup_path(&path).exists() {
+        thread::sleep(Duration::from_millis(1));
+    }
     b.write(&vec![b'c'; 2 * 1024 * 1024]).unwrap();
     b.flush().unwrap();
     assert_eq!(backups(dir.path()).len(), 2);
