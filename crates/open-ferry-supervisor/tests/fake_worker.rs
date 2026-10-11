@@ -62,6 +62,8 @@ struct Test {
     listeners: Arc<Vec<(String, TcpListener)>>,
     owned: Arc<Mutex<Vec<WorkerPort>>>,
     timings: Timings,
+    /// The workers whose one `loaded` has been seen: a second one is an error.
+    loaded: std::collections::HashSet<u64>,
 }
 
 impl Test {
@@ -86,6 +88,7 @@ impl Test {
             ]),
             owned,
             timings,
+            loaded: std::collections::HashSet::new(),
         }
     }
 
@@ -167,16 +170,30 @@ impl Test {
     }
 
     async fn message(&mut self, id: u64, matches: impl Fn(&Message) -> bool) -> Message {
+        let (registry, loaded) = (&mut self.registry, &mut self.loaded);
         tokio::time::timeout(WAIT, async {
             loop {
-                let (worker, event) = self.registry.next_event().await;
+                let (worker, event) = registry.next_event().await;
                 match event {
-                    Event::Message(message) if worker == id && matches(&message) => return message,
-                    Event::Message(Message::Status { .. }) => {}
-                    // An active start reports `loaded` too, when the test is
-                    // waiting for something else (the test of that is
+                    // Each worker reports `loaded` once, a standby before its hold
+                    // and an active start once it is serving (that an active start
+                    // sends it is
                     // `an_active_start_sends_loaded_before_its_first_active_status`).
-                    Event::Message(Message::Loaded { .. }) => {}
+                    // It is counted before the worker is compared with the one the
+                    // test waits for: one from another worker is skipped, once, and a
+                    // second from any worker, a resume's for instance, is unexpected.
+                    Event::Message(message @ Message::Loaded { .. }) => {
+                        if !loaded.insert(worker) {
+                            panic!("a second `loaded` from worker {worker}");
+                        }
+                        if worker == id && matches(&message) {
+                            return message;
+                        }
+                    }
+                    Event::Message(message) if worker == id && matches(&message) => {
+                        return message;
+                    }
+                    Event::Message(Message::Status { .. }) => {}
                     Event::Message(_) if worker != id => {}
                     event => panic!("unexpected event {worker}: {event:?}"),
                 }

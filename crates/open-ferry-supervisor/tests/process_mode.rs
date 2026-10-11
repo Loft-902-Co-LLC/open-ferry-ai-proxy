@@ -111,8 +111,12 @@ fn off_as_a_hands_over_cancels_at_checkpoint_two_and_a_resumes() {
     sw.accepted();
     fx.wait_arrived("switch.before_checkpoint_two");
     // A has handed over (and let go of the lease); B has not been told to take
-    // over; A has not been told to resume.
-    assert!(fx.logged("A", "handed_over"), "{}", fx.dump());
+    // over; A has not been told to resume. The fake sends `HandedOver` and then
+    // logs the event, so the barrier can be reached first: wait, bounded, for the
+    // event while the barrier is held, then make the negative assertions.
+    fx.wait_for("A's `handed_over` event", || {
+        fx.logged("A", "handed_over").then_some(())
+    });
     assert!(!fx.sent_to(2).contains(&"send:take_over".to_owned()));
     assert!(!fx.sent_to(1).contains(&"send:resume".to_owned()));
     fx.mode(true, 1);

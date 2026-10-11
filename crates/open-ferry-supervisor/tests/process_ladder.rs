@@ -144,6 +144,8 @@ fn row_g_the_kept_copy_gets_three_tries_then_previous() {
     fx.wait_for("the worker from `previous` to run", || {
         fx.pid_of(7).filter(|pid| alive(*pid))
     });
+    // Its own evidence that it loaded, and its try uncounted.
+    fx.wait_loaded();
     fx.wait_settled();
     // And nothing was started after it.
     let spawns = assert_rungs(&fx, &["B", "B", "B", "A"]);
@@ -172,6 +174,7 @@ fn row_g_previous_gets_three_tries_then_the_installed_file_by_hash() {
     fx.wait_for("the installed file to run", || {
         fx.pid_of(10).filter(|pid| alive(*pid))
     });
+    fx.wait_loaded();
     fx.wait_settled();
     let spawns = assert_rungs(&fx, &all);
     assert_spaced(&fx, &spawns);
@@ -231,12 +234,18 @@ fn row_g_every_rung_failing_is_degraded_and_the_next_cycle_waits() {
     // The fault goes. A worker whose handshake ended after that reads no
     // fault, so the first of those loads and stays.
     fx.clear_fault("fail-load");
-    let cleared = now_ms();
-    let kept = fx.wait_for("a worker started after the fault was gone", || {
-        let log = fx.driver_log();
-        let last = log.iter().rev().find(|v| v["k"] == "spawn")?;
-        (last["at"].as_u64()? > cleared).then(|| last["n"].as_u64().unwrap())
-    });
+    // The worker that stays is the newest one with its own `loaded` evidence
+    // (no worker loaded while the fault was in, so none of the earlier starts
+    // can be it) and its try uncounted; no timestamp picks it.
+    fx.wait_loaded();
+    let kept = fx
+        .driver_log()
+        .iter()
+        .rev()
+        .find(|v| v["k"] == "spawn")
+        .unwrap()["n"]
+        .as_u64()
+        .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(BACKOFF_MS * 4));
     let last = fx
         .driver_log()

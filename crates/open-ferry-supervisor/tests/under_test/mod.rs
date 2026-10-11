@@ -446,7 +446,13 @@ async fn child_main(fixture: PathBuf) -> String {
         main,
         management,
         fixture: fixture.clone(),
-        sha: hash_file(&installed).expect("hash the installed file"),
+        // The installed file's hash at the start, unless the test fixed the
+        // supervisor's own hash: damaging the installed file later must not make
+        // the damaged bytes the supervisor's own.
+        sha: match spec["own_sha256"].as_str() {
+            Some(sha) => sha.to_owned(),
+            None => hash_file(&installed).expect("hash the installed file"),
+        },
     };
     let driver = Logged {
         inner: ProcessDriver::new(ServiceKind::User, timings.exit_poll),
@@ -661,6 +667,23 @@ pub struct Ev {
     pub lease: bool,
 }
 
+/// Why the fixture does not trust its endpoint (`Fx::identity`).
+#[derive(Debug)]
+pub enum Refusal {
+    /// No record of the child's own yet: poll again, trust nothing.
+    Wait(String),
+    /// Another supervisor may be answering.
+    Foreign(String),
+}
+
+impl Refusal {
+    pub fn why(&self) -> &str {
+        match self {
+            Refusal::Wait(why) | Refusal::Foreign(why) => why,
+        }
+    }
+}
+
 /// The supervisor child, ended by its handle when this drops.
 pub struct Sup {
     child: Option<std::process::Child>,
@@ -862,6 +885,9 @@ pub struct Fx {
     shas: Mutex<HashMap<String, String>>,
     /// The config the workers are given, relative to the fixture.
     config: Mutex<String>,
+    /// The hash the supervisor child takes as its own, when the test fixes it
+    /// (`keep_own_hash`); otherwise the child hashes the installed file at its start.
+    own_sha: Mutex<Option<String>>,
     /// The pid of the supervisor child spawned last.
     child: Mutex<Option<u32>>,
     _permit: Permit,
@@ -883,6 +909,7 @@ impl Fx {
             dir,
             shas: Mutex::new(HashMap::new()),
             config: Mutex::new("config.yaml".to_owned()),
+            own_sha: Mutex::new(None),
             child: Mutex::new(None),
             _permit: permit,
         };
@@ -972,6 +999,12 @@ impl Fx {
         std::fs::write(&binary, bytes).unwrap();
     }
 
+    /// Fixes the hash every supervisor child started from now on takes as its
+    /// own to the installed file's hash now. Call while the installed file is whole.
+    pub fn keep_own_hash(&self) {
+        *self.own_sha.lock().unwrap() = Some(hash_file(&self.installed()).unwrap());
+    }
+
     pub fn sha(&self, version: &str) -> String {
         hash_file(&self.data_dir().binary(version, NAME)).unwrap()
     }
@@ -1024,6 +1057,15 @@ impl Fx {
     }
     pub fn release(&self, name: &str) {
         std::fs::write(self.seam_file(name, ".release"), b"").unwrap();
+    }
+
+    /// Arms a barrier that has been released before, so its next arrival holds
+    /// again (a hold is taken once: the release file stays).
+    pub fn rehold(&self, name: &str) {
+        for ext in [".arrived", ".release"] {
+            let _ = std::fs::remove_file(self.seam_file(name, ext));
+        }
+        self.hold(name);
     }
 
     /// Takes the workers' lease (`active-worker.lock`) as a second process
@@ -1086,6 +1128,7 @@ impl Fx {
             json!({
                 "timings": timings.json(), "versions": versions,
                 "config": *self.config.lock().unwrap(),
+                "own_sha256": *self.own_sha.lock().unwrap(),
             })
             .to_string(),
         )
@@ -1144,31 +1187,78 @@ impl Fx {
 
     /// The fixture's own `supervisor.json` must name the location the client uses and the
     /// child the fixture started, or whatever answers is not the fixture's supervisor.
-    /// A record that is absent, unreadable, or left by a supervisor that has since died
-    /// (a restart that has not written its own yet) is not a verdict; a live process
-    /// that is not the child, or any other endpoint, panics, naming both values.
-    pub fn check_the_supervisor_is_ours(&self) {
+    /// Only a record that does is a verdict of `Ok`. A record that is absent, unreadable,
+    /// malformed, or names a process that is not alive and not the child (the one a
+    /// restart has not yet replaced) is `Wait`: the caller may poll again, but must not
+    /// trust any answer. A live process that is not the child, or another endpoint, is
+    /// `Foreign`: another supervisor may be answering.
+    pub fn identity(&self) -> Result<(), Refusal> {
+        let wait = |why: String| Err(Refusal::Wait(why));
         let Some(child) = *self.child.lock().unwrap() else {
-            return;
+            return wait("no supervisor has been started".to_owned());
         };
-        let Ok(text) = std::fs::read_to_string(self.data().join("supervisor.json")) else {
-            return;
+        let path = self.data().join("supervisor.json");
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) => return wait(format!("{} is not readable: {error}", path.display())),
         };
         let Ok(record) = serde_json::from_str::<Value>(&text) else {
-            return;
+            return wait(format!("{} is not JSON: {text:?}", path.display()));
         };
         let want = client_location(self.root())
             .expect("the client's location")
             .to_record();
-        let endpoint = record["endpoint"].as_str().unwrap_or_default();
-        assert_eq!(
-            endpoint, want,
-            "SET-UP: supervisor.json names the endpoint {endpoint:?}, not the one the fixture              connects to ({want:?}); another supervisor may be answering"
-        );
-        let pid = record["pid"].as_u64().unwrap_or(0) as u32;
-        assert!(
-            pid == child || !alive(pid),
-            "SET-UP: supervisor.json names pid {pid}, a live process, not the child the fixture              started ({child}); another supervisor may be answering"
+        let Some(endpoint) = record["endpoint"].as_str() else {
+            return wait(format!("{} names no endpoint: {text:?}", path.display()));
+        };
+        if endpoint != want {
+            return Err(Refusal::Foreign(format!(
+                "SET-UP: supervisor.json names the endpoint {endpoint:?}, not the one the fixture connects to ({want:?}); another supervisor may be answering"
+            )));
+        }
+        // Compared as read: a pid that does not fit a `u32` is no process's and
+        // truncating it could make it the child's. A pid that is missing or not a
+        // number is refused, not waited for.
+        let Some(named) = record["pid"].as_u64() else {
+            return Err(Refusal::Foreign(format!(
+                "SET-UP: supervisor.json names no usable pid: {text:?}"
+            )));
+        };
+        if named == u64::from(child) {
+            return Ok(());
+        }
+        let Ok(pid) = u32::try_from(named) else {
+            return Err(Refusal::Foreign(format!(
+                "SET-UP: supervisor.json names pid {named}, which is out of range, not the child ({child})"
+            )));
+        };
+        if alive(pid) {
+            return Err(Refusal::Foreign(format!(
+                "SET-UP: supervisor.json names pid {pid}, a live process, not the child the fixture started ({child}); another supervisor may be answering"
+            )));
+        }
+        wait(format!(
+            "supervisor.json names pid {pid}, not the child ({child}): a record left by a supervisor that has gone"
+        ))
+    }
+
+    /// `identity`, as an assertion: anything but the child's own record panics.
+    #[track_caller]
+    pub fn check_the_supervisor_is_ours(&self) {
+        if let Err(refusal) = self.identity() {
+            panic!("{}", refusal.why());
+        }
+    }
+
+    /// Waits, bounded, for the child's own record; a foreign one panics at once.
+    fn wait_ours(&self) {
+        self.wait_for(
+            "supervisor.json to name the child and the client's endpoint",
+            || match self.identity() {
+                Ok(()) => Some(()),
+                Err(Refusal::Wait(_)) => None,
+                Err(foreign) => panic!("{}", foreign.why()),
+            },
         );
     }
 
@@ -1193,7 +1283,12 @@ impl Fx {
 
     fn ask(&self, request: EndpointRequest) -> Option<EndpointReply> {
         let root = self.root().to_owned();
-        self.check_the_supervisor_is_ours();
+        match self.identity() {
+            Ok(()) => {}
+            // Not the child's record (yet): nothing is asked, so nothing is trusted.
+            Err(Refusal::Wait(_)) => return None,
+            Err(foreign) => panic!("{}", foreign.why()),
+        }
         runtime().block_on(async {
             tokio::time::timeout(Duration::from_secs(20), async {
                 let mut channel = Self::open(&root).await.ok()?;
@@ -1365,7 +1460,7 @@ Host: test
         };
         let (tx, rx) = channel();
         let root = self.root().to_owned();
-        self.check_the_supervisor_is_ours();
+        self.wait_ours();
         runtime().spawn(async move {
             let mut channel = match Fx::open(&root).await {
                 Ok(channel) => channel,
