@@ -67,6 +67,16 @@ impl Fake {
         }
     }
 
+    /// What a worker started active sends first: `loaded`, then its first
+    /// status, in the `active` phase.
+    async fn recv_active_start(&mut self) {
+        assert!(matches!(self.recv().await, Message::Loaded { .. }));
+        assert!(matches!(
+            self.recv().await,
+            Message::Status { phase, .. } if phase == "active"
+        ));
+    }
+
     /// The next message that isn't a `status`.
     async fn recv_other(&mut self) -> Message {
         loop {
@@ -605,14 +615,40 @@ async fn a_message_that_makes_no_sense_in_the_state_is_ignored() {
 #[tokio::test]
 async fn an_active_worker_takes_the_lease_and_serves() {
     let mut rig = Setup::new(Role::Active).start();
-    // No `loaded` for an active start: its first message is a status.
-    assert!(matches!(rig.fake().recv().await, Message::Status { .. }));
+    rig.fake().recv_active_start().await;
     assert!(!rig.lease_is_free(), "the active worker holds the lease");
     let answer = get(rig.main, "/healthz").await;
     assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
     rig.fake().send(Message::Stop { budget_ms: 2_000 }).await;
     assert!(succeeded(rig.exit().await));
     assert!(!rig.lease_is_free(), "run returning must retain the lease");
+}
+
+// The supervisor counts a worker started active as not yet started until
+// `loaded`: it comes once, holding the lease, before the first status.
+#[tokio::test]
+async fn an_active_start_says_loaded_once_before_its_first_status() {
+    let mut rig = Setup::new(Role::Active).start();
+    assert!(matches!(rig.fake().recv().await, Message::Loaded { .. }));
+    assert!(
+        !rig.lease_is_free(),
+        "`loaded` came before the worker held the lease"
+    );
+    assert!(matches!(rig.fake().recv().await, Message::Status { phase, .. } if phase == "active"));
+    // Two more status rounds, and no second `loaded` among them.
+    for _ in 0..2 {
+        rig.fake().send(Message::Ping).await;
+        assert!(matches!(rig.fake().recv().await, Message::Status { .. }));
+    }
+    rig.fake().send(Message::Stop { budget_ms: 1_000 }).await;
+    assert!(succeeded(rig.exit().await));
+    while let Some(frame) = rig.fake().channel.receive::<Message>().await.unwrap() {
+        assert!(
+            !matches!(frame.message, Message::Loaded { .. }),
+            "a second `loaded`: {:?}",
+            frame.message
+        );
+    }
 }
 
 #[tokio::test]
@@ -633,7 +669,7 @@ async fn a_worker_serves_the_management_socket_it_was_given() {
     let mut setup = Setup::new(Role::Active);
     setup.management = true;
     let mut rig = setup.start();
-    assert!(matches!(rig.fake().recv().await, Message::Status { .. }));
+    rig.fake().recv_active_start().await;
     let main = get(rig.main, "/healthz").await;
     assert!(main.starts_with("HTTP/1.1 200"), "{main}");
     // The management address serves the management API alone: the proxy's
@@ -650,10 +686,11 @@ async fn a_worker_serves_the_welcome_topology_and_warns_once() {
     let mut rig = Setup::new(Role::Active).start();
     let first = rig.fake().channel.receive::<Message>().await;
     assert!(
-        matches!(&first, Ok(Some(frame)) if matches!(frame.message, Message::Status { .. })),
+        matches!(&first, Ok(Some(frame)) if matches!(frame.message, Message::Loaded { .. })),
         "{first:?}: {:?}",
         logged.at_least(Level::WARN)
     );
+    assert!(matches!(rig.fake().recv().await, Message::Status { .. }));
     let disagreements = |logged: &Logged| -> Vec<String> {
         logged
             .at_least(Level::WARN)
@@ -675,10 +712,11 @@ async fn a_worker_serves_the_welcome_topology_and_warns_once() {
     let mut rig = setup.start();
     let first = rig.fake().channel.receive::<Message>().await;
     assert!(
-        matches!(&first, Ok(Some(frame)) if matches!(frame.message, Message::Status { .. })),
+        matches!(&first, Ok(Some(frame)) if matches!(frame.message, Message::Loaded { .. })),
         "{first:?}: {:?}",
         logged.at_least(Level::WARN)
     );
+    assert!(matches!(rig.fake().recv().await, Message::Status { .. }));
     let answer = get(rig.main, "/healthz").await;
     assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
     drop(other);
@@ -704,7 +742,7 @@ async fn release_of_a_standby_is_ignored() {
 #[tokio::test]
 async fn release_of_an_idle_active_worker_drains_and_exits() {
     let mut rig = Setup::new(Role::Active).start();
-    assert!(matches!(rig.fake().recv().await, Message::Status { .. }));
+    rig.fake().recv_active_start().await;
     rig.fake().send(Message::Release).await;
     assert_eq!(rig.fake().recv_status().await.2, "draining");
     assert!(matches!(rig.fake().recv_other().await, Message::Drained));
@@ -719,7 +757,7 @@ async fn release_closes_a_connection_with_no_request_at_the_drain_budget() {
     let mut setup = Setup::new(Role::Active);
     setup.drain_ms = 400;
     let mut rig = setup.start();
-    assert!(matches!(rig.fake().recv().await, Message::Status { .. }));
+    rig.fake().recv_active_start().await;
     let mut idle = TcpStream::connect(rig.main).await.unwrap();
     rig.fake().wait_live(1).await;
     let released = Instant::now();
@@ -865,7 +903,7 @@ async fn stop_cuts_what_is_left_at_the_budget() {
     let mut setup = Setup::new(Role::Active);
     let arrived = wedge_response(&mut setup);
     let mut rig = setup.start();
-    assert!(matches!(rig.fake().recv().await, Message::Status { .. }));
+    rig.fake().recv_active_start().await;
     let mut stuck = request_to_wedge(rig.main, &arrived).await;
     rig.fake().wait_live(1).await;
     let started = Instant::now();
@@ -893,7 +931,7 @@ async fn eof_stops_within_the_stop_budget_and_keeps_the_lease_until_exit() {
     setup.stop_ms = 500;
     let arrived = wedge_response(&mut setup);
     let mut rig = setup.start();
-    assert!(matches!(rig.fake().recv().await, Message::Status { .. }));
+    rig.fake().recv_active_start().await;
     let mut stuck = request_to_wedge(rig.main, &arrived).await;
     rig.fake().wait_live(1).await;
     let started = Instant::now();
@@ -972,7 +1010,7 @@ async fn a_wedged_service_loop_does_not_keep_the_worker_from_answering() {
         let _ = wedged.lock().unwrap().recv();
     }));
     let mut rig = setup.start();
-    assert!(matches!(rig.fake().recv().await, Message::Status { .. }));
+    rig.fake().recv_active_start().await;
     tokio::time::timeout(WAIT, arrival).await.unwrap().unwrap();
     assert_eq!(rig.fake().ping().await, "active");
     assert_eq!(rig.fake().ping().await, "active");
