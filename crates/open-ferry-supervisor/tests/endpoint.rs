@@ -78,6 +78,56 @@ mod unix {
         }
     }
 
+    /// A bound stream socket that was never made a listener. Even a concurrent
+    /// fork retaining this fd cannot make a stream connect succeed. Using
+    /// StdListener::bind here left a listening fd alive in fork-to-exec windows.
+    fn stale_socket(path: &Path) -> std::os::fd::OwnedFd {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::ffi::OsStrExt;
+        // SAFETY: socket returns a fresh owned descriptor; sockaddr is zeroed
+        // and filled with a checked, NUL-terminated filesystem path.
+        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+        assert!(fd >= 0);
+        let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+        let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        address.sun_family = libc::AF_UNIX as _;
+        let bytes = path.as_os_str().as_bytes();
+        assert!(bytes.len() < address.sun_path.len());
+        for (slot, byte) in address.sun_path.iter_mut().zip(bytes) {
+            *slot = *byte as _;
+        }
+        let length = std::mem::size_of_val(&address) as libc::socklen_t;
+        #[cfg(target_os = "macos")]
+        {
+            address.sun_len = length as _;
+        }
+        assert_eq!(
+            unsafe {
+                libc::bind(
+                    fd.as_raw_fd(),
+                    (&address as *const libc::sockaddr_un).cast(),
+                    length,
+                )
+            },
+            0
+        );
+        fd
+    }
+
+    #[tokio::test]
+    async fn a_stale_fixture_refuses_connect_even_while_an_fd_is_retained() {
+        let fx = Fixture::new();
+        fx.make_dir(0o700);
+        let fd = stale_socket(&fx.location.socket_path());
+        fs::set_permissions(fx.location.socket_path(), fs::Permissions::from_mode(0o600)).unwrap();
+        // A fork can retain the descriptor until exec; retention is deliberate here.
+        assert!(
+            matches!(std::os::unix::net::UnixStream::connect(fx.location.socket_path()), Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused)
+        );
+        drop(fd);
+        fx.bind().expect("replace the stale socket");
+    }
+
     fn mode_of(path: &Path) -> u32 {
         fs::metadata(path).expect("metadata").permissions().mode() & 0o7777
     }
@@ -138,7 +188,7 @@ mod unix {
         let fx = Fixture::new();
         fx.make_dir(0o700);
         let socket = fx.location.socket_path();
-        drop(StdListener::bind(&socket).expect("stale bind"));
+        drop(stale_socket(&socket));
         fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).expect("chmod");
         assert!(socket.exists());
 
@@ -279,7 +329,7 @@ mod unix {
         let fx = Fixture::new();
         fx.make_dir(0o700);
         let socket = fx.location.socket_path();
-        drop(StdListener::bind(&socket).expect("stale bind"));
+        drop(stale_socket(&socket));
         fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).expect("chmod");
 
         let holder = fs::OpenOptions::new()
@@ -304,8 +354,22 @@ mod unix {
         );
 
         drop(holder);
-        let server = fx.bind().expect("bind once the lock is free");
+        let server = bind_after_release(|| fx.bind());
         assert!(server.socket_path().exists());
+    }
+
+    fn bind_after_release(mut bind: impl FnMut() -> Result<Server, EndpointError>) -> Server {
+        // A parallel child's fork-to-exec window can briefly retain our flock fd.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match bind() {
+                Ok(server) => return server,
+                Err(EndpointError::Taken(_)) if std::time::Instant::now() < deadline => {
+                    std::thread::yield_now();
+                }
+                Err(error) => panic!("bind after lock release: {error}"),
+            }
+        }
     }
 
     #[tokio::test]
@@ -321,8 +385,7 @@ mod unix {
             Err(EndpointError::Taken(_))
         ));
         drop(first);
-        let second =
-            Server::bind(&fx.location, &fx.identity, &other_lock).expect("second after drop");
+        let second = bind_after_release(|| Server::bind(&fx.location, &fx.identity, &other_lock));
         assert!(second.socket_path().exists());
     }
 

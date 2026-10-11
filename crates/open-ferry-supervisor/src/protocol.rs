@@ -7,6 +7,8 @@ use std::{io, net::SocketAddr, path::PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
 pub const VERSION: u32 = 1;
+/// Capabilities every worker must advertise before receiving welcome.
+pub const REQUIRED_CAPS: &[&str] = &[];
 pub const MAX_FRAME: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -236,6 +238,26 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> Channel<R, W> {
             read_failed: false,
             write_failed: false,
         }
+    }
+
+    /// Separates transport directions without discarding buffered input.
+    pub fn into_read_write(self) -> (Channel<R, tokio::io::Sink>, Channel<tokio::io::Empty, W>) {
+        (
+            Channel {
+                reader: self.reader,
+                writer: tokio::io::sink(),
+                pending: self.pending,
+                read_failed: self.read_failed,
+                write_failed: false,
+            },
+            Channel {
+                reader: BufReader::new(tokio::io::empty()),
+                writer: self.writer,
+                pending: Vec::new(),
+                read_failed: false,
+                write_failed: self.write_failed,
+            },
+        )
     }
 
     /// Cancellation-safe: a partial frame remains buffered for the next call.

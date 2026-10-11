@@ -14,6 +14,10 @@ FORBIDDEN = (
     b"handover.gate_closing", b"handover.gate_closed", b"lease.release",
     b"take_over.before_reload", b"rename.after_first", b"journal.before:",
     b"journal.after:", b"journal.fail:", b"state.fail:", b"disk.commit.before_replace",
+    b"injected fault", b"required-test-cap",
+    b"termination-timeout.hold", b"termination-timeout.arrived",
+    b"startup.before_install", b"install.between_renames",
+    b"startup.after_prepared_journal", b"startup.recovered_install_sync",
 )
 if len(sys.argv) != 2:
     raise SystemExit("usage: check-release.py <cargo-build.json>")

@@ -22,3 +22,9 @@ open-ferry-supervisor = { path = "crates/open-ferry-supervisor" }
 # preserve_order keeps client key order; arbitrary_precision keeps number text
 # exact (e.g. 64-bit IDs in tool inputs), matching upstream's raw-byte handling.
 serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
+
+# Debug builds hash whole installed binaries (supervised installs, staging
+# checks); unoptimized sha2 is far too slow for that. Applies to every sha2
+# version in the tree. Nothing else is optimized.
+[profile.dev.package.sha2]
+opt-level = 3

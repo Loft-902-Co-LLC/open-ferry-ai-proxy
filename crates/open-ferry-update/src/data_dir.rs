@@ -130,17 +130,67 @@ impl DataDir {
     /// another process holds it.
     pub fn try_lock(&self) -> io::Result<Option<UpdateLock>> {
         fs::create_dir_all(&self.root)?;
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(self.root.join(LOCK_FILE))?;
+        self.try_lock_existing_dir()
+    }
+
+    /// Takes the update lock without creating any directories. Refuses links
+    /// and non-regular lock files, including a link whose target is absent.
+    pub fn try_lock_existing_dir(&self) -> io::Result<Option<UpdateLock>> {
+        let mut options = OpenOptions::new();
+        options.create(true).truncate(false).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            // Share READ and WRITE so other contenders can open and try the
+            // same OS lock, but not DELETE: a held lock's directory entry must
+            // not be renamed or removed. The updater and supervisor retain
+            // update.lock permanently; their cleanup targets only versions,
+            // pins, journal/state temps and installed-file asides.
+            options
+                .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT)
+                .share_mode(
+                    windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ
+                        | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE,
+                );
+        }
+        let file = options.open(self.root.join(LOCK_FILE))?;
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            check_lock_attributes(file.metadata()?.file_attributes())?;
+        }
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "update lock is not a regular file",
+            ));
+        }
         match file.try_lock() {
             Ok(()) => Ok(Some(UpdateLock { _file: file })),
             Err(TryLockError::WouldBlock) => Ok(None),
             Err(TryLockError::Error(error)) => Err(error),
         }
     }
+}
+
+/// The Windows no-follow open's attribute check, kept separate so a test
+/// exercises the refusal even on hosts that refuse opening directory junctions.
+#[cfg(windows)]
+fn check_lock_attributes(attributes: u32) -> io::Result<()> {
+    if attributes & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "update lock is a reparse point",
+        ));
+    }
+    Ok(())
 }
 
 /// Whether `path` is absolute on Windows (when `windows`) or on Unix,
@@ -163,4 +213,52 @@ fn is_absolute(path: &Path, windows: bool) -> bool {
 #[derive(Debug)]
 pub struct UpdateLock {
     _file: File,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_update_lock_link_to_a_missing_target_is_refused_without_creating_the_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("data");
+        fs::create_dir(&root).unwrap();
+        let target = dir.path().join("must-not-exist");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, root.join(LOCK_FILE)).unwrap();
+        #[cfg(windows)]
+        {
+            let result = std::process::Command::new(std::env::var_os("COMSPEC").unwrap())
+                .args(["/c", "mklink", "/J"])
+                .arg(root.join(LOCK_FILE))
+                .arg(&target)
+                .output()
+                .unwrap();
+            assert!(result.status.success(), "{result:?}");
+        }
+        assert!(DataDir::at(root).try_lock().is_err());
+        assert!(!target.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_reparse_attribute_has_its_own_lock_refusal() {
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+        };
+        let error = check_lock_attributes(FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(error.to_string(), "update lock is a reparse point");
+        assert!(check_lock_attributes(0).is_ok());
+    }
+
+    #[test]
+    fn locking_an_existing_root_never_creates_its_directory_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("absent").join("data");
+        assert!(DataDir::at(&root).try_lock_existing_dir().is_err());
+        assert!(!dir.path().join("absent").exists());
+    }
 }

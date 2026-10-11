@@ -456,6 +456,15 @@ pub(crate) fn publish_file(from: &Path, to: &Path) -> io::Result<()> {
     publish_file_with(&RealFs, from, to, platform_transient)
 }
 
+/// Not upstream's: [`publish_file`] for the supervisor, which places a missing
+/// installed file with it (re-exported by `switch`). Same contract: `to` is
+/// whole or absent, `AlreadyExists` says it was there, the move is written
+/// through on Windows, the caller syncs the directory after on Unix
+/// ([`sync_parent`]), and the update lock is held.
+pub fn publish_file_no_replace(from: &Path, to: &Path) -> io::Result<()> {
+    publish_file(from, to)
+}
+
 /// Publishes the directory `from` as `to` without replacing, even an empty
 /// `to` (`AlreadyExists`; `from` is left). The caller syncs the directory
 /// holding `to` after on the native path ([`sync_parent`]); the fallback

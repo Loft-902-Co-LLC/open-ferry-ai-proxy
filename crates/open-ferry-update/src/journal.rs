@@ -203,6 +203,11 @@ pub struct Return {
     pub why: String,
     /// When it was decided, RFC 3339.
     pub decided: String,
+    /// The target is the installed file, not the kept copy of the same
+    /// version: a rung is a location and its artifact, and the artifact alone
+    /// can't tell the two apart.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub installed: bool,
 }
 
 /// The switch in progress.
@@ -221,6 +226,32 @@ pub struct Switch {
     pub admitted: Admitted,
     #[serde(default, rename = "return")]
     pub return_: Option<Return>,
+}
+
+/// A rung of a ladder: a location (a kept copy of the artifact, or the
+/// installed file) and the artifact run from it. The artifact alone can't say
+/// which: a kept copy and the installed file may hold the same bytes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Rung {
+    pub installed: bool,
+    pub artifact: Artifact,
+}
+
+/// Where a ladder stands (6.1 g), so a supervisor that restarts goes on from
+/// it and does not give a rung three more tries every time it starts.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LadderRecord {
+    /// The ladder it belongs to: `None` is the restart ladder, `Some(id)` the
+    /// return of switch `id`. A count never applies to another ladder.
+    pub switch: Option<String>,
+    /// The rung being tried.
+    pub current: Option<Rung>,
+    /// Starts of `current` since it last reported `loaded`, the one in flight
+    /// included: a crash while it runs counts it as failed.
+    pub attempts: u32,
+    /// The rungs this cycle has used up.
+    #[serde(default)]
+    pub spent: Vec<Rung>,
 }
 
 /// A release to mark failed.
@@ -264,6 +295,10 @@ pub struct Journal {
     pub switch: Option<Switch>,
     #[serde(default)]
     pub outcomes: Vec<Outcome>,
+    /// Where the ladder a worker is being started from stands. Absent when
+    /// nothing is being retried.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ladder: Option<LadderRecord>,
 }
 
 impl Journal {
@@ -280,6 +315,7 @@ impl Journal {
             workers: Vec::new(),
             switch: None,
             outcomes: Vec::new(),
+            ladder: None,
         }
     }
 
@@ -322,25 +358,34 @@ impl Journal {
             self.previous = Some(std::mem::replace(&mut self.confirmed, switch.to.clone()));
         }
         self.active = switch.to;
+        self.ladder = None;
         self.install_pending = install;
         self.push_outcome(outcome);
         true
     }
 
     /// J-R2, after a return: `active = confirmed = return.target`, `switch`
-    /// cleared and the outcome carried; `previous` does not change. `false`
-    /// when no return is journalled.
+    /// cleared and the outcome carried. `previous` does not change, except
+    /// that a kept copy that was `previous` and has now become `confirmed` is
+    /// cleared here: recovery leaves it in place while the return is open, so
+    /// the return ladder still holds it.
+    /// `false` when no return is journalled.
     pub fn finish_return(&mut self, outcome: Outcome) -> bool {
-        let Some(target) = self
+        let Some((target, installed)) = self
             .switch
             .as_ref()
             .and_then(|switch| switch.return_.as_ref())
-            .map(|ret| ret.target.clone())
+            .map(|ret| (ret.target.clone(), ret.installed))
         else {
             return false;
         };
         self.switch = None;
+        // The return's ladder ends here: a new cycle starts from nothing.
+        self.ladder = None;
         self.active = target.clone();
+        if !installed && self.previous.as_ref() == Some(&target) {
+            self.previous = None;
+        }
         self.confirmed = target;
         self.push_outcome(outcome);
         true
@@ -1299,6 +1344,7 @@ mod tests {
             blame: Blame::Environment,
             why: "w".into(),
             decided: "2026-10-09T10:00:00Z".into(),
+            installed: false,
         });
         journal.workers.push(Worker {
             pid: 1,
@@ -1425,6 +1471,7 @@ mod tests {
             blame: Blame::NewVersion,
             why: "w".into(),
             decided: "d".into(),
+            installed: false,
         });
         journal.confirmed = artifact("0.3.0");
         assert!(journal.finish_return(outcome("s1")));

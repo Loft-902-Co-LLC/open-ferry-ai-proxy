@@ -9,9 +9,13 @@
 //! The rules (design v3 3.3, as review 3's T4 and T5 amend them):
 //! - Outcomes the state file has not been given are replayed first
 //!   (`upserts`); an entry leaves the journal by id once its upsert lands.
-//! - `switch.return` set: run `return.target`; J-R2 writes `active =
-//!   confirmed = return.target`, clears `switch` and carries the outcome in
-//!   one write; `previous` does not change.
+//! - `switch.return` set: run `return.target` (a lower rung when it fails
+//!   its hash check, which `return.target` then names). The outcome is
+//!   recorded now with the stored blame and why and no `returned_to`, which
+//!   means a worker of that version started. `switch` and its `return` stay
+//!   in the journal until one has; the supervisor then does J-R2 (`active =
+//!   confirmed = return.target`, `switch` cleared, the record given
+//!   `returned_to`); `previous` does not change.
 //! - `switch` set, no `return`: run `confirmed`, always. When `confirmed` is
 //!   `switch.to` (a rollback that ended a watch window) the restart
 //!   completed the rollback; otherwise the switch failed, before `ready`
@@ -184,7 +188,7 @@ pub struct RecoveryPlan {
     /// every pending record, old and new. Name the write with
     /// [`journal_write_name`](Self::journal_write_name).
     pub journal_write: Option<Journal>,
-    /// The name of the `journal_write`: `J-R2` after a return, `reconcile-installed`
+    /// The name of the `journal_write`: `J-R1` for a journalled return, `reconcile-installed`
     /// when the only change is `installed` (O5), else `recovery`.
     pub journal_write_name: &'static str,
     /// The records to upsert into the state file by id, in order, and the
@@ -375,8 +379,10 @@ fn restart_outcome(switch: &Switch, ran: &Artifact, completed: bool, now: &str) 
 }
 
 /// The outcome of a decided return (J-R1 was written): the forward switch's
-/// own record, with the blame and why the decision stored.
-fn return_outcome(switch: &Switch, ret: &Return, ran: &Artifact, now: &str) -> Outcome {
+/// own record, with the blame and why the decision stored. `returned_to` is
+/// `ran`, the version of a worker that has started: a caller that has not
+/// started one clears it.
+pub fn return_outcome(switch: &Switch, ret: &Return, ran: &Artifact, now: &str) -> Outcome {
     let result = if switch.phase == Phase::Watching {
         "failed-after-switch"
     } else {
@@ -433,12 +439,45 @@ pub fn plan_recovery(journal: &Journal, facts: &Facts) -> RecoveryPlan {
         })
     };
     let mut candidates = vec![primary.clone()];
-    for next in [Some(&journal.confirmed), journal.previous.as_ref()]
-        .into_iter()
-        .flatten()
-    {
-        if !candidates.contains(next) && allowed(next) {
-            candidates.push(next.clone());
+    match (returning, journal.switch.as_ref()) {
+        // A return resumes at the rung it journalled and goes on down the
+        // ladder from there: the kept copy of `from`, `previous`, the installed
+        // file. It never goes back up to a rung it has spent, so `confirmed`
+        // (which is `from`) is not a step back from `previous`, and a return
+        // journalled at the installed file has nothing but that file left. The
+        // ladder moves back only when the supervisor journals a new cycle.
+        (Some(ret), Some(switch)) => {
+            let mut ladder: Vec<&Artifact> = Vec::new();
+            for next in [Some(&switch.from), journal.previous.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                if !ladder.contains(&next) && allowed(next) {
+                    ladder.push(next);
+                }
+            }
+            if ret.installed {
+                candidates.clear();
+            } else if let Some(at) = ladder.iter().position(|next| **next == ret.target) {
+                candidates = ladder[at..].iter().map(|next| (*next).clone()).collect();
+            } else {
+                candidates.extend(
+                    ladder
+                        .into_iter()
+                        .filter(|next| **next != ret.target)
+                        .cloned(),
+                );
+            }
+        }
+        _ => {
+            for next in [Some(&journal.confirmed), journal.previous.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                if !candidates.contains(next) && allowed(next) {
+                    candidates.push(next.clone());
+                }
+            }
         }
     }
     let ran = match candidates.iter().find(|artifact| facts.verified(artifact)) {
@@ -460,6 +499,25 @@ pub fn plan_recovery(journal: &Journal, facts: &Facts) -> RecoveryPlan {
             ));
             plan.upserts = journal.outcomes.clone();
             plan.notes.push("no artifact can run: degraded".to_owned());
+            // A journalled return that nothing could carry out is still the
+            // forward switch's outcome (6.1 g): recorded now with the stored
+            // blame and why (and `mark_failed`), `returned_to` absent until a
+            // worker of the return runs, and kept in the journal with the
+            // switch. The upsert is by id, so a start that finds it again
+            // adds no second entry.
+            if let (Some(ret), Some(switch)) = (returning, journal.switch.as_ref()) {
+                let mut outcome = return_outcome(switch, ret, &ret.target, &now);
+                outcome.record.returned_to = None;
+                let mut next = journal.clone();
+                next.push_outcome(outcome);
+                plan.upserts = next.outcomes.clone();
+                plan.journal_write = (next != *journal).then_some(next);
+                plan.journal_write_name = "J-R1";
+                plan.notes.push(
+                    "the journalled return could not start: its outcome is recorded without returned_to"
+                        .to_owned(),
+                );
+            }
             // U2-O1: the repair of a missing installed file doesn't need a
             // worker, so it is returned even though none can run.
             if journal.install_pending.is_none() && facts.installed_sha256.is_none() {
@@ -480,8 +538,16 @@ pub fn plan_recovery(journal: &Journal, facts: &Facts) -> RecoveryPlan {
     match &journal.switch {
         Some(switch) => {
             let outcome = if let Some(ret) = returning {
-                notes.push("a journalled return is carried out".to_owned());
-                return_outcome(switch, ret, &run_artifact, &now)
+                notes.push(
+                    "a journalled return is carried out: recorded now, confirmed once a worker of it runs"
+                        .to_owned(),
+                );
+                // `returned_to` means a worker of that version started, and
+                // none has. The record is made now with the stored blame and
+                // why (and `mark_failed`); J-R2 adds `returned_to` to it by id.
+                let mut outcome = return_outcome(switch, ret, &run_artifact, &now);
+                outcome.record.returned_to = None;
+                outcome
             } else {
                 let completed = switch.how == How::Rollback
                     && on_primary
@@ -494,11 +560,22 @@ pub fn plan_recovery(journal: &Journal, facts: &Facts) -> RecoveryPlan {
                 });
                 restart_outcome(switch, &run_artifact, completed, &now)
             };
-            j.switch = None;
+            if returning.is_some() {
+                // The switch and its `return` stay until a worker of
+                // `return.target` has started; then J-R2 clears `switch` and
+                // confirms what runs. `target` is what is tried now: a rung
+                // below the journalled one when that failed its hash check.
+                if let Some(ret) = j.switch.as_mut().and_then(|held| held.return_.as_mut()) {
+                    ret.target = run_artifact.clone();
+                    ret.installed = installed_ran;
+                }
+            } else {
+                j.switch = None;
+            }
             j.push_outcome(outcome);
             j.active = run_artifact.clone();
-            if returning.is_some() || !on_primary {
-                // J-R2, or a fallback: what runs is now the confirmed one.
+            if returning.is_none() && !on_primary {
+                // A fallback: what runs is now the confirmed one.
                 // `previous` does not change.
                 j.confirmed = run_artifact.clone();
             }
@@ -511,7 +588,14 @@ pub fn plan_recovery(journal: &Journal, facts: &Facts) -> RecoveryPlan {
         }
     }
 
-    if !installed_ran && !on_primary && journal.previous.as_ref() == Some(&run_artifact) {
+    // While a return stays open `previous` stays too: the return ladder is
+    // rebuilt from the journal and needs the fallback recovery chose. J-R2
+    // (`Journal::finish_return`) clears it where the return ends.
+    if returning.is_none()
+        && !installed_ran
+        && !on_primary
+        && journal.previous.as_ref() == Some(&run_artifact)
+    {
         j.previous = None;
     }
 
@@ -552,8 +636,14 @@ pub fn plan_recovery(journal: &Journal, facts: &Facts) -> RecoveryPlan {
         // Identity is version and hash, not size: an artifact made from the
         // installed file carries the file's size. An input journal that
         // already breaks the invariant is cleared too.
-        let superseded =
-            j.confirmed.version != target.version || j.confirmed.sha256 != target.sha256;
+        // A return confirms what it runs at J-R2, so it counts as confirmed
+        // here: the install of the artifact it left is superseded.
+        let confirmed = if returning.is_some() {
+            &run_artifact
+        } else {
+            &j.confirmed
+        };
+        let superseded = confirmed.version != target.version || confirmed.sha256 != target.sha256;
         if superseded {
             notes.push(format!(
                 "confirmed moved off {}: its pending install is superseded",
@@ -634,6 +724,20 @@ pub fn plan_recovery(journal: &Journal, facts: &Facts) -> RecoveryPlan {
         install = repair_missing_installed(&j, facts, &mut notes);
     }
 
+    // An install of the return's own target waits for J-R2: until a worker of
+    // it runs, it is not what is confirmed. Its pending record and retry stay.
+    if returning.is_some()
+        && matches!(
+            install,
+            InstallAction::Replace { .. } | InstallAction::Place { .. }
+        )
+    {
+        install = InstallAction::None;
+        notes.push(
+            "the install of the return's target waits until a worker of it has started".to_owned(),
+        );
+    }
+
     // Authenticate and report any completed install before rebuilding from the
     // installed fallback. Otherwise clearing the pending install would lose the
     // only operation id that lets the state file learn its result after a crash.
@@ -642,6 +746,23 @@ pub fn plan_recovery(journal: &Journal, facts: &Facts) -> RecoveryPlan {
             Journal::first_start(run_artifact.clone(), Some(Installed::from(&run_artifact)));
         rebuilt.seq = j.seq;
         rebuilt.outcomes = std::mem::take(&mut j.outcomes);
+        // Where the ladder stands survives the rebuild: the restart ladder's
+        // record, or the open return's (it is keyed by its switch id), so a
+        // supervisor that restarts goes on from it.
+        rebuilt.ladder = j
+            .ladder
+            .take()
+            .filter(|record| record.switch.is_none() || returning.is_some());
+        // A return still waits for a worker of it to start: `confirmed` is
+        // what it was until then (J-R2 moves it once a worker of the installed
+        // file runs), so a failed start leaves nothing confirmed that never ran.
+        if returning.is_some() {
+            rebuilt.switch = j.switch.take();
+            rebuilt.confirmed = j.confirmed.clone();
+            // The return ladder is rebuilt from the journal and holds
+            // `previous` while the return is open (J-R2 clears it).
+            rebuilt.previous = j.previous.take();
+        }
         j = rebuilt;
         install = InstallAction::None;
         notes.push("the journal is rebuilt from the installed file".to_owned());
@@ -676,7 +797,7 @@ pub fn plan_recovery(journal: &Journal, facts: &Facts) -> RecoveryPlan {
         only == j
     };
     let journal_write_name = if returning.is_some() {
-        "J-R2"
+        "J-R1"
     } else if only_installed_changed {
         "reconcile-installed"
     } else {
@@ -1041,15 +1162,18 @@ mod tests {
             blame,
             why: "the new version exited with code 101".into(),
             decided: "2026-10-09T11:05:00Z".into(),
+            installed: false,
         });
         journal
     }
 
     #[test]
-    fn a_journalled_return_is_carried_out_in_one_write() {
-        // Not upstream's: T4 and T5, J-R2. `active = confirmed =
-        // return.target`, `switch` null, the outcome set, `previous`
-        // unchanged; mark_failed only for blame new-version on an update.
+    fn a_journalled_return_is_recorded_without_claiming_a_start() {
+        // Not upstream's: T4 and T5. The outcome is recorded with the stored
+        // blame and why, no `returned_to` (no worker has started), and
+        // mark_failed only for blame new-version on an update. `switch` and
+        // its `return` stay until a worker of `return.target` runs (J-R2,
+        // the supervisor's); `confirmed` and `previous` do not change.
         let mut journal = idle("0.2.0");
         journal.previous = Some(art("0.1.0"));
         journal.active = art("0.3.0");
@@ -1063,7 +1187,7 @@ mod tests {
             Some("failed-after-switch")
         );
         assert_eq!(outcome.record.blame.as_deref(), Some("new-version"));
-        assert_eq!(outcome.record.returned_to.as_deref(), Some("0.2.0"));
+        assert_eq!(outcome.record.returned_to, None, "nothing has started");
         assert_eq!(
             outcome.record.why.as_deref(),
             Some("the new version exited with code 101")
@@ -1075,12 +1199,20 @@ mod tests {
                 why: "the new version exited with code 101".into()
             })
         );
+        assert_eq!(plan.journal_write_name, "J-R1");
         let next = written(&plan);
         assert_eq!(next.active, art("0.2.0"));
         assert_eq!(next.confirmed, art("0.2.0"));
         assert_eq!(next.previous, Some(art("0.1.0")));
-        assert!(next.switch.is_none());
+        let held = next.switch.as_ref().expect("the switch stays");
+        assert_eq!(held.return_.as_ref().unwrap().target, art("0.2.0"));
         assert_eq!(next.outcomes, plan.upserts);
+
+        // Planned again from what it wrote (a crash before the start): the
+        // same one record, by id.
+        let again = plan_recovery(next, &facts_for(next));
+        assert_eq!(again.upserts.len(), 1);
+        assert_eq!(again.upserts[0].record, outcome.record);
 
         // The same return before ready is failed-to-load, and an
         // environment blame marks nothing.
@@ -1115,12 +1247,26 @@ mod tests {
             outcome.record.result.as_deref(),
             Some("failed-after-switch")
         );
-        assert_eq!(outcome.record.returned_to.as_deref(), Some("0.3.0"));
+        assert_eq!(outcome.record.returned_to, None, "nothing has started");
         assert!(outcome.mark_failed.is_none());
         let next = written(&plan);
         assert_eq!(next.active, art("0.3.0"));
-        assert_eq!(next.confirmed, art("0.3.0"));
+        assert_eq!(
+            next.confirmed,
+            art("0.2.0"),
+            "J-R2 confirms it, not recovery"
+        );
         assert_eq!(next.previous, Some(art("0.1.0")));
+        assert_eq!(
+            next.switch
+                .as_ref()
+                .unwrap()
+                .return_
+                .as_ref()
+                .unwrap()
+                .target,
+            art("0.3.0")
+        );
     }
 
     #[test]
@@ -1279,7 +1425,19 @@ mod tests {
         facts.versions.remove("0.3.0");
         let plan = plan_recovery(&with_previous, &facts);
         assert_eq!(plan.run, RunChoice::Version(art("0.1.0")));
-        assert_eq!(written(&plan).confirmed, art("0.1.0"));
+        assert_eq!(written(&plan).confirmed, art("0.2.0"));
+        assert_eq!(
+            written(&plan)
+                .switch
+                .as_ref()
+                .unwrap()
+                .return_
+                .as_ref()
+                .unwrap()
+                .target,
+            art("0.1.0"),
+            "the rung that is tried is journalled in return.target"
+        );
 
         // So is a known installed file with another hash.
         let mut with_other = journal.clone();
@@ -1934,5 +2092,114 @@ mod tests {
         let after = plan_recovery(written(&a), &facts_for(written(&a)));
         assert!(after.journal_write.is_none());
         assert_eq!(after.upserts, a.upserts);
+    }
+
+    // ---- round 5 ----------------------------------------------------------
+
+    fn returning_at(target: &str) -> Journal {
+        let mut journal = idle("0.2.0");
+        journal.previous = Some(art("0.1.0"));
+        journal.active = art("0.3.0");
+        journal.switch = Some(switch(How::Update, "0.2.0", "0.3.0", Phase::Watching));
+        let mut journal = with_return(journal, Blame::NewVersion);
+        journal
+            .switch
+            .as_mut()
+            .unwrap()
+            .return_
+            .as_mut()
+            .unwrap()
+            .target = art(target);
+        journal
+    }
+
+    #[test]
+    fn a_resume_goes_on_down_the_ladder_and_never_back_to_a_spent_rung() {
+        // Round 5, item 2 (e): the return is journalled at P (0.1.0), P's hash
+        // is no longer valid, and A's (0.2.0, spent before the restart) is.
+        // Recovery tries the installed file, never A.
+        let mut journal = returning_at("0.1.0");
+        journal.installed = Some(Installed::from(&art("0.5.0")));
+        let mut facts = facts_for(&journal);
+        facts.installed_sha256 = Some(art("0.5.0").sha256);
+        facts
+            .versions
+            .insert("0.1.0".into(), "not the recorded hash".into());
+        let plan = plan_recovery(&journal, &facts);
+        match &plan.run {
+            RunChoice::VerifiedInstalled(artifact) => assert_eq!(artifact.version, "0.5.0"),
+            other => panic!("the installed file, never A: {other:?}"),
+        }
+        let ret = written(&plan)
+            .switch
+            .as_ref()
+            .unwrap()
+            .return_
+            .as_ref()
+            .unwrap();
+        assert!(
+            ret.installed,
+            "the rung is journalled as the installed file"
+        );
+        assert_eq!(ret.target.sha256, art("0.5.0").sha256);
+    }
+
+    #[test]
+    fn a_return_that_nothing_can_run_still_records_the_forward_switch_once() {
+        // Round 5, item 3 (a): crash after J-R1 and before the record, and no
+        // artifact verifies. One record, `mark_failed` per the blame,
+        // `returned_to` absent, the switch kept; a third start still has one.
+        let mut journal = returning_at("0.2.0");
+        journal.installed = None;
+        let mut facts = facts_for(&journal);
+        facts.installed_sha256 = None;
+        for version in ["0.1.0", "0.2.0"] {
+            facts.versions.insert(version.into(), "wrong".into());
+        }
+        let plan = plan_recovery(&journal, &facts);
+        assert_eq!(plan.run, RunChoice::Nothing);
+        assert_eq!(plan.journal_write_name, "J-R1");
+        let outcome = only_outcome(&plan);
+        assert_eq!(
+            outcome.record.result.as_deref(),
+            Some("failed-after-switch")
+        );
+        assert_eq!(outcome.record.returned_to, None);
+        assert_eq!(
+            outcome.mark_failed.as_ref().map(|m| m.version.as_str()),
+            Some("0.3.0")
+        );
+        let next = written(&plan).clone();
+        assert!(next.switch.as_ref().unwrap().return_.is_some());
+        assert_eq!(next.outcomes.len(), 1);
+        // The second and third start, from what was written.
+        let again = plan_recovery(&next, &facts);
+        let third_journal = again.journal_write.clone().unwrap_or(next.clone());
+        let third = plan_recovery(&third_journal, &facts);
+        assert_eq!(again.upserts.len(), 1);
+        assert_eq!(third.upserts.len(), 1);
+        assert_eq!(third.upserts[0].record.id, outcome.record.id);
+    }
+
+    #[test]
+    fn the_installed_rebuild_does_not_confirm_a_return_before_it_starts() {
+        // Round 5, item 4: the return target and `previous` fail
+        // verification, the installed file (I = 0.5.0) is known by its hash.
+        // The rebuilt journal keeps `confirmed` and the return; J-R2 (the
+        // supervisor's) moves `confirmed` once a worker of I runs.
+        let mut journal = returning_at("0.2.0");
+        journal.installed = Some(Installed::from(&art("0.5.0")));
+        let mut facts = facts_for(&journal);
+        facts.installed_sha256 = Some(art("0.5.0").sha256);
+        for version in ["0.1.0", "0.2.0"] {
+            facts.versions.insert(version.into(), "wrong".into());
+        }
+        let plan = plan_recovery(&journal, &facts);
+        assert!(matches!(plan.run, RunChoice::VerifiedInstalled(_)));
+        let next = written(&plan);
+        assert_eq!(next.confirmed, art("0.2.0"), "confirmed stays until J-R2");
+        assert_eq!(next.active.sha256, art("0.5.0").sha256);
+        assert!(next.switch.as_ref().unwrap().return_.is_some());
+        assert_eq!(next.outcomes.len(), 1);
     }
 }
