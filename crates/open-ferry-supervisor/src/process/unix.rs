@@ -138,6 +138,45 @@ impl WorkerProcess {
             std::thread::sleep(remaining.min(std::time::Duration::from_millis(10)));
         }
     }
+    /// Sends a kill through the retained child and bounds the subsequent wait.
+    pub fn kill_and_wait(&mut self, timeout: std::time::Duration) -> io::Result<ExitStatus> {
+        self.terminate_and_wait(timeout).map(|(status, _)| status)
+    }
+    /// [`kill_and_wait`](Self::kill_and_wait) that also says whether the kill
+    /// was what ended the worker. The exit is checked right before the kill is
+    /// sent: one already gone is `AlreadyExited` and nothing is sent. After a
+    /// kill the status must be a SIGKILL; a worker that exited in the gap
+    /// between the check and the kill (kill on an unreaped zombie succeeds)
+    /// shows its own status and counts as `AlreadyExited`. A SIGKILL is
+    /// consistent with our kill, not proof of it: one from another source in
+    /// that same gap (the worker's own, the OOM killer, a process-group kill)
+    /// looks identical and is reported `Issued`. Accepted residual, the Unix
+    /// counterpart of the Windows one; the worker never sends itself SIGKILL.
+    pub fn terminate_and_wait(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> io::Result<(ExitStatus, super::Termination)> {
+        use std::os::unix::process::ExitStatusExt;
+        #[cfg(test)]
+        super::TERMINATION_MUST_NOT_BLOCK
+            .with(|marked| assert!(!marked.get(), "termination ran on the async runtime thread"));
+        if let Some(status) = self.child.try_wait()? {
+            return Ok((status, super::Termination::AlreadyExited));
+        }
+        self.child.kill()?;
+        let status = self.wait_timeout(timeout)?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the worker did not exit after it was terminated",
+            )
+        })?;
+        let ours = if status.signal() == Some(libc::SIGKILL) {
+            super::Termination::Issued
+        } else {
+            super::Termination::AlreadyExited
+        };
+        Ok((status, ours))
+    }
     /// Explicit emergency kill, followed by reap through the retained child.
     pub fn kill(&mut self) -> io::Result<ExitStatus> {
         self.terminate()

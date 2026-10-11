@@ -27,7 +27,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::io::Write;
 
-use crate::journal::{JournalView, add_newest_other};
+use crate::journal::{Journal, JournalView, add_newest_other};
 use crate::pins::PinStore;
 use crate::staging::{StagingDir, hash_file, rename_directory_exclusive, sync_directory};
 use std::fs;
@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{SecondsFormat, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use open_ferry_core::config::SelfUpdateMode;
 use serde::Serialize;
 use url::Url;
@@ -456,79 +456,7 @@ impl Updater {
 
     /// Cleanup under the update lock, only after journal/pin preflight.
     fn cleanup_stale_artifacts(&self, keep: &BTreeSet<String>) -> Result<(), UpdateError> {
-        let view = JournalView::load(&self.data.root().join(crate::journal::JOURNAL_FILE))
-            .map_err(|error| UpdateError::Journal(error.to_string()))?;
-        view.ensure_supported()
-            .map_err(|error| UpdateError::Journal(error.to_string()))?;
-        let pins = PinStore::new(&self.data.versions())
-            .live(Utc::now())
-            .map_err(|error| UpdateError::Journal(error.to_string()))?;
-        let fresh = self.state();
-        let mut recorded = Vec::new();
-        if let (Some(version), Some(hash)) = (&fresh.staged, &fresh.staged_sha256) {
-            recorded.push((version.clone(), hash.clone()));
-        }
-        for record in fresh.last_switch.iter().chain(fresh.history.iter()) {
-            recorded.push((record.to.clone(), record.sha256.clone()));
-        }
-        for pin in pins {
-            recorded.push((pin.version, pin.sha256));
-        }
-        if let Some(journal) = view.journal() {
-            for artifact in
-                [&journal.active, &journal.confirmed]
-                    .into_iter()
-                    .chain(journal.previous.iter())
-                    .chain(
-                        journal
-                            .install_pending
-                            .iter()
-                            .map(|pending| &pending.target),
-                    )
-                    .chain(
-                        journal
-                            .switch
-                            .iter()
-                            .flat_map(|switch| [&switch.from, &switch.to]),
-                    )
-                    .chain(journal.switch.iter().filter_map(|switch| {
-                        switch.return_.as_ref().map(|return_| &return_.target)
-                    }))
-            {
-                recorded.push((artifact.version.clone(), artifact.sha256.clone()));
-            }
-            if let Some(installed) = &journal.installed {
-                recorded.push((installed.version.clone(), installed.sha256.clone()));
-            }
-        }
-        let verified: Vec<_> = recorded
-            .into_iter()
-            .filter_map(|(version, hash)| {
-                (keep.contains(&version)
-                    && semver::Version::parse(&version).is_ok()
-                    && hash_file(&self.data.binary(&version, self.binary_name()))
-                        .ok()
-                        .as_deref()
-                        == Some(hash.as_str()))
-                .then_some(hash)
-            })
-            .collect();
-        if let Err(error) = crate::staging::cleanup_stale_staging(&self.data.versions()) {
-            tracing::warn!(%error, path = %self.data.versions().display(), "could not finish stale staging cleanup; continuing");
-        }
-        if let Ok(Some(receipt)) = Receipt::load(&self.data.receipt_file()) {
-            match crate::switch::cleanup_stale_prev(Path::new(&receipt.binary), &verified) {
-                Ok(cleanup) => {
-                    for path in cleanup.removed {
-                        tracing::info!(path = %path.display(), "removed a stale installed link");
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(%error, path = %receipt.binary, "could not finish stale installed-link cleanup; continuing");
-                }
-            }
-        }
-        Ok(())
+        cleanup_stale_artifacts_in(&self.data, self.binary_name(), keep)
     }
 
     /// Whether this install updates itself.
@@ -1101,26 +1029,59 @@ pub(crate) fn retention_keep(
     data: &DataDir,
     extra: impl IntoIterator<Item = String>,
 ) -> Result<BTreeSet<String>, UpdateError> {
+    // Every recorded worker, including draining ones, is conservatively
+    // retained: only the supervisor can say which pids are alive.
+    retention_keep_with(data, extra, Utc::now(), |_, _| true, None, None)
+}
+
+/// [`retention_keep`] with the clock and the liveness check supplied, and
+/// optionally the supervisor's in-memory journal, whose keep set is added to
+/// the on-disk one (the supervisor's picture may be ahead of its last write).
+///
+/// `strict` is the supervised path's one listing of `versions/` ([`all_versions`]):
+/// when given, the newest-other candidates come from it, and the state file
+/// is read with [`State::load_strict`], so a listing or a state read that
+/// fails is an error and never a smaller keep set. The CLI passes `None` and
+/// keeps its lenient reads ([`DataDir::kept_versions`], [`State::load`]).
+pub(crate) fn retention_keep_with(
+    data: &DataDir,
+    extra: impl IntoIterator<Item = String>,
+    now: DateTime<Utc>,
+    is_live: impl Fn(u32, u64) -> bool,
+    memory: Option<&Journal>,
+    strict: Option<&BTreeSet<String>>,
+) -> Result<BTreeSet<String>, UpdateError> {
     let view = JournalView::load(&data.root().join(crate::journal::JOURNAL_FILE))
         .map_err(|error| UpdateError::Journal(error.to_string()))?;
     view.ensure_supported()
         .map_err(|error| UpdateError::Journal(error.to_string()))?;
-    let now = Utc::now();
     let pins = PinStore::new(&data.versions())
         .live(now)
         .map_err(|error| UpdateError::Journal(error.to_string()))?;
-    // Phase 2 injects pid/start-time liveness. Until then every recorded
-    // worker, including draining workers, is conservatively retained.
-    let mut keep = view.keep_set(&pins, now, |_, _| true);
+    let mut keep = view.keep_set(&pins, now, &is_live);
+    if let Some(memory) = memory {
+        keep.extend(memory.keep_set(&pins, now, &is_live));
+    }
     keep.extend(extra);
-    let fresh = State::load(&data.state_file());
+    let fresh = match strict {
+        Some(_) => State::load_strict(&data.state_file()).map_err(|error| {
+            UpdateError::Journal(format!(
+                "could not read the update state {}: {error}",
+                data.state_file().display()
+            ))
+        })?,
+        None => State::load(&data.state_file()),
+    };
     keep.extend(fresh.previous);
     keep.extend(fresh.staged);
-    if view.journal().is_some() {
+    if view.journal().is_some() || memory.is_some() {
         // A positively empty directory may be a crashed publication claim,
         // not an artifact. Unreadable and non-empty candidates remain protected.
-        let candidates: Vec<_> = data
-            .kept_versions()
+        let listed: Vec<String> = match strict {
+            Some(versions) => versions.iter().cloned().collect(),
+            None => data.kept_versions(),
+        };
+        let candidates: Vec<_> = listed
             .into_iter()
             .filter(|version| {
                 fs::read_dir(data.version_dir(version))
@@ -1130,6 +1091,189 @@ pub(crate) fn retention_keep(
         add_newest_other(&mut keep, &candidates);
     }
     Ok(keep)
+}
+
+/// Stale staging directories and installed links, under the update lock, only
+/// after the journal and pin preflight. [`Updater::prune`] and
+/// [`supervised_prune`] share it.
+fn cleanup_stale_artifacts_in(
+    data: &DataDir,
+    binary_name: &str,
+    keep: &BTreeSet<String>,
+) -> Result<(), UpdateError> {
+    let view = JournalView::load(&data.root().join(crate::journal::JOURNAL_FILE))
+        .map_err(|error| UpdateError::Journal(error.to_string()))?;
+    view.ensure_supported()
+        .map_err(|error| UpdateError::Journal(error.to_string()))?;
+    let pins = PinStore::new(&data.versions())
+        .live(Utc::now())
+        .map_err(|error| UpdateError::Journal(error.to_string()))?;
+    let fresh = State::load(&data.state_file());
+    let mut recorded = Vec::new();
+    if let (Some(version), Some(hash)) = (&fresh.staged, &fresh.staged_sha256) {
+        recorded.push((version.clone(), hash.clone()));
+    }
+    for record in fresh.last_switch.iter().chain(fresh.history.iter()) {
+        recorded.push((record.to.clone(), record.sha256.clone()));
+    }
+    for pin in pins {
+        recorded.push((pin.version, pin.sha256));
+    }
+    if let Some(journal) = view.journal() {
+        for artifact in [&journal.active, &journal.confirmed]
+            .into_iter()
+            .chain(journal.previous.iter())
+            .chain(
+                journal
+                    .install_pending
+                    .iter()
+                    .map(|pending| &pending.target),
+            )
+            .chain(
+                journal
+                    .switch
+                    .iter()
+                    .flat_map(|switch| [&switch.from, &switch.to]),
+            )
+            .chain(
+                journal
+                    .switch
+                    .iter()
+                    .filter_map(|switch| switch.return_.as_ref().map(|return_| &return_.target)),
+            )
+        {
+            recorded.push((artifact.version.clone(), artifact.sha256.clone()));
+        }
+        if let Some(installed) = &journal.installed {
+            recorded.push((installed.version.clone(), installed.sha256.clone()));
+        }
+    }
+    let verified: Vec<_> = recorded
+        .into_iter()
+        .filter_map(|(version, hash)| {
+            (keep.contains(&version)
+                && semver::Version::parse(&version).is_ok()
+                && hash_file(&data.binary(&version, binary_name))
+                    .ok()
+                    .as_deref()
+                    == Some(hash.as_str()))
+            .then_some(hash)
+        })
+        .collect();
+    if let Err(error) = crate::staging::cleanup_stale_staging(&data.versions()) {
+        tracing::warn!(%error, path = %data.versions().display(), "could not finish stale staging cleanup; continuing");
+    }
+    if let Ok(Some(receipt)) = Receipt::load(&data.receipt_file()) {
+        match crate::switch::cleanup_stale_prev(Path::new(&receipt.binary), &verified) {
+            Ok(cleanup) => {
+                for path in cleanup.removed {
+                    tracing::info!(path = %path.display(), "removed a stale installed link");
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, path = %receipt.binary, "could not finish stale installed-link cleanup; continuing");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// What the supervisor's prune removed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SupervisedPruned {
+    /// The version directories deleted.
+    pub removed: Vec<String>,
+    /// The expired pin files deleted.
+    pub pins_removed: usize,
+    /// Why the expired pins could not all be removed, after the versions above
+    /// had been deleted. `None` when they could.
+    pub pins_error: Option<String>,
+}
+
+/// The supervisor's keep set (v3 3.5): what the journal on disk and in memory
+/// protect (a worker counts when `is_live(pid, started)` says it exists), live
+/// pins, `state.staged` and `state.previous`, the newest other version, and the
+/// versions of the workers the supervisor tracks (`tracked`). Reads only; the
+/// caller need not hold the update lock for a reply that may lag. An unreadable
+/// or newer-format journal and an unparseable pin are errors: the caller must
+/// treat every version as kept. Additive: nothing the CLI calls uses it.
+pub fn supervised_keep_set(
+    data: &DataDir,
+    tracked: impl IntoIterator<Item = String>,
+    memory: Option<&Journal>,
+    now: DateTime<Utc>,
+    is_live: impl Fn(u32, u64) -> bool,
+) -> Result<BTreeSet<String>, UpdateError> {
+    // The newest-other rule lists `versions/`. [`DataDir::kept_versions`] hides
+    // a listing error, which would drop that extra version without a word, so
+    // a listing that fails is an error here, and the one strict listing is
+    // the one the candidates come from (never a second, lenient one).
+    let versions = all_versions(data)?;
+    retention_keep_with(data, tracked, now, is_live, memory, Some(&versions))
+}
+
+/// Every version directory present (the fail-closed keep set). Unlike
+/// [`DataDir::kept_versions`], which the CLI uses and which treats an
+/// unreadable directory or entry as absent, any listing error is an error: a
+/// partial list must never stand for "every version". A `versions/` that does
+/// not exist is an empty list.
+pub fn all_versions(data: &DataDir) -> Result<BTreeSet<String>, UpdateError> {
+    let listing = |error: io::Error| {
+        UpdateError::Journal(format!(
+            "could not list {}: {error}",
+            data.versions().display()
+        ))
+    };
+    let entries = match fs::read_dir(data.versions()) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
+        Err(error) => return Err(listing(error)),
+    };
+    let mut versions = BTreeSet::new();
+    for entry in entries {
+        let entry = entry.map_err(listing)?;
+        if !entry.file_type().map_err(listing)?.is_dir() {
+            continue;
+        }
+        if let Ok(name) = entry.file_name().into_string()
+            && semver::Version::parse(&name).is_ok()
+        {
+            versions.insert(name);
+        }
+    }
+    Ok(versions)
+}
+
+/// The supervisor's prune: [`supervised_keep_set`], then the stale-artifact
+/// cleanup, the deletion of every other version directory, and the removal of
+/// expired pins, exactly as [`Updater::prune`] does it. The caller holds the
+/// update lock. An unreadable or newer journal, an unparseable pin or a
+/// `versions/` that cannot be listed refuses before anything is deleted; a
+/// failure to remove the expired pins comes after the deletions and is
+/// [`SupervisedPruned::pins_error`], not an error.
+pub fn supervised_prune(
+    data: &DataDir,
+    binary_name: &str,
+    tracked: impl IntoIterator<Item = String>,
+    memory: Option<&Journal>,
+    now: DateTime<Utc>,
+    is_live: impl Fn(u32, u64) -> bool,
+) -> Result<SupervisedPruned, UpdateError> {
+    let keep = supervised_keep_set(data, tracked, memory, now, is_live)?;
+    cleanup_stale_artifacts_in(data, binary_name, &keep)?;
+    let mut done = SupervisedPruned::default();
+    for version in all_versions(data)? {
+        if !keep.contains(&version) && fs::remove_dir_all(data.version_dir(&version)).is_ok() {
+            done.removed.push(version);
+        }
+    }
+    // Versions may be gone by now: a failure here is not "nothing was
+    // deleted", so it is reported next to what was.
+    match PinStore::new(&data.versions()).remove_expired(now) {
+        Ok(removed) => done.pins_removed = removed,
+        Err(error) => done.pins_error = Some(error.to_string()),
+    }
+    Ok(done)
 }
 
 /// A file's modification time, in milliseconds since the epoch.

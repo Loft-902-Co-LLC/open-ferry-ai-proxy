@@ -36,6 +36,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// Not upstream's: the no-replace, written-through file publication, for the
+/// supervisor's placing of a missing installed file.
+pub use crate::publication::publish_file_no_replace;
+
 /// How many times a rename is retried after a transient error.
 pub const RENAME_TRIES: usize = 5;
 
@@ -277,6 +281,21 @@ impl ReplaceOnDisk {
         prepare_with(&RealFileOps, plan, cfg!(windows))
     }
 
+    /// Not upstream's: as [`prepare`](Self::prepare), but the new binary is
+    /// copied from `source`, a file the caller opened and checked itself,
+    /// read from its start; `plan.new_binary` is not opened. For a caller that
+    /// must not reopen the path (it may have been swapped for a link or a pipe).
+    pub fn prepare_from_open(
+        &self,
+        plan: &SwitchPlan,
+        source: &mut fs::File,
+    ) -> Result<PreparedSwitch, SwitchError> {
+        // Whatever the caller read first (a hash, a size check) moved the
+        // offset: the copy is of the whole file.
+        io::Seek::seek(source, io::SeekFrom::Start(0)).map_err(step("rewind the new binary"))?;
+        prepare_with_source(&RealFileOps, plan, cfg!(windows), Some(source))
+    }
+
     /// Puts the prepared binary in place of the installed one.
     pub fn commit(&self, prepared: &PreparedSwitch) -> Result<SwitchOutcome, SwitchError> {
         commit_with(&RealFileOps, prepared)
@@ -363,8 +382,18 @@ fn copy_to_temp(from: &Path, to: &Path, root: &Path) -> io::Result<PathBuf> {
 /// error only the file made here is removed.
 fn copy_beside(from: &Path, to: &Path, suffix: &str, executable: bool) -> io::Result<PathBuf> {
     let mut source = fs::File::open(from)?;
+    copy_beside_open(&mut source, to, suffix, executable)
+}
+
+/// [`copy_beside`] from a file that is already open.
+fn copy_beside_open(
+    source: &mut fs::File,
+    to: &Path,
+    suffix: &str,
+    executable: bool,
+) -> io::Result<PathBuf> {
     let (mut file, temp) = create_unique(to, suffix)?;
-    let copied = io::copy(&mut source, &mut file)
+    let copied = io::copy(source, &mut file)
         .and_then(|_| {
             let permissions = if executable {
                 executable_permissions(source.metadata()?.permissions())
@@ -393,11 +422,16 @@ fn create_unique(path: &Path, suffix: &str) -> io::Result<(fs::File, PathBuf)> {
             0 => sibling(path, suffix),
             n => sibling(path, &format!("{suffix}.{n}")),
         };
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&candidate)
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        // Not upstream's: private while the bytes are written; the final
+        // permissions are set after the copy.
+        #[cfg(unix)]
         {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o700);
+        }
+        match options.open(&candidate) {
             Ok(file) => return Ok((file, candidate)),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error),
@@ -514,6 +548,17 @@ pub fn prepare_with(
     plan: &SwitchPlan,
     use_aside: bool,
 ) -> Result<PreparedSwitch, SwitchError> {
+    prepare_with_source(ops, plan, use_aside, None)
+}
+
+/// [`prepare_with`], copying from `source` when given instead of opening
+/// `plan.new_binary`.
+fn prepare_with_source(
+    ops: &dyn FileOps,
+    plan: &SwitchPlan,
+    use_aside: bool,
+    source: Option<&mut fs::File>,
+) -> Result<PreparedSwitch, SwitchError> {
     if use_aside {
         // A copy a lost power left in the installed file's place comes first:
         // the aside a journal recorded, else the newest `.old`. Nothing is
@@ -554,12 +599,11 @@ pub fn prepare_with(
         .map_err(step("keep a copy of the installed binary"))?;
     }
     // A new file of this call's own: a crashed run's `.new` is not touched.
-    let new = copy_beside(
-        &plan.new_binary,
-        &plan.installed,
-        &format!(".new.{}", std::process::id()),
-        true,
-    )
+    let suffix = format!(".new.{}", std::process::id());
+    let new = match source {
+        Some(source) => copy_beside_open(source, &plan.installed, &suffix, true),
+        None => copy_beside(&plan.new_binary, &plan.installed, &suffix, true),
+    }
     .and_then(|new| match ops.sync_parent(&new) {
         Ok(()) => Ok(new),
         Err(error) => {
@@ -1555,6 +1599,32 @@ mod tests {
         assert_eq!(read(&d.installed), "again");
     }
 
+    // Not upstream's: `prepare_from_open` copies the whole file whatever the
+    // handle's offset was (the caller has read it to hash it).
+    #[test]
+    fn prepare_from_open_copies_the_whole_file_after_the_handle_was_read_to_the_end() {
+        use std::io::Read;
+        let d = dir();
+        let source = d.installed.with_file_name("release-binary");
+        fs::write(&source, "release").unwrap();
+        let plan = SwitchPlan {
+            from: "0.1.0".into(),
+            to: "0.2.0".into(),
+            new_binary: d.installed.with_file_name("never-opened"),
+            installed: d.installed.clone(),
+            keep_installed_at: None,
+            keep_root: None,
+            keep_policy: KeepPolicy::Immutable,
+            preferred_aside: None,
+            expected_installed_sha256: None,
+        };
+        let mut handle = fs::File::open(&source).unwrap();
+        let mut sink = Vec::new();
+        handle.read_to_end(&mut sink).unwrap();
+        let prepared = ReplaceOnDisk.prepare_from_open(&plan, &mut handle).unwrap();
+        assert_eq!(read(&prepared.new), "release");
+    }
+
     // Not upstream's: a prepare after a lost power puts the old copy back
     // before it copies anything.
     #[test]
@@ -1686,6 +1756,18 @@ mod tests {
         commit_with(&RealFileOps, &prepared).unwrap();
         assert_eq!(read(&d.installed), "new");
         assert!(sync_parent(&d.installed).is_ok());
+    }
+
+    // Not upstream's: a copy is created private (0o700), so its bytes are never
+    // group or world readable-writable while they are written.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_is_created_with_a_private_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = dir();
+        let (file, path) = create_unique(&d.installed, ".probe").unwrap();
+        let mode = file.metadata().unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "{}", path.display());
     }
 
     // Not upstream's: kept bytes and their directory are durable before any

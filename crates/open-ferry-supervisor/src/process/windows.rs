@@ -570,6 +570,11 @@ impl WorkerProcess {
 
     /// [`terminate`](Self::terminate), then waits up to `timeout` for the exit.
     pub fn kill_and_wait(&self, timeout: Duration) -> io::Result<ExitStatus> {
+        #[cfg(test)]
+        super::TERMINATION_MUST_NOT_BLOCK
+            .with(|marked| assert!(!marked.get(), "termination ran on the async runtime thread"));
+        // Always ends the job, even when the worker has exited, so
+        // descendants that outlived it end too.
         self.terminate()?;
         self.process.wait_timeout(timeout)?.ok_or_else(|| {
             io::Error::new(
@@ -577,6 +582,39 @@ impl WorkerProcess {
                 "the worker did not exit after it was terminated",
             )
         })
+    }
+
+    /// [`kill_and_wait`](Self::kill_and_wait) that also says whether the kill
+    /// was what ended the worker. The exit is checked before the job's
+    /// terminate, which kills first: a later TerminateProcess failure does not
+    /// mean the worker had already exited. A root found already exited is
+    /// reported `AlreadyExited`, and the job is still terminated so that its
+    /// descendants end. The exit status is not consulted
+    /// (`KILLED` can be a worker's own exit code). A worker that exits in the
+    /// microseconds between this check and the terminate call is reported
+    /// `Issued`; that window is an accepted residual.
+    pub fn terminate_and_wait(
+        &self,
+        timeout: Duration,
+    ) -> io::Result<(ExitStatus, super::Termination)> {
+        #[cfg(test)]
+        super::TERMINATION_MUST_NOT_BLOCK
+            .with(|marked| assert!(!marked.get(), "termination ran on the async runtime thread"));
+        if let Some(status) = self.process.try_wait()? {
+            // The root's exit stands, but the job can still hold descendants
+            // that outlived it: end them. The job handle is ours, so there is
+            // no pid to be reused. A failure here changes nothing reported.
+            let _ = self.job.terminate(KILLED);
+            return Ok((status, super::Termination::AlreadyExited));
+        }
+        self.terminate()?;
+        let status = self.process.wait_timeout(timeout)?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the worker did not exit after it was terminated",
+            )
+        })?;
+        Ok((status, super::Termination::Issued))
     }
 
     /// Ends the worker and everything in its job, then waits on the retained
@@ -788,6 +826,7 @@ fn push_arg(line: &mut Vec<u16>, arg: &OsStr, force_quotes: bool) -> io::Result<
 mod tests {
     use super::*;
     use std::ffi::OsString;
+    use std::path::PathBuf;
 
     fn quoted(arg: &str) -> String {
         let mut line = Vec::new();
@@ -854,5 +893,69 @@ mod tests {
             stderr: None,
         };
         assert!(WorkerProcess::spawn(&spec).is_err());
+    }
+
+    /// A worker whose root has exited but whose job still holds a live
+    /// descendant (a started `ping` runs on).
+    fn exited_root_with_a_live_descendant() -> WorkerProcess {
+        let exe = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        let args = [
+            OsString::from("-NoProfile"),
+            OsString::from("-NonInteractive"),
+            OsString::from("-Command"),
+            OsString::from(
+                "Start-Process -WindowStyle Hidden ping -ArgumentList '-n','120','127.0.0.1'",
+            ),
+        ];
+        let spec = SpawnSpec {
+            exe: &exe,
+            args: &args,
+            cwd: None,
+            stdout: None,
+            stderr: None,
+        };
+        let worker = WorkerProcess::spawn(&spec).unwrap();
+        let bound = std::time::Instant::now() + Duration::from_secs(10);
+        assert!(
+            worker
+                .wait_timeout(Duration::from_secs(10))
+                .unwrap()
+                .is_some(),
+            "the root did not exit"
+        );
+        while worker.job().active_processes().unwrap() == 0 {
+            assert!(std::time::Instant::now() < bound, "no descendant appeared");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        worker
+    }
+
+    fn the_job_empties(worker: &WorkerProcess) {
+        let bound = std::time::Instant::now() + Duration::from_secs(10);
+        while worker.job().active_processes().unwrap() != 0 {
+            assert!(
+                std::time::Instant::now() < bound,
+                "the descendant outlived the termination"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn terminating_an_exited_root_still_ends_its_descendants() {
+        // Not upstream's: the job outlives its root, and what runs in it must end.
+        let worker = exited_root_with_a_live_descendant();
+        let (_, how) = worker.terminate_and_wait(Duration::from_secs(5)).unwrap();
+        assert_eq!(how, super::super::Termination::AlreadyExited);
+        the_job_empties(&worker);
+    }
+
+    #[test]
+    fn kill_and_wait_on_an_exited_root_still_ends_its_descendants() {
+        // Not upstream's: the legacy call always ends the job.
+        let worker = exited_root_with_a_live_descendant();
+        worker.kill_and_wait(Duration::from_secs(5)).unwrap();
+        the_job_empties(&worker);
     }
 }

@@ -22,6 +22,8 @@ pub enum StageExclusiveError {
     Journal(crate::journal::JournalError),
     /// The copied binary did not identify itself as a release version.
     Version(String),
+    /// The supervisor refused a staging or reusable binary before reading/running it.
+    Untrusted(String),
     /// The version already belongs to different bytes.
     SwitchingDisabled { version: String },
 }
@@ -31,6 +33,7 @@ impl std::fmt::Display for StageExclusiveError {
         match self {
             Self::Io(error) => error.fmt(f),
             Self::Journal(error) => error.fmt(f),
+            Self::Untrusted(reason) => write!(f, "staging trust refused: {reason}"),
             Self::Version(error) => write!(f, "the copied binary failed --version: {error}"),
             Self::SwitchingDisabled { version } => write!(
                 f,
@@ -73,10 +76,24 @@ impl StagingDir {
     fn create_with_tag(versions: &Path, tag: u64) -> io::Result<Self> {
         // The data root holds `versions`; it is re-synced with the levels
         // below it, and nothing above it unless this call makes it.
-        crate::publication::create_dir_all_durable(
-            versions,
-            versions.parent().unwrap_or(versions),
-        )?;
+        // Explicit creation modes cannot be widened by a permissive umask.
+        // On Windows new entries inherit the trusted parent's ACL.
+        let root = versions.parent().unwrap_or(versions);
+        let root_missing = !root.exists();
+        if !versions.exists() {
+            create_stage_dir(versions, true)?;
+        }
+        sync_directory(versions)?;
+        sync_directory(root)?;
+        if root_missing {
+            // Preserve the durable creation boundary when this call also made
+            // the data root: its entry lives in the parent above it.
+            let parent = root
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
+            sync_directory(parent)?;
+        }
         let prefix = staging_prefix(tag);
         let base = versions.join(&prefix);
         for attempt in 0..100 {
@@ -85,7 +102,7 @@ impl StagingDir {
             } else {
                 versions.join(format!("{prefix}.{}", NEXT.fetch_add(1, Ordering::Relaxed)))
             };
-            match fs::create_dir(&path) {
+            match create_stage_dir(&path, false) {
                 Ok(()) => {
                     // Own it before syncing, so a failed sync still cleans up.
                     let staging = Self(path);
@@ -103,6 +120,17 @@ impl StagingDir {
         ))
     }
 }
+fn create_stage_dir(path: &Path, recursive: bool) -> io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(recursive);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o755);
+    }
+    builder.create(path)
+}
+
 impl Drop for StagingDir {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
@@ -239,7 +267,68 @@ pub(crate) async fn stage_exclusive_with(
     binary_name: &str,
     runner: &dyn Runner,
     timeout: Duration,
-    keep_version: &dyn Fn(&str) -> io::Result<bool>,
+    keep_version: &(dyn Fn(&str) -> io::Result<bool> + Sync),
+) -> Result<crate::journal::Artifact, StageExclusiveError> {
+    stage_exclusive_inner(
+        data,
+        installed,
+        binary_name,
+        runner,
+        timeout,
+        keep_version,
+        None,
+    )
+    .await
+}
+
+/// Supervisor staging, with its identity-specific trust check. The hook opens
+/// a no-follow, nonblocking regular file after checking its directory chain.
+/// It runs before the probe and before reading any reusable binary.
+pub async fn stage_exclusive_checked(
+    data: &DataDir,
+    installed: &Path,
+    binary_name: &str,
+    runner: &dyn Runner,
+    timeout: Duration,
+    checked_open: &(dyn Fn(&Path) -> Result<File, String> + Sync),
+) -> Result<crate::journal::Artifact, StageExclusiveError> {
+    stage_exclusive_inner(
+        data,
+        installed,
+        binary_name,
+        runner,
+        timeout,
+        &|version| {
+            crate::updater::retention_keep(data, [])
+                .map(|keep| keep.contains(version))
+                .map_err(io::Error::other)
+        },
+        Some(checked_open),
+    )
+    .await
+}
+
+type CheckedOpen<'a> = &'a (dyn Fn(&Path) -> Result<File, String> + Sync);
+
+fn create_staged_file(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o700);
+    }
+    options.open(path)
+}
+
+async fn stage_exclusive_inner(
+    data: &DataDir,
+    installed: &Path,
+    binary_name: &str,
+    runner: &dyn Runner,
+    timeout: Duration,
+    keep_version: &(dyn Fn(&str) -> io::Result<bool> + Sync),
+    checked_open: Option<CheckedOpen<'_>>,
 ) -> Result<crate::journal::Artifact, StageExclusiveError> {
     crate::journal::JournalView::load(&data.root().join(crate::journal::JOURNAL_FILE))
         .and_then(|view| view.ensure_supported())
@@ -275,10 +364,7 @@ pub(crate) async fn stage_exclusive_with(
     let staging = StagingDir::create(&data.versions())?;
     let path = staging.0.join(binary_name);
     let mut source = File::open(installed)?;
-    let mut dest = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)?;
+    let mut dest = create_staged_file(&path)?;
     let mut hash = Sha256::new();
     let mut size = 0_u64;
     let mut buffer = [0_u8; 64 * 1024];
@@ -294,10 +380,19 @@ pub(crate) async fn stage_exclusive_with(
         hash.update(bytes);
         size += read as u64;
     }
-    dest.set_permissions(source.metadata()?.permissions())?;
+    let permissions = source.metadata()?.permissions();
+    #[cfg(unix)]
+    let permissions = {
+        use std::os::unix::fs::PermissionsExt;
+        fs::Permissions::from_mode(permissions.mode() & 0o755)
+    };
+    dest.set_permissions(permissions)?;
     dest.sync_all()?;
     drop(dest);
     sync_directory(&staging.0)?;
+    if let Some(check) = checked_open {
+        drop(check(&path).map_err(StageExclusiveError::Untrusted)?);
+    }
     let printed = runner
         .version(&path, timeout)
         .await
@@ -312,7 +407,19 @@ pub(crate) async fn stage_exclusive_with(
     let sha256 = hex_digest(hash);
     let target = data.version_dir(&version);
     if target.exists() {
-        if hash_file(&target.join(binary_name)).ok().as_deref() != Some(sha256.as_str()) {
+        let binary = target.join(binary_name);
+        // An empty publication claim has no binary to check or hash.
+        let existing_hash = if fs::symlink_metadata(&binary)
+            .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+        {
+            None
+        } else if let Some(check) = checked_open {
+            let file = check(&binary).map_err(StageExclusiveError::Untrusted)?;
+            Some(hash_open_file(file)?)
+        } else {
+            hash_file(&binary).ok()
+        };
+        if existing_hash.as_deref() != Some(sha256.as_str()) {
             // Only an empty claim that nothing retains may go. `remove_dir`
             // refuses a directory that has gained any entry since the check.
             let removable = is_empty_dir(&target)? && !keep_version(&version)?;
@@ -345,7 +452,10 @@ fn hex_digest(hash: Sha256) -> String {
 
 /// Hash a file without allocating its entire contents.
 pub fn hash_file(path: &Path) -> io::Result<String> {
-    let mut file = File::open(path)?;
+    hash_open_file(File::open(path)?)
+}
+
+fn hash_open_file(mut file: File) -> io::Result<String> {
     let mut hash = Sha256::new();
     let mut bytes = [0_u8; 64 * 1024];
     loop {
@@ -388,6 +498,62 @@ mod tests {
     const BINARY: &[u8] = b"a staged build";
     const LIMIT: Duration = Duration::from_secs(5);
 
+    // Directory sync is a no-op on Windows, so only Unix can catch this error.
+    #[cfg(unix)]
+    #[test]
+    fn a_relative_data_root_syncs_the_current_directory() {
+        let owned = tempfile::tempdir_in(".").unwrap();
+        let root = PathBuf::from(owned.path().file_name().unwrap());
+        fs::remove_dir(&root).unwrap();
+        assert_eq!(root.parent(), Some(Path::new("")));
+        let staging = StagingDir::create(&root.join("versions")).unwrap();
+        assert!(staging.0.is_dir());
+        drop(staging);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_file_is_private_at_creation_with_umask_zero() {
+        use std::os::unix::fs::PermissionsExt;
+        if let Some(root) = std::env::var_os("OFP_T5_CREATION_ROOT") {
+            // SAFETY: the parent selects only this test in an isolated child.
+            unsafe { libc::umask(0) };
+            let root = PathBuf::from(root);
+            let file = create_staged_file(&root.join("staged")).unwrap();
+            assert_eq!(file.metadata().unwrap().len(), 0);
+            assert_eq!(
+                file.metadata().unwrap().permissions().mode() & 0o7777,
+                0o700
+            );
+            fs::write(root.join("completed"), b"completed").unwrap();
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "staging::tests::staged_file_is_private_at_creation_with_umask_zero",
+                "--test-threads=1",
+            ])
+            .env("OFP_T5_CREATION_ROOT", root.path())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "creation-mode child: {status}");
+                assert!(root.path().join("completed").is_file(), "child did not run");
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("creation-mode child exceeded its watchdog");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     struct Prints(&'static str);
     impl Runner for Prints {
         fn version<'a>(
@@ -413,7 +579,7 @@ mod tests {
     async fn stage(
         data: &DataDir,
         installed: &Path,
-        keep: &dyn Fn(&str) -> io::Result<bool>,
+        keep: &(dyn Fn(&str) -> io::Result<bool> + Sync),
     ) -> Result<crate::journal::Artifact, StageExclusiveError> {
         stage_exclusive_with(data, installed, "open-ferry", &Prints("0.1.0"), LIMIT, keep).await
     }

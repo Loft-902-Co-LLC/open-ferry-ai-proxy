@@ -116,6 +116,9 @@ pub mod installed_binary {
     pub const UNCHANGED: &str = "unchanged";
     /// Something else replaced the installed file; it was left alone.
     pub const CHANGED_ELSEWHERE: &str = "changed-elsewhere";
+    /// The version it would have installed is no longer the one that will be
+    /// confirmed: the install was dropped, the file never touched.
+    pub const SUPERSEDED: &str = "superseded";
 
     /// The replacement failed, and is retried.
     pub fn failed(why: &str) -> String {
@@ -188,6 +191,11 @@ pub struct SwitchRecord {
     pub modified_ms: i64,
     /// Whether open-ferry must be restarted to run it.
     pub restart_needed: bool,
+    /// The supervisor version that decided `restart_needed` (a worker needed
+    /// a newer supervisor than that one). Left out when unknown, and a
+    /// merge never relabels it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restart_needed_by: Option<String>,
     /// The operation's id; empty for a switch that no supervisor made.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub id: String,
@@ -367,6 +375,12 @@ impl SwitchRecord {
             self.modified_ms = incoming.modified_ms;
         }
         self.restart_needed |= incoming.restart_needed;
+        // Whoever decided the requirement keeps it: a later record of the
+        // same switch from another supervisor version never relabels it.
+        if self.restart_needed_by.is_none() {
+            self.restart_needed_by
+                .clone_from(&incoming.restart_needed_by);
+        }
         self.blue_green |= incoming.blue_green;
 
         if incoming.result.is_some() {
@@ -393,6 +407,47 @@ impl SwitchRecord {
         if !stale_pending {
             replace(&mut self.installed_binary, &incoming.installed_binary);
         }
+    }
+}
+
+/// The operation order an id carries: a supervisor's ids are
+/// `sw-<12 hex digits: its start in UNIX ms><4 random hex digits>-<counter>`,
+/// the run part drawn once per Core and the counter growing with each
+/// operation of that Core. Returns (start ms, suffix, counter), or `None`
+/// for any other id (including the older form with 12 random digits).
+fn operation_order(id: &str) -> Option<(u64, &str, u64)> {
+    let rest = id.strip_prefix("sw-")?;
+    let (run, counter) = rest.rsplit_once('-')?;
+    if run.len() != 16 || !run.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return None;
+    }
+    let (start, suffix) = run.split_at(12);
+    Some((
+        u64::from_str_radix(start, 16).ok()?,
+        suffix,
+        counter.parse().ok()?,
+    ))
+}
+
+/// Whether `other` is newer than `new`: a later `at`, or the same second
+/// and a later operation. Of two ids in the current form, the one from the
+/// Core that started later is ahead; the same Core's counter orders its own;
+/// two Cores that started in the same millisecond are not ordered. This does
+/// not depend on which record was delivered first. A wall clock that steps
+/// backwards across a restart can misorder records of two runs.
+fn is_ahead(other: &SwitchRecord, new: &SwitchRecord) -> bool {
+    if other.at != new.at {
+        return other.at > new.at;
+    }
+    match (operation_order(&other.id), operation_order(&new.id)) {
+        (Some((start_a, suffix_a, a)), Some((start_b, suffix_b, b))) => {
+            if start_a != start_b {
+                start_a > start_b
+            } else {
+                suffix_a == suffix_b && a > b
+            }
+        }
+        _ => false,
     }
 }
 
@@ -433,11 +488,14 @@ impl State {
         if let Some(slot) = slot.and_then(|slot| self.history.get_mut(slot)) {
             *slot = merged.clone();
         } else {
-            // Newest first, by time; a tie puts the new one before.
+            // Newest first, by time. A tie in the same second goes by the
+            // operation order the ids carry (see `operation_order`), so a
+            // late retry of an older operation's record can't pass a newer
+            // one; where the ids say nothing, the new one goes before.
             let at = self
                 .history
                 .iter()
-                .position(|other| other.at <= merged.at)
+                .position(|other| !is_ahead(other, &merged))
                 .unwrap_or(self.history.len());
             self.history.insert(at, merged.clone());
             self.history.truncate(MAX_HISTORY);
@@ -524,6 +582,23 @@ impl State {
                 Self::default()
             }),
             Err(_) => Self::default(),
+        }
+    }
+
+    /// The state in `path`, for a caller that must not act on a state it
+    /// could not read (the supervisor's keep set): a missing file is the empty
+    /// state, and any other read error or a parse error is an error. Additive;
+    /// [`State::load`] and its callers are unchanged.
+    pub fn load_strict(path: &Path) -> io::Result<Self> {
+        match fs::read(path) {
+            Ok(data) => serde_json::from_slice(&data).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("the update state {} doesn't parse: {error}", path.display()),
+                )
+            }),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(error) => Err(error),
         }
     }
 
@@ -752,6 +827,43 @@ mod tests {
         assert_eq!(state.history[1].superseded_by.as_deref(), Some("two"));
         // The older record doesn't take `last_switch` from the newer.
         assert_eq!(state.last_switch.as_ref(), Some(&two));
+    }
+
+    // Not upstream's: a late retry of an older operation's record, in the
+    // same second as a newer one, does not become `last_switch`.
+    #[test]
+    fn a_late_record_of_an_older_operation_in_the_same_second_is_not_last_switch() {
+        let at = "2026-10-09T10:00:00Z";
+        let (one, two) = ("sw-0000000000aabbcc-1", "sw-0000000000aabbcc-2");
+        let mut state = State::default();
+        state.upsert_record(record(two, at));
+        state.upsert_record(record(one, at));
+        let ids: Vec<_> = state.history.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, [two, one]);
+        assert_eq!(state.last_switch.as_ref().map(|r| r.id.as_str()), Some(two));
+        // The same, with the newer one arriving after.
+        let mut other = State::default();
+        other.upsert_record(record(one, at));
+        other.upsert_record(record(two, at));
+        assert_eq!(other.last_switch.as_ref().map(|r| r.id.as_str()), Some(two));
+    }
+
+    // The older id form (12 random hex digits) and any other id keep the old
+    // rule: the new record goes before.
+    #[test]
+    fn an_id_of_the_old_form_against_one_of_the_new_form_keeps_the_old_rule() {
+        let at = "2026-10-09T10:00:00Z";
+        for (first, second) in [
+            ("sw-0123456789ab-9", "sw-0000000000aabbcc-1"),
+            ("sw-0000000000aabbcc-9", "sw-0123456789ab-1"),
+            ("sw-abc-2", "sw-abc-1"),
+        ] {
+            let mut state = State::default();
+            state.upsert_record(record(first, at));
+            state.upsert_record(record(second, at));
+            let ids: Vec<_> = state.history.iter().map(|r| r.id.as_str()).collect();
+            assert_eq!(ids, [second, first], "the new record goes before");
+        }
     }
 
     // Not upstream's: the last 5, newest first.

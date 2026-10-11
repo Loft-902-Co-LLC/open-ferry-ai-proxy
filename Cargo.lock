@@ -1993,7 +1993,10 @@ dependencies = [
 name = "open-ferry-supervisor"
 version = "0.0.0"
 dependencies = [
+ "chrono",
+ "getrandom 0.3.4",
  "libc",
+ "open-ferry-update",
  "serde",
  "serde_json",
  "sha2 0.10.9",

@@ -63,7 +63,7 @@ impl Identity {
     }
 
     /// The pipe's DACL: the user alone, or SYSTEM plus Administrators.
-    fn pipe_sddl(&self) -> String {
+    pub(crate) fn pipe_sddl(&self) -> String {
         match self.kind {
             ServiceKind::User => format!("D:P(A;;GA;;;{})", self.sid),
             ServiceKind::System => "D:P(A;;GA;;;SY)(A;;GA;;;BA)".to_string(),

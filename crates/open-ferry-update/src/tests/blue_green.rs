@@ -46,6 +46,45 @@ async fn draining_version_is_immutable() {
     assert!(path.is_file());
 }
 
+// Not upstream's: the CLI's prune keeps every worker the journal lists (it
+// cannot tell which are alive), exactly as before the supervisor's prune
+// existed; the supervisor's prune, which can, drops the version of a worker
+// that is gone and keeps it while the worker lives.
+#[tokio::test]
+async fn the_cli_prune_keeps_a_listed_worker_and_the_supervised_prune_asks_if_it_lives() {
+    use crate::updater::supervised_prune;
+    let f = Fixture::new().await;
+    journal(&f, "0.2.0");
+    for version in ["0.2.0", "0.3.0", "0.4.0"] {
+        fs::create_dir_all(f.data.version_dir(version)).unwrap();
+        fs::write(f.data.binary(version, "open-ferry"), good_binary(version)).unwrap();
+    }
+    {
+        let _lock = f.updater.lock().unwrap();
+        f.updater.prune(&f.updater.state()).unwrap();
+    }
+    assert!(
+        f.data.binary("0.2.0", "open-ferry").is_file(),
+        "the CLI keeps it"
+    );
+    assert!(
+        f.data.binary("0.4.0", "open-ferry").is_file(),
+        "the newest other"
+    );
+    assert!(!f.data.version_dir("0.3.0").exists());
+    let now = chrono::Utc::now();
+    let alive = supervised_prune(&f.data, "open-ferry", [], None, now, |pid, started| {
+        pid == 123 && started == 1
+    })
+    .unwrap();
+    assert!(alive.removed.is_empty(), "{alive:?}");
+    assert!(f.data.binary("0.2.0", "open-ferry").is_file());
+    let gone = supervised_prune(&f.data, "open-ferry", [], None, now, |_, _| false).unwrap();
+    assert_eq!(gone.removed, ["0.2.0"]);
+    assert!(!f.data.version_dir("0.2.0").exists());
+    assert!(f.data.binary("0.4.0", "open-ferry").is_file());
+}
+
 // Not upstream's: test 19, a changed pinned stage is refused without deletion.
 #[tokio::test]
 async fn changed_pinned_stage_is_not_deleted() {
@@ -976,4 +1015,259 @@ async fn failed_check_leaves_an_in_use_version_directory_intact() {
             .to_string_lossy()
             .starts_with(".staging.")
     }));
+}
+
+// Not upstream's: a refused probe must never reach the runner, and owns only
+// the staging directory it removes on the error path.
+#[tokio::test]
+async fn checked_staging_refuses_before_the_version_probe() {
+    let f = Fixture::new().await;
+    let error = crate::staging::stage_exclusive_checked(
+        &f.data,
+        &f.installed,
+        "open-ferry",
+        f.runner.as_ref(),
+        std::time::Duration::from_secs(2),
+        &|path| Err(format!("{}: refused staging chain", path.display())),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, StageExclusiveError::Untrusted(_)));
+    assert_eq!(f.runner.runs.load(Ordering::SeqCst), 0);
+    assert!(fs::read_dir(f.data.versions()).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".staging.")
+    }));
+}
+
+// Not upstream's: 5b H3. The supervisor's fail-closed list of every version
+// treats any listing error as an error, where `DataDir::kept_versions` (the
+// CLI's, unchanged) treats an unreadable `versions/` as empty.
+#[tokio::test]
+async fn the_supervised_listing_fails_closed_where_the_cli_listing_stays_lenient() {
+    use crate::updater::{all_versions, supervised_keep_set, supervised_prune};
+    let f = Fixture::new().await;
+    let now = chrono::Utc::now();
+    // Present: directories that parse as versions, and nothing else.
+    for version in ["0.2.0", "0.4.0", "not-a-version"] {
+        fs::create_dir_all(f.data.version_dir(version)).unwrap();
+    }
+    fs::write(f.data.versions().join("0.9.0"), b"a file, not a version").unwrap();
+    assert_eq!(
+        all_versions(&f.data)
+            .unwrap()
+            .into_iter()
+            .collect::<Vec<_>>(),
+        ["0.2.0", "0.4.0"]
+    );
+    // No `versions/` at all is an empty list.
+    let _ = fs::remove_dir_all(f.data.versions());
+    assert!(all_versions(&f.data).unwrap().is_empty());
+    // A `versions/` that is a file cannot be listed.
+    fs::write(f.data.versions(), b"not a directory").unwrap();
+    assert!(all_versions(&f.data).is_err());
+    assert!(
+        f.data.kept_versions().is_empty(),
+        "the CLI's listing is unchanged: an unreadable directory is empty"
+    );
+    assert!(supervised_keep_set(&f.data, [], None, now, |_, _| false).is_err());
+    assert!(supervised_prune(&f.data, "open-ferry", [], None, now, |_, _| false).is_err());
+}
+
+/// Makes removing the pin file `file` (in `dir`) fail until the guard is
+/// dropped. `None` when this process cannot make a removal fail (a Unix
+/// superuser, to whom a directory's mode means nothing).
+struct Unremovable {
+    #[cfg(unix)]
+    dir: std::path::PathBuf,
+    #[cfg(windows)]
+    _handle: fs::File,
+}
+
+impl Unremovable {
+    #[cfg(windows)]
+    fn hold(_dir: &std::path::Path, file: &std::path::Path) -> Option<Self> {
+        use std::os::windows::fs::OpenOptionsExt;
+        // Open without FILE_SHARE_DELETE: a removal is a sharing violation.
+        let handle = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .open(file)
+            .unwrap();
+        Some(Self { _handle: handle })
+    }
+
+    #[cfg(unix)]
+    fn hold(dir: &std::path::Path, _file: &std::path::Path) -> Option<Self> {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o500)).unwrap();
+        let guard = Self {
+            dir: dir.to_owned(),
+        };
+        let probe = dir.join(".probe");
+        if fs::File::create(&probe).is_ok() {
+            let _ = fs::remove_file(&probe);
+            return None;
+        }
+        Some(guard)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Unremovable {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&self.dir, fs::Permissions::from_mode(0o700));
+    }
+}
+
+// Not upstream's: 5b L8. An expired pin that cannot be removed comes after the
+// version directories were deleted, so it is reported beside them, not as a
+// refusal that says nothing was deleted.
+#[tokio::test]
+async fn a_pin_that_cannot_be_removed_is_reported_beside_the_versions_that_were() {
+    use crate::updater::supervised_prune;
+    let f = Fixture::new().await;
+    for version in ["0.2.0", "0.3.0", "0.4.0"] {
+        fs::create_dir_all(f.data.version_dir(version)).unwrap();
+        fs::write(f.data.binary(version, "open-ferry"), good_binary(version)).unwrap();
+    }
+    let now = chrono::Utc::now();
+    let store = PinStore::new(&f.data.versions());
+    let pin = store
+        .create("0.9.0", &sha256_hex(b"x"), now - chrono::Duration::days(30))
+        .unwrap();
+    let file = store.dir().join(format!("{}.json", pin.id));
+    let Some(guard) = Unremovable::hold(store.dir(), &file) else {
+        eprintln!("skipped: this process can remove files from a read-only directory");
+        return;
+    };
+    let done = supervised_prune(&f.data, "open-ferry", [], None, now, |_, _| false).unwrap();
+    assert!(
+        !done.removed.is_empty() && !f.data.version_dir("0.2.0").exists(),
+        "the versions were deleted: {done:?}"
+    );
+    assert!(done.pins_error.is_some(), "{done:?}");
+    assert_eq!(done.pins_removed, 0);
+    assert!(file.exists(), "the pin is still there");
+    drop(guard);
+    let again = supervised_prune(&f.data, "open-ferry", [], None, now, |_, _| false).unwrap();
+    assert_eq!(again.pins_removed, 1, "{again:?}");
+    assert_eq!(again.pins_error, None);
+    assert!(!file.exists());
+}
+
+/// A version directory that is not empty (an empty one may be a crashed
+/// publication claim, which the newest-other rule skips).
+fn occupied(f: &Fixture, version: &str) {
+    fs::create_dir_all(f.data.version_dir(version)).unwrap();
+    fs::write(f.data.binary(version, "open-ferry"), b"x").unwrap();
+}
+
+// Not upstream's: the supervised keep set reads the state file strictly. A
+// missing file is the empty state; a file it cannot read or parse is an error
+// (the prune refuses and deletes nothing), where the CLI's `State::load` still
+// turns either into an empty state.
+#[tokio::test]
+async fn the_supervised_keep_set_refuses_a_state_file_it_cannot_read() {
+    use crate::state::State;
+    use crate::updater::{supervised_keep_set, supervised_prune};
+    let f = Fixture::new().await;
+    let now = chrono::Utc::now();
+    journal(&f, "0.1.0");
+    for version in ["0.1.0", "0.2.0", "0.4.0"] {
+        occupied(&f, version);
+    }
+    // 0.2.0 is protected by the state's `staged` alone.
+    let state = State {
+        staged: Some("0.2.0".to_owned()),
+        ..State::default()
+    };
+    state.save(&f.data.state_file()).unwrap();
+    let keep = supervised_keep_set(&f.data, [], None, now, |_, _| false).unwrap();
+    assert!(keep.contains("0.2.0"), "{keep:?}");
+    assert!(keep.contains("0.4.0"), "{keep:?}");
+
+    // A missing file is the empty state: not an error.
+    fs::remove_file(f.data.state_file()).unwrap();
+    assert!(supervised_keep_set(&f.data, [], None, now, |_, _| false).is_ok());
+
+    // A parse error, then a read error (a directory in place of the file).
+    for damage in ["parse", "read"] {
+        let _ = fs::remove_file(f.data.state_file());
+        let _ = fs::remove_dir_all(f.data.state_file());
+        if damage == "parse" {
+            fs::write(f.data.state_file(), b"{ not json").unwrap();
+        } else {
+            fs::create_dir(f.data.state_file()).unwrap();
+        }
+        assert!(
+            supervised_keep_set(&f.data, [], None, now, |_, _| false).is_err(),
+            "{damage}"
+        );
+        assert!(
+            supervised_prune(&f.data, "open-ferry", [], None, now, |_, _| false).is_err(),
+            "{damage}"
+        );
+        for version in ["0.1.0", "0.2.0", "0.4.0"] {
+            assert!(
+                f.data.binary(version, "open-ferry").is_file(),
+                "{damage} {version}"
+            );
+        }
+        // The CLI's reader is unchanged: an empty state.
+        assert_eq!(State::load(&f.data.state_file()), State::default());
+    }
+}
+
+// Not upstream's: the supervised newest-other candidates come from the one
+// strict listing, never a second lenient one. A version only the strict
+// listing names (its directory cannot be read, as after a listing that fails
+// the second time) stays kept; the CLI's path, which lists with
+// `kept_versions`, is unchanged.
+#[tokio::test]
+async fn the_supervised_newest_other_comes_from_the_strict_listing() {
+    use crate::updater::retention_keep_with;
+    let f = Fixture::new().await;
+    let now = chrono::Utc::now();
+    journal(&f, "0.1.0");
+    occupied(&f, "0.1.0");
+    let strict: std::collections::BTreeSet<String> =
+        ["0.1.0".to_owned(), "0.9.0".to_owned()].into();
+    // 0.9.0 is not on disk: only the listing handed in names it.
+    let keep = retention_keep_with(&f.data, [], now, |_, _| false, None, Some(&strict)).unwrap();
+    assert!(keep.contains("0.9.0"), "{keep:?}");
+    let lenient = retention_keep_with(&f.data, [], now, |_, _| false, None, None).unwrap();
+    assert!(!lenient.contains("0.9.0"), "{lenient:?}");
+}
+
+// Through `supervised_keep_set` itself: the newest-other candidates come from
+// the one strict listing it took first, not from a second one. `tracked` is
+// read after that listing and before the candidates are chosen, so a version
+// that vanishes while it is read is the seam: only the first listing has it.
+#[tokio::test]
+async fn the_supervised_keep_set_takes_its_newest_other_from_its_one_strict_listing() {
+    use crate::updater::supervised_keep_set;
+    let f = Fixture::new().await;
+    let now = chrono::Utc::now();
+    journal(&f, "0.1.0");
+    occupied(&f, "0.1.0");
+    occupied(&f, "0.9.0");
+    let vanishing = f.data.version_dir("0.9.0");
+    let mut taken = false;
+    let tracked = std::iter::from_fn(move || {
+        if !taken {
+            taken = true;
+            std::fs::remove_dir_all(&vanishing).unwrap();
+        }
+        None
+    });
+    let keep = supervised_keep_set(&f.data, tracked, None, now, |_, _| false).unwrap();
+    assert!(
+        keep.contains("0.9.0"),
+        "the one listing named it; a second listing would not: {keep:?}"
+    );
 }

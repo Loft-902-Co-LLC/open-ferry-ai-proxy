@@ -14,6 +14,37 @@ pub use unix::process_alive;
 #[cfg(windows)]
 pub use windows::process_alive;
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TERMINATION_MUST_NOT_BLOCK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// What a termination call found, about the worker's own process.
+///
+/// `AlreadyExited`: it had exited before the call's kill could end it, so the
+/// kill is not what ended it.
+/// - Unix: when the first check finds the exit, nothing is sent (a reaped pid
+///   could be reused). A worker that exits between that check and the kill is
+///   not reaped yet, so the kill reaches only its zombie, never a reused pid;
+///   its own exit status, not a SIGKILL, shows the kill did not end it.
+/// - Windows: the job it ran in is still terminated, ending any descendants
+///   that outlived it; the job handle is ours, so no pid is involved.
+///
+/// `Issued`: the call ended a process that was still running, to the extent
+/// it can be told.
+/// - Unix: the exit check came first and the status is SIGKILL. That is
+///   consistent with our kill, not proof of it: a SIGKILL from elsewhere
+///   (the worker itself, the OOM killer, a process-group kill) in the
+///   microseconds before our kill is indistinguishable. Accepted residual.
+/// - Windows: the exit check came first and the job was then terminated. A
+///   worker that exits between the two is reported `Issued`. Accepted
+///   residual.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Termination {
+    AlreadyExited,
+    Issued,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcessIdentity {
     pub pid: u32,
@@ -108,6 +139,17 @@ mod tests {
             io::ErrorKind::WouldBlock
         );
         drop(lock);
-        assert!(SupervisorLock::try_acquire(dir.path()).is_ok());
+        // A parallel child's fork-to-exec window can briefly retain our flock fd.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match SupervisorLock::try_acquire(dir.path()) {
+                Ok(_) => break,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    assert!(std::time::Instant::now() < deadline, "lock stayed held");
+                    std::thread::yield_now();
+                }
+                Err(error) => panic!("lock after release: {error}"),
+            }
+        }
     }
 }
