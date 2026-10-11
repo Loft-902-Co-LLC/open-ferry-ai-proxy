@@ -6,8 +6,10 @@
 //! draining, and what the supervisor may ask in
 //! them:
 //! - `loaded`, once, in either role: a standby sends it when it has loaded,
-//!   a worker started active once it holds the lease and serves, and both
-//!   before their first `status`. The supervisor counts a start until it.
+//!   a worker started active once it holds the lease and every listener
+//!   its topology names, and both before their first `active` or `standby`
+//!   `status`. Statuses in the `loading` phase (the answer to a `ping`, or
+//!   the timer's) may come before it. The supervisor counts a start until it.
 //! - `status` and `ping` in every state. The supervisor's `ping` is answered
 //!   with one `status`; the worker never sends `ping`, ignores a `status`
 //!   from the supervisor, and sends `status` every [`STATUS_EVERY`] and when
@@ -197,6 +199,13 @@ pub(super) struct Timing {
     pub(super) resume_error: Option<ResumeErrorHook>,
     #[cfg(test)]
     pub(super) watcher_error: Option<WatcherErrorHook>,
+    /// Holds the spawned server task before its first poll until
+    /// `activate` reaches the barrier for the listeners.
+    #[cfg(test)]
+    pub(super) hold_server: Option<Arc<tokio::sync::Notify>>,
+    /// Which listener, by the topology's name, fails when it is made.
+    #[cfg(test)]
+    pub(super) fail_listener: Option<&'static str>,
 }
 
 impl Default for Timing {
@@ -230,6 +239,10 @@ impl Default for Timing {
             resume_error: None,
             #[cfg(test)]
             watcher_error: None,
+            #[cfg(test)]
+            hold_server: None,
+            #[cfg(test)]
+            fail_listener: None,
         }
     }
 }
@@ -785,7 +798,8 @@ where
                     Ready::Standby(standby) => self.state = State::Standby(standby),
                     Ready::Active(active) => self.state = State::Active(active),
                 }
-                // The supervisor counts a start until `loaded`, in either role.
+                // The supervisor counts a start until `loaded`, in either role. It comes
+                // before the first active or standby status; a loading one may precede it.
                 let ms = u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
                 self.send(&Message::Loaded { ms }).await;
                 self.send_status().await;
@@ -1146,6 +1160,19 @@ async fn activate(
     let extra = timing.routes.clone();
     #[cfg(not(test))]
     let extra = axum::Router::new();
+    // The listeners the loops make: the main one, and the management one.
+    let expected_listeners = 1 + usize::from(topology.management.is_some());
+    #[cfg(test)]
+    let fail_port = timing.fail_listener.and_then(|name| {
+        let served = if name == topology::MANAGEMENT {
+            topology.management.as_ref()
+        } else {
+            Some(&topology.main)
+        };
+        served
+            .and_then(|served| served.listener.local_addr().ok())
+            .map(|address| address.port())
+    });
     let (server, stop_server) = match serve(
         &service,
         topology,
@@ -1153,6 +1180,8 @@ async fn activate(
         control,
         extra,
         timing.failed.clone(),
+        #[cfg(test)]
+        timing.hold_server.clone(),
     ) {
         Ok(serving) => serving,
         Err(error) => {
@@ -1188,6 +1217,12 @@ async fn activate(
     } else {
         server
     };
+    #[cfg(test)]
+    if let Some(port) = fail_port {
+        let queued = Arc::new(tokio::sync::Notify::new());
+        queued.notify_one();
+        control.fail_listener_after(port, queued);
+    }
     #[cfg(test)]
     let listener_failure = timing.fail_listener_when_sync_queued.then(|| {
         let queued = Arc::new(tokio::sync::Notify::new());
@@ -1263,7 +1298,21 @@ async fn activate(
             } => unreachable!(),
         }
     };
-    if let Err(error) = resume.await {
+    let resumed = async {
+        resume.await?;
+        // The spawned server task is first polled when it is scheduled, so
+        // `resume_accept` can return before any loop holds a listener (it
+        // leaves out the loops not yet polled). `loaded` follows this, so
+        // every listener must exist, or a failure to make one is a failed
+        // start. No timer here: the supervisor's load timeout ends a loading
+        // worker by its handle.
+        #[cfg(test)]
+        if let Some(hold) = &timing.hold_server {
+            hold.notify_one();
+        }
+        control.await_listeners(expected_listeners).await
+    };
+    if let Err(error) = resumed.await {
         timing.failed.store(true, Ordering::SeqCst);
         #[cfg(test)]
         if let Some(observed) = &timing.resume_error {
@@ -1351,6 +1400,7 @@ fn serve(
     control: &ServeControl,
     extra: axum::Router,
     failed: Arc<AtomicBool>,
+    #[cfg(test)] hold: Option<Arc<tokio::sync::Notify>>,
 ) -> io::Result<(Server, watch::Sender<bool>)> {
     let (stop_server, stopped) = watch::channel(false);
     let tls_for = |served: &Served| tls.clone().filter(|_| served.tls);
@@ -1358,12 +1408,16 @@ fn serve(
     let main = tokio_listener(topology.main.listener)?;
     let server = match topology.management {
         None => tokio::spawn(record_server(
-            serve_with(
-                control.clone(),
-                main,
-                main_tls,
-                service.app_with(extra),
-                stopped,
+            held(
+                serve_with(
+                    control.clone(),
+                    main,
+                    main_tls,
+                    service.app_with(extra),
+                    stopped,
+                ),
+                #[cfg(test)]
+                hold,
             ),
             failed.clone(),
         )),
@@ -1372,21 +1426,43 @@ fn serve(
             let management = tokio_listener(served.listener)?;
             let (main_app, management_app) = management_listener::apps(service, extra);
             tokio::spawn(record_server(
-                management_listener::serve_both(
-                    serve_with(control.clone(), main, main_tls, main_app, stopped.clone()),
-                    serve_with(
-                        control.clone(),
-                        management,
-                        management_tls,
-                        management_app,
-                        stopped,
+                held(
+                    management_listener::serve_both(
+                        serve_with(control.clone(), main, main_tls, main_app, stopped.clone()),
+                        serve_with(
+                            control.clone(),
+                            management,
+                            management_tls,
+                            management_app,
+                            stopped,
+                        ),
                     ),
+                    #[cfg(test)]
+                    hold,
                 ),
                 failed,
             ))
         }
     };
     Ok((server, stop_server))
+}
+
+/// The server's future, held before its first poll until `hold` is
+/// notified, in a test that needs the activation to get ahead of the loops.
+#[cfg(test)]
+async fn held(
+    server: impl Future<Output = io::Result<()>>,
+    hold: Option<Arc<tokio::sync::Notify>>,
+) -> io::Result<()> {
+    if let Some(hold) = hold {
+        hold.notified().await;
+    }
+    server.await
+}
+
+#[cfg(not(test))]
+fn held(server: impl Future<Output = io::Result<()>>) -> impl Future<Output = io::Result<()>> {
+    server
 }
 
 /// Records API failures at their source, even when the service loop is

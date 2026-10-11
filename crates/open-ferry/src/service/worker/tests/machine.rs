@@ -219,6 +219,8 @@ impl Setup {
                 fail_listener_when_sync_queued: false,
                 resume_error: None,
                 watcher_error: None,
+                hold_server: None,
+                fail_listener: None,
                 activation_stop_budget: Duration::from_secs(5),
             },
             channel_capacity: 1 << 16,
@@ -649,6 +651,53 @@ async fn an_active_start_says_loaded_once_before_its_first_status() {
             frame.message
         );
     }
+}
+
+// A worker held in loading answers a ping with a loading status; once it has
+// loaded, `loaded` comes before its first active status.
+#[tokio::test]
+async fn loaded_follows_a_loading_status_and_comes_before_the_active_one() {
+    let mut setup = Setup::new(Role::Active);
+    setup.load_ms = 60_000;
+    let mut rig = setup.start();
+    let held = Lease::try_take(&rig.data).unwrap().unwrap();
+    rig.fake().send(Message::Ping).await;
+    assert!(matches!(rig.fake().recv().await, Message::Status { phase, .. } if phase == "loading"));
+    drop(held);
+    assert!(matches!(rig.fake().recv().await, Message::Loaded { .. }));
+    assert!(matches!(rig.fake().recv().await, Message::Status { phase, .. } if phase == "active"));
+}
+
+// The server task is first polled only when it is scheduled, so activation
+// can get ahead of the loops: a listener that fails then is a failed start.
+async fn a_listener_fails_after_activation_resumed(name: &'static str, management: bool) {
+    let mut setup = Setup::new(Role::Active);
+    setup.management = management;
+    setup.timing.hold_server = Some(Arc::new(tokio::sync::Notify::new()));
+    setup.timing.fail_listener = Some(name);
+    let mut rig = setup.start();
+    let first = rig.fake().recv().await;
+    assert!(
+        matches!(first, Message::LoadFailed { .. }),
+        "{name}: {first:?}"
+    );
+    assert!(!succeeded(rig.exit().await), "{name}");
+    while let Some(frame) = rig.fake().channel.receive::<Message>().await.unwrap() {
+        assert!(
+            !matches!(frame.message, Message::Loaded { .. }),
+            "{name}: `loaded` after the failure"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_main_listener_that_fails_after_activation_resumed_is_a_failed_load() {
+    a_listener_fails_after_activation_resumed(MAIN, false).await;
+}
+
+#[tokio::test]
+async fn a_management_listener_that_fails_after_activation_resumed_is_a_failed_load() {
+    a_listener_fails_after_activation_resumed(MANAGEMENT, true).await;
 }
 
 #[tokio::test]
