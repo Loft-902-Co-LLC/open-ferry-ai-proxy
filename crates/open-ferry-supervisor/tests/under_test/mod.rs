@@ -548,10 +548,14 @@ impl Drop for Permit {
 }
 
 /// A fresh directory under a path the data directory's trust check accepts
-/// (the target directory on Windows, `$HOME` elsewhere).
+/// (the target directory on Windows, or `OFP_TEST_SCRATCH` when set: CI's
+/// runner, whose drive root is owned by NETWORK SERVICE; `$HOME` elsewhere).
 fn scratch() -> tempfile::TempDir {
     if cfg!(windows) {
-        tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap()
+        match std::env::var_os("OFP_TEST_SCRATCH") {
+            Some(root) => tempfile::tempdir_in(root).unwrap(),
+            None => tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap(),
+        }
     } else {
         tempfile::tempdir_in(std::env::var_os("HOME").expect("HOME is set")).unwrap()
     }

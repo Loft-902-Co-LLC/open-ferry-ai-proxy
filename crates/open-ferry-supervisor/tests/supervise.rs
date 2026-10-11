@@ -181,10 +181,14 @@ struct Rig {
 /// by the host user when a container runs as root) nor under `/tmp` (anyone can
 /// write to it). Off Windows it is under the user's home directory; Windows'
 /// temp directory does not pass the check either, so there it stays under the
-/// target directory the user owns.
+/// target directory the user owns, or under `OFP_TEST_SCRATCH` when set (CI's
+/// runner, whose drive root is owned by NETWORK SERVICE).
 fn scratch() -> tempfile::TempDir {
     if cfg!(windows) {
-        tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap()
+        match std::env::var_os("OFP_TEST_SCRATCH") {
+            Some(root) => tempfile::tempdir_in(root).unwrap(),
+            None => tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap(),
+        }
     } else {
         let home = std::env::var_os("HOME").expect("HOME is set");
         tempfile::tempdir_in(home).unwrap()

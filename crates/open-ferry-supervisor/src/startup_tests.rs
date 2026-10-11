@@ -25,7 +25,9 @@ pub(crate) struct Dirs {
 
 /// A rig whose configuration points at real files. The data directory's trust
 /// check looks at every ancestor, so it is under `$HOME` on Unix (not `/tmp`),
-/// and under the working directory (the package) elsewhere.
+/// and elsewhere under `OFP_TEST_SCRATCH` when set (CI's Windows runner, whose
+/// drive root is owned by NETWORK SERVICE), else the working directory (the
+/// package).
 pub(crate) async fn real_rig() -> (Rig, Dirs) {
     let mut rig = Rig::new().await;
     // The rig's own worker is not wanted: start-up begins from nothing.
@@ -38,6 +40,8 @@ pub(crate) async fn real_rig() -> (Rig, Dirs) {
             .prefix("ofp-s8-start-")
             .tempdir_in(home)
             .unwrap()
+    } else if let Some(root) = std::env::var_os("OFP_TEST_SCRATCH") {
+        tempfile::tempdir_in(root).unwrap()
     } else {
         tempfile::tempdir_in(".").unwrap()
     };
