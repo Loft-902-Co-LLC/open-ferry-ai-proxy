@@ -896,17 +896,21 @@ mod tests {
     }
 
     /// A worker whose root has exited but whose job still holds a live
-    /// descendant (a started `ping` runs on).
+    /// descendant: `cmd`'s `start /b` leaves a `ping` running on the root's
+    /// hidden console. `cmd` exits at once, where PowerShell can take longer
+    /// than the bound to start on a loaded CI runner.
     fn exited_root_with_a_live_descendant() -> WorkerProcess {
-        let exe = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
-            .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+        let exe = system.join("cmd.exe");
         let args = [
-            OsString::from("-NoProfile"),
-            OsString::from("-NonInteractive"),
-            OsString::from("-Command"),
-            OsString::from(
-                "Start-Process -WindowStyle Hidden ping -ArgumentList '-n','120','127.0.0.1'",
-            ),
+            OsString::from("/d"),
+            OsString::from("/c"),
+            OsString::from("start"),
+            OsString::from("/b"),
+            system.join("PING.EXE").into_os_string(),
+            OsString::from("-n"),
+            OsString::from("120"),
+            OsString::from("127.0.0.1"),
         ];
         let spec = SpawnSpec {
             exe: &exe,
@@ -916,10 +920,10 @@ mod tests {
             stderr: None,
         };
         let worker = WorkerProcess::spawn(&spec).unwrap();
-        let bound = std::time::Instant::now() + Duration::from_secs(10);
+        let bound = std::time::Instant::now() + Duration::from_secs(30);
         assert!(
             worker
-                .wait_timeout(Duration::from_secs(10))
+                .wait_timeout(Duration::from_secs(30))
                 .unwrap()
                 .is_some(),
             "the root did not exit"
