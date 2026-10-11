@@ -2,7 +2,7 @@
 //!
 //! [`supervise`] starts the supervisor, serves the endpoint, and runs the
 //! core. A panic in the core (or anywhere in the future it runs in) is
-//! caught, logged at error, and answered by [`startup::reenter`]: every worker
+//! caught, logged at error, and answered by [`startup::reenter`](crate::startup::reenter): every worker
 //! stops, the in-memory state is dropped, and recovery runs again over the
 //! disk, with the lock, the listening sockets and the endpoint kept. After
 //! [`ReentryLimit`] allows no more (3 in 10 minutes), the workers are stopped

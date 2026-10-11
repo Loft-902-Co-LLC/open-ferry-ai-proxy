@@ -1,8 +1,10 @@
 //! Not upstream's: what the supervisor does when a part of itself panics (lead
 //! answer 1). The caller logs the panic at error level, stops every worker as a
 //! service stop does, drops all state except the sockets, `supervisor.lock` and
-//! the endpoint, and runs startup recovery again. At most [`PANIC_REENTRIES`]
-//! times in [`PANIC_WINDOW`]; after that the supervisor exits non-zero.
+//! the endpoint, and runs startup recovery again. At most
+//! [`PANIC_REENTRIES`](crate::timings::PANIC_REENTRIES) times in
+//! [`PANIC_WINDOW`](crate::timings::PANIC_WINDOW); after that the supervisor
+//! exits non-zero.
 
 use std::collections::VecDeque;
 use std::future::Future;
