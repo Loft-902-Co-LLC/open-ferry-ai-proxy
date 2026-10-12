@@ -285,6 +285,11 @@ mod tests {
         answer
     }
 
+    /// A directory of its own for one test. The name carries a timestamp as
+    /// well as the process id and a counter: a test that fails leaves its
+    /// directory behind, and a later run whose process id repeats (Windows
+    /// reuses them) would otherwise ask for the same name and fail with
+    /// "already exists".
     fn scratch() -> PathBuf {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let base = if cfg!(unix) {
@@ -293,9 +298,13 @@ mod tests {
             std::env::temp_dir()
         };
         let path = base.join(format!(
-            "ofp-s2-install-{}-{}",
+            "ofp-s2-install-{}-{}-{}",
             std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
+            NEXT.fetch_add(1, Ordering::Relaxed),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         std::fs::create_dir(&path).unwrap();
         path
@@ -318,6 +327,7 @@ mod tests {
         std::fs::remove_file(&installed).unwrap();
         std::fs::create_dir(&installed).unwrap();
         assert_eq!(disk.installed_size(), None, "a directory is not a binary");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

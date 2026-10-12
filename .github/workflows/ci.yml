@@ -67,20 +67,9 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked --no-fail-fast
 
-      # The blue-green switch's test seams (worker faults, barriers, the
-      # supervisor's isolation flags) are compiled only with this feature.
-      # The supervisor's process tests run on it: against its fake worker,
-      # and open-ferry's against the real one. Each process runs with the
-      # environment cleaned, on its own data directory and endpoint, and its
-      # update checks go to a closed loopback port.
-      - name: Clippy with the blue-green test seams
-        run: cargo clippy -p open-ferry -p open-ferry-supervisor -p open-ferry-update --all-targets --locked --features blue-green-test -- -D warnings
-
-      - name: Test with the blue-green test seams
-        run: cargo test -p open-ferry -p open-ferry-supervisor -p open-ferry-update --locked --features blue-green-test --no-fail-fast
-
-      # What the release workflow ships carries none of those seams: build it
-      # as it ships (the feature off) and scan it for their strings.
+      # What the release workflow ships carries none of the blue-green test
+      # seams (see the blue-green job): build it as it ships (the feature off)
+      # and scan it for their strings.
       - name: Release builds hold no test seams
         shell: bash
         env:
@@ -96,6 +85,59 @@ jobs:
         run: cargo doc --no-deps --workspace --locked
         env:
           RUSTDOCFLAGS: -D warnings
+
+  # The blue-green switch's test seams (worker faults, barriers, the
+  # supervisor's isolation flags) are compiled only with this feature. The
+  # supervisor's process tests run on it: against its fake worker, and
+  # open-ferry's against the real one. Each process runs with the environment
+  # cleaned, on its own data directory and endpoint, and its update checks go
+  # to a closed loopback port. These take longer than everything in check
+  # together, so they run beside it, not in it.
+  blue-green:
+    name: blue-green (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the toolchain from rust-toolchain.toml
+        run: rustup toolchain install --profile minimal
+
+      # Its own cache: the feature changes what these crates build, and the
+      # check job saves under the plain key. It starts from check's if it has
+      # none yet.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-blue-green-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: |
+            cargo-blue-green-${{ runner.os }}-
+            cargo-${{ runner.os }}-
+
+      # As in check: the trust check refuses the runner's D: drive.
+      - name: Scratch directory for the trust checks
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:USERPROFILE 'ofp-scratch'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          "OFP_TEST_SCRATCH=$dir" >> $env:GITHUB_ENV
+
+      - name: Clippy with the blue-green test seams
+        run: cargo clippy -p open-ferry -p open-ferry-supervisor -p open-ferry-update --all-targets --locked --features blue-green-test -- -D warnings
+
+      - name: Test with the blue-green test seams
+        run: cargo test -p open-ferry -p open-ferry-supervisor -p open-ferry-update --locked --features blue-green-test --no-fail-fast
 
   # What the release workflow's rust-licenses job does, so that a new crate
   # under a license about.toml doesn't accept fails here, not at release time.
