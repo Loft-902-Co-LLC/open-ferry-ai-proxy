@@ -157,6 +157,9 @@ fn start_with_a_grandchild(fx: &Fx) -> (Sup, u32, u32, Grandchild) {
 #[cfg(windows)]
 #[test]
 fn a_killed_supervisor_leaves_no_grandchild() {
+    if lacks(Cap::SpawnGrandchild) {
+        return;
+    }
     let fx = Fx::new();
     let (mut sup, a, grandchild, _guard) = start_with_a_grandchild(&fx);
     sup.kill();
@@ -178,6 +181,9 @@ fn a_killed_supervisor_leaves_no_grandchild() {
 #[cfg(windows)]
 #[test]
 fn a_stopped_supervisor_leaves_no_grandchild() {
+    if lacks(Cap::SpawnGrandchild) {
+        return;
+    }
     let fx = Fx::new();
     let (mut sup, a, grandchild, _guard) = start_with_a_grandchild(&fx);
     fx.stop();
