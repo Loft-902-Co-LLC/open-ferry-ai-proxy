@@ -218,13 +218,22 @@ fn the_workers_run_in_the_fixture_and_write_its_logs_not_the_package_roots() {
     std::fs::create_dir_all(&logs).unwrap();
     let _sup = fx.start(&Tm::default());
     fx.wait_loaded();
-    let found: Vec<_> = std::fs::read_dir(&logs)
-        .unwrap()
-        .filter_map(Result::ok)
-        .collect();
-    assert!(
-        !found.is_empty(),
-        "nothing in {}: the worker's working directory is not the fixture\n{}",
+    // The usage ledger (open-ferry-dashboard's `LEDGER_FILE`) is opened on a
+    // thread of its own, so `loaded` can come first. Wait for it where the
+    // worker would put it with either working directory: the fixture's
+    // `logs`, or the auth directory's when that is not the fixture.
+    let ledger = "open-ferry-usage.sqlite3";
+    let fallback = fx.root().join("auth").join("logs");
+    let found = fx.wait_for("the usage ledger", || {
+        [&logs, &fallback]
+            .into_iter()
+            .map(|dir| dir.join(ledger))
+            .find(|path| path.is_file())
+    });
+    assert_eq!(
+        found,
+        logs.join(ledger),
+        "the ledger is not in {}: the worker's working directory is not the fixture\n{}",
         logs.display(),
         fx.dump()
     );
